@@ -35,6 +35,13 @@ describe("World Editor design contract", () => {
     expect(compact).toMatch(/\.draft-ledger-details\s*\{[^}]*grid-template-columns:\s*1fr/s);
   });
 
+  it("keeps immutable context and advanced recovery actions readable", () => {
+    expect(rule(".editor-readonly-context")).toMatch(/overflow-wrap:\s*anywhere/);
+    expect(rule(".editor-readonly-context p")).toMatch(/margin:\s*0/);
+    expect(rule(".advanced-json-actions")).toMatch(/display:\s*flex/);
+    expect(rule(".advanced-json-actions")).toMatch(/flex-wrap:\s*wrap/);
+  });
+
   it("gives disclosure and cover choices explicit aligned touch targets", () => {
     expect(rule(".advanced-json summary")).toMatch(/min-height:\s*(?:44px|[3-9]\dpx)/);
     expect(rule(".advanced-json summary")).toMatch(/display:\s*flex/);

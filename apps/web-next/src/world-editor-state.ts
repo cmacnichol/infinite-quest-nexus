@@ -192,6 +192,13 @@ export function editWorldDraft(
   return { ...state, draft, status: "unsaved", saveError: null };
 }
 
+export function replaceWorldDraft(
+  state: WorldEditorState,
+  draft: EditableWorldDraft
+): WorldEditorState {
+  return { ...state, draft: clone(draft), status: "unsaved", saveError: null };
+}
+
 export function addCollectionItem(
   state: WorldEditorState,
   collection: DraftCollectionName,

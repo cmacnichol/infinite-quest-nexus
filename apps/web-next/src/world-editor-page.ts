@@ -16,6 +16,12 @@ import {
   type AdvancedJsonShape,
   type StructuredRecordKind
 } from "./world-editor-fields";
+import {
+  mergeRootDraftExtras,
+  mergeWorldExtras,
+  rootDraftExtras,
+  worldExtras
+} from "./world-editor-extras";
 import type { EditableWorldDraft, WorldAggregate } from "./world-editor-model";
 import {
   addCollectionItem,
@@ -26,6 +32,7 @@ import {
   editWorldDraft,
   failDraftSave,
   removeCollectionItem,
+  replaceWorldDraft,
   restoreCollectionItem,
   updateCollectionItem,
   validateWorldDraft,
@@ -69,6 +76,16 @@ interface PendingStructuredValidation {
   field: string;
   value: string;
   message: string;
+}
+
+interface PendingJsonInput {
+  key: string;
+  raw: string;
+  shape: AdvancedJsonShape;
+  error: string | null;
+  section: EditorSection;
+  collection?: DraftCollectionName;
+  itemId?: string;
 }
 
 const SECTION_LABELS: Record<EditorSection, string> = {
@@ -154,7 +171,9 @@ function overviewFieldsMarkup(): string {
     const control = field.kind === "input"
       ? `<input id="${id}" name="world.${field.name}" type="text" disabled />`
       : `<textarea id="${id}" name="world.${field.name}" rows="${field.rows}" disabled></textarea>`;
-    return `<label class="editor-field editor-field-${field.name}" for="${id}"><span>${field.label}</span>${control}</label>`;
+    const errorId = `${id}-error`;
+    const associatedControl = control.replace(" disabled", ` aria-describedby="${errorId}" disabled`);
+    return `<label class="editor-field editor-field-${field.name}" for="${id}"><span>${field.label}</span>${associatedControl}<small id="${errorId}" class="field-error" data-overview-error="${field.name}"></small></label>`;
   }).join("");
 }
 
@@ -170,6 +189,10 @@ const editorMarkup = `
       <div class="editor-identity">
         <a href="/app/">World Library</a>
         <h1 id="editor-title">World Editor</h1>
+        <div class="editor-readonly-context" aria-label="Published world context">
+          <p data-version-context></p>
+          <p data-campaign-context></p>
+        </div>
       </div>
       <p class="editor-command-status" data-editor-state aria-live="polite">Loading world editor…</p>
       <div class="editor-save-cell"><button type="button" data-action="save-draft" disabled>Save draft</button></div>
@@ -181,6 +204,26 @@ const editorMarkup = `
           <header><h2 id="overview-heading">Overview</h2><p>Set the world’s identity and the opening frame the Story Engine can build from.</p></header>
           <div class="editor-load-state" data-load-state></div>
           <form class="overview-form" novalidate>${overviewFieldsMarkup()}</form>
+          <div class="overview-extras">
+            <details class="advanced-json">
+              <summary>Unknown world properties</summary>
+              <textarea rows="10" data-world-extras-json data-json-editor-key="world-extras" data-json-shape="object" aria-label="Unknown world properties JSON" aria-describedby="world-extras-json-error"></textarea>
+              <div class="advanced-json-actions">
+                <button type="button" data-action="apply-world-extras-json" data-json-editor-key="world-extras">Apply JSON</button>
+                <button type="button" data-action="discard-json" data-json-editor-key="world-extras">Discard changes</button>
+              </div>
+              <p id="world-extras-json-error" class="field-error" data-json-error="world-extras"></p>
+            </details>
+            <details class="advanced-json">
+              <summary>Unknown root draft properties</summary>
+              <textarea rows="10" data-root-extras-json data-json-editor-key="root-extras" data-json-shape="object" aria-label="Unknown root draft properties JSON" aria-describedby="root-extras-json-error"></textarea>
+              <div class="advanced-json-actions">
+                <button type="button" data-action="apply-root-extras-json" data-json-editor-key="root-extras">Apply JSON</button>
+                <button type="button" data-action="discard-json" data-json-editor-key="root-extras">Discard changes</button>
+              </div>
+              <p id="root-extras-json-error" class="field-error" data-json-error="root-extras"></p>
+            </details>
+          </div>
         </section>
         <section class="overview-editor collection-section" data-editor-section="characters" hidden aria-labelledby="collection-section-heading">
           <header><h2 id="collection-section-heading" data-section-heading>Characters</h2><p data-section-description></p></header>
@@ -240,6 +283,9 @@ export function mountWorldEditorPage(
   const pageView = view;
 
   const main = requiredElement<HTMLElement>(root, '[data-page="world-editor"]');
+  const editorTitle = requiredElement<HTMLElement>(root, "#editor-title");
+  const versionContext = requiredElement<HTMLElement>(root, "[data-version-context]");
+  const campaignContext = requiredElement<HTMLElement>(root, "[data-campaign-context]");
   const form = requiredElement<HTMLFormElement>(root, ".overview-form");
   const overviewSection = requiredElement<HTMLElement>(root, '[data-editor-section="overview"]');
   const collectionSection = requiredElement<HTMLElement>(root, ".collection-section");
@@ -279,6 +325,8 @@ export function mountWorldEditorPage(
   let coverChoice: CoverChoice = "keep";
   let coverAssetId = "";
   let coverChanged = false;
+  let coverRetryOnly = false;
+  let coverSaving = false;
   let disposed = false;
   let loadController: AbortController | null = null;
   let saveController: AbortController | null = null;
@@ -288,6 +336,7 @@ export function mountWorldEditorPage(
   const itemIdentities = new Map<DraftCollectionName, string[]>();
   const removedItemIdentities = new Map<string, string>();
   const pendingStructuredValidations = new Map<string, PendingStructuredValidation>();
+  const pendingJsonInputs = new Map<string, PendingJsonInput>();
   let nextItemIdentity = 1;
 
   function createItemIdentity(): string {
@@ -316,6 +365,14 @@ export function mountWorldEditorPage(
     for (const [key, pending] of pendingStructuredValidations) {
       if (pending.collection === collection && (itemId === undefined || pending.itemId === itemId)) {
         pendingStructuredValidations.delete(key);
+      }
+    }
+  }
+
+  function clearPendingJsonInputs(collection: DraftCollectionName, itemId?: string): void {
+    for (const [key, pending] of pendingJsonInputs) {
+      if (pending.collection === collection && (itemId === undefined || pending.itemId === itemId)) {
+        pendingJsonInputs.delete(key);
       }
     }
   }
@@ -355,6 +412,95 @@ export function mountWorldEditorPage(
     });
   }
 
+  function jsonControl(key: string): HTMLTextAreaElement | null {
+    return [...root.querySelectorAll<HTMLTextAreaElement>("textarea[data-json-editor-key]")]
+      .find((control) => control.dataset.jsonEditorKey === key) ?? null;
+  }
+
+  function jsonError(key: string): HTMLElement | null {
+    return [...root.querySelectorAll<HTMLElement>("[data-json-error]")]
+      .find((error) => error.dataset.jsonError === key) ?? null;
+  }
+
+  function configureJsonEditor(
+    textarea: HTMLTextAreaElement,
+    error: HTMLElement,
+    key: string,
+    shape: AdvancedJsonShape,
+    canonicalValue: unknown,
+    location: Omit<PendingJsonInput, "key" | "raw" | "shape" | "error">
+  ): void {
+    const pending = pendingJsonInputs.get(key);
+    textarea.dataset.jsonEditorKey = key;
+    textarea.dataset.jsonShape = shape;
+    textarea.dataset.jsonSection = location.section;
+    if (location.collection) textarea.dataset.jsonCollection = location.collection;
+    else delete textarea.dataset.jsonCollection;
+    if (location.itemId) textarea.dataset.jsonItemId = location.itemId;
+    else delete textarea.dataset.jsonItemId;
+    textarea.value = pending?.raw ?? serializeAdvancedJson(canonicalValue);
+    if (!error.id) error.id = `${key.replace(/[^a-z0-9-]/gi, "-")}-json-error`;
+    error.dataset.jsonError = key;
+    textarea.setAttribute("aria-describedby", error.id);
+    if (pending) {
+      error.textContent = pending.error ?? "Apply or discard JSON changes before saving.";
+      if (pending.error) textarea.setAttribute("aria-invalid", "true");
+      else textarea.removeAttribute("aria-invalid");
+      Object.assign(pending, location);
+    } else {
+      error.textContent = "";
+      textarea.removeAttribute("aria-invalid");
+    }
+  }
+
+  function renderWorldContext(world: WorldAggregate): void {
+    editorTitle.textContent = world.title;
+    const latestVersion = world.versions.reduce((latest, version) =>
+      latest === null || version.versionNumber > latest.versionNumber ? version : latest, null as WorldAggregate["versions"][number] | null);
+    const activeCampaigns = world.campaigns.filter((campaign) => campaign.status === "active");
+    const latestCampaign = world.campaigns.reduce((latest, campaign) =>
+      latest === null || campaign.updatedAt > latest.updatedAt ? campaign : latest, null as WorldAggregate["campaigns"][number] | null);
+    const latestTurn = world.campaigns.reduce((turn, campaign) => Math.max(turn, campaign.activeTurnNumber), 0);
+    const versionLink = document.createElement("a");
+    versionLink.href = "/nexus/#world-library";
+    versionLink.textContent = "Manage published versions";
+    versionContext.replaceChildren(
+      `${world.versions.length} published version${world.versions.length === 1 ? "" : "s"}${latestVersion ? ` · Latest v${latestVersion.versionNumber}` : ""} · `,
+      versionLink
+    );
+    const campaignLink = document.createElement("a");
+    campaignLink.href = "/nexus/#campaigns";
+    campaignLink.textContent = "Manage campaigns";
+    campaignContext.replaceChildren(
+      `${activeCampaigns.length} active campaign${activeCampaigns.length === 1 ? "" : "s"}${world.campaigns.length !== activeCampaigns.length ? ` · ${world.campaigns.length} total` : ""}${world.campaigns.length ? ` · Turn ${latestTurn}` : ""}${latestCampaign ? ` · Latest ${latestCampaign.title}` : ""} · `,
+      campaignLink
+    );
+  }
+
+  function renderOverviewValidation(): void {
+    if (!state) return;
+    const issues = validateWorldDraft(state).issues.filter((issue) => issue.severity === "error");
+    for (const definition of fieldDefinitions) {
+      const control = form.querySelector<HTMLInputElement | HTMLTextAreaElement>(`[name="world.${definition.name}"]`);
+      const error = form.querySelector<HTMLElement>(`[data-overview-error="${definition.name}"]`);
+      const issue = issues.find((candidate) => candidate.path === `world.${definition.name}`);
+      if (!control || !error) continue;
+      error.textContent = issue?.message ?? "";
+      if (issue) control.setAttribute("aria-invalid", "true");
+      else control.removeAttribute("aria-invalid");
+    }
+  }
+
+  function renderOverviewExtras(): void {
+    if (!state) return;
+    const worldTextarea = requiredElement<HTMLTextAreaElement>(root, "[data-world-extras-json]");
+    const worldError = requiredElement<HTMLElement>(root, '[data-json-error="world-extras"]');
+    configureJsonEditor(worldTextarea, worldError, "world-extras", "object", worldExtras(state.draft), { section: "overview" });
+    const rootTextarea = requiredElement<HTMLTextAreaElement>(root, "[data-root-extras-json]");
+    const rootError = requiredElement<HTMLElement>(root, '[data-json-error="root-extras"]');
+    configureJsonEditor(rootTextarea, rootError, "root-extras", "object", rootDraftExtras(state.draft), { section: "overview" });
+  }
+
   function isReadOnly(): boolean {
     return authoritativeStatus === "archived" || state?.revision === null;
   }
@@ -368,8 +514,9 @@ export function mountWorldEditorPage(
       field.readOnly = readOnly;
       field.setAttribute("aria-readonly", String(readOnly));
     }
-    for (const control of sectionContent.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLButtonElement>("input, textarea, button")) {
-      if (control.dataset.sectionNavigation !== undefined) continue;
+    for (const control of root.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLButtonElement>(
+      ".overview-extras input, .overview-extras textarea, .overview-extras button, [data-section-content] input, [data-section-content] textarea, [data-section-content] button"
+    )) {
       control.disabled = disabled || readOnly;
       if (control instanceof pageView.HTMLInputElement || control instanceof pageView.HTMLTextAreaElement) {
         control.readOnly = readOnly;
@@ -384,6 +531,8 @@ export function mountWorldEditorPage(
       const field = form.querySelector<HTMLInputElement | HTMLTextAreaElement>(`[name="world.${definition.name}"]`);
       if (field) field.value = state.draft.world[definition.name];
     }
+    renderOverviewValidation();
+    renderOverviewExtras();
     renderFieldAvailability();
   }
 
@@ -391,7 +540,12 @@ export function mountWorldEditorPage(
     if (!state) return;
     const readiness = draftReadiness(state);
     const readyCount = readiness.sections.filter((section) => section.ready).length;
-    ledgerState.textContent = `State ${state.status === "unsaved" || state.status === "error" ? "Unsaved" : state.status === "saving" ? "Saving" : "Saved"}`;
+    const hasInvalidInput = validateWorldDraft(state).issues.some((issue) => issue.severity === "error") ||
+      pendingStructuredValidations.size > 0 || [...pendingJsonInputs.values()].some((input) => input.error);
+    const hasConflict = state.status === "error" && state.saveError?.kind === "conflict";
+    const ledgerStatus = hasConflict ? "Conflict" : hasInvalidInput ? "Invalid" : state.status === "saving" ? "Saving" :
+      state.status === "unsaved" || state.status === "error" || pendingJsonInputs.size > 0 ? "Unsaved" : "Saved";
+    ledgerState.textContent = `State ${ledgerStatus}`;
     ledgerRevision.textContent = state.revision === null ? "Revision Not created" : `Revision ${state.revision}`;
     ledgerReadiness.textContent = `Readiness ${readyCount === readiness.sections.length ? "Ready" : `${readyCount} of ${readiness.sections.length}`}`;
     ledgerWarnings.textContent = `Warnings ${readiness.warningCount}`;
@@ -405,16 +559,26 @@ export function mountWorldEditorPage(
 
   function renderStatus(): void {
     if (!state) return;
+    const hasInvalidInput = validateWorldDraft(state).issues.some((issue) => issue.severity === "error") ||
+      pendingStructuredValidations.size > 0 || [...pendingJsonInputs.values()].some((input) => input.error);
+    const hasConflict = state.status === "error" && state.saveError?.kind === "conflict";
     if (authoritativeStatus === "archived") editorState.textContent = "Archived worlds are read-only.";
     else if (state.revision === null) editorState.textContent = "No editable draft is available.";
     else if (state.status === "saving") editorState.textContent = "Saving draft…";
+    else if (hasConflict) editorState.textContent = "Conflict — local draft preserved";
+    else if (hasInvalidInput) editorState.textContent = "Invalid input — review highlighted fields";
+    else if (pendingJsonInputs.size > 0) editorState.textContent = "Unsaved JSON changes";
+    else if (coverSaving) editorState.textContent = "Draft saved · Updating cover…";
+    else if (coverChanged && state.status === "saved") editorState.textContent = "Draft saved · Cover update pending";
     else if (state.status === "unsaved" || state.status === "error") editorState.textContent = "Unsaved changes";
     else editorState.textContent = "Draft saved";
-    const canSaveDraft = state.status === "unsaved" ||
+    const canSaveDraft = state.status === "unsaved" || pendingStructuredValidations.size > 0 || pendingJsonInputs.size > 0 ||
       (state.status === "error" && state.saveError?.kind !== "conflict");
-    saveButton.disabled = isReadOnly() || state.status === "saving" || (!canSaveDraft && !coverChanged);
+    saveButton.textContent = coverChanged && state.status === "saved" ? "Retry cover" : "Save draft";
+    saveButton.disabled = isReadOnly() || state.status === "saving" || coverSaving || hasConflict || (!canSaveDraft && !coverChanged);
     setDirtyGuard(!isReadOnly() && (
-      pendingStructuredValidations.size > 0 || coverChanged || state.status === "unsaved" || state.status === "saving" || state.status === "error"
+      pendingStructuredValidations.size > 0 || pendingJsonInputs.size > 0 || coverChanged || state.status === "unsaved" ||
+      state.status === "saving" || state.status === "error"
     ));
     renderFieldAvailability();
     renderLedger();
@@ -490,16 +654,14 @@ export function mountWorldEditorPage(
         );
         if (pending) control.setAttribute("aria-invalid", "true");
         if (control instanceof pageView.HTMLTextAreaElement) control.rows = definition.kind === "json" ? 6 : 3;
-        structuredForm.append(labelledControl(definition.label, control));
+        const fieldError = document.createElement("p");
+        fieldError.id = `structured-${spec.collection}-${currentItemId ?? index}-${definition.name}-error`;
+        fieldError.dataset.structuredError = definition.name;
+        fieldError.className = "field-error";
+        fieldError.textContent = pending?.message ?? "";
+        control.setAttribute("aria-describedby", fieldError.id);
+        structuredForm.append(labelledControl(definition.label, control), fieldError);
       }
-      const fieldError = document.createElement("p");
-      fieldError.dataset.structuredError = "";
-      fieldError.className = "field-error";
-      const currentItemId = itemIdentity(spec.collection, index);
-      fieldError.textContent = currentItemId
-        ? firstPendingStructuredValidation(spec.collection, currentItemId)?.message ?? ""
-        : "";
-      structuredForm.append(fieldError);
       detail.append(structuredForm);
     }
 
@@ -511,12 +673,21 @@ export function mountWorldEditorPage(
     const json = document.createElement("textarea");
     json.dataset.advancedJson = "";
     json.rows = 12;
-    json.value = serializeAdvancedJson(record);
     json.setAttribute("aria-label", `Advanced JSON for selected ${spec.singular}`);
     const error = document.createElement("p");
     error.className = "field-error";
-    error.dataset.jsonError = "";
-    advanced.append(summary, json, button("apply-advanced-json", "Apply JSON"), error);
+    const currentItemId = itemIdentity(spec.collection, index);
+    const jsonKey = `record:${spec.collection}:${currentItemId ?? index}`;
+    configureJsonEditor(json, error, jsonKey, "object", record, {
+      section: activeSection,
+      collection: spec.collection,
+      itemId: currentItemId
+    });
+    const apply = button("apply-advanced-json", "Apply JSON");
+    apply.dataset.jsonEditorKey = jsonKey;
+    const discard = button("discard-advanced-json", "Discard changes");
+    discard.dataset.jsonEditorKey = jsonKey;
+    advanced.append(summary, json, apply, discard, error);
     detail.append(advanced, button("remove-item", `Remove ${spec.singular}`));
     host.append(detail);
   }
@@ -530,12 +701,16 @@ export function mountWorldEditorPage(
     const textarea = document.createElement("textarea");
     textarea.dataset.defaultsJson = "";
     textarea.rows = 10;
-    textarea.value = serializeAdvancedJson(state.draft.defaults);
     textarea.setAttribute("aria-label", "World defaults JSON");
     const error = document.createElement("p");
     error.dataset.defaultsError = "";
     error.className = "field-error";
-    details.append(summary, textarea, button("apply-defaults-json", "Apply defaults JSON"), error);
+    configureJsonEditor(textarea, error, "defaults", "object", state.draft.defaults, { section: "mechanics" });
+    const apply = button("apply-defaults-json", "Apply defaults JSON");
+    apply.dataset.jsonEditorKey = "defaults";
+    const discard = button("discard-json", "Discard changes");
+    discard.dataset.jsonEditorKey = "defaults";
+    details.append(summary, textarea, apply, discard, error);
     host.append(details);
   }
 
@@ -548,12 +723,19 @@ export function mountWorldEditorPage(
     const textarea = document.createElement("textarea");
     textarea.dataset.collectionJson = "";
     textarea.rows = 10;
-    textarea.value = serializeAdvancedJson(state.draft.assets);
     textarea.setAttribute("aria-label", "Assets JSON");
     const error = document.createElement("p");
     error.dataset.collectionJsonError = "";
     error.className = "field-error";
-    details.append(summary, textarea, button("apply-collection-json", "Apply assets JSON"), error);
+    configureJsonEditor(textarea, error, "collection:assets", "array", state.draft.assets, {
+      section: "assets",
+      collection: "assets"
+    });
+    const apply = button("apply-collection-json", "Apply assets JSON");
+    apply.dataset.jsonEditorKey = "collection:assets";
+    const discard = button("discard-json", "Discard changes");
+    discard.dataset.jsonEditorKey = "collection:assets";
+    details.append(summary, textarea, apply, discard, error);
     host.append(details);
   }
 
@@ -717,8 +899,11 @@ export function mountWorldEditorPage(
     coverChoice = "keep";
     coverAssetId = "";
     coverChanged = false;
+    coverRetryOnly = false;
     state = createWorldEditorState(world);
+    renderWorldContext(world);
     pendingStructuredValidations.clear();
+    pendingJsonInputs.clear();
     resetItemIdentities(state.draft);
     main.setAttribute("aria-busy", "false");
     loadState.replaceChildren();
@@ -797,8 +982,82 @@ export function mountWorldEditorPage(
     heading.focus();
   }
 
+  function requestedCoverIntent(): string | null | undefined {
+    if (!coverChanged) return undefined;
+    if (coverChoice === "remove") return null;
+    if (coverChoice === "select") return coverAssetId.trim();
+    return undefined;
+  }
+
+  async function updateCover(requestedCover: string | null, controller: AbortController): Promise<void> {
+    coverSaving = true;
+    renderStatus();
+    try {
+      const cover = await setWorldCoverAsset(worldId, requestedCover, controller.signal);
+      if (disposed || saveController !== controller || controller.signal.aborted) return;
+      currentCoverUrl = cover.assetUrl;
+      coverChoice = "keep";
+      coverAssetId = "";
+      coverChanged = false;
+      coverRetryOnly = false;
+      announcement.textContent = "Draft saved. Cover updated.";
+    } catch {
+      if (disposed || saveController !== controller || controller.signal.aborted) return;
+      coverChanged = true;
+      coverRetryOnly = true;
+      announcement.textContent = requestedCover === null
+        ? "Draft saved. The cover was not removed; cover work remains pending. Try again."
+        : "Draft saved. The cover was not attached; cover work remains pending. Check the authorized retained asset id and try again.";
+    } finally {
+      if (!disposed && saveController === controller) {
+        coverSaving = false;
+        if (activeSection === "assets") renderCollectionEditor();
+        renderStatus();
+      }
+    }
+  }
+
+  function focusPendingJsonInput(pending: PendingJsonInput): void {
+    const selectedItemId = pending.collection
+      ? itemIdentity(pending.collection, selectedIndexes.get(pending.collection) ?? 0)
+      : undefined;
+    const alreadyRendered = activeSection === pending.section &&
+      (!pending.collection || (activeCollection === pending.collection && (!pending.itemId || selectedItemId === pending.itemId)));
+    if (!alreadyRendered) {
+      activeSection = pending.section;
+      renderSection();
+      if (pending.collection) {
+        activeCollection = pending.collection;
+        if (pending.itemId) {
+          const index = itemIdentities.get(pending.collection)?.indexOf(pending.itemId) ?? -1;
+          if (index >= 0) selectedIndexes.set(pending.collection, index);
+        }
+        renderCollectionEditor();
+      }
+    }
+    const control = jsonControl(pending.key);
+    const error = jsonError(pending.key);
+    control?.closest("details")?.setAttribute("open", "");
+    if (error && !pending.error) error.textContent = "Apply or discard JSON changes before saving.";
+    control?.focus();
+    announcement.textContent = pending.error ?? "Apply or discard JSON changes before saving.";
+  }
+
   async function saveDraft(): Promise<void> {
-    if (!state || isReadOnly() || state.status === "saving") return;
+    if (!state || isReadOnly() || state.status === "saving" || coverSaving) return;
+    renderOverviewValidation();
+    const firstError = validateWorldDraft(state).issues.find((issue) => issue.severity === "error");
+    if (firstError) {
+      form.querySelector<HTMLElement>(`[name="${firstError.path}"]`)?.focus();
+      announcement.textContent = firstError.message;
+      renderStatus();
+      return;
+    }
+    const pendingJson = pendingJsonInputs.values().next().value as PendingJsonInput | undefined;
+    if (pendingJson) {
+      focusPendingJsonInput(pendingJson);
+      return;
+    }
     const pendingStructuredValidation = firstPendingStructuredValidation();
     if (pendingStructuredValidation) {
       const section = (Object.entries(SECTION_COLLECTIONS) as Array<[
@@ -820,58 +1079,42 @@ export function mountWorldEditorPage(
       announcement.textContent = pendingStructuredValidation.message;
       return;
     }
-    if (state.status === "saved" && !coverChanged) return;
     if (coverChanged && coverChoice === "select" && !coverAssetId.trim()) {
+      activeSection = "assets";
+      renderSection();
       const coverError = sectionContent.querySelector<HTMLElement>("[data-cover-error]");
+      const coverInput = sectionContent.querySelector<HTMLInputElement>('[name="coverAssetId"]');
       if (coverError) coverError.textContent = "Enter an authorized retained asset id.";
+      coverInput?.setAttribute("aria-invalid", "true");
+      coverInput?.focus();
       announcement.textContent = "Enter a retained asset id before saving the cover.";
       return;
     }
-    const validation = validateWorldDraft(state);
-    const firstError = validation.issues.find((issue) => issue.severity === "error");
-    if (firstError) {
-      form.querySelector<HTMLElement>(`[name="${firstError.path}"]`)?.focus();
-      announcement.textContent = firstError.message;
-      return;
-    }
-    const expectedRevision = state.revision;
-    if (expectedRevision === null) return;
-    const requestedCover = coverChanged ? (coverChoice === "remove" ? null : coverChoice === "select" ? coverAssetId.trim() : undefined) : undefined;
-    state = beginDraftSave(state);
-    announcement.textContent = "Saving draft…";
-    renderStatus();
+    const requestedCover = requestedCoverIntent();
     saveController?.abort(new DOMException("Draft save replaced", "AbortError"));
     const controller = new AbortController();
     saveController = controller;
+    if (state.status === "saved" && requestedCover !== undefined && coverRetryOnly) {
+      await updateCover(requestedCover, controller);
+      return;
+    }
+    if (state.status === "saved" && requestedCover === undefined) return;
+    const expectedRevision = state.revision;
+    if (expectedRevision === null) return;
+    state = beginDraftSave(state);
+    announcement.textContent = "Saving draft…";
+    renderStatus();
     try {
       const result = await saveWorldDraft(worldId, expectedRevision, state.draft, controller.signal);
       if (disposed || saveController !== controller || controller.signal.aborted) return;
       state = completeDraftSave(state, { revision: result.revision, content: result.content });
       resetItemIdentities(state.draft);
       conflictHost.replaceChildren();
-      coverChanged = false;
       renderOverviewFields();
       renderSection();
       renderStatus();
       announcement.textContent = "Draft saved.";
-      if (requestedCover !== undefined) {
-        try {
-          const cover = await setWorldCoverAsset(worldId, requestedCover, controller.signal);
-          if (disposed || saveController !== controller || controller.signal.aborted) return;
-          currentCoverUrl = cover.assetUrl;
-          coverChoice = "keep";
-          coverAssetId = "";
-          if (activeSection === "assets") renderCollectionEditor();
-          announcement.textContent = "Draft saved. Cover updated.";
-        } catch {
-          if (disposed || saveController !== controller || controller.signal.aborted) return;
-          coverChanged = true;
-          renderStatus();
-          announcement.textContent = requestedCover === null
-            ? "Draft saved. The cover was not removed; try again."
-            : "Draft saved. The cover was not attached; check the authorized retained asset id and try again.";
-        }
-      }
+      if (requestedCover !== undefined) await updateCover(requestedCover, controller);
     } catch (error) {
       if (disposed || saveController !== controller || controller.signal.aborted) return;
       const kind = error instanceof WorldEditorApiError ? error.kind : "request_failed";
@@ -898,7 +1141,7 @@ export function mountWorldEditorPage(
     const currentItemId = itemIdentity(activeCollection, index);
     if (!currentItemId) return;
     const validationKey = structuredValidationKey(activeCollection, currentItemId, field);
-    const fieldError = sectionContent.querySelector<HTMLElement>("[data-structured-error]");
+    const fieldError = sectionContent.querySelector<HTMLElement>(`[data-structured-error="${field}"]`);
     let value: unknown = target.value;
     let validationMessage: string | undefined;
     if (target.dataset.jsonShape) {
@@ -919,17 +1162,19 @@ export function mountWorldEditorPage(
         message: validationMessage
       });
       target.setAttribute("aria-invalid", "true");
-      if (fieldError) fieldError.textContent = firstPendingStructuredValidation(activeCollection, currentItemId)?.message ?? "";
+      if (fieldError) fieldError.textContent = validationMessage;
       renderStatus();
       return;
     }
     pendingStructuredValidations.delete(validationKey);
     target.removeAttribute("aria-invalid");
-    if (fieldError) fieldError.textContent = firstPendingStructuredValidation(activeCollection, currentItemId)?.message ?? "";
+    if (fieldError) fieldError.textContent = "";
     const merged = mergeStructuredFields(spec.kind, original, { [field]: value });
     state = updateCollectionItem(state, activeCollection, index, merged);
     const advanced = sectionContent.querySelector<HTMLTextAreaElement>("[data-advanced-json]");
-    if (advanced) advanced.value = serializeAdvancedJson(merged);
+    if (advanced && !pendingJsonInputs.has(advanced.dataset.jsonEditorKey ?? "")) {
+      advanced.value = serializeAdvancedJson(merged);
+    }
     announcement.textContent = "";
     conflictHost.replaceChildren();
     renderStatus();
@@ -939,6 +1184,27 @@ export function mountWorldEditorPage(
     if (!state || isReadOnly() || state.status === "saving") return;
     const target = event.target;
     if (!(target instanceof pageView.HTMLInputElement) && !(target instanceof pageView.HTMLTextAreaElement)) return;
+    if (target instanceof pageView.HTMLTextAreaElement && target.dataset.jsonEditorKey && target.dataset.jsonShape) {
+      const key = target.dataset.jsonEditorKey;
+      const parsed = parseAdvancedJson(target.value, target.dataset.jsonShape as AdvancedJsonShape);
+      const existing = pendingJsonInputs.get(key);
+      const section = existing?.section ?? (key === "root-extras" || key === "world-extras" ? "overview" : activeSection);
+      pendingJsonInputs.set(key, {
+        key,
+        raw: target.value,
+        shape: target.dataset.jsonShape as AdvancedJsonShape,
+        error: parsed.error ?? null,
+        section: (target.dataset.jsonSection as EditorSection | undefined) ?? section,
+        collection: target.dataset.jsonCollection as DraftCollectionName | undefined,
+        itemId: target.dataset.jsonItemId
+      });
+      const error = jsonError(key);
+      if (error) error.textContent = parsed.error ?? "Apply or discard JSON changes before saving.";
+      if (parsed.error) target.setAttribute("aria-invalid", "true");
+      else target.removeAttribute("aria-invalid");
+      renderStatus();
+      return;
+    }
     if (target.dataset.collectionSearch !== undefined) {
       searches.set(activeCollection, target.value);
       const count = sectionContent.querySelector<HTMLElement>("[data-result-count]");
@@ -964,6 +1230,7 @@ export function mountWorldEditorPage(
     const field = match?.[1] as OverviewField | undefined;
     if (!field || !fieldDefinitions.some((definition) => definition.name === field)) return;
     state = editWorldDraft(state, ["world", field], target.value);
+    renderOverviewValidation();
     announcement.textContent = "";
     conflictHost.replaceChildren();
     renderStatus();
@@ -1020,6 +1287,7 @@ export function mountWorldEditorPage(
       const removal = state.pendingRemovals.find((candidate) => !previousRemovalIds.has(candidate.id));
       if (removedItemId) {
         clearPendingStructuredValidations(activeCollection, removedItemId);
+        clearPendingJsonInputs(activeCollection, removedItemId);
         itemIdentities.get(activeCollection)?.splice(index, 1);
         if (removal) removedItemIdentities.set(removal.id, removedItemId);
       }
@@ -1045,16 +1313,38 @@ export function mountWorldEditorPage(
       renderCollectionEditor();
       renderStatus();
     }
-    if (action === "apply-advanced-json" && !isReadOnly()) {
-      const textarea = sectionContent.querySelector<HTMLTextAreaElement>("[data-advanced-json]");
-      const error = sectionContent.querySelector<HTMLElement>("[data-json-error]");
+    if ((action === "discard-json" || action === "discard-advanced-json") && actionButton?.dataset.jsonEditorKey) {
+      pendingJsonInputs.delete(actionButton.dataset.jsonEditorKey);
+      if (activeSection === "overview") renderOverviewExtras();
+      else renderCollectionEditor();
+      renderStatus();
+    }
+    if ((action === "apply-root-extras-json" || action === "apply-world-extras-json") && actionButton?.dataset.jsonEditorKey && !isReadOnly()) {
+      const key = actionButton.dataset.jsonEditorKey;
+      const textarea = jsonControl(key);
       if (textarea) {
         const parsed = parseAdvancedJson(textarea.value, "object");
-        if (error) error.textContent = parsed.error ?? "";
-        if (!parsed.error) {
+        if (parsed.error) textarea.dispatchEvent(new pageView.Event("input", { bubbles: true }));
+        else {
+          state = replaceWorldDraft(state, action === "apply-root-extras-json"
+            ? mergeRootDraftExtras(state.draft, parsed.value as Record<string, unknown>)
+            : mergeWorldExtras(state.draft, parsed.value as Record<string, unknown>));
+          pendingJsonInputs.delete(key);
+          renderOverviewFields();
+          renderStatus();
+        }
+      }
+    }
+    if (action === "apply-advanced-json" && !isReadOnly()) {
+      const textarea = sectionContent.querySelector<HTMLTextAreaElement>("[data-advanced-json]");
+      if (textarea) {
+        const parsed = parseAdvancedJson(textarea.value, "object");
+        if (parsed.error) textarea.dispatchEvent(new pageView.Event("input", { bubbles: true }));
+        else {
           const index = selectedIndexes.get(activeCollection) ?? 0;
           const replacedItemId = itemIdentity(activeCollection, index);
           state = updateCollectionItem(state, activeCollection, index, parsed.value);
+          pendingJsonInputs.delete(textarea.dataset.jsonEditorKey ?? "");
           if (replacedItemId) clearPendingStructuredValidations(activeCollection, replacedItemId);
           renderCollectionEditor();
           renderStatus();
@@ -1063,25 +1353,27 @@ export function mountWorldEditorPage(
     }
     if (action === "apply-defaults-json" && !isReadOnly()) {
       const textarea = sectionContent.querySelector<HTMLTextAreaElement>("[data-defaults-json]");
-      const error = sectionContent.querySelector<HTMLElement>("[data-defaults-error]");
       if (textarea) {
         const parsed = parseAdvancedJson(textarea.value, "object");
-        if (error) error.textContent = parsed.error ?? "";
-        if (!parsed.error) {
+        if (parsed.error) textarea.dispatchEvent(new pageView.Event("input", { bubbles: true }));
+        else {
           state = editWorldDraft(state, ["defaults"], parsed.value);
+          pendingJsonInputs.delete("defaults");
+          renderCollectionEditor();
           renderStatus();
         }
       }
     }
     if (action === "apply-collection-json" && !isReadOnly()) {
       const textarea = sectionContent.querySelector<HTMLTextAreaElement>("[data-collection-json]");
-      const error = sectionContent.querySelector<HTMLElement>("[data-collection-json-error]");
       if (textarea) {
         const parsed = parseAdvancedJson(textarea.value, "array");
-        if (error) error.textContent = parsed.error ?? "";
-        if (!parsed.error) {
+        if (parsed.error) textarea.dispatchEvent(new pageView.Event("input", { bubbles: true }));
+        else {
           state = editWorldDraft(state, [activeCollection], parsed.value);
+          pendingJsonInputs.delete(textarea.dataset.jsonEditorKey ?? "");
           clearPendingStructuredValidations(activeCollection);
+          clearPendingJsonInputs(activeCollection);
           itemIdentities.set(activeCollection, state.draft[activeCollection].map(() => createItemIdentity()));
           selectedIndexes.set(activeCollection, 0);
           renderCollectionEditor();

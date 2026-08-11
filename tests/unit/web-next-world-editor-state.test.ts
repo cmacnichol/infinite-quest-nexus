@@ -9,6 +9,7 @@ import {
   editWorldDraft,
   failDraftSave,
   removeCollectionItem,
+  replaceWorldDraft,
   restoreCollectionItem,
   updateCollectionItem,
   validateWorldDraft
@@ -61,6 +62,18 @@ describe("World Editor draft state", () => {
     expect(edited.draft.world.premise).toBe("A changed premise");
     expect(state.draft.world.premise).not.toBe("A changed premise");
     expect(worldAggregateFixture.draftContent?.world.premise).not.toBe("A changed premise");
+  });
+
+  it("replaces the complete draft immutably for scoped extras edits", () => {
+    const state = createWorldEditorState(worldAggregateFixture);
+    const replacement = structuredClone(state.draft);
+    replacement.importedLore = { source: "edited" };
+
+    const edited = replaceWorldDraft(state, replacement);
+
+    expect(edited.status).toBe("unsaved");
+    expect(edited.draft.importedLore).toEqual({ source: "edited" });
+    expect(state.draft.importedLore).toEqual({ source: "portable-export" });
   });
 
   it("adds and updates cloned collection records without mutating prior state", () => {

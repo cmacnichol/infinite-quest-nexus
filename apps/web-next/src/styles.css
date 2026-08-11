@@ -755,6 +755,24 @@ footer p:first-child {
   line-height: 1;
 }
 
+.editor-readonly-context {
+  display: grid;
+  gap: 4px;
+  margin-top: 12px;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.editor-readonly-context p {
+  margin: 0;
+}
+
+.editor-readonly-context a {
+  color: var(--accent-hover);
+  text-underline-offset: 3px;
+}
+
 .editor-command-status {
   display: grid;
   place-items: center;
@@ -1260,6 +1278,22 @@ footer p:first-child {
 
 .advanced-json button {
   margin-top: 10px;
+}
+
+.advanced-json-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.advanced-json-actions button + button {
+  color: var(--text-secondary);
+  border-color: var(--rule-strong);
+}
+
+.overview-extras {
+  max-width: 920px;
+  padding: 0 var(--cell) var(--cell);
 }
 
 .field-error {

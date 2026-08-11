@@ -125,6 +125,54 @@ describe("World Editor Overview page", () => {
     expect(document.querySelector('[data-draft-ledger]')?.textContent).toContain("Ready");
   });
 
+  it("shows the loaded title and immutable version and campaign context with management links", async () => {
+    const { document, root } = editorFixture();
+    const contextualWorld: WorldAggregate = {
+      ...world,
+      title: "Loaded aggregate title",
+      versions: [{
+        id: "version-2",
+        versionNumber: 2,
+        sourceHash: null,
+        releaseNotes: "Second edition",
+        createdFromRevision: 7,
+        publishedAt: "2026-08-10T12:00:00.000Z",
+        createdAt: "2026-08-10T12:00:00.000Z",
+        deletable: false,
+        deletionBlockers: {
+          currentCampaigns: 1,
+          campaignMigrations: 0,
+          campaignTransfers: 0,
+          chronicleMemories: 0,
+          modelChains: 0
+        },
+        detachments: { drafts: 1, forks: 0, imports: 0 }
+      }],
+      campaigns: [{
+        id: "campaign-1",
+        title: "The Western Dome",
+        status: "active",
+        activeTurnNumber: 12,
+        worldVersionId: "version-2",
+        worldVersionNumber: 2,
+        selectedCharacterId: null,
+        selectedCharacterName: null,
+        turnControlStyle: "action_only",
+        updatedAt: "2026-08-11T12:00:00.000Z"
+      }]
+    };
+    mountWorldEditorPage(root, worldId, { loadWorld: vi.fn().mockResolvedValue(contextualWorld) });
+
+    await settle();
+
+    expect(document.querySelector("#editor-title")?.textContent).toBe("Loaded aggregate title");
+    expect(document.querySelector("[data-version-context]")?.textContent).toContain("1 published version · Latest v2");
+    expect(document.querySelector("[data-campaign-context]")?.textContent).toContain("1 active campaign · Turn 12");
+    expect(document.querySelector<HTMLAnchorElement>('[data-version-context] a')?.href).toContain("/nexus/#world-library");
+    expect(document.querySelector<HTMLAnchorElement>('[data-campaign-context] a')?.href).toContain("/nexus/#campaigns");
+    expect(document.querySelector("[data-version-context] button, [data-campaign-context] button")).toBeNull();
+  });
+
   it("renders retryable load failures without replacing the shared shell", async () => {
     const { document, root } = editorFixture();
     const loadWorld = vi.fn()
@@ -220,7 +268,14 @@ describe("World Editor Overview page", () => {
 
     expect(saveWorldDraft).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(title);
+    expect(title.getAttribute("aria-invalid")).toBe("true");
+    const titleErrorId = title.getAttribute("aria-describedby");
+    expect(titleErrorId).not.toBeNull();
+    expect(document.getElementById(titleErrorId!)?.textContent).toContain("World title is required");
     expect(document.querySelector('[data-save-announcement]')?.textContent).toContain("World title is required");
+    for (const field of document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(".overview-form input, .overview-form textarea")) {
+      expect(document.getElementById(field.getAttribute("aria-describedby") ?? "")).not.toBeNull();
+    }
   });
 
   it("keeps dirty protection and editing locks active until a pending save is adopted", async () => {
@@ -337,6 +392,8 @@ describe("World Editor Overview page", () => {
     expect(conflict).not.toBeNull();
     expect(conflict?.contains(document.activeElement)).toBe(true);
     expect(title.value).toBe("Unsaved local title");
+    expect(document.querySelector('[data-editor-state]')?.textContent).toContain("Conflict");
+    expect(document.querySelector('[data-ledger-state]')?.textContent).toContain("Conflict");
     expect(document.querySelector('[role="dialog"]')).toBeNull();
 
     document.querySelector<HTMLButtonElement>('[data-action="copy-unsaved-draft"]')?.click();
@@ -482,8 +539,8 @@ describe("World Editor Overview page", () => {
     if (!advanced) throw new Error("Advanced JSON field missing.");
     advanced.value = "{";
     document.querySelector<HTMLButtonElement>('[data-action="apply-advanced-json"]')?.click();
-    expect(document.querySelector('[data-json-error]')?.textContent).toContain("valid JSON");
-    expect(document.querySelector('[data-editor-state]')?.textContent).toContain("Unsaved changes");
+    expect(document.getElementById(advanced.getAttribute("aria-describedby") ?? "")?.textContent).toContain("valid JSON");
+    expect(document.querySelector('[data-editor-state]')?.textContent).toContain("Invalid input");
 
     document.querySelector<HTMLButtonElement>('[data-section-target="mechanics"]')?.click();
     for (const collection of ["rpgStats", "defaultTriggers", "eventTriggers"]) {
@@ -529,9 +586,12 @@ describe("World Editor Overview page", () => {
     value.value = "many";
     value.dispatchEvent(new window.Event("input", { bubbles: true }));
 
-    expect(document.querySelector('[data-structured-error]')?.textContent).toContain("number");
-    expect(document.querySelector('[data-editor-state]')?.textContent).toContain("Draft saved");
-    expect(document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')?.disabled).toBe(true);
+    const describedError = document.getElementById(value.getAttribute("aria-describedby") ?? "");
+    expect(describedError?.textContent).toContain("number");
+    expect(value.getAttribute("aria-invalid")).toBe("true");
+    expect(document.querySelector('[data-editor-state]')?.textContent).toContain("Invalid input");
+    expect(document.querySelector('[data-ledger-state]')?.textContent).toContain("Invalid");
+    expect(document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')?.disabled).toBe(false);
   });
 
   it("keeps Save actionable and recovers a pending structured error after the user navigates away", async () => {
@@ -770,14 +830,15 @@ describe("World Editor Overview page", () => {
     if (!detail || !advanced || !search) throw new Error("Collection detail fixture is incomplete.");
     advanced.value = "{";
     document.querySelector<HTMLButtonElement>('[data-action="apply-advanced-json"]')?.click();
-    expect(document.querySelector('[data-json-error]')?.textContent).toContain("valid JSON");
+    const errorId = advanced.getAttribute("aria-describedby") ?? "";
+    expect(document.getElementById(errorId)?.textContent).toContain("valid JSON");
 
     search.value = "Eastern";
     search.dispatchEvent(new window.Event("input", { bubbles: true }));
 
     expect(document.querySelector('[data-record-detail]')).toBe(detail);
     expect(advanced.value).toBe("{");
-    expect(document.querySelector('[data-json-error]')?.textContent).toContain("valid JSON");
+    expect(document.getElementById(errorId)?.textContent).toContain("valid JSON");
   });
 
   it("edits defaults and assets JSON and reports cover failure independently after the draft saves", async () => {
@@ -869,7 +930,7 @@ describe("World Editor Overview page", () => {
     document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')?.click();
     await settle();
 
-    expect(saveWorldDraft).toHaveBeenCalledTimes(2);
+    expect(saveWorldDraft).toHaveBeenCalledTimes(1);
     expect(setWorldCoverAsset).toHaveBeenCalledTimes(2);
     expect(setWorldCoverAsset).toHaveBeenNthCalledWith(1, worldId, "asset-1", expect.any(AbortSignal));
     expect(setWorldCoverAsset).toHaveBeenNthCalledWith(2, worldId, "asset-1", expect.any(AbortSignal));
@@ -971,6 +1032,176 @@ describe("World Editor Overview page", () => {
     expect(sequence).toEqual(["draft", "cover"]);
     expect(removeCover).toHaveBeenCalledWith(worldId, null, expect.any(AbortSignal));
     expect(second.document.querySelector('[data-save-announcement]')?.textContent).toContain("Cover updated");
+  });
+
+  it("edits root and world extras without exposing or mutating known schema fields", async () => {
+    const { document, root } = editorFixture();
+    const authoredDraft: EditableWorldDraft = {
+      ...structuredClone(draft),
+      importedRoot: { source: "archive" },
+      world: { ...draft.world, importedWorld: { constellation: "glass" } }
+    };
+    const saveWorldDraft = vi.fn().mockImplementation(async (_id, _revision, content) => savedResponse(content));
+    mountWorldEditorPage(root, worldId, {
+      loadWorld: vi.fn().mockResolvedValue({ ...world, draftContent: authoredDraft }),
+      saveWorldDraft
+    });
+    await settle();
+
+    const rootJson = document.querySelector<HTMLTextAreaElement>("[data-root-extras-json]");
+    const worldJson = document.querySelector<HTMLTextAreaElement>("[data-world-extras-json]");
+    if (!rootJson || !worldJson) throw new Error("Unknown-property editors are missing.");
+    expect(rootJson.value).toContain('"importedRoot"');
+    expect(rootJson.value).not.toContain('"schemaVersion"');
+    expect(rootJson.value).not.toContain('"world"');
+    expect(worldJson.value).toContain('"importedWorld"');
+    expect(worldJson.value).not.toContain('"title"');
+
+    rootJson.value = '{"schemaVersion":99,"world":{"title":"Injected"},"importedRoot":{"source":"edited"},"newRoot":true}';
+    document.querySelector<HTMLButtonElement>('[data-action="apply-root-extras-json"]')?.click();
+    worldJson.value = '{"title":"Injected","importedWorld":{"constellation":"edited"},"newWorld":["kept"]}';
+    document.querySelector<HTMLButtonElement>('[data-action="apply-world-extras-json"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')?.click();
+    await settle();
+
+    expect(saveWorldDraft).toHaveBeenCalledWith(worldId, 8, expect.objectContaining({
+      schemaVersion: 5,
+      importedRoot: { source: "edited" },
+      newRoot: true,
+      world: expect.objectContaining({
+        title: "The Glass Observatory",
+        importedWorld: { constellation: "edited" },
+        newWorld: ["kept"]
+      })
+    }), expect.any(AbortSignal));
+  });
+
+  it("associates structured and every advanced JSON error with its invalid control", async () => {
+    const { document, root, window } = editorFixture();
+    const authoredDraft: EditableWorldDraft = {
+      ...structuredClone(draft),
+      playableCharacters: [{ name: "Mara", profile: {}, rpgStats: [], defaultTriggers: [] }],
+      entities: [{ name: "Western Dome" }],
+      rpgStats: [{ name: "Resolve", value: 7 }],
+      assets: [{ id: "asset-1" }]
+    };
+    mountWorldEditorPage(root, worldId, {
+      loadWorld: vi.fn().mockResolvedValue({ ...world, draftContent: authoredDraft })
+    });
+    await settle();
+
+    const assertInvalidAssociation = (control: HTMLTextAreaElement | HTMLInputElement) => {
+      expect(control.getAttribute("aria-invalid")).toBe("true");
+      const describedBy = control.getAttribute("aria-describedby");
+      expect(describedBy).not.toBeNull();
+      expect(document.getElementById(describedBy!)?.textContent).not.toBe("");
+    };
+
+    for (const selector of ["[data-root-extras-json]", "[data-world-extras-json]"]) {
+      const control = document.querySelector<HTMLTextAreaElement>(selector);
+      if (!control) throw new Error(`Missing JSON control ${selector}.`);
+      control.value = "{";
+      control.dispatchEvent(new window.Event("input", { bubbles: true }));
+      assertInvalidAssociation(control);
+    }
+
+    document.querySelector<HTMLButtonElement>('[data-section-target="characters"]')?.click();
+    for (const control of document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("[data-structured-field]")) {
+      expect(document.getElementById(control.getAttribute("aria-describedby") ?? "")).not.toBeNull();
+    }
+    const profile = document.querySelector<HTMLTextAreaElement>('[name="structured.profile"]');
+    if (!profile) throw new Error("Profile JSON field missing.");
+    profile.value = "{";
+    profile.dispatchEvent(new window.Event("input", { bubbles: true }));
+    assertInvalidAssociation(profile);
+
+    document.querySelector<HTMLButtonElement>('[data-section-target="canon"]')?.click();
+    const recordJson = document.querySelector<HTMLTextAreaElement>("[data-advanced-json]");
+    if (!recordJson) throw new Error("Record JSON field missing.");
+    recordJson.value = "{";
+    recordJson.dispatchEvent(new window.Event("input", { bubbles: true }));
+    assertInvalidAssociation(recordJson);
+
+    document.querySelector<HTMLButtonElement>('[data-section-target="mechanics"]')?.click();
+    const defaultsJson = document.querySelector<HTMLTextAreaElement>("[data-defaults-json]");
+    if (!defaultsJson) throw new Error("Defaults JSON field missing.");
+    defaultsJson.value = "{";
+    defaultsJson.dispatchEvent(new window.Event("input", { bubbles: true }));
+    assertInvalidAssociation(defaultsJson);
+
+    document.querySelector<HTMLButtonElement>('[data-section-target="assets"]')?.click();
+    const assetsJson = document.querySelector<HTMLTextAreaElement>("[data-collection-json]");
+    if (!assetsJson) throw new Error("Assets JSON field missing.");
+    assetsJson.value = "{";
+    assetsJson.dispatchEvent(new window.Event("input", { bubbles: true }));
+    assertInvalidAssociation(assetsJson);
+  });
+
+  it("returns to and focuses the first invalid advanced JSON control", async () => {
+    const { document, root, window } = editorFixture();
+    const authoredDraft = { ...structuredClone(draft), entities: [{ name: "Western Dome" }] };
+    const saveWorldDraft = vi.fn();
+    mountWorldEditorPage(root, worldId, {
+      loadWorld: vi.fn().mockResolvedValue({ ...world, draftContent: authoredDraft }),
+      saveWorldDraft
+    });
+    await settle();
+    document.querySelector<HTMLButtonElement>('[data-section-target="canon"]')?.click();
+    const advanced = document.querySelector<HTMLTextAreaElement>("[data-advanced-json]");
+    if (!advanced) throw new Error("Advanced JSON field missing.");
+    advanced.value = "{";
+    advanced.dispatchEvent(new window.Event("input", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>('[data-section-target="overview"]')?.click();
+
+    document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')?.click();
+    await settle();
+
+    const recovered = document.querySelector<HTMLTextAreaElement>("[data-advanced-json]");
+    expect(saveWorldDraft).not.toHaveBeenCalled();
+    expect(document.querySelector('[data-section-target="canon"]')?.getAttribute("aria-current")).toBe("page");
+    expect(recovered?.value).toBe("{");
+    expect(recovered?.getAttribute("aria-invalid")).toBe("true");
+    expect(document.activeElement).toBe(recovered);
+  });
+
+  it("treats raw advanced JSON as protected local work until it is applied or discarded", async () => {
+    const { document, root, window } = editorFixture();
+    const authoredDraft = { ...structuredClone(draft), entities: [{ name: "Western Dome" }] };
+    const saveWorldDraft = vi.fn();
+    mountWorldEditorPage(root, worldId, {
+      loadWorld: vi.fn().mockResolvedValue({ ...world, draftContent: authoredDraft }),
+      saveWorldDraft
+    });
+    await settle();
+    document.querySelector<HTMLButtonElement>('[data-section-target="canon"]')?.click();
+    const advanced = document.querySelector<HTMLTextAreaElement>("[data-advanced-json]");
+    if (!advanced) throw new Error("Advanced JSON field missing.");
+    advanced.value = '{"name":"Unapplied local name"}';
+    advanced.dispatchEvent(new window.Event("input", { bubbles: true }));
+
+    expect(document.querySelector('[data-editor-state]')?.textContent).toContain("Unsaved JSON");
+    const dirtyUnload = new window.Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(dirtyUnload);
+    expect(dirtyUnload.defaultPrevented).toBe(true);
+
+    document.querySelector<HTMLButtonElement>('[data-section-target="overview"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-section-target="canon"]')?.click();
+    const recovered = document.querySelector<HTMLTextAreaElement>("[data-advanced-json]");
+    expect(recovered?.value).toBe('{"name":"Unapplied local name"}');
+
+    document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')?.click();
+    await settle();
+    expect(saveWorldDraft).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(recovered);
+    expect(recovered?.value).toBe('{"name":"Unapplied local name"}');
+    expect(document.getElementById(recovered?.getAttribute("aria-describedby") ?? "")?.textContent)
+      .toContain("Apply or discard");
+
+    document.querySelector<HTMLButtonElement>('[data-action="discard-advanced-json"]')?.click();
+    expect(document.querySelector<HTMLTextAreaElement>("[data-advanced-json]")?.value).toContain('"Western Dome"');
+    const cleanUnload = new window.Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(cleanUnload);
+    expect(cleanUnload.defaultPrevented).toBe(false);
   });
 
   it("expands the ledger drawer and aborts active requests when disposed", async () => {
