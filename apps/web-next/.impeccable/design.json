@@ -266,9 +266,11 @@
         "--text-on-accent": "{colors.accent-text}",
         "--rule": "{colors.grid}",
         "--rule-strong": "{colors.grid-strong}",
+        "--rule-grid": "color-mix(in srgb, var(--rule-strong) 68%, transparent)",
         "--accent": "{colors.indigo}",
         "--accent-hover": "{colors.indigo-dark}",
         "--accent-soft": "{colors.indigo-soft}",
+        "--accent-grid": "color-mix(in srgb, var(--accent) 16%, transparent)",
         "--focus-shadow": "rgba(35, 70, 168, 0.2)",
         "--artwork-fallback": "#e1e7ec",
         "--artwork-overlay": "rgba(16, 20, 24, 0.18)"
@@ -287,9 +289,11 @@
         "--text-on-accent": "#101418",
         "--rule": "#39495a",
         "--rule-strong": "#5b6c7e",
+        "--rule-grid": "color-mix(in srgb, var(--rule-strong) 68%, transparent)",
         "--accent": "#8eabff",
         "--accent-hover": "#b5c7ff",
         "--accent-soft": "#243760",
+        "--accent-grid": "color-mix(in srgb, var(--accent) 16%, transparent)",
         "--focus-shadow": "rgba(142, 171, 255, 0.24)",
         "--artwork-fallback": "#25313d",
         "--artwork-overlay": "rgba(16, 20, 24, 0.18)"

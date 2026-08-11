@@ -133,7 +133,7 @@ The palette is a cool technical paper system in light mode and a deep blue-black
 
 Light mode uses `#dfe7ee` page, translucent `#f8fafb` paper and entry surfaces, `#101418` primary text, `#46515c` secondary text, `#b8c5d0` / `#8798a8` rules, and the deep `#2346a8` / `#17327f` editorial indigo pair. Dark mode uses `#111821` page, translucent `#111821` paper and `#18212c` entries, `#edf2f7` primary text, `#b7c2cd` secondary text, `#39495a` / `#5b6c7e` rules, and `#8eabff` / `#b5c7ff` accents.
 
-The shared contract is `--surface-page`, `--surface-paper`, `--surface-entry`, `--surface-entry-hover`, `--surface-muted`, `--surface-inverse`, `--surface-atmosphere`, `--text-primary`, `--text-secondary`, `--text-inverse`, `--text-on-accent`, `--rule`, `--rule-strong`, `--accent`, `--accent-hover`, `--accent-soft`, `--focus-shadow`, `--artwork-fallback`, and `--artwork-overlay`. Every role is declared in both theme blocks. `--artwork-overlay` deliberately has the same value in both themes so interaction never retints user artwork.
+The shared contract is `--surface-page`, `--surface-paper`, `--surface-entry`, `--surface-entry-hover`, `--surface-muted`, `--surface-inverse`, `--surface-atmosphere`, `--text-primary`, `--text-secondary`, `--text-inverse`, `--text-on-accent`, `--rule`, `--rule-strong`, `--rule-grid`, `--accent`, `--accent-hover`, `--accent-soft`, `--accent-grid`, `--focus-shadow`, `--artwork-fallback`, and `--artwork-overlay`. Every role is declared in both theme blocks. The faint `--rule-grid` and `--accent-grid` roles keep color composition inside the palettes rather than rebuilding colors in component selectors. `--artwork-overlay` deliberately has the same value in both themes so interaction never retints user artwork.
 
 ### Named Rules
 

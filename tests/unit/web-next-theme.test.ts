@@ -74,6 +74,12 @@ function cssRule(css: string, selector: string): string {
   return "";
 }
 
+function cssWithoutThemePalettes(css: string): string {
+  return css
+    .replace(/:root\[data-theme="dark"\]\s*\{[^}]*\}/, "")
+    .replace(/:root\s*\{[^}]*\}/, "");
+}
+
 function contrastRatio(foreground: string, background: string): number {
   const luminance = (hex: string) => {
     const channels = hex.match(/[\da-f]{2}/gi);
@@ -195,8 +201,8 @@ describe("web theme integration", () => {
       "--surface-page", "--surface-paper", "--surface-entry", "--surface-entry-hover",
       "--surface-muted", "--surface-inverse", "--surface-atmosphere",
       "--text-primary", "--text-secondary", "--text-inverse", "--text-on-accent",
-      "--rule", "--rule-strong", "--accent", "--accent-hover", "--accent-soft",
-      "--focus-shadow", "--artwork-fallback", "--artwork-overlay"
+      "--rule", "--rule-strong", "--rule-grid", "--accent", "--accent-hover", "--accent-soft",
+      "--accent-grid", "--focus-shadow", "--artwork-fallback", "--artwork-overlay"
     ];
 
     expect([...light.keys()].filter((token) => requiredTokens.includes(token))).toEqual(requiredTokens);
@@ -206,6 +212,24 @@ describe("web theme integration", () => {
       expect(dark.has(obsoleteToken)).toBe(false);
       expect(css).not.toMatch(new RegExp(`${obsoleteToken}(?![\\w-])`));
     }
+  });
+
+  it("keeps literal theme colors inside the light and dark palette declarations", () => {
+    const css = fs.readFileSync(path.join(webNextRoot, "src/styles.css"), "utf8");
+    const selectors = cssWithoutThemePalettes(css);
+    const themeInvariantMediaAllowlist = new Set<string>([]);
+    const prohibitedColorLiteral = /#[\da-f]{3,8}\b|\brgba?\s*\(|\bcolor-mix\s*\(/i;
+    const leaks = [...selectors.matchAll(/([^{}]+)\{([^{}]*)\}/g)].flatMap((rule) => {
+      const selector = rule[1].replace(/\s+/g, " ").trim();
+      return rule[2]
+        .split(";")
+        .map((declaration) => declaration.trim())
+        .filter((declaration) => prohibitedColorLiteral.test(declaration))
+        .map((declaration) => `${selector} { ${declaration} }`)
+        .filter((leak) => !themeInvariantMediaAllowlist.has(leak));
+    });
+
+    expect(leaks).toEqual([]);
   });
 
   it("keeps filled accent text readable in every theme and interaction state", () => {

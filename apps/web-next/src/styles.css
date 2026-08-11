@@ -49,9 +49,11 @@
   --text-on-accent: #f5f7fb;
   --rule: #b8c5d0;
   --rule-strong: #8798a8;
+  --rule-grid: color-mix(in srgb, var(--rule-strong) 68%, transparent);
   --accent: #2346a8;
   --accent-hover: #17327f;
   --accent-soft: #c8d5f2;
+  --accent-grid: color-mix(in srgb, var(--accent) 16%, transparent);
   --focus-shadow: rgba(35, 70, 168, 0.2);
   --artwork-fallback: #e1e7ec;
   --artwork-overlay: rgba(16, 20, 24, 0.18);
@@ -74,9 +76,11 @@
   --text-on-accent: #101418;
   --rule: #39495a;
   --rule-strong: #5b6c7e;
+  --rule-grid: color-mix(in srgb, var(--rule-strong) 68%, transparent);
   --accent: #8eabff;
   --accent-hover: #b5c7ff;
   --accent-soft: #243760;
+  --accent-grid: color-mix(in srgb, var(--accent) 16%, transparent);
   --focus-shadow: rgba(142, 171, 255, 0.24);
   --artwork-fallback: #25313d;
   --artwork-overlay: rgba(16, 20, 24, 0.18);
@@ -111,8 +115,8 @@ body::after {
 body::before {
   background-color: var(--surface-paper);
   background-image:
-    linear-gradient(to right, color-mix(in srgb, var(--rule-strong) 68%, transparent) 1px, transparent 1px),
-    linear-gradient(to bottom, color-mix(in srgb, var(--rule-strong) 68%, transparent) 1px, transparent 1px);
+    linear-gradient(to right, var(--rule-grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--rule-grid) 1px, transparent 1px);
   background-size: var(--cell) var(--cell);
 }
 
@@ -542,8 +546,8 @@ h1 span:last-child {
   place-items: center;
   background-color: var(--artwork-fallback);
   background-image:
-    linear-gradient(to right, color-mix(in srgb, var(--accent) 16%, transparent) 1px, transparent 1px),
-    linear-gradient(to bottom, color-mix(in srgb, var(--accent) 16%, transparent) 1px, transparent 1px);
+    linear-gradient(to right, var(--accent-grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--accent-grid) 1px, transparent 1px);
   background-size: 18px 18px;
 }
 
