@@ -69,9 +69,40 @@ describe("World Library overview", () => {
     search.dispatchEvent(new Event("input", { bubbles: true }));
 
     expect(fetchWorlds).toHaveBeenCalledTimes(2);
+    expect(document.querySelectorAll('a[href="/app/worlds/new"]')).toHaveLength(1);
+    expect(document.querySelector('a[href="/app/worlds/new"]')?.textContent).toContain("Create world");
     expect(document.querySelectorAll(".world-entry")).toHaveLength(1);
     expect(document.querySelector(".world-entry")?.textContent).toContain("Glass Harbor");
+    expect(document.querySelector(".world-entry a")?.getAttribute("href")).toBe("/app/worlds/world-1");
     consoleError.mockRestore();
+  });
+
+  it("routes the reserved new path to the creation shell without loading a world", async () => {
+    const { window } = parseHTML('<html><body><div id="app"></div></body></html>');
+    window.location = { pathname: "/app/worlds/new" } as Location;
+    Object.defineProperty(window, "localStorage", { configurable: true, value: null });
+    const fetch = vi.fn();
+    const previousGlobals = new Map<PropertyKey, PropertyDescriptor | undefined>();
+    for (const [name, value] of [["window", window], ["document", window.document], ["fetch", fetch]] as const) {
+      previousGlobals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+      Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+    }
+
+    try {
+      vi.resetModules();
+      await import("../../apps/web-next/src/bootstrap.js");
+      expect(window.document.querySelectorAll('[data-page="world-creation"]')).toHaveLength(1);
+      expect(window.document.querySelector('[data-page="world-editor"]')).toBeNull();
+      expect(window.document.querySelector('[data-page="world-creation"] button:disabled')).not.toBeNull();
+      expect(window.document.querySelector(".theme-toggle")).not.toBeNull();
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      for (const [name, descriptor] of previousGlobals) {
+        if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+        else Reflect.deleteProperty(globalThis, name);
+      }
+      vi.resetModules();
+    }
   });
 
   it("keeps the mounted editor and theme control through BFCache transitions, then disposes on non-persisted pagehide", async () => {

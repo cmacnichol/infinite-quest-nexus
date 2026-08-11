@@ -1,4 +1,5 @@
 import { initializeAppTheme, renderAppShell } from "./app-shell";
+import { worldCreationPath } from "./world-creation-model";
 import {
   filterWorlds,
   installArtworkFallback,
@@ -31,6 +32,7 @@ const libraryMarkup = `
         <span class="title-slash" aria-hidden="true"></span>
       </div>
       <p>Browse the worlds that hold your lore, characters, and campaigns.</p>
+      <a class="library-create-action" href="${worldCreationPath()}">Create world</a>
     </section>
 
     <section class="library-tools" aria-label="Find a world">

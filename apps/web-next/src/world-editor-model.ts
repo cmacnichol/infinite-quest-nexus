@@ -181,21 +181,23 @@ export function parseWorldAggregate(value: unknown): WorldAggregate {
   };
 }
 
+export function createEmptyWorldDraft(): EditableWorldDraft {
+  return {
+    schemaVersion: 5,
+    world: { title: "", genre: "", tone: "", premise: "", backgroundStory: "", firstAction: "", rules: "" },
+    playableCharacters: [],
+    entities: [],
+    relationships: [],
+    rpgStats: [],
+    defaultTriggers: [],
+    eventTriggers: [],
+    assets: [],
+    defaults: {}
+  };
+}
+
 export function cloneWorldDraft(world: WorldAggregate): EditableWorldDraft {
-  if (world.draftContent === null) {
-    return {
-      schemaVersion: 5,
-      world: { title: "", genre: "", tone: "", premise: "", backgroundStory: "", firstAction: "", rules: "" },
-      playableCharacters: [],
-      entities: [],
-      relationships: [],
-      rpgStats: [],
-      defaultTriggers: [],
-      eventTriggers: [],
-      assets: [],
-      defaults: {}
-    };
-  }
+  if (world.draftContent === null) return createEmptyWorldDraft();
   const draft = typeof structuredClone === "function"
     ? structuredClone(world.draftContent)
     : JSON.parse(JSON.stringify(world.draftContent)) as EditableWorldDraft;
@@ -211,7 +213,8 @@ export function worldIdFromPath(pathname: string): string | null {
   const match = /^\/app\/worlds\/([^/]+)$/.exec(pathname);
   if (!match?.[1]) return null;
   try {
-    return decodeURIComponent(match[1]);
+    const worldId = decodeURIComponent(match[1]);
+    return worldId === "new" ? null : worldId;
   } catch {
     return null;
   }

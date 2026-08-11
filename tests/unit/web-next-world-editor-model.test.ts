@@ -78,6 +78,7 @@ describe("World Editor browser boundary", () => {
       "22222222-2222-4222-8222-222222222222"
     );
     expect(worldIdFromPath("/app/")).toBeNull();
+    expect(worldIdFromPath("/app/worlds/new")).toBeNull();
   });
 
   it("strictly parses world aggregates while preserving nested world data", () => {
