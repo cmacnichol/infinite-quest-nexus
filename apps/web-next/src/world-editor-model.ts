@@ -138,10 +138,12 @@ function parseVersion(value: unknown): PublishedWorldSummary {
 
 function parseCampaign(value: unknown): WorldCampaignSummary {
   if (!isRecord(value) || !isString(value.id) || !isString(value.title) ||
-      !["active", "archived"].includes(String(value.status)) || !isNonNegativeInteger(value.activeTurnNumber) ||
+      !isString(value.status) || !["active", "archived"].includes(value.status) ||
+      !isNonNegativeInteger(value.activeTurnNumber) ||
       !isString(value.worldVersionId) || !isPositiveInteger(value.worldVersionNumber) ||
       !isNullableString(value.selectedCharacterId) || !isNullableString(value.selectedCharacterName) ||
-      !["action_only", "flexible_auto", "flexible_action", "flexible_scene"].includes(String(value.turnControlStyle)) ||
+      !isString(value.turnControlStyle) ||
+      !["action_only", "flexible_auto", "flexible_action", "flexible_scene"].includes(value.turnControlStyle) ||
       !isString(value.updatedAt)) {
     return unexpectedWorldResponse();
   }
@@ -150,7 +152,8 @@ function parseCampaign(value: unknown): WorldCampaignSummary {
 
 export function parseWorldAggregate(value: unknown): WorldAggregate {
   if (!isRecord(value) || !isString(value.id) || !isString(value.title) ||
-      !["draft", "active", "archived"].includes(String(value.status)) || !isString(value.imageUrl) ||
+      !isString(value.status) || !["draft", "active", "archived"].includes(value.status) ||
+      !isString(value.imageUrl) ||
       !isNullableString(value.forkedFromWorldId) || !isNullableString(value.forkedFromWorldVersionId) ||
       !isString(value.createdAt) || !isString(value.updatedAt) ||
       !(value.draftRevision === null || isPositiveInteger(value.draftRevision)) ||

@@ -1,7 +1,5 @@
-import fs from "node:fs";
-import path from "node:path";
 import { parseHTML } from "linkedom";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   filterWorlds,
   installArtworkFallback,
@@ -42,15 +40,38 @@ const worlds: WorldSummary[] = [
   }
 ];
 
-const bootstrapPath = path.resolve(import.meta.dirname, "../../apps/web-next/src/bootstrap.ts");
-
 describe("World Library overview", () => {
   it("routes world cards into the replacement World Editor", () => {
-    const bootstrap = fs.readFileSync(bootstrapPath, "utf8");
-
     expect(worldEditorPath("world / 1")).toBe("/app/worlds/world%20%2F%201");
-    expect(bootstrap).toContain("link.href = worldEditorPath(world.id);");
-    expect(bootstrap).toContain('data-page="world-editor"');
+  });
+
+  it("bootstraps the routed World Editor loading state", async () => {
+    const { window } = parseHTML('<div id="app"></div>');
+    window.location = { pathname: "/app/worlds/22222222-2222-4222-8222-222222222222" } as Location;
+    const previousGlobals = new Map<PropertyKey, PropertyDescriptor | undefined>();
+    for (const [name, value] of [
+      ["window", window],
+      ["document", window.document],
+      ["HTMLElement", window.HTMLElement]
+    ] as const) {
+      previousGlobals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+      Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+    }
+
+    try {
+      vi.resetModules();
+      await import("../../apps/web-next/src/bootstrap.js");
+
+      const loadingRegion = window.document.querySelector('[data-page="world-editor"]');
+      expect(loadingRegion?.getAttribute("aria-busy")).toBe("true");
+      expect(loadingRegion?.textContent).toContain("Loading world editor");
+    } finally {
+      for (const [name, descriptor] of previousGlobals) {
+        if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+        else Reflect.deleteProperty(globalThis, name);
+      }
+      vi.resetModules();
+    }
   });
 
   it("parses the API response at the browser boundary", () => {

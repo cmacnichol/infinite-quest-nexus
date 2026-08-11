@@ -89,6 +89,39 @@ describe("World Editor browser boundary", () => {
     expect(() => parseWorldAggregate({ id: "missing" })).toThrow("unexpected world response");
   });
 
+  it.each([
+    ["world status", { ...worldAggregateFixture, status: { toString: () => "draft" } }],
+    ["campaign status", {
+      ...worldAggregateFixture,
+      campaigns: [{ ...worldAggregateFixture.campaigns[0], status: { toString: () => "active" } }]
+    }],
+    ["campaign turn control style", {
+      ...worldAggregateFixture,
+      campaigns: [{
+        ...worldAggregateFixture.campaigns[0],
+        turnControlStyle: { toString: () => "flexible_auto" }
+      }]
+    }]
+  ])("rejects a non-string %s before checking its allowed values", (_field, response) => {
+    expect(() => parseWorldAggregate(response)).toThrow("unexpected world response");
+  });
+
+  it.each([
+    ["versions collection", { ...worldAggregateFixture, versions: {} }],
+    ["campaigns collection", { ...worldAggregateFixture, campaigns: "active" }],
+    ["draft content array", {
+      ...worldAggregateFixture,
+      draftContent: { ...worldAggregateFixture.draftContent, entities: {} }
+    }],
+    ["version summary", { ...worldAggregateFixture, versions: [{ ...worldAggregateFixture.versions[0], detachments: [] }] }],
+    ["campaign summary", {
+      ...worldAggregateFixture,
+      campaigns: [{ ...worldAggregateFixture.campaigns[0], worldVersionNumber: "1" }]
+    }]
+  ])("rejects a malformed %s", (_boundary, response) => {
+    expect(() => parseWorldAggregate(response)).toThrow("unexpected world response");
+  });
+
   it("clones an editable draft without mutating the parsed aggregate", () => {
     const aggregate = parseWorldAggregate(worldAggregateFixture);
     const draft = cloneWorldDraft(aggregate);
