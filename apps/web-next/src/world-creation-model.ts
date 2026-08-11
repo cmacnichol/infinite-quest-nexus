@@ -179,9 +179,9 @@ export function editCreationDraft(
   path: readonly string[],
   value: unknown
 ): WorldCreationState {
-  const draft = canonicalDraft(state.draft);
+  let draft = canonicalDraft(state.draft);
   if (path[0] !== "playableCharacters") setAtPath(draft, path, value);
-  draft.playableCharacters = [];
+  draft = canonicalDraft(draft);
   return {
     ...state,
     draft,
@@ -201,7 +201,11 @@ export function validateCreationStage(
   }
   if (stage === "foundation" || stage === "review") {
     const world = state.draft.world as unknown;
-    if (typeof world === "object" && world !== null && !Array.isArray(world)) {
+    if (typeof world !== "object" || world === null || Array.isArray(world)) {
+      if (stage === "foundation") {
+        issues.push({ path: "world", message: "World details must be an object." });
+      }
+    } else {
       const title = (world as Record<string, unknown>).title;
       if (typeof title !== "string" || !title.trim()) {
         issues.push({ path: "world.title", message: "World title is required." });

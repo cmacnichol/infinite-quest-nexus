@@ -67,6 +67,20 @@ describe("World Creation local workflow", () => {
     expect(edited.navigationDirty).toBe(true);
   });
 
+  it("keeps protected root fields canonical during direct edits", () => {
+    const initial = createWorldCreationState();
+    const schemaEdited = editCreationDraft(initial, ["schemaVersion"], 4);
+    const charactersEdited = editCreationDraft(schemaEdited, ["playableCharacters"], [
+      { id: "forbidden", name: "Forbidden character" }
+    ]);
+
+    expect(schemaEdited.draft.schemaVersion).toBe(5);
+    expect(charactersEdited.draft.schemaVersion).toBe(5);
+    expect(charactersEdited.draft.playableCharacters).toEqual([]);
+    expect(initial.draft.schemaVersion).toBe(5);
+    expect(initial.draft.playableCharacters).toEqual([]);
+  });
+
   it("allows adjacent valid stage movement, backwards movement, and rejects skips or an untitled Foundation", () => {
     const selected = selectCreationMethod(createWorldCreationState(), "manual");
     const foundation = setCreationStage(selected, "foundation");
@@ -117,6 +131,25 @@ describe("World Creation local workflow", () => {
 
     const ready = editCreationDraft(selectCreationMethod(initial, "manual"), ["world", "title"], "Glass Atlas");
     expect(creationReadiness(ready).stages.every((stage) => stage.ready)).toBe(true);
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["non-object", null]
+  ])("marks a %s Foundation world root unready and blocks forward navigation", (_case, world) => {
+    const foundation = setCreationStage(
+      selectCreationMethod(createWorldCreationState(), "manual"),
+      "foundation"
+    );
+    const malformed = editCreationDraft(foundation, ["world"], world);
+    const foundationReadiness = creationReadiness(malformed).stages.find(({ stage }) => stage === "foundation");
+
+    expect(validateCreationStage(malformed, "foundation").issues).toContainEqual({
+      path: "world",
+      message: "World details must be an object."
+    });
+    expect(foundationReadiness).toEqual({ stage: "foundation", ready: false, issueCount: 1 });
+    expect(setCreationStage(malformed, "canon")).toBe(malformed);
   });
 
   it("reports malformed final object and array roots instead of throwing", () => {
