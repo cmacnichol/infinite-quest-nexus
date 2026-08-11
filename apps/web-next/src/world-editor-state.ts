@@ -192,6 +192,31 @@ export function editWorldDraft(
   return { ...state, draft, status: "unsaved", saveError: null };
 }
 
+export function addCollectionItem(
+  state: WorldEditorState,
+  collection: DraftCollectionName,
+  value: unknown = {}
+): WorldEditorState {
+  const draft = clone(state.draft);
+  draft[collection].push(clone(value));
+  return { ...state, draft, status: "unsaved", saveError: null };
+}
+
+export function updateCollectionItem(
+  state: WorldEditorState,
+  collection: DraftCollectionName,
+  index: number,
+  value: unknown
+): WorldEditorState {
+  const current = state.draft[collection];
+  if (!Number.isInteger(index) || index < 0 || index >= current.length) {
+    throw new RangeError(`No ${collection} item exists at index ${index}.`);
+  }
+  const draft = clone(state.draft);
+  draft[collection][index] = clone(value);
+  return { ...state, draft, status: "unsaved", saveError: null };
+}
+
 export function removeCollectionItem(
   state: WorldEditorState,
   collection: DraftCollectionName,

@@ -815,7 +815,8 @@ footer p:first-child {
 }
 
 .editor-section-index a,
-.editor-section-index span {
+.editor-section-index span,
+.editor-section-index button {
   min-height: 56px;
   display: flex;
   align-items: center;
@@ -830,7 +831,18 @@ footer p:first-child {
   text-transform: uppercase;
 }
 
-.editor-section-index a[aria-current="page"] {
+.editor-section-index button {
+  width: 100%;
+  background: transparent;
+  border-top: 0;
+  border-right: 0;
+  border-left: 0;
+  text-align: start;
+  cursor: pointer;
+}
+
+.editor-section-index a[aria-current="page"],
+.editor-section-index button[aria-current="page"] {
   color: var(--text-primary);
   background: var(--accent-soft);
   box-shadow: inset 3px 0 0 var(--accent);
@@ -838,6 +850,11 @@ footer p:first-child {
 
 .editor-section-index span[aria-disabled="true"] {
   opacity: 0.72;
+}
+
+.editor-canvas {
+  min-width: 0;
+  background: var(--surface-paper);
 }
 
 .overview-editor {
@@ -1049,6 +1066,252 @@ footer p:first-child {
   color: var(--text-secondary);
   border-right: 1px solid var(--rule);
   font-size: 0.78rem;
+}
+
+.collection-section > header {
+  margin-bottom: var(--cell);
+}
+
+.collection-editor {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.34fr) minmax(0, 1fr);
+  border-top: 1px solid var(--rule-strong);
+  border-left: 1px solid var(--rule-strong);
+}
+
+.collection-toolbar {
+  grid-column: 1 / -1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 14px;
+  border-right: 1px solid var(--rule-strong);
+  border-bottom: 1px solid var(--rule-strong);
+}
+
+.collection-toolbar h3,
+.collection-detail h3,
+.cover-editor h3 {
+  margin: 0 auto 0 0;
+  font-family: "Literata", Georgia, serif;
+  font-size: 1rem;
+}
+
+.collection-switches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.collection-toolbar button,
+.collection-detail button,
+.pending-removals button,
+.advanced-json button,
+.collection-switches button {
+  min-height: 42px;
+  padding: 9px 12px;
+  color: var(--accent-hover);
+  background: transparent;
+  border: 1px solid var(--accent);
+  border-radius: 0;
+  cursor: pointer;
+  font-family: "Chakra Petch", sans-serif;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.045em;
+  text-transform: uppercase;
+}
+
+.collection-switches button[aria-pressed="true"] {
+  color: var(--text-on-accent);
+  background: var(--accent);
+}
+
+.collection-master {
+  min-width: 0;
+  max-height: 640px;
+  overflow: auto;
+  border-right: 1px solid var(--rule-strong);
+  border-bottom: 1px solid var(--rule-strong);
+}
+
+.collection-master > input {
+  width: 100%;
+  min-height: 48px;
+  padding: 10px 14px;
+  color: var(--text-primary);
+  background: var(--surface-entry);
+  border: 0;
+  border-bottom: 1px solid var(--rule-strong);
+  border-radius: 0;
+}
+
+.collection-master > p {
+  margin: 0;
+  padding: 10px 14px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--rule);
+  font-size: 0.78rem;
+}
+
+.collection-master ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.collection-master li {
+  border-bottom: 1px solid var(--rule);
+}
+
+.collection-master li button {
+  width: 100%;
+  min-height: 48px;
+  padding: 10px 14px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 0;
+  text-align: start;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.collection-master li button[aria-current="true"] {
+  color: var(--text-primary);
+  background: var(--accent-soft);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.collection-detail-host {
+  min-width: 0;
+  padding: var(--cell);
+  border-right: 1px solid var(--rule-strong);
+  border-bottom: 1px solid var(--rule-strong);
+}
+
+.structured-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: var(--cell) 0;
+  border-top: 1px solid var(--rule-strong);
+  border-left: 1px solid var(--rule-strong);
+}
+
+.structured-fields .editor-field:has(textarea) {
+  grid-column: 1 / -1;
+}
+
+.advanced-json {
+  margin-top: var(--cell);
+  padding-top: 14px;
+  border-top: 1px solid var(--rule-strong);
+}
+
+.advanced-json summary {
+  margin-bottom: 12px;
+  color: var(--accent-hover);
+  cursor: pointer;
+  font-family: "Chakra Petch", sans-serif;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+}
+
+.advanced-json textarea,
+.cover-editor > input {
+  width: 100%;
+  padding: 12px 14px;
+  color: var(--text-primary);
+  background: var(--surface-entry);
+  border: 1px solid var(--rule-strong);
+  border-radius: 0;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.advanced-json button {
+  margin-top: 10px;
+}
+
+.field-error {
+  min-height: 1.4em;
+  margin: 8px 0 0;
+  color: var(--accent-hover);
+}
+
+.pending-removals p {
+  margin: 12px 0 0;
+  color: var(--text-secondary);
+}
+
+.cover-editor {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.35fr) minmax(0, 1fr);
+  gap: var(--cell);
+  align-items: start;
+  margin-bottom: var(--cell);
+  padding-bottom: var(--cell);
+  border-bottom: 1px solid var(--rule-strong);
+}
+
+.cover-editor h3,
+.cover-editor .field-error {
+  grid-column: 1 / -1;
+}
+
+.cover-artwork {
+  min-height: 160px;
+  display: grid;
+  place-items: center;
+  background: var(--artwork-fallback);
+  border: 1px solid var(--rule-strong);
+}
+
+.cover-artwork img {
+  width: 100%;
+  height: 220px;
+  object-fit: cover;
+}
+
+.cover-artwork p {
+  max-width: 24ch;
+  margin: 0;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.cover-editor fieldset {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 14px;
+  border: 1px solid var(--rule-strong);
+}
+
+.cover-editor legend {
+  padding: 0 6px;
+  font-family: "Chakra Petch", sans-serif;
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.cover-editor > input {
+  grid-column: 2;
+}
+
+.collection-toolbar button:focus-visible,
+.collection-master button:focus-visible,
+.collection-master input:focus-visible,
+.collection-detail button:focus-visible,
+.advanced-json textarea:focus-visible,
+.cover-editor input:focus-visible,
+.editor-section-index button:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: -3px;
 }
 
 @keyframes loading-sweep {
@@ -1311,7 +1574,8 @@ footer p:first-child {
   }
 
   .editor-section-index a,
-  .editor-section-index span {
+  .editor-section-index span,
+  .editor-section-index button {
     min-width: 116px;
     justify-content: center;
     padding: 0 10px;
@@ -1335,6 +1599,20 @@ footer p:first-child {
   .editor-field-backgroundStory,
   .editor-field-rules {
     grid-column: auto;
+  }
+
+  .collection-editor,
+  .cover-editor,
+  .structured-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .collection-master {
+    max-height: 320px;
+  }
+
+  .cover-editor > input {
+    grid-column: 1;
   }
 
   .save-conflict-actions {

@@ -160,6 +160,15 @@ describe("World Editor API boundary", () => {
     expect(error).toMatchObject({ kind: "invalid_response", status: 200 });
   });
 
+  it("removes a cover independently with a null retained asset selection", async () => {
+    const fetch = vi.fn().mockResolvedValue(jsonResponse({ assetUrl: "" }));
+    vi.stubGlobal("fetch", fetch);
+
+    await expect(setWorldCoverAsset(worldId, null)).resolves.toEqual({ assetUrl: "" });
+    const [, init] = fetch.mock.calls[0]!;
+    expect(JSON.parse(String(init.body))).toEqual({ assetId: null });
+  });
+
   it("sets a cover through its independent encoded endpoint", async () => {
     const fetch = vi.fn().mockResolvedValue(jsonResponse({ assetUrl: "/api/v1/assets/asset-1" }));
     vi.stubGlobal("fetch", fetch);

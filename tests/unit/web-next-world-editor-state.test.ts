@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { WorldAggregate } from "../../apps/web-next/src/world-editor-model.js";
 import {
+  addCollectionItem,
   beginDraftSave,
   completeDraftSave,
   createWorldEditorState,
@@ -9,6 +10,7 @@ import {
   failDraftSave,
   removeCollectionItem,
   restoreCollectionItem,
+  updateCollectionItem,
   validateWorldDraft
 } from "../../apps/web-next/src/world-editor-state.js";
 
@@ -59,6 +61,31 @@ describe("World Editor draft state", () => {
     expect(edited.draft.world.premise).toBe("A changed premise");
     expect(state.draft.world.premise).not.toBe("A changed premise");
     expect(worldAggregateFixture.draftContent?.world.premise).not.toBe("A changed premise");
+  });
+
+  it("adds and updates cloned collection records without mutating prior state", () => {
+    const state = createWorldEditorState(worldAggregateFixture);
+    const added = addCollectionItem(state, "entities", { id: "entity-2", title: "Eastern Dome" });
+    const updated = updateCollectionItem(added, "entities", 1, {
+      id: "entity-2",
+      title: "Northern Dome",
+      importedExtension: { keep: true }
+    });
+
+    expect(state.draft.entities).toEqual([{ id: "entity-1", name: "Western Dome" }]);
+    expect(added.draft.entities).toHaveLength(2);
+    expect(updated.draft.entities[1]).toEqual({
+      id: "entity-2",
+      title: "Northern Dome",
+      importedExtension: { keep: true }
+    });
+    expect(updated.status).toBe("unsaved");
+  });
+
+  it("rejects collection updates outside the current local collection", () => {
+    const state = createWorldEditorState(worldAggregateFixture);
+
+    expect(() => updateCollectionItem(state, "entities", 2, {})).toThrow(RangeError);
   });
 
   it("records a reversible collection removal with its original position and value", () => {

@@ -262,6 +262,17 @@ describe("web theme integration", () => {
     expect(cssRule(css, ".save-conflict")).toMatch(/background:\s*var\(--surface-entry\)/);
   });
 
+  it("lays out the collection editor as one semantic master-detail surface without retinting cover art", () => {
+    const css = fs.readFileSync(path.join(webNextRoot, "src/styles.css"), "utf8");
+
+    expect(cssRule(css, ".collection-editor")).toMatch(/display:\s*grid/);
+    expect(cssRule(css, ".collection-editor")).toMatch(/grid-template-columns:/);
+    expect(cssRule(css, ".collection-master")).toMatch(/overflow:\s*auto/);
+    expect(cssRule(css, ".cover-artwork img")).toMatch(/object-fit:\s*cover/);
+    expect(cssRule(css, ".cover-artwork img")).not.toMatch(/filter:/);
+    expect(cssRule(css, ".editor-section-index button")).toMatch(/background:\s*transparent/);
+  });
+
   it("keeps the footer identity readable on the inverse surface in every theme", () => {
     const css = fs.readFileSync(path.join(webNextRoot, "src/styles.css"), "utf8");
     const themes = [
