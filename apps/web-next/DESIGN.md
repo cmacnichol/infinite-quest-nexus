@@ -239,8 +239,28 @@ Components are precise, tactile through state rather than simulated material, an
 ### Indexed Content Entry
 - Present artwork and text as one complete interactive cell. Keep imagery visually richer than chrome, provide a no-image grid fallback, and use a clipped cover corner, coordinate marker, concise metadata rule, and northeast action arrow as recurring wayfinding details. Exact entry composition remains surface-specific.
 
+### Editor Command Row
+- Keep world identity and the return path in the leading cell, live draft status in the center, and **Save draft** as the far-right accent action. Saving remains explicit; no field edit triggers persistence.
+- On compact screens, keep identity and Save draft together in the first row. Move status to a full-width second row rather than hiding it or moving the primary action below the form.
+
+### Section Index
+- Use one square, rule-separated control per editor section with no section-number decoration. The active section receives the semantic soft-accent surface and a three-pixel orientation rule; keyboard focus receives a complete semantic outline.
+- Desktop uses a left vertical index. At `720px` and below it recomposes into a horizontally scrollable section switcher with at least 44px targets and a bottom active rule.
+
+### Master-Detail Collection Editor
+- Use one bounded master list beside one persistent detail editor. Search and collection switches remain in the shared toolbar; selecting or filtering records must not discard unapplied detail-field state.
+- At compact widths, stack toolbar, bounded master list, and detail as complete cells. Do not nest cards, open modals, or squeeze the desktop columns.
+
+### Editor Field and Error
+- Keep prose controls within the editor's readable measure and allow long-form textareas to grow vertically. Fields use semantic entry, text, rule, focus, read-only, and error roles with square borders.
+- Invalid controls expose `aria-invalid`, a persistent semantic error border/inset, and adjacent recovery copy. Error meaning cannot depend on color alone; focus recovery returns to the affected control.
+
+### Draft Ledger
+- The Draft Ledger is the editor's bottom drawer and persistent draft-health summary. Its collapsed row exposes state, revision, readiness, and warnings; its labelled toggle controls a full-width detail region without a modal or overlay.
+- The drawer stays in document flow so expansion cannot cover the focused field. Mobile uses a two-column summary and a one-column full-width detail sheet. Drawer transitions are removed under reduced motion.
+
 ### Motion
-- Use short state transitions for rules, color, arrows, and focus. Filtering may use the View Transitions API to reveal the newly arranged group as one unit, but only when supported and when reduced motion is not requested. Under `prefers-reduced-motion: reduce`, collapse animations and transitions to effectively immediate feedback.
+- Use short state transitions for rules, color, arrows, focus, and the Draft Ledger surface. Filtering may use the View Transitions API to reveal the newly arranged group as one unit, but only when supported and when reduced motion is not requested. Under `prefers-reduced-motion: reduce`, collapse animations and transitions to effectively immediate feedback.
 
 ## Do's and Don'ts
 

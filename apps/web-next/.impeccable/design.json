@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-08-11T05:50:00.253Z",
+  "generatedAt": "2026-08-11T15:13:58.302Z",
   "title": "Design System: Infinite Quest Nexus",
   "extensions": {
     "colorMeta": {
@@ -243,6 +243,10 @@
     ],
     "breakpoints": [
       {
+        "name": "editor-compact",
+        "value": "720px"
+      },
+      {
         "name": "compact",
         "value": "680px"
       },
@@ -273,7 +277,9 @@
         "--accent-grid": "color-mix(in srgb, var(--accent) 16%, transparent)",
         "--focus-shadow": "rgba(35, 70, 168, 0.2)",
         "--artwork-fallback": "#e1e7ec",
-        "--artwork-overlay": "rgba(16, 20, 24, 0.18)"
+        "--artwork-overlay": "rgba(16, 20, 24, 0.18)",
+        "--status-error": "#9e2430",
+        "--status-error-soft": "#f4d9dc"
       },
       "dark": {
         "--surface-page": "#111821",
@@ -296,7 +302,9 @@
         "--accent-grid": "color-mix(in srgb, var(--accent) 16%, transparent)",
         "--focus-shadow": "rgba(142, 171, 255, 0.24)",
         "--artwork-fallback": "#25313d",
-        "--artwork-overlay": "rgba(16, 20, 24, 0.18)"
+        "--artwork-overlay": "rgba(16, 20, 24, 0.18)",
+        "--status-error": "#ff9da7",
+        "--status-error-soft": "#4b252d"
       }
     }
   },
@@ -355,6 +363,41 @@
       "description": "A reusable semantic-theme control with one visible authored icon and a 44px minimum target.",
       "html": "<button class=\"ds-theme-toggle\" type=\"button\" aria-label=\"Use dark theme\" title=\"Use dark theme\"><svg class=\"ds-theme-icon ds-theme-icon-sun\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><circle cx=\"12\" cy=\"12\" r=\"3.5\"></circle></svg><svg class=\"ds-theme-icon ds-theme-icon-moon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M20 15.5A8.5 8.5 0 0 1 8.5 4 8.5 8.5 0 1 0 20 15.5Z\"></path></svg></button>",
       "css": ".ds-theme-toggle { width: 48px; min-width: 44px; min-height: 44px; display: grid; place-items: center; padding: 0; color: var(--accent, #2346a8); background: transparent; border: 0; border-left: 1px solid var(--rule-strong, #8798a8); border-radius: 0; cursor: pointer; } .ds-theme-toggle:hover { color: var(--accent-hover, #17327f); background: var(--accent-soft, #c8d5f2); } .ds-theme-toggle:focus-visible { outline: 3px solid var(--accent, #2346a8); outline-offset: -3px; } .ds-theme-icon { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; } .ds-theme-icon-moon, :root[data-theme=\"dark\"] .ds-theme-icon-sun { display: none; } :root[data-theme=\"dark\"] .ds-theme-icon-moon { display: block; }"
+    },
+    {
+      "name": "Editor Command Row",
+      "kind": "custom",
+      "description": "The explicit-save command band pairing world identity, live draft status, and the primary Save draft action.",
+      "html": "<section class=\"editor-command-row\"><div class=\"editor-identity\"><a href=\"/app/\">World Library</a><h1>World Editor</h1></div><p class=\"editor-command-status\" aria-live=\"polite\">Unsaved changes</p><div class=\"editor-save-cell\"><button type=\"button\">Save draft</button></div></section>",
+      "css": ".editor-command-row { display: grid; grid-template-columns: minmax(240px, 1fr) minmax(220px, auto) minmax(180px, .45fr); border-bottom: 1px solid var(--rule-strong); } .editor-save-cell button { min-height: 52px; color: var(--text-on-accent); background: var(--accent); border: 0; border-radius: 0; }"
+    },
+    {
+      "name": "Section Index",
+      "kind": "nav",
+      "description": "A left-side editor index that recomposes into a horizontal compact section switcher without numeric decoration.",
+      "html": "<nav class=\"editor-section-index\" aria-label=\"World editor sections\"><button type=\"button\" aria-current=\"page\">Overview</button><button type=\"button\">Characters</button><button type=\"button\">Canon</button></nav>",
+      "css": ".editor-section-index { min-height: 44px; display: flex; flex-direction: column; border-right: 1px solid var(--rule-strong); } .editor-section-index button { min-height: 56px; color: var(--text-secondary); background: transparent; border: 0; border-bottom: 1px solid var(--rule); border-radius: 0; } .editor-section-index button[aria-current=\"page\"] { color: var(--text-primary); background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }"
+    },
+    {
+      "name": "Master-Detail Collection Editor",
+      "kind": "custom",
+      "description": "One bounded searchable master list and one persistent structured detail editor, stacked as complete cells on compact screens.",
+      "html": "<div class=\"collection-editor\"><div class=\"collection-toolbar\"><h3>Entities</h3><button type=\"button\">Add entity</button></div><div class=\"collection-master\"><input type=\"search\" aria-label=\"Search entities\"><ol><li><button type=\"button\" aria-current=\"true\">North Gate</button></li></ol></div><div class=\"collection-detail-host\"><h3>North Gate</h3></div></div>",
+      "css": ".collection-editor { display: grid; grid-template-columns: minmax(220px, .34fr) minmax(0, 1fr); border-top: 1px solid var(--rule-strong); border-left: 1px solid var(--rule-strong); } .collection-master { max-height: 640px; overflow: auto; border-right: 1px solid var(--rule-strong); }"
+    },
+    {
+      "name": "Editor Field and Error",
+      "kind": "input",
+      "description": "A square semantic field with readable prose measure, visible focus, persistent aria-invalid treatment, and adjacent recovery copy.",
+      "html": "<label class=\"editor-field\"><span>Premise</span><textarea aria-invalid=\"true\" aria-describedby=\"premise-error\"></textarea><small id=\"premise-error\" class=\"field-error\">Enter a premise before saving.</small></label>",
+      "css": ".editor-field textarea { color: var(--text-primary); background: var(--surface-entry); border: 1px solid var(--rule-strong); border-radius: 0; resize: vertical; } .editor-field textarea[aria-invalid=\"true\"] { border-color: var(--status-error); box-shadow: inset 3px 0 0 var(--status-error); } .field-error { color: var(--status-error); }"
+    },
+    {
+      "name": "Draft Ledger",
+      "kind": "disclosure",
+      "description": "The in-flow bottom drawer summarizing state, revision, readiness, and warnings before revealing full-width draft details.",
+      "html": "<section class=\"draft-ledger\" aria-label=\"Draft ledger\"><div class=\"draft-ledger-summary\"><span>State unsaved</span><span>Revision 8</span><span>Readiness 4 of 5</span><span>Warnings 1</span><button type=\"button\" aria-expanded=\"false\" aria-controls=\"draft-ledger-details\">Draft details</button></div><div id=\"draft-ledger-details\" class=\"draft-ledger-details\" hidden></div></section>",
+      "css": ".draft-ledger { width: 100%; background: var(--surface-entry); border-bottom: 1px solid var(--rule-strong); } .draft-ledger-details { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border-top: 1px solid var(--rule); transition: background-color 180ms ease; }"
     }
   ],
   "narrative": {

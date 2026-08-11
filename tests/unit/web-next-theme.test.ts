@@ -222,7 +222,7 @@ describe("web theme integration", () => {
       "--surface-muted", "--surface-inverse", "--surface-atmosphere",
       "--text-primary", "--text-secondary", "--text-inverse", "--text-on-accent",
       "--rule", "--rule-strong", "--rule-grid", "--accent", "--accent-hover", "--accent-soft",
-      "--accent-grid", "--focus-shadow", "--artwork-fallback", "--artwork-overlay"
+      "--accent-grid", "--status-error", "--status-error-soft", "--focus-shadow", "--artwork-fallback", "--artwork-overlay"
     ];
 
     expect([...light.keys()].filter((token) => requiredTokens.includes(token))).toEqual(requiredTokens);
@@ -258,7 +258,7 @@ describe("web theme integration", () => {
     expect(cssRule(css, ".editor-command-row")).toMatch(/display:\s*grid/);
     expect(cssRule(css, ".editor-save-cell button")).toMatch(/background:\s*var\(--accent\)/);
     expect(cssRule(css, ".editor-save-cell button:disabled")).toMatch(/background:\s*var\(--surface-muted\)/);
-    expect(cssRule(css, ".editor-field input:focus, .editor-field textarea:focus")).toMatch(/border-color:\s*var\(--accent\)/);
+    expect(cssRule(css, ".editor-field input:focus-visible, .editor-field textarea:focus-visible")).toMatch(/border-color:\s*var\(--accent\)/);
     expect(cssRule(css, ".save-conflict")).toMatch(/background:\s*var\(--surface-entry\)/);
   });
 
@@ -314,7 +314,10 @@ describe("web theme integration", () => {
   it("keeps the design sidecar synchronized with filled-accent and artwork roles", () => {
     const design = JSON.parse(fs.readFileSync(path.join(webNextRoot, ".impeccable/design.json"), "utf8"));
     const { light, dark } = design.extensions.themePalettes as Record<string, Record<string, string>>;
-    const requiredTokens = ["--text-on-accent", "--focus-shadow", "--artwork-fallback", "--artwork-overlay"];
+    const requiredTokens = [
+      "--text-on-accent", "--status-error", "--status-error-soft",
+      "--focus-shadow", "--artwork-fallback", "--artwork-overlay"
+    ];
 
     for (const token of requiredTokens) {
       expect(light).toHaveProperty(token);
