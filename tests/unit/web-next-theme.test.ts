@@ -80,4 +80,83 @@ describe("web theme policy", () => {
     expect(controller.toggle()).toBe("dark");
     expect(document.documentElement.dataset.theme).toBe("dark");
   });
+
+  it("reads storage once during initialization", () => {
+    const { document } = parseHTML("<html><body></body></html>").window;
+    let reads = 0;
+    const storage = {
+      getItem: () => {
+        reads += 1;
+        return "dark";
+      },
+      setItem: () => undefined
+    };
+
+    const controller = createThemeController({ root: document.documentElement, storage, mediaQuery: mediaQuery(false) });
+
+    expect(reads).toBe(1);
+    expect(controller.current()).toBe("dark");
+  });
+
+  it("falls back to light and remains usable when reading media matches throws", () => {
+    const { document } = parseHTML("<html><body></body></html>").window;
+    const media = mediaQuery(false);
+    Object.defineProperty(media, "matches", {
+      get: () => { throw new Error("blocked"); }
+    });
+
+    const controller = createThemeController({ root: document.documentElement, storage: null, mediaQuery: media });
+
+    expect(controller.current()).toBe("light");
+    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(controller.toggle()).toBe("dark");
+  });
+
+  it("remains usable when media listener registration throws", () => {
+    const { document } = parseHTML("<html><body></body></html>").window;
+    const media = mediaQuery(false);
+    media.addEventListener = () => { throw new Error("blocked"); };
+
+    const controller = createThemeController({ root: document.documentElement, storage: null, mediaQuery: media });
+
+    expect(controller.current()).toBe("light");
+    expect(controller.toggle()).toBe("dark");
+    expect(() => controller.dispose()).not.toThrow();
+  });
+
+  it("contains media listener disposal failures", () => {
+    const { document } = parseHTML("<html><body></body></html>").window;
+    const media = mediaQuery(false);
+    media.removeEventListener = () => { throw new Error("blocked"); };
+    const controller = createThemeController({ root: document.documentElement, storage: null, mediaQuery: media });
+
+    expect(() => controller.dispose()).not.toThrow();
+    expect(controller.toggle()).toBe("dark");
+  });
+
+  it("does not follow system changes when a stored preference exists", () => {
+    const { document } = parseHTML("<html><body></body></html>").window;
+    const media = mediaQuery(false);
+    const storage = {
+      getItem: () => "light",
+      setItem: () => undefined
+    };
+    const controller = createThemeController({ root: document.documentElement, storage, mediaQuery: media });
+
+    media.emit(true);
+
+    expect(controller.current()).toBe("light");
+    expect(document.documentElement.dataset.theme).toBe("light");
+  });
+
+  it("unregisters a successfully registered listener on disposal", () => {
+    const { document } = parseHTML("<html><body></body></html>").window;
+    const media = mediaQuery(false);
+    const controller = createThemeController({ root: document.documentElement, storage: null, mediaQuery: media });
+
+    controller.dispose();
+    media.emit(true);
+
+    expect(controller.current()).toBe("light");
+  });
 });

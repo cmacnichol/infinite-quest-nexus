@@ -53,12 +53,22 @@ function writeStoredTheme(storage: ThemeEnvironment["storage"], theme: Theme): v
   }
 }
 
+function systemPrefersDark(mediaQuery: ThemeEnvironment["mediaQuery"]): boolean {
+  try {
+    return mediaQuery?.matches ?? false;
+  } catch {
+    return false;
+  }
+}
+
 export function createThemeController(
   environment: ThemeEnvironment,
   onChange: (theme: Theme) => void = () => undefined
 ): ThemeController {
-  let hasManualPreference = readStoredTheme(environment.storage) !== null;
-  let theme = resolveTheme(readStoredTheme(environment.storage), environment.mediaQuery?.matches ?? false);
+  const storedTheme = readStoredTheme(environment.storage);
+  let hasManualPreference = storedTheme !== null;
+  let theme = resolveTheme(storedTheme, systemPrefersDark(environment.mediaQuery));
+  let listenerRegistered = false;
 
   const commit = (next: Theme) => {
     theme = next;
@@ -70,7 +80,12 @@ export function createThemeController(
   };
 
   commit(theme);
-  environment.mediaQuery?.addEventListener("change", onSystemChange);
+  try {
+    environment.mediaQuery?.addEventListener("change", onSystemChange);
+    listenerRegistered = environment.mediaQuery !== null;
+  } catch {
+    // Theme controls remain available when media query listeners are blocked.
+  }
 
   return {
     current: () => theme,
@@ -81,6 +96,14 @@ export function createThemeController(
       commit(selected);
       return selected;
     },
-    dispose: () => environment.mediaQuery?.removeEventListener("change", onSystemChange)
+    dispose: () => {
+      if (!listenerRegistered) return;
+      listenerRegistered = false;
+      try {
+        environment.mediaQuery?.removeEventListener("change", onSystemChange);
+      } catch {
+        // Disposal remains safe when media query listener removal is blocked.
+      }
+    }
   };
 }
