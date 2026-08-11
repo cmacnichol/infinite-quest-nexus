@@ -13,6 +13,7 @@ import {
   createWorldCreationState,
   creationStageProgress,
   editCreationDraft,
+  hasLocalWorldCreationContent,
   removeCreationCollectionItem,
   restoreCreationCollectionItem,
   selectCreationMethod,
@@ -196,13 +197,6 @@ function textValue(value: unknown): string {
   return typeof value === "string" || typeof value === "number" || typeof value === "boolean" ? String(value) : "";
 }
 
-function draftHasLocalContent(state: WorldCreationState): boolean {
-  return Object.values(state.draft.world).some((value) => typeof value === "string" && value.trim()) ||
-    state.draft.entities.length > 0 || state.draft.relationships.length > 0 || state.draft.rpgStats.length > 0 ||
-    state.draft.defaultTriggers.length > 0 || state.draft.eventTriggers.length > 0 ||
-    Object.keys(state.draft.defaults).length > 0;
-}
-
 export function mountWorldCreationPage(
   root: HTMLElement,
   dependencies: WorldCreationPageDependencies = {}
@@ -294,6 +288,8 @@ export function mountWorldCreationPage(
       const item = stageItems.find((candidate) => candidate.dataset.stage === progress.stage);
       if (!item) continue;
       item.dataset.stageState = progress.state;
+      const label = item.textContent?.trim() || progress.stage;
+      item.setAttribute("aria-label", `${label}, ${progress.state}`);
       if (progress.state === "current") item.setAttribute("aria-current", "step");
       else item.removeAttribute("aria-current");
       if (progress.state === "upcoming") item.setAttribute("aria-disabled", "true");
@@ -510,6 +506,7 @@ export function mountWorldCreationPage(
   }
 
   function updateMethod(method: "manual" | "ai"): void {
+    if (generationController) cancelGeneration();
     state = selectCreationMethod(state, method);
     aiPrompt.hidden = method !== "ai";
     manualAction.hidden = method !== "manual";
@@ -620,7 +617,13 @@ export function mountWorldCreationPage(
 
   async function generate(): Promise<void> {
     if (!concept.trim() || generationController) return;
-    if (draftHasLocalContent(state) && !confirmGeneratedReplacement()) return;
+    if (hasLocalWorldCreationContent(state.draft) && !confirmGeneratedReplacement()) return;
+    const requestStart = {
+      concept,
+      draft: JSON.stringify(state.draft),
+      method: state.method,
+      stage: state.stage
+    };
     const controller = new AbortController();
     generationController = controller;
     generationSequence += 1;
@@ -633,6 +636,10 @@ export function mountWorldCreationPage(
     try {
       const preview = await generateWorldPreview({ title: "", prompt: concept, progressKey }, controller.signal);
       if (disposed || generationController !== controller || controller.signal.aborted || generationSequence !== requestSequence) return;
+      const requestContextUnchanged = concept === requestStart.concept &&
+        JSON.stringify(state.draft) === requestStart.draft &&
+        state.method === requestStart.method && state.stage === requestStart.stage;
+      if (!requestContextUnchanged) return;
       state = applyGeneratedPreview(state, preview);
       state = setCreationStage(state, "foundation");
       generationStatus.textContent = "World draft generated. Please review every field before continuing.";
@@ -795,6 +802,7 @@ export function mountWorldCreationPage(
     else if (action === "generate-world") void generate();
     else if (action === "cancel-generation") cancelGeneration();
     else if (action === "continue-manual") {
+      if (generationController) cancelGeneration();
       state = setCreationStage(state, "foundation");
       renderStage();
     } else if (action === "continue-stage") validateAndContinue();

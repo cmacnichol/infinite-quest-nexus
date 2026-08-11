@@ -396,6 +396,136 @@ describe("World Creation generation and convergent editing", () => {
     }
   });
 
+  it("stops progress polling after success, terminal progress, cancellation, and disposal", async () => {
+    vi.useFakeTimers();
+    try {
+      const successFixture = creationFixture();
+      const successProgress = vi.fn().mockResolvedValue({
+        status: "processing", phase: "world_structure", progressPercent: 20, message: "Working"
+      });
+      mountWorldCreationPage(successFixture.root, {
+        generateWorldPreview: vi.fn().mockResolvedValue(generatedPreview),
+        loadWorldGenerationProgress: successProgress,
+        generationPollIntervalMs: 100
+      });
+      chooseMethod(successFixture.document, successFixture.window as unknown as Window, "ai");
+      enterConcept(successFixture.document, successFixture.window as unknown as Window, "Success");
+      successFixture.document.querySelector<HTMLButtonElement>('[data-action="generate-world"]')?.click();
+      await settle();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(successProgress).not.toHaveBeenCalled();
+
+      const terminalFixture = creationFixture();
+      const terminalGeneration = deferred<typeof generatedPreview>();
+      const terminalProgress = vi.fn().mockResolvedValue({
+        status: "completed", phase: "complete", progressPercent: 100, message: "Complete"
+      });
+      mountWorldCreationPage(terminalFixture.root, {
+        generateWorldPreview: () => terminalGeneration.promise,
+        loadWorldGenerationProgress: terminalProgress,
+        generationPollIntervalMs: 100
+      });
+      chooseMethod(terminalFixture.document, terminalFixture.window as unknown as Window, "ai");
+      enterConcept(terminalFixture.document, terminalFixture.window as unknown as Window, "Terminal");
+      terminalFixture.document.querySelector<HTMLButtonElement>('[data-action="generate-world"]')?.click();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(terminalProgress).toHaveBeenCalledTimes(1);
+      expect(terminalFixture.document.querySelector<HTMLProgressElement>("[data-generation-progress]")?.value).toBe(100);
+
+      const cancelFixture = creationFixture();
+      const cancelProgress = vi.fn().mockResolvedValue({
+        status: "processing", phase: "world_structure", progressPercent: 20, message: "Working"
+      });
+      mountWorldCreationPage(cancelFixture.root, {
+        generateWorldPreview: () => deferred<typeof generatedPreview>().promise,
+        loadWorldGenerationProgress: cancelProgress,
+        generationPollIntervalMs: 100
+      });
+      chooseMethod(cancelFixture.document, cancelFixture.window as unknown as Window, "ai");
+      enterConcept(cancelFixture.document, cancelFixture.window as unknown as Window, "Cancel");
+      cancelFixture.document.querySelector<HTMLButtonElement>('[data-action="generate-world"]')?.click();
+      await vi.advanceTimersByTimeAsync(100);
+      cancelFixture.document.querySelector<HTMLButtonElement>('[data-action="cancel-generation"]')?.click();
+      const cancelCalls = cancelProgress.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(500);
+      expect(cancelProgress).toHaveBeenCalledTimes(cancelCalls);
+
+      const disposeFixture = creationFixture();
+      const disposeProgress = vi.fn().mockResolvedValue({
+        status: "processing", phase: "world_structure", progressPercent: 20, message: "Working"
+      });
+      const mounted = mountWorldCreationPage(disposeFixture.root, {
+        generateWorldPreview: () => deferred<typeof generatedPreview>().promise,
+        loadWorldGenerationProgress: disposeProgress,
+        generationPollIntervalMs: 100
+      });
+      chooseMethod(disposeFixture.document, disposeFixture.window as unknown as Window, "ai");
+      enterConcept(disposeFixture.document, disposeFixture.window as unknown as Window, "Dispose");
+      disposeFixture.document.querySelector<HTMLButtonElement>('[data-action="generate-world"]')?.click();
+      await vi.advanceTimersByTimeAsync(100);
+      mounted.dispose();
+      const disposeCalls = disposeProgress.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(500);
+      expect(disposeProgress).toHaveBeenCalledTimes(disposeCalls);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("invalidates a pending AI result when switching to Manual and preserves later Foundation edits", async () => {
+    const { document, root, window } = creationFixture();
+    const pending = deferred<typeof generatedPreview>();
+    const generateWorldPreview = vi.fn(() => pending.promise);
+    mountWorldCreationPage(root, { generateWorldPreview, loadWorldGenerationProgress: vi.fn() });
+    chooseMethod(document, window as unknown as Window, "ai");
+    enterConcept(document, window as unknown as Window, "Generate this");
+    document.querySelector<HTMLButtonElement>('[data-action="generate-world"]')?.click();
+
+    chooseMethod(document, window as unknown as Window, "manual");
+    expect((generateWorldPreview.mock.calls[0]?.[1] as AbortSignal).aborted).toBe(true);
+    document.querySelector<HTMLButtonElement>('[data-action="continue-manual"]')?.click();
+    inputValue(document, window as unknown as Window, '[name="world.title"]', "Manual Atlas");
+    inputValue(document, window as unknown as Window, '[name="world.genre"]', "Hand-authored fantasy");
+    pending.resolve(generatedPreview);
+    await settle();
+
+    expect(document.querySelector<HTMLInputElement>('[name="world.title"]')?.value).toBe("Manual Atlas");
+    expect(document.querySelector<HTMLInputElement>('[name="world.genre"]')?.value).toBe("Hand-authored fantasy");
+    expect(document.querySelector('[data-creation-stage="foundation"]')).not.toBeNull();
+  });
+
+  it("preserves existing Foundation fields and concept after generation failures", async () => {
+    const { document, root, window } = creationFixture();
+    const generateWorldPreview = vi.fn()
+      .mockResolvedValueOnce({ title: "Broken", content: { schemaVersion: 5 } })
+      .mockRejectedValueOnce(new WorldCreationApiError("unavailable", "offline", 503));
+    mountWorldCreationPage(root, {
+      generateWorldPreview: generateWorldPreview as never,
+      loadWorldGenerationProgress: vi.fn(),
+      confirmGeneratedReplacement: () => true
+    });
+    chooseMethod(document, window as unknown as Window, "manual");
+    document.querySelector<HTMLButtonElement>('[data-action="continue-manual"]')?.click();
+    inputValue(document, window as unknown as Window, '[name="world.title"]', "Existing Atlas");
+    inputValue(document, window as unknown as Window, '[name="world.genre"]', "Existing genre");
+    document.querySelector<HTMLButtonElement>('[data-action="back-stage"]')?.click();
+    chooseMethod(document, window as unknown as Window, "ai");
+    enterConcept(document, window as unknown as Window, "Preserve this concept");
+
+    for (const expected of ["could not be generated", "unavailable"]) {
+      document.querySelector<HTMLButtonElement>('[data-action="generate-world"]')?.click();
+      await settle();
+      expect(document.querySelector("[data-generation-status]")?.textContent).toContain(expected);
+    }
+    chooseMethod(document, window as unknown as Window, "manual");
+    document.querySelector<HTMLButtonElement>('[data-action="continue-manual"]')?.click();
+    expect(document.querySelector<HTMLInputElement>('[name="world.title"]')?.value).toBe("Existing Atlas");
+    expect(document.querySelector<HTMLInputElement>('[name="world.genre"]')?.value).toBe("Existing genre");
+    document.querySelector<HTMLButtonElement>('[data-action="back-stage"]')?.click();
+    chooseMethod(document, window as unknown as Window, "ai");
+    expect(document.querySelector<HTMLTextAreaElement>('[data-concept-prompt="compact"]')?.value).toBe("Preserve this concept");
+  });
+
   it("recovers from malformed output and provider failure while preserving concept and local fields", async () => {
     const { document, root, window } = creationFixture();
     const confirmGeneratedReplacement = vi.fn().mockReturnValueOnce(false).mockReturnValue(true);
@@ -449,6 +579,7 @@ describe("World Creation generation and convergent editing", () => {
     inputValue(document, window as unknown as Window, '[name="world.genre"]', "Solar fantasy");
     document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
     expect(document.querySelector('[data-stage="foundation"]')?.dataset.stageState).toBe("completed");
+    expect(document.querySelector('[data-stage="foundation"]')?.getAttribute("aria-label")).toMatch(/Foundation.*completed/i);
     expect(document.querySelector('[data-stage="canon"]')?.dataset.stageState).toBe("current");
     document.querySelector<HTMLButtonElement>('[data-action="back-stage"]')?.click();
     expect(document.querySelector<HTMLInputElement>('[name="world.title"]')?.value).toBe("Local Atlas");
@@ -493,15 +624,30 @@ describe("World Creation generation and convergent editing", () => {
     document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
     document.querySelector<HTMLButtonElement>('[data-action="add-item"]')?.click();
     inputValue(document, window as unknown as Window, '[data-structured-field="name"]', "Resolve");
-    const advanced = document.querySelector<HTMLTextAreaElement>("[data-advanced-json]");
+    inputValue(document, window as unknown as Window, '[data-structured-field="value"]', "3");
+    inputValue(document, window as unknown as Window, '[data-structured-field="note"]', "Resist fear");
+    let advanced = document.querySelector<HTMLTextAreaElement>("[data-advanced-json]");
     if (!advanced) throw new Error("Advanced JSON editor missing.");
     advanced.value = '{"name":"Resolve","value":3,"unknownRule":"keep"}';
     advanced.dispatchEvent(new window.Event("input", { bubbles: true }));
     document.querySelector<HTMLButtonElement>('[data-action="apply-advanced-json"]')?.click();
-    expect(document.querySelector<HTMLTextAreaElement>("[data-advanced-json]")?.value).toContain("unknownRule");
-    for (const collection of ["defaultTriggers", "eventTriggers"]) {
+    inputValue(document, window as unknown as Window, '[data-structured-field="name"]', "Composure");
+    advanced = document.querySelector<HTMLTextAreaElement>("[data-advanced-json]");
+    expect(advanced?.value).toContain('"unknownRule": "keep"');
+    expect(advanced?.value).toContain('"name": "Composure"');
+    for (const [collection, values] of [
+      ["defaultTriggers", ["Torch", "At dusk", "Light the torch"]],
+      ["eventTriggers", ["Bell", "When danger nears", "Sound the alarm"]]
+    ] as const) {
       document.querySelector<HTMLButtonElement>(`[data-collection-target="${collection}"]`)?.click();
       document.querySelector<HTMLButtonElement>('[data-action="add-item"]')?.click();
+      inputValue(document, window as unknown as Window, '[data-structured-field="name"]', values[0]);
+      inputValue(document, window as unknown as Window, '[data-structured-field="condition"]', values[1]);
+      inputValue(document, window as unknown as Window, '[data-structured-field="effect"]', values[2]);
+      const triggerJson = document.querySelector<HTMLTextAreaElement>("[data-advanced-json]")?.value ?? "";
+      expect(triggerJson).toContain(values[0]);
+      expect(triggerJson).toContain(values[1]);
+      expect(triggerJson).toContain(values[2]);
     }
     const defaults = document.querySelector<HTMLTextAreaElement>("[data-defaults-json]");
     if (!defaults) throw new Error("Defaults JSON editor missing.");

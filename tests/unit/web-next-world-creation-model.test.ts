@@ -9,6 +9,7 @@ import {
   creationStageProgress,
   editCreationDraft,
   failCreation,
+  hasLocalWorldCreationContent,
   isWorldCreationPath,
   removeCreationCollectionItem,
   restoreCreationCollectionItem,
@@ -166,6 +167,15 @@ describe("World Creation local workflow", () => {
       { path: "world", message: "World details must be an object." },
       { path: "entities", message: "entities must be an array." }
     ]));
+  });
+
+  it("detects local content across assets and imported world field shapes", () => {
+    const empty = createWorldCreationState();
+    expect(hasLocalWorldCreationContent(empty.draft)).toBe(false);
+    expect(hasLocalWorldCreationContent(editCreationDraft(empty, ["assets"], [{ id: "cover" }]).draft)).toBe(true);
+    expect(hasLocalWorldCreationContent(editCreationDraft(empty, ["world", "importedCount"], 3).draft)).toBe(true);
+    expect(hasLocalWorldCreationContent(editCreationDraft(empty, ["world", "importedFlag"], true).draft)).toBe(true);
+    expect(hasLocalWorldCreationContent(editCreationDraft(empty, ["world", "importedData"], { keep: true }).draft)).toBe(true);
   });
 
   it("canonicalizes generated previews, removes characters, and records replacement metadata", () => {

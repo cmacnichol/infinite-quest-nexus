@@ -112,9 +112,9 @@ function setAtPath(target: Record<string, unknown>, path: readonly string[], val
   parent[path[path.length - 1]!] = clone(value);
 }
 
-function hasLocalDraftContent(state: WorldCreationState): boolean {
+export function hasLocalWorldCreationContent(draft: EditableWorldDraft): boolean {
   const empty = createEmptyWorldDraft();
-  return JSON.stringify(canonicalDraft(state.draft)) !== JSON.stringify(empty);
+  return JSON.stringify(canonicalDraft(draft)) !== JSON.stringify(empty);
 }
 
 function structuralIssues(draft: EditableWorldDraft): CreationValidationIssue[] {
@@ -363,7 +363,7 @@ export function applyGeneratedPreview(
     navigationDirty: true,
     pendingRemovals: [],
     generationReplacement: {
-      replacedLocalDraft: hasLocalDraftContent(state),
+      replacedLocalDraft: hasLocalWorldCreationContent(state.draft),
       previousTitle,
       generatedTitle: preview.title
     },
