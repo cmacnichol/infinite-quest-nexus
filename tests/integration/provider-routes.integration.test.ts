@@ -189,4 +189,63 @@ integration("provider route configuration redaction", () => {
     expect(provider.configuration.nested).not.toHaveProperty("accessToken");
     expect(provider).not.toHaveProperty("apiKey");
   });
+
+  it("redacts the previously-stored configuration from PATCH responses that don't submit configuration", async () => {
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/providers",
+      payload: {
+        ...baseProviderInput,
+        name: `${baseProviderInput.name} PATCH-NO-CONFIG ${crypto.randomUUID()}`,
+        apiKey: "primary-secret",
+        configuration: {
+          apiKey: "stored-secondary-secret",
+          nested: { accessToken: "stored-nested-secret" },
+          projectId: "project-3"
+        }
+      }
+    });
+    expect(created.statusCode).toBe(201);
+
+    const response = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/providers/${created.json().id}`,
+      payload: { name: `${baseProviderInput.name} PATCH-NO-CONFIG renamed ${crypto.randomUUID()}` }
+    });
+
+    expect(response.statusCode).toBe(200);
+    const provider = response.json();
+    expect(provider.configuration).toMatchObject({ projectId: "project-3" });
+    expect(provider.configuration).not.toHaveProperty("apiKey");
+    expect(provider.configuration.nested).not.toHaveProperty("accessToken");
+  });
+
+  it("redacts stored configuration from PUT .../default responses", async () => {
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/providers",
+      payload: {
+        ...baseProviderInput,
+        name: `${baseProviderInput.name} DEFAULT ${crypto.randomUUID()}`,
+        apiKey: "primary-secret",
+        configuration: {
+          apiKey: "stored-secondary-secret",
+          nested: { accessToken: "stored-nested-secret" },
+          projectId: "project-4"
+        }
+      }
+    });
+    expect(created.statusCode).toBe(201);
+
+    const response = await app.inject({
+      method: "PUT",
+      url: `/api/v1/providers/${created.json().id}/default`
+    });
+
+    expect(response.statusCode).toBe(200);
+    const provider = response.json();
+    expect(provider.configuration).toMatchObject({ projectId: "project-4" });
+    expect(provider.configuration).not.toHaveProperty("apiKey");
+    expect(provider.configuration.nested).not.toHaveProperty("accessToken");
+  });
 });

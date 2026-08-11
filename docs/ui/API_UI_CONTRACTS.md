@@ -154,10 +154,14 @@ quick index for implementers wiring one screen at a time.
   enforced again server-side at `provider-service.ts:180-182`).
 - Provider read responses never include `apiKey` — only `hasApiKey: boolean`
   (`provider-service.ts:51`). Credential-like keys in `configuration` are
-  recursively redacted by `redactedProvider()` (`provider-service.ts:58-62`);
-  create and update responses preserve submitted configuration so legitimate
-  write values round-trip. The UI should still avoid logging configuration
-  values unnecessarily.
+  recursively redacted by `publicProviderForRead()` (`provider-service.ts:58-62`).
+  List (`GET`), `PUT .../default`, and `PATCH` responses where the request body
+  omits `configuration` all go through this redaction, since they would
+  otherwise echo a previously-stored value the caller didn't just submit.
+  `POST` and `PATCH` responses where the request body *includes*
+  `configuration` return it unredacted — that's the caller's own just-submitted
+  input, not a leak — so legitimate write values round-trip. The UI should
+  still avoid logging configuration values unnecessarily.
 - Health status: `unknown | healthy | degraded | unavailable`, auto-degrades
   after 3 consecutive failures (`provider-service.ts:62-85`).
 

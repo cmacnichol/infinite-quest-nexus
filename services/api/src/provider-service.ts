@@ -142,7 +142,7 @@ export async function setDefaultProvider(pool: DatabasePool, providerProfileId: 
     await client.query("UPDATE provider_profiles SET is_default = false, updated_at = now() WHERE owner_user_id = $1 AND provider_role = $2 AND is_default = true", [ownerUserId, role]);
     await client.query("UPDATE provider_profiles SET is_default = true, updated_at = now() WHERE id = $1 AND owner_user_id = $2", [providerProfileId, ownerUserId]);
     const result = await client.query<ProviderRow>(`SELECT ${selectColumns} FROM provider_profiles WHERE id = $1 AND owner_user_id = $2`, [providerProfileId, ownerUserId]);
-    return publicProvider(result.rows[0]!);
+    return publicProviderForRead(result.rows[0]!);
   });
 }
 
@@ -203,7 +203,10 @@ export async function updateProvider(pool: DatabasePool, providerProfileId: stri
        DO UPDATE SET work_version = chronicle_jobs.work_version + 1, updated_at = now()`,
       [ownerUserId, providerProfileId]
     );
-    return publicProvider(updated);
+    // Echoing back configuration the caller just submitted isn't a leak; but when
+    // configuration was omitted, the response is exposing a previously-stored value the
+    // caller didn't just provide, so it must be redacted like a read response.
+    return input.configuration !== undefined ? publicProvider(updated) : publicProviderForRead(updated);
   });
 }
 
