@@ -1,4 +1,5 @@
 import "./styles.css";
+import { generateWorldPreview } from "./world-creation-api";
 import { isWorldCreationPath } from "./world-creation-model";
 import { mountWorldCreationPage } from "./world-creation-page";
 import { worldIdFromPath } from "./world-editor-model";
@@ -10,7 +11,7 @@ if (!root) throw new Error("The replacement app root is missing.");
 
 const worldId = worldIdFromPath(window.location.pathname);
 const mountedPage: MountedPage = isWorldCreationPath(window.location.pathname)
-  ? mountWorldCreationPage(root)
+  ? mountWorldCreationPage(root, { generateWorldPreview })
   : worldId === null
     ? mountWorldLibraryPage(root)
     : mountWorldEditorPage(root, worldId);
