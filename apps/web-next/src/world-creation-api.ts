@@ -1,3 +1,4 @@
+import { canonicalizeWorldCreationDraft } from "./world-creation-model";
 import { parseEditableWorldDraft, type EditableWorldDraft } from "./world-editor-model";
 
 export type WorldCreationApiErrorKind =
@@ -84,13 +85,7 @@ function isPositiveInteger(value: unknown): value is number {
 }
 
 function canonicalDraft(value: unknown): EditableWorldDraft {
-  const parsed = parseEditableWorldDraft(value);
-  const result = typeof structuredClone === "function"
-    ? structuredClone(parsed)
-    : JSON.parse(JSON.stringify(parsed)) as EditableWorldDraft;
-  result.schemaVersion = 5;
-  result.playableCharacters = [];
-  return result;
+  return canonicalizeWorldCreationDraft(parseEditableWorldDraft(value));
 }
 
 function ownerSafeDraftContent(draft: EditableWorldDraft): EditableWorldDraft {

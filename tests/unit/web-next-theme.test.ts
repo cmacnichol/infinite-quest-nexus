@@ -252,6 +252,16 @@ describe("web theme integration", () => {
     expect(leaks).toEqual([]);
   });
 
+  it("enforces compact 48px world-creation method controls in CSS", () => {
+    const css = fs.readFileSync(path.join(webNextRoot, "src/styles.css"), "utf8");
+    const methodControl = cssRule(css, ".creation-method-control");
+
+    expect(methodControl).toMatch(/display:\s*(?:inline-)?flex/);
+    expect(methodControl).toMatch(/box-sizing:\s*border-box/);
+    expect(methodControl).toMatch(/height:\s*48px/);
+    expect(methodControl).toMatch(/align-items:\s*center/);
+  });
+
   it("uses the shared semantic theme contract for the editor command and conflict surfaces", () => {
     const css = fs.readFileSync(path.join(webNextRoot, "src/styles.css"), "utf8");
 

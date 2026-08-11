@@ -51,6 +51,16 @@ async function settle(): Promise<void> {
   await Promise.resolve();
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("World Creation Method stage", () => {
   it("renders the shared shell, theme control, stage context, and two compact radio controls", () => {
     const { document, root } = creationFixture();
@@ -65,10 +75,10 @@ describe("World Creation Method stage", () => {
     expect(methods).toHaveLength(2);
     expect(methods.every((method) => method.querySelector('input[type="radio"][name="creationMethod"]'))).toBe(true);
     expect(methods.every((method) => !method.matches("article, .card") && !method.querySelector("p"))).toBe(true);
-    expect(methods.map((method) => method.getAttribute("data-control-size"))).toEqual(["48", "48"]);
+    expect(methods.every((method) => !method.hasAttribute("data-control-size"))).toBe(true);
   });
 
-  it("shows AI prompt authoring only for AI and lets Manual continue without generation", () => {
+  it("shows AI prompt authoring only for AI and lets Manual continue to Foundation without generation", () => {
     const { document, root, window } = creationFixture();
     const generateWorldPreview = vi.fn().mockResolvedValue(generatedPreview);
     mountWorldCreationPage(root, { generateWorldPreview });
@@ -86,7 +96,17 @@ describe("World Creation Method stage", () => {
     manual.checked = true;
     manual.dispatchEvent(new window.Event("change", { bubbles: true }));
     expect(document.querySelector('[data-ai-prompt]')?.hasAttribute("hidden")).toBe(true);
-    expect(document.querySelector<HTMLButtonElement>('[data-action="continue-manual"]')?.disabled).toBe(false);
+    const continueManual = document.querySelector<HTMLButtonElement>('[data-action="continue-manual"]');
+    expect(continueManual?.disabled).toBe(false);
+
+    continueManual?.click();
+
+    expect(document.querySelector('[data-creation-stage="foundation"]')).not.toBeNull();
+    expect(document.querySelector<HTMLElement>('[data-foundation-stage]')?.hidden).toBe(false);
+    expect(document.querySelector('[data-foundation-stage] h2')?.textContent).toBe("Foundation");
+    expect(document.querySelector('[data-stage="foundation"]')?.getAttribute("aria-current")).toBe("step");
+    expect(document.querySelector('[data-stage="foundation"]')?.hasAttribute("aria-disabled")).toBe(false);
+    expect(document.querySelector('[data-stage="method"]')?.hasAttribute("aria-current")).toBe(false);
     expect(generateWorldPreview).not.toHaveBeenCalled();
   });
 
@@ -145,7 +165,15 @@ describe("World Creation Method stage", () => {
     expect(dialog.contains(document.activeElement)).toBe(true);
 
     const lastDialogControl = dialog.querySelectorAll<HTMLButtonElement>("button").item(2);
-    if (!lastDialogControl) throw new Error("Dialog paste action missing.");
+    const backgroundControl = document.querySelector<HTMLButtonElement>(".theme-toggle");
+    if (!lastDialogControl || !backgroundControl) throw new Error("Dialog focus fixture incomplete.");
+    backgroundControl.focus();
+    backgroundControl.dispatchEvent(keyboardEvent(window as unknown as Window, "Tab"));
+    expect(document.activeElement).toBe(close);
+    backgroundControl.focus();
+    backgroundControl.dispatchEvent(keyboardEvent(window as unknown as Window, "Tab", true));
+    expect(document.activeElement).toBe(lastDialogControl);
+
     lastDialogControl.focus();
     lastDialogControl.dispatchEvent(keyboardEvent(window as unknown as Window, "Tab"));
     expect(document.activeElement).toBe(close);
@@ -181,6 +209,67 @@ describe("World Creation Method stage", () => {
     await settle();
     expect(document.querySelector('[data-clipboard-status]')?.textContent).toContain("could not copy");
     expect(document.activeElement).toBe(compact);
+  });
+
+  it("does not steal focus after delayed successful clipboard work when focus moved elsewhere", async () => {
+    const { document, root, window } = creationFixture();
+    const pendingCopy = deferred<void>();
+    const pendingPaste = deferred<string>();
+    mountWorldCreationPage(root, {
+      generateWorldPreview: vi.fn().mockResolvedValue(generatedPreview),
+      writeClipboardText: () => pendingCopy.promise,
+      readClipboardText: () => pendingPaste.promise
+    });
+    const compact = document.querySelector<HTMLTextAreaElement>('[data-concept-prompt="compact"]');
+    const backgroundControl = document.querySelector<HTMLButtonElement>(".theme-toggle");
+    if (!compact || !backgroundControl) throw new Error("Clipboard focus fixture incomplete.");
+    compact.value = "A glass city";
+    compact.dispatchEvent(new window.Event("input", { bubbles: true }));
+    compact.focus();
+
+    document.querySelector<HTMLButtonElement>('[data-action="copy-prompt"]')?.click();
+    backgroundControl.focus();
+    pendingCopy.resolve();
+    await settle();
+    expect(document.activeElement).toBe(backgroundControl);
+
+    compact.focus();
+    compact.selectionStart = 2;
+    compact.selectionEnd = 7;
+    document.querySelector<HTMLButtonElement>('[data-action="paste-prompt"]')?.click();
+    backgroundControl.focus();
+    pendingPaste.resolve("bright");
+    await settle();
+    expect(compact.value).toBe("A bright city");
+    expect(document.activeElement).toBe(backgroundControl);
+  });
+
+  it("does not steal focus after delayed failed clipboard work when focus moved elsewhere", async () => {
+    const { document, root } = creationFixture();
+    const pendingCopy = deferred<void>();
+    const pendingPaste = deferred<string>();
+    mountWorldCreationPage(root, {
+      generateWorldPreview: vi.fn().mockResolvedValue(generatedPreview),
+      writeClipboardText: () => pendingCopy.promise,
+      readClipboardText: () => pendingPaste.promise
+    });
+    const compact = document.querySelector<HTMLTextAreaElement>('[data-concept-prompt="compact"]');
+    const backgroundControl = document.querySelector<HTMLButtonElement>(".theme-toggle");
+    if (!compact || !backgroundControl) throw new Error("Clipboard focus fixture incomplete.");
+    compact.focus();
+
+    document.querySelector<HTMLButtonElement>('[data-action="copy-prompt"]')?.click();
+    backgroundControl.focus();
+    pendingCopy.reject(new Error("denied"));
+    await settle();
+    expect(document.activeElement).toBe(backgroundControl);
+
+    compact.focus();
+    document.querySelector<HTMLButtonElement>('[data-action="paste-prompt"]')?.click();
+    backgroundControl.focus();
+    pendingPaste.reject(new Error("denied"));
+    await settle();
+    expect(document.activeElement).toBe(backgroundControl);
   });
 
   it("pastes at the current selection and recovers when clipboard permission is denied", async () => {

@@ -85,12 +85,14 @@ function clone<T>(value: T): T {
     : JSON.parse(JSON.stringify(value)) as T;
 }
 
-function canonicalDraft(draft: EditableWorldDraft): EditableWorldDraft {
+export function canonicalizeWorldCreationDraft(draft: EditableWorldDraft): EditableWorldDraft {
   const result = clone(draft);
   result.schemaVersion = 5;
   result.playableCharacters = [];
   return result;
 }
+
+const canonicalDraft = canonicalizeWorldCreationDraft;
 
 function setAtPath(target: Record<string, unknown>, path: readonly string[], value: unknown): void {
   if (path.length === 0) throw new Error("A creation draft field path is required.");

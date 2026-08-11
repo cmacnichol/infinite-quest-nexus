@@ -9,6 +9,7 @@ import {
   applyGeneratedPreview,
   createWorldCreationState,
   selectCreationMethod,
+  setCreationStage,
   type WorldCreationState
 } from "./world-creation-model";
 import type { MountedPage } from "./world-library-page";
@@ -63,12 +64,12 @@ const creationMarkup = `
 
     <div class="editor-workspace creation-workspace">
       <nav class="editor-section-index creation-stage-index" aria-label="World creation stages">
-        <span aria-current="step">Method</span>
-        <span aria-disabled="true">Foundation</span>
-        <span aria-disabled="true">Canon</span>
-        <span aria-disabled="true">Mechanics</span>
-        <span aria-disabled="true">Cover</span>
-        <span aria-disabled="true">Review</span>
+        <span data-stage="method" aria-current="step">Method</span>
+        <span data-stage="foundation" aria-disabled="true">Foundation</span>
+        <span data-stage="canon" aria-disabled="true">Canon</span>
+        <span data-stage="mechanics" aria-disabled="true">Mechanics</span>
+        <span data-stage="cover" aria-disabled="true">Cover</span>
+        <span data-stage="review" aria-disabled="true">Review</span>
       </nav>
 
       <section class="editor-canvas creation-canvas" data-creation-stage="method" aria-labelledby="method-heading">
@@ -82,11 +83,11 @@ const creationMarkup = `
 
           <fieldset class="creation-method-controls">
             <legend>Creation method</legend>
-            <label class="creation-method-control" data-control-size="48">
+            <label class="creation-method-control">
               <input type="radio" name="creationMethod" value="manual" />
               <span>Manual</span>
             </label>
-            <label class="creation-method-control" data-control-size="48">
+            <label class="creation-method-control">
               <input type="radio" name="creationMethod" value="ai" />
               <span>AI-assisted</span>
             </label>
@@ -117,6 +118,15 @@ const creationMarkup = `
             <p>Begin with an empty world and author each section directly.</p>
             <button type="button" data-action="continue-manual">Continue manually</button>
           </div>
+        </div>
+
+        <div class="overview-editor creation-foundation-stage" data-foundation-stage hidden>
+          <header>
+            <div>
+              <h2 id="foundation-heading">Foundation</h2>
+            </div>
+            <p>Define the world identity and opening premise.</p>
+          </header>
         </div>
       </section>
     </div>
@@ -159,6 +169,10 @@ export function mountWorldCreationPage(
   }
   const pageView = view;
 
+  const canvas = requiredElement<HTMLElement>(root, "[data-creation-stage]");
+  const methodStage = requiredElement<HTMLElement>(root, ".creation-method-stage");
+  const foundationStage = requiredElement<HTMLElement>(root, "[data-foundation-stage]");
+  const stageItems = [...root.querySelectorAll<HTMLElement>("[data-stage]")];
   const aiPrompt = requiredElement<HTMLElement>(root, "[data-ai-prompt]");
   const manualAction = requiredElement<HTMLElement>(root, "[data-manual-action]");
   const compactPrompt = requiredElement<HTMLTextAreaElement>(root, '[data-concept-prompt="compact"]');
@@ -201,6 +215,20 @@ export function mountWorldCreationPage(
     generateButton.disabled = !concept.trim();
   }
 
+  function renderStage(): void {
+    canvas.dataset.creationStage = state.stage;
+    methodStage.hidden = state.stage !== "method";
+    foundationStage.hidden = state.stage !== "foundation";
+    canvas.setAttribute("aria-labelledby", state.stage === "foundation" ? "foundation-heading" : "method-heading");
+    const activeIndex = stageItems.findIndex((item) => item.dataset.stage === state.stage);
+    stageItems.forEach((item, index) => {
+      if (index === activeIndex) item.setAttribute("aria-current", "step");
+      else item.removeAttribute("aria-current");
+      if (index > activeIndex) item.setAttribute("aria-disabled", "true");
+      else item.removeAttribute("aria-disabled");
+    });
+  }
+
   function updateMethod(method: "manual" | "ai"): void {
     state = selectCreationMethod(state, method);
     aiPrompt.hidden = method !== "ai";
@@ -235,17 +263,19 @@ export function mountWorldCreationPage(
 
   async function copyPrompt(): Promise<void> {
     const editor = activePrompt();
+    const focusBeforeClipboard = document.activeElement;
     try {
       await writeClipboardText(concept);
       clipboardAnnouncement("Copied world concept.");
     } catch {
       clipboardAnnouncement("We could not copy the world concept. Select the text and copy it manually.");
     }
-    if (!disposed) editor.focus();
+    if (!disposed && document.activeElement === focusBeforeClipboard) editor.focus();
   }
 
   async function pastePrompt(): Promise<void> {
     const editor = activePrompt();
+    const focusBeforeClipboard = document.activeElement;
     const start = editor.selectionStart ?? editor.value.length;
     const end = editor.selectionEnd ?? start;
     try {
@@ -259,7 +289,7 @@ export function mountWorldCreationPage(
     } catch {
       clipboardAnnouncement("Clipboard permission was denied. Paste with your browser or keyboard instead.");
     }
-    if (!disposed) editor.focus();
+    if (!disposed && document.activeElement === focusBeforeClipboard) editor.focus();
   }
 
   async function generate(): Promise<void> {
@@ -296,7 +326,10 @@ export function mountWorldCreationPage(
     if (focusable.length === 0) return;
     const first = focusable[0]!;
     const last = focusable[focusable.length - 1]!;
-    if (event.shiftKey && document.activeElement === first) {
+    if (!(document.activeElement instanceof pageView.Node) || !dialog.contains(document.activeElement)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    } else if (event.shiftKey && document.activeElement === first) {
       event.preventDefault();
       last.focus();
     } else if (!event.shiftKey && document.activeElement === last) {
@@ -325,6 +358,13 @@ export function mountWorldCreationPage(
     else if (action === "copy-prompt") void copyPrompt();
     else if (action === "paste-prompt") void pastePrompt();
     else if (action === "generate-world") void generate();
+    else if (action === "continue-manual") {
+      const nextState = setCreationStage(state, "foundation");
+      if (nextState !== state) {
+        state = nextState;
+        renderStage();
+      }
+    }
   }
 
   function onKeyDown(event: Event): void {
@@ -341,7 +381,7 @@ export function mountWorldCreationPage(
   root.addEventListener("input", onInput);
   root.addEventListener("change", onChange);
   root.addEventListener("click", onClick);
-  root.addEventListener("keydown", onKeyDown);
+  document.addEventListener("keydown", onKeyDown);
 
   return {
     dispose() {
@@ -350,7 +390,7 @@ export function mountWorldCreationPage(
       root.removeEventListener("input", onInput);
       root.removeEventListener("change", onChange);
       root.removeEventListener("click", onClick);
-      root.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("keydown", onKeyDown);
       theme.dispose();
     }
   };

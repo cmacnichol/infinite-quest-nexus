@@ -914,6 +914,56 @@ footer p:first-child {
   line-height: 1.55;
 }
 
+.creation-method-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: var(--cell) 0 0;
+  padding: 0;
+  border: 0;
+}
+
+.creation-method-controls legend {
+  width: 100%;
+  margin-bottom: 10px;
+  color: var(--text-secondary);
+  font-family: "Chakra Petch", sans-serif;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.creation-method-control {
+  height: 48px;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 16px;
+  color: var(--text-primary);
+  background: var(--surface-entry);
+  border: 1px solid var(--rule-strong);
+  cursor: pointer;
+  font-family: "Chakra Petch", sans-serif;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.creation-method-control:focus-within {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.creation-method-control input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
 .overview-form {
   width: min(100%, 1120px);
   display: grid;
