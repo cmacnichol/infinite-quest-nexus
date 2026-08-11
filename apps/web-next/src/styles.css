@@ -708,7 +708,7 @@ footer p {
 }
 
 footer p:first-child {
-  color: var(--accent);
+  color: var(--text-inverse);
   font-family: "Chakra Petch", sans-serif;
   font-weight: 600;
 }

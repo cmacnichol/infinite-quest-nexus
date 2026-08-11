@@ -16,6 +16,7 @@ interface ThemeControl {
   title: string;
   setAttribute(name: string, value: string): void;
   addEventListener(type: "click", listener: () => void): void;
+  removeEventListener(type: "click", listener: () => void): void;
 }
 
 export function resolveThemeMediaQuery(source: ThemeMediaSource): ThemeMediaQuery | null {
@@ -48,6 +49,18 @@ export function initializeThemeControl(
     control.title = label;
   };
   const controller = createThemeController(environment, updateControl);
-  control.addEventListener("click", () => controller.toggle());
-  return controller;
+  const onClick = () => controller.toggle();
+  let disposed = false;
+  control.addEventListener("click", onClick);
+
+  return {
+    current: () => controller.current(),
+    toggle: () => controller.toggle(),
+    dispose: () => {
+      if (disposed) return;
+      disposed = true;
+      control.removeEventListener("click", onClick);
+      controller.dispose();
+    }
+  };
 }

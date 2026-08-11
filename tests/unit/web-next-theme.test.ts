@@ -18,14 +18,11 @@ import {
 
 const webNextRoot = path.resolve(import.meta.dirname, "../../apps/web-next");
 
-function runInlineThemeBootstrap(options: {
+function runPreRenderThemeBootstrap(options: {
   stored?: string | null;
   matchMedia?: PropertyDescriptor;
 }) {
-  const html = fs.readFileSync(path.join(webNextRoot, "index.html"), "utf8");
-  const script = html.match(/<script>([\s\S]*?)<\/script>/)?.[1];
-  if (!script) throw new Error("The inline theme bootstrap is missing.");
-
+  const script = fs.readFileSync(path.join(webNextRoot, "public/theme-bootstrap.js"), "utf8");
   const root = { dataset: {} as Record<string, string>, style: {} as Record<string, string> };
   const sandbox = {
     document: { documentElement: root },
@@ -109,14 +106,19 @@ function mediaQuery(matches: boolean) {
 }
 
 describe("web theme integration", () => {
-  it("applies a validated initial theme before the application module", () => {
+  it("loads a CSP-compatible pre-render theme bootstrap before the application module", () => {
     const html = fs.readFileSync(path.join(webNextRoot, "index.html"), "utf8");
-    const bootstrapIndex = html.indexOf("infinite-quest.theme");
-    const moduleIndex = html.indexOf("/src/bootstrap.ts");
+    const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/g)];
+    const bootstrapIndex = html.indexOf('src="/app/theme-bootstrap.js"');
+    const moduleIndex = html.indexOf('src="/src/bootstrap.ts"');
+
+    expect(scripts).toHaveLength(2);
+    for (const [, attributes, body] of scripts) {
+      expect(attributes).toMatch(/\bsrc="[^"]+"/);
+      expect(body.trim()).toBe("");
+    }
     expect(bootstrapIndex).toBeGreaterThan(-1);
     expect(moduleIndex).toBeGreaterThan(bootstrapIndex);
-    expect(html).toContain("prefers-color-scheme: dark");
-    expect(html).toContain("document.documentElement.dataset.theme");
   });
 
   it("renders the reusable theme toggle with authored icon states", () => {
@@ -124,11 +126,12 @@ describe("web theme integration", () => {
     expect(source).toContain('class="theme-toggle"');
     expect(source).toContain('class="theme-icon theme-icon-sun"');
     expect(source).toContain('class="theme-icon theme-icon-moon"');
-    expect(source).toContain("initializeThemeControl");
+    expect(source).toContain("const themeControl = initializeThemeControl");
+    expect(source).toMatch(/addEventListener\("pagehide",\s*\(\) => themeControl\.dispose\(\)/);
   });
 
   it("keeps a valid stored choice authoritative when matchMedia access throws", () => {
-    const root = runInlineThemeBootstrap({
+    const root = runPreRenderThemeBootstrap({
       stored: "dark",
       matchMedia: { get: () => { throw new Error("blocked"); } }
     });
@@ -138,7 +141,7 @@ describe("web theme integration", () => {
   });
 
   it("falls back to light when matchMedia access throws", () => {
-    const root = runInlineThemeBootstrap({
+    const root = runPreRenderThemeBootstrap({
       matchMedia: { get: () => { throw new Error("blocked"); } }
     });
 
@@ -147,7 +150,7 @@ describe("web theme integration", () => {
   });
 
   it("falls back to light when calling matchMedia throws", () => {
-    const root = runInlineThemeBootstrap({
+    const root = runPreRenderThemeBootstrap({
       matchMedia: { value: () => { throw new Error("blocked"); } }
     });
 
@@ -156,7 +159,7 @@ describe("web theme integration", () => {
   });
 
   it("falls back to light when reading media matches throws", () => {
-    const root = runInlineThemeBootstrap({
+    const root = runPreRenderThemeBootstrap({
       matchMedia: {
         value: () => Object.defineProperty({}, "matches", {
           get: () => { throw new Error("blocked"); }
@@ -169,7 +172,7 @@ describe("web theme integration", () => {
   });
 
   it("uses a valid stored choice instead of the opposite system choice", () => {
-    const root = runInlineThemeBootstrap({
+    const root = runPreRenderThemeBootstrap({
       stored: "light",
       matchMedia: { value: () => ({ matches: true }) }
     });
@@ -232,6 +235,22 @@ describe("web theme integration", () => {
     expect(leaks).toEqual([]);
   });
 
+  it("keeps the footer identity readable on the inverse surface in every theme", () => {
+    const css = fs.readFileSync(path.join(webNextRoot, "src/styles.css"), "utf8");
+    const themes = [
+      cssDeclarations(css, ":root"),
+      cssDeclarations(css, ':root[data-theme="dark"]')
+    ];
+
+    for (const theme of themes) {
+      expect(contrastRatio(
+        theme.get("--text-inverse") ?? "",
+        theme.get("--surface-inverse") ?? ""
+      )).toBeGreaterThanOrEqual(4.5);
+    }
+    expect(cssRule(css, "footer p:first-child")).toMatch(/color:\s*var\(--text-inverse\)/);
+  });
+
   it("keeps filled accent text readable in every theme and interaction state", () => {
     const css = fs.readFileSync(path.join(webNextRoot, "src/styles.css"), "utf8");
     const themes = [
@@ -289,6 +308,40 @@ describe("web theme integration", () => {
 });
 
 describe("web theme control integration", () => {
+  it("removes click and system listeners on disposal before safe reinitialization", () => {
+    const { document, Event } = parseHTML("<html><body><button type=\"button\"></button></body></html>").window;
+    const button = document.querySelector("button");
+    if (!button) throw new Error("Button fixture is missing.");
+    const media = mediaQuery(false);
+    let writes = 0;
+    const storage = {
+      getItem: () => null,
+      setItem: () => { writes += 1; }
+    };
+
+    const disposedControl = initializeThemeControl(button, {
+      root: document.documentElement,
+      storage,
+      mediaQuery: media
+    });
+    disposedControl.dispose();
+    button.dispatchEvent(new Event("click"));
+    media.emit(true);
+    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(writes).toBe(0);
+
+    media.emit(false);
+    const activeControl = initializeThemeControl(button, {
+      root: document.documentElement,
+      storage,
+      mediaQuery: media
+    });
+    button.dispatchEvent(new Event("click"));
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(writes).toBe(1);
+    activeControl.dispose();
+  });
+
   it.each([
     ["property access", () => Object.defineProperty({}, "matchMedia", {
       get: () => { throw new Error("blocked"); }

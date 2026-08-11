@@ -4,7 +4,7 @@
 
 **Goal:** Add a reusable, persisted light/dark theme system and accessible header toggle to `apps/web-next`, while replacing the bright cobalt with a darker editorial indigo.
 
-**Architecture:** A focused `theme.ts` module owns theme validation, preference resolution, persistence, DOM application, system-change synchronization, and cleanup. `bootstrap.ts` consumes that module and renders the shared header control. `styles.css` uses semantic theme tokens, while a minimal pre-render script in `index.html` applies the initial theme before the application module loads.
+**Architecture:** A focused `theme.ts` module owns theme validation, preference resolution, persistence, DOM application, system-change synchronization, and cleanup. `bootstrap.ts` consumes that module and renders the shared header control. `styles.css` uses semantic theme tokens, while a minimal synchronous same-origin script from `public/theme-bootstrap.js` applies the initial theme before the application module loads without requiring a CSP exception.
 
 **Tech Stack:** TypeScript, Vite, CSS custom properties, DOM `matchMedia`, `localStorage`, Vitest, LinkeDOM, Playwright/Chrome for bounded visual verification.
 
@@ -253,6 +253,7 @@ git commit -m "Add reusable web theme policy"
 ### Task 2: Initial Theme Bootstrap and Shared Header Toggle
 
 **Files:**
+- Create: `apps/web-next/public/theme-bootstrap.js`
 - Modify: `apps/web-next/index.html`
 - Modify: `apps/web-next/src/bootstrap.ts`
 - Modify: `tests/unit/web-next-theme.test.ts`
@@ -260,7 +261,7 @@ git commit -m "Add reusable web theme policy"
 **Interfaces:**
 - Consumes: `THEME_STORAGE_KEY`, `createThemeController`, and `Theme` from Task 1.
 - Produces: header button `.theme-toggle` with `aria-label`, `title`, and two authored SVG states.
-- Produces: early `<head>` script that applies `data-theme` before `/src/bootstrap.ts` executes.
+- Produces: early synchronous same-origin `<head>` script that applies `data-theme` before `/src/bootstrap.ts` executes under `script-src 'self'`.
 
 - [ ] **Step 1: Write failing initial-bootstrap and label tests**
 
@@ -272,14 +273,13 @@ import path from "node:path";
 
 const webNextRoot = path.resolve(import.meta.dirname, "../../apps/web-next");
 
-it("applies a validated initial theme before the application module", () => {
+it("loads a CSP-compatible pre-render theme bootstrap before the application module", () => {
   const html = fs.readFileSync(path.join(webNextRoot, "index.html"), "utf8");
-  const bootstrapIndex = html.indexOf("infinite-quest.theme");
-  const moduleIndex = html.indexOf("/src/bootstrap.ts");
+  const bootstrapIndex = html.indexOf('src="/app/theme-bootstrap.js"');
+  const moduleIndex = html.indexOf('src="/src/bootstrap.ts"');
+  expect(html).not.toMatch(/<script(?![^>]*\bsrc=)/i);
   expect(bootstrapIndex).toBeGreaterThan(-1);
   expect(moduleIndex).toBeGreaterThan(bootstrapIndex);
-  expect(html).toContain("prefers-color-scheme: dark");
-  expect(html).toContain("document.documentElement.dataset.theme");
 });
 
 it("renders an accessible reusable theme toggle contract", () => {
@@ -303,24 +303,13 @@ Expected: FAIL because the early script, toggle markup, and controller wiring ar
 
 - [ ] **Step 3: Add the pre-render theme bootstrap**
 
-In `apps/web-next/index.html`, before the module script and preferably in `<head>`, add a short synchronous script:
+Create the focused classic script at `apps/web-next/public/theme-bootstrap.js`, and load it synchronously from `<head>` before the application module:
 
 ```html
-<script>
-  (() => {
-    const key = "infinite-quest.theme";
-    let stored = null;
-    try { stored = localStorage.getItem(key); } catch {}
-    const explicit = stored === "light" || stored === "dark" ? stored : null;
-    const systemDark = typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: dark)").matches;
-    const theme = explicit || (systemDark ? "dark" : "light");
-    document.documentElement.dataset.theme = theme;
-    document.documentElement.style.colorScheme = theme;
-  })();
-</script>
+<script vite-ignore src="/app/theme-bootstrap.js"></script>
 ```
 
-Do not add application content or user data to the HTML.
+The external script resolves stored, system, and light-fallback behavior and applies `data-theme` plus `color-scheme`. Keep `index.html` free of inline executable scripts so production `script-src 'self'` permits the bootstrap without `unsafe-inline`. Do not add application content or user data to the HTML.
 
 - [ ] **Step 4: Add the shared header toggle markup**
 
@@ -387,7 +376,7 @@ Expected: PASS with no TypeScript errors.
 - [ ] **Step 8: Commit the integration**
 
 ```bash
-git add apps/web-next/index.html apps/web-next/src/bootstrap.ts tests/unit/web-next-theme.test.ts
+git add apps/web-next/public/theme-bootstrap.js apps/web-next/index.html apps/web-next/src/bootstrap.ts tests/unit/web-next-theme.test.ts
 git commit -m "Add web theme toggle"
 ```
 

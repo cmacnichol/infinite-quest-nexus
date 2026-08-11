@@ -5,26 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="description" content="Browse and search the worlds that power Infinite Quest campaigns." />
   <meta name="theme-color" content="#f8fafb" />
-  <script>
-    (() => {
-      const key = "infinite-quest.theme";
-      let stored = null;
-      try {
-        stored = localStorage.getItem(key);
-      } catch {}
-      const explicit = stored === "light" || stored === "dark" ? stored : null;
-      let systemDark = false;
-      if (!explicit) {
-        try {
-          systemDark = typeof matchMedia === "function"
-            && matchMedia("(prefers-color-scheme: dark)").matches;
-        } catch {}
-      }
-      const theme = explicit || (systemDark ? "dark" : "light");
-      document.documentElement.dataset.theme = theme;
-      document.documentElement.style.colorScheme = theme;
-    })();
-  </script>
+  <script vite-ignore src="/app/theme-bootstrap.js"></script>
   <title>World Library · Infinite Quest Nexus</title>
 </head>
 <body>

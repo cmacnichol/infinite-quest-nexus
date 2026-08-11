@@ -103,11 +103,12 @@ try {
 }
 
 const themeMediaQuery = resolveThemeMediaQuery(window);
-initializeThemeControl(themeToggle, {
+const themeControl = initializeThemeControl(themeToggle, {
   root: document.documentElement,
   storage: themeStorage,
   mediaQuery: themeMediaQuery
 });
+window.addEventListener("pagehide", () => themeControl.dispose(), { once: true });
 
 const searchField = searchInput;
 const countOutput = resultCount;
