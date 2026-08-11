@@ -4,12 +4,14 @@ import {
   installThemeControlLifecycle,
   resolveThemeMediaQuery
 } from "./theme-control";
+import { worldIdFromPath } from "./world-editor-model";
 import {
   filterWorlds,
   installArtworkFallback,
   parseWorldListResponse,
   safeArtworkUrl,
   worldDescription,
+  worldEditorPath,
   type WorldSummary
 } from "./world-library.js";
 
@@ -19,6 +21,15 @@ if (!(root instanceof HTMLElement)) {
   throw new Error("The replacement app root is missing.");
 }
 
+const worldId = worldIdFromPath(window.location.pathname);
+
+if (worldId !== null) {
+  root.innerHTML = `
+    <main id="main-content" data-page="world-editor" aria-busy="true">
+      <p>Loading world editor…</p>
+    </main>
+  `;
+} else {
 root.innerHTML = `
   <div class="app-shell">
     <header class="site-header">
@@ -140,7 +151,7 @@ function createWorldCard(world: WorldSummary, index: number): HTMLElement {
 
   const link = document.createElement("a");
   link.className = "world-link";
-  link.href = `/nexus/?view=worlds&worldId=${encodeURIComponent(world.id)}`;
+  link.href = worldEditorPath(world.id);
   link.setAttribute("aria-label", `Open ${world.title}, ${campaignLabel(world.campaignCount)}`);
 
   const cover = document.createElement("div");
@@ -257,3 +268,4 @@ document.addEventListener("keydown", (event) => {
 });
 
 void loadWorlds();
+}

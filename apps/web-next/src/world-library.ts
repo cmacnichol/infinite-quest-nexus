@@ -1,3 +1,5 @@
+export { worldEditorPath } from "./world-editor-model";
+
 export interface WorldPreview {
   title?: unknown;
   premise?: unknown;

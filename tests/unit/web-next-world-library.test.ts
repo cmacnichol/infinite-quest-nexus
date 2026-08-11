@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { parseHTML } from "linkedom";
 import { describe, expect, it } from "vitest";
 import {
@@ -6,6 +8,7 @@ import {
   parseWorldListResponse,
   safeArtworkUrl,
   worldDescription,
+  worldEditorPath,
   type WorldSummary
 } from "../../apps/web-next/src/world-library.js";
 
@@ -39,7 +42,17 @@ const worlds: WorldSummary[] = [
   }
 ];
 
+const bootstrapPath = path.resolve(import.meta.dirname, "../../apps/web-next/src/bootstrap.ts");
+
 describe("World Library overview", () => {
+  it("routes world cards into the replacement World Editor", () => {
+    const bootstrap = fs.readFileSync(bootstrapPath, "utf8");
+
+    expect(worldEditorPath("world / 1")).toBe("/app/worlds/world%20%2F%201");
+    expect(bootstrap).toContain("link.href = worldEditorPath(world.id);");
+    expect(bootstrap).toContain('data-page="world-editor"');
+  });
+
   it("parses the API response at the browser boundary", () => {
     expect(parseWorldListResponse({ worlds }).worlds).toHaveLength(3);
     expect(() => parseWorldListResponse({ worlds: [{ title: "Missing fields" }] })).toThrow(
