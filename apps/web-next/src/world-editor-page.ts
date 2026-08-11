@@ -65,7 +65,7 @@ interface CollectionSpec {
 
 interface PendingStructuredValidation {
   collection: DraftCollectionName;
-  index: number;
+  itemId: string;
   field: string;
   value: string;
   message: string;
@@ -285,20 +285,55 @@ export function mountWorldEditorPage(
   let unloadInstalled = false;
   const selectedIndexes = new Map<DraftCollectionName, number>();
   const searches = new Map<DraftCollectionName, string>();
+  const itemIdentities = new Map<DraftCollectionName, string[]>();
+  const removedItemIdentities = new Map<string, string>();
   const pendingStructuredValidations = new Map<string, PendingStructuredValidation>();
+  let nextItemIdentity = 1;
 
-  function structuredValidationKey(collection: DraftCollectionName, index: number, field: string): string {
-    return `${collection}:${index}:${field}`;
+  function createItemIdentity(): string {
+    const identity = `editor-item-${nextItemIdentity}`;
+    nextItemIdentity += 1;
+    return identity;
+  }
+
+  function itemIdentity(collection: DraftCollectionName, index: number): string | undefined {
+    return itemIdentities.get(collection)?.[index];
+  }
+
+  function resetItemIdentities(draft: EditableWorldDraft): void {
+    removedItemIdentities.clear();
+    itemIdentities.clear();
+    for (const collection of Object.keys(COLLECTIONS) as DraftCollectionName[]) {
+      itemIdentities.set(collection, draft[collection].map(() => createItemIdentity()));
+    }
+  }
+
+  function structuredValidationKey(collection: DraftCollectionName, itemId: string, field: string): string {
+    return `${collection}:${itemId}:${field}`;
+  }
+
+  function clearPendingStructuredValidations(collection: DraftCollectionName, itemId?: string): void {
+    for (const [key, pending] of pendingStructuredValidations) {
+      if (pending.collection === collection && (itemId === undefined || pending.itemId === itemId)) {
+        pendingStructuredValidations.delete(key);
+      }
+    }
   }
 
   function firstPendingStructuredValidation(
     collection?: DraftCollectionName,
-    index?: number
+    itemId?: string
   ): PendingStructuredValidation | undefined {
-    return [...pendingStructuredValidations.values()].find((pending) =>
-      (collection === undefined || pending.collection === collection) &&
-      (index === undefined || pending.index === index)
-    );
+    for (const [key, pending] of pendingStructuredValidations) {
+      const remainsPresent = itemIdentities.get(pending.collection)?.includes(pending.itemId) ?? false;
+      if (!remainsPresent) {
+        pendingStructuredValidations.delete(key);
+        continue;
+      }
+      if ((collection === undefined || pending.collection === collection) &&
+        (itemId === undefined || pending.itemId === itemId)) return pending;
+    }
+    return undefined;
   }
 
   const beforeUnload = (event: Event) => event.preventDefault();
@@ -377,7 +412,7 @@ export function mountWorldEditorPage(
     else editorState.textContent = "Draft saved";
     const canSaveDraft = state.status === "unsaved" ||
       (state.status === "error" && state.saveError?.kind !== "conflict");
-    saveButton.disabled = isReadOnly() || state.status === "saving" || pendingStructuredValidations.size > 0 || (!canSaveDraft && !coverChanged);
+    saveButton.disabled = isReadOnly() || state.status === "saving" || (!canSaveDraft && !coverChanged);
     setDirtyGuard(!isReadOnly() && (
       pendingStructuredValidations.size > 0 || coverChanged || state.status === "unsaved" || state.status === "saving" || state.status === "error"
     ));
@@ -446,7 +481,10 @@ export function mountWorldEditorPage(
         control.dataset.structuredField = definition.name;
         if (definition.shape) control.dataset.jsonShape = definition.shape;
         const value = structured[definition.name];
-        const pending = pendingStructuredValidations.get(structuredValidationKey(spec.collection, index, definition.name));
+        const currentItemId = itemIdentity(spec.collection, index);
+        const pending = currentItemId
+          ? pendingStructuredValidations.get(structuredValidationKey(spec.collection, currentItemId, definition.name))
+          : undefined;
         control.value = pending?.value ?? (
           definition.kind === "json" ? serializeAdvancedJson(value ?? (definition.shape === "array" ? [] : {})) : textValue(value)
         );
@@ -457,7 +495,10 @@ export function mountWorldEditorPage(
       const fieldError = document.createElement("p");
       fieldError.dataset.structuredError = "";
       fieldError.className = "field-error";
-      fieldError.textContent = firstPendingStructuredValidation(spec.collection, index)?.message ?? "";
+      const currentItemId = itemIdentity(spec.collection, index);
+      fieldError.textContent = currentItemId
+        ? firstPendingStructuredValidation(spec.collection, currentItemId)?.message ?? ""
+        : "";
       structuredForm.append(fieldError);
       detail.append(structuredForm);
     }
@@ -678,6 +719,7 @@ export function mountWorldEditorPage(
     coverChanged = false;
     state = createWorldEditorState(world);
     pendingStructuredValidations.clear();
+    resetItemIdentities(state.draft);
     main.setAttribute("aria-busy", "false");
     loadState.replaceChildren();
     if (world.draftRevision === null) {
@@ -767,7 +809,9 @@ export function mountWorldEditorPage(
         activeSection = section;
         renderSection();
         activeCollection = pendingStructuredValidation.collection;
-        selectedIndexes.set(activeCollection, pendingStructuredValidation.index);
+        const pendingIndex = itemIdentities.get(activeCollection)?.indexOf(pendingStructuredValidation.itemId) ?? -1;
+        if (pendingIndex < 0) return;
+        selectedIndexes.set(activeCollection, pendingIndex);
         renderCollectionEditor();
       }
       sectionContent.querySelector<HTMLElement>(
@@ -803,6 +847,7 @@ export function mountWorldEditorPage(
       const result = await saveWorldDraft(worldId, expectedRevision, state.draft, controller.signal);
       if (disposed || saveController !== controller || controller.signal.aborted) return;
       state = completeDraftSave(state, { revision: result.revision, content: result.content });
+      resetItemIdentities(state.draft);
       conflictHost.replaceChildren();
       coverChanged = false;
       renderOverviewFields();
@@ -850,7 +895,9 @@ export function mountWorldEditorPage(
     const original = state.draft[activeCollection][index];
     if (original === undefined) return;
     const field = target.dataset.structuredField!;
-    const validationKey = structuredValidationKey(activeCollection, index, field);
+    const currentItemId = itemIdentity(activeCollection, index);
+    if (!currentItemId) return;
+    const validationKey = structuredValidationKey(activeCollection, currentItemId, field);
     const fieldError = sectionContent.querySelector<HTMLElement>("[data-structured-error]");
     let value: unknown = target.value;
     let validationMessage: string | undefined;
@@ -866,19 +913,19 @@ export function mountWorldEditorPage(
     if (validationMessage) {
       pendingStructuredValidations.set(validationKey, {
         collection: activeCollection,
-        index,
+        itemId: currentItemId,
         field,
         value: target.value,
         message: validationMessage
       });
       target.setAttribute("aria-invalid", "true");
-      if (fieldError) fieldError.textContent = firstPendingStructuredValidation(activeCollection, index)?.message ?? "";
+      if (fieldError) fieldError.textContent = firstPendingStructuredValidation(activeCollection, currentItemId)?.message ?? "";
       renderStatus();
       return;
     }
     pendingStructuredValidations.delete(validationKey);
     target.removeAttribute("aria-invalid");
-    if (fieldError) fieldError.textContent = firstPendingStructuredValidation(activeCollection, index)?.message ?? "";
+    if (fieldError) fieldError.textContent = firstPendingStructuredValidation(activeCollection, currentItemId)?.message ?? "";
     const merged = mergeStructuredFields(spec.kind, original, { [field]: value });
     state = updateCollectionItem(state, activeCollection, index, merged);
     const advanced = sectionContent.querySelector<HTMLTextAreaElement>("[data-advanced-json]");
@@ -959,6 +1006,7 @@ export function mountWorldEditorPage(
     }
     if (action === "add-item" && !isReadOnly()) {
       state = addCollectionItem(state, activeCollection, {});
+      itemIdentities.get(activeCollection)?.push(createItemIdentity());
       selectedIndexes.set(activeCollection, state.draft[activeCollection].length - 1);
       announcement.textContent = "";
       renderCollectionEditor();
@@ -966,13 +1014,34 @@ export function mountWorldEditorPage(
     }
     if (action === "remove-item" && !isReadOnly()) {
       const index = selectedIndexes.get(activeCollection) ?? 0;
+      const removedItemId = itemIdentity(activeCollection, index);
+      const previousRemovalIds = new Set(state.pendingRemovals.map((removal) => removal.id));
       state = removeCollectionItem(state, activeCollection, index);
+      const removal = state.pendingRemovals.find((candidate) => !previousRemovalIds.has(candidate.id));
+      if (removedItemId) {
+        clearPendingStructuredValidations(activeCollection, removedItemId);
+        itemIdentities.get(activeCollection)?.splice(index, 1);
+        if (removal) removedItemIdentities.set(removal.id, removedItemId);
+      }
       selectedIndexes.set(activeCollection, Math.min(index, Math.max(state.draft[activeCollection].length - 1, 0)));
       renderCollectionEditor();
       renderStatus();
     }
     if (action === "undo-removal" && actionButton?.dataset.removalId && !isReadOnly()) {
-      state = restoreCollectionItem(state, actionButton.dataset.removalId);
+      const removalId = actionButton.dataset.removalId;
+      const removal = state.pendingRemovals.find((candidate) => candidate.id === removalId);
+      if (removal) {
+        const earlierPendingCount = state.pendingRemovals.filter((candidate) =>
+          candidate.collection === removal.collection && candidate.originalIndex < removal.originalIndex
+        ).length;
+        const restorationIndex = removal.originalIndex - earlierPendingCount;
+        state = restoreCollectionItem(state, removalId);
+        const restoredItemId = removedItemIdentities.get(removalId) ?? createItemIdentity();
+        const identities = itemIdentities.get(removal.collection) ?? [];
+        identities.splice(restorationIndex, 0, restoredItemId);
+        itemIdentities.set(removal.collection, identities);
+        removedItemIdentities.delete(removalId);
+      }
       renderCollectionEditor();
       renderStatus();
     }
@@ -984,7 +1053,9 @@ export function mountWorldEditorPage(
         if (error) error.textContent = parsed.error ?? "";
         if (!parsed.error) {
           const index = selectedIndexes.get(activeCollection) ?? 0;
+          const replacedItemId = itemIdentity(activeCollection, index);
           state = updateCollectionItem(state, activeCollection, index, parsed.value);
+          if (replacedItemId) clearPendingStructuredValidations(activeCollection, replacedItemId);
           renderCollectionEditor();
           renderStatus();
         }
@@ -1010,6 +1081,8 @@ export function mountWorldEditorPage(
         if (error) error.textContent = parsed.error ?? "";
         if (!parsed.error) {
           state = editWorldDraft(state, [activeCollection], parsed.value);
+          clearPendingStructuredValidations(activeCollection);
+          itemIdentities.set(activeCollection, state.draft[activeCollection].map(() => createItemIdentity()));
           selectedIndexes.set(activeCollection, 0);
           renderCollectionEditor();
           renderStatus();

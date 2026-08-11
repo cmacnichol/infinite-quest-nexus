@@ -534,7 +534,7 @@ describe("World Editor Overview page", () => {
     expect(document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')?.disabled).toBe(true);
   });
 
-  it("keeps a numeric stat error pending when another structured field changes and blocks save", async () => {
+  it("keeps Save actionable and recovers a pending structured error after the user navigates away", async () => {
     const { document, root, window } = editorFixture();
     const authoredDraft = { ...structuredClone(draft), rpgStats: [{ name: "Resolve", value: 7 }] };
     const saveWorldDraft = vi.fn().mockResolvedValue(savedResponse(authoredDraft));
@@ -549,26 +549,174 @@ describe("World Editor Overview page", () => {
     const save = document.querySelector<HTMLButtonElement>('[data-action="save-draft"]');
     if (!value || !name || !save) throw new Error("Structured stat fixture is incomplete.");
 
-    value.value = "many";
-    value.dispatchEvent(new window.Event("input", { bubbles: true }));
     name.value = "Determination";
     name.dispatchEvent(new window.Event("input", { bubbles: true }));
+    value.value = "many";
+    value.dispatchEvent(new window.Event("input", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>('[data-section-target="canon"]')?.click();
 
-    expect(value.value).toBe("many");
-    expect(document.querySelector('[data-structured-error]')?.textContent).toContain("number");
-    expect(save.disabled).toBe(true);
+    expect(save.disabled).toBe(false);
     save.click();
     await settle();
+
     expect(saveWorldDraft).not.toHaveBeenCalled();
+    expect(document.querySelector('[data-section-target="mechanics"]')?.getAttribute("aria-current")).toBe("page");
     const recoveredValue = document.querySelector<HTMLInputElement>('[name="structured.value"]');
     if (!recoveredValue) throw new Error("Structured stat value was not recovered.");
     expect(recoveredValue.value).toBe("many");
+    expect(recoveredValue.getAttribute("aria-invalid")).toBe("true");
     expect(document.activeElement).toBe(recoveredValue);
+    expect(document.querySelector('[data-save-announcement]')?.textContent).toContain("valid number");
 
     recoveredValue.value = "8";
     recoveredValue.dispatchEvent(new window.Event("input", { bubbles: true }));
     expect(document.querySelector('[data-structured-error]')?.textContent).toBe("");
     expect(save.disabled).toBe(false);
+  });
+
+  it("clears a pending structured error when its invalid record is removed", async () => {
+    const { document, root, window } = editorFixture();
+    const authoredDraft = { ...structuredClone(draft), rpgStats: [{ name: "Resolve", value: 7 }, { name: "Focus", value: 4 }] };
+    const saveWorldDraft = vi.fn().mockResolvedValue(savedResponse(authoredDraft));
+    mountWorldEditorPage(root, worldId, {
+      loadWorld: vi.fn().mockResolvedValue({ ...world, draftContent: authoredDraft }),
+      saveWorldDraft
+    });
+    await settle();
+    document.querySelector<HTMLButtonElement>('[data-section-target="mechanics"]')?.click();
+    const value = document.querySelector<HTMLInputElement>('[name="structured.value"]');
+    if (!value) throw new Error("Structured stat value is missing.");
+    value.value = "many";
+    value.dispatchEvent(new window.Event("input", { bubbles: true }));
+
+    document.querySelector<HTMLButtonElement>('[data-action="remove-item"]')?.click();
+    const save = document.querySelector<HTMLButtonElement>('[data-action="save-draft"]');
+    if (!save) throw new Error("Save action is missing.");
+    expect(save.disabled).toBe(false);
+    save.click();
+    await settle();
+
+    expect(saveWorldDraft).toHaveBeenCalledTimes(1);
+    expect(saveWorldDraft.mock.calls[0]?.[2].rpgStats).toEqual([{ name: "Focus", value: 4 }]);
+  });
+
+  it("keeps a pending error attached to its record when an earlier record is removed", async () => {
+    const { document, root, window } = editorFixture();
+    const authoredDraft = { ...structuredClone(draft), rpgStats: [{ name: "Resolve", value: 7 }, { name: "Focus", value: 4 }] };
+    const saveWorldDraft = vi.fn();
+    mountWorldEditorPage(root, worldId, {
+      loadWorld: vi.fn().mockResolvedValue({ ...world, draftContent: authoredDraft }),
+      saveWorldDraft
+    });
+    await settle();
+    document.querySelector<HTMLButtonElement>('[data-section-target="mechanics"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-action="select-item"][data-item-index="1"]')?.click();
+    const invalidValue = document.querySelector<HTMLInputElement>('[name="structured.value"]');
+    if (!invalidValue) throw new Error("Second structured stat value is missing.");
+    invalidValue.value = "many";
+    invalidValue.dispatchEvent(new window.Event("input", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>('[data-action="select-item"][data-item-index="0"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-action="remove-item"]')?.click();
+
+    const save = document.querySelector<HTMLButtonElement>('[data-action="save-draft"]');
+    if (!save) throw new Error("Save action is missing.");
+    expect(save.disabled).toBe(false);
+    save.click();
+    await settle();
+
+    expect(saveWorldDraft).not.toHaveBeenCalled();
+    const recoveredValue = document.querySelector<HTMLInputElement>('[name="structured.value"]');
+    expect(recoveredValue?.value).toBe("many");
+    expect(document.querySelector('[data-record-detail]')?.textContent).toContain("Focus");
+    expect(document.activeElement).toBe(recoveredValue);
+  });
+
+  it("does not restore a rejected structured value when an invalid record is removed and undone", async () => {
+    const { document, root, window } = editorFixture();
+    const authoredDraft = { ...structuredClone(draft), rpgStats: [{ name: "Resolve", value: 7 }] };
+    const saveWorldDraft = vi.fn().mockResolvedValue(savedResponse(authoredDraft));
+    mountWorldEditorPage(root, worldId, {
+      loadWorld: vi.fn().mockResolvedValue({ ...world, draftContent: authoredDraft }),
+      saveWorldDraft
+    });
+    await settle();
+    document.querySelector<HTMLButtonElement>('[data-section-target="mechanics"]')?.click();
+    const value = document.querySelector<HTMLInputElement>('[name="structured.value"]');
+    if (!value) throw new Error("Structured stat value is missing.");
+    value.value = "many";
+    value.dispatchEvent(new window.Event("input", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>('[data-action="remove-item"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-action="undo-removal"]')?.click();
+
+    expect(document.querySelector<HTMLInputElement>('[name="structured.value"]')?.value).toBe("7");
+    expect(document.querySelector('[data-structured-error]')?.textContent).toBe("");
+    const save = document.querySelector<HTMLButtonElement>('[data-action="save-draft"]');
+    if (!save) throw new Error("Save action is missing.");
+    save.click();
+    await settle();
+    expect(saveWorldDraft).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a pending structured error attached to its record when another record is added", async () => {
+    const { document, root, window } = editorFixture();
+    const authoredDraft = { ...structuredClone(draft), rpgStats: [{ name: "Resolve", value: 7 }] };
+    const saveWorldDraft = vi.fn();
+    mountWorldEditorPage(root, worldId, {
+      loadWorld: vi.fn().mockResolvedValue({ ...world, draftContent: authoredDraft }),
+      saveWorldDraft
+    });
+    await settle();
+    document.querySelector<HTMLButtonElement>('[data-section-target="mechanics"]')?.click();
+    const value = document.querySelector<HTMLInputElement>('[name="structured.value"]');
+    if (!value) throw new Error("Structured stat value is missing.");
+    value.value = "many";
+    value.dispatchEvent(new window.Event("input", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>('[data-action="add-item"]')?.click();
+
+    const save = document.querySelector<HTMLButtonElement>('[data-action="save-draft"]');
+    if (!save) throw new Error("Save action is missing.");
+    expect(save.disabled).toBe(false);
+    save.click();
+    await settle();
+
+    expect(saveWorldDraft).not.toHaveBeenCalled();
+    expect(document.querySelector<HTMLInputElement>('[name="structured.value"]')?.value).toBe("many");
+    expect(document.querySelector('[data-record-detail]')?.textContent).toContain("Resolve");
+  });
+
+  it("preserves unrelated pending recovery when the assets collection is replaced through advanced JSON", async () => {
+    const { document, root, window } = editorFixture();
+    const authoredDraft = {
+      ...structuredClone(draft),
+      rpgStats: [{ name: "Resolve", value: 7 }],
+      assets: [{ id: "old-asset", filename: "old.webp" }]
+    };
+    const saveWorldDraft = vi.fn();
+    mountWorldEditorPage(root, worldId, {
+      loadWorld: vi.fn().mockResolvedValue({ ...world, draftContent: authoredDraft }),
+      saveWorldDraft
+    });
+    await settle();
+    document.querySelector<HTMLButtonElement>('[data-section-target="mechanics"]')?.click();
+    const value = document.querySelector<HTMLInputElement>('[name="structured.value"]');
+    if (!value) throw new Error("Structured stat value is missing.");
+    value.value = "many";
+    value.dispatchEvent(new window.Event("input", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>('[data-section-target="assets"]')?.click();
+    const assetsJson = document.querySelector<HTMLTextAreaElement>('[data-collection-json]');
+    if (!assetsJson) throw new Error("Assets collection JSON is missing.");
+    assetsJson.value = '[{"id":"new-asset","filename":"new.webp"}]';
+    document.querySelector<HTMLButtonElement>('[data-action="apply-collection-json"]')?.click();
+
+    const save = document.querySelector<HTMLButtonElement>('[data-action="save-draft"]');
+    if (!save) throw new Error("Save action is missing.");
+    expect(save.disabled).toBe(false);
+    save.click();
+    await settle();
+
+    expect(saveWorldDraft).not.toHaveBeenCalled();
+    expect(document.querySelector('[data-section-target="mechanics"]')?.getAttribute("aria-current")).toBe("page");
+    expect(document.querySelector<HTMLInputElement>('[name="structured.value"]')?.value).toBe("many");
   });
 
   it("updates only collection results during sequential search input while retaining focus and unapplied detail DOM", async () => {
