@@ -70,6 +70,11 @@ export interface CreationReadiness {
   }>;
 }
 
+export interface CreationStageProgress {
+  stage: CreationStage;
+  state: "completed" | "current" | "upcoming";
+}
+
 const CREATION_STAGES: readonly CreationStage[] = [
   "method",
   "foundation",
@@ -245,6 +250,50 @@ export function creationReadiness(state: WorldCreationState): CreationReadiness 
       const issues = validateCreationStage(state, stage).issues;
       return { stage, ready: issues.length === 0, issueCount: issues.length };
     })
+  };
+}
+
+export function creationStageProgress(state: WorldCreationState): CreationStageProgress[] {
+  const activeIndex = CREATION_STAGES.indexOf(state.stage);
+  return CREATION_STAGES.map((stage, index) => ({
+    stage,
+    state: index < activeIndex ? "completed" : index === activeIndex ? "current" : "upcoming"
+  }));
+}
+
+export function addCreationCollectionItem(
+  state: WorldCreationState,
+  collection: CreationCollectionName,
+  value: unknown = {}
+): WorldCreationState {
+  const draft = canonicalDraft(state.draft);
+  draft[collection].push(clone(value));
+  return {
+    ...state,
+    draft,
+    status: "unsaved",
+    navigationDirty: true,
+    creationError: null
+  };
+}
+
+export function updateCreationCollectionItem(
+  state: WorldCreationState,
+  collection: CreationCollectionName,
+  index: number,
+  value: unknown
+): WorldCreationState {
+  if (!Number.isInteger(index) || index < 0 || index >= state.draft[collection].length) {
+    throw new RangeError(`No ${collection} item exists at index ${index}.`);
+  }
+  const draft = canonicalDraft(state.draft);
+  draft[collection][index] = clone(value);
+  return {
+    ...state,
+    draft,
+    status: "unsaved",
+    navigationDirty: true,
+    creationError: null
   };
 }
 

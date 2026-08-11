@@ -61,6 +61,27 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+function chooseMethod(document: Document, window: Window, method: "manual" | "ai"): void {
+  const control = document.querySelector<HTMLInputElement>(`[name="creationMethod"][value="${method}"]`);
+  if (!control) throw new Error(`The ${method} creation method is missing.`);
+  control.checked = true;
+  control.dispatchEvent(new window.Event("change", { bubbles: true }));
+}
+
+function enterConcept(document: Document, window: Window, concept: string): void {
+  const prompt = document.querySelector<HTMLTextAreaElement>('[data-concept-prompt="compact"]');
+  if (!prompt) throw new Error("The concept prompt is missing.");
+  prompt.value = concept;
+  prompt.dispatchEvent(new window.Event("input", { bubbles: true }));
+}
+
+function inputValue(document: Document, window: Window, selector: string, value: string): void {
+  const control = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector);
+  if (!control) throw new Error(`The input ${selector} is missing.`);
+  control.value = value;
+  control.dispatchEvent(new window.Event("input", { bubbles: true }));
+}
+
 describe("World Creation Method stage", () => {
   it("renders the shared shell, theme control, stage context, and two compact radio controls", () => {
     const { document, root } = creationFixture();
@@ -327,5 +348,168 @@ describe("World Creation Method stage", () => {
     expect(document.querySelector('[data-generation-status]')?.textContent).toContain("unavailable");
     expect(document.querySelector<HTMLAnchorElement>('[data-generation-status] a[href="/nexus/?view=setup"]')?.textContent)
       .toContain("Provider Setup");
+  });
+});
+
+describe("World Creation generation and convergent editing", () => {
+  it("polls semantic progress with unique keys, cancels, and ignores stale completion", async () => {
+    vi.useFakeTimers();
+    try {
+      const { document, root, window } = creationFixture();
+      const first = deferred<typeof generatedPreview>();
+      const second = deferred<typeof generatedPreview>();
+      const generateWorldPreview = vi.fn().mockImplementationOnce(() => first.promise).mockImplementationOnce(() => second.promise);
+      const loadWorldGenerationProgress = vi.fn().mockResolvedValue({
+        status: "processing", phase: "world_structure", progressPercent: 42, message: "Organizing canon"
+      });
+      mountWorldCreationPage(root, { generateWorldPreview, loadWorldGenerationProgress, generationPollIntervalMs: 100 });
+      chooseMethod(document, window as unknown as Window, "ai");
+      enterConcept(document, window as unknown as Window, "A glass city");
+
+      document.querySelector<HTMLButtonElement>('[data-action="generate-world"]')?.click();
+      await vi.advanceTimersByTimeAsync(100);
+      const firstKey = generateWorldPreview.mock.calls[0]?.[0].progressKey;
+      expect(loadWorldGenerationProgress).toHaveBeenCalledWith(firstKey, expect.any(AbortSignal));
+      expect(document.querySelector<HTMLProgressElement>("[data-generation-progress]")?.value).toBe(42);
+      expect(document.querySelector("[data-generation-status]")?.textContent).toContain("Organizing canon");
+
+      document.querySelector<HTMLButtonElement>('[data-action="cancel-generation"]')?.click();
+      expect((generateWorldPreview.mock.calls[0]?.[1] as AbortSignal).aborted).toBe(true);
+      document.querySelector<HTMLButtonElement>('[data-action="generate-world"]')?.click();
+      expect(generateWorldPreview.mock.calls[1]?.[0].progressKey).not.toBe(firstKey);
+      first.resolve({ ...generatedPreview, title: "Stale Atlas" });
+      await Promise.resolve();
+      expect(document.querySelector('[data-creation-stage="method"]')).not.toBeNull();
+
+      second.resolve({
+        ...generatedPreview,
+        content: { ...generatedPreview.content, playableCharacters: [{ name: "Generated Character" }] }
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(document.querySelector('[data-creation-stage="foundation"]')).not.toBeNull();
+      expect(document.querySelector<HTMLInputElement>('[name="world.title"]')?.value).toBe("Glass Atlas");
+      expect(document.body.textContent).not.toContain("Generated Character");
+      expect(document.querySelector("[data-generation-status]")?.textContent).toContain("review every field");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("recovers from malformed output and provider failure while preserving concept and local fields", async () => {
+    const { document, root, window } = creationFixture();
+    const confirmGeneratedReplacement = vi.fn().mockReturnValueOnce(false).mockReturnValue(true);
+    const generateWorldPreview = vi.fn()
+      .mockResolvedValueOnce({ title: "Broken", content: { schemaVersion: 5 } })
+      .mockRejectedValueOnce(new WorldCreationApiError("unavailable", "offline", 503))
+      .mockResolvedValueOnce(generatedPreview);
+    mountWorldCreationPage(root, {
+      generateWorldPreview: generateWorldPreview as never,
+      loadWorldGenerationProgress: vi.fn(),
+      confirmGeneratedReplacement
+    });
+    chooseMethod(document, window as unknown as Window, "ai");
+    enterConcept(document, window as unknown as Window, "A glass city");
+    document.querySelector<HTMLButtonElement>('[data-action="generate-world"]')?.click();
+    await settle();
+    expect(document.querySelector("[data-generation-status]")?.textContent).toContain("could not be generated");
+    expect(document.querySelector<HTMLTextAreaElement>('[data-concept-prompt="compact"]')?.value).toBe("A glass city");
+    document.querySelector<HTMLButtonElement>('[data-action="generate-world"]')?.click();
+    await settle();
+    expect(document.querySelector("[data-generation-status]")?.textContent).toContain("unavailable");
+
+    chooseMethod(document, window as unknown as Window, "manual");
+    document.querySelector<HTMLButtonElement>('[data-action="continue-manual"]')?.click();
+    inputValue(document, window as unknown as Window, '[name="world.title"]', "Local Atlas");
+    document.querySelector<HTMLButtonElement>('[data-action="back-stage"]')?.click();
+    chooseMethod(document, window as unknown as Window, "ai");
+    enterConcept(document, window as unknown as Window, "Replace it");
+    document.querySelector<HTMLButtonElement>('[data-action="generate-world"]')?.click();
+    expect(generateWorldPreview).toHaveBeenCalledTimes(2);
+    expect(confirmGeneratedReplacement).toHaveBeenCalledTimes(1);
+    document.querySelector<HTMLButtonElement>('[data-action="generate-world"]')?.click();
+    await settle();
+    expect(document.querySelector<HTMLInputElement>('[name="world.title"]')?.value).toBe("Glass Atlas");
+  });
+
+  it("validates and preserves the shared Foundation path without authoritative requests", () => {
+    const { document, root, window } = creationFixture();
+    const generateWorldPreview = vi.fn();
+    const loadWorldGenerationProgress = vi.fn();
+    mountWorldCreationPage(root, { generateWorldPreview, loadWorldGenerationProgress });
+    chooseMethod(document, window as unknown as Window, "manual");
+    document.querySelector<HTMLButtonElement>('[data-action="continue-manual"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+    const title = document.querySelector<HTMLInputElement>('[name="world.title"]');
+    expect(title?.getAttribute("aria-invalid")).toBe("true");
+    expect(document.activeElement).toBe(title);
+    expect(document.querySelector('[data-field-error="world.title"]')?.textContent).toContain("required");
+
+    inputValue(document, window as unknown as Window, '[name="world.title"]', "Local Atlas");
+    inputValue(document, window as unknown as Window, '[name="world.genre"]', "Solar fantasy");
+    document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+    expect(document.querySelector('[data-stage="foundation"]')?.dataset.stageState).toBe("completed");
+    expect(document.querySelector('[data-stage="canon"]')?.dataset.stageState).toBe("current");
+    document.querySelector<HTMLButtonElement>('[data-action="back-stage"]')?.click();
+    expect(document.querySelector<HTMLInputElement>('[name="world.title"]')?.value).toBe("Local Atlas");
+    expect(document.querySelector<HTMLInputElement>('[name="world.genre"]')?.value).toBe("Solar fantasy");
+    expect(generateWorldPreview).not.toHaveBeenCalled();
+    expect(loadWorldGenerationProgress).not.toHaveBeenCalled();
+  });
+
+  it("keeps Canon detail mounted while filtering, caps rows, edits aliases, and undoes removal", () => {
+    const { document, root, window } = creationFixture();
+    mountWorldCreationPage(root, { generateWorldPreview: vi.fn() });
+    chooseMethod(document, window as unknown as Window, "manual");
+    document.querySelector<HTMLButtonElement>('[data-action="continue-manual"]')?.click();
+    inputValue(document, window as unknown as Window, '[name="world.title"]', "Atlas");
+    document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+    for (let index = 0; index < 105; index += 1) {
+      document.querySelector<HTMLButtonElement>('[data-action="add-item"]')?.click();
+      inputValue(document, window as unknown as Window, '[data-structured-field="name"]', `Entity ${index}`);
+    }
+    expect(document.querySelectorAll("[data-collection-row]")).toHaveLength(100);
+    const detail = document.querySelector("[data-record-detail]");
+    inputValue(document, window as unknown as Window, "[data-collection-search]", "no match");
+    expect(document.querySelector("[data-record-detail]")).toBe(detail);
+    inputValue(document, window as unknown as Window, "[data-collection-search]", "Entity 104");
+    document.querySelector<HTMLButtonElement>("[data-collection-row] button")?.click();
+    document.querySelector<HTMLButtonElement>('[data-action="remove-item"]')?.click();
+    expect(document.querySelector("[data-pending-removals]")?.textContent).toContain("Entity 104");
+    document.querySelector<HTMLButtonElement>('[data-action="undo-removal"]')?.click();
+    expect(document.querySelector("[data-pending-removals]")?.textContent).not.toContain("Entity 104");
+    document.querySelector<HTMLButtonElement>('[data-collection-target="relationships"]')?.click();
+    expect(document.querySelector('[data-collection-editor]')?.getAttribute("data-active-collection")).toBe("relationships");
+  });
+
+  it("edits all Mechanics collections, defaults, and advanced unknown properties without characters", () => {
+    const { document, root, window } = creationFixture();
+    const generateWorldPreview = vi.fn();
+    mountWorldCreationPage(root, { generateWorldPreview });
+    chooseMethod(document, window as unknown as Window, "manual");
+    document.querySelector<HTMLButtonElement>('[data-action="continue-manual"]')?.click();
+    inputValue(document, window as unknown as Window, '[name="world.title"]', "Atlas");
+    document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-action="add-item"]')?.click();
+    inputValue(document, window as unknown as Window, '[data-structured-field="name"]', "Resolve");
+    const advanced = document.querySelector<HTMLTextAreaElement>("[data-advanced-json]");
+    if (!advanced) throw new Error("Advanced JSON editor missing.");
+    advanced.value = '{"name":"Resolve","value":3,"unknownRule":"keep"}';
+    advanced.dispatchEvent(new window.Event("input", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>('[data-action="apply-advanced-json"]')?.click();
+    expect(document.querySelector<HTMLTextAreaElement>("[data-advanced-json]")?.value).toContain("unknownRule");
+    for (const collection of ["defaultTriggers", "eventTriggers"]) {
+      document.querySelector<HTMLButtonElement>(`[data-collection-target="${collection}"]`)?.click();
+      document.querySelector<HTMLButtonElement>('[data-action="add-item"]')?.click();
+    }
+    const defaults = document.querySelector<HTMLTextAreaElement>("[data-defaults-json]");
+    if (!defaults) throw new Error("Defaults JSON editor missing.");
+    defaults.value = '{"difficulty":"heroic"}';
+    defaults.dispatchEvent(new window.Event("input", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>('[data-action="apply-defaults-json"]')?.click();
+    expect(document.querySelector<HTMLTextAreaElement>("[data-defaults-json]")?.value).toContain("heroic");
+    expect(document.querySelector('[data-stage="characters"], [data-collection-target="playableCharacters"]')).toBeNull();
+    expect(generateWorldPreview).not.toHaveBeenCalled();
   });
 });

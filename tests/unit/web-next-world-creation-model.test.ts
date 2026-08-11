@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  addCreationCollectionItem,
   applyGeneratedPreview,
   beginCreation,
   completeCreation,
   createWorldCreationState,
   creationReadiness,
+  creationStageProgress,
   editCreationDraft,
   failCreation,
   isWorldCreationPath,
@@ -12,6 +14,7 @@ import {
   restoreCreationCollectionItem,
   selectCreationMethod,
   setCreationStage,
+  updateCreationCollectionItem,
   validateCreationStage,
   worldCreationPath
 } from "../../apps/web-next/src/world-creation-model.js";
@@ -203,5 +206,33 @@ describe("World Creation local workflow", () => {
     expect(complete.status).toBe("created");
     expect(complete.navigationDirty).toBe(false);
     expect(complete.creationError).toBeNull();
+  });
+
+  it("reports current and completed editing stages without treating future stages as complete", () => {
+    const foundation = setCreationStage(selectCreationMethod(createWorldCreationState(), "manual"), "foundation");
+    expect(creationStageProgress(foundation)).toEqual([
+      { stage: "method", state: "completed" },
+      { stage: "foundation", state: "current" },
+      { stage: "canon", state: "upcoming" },
+      { stage: "mechanics", state: "upcoming" },
+      { stage: "cover", state: "upcoming" },
+      { stage: "review", state: "upcoming" }
+    ]);
+  });
+
+  it("adds and updates creation collection records immutably while preserving unknown properties", () => {
+    const initial = createWorldCreationState();
+    const added = addCreationCollectionItem(initial, "entities", { id: "archive", title: "Archive", secret: 7 });
+    const updated = updateCreationCollectionItem(added, "entities", 0, {
+      id: "archive",
+      title: "Living Archive",
+      secret: 7
+    });
+
+    expect(initial.draft.entities).toEqual([]);
+    expect(added.draft.entities).toEqual([{ id: "archive", title: "Archive", secret: 7 }]);
+    expect(updated.draft.entities).toEqual([{ id: "archive", title: "Living Archive", secret: 7 }]);
+    expect(updated.draft.playableCharacters).toEqual([]);
+    expect(() => updateCreationCollectionItem(updated, "entities", 1, {})).toThrow(RangeError);
   });
 });
