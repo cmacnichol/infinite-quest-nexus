@@ -94,7 +94,7 @@ function unexpectedWorldResponse(): never {
   throw new Error("The World Editor returned an unexpected world response.");
 }
 
-function parseWorldContent(value: unknown): EditableWorldDraft {
+export function parseEditableWorldDraft(value: unknown): EditableWorldDraft {
   if (!isRecord(value) || !isPositiveInteger(value.schemaVersion) || !isRecord(value.world)) {
     return unexpectedWorldResponse();
   }
@@ -173,7 +173,7 @@ export function parseWorldAggregate(value: unknown): WorldAggregate {
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,
     draftRevision: value.draftRevision,
-    draftContent: value.draftContent === null ? null : parseWorldContent(value.draftContent),
+    draftContent: value.draftContent === null ? null : parseEditableWorldDraft(value.draftContent),
     draftBasedOnWorldVersionId: value.draftBasedOnWorldVersionId,
     draftUpdatedAt: value.draftUpdatedAt,
     versions: value.versions.map(parseVersion),

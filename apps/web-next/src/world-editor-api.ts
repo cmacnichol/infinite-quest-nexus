@@ -1,4 +1,5 @@
 import {
+  parseEditableWorldDraft,
   parseWorldAggregate,
   type EditableWorldDraft,
   type WorldAggregate
@@ -50,39 +51,31 @@ function isPositiveInteger(value: unknown): value is number {
   return Number.isInteger(value) && Number(value) > 0;
 }
 
-function isEditableWorldDraft(value: unknown): value is EditableWorldDraft {
-  if (!isRecord(value) || !isPositiveInteger(value.schemaVersion) || !isRecord(value.world) ||
-      !isRecord(value.defaults)) {
-    return false;
-  }
-  const world = value.world;
-  const overviewFields = ["title", "genre", "tone", "premise", "backgroundStory", "firstAction", "rules"];
-  const collectionFields = [
-    "playableCharacters",
-    "entities",
-    "relationships",
-    "rpgStats",
-    "defaultTriggers",
-    "eventTriggers",
-    "assets"
-  ];
-  return overviewFields.every((field) => typeof world[field] === "string") &&
-    collectionFields.every((field) => Array.isArray(value[field]));
-}
-
 function parseDraftSaveResponse(value: unknown): WorldDraftSaveResponse {
   if (!isRecord(value) || typeof value.worldId !== "string" || typeof value.title !== "string" ||
-      !isPositiveInteger(value.revision) || !isEditableWorldDraft(value.content) ||
-      typeof value.updatedAt !== "string") {
+      !isPositiveInteger(value.revision) || typeof value.updatedAt !== "string") {
     throw new Error("The World Editor returned an unexpected draft response.");
   }
   return {
     worldId: value.worldId,
     title: value.title,
     revision: value.revision,
-    content: value.content,
+    content: parseEditableWorldDraft(value.content),
     updatedAt: value.updatedAt
   };
+}
+
+const FORBIDDEN_DRAFT_IDENTITY_KEYS = new Set([
+  "user_id",
+  "userId",
+  "owner_user_id",
+  "ownerUserId"
+]);
+
+function ownerSafeDraftContent(draft: EditableWorldDraft): EditableWorldDraft {
+  return Object.fromEntries(
+    Object.entries(draft).filter(([key]) => !FORBIDDEN_DRAFT_IDENTITY_KEYS.has(key))
+  ) as EditableWorldDraft;
 }
 
 function parseCoverAssetResponse(value: unknown): WorldCoverAssetResponse {
@@ -166,7 +159,11 @@ export async function saveWorldDraft(
   const { response, value } = await fetchJson(`/api/v1/worlds/${encodeURIComponent(worldId)}/draft`, {
     method: "PUT",
     headers: { Accept: "application/json", "Content-Type": "application/json" },
-    body: JSON.stringify({ expectedRevision, title: draft.world.title, content: draft }),
+    body: JSON.stringify({
+      expectedRevision,
+      title: draft.world.title,
+      content: ownerSafeDraftContent(draft)
+    }),
     signal
   });
   try {

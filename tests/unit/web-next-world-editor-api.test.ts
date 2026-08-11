@@ -71,32 +71,42 @@ describe("World Editor API boundary", () => {
     });
   });
 
-  it("saves the revision, title, and untouched draft without owner identity", async () => {
+  it("strips root identity keys while preserving all other imported draft properties", async () => {
+    const adversarialDraft = {
+      ...structuredClone(draft),
+      user_id: "attacker-1",
+      userId: "attacker-2",
+      owner_user_id: "attacker-3",
+      ownerUserId: "attacker-4",
+      importedLore: { source: "portable-export", ownerUserId: "nested-provenance" },
+      futureRootProperty: ["preserve", "verbatim"]
+    } as EditableWorldDraft;
+    const expectedContent = {
+      ...structuredClone(draft),
+      importedLore: adversarialDraft.importedLore,
+      futureRootProperty: adversarialDraft.futureRootProperty
+    };
     const fetch = vi.fn().mockResolvedValue(jsonResponse({
       worldId,
       title: draft.world.title,
       revision: 9,
-      content: draft,
+      content: expectedContent,
       updatedAt: "2026-08-11T12:35:00.000Z"
     }));
     vi.stubGlobal("fetch", fetch);
 
-    const result = await saveWorldDraft(worldId, 8, draft);
+    const result = await saveWorldDraft(worldId, 8, adversarialDraft);
 
-    expect(result).toEqual({
-      worldId,
-      title: draft.world.title,
-      revision: 9,
-      content: draft,
-      updatedAt: "2026-08-11T12:35:00.000Z"
-    });
-    expect(fetch).toHaveBeenCalledWith(`/api/v1/worlds/${worldId}/draft`, {
-      method: "PUT",
-      headers: { Accept: "application/json", "Content-Type": "application/json" },
-      body: JSON.stringify({ expectedRevision: 8, title: draft.world.title, content: draft }),
-      signal: undefined
-    });
-    expect(JSON.stringify(fetch.mock.calls[0])).not.toMatch(/owner|userId|user_id/i);
+    expect(result.content).toEqual(expectedContent);
+    const [, init] = fetch.mock.calls[0]!;
+    const body = JSON.parse(String(init.body));
+    expect(body).toEqual({ expectedRevision: 8, title: draft.world.title, content: expectedContent });
+    expect(body.content).not.toHaveProperty("user_id");
+    expect(body.content).not.toHaveProperty("userId");
+    expect(body.content).not.toHaveProperty("owner_user_id");
+    expect(body.content).not.toHaveProperty("ownerUserId");
+    expect(body.content.importedLore.ownerUserId).toBe("nested-provenance");
+    expect(adversarialDraft).toHaveProperty("ownerUserId", "attacker-4");
   });
 
   it("propagates request abortion without wrapping it as an API error", async () => {

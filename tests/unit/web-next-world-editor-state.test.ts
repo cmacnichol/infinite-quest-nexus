@@ -79,26 +79,41 @@ describe("World Editor draft state", () => {
     expect(removed.draft.entities).toHaveLength(0);
   });
 
-  it("derives opaque removal ids without hidden mutable transition state", () => {
-    const state = createWorldEditorState(worldAggregateFixture);
-
-    expect(removeCollectionItem(state, "entities", 0).pendingRemovals[0]?.id).toBe(
-      removeCollectionItem(state, "entities", 0).pendingRemovals[0]?.id
-    );
-  });
-
-  it("restores multiple removals to their positions in the original collection", () => {
+  it("allocates monotonic removal ids that are not reused after undo", () => {
     const state = editWorldDraft(createWorldEditorState(worldAggregateFixture), ["entities"], [
-      { id: "a" }, { id: "b" }, { id: "c" }
+      { id: "a" }, { id: "b" }
     ]);
-    const withoutB = removeCollectionItem(state, "entities", 1);
-    const withoutBOrC = removeCollectionItem(withoutB, "entities", 1);
+    const firstRemoval = removeCollectionItem(state, "entities", 0);
+    const firstId = firstRemoval.pendingRemovals[0]!.id;
+    const restored = restoreCollectionItem(firstRemoval, firstId);
+    const secondRemoval = removeCollectionItem(restored, "entities", 0);
 
-    expect(withoutBOrC.pendingRemovals.map((removal) => removal.originalIndex)).toEqual([1, 2]);
-    const withC = restoreCollectionItem(withoutBOrC, withoutBOrC.pendingRemovals[1]!.id);
-    const restored = restoreCollectionItem(withC, withC.pendingRemovals[0]!.id);
-    expect(restored.draft.entities).toEqual([{ id: "a" }, { id: "b" }, { id: "c" }]);
+    expect(firstId).toBe("draft-removal-1");
+    expect(secondRemoval.pendingRemovals[0]!.id).toBe("draft-removal-2");
+    expect(restoreCollectionItem(secondRemoval, firstId)).toBe(secondRemoval);
   });
+
+  it.each(["first-then-second", "second-then-first"] as const)(
+    "restores four-item removals in exact original order when undoing %s",
+    (restorationOrder) => {
+      const state = editWorldDraft(createWorldEditorState(worldAggregateFixture), ["entities"], [
+        { id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }
+      ]);
+      const withoutB = removeCollectionItem(state, "entities", 1);
+      const withoutBOrC = removeCollectionItem(withoutB, "entities", 1);
+      const [first, second] = withoutBOrC.pendingRemovals;
+      const ids = restorationOrder === "first-then-second"
+        ? [first!.id, second!.id]
+        : [second!.id, first!.id];
+
+      const partiallyRestored = restoreCollectionItem(withoutBOrC, ids[0]!);
+      const restored = restoreCollectionItem(partiallyRestored, ids[1]!);
+
+      expect(restored.draft.entities).toEqual([
+        { id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }
+      ]);
+    }
+  );
 
   it("returns a stable title path when the required title is blank", () => {
     const state = createWorldEditorState(worldAggregateFixture);
@@ -124,6 +139,22 @@ describe("World Editor draft state", () => {
     expect(state.draft.defaults).toEqual({});
   });
 
+  it.each([
+    ["defaults", "[]", "JSON object"],
+    ["playableCharacters", "{}", "JSON array"],
+    ["entities", "{}", "JSON array"],
+    ["relationships", "{}", "JSON array"],
+    ["rpgStats", "{}", "JSON array"],
+    ["defaultTriggers", "{}", "JSON array"],
+    ["eventTriggers", "{}", "JSON array"],
+    ["assets", "null", "JSON array"]
+  ])("rejects valid JSON with the wrong %s root shape before changing state", (root, json, message) => {
+    const state = createWorldEditorState(worldAggregateFixture);
+
+    expect(() => editWorldDraft(state, [root], json)).toThrow(message);
+    expect(state.draft).toEqual(worldAggregateFixture.draftContent);
+  });
+
   it("reports all five readiness sections, warning counts, and preserved-data notices", () => {
     const state = createWorldEditorState(worldAggregateFixture);
     const readiness = draftReadiness(state);
@@ -146,6 +177,17 @@ describe("World Editor draft state", () => {
     const state = editWorldDraft(createWorldEditorState(worldAggregateFixture), ["world", "title"], "");
 
     expect(draftReadiness(state).sections[0]).toEqual({ section: "Overview", ready: false, issueCount: 1 });
+  });
+
+  it("keeps a section ready when its only validation issue is a warning", () => {
+    const state = editWorldDraft(createWorldEditorState(worldAggregateFixture), ["world", "premise"], "");
+
+    expect(validateWorldDraft(state).issues).toContainEqual({
+      path: "world.premise",
+      severity: "warning",
+      message: "A world premise is recommended."
+    });
+    expect(draftReadiness(state).sections[0]).toEqual({ section: "Overview", ready: true, issueCount: 1 });
   });
 
   it("transitions through saving and completes with the server revision and content", () => {

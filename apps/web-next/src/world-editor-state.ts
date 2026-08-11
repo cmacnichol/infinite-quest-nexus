@@ -32,6 +32,7 @@ export interface WorldEditorState {
   revision: number | null;
   status: WorldEditorStatus;
   pendingRemovals: PendingRemoval[];
+  nextRemovalSequence: number;
   saveError: DraftSaveError | null;
 }
 
@@ -97,14 +98,6 @@ const ADVANCED_JSON_ROOTS = new Set([
   "defaults"
 ]);
 
-function nextRemovalId(pendingRemovals: readonly PendingRemoval[]): string {
-  const nextSequence = pendingRemovals.reduce((highest, removal) => {
-    const match = /^draft-removal-(\d+)$/.exec(removal.id);
-    return Math.max(highest, match ? Number(match[1]) : 0);
-  }, 0) + 1;
-  return `draft-removal-${nextSequence}`;
-}
-
 function originalCollectionIndex(
   pendingRemovals: readonly PendingRemoval[],
   collection: DraftCollectionName,
@@ -127,11 +120,20 @@ function advancedJsonValue(path: readonly string[], value: unknown): unknown {
   if (path.length !== 1 || typeof value !== "string" || !ADVANCED_JSON_ROOTS.has(path[0]!)) {
     return value;
   }
+  let parsed: unknown;
   try {
-    return JSON.parse(value) as unknown;
+    parsed = JSON.parse(value) as unknown;
   } catch {
     throw new Error(`${path[0]} must contain valid JSON.`);
   }
+  if (path[0] === "defaults") {
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new Error("defaults must contain a JSON object.");
+    }
+  } else if (!Array.isArray(parsed)) {
+    throw new Error(`${path[0]} must contain a JSON array.`);
+  }
+  return parsed;
 }
 
 function setAtPath(target: Record<string, unknown>, path: readonly string[], value: unknown): void {
@@ -175,6 +177,7 @@ export function createWorldEditorState(world: WorldAggregate): WorldEditorState 
     revision: world.draftRevision,
     status: "saved",
     pendingRemovals: [],
+    nextRemovalSequence: 1,
     saveError: null
   };
 }
@@ -201,7 +204,7 @@ export function removeCollectionItem(
   const draft = clone(state.draft);
   const [value] = draft[collection].splice(index, 1);
   const removal: PendingRemoval = {
-    id: nextRemovalId(state.pendingRemovals),
+    id: `draft-removal-${state.nextRemovalSequence}`,
     collection,
     originalIndex: originalCollectionIndex(state.pendingRemovals, collection, index),
     value: clone(value)
@@ -211,6 +214,7 @@ export function removeCollectionItem(
     draft,
     status: "unsaved",
     pendingRemovals: [...state.pendingRemovals, removal],
+    nextRemovalSequence: state.nextRemovalSequence + 1,
     saveError: null
   };
 }
@@ -219,7 +223,11 @@ export function restoreCollectionItem(state: WorldEditorState, removalId: string
   const removal = state.pendingRemovals.find((candidate) => candidate.id === removalId);
   if (!removal) return state;
   const draft = clone(state.draft);
-  draft[removal.collection].splice(removal.originalIndex, 0, clone(removal.value));
+  const earlierPendingCount = state.pendingRemovals.filter((candidate) =>
+    candidate.collection === removal.collection && candidate.originalIndex < removal.originalIndex
+  ).length;
+  const restorationIndex = removal.originalIndex - earlierPendingCount;
+  draft[removal.collection].splice(restorationIndex, 0, clone(removal.value));
   return {
     ...state,
     draft,
@@ -234,6 +242,9 @@ export function validateWorldDraft(state: WorldEditorState): DraftValidation {
   if (!state.draft.world.title.trim()) {
     issues.push({ path: "world.title", severity: "error", message: "World title is required." });
   }
+  if (!state.draft.world.premise.trim()) {
+    issues.push({ path: "world.premise", severity: "warning", message: "A world premise is recommended." });
+  }
   return { issues };
 }
 
@@ -247,8 +258,12 @@ export function draftReadiness(state: WorldEditorState): DraftReadiness {
     "Assets"
   ];
   const sections = sectionNames.map((section) => {
-    const issueCount = issues.filter((issue) => sectionForPath(issue.path) === section).length;
-    return { section, ready: issueCount === 0, issueCount };
+    const sectionIssues = issues.filter((issue) => sectionForPath(issue.path) === section);
+    return {
+      section,
+      ready: sectionIssues.every((issue) => issue.severity !== "error"),
+      issueCount: sectionIssues.length
+    };
   });
   const notices = preservedDataNotices(state.draft);
   return { sections, warningCount: issues.filter((issue) => issue.severity === "warning").length + notices.length, notices };
