@@ -30,8 +30,12 @@ describe("World Editor design contract", () => {
     expect(compact).not.toBe("");
     expect(rule(".editor-workspace")).toMatch(/grid-template-columns:/);
     expect(rule(".draft-ledger-details")).toMatch(/grid-template-columns:/);
-    expect(compact).toMatch(/\.editor-save-cell\s*\{[^}]*grid-row:\s*1[^}]*grid-column:\s*2/s);
+    expect(rule(".draft-ledger")).toMatch(/position:\s*sticky/);
+    expect(rule(".draft-ledger")).toMatch(/bottom:\s*0/);
+    expect(rule(".draft-ledger-summary")).toMatch(/grid-template-columns:[^;]*auto\s+auto/);
     expect(compact).toMatch(/\.editor-section-index\s*\{[^}]*flex-direction:\s*row[^}]*overflow-x:\s*auto/s);
+    expect(compact).toMatch(/\.editor-readonly-context\s*\{[^}]*grid-column:\s*1[^}]*border-top:\s*1px solid var\(--rule\)[^}]*border-left:\s*0/s);
+    expect(compact).toMatch(/\.draft-ledger-summary \.editor-save-cell\s*\{[^}]*grid-column:\s*2[^}]*border-top:\s*1px solid var\(--rule\)/s);
     expect(compact).toMatch(/\.draft-ledger-details\s*\{[^}]*grid-template-columns:\s*1fr/s);
   });
 

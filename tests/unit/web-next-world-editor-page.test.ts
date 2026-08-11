@@ -94,7 +94,8 @@ describe("World Editor Overview page", () => {
     expect(document.querySelector('[data-editor-section="overview"]')).not.toBeNull();
     expect(document.querySelector('[data-draft-ledger]')).not.toBeNull();
     expect(document.querySelector(".theme-toggle")).not.toBeNull();
-    expect(document.querySelector('[data-editor-state]')?.textContent).toContain("Loading world");
+    expect(document.querySelector(".editor-command-row [data-editor-state]")).toBeNull();
+    expect(document.querySelector('[data-draft-ledger] [data-editor-state]')?.textContent).toContain("Loading world");
   });
 
   it("populates every Overview field and exposes one current section", async () => {
@@ -117,9 +118,10 @@ describe("World Editor Overview page", () => {
       "First action",
       "Rules"
     ]);
-    const finalCommandCell = document.querySelector(".editor-command-row > :last-child");
-    expect(finalCommandCell?.classList.contains("editor-save-cell")).toBe(true);
-    expect(finalCommandCell?.querySelector("button")?.textContent).toBe("Save draft");
+    expect(document.querySelector(".editor-command-row .editor-save-cell")).toBeNull();
+    const finalLedgerCell = document.querySelector(".draft-ledger-summary > :last-child");
+    expect(finalLedgerCell?.classList.contains("editor-save-cell")).toBe(true);
+    expect(finalLedgerCell?.querySelector("button")?.textContent).toBe("Save draft");
     expect(document.querySelectorAll('[data-section-index] [aria-current="page"]')).toHaveLength(1);
     expect(document.querySelector('[data-draft-ledger]')?.textContent).toContain("Revision 8");
     expect(document.querySelector('[data-draft-ledger]')?.textContent).toContain("Ready");

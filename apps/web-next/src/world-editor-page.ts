@@ -194,8 +194,6 @@ const editorMarkup = `
           <p data-campaign-context></p>
         </div>
       </div>
-      <p class="editor-command-status" data-editor-state aria-live="polite">Loading world editor…</p>
-      <div class="editor-save-cell"><button type="button" data-action="save-draft" disabled>Save draft</button></div>
     </section>
     <div class="editor-workspace">
       <nav class="editor-section-index" data-section-index aria-label="World editor sections">${sectionIndexMarkup()}</nav>
@@ -235,9 +233,10 @@ const editorMarkup = `
     </div>
     <section class="draft-ledger" data-draft-ledger aria-label="Draft ledger">
       <div class="draft-ledger-summary">
-        <span data-ledger-state>State —</span><span data-ledger-revision>Revision —</span>
+        <span data-editor-state data-ledger-state aria-live="polite">Loading world editor…</span><span data-ledger-revision>Revision —</span>
         <span data-ledger-readiness>Readiness —</span><span data-ledger-warnings>Warnings —</span>
         <button type="button" data-action="toggle-ledger" aria-expanded="false" aria-controls="draft-ledger-details">Draft details</button>
+        <div class="editor-save-cell"><button type="button" data-action="save-draft" disabled>Save draft</button></div>
       </div>
       <div id="draft-ledger-details" class="draft-ledger-details" hidden></div>
     </section>
@@ -297,7 +296,6 @@ export function mountWorldEditorPage(
   const loadState = requiredElement<HTMLElement>(root, "[data-load-state]");
   const announcement = requiredElement<HTMLElement>(root, "[data-save-announcement]");
   const conflictHost = requiredElement<HTMLElement>(root, "[data-conflict-host]");
-  const ledgerState = requiredElement<HTMLElement>(root, "[data-ledger-state]");
   const ledgerRevision = requiredElement<HTMLElement>(root, "[data-ledger-revision]");
   const ledgerReadiness = requiredElement<HTMLElement>(root, "[data-ledger-readiness]");
   const ledgerWarnings = requiredElement<HTMLElement>(root, "[data-ledger-warnings]");
@@ -540,12 +538,6 @@ export function mountWorldEditorPage(
     if (!state) return;
     const readiness = draftReadiness(state);
     const readyCount = readiness.sections.filter((section) => section.ready).length;
-    const hasInvalidInput = validateWorldDraft(state).issues.some((issue) => issue.severity === "error") ||
-      pendingStructuredValidations.size > 0 || [...pendingJsonInputs.values()].some((input) => input.error);
-    const hasConflict = state.status === "error" && state.saveError?.kind === "conflict";
-    const ledgerStatus = hasConflict ? "Conflict" : hasInvalidInput ? "Invalid" : state.status === "saving" ? "Saving" :
-      state.status === "unsaved" || state.status === "error" || pendingJsonInputs.size > 0 ? "Unsaved" : "Saved";
-    ledgerState.textContent = `State ${ledgerStatus}`;
     ledgerRevision.textContent = state.revision === null ? "Revision Not created" : `Revision ${state.revision}`;
     ledgerReadiness.textContent = `Readiness ${readyCount === readiness.sections.length ? "Ready" : `${readyCount} of ${readiness.sections.length}`}`;
     ledgerWarnings.textContent = `Warnings ${readiness.warningCount}`;

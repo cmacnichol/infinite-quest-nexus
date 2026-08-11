@@ -367,9 +367,9 @@
     {
       "name": "Editor Command Row",
       "kind": "custom",
-      "description": "The explicit-save command band pairing world identity, live draft status, and the primary Save draft action.",
-      "html": "<section class=\"editor-command-row\"><div class=\"editor-identity\"><a href=\"/app/\">World Library</a><h1>World Editor</h1></div><p class=\"editor-command-status\" aria-live=\"polite\">Unsaved changes</p><div class=\"editor-save-cell\"><button type=\"button\">Save draft</button></div></section>",
-      "css": ".editor-command-row { display: grid; grid-template-columns: minmax(240px, 1fr) minmax(220px, auto) minmax(180px, .45fr); border-bottom: 1px solid var(--rule-strong); } .editor-save-cell button { min-height: 52px; color: var(--text-on-accent); background: var(--accent); border: 0; border-radius: 0; }"
+      "description": "A world-identity band with immutable version and campaign context in a separated far-right reference rail.",
+      "html": "<section class=\"editor-command-row\"><div class=\"editor-identity\"><a href=\"/app/\">World Library</a><h1>World Editor</h1><div class=\"editor-readonly-context\"><p>1 published version</p><p>1 active campaign</p></div></div></section>",
+      "css": ".editor-command-row { display: grid; grid-template-columns: minmax(0, 1fr); border-bottom: 1px solid var(--rule-strong); } .editor-identity { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 32%); column-gap: var(--cell); } .editor-readonly-context { grid-column: 2; grid-row: 1 / span 2; padding-left: var(--cell); border-left: 1px solid var(--rule-strong); }"
     },
     {
       "name": "Section Index",
@@ -395,9 +395,9 @@
     {
       "name": "Draft Ledger",
       "kind": "disclosure",
-      "description": "The in-flow bottom drawer summarizing state, revision, readiness, and warnings before revealing full-width draft details.",
-      "html": "<section class=\"draft-ledger\" aria-label=\"Draft ledger\"><div class=\"draft-ledger-summary\"><span>State unsaved</span><span>Revision 8</span><span>Readiness 4 of 5</span><span>Warnings 1</span><button type=\"button\" aria-expanded=\"false\" aria-controls=\"draft-ledger-details\">Draft details</button></div><div id=\"draft-ledger-details\" class=\"draft-ledger-details\" hidden></div></section>",
-      "css": ".draft-ledger { width: 100%; background: var(--surface-entry); border-bottom: 1px solid var(--rule-strong); } .draft-ledger-details { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border-top: 1px solid var(--rule); transition: background-color 180ms ease; }"
+      "description": "The sticky bottom drawer and sole draft-status surface, with Save draft anchored in its far-right action cell.",
+      "html": "<section class=\"draft-ledger\" aria-label=\"Draft ledger\"><div class=\"draft-ledger-summary\"><span>Draft saved</span><span>Revision 8</span><span>Readiness 4 of 5</span><span>Warnings 1</span><button type=\"button\" aria-expanded=\"false\" aria-controls=\"draft-ledger-details\">Draft details</button><div class=\"editor-save-cell\"><button type=\"button\">Save draft</button></div></div><div id=\"draft-ledger-details\" class=\"draft-ledger-details\" hidden></div></section>",
+      "css": ".draft-ledger { position: sticky; bottom: 0; width: 100%; background: var(--surface-entry); border-top: 1px solid var(--rule-strong); border-bottom: 1px solid var(--rule-strong); } .draft-ledger-summary { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)) auto auto; } .draft-ledger-details { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border-top: 1px solid var(--rule); transition: background-color 180ms ease; }"
     }
   ],
   "narrative": {

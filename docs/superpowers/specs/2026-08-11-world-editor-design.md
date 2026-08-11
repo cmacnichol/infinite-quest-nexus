@@ -8,7 +8,7 @@ Add a production-ready World Edit Page to the replacement web application. A rea
 
 - Each World Library card links to `/app/worlds/:worldId`.
 - The editor retains the shared application header, theme control, and primary navigation.
-- An editor command row provides **Back to World Library**, the world title and draft state, and a far-right **Save draft** action.
+- An editor command row provides **Back to World Library** and the world title, with immutable version and campaign context in a separated far-right reference rail.
 - Published versions and campaigns are read-only context with links to their existing management surfaces.
 
 ## Information architecture
@@ -19,7 +19,7 @@ The page uses the approved **Draft Ledger with Bottom Drawer** structure:
 - The editing canvas uses the remaining width.
 - Desktop sections are **Overview**, **Characters**, **Canon**, **Mechanics**, and **Assets**.
 - On narrow screens the section index becomes a horizontally available section switcher.
-- A docked Draft Ledger bar shows saved/unsaved state, draft revision, readiness, and warning count. It expands upward into a full-width review drawer.
+- A sticky Draft Ledger bar remains visible at the viewport edge, shows saved/unsaved state, draft revision, readiness, and warning count, and keeps **Save draft** in its far-right action cell. It expands upward into a full-width review drawer.
 
 The sections edit:
 
