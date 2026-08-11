@@ -1,7 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
+import vm from "node:vm";
 import { parseHTML } from "linkedom";
 import { describe, expect, it } from "vitest";
+import {
+  initializeThemeControl,
+  resolveThemeMediaQuery
+} from "../../apps/web-next/src/theme-control.js";
 import {
   THEME_STORAGE_KEY,
   applyTheme,
@@ -12,6 +17,46 @@ import {
 } from "../../apps/web-next/src/theme.js";
 
 const webNextRoot = path.resolve(import.meta.dirname, "../../apps/web-next");
+
+function runInlineThemeBootstrap(options: {
+  stored?: string | null;
+  matchMedia?: PropertyDescriptor;
+}) {
+  const html = fs.readFileSync(path.join(webNextRoot, "index.html"), "utf8");
+  const script = html.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+  if (!script) throw new Error("The inline theme bootstrap is missing.");
+
+  const root = { dataset: {} as Record<string, string>, style: {} as Record<string, string> };
+  const sandbox = {
+    document: { documentElement: root },
+    localStorage: { getItem: () => options.stored ?? null }
+  };
+  if (options.matchMedia) Object.defineProperty(sandbox, "matchMedia", options.matchMedia);
+
+  vm.runInContext(script, vm.createContext(sandbox));
+  return root;
+}
+
+function visibleThemeIcons(css: string, theme: "light" | "dark"): string[] {
+  const displays = new Map([
+    ["theme-icon-sun", "inline"],
+    ["theme-icon-moon", "inline"]
+  ]);
+
+  for (const match of css.matchAll(/([^{}]+)\{([^{}]+)\}/g)) {
+    const display = match[2].match(/display:\s*(\w+)/)?.[1];
+    if (!display) continue;
+    for (const selector of match[1].split(",").map((value) => value.trim())) {
+      const requiredTheme = selector.match(/:root\[data-theme="(light|dark)"\]/)?.[1];
+      if (requiredTheme && requiredTheme !== theme) continue;
+      for (const icon of displays.keys()) {
+        if (selector === ".theme-icon" || selector.endsWith(`.${icon}`)) displays.set(icon, display);
+      }
+    }
+  }
+
+  return [...displays].filter(([, display]) => display !== "none").map(([icon]) => icon);
+}
 
 function mediaQuery(matches: boolean) {
   const listeners = new Set<(event: { matches: boolean }) => void>();
@@ -37,20 +82,108 @@ describe("web theme integration", () => {
     expect(html).toContain("document.documentElement.dataset.theme");
   });
 
-  it("renders an accessible reusable theme toggle contract", () => {
+  it("renders the reusable theme toggle with authored icon states", () => {
     const source = fs.readFileSync(path.join(webNextRoot, "src/bootstrap.ts"), "utf8");
     expect(source).toContain('class="theme-toggle"');
-    expect(source).toContain("Use dark theme");
-    expect(source).toContain("Use light theme");
-    expect(source).toContain("createThemeController");
+    expect(source).toContain('class="theme-icon theme-icon-sun"');
+    expect(source).toContain('class="theme-icon theme-icon-moon"');
+    expect(source).toContain("initializeThemeControl");
   });
 
-  it("resolves a throwing localStorage getter before controller creation", () => {
-    const source = fs.readFileSync(path.join(webNextRoot, "src/bootstrap.ts"), "utf8");
-    expect(source).toMatch(/let themeStorage: Storage \| null = null;/);
-    expect(source).toMatch(/try\s*{\s*themeStorage = window\.localStorage;\s*}\s*catch\s*{/);
-    expect(source).toMatch(/createThemeController\(\{[\s\S]*storage: themeStorage,/);
-    expect(source).not.toMatch(/storage:\s*window\.localStorage/);
+  it("keeps a valid stored choice authoritative when matchMedia access throws", () => {
+    const root = runInlineThemeBootstrap({
+      stored: "dark",
+      matchMedia: { get: () => { throw new Error("blocked"); } }
+    });
+
+    expect(root.dataset.theme).toBe("dark");
+    expect(root.style.colorScheme).toBe("dark");
+  });
+
+  it("falls back to light when matchMedia access throws", () => {
+    const root = runInlineThemeBootstrap({
+      matchMedia: { get: () => { throw new Error("blocked"); } }
+    });
+
+    expect(root.dataset.theme).toBe("light");
+    expect(root.style.colorScheme).toBe("light");
+  });
+
+  it("falls back to light when calling matchMedia throws", () => {
+    const root = runInlineThemeBootstrap({
+      matchMedia: { value: () => { throw new Error("blocked"); } }
+    });
+
+    expect(root.dataset.theme).toBe("light");
+    expect(root.style.colorScheme).toBe("light");
+  });
+
+  it("falls back to light when reading media matches throws", () => {
+    const root = runInlineThemeBootstrap({
+      matchMedia: {
+        value: () => Object.defineProperty({}, "matches", {
+          get: () => { throw new Error("blocked"); }
+        })
+      }
+    });
+
+    expect(root.dataset.theme).toBe("light");
+    expect(root.style.colorScheme).toBe("light");
+  });
+
+  it("uses a valid stored choice instead of the opposite system choice", () => {
+    const root = runInlineThemeBootstrap({
+      stored: "light",
+      matchMedia: { value: () => ({ matches: true }) }
+    });
+
+    expect(root.dataset.theme).toBe("light");
+    expect(root.style.colorScheme).toBe("light");
+  });
+
+  it("gives the theme control a square touch target and one visible icon per theme", () => {
+    const css = fs.readFileSync(path.join(webNextRoot, "src/styles.css"), "utf8");
+    const toggleRule = css.match(/\.theme-toggle\s*\{([^}]*)\}/)?.[1] ?? "";
+    const iconRule = css.match(/\.theme-icon\s*\{([^}]*)\}/)?.[1] ?? "";
+
+    expect(toggleRule).toMatch(/min-width:\s*44px/);
+    expect(toggleRule).toMatch(/min-height:\s*44px/);
+    expect(toggleRule).toMatch(/border-radius:\s*0/);
+    expect(css).toMatch(/\.theme-toggle:focus-visible\s*\{[^}]*outline:/);
+    expect(iconRule).toMatch(/width:\s*24px/);
+    expect(iconRule).toMatch(/height:\s*24px/);
+    expect(visibleThemeIcons(css, "light")).toEqual(["theme-icon-sun"]);
+    expect(visibleThemeIcons(css, "dark")).toEqual(["theme-icon-moon"]);
+  });
+});
+
+describe("web theme control integration", () => {
+  it.each([
+    ["property access", () => Object.defineProperty({}, "matchMedia", {
+      get: () => { throw new Error("blocked"); }
+    })],
+    ["method call", () => ({
+      matchMedia: () => { throw new Error("blocked"); }
+    })]
+  ])("keeps controller initialization and click registration functional when matchMedia %s throws", (_case, createSource) => {
+    const { document, Event } = parseHTML("<html><body><button type=\"button\"></button></body></html>").window;
+    const button = document.querySelector("button");
+    if (!button) throw new Error("Button fixture is missing.");
+
+    const mediaQuery = resolveThemeMediaQuery(createSource());
+    expect(mediaQuery).toBeNull();
+    initializeThemeControl(button, {
+      root: document.documentElement,
+      storage: null,
+      mediaQuery
+    });
+
+    expect(button.getAttribute("aria-label")).toBe("Use dark theme");
+    expect(button.title).toBe("Use dark theme");
+    button.dispatchEvent(new Event("click"));
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(button.getAttribute("aria-label")).toBe("Use light theme");
+    expect(button.title).toBe("Use light theme");
   });
 });
 

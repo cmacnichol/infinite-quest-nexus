@@ -1,5 +1,5 @@
 import "./styles.css";
-import { createThemeController, type Theme } from "./theme";
+import { initializeThemeControl, resolveThemeMediaQuery } from "./theme-control";
 import {
   filterWorlds,
   installArtworkFallback,
@@ -95,12 +95,6 @@ if (!(themeToggle instanceof HTMLButtonElement)) {
   throw new Error("The theme control could not be initialized.");
 }
 
-const updateThemeControl = (theme: Theme) => {
-  const label = theme === "light" ? "Use dark theme" : "Use light theme";
-  themeToggle.setAttribute("aria-label", label);
-  themeToggle.title = label;
-};
-
 let themeStorage: Storage | null = null;
 try {
   themeStorage = window.localStorage;
@@ -108,14 +102,12 @@ try {
   // Theme switching remains available when storage access is blocked.
 }
 
-const themeController = createThemeController({
+const themeMediaQuery = resolveThemeMediaQuery(window);
+initializeThemeControl(themeToggle, {
   root: document.documentElement,
   storage: themeStorage,
-  mediaQuery: window.matchMedia?.("(prefers-color-scheme: dark)") ?? null
-}, updateThemeControl);
-
-updateThemeControl(themeController.current());
-themeToggle.addEventListener("click", () => themeController.toggle());
+  mediaQuery: themeMediaQuery
+});
 
 const searchField = searchInput;
 const countOutput = resultCount;
