@@ -534,6 +534,43 @@ describe("World Editor Overview page", () => {
     expect(document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')?.disabled).toBe(true);
   });
 
+  it("keeps a numeric stat error pending when another structured field changes and blocks save", async () => {
+    const { document, root, window } = editorFixture();
+    const authoredDraft = { ...structuredClone(draft), rpgStats: [{ name: "Resolve", value: 7 }] };
+    const saveWorldDraft = vi.fn().mockResolvedValue(savedResponse(authoredDraft));
+    mountWorldEditorPage(root, worldId, {
+      loadWorld: vi.fn().mockResolvedValue({ ...world, draftContent: authoredDraft }),
+      saveWorldDraft
+    });
+    await settle();
+    document.querySelector<HTMLButtonElement>('[data-section-target="mechanics"]')?.click();
+    const value = document.querySelector<HTMLInputElement>('[name="structured.value"]');
+    const name = document.querySelector<HTMLInputElement>('[name="structured.name"]');
+    const save = document.querySelector<HTMLButtonElement>('[data-action="save-draft"]');
+    if (!value || !name || !save) throw new Error("Structured stat fixture is incomplete.");
+
+    value.value = "many";
+    value.dispatchEvent(new window.Event("input", { bubbles: true }));
+    name.value = "Determination";
+    name.dispatchEvent(new window.Event("input", { bubbles: true }));
+
+    expect(value.value).toBe("many");
+    expect(document.querySelector('[data-structured-error]')?.textContent).toContain("number");
+    expect(save.disabled).toBe(true);
+    save.click();
+    await settle();
+    expect(saveWorldDraft).not.toHaveBeenCalled();
+    const recoveredValue = document.querySelector<HTMLInputElement>('[name="structured.value"]');
+    if (!recoveredValue) throw new Error("Structured stat value was not recovered.");
+    expect(recoveredValue.value).toBe("many");
+    expect(document.activeElement).toBe(recoveredValue);
+
+    recoveredValue.value = "8";
+    recoveredValue.dispatchEvent(new window.Event("input", { bubbles: true }));
+    expect(document.querySelector('[data-structured-error]')?.textContent).toBe("");
+    expect(save.disabled).toBe(false);
+  });
+
   it("updates only collection results during sequential search input while retaining focus and unapplied detail DOM", async () => {
     const { document, root, window } = editorFixture();
     const entities = Array.from({ length: 150 }, (_, index) => ({

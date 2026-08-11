@@ -63,6 +63,14 @@ interface CollectionSpec {
   kind: StructuredRecordKind;
 }
 
+interface PendingStructuredValidation {
+  collection: DraftCollectionName;
+  index: number;
+  field: string;
+  value: string;
+  message: string;
+}
+
 const SECTION_LABELS: Record<EditorSection, string> = {
   overview: "Overview",
   characters: "Characters",
@@ -277,6 +285,21 @@ export function mountWorldEditorPage(
   let unloadInstalled = false;
   const selectedIndexes = new Map<DraftCollectionName, number>();
   const searches = new Map<DraftCollectionName, string>();
+  const pendingStructuredValidations = new Map<string, PendingStructuredValidation>();
+
+  function structuredValidationKey(collection: DraftCollectionName, index: number, field: string): string {
+    return `${collection}:${index}:${field}`;
+  }
+
+  function firstPendingStructuredValidation(
+    collection?: DraftCollectionName,
+    index?: number
+  ): PendingStructuredValidation | undefined {
+    return [...pendingStructuredValidations.values()].find((pending) =>
+      (collection === undefined || pending.collection === collection) &&
+      (index === undefined || pending.index === index)
+    );
+  }
 
   const beforeUnload = (event: Event) => event.preventDefault();
 
@@ -354,8 +377,10 @@ export function mountWorldEditorPage(
     else editorState.textContent = "Draft saved";
     const canSaveDraft = state.status === "unsaved" ||
       (state.status === "error" && state.saveError?.kind !== "conflict");
-    saveButton.disabled = isReadOnly() || state.status === "saving" || (!canSaveDraft && !coverChanged);
-    setDirtyGuard(!isReadOnly() && (coverChanged || state.status === "unsaved" || state.status === "saving" || state.status === "error"));
+    saveButton.disabled = isReadOnly() || state.status === "saving" || pendingStructuredValidations.size > 0 || (!canSaveDraft && !coverChanged);
+    setDirtyGuard(!isReadOnly() && (
+      pendingStructuredValidations.size > 0 || coverChanged || state.status === "unsaved" || state.status === "saving" || state.status === "error"
+    ));
     renderFieldAvailability();
     renderLedger();
   }
@@ -421,13 +446,18 @@ export function mountWorldEditorPage(
         control.dataset.structuredField = definition.name;
         if (definition.shape) control.dataset.jsonShape = definition.shape;
         const value = structured[definition.name];
-        control.value = definition.kind === "json" ? serializeAdvancedJson(value ?? (definition.shape === "array" ? [] : {})) : textValue(value);
+        const pending = pendingStructuredValidations.get(structuredValidationKey(spec.collection, index, definition.name));
+        control.value = pending?.value ?? (
+          definition.kind === "json" ? serializeAdvancedJson(value ?? (definition.shape === "array" ? [] : {})) : textValue(value)
+        );
+        if (pending) control.setAttribute("aria-invalid", "true");
         if (control instanceof pageView.HTMLTextAreaElement) control.rows = definition.kind === "json" ? 6 : 3;
         structuredForm.append(labelledControl(definition.label, control));
       }
       const fieldError = document.createElement("p");
       fieldError.dataset.structuredError = "";
       fieldError.className = "field-error";
+      fieldError.textContent = firstPendingStructuredValidation(spec.collection, index)?.message ?? "";
       structuredForm.append(fieldError);
       detail.append(structuredForm);
     }
@@ -647,6 +677,7 @@ export function mountWorldEditorPage(
     coverAssetId = "";
     coverChanged = false;
     state = createWorldEditorState(world);
+    pendingStructuredValidations.clear();
     main.setAttribute("aria-busy", "false");
     loadState.replaceChildren();
     if (world.draftRevision === null) {
@@ -726,6 +757,25 @@ export function mountWorldEditorPage(
 
   async function saveDraft(): Promise<void> {
     if (!state || isReadOnly() || state.status === "saving") return;
+    const pendingStructuredValidation = firstPendingStructuredValidation();
+    if (pendingStructuredValidation) {
+      const section = (Object.entries(SECTION_COLLECTIONS) as Array<[
+        Exclude<EditorSection, "overview">,
+        DraftCollectionName[]
+      ]>).find(([, collections]) => collections.includes(pendingStructuredValidation.collection))?.[0];
+      if (section) {
+        activeSection = section;
+        renderSection();
+        activeCollection = pendingStructuredValidation.collection;
+        selectedIndexes.set(activeCollection, pendingStructuredValidation.index);
+        renderCollectionEditor();
+      }
+      sectionContent.querySelector<HTMLElement>(
+        `[data-structured-field="${pendingStructuredValidation.field}"]`
+      )?.focus();
+      announcement.textContent = pendingStructuredValidation.message;
+      return;
+    }
     if (state.status === "saved" && !coverChanged) return;
     if (coverChanged && coverChoice === "select" && !coverAssetId.trim()) {
       const coverError = sectionContent.querySelector<HTMLElement>("[data-cover-error]");
@@ -800,24 +850,35 @@ export function mountWorldEditorPage(
     const original = state.draft[activeCollection][index];
     if (original === undefined) return;
     const field = target.dataset.structuredField!;
+    const validationKey = structuredValidationKey(activeCollection, index, field);
     const fieldError = sectionContent.querySelector<HTMLElement>("[data-structured-error]");
     let value: unknown = target.value;
+    let validationMessage: string | undefined;
     if (target.dataset.jsonShape) {
       const parsed = parseAdvancedJson(target.value, target.dataset.jsonShape as AdvancedJsonShape);
-      if (fieldError) fieldError.textContent = parsed.error ?? "";
-      if (parsed.error) return;
+      validationMessage = parsed.error ?? undefined;
       value = parsed.value;
     } else if (spec.kind === "stat" && field === "value" && typeof structuredFieldsFor("stat", original).value === "number") {
       const numericValue = target.value.trim() === "" ? Number.NaN : Number(target.value);
-      if (!Number.isFinite(numericValue)) {
-        if (fieldError) fieldError.textContent = "Enter a valid number.";
-        return;
-      }
-      if (fieldError) fieldError.textContent = "";
-      value = numericValue;
-    } else if (fieldError) {
-      fieldError.textContent = "";
+      if (!Number.isFinite(numericValue)) validationMessage = "Enter a valid number.";
+      else value = numericValue;
     }
+    if (validationMessage) {
+      pendingStructuredValidations.set(validationKey, {
+        collection: activeCollection,
+        index,
+        field,
+        value: target.value,
+        message: validationMessage
+      });
+      target.setAttribute("aria-invalid", "true");
+      if (fieldError) fieldError.textContent = firstPendingStructuredValidation(activeCollection, index)?.message ?? "";
+      renderStatus();
+      return;
+    }
+    pendingStructuredValidations.delete(validationKey);
+    target.removeAttribute("aria-invalid");
+    if (fieldError) fieldError.textContent = firstPendingStructuredValidation(activeCollection, index)?.message ?? "";
     const merged = mergeStructuredFields(spec.kind, original, { [field]: value });
     state = updateCollectionItem(state, activeCollection, index, merged);
     const advanced = sectionContent.querySelector<HTMLTextAreaElement>("[data-advanced-json]");
