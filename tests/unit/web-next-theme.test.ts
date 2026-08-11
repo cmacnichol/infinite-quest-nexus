@@ -3,6 +3,7 @@ import path from "node:path";
 import vm from "node:vm";
 import { parseHTML } from "linkedom";
 import { describe, expect, it } from "vitest";
+import { initializeAppTheme, renderAppShell } from "../../apps/web-next/src/app-shell.js";
 import {
   initializeThemeControl,
   installThemeControlLifecycle,
@@ -129,13 +130,21 @@ describe("web theme integration", () => {
     expect(moduleIndex).toBeGreaterThan(bootstrapIndex);
   });
 
-  it("renders the reusable theme toggle with authored icon states", () => {
-    const source = fs.readFileSync(path.join(webNextRoot, "src/bootstrap.ts"), "utf8");
-    expect(source).toContain('class="theme-toggle"');
-    expect(source).toContain('class="theme-icon theme-icon-sun"');
-    expect(source).toContain('class="theme-icon theme-icon-moon"');
-    expect(source).toContain("const themeControl = initializeThemeControl");
-    expect(source).toContain("installThemeControlLifecycle(window, themeControl)");
+  it("renders and initializes the shared theme control on every app page", () => {
+    const { document, Event } = parseHTML('<html><body><div id="app"></div></body></html>').window;
+    const root = document.querySelector<HTMLElement>("#app");
+    if (!root) throw new Error("Shell fixture is missing.");
+
+    renderAppShell(root, '<main id="main-content">Page</main>', "world-library");
+    const theme = initializeAppTheme(root);
+    const toggle = document.querySelector<HTMLButtonElement>(".theme-toggle");
+
+    expect(toggle?.querySelector(".theme-icon-sun")).not.toBeNull();
+    expect(toggle?.querySelector(".theme-icon-moon")).not.toBeNull();
+    expect(toggle?.getAttribute("aria-label")).toBe("Use dark theme");
+    toggle?.dispatchEvent(new Event("click"));
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    theme.dispose();
   });
 
   it("keeps a valid stored choice authoritative when matchMedia access throws", () => {
@@ -241,6 +250,16 @@ describe("web theme integration", () => {
     });
 
     expect(leaks).toEqual([]);
+  });
+
+  it("uses the shared semantic theme contract for the editor command and conflict surfaces", () => {
+    const css = fs.readFileSync(path.join(webNextRoot, "src/styles.css"), "utf8");
+
+    expect(cssRule(css, ".editor-command-row")).toMatch(/display:\s*grid/);
+    expect(cssRule(css, ".editor-save-cell button")).toMatch(/background:\s*var\(--accent\)/);
+    expect(cssRule(css, ".editor-save-cell button:disabled")).toMatch(/background:\s*var\(--surface-muted\)/);
+    expect(cssRule(css, ".editor-field input:focus, .editor-field textarea:focus")).toMatch(/border-color:\s*var\(--accent\)/);
+    expect(cssRule(css, ".save-conflict")).toMatch(/background:\s*var\(--surface-entry\)/);
   });
 
   it("keeps the footer identity readable on the inverse surface in every theme", () => {

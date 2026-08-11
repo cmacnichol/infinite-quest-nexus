@@ -9,6 +9,7 @@ import {
   worldEditorPath,
   type WorldSummary
 } from "../../apps/web-next/src/world-library.js";
+import { mountWorldLibraryPage } from "../../apps/web-next/src/world-library-page.js";
 
 const worlds: WorldSummary[] = [
   {
@@ -45,15 +46,45 @@ describe("World Library overview", () => {
     expect(worldEditorPath("world / 1")).toBe("/app/worlds/world%20%2F%201");
   });
 
-  it("bootstraps the routed World Editor loading state", async () => {
-    const { window } = parseHTML('<div id="app"></div>');
+  it("preserves search, retry, and theme controls after extracting the library page", async () => {
+    const { document, Event } = parseHTML('<html><body><div id="app"></div></body></html>').window;
+    const root = document.querySelector<HTMLElement>("#app");
+    if (!root) throw new Error("Library fixture missing.");
+    const fetchWorlds = vi.fn()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ worlds }), { status: 200 }));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    mountWorldLibraryPage(root, { fetchWorlds });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(document.querySelector(".theme-toggle")).not.toBeNull();
+    expect(document.querySelector('[data-action="retry-worlds"]')).not.toBeNull();
+
+    document.querySelector<HTMLButtonElement>('[data-action="retry-worlds"]')?.click();
+    await vi.waitFor(() => expect(document.querySelectorAll(".world-entry")).toHaveLength(2));
+    const search = document.querySelector<HTMLInputElement>("#world-search");
+    if (!search) throw new Error("Search fixture missing.");
+    search.value = "mirrored";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+
+    expect(fetchWorlds).toHaveBeenCalledTimes(2);
+    expect(document.querySelectorAll(".world-entry")).toHaveLength(1);
+    expect(document.querySelector(".world-entry")?.textContent).toContain("Glass Harbor");
+    consoleError.mockRestore();
+  });
+
+  it("routes bootstrap to one editor page and disposes it on non-persisted pagehide", async () => {
+    const { window } = parseHTML('<html><body><div id="app"></div></body></html>');
     window.location = { pathname: "/app/worlds/22222222-2222-4222-8222-222222222222" } as Location;
+    Object.defineProperty(window, "localStorage", { configurable: true, value: null });
+    let requestSignal: AbortSignal | undefined;
+    const fetch = vi.fn((_url: string, init?: RequestInit) => {
+      requestSignal = init?.signal ?? undefined;
+      return new Promise<Response>(() => undefined);
+    });
     const previousGlobals = new Map<PropertyKey, PropertyDescriptor | undefined>();
-    for (const [name, value] of [
-      ["window", window],
-      ["document", window.document],
-      ["HTMLElement", window.HTMLElement]
-    ] as const) {
+    for (const [name, value] of [["window", window], ["document", window.document], ["fetch", fetch]] as const) {
       previousGlobals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
       Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
     }
@@ -61,10 +92,13 @@ describe("World Library overview", () => {
     try {
       vi.resetModules();
       await import("../../apps/web-next/src/bootstrap.js");
+      expect(window.document.querySelectorAll('[data-page="world-editor"]')).toHaveLength(1);
+      expect(window.document.querySelector('[data-page="world-library"]')).toBeNull();
 
-      const loadingRegion = window.document.querySelector('[data-page="world-editor"]');
-      expect(loadingRegion?.getAttribute("aria-busy")).toBe("true");
-      expect(loadingRegion?.textContent).toContain("Loading world editor");
+      const pageHide = new window.Event("pagehide");
+      Object.defineProperty(pageHide, "persisted", { value: false });
+      window.dispatchEvent(pageHide);
+      expect(requestSignal?.aborted).toBe(true);
     } finally {
       for (const [name, descriptor] of previousGlobals) {
         if (descriptor) Object.defineProperty(globalThis, name, descriptor);
