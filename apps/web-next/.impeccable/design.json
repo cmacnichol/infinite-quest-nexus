@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-08-11T05:39:58.268Z",
+  "generatedAt": "2026-08-11T05:50:00.253Z",
   "title": "Design System: Infinite Quest Nexus",
   "extensions": {
     "colorMeta": {
@@ -168,6 +168,21 @@
           "oklch(87% 0.006 264)",
           "oklch(95% 0.006 264)"
         ]
+      },
+      "accent-text": {
+        "role": "neutral",
+        "displayName": "Text on Accent",
+        "canonical": "#f5f7fb",
+        "tonalRamp": [
+          "oklch(15% 0.006 264)",
+          "oklch(27% 0.006 264)",
+          "oklch(39% 0.006 264)",
+          "oklch(51% 0.006 264)",
+          "oklch(63% 0.006 264)",
+          "oklch(75% 0.006 264)",
+          "oklch(87% 0.006 264)",
+          "oklch(95% 0.006 264)"
+        ]
       }
     },
     "typographyMeta": {
@@ -248,13 +263,15 @@
         "--text-primary": "{colors.ink}",
         "--text-secondary": "{colors.muted}",
         "--text-inverse": "{colors.inverse-text}",
+        "--text-on-accent": "{colors.accent-text}",
         "--rule": "{colors.grid}",
         "--rule-strong": "{colors.grid-strong}",
         "--accent": "{colors.indigo}",
         "--accent-hover": "{colors.indigo-dark}",
         "--accent-soft": "{colors.indigo-soft}",
         "--focus-shadow": "rgba(35, 70, 168, 0.2)",
-        "--artwork-fallback": "#e1e7ec"
+        "--artwork-fallback": "#e1e7ec",
+        "--artwork-overlay": "rgba(16, 20, 24, 0.18)"
       },
       "dark": {
         "--surface-page": "#111821",
@@ -267,13 +284,15 @@
         "--text-primary": "#edf2f7",
         "--text-secondary": "#b7c2cd",
         "--text-inverse": "#edf2f7",
+        "--text-on-accent": "#101418",
         "--rule": "#39495a",
         "--rule-strong": "#5b6c7e",
         "--accent": "#8eabff",
         "--accent-hover": "#b5c7ff",
         "--accent-soft": "#243760",
         "--focus-shadow": "rgba(142, 171, 255, 0.24)",
-        "--artwork-fallback": "#25313d"
+        "--artwork-fallback": "#25313d",
+        "--artwork-overlay": "rgba(16, 20, 24, 0.18)"
       }
     }
   },
@@ -299,7 +318,7 @@
       "refersTo": "button-primary",
       "description": "A square accent action for retry and other decisive operations.",
       "html": "<button class=\"ds-btn-primary\" type=\"button\">Try again</button>",
-      "css": ".ds-btn-primary { padding: 12px 18px; color: var(--text-inverse, #f5f7fb); background: var(--accent, #2346a8); border: 1px solid var(--accent, #2346a8); border-radius: 0; cursor: pointer; font-family: 'Chakra Petch', sans-serif; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; transition: background-color 180ms ease, border-color 180ms ease; } .ds-btn-primary:hover { background: var(--accent-hover, #17327f); border-color: var(--accent-hover, #17327f); } .ds-btn-primary:focus-visible { background: var(--accent-hover, #17327f); outline: 3px solid var(--text-primary, #101418); outline-offset: 3px; } .ds-btn-primary:active { background: var(--surface-inverse, #101418); border-color: var(--surface-inverse, #101418); }"
+      "css": ".ds-btn-primary { padding: 12px 18px; color: var(--text-on-accent, #f5f7fb); background: var(--accent, #2346a8); border: 1px solid var(--accent, #2346a8); border-radius: 0; cursor: pointer; font-family: 'Chakra Petch', sans-serif; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; transition: background-color 180ms ease, border-color 180ms ease; } .ds-btn-primary:hover { color: var(--text-on-accent, #f5f7fb); background: var(--accent-hover, #17327f); border-color: var(--accent-hover, #17327f); } .ds-btn-primary:focus-visible { color: var(--text-on-accent, #f5f7fb); background: var(--accent-hover, #17327f); border-color: var(--accent-hover, #17327f); outline: 3px solid var(--text-primary, #101418); outline-offset: 3px; } .ds-btn-primary:active { color: var(--text-on-accent, #f5f7fb); background: var(--accent-hover, #17327f); border-color: var(--accent-hover, #17327f); }"
     },
     {
       "name": "Search Field",
@@ -315,7 +334,7 @@
       "refersTo": "indexed-entry",
       "description": "A complete clickable atlas cell pairing distinctive media with concise evidence.",
       "html": "<a class=\"ds-entry\" href=\"#\" aria-label=\"Open The Glass Frontier, 3 campaigns\"><span class=\"ds-entry-cover\"><span class=\"ds-entry-glyph\" aria-hidden=\"true\">G</span><span class=\"ds-coordinate\" aria-hidden=\"true\">01 / W</span></span><span class=\"ds-entry-copy\"><strong>The Glass Frontier</strong><span class=\"ds-entry-description\">A durable world of contested passages and impossible horizons.</span><span class=\"ds-entry-meta\"><span>3 campaigns</span><span class=\"ds-entry-action\">Open world <svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M7 17 17 7M8 7h9v9\"></path></svg></span></span></span></a>",
-      "css": ".ds-entry { width: min(100%, 390px); display: grid; grid-template-rows: auto 1fr; padding: clamp(13px, 1.33vw, 21px); color: var(--text-primary, #101418); background: var(--surface-entry, rgba(248, 250, 251, 0.96)); border: 1px solid var(--rule-strong, #8798a8); border-radius: 0; text-decoration: none; transition: background-color 180ms ease; } .ds-entry:hover, .ds-entry:focus-visible { background: var(--surface-entry-hover, #ffffff); outline: none; } .ds-entry:focus-visible { box-shadow: inset 0 0 0 3px var(--accent, #2346a8); } .ds-entry:active { background: var(--surface-entry, rgba(248, 250, 251, 0.96)); } .ds-entry-cover { position: relative; aspect-ratio: 16 / 9; overflow: hidden; display: grid; place-items: center; color: var(--accent, #2346a8); background-color: var(--artwork-fallback, #e1e7ec); background-image: linear-gradient(to right, color-mix(in srgb, var(--accent, #2346a8) 16%, transparent) 1px, transparent 1px), linear-gradient(to bottom, color-mix(in srgb, var(--accent, #2346a8) 16%, transparent) 1px, transparent 1px); background-size: 18px 18px; border-bottom: 1px solid var(--text-primary, #101418); clip-path: polygon(0 0, calc(100% - 22px) 0, 100% 22px, 100% 100%, 0 100%); } .ds-entry-glyph { font-family: 'Chakra Petch', sans-serif; font-size: 5rem; font-weight: 600; line-height: 1; } .ds-coordinate { position: absolute; right: 0; bottom: 0; padding: 7px 10px; color: var(--text-inverse, #f5f7fb); background: var(--accent, #2346a8); font-family: 'Chakra Petch', sans-serif; font-size: 0.72rem; font-weight: 600; letter-spacing: 0.08em; } .ds-entry-copy { min-height: 166px; display: flex; flex-direction: column; padding-top: 18px; } .ds-entry-copy strong { margin-bottom: 0.7rem; font-family: 'Literata', Georgia, serif; font-size: 1.5rem; font-weight: 600; line-height: 1.08; letter-spacing: -0.02em; } .ds-entry-description { margin-bottom: 1.6rem; color: var(--text-secondary, #46515c); font-family: 'Geologica', sans-serif; font-size: 0.9rem; line-height: 1.55; } .ds-entry-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: auto; padding-top: 14px; border-top: 1px solid var(--rule, #b8c5d0); color: var(--text-secondary, #46515c); font-family: 'Geologica', sans-serif; font-size: 0.75rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.055em; } .ds-entry-action { display: inline-flex; align-items: center; gap: 7px; color: var(--accent-hover, #17327f); font-family: 'Chakra Petch', sans-serif; font-weight: 600; } .ds-entry-action svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: square; stroke-linejoin: miter; transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1); } .ds-entry:hover .ds-entry-action svg, .ds-entry:focus-visible .ds-entry-action svg { transform: translate(3px, -3px); }"
+      "css": ".ds-entry { width: min(100%, 390px); display: grid; grid-template-rows: auto 1fr; padding: clamp(13px, 1.33vw, 21px); color: var(--text-primary, #101418); background: var(--surface-entry, rgba(248, 250, 251, 0.96)); border: 1px solid var(--rule-strong, #8798a8); border-radius: 0; text-decoration: none; transition: background-color 180ms ease; } .ds-entry:hover, .ds-entry:focus-visible { background: var(--surface-entry-hover, #ffffff); outline: none; } .ds-entry:focus-visible { box-shadow: inset 0 0 0 3px var(--accent, #2346a8); } .ds-entry:active { background: var(--surface-entry, rgba(248, 250, 251, 0.96)); } .ds-entry-cover { position: relative; aspect-ratio: 16 / 9; overflow: hidden; display: grid; place-items: center; color: var(--accent, #2346a8); background-color: var(--artwork-fallback, #e1e7ec); background-image: linear-gradient(to right, color-mix(in srgb, var(--accent, #2346a8) 16%, transparent) 1px, transparent 1px), linear-gradient(to bottom, color-mix(in srgb, var(--accent, #2346a8) 16%, transparent) 1px, transparent 1px); background-size: 18px 18px; border-bottom: 1px solid var(--text-primary, #101418); clip-path: polygon(0 0, calc(100% - 22px) 0, 100% 22px, 100% 100%, 0 100%); } .ds-entry-glyph { font-family: 'Chakra Petch', sans-serif; font-size: 5rem; font-weight: 600; line-height: 1; } .ds-coordinate { position: absolute; right: 0; bottom: 0; padding: 7px 10px; color: var(--text-on-accent, #f5f7fb); background: var(--accent, #2346a8); font-family: 'Chakra Petch', sans-serif; font-size: 0.72rem; font-weight: 600; letter-spacing: 0.08em; } .ds-entry-copy { min-height: 166px; display: flex; flex-direction: column; padding-top: 18px; } .ds-entry-copy strong { margin-bottom: 0.7rem; font-family: 'Literata', Georgia, serif; font-size: 1.5rem; font-weight: 600; line-height: 1.08; letter-spacing: -0.02em; } .ds-entry-description { margin-bottom: 1.6rem; color: var(--text-secondary, #46515c); font-family: 'Geologica', sans-serif; font-size: 0.9rem; line-height: 1.55; } .ds-entry-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: auto; padding-top: 14px; border-top: 1px solid var(--rule, #b8c5d0); color: var(--text-secondary, #46515c); font-family: 'Geologica', sans-serif; font-size: 0.75rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.055em; } .ds-entry-action { display: inline-flex; align-items: center; gap: 7px; color: var(--accent-hover, #17327f); font-family: 'Chakra Petch', sans-serif; font-weight: 600; } .ds-entry-action svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: square; stroke-linejoin: miter; transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1); } .ds-entry:hover .ds-entry-action svg, .ds-entry:focus-visible .ds-entry-action svg { transform: translate(3px, -3px); }"
     },
     {
       "name": "Coordinate Chip",
@@ -323,7 +342,7 @@
       "refersTo": "coordinate-chip",
       "description": "A square index marker attached to visual content.",
       "html": "<span class=\"ds-coordinate-chip\">04 / W</span>",
-      "css": ".ds-coordinate-chip { display: inline-flex; align-items: center; min-height: 28px; padding: 7px 10px; color: var(--text-inverse, #f5f7fb); background: var(--accent, #2346a8); border: 1px solid var(--accent, #2346a8); border-radius: 0; font-family: 'Chakra Petch', sans-serif; font-size: 0.72rem; font-weight: 600; line-height: 1; letter-spacing: 0.08em; text-transform: uppercase; }"
+      "css": ".ds-coordinate-chip { display: inline-flex; align-items: center; min-height: 28px; padding: 7px 10px; color: var(--text-on-accent, #f5f7fb); background: var(--accent, #2346a8); border: 1px solid var(--accent, #2346a8); border-radius: 0; font-family: 'Chakra Petch', sans-serif; font-size: 0.72rem; font-weight: 600; line-height: 1; letter-spacing: 0.08em; text-transform: uppercase; }"
     },
     {
       "name": "Theme Toggle",
@@ -353,7 +372,7 @@
       },
       {
         "name": "The Artwork Priority Rule",
-        "body": "Full-color user-provided world artwork may exceed the restrained interface palette; theme changes never recolor, replace, bundle, or otherwise alter it.",
+        "body": "Full-color user-provided world artwork may exceed the restrained interface palette; theme changes never recolor, replace, bundle, or otherwise alter it. Media overlays and image treatment remain theme-invariant, while keyboard focus is shown on the enclosing cell.",
         "section": "colors"
       },
       {

@@ -58,6 +58,37 @@ function visibleThemeIcons(css: string, theme: "light" | "dark"): string[] {
   return [...displays].filter(([, display]) => display !== "none").map(([icon]) => icon);
 }
 
+function cssDeclarations(css: string, selector: string): Map<string, string> {
+  const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const block = css.match(new RegExp(`${escapedSelector}\\s*\\{([^}]*)\\}`))?.[1];
+  if (!block) throw new Error(`Missing CSS declaration block for ${selector}.`);
+
+  return new Map([...block.matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)].map((match) => [match[1], match[2].trim()]));
+}
+
+function cssRule(css: string, selector: string): string {
+  const normalizedSelector = selector.replace(/\s+/g, " ").trim();
+  for (const match of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    if (match[1].replace(/\s+/g, " ").trim() === normalizedSelector) return match[2];
+  }
+  return "";
+}
+
+function contrastRatio(foreground: string, background: string): number {
+  const luminance = (hex: string) => {
+    const channels = hex.match(/[\da-f]{2}/gi);
+    if (!channels || channels.length !== 3) throw new Error(`Expected a six-digit hex color, received ${hex}.`);
+    const [red, green, blue] = channels.map((channel) => {
+      const value = Number.parseInt(channel, 16) / 255;
+      return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+    });
+    return (0.2126 * red) + (0.7152 * green) + (0.0722 * blue);
+  };
+  const lighter = Math.max(luminance(foreground), luminance(background));
+  const darker = Math.min(luminance(foreground), luminance(background));
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
 function mediaQuery(matches: boolean) {
   const listeners = new Set<(event: { matches: boolean }) => void>();
   return {
@@ -156,17 +187,80 @@ describe("web theme integration", () => {
     expect(visibleThemeIcons(css, "dark")).toEqual(["theme-icon-moon"]);
   });
 
-  it("defines reusable light and dark semantic theme tokens", () => {
+  it("defines the complete semantic contract independently in both theme blocks", () => {
     const css = fs.readFileSync(path.join(webNextRoot, "src/styles.css"), "utf8");
-    for (const token of [
-      "--surface-page", "--surface-entry", "--surface-inverse",
-      "--text-primary", "--text-secondary", "--text-inverse",
-      "--rule", "--rule-strong", "--accent", "--accent-hover", "--accent-soft"
-    ]) expect(css).toContain(token);
-    expect(css).toContain(':root[data-theme="dark"]');
-    expect(css).toContain(".theme-toggle");
-    expect(css).toContain(".theme-icon-moon");
-    expect(css).toContain(".theme-icon-sun");
+    const light = cssDeclarations(css, ":root");
+    const dark = cssDeclarations(css, ':root[data-theme="dark"]');
+    const requiredTokens = [
+      "--surface-page", "--surface-paper", "--surface-entry", "--surface-entry-hover",
+      "--surface-muted", "--surface-inverse", "--surface-atmosphere",
+      "--text-primary", "--text-secondary", "--text-inverse", "--text-on-accent",
+      "--rule", "--rule-strong", "--accent", "--accent-hover", "--accent-soft",
+      "--focus-shadow", "--artwork-fallback", "--artwork-overlay"
+    ];
+
+    expect([...light.keys()].filter((token) => requiredTokens.includes(token))).toEqual(requiredTokens);
+    expect([...dark.keys()]).toEqual(requiredTokens);
+    for (const obsoleteToken of ["--ink", "--muted", "--paper", "--canvas", "--grid", "--grid-strong", "--cobalt"]) {
+      expect(light.has(obsoleteToken)).toBe(false);
+      expect(dark.has(obsoleteToken)).toBe(false);
+      expect(css).not.toMatch(new RegExp(`${obsoleteToken}(?![\\w-])`));
+    }
+  });
+
+  it("keeps filled accent text readable in every theme and interaction state", () => {
+    const css = fs.readFileSync(path.join(webNextRoot, "src/styles.css"), "utf8");
+    const themes = [
+      cssDeclarations(css, ":root"),
+      cssDeclarations(css, ':root[data-theme="dark"]')
+    ];
+
+    for (const theme of themes) {
+      const foreground = theme.get("--text-on-accent") ?? "";
+      expect(contrastRatio(foreground, theme.get("--accent") ?? "")).toBeGreaterThanOrEqual(4.5);
+      expect(contrastRatio(foreground, theme.get("--accent-hover") ?? "")).toBeGreaterThanOrEqual(4.5);
+    }
+
+    expect(cssRule(css, ".coordinate")).toMatch(/color:\s*var\(--text-on-accent\)/);
+    expect(cssRule(css, ".coordinate")).toMatch(/background:\s*var\(--accent\)/);
+    expect(cssRule(css, ".library-message button")).toMatch(/color:\s*var\(--text-on-accent\)/);
+    expect(cssRule(css, ".library-message button")).toMatch(/background:\s*var\(--accent\)/);
+    const filledButtonState = cssRule(css, ".library-message button:hover, .library-message button:focus-visible");
+    expect(filledButtonState).toMatch(/color:\s*var\(--text-on-accent\)/);
+    expect(filledButtonState).toMatch(/background:\s*var\(--accent-hover\)/);
+  });
+
+  it("keeps the design sidecar synchronized with filled-accent and artwork roles", () => {
+    const design = JSON.parse(fs.readFileSync(path.join(webNextRoot, ".impeccable/design.json"), "utf8"));
+    const { light, dark } = design.extensions.themePalettes as Record<string, Record<string, string>>;
+    const requiredTokens = ["--text-on-accent", "--focus-shadow", "--artwork-fallback", "--artwork-overlay"];
+
+    for (const token of requiredTokens) {
+      expect(light).toHaveProperty(token);
+      expect(dark).toHaveProperty(token);
+    }
+    expect(dark["--artwork-overlay"]).toBe(light["--artwork-overlay"]);
+
+    for (const componentName of ["Primary Button", "Indexed Content Entry", "Coordinate Chip"]) {
+      const component = design.components.find((entry: { name: string }) => entry.name === componentName);
+      expect(component?.css).toMatch(/var\(--text-on-accent/);
+      expect(component?.css).not.toMatch(/var\(--text-inverse/);
+    }
+  });
+
+  it("keeps artwork interaction treatment theme-invariant while preserving keyboard focus", () => {
+    const css = fs.readFileSync(path.join(webNextRoot, "src/styles.css"), "utf8");
+    const light = cssDeclarations(css, ":root");
+    const dark = cssDeclarations(css, ':root[data-theme="dark"]');
+    const overlayRule = cssRule(css, ".world-cover::after");
+
+    expect(dark.get("--artwork-overlay")).toBe(light.get("--artwork-overlay"));
+    expect(overlayRule).toMatch(/var\(--artwork-overlay\)/);
+    expect(overlayRule).not.toMatch(/var\(--focus-shadow\)/);
+    expect(cssRule(css, ".world-cover")).toMatch(/background:\s*var\(--artwork-fallback\)/);
+    expect(cssRule(css, ".cover-fallback")).toMatch(/background-color:\s*var\(--artwork-fallback\)/);
+    expect(cssRule(css, ".search-control:focus-within")).toMatch(/box-shadow:[^;]*var\(--focus-shadow\)/);
+    expect(cssRule(css, ".world-link:focus-visible")).toMatch(/box-shadow:\s*inset[^;]*var\(--accent\)/);
   });
 });
 

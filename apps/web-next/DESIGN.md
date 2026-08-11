@@ -13,6 +13,7 @@ colors:
   indigo-dark: "#17327f"
   indigo-soft: "#c8d5f2"
   inverse-text: "#f5f7fb"
+  accent-text: "#f5f7fb"
 typography:
   display:
     fontFamily: "Literata, Georgia, serif"
@@ -52,13 +53,13 @@ spacing:
 components:
   button-primary:
     backgroundColor: "{colors.indigo}"
-    textColor: "{colors.inverse-text}"
+    textColor: "{colors.accent-text}"
     typography: "{typography.label}"
     rounded: "{rounded.square}"
     padding: "12px 18px"
   button-primary-hover:
     backgroundColor: "{colors.indigo-dark}"
-    textColor: "{colors.inverse-text}"
+    textColor: "{colors.accent-text}"
   search-field:
     backgroundColor: "{colors.paper}"
     textColor: "{colors.ink}"
@@ -84,7 +85,7 @@ components:
     padding: "{spacing.cell}"
   coordinate-chip:
     backgroundColor: "{colors.indigo}"
-    textColor: "{colors.inverse-text}"
+    textColor: "{colors.accent-text}"
     typography: "{typography.label}"
     rounded: "{rounded.square}"
     padding: "7px 10px"
@@ -125,13 +126,14 @@ The palette is a cool technical paper system in light mode and a deep blue-black
 - **Atmosphere Plane:** A cool indigo geometric plane that gives the upper canvas directional depth without becoming decorative chrome.
 - **Construction Grid:** Quiet cell lines and internal dividers.
 - **Strong Construction Grid:** Major section rules and content boundaries.
-- **Inverse Text:** Text and marks placed directly on indigo or the inverse surface.
+- **Inverse Text:** Text and marks placed on the inverse surface.
+- **Text on Accent:** The dedicated foreground for filled accent states: near-white over the deep light-theme indigos and Atlas Ink over the luminous dark-theme indigos. Do not substitute `--text-inverse`; the two roles intentionally diverge in dark mode.
 
 ### Semantic Theme Palettes
 
 Light mode uses `#dfe7ee` page, translucent `#f8fafb` paper and entry surfaces, `#101418` primary text, `#46515c` secondary text, `#b8c5d0` / `#8798a8` rules, and the deep `#2346a8` / `#17327f` editorial indigo pair. Dark mode uses `#111821` page, translucent `#111821` paper and `#18212c` entries, `#edf2f7` primary text, `#b7c2cd` secondary text, `#39495a` / `#5b6c7e` rules, and `#8eabff` / `#b5c7ff` accents.
 
-The shared contract is `--surface-page`, `--surface-paper`, `--surface-entry`, `--surface-entry-hover`, `--surface-muted`, `--surface-inverse`, `--surface-atmosphere`, `--text-primary`, `--text-secondary`, `--text-inverse`, `--rule`, `--rule-strong`, `--accent`, `--accent-hover`, `--accent-soft`, `--focus-shadow`, and `--artwork-fallback`.
+The shared contract is `--surface-page`, `--surface-paper`, `--surface-entry`, `--surface-entry-hover`, `--surface-muted`, `--surface-inverse`, `--surface-atmosphere`, `--text-primary`, `--text-secondary`, `--text-inverse`, `--text-on-accent`, `--rule`, `--rule-strong`, `--accent`, `--accent-hover`, `--accent-soft`, `--focus-shadow`, `--artwork-fallback`, and `--artwork-overlay`. Every role is declared in both theme blocks. `--artwork-overlay` deliberately has the same value in both themes so interaction never retints user artwork.
 
 ### Named Rules
 
@@ -139,7 +141,7 @@ The shared contract is `--surface-page`, `--surface-paper`, `--surface-entry`, `
 
 **The Semantic Theme Rule.** Future pages and reusable components must consume semantic tokens, never World Library selectors, obsolete visual-role aliases, or literal light/dark theme colors.
 
-**The Artwork Priority Rule.** Full-color user-provided world artwork may exceed the restrained interface palette, but surrounding UI must remain quiet enough for the artwork to lead. Theme changes must not recolor, replace, bundle, or otherwise alter that artwork.
+**The Artwork Priority Rule.** Full-color user-provided world artwork may exceed the restrained interface palette, but surrounding UI must remain quiet enough for the artwork to lead. Theme changes must not recolor, replace, bundle, or otherwise alter that artwork; media overlays and image treatment remain theme-invariant, while keyboard focus is indicated on the enclosing cell.
 
 ## Typography
 
@@ -202,12 +204,12 @@ Components are precise, tactile through state rather than simulated material, an
 
 ### Buttons
 - **Shape:** Square with a one-pixel border and no radius.
-- **Primary:** The semantic accent with inverse uppercase Chakra Petch text and compact rectangular padding.
-- **Hover / Focus:** Shift to `--accent-hover`; retain a clear `:focus-visible` outline rather than relying on color alone.
+- **Primary:** The semantic accent with `--text-on-accent` uppercase Chakra Petch text and compact rectangular padding.
+- **Hover / Focus:** Shift to `--accent-hover`, retain `--text-on-accent`, and keep a clear `:focus-visible` outline rather than relying on color alone. The normal and hover pairings maintain at least 4.5:1 text contrast in both themes.
 - **Secondary / Link actions:** Keep the surface transparent, use `--accent-hover` text, and pair directional actions with the square northeast arrow.
 
 ### Chips
-- **Style:** Coordinates are compact accent rectangles with inverse uppercase operational text.
+- **Style:** Coordinates are compact accent rectangles with `--text-on-accent` uppercase operational text.
 - **State:** Treat them as index metadata, not rounded interactive pills.
 
 ### Cards / Containers

@@ -46,6 +46,7 @@
   --text-primary: #101418;
   --text-secondary: #46515c;
   --text-inverse: #f5f7fb;
+  --text-on-accent: #f5f7fb;
   --rule: #b8c5d0;
   --rule-strong: #8798a8;
   --accent: #2346a8;
@@ -53,6 +54,7 @@
   --accent-soft: #c8d5f2;
   --focus-shadow: rgba(35, 70, 168, 0.2);
   --artwork-fallback: #e1e7ec;
+  --artwork-overlay: rgba(16, 20, 24, 0.18);
   --cell: clamp(20px, 2.05vw, 32px);
   --edge: clamp(20px, 4vw, 64px);
 }
@@ -69,6 +71,7 @@
   --text-primary: #edf2f7;
   --text-secondary: #b7c2cd;
   --text-inverse: #edf2f7;
+  --text-on-accent: #101418;
   --rule: #39495a;
   --rule-strong: #5b6c7e;
   --accent: #8eabff;
@@ -76,6 +79,7 @@
   --accent-soft: #243760;
   --focus-shadow: rgba(142, 171, 255, 0.24);
   --artwork-fallback: #25313d;
+  --artwork-overlay: rgba(16, 20, 24, 0.18);
 }
 
 * {
@@ -507,7 +511,7 @@ h1 span:last-child {
   position: absolute;
   inset: 0;
   content: "";
-  background: linear-gradient(135deg, transparent 64%, var(--focus-shadow));
+  background: linear-gradient(135deg, transparent 64%, var(--artwork-overlay));
   opacity: 0;
   transition: opacity 220ms ease;
 }
@@ -557,7 +561,7 @@ h1 span:last-child {
   right: 0;
   bottom: 0;
   padding: 7px 10px;
-  color: var(--text-inverse);
+  color: var(--text-on-accent);
   background: var(--accent);
   font-family: "Chakra Petch", sans-serif;
   font-size: 0.72rem;
@@ -650,7 +654,7 @@ h1 span:last-child {
 .library-message button {
   margin-top: 24px;
   padding: 12px 18px;
-  color: var(--text-inverse);
+  color: var(--text-on-accent);
   background: var(--accent);
   border: 1px solid var(--accent);
   cursor: pointer;
@@ -662,7 +666,14 @@ h1 span:last-child {
 
 .library-message button:hover,
 .library-message button:focus-visible {
+  color: var(--text-on-accent);
   background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.library-message button:focus-visible {
+  outline: 3px solid var(--text-primary);
+  outline-offset: 3px;
 }
 
 .skeleton {
