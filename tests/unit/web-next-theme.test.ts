@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { parseHTML } from "linkedom";
 import { describe, expect, it } from "vitest";
 import {
@@ -8,6 +10,8 @@ import {
   parseStoredTheme,
   resolveTheme
 } from "../../apps/web-next/src/theme.js";
+
+const webNextRoot = path.resolve(import.meta.dirname, "../../apps/web-next");
 
 function mediaQuery(matches: boolean) {
   const listeners = new Set<(event: { matches: boolean }) => void>();
@@ -21,6 +25,34 @@ function mediaQuery(matches: boolean) {
     }
   };
 }
+
+describe("web theme integration", () => {
+  it("applies a validated initial theme before the application module", () => {
+    const html = fs.readFileSync(path.join(webNextRoot, "index.html"), "utf8");
+    const bootstrapIndex = html.indexOf("infinite-quest.theme");
+    const moduleIndex = html.indexOf("/src/bootstrap.ts");
+    expect(bootstrapIndex).toBeGreaterThan(-1);
+    expect(moduleIndex).toBeGreaterThan(bootstrapIndex);
+    expect(html).toContain("prefers-color-scheme: dark");
+    expect(html).toContain("document.documentElement.dataset.theme");
+  });
+
+  it("renders an accessible reusable theme toggle contract", () => {
+    const source = fs.readFileSync(path.join(webNextRoot, "src/bootstrap.ts"), "utf8");
+    expect(source).toContain('class="theme-toggle"');
+    expect(source).toContain("Use dark theme");
+    expect(source).toContain("Use light theme");
+    expect(source).toContain("createThemeController");
+  });
+
+  it("resolves a throwing localStorage getter before controller creation", () => {
+    const source = fs.readFileSync(path.join(webNextRoot, "src/bootstrap.ts"), "utf8");
+    expect(source).toMatch(/let themeStorage: Storage \| null = null;/);
+    expect(source).toMatch(/try\s*{\s*themeStorage = window\.localStorage;\s*}\s*catch\s*{/);
+    expect(source).toMatch(/createThemeController\(\{[\s\S]*storage: themeStorage,/);
+    expect(source).not.toMatch(/storage:\s*window\.localStorage/);
+  });
+});
 
 describe("web theme policy", () => {
   it("accepts only explicit light and dark stored values", () => {

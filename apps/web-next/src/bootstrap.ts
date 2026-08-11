@@ -1,4 +1,5 @@
 import "./styles.css";
+import { createThemeController, type Theme } from "./theme";
 import {
   filterWorlds,
   installArtworkFallback,
@@ -31,6 +32,15 @@ root.innerHTML = `
         Enter story
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9" /></svg>
       </a>
+      <button class="theme-toggle" type="button" aria-label="Use dark theme" title="Use dark theme">
+        <svg class="theme-icon theme-icon-sun" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="3.5" />
+          <path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M19.1 4.9l-1.8 1.8M6.7 17.3l-1.8 1.8" />
+        </svg>
+        <svg class="theme-icon theme-icon-moon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M20 15.5A8.5 8.5 0 0 1 8.5 4 8.5 8.5 0 1 0 20 15.5Z" />
+        </svg>
+      </button>
     </header>
 
     <main id="main-content">
@@ -79,6 +89,33 @@ const worldGrid = root.querySelector("#world-grid");
 if (!(searchInput instanceof HTMLInputElement) || !(resultCount instanceof HTMLElement) || !(worldGrid instanceof HTMLElement)) {
   throw new Error("The World Library interface could not be initialized.");
 }
+
+const themeToggle = root.querySelector(".theme-toggle");
+if (!(themeToggle instanceof HTMLButtonElement)) {
+  throw new Error("The theme control could not be initialized.");
+}
+
+const updateThemeControl = (theme: Theme) => {
+  const label = theme === "light" ? "Use dark theme" : "Use light theme";
+  themeToggle.setAttribute("aria-label", label);
+  themeToggle.title = label;
+};
+
+let themeStorage: Storage | null = null;
+try {
+  themeStorage = window.localStorage;
+} catch {
+  // Theme switching remains available when storage access is blocked.
+}
+
+const themeController = createThemeController({
+  root: document.documentElement,
+  storage: themeStorage,
+  mediaQuery: window.matchMedia?.("(prefers-color-scheme: dark)") ?? null
+}, updateThemeControl);
+
+updateThemeControl(themeController.current());
+themeToggle.addEventListener("click", () => themeController.toggle());
 
 const searchField = searchInput;
 const countOutput = resultCount;
