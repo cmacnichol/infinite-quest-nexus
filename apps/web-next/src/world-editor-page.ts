@@ -779,7 +779,9 @@ export function mountWorldEditorPage(
     assetInput.value = coverAssetId;
     assetInput.placeholder = "Authorized retained asset id";
     assetInput.setAttribute("aria-label", "Retained cover asset id");
+    assetInput.setAttribute("aria-describedby", "cover-asset-id-error");
     const error = document.createElement("p");
+    error.id = "cover-asset-id-error";
     error.dataset.coverError = "";
     error.className = "field-error";
     region.append(heading, artwork, choices, assetInput, error);
@@ -1079,17 +1081,24 @@ export function mountWorldEditorPage(
       announcement.textContent = pendingStructuredValidation.message;
       return;
     }
-    if (coverChanged && coverChoice === "select" && !coverAssetId.trim()) {
+    const coverValidationMessage = coverChanged && coverChoice === "select" && !coverAssetId.trim()
+      ? "Enter an authorized retained asset id."
+      : null;
+    if (coverValidationMessage) {
       activeSection = "assets";
       renderSection();
       const coverError = sectionContent.querySelector<HTMLElement>("[data-cover-error]");
       const coverInput = sectionContent.querySelector<HTMLInputElement>('[name="coverAssetId"]');
-      if (coverError) coverError.textContent = "Enter an authorized retained asset id.";
+      if (coverError) coverError.textContent = coverValidationMessage;
       coverInput?.setAttribute("aria-invalid", "true");
       coverInput?.focus();
       announcement.textContent = "Enter a retained asset id before saving the cover.";
       return;
     }
+    const coverError = sectionContent.querySelector<HTMLElement>("[data-cover-error]");
+    const coverInput = sectionContent.querySelector<HTMLInputElement>('[name="coverAssetId"]');
+    if (coverError) coverError.textContent = "";
+    coverInput?.removeAttribute("aria-invalid");
     const requestedCover = requestedCoverIntent();
     saveController?.abort(new DOMException("Draft save replaced", "AbortError"));
     const controller = new AbortController();

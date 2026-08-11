@@ -901,6 +901,47 @@ describe("World Editor Overview page", () => {
     expect(document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')?.disabled).toBe(false);
   });
 
+  it("associates retained cover validation with its input across invalid and valid saves", async () => {
+    const { document, root, window } = editorFixture();
+    const saveWorldDraft = vi.fn().mockResolvedValue(savedResponse());
+    const setWorldCoverAsset = vi.fn().mockResolvedValue({ assetUrl: "/api/v1/assets/asset-1" });
+    mountWorldEditorPage(root, worldId, {
+      loadWorld: vi.fn().mockResolvedValue(world),
+      saveWorldDraft,
+      setWorldCoverAsset
+    });
+    await settle();
+    document.querySelector<HTMLButtonElement>('[data-section-target="assets"]')?.click();
+    const select = document.querySelector<HTMLInputElement>('[name="coverChoice"][value="select"]');
+    const assetId = document.querySelector<HTMLInputElement>('[name="coverAssetId"]');
+    if (!select || !assetId) throw new Error("Cover attachment controls are missing.");
+    select.checked = true;
+    select.dispatchEvent(new window.Event("change", { bubbles: true }));
+
+    document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')?.click();
+    await settle();
+
+    const invalidAssetId = document.querySelector<HTMLInputElement>('[name="coverAssetId"]');
+    if (!invalidAssetId) throw new Error("Validated cover asset input is missing.");
+    const errorId = invalidAssetId.getAttribute("aria-describedby");
+    expect(errorId).toBeTruthy();
+    expect(document.querySelectorAll(`#${errorId}`)).toHaveLength(1);
+    expect(document.getElementById(errorId!)?.textContent).toContain("authorized retained asset id");
+    expect(invalidAssetId.getAttribute("aria-invalid")).toBe("true");
+
+    invalidAssetId.value = "asset-1";
+    invalidAssetId.dispatchEvent(new window.Event("input", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')?.click();
+    await settle();
+
+    const validAssetId = document.querySelector<HTMLInputElement>('[name="coverAssetId"]');
+    expect(validAssetId?.getAttribute("aria-describedby")).toBe(errorId);
+    expect(validAssetId?.getAttribute("aria-invalid")).toBeNull();
+    expect(document.getElementById(errorId!)?.textContent).toBe("");
+    expect(saveWorldDraft).toHaveBeenCalledTimes(1);
+    expect(setWorldCoverAsset).toHaveBeenCalledWith(worldId, "asset-1", expect.any(AbortSignal));
+  });
+
   it("retries a failed cover attachment with the retained intent", async () => {
     const { document, root, window } = editorFixture();
     const saveWorldDraft = vi.fn().mockResolvedValue(savedResponse());
