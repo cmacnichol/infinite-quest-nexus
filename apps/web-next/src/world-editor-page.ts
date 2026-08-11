@@ -96,10 +96,10 @@ const STRUCTURED_FIELDS: Record<Exclude<StructuredRecordKind, "asset">, Array<{
 }>> = {
   character: [
     { name: "name", label: "Name", kind: "input" },
-    { name: "narrativeGuidance", label: "Narrative guidance", kind: "textarea" },
-    { name: "profileGroups", label: "Profile groups", kind: "json", shape: "object" },
-    { name: "stats", label: "Stats", kind: "json", shape: "array" },
-    { name: "defaultTrackers", label: "Default trackers", kind: "json", shape: "array" }
+    { name: "characterText", label: "Narrative guidance", kind: "textarea" },
+    { name: "profile", label: "Profile groups", kind: "json", shape: "object" },
+    { name: "rpgStats", label: "Stats", kind: "json", shape: "array" },
+    { name: "defaultTriggers", label: "Default trackers", kind: "json", shape: "array" }
   ],
   entity: [
     { name: "name", label: "Name", kind: "input" },
@@ -533,6 +533,32 @@ export function mountWorldEditorPage(
     host.append(region);
   }
 
+  function renderCollectionResults(
+    count: HTMLElement,
+    list: HTMLOListElement,
+    spec: CollectionSpec,
+    items: unknown[],
+    selected: number,
+    query: string
+  ): void {
+    const matches = items.map((value, index) => ({
+      index,
+      summary: collectionItemSummary(spec.kind, value, index)
+    })).filter((item) => item.summary.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
+    const visible = matches.slice(0, 100);
+    count.textContent = `${visible.length} of ${items.length} items shown${matches.length !== items.length ? ` · ${matches.length} match` : ""}`;
+    list.replaceChildren();
+    for (const item of visible) {
+      const row = document.createElement("li");
+      row.dataset.collectionRow = "";
+      const select = button("select-item", item.summary);
+      select.dataset.itemIndex = String(item.index);
+      select.setAttribute("aria-current", String(item.index === selected));
+      row.append(select);
+      list.append(row);
+    }
+  }
+
   function renderCollectionEditor(): void {
     if (!state || activeSection === "overview") return;
     const validCollections = SECTION_COLLECTIONS[activeSection];
@@ -542,9 +568,6 @@ export function mountWorldEditorPage(
     const selected = Math.min(selectedIndexes.get(activeCollection) ?? 0, Math.max(items.length - 1, 0));
     selectedIndexes.set(activeCollection, selected);
     const query = searches.get(activeCollection) ?? "";
-    const matches = items.map((value, index) => ({ value, index, summary: collectionItemSummary(spec.kind, value, index) }))
-      .filter((item) => item.summary.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
-    const visible = matches.slice(0, 100);
 
     sectionContent.replaceChildren();
     if (activeSection === "assets") renderCoverEditor(sectionContent);
@@ -577,18 +600,9 @@ export function mountWorldEditorPage(
     search.setAttribute("aria-label", `Search ${spec.label.toLowerCase()}`);
     const count = document.createElement("p");
     count.dataset.resultCount = "";
-    count.textContent = `${visible.length} of ${items.length} items shown${matches.length !== items.length ? ` · ${matches.length} match` : ""}`;
     const list = document.createElement("ol");
     list.dataset.collectionList = "";
-    for (const item of visible) {
-      const row = document.createElement("li");
-      row.dataset.collectionRow = "";
-      const select = button("select-item", item.summary);
-      select.dataset.itemIndex = String(item.index);
-      select.setAttribute("aria-current", String(item.index === selected));
-      row.append(select);
-      list.append(row);
-    }
+    renderCollectionResults(count, list, spec, items, selected, query);
     master.append(search, count, list);
 
     const detailHost = document.createElement("div");
@@ -758,7 +772,9 @@ export function mountWorldEditorPage(
           if (disposed || saveController !== controller || controller.signal.aborted) return;
           coverChanged = true;
           renderStatus();
-          announcement.textContent = "Draft saved. The cover was not updated; choose an authorized retained asset and try again.";
+          announcement.textContent = requestedCover === null
+            ? "Draft saved. The cover was not removed; try again."
+            : "Draft saved. The cover was not attached; check the authorized retained asset id and try again.";
         }
       }
     } catch (error) {
@@ -783,15 +799,26 @@ export function mountWorldEditorPage(
     const index = selectedIndexes.get(activeCollection) ?? 0;
     const original = state.draft[activeCollection][index];
     if (original === undefined) return;
+    const field = target.dataset.structuredField!;
+    const fieldError = sectionContent.querySelector<HTMLElement>("[data-structured-error]");
     let value: unknown = target.value;
     if (target.dataset.jsonShape) {
       const parsed = parseAdvancedJson(target.value, target.dataset.jsonShape as AdvancedJsonShape);
-      const error = sectionContent.querySelector<HTMLElement>("[data-structured-error]");
-      if (error) error.textContent = parsed.error ?? "";
+      if (fieldError) fieldError.textContent = parsed.error ?? "";
       if (parsed.error) return;
       value = parsed.value;
+    } else if (spec.kind === "stat" && field === "value" && typeof structuredFieldsFor("stat", original).value === "number") {
+      const numericValue = target.value.trim() === "" ? Number.NaN : Number(target.value);
+      if (!Number.isFinite(numericValue)) {
+        if (fieldError) fieldError.textContent = "Enter a valid number.";
+        return;
+      }
+      if (fieldError) fieldError.textContent = "";
+      value = numericValue;
+    } else if (fieldError) {
+      fieldError.textContent = "";
     }
-    const merged = mergeStructuredFields(spec.kind, original, { [target.dataset.structuredField!]: value });
+    const merged = mergeStructuredFields(spec.kind, original, { [field]: value });
     state = updateCollectionItem(state, activeCollection, index, merged);
     const advanced = sectionContent.querySelector<HTMLTextAreaElement>("[data-advanced-json]");
     if (advanced) advanced.value = serializeAdvancedJson(merged);
@@ -806,7 +833,13 @@ export function mountWorldEditorPage(
     if (!(target instanceof pageView.HTMLInputElement) && !(target instanceof pageView.HTMLTextAreaElement)) return;
     if (target.dataset.collectionSearch !== undefined) {
       searches.set(activeCollection, target.value);
-      renderCollectionEditor();
+      const count = sectionContent.querySelector<HTMLElement>("[data-result-count]");
+      const list = sectionContent.querySelector<HTMLOListElement>("[data-collection-list]");
+      if (count && list) {
+        const items = state.draft[activeCollection];
+        const selected = selectedIndexes.get(activeCollection) ?? 0;
+        renderCollectionResults(count, list, COLLECTIONS[activeCollection], items, selected, target.value);
+      }
       return;
     }
     if (target.name === "coverAssetId") {

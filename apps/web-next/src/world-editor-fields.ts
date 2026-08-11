@@ -11,10 +11,10 @@ type AliasDefinitions = Record<string, readonly string[]>;
 const FIELD_ALIASES: Record<Exclude<StructuredRecordKind, "asset">, AliasDefinitions> = {
   character: {
     name: ["name"],
-    narrativeGuidance: ["characterText", "narrativeGuidance"],
-    profileGroups: ["profile", "profileGroups"],
-    stats: ["rpgStats", "stats"],
-    defaultTrackers: ["defaultTriggers", "defaultTrackers"]
+    characterText: ["characterText"],
+    profile: ["profile"],
+    rpgStats: ["rpgStats"],
+    defaultTriggers: ["defaultTriggers"]
   },
   entity: {
     name: ["name", "title"],
@@ -76,7 +76,7 @@ export function mergeStructuredFields(
     if (!Object.hasOwn(changes, field)) continue;
     const key = aliases.find((candidate) => Object.hasOwn(merged, candidate)) ?? aliases[0]!;
     const nextValue = changes[field];
-    if (kind === "character" && field === "profileGroups" && isRecord(merged[key]) && isRecord(nextValue)) {
+    if (kind === "character" && field === "profile" && isRecord(merged[key]) && isRecord(nextValue)) {
       merged[key] = { ...clone(merged[key]), ...clone(nextValue) };
     } else {
       merged[key] = clone(nextValue);

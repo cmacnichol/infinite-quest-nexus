@@ -433,13 +433,17 @@ describe("World Editor Overview page", () => {
     document.querySelector<HTMLButtonElement>('[data-section-target="characters"]')?.click();
     expect(document.querySelectorAll("[data-collection-editor]")).toHaveLength(1);
     expect(document.querySelector<HTMLInputElement>('[name="structured.name"]')?.value).toBe("Mara");
-    expect(document.querySelector<HTMLTextAreaElement>('[name="structured.narrativeGuidance"]')?.value)
+    expect(document.querySelector<HTMLTextAreaElement>('[name="structured.characterText"]')?.value)
       .toBe("A patient observer.");
-    expect(document.querySelector('[name="structured.profileGroups"]')).not.toBeNull();
-    expect(document.querySelector('[name="structured.stats"]')).not.toBeNull();
-    expect(document.querySelector('[name="structured.defaultTrackers"]')).not.toBeNull();
+    expect(document.querySelector('[name="structured.profile"]')).not.toBeNull();
+    expect(document.querySelector('[name="structured.rpgStats"]')).not.toBeNull();
+    expect(document.querySelector('[name="structured.defaultTriggers"]')).not.toBeNull();
+    expect(document.querySelector('[name="structured.narrativeGuidance"]')).toBeNull();
+    expect(document.querySelector('[name="structured.profileGroups"]')).toBeNull();
+    expect(document.querySelector('[name="structured.stats"]')).toBeNull();
+    expect(document.querySelector('[name="structured.defaultTrackers"]')).toBeNull();
 
-    const guidance = document.querySelector<HTMLTextAreaElement>('[name="structured.narrativeGuidance"]');
+    const guidance = document.querySelector<HTMLTextAreaElement>('[name="structured.characterText"]');
     if (!guidance) throw new Error("Character guidance field missing.");
     guidance.value = "A decisive observer.";
     guidance.dispatchEvent(new window.Event("input", { bubbles: true }));
@@ -488,7 +492,49 @@ describe("World Editor Overview page", () => {
     }
   });
 
-  it("bounds large collection rendering while reporting the complete size and allowing search to narrow it", async () => {
+  it("preserves numeric stat primitives when structured values are edited", async () => {
+    const { document, root, window } = editorFixture();
+    const authoredDraft = { ...structuredClone(draft), rpgStats: [{ skill: "Resolve", score: 7, imported: { keep: true } }] };
+    const saveWorldDraft = vi.fn().mockResolvedValue(savedResponse(authoredDraft));
+    mountWorldEditorPage(root, worldId, {
+      loadWorld: vi.fn().mockResolvedValue({ ...world, draftContent: authoredDraft }),
+      saveWorldDraft
+    });
+    await settle();
+    document.querySelector<HTMLButtonElement>('[data-section-target="mechanics"]')?.click();
+    const value = document.querySelector<HTMLInputElement>('[name="structured.value"]');
+    if (!value) throw new Error("Structured stat value is missing.");
+
+    value.value = "8.5";
+    value.dispatchEvent(new window.Event("input", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')?.click();
+    await settle();
+
+    expect(saveWorldDraft).toHaveBeenCalledWith(worldId, 8, expect.objectContaining({
+      rpgStats: [{ skill: "Resolve", score: 8.5, imported: { keep: true } }]
+    }), expect.any(AbortSignal));
+  });
+
+  it("rejects a non-numeric structured edit for an existing numeric stat", async () => {
+    const { document, root, window } = editorFixture();
+    const authoredDraft = { ...structuredClone(draft), rpgStats: [{ name: "Resolve", value: 7 }] };
+    mountWorldEditorPage(root, worldId, {
+      loadWorld: vi.fn().mockResolvedValue({ ...world, draftContent: authoredDraft })
+    });
+    await settle();
+    document.querySelector<HTMLButtonElement>('[data-section-target="mechanics"]')?.click();
+    const value = document.querySelector<HTMLInputElement>('[name="structured.value"]');
+    if (!value) throw new Error("Structured stat value is missing.");
+
+    value.value = "many";
+    value.dispatchEvent(new window.Event("input", { bubbles: true }));
+
+    expect(document.querySelector('[data-structured-error]')?.textContent).toContain("number");
+    expect(document.querySelector('[data-editor-state]')?.textContent).toContain("Draft saved");
+    expect(document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')?.disabled).toBe(true);
+  });
+
+  it("updates only collection results during sequential search input while retaining focus and unapplied detail DOM", async () => {
     const { document, root, window } = editorFixture();
     const entities = Array.from({ length: 150 }, (_, index) => ({
       id: `entity-${index}`,
@@ -504,13 +550,49 @@ describe("World Editor Overview page", () => {
     expect(document.querySelectorAll("[data-collection-row]")).toHaveLength(100);
     expect(document.querySelector('[data-result-count]')?.textContent).toContain("100 of 150");
     const search = document.querySelector<HTMLInputElement>('[data-collection-search]');
-    if (!search) throw new Error("Collection search missing.");
-    search.value = "Needle";
-    search.dispatchEvent(new window.Event("input", { bubbles: true }));
+    const detail = document.querySelector<HTMLElement>('[data-record-detail]');
+    const advanced = document.querySelector<HTMLTextAreaElement>('[data-advanced-json]');
+    if (!search || !detail || !advanced) throw new Error("Collection search fixture is incomplete.");
+    advanced.value = '{"unapplied":true}';
+    search.focus();
+
+    for (const query of ["N", "Needle"]) {
+      search.value = query;
+      search.dispatchEvent(new window.Event("input", { bubbles: true }));
+      expect(document.querySelector('[data-collection-search]')).toBe(search);
+      expect(document.activeElement).toBe(search);
+      expect(document.querySelector('[data-record-detail]')).toBe(detail);
+      expect(document.querySelector<HTMLTextAreaElement>('[data-advanced-json]')).toBe(advanced);
+      expect(advanced.value).toBe('{"unapplied":true}');
+    }
 
     expect(document.querySelectorAll("[data-collection-row]")).toHaveLength(1);
     expect(document.querySelector('[data-result-count]')?.textContent).toContain("1 of 150");
     expect(document.querySelector('[data-collection-list]')?.textContent).toContain("Needle Observatory");
+  });
+
+  it("preserves invalid selected-record JSON and its error while collection search changes", async () => {
+    const { document, root, window } = editorFixture();
+    const entities = [{ name: "Western Dome" }, { name: "Eastern Dome" }];
+    mountWorldEditorPage(root, worldId, {
+      loadWorld: vi.fn().mockResolvedValue({ ...world, draftContent: { ...structuredClone(draft), entities } })
+    });
+    await settle();
+    document.querySelector<HTMLButtonElement>('[data-section-target="canon"]')?.click();
+    const detail = document.querySelector<HTMLElement>('[data-record-detail]');
+    const advanced = document.querySelector<HTMLTextAreaElement>('[data-advanced-json]');
+    const search = document.querySelector<HTMLInputElement>('[data-collection-search]');
+    if (!detail || !advanced || !search) throw new Error("Collection detail fixture is incomplete.");
+    advanced.value = "{";
+    document.querySelector<HTMLButtonElement>('[data-action="apply-advanced-json"]')?.click();
+    expect(document.querySelector('[data-json-error]')?.textContent).toContain("valid JSON");
+
+    search.value = "Eastern";
+    search.dispatchEvent(new window.Event("input", { bubbles: true }));
+
+    expect(document.querySelector('[data-record-detail]')).toBe(detail);
+    expect(advanced.value).toBe("{");
+    expect(document.querySelector('[data-json-error]')?.textContent).toContain("valid JSON");
   });
 
   it("edits defaults and assets JSON and reports cover failure independently after the draft saves", async () => {
@@ -569,8 +651,92 @@ describe("World Editor Overview page", () => {
     expect(document.querySelector('[data-editor-state]')?.textContent).toContain("Draft saved");
     expect(document.querySelector('[data-save-announcement]')?.textContent).toContain("Draft saved");
     expect(document.querySelector('[data-save-announcement]')?.textContent).toContain("cover");
-    expect(document.querySelector('[data-save-announcement]')?.textContent).toContain("not updated");
+    expect(document.querySelector('[data-save-announcement]')?.textContent).toContain("not attached");
     expect(document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')?.disabled).toBe(false);
+  });
+
+  it("retries a failed cover attachment with the retained intent", async () => {
+    const { document, root, window } = editorFixture();
+    const saveWorldDraft = vi.fn().mockResolvedValue(savedResponse());
+    const setWorldCoverAsset = vi.fn()
+      .mockRejectedValueOnce(new WorldEditorApiError("network", "offline", null))
+      .mockResolvedValueOnce({ assetUrl: "/api/v1/assets/asset-1" });
+    mountWorldEditorPage(root, worldId, {
+      loadWorld: vi.fn().mockResolvedValue(world),
+      saveWorldDraft,
+      setWorldCoverAsset
+    });
+    await settle();
+    document.querySelector<HTMLButtonElement>('[data-section-target="assets"]')?.click();
+    const select = document.querySelector<HTMLInputElement>('[name="coverChoice"][value="select"]');
+    const assetId = document.querySelector<HTMLInputElement>('[name="coverAssetId"]');
+    if (!select || !assetId) throw new Error("Cover attachment controls are missing.");
+    select.checked = true;
+    select.dispatchEvent(new window.Event("change", { bubbles: true }));
+    assetId.value = "asset-1";
+    assetId.dispatchEvent(new window.Event("input", { bubbles: true }));
+
+    document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')?.click();
+    await settle();
+
+    expect(document.querySelector<HTMLInputElement>('[name="coverChoice"][value="select"]')?.checked).toBe(true);
+    expect(document.querySelector<HTMLInputElement>('[name="coverAssetId"]')?.value).toBe("asset-1");
+    document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')?.click();
+    await settle();
+
+    expect(saveWorldDraft).toHaveBeenCalledTimes(2);
+    expect(setWorldCoverAsset).toHaveBeenCalledTimes(2);
+    expect(setWorldCoverAsset).toHaveBeenNthCalledWith(1, worldId, "asset-1", expect.any(AbortSignal));
+    expect(setWorldCoverAsset).toHaveBeenNthCalledWith(2, worldId, "asset-1", expect.any(AbortSignal));
+    expect(document.querySelector('[data-save-announcement]')?.textContent).toContain("Cover updated");
+  });
+
+  it("does not call the cover endpoint when the draft save fails", async () => {
+    const { document, root, window } = editorFixture();
+    const saveWorldDraft = vi.fn().mockRejectedValue(new WorldEditorApiError("network", "offline", null));
+    const setWorldCoverAsset = vi.fn();
+    mountWorldEditorPage(root, worldId, {
+      loadWorld: vi.fn().mockResolvedValue(world),
+      saveWorldDraft,
+      setWorldCoverAsset
+    });
+    await settle();
+    document.querySelector<HTMLButtonElement>('[data-section-target="assets"]')?.click();
+    const select = document.querySelector<HTMLInputElement>('[name="coverChoice"][value="select"]');
+    const assetId = document.querySelector<HTMLInputElement>('[name="coverAssetId"]');
+    if (!select || !assetId) throw new Error("Cover attachment controls are missing.");
+    select.checked = true;
+    select.dispatchEvent(new window.Event("change", { bubbles: true }));
+    assetId.value = "asset-1";
+    assetId.dispatchEvent(new window.Event("input", { bubbles: true }));
+
+    document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')?.click();
+    await settle();
+
+    expect(saveWorldDraft).toHaveBeenCalledTimes(1);
+    expect(setWorldCoverAsset).not.toHaveBeenCalled();
+    expect(document.querySelector('[data-save-announcement]')?.textContent).toContain("draft could not be saved");
+  });
+
+  it("reports a failed cover removal with removal-specific recovery copy", async () => {
+    const { document, root, window } = editorFixture();
+    mountWorldEditorPage(root, worldId, {
+      loadWorld: vi.fn().mockResolvedValue({ ...world, imageUrl: "/api/v1/assets/current" }),
+      saveWorldDraft: vi.fn().mockResolvedValue(savedResponse()),
+      setWorldCoverAsset: vi.fn().mockRejectedValue(new WorldEditorApiError("network", "offline", null))
+    });
+    await settle();
+    document.querySelector<HTMLButtonElement>('[data-section-target="assets"]')?.click();
+    const remove = document.querySelector<HTMLInputElement>('[name="coverChoice"][value="remove"]');
+    if (!remove) throw new Error("Remove cover choice is missing.");
+    remove.checked = true;
+    remove.dispatchEvent(new window.Event("change", { bubbles: true }));
+
+    document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')?.click();
+    await settle();
+
+    expect(document.querySelector('[data-save-announcement]')?.textContent).toContain("cover was not removed");
+    expect(document.querySelector('[data-save-announcement]')?.textContent).not.toContain("retained asset");
   });
 
   it("keeps the cover by default and performs removal only after the draft save succeeds", async () => {

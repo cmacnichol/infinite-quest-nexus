@@ -7,6 +7,35 @@ import {
   structuredFieldsFor
 } from "../../apps/web-next/src/world-editor-fields.js";
 
+const mergeAliasCases = [
+  ["relationship", "source", "source", "old-source", "new-source"],
+  ["relationship", "source", "from", "old-source", "new-source"],
+  ["relationship", "source", "sourceId", "old-source", "new-source"],
+  ["relationship", "target", "target", "old-target", "new-target"],
+  ["relationship", "target", "to", "old-target", "new-target"],
+  ["relationship", "target", "targetId", "old-target", "new-target"],
+  ["relationship", "type", "type", "old-type", "new-type"],
+  ["relationship", "type", "kind", "old-type", "new-type"],
+  ["relationship", "description", "description", "old description", "new description"],
+  ["relationship", "description", "notes", "old description", "new description"],
+  ["stat", "name", "name", "Resolve", "Focus"],
+  ["stat", "name", "skill", "Resolve", "Focus"],
+  ["stat", "name", "stat", "Resolve", "Focus"],
+  ["stat", "value", "value", 7, 8],
+  ["stat", "value", "score", 7, 8],
+  ["stat", "value", "rating", 7, 8],
+  ["stat", "note", "note", "Fear", "Pressure"],
+  ["stat", "note", "covers", "Fear", "Pressure"],
+  ["trigger", "name", "name", "Dusk", "Nightfall"],
+  ["trigger", "name", "title", "Dusk", "Nightfall"],
+  ["trigger", "name", "label", "Dusk", "Nightfall"],
+  ["trigger", "condition", "condition", "Sun sets", "Stars rise"],
+  ["trigger", "condition", "when", "Sun sets", "Stars rise"],
+  ["trigger", "effect", "effect", "Open dome", "Close dome"],
+  ["trigger", "effect", "then", "Open dome", "Close dome"],
+  ["trigger", "effect", "rules", "Open dome", "Close dome"]
+] as const;
+
 describe("World Editor field adapters", () => {
   it.each([
     ["entity", { title: "Glass Dome", kind: "location", notes: "Faces west." }, { name: "Glass Dome", type: "location", description: "Faces west." }],
@@ -46,7 +75,21 @@ describe("World Editor field adapters", () => {
     expect(merged).not.toHaveProperty("description");
   });
 
-  it("exposes character guidance, profile groups, stats, and default trackers without dropping extensions", () => {
+  it.each(mergeAliasCases)(
+    "merges %s.%s through the existing %s alias without dropping unknown keys",
+    (kind, field, alias, originalValue, nextValue) => {
+      const importedExtension = { keep: true };
+      const original = { [alias]: originalValue, importedExtension };
+
+      const merged = mergeStructuredFields(kind, original, { [field]: nextValue });
+
+      expect(merged).toEqual({ [alias]: nextValue, importedExtension: { keep: true } });
+      expect(merged.importedExtension).not.toBe(importedExtension);
+      if (alias !== field) expect(merged).not.toHaveProperty(field);
+    }
+  );
+
+  it("uses only authoritative character fields while preserving unknown keys", () => {
     const character = {
       id: "mara",
       name: "Mara",
@@ -54,23 +97,31 @@ describe("World Editor field adapters", () => {
       profile: { identity: { pronouns: "she/her" }, importedGroup: { keep: true } },
       rpgStats: [{ id: "resolve", value: 7 }],
       defaultTriggers: [{ id: "torch", value: "lit" }],
-      importedExtension: true
+      narrativeGuidance: "Unknown imported guidance survives.",
+      profileGroups: { unknown: true },
+      stats: ["unknown"],
+      defaultTrackers: ["unknown"],
+      importedExtension: { keep: true }
     };
 
     expect(structuredFieldsFor("character", character)).toEqual({
       name: "Mara",
-      narrativeGuidance: "A patient observer.",
-      profileGroups: character.profile,
-      stats: character.rpgStats,
-      defaultTrackers: character.defaultTriggers
+      characterText: "A patient observer.",
+      profile: character.profile,
+      rpgStats: character.rpgStats,
+      defaultTriggers: character.defaultTriggers
     });
     expect(mergeStructuredFields("character", character, {
-      narrativeGuidance: "A decisive observer.",
-      profileGroups: { ...character.profile, story: { role: "Scout" } }
-    })).toMatchObject({
       characterText: "A decisive observer.",
-      profile: { importedGroup: { keep: true }, story: { role: "Scout" } },
-      importedExtension: true
+      profile: { story: { role: "Scout" } }
+    })).toEqual({
+      ...character,
+      characterText: "A decisive observer.",
+      profile: {
+        identity: { pronouns: "she/her" },
+        importedGroup: { keep: true },
+        story: { role: "Scout" }
+      }
     });
   });
 
