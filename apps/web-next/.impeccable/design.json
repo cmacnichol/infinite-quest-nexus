@@ -1,0 +1,349 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-11T03:02:00Z",
+  "title": "Design System: Infinite Quest Nexus",
+  "extensions": {
+    "colorMeta": {
+      "ink": {
+        "role": "neutral",
+        "displayName": "Atlas Ink",
+        "canonical": "#101418",
+        "tonalRamp": [
+          "oklch(15% 0.0103 248.4)",
+          "oklch(27% 0.0103 248.4)",
+          "oklch(39% 0.0103 248.4)",
+          "oklch(51% 0.0103 248.4)",
+          "oklch(63% 0.0103 248.4)",
+          "oklch(75% 0.0103 248.4)",
+          "oklch(87% 0.0103 248.4)",
+          "oklch(95% 0.0103 248.4)"
+        ]
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "Operational Gray",
+        "canonical": "#525c66",
+        "tonalRamp": [
+          "oklch(15% 0.0205 248.3)",
+          "oklch(27% 0.0205 248.3)",
+          "oklch(39% 0.0205 248.3)",
+          "oklch(51% 0.0205 248.3)",
+          "oklch(63% 0.0205 248.3)",
+          "oklch(75% 0.0205 248.3)",
+          "oklch(87% 0.0205 248.3)",
+          "oklch(95% 0.0205 248.3)"
+        ]
+      },
+      "paper": {
+        "role": "neutral",
+        "displayName": "Paper White",
+        "canonical": "#f8fafb",
+        "tonalRamp": [
+          "oklch(15% 0.0025 228.8)",
+          "oklch(27% 0.0025 228.8)",
+          "oklch(39% 0.0025 228.8)",
+          "oklch(51% 0.0025 228.8)",
+          "oklch(63% 0.0025 228.8)",
+          "oklch(75% 0.0025 228.8)",
+          "oklch(87% 0.0025 228.8)",
+          "oklch(95% 0.0025 228.8)"
+        ]
+      },
+      "canvas": {
+        "role": "neutral",
+        "displayName": "Cool Canvas",
+        "canonical": "#dfe7ee",
+        "tonalRamp": [
+          "oklch(15% 0.015 245)",
+          "oklch(27% 0.015 245)",
+          "oklch(39% 0.015 245)",
+          "oklch(51% 0.015 245)",
+          "oklch(63% 0.015 245)",
+          "oklch(75% 0.015 245)",
+          "oklch(87% 0.015 245)",
+          "oklch(95% 0.015 245)"
+        ]
+      },
+      "atmosphere": {
+        "role": "secondary",
+        "displayName": "Atmosphere Plane",
+        "canonical": "#cbdcff",
+        "tonalRamp": [
+          "oklch(15% 0.07 260)",
+          "oklch(27% 0.07 260)",
+          "oklch(39% 0.07 260)",
+          "oklch(51% 0.07 260)",
+          "oklch(63% 0.07 260)",
+          "oklch(75% 0.07 260)",
+          "oklch(87% 0.07 260)",
+          "oklch(95% 0.07 260)"
+        ]
+      },
+      "grid": {
+        "role": "neutral",
+        "displayName": "Construction Grid",
+        "canonical": "#ccd6df",
+        "tonalRamp": [
+          "oklch(15% 0.0165 245.1)",
+          "oklch(27% 0.0165 245.1)",
+          "oklch(39% 0.0165 245.1)",
+          "oklch(51% 0.0165 245.1)",
+          "oklch(63% 0.0165 245.1)",
+          "oklch(75% 0.0165 245.1)",
+          "oklch(87% 0.0165 245.1)",
+          "oklch(95% 0.0165 245.1)"
+        ]
+      },
+      "grid-strong": {
+        "role": "neutral",
+        "displayName": "Strong Construction Grid",
+        "canonical": "#9aa9b7",
+        "tonalRamp": [
+          "oklch(15% 0.0264 246.3)",
+          "oklch(27% 0.0264 246.3)",
+          "oklch(39% 0.0264 246.3)",
+          "oklch(51% 0.0264 246.3)",
+          "oklch(63% 0.0264 246.3)",
+          "oklch(75% 0.0264 246.3)",
+          "oklch(87% 0.0264 246.3)",
+          "oklch(95% 0.0264 246.3)"
+        ]
+      },
+      "cobalt": {
+        "role": "primary",
+        "displayName": "Signal Cobalt",
+        "canonical": "#064ef5",
+        "tonalRamp": [
+          "oklch(15% 0.2549 263.2)",
+          "oklch(27% 0.2549 263.2)",
+          "oklch(39% 0.2549 263.2)",
+          "oklch(51% 0.2549 263.2)",
+          "oklch(63% 0.2549 263.2)",
+          "oklch(75% 0.2549 263.2)",
+          "oklch(87% 0.2549 263.2)",
+          "oklch(95% 0.2549 263.2)"
+        ]
+      },
+      "cobalt-dark": {
+        "role": "primary",
+        "displayName": "Deep Cobalt",
+        "canonical": "#003bbd",
+        "tonalRamp": [
+          "oklch(15% 0.2092 262.8)",
+          "oklch(27% 0.2092 262.8)",
+          "oklch(39% 0.2092 262.8)",
+          "oklch(51% 0.2092 262.8)",
+          "oklch(63% 0.2092 262.8)",
+          "oklch(75% 0.2092 262.8)",
+          "oklch(87% 0.2092 262.8)",
+          "oklch(95% 0.2092 262.8)"
+        ]
+      },
+      "white": {
+        "role": "neutral",
+        "displayName": "Pure White",
+        "canonical": "#ffffff",
+        "tonalRamp": [
+          "oklch(15% 0 0)",
+          "oklch(27% 0 0)",
+          "oklch(39% 0 0)",
+          "oklch(51% 0 0)",
+          "oklch(63% 0 0)",
+          "oklch(75% 0 0)",
+          "oklch(87% 0 0)",
+          "oklch(95% 0 0)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Literary Display",
+        "purpose": "Restrained identity headings for major creative-writing spaces."
+      },
+      "headline": {
+        "displayName": "Literary Headline",
+        "purpose": "Strong state and message headings."
+      },
+      "title": {
+        "displayName": "World Title",
+        "purpose": "Compact literary names for indexed content entries."
+      },
+      "body": {
+        "displayName": "Narrative Body",
+        "purpose": "Descriptions, guidance, and explanatory copy."
+      },
+      "label": {
+        "displayName": "Operational Label",
+        "purpose": "Navigation, coordinates, result counts, and actions."
+      }
+    },
+    "shadows": [
+      {
+        "name": "search-focus",
+        "value": "0 8px 24px rgba(6, 78, 245, 0.13)",
+        "purpose": "Concentrates attention on the active primary query field."
+      },
+      {
+        "name": "cell-focus-inset",
+        "value": "inset 0 0 0 3px #064ef5",
+        "purpose": "Bounds a complete clickable cell for keyboard focus without shifting layout."
+      }
+    ],
+    "motion": [
+      {
+        "name": "state-fast",
+        "value": "180ms ease",
+        "purpose": "Border and tonal state changes."
+      },
+      {
+        "name": "directional-snap",
+        "value": "220ms cubic-bezier(0.22, 1, 0.36, 1)",
+        "purpose": "Northeast arrow movement and concise directional feedback."
+      },
+      {
+        "name": "media-settle",
+        "value": "420ms cubic-bezier(0.22, 1, 0.36, 1)",
+        "purpose": "Restrained cover-image scale response."
+      },
+      {
+        "name": "grid-reveal",
+        "value": "320ms cubic-bezier(0.22, 1, 0.36, 1)",
+        "purpose": "Whole-group reveal after supported view transitions; disabled for reduced motion."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "compact",
+        "value": "680px"
+      },
+      {
+        "name": "medium",
+        "value": "1000px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Brand Lockup",
+      "kind": "custom",
+      "description": "The compact product signature for persistent app navigation.",
+      "html": "<a class=\"ds-brand\" href=\"#\" aria-label=\"Infinite Quest Nexus home\"><span class=\"ds-brand-mark\" aria-hidden=\"true\"><i></i><i></i><i></i><i></i><i></i></span><span>Infinite Quest <b>Nexus</b></span></a>",
+      "css": ".ds-brand { display: inline-flex; align-items: center; gap: 12px; color: var(--ink, #101418); font-family: 'Chakra Petch', sans-serif; font-size: 0.92rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; text-decoration: none; } .ds-brand:focus-visible { outline: 3px solid var(--cobalt, #064ef5); outline-offset: 4px; } .ds-brand-mark { width: 27px; height: 24px; display: grid; grid-template-columns: repeat(5, 1fr); gap: 2px; align-items: end; } .ds-brand-mark i { display: block; height: 100%; background: var(--ink, #101418); } .ds-brand-mark i:nth-child(2), .ds-brand-mark i:nth-child(4) { height: 48%; background: var(--cobalt, #064ef5); } .ds-brand-mark i:nth-child(3) { height: 72%; } .ds-brand b { color: var(--cobalt, #064ef5); font-weight: inherit; }"
+    },
+    {
+      "name": "Navigation Item",
+      "kind": "nav",
+      "refersTo": "navigation-item",
+      "description": "An operational destination marked by a growing cobalt baseline.",
+      "html": "<a class=\"ds-nav-item\" href=\"#\" aria-current=\"page\">World Library</a>",
+      "css": ".ds-nav-item { position: relative; min-height: 48px; display: inline-flex; align-items: center; padding: 0 20px; color: #39434c; font-family: 'Geologica', sans-serif; font-size: 0.79rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.055em; text-decoration: none; } .ds-nav-item::after { position: absolute; right: 0; bottom: 0; left: 0; height: 3px; content: ''; background: var(--cobalt, #064ef5); transform: scaleX(0); transform-origin: left; transition: transform 240ms cubic-bezier(0.22, 1, 0.36, 1); } .ds-nav-item:hover, .ds-nav-item:focus-visible, .ds-nav-item[aria-current='page'] { color: var(--ink, #101418); outline: none; } .ds-nav-item:hover::after, .ds-nav-item:focus-visible::after, .ds-nav-item[aria-current='page']::after { transform: scaleX(1); } .ds-nav-item:active { color: var(--cobalt-dark, #003bbd); }"
+    },
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "A square cobalt action for retry and other decisive operations.",
+      "html": "<button class=\"ds-btn-primary\" type=\"button\">Try again</button>",
+      "css": ".ds-btn-primary { padding: 12px 18px; color: var(--white, #ffffff); background: var(--cobalt, #064ef5); border: 1px solid var(--cobalt, #064ef5); border-radius: 0; cursor: pointer; font-family: 'Chakra Petch', sans-serif; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; transition: background-color 180ms ease, border-color 180ms ease; } .ds-btn-primary:hover { background: var(--cobalt-dark, #003bbd); border-color: var(--cobalt-dark, #003bbd); } .ds-btn-primary:focus-visible { background: var(--cobalt-dark, #003bbd); outline: 3px solid var(--ink, #101418); outline-offset: 3px; } .ds-btn-primary:active { background: var(--ink, #101418); border-color: var(--ink, #101418); }"
+    },
+    {
+      "name": "Search Field",
+      "kind": "input",
+      "refersTo": "search-field",
+      "description": "The focused query control with the system's only lifted shadow.",
+      "html": "<label class=\"ds-search\" for=\"ds-search-input\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><circle cx=\"11\" cy=\"11\" r=\"6.5\"></circle><path d=\"m16 16 4 4\"></path></svg><span class=\"ds-visually-hidden\">Search worlds</span><input id=\"ds-search-input\" type=\"search\" placeholder=\"Search by title or description\"><kbd aria-hidden=\"true\">/</kbd></label>",
+      "css": ".ds-search { width: min(100%, 620px); height: 52px; display: flex; align-items: center; color: var(--ink, #101418); background: var(--paper, #f8fafb); border: 1px solid var(--ink, #101418); border-radius: 0; transition: border-color 180ms ease, box-shadow 180ms ease; } .ds-search:focus-within { border-color: var(--cobalt, #064ef5); box-shadow: 0 8px 24px rgba(6, 78, 245, 0.13); } .ds-search svg { width: 22px; height: 22px; margin-left: 18px; fill: none; stroke: var(--cobalt, #064ef5); stroke-width: 1.8; stroke-linecap: square; stroke-linejoin: miter; } .ds-search input { min-width: 0; flex: 1; height: 100%; padding: 0 18px; color: var(--ink, #101418); background: transparent; border: 0; outline: 0; font-family: 'Geologica', sans-serif; font-size: 1rem; } .ds-search input::placeholder { color: #5b6570; opacity: 1; } .ds-search kbd { margin-right: 14px; padding: 4px 8px; color: #39434c; background: #e6ebf0; border: 1px solid #a9b4be; border-radius: 0; font-family: 'Geologica', sans-serif; font-size: 0.72rem; } .ds-visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }"
+    },
+    {
+      "name": "Indexed Content Entry",
+      "kind": "card",
+      "refersTo": "indexed-entry",
+      "description": "A complete clickable atlas cell pairing distinctive media with concise evidence.",
+      "html": "<a class=\"ds-entry\" href=\"#\" aria-label=\"Open The Glass Frontier, 3 campaigns\"><span class=\"ds-entry-cover\"><span class=\"ds-entry-glyph\" aria-hidden=\"true\">G</span><span class=\"ds-coordinate\" aria-hidden=\"true\">01 / W</span></span><span class=\"ds-entry-copy\"><strong>The Glass Frontier</strong><span class=\"ds-entry-description\">A durable world of contested passages and impossible horizons.</span><span class=\"ds-entry-meta\"><span>3 campaigns</span><span class=\"ds-entry-action\">Open world <svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M7 17 17 7M8 7h9v9\"></path></svg></span></span></span></a>",
+      "css": ".ds-entry { width: min(100%, 390px); display: grid; grid-template-rows: auto 1fr; padding: clamp(13px, 1.33vw, 21px); color: var(--ink, #101418); background: color-mix(in srgb, var(--paper, #f8fafb) 96%, transparent); border: 1px solid var(--grid-strong, #9aa9b7); border-radius: 0; text-decoration: none; transition: background-color 180ms ease; } .ds-entry:hover, .ds-entry:focus-visible { background: var(--white, #ffffff); outline: none; } .ds-entry:focus-visible { box-shadow: inset 0 0 0 3px var(--cobalt, #064ef5); } .ds-entry:active { background: var(--paper, #f8fafb); } .ds-entry-cover { position: relative; aspect-ratio: 16 / 9; overflow: hidden; display: grid; place-items: center; color: var(--cobalt, #064ef5); background-color: #e9edf0; background-image: linear-gradient(to right, rgba(6, 78, 245, 0.16) 1px, transparent 1px), linear-gradient(to bottom, rgba(6, 78, 245, 0.16) 1px, transparent 1px); background-size: 18px 18px; border-bottom: 1px solid var(--ink, #101418); clip-path: polygon(0 0, calc(100% - 22px) 0, 100% 22px, 100% 100%, 0 100%); } .ds-entry-glyph { font-family: 'Chakra Petch', sans-serif; font-size: 5rem; font-weight: 600; line-height: 1; } .ds-coordinate { position: absolute; right: 0; bottom: 0; padding: 7px 10px; color: var(--white, #ffffff); background: var(--cobalt, #064ef5); font-family: 'Chakra Petch', sans-serif; font-size: 0.72rem; font-weight: 600; letter-spacing: 0.08em; } .ds-entry-copy { min-height: 166px; display: flex; flex-direction: column; padding-top: 18px; } .ds-entry-copy strong { margin-bottom: 0.7rem; font-family: 'Literata', Georgia, serif; font-size: 1.5rem; font-weight: 600; line-height: 1.08; letter-spacing: -0.02em; } .ds-entry-description { margin-bottom: 1.6rem; color: #49535d; font-family: 'Geologica', sans-serif; font-size: 0.9rem; line-height: 1.55; } .ds-entry-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: auto; padding-top: 14px; border-top: 1px solid var(--grid, #ccd6df); color: #303a43; font-family: 'Geologica', sans-serif; font-size: 0.75rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.055em; } .ds-entry-action { display: inline-flex; align-items: center; gap: 7px; color: var(--cobalt-dark, #003bbd); font-family: 'Chakra Petch', sans-serif; font-weight: 600; } .ds-entry-action svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: square; stroke-linejoin: miter; transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1); } .ds-entry:hover .ds-entry-action svg, .ds-entry:focus-visible .ds-entry-action svg { transform: translate(3px, -3px); }"
+    },
+    {
+      "name": "Coordinate Chip",
+      "kind": "chip",
+      "refersTo": "coordinate-chip",
+      "description": "A square index marker attached to visual content.",
+      "html": "<span class=\"ds-coordinate-chip\">04 / W</span>",
+      "css": ".ds-coordinate-chip { display: inline-flex; align-items: center; min-height: 28px; padding: 7px 10px; color: var(--white, #ffffff); background: var(--cobalt, #064ef5); border: 1px solid var(--cobalt, #064ef5); border-radius: 0; font-family: 'Chakra Petch', sans-serif; font-size: 0.72rem; font-weight: 600; line-height: 1; letter-spacing: 0.08em; text-transform: uppercase; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "Constructed Atlas Grid",
+    "overview": "Infinite Quest Nexus should feel like an atlas being actively indexed: precise, durable, and visibly assembled from paper, ink, cobalt marks, and measured cells. The system makes story records feel authored and persistent without imitating a fantasy manuscript; its confidence comes from modernist construction, disciplined information labels, and artwork given room to remain the richest material.\n\nThe interface is flat, operational, and intentionally square. Grid lines expose the underlying structure instead of hiding it, while a restrained diagonal slash, clipped corner, or cobalt state creates recognition without turning every surface into decoration. Responsive changes preserve complete cells and complete content units rather than squeezing desktop fragments into narrow columns.",
+    "keyCharacteristics": [
+      "Paper-white fields, near-black ink, cool construction rules, and sparing cobalt signals.",
+      "Visible modular cells and square divisions that explain the layout.",
+      "Literata for a restrained literary display voice that connects the interface to reading and writing.",
+      "Geologica for readable prose and Chakra Petch for operational hierarchy.",
+      "Flat tonal depth, clipped cover geometry, and one focused search shadow.",
+      "Whole-cell responsive recomposition with purposeful, reduced-motion-safe reveals."
+    ],
+    "rules": [
+      {
+        "name": "The Cobalt Signal Rule",
+        "body": "Cobalt is a state and orientation color, not a general surface fill; preserve its authority by using it sparingly.",
+        "section": "colors"
+      },
+      {
+        "name": "The Artwork Priority Rule",
+        "body": "Full-color world artwork may exceed the restrained interface palette, but surrounding UI must remain quiet enough for the artwork to lead.",
+        "section": "colors"
+      },
+      {
+        "name": "The Literary Display Rule",
+        "body": "Literata names worlds and major spaces; keep it measured, never oversized or ornamental.",
+        "section": "typography"
+      },
+      {
+        "name": "The Three-Voice Rule",
+        "body": "Literata names, Geologica explains, and Chakra Petch orients and operates.",
+        "section": "typography"
+      },
+      {
+        "name": "The Whole-Cell Rule",
+        "body": "At every viewport, move and resize complete cells or content units; never leave controls, labels, or artwork as squeezed remnants of a desktop composition.",
+        "section": "layout"
+      },
+      {
+        "name": "The Visible Construction Rule",
+        "body": "Spacing and one-pixel rules should make the organizing grid legible without overpowering content.",
+        "section": "layout"
+      },
+      {
+        "name": "The Flat-by-Default Rule",
+        "body": "Do not use shadows to manufacture card hierarchy; use construction rules, tonal fields, and explicit focus state instead.",
+        "section": "elevation"
+      },
+      {
+        "name": "The Square Rule",
+        "body": "Buttons, fields, navigation, tags, messages, and content containers remain unrounded.",
+        "section": "shapes"
+      },
+      {
+        "name": "The One Cut Rule",
+        "body": "When a silhouette needs distinction, clip one purposeful corner or add one diagonal mark; do not scatter ornamental angles across every edge.",
+        "section": "shapes"
+      }
+    ],
+    "dos": [
+      "Do build hierarchy with paper, ink, cobalt signals, visible rules, and complete modular cells.",
+      "Do use Literata at a restrained scale for major spaces, world names, and literary identity moments.",
+      "Do keep Geologica for explanatory prose and Chakra Petch for operational labels and actions.",
+      "Do preserve square controls, one-pixel construction rules, clipped media corners, and clear keyboard focus.",
+      "Do recompose complete content units for narrow screens and honor reduced-motion preferences.",
+      "Do let world artwork remain richer than the surrounding interface palette."
+    ],
+    "donts": [
+      "Don't introduce rounded-card dashboard styling, pill controls, or soft floating panels.",
+      "Don't spread cobalt across large passive surfaces or use it as decoration without state or wayfinding value.",
+      "Don't add ambient card shadows; reserve the focused shadow for active search or an equivalent primary query field.",
+      "Don't make literary display type oversized, ornamental, or faux-antique; it should support reading and creative writing without becoming costume.",
+      "Don't shrink a multi-column composition until its controls and copy become cramped; switch the whole-cell arrangement instead.",
+      "Don't elevate World Library-specific column counts, hero placement, or entry order into global design law."
+    ]
+  }
+}
