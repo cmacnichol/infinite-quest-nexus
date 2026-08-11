@@ -948,14 +948,14 @@ async function executeLoadedGeneration(
     let validation = await phase("story_validation", async () => {
       const parsed = parseStoryOutput(result.content, storyMemoryDefaults);
       const firstReason: "output_limit" | "invalid_json" | "invalid_schema" | "mechanics_leak" | null =
-        result.outputLimited ? "output_limit" : (!parsed.ok ? parsed.code : null);
+        !parsed.ok ? parsed.code : null;
       const initialValidationErrors = parsed.ok ? [] : parsed.errors;
       const initialAttemptNumber = job.attempts * 2 - 1;
       logger.info({
         event: "turn_generation_validation_completed",
         ...generationLogContext(job, workerId),
         storyOperation: "story_generation",
-        valid: parsed.ok && !result.outputLimited,
+        valid: parsed.ok,
         outputLimited: result.outputLimited,
         validationCode: firstReason,
         validationErrorCount: initialValidationErrors.length,
@@ -985,11 +985,15 @@ async function executeLoadedGeneration(
       return { parsed, firstReason, initialValidationErrors, initialAttemptNumber };
     });
     let { parsed, firstReason, initialValidationErrors, initialAttemptNumber } = validation;
-    if (firstReason) {
+    // A provider can report a length finish after it has delivered a complete
+    // structured response.  Accept that response when validation succeeds;
+    // an incomplete output remains recoverable rather than being silently
+    // replaced with a shorter turn.
+    if (firstReason && !result.outputLimited) {
       const recoveryReason = firstReason;
       const recoveryKind = recoveryReason === "mechanics_leak"
         ? "mechanics_cleanup"
-        : recoveryReason === "output_limit" ? "compact_completion" : "schema_repair";
+        : "schema_repair";
       const rejectedResponse = result.content;
       logger.warn({
         event: "turn_generation_recovery_started",
@@ -1066,13 +1070,9 @@ async function executeLoadedGeneration(
       ({ parsed, firstReason, initialValidationErrors, initialAttemptNumber } = validation);
     }
     const validationFailure = "code" in parsed ? parsed : null;
-    if (result.outputLimited || validationFailure) {
-      const code = result.outputLimited
-        ? "output_limit"
-        : validationFailure?.code || "invalid_schema";
-      const messages = result.outputLimited
-        ? ["The provider stopped before a complete story object was available."]
-        : validationFailure?.errors || ["Story validation failed."];
+    if (validationFailure) {
+      const code = validationFailure.code || "invalid_schema";
+      const messages = validationFailure.errors || ["Story validation failed."];
       assertActiveGenerationUpdate(await repository.markRecoverable({
         ...scope,
         providerResponseId: result.responseId || null,

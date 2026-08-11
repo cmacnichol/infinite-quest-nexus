@@ -1678,19 +1678,16 @@ integration("durable Story Engine integration", () => {
     expect(JSON.stringify(storyRequest)).not.toContain("activation_reason");
   });
 
-  it("recovers an output-limited response with a compact second request", async () => {
+  it("accepts a complete validated response even when the provider reports an output limit", async () => {
     const imported = await campaign("long");
     replies.push(
-      { content: '{"narration":"Location Gamma opens', finishReason: "length" },
-      { content: validStory("Location Gamma opens in a compact, complete response.") }
+      { content: validStory("Location Gamma opens in a complete response."), finishReason: "length" }
     );
     const job = await queue(imported.campaignId);
     await runGenerationJob(pool, "story-worker-b", 30, credentialSecret);
     expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
     const attempts = await pool.query<{ recovery_kind: string }>("SELECT recovery_kind FROM generation_attempts WHERE generation_job_id = $1 ORDER BY attempt_number", [job.id]);
-    expect(attempts.rows.map((row) => row.recovery_kind)).toEqual(["initial", "compact_completion"]);
-    expect(JSON.stringify(requests.at(-1))).toContain("compact, complete JSON object");
-    expect(JSON.stringify(requests.at(-1))).toContain("400-600 narration words");
+    expect(attempts.rows.map((row) => row.recovery_kind)).toEqual(["initial"]);
   });
 
   it("rewrites mechanics-contaminated output before committing it", async () => {
