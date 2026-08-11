@@ -288,8 +288,15 @@ export function mountWorldCreationPage(
       const item = stageItems.find((candidate) => candidate.dataset.stage === progress.stage);
       if (!item) continue;
       item.dataset.stageState = progress.state;
-      const label = item.textContent?.trim() || progress.stage;
-      item.setAttribute("aria-label", `${label}, ${progress.state}`);
+      item.querySelector("[data-stage-completion]")?.remove();
+      item.removeAttribute("aria-label");
+      if (progress.state === "completed") {
+        const completion = document.createElement("span");
+        completion.className = "visually-hidden";
+        completion.dataset.stageCompletion = "";
+        completion.textContent = "Completed: ";
+        item.prepend(completion);
+      }
       if (progress.state === "current") item.setAttribute("aria-current", "step");
       else item.removeAttribute("aria-current");
       if (progress.state === "upcoming") item.setAttribute("aria-disabled", "true");
