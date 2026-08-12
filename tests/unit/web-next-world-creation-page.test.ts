@@ -108,7 +108,7 @@ function handoffStore() {
     returnPath: vi.fn((key: string) => sessions.get(key)?.parentRoute ?? null),
     complete: vi.fn((key: string, workflowId: string, result: CharacterWorkspaceResult) => {
       const session = sessions.get(key);
-      if (expired || !session || session.workflowId !== workflowId || results.has(key)) return false;
+      if (expired || !session || session.workflowId !== workflowId || results.has(key) || invalidResults.has(key)) return false;
       results.set(key, structuredClone(result));
       return true;
     }),
@@ -119,6 +119,15 @@ function handoffStore() {
       if (invalidResults.has(key)) return { status: "invalid", session: structuredClone(session) };
       if (!result) return null;
       return { status: "ready", session: structuredClone(session), result: structuredClone(result) };
+    }),
+    resetInvalidResult: vi.fn((key: string, origin: "world-creation" | "world-editor", workflowId: string) => {
+      const session = sessions.get(key);
+      if (expired || !session || session.origin !== origin || session.workflowId !== workflowId ||
+          !invalidResults.has(key) || results.has(key)) {
+        return false;
+      }
+      invalidResults.delete(key);
+      return true;
     }),
     consume: vi.fn((key: string, origin: "world-creation" | "world-editor", workflowId: string) => {
       const session = sessions.get(key);
@@ -732,14 +741,15 @@ describe("World Creation Characters stage", () => {
     expect(handoff.store.consume).not.toHaveBeenCalled();
   });
 
-  it("renders recovery for a malformed stored result without applying or consuming it", () => {
+  it("resets a malformed result, returns to Character Workspace, and applies one valid replacement", () => {
     const { document, root, window } = creationFixture();
     const handoff = handoffStore();
+    const navigate = vi.fn();
     mountWorldCreationPage(root, {
       initialState: characterStageState(reviewedCharacter("keeper", "Keeper")),
       characterSessionStore: handoff.store,
       characterWorkflowIdFactory: () => "workflow-invalid-result",
-      navigate: vi.fn()
+      navigate
     });
     document.querySelector<HTMLButtonElement>('[data-action="add-character"]')?.click();
     const session = handoff.sessions.get("handoff-1");
@@ -757,8 +767,75 @@ describe("World Creation Characters stage", () => {
     expect(handoff.store.consume).not.toHaveBeenCalled();
 
     error?.querySelector<HTMLButtonElement>('[data-action="retry-character-result"]')?.click();
-    expect(document.querySelectorAll("[data-character-roster-item]")).toHaveLength(1);
-    expect(handoff.store.consume).not.toHaveBeenCalled();
+    expect(handoff.store.resetInvalidResult).toHaveBeenCalledWith(
+      session.key,
+      "world-creation",
+      session.workflowId
+    );
+    expect(navigate).toHaveBeenCalledWith(`/app/characters/${session.key}`);
+    expect(handoff.store.complete(session.key, session.workflowId, {
+      status: "accepted",
+      candidate: reviewedCharacter("scout", "Scout") as never
+    })).toBe(true);
+
+    pageshow(window as unknown as Window);
+    expect(document.querySelectorAll("[data-character-roster-item]")).toHaveLength(2);
+    expect(document.querySelector("[data-character-roster]")?.textContent).toContain("Scout");
+    expect(handoff.store.consume).toHaveBeenCalledTimes(1);
+    pageshow(window as unknown as Window);
+    expect(handoff.store.consume).toHaveBeenCalledTimes(1);
+  });
+
+  it("resets a malformed result before the Return to character workspace link navigates", () => {
+    const { document, root, window } = creationFixture();
+    const handoff = handoffStore();
+    const navigate = vi.fn();
+    mountWorldCreationPage(root, {
+      initialState: characterStageState(),
+      characterSessionStore: handoff.store,
+      characterWorkflowIdFactory: () => "workflow-invalid-return",
+      navigate
+    });
+    document.querySelector<HTMLButtonElement>('[data-action="add-character"]')?.click();
+    const session = handoff.sessions.get("handoff-1");
+    if (!session) throw new Error("Malformed return handoff missing.");
+    handoff.invalidateResult(session.key);
+    pageshow(window as unknown as Window);
+
+    document.querySelector<HTMLAnchorElement>(`[data-character-handoff-error] a[href="/app/characters/${session.key}"]`)?.click();
+
+    expect(handoff.store.resetInvalidResult).toHaveBeenCalledWith(
+      session.key,
+      "world-creation",
+      session.workflowId
+    );
+    expect(navigate).toHaveBeenCalledWith(`/app/characters/${session.key}`);
+    expect(handoff.sessions.has(session.key)).toBe(true);
+  });
+
+  it("does not navigate when malformed-result removal fails", () => {
+    const { document, root, window } = creationFixture();
+    const handoff = handoffStore();
+    const navigate = vi.fn();
+    mountWorldCreationPage(root, {
+      initialState: characterStageState(),
+      characterSessionStore: handoff.store,
+      characterWorkflowIdFactory: () => "workflow-reset-failure",
+      navigate
+    });
+    document.querySelector<HTMLButtonElement>('[data-action="add-character"]')?.click();
+    const session = handoff.sessions.get("handoff-1");
+    if (!session) throw new Error("Reset-failure handoff missing.");
+    handoff.invalidateResult(session.key);
+    pageshow(window as unknown as Window);
+    navigate.mockClear();
+    vi.mocked(handoff.store.resetInvalidResult).mockReturnValueOnce(false);
+
+    document.querySelector<HTMLButtonElement>('[data-action="retry-character-result"]')?.click();
+
+    expect(navigate).not.toHaveBeenCalled();
+    expect(document.querySelector("[data-character-handoff-error]")?.textContent).toContain("could not be safely removed");
+    expect(handoff.sessions.has(session.key)).toBe(true);
   });
 
   it.each([

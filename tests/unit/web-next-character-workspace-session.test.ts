@@ -341,6 +341,68 @@ describe("character workspace session store", () => {
     expect(storage.length).toBe(0);
   });
 
+  it("resets only an invalid matching result and accepts one valid replacement exactly once", () => {
+    const storage = new MemoryStorage();
+    const store = createCharacterWorkspaceSessionStore(storage, {
+      now: () => NOW,
+      keyFactory: () => "invalid-reset"
+    });
+    const session = store.create(createInput());
+    const sessionKey = `iqn:character-workspace:session:${session.key}`;
+    const returnKey = `iqn:character-workspace:return:${session.key}`;
+    const resultKey = `iqn:character-workspace:result:${session.key}`;
+    storage.setItem(resultKey, "{");
+
+    expect(store.resetInvalidResult(session.key, session.origin, session.workflowId)).toBe(true);
+    expect(storage.getItem(resultKey)).toBeNull();
+    expect(storage.getItem(sessionKey)).not.toBeNull();
+    expect(storage.getItem(returnKey)).not.toBeNull();
+
+    const accepted = { status: "accepted" as const, candidate: candidate({ name: "Mara Restored" }) };
+    expect(store.complete(session.key, session.workflowId, accepted)).toBe(true);
+    expect(store.consume(session.key, session.origin, session.workflowId)).toEqual({ session, result: accepted });
+    expect(store.consume(session.key, session.origin, session.workflowId)).toBeNull();
+  });
+
+  it("denies invalid-result reset for mismatched identity and valid results", () => {
+    const storage = new MemoryStorage();
+    const store = createCharacterWorkspaceSessionStore(storage, {
+      now: () => NOW,
+      keyFactory: () => "reset-denied"
+    });
+    const session = store.create(createInput());
+    const resultKey = `iqn:character-workspace:result:${session.key}`;
+    storage.setItem(resultKey, "{");
+
+    expect(store.resetInvalidResult(session.key, "world-editor", session.workflowId)).toBe(false);
+    expect(store.resetInvalidResult(session.key, session.origin, "wrong-workflow")).toBe(false);
+    expect(storage.getItem(resultKey)).toBe("{");
+
+    storage.removeItem(resultKey);
+    expect(store.complete(session.key, session.workflowId, { status: "cancelled" })).toBe(true);
+    const validResult = storage.getItem(resultKey);
+    expect(store.resetInvalidResult(session.key, session.origin, session.workflowId)).toBe(false);
+    expect(storage.getItem(resultKey)).toBe(validResult);
+  });
+
+  it("fails closed when invalid-result removal fails", () => {
+    const storage = new MemoryStorage();
+    const store = createCharacterWorkspaceSessionStore(storage, {
+      now: () => NOW,
+      keyFactory: () => "reset-remove-failure"
+    });
+    const session = store.create(createInput());
+    const resultKey = `iqn:character-workspace:result:${session.key}`;
+    storage.setItem(resultKey, "{");
+    storage.failingRemovals.add(resultKey);
+
+    expect(store.resetInvalidResult(session.key, session.origin, session.workflowId)).toBe(false);
+    expect(storage.getItem(resultKey)).toBe("{");
+    expect(store.complete(session.key, session.workflowId, { status: "cancelled" })).toBe(false);
+    expect(store.load(session.key)).toEqual(session);
+    expect(store.returnPath(session.key)).toBe(session.parentRoute);
+  });
+
   it("fails closed and cannot return a result later when any record removal fails", () => {
     for (const recordType of ["session", "return", "result"]) {
       const storage = new MemoryStorage();

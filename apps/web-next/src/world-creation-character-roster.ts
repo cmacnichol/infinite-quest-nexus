@@ -23,6 +23,7 @@ export interface WorldCreationCharacterRosterInput {
     message: string;
     returnPath: string;
     onRetry: () => void;
+    onReturn?: () => void;
   };
 }
 
@@ -153,17 +154,21 @@ export function renderWorldCreationCharacterRoster(
     const target = event.target;
     if (!(target instanceof document.defaultView!.Element)) return;
     const button = target.closest<HTMLButtonElement>("button[data-action]");
-    if (!button) return;
-    if (button.dataset.action === "add-character") begin("create", null);
-    else if (button.dataset.action === "edit-character" && button.dataset.characterId) {
+    if (button?.dataset.action === "add-character") begin("create", null);
+    else if (button?.dataset.action === "edit-character" && button.dataset.characterId) {
       const candidate = roster.find(({ id }) => id === button.dataset.characterId);
       if (candidate) begin("edit", candidate);
-    } else if (button.dataset.action === "remove-character" && button.dataset.characterId) {
+    } else if (button?.dataset.action === "remove-character" && button.dataset.characterId) {
       input.onRemove(button.dataset.characterId);
-    } else if (button.dataset.action === "undo-character-removal" && button.dataset.removalId) {
+    } else if (button?.dataset.action === "undo-character-removal" && button.dataset.removalId) {
       input.onRestore(button.dataset.removalId);
-    } else if (button.dataset.action === "retry-character-result") {
+    } else if (button?.dataset.action === "retry-character-result") {
       input.handoffRecovery?.onRetry();
+    } else {
+      const returnLink = target.closest<HTMLAnchorElement>("[data-character-handoff-error] a");
+      if (!returnLink || !input.handoffRecovery?.onReturn) return;
+      event.preventDefault();
+      input.handoffRecovery.onReturn();
     }
   });
 

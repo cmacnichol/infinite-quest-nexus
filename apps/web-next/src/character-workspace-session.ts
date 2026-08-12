@@ -61,6 +61,11 @@ export interface CharacterWorkspaceSessionStore {
     origin: CharacterWorkspaceOrigin,
     workflowId: string
   ): CharacterWorkspaceResultInspection | null;
+  resetInvalidResult(
+    key: string,
+    origin: CharacterWorkspaceOrigin,
+    workflowId: string
+  ): boolean;
   consume(
     key: string,
     origin: CharacterWorkspaceOrigin,
@@ -421,6 +426,15 @@ export function createCharacterWorkspaceSessionStore(
     },
 
     peek,
+
+    resetInvalidResult(key, origin, workflowId) {
+      const session = load(key);
+      if (session === null || session.origin !== origin || session.workflowId !== workflowId) return false;
+      const resultKey = resultStorageKey(key);
+      const rawResult = safeRead(storage, resultKey);
+      if (rawResult === null || parseStoredResult(decode(rawResult), session, now()) !== null) return false;
+      return safeRemove(storage, resultKey) && isAbsent(storage, resultKey);
+    },
 
     consume(key, origin, workflowId) {
       const pending = peek(key, origin, workflowId);

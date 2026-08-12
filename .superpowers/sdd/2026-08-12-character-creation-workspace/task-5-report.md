@@ -137,3 +137,37 @@ Observed the reproducible order defect `b, a, c` instead of `a, b, c`. Character
 - Session/page targeted suite: 2 files, 82 tests passed.
 - `pnpm --filter @infinite-quest/web-next check` passed.
 - `git diff --check` passed (Git emitted only the existing CRLF normalization warning for `world-creation-page.ts`).
+
+---
+
+## Fix Round 3
+
+### RED Evidence
+
+`pnpm vitest run tests/unit/web-next-character-workspace-session.test.ts tests/unit/web-next-world-creation-page.test.ts` failed with the expected 5 regressions: the session store had no invalid-result reset operation, and neither malformed-result recovery control reset the blocked slot or returned to Character Workspace.
+
+### Completed
+
+- Added `resetInvalidResult(key, origin, workflowId)`, restricted to a matching live validated session whose existing raw result fails strict stored-result parsing.
+- Denied reset for absent results, valid results, and origin/workflow mismatches.
+- Removed only the invalid result record, verified its absence, and preserved the live session and return tombstone.
+- Kept removal failures fail-closed so World Creation does not navigate or permit replacement while the invalid slot remains.
+- Changed malformed-result **Retry result** and **Return to character workspace** recovery to reset first and navigate only after reset succeeds.
+- Covered the complete recovery path: invalid reset, valid Character Workspace replacement, parent roster application, and exactly-once consumption.
+
+### Files Changed
+
+- `apps/web-next/src/character-workspace-session.ts` — Added the identity-bound, strict invalid-result reset contract and implementation.
+- `apps/web-next/src/world-creation-character-roster.ts` — Added an interceptable Return recovery action while preserving normal links for valid-result recovery.
+- `apps/web-next/src/world-creation-page.ts` — Routes malformed Retry/Return through reset-before-navigation and reports fail-closed removal failure.
+- `tests/unit/web-next-character-workspace-session.test.ts` — Covers reset success, replacement/consume-once, mismatch and valid-result denial, record preservation, and removal failure.
+- `tests/unit/web-next-world-creation-page.test.ts` — Covers both recovery controls, valid replacement application/one consumption, and no navigation on reset failure.
+- `.superpowers/sdd/2026-08-12-character-creation-workspace/task-5-report.md` — Appended Fix Round 3 evidence.
+
+### Verification
+
+- Session/page targeted suite: 2 files, 87 tests passed.
+- Broader `web-next` unit suite: 17 files, 348 tests passed.
+- `pnpm --filter @infinite-quest/web-next check` passed.
+- `pnpm --filter @infinite-quest/web-next build` passed; Vite emitted only the existing runtime font-resolution notices.
+- `git diff --check` passed (Git emitted only the existing CRLF normalization warning for `world-creation-page.ts`).

@@ -319,6 +319,7 @@ export function mountWorldCreationPage(
   let activeCollection: EditableCollection = "entities";
   let activeCharacterHandoff: Pick<CharacterWorkspaceSession, "key" | "workflowId"> | null = null;
   let characterHandoffError: string | null = null;
+  let characterHandoffResultInvalid = false;
   const selectedIndexes = new Map<EditableCollection, number>();
   const searches = new Map<EditableCollection, string>();
 
@@ -671,6 +672,7 @@ export function mountWorldCreationPage(
       onSessionCreated: (session) => {
         activeCharacterHandoff = { key: session.key, workflowId: session.workflowId };
         characterHandoffError = null;
+        characterHandoffResultInvalid = false;
       },
       onRemove: (characterId) => {
         state = removeCreationCharacter(state, characterId);
@@ -688,7 +690,10 @@ export function mountWorldCreationPage(
         handoffRecovery: {
           message: characterHandoffError,
           returnPath: characterWorkspacePath(activeCharacterHandoff.key),
-          onRetry: () => consumeCharacterHandoff(true)
+          onRetry: characterHandoffResultInvalid
+            ? resetInvalidCharacterHandoff
+            : () => consumeCharacterHandoff(true),
+          ...(characterHandoffResultInvalid ? { onReturn: resetInvalidCharacterHandoff } : {})
         }
       } : {})
     }));
@@ -1392,6 +1397,24 @@ export function mountWorldCreationPage(
     trapDialogFocus(keyboardEvent);
   }
 
+  function resetInvalidCharacterHandoff(): void {
+    if (!activeCharacterHandoff || !characterSessionStore) return;
+    const destination = characterWorkspacePath(activeCharacterHandoff.key);
+    const reset = characterSessionStore.resetInvalidResult(
+      activeCharacterHandoff.key,
+      "world-creation",
+      activeCharacterHandoff.workflowId
+    );
+    if (!reset) {
+      characterHandoffError = "The invalid character result could not be safely removed. Your draft and handoff are unchanged; try again.";
+      renderStage();
+      return;
+    }
+    characterHandoffError = null;
+    characterHandoffResultInvalid = false;
+    navigate(destination);
+  }
+
   function consumeCharacterHandoff(useCurrentRoster = false): void {
     if (!activeCharacterHandoff || !characterSessionStore) return;
     const pending = characterSessionStore.peek(
@@ -1402,6 +1425,7 @@ export function mountWorldCreationPage(
     if (!pending) return;
     if (pending.status === "invalid") {
       state = { ...state, stage: "characters" };
+      characterHandoffResultInvalid = true;
       characterHandoffError = "The stored character result is invalid and could not be recovered. It was not applied or removed; return to the character workspace to review the handoff.";
       renderStage();
       setDirtyGuard(state.navigationDirty);
@@ -1423,6 +1447,7 @@ export function mountWorldCreationPage(
           : appendCreationCharacter(nextState, pending.result.candidate);
       } catch {
         state = { ...state, stage: "characters" };
+        characterHandoffResultInvalid = false;
         characterHandoffError = pending.session.mode === "edit"
           ? "This character could not be updated because the roster changed. The result is preserved; retry it or return to the character workspace."
           : "This character could not be added because it is invalid, duplicated, or the roster is full. The result is preserved; adjust the roster and retry it, or return to the character workspace.";
@@ -1439,6 +1464,7 @@ export function mountWorldCreationPage(
     );
     if (!consumed) {
       state = { ...state, stage: "characters" };
+      characterHandoffResultInvalid = false;
       characterHandoffError = "The character result could not be applied. It may still be recoverable; retry it or return to the character workspace.";
       renderStage();
       setDirtyGuard(state.navigationDirty);
@@ -1447,6 +1473,7 @@ export function mountWorldCreationPage(
     state = nextState;
     activeCharacterHandoff = null;
     characterHandoffError = null;
+    characterHandoffResultInvalid = false;
     renderStage();
     setDirtyGuard(state.navigationDirty);
   }
