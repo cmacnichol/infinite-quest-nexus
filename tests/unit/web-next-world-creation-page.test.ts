@@ -1,5 +1,6 @@
 import { parseHTML } from "linkedom";
 import { describe, expect, it, vi } from "vitest";
+import { MAX_PLAYABLE_CHARACTERS } from "../../packages/contracts/src/world-library.js";
 import { WorldCreationApiError } from "../../apps/web-next/src/world-creation-api.js";
 import {
   appendCreationCharacter,
@@ -110,6 +111,12 @@ function handoffStore() {
       results.set(key, structuredClone(result));
       return true;
     }),
+    peek: vi.fn((key: string, origin: "world-creation" | "world-editor", workflowId: string) => {
+      const session = sessions.get(key);
+      const result = results.get(key);
+      if (expired || !session || !result || session.origin !== origin || session.workflowId !== workflowId) return null;
+      return { session: structuredClone(session), result: structuredClone(result) };
+    }),
     consume: vi.fn((key: string, origin: "world-creation" | "world-editor", workflowId: string) => {
       const session = sessions.get(key);
       const result = results.get(key);
@@ -119,7 +126,7 @@ function handoffStore() {
       return { session: structuredClone(session), result: structuredClone(result) };
     })
   };
-  return { store, sessions, expire: () => { expired = true; } };
+  return { store, sessions, results, expire: () => { expired = true; } };
 }
 
 function creationFixture() {
@@ -542,6 +549,28 @@ describe("World Creation Characters stage", () => {
     expect(document.querySelector('[data-action="continue-stage"]')).not.toBeNull();
   });
 
+  it("prevents another handoff at the roster limit and explains the disabled action", () => {
+    const { document, root } = creationFixture();
+    const handoff = handoffStore();
+    const initial = characterStageState();
+    initial.draft.playableCharacters = Array.from({ length: MAX_PLAYABLE_CHARACTERS }, (_, index) =>
+      reviewedCharacter(`character-${index}`, `Character ${index}`)
+    );
+    mountWorldCreationPage(root, {
+      initialState: initial,
+      characterSessionStore: handoff.store,
+      navigate: vi.fn()
+    });
+
+    const add = document.querySelector<HTMLButtonElement>('[data-action="add-character"]');
+    const explanation = document.querySelector<HTMLElement>("#character-roster-limit");
+    expect(add?.disabled).toBe(true);
+    expect(add?.getAttribute("aria-describedby")).toBe("character-roster-limit");
+    expect(explanation?.textContent).toContain(`${MAX_PLAYABLE_CHARACTERS}`);
+    add?.click();
+    expect(handoff.store.create).not.toHaveBeenCalled();
+  });
+
   it("creates exact Add and Edit handoffs without mutating the parent draft", () => {
     const addFixture = creationFixture();
     const addHandoff = handoffStore();
@@ -613,6 +642,7 @@ describe("World Creation Characters stage", () => {
     expect(document.querySelector("[data-character-roster]")?.textContent).toContain("Scout");
     pageshow(window as unknown as Window);
     expect(document.querySelectorAll("[data-character-roster-item]")).toHaveLength(2);
+    expect(handoff.store.consume).toHaveBeenCalledTimes(1);
     document.querySelector<HTMLButtonElement>('[data-stage="foundation"]')?.click();
     expect(document.querySelector<HTMLInputElement>('[name="world.title"]')?.value).toBe("Glass Atlas");
 
@@ -627,6 +657,137 @@ describe("World Creation Characters stage", () => {
     pageshow(window as unknown as Window);
     expect(document.querySelector("[data-character-roster]")?.textContent).toContain("Keeper Prime");
     expect(document.querySelector("[data-character-roster]")?.textContent).not.toContain("KeeperEdit");
+    expect(handoff.store.consume).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves a rejected duplicate result and offers retry and return without throwing", () => {
+    const { document, root, window } = creationFixture();
+    const handoff = handoffStore();
+    mountWorldCreationPage(root, {
+      initialState: characterStageState(reviewedCharacter("keeper", "Keeper")),
+      characterSessionStore: handoff.store,
+      characterWorkflowIdFactory: () => "workflow-duplicate",
+      navigate: vi.fn()
+    });
+
+    document.querySelector<HTMLButtonElement>('[data-action="add-character"]')?.click();
+    const session = handoff.sessions.get("handoff-1");
+    if (!session) throw new Error("Duplicate handoff missing.");
+    expect(handoff.store.complete(session.key, session.workflowId, {
+      status: "accepted",
+      candidate: reviewedCharacter("keeper", "Keeper Again") as never
+    })).toBe(true);
+
+    expect(() => pageshow(window as unknown as Window)).not.toThrow();
+    expect(document.querySelectorAll("[data-character-roster-item]")).toHaveLength(1);
+    expect(handoff.sessions.has(session.key)).toBe(true);
+    expect(handoff.results.has(session.key)).toBe(true);
+    expect(handoff.store.consume).not.toHaveBeenCalled();
+    const error = document.querySelector<HTMLElement>('[data-character-handoff-error]');
+    expect(error?.getAttribute("role")).toBe("alert");
+    expect(error?.textContent).toContain("could not be added");
+    expect(error?.querySelector<HTMLButtonElement>('[data-action="retry-character-result"]')).not.toBeNull();
+    expect(error?.querySelector<HTMLAnchorElement>(`a[href="/app/characters/${session.key}"]`)).not.toBeNull();
+
+    error?.querySelector<HTMLButtonElement>('[data-action="retry-character-result"]')?.click();
+    expect(handoff.sessions.has(session.key)).toBe(true);
+    expect(handoff.results.has(session.key)).toBe(true);
+    expect(handoff.store.consume).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["origin", (session: CharacterWorkspaceSession) => { session.origin = "world-editor"; }],
+    ["workflow", (session: CharacterWorkspaceSession) => { session.workflowId = "wrong-workflow"; }]
+  ])("leaves a %s-mismatched BFCache result and roster unchanged", (_kind, mismatch) => {
+    const { document, root, window } = creationFixture();
+    const handoff = handoffStore();
+    mountWorldCreationPage(root, {
+      initialState: characterStageState(reviewedCharacter("keeper", "Keeper")),
+      characterSessionStore: handoff.store,
+      characterWorkflowIdFactory: () => "workflow-safe",
+      navigate: vi.fn()
+    });
+    document.querySelector<HTMLButtonElement>('[data-action="add-character"]')?.click();
+    const session = handoff.sessions.get("handoff-1");
+    if (!session) throw new Error("Mismatch handoff missing.");
+    expect(handoff.store.complete(session.key, session.workflowId, {
+      status: "accepted",
+      candidate: reviewedCharacter("scout", "Scout") as never
+    })).toBe(true);
+    mismatch(session);
+
+    pageshow(window as unknown as Window);
+
+    expect(document.querySelectorAll("[data-character-roster-item]")).toHaveLength(1);
+    expect(handoff.results.has(session.key)).toBe(true);
+    expect(handoff.store.consume).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["invalid", (_session: CharacterWorkspaceSession) => {
+      return { id: "invalid-only" } as never;
+    }],
+    ["overflow", (session: CharacterWorkspaceSession) => {
+      session.parentDraft.playableCharacters = Array.from({ length: MAX_PLAYABLE_CHARACTERS }, (_, index) =>
+        reviewedCharacter(`existing-${index}`, `Existing ${index}`)
+      );
+      return reviewedCharacter("overflow", "Overflow") as never;
+    }]
+  ])("preserves an %s accepted create result when validation rejects it", (_kind, rejectedCandidate) => {
+    const { document, root, window } = creationFixture();
+    const handoff = handoffStore();
+    mountWorldCreationPage(root, {
+      initialState: characterStageState(),
+      characterSessionStore: handoff.store,
+      characterWorkflowIdFactory: () => "workflow-rejected",
+      navigate: vi.fn()
+    });
+    document.querySelector<HTMLButtonElement>('[data-action="add-character"]')?.click();
+    const session = handoff.sessions.get("handoff-1");
+    if (!session) throw new Error("Rejected create handoff missing.");
+    const candidate = rejectedCandidate(session);
+    expect(handoff.store.complete(session.key, session.workflowId, {
+      status: "accepted",
+      candidate
+    })).toBe(true);
+
+    expect(() => pageshow(window as unknown as Window)).not.toThrow();
+    expect(document.querySelectorAll("[data-character-roster-item]")).toHaveLength(0);
+    expect(document.querySelector("[data-character-handoff-error]")?.textContent).toContain("could not be added");
+    expect(handoff.sessions.has(session.key)).toBe(true);
+    expect(handoff.results.has(session.key)).toBe(true);
+    expect(handoff.store.consume).not.toHaveBeenCalled();
+  });
+
+  it("preserves a missing-edit-target result instead of throwing or losing it", () => {
+    const { document, root, window } = creationFixture();
+    const handoff = handoffStore();
+    mountWorldCreationPage(root, {
+      initialState: characterStageState(reviewedCharacter("keeper", "Keeper")),
+      characterSessionStore: handoff.store,
+      characterWorkflowIdFactory: () => "workflow-edit",
+      navigate: vi.fn()
+    });
+    document.querySelector<HTMLButtonElement>('[data-action="edit-character"]')?.click();
+    const session = handoff.sessions.get("handoff-1");
+    if (!session) throw new Error("Edit handoff missing.");
+    session.parentDraft.playableCharacters = [];
+    expect(handoff.store.complete(session.key, session.workflowId, {
+      status: "accepted",
+      candidate: reviewedCharacter("keeper", "Keeper Prime") as never
+    })).toBe(true);
+
+    expect(() => pageshow(window as unknown as Window)).not.toThrow();
+    expect(document.querySelector("[data-character-handoff-error]")?.textContent).toContain("could not be updated");
+    expect(handoff.sessions.has(session.key)).toBe(true);
+    expect(handoff.results.has(session.key)).toBe(true);
+    expect(handoff.store.consume).not.toHaveBeenCalled();
+
+    document.querySelector<HTMLButtonElement>('[data-action="retry-character-result"]')?.click();
+    expect(document.querySelector("[data-character-roster]")?.textContent).toContain("Keeper Prime");
+    expect(handoff.sessions.has(session.key)).toBe(false);
+    expect(handoff.results.has(session.key)).toBe(false);
+    expect(handoff.store.consume).toHaveBeenCalledTimes(1);
   });
 
   it("leaves the reviewed roster unchanged for cancellation, expiry, or unmatched workflow results", () => {
@@ -656,7 +817,8 @@ describe("World Creation Characters stage", () => {
     handoff.expire();
     pageshow(window as unknown as Window);
     expect(document.querySelectorAll("[data-character-roster-item]")).toHaveLength(1);
-    expect(handoff.store.consume).toHaveBeenCalledWith("handoff-2", "world-creation", "workflow-safe");
+    expect(handoff.store.peek).toHaveBeenCalledWith("handoff-2", "world-creation", "workflow-safe");
+    expect(handoff.store.consume).not.toHaveBeenCalledWith("handoff-2", "world-creation", "workflow-safe");
   });
 
   it("removes and undoes roster entries and offers Add another for a reviewed roster", () => {

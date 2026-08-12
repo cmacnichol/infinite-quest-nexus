@@ -52,6 +52,7 @@ import {
   renderWorldCreationCharacterRoster
 } from "./world-creation-character-roster.js";
 import {
+  characterWorkspacePath,
   createCharacterWorkspaceSessionStore,
   type CharacterWorkspaceSession,
   type CharacterWorkspaceSessionStore
@@ -317,6 +318,7 @@ export function mountWorldCreationPage(
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let activeCollection: EditableCollection = "entities";
   let activeCharacterHandoff: Pick<CharacterWorkspaceSession, "key" | "workflowId"> | null = null;
+  let characterHandoffError: string | null = null;
   const selectedIndexes = new Map<EditableCollection, number>();
   const searches = new Map<EditableCollection, string>();
 
@@ -668,6 +670,7 @@ export function mountWorldCreationPage(
       navigate,
       onSessionCreated: (session) => {
         activeCharacterHandoff = { key: session.key, workflowId: session.workflowId };
+        characterHandoffError = null;
       },
       onRemove: (characterId) => {
         state = removeCreationCharacter(state, characterId);
@@ -680,7 +683,14 @@ export function mountWorldCreationPage(
         renderCharacters();
         renderStageIndex();
         setDirtyGuard(state.navigationDirty);
-      }
+      },
+      ...(characterHandoffError && activeCharacterHandoff ? {
+        handoffRecovery: {
+          message: characterHandoffError,
+          returnPath: characterWorkspacePath(activeCharacterHandoff.key),
+          onRetry: () => consumeCharacterHandoff(true)
+        }
+      } : {})
     }));
     editingStage.append(stageActions());
   }
@@ -1382,25 +1392,54 @@ export function mountWorldCreationPage(
     trapDialogFocus(keyboardEvent);
   }
 
-  function consumeCharacterHandoff(): void {
+  function consumeCharacterHandoff(useCurrentRoster = false): void {
     if (!activeCharacterHandoff || !characterSessionStore) return;
+    const pending = characterSessionStore.peek(
+      activeCharacterHandoff.key,
+      "world-creation",
+      activeCharacterHandoff.workflowId
+    );
+    if (!pending) return;
+
+    let nextState = state;
+    if (pending.result.status === "accepted") {
+      try {
+        nextState = useCurrentRoster
+          ? { ...state, stage: "characters" }
+          : {
+              ...state,
+              stage: "characters",
+              draft: structuredClone(pending.session.parentDraft)
+            };
+        nextState = pending.session.mode === "edit" && pending.session.candidate
+          ? replaceCreationCharacter(nextState, pending.session.candidate.id, pending.result.candidate)
+          : appendCreationCharacter(nextState, pending.result.candidate);
+      } catch {
+        state = { ...state, stage: "characters" };
+        characterHandoffError = pending.session.mode === "edit"
+          ? "This character could not be updated because the roster changed. The result is preserved; retry it or return to the character workspace."
+          : "This character could not be added because it is invalid, duplicated, or the roster is full. The result is preserved; adjust the roster and retry it, or return to the character workspace.";
+        renderStage();
+        setDirtyGuard(state.navigationDirty);
+        return;
+      }
+    }
+
     const consumed = characterSessionStore.consume(
       activeCharacterHandoff.key,
       "world-creation",
       activeCharacterHandoff.workflowId
     );
-    if (!consumed) return;
-    activeCharacterHandoff = null;
-    if (consumed.result.status === "accepted") {
-      state = {
-        ...state,
-        stage: "characters",
-        draft: structuredClone(consumed.session.parentDraft)
-      };
-      state = consumed.session.mode === "edit" && consumed.session.candidate
-        ? replaceCreationCharacter(state, consumed.session.candidate.id, consumed.result.candidate)
-        : appendCreationCharacter(state, consumed.result.candidate);
+    if (!consumed) {
+      state = { ...state, stage: "characters" };
+      characterHandoffError = "The character result could not be applied. It may still be recoverable; retry it or return to the character workspace.";
+      renderStage();
+      setDirtyGuard(state.navigationDirty);
+      return;
     }
+    state = nextState;
+    activeCharacterHandoff = null;
+    characterHandoffError = null;
     renderStage();
     setDirtyGuard(state.navigationDirty);
   }

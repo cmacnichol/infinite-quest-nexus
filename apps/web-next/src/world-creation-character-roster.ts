@@ -1,4 +1,8 @@
-import { playableCharacterSchema, type PlayableCharacter } from "../../../packages/contracts/src/world-library.js";
+import {
+  MAX_PLAYABLE_CHARACTERS,
+  playableCharacterSchema,
+  type PlayableCharacter
+} from "../../../packages/contracts/src/world-library.js";
 import {
   characterWorkspacePath,
   type CharacterWorkspaceSession,
@@ -15,6 +19,11 @@ export interface WorldCreationCharacterRosterInput {
   onSessionCreated: (session: CharacterWorkspaceSession) => void;
   onRemove: (characterId: string) => void;
   onRestore: (removalId: string) => void;
+  handoffRecovery?: {
+    message: string;
+    returnPath: string;
+    onRetry: () => void;
+  };
 }
 
 function reviewedRoster(state: WorldCreationState): PlayableCharacter[] {
@@ -74,7 +83,30 @@ export function renderWorldCreationCharacterRoster(
   status.dataset.characterRosterStatus = "";
   status.setAttribute("role", "status");
   const add = action(document, "add-character", roster.length === 0 ? "Add character" : "Add another");
-  section.append(add, status);
+  if (roster.length >= MAX_PLAYABLE_CHARACTERS) {
+    add.disabled = true;
+    add.setAttribute("aria-describedby", "character-roster-limit");
+    const limit = document.createElement("p");
+    limit.id = "character-roster-limit";
+    limit.textContent = `This roster has the maximum ${MAX_PLAYABLE_CHARACTERS} characters. Remove one before adding another.`;
+    section.append(add, limit, status);
+  } else {
+    section.append(add, status);
+  }
+
+  if (input.handoffRecovery) {
+    const recovery = document.createElement("div");
+    recovery.dataset.characterHandoffError = "";
+    recovery.setAttribute("role", "alert");
+    const message = document.createElement("p");
+    message.textContent = input.handoffRecovery.message;
+    const retry = action(document, "retry-character-result", "Retry result");
+    const returnLink = document.createElement("a");
+    returnLink.href = input.handoffRecovery.returnPath;
+    returnLink.textContent = "Return to character workspace";
+    recovery.append(message, retry, returnLink);
+    section.append(recovery);
+  }
 
   const removals = document.createElement("div");
   removals.dataset.characterRemovals = "";
@@ -90,6 +122,10 @@ export function renderWorldCreationCharacterRoster(
   section.append(removals);
 
   function begin(mode: "create" | "edit", candidate: PlayableCharacter | null): void {
+    if (mode === "create" && roster.length >= MAX_PLAYABLE_CHARACTERS) {
+      status.textContent = `Remove a character before adding another; this roster already has ${MAX_PLAYABLE_CHARACTERS}.`;
+      return;
+    }
     if (!input.sessionStore) {
       status.textContent = "Character editing is unavailable in this browser session. Your world draft is unchanged.";
       return;
@@ -126,6 +162,8 @@ export function renderWorldCreationCharacterRoster(
       input.onRemove(button.dataset.characterId);
     } else if (button.dataset.action === "undo-character-removal" && button.dataset.removalId) {
       input.onRestore(button.dataset.removalId);
+    } else if (button.dataset.action === "retry-character-result") {
+      input.handoffRecovery?.onRetry();
     }
   });
 

@@ -52,6 +52,11 @@ export interface CharacterWorkspaceSessionStore {
   load(key: string): CharacterWorkspaceSession | null;
   returnPath(key: string): string | null;
   complete(key: string, workflowId: string, result: CharacterWorkspaceResult): boolean;
+  peek(
+    key: string,
+    origin: CharacterWorkspaceOrigin,
+    workflowId: string
+  ): ConsumedCharacterWorkspaceSession | null;
   consume(
     key: string,
     origin: CharacterWorkspaceOrigin,
@@ -321,6 +326,21 @@ export function createCharacterWorkspaceSessionStore(
     return null;
   }
 
+  function peek(
+    key: string,
+    origin: CharacterWorkspaceOrigin,
+    workflowId: string
+  ): ConsumedCharacterWorkspaceSession | null {
+    const session = load(key);
+    if (session === null || session.origin !== origin || session.workflowId !== workflowId) return null;
+    const stored = parseStoredResult(
+      decode(safeRead(storage, resultStorageKey(key))),
+      session,
+      now()
+    );
+    return stored === null ? null : { session, result: stored.result };
+  }
+
   return {
     create(input) {
       let key = "";
@@ -396,15 +416,12 @@ export function createCharacterWorkspaceSessionStore(
       }
     },
 
+    peek,
+
     consume(key, origin, workflowId) {
-      const session = load(key);
-      if (session === null || session.origin !== origin || session.workflowId !== workflowId) return null;
-      const stored = parseStoredResult(
-        decode(safeRead(storage, resultStorageKey(key))),
-        session,
-        now()
-      );
-      if (stored === null) return null;
+      const pending = peek(key, origin, workflowId);
+      if (pending === null) return null;
+      const { session } = pending;
 
       const sessionKey = sessionStorageKey(key);
       const returnKey = returnStorageKey(key);
@@ -429,7 +446,7 @@ export function createCharacterWorkspaceSessionStore(
       const recordsAreAbsent = [sessionKey, returnKey, resultKey]
         .every((storageKey) => isAbsent(storage, storageKey));
       if (!removalsSucceeded || !recordsAreAbsent) return null;
-      return { session, result: stored.result };
+      return pending;
     }
   };
 }

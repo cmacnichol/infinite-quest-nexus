@@ -320,8 +320,16 @@ describe("character workspace session store", () => {
     expect(store.complete(session.key, "wrong-workflow", accepted)).toBe(false);
     expect(store.complete(session.key, session.workflowId, accepted)).toBe(true);
     expect(store.complete(session.key, session.workflowId, { status: "cancelled" })).toBe(false);
-    expect(store.consume(session.key, "world-editor", session.workflowId)).toBeNull();
-    expect(store.consume(session.key, "world-creation", "wrong-workflow")).toBeNull();
+    expect(store.peek(session.key, "world-editor", session.workflowId)).toBeNull();
+    expect(store.peek(session.key, "world-creation", "wrong-workflow")).toBeNull();
+    expect(store.peek(session.key, "world-creation", session.workflowId)).toEqual({
+      session,
+      result: accepted
+    });
+    expect(store.peek(session.key, "world-creation", session.workflowId)).toEqual({
+      session,
+      result: accepted
+    });
 
     expect(store.consume(session.key, "world-creation", session.workflowId)).toEqual({
       session,
