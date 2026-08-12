@@ -266,6 +266,31 @@ describe("web theme integration", () => {
     expect(cssRule(css, ".creation-method-control:has(input:checked)")).toMatch(/background:\s*var\(--accent-soft\)/);
   });
 
+  it("enforces the compact Character Workspace design contract", () => {
+    const css = fs.readFileSync(path.join(webNextRoot, "src/styles.css"), "utf8");
+    const method = cssRule(css, ".character-method-control");
+    const action = cssRule(css, ".character-prompt-tools button, .character-generation-actions button, .character-progress-ledger button, .character-command-row > button");
+    const stage = cssRule(css, ".character-stage-index button");
+    const fields = cssRule(css, ".character-fields");
+    const ledger = cssRule(css, ".character-progress-ledger");
+    const dialog = cssRule(css, ".character-prompt-dialog");
+
+    expect(method).toMatch(/height:\s*48px/);
+    expect(method).toMatch(/background:\s*var\(--surface-entry\)/);
+    expect(method).toMatch(/border-radius:\s*0/);
+    expect(action).toMatch(/min-height:\s*44px/);
+    expect(stage).toMatch(/min-height:\s*52px/);
+    expect(fields).toMatch(/grid-template-columns:\s*minmax\(0,\s*1fr\)/);
+    expect(ledger).toMatch(/grid-template-columns:\s*minmax\(0,\s*1fr\) repeat\(2,\s*minmax\(0,\s*[^)]+\)\)/);
+    expect(dialog).toMatch(/background:\s*var\(--surface-paper\)/);
+    expect(dialog).not.toMatch(/box-shadow:/);
+    expect(cssRule(css, ".character-field input:focus-visible, .character-field textarea:focus-visible, .character-progress-ledger button:focus-visible, .character-prompt-tools button:focus-visible, .character-stage-index button:focus-visible")).toMatch(/outline:[^;]*var\(--accent\)/);
+    expect(css).toMatch(/@media\s*\(max-width:\s*720px\)[\s\S]*\.character-stage-index\s*\{[^}]*display:\s*flex[^}]*overflow-x:\s*auto/);
+    expect(css).toMatch(/@media\s*\(max-width:\s*720px\)[\s\S]*\.character-prompt-dialog\s*\{[^}]*width:\s*100%[^}]*margin:\s*auto 0 0/);
+    expect(css).toMatch(/@media\s*\(max-width:\s*720px\)[\s\S]*\.character-progress-ledger\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
+    expect(css).toMatch(/@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*\.character-prompt-dialog[\s\S]*transition:\s*none/);
+  });
+
   it("uses the shared semantic theme contract for the editor command and conflict surfaces", () => {
     const css = fs.readFileSync(path.join(webNextRoot, "src/styles.css"), "utf8");
 

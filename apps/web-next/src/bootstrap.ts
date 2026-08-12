@@ -1,5 +1,7 @@
 import "./styles.css";
 import { generateWorldPreview } from "./world-creation-api";
+import { mountCharacterWorkspacePage } from "./character-workspace-page";
+import { characterSessionKeyFromPath } from "./character-workspace-session";
 import { isWorldCreationPath } from "./world-creation-model";
 import { mountWorldCreationPage } from "./world-creation-page";
 import { worldIdFromPath } from "./world-editor-model";
@@ -9,12 +11,15 @@ import { mountWorldLibraryPage, type MountedPage } from "./world-library-page";
 const root = document.querySelector<HTMLElement>("#app");
 if (!root) throw new Error("The replacement app root is missing.");
 
+const characterSessionKey = characterSessionKeyFromPath(window.location.pathname);
 const worldId = worldIdFromPath(window.location.pathname);
-const mountedPage: MountedPage = isWorldCreationPath(window.location.pathname)
-  ? mountWorldCreationPage(root, { generateWorldPreview })
-  : worldId === null
-    ? mountWorldLibraryPage(root)
-    : mountWorldEditorPage(root, worldId);
+const mountedPage: MountedPage = characterSessionKey !== null
+  ? mountCharacterWorkspacePage(root, characterSessionKey)
+  : isWorldCreationPath(window.location.pathname)
+    ? mountWorldCreationPage(root, { generateWorldPreview })
+    : worldId === null
+      ? mountWorldLibraryPage(root)
+      : mountWorldEditorPage(root, worldId);
 
 function onPageHide(event: PageTransitionEvent): void {
   if (event.persisted) return;
