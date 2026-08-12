@@ -21,6 +21,8 @@ const longText = z.preprocess(coerceToString, z.string().max(200_000).default(""
 const characterId = z.string().trim().min(1).max(200);
 
 export const WORLD_CONTENT_SCHEMA_VERSION = 5;
+export const MAX_PLAYABLE_CHARACTERS = 1000;
+export const MAX_CHARACTER_MECHANICS_ITEMS = 10_000;
 
 const profileText = z.preprocess(coerceToString, z.string().trim().max(20_000).default(""));
 const profileShortText = z.preprocess(coerceToString, z.string().trim().max(2_000).default(""));
@@ -72,8 +74,8 @@ export const playableCharacterSchema = z.object({
   name: z.string().trim().min(1).max(200),
   characterText: longText,
   profile: characterProfileSchema.optional(),
-  rpgStats: z.array(z.unknown()).max(10_000).default([]),
-  defaultTriggers: z.array(z.unknown()).max(10_000).default([]),
+  rpgStats: z.array(z.unknown()).max(MAX_CHARACTER_MECHANICS_ITEMS).default([]),
+  defaultTriggers: z.array(z.unknown()).max(MAX_CHARACTER_MECHANICS_ITEMS).default([]),
   source: z.record(z.string(), z.unknown()).default({})
 }).passthrough();
 
@@ -90,11 +92,11 @@ export const worldOverviewSchema = z.object({
 export const worldContentSchema = z.object({
   schemaVersion: z.number().int().positive().default(WORLD_CONTENT_SCHEMA_VERSION),
   world: worldOverviewSchema,
-  playableCharacters: z.array(playableCharacterSchema).max(1000).default([]),
+  playableCharacters: z.array(playableCharacterSchema).max(MAX_PLAYABLE_CHARACTERS).default([]),
   entities: z.array(z.unknown()).max(20_000).default([]),
   relationships: z.array(z.unknown()).max(50_000).default([]),
-  rpgStats: z.array(z.unknown()).max(10_000).default([]),
-  defaultTriggers: z.array(z.unknown()).max(10_000).default([]),
+  rpgStats: z.array(z.unknown()).max(MAX_CHARACTER_MECHANICS_ITEMS).default([]),
+  defaultTriggers: z.array(z.unknown()).max(MAX_CHARACTER_MECHANICS_ITEMS).default([]),
   eventTriggers: z.array(z.unknown()).max(10_000).default([]),
   assets: z.array(z.unknown()).max(10_000).default([]),
   defaults: z.record(z.string(), z.unknown()).default({})
@@ -184,6 +186,10 @@ export const playableCharacterGenerationPreviewRequestSchema = z.object({
   content: worldContentSchema,
   prompt: z.string().trim().min(1).max(20_000),
   characterId: characterId.optional()
+}).strict();
+
+export const playableCharacterGenerationPreviewResponseSchema = z.object({
+  character: playableCharacterSchema
 }).strict();
 
 export const worldForkSchema = z.object({
@@ -285,6 +291,7 @@ export type WorldDraftUpdateRequest = z.infer<typeof worldDraftUpdateSchema>;
 export type WorldPublishRequest = z.infer<typeof worldPublishSchema>;
 export type PlayableCharacterGenerationRequest = z.infer<typeof playableCharacterGenerationRequestSchema>;
 export type PlayableCharacterGenerationPreviewRequest = z.infer<typeof playableCharacterGenerationPreviewRequestSchema>;
+export type PlayableCharacterGenerationPreviewResponse = z.infer<typeof playableCharacterGenerationPreviewResponseSchema>;
 export type WorldForkRequest = z.infer<typeof worldForkSchema>;
 export type WorldStatusUpdateRequest = z.infer<typeof worldStatusUpdateSchema>;
 export type WorldImportRequest = z.infer<typeof worldImportRequestSchema>;

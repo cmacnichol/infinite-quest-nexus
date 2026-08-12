@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  MAX_CHARACTER_MECHANICS_ITEMS,
+  MAX_PLAYABLE_CHARACTERS,
   WORLD_CONTENT_SCHEMA_VERSION,
   campaignCreateSchema,
   canonicalizeWorldContent,
+  playableCharacterGenerationPreviewResponseSchema,
   playableCharacterGenerationRequestSchema,
   portableWorldSchema,
   worldContentSchema,
@@ -77,6 +80,63 @@ describe("World Library contracts", () => {
 
   it("requires optimistic revision numbers for draft updates", () => {
     expect(() => worldDraftUpdateSchema.parse({ expectedRevision: 0, content: { world: { title: "Synthetic Test World" } } })).toThrow();
+  });
+
+  it("shares playable-character collection bounds and strictly parses generation previews", () => {
+    expect(playableCharacterGenerationPreviewResponseSchema.parse({
+      character: { id: "trusted-id", name: "Mara", characterText: "A patient observer." }
+    }).character.id).toBe("trusted-id");
+    expect(() => playableCharacterGenerationPreviewResponseSchema.parse({
+      character: { id: "mara", name: "Mara", characterText: "Guidance" },
+      ownerUserId: "spoofed"
+    })).toThrow();
+
+    const characters = Array.from({ length: MAX_PLAYABLE_CHARACTERS }, (_, index) => ({
+      id: `character-${index}`,
+      name: `Character ${index}`,
+      characterText: "Guidance"
+    }));
+    expect(worldContentSchema.parse({ world: { title: "Bounded World" }, playableCharacters: characters }).playableCharacters)
+      .toHaveLength(MAX_PLAYABLE_CHARACTERS);
+    expect(() => worldContentSchema.parse({
+      world: { title: "Overfull World" },
+      playableCharacters: [...characters, { id: "overflow", name: "Overflow", characterText: "Guidance" }]
+    })).toThrow();
+
+    const mechanics = Array.from({ length: MAX_CHARACTER_MECHANICS_ITEMS }, (_, index) => ({ index }));
+    const boundedCharacter = playableCharacterGenerationPreviewResponseSchema.parse({
+      character: {
+        id: "bounded",
+        name: "Bounded",
+        characterText: "Guidance",
+        rpgStats: mechanics,
+        defaultTriggers: mechanics
+      }
+    }).character;
+    expect(boundedCharacter.rpgStats).toHaveLength(MAX_CHARACTER_MECHANICS_ITEMS);
+    expect(boundedCharacter.defaultTriggers).toHaveLength(MAX_CHARACTER_MECHANICS_ITEMS);
+    const boundedWorld = worldContentSchema.parse({
+      world: { title: "Bounded Mechanics World" },
+      rpgStats: mechanics,
+      defaultTriggers: mechanics
+    });
+    expect(boundedWorld.rpgStats).toHaveLength(MAX_CHARACTER_MECHANICS_ITEMS);
+    expect(boundedWorld.defaultTriggers).toHaveLength(MAX_CHARACTER_MECHANICS_ITEMS);
+    for (const collection of ["rpgStats", "defaultTriggers"] as const) {
+      const overflow = [...mechanics, {}];
+      expect(() => playableCharacterGenerationPreviewResponseSchema.parse({
+        character: {
+          id: "overflow",
+          name: "Overflow",
+          characterText: "Guidance",
+          [collection]: overflow
+        }
+      })).toThrow();
+      expect(() => worldContentSchema.parse({
+        world: { title: "Overfull Mechanics World" },
+        [collection]: overflow
+      })).toThrow();
+    }
   });
 
   it("validates character generation requests without accepting provider selection", () => {
