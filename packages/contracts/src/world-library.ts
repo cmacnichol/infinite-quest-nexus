@@ -185,7 +185,8 @@ export const characterProfileOrganizationResultSchema = z.object({
 export const playableCharacterGenerationPreviewRequestSchema = z.object({
   content: worldContentSchema,
   prompt: z.string().trim().min(1).max(20_000),
-  characterId: characterId.optional()
+  characterId: characterId.optional(),
+  progressKey: z.string().trim().min(1).max(512).optional()
 }).strict();
 
 export const playableCharacterGenerationPreviewResponseSchema = z.object({

@@ -52,6 +52,7 @@ import {
   playableCharacterGenerationRequestSchema,
   characterProfileOrganizationRequestSchema,
   playableCharacterGenerationPreviewRequestSchema,
+  playableCharacterGenerationPreviewResponseSchema,
   resourceDeleteSchema,
   worldCreateSchema,
   worldGenerationPreviewRequestSchema,
@@ -761,10 +762,13 @@ export async function buildServer({
 
   app.post("/api/v1/worlds/playable-characters/generate-preview", async (request) => {
     const ownerScope = await resolveWorldCampaignOwnerScope();
-    return worldCampaignAdapter.run(() => worldCampaignAdapter.application.generatePlayableCharacterPreview(
-      ownerScope,
-      playableCharacterGenerationPreviewRequestSchema.parse(request.body)
-    ));
+    return parseResponseProjection(
+      playableCharacterGenerationPreviewResponseSchema,
+      await worldCampaignAdapter.run(() => worldCampaignAdapter.application.generatePlayableCharacterPreview(
+        ownerScope,
+        playableCharacterGenerationPreviewRequestSchema.parse(request.body)
+      ))
+    );
   });
 
   app.get<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId", async (request) => (

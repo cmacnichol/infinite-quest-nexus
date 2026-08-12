@@ -115,6 +115,7 @@ export function createProviderWorldGenerationCollaborator(
       scope.ownerUserId,
       request,
       providers,
+      providerDependencies,
     ),
     generatePlayableCharacter: (scope, request) => generatePlayableCharacterForOwner(
       pool,
