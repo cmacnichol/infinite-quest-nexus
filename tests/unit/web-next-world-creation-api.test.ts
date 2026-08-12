@@ -180,6 +180,18 @@ describe("World Creation API boundary", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it("rejects a created-world response whose id is not a UUID", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({
+      ...createdResponse,
+      id: "world / unsafe"
+    }, 201)));
+
+    await expect(createWorld(draft)).rejects.toMatchObject({
+      kind: "invalid_response",
+      status: 201
+    });
+  });
+
   it("creates with only title and owner-safe canonical content while forcing characters empty", async () => {
     const adversarial = {
       ...structuredClone(draft),

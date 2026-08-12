@@ -76,6 +76,7 @@ export interface WorldCreationPageDependencies {
 
 type EditableStage = "canon" | "mechanics";
 type EditableCollection = Exclude<CreationCollectionName, "assets">;
+type CreationCoverHandoff = "none" | "pending" | "completed" | "recovery";
 
 interface CollectionSpec {
   collection: EditableCollection;
@@ -85,6 +86,10 @@ interface CollectionSpec {
 }
 
 const STAGE_ORDER: readonly CreationStage[] = ["method", "foundation", "canon", "mechanics", "cover", "review"];
+
+function createdWorldDestination(worldId: string, cover: CreationCoverHandoff): string {
+  return `/app/worlds/${encodeURIComponent(worldId)}?creation=created&cover=${cover}`;
+}
 const FOUNDATION_FIELDS = [
   ["title", "Title", "input", 1],
   ["genre", "Genre", "input", 1],
@@ -166,12 +171,12 @@ const creationMarkup = `
     </header>
     <div class="editor-workspace creation-workspace">
       <nav class="editor-section-index creation-stage-index" aria-label="World creation stages">
-        <span data-stage="method" aria-current="step">Method</span>
-        <span data-stage="foundation" aria-disabled="true">Foundation</span>
-        <span data-stage="canon" aria-disabled="true">Canon</span>
-        <span data-stage="mechanics" aria-disabled="true">Mechanics</span>
-        <span data-stage="cover" aria-disabled="true">Cover</span>
-        <span data-stage="review" aria-disabled="true">Review</span>
+        <button type="button" data-stage="method" aria-current="step">Method</button>
+        <button type="button" data-stage="foundation" aria-disabled="true" disabled>Foundation</button>
+        <button type="button" data-stage="canon" aria-disabled="true" disabled>Canon</button>
+        <button type="button" data-stage="mechanics" aria-disabled="true" disabled>Mechanics</button>
+        <button type="button" data-stage="cover" aria-disabled="true" disabled>Cover</button>
+        <button type="button" data-stage="review" aria-disabled="true" disabled>Review</button>
       </nav>
       <section class="editor-canvas creation-canvas" data-creation-stage="method" aria-labelledby="method-heading">
         <div class="overview-editor creation-method-stage">
@@ -190,7 +195,7 @@ const creationMarkup = `
                 <button type="button" data-action="expand-prompt">${expandIcon}<span>Expand</span></button>
               </div>
             </div>
-            <label class="editor-field creation-prompt-field"><span>Concept prompt</span><textarea rows="7" data-concept-prompt="compact" aria-describedby="creation-clipboard-status creation-generation-status" placeholder="A glass city follows a migrating star…"></textarea></label>
+            <label class="editor-field creation-prompt-field"><span>Concept prompt</span><textarea rows="7" data-concept-prompt="compact" aria-describedby="creation-clipboard-status creation-generation-status" placeholder="Describe your world concept"></textarea></label>
             <p id="creation-clipboard-status" data-clipboard-status aria-live="polite"></p>
             <div id="creation-generation-status" data-generation-status aria-live="polite"></div>
             <div class="creation-generation-actions">
@@ -238,7 +243,7 @@ export function mountWorldCreationPage(
   const canvas = requiredElement<HTMLElement>(root, "[data-creation-stage]");
   const methodStage = requiredElement<HTMLElement>(root, ".creation-method-stage");
   const editingStage = requiredElement<HTMLElement>(root, "[data-editing-stage]");
-  const stageItems = [...root.querySelectorAll<HTMLElement>("[data-stage]")];
+  const stageItems = [...root.querySelectorAll<HTMLButtonElement>("[data-stage]")];
   const aiPrompt = requiredElement<HTMLElement>(root, "[data-ai-prompt]");
   const manualAction = requiredElement<HTMLElement>(root, "[data-manual-action]");
   const compactPrompt = requiredElement<HTMLTextAreaElement>(root, '[data-concept-prompt="compact"]');
@@ -281,6 +286,8 @@ export function mountWorldCreationPage(
   let createdWorld: CreatedWorldResponse | null = null;
   let coverError: WorldCreationApiError | Error | null = null;
   let coverStatus: string | null = null;
+  let coverHandoff: Exclude<CreationCoverHandoff, "none" | "recovery"> | null = null;
+  let assetsJsonInvalid = false;
   let unloadInstalled = false;
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let activeCollection: EditableCollection = "entities";
@@ -347,7 +354,9 @@ export function mountWorldCreationPage(
       }
       if (progress.state === "current") item.setAttribute("aria-current", "step");
       else item.removeAttribute("aria-current");
-      if (progress.state === "upcoming") item.setAttribute("aria-disabled", "true");
+      const unavailable = progress.state === "upcoming";
+      item.disabled = unavailable;
+      if (unavailable) item.setAttribute("aria-disabled", "true");
       else item.removeAttribute("aria-disabled");
     }
   }
@@ -562,6 +571,7 @@ export function mountWorldCreationPage(
       ["generated", "Generate a cover"]
     ] as const) {
       const label = document.createElement("label");
+      label.className = "creation-cover-control";
       const control = document.createElement("input");
       control.type = "radio";
       control.name = "coverMode";
@@ -604,7 +614,23 @@ export function mountWorldCreationPage(
       providerGuidance.textContent = "If the image provider is unavailable, the world can still be created and the cover can be retried.";
       editingStage.append(field, providerGuidance);
     }
-    editingStage.append(stageActions());
+
+    const assets = document.createElement("details");
+    assets.className = "advanced-json creation-assets-editor";
+    const assetsSummary = document.createElement("summary");
+    assetsSummary.textContent = "World assets JSON";
+    const assetsJson = document.createElement("textarea");
+    assetsJson.dataset.assetsJson = "";
+    assetsJson.rows = 10;
+    assetsJson.value = serializeAdvancedJson(state.draft.assets);
+    assetsJson.setAttribute("aria-label", "World assets JSON");
+    assetsJson.setAttribute("aria-describedby", "creation-assets-error");
+    const assetsError = document.createElement("p");
+    assetsError.id = "creation-assets-error";
+    assetsError.className = "field-error";
+    assetsError.dataset.assetsError = "";
+    assets.append(assetsSummary, assetsJson, button("apply-assets-json", "Apply assets JSON"), assetsError);
+    editingStage.append(assets, stageActions());
   }
 
   function stageForIssue(path: string): CreationStage {
@@ -627,7 +653,26 @@ export function mountWorldCreationPage(
     const readiness = document.createElement("p");
     readiness.dataset.reviewReadiness = "";
     readiness.textContent = review.ready ? "Ready to create" : "Needs attention before creation";
-    editingStage.append(heading, provenance, readiness);
+    const warningCount = document.createElement("p");
+    warningCount.dataset.reviewWarningCount = "";
+    warningCount.textContent = `Warnings ${review.warningCount}`;
+    const coverIntent = document.createElement("p");
+    coverIntent.dataset.reviewCoverIntent = "";
+    coverIntent.textContent = review.coverIntent.mode === "none"
+      ? "Cover intent: No cover"
+      : review.coverIntent.mode === "retained_asset"
+        ? `Cover intent: Retained asset ${review.coverIntent.assetId}`
+        : `Cover intent: Generate cover — ${review.coverIntent.prompt}`;
+    const readinessList = document.createElement("ul");
+    readinessList.dataset.reviewStageReadiness = "";
+    for (const stageReadiness of review.readiness) {
+      const item = document.createElement("li");
+      item.dataset.reviewStage = stageReadiness.stage;
+      const label = stageReadiness.stage[0]!.toUpperCase() + stageReadiness.stage.slice(1);
+      item.textContent = `${label}: ${stageReadiness.ready ? "ready" : `needs attention · ${stageReadiness.issueCount} issue${stageReadiness.issueCount === 1 ? "" : "s"}`}`;
+      readinessList.append(item);
+    }
+    editingStage.append(heading, provenance, readiness, warningCount, coverIntent, readinessList);
 
     const validation = validateCreationStage(state, "review");
     if (validation.issues.length > 0) {
@@ -753,20 +798,16 @@ export function mountWorldCreationPage(
   }
 
   async function copyPrompt(): Promise<void> {
-    const editor = activePrompt();
-    const focusBeforeClipboard = document.activeElement;
     try {
       await writeClipboardText(concept);
       clipboardAnnouncement("Copied world concept.");
     } catch {
       clipboardAnnouncement("We could not copy the world concept. Select the text and copy it manually.");
     }
-    if (!disposed && document.activeElement === focusBeforeClipboard) editor.focus();
   }
 
   async function pastePrompt(): Promise<void> {
     const editor = activePrompt();
-    const focusBeforeClipboard = document.activeElement;
     const start = editor.selectionStart ?? editor.value.length;
     const end = editor.selectionEnd ?? start;
     try {
@@ -780,7 +821,6 @@ export function mountWorldCreationPage(
     } catch {
       clipboardAnnouncement("Clipboard permission was denied. Paste with your browser or keyboard instead.");
     }
-    if (!disposed && document.activeElement === focusBeforeClipboard) editor.focus();
   }
 
   function clearPollTimer(): void {
@@ -808,6 +848,17 @@ export function mountWorldCreationPage(
       try {
         const progress = await loadWorldGenerationProgress(progressKey, controller.signal);
         if (disposed || generationController !== controller || controller.signal.aborted) return;
+        if (progress.status === "failed") {
+          generationSequence += 1;
+          generationController = null;
+          clearPollTimer();
+          controller.abort(new DOMException("World generation failed", "AbortError"));
+          generationStatus.textContent = progress.errorMessage?.trim() || progress.message ||
+            "World generation failed. Your concept and local fields are unchanged; try again.";
+          generateButton.disabled = !concept.trim();
+          cancelButton.hidden = true;
+          return;
+        }
         renderProgress(progress);
         if (progress.status === "processing" || progress.status === "unknown") scheduleProgressPoll(controller, progressKey);
       } catch {
@@ -888,6 +939,7 @@ export function mountWorldCreationPage(
         await attachCreatedWorldCover(world.id, intent.assetId, controller.signal);
         if (disposed || creationController !== controller || controller.signal.aborted) return false;
         coverStatus = "The retained cover was attached successfully.";
+        coverHandoff = "completed";
       } else if (intent.mode === "generated") {
         const result = await generateCreatedWorldCover(world.id, intent.prompt, controller.signal);
         if (disposed || creationController !== controller || controller.signal.aborted) return false;
@@ -903,6 +955,7 @@ export function mountWorldCreationPage(
           : result.status === "queued"
             ? "Cover generation was queued and will continue in the background."
             : "Cover generation is in progress and will continue in the background.";
+        coverHandoff = result.status === "completed" ? "completed" : "pending";
       }
       if (disposed || creationController !== controller || controller.signal.aborted) return false;
       coverError = null;
@@ -939,10 +992,11 @@ export function mountWorldCreationPage(
       createdWorld = result;
       state = completeCreation(state, result.id);
       setDirtyGuard(false);
-      if (coverIntent.mode === "none" || await performCover(result, coverIntent, controller)) {
-        if (!disposed && creationController === controller && !controller.signal.aborted) {
-          navigate(`/app/worlds/${result.id}`);
-        }
+      if (coverIntent.mode === "none") {
+        navigate(createdWorldDestination(result.id, "none"));
+      } else if (await performCover(result, coverIntent, controller) &&
+        !disposed && creationController === controller && !controller.signal.aborted && coverHandoff) {
+        navigate(createdWorldDestination(result.id, coverHandoff));
       }
     } catch (error) {
       if (disposed || creationController !== controller || controller.signal.aborted || createdWorld) return;
@@ -966,24 +1020,30 @@ export function mountWorldCreationPage(
     try {
       if (await performCover(createdWorld, structuredClone(state.coverIntent), controller) &&
         !disposed && creationController === controller && !controller.signal.aborted) {
-        navigate(`/app/worlds/${createdWorld.id}`);
+        navigate(createdWorldDestination(createdWorld.id, coverHandoff ?? "completed"));
       }
     } finally {
       if (creationController === controller) creationController = null;
     }
   }
 
-  function validateAndContinue(): void {
-    const validation = validateCreationStage(state);
-    if (validation.issues.length > 0) {
-      const issue = validation.issues[0]!;
-      const control = editingStage.querySelector<HTMLElement>(`[name="${issue.path}"]`);
-      const error = editingStage.querySelector<HTMLElement>(`[data-field-error="${issue.path}"]`);
-      control?.setAttribute("aria-invalid", "true");
-      if (error) error.textContent = issue.message;
-      control?.focus();
-      return;
+  function focusStageIssue(): boolean {
+    if (state.stage === "cover" && assetsJsonInvalid) {
+      editingStage.querySelector<HTMLTextAreaElement>("[data-assets-json]")?.focus();
+      return true;
     }
+    const issue = validateCreationStage(state).issues[0];
+    if (!issue) return false;
+    const control = editingStage.querySelector<HTMLElement>(`[name="${issue.path}"]`);
+    const error = editingStage.querySelector<HTMLElement>(`[data-field-error="${issue.path}"]`);
+    control?.setAttribute("aria-invalid", "true");
+    if (error) error.textContent = issue.message;
+    control?.focus();
+    return true;
+  }
+
+  function validateAndContinue(): void {
+    if (focusStageIssue()) return;
     const index = STAGE_ORDER.indexOf(state.stage);
     const next = STAGE_ORDER[index + 1];
     if (!next) return;
@@ -1033,6 +1093,23 @@ export function mountWorldCreationPage(
     const index = selectedIndexes.get(activeCollection) ?? 0;
     state = updateCreationCollectionItem(state, activeCollection, index, parsed.value);
     renderCollectionEditor();
+  }
+
+  function applyAssetsJson(): void {
+    const textarea = editingStage.querySelector<HTMLTextAreaElement>("[data-assets-json]");
+    const error = editingStage.querySelector<HTMLElement>("[data-assets-error]");
+    if (!textarea) return;
+    const parsed = parseAdvancedJson<unknown[]>(textarea.value, "array");
+    if (parsed.error) {
+      assetsJsonInvalid = true;
+      textarea.setAttribute("aria-invalid", "true");
+      if (error) error.textContent = parsed.error;
+      textarea.focus();
+      return;
+    }
+    assetsJsonInvalid = false;
+    state = editCreationDraft(state, ["assets"], parsed.value);
+    renderCover();
   }
 
   function applyDefaultsJson(): void {
@@ -1124,6 +1201,22 @@ export function mountWorldCreationPage(
   function onClick(event: Event): void {
     const target = event.target;
     if (!(target instanceof pageView.Element)) return;
+    const stageButton = target.closest<HTMLButtonElement>("button[data-stage]");
+    if (stageButton?.dataset.stage && !stageButton.disabled) {
+      const previousStage = state.stage;
+      const previousIndex = STAGE_ORDER.indexOf(previousStage);
+      const targetStage = stageButton.dataset.stage as CreationStage;
+      state = setCreationStage(state, targetStage);
+      if (state.stage !== previousStage) {
+        if (assetsJsonInvalid && previousStage === "cover") assetsJsonInvalid = false;
+        if (state.stage === "canon") activeCollection = "entities";
+        if (state.stage === "mechanics") activeCollection = "rpgStats";
+        renderStage();
+      } else if (STAGE_ORDER.indexOf(targetStage) > previousIndex) {
+        focusStageIssue();
+      }
+      return;
+    }
     const issueLink = target.closest<HTMLAnchorElement>("[data-review-issue-stage]");
     if (issueLink?.dataset.reviewIssueStage) {
       event.preventDefault();
@@ -1168,7 +1261,9 @@ export function mountWorldCreationPage(
     else if (action === "back-stage") goBack();
     else if (action === "create-world") void submitCreation();
     else if (action === "retry-cover") void retryCover();
-    else if (action === "open-created-world" && createdWorld) navigate(`/app/worlds/${createdWorld.id}`);
+    else if (action === "open-created-world" && createdWorld) {
+      navigate(createdWorldDestination(createdWorld.id, "recovery"));
+    }
     else if (action === "switch-collection" && actionButton?.dataset.collectionTarget) {
       activeCollection = actionButton.dataset.collectionTarget as EditableCollection;
       renderCollectionEditor();
@@ -1188,11 +1283,22 @@ export function mountWorldCreationPage(
       state = restoreCreationCollectionItem(state, actionButton.dataset.removalId);
       renderCollectionEditor();
     } else if (action === "apply-advanced-json") applyAdvancedJson();
+    else if (action === "apply-assets-json") applyAssetsJson();
     else if (action === "apply-defaults-json") applyDefaultsJson();
   }
 
   function onKeyDown(event: Event): void {
     const keyboardEvent = event as KeyboardEvent;
+    const target = keyboardEvent.target;
+    if (!dialogIsOpen() && target instanceof pageView.Element &&
+      (keyboardEvent.key === "Enter" || keyboardEvent.key === " ")) {
+      const stageButton = target.closest<HTMLButtonElement>("button[data-stage]:not([disabled])");
+      if (stageButton) {
+        keyboardEvent.preventDefault();
+        stageButton.click();
+        return;
+      }
+    }
     if (!dialogIsOpen()) return;
     if (keyboardEvent.key === "Escape") {
       keyboardEvent.preventDefault();

@@ -98,6 +98,36 @@ describe("World Editor Overview page", () => {
     expect(document.querySelector('[data-draft-ledger] [data-editor-state]')?.textContent).toContain("Loading world");
   });
 
+  it.each([
+    ["?creation=created&cover=none", "World created. You can continue editing its draft."],
+    ["?creation=created&cover=pending", "World created. Cover generation is continuing in the background."],
+    ["?creation=created&cover=completed", "World created. Its cover is ready."],
+    ["?creation=created&cover=recovery", "World created. Its cover still needs attention; retry it from Assets."]
+  ])("announces the safe creation handoff %s after the destination loads", async (creationStatusSearch, message) => {
+    const { document, root } = editorFixture();
+    mountWorldEditorPage(root, worldId, {
+      loadWorld: vi.fn().mockResolvedValue(world),
+      creationStatusSearch
+    });
+
+    await settle();
+
+    expect(document.querySelector('[data-save-announcement]')?.textContent).toBe(message);
+  });
+
+  it("ignores unrecognized creation handoff values instead of rendering query content", async () => {
+    const { document, root } = editorFixture();
+    mountWorldEditorPage(root, worldId, {
+      loadWorld: vi.fn().mockResolvedValue(world),
+      creationStatusSearch: "?creation=<script>&cover=secret-token"
+    });
+
+    await settle();
+
+    expect(document.querySelector('[data-save-announcement]')?.textContent).toBe("");
+    expect(root.textContent).not.toContain("secret-token");
+  });
+
   it("populates every Overview field and exposes one current section", async () => {
     const { document, root } = editorFixture();
     mountWorldEditorPage(root, worldId, { loadWorld: vi.fn().mockResolvedValue(world) });

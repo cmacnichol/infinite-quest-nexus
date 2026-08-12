@@ -50,6 +50,7 @@ export interface CreationError {
 
 export interface WorldCreationState {
   stage: CreationStage;
+  furthestStageIndex: number;
   method: CreationMethod | null;
   draft: EditableWorldDraft;
   provenance: CreationMethod | null;
@@ -78,13 +79,16 @@ export interface CreationReadiness {
 
 export interface CreationStageProgress {
   stage: CreationStage;
-  state: "completed" | "current" | "upcoming";
+  state: "completed" | "current" | "revisitable" | "upcoming";
 }
 
 export interface CreationReview {
   provenance: CreationMethod | null;
   ready: boolean;
   warnings: string[];
+  warningCount: number;
+  readiness: CreationReadiness["stages"];
+  coverIntent: CreationCoverIntent;
   counts: {
     entities: number;
     relationships: number;
@@ -181,6 +185,7 @@ export function isWorldCreationPath(pathname: string): boolean {
 export function createWorldCreationState(): WorldCreationState {
   return {
     stage: "method",
+    furthestStageIndex: 0,
     method: null,
     draft: createEmptyWorldDraft(),
     provenance: null,
@@ -288,9 +293,15 @@ export function setCreationStage(
 ): WorldCreationState {
   const currentIndex = CREATION_STAGES.indexOf(state.stage);
   const nextIndex = CREATION_STAGES.indexOf(stage);
-  if (nextIndex < 0 || nextIndex === currentIndex || nextIndex > currentIndex + 1) return state;
+  if (nextIndex < 0 || nextIndex === currentIndex) return state;
+  if (nextIndex > state.furthestStageIndex && nextIndex > currentIndex + 1) return state;
   if (nextIndex > currentIndex && validateCreationStage(state, state.stage).issues.length > 0) return state;
-  return { ...state, stage, draft: canonicalDraft(state.draft) };
+  return {
+    ...state,
+    stage,
+    furthestStageIndex: Math.max(state.furthestStageIndex, nextIndex),
+    draft: canonicalDraft(state.draft)
+  };
 }
 
 export function creationReadiness(state: WorldCreationState): CreationReadiness {
@@ -304,10 +315,14 @@ export function creationReadiness(state: WorldCreationState): CreationReadiness 
 
 export function creationReview(state: WorldCreationState): CreationReview {
   const draft = canonicalDraft(state.draft);
+  const warnings = state.coverIntent.mode === "none" ? ["No cover will be attached."] : [];
   return {
     provenance: state.provenance,
     ready: validateCreationStage(state, "review").issues.length === 0,
-    warnings: state.coverIntent.mode === "none" ? ["No cover will be attached."] : [],
+    warnings,
+    warningCount: warnings.length,
+    readiness: creationReadiness(state).stages,
+    coverIntent: clone(state.coverIntent),
     counts: {
       entities: draft.entities.length,
       relationships: draft.relationships.length,
@@ -324,7 +339,13 @@ export function creationStageProgress(state: WorldCreationState): CreationStageP
   const activeIndex = CREATION_STAGES.indexOf(state.stage);
   return CREATION_STAGES.map((stage, index) => ({
     stage,
-    state: index < activeIndex ? "completed" : index === activeIndex ? "current" : "upcoming"
+    state: index < activeIndex
+      ? "completed"
+      : index === activeIndex
+        ? "current"
+        : index <= state.furthestStageIndex
+          ? "revisitable"
+          : "upcoming"
   }));
 }
 

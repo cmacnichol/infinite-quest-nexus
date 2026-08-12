@@ -13,7 +13,7 @@ Complete. The World Creation Wizard now has its final Constructed Atlas Grid sty
 - Added semantic current, completed, upcoming, checked, hover, focus, disabled, progress, validation, dialog, and review treatments without creation-page theme literals.
 - Added explicit reduced-motion removal for dialog, stage, progress, and ledger transitions/animations.
 - Bounded serialized Review content so the final Create boundary remains visible with the ledger.
-- Corrected two visual-regression findings: nested hidden completion text now remains visually hidden, and the Manual action remains hidden while AI-assisted authoring is selected.
+- Corrected three visual-regression findings: nested hidden completion text remains visually hidden, the Manual action remains hidden while AI-assisted authoring is selected, and Review content stays bounded above the ledger.
 - Documented Creation Stage Index, Compact Method Control, Prompt Toolbar, Expanded Prompt Dialog, and Creation Progress Ledger in `DESIGN.md` and `.impeccable/design.json`.
 - Added the Operate-mode surface brief covering manual/AI convergence, the no-character rule, authoritative Create boundary, provider/clipboard recovery, responsive composition, accessibility, and motion.
 

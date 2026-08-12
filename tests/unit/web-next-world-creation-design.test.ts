@@ -6,6 +6,7 @@ import { mountWorldCreationPage } from "../../apps/web-next/src/world-creation-p
 
 const webNextRoot = path.resolve(import.meta.dirname, "../../apps/web-next");
 const css = fs.readFileSync(path.join(webNextRoot, "src/styles.css"), "utf8");
+const creationSource = fs.readFileSync(path.join(webNextRoot, "src/world-creation-page.ts"), "utf8");
 
 function cssRule(source: string, selector: string): string {
   const normalizedSelector = selector.replace(/\s+/g, " ").trim();
@@ -41,6 +42,8 @@ describe("World Creation Atlas Workspace design contract", () => {
     const method = cssRule(css, ".creation-method-control");
     const tool = cssRule(css, ".creation-prompt-tools button");
     const stageAction = cssRule(css, ".creation-stage-actions button");
+    const dynamicActions = cssRule(css, ".creation-stage-index button, .creation-canvas button, .creation-canvas summary, .creation-cover-control");
+    const coverControl = cssRule(css, ".creation-cover-control");
 
     expect(method).toMatch(/height:\s*48px/);
     expect(method).toMatch(/display:\s*inline-flex/);
@@ -48,6 +51,14 @@ describe("World Creation Atlas Workspace design contract", () => {
     expect(tool).toMatch(/min-width:\s*44px/);
     expect(tool).toMatch(/min-height:\s*44px/);
     expect(stageAction).toMatch(/min-height:\s*44px/);
+    expect(dynamicActions).toMatch(/min-height:\s*44px/);
+    expect(coverControl).toMatch(/min-height:\s*44px/);
+    expect(coverControl).toMatch(/display:\s*flex/);
+  });
+
+  it("keeps illustrative sample worlds out of runtime creation content", () => {
+    expect(creationSource).not.toContain("A glass city follows a migrating star");
+    expect(creationSource).not.toContain("A glass city follows a migrating star…");
   });
 
   it("renders only Copy, Paste, and Expand prompt tools with authored SVG icons", () => {
@@ -67,6 +78,7 @@ describe("World Creation Atlas Workspace design contract", () => {
   it("constructs a desktop stage rail, broad canvas, and bottom progress ledger", () => {
     expect(cssRule(css, ".creation-workspace")).toMatch(/grid-template-columns:\s*minmax\([^;]+\)\s+minmax\(0,\s*1fr\)/);
     expect(cssRule(css, ".creation-stage-index")).toMatch(/border-right:\s*1px solid var\(--rule-strong\)/);
+    expect(cssRule(css, ".creation-stage-index button")).toMatch(/min-height:\s*64px/);
     expect(cssRule(css, ".creation-canvas")).toMatch(/min-height:/);
     expect(cssRule(css, ".creation-progress-ledger, .creation-stage-actions")).toMatch(/position:\s*sticky/);
     expect(cssRule(css, ".creation-progress-ledger, .creation-stage-actions")).toMatch(/bottom:\s*0/);
@@ -78,10 +90,13 @@ describe("World Creation Atlas Workspace design contract", () => {
 
     expect(cssRule(compact, ".creation-stage-index")).toMatch(/flex-direction:\s*row/);
     expect(cssRule(compact, ".creation-stage-index")).toMatch(/overflow-x:\s*auto/);
+    expect(cssRule(compact, ".creation-stage-index button")).toMatch(/min-height:\s*52px/);
     expect(cssRule(compact, ".creation-progress-ledger, .creation-stage-actions")).toMatch(/grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
+    expect(cssRule(compact, ".creation-stage-actions::before")).toMatch(/grid-column:\s*1\s*\/\s*-1/);
     expect(cssRule(compact, ".creation-prompt-dialog")).toMatch(/width:\s*100%/);
     expect(cssRule(compact, ".creation-prompt-dialog")).toMatch(/max-width:\s*none/);
     expect(cssRule(compact, ".creation-prompt-dialog")).toMatch(/margin:\s*0/);
+    expect(cssRule(compact, ".creation-prompt-dialog")).toMatch(/inset:\s*auto\s+0\s+0/);
   });
 
   it("styles current, completed, focus, checked, disabled, and dialog states without color-only meaning", () => {

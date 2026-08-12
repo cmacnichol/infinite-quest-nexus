@@ -57,6 +57,7 @@ export interface WorldEditorPageDependencies {
   copyUnsavedDraft?: (serializedDraft: string) => Promise<void>;
   downloadUnsavedDraft?: (serializedDraft: string, filename: string) => void;
   confirmReload?: () => boolean;
+  creationStatusSearch?: string;
 }
 
 type OverviewField = "title" | "genre" | "tone" | "premise" | "backgroundStory" | "firstAction" | "rules";
@@ -266,6 +267,17 @@ function textValue(value: unknown): string {
   return "";
 }
 
+function creationHandoffMessage(search: string): string {
+  const parameters = new URLSearchParams(search);
+  if (parameters.get("creation") !== "created") return "";
+  const cover = parameters.get("cover");
+  if (cover === "none") return "World created. You can continue editing its draft.";
+  if (cover === "pending") return "World created. Cover generation is continuing in the background.";
+  if (cover === "completed") return "World created. Its cover is ready.";
+  if (cover === "recovery") return "World created. Its cover still needs attention; retry it from Assets.";
+  return "";
+}
+
 export function mountWorldEditorPage(
   root: HTMLElement,
   worldId: string,
@@ -314,6 +326,9 @@ export function mountWorldEditorPage(
   const confirmReload = dependencies.confirmReload ?? (() => pageView.confirm(
     "Reload the authoritative draft? Your unsaved changes will be discarded."
   ));
+  const creationMessage = creationHandoffMessage(
+    dependencies.creationStatusSearch ?? pageView.location?.search ?? ""
+  );
 
   let state: WorldEditorState | null = null;
   let authoritativeStatus: WorldAggregate["status"] | null = null;
@@ -912,7 +927,7 @@ export function mountWorldEditorPage(
       loadState.append(blockedState);
     }
     conflictHost.replaceChildren();
-    announcement.textContent = "";
+    announcement.textContent = creationMessage;
     renderOverviewFields();
     renderSection();
     renderStatus();

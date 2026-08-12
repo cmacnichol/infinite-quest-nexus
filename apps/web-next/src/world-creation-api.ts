@@ -77,6 +77,11 @@ function isPositiveInteger(value: unknown): value is number {
   return Number.isInteger(value) && Number(value) > 0;
 }
 
+function isUuid(value: unknown): value is string {
+  return typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
 function canonicalDraft(value: unknown): EditableWorldDraft {
   return canonicalizeWorldCreationDraft(parseEditableWorldDraft(value));
 }
@@ -154,7 +159,7 @@ function parseGenerationProgress(value: unknown): WorldGenerationProgressRespons
 }
 
 function parseCreatedWorld(value: unknown): CreatedWorldResponse {
-  if (!isRecord(value) || typeof value.id !== "string" || !value.id ||
+  if (!isRecord(value) || !isUuid(value.id) ||
       typeof value.title !== "string" || !value.title.trim() || value.status !== "draft" ||
       typeof value.imageUrl !== "string" || !isPositiveInteger(value.draftRevision) ||
       !(value.draftBasedOnWorldVersionId === null || typeof value.draftBasedOnWorldVersionId === "string") ||

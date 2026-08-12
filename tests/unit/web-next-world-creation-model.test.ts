@@ -103,7 +103,12 @@ describe("World Creation local workflow", () => {
     expect(canon.stage).toBe("canon");
     expect(setCreationStage(canon, "foundation").stage).toBe("foundation");
     const mechanics = setCreationStage(canon, "mechanics");
-    expect(setCreationStage(mechanics, "method").stage).toBe("method");
+    const revisitedMethod = setCreationStage(mechanics, "method");
+    expect(revisitedMethod.stage).toBe("method");
+    expect(setCreationStage(revisitedMethod, "mechanics").stage).toBe("mechanics");
+
+    const invalidRevisit = editCreationDraft(setCreationStage(mechanics, "foundation"), ["world", "title"], "");
+    expect(setCreationStage(invalidRevisit, "mechanics")).toBe(invalidRevisit);
   });
 
   it("removes and restores collection records with monotonic undo metadata", () => {
@@ -252,6 +257,16 @@ describe("World Creation local workflow", () => {
     expect(review.provenance).toBe("ai");
     expect(review.ready).toBe(true);
     expect(review.warnings).toEqual(["No cover will be attached."]);
+    expect(review.warningCount).toBe(1);
+    expect(review.coverIntent).toEqual({ mode: "none" });
+    expect(review.readiness).toEqual([
+      { stage: "method", ready: true, issueCount: 0 },
+      { stage: "foundation", ready: true, issueCount: 0 },
+      { stage: "canon", ready: true, issueCount: 0 },
+      { stage: "mechanics", ready: true, issueCount: 0 },
+      { stage: "cover", ready: true, issueCount: 0 },
+      { stage: "review", ready: true, issueCount: 0 }
+    ]);
     expect(review.counts).toEqual({
       entities: 2,
       relationships: 1,
@@ -263,12 +278,17 @@ describe("World Creation local workflow", () => {
     expect(review.draft.playableCharacters).toEqual([]);
   });
 
-  it("reports current and completed editing stages without treating future stages as complete", () => {
-    const foundation = setCreationStage(selectCreationMethod(createWorldCreationState(), "manual"), "foundation");
-    expect(creationStageProgress(foundation)).toEqual([
+  it("reports completed, current, revisitable, and unavailable stages", () => {
+    let state = selectCreationMethod(createWorldCreationState(), "manual");
+    state = setCreationStage(state, "foundation");
+    state = editCreationDraft(state, ["world", "title"], "Atlas");
+    state = setCreationStage(state, "canon");
+    state = setCreationStage(state, "foundation");
+
+    expect(creationStageProgress(state)).toEqual([
       { stage: "method", state: "completed" },
       { stage: "foundation", state: "current" },
-      { stage: "canon", state: "upcoming" },
+      { stage: "canon", state: "revisitable" },
       { stage: "mechanics", state: "upcoming" },
       { stage: "cover", state: "upcoming" },
       { stage: "review", state: "upcoming" }
