@@ -107,3 +107,37 @@ No Task 1 correctness issue remained after self-review. One API-design caveat is
 `pnpm vitest run` completed with 152 passed files, 13 failed files, and 58 skipped files (1,734 passed tests; 129 failed; 637 skipped). Failures are outside Task 1 and are dominated by Windows/Linux filesystem assumptions (`/proc/self/fd`, `filesystem_platform_unsupported`, path composition), plus an unavailable `pnpm` child-process executable. The two Task 1 suites pass independently.
 
 Projectmem was explicitly unavailable for this task, so no projectmem precheck or event logging was performed.
+
+## Fix Round 1
+
+Resolved every round-one review finding test-first.
+
+### RED evidence
+
+`pnpm vitest run tests/unit/web-next-character-workspace-model.test.ts` initially failed 3/10 tests. The failures reproduced raw roster-ID whitespace collisions, hidden malformed profile roots/null values, and `characterReview.ready` disagreeing with final handoff schema eligibility.
+
+### Corrections
+
+- Canonicalize factory and roster IDs through the playable-character ID schema before collision checks.
+- Reject invalid/overlong factory values during bounded retries, canonicalize surrounding whitespace, and truncate deterministic suffix bases so every fallback remains within 200 characters.
+- Preserve explicit `null` profiles as invalid input rather than hydrating them as empty profiles.
+- Surface profile-root errors on each relevant profile stage and section errors on identity, story, or appearance with stable candidate paths.
+- Make review counts defensive for malformed profile roots/sections so review never throws.
+- Derive review readiness from the same final schema/collision handoff boundary used by `characterHandoffCandidate`.
+- Add exact 200-character ID/name and 200,000-character narrative acceptance tests, one-over rejection tests, malformed root/identity/story/appearance tests, and final-schema readiness parity coverage.
+
+### Verification
+
+- `pnpm vitest run tests/unit/world-library.test.ts tests/unit/web-next-character-workspace-model.test.ts` — 2 files passed, 30 tests passed.
+- `pnpm exec tsc --ignoreConfig --noEmit --strict --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck apps/web-next/src/character-workspace-model.ts packages/contracts/src/world-library.ts` — exit 0, no diagnostics.
+- `git diff --check` — exit 0, no diagnostics.
+
+### Files changed
+
+- `apps/web-next/src/character-workspace-model.ts`
+- `tests/unit/web-next-character-workspace-model.test.ts`
+- `.superpowers/sdd/2026-08-12-character-creation-workspace/task-1-report.md`
+
+### Concerns
+
+No scoped correctness concern remains. The pre-existing untracked `.superpowers/brainstorm/` directory remains untouched and excluded from the commit. Projectmem MCP and the `pjm` CLI were unavailable, so required prechecks/event logging could not be performed.

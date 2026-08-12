@@ -58,6 +58,32 @@ describe("character workspace model", () => {
       idFactory: () => "collision"
     });
     expect(repeatedCollision.candidate.id).toBe("collision-3");
+
+    const whitespaceCollision = createCharacterWorkspaceState({
+      roster: [completeCharacter({ id: " collision " })],
+      idFactory: () => "collision"
+    });
+    expect(whitespaceCollision.candidate.id).toBe("collision-2");
+
+    const canonicalFactoryId = createCharacterWorkspaceState({
+      roster: [],
+      idFactory: () => "  trusted-character  "
+    });
+    expect(canonicalFactoryId.candidate.id).toBe("trusted-character");
+
+    const maximumId = "x".repeat(200);
+    const boundedSuffix = createCharacterWorkspaceState({
+      roster: [completeCharacter({ id: maximumId })],
+      idFactory: () => maximumId
+    });
+    expect(boundedSuffix.candidate.id).toBe(`${"x".repeat(198)}-2`);
+    expect(boundedSuffix.candidate.id).toHaveLength(200);
+
+    const repairedOverlongId = createCharacterWorkspaceState({
+      roster: [],
+      idFactory: () => "x".repeat(201)
+    });
+    expect(repairedOverlongId.candidate.id).toBe("character-2");
   });
 
   it("performs immutable nested edits while preserving unknown safe properties", () => {
@@ -95,6 +121,63 @@ describe("character workspace model", () => {
       .toContainEqual(expect.objectContaining({ path: "candidate.name", message: "Character name must contain 200 characters or fewer." }));
     expect(validateCharacterStage(longGuidance, "story").issues)
       .toContainEqual(expect.objectContaining({ path: "candidate.characterText", message: "Narrative guidance must contain 200000 characters or fewer." }));
+  });
+
+  it("accepts exact text boundaries and rejects one character beyond them", () => {
+    const exact = createCharacterWorkspaceState({
+      roster: [],
+      method: "manual",
+      candidate: completeCharacter({
+        id: "i".repeat(200),
+        name: "n".repeat(200),
+        characterText: "g".repeat(200_000)
+      })
+    });
+
+    expect(validateCharacterStage(exact, "review").issues.filter(({ severity }) => severity === "error")).toEqual([]);
+    expect(characterHandoffCandidate(exact)).not.toBeNull();
+
+    const overlongId = editCharacterCandidate(exact, ["id"], "i".repeat(201));
+    const overlongName = editCharacterCandidate(exact, ["name"], "n".repeat(201));
+    const overlongStory = editCharacterCandidate(exact, ["characterText"], "g".repeat(200_001));
+    expect(characterHandoffCandidate(overlongId)).toBeNull();
+    expect(characterHandoffCandidate(overlongName)).toBeNull();
+    expect(characterHandoffCandidate(overlongStory)).toBeNull();
+  });
+
+  it("surfaces malformed profile roots and sections without throwing during review", () => {
+    const malformedProfiles: Array<{ profile: unknown; stage: "identity" | "story" | "appearance"; path: string }> = [
+      { profile: null, stage: "identity", path: "candidate.profile" },
+      { profile: "invalid", stage: "story", path: "candidate.profile" },
+      { profile: { identity: null }, stage: "identity", path: "candidate.profile.identity" },
+      { profile: { story: null }, stage: "story", path: "candidate.profile.story" },
+      { profile: { appearance: null }, stage: "appearance", path: "candidate.profile.appearance" }
+    ];
+
+    for (const malformed of malformedProfiles) {
+      const state = createCharacterWorkspaceState({
+        roster: [],
+        method: "manual",
+        candidate: { ...completeCharacter(), profile: malformed.profile } as PlayableCharacter
+      });
+      expect(validateCharacterStage(state, malformed.stage).issues)
+        .toContainEqual(expect.objectContaining({ path: malformed.path, severity: "error" }));
+      expect(() => characterReview(state)).not.toThrow();
+      expect(characterReview(state).ready).toBe(false);
+      expect(characterHandoffCandidate(state)).toBeNull();
+    }
+  });
+
+  it("keeps review readiness aligned with final handoff schema eligibility", () => {
+    const malformed = createCharacterWorkspaceState({
+      roster: [],
+      method: "manual",
+      candidate: { ...completeCharacter(), source: null } as unknown as PlayableCharacter
+    });
+
+    expect(() => characterReview(malformed)).not.toThrow();
+    expect(characterReview(malformed).ready).toBe(false);
+    expect(characterHandoffCandidate(malformed)).toBeNull();
   });
 
   it("applies generated fields without trusting generated identity or owner keys", () => {

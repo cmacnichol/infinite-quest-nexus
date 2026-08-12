@@ -74,17 +74,37 @@ function stripProhibitedRootKeys(value: Record<string, unknown>): Record<string,
   return Object.fromEntries(Object.entries(value).filter(([key]) => !PROHIBITED_ROOT_KEYS.has(key)));
 }
 
+function canonicalCharacterId(value: unknown): string | null {
+  const parsed = playableCharacterSchema.shape.id.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+function rosterIds(roster: readonly PlayableCharacter[]): Set<string> {
+  const ids = new Set<string>();
+  for (const character of roster) {
+    const id = canonicalCharacterId(character?.id);
+    if (id !== null) ids.add(id);
+  }
+  return ids;
+}
+
+function suffixedId(base: string, suffix: number): string {
+  const suffixText = `-${suffix}`;
+  return `${base.slice(0, MAX_CHARACTER_NAME_LENGTH - suffixText.length)}${suffixText}`;
+}
+
 function createTrustedId(roster: readonly PlayableCharacter[], idFactory: () => string): string {
-  const ids = new Set(roster.map(({ id }) => id));
+  const ids = rosterIds(roster);
   let base = "character";
   for (let attempt = 0; attempt < ID_FACTORY_RETRIES; attempt += 1) {
-    const generated = idFactory().trim();
-    if (generated) base = generated;
-    if (generated && !ids.has(generated)) return generated;
+    const generated = canonicalCharacterId(idFactory());
+    if (generated === null) continue;
+    base = generated;
+    if (!ids.has(generated)) return generated;
   }
   let suffix = 2;
-  while (ids.has(`${base}-${suffix}`)) suffix += 1;
-  return `${base}-${suffix}`;
+  while (ids.has(suffixedId(base, suffix))) suffix += 1;
+  return suffixedId(base, suffix);
 }
 
 function emptyCandidate(id: string): PlayableCharacter {
@@ -127,8 +147,8 @@ function normalizedName(value: unknown): string {
 
 function duplicateIdentityIssues(state: CharacterWorkspaceState): CharacterValidationIssue[] {
   const issues: CharacterValidationIssue[] = [];
-  const candidateId = typeof state.candidate.id === "string" ? state.candidate.id.trim() : "";
-  if (candidateId && state.roster.some(({ id }) => id.trim() === candidateId)) {
+  const candidateId = canonicalCharacterId(state.candidate.id);
+  if (candidateId !== null && rosterIds(state.roster).has(candidateId)) {
     issues.push(issue("identity", "candidate.id", "Character ID must be unique in this world draft."));
   }
   const name = normalizedName(state.candidate.name);
@@ -139,24 +159,32 @@ function duplicateIdentityIssues(state: CharacterWorkspaceState): CharacterValid
 }
 
 function profileContractIssues(state: CharacterWorkspaceState, stage: CharacterStage): CharacterValidationIssue[] {
-  const parsed = characterProfileSchema.safeParse(state.candidate.profile ?? {});
+  const parsed = characterProfileSchema.safeParse(state.candidate.profile);
   if (parsed.success) return [];
   return parsed.error.issues
     .filter((profileIssue) => {
       const section = profileIssue.path[0];
+      if (section === undefined) return true;
       if (stage === "identity") return section === "identity";
       if (stage === "story") return section === "story" || section === "unclassifiedNotes";
       return stage === "appearance" && section === "appearance";
     })
     .map((profileIssue) => issue(
       stage,
-      `candidate.profile.${profileIssue.path.join(".")}`,
+      ["candidate.profile", ...profileIssue.path].join("."),
       profileIssue.message
     ));
 }
 
-function completedTextCount(value: Record<string, unknown>): number {
-  return Object.values(value).filter((entry) => typeof entry === "string" && entry.trim().length > 0).length;
+function recordValue(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function completedTextCount(value: unknown): number {
+  return Object.values(recordValue(value))
+    .filter((entry) => typeof entry === "string" && entry.trim().length > 0).length;
 }
 
 export function createCharacterWorkspaceState(options: CreateCharacterWorkspaceOptions): CharacterWorkspaceState {
@@ -164,7 +192,7 @@ export function createCharacterWorkspaceState(options: CreateCharacterWorkspaceO
   const candidate = options.candidate
     ? clone(options.candidate)
     : emptyCandidate(createTrustedId(roster, options.idFactory ?? (() => crypto.randomUUID())));
-  candidate.profile ??= characterProfileSchema.parse({});
+  if (candidate.profile === undefined) candidate.profile = characterProfileSchema.parse({});
   return {
     stage: "method",
     furthestStageIndex: 0,
@@ -278,15 +306,17 @@ export function characterReview(state: CharacterWorkspaceState): CharacterReview
   const candidate = clone(state.candidate);
   const allIssues = validateCharacterStage(state, "review").issues;
   const warnings = allIssues.filter(({ severity }) => severity === "warning");
-  const profile = candidate.profile ?? characterProfileSchema.parse({});
-  const appearance = profile.appearance as Record<string, unknown>;
-  const appearanceTextCount = completedTextCount(appearance);
+  const profile = recordValue(candidate.profile);
+  const identity = recordValue(profile.identity);
+  const story = recordValue(profile.story);
+  const appearance = recordValue(profile.appearance);
+  const aliases = Array.isArray(identity.aliases) ? identity.aliases : [];
   const distinguishingFeatures = Array.isArray(appearance.distinguishingFeatures)
     ? appearance.distinguishingFeatures.filter((entry) => typeof entry === "string" && entry.trim()).length
     : 0;
   return {
     provenance: state.method,
-    ready: allIssues.every(({ severity }) => severity !== "error"),
+    ready: characterHandoffCandidate(state) !== null,
     warnings,
     warningCount: warnings.length,
     readiness: CHARACTER_STAGES.map((reviewStage) => {
@@ -295,9 +325,9 @@ export function characterReview(state: CharacterWorkspaceState): CharacterReview
       return { stage: reviewStage, ready: errors.length === 0, issueCount: errors.length };
     }),
     counts: {
-      aliases: profile.identity.aliases.length,
-      completedStoryFields: completedTextCount(profile.story as Record<string, unknown>),
-      completedAppearanceFields: appearanceTextCount + distinguishingFeatures,
+      aliases: aliases.length,
+      completedStoryFields: completedTextCount(story),
+      completedAppearanceFields: completedTextCount(appearance) + distinguishingFeatures,
       stats: Array.isArray(candidate.rpgStats) ? candidate.rpgStats.length : 0,
       triggers: Array.isArray(candidate.defaultTriggers) ? candidate.defaultTriggers.length : 0
     },
@@ -310,6 +340,6 @@ export function characterHandoffCandidate(state: CharacterWorkspaceState): Playa
   if (validation.issues.some(({ severity }) => severity === "error")) return null;
   const safeCandidate = stripProhibitedRootKeys(clone(state.candidate) as Record<string, unknown>);
   const parsed = playableCharacterSchema.safeParse(safeCandidate);
-  if (!parsed.success || state.roster.some(({ id }) => id.trim() === parsed.data.id)) return null;
+  if (!parsed.success || rosterIds(state.roster).has(parsed.data.id)) return null;
   return clone(parsed.data);
 }
