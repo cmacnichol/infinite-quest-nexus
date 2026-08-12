@@ -77,6 +77,14 @@ describe("Prompt Library catalog", () => {
     }
   });
 
+  it("makes story-writing length a soft goal without permitting invented padding", () => {
+    expect(PROMPT_TEMPLATE_CATALOG.story_system.defaultContent).toContain("The length range is a soft pacing goal, not a requirement.");
+    expect(PROMPT_TEMPLATE_CATALOG.story_recovery_output_limit.defaultContent).toContain("soft pacing goal");
+    expect(PROMPT_TEMPLATE_CATALOG.scene_coverage.defaultContent).toContain("Do not treat extra invented material as evidence of better coverage.");
+    expect(PROMPT_TEMPLATE_CATALOG.scene_coverage_rewrite.defaultContent).toContain("Length is a soft pacing goal");
+    expect(PROMPT_TEMPLATE_CATALOG.event_extension.defaultContent).toContain("Stop once the event is integrated.");
+  });
+
   it("allows only eligible campaign overrides", () => {
     expect(promptTemplateOverrideSchema.safeParse({ key: "story_system", scope: "campaign", campaignId: crypto.randomUUID(), content: "Write safely." }).success).toBe(true);
     expect(promptTemplateOverrideSchema.safeParse({ key: "world_generation", scope: "campaign", campaignId: crypto.randomUUID(), content: "Write safely." }).success).toBe(false);
