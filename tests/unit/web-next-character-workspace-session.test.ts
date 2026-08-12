@@ -267,10 +267,14 @@ describe("character workspace session store", () => {
         owner_user_id: "nested-owner",
         loreExtension: {
           keep: "safe lore",
+          secretary: "records the council's safe lore",
+          tokenizer: "splits ancient runes",
+          passwordlessSociety: "trusts spoken oaths",
           accessToken: "token",
           client_secret: "secret",
           databasePassword: "password",
-          "api-key": "api key"
+          "api-key": "api key",
+          credentials: ["credential"]
         }
       },
       playableCharacters: [candidate({ user_id: "character-owner", credentials: ["credential"] })]
@@ -292,7 +296,14 @@ describe("character workspace session store", () => {
       /ownerUserId|owner_user_id|userId|user_id|credential|accessToken|client_secret|databasePassword|api-key|auth_token|apiKey/u
     );
     expect(session.parentDraft).toMatchObject({
-      world: { loreExtension: { keep: "safe lore" } }
+      world: {
+        loreExtension: {
+          keep: "safe lore",
+          secretary: "records the council's safe lore",
+          tokenizer: "splits ancient runes",
+          passwordlessSociety: "trusts spoken oaths"
+        }
+      }
     });
     expect(session.candidate).toMatchObject({ safeExtension: { keep: true } });
   });
@@ -320,21 +331,23 @@ describe("character workspace session store", () => {
     expect(storage.length).toBe(0);
   });
 
-  it("fails closed and cannot return a result later when storage removal fails", () => {
-    const storage = new MemoryStorage();
-    const store = createCharacterWorkspaceSessionStore(storage, {
-      now: () => NOW,
-      keyFactory: () => "remove-failure"
-    });
-    const session = store.create(createInput());
-    expect(store.complete(session.key, session.workflowId, {
-      status: "accepted",
-      candidate: candidate()
-    })).toBe(true);
-    storage.failingRemovals.add(`iqn:character-workspace:session:${session.key}`);
+  it("fails closed and cannot return a result later when any record removal fails", () => {
+    for (const recordType of ["session", "return", "result"]) {
+      const storage = new MemoryStorage();
+      const store = createCharacterWorkspaceSessionStore(storage, {
+        now: () => NOW,
+        keyFactory: () => `remove-failure-${recordType}`
+      });
+      const session = store.create(createInput());
+      expect(store.complete(session.key, session.workflowId, {
+        status: "accepted",
+        candidate: candidate()
+      })).toBe(true);
+      storage.failingRemovals.add(`iqn:character-workspace:${recordType}:${session.key}`);
 
-    expect(store.consume(session.key, session.origin, session.workflowId)).toBeNull();
-    expect(store.consume(session.key, session.origin, session.workflowId)).toBeNull();
+      expect(store.consume(session.key, session.origin, session.workflowId)).toBeNull();
+      expect(store.consume(session.key, session.origin, session.workflowId)).toBeNull();
+    }
   });
 
   it("returns cancellation exactly once", () => {

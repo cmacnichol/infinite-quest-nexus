@@ -79,7 +79,8 @@ const MAX_HANDOFF_BYTES = 512 * 1024;
 const MAX_KEY_ATTEMPTS = 10;
 const MAX_IDENTITY_LENGTH = 512;
 const PROHIBITED_IDENTITY_KEYS = new Set(["user_id", "userId", "owner_user_id", "ownerUserId"]);
-const PROHIBITED_SECRET_KEY_PARTS = ["credential", "token", "secret", "password", "apikey"];
+const PROHIBITED_SECRET_TOKENS = new Set(["credential", "credentials", "token", "secret", "password"]);
+const PROHIBITED_WHOLE_SECRET_KEYS = new Set(["apikey"]);
 const RESULT_FIELDS = new Set(["version", "key", "workflowId", "expiresAt", "result"]);
 const SESSION_FIELDS = new Set([
   "version",
@@ -147,10 +148,21 @@ function isSafeParentRoute(value: unknown): value is string {
   }
 }
 
+function semanticKeyTokens(key: string): string[] {
+  return key
+    .replace(/([a-z0-9])([A-Z])/gu, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/gu, "$1 $2")
+    .split(/[^a-zA-Z0-9]+/gu)
+    .filter((token) => token.length > 0)
+    .map((token) => token.toLowerCase());
+}
+
 function isProhibitedHandoffKey(key: string): boolean {
   if (PROHIBITED_IDENTITY_KEYS.has(key)) return true;
-  const normalized = key.replace(/[^a-zA-Z0-9]/gu, "").toLowerCase();
-  return PROHIBITED_SECRET_KEY_PARTS.some((part) => normalized.includes(part));
+  const tokens = semanticKeyTokens(key);
+  return tokens.some((token) => PROHIBITED_SECRET_TOKENS.has(token)) ||
+    tokens.some((token, index) => token === "api" && tokens[index + 1] === "key") ||
+    (tokens.length === 1 && PROHIBITED_WHOLE_SECRET_KEYS.has(tokens[0] ?? ""));
 }
 
 function sanitizeUnknown(value: unknown): unknown {

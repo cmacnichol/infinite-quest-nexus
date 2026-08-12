@@ -48,23 +48,25 @@ The final parsers sanitize decoded candidates and strictly reject unknown sessio
 
 ## Verification
 
+The original pre-fix Task 2 verification reported 39 passing tests. That historical result is superseded by the final verification below after both fix rounds.
+
 ```bash
 pnpm vitest run tests/unit/world-library.test.ts tests/unit/web-next-character-workspace-model.test.ts tests/unit/web-next-character-workspace-session.test.ts
 ```
 
-Result: 3 files passed; 39 tests passed, 0 failed.
+Final result: 3 files passed; 43 tests passed, 0 failed.
 
 ```bash
-pnpm exec tsc --ignoreConfig --noEmit --strict --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck apps/web-next/src/character-workspace-session.ts tests/unit/web-next-character-workspace-session.test.ts
+pnpm exec tsc --ignoreConfig --noEmit --strict --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck apps/web-next/src/character-workspace-model.ts apps/web-next/src/character-workspace-session.ts packages/contracts/src/world-library.ts tests/unit/web-next-character-workspace-model.test.ts tests/unit/web-next-character-workspace-session.test.ts
 ```
 
-Result: exit 0 with no diagnostics.
+Final result: exit 0 with no diagnostics.
 
 ```bash
 git diff --check
 ```
 
-Result: exit 0 with no diagnostics before report creation; rerun before commit.
+Final result: exit 0 with no diagnostics after the round-two report update.
 
 ## Concerns
 
@@ -94,6 +96,37 @@ Resolved every round-one finding test-first.
 - `pnpm vitest run tests/unit/world-library.test.ts tests/unit/web-next-character-workspace-model.test.ts tests/unit/web-next-character-workspace-session.test.ts` — 3 files passed, 43 tests passed.
 - `pnpm exec tsc --ignoreConfig --noEmit --strict --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck apps/web-next/src/character-workspace-model.ts apps/web-next/src/character-workspace-session.ts packages/contracts/src/world-library.ts tests/unit/web-next-character-workspace-model.test.ts tests/unit/web-next-character-workspace-session.test.ts` — exit 0, no diagnostics.
 - `git diff --check` — exit 0, no diagnostics after the report update.
+
+### Files changed
+
+- `apps/web-next/src/character-workspace-session.ts`
+- `tests/unit/web-next-character-workspace-session.test.ts`
+- `.superpowers/sdd/2026-08-12-character-creation-workspace/task-2-report.md`
+
+### Concerns
+
+Projectmem MCP remains unavailable, so required file prechecks and event logging could not be performed. The pre-existing untracked `.superpowers/brainstorm/` directory remains untouched and excluded from the commit.
+
+## Fix Round 2
+
+Resolved the remaining credential-key boundary and cleanup-coverage findings test-first.
+
+### RED evidence
+
+`pnpm vitest run tests/unit/web-next-character-workspace-session.test.ts` failed 1 of 13 tests after adding safe lore keys. The session incorrectly removed `secretary`, `tokenizer`, and `passwordlessSociety`, confirming that normalized substring matching treated fragments inside unrelated words as credentials.
+
+### Corrections
+
+- Tokenize handoff keys at camelCase, Pascal/acronym, snake_case, kebab-case, and other non-alphanumeric boundaries before matching credential terms.
+- Preserve unrelated semantic tokens such as `secretary`, `tokenizer`, and `passwordlessSociety` while continuing to remove `accessToken`, `client_secret`, `api-key`, `password`, `credentials`, and existing API-key variants.
+- Exercise fail-closed consumption independently when removal of the session, return tombstone, or result record throws; no case can return the accepted result on a later consume.
+- Mark the original 39-test verification as pre-fix and superseded, and make the primary final verification consistent with the 43-test result.
+
+### Verification
+
+- `pnpm vitest run tests/unit/world-library.test.ts tests/unit/web-next-character-workspace-model.test.ts tests/unit/web-next-character-workspace-session.test.ts` — 3 files passed, 43 tests passed, 0 failed.
+- `pnpm exec tsc --ignoreConfig --noEmit --strict --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck apps/web-next/src/character-workspace-model.ts apps/web-next/src/character-workspace-session.ts packages/contracts/src/world-library.ts tests/unit/web-next-character-workspace-model.test.ts tests/unit/web-next-character-workspace-session.test.ts` — exit 0, no diagnostics.
+- `git diff --check` — exit 0, no diagnostics after the round-two report update.
 
 ### Files changed
 
