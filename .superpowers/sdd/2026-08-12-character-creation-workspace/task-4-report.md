@@ -114,3 +114,20 @@ git diff --check
 ```
 
 Result: exit 0 with no whitespace diagnostics.
+
+## Fix Round 2
+
+Fixed the remaining fallback-modal isolation defect. Instead of inerting `.character-main` (which contains the fallback dialog), the page now walks from the dialog to the document body and inerts only sibling background subtrees. The fallback dialog therefore has no inert ancestor and remains interactive while background controls are isolated. Closing or disposing restores every affected subtree's original inert attribute state and value.
+
+Added a realistic rendered-DOM regression proving that no dialog ancestor is inert, background controls are in an inert subtree and redirected by the focus handler, the expanded prompt receives focus, pointer interaction cannot dismiss the dialog, and pre-existing inert state is restored exactly after both close and disposal.
+
+### RED evidence
+
+`pnpm vitest run tests/unit/web-next-character-workspace-page.test.ts -t "keeps the fallback dialog"` failed as expected because `.character-main` was inert and therefore an ancestor of the fallback dialog.
+
+### Fix-round verification
+
+- `pnpm vitest run tests/unit/web-next-character-workspace-page.test.ts` — 15 tests passed.
+- `pnpm vitest run tests/unit/web-next-theme.test.ts` — 36 tests passed.
+- `pnpm --filter @infinite-quest/web-next check` — exit 0 with no TypeScript diagnostics.
+- `git diff --check` — exit 0 with no whitespace diagnostics.

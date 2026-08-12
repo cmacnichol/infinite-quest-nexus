@@ -126,7 +126,6 @@ export function mountCharacterWorkspacePage(
   const activeSession = session;
   renderAppShell(root, workspaceMarkup(activeSession.parentRoute), "world-library");
   const theme = initializeAppTheme(root);
-  const main = required<HTMLElement>(root, ".character-main");
   const canvas = required<HTMLElement>(root, "[data-character-canvas]");
   const stageButtons = [...root.querySelectorAll<HTMLButtonElement>("[data-character-stage]")];
   const dialog = required<HTMLDialogElement>(root, ".character-prompt-dialog");
@@ -162,6 +161,7 @@ export function mountCharacterWorkspacePage(
   let mechanicsIndex = 0;
   let dialogOpen = false;
   let fallbackModal = false;
+  let fallbackInertStates: Array<{ element: HTMLElement; value: string | null }> = [];
 
   function beforeUnload(event: Event): void { event.preventDefault(); }
   function markDirty(): void {
@@ -409,6 +409,28 @@ export function mountCharacterWorkspacePage(
     void trigger;
   }
 
+  function isolateFallbackDialog(): void {
+    let branch: HTMLElement = dialog;
+    while (branch.parentElement) {
+      const parent = branch.parentElement;
+      for (const sibling of parent.children) {
+        if (sibling === branch || !(sibling instanceof pageView.HTMLElement)) continue;
+        fallbackInertStates.push({ element: sibling, value: sibling.getAttribute("inert") });
+        sibling.setAttribute("inert", "");
+      }
+      if (parent === document.body) break;
+      branch = parent;
+    }
+  }
+
+  function restoreFallbackBackground(): void {
+    for (const { element, value } of fallbackInertStates) {
+      if (value === null) element.removeAttribute("inert");
+      else element.setAttribute("inert", value);
+    }
+    fallbackInertStates = [];
+  }
+
   function openDialog(): void {
     if (disposed || dialogOpen) return;
     expandedPrompt.value = prompt;
@@ -418,7 +440,7 @@ export function mountCharacterWorkspacePage(
     } else {
       fallbackModal = true;
       dialog.setAttribute("open", "");
-      main.setAttribute("inert", "");
+      isolateFallbackDialog();
     }
     expandedPrompt.focus();
   }
@@ -428,7 +450,7 @@ export function mountCharacterWorkspacePage(
     dialogOpen = false;
     if (typeof dialog.close === "function" && dialog.hasAttribute("open")) dialog.close();
     else dialog.removeAttribute("open");
-    main.removeAttribute("inert");
+    restoreFallbackBackground();
     fallbackModal = false;
     if (restoreFocus && !disposed) canvas.querySelector<HTMLButtonElement>(expandButtonSelector)?.focus();
   }
