@@ -21,7 +21,15 @@ const draft: EditableWorldDraft = {
     firstAction: "Open the western dome.",
     rules: "Reflections remember."
   },
-  playableCharacters: [{ id: "forbidden", name: "A generated character" }],
+  playableCharacters: [{
+    id: "reviewed-character",
+    name: "A reviewed character",
+    characterText: "Protect the observatory.",
+    rpgStats: [],
+    defaultTriggers: [],
+    source: {},
+    preservedLore: { oath: "North" }
+  }],
   entities: [],
   relationships: [],
   rpgStats: [],
@@ -37,7 +45,7 @@ const createdResponse = {
   status: "draft",
   imageUrl: "",
   draftRevision: 1,
-  draftContent: { ...draft, schemaVersion: 5, playableCharacters: [] },
+  draftContent: { ...draft, schemaVersion: 5 },
   draftBasedOnWorldVersionId: null,
   createdAt: "2026-08-11T12:00:00.000Z",
   updatedAt: "2026-08-11T12:00:00.000Z"
@@ -192,14 +200,19 @@ describe("World Creation API boundary", () => {
     });
   });
 
-  it("creates with only title and owner-safe canonical content while forcing characters empty", async () => {
+  it("creates with only title and owner-safe canonical content while sending the exact reviewed roster", async () => {
     const adversarial = {
       ...structuredClone(draft),
       user_id: "attacker-1",
       userId: "attacker-2",
       owner_user_id: "attacker-3",
       ownerUserId: "attacker-4",
-      importedLore: { ownerUserId: "nested-provenance" }
+      importedLore: { ownerUserId: "nested-provenance" },
+      playableCharacters: [{
+        ...structuredClone(draft.playableCharacters[0]),
+        owner_user_id: "character-attacker",
+        preservedLore: { oath: "North", ownerUserId: "nested-character-attacker" }
+      }]
     } as EditableWorldDraft;
     const fetch = vi.fn().mockResolvedValue(jsonResponse({
       ...createdResponse,
@@ -219,13 +232,21 @@ describe("World Creation API boundary", () => {
     expect(Object.keys(body)).toEqual(["title", "content"]);
     expect(body.title).toBe(draft.world.title);
     expect(body.content.schemaVersion).toBe(5);
-    expect(body.content.playableCharacters).toEqual([]);
+    expect(body.content.playableCharacters).toEqual([{
+      id: "reviewed-character",
+      name: "A reviewed character",
+      characterText: "Protect the observatory.",
+      rpgStats: [],
+      defaultTriggers: [],
+      source: {},
+      preservedLore: { oath: "North" }
+    }]);
     expect(body.content).not.toHaveProperty("user_id");
     expect(body.content).not.toHaveProperty("userId");
     expect(body.content).not.toHaveProperty("owner_user_id");
     expect(body.content).not.toHaveProperty("ownerUserId");
     expect(body.content.importedLore.ownerUserId).toBe("nested-provenance");
-    expect(adversarial.playableCharacters).toHaveLength(1);
+    expect(adversarial.playableCharacters[0]).toHaveProperty("owner_user_id", "character-attacker");
   });
 
   it("attaches a retained cover through an independent encoded PUT", async () => {

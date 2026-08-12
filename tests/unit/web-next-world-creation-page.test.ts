@@ -2,6 +2,7 @@ import { parseHTML } from "linkedom";
 import { describe, expect, it, vi } from "vitest";
 import { WorldCreationApiError } from "../../apps/web-next/src/world-creation-api.js";
 import {
+  appendCreationCharacter,
   createWorldCreationState,
   editCreationDraft,
   selectCreationMethod,
@@ -9,6 +10,12 @@ import {
   setCreationStage,
   type WorldCreationState
 } from "../../apps/web-next/src/world-creation-model.js";
+import type {
+  CharacterWorkspaceResult,
+  CharacterWorkspaceSession,
+  CharacterWorkspaceSessionStore,
+  CreateCharacterWorkspaceSession
+} from "../../apps/web-next/src/character-workspace-session.js";
 import { mountWorldCreationPage } from "../../apps/web-next/src/world-creation-page.js";
 
 const createdWorld = {
@@ -65,6 +72,55 @@ const generatedPreview = {
     defaults: {}
   }
 };
+
+function reviewedCharacter(id: string, name: string) {
+  return {
+    id,
+    name,
+    characterText: `${name} protects the atlas.`,
+    rpgStats: [],
+    defaultTriggers: [],
+    source: {},
+    preservedLore: { oath: "North" }
+  };
+}
+
+function handoffStore() {
+  let sequence = 0;
+  let expired = false;
+  const sessions = new Map<string, CharacterWorkspaceSession>();
+  const results = new Map<string, CharacterWorkspaceResult>();
+  const store: CharacterWorkspaceSessionStore = {
+    create: vi.fn((input: CreateCharacterWorkspaceSession) => {
+      sequence += 1;
+      const session: CharacterWorkspaceSession = {
+        ...structuredClone(input),
+        version: 1,
+        key: `handoff-${sequence}`,
+        expiresAt: Date.now() + 30 * 60 * 1000
+      };
+      sessions.set(session.key, session);
+      return structuredClone(session);
+    }),
+    load: vi.fn((key: string) => expired ? null : structuredClone(sessions.get(key) ?? null)),
+    returnPath: vi.fn((key: string) => sessions.get(key)?.parentRoute ?? null),
+    complete: vi.fn((key: string, workflowId: string, result: CharacterWorkspaceResult) => {
+      const session = sessions.get(key);
+      if (expired || !session || session.workflowId !== workflowId || results.has(key)) return false;
+      results.set(key, structuredClone(result));
+      return true;
+    }),
+    consume: vi.fn((key: string, origin: "world-creation" | "world-editor", workflowId: string) => {
+      const session = sessions.get(key);
+      const result = results.get(key);
+      if (expired || !session || !result || session.origin !== origin || session.workflowId !== workflowId) return null;
+      sessions.delete(key);
+      results.delete(key);
+      return { session: structuredClone(session), result: structuredClone(result) };
+    })
+  };
+  return { store, sessions, expire: () => { expired = true; } };
+}
 
 function creationFixture() {
   const { document, window } = parseHTML('<html><body><div id="app"></div></body></html>');
@@ -131,6 +187,13 @@ function advanceManualWizardToCover(document: Document, window: Window): void {
   expect(document.querySelector('[data-creation-stage="cover"]')).not.toBeNull();
 }
 
+function advanceCoverToReview(document: Document): void {
+  document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+  expect(document.querySelector('[data-creation-stage="characters"]')).not.toBeNull();
+  document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+  expect(document.querySelector('[data-creation-stage="review"]')).not.toBeNull();
+}
+
 function createdDestination(cover: "none" | "pending" | "completed" | "recovery"): string {
   return `/app/worlds/${encodeURIComponent(createdWorld.id)}?creation=created&cover=${cover}`;
 }
@@ -138,7 +201,7 @@ function createdDestination(cover: "none" | "pending" | "completed" | "recovery"
 function reviewedState(method: "manual" | "ai" = "manual"): WorldCreationState {
   let state = selectCreationMethod(createWorldCreationState(), method);
   state = editCreationDraft(state, ["world", "title"], "Glass Atlas");
-  for (const stage of ["foundation", "canon", "mechanics", "cover", "review"] as const) {
+  for (const stage of ["foundation", "canon", "mechanics", "cover", "characters", "review"] as const) {
     state = setCreationStage(state, stage);
   }
   return state;
@@ -450,6 +513,191 @@ describe("World Creation Method stage", () => {
   });
 });
 
+describe("World Creation Characters stage", () => {
+  function characterStageState(...characters: ReturnType<typeof reviewedCharacter>[]): WorldCreationState {
+    let state = selectCreationMethod(createWorldCreationState(), "manual");
+    state = editCreationDraft(state, ["world", "title"], "Glass Atlas");
+    for (const stage of ["foundation", "canon", "mechanics", "cover", "characters"] as const) {
+      state = setCreationStage(state, stage);
+    }
+    for (const candidate of characters) state = appendCreationCharacter(state, candidate);
+    return state;
+  }
+
+  function pageshow(window: Window): void {
+    const event = new window.Event("pageshow");
+    Object.defineProperty(event, "persisted", { value: true });
+    window.dispatchEvent(event);
+  }
+
+  it("places an optional Characters stage before Review and teaches the empty state", () => {
+    const { document, root } = creationFixture();
+    mountWorldCreationPage(root, { initialState: characterStageState() });
+
+    const stages = [...document.querySelectorAll<HTMLElement>("[data-stage]")].map((stage) => stage.dataset.stage);
+    expect(stages).toEqual(["method", "foundation", "canon", "mechanics", "cover", "characters", "review"]);
+    expect(document.querySelector('[data-creation-stage="characters"]')).not.toBeNull();
+    expect(document.querySelector("[data-character-roster-empty]")?.textContent).toContain("optional");
+    expect(document.querySelector<HTMLButtonElement>('[data-action="add-character"]')?.textContent).toBe("Add character");
+    expect(document.querySelector('[data-action="continue-stage"]')).not.toBeNull();
+  });
+
+  it("creates exact Add and Edit handoffs without mutating the parent draft", () => {
+    const addFixture = creationFixture();
+    const addHandoff = handoffStore();
+    const addNavigate = vi.fn();
+    const initial = characterStageState(reviewedCharacter("keeper", "Keeper"));
+    mountWorldCreationPage(addFixture.root, {
+      initialState: initial,
+      characterSessionStore: addHandoff.store,
+      characterWorkflowIdFactory: () => "workflow-add",
+      navigate: addNavigate
+    });
+
+    addFixture.document.querySelector<HTMLButtonElement>('[data-action="add-character"]')?.click();
+    const addSession = addHandoff.sessions.get("handoff-1");
+    expect(addSession).toMatchObject({
+      origin: "world-creation",
+      mode: "create",
+      workflowId: "workflow-add",
+      parentRoute: "/app/worlds/new",
+      expectedWorldRevision: null,
+      candidate: null,
+      rosterSummaries: [{ id: "keeper", name: "Keeper" }]
+    });
+    expect(addSession?.parentDraft).toEqual(initial.draft);
+    expect(addSession?.worldContext).toEqual(initial.draft);
+    expect(addNavigate).toHaveBeenCalledWith("/app/characters/handoff-1");
+
+    const editFixture = creationFixture();
+    const editHandoff = handoffStore();
+    mountWorldCreationPage(editFixture.root, {
+      initialState: initial,
+      characterSessionStore: editHandoff.store,
+      characterWorkflowIdFactory: () => "workflow-edit",
+      navigate: vi.fn()
+    });
+    editFixture.document.querySelector<HTMLButtonElement>('[data-action="edit-character"]')?.click();
+    expect(editHandoff.sessions.get("handoff-1")).toMatchObject({
+      mode: "edit",
+      workflowId: "workflow-edit",
+      candidate: expect.objectContaining({ id: "keeper", name: "Keeper" })
+    });
+    expect(initial.draft.playableCharacters).toHaveLength(1);
+  });
+
+  it("restores the parent draft and consumes accepted append and replace results exactly once after BFCache return", () => {
+    const { document, root, window } = creationFixture();
+    const handoff = handoffStore();
+    const initial = characterStageState(reviewedCharacter("keeper", "Keeper"));
+    mountWorldCreationPage(root, {
+      initialState: initial,
+      characterSessionStore: handoff.store,
+      characterWorkflowIdFactory: () => "workflow-append",
+      navigate: vi.fn()
+    });
+
+    document.querySelector<HTMLButtonElement>('[data-action="add-character"]')?.click();
+    const addSession = handoff.sessions.get("handoff-1");
+    if (!addSession) throw new Error("Add handoff missing.");
+    document.querySelector<HTMLButtonElement>('[data-stage="foundation"]')?.click();
+    inputValue(document, window as unknown as Window, '[name="world.title"]', "Stale mutation");
+    expect(handoff.store.complete(addSession.key, addSession.workflowId, {
+      status: "accepted",
+      candidate: reviewedCharacter("scout", "Scout") as never
+    })).toBe(true);
+    pageshow(window as unknown as Window);
+    document.querySelector<HTMLButtonElement>('[data-stage="characters"]')?.click();
+
+    expect(document.querySelectorAll("[data-character-roster-item]")).toHaveLength(2);
+    expect(document.querySelector("[data-character-roster]")?.textContent).toContain("Scout");
+    pageshow(window as unknown as Window);
+    expect(document.querySelectorAll("[data-character-roster-item]")).toHaveLength(2);
+    document.querySelector<HTMLButtonElement>('[data-stage="foundation"]')?.click();
+    expect(document.querySelector<HTMLInputElement>('[name="world.title"]')?.value).toBe("Glass Atlas");
+
+    document.querySelector<HTMLButtonElement>('[data-stage="characters"]')?.click();
+    document.querySelectorAll<HTMLButtonElement>('[data-action="edit-character"]').item(0).click();
+    const editSession = handoff.sessions.get("handoff-2");
+    if (!editSession) throw new Error("Edit handoff missing.");
+    expect(handoff.store.complete(editSession.key, editSession.workflowId, {
+      status: "accepted",
+      candidate: reviewedCharacter("keeper", "Keeper Prime") as never
+    })).toBe(true);
+    pageshow(window as unknown as Window);
+    expect(document.querySelector("[data-character-roster]")?.textContent).toContain("Keeper Prime");
+    expect(document.querySelector("[data-character-roster]")?.textContent).not.toContain("KeeperEdit");
+  });
+
+  it("leaves the reviewed roster unchanged for cancellation, expiry, or unmatched workflow results", () => {
+    const { document, root, window } = creationFixture();
+    const handoff = handoffStore();
+    mountWorldCreationPage(root, {
+      initialState: characterStageState(reviewedCharacter("keeper", "Keeper")),
+      characterSessionStore: handoff.store,
+      characterWorkflowIdFactory: () => "workflow-safe",
+      navigate: vi.fn()
+    });
+
+    document.querySelector<HTMLButtonElement>('[data-action="add-character"]')?.click();
+    const cancelled = handoff.sessions.get("handoff-1");
+    if (!cancelled) throw new Error("Cancelled handoff missing.");
+    handoff.store.complete(cancelled.key, cancelled.workflowId, { status: "cancelled" });
+    pageshow(window as unknown as Window);
+    expect(document.querySelectorAll("[data-character-roster-item]")).toHaveLength(1);
+
+    document.querySelector<HTMLButtonElement>('[data-action="add-character"]')?.click();
+    const expired = handoff.sessions.get("handoff-2");
+    if (!expired) throw new Error("Expired handoff missing.");
+    handoff.store.complete(expired.key, expired.workflowId, {
+      status: "accepted",
+      candidate: reviewedCharacter("expired", "Expired") as never
+    });
+    handoff.expire();
+    pageshow(window as unknown as Window);
+    expect(document.querySelectorAll("[data-character-roster-item]")).toHaveLength(1);
+    expect(handoff.store.consume).toHaveBeenCalledWith("handoff-2", "world-creation", "workflow-safe");
+  });
+
+  it("removes and undoes roster entries and offers Add another for a reviewed roster", () => {
+    const { document, root } = creationFixture();
+    mountWorldCreationPage(root, {
+      initialState: characterStageState(
+        reviewedCharacter("keeper", "Keeper"),
+        reviewedCharacter("scout", "Scout")
+      )
+    });
+
+    expect(document.querySelector<HTMLButtonElement>('[data-action="add-character"]')?.textContent).toBe("Add another");
+    document.querySelector<HTMLButtonElement>('[data-action="remove-character"]')?.click();
+    expect(document.querySelectorAll("[data-character-roster-item]")).toHaveLength(1);
+    expect(document.querySelector("[data-character-removals]")?.textContent).toContain("Keeper removed");
+    document.querySelector<HTMLButtonElement>('[data-action="undo-character-removal"]')?.click();
+    expect(document.querySelectorAll("[data-character-roster-item]")).toHaveLength(2);
+    expect(document.querySelector("[data-character-roster]")?.textContent).toContain("Keeper");
+  });
+
+  it("submits exactly the reviewed roster shown before final creation", async () => {
+    const { document, root } = creationFixture();
+    let state = characterStageState(
+      reviewedCharacter("keeper", "Keeper"),
+      reviewedCharacter("scout", "Scout")
+    );
+    state = setCreationStage(state, "review");
+    const createWorld = vi.fn().mockResolvedValue(createdWorld);
+    mountWorldCreationPage(root, { initialState: state, createWorld, navigate: vi.fn() });
+
+    document.querySelector<HTMLButtonElement>('[data-action="create-world"]')?.click();
+    await settle();
+
+    expect(createWorld).toHaveBeenCalledTimes(1);
+    expect(createWorld.mock.calls[0]?.[0].playableCharacters).toEqual([
+      expect.objectContaining({ id: "keeper", name: "Keeper", preservedLore: { oath: "North" } }),
+      expect.objectContaining({ id: "scout", name: "Scout", preservedLore: { oath: "North" } })
+    ]);
+  });
+});
+
 describe("World Creation Cover and Review stages", () => {
   it("defaults to no cover and validates only the selected retained or generated input", () => {
     const { document, root, window } = creationFixture();
@@ -503,7 +751,7 @@ describe("World Creation Cover and Review stages", () => {
       { id: "authored-map", custom: "preserved" }
     ]);
     document.querySelector<HTMLButtonElement>('[data-action="apply-assets-json"]')?.click();
-    document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+    advanceCoverToReview(document);
 
     const serialized = JSON.parse(document.querySelector('[data-review-serialized]')?.textContent ?? "null");
     expect(serialized.assets).toEqual([
@@ -570,13 +818,14 @@ describe("World Creation Cover and Review stages", () => {
     const { document, root, window } = creationFixture();
     mountWorldCreationPage(root);
     advanceManualWizardToCover(document, window as unknown as Window);
-    document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+    advanceCoverToReview(document);
 
     expect(document.querySelector('[data-creation-stage="review"]')).not.toBeNull();
     expect(document.querySelector('[data-review-provenance]')?.textContent).toContain("Manual");
     expect(document.querySelector('[data-review-readiness]')?.textContent).toContain("Ready");
-    expect(document.querySelectorAll('[data-review-stage]')).toHaveLength(6);
+    expect(document.querySelectorAll('[data-review-stage]')).toHaveLength(7);
     expect(document.querySelector('[data-review-stage="method"]')?.textContent).toContain("ready");
+    expect(document.querySelector('[data-review-stage="characters"]')?.textContent).toContain("ready");
     expect(document.querySelector('[data-review-stage="review"]')?.textContent).toContain("ready");
     expect(document.querySelector('[data-review-warning-count]')?.textContent).toBe("Warnings 1");
     expect(document.querySelector('[data-review-cover-intent]')?.textContent).toBe("Cover intent: No cover");
@@ -599,10 +848,10 @@ describe("World Creation Cover and Review stages", () => {
     generated!.checked = true;
     generated!.dispatchEvent(new window.Event("change", { bubbles: true }));
     inputValue(document, window as unknown as Window, '[name="cover.prompt"]', "Moonlit glass towers");
-    document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+    advanceCoverToReview(document);
     expect(document.querySelector('[data-review-cover-intent]')?.textContent)
       .toBe("Cover intent: Generate cover — Moonlit glass towers");
-    document.querySelector<HTMLButtonElement>('[data-action="back-stage"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-stage="cover"]')?.click();
 
     expect(document.querySelector<HTMLInputElement>('[name="coverMode"][value="generated"]')?.checked).toBe(true);
     expect(document.querySelector<HTMLTextAreaElement>('[name="cover.prompt"]')?.value).toBe("Moonlit glass towers");
@@ -667,7 +916,7 @@ describe("World Creation authoritative creation", () => {
     const navigate = vi.fn();
     mountWorldCreationPage(root, { createWorld, navigate });
     advanceManualWizardToCover(document, window as unknown as Window);
-    document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+    advanceCoverToReview(document);
     const create = document.querySelector<HTMLButtonElement>('[data-action="create-world"]');
 
     create?.click();
@@ -716,7 +965,7 @@ describe("World Creation authoritative creation", () => {
     expect(JSON.parse(document.querySelector('[data-review-serialized]')?.textContent ?? "null")).toEqual(expectedDraft);
     expect(document.querySelector<HTMLButtonElement>('[data-action="create-world"]')?.disabled).toBe(false);
 
-    document.querySelector<HTMLButtonElement>('[data-action="back-stage"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-stage="cover"]')?.click();
     expect(document.querySelector<HTMLInputElement>('[name="coverMode"][value="generated"]')?.checked).toBe(true);
     expect(document.querySelector<HTMLTextAreaElement>('[name="cover.prompt"]')?.value).toBe("Moonlit glass towers");
   });
@@ -732,7 +981,7 @@ describe("World Creation authoritative creation", () => {
     retained!.checked = true;
     retained!.dispatchEvent(new window.Event("change", { bubbles: true }));
     inputValue(document, window as unknown as Window, '[name="cover.assetId"]', "asset-1");
-    document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+    advanceCoverToReview(document);
 
     document.querySelector<HTMLButtonElement>('[data-action="create-world"]')?.click();
     await settle();
@@ -766,7 +1015,7 @@ describe("World Creation authoritative creation", () => {
     generated!.checked = true;
     generated!.dispatchEvent(new window.Event("change", { bubbles: true }));
     inputValue(document, window as unknown as Window, '[name="cover.prompt"]', "Moonlit glass towers");
-    document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+    advanceCoverToReview(document);
 
     document.querySelector<HTMLButtonElement>('[data-action="create-world"]')?.click();
     await settle();
@@ -798,7 +1047,7 @@ describe("World Creation authoritative creation", () => {
     generated!.checked = true;
     generated!.dispatchEvent(new window.Event("change", { bubbles: true }));
     inputValue(document, window as unknown as Window, '[name="cover.prompt"]', "Moonlit glass towers");
-    document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+    advanceCoverToReview(document);
 
     document.querySelector<HTMLButtonElement>('[data-action="create-world"]')?.click();
     await settle();
@@ -852,7 +1101,7 @@ describe("World Creation authoritative creation", () => {
     const navigate = vi.fn();
     const mounted = mountWorldCreationPage(root, { createWorld, navigate });
     advanceManualWizardToCover(document, window as unknown as Window);
-    document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+    advanceCoverToReview(document);
     document.querySelector<HTMLButtonElement>('[data-action="create-world"]')?.click();
     const signal = createWorld.mock.calls[0]?.[1] as AbortSignal;
 
@@ -878,7 +1127,7 @@ describe("World Creation authoritative creation", () => {
     generated!.checked = true;
     generated!.dispatchEvent(new window.Event("change", { bubbles: true }));
     inputValue(document, window as unknown as Window, '[name="cover.prompt"]', "Moonlit glass towers");
-    document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+    advanceCoverToReview(document);
     document.querySelector<HTMLButtonElement>('[data-action="create-world"]')?.click();
     await settle();
     const signal = generateCreatedWorldCover.mock.calls[0]?.[2] as AbortSignal;
@@ -911,7 +1160,7 @@ describe("World Creation authoritative creation", () => {
     generated!.checked = true;
     generated!.dispatchEvent(new window.Event("change", { bubbles: true }));
     inputValue(document, window as unknown as Window, '[name="cover.prompt"]', "Moonlit glass towers");
-    document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+    advanceCoverToReview(document);
     document.querySelector<HTMLButtonElement>('[data-action="create-world"]')?.click();
     await settle();
     document.querySelector<HTMLButtonElement>('[data-action="retry-cover"]')?.click();
@@ -1312,7 +1561,8 @@ describe("World Creation generation and convergent editing", () => {
     defaults.dispatchEvent(new window.Event("input", { bubbles: true }));
     document.querySelector<HTMLButtonElement>('[data-action="apply-defaults-json"]')?.click();
     expect(document.querySelector<HTMLTextAreaElement>("[data-defaults-json]")?.value).toContain("heroic");
-    expect(document.querySelector('[data-stage="characters"], [data-collection-target="playableCharacters"]')).toBeNull();
+    expect(document.querySelector('[data-stage="characters"]')).not.toBeNull();
+    expect(document.querySelector('[data-collection-target="playableCharacters"]')).toBeNull();
     expect(generateWorldPreview).not.toHaveBeenCalled();
   });
 });

@@ -1,4 +1,8 @@
-import { canonicalizeWorldCreationDraft, worldCreationSubmissionSnapshot } from "./world-creation-model";
+import {
+  canonicalizeGeneratedWorldCreationDraft,
+  canonicalizeWorldCreationDraft,
+  worldCreationSubmissionSnapshot
+} from "./world-creation-model";
 import { parseEditableWorldDraft, type EditableWorldDraft } from "./world-editor-model";
 
 export type WorldCreationApiErrorKind =
@@ -138,7 +142,10 @@ function parseGeneratedPreview(value: unknown): WorldGenerationPreviewResponse {
   if (!isRecord(value) || typeof value.title !== "string" || !value.title.trim()) {
     throw new Error("World generation returned an unexpected preview.");
   }
-  return { title: value.title, content: canonicalDraft(value.content) };
+  return {
+    title: value.title,
+    content: canonicalizeGeneratedWorldCreationDraft(parseEditableWorldDraft(value.content))
+  };
 }
 
 function parseGenerationProgress(value: unknown): WorldGenerationProgressResponse {

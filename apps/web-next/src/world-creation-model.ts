@@ -1,4 +1,10 @@
 import {
+  MAX_PLAYABLE_CHARACTERS,
+  playableCharacterSchema,
+  type PlayableCharacter
+} from "../../../packages/contracts/src/world-library.js";
+import { sanitizeCharacterWorkspaceValue } from "./character-workspace-sanitizer.js";
+import {
   createEmptyWorldDraft,
   parseEditableWorldDraft,
   type EditableWorldDraft
@@ -7,7 +13,7 @@ import {
 export const WORLD_CREATION_PATH = "/app/worlds/new";
 
 export type CreationMethod = "manual" | "ai";
-export type CreationStage = "method" | "foundation" | "canon" | "mechanics" | "cover" | "review";
+export type CreationStage = "method" | "foundation" | "canon" | "mechanics" | "cover" | "characters" | "review";
 export type CreationStatus = "pristine" | "unsaved" | "creating" | "created" | "error";
 export type CreationCoverIntent =
   | { mode: "none" }
@@ -32,7 +38,7 @@ export interface CreationValidation {
 
 export interface CreationPendingRemoval {
   id: string;
-  collection: CreationCollectionName;
+  collection: CreationCollectionName | "playableCharacters";
   originalIndex: number;
   value: unknown;
 }
@@ -95,7 +101,7 @@ export interface CreationReview {
     stats: number;
     triggers: number;
     assets: number;
-    characters: 0;
+    characters: number;
   };
   draft: EditableWorldDraft;
 }
@@ -106,6 +112,7 @@ const CREATION_STAGES: readonly CreationStage[] = [
   "canon",
   "mechanics",
   "cover",
+  "characters",
   "review"
 ];
 
@@ -115,11 +122,34 @@ function clone<T>(value: T): T {
     : JSON.parse(JSON.stringify(value)) as T;
 }
 
+function canonicalCharacter(candidate: unknown): PlayableCharacter {
+  const parsed = playableCharacterSchema.safeParse(sanitizeCharacterWorkspaceValue(candidate));
+  if (!parsed.success) throw new Error("Reviewed character does not satisfy the playable-character contract.");
+  return parsed.data;
+}
+
+function canonicalRoster(value: readonly unknown[]): PlayableCharacter[] {
+  if (value.length > MAX_PLAYABLE_CHARACTERS) {
+    throw new Error(`A world draft cannot contain more than ${MAX_PLAYABLE_CHARACTERS} playable characters.`);
+  }
+  const roster = value.map(canonicalCharacter);
+  const ids = new Set<string>();
+  for (const character of roster) {
+    if (ids.has(character.id)) throw new Error("Reviewed character IDs must be unique in a world draft.");
+    ids.add(character.id);
+  }
+  return roster;
+}
+
 export function canonicalizeWorldCreationDraft(draft: EditableWorldDraft): EditableWorldDraft {
   const result = clone(draft);
   result.schemaVersion = 5;
-  result.playableCharacters = [];
+  result.playableCharacters = canonicalRoster(result.playableCharacters);
   return result;
+}
+
+export function canonicalizeGeneratedWorldCreationDraft(draft: EditableWorldDraft): EditableWorldDraft {
+  return canonicalizeWorldCreationDraft({ ...draft, playableCharacters: [] });
 }
 
 export function worldCreationSubmissionSnapshot(draft: EditableWorldDraft): EditableWorldDraft {
@@ -164,7 +194,7 @@ function structuralIssues(draft: EditableWorldDraft): CreationValidationIssue[] 
 
 function originalCollectionIndex(
   removals: readonly CreationPendingRemoval[],
-  collection: CreationCollectionName,
+  collection: CreationPendingRemoval["collection"],
   currentIndex: number
 ): number {
   return removals
@@ -280,6 +310,7 @@ export function validateCreationStage(
       canon: ["entities", "relationships"],
       mechanics: ["rpgStats", "defaultTriggers", "eventTriggers", "defaults"],
       cover: ["assets"],
+      characters: [],
       review: ["world", "entities", "relationships", "rpgStats", "defaultTriggers", "eventTriggers", "assets", "defaults"]
     };
     issues.push(...structuralIssues(state.draft).filter((issue) => relevantRoots[stage].includes(issue.path)));
@@ -329,7 +360,7 @@ export function creationReview(state: WorldCreationState): CreationReview {
       stats: draft.rpgStats.length,
       triggers: draft.defaultTriggers.length + draft.eventTriggers.length,
       assets: draft.assets.length,
-      characters: 0
+      characters: draft.playableCharacters.length
     },
     draft
   };
@@ -347,6 +378,76 @@ export function creationStageProgress(state: WorldCreationState): CreationStageP
           ? "revisitable"
           : "upcoming"
   }));
+}
+
+function characterState(state: WorldCreationState, draft: EditableWorldDraft): WorldCreationState {
+  return {
+    ...state,
+    draft,
+    status: "unsaved",
+    navigationDirty: true,
+    creationError: null
+  };
+}
+
+export function appendCreationCharacter(state: WorldCreationState, candidate: unknown): WorldCreationState {
+  const draft = canonicalDraft(state.draft);
+  draft.playableCharacters.push(canonicalCharacter(candidate));
+  draft.playableCharacters = canonicalRoster(draft.playableCharacters);
+  return characterState(state, draft);
+}
+
+export function replaceCreationCharacter(
+  state: WorldCreationState,
+  characterId: string,
+  candidate: unknown
+): WorldCreationState {
+  const draft = canonicalDraft(state.draft);
+  const index = draft.playableCharacters.findIndex((character) =>
+    typeof character === "object" && character !== null && (character as { id?: unknown }).id === characterId
+  );
+  if (index < 0) throw new RangeError(`No playable character exists with ID ${characterId}.`);
+  const replacement = canonicalCharacter(candidate);
+  if (replacement.id !== characterId) throw new Error("A replacement character ID must match the reviewed character ID.");
+  draft.playableCharacters[index] = replacement;
+  draft.playableCharacters = canonicalRoster(draft.playableCharacters);
+  return characterState(state, draft);
+}
+
+export function removeCreationCharacter(state: WorldCreationState, characterId: string): WorldCreationState {
+  const draft = canonicalDraft(state.draft);
+  const index = draft.playableCharacters.findIndex((character) =>
+    typeof character === "object" && character !== null && (character as { id?: unknown }).id === characterId
+  );
+  if (index < 0) throw new RangeError(`No playable character exists with ID ${characterId}.`);
+  const [value] = draft.playableCharacters.splice(index, 1);
+  return {
+    ...characterState(state, draft),
+    pendingRemovals: [...state.pendingRemovals, {
+      id: `creation-removal-${state.nextRemovalSequence}`,
+      collection: "playableCharacters",
+      originalIndex: originalCollectionIndex(state.pendingRemovals, "playableCharacters", index),
+      value: clone(value)
+    }],
+    nextRemovalSequence: state.nextRemovalSequence + 1
+  };
+}
+
+export function restoreCreationCharacter(state: WorldCreationState, removalId: string): WorldCreationState {
+  const removal = state.pendingRemovals.find((candidate) =>
+    candidate.id === removalId && candidate.collection === "playableCharacters"
+  );
+  if (!removal) return state;
+  const draft = canonicalDraft(state.draft);
+  const earlierPendingCount = state.pendingRemovals.filter((candidate) =>
+    candidate.collection === "playableCharacters" && candidate.originalIndex < removal.originalIndex
+  ).length;
+  draft.playableCharacters.splice(removal.originalIndex - earlierPendingCount, 0, canonicalCharacter(removal.value));
+  draft.playableCharacters = canonicalRoster(draft.playableCharacters);
+  return {
+    ...characterState(state, draft),
+    pendingRemovals: state.pendingRemovals.filter((candidate) => candidate.id !== removalId)
+  };
 }
 
 export function addCreationCollectionItem(
@@ -439,8 +540,10 @@ export function applyGeneratedPreview(
   preview: GeneratedWorldPreview
 ): WorldCreationState {
   const previousTitle = typeof state.draft.world?.title === "string" ? state.draft.world.title : "";
+  const reviewedRoster = canonicalRoster(state.draft.playableCharacters);
   const parsed = parseEditableWorldDraft(preview.content);
-  const draft = canonicalDraft(parsed);
+  const draft = canonicalDraft({ ...parsed, playableCharacters: [] });
+  draft.playableCharacters = reviewedRoster;
   draft.world.title = preview.title;
   return {
     ...state,

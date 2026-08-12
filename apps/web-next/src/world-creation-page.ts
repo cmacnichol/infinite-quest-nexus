@@ -15,6 +15,7 @@ import {
 } from "./world-creation-api";
 import {
   addCreationCollectionItem,
+  appendCreationCharacter,
   applyGeneratedPreview,
   beginCreation,
   completeCreation,
@@ -24,7 +25,10 @@ import {
   editCreationDraft,
   failCreation,
   hasLocalWorldCreationContent,
+  removeCreationCharacter,
   removeCreationCollectionItem,
+  replaceCreationCharacter,
+  restoreCreationCharacter,
   restoreCreationCollectionItem,
   selectCreationMethod,
   setCreationCoverIntent,
@@ -44,6 +48,14 @@ import {
   structuredFieldsFor,
   type StructuredRecordKind
 } from "./world-editor-fields";
+import {
+  renderWorldCreationCharacterRoster
+} from "./world-creation-character-roster.js";
+import {
+  createCharacterWorkspaceSessionStore,
+  type CharacterWorkspaceSession,
+  type CharacterWorkspaceSessionStore
+} from "./character-workspace-session.js";
 import type { MountedPage } from "./world-library-page";
 
 export interface WorldCreationPageDependencies {
@@ -71,6 +83,8 @@ export interface WorldCreationPageDependencies {
     signal?: AbortSignal
   ) => Promise<GeneratedWorldCoverResponse>;
   navigate?: (path: string) => void;
+  characterSessionStore?: CharacterWorkspaceSessionStore;
+  characterWorkflowIdFactory?: () => string;
   initialState?: WorldCreationState;
 }
 
@@ -85,7 +99,7 @@ interface CollectionSpec {
   kind: Exclude<StructuredRecordKind, "character" | "asset">;
 }
 
-const STAGE_ORDER: readonly CreationStage[] = ["method", "foundation", "canon", "mechanics", "cover", "review"];
+const STAGE_ORDER: readonly CreationStage[] = ["method", "foundation", "canon", "mechanics", "cover", "characters", "review"];
 
 function createdWorldDestination(worldId: string, cover: CreationCoverHandoff): string {
   return `/app/worlds/${encodeURIComponent(worldId)}?creation=created&cover=${cover}`;
@@ -165,7 +179,7 @@ const creationMarkup = `
         <h1 id="creation-title">Create world</h1>
         <div class="editor-readonly-context" aria-label="Creation context">
           <p>New reusable world draft</p>
-          <p>Characters are added after the world is created.</p>
+          <p>Review world details and an optional character roster before creation.</p>
         </div>
       </div>
     </header>
@@ -176,6 +190,7 @@ const creationMarkup = `
         <button type="button" data-stage="canon" aria-disabled="true" disabled>Canon</button>
         <button type="button" data-stage="mechanics" aria-disabled="true" disabled>Mechanics</button>
         <button type="button" data-stage="cover" aria-disabled="true" disabled>Cover</button>
+        <button type="button" data-stage="characters" aria-disabled="true" disabled>Characters</button>
         <button type="button" data-stage="review" aria-disabled="true" disabled>Review</button>
       </nav>
       <section class="editor-canvas creation-canvas" data-creation-stage="method" aria-labelledby="method-heading">
@@ -262,6 +277,16 @@ export function mountWorldCreationPage(
   const attachCreatedWorldCover = dependencies.attachCreatedWorldCover ?? attachCreatedWorldCoverRequest;
   const generateCreatedWorldCover = dependencies.generateCreatedWorldCover ?? generateCreatedWorldCoverRequest;
   const navigate = dependencies.navigate ?? ((path: string) => pageView.location.assign(path));
+  let defaultCharacterSessionStore: CharacterWorkspaceSessionStore | null = null;
+  if (!dependencies.characterSessionStore) {
+    try {
+      defaultCharacterSessionStore = createCharacterWorkspaceSessionStore(pageView.sessionStorage);
+    } catch {
+      defaultCharacterSessionStore = null;
+    }
+  }
+  const characterSessionStore = dependencies.characterSessionStore ?? defaultCharacterSessionStore;
+  const characterWorkflowIdFactory = dependencies.characterWorkflowIdFactory ?? (() => crypto.randomUUID());
   const pollInterval = Math.max(50, dependencies.generationPollIntervalMs ?? 500);
   const confirmGeneratedReplacement = dependencies.confirmGeneratedReplacement ?? (() => pageView.confirm(
     "Replace the fields already entered with the generated draft?"
@@ -291,6 +316,7 @@ export function mountWorldCreationPage(
   let unloadInstalled = false;
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let activeCollection: EditableCollection = "entities";
+  let activeCharacterHandoff: Pick<CharacterWorkspaceSession, "key" | "workflowId"> | null = null;
   const selectedIndexes = new Map<EditableCollection, number>();
   const searches = new Map<EditableCollection, string>();
 
@@ -633,6 +659,32 @@ export function mountWorldCreationPage(
     editingStage.append(assets, stageActions());
   }
 
+  function renderCharacters(): void {
+    editingStage.replaceChildren(renderWorldCreationCharacterRoster({
+      document,
+      state,
+      sessionStore: characterSessionStore,
+      workflowIdFactory: characterWorkflowIdFactory,
+      navigate,
+      onSessionCreated: (session) => {
+        activeCharacterHandoff = { key: session.key, workflowId: session.workflowId };
+      },
+      onRemove: (characterId) => {
+        state = removeCreationCharacter(state, characterId);
+        renderCharacters();
+        renderStageIndex();
+        setDirtyGuard(state.navigationDirty);
+      },
+      onRestore: (removalId) => {
+        state = restoreCreationCharacter(state, removalId);
+        renderCharacters();
+        renderStageIndex();
+        setDirtyGuard(state.navigationDirty);
+      }
+    }));
+    editingStage.append(stageActions());
+  }
+
   function stageForIssue(path: string): CreationStage {
     if (path === "method") return "method";
     if (path === "world" || path.startsWith("world.")) return "foundation";
@@ -761,6 +813,7 @@ export function mountWorldCreationPage(
     if (state.stage === "foundation") renderFoundation();
     else if (state.stage === "canon" || state.stage === "mechanics") renderCollectionEditor();
     else if (state.stage === "cover") renderCover();
+    else if (state.stage === "characters") renderCharacters();
     else if (state.stage === "review") renderReview();
     canvas.setAttribute("aria-labelledby", state.stage === "method" ? "method-heading" : `${state.stage}-heading`);
   }
@@ -1329,6 +1382,30 @@ export function mountWorldCreationPage(
     trapDialogFocus(keyboardEvent);
   }
 
+  function consumeCharacterHandoff(): void {
+    if (!activeCharacterHandoff || !characterSessionStore) return;
+    const consumed = characterSessionStore.consume(
+      activeCharacterHandoff.key,
+      "world-creation",
+      activeCharacterHandoff.workflowId
+    );
+    if (!consumed) return;
+    activeCharacterHandoff = null;
+    if (consumed.result.status === "accepted") {
+      state = {
+        ...state,
+        stage: "characters",
+        draft: structuredClone(consumed.session.parentDraft)
+      };
+      state = consumed.session.mode === "edit" && consumed.session.candidate
+        ? replaceCreationCharacter(state, consumed.session.candidate.id, consumed.result.candidate)
+        : appendCreationCharacter(state, consumed.result.candidate);
+    }
+    renderStage();
+    setDirtyGuard(state.navigationDirty);
+  }
+
+  const onPageShow = () => consumeCharacterHandoff();
   const onRootInput = (event: Event) => {
     onInput(event);
     setDirtyGuard(state.navigationDirty);
@@ -1346,6 +1423,7 @@ export function mountWorldCreationPage(
   root.addEventListener("change", onRootChange);
   root.addEventListener("click", onRootClick);
   document.addEventListener("keydown", onKeyDown);
+  pageView.addEventListener("pageshow", onPageShow);
   renderStage();
 
   return {
@@ -1362,6 +1440,7 @@ export function mountWorldCreationPage(
       root.removeEventListener("change", onRootChange);
       root.removeEventListener("click", onRootClick);
       document.removeEventListener("keydown", onKeyDown);
+      pageView.removeEventListener("pageshow", onPageShow);
       theme.dispose();
     }
   };

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   addCreationCollectionItem,
+  appendCreationCharacter,
   applyGeneratedPreview,
   beginCreation,
   completeCreation,
@@ -12,15 +13,37 @@ import {
   failCreation,
   hasLocalWorldCreationContent,
   isWorldCreationPath,
+  removeCreationCharacter,
   removeCreationCollectionItem,
+  replaceCreationCharacter,
+  restoreCreationCharacter,
   restoreCreationCollectionItem,
   selectCreationMethod,
   setCreationCoverIntent,
   setCreationStage,
   updateCreationCollectionItem,
   validateCreationStage,
-  worldCreationPath
+  worldCreationPath,
+  worldCreationSubmissionSnapshot
 } from "../../apps/web-next/src/world-creation-model.js";
+import { MAX_PLAYABLE_CHARACTERS } from "../../packages/contracts/src/world-library.js";
+
+function character(id: string, name = id) {
+  return {
+    id,
+    name,
+    characterText: `${name} protects the atlas.`,
+    profile: {
+      identity: { aliases: [], pronouns: "they/them" },
+      story: {},
+      appearance: {},
+      unclassifiedNotes: ""
+    },
+    rpgStats: [],
+    defaultTriggers: [],
+    source: {}
+  };
+}
 
 const providerDraft = {
   schemaVersion: 4,
@@ -73,17 +96,17 @@ describe("World Creation local workflow", () => {
     expect(edited.navigationDirty).toBe(true);
   });
 
-  it("keeps protected root fields canonical during direct edits", () => {
+  it("keeps protected roots canonical and lets only reviewed transitions introduce characters", () => {
     const initial = createWorldCreationState();
     const schemaEdited = editCreationDraft(initial, ["schemaVersion"], 4);
-    const charactersEdited = editCreationDraft(schemaEdited, ["playableCharacters"], [
-      { id: "forbidden", name: "Forbidden character" }
-    ]);
+    const directlyEdited = editCreationDraft(schemaEdited, ["playableCharacters"], [character("forbidden")]);
+    const appended = appendCreationCharacter(directlyEdited, character("keeper", "Keeper"));
 
     expect(schemaEdited.draft.schemaVersion).toBe(5);
-    expect(charactersEdited.draft.schemaVersion).toBe(5);
-    expect(charactersEdited.draft.playableCharacters).toEqual([]);
-    expect(initial.draft.schemaVersion).toBe(5);
+    expect(directlyEdited.draft.playableCharacters).toEqual([]);
+    expect(appended.draft.playableCharacters).toEqual([
+      expect.objectContaining({ id: "keeper", name: "Keeper", characterText: "Keeper protects the atlas." })
+    ]);
     expect(initial.draft.playableCharacters).toEqual([]);
   });
 
@@ -129,7 +152,7 @@ describe("World Creation local workflow", () => {
     expect(state.draft.playableCharacters).toEqual([]);
   });
 
-  it("reports readiness for all six stages without requiring invented lore volume", () => {
+  it("reports readiness for all seven stages without requiring invented lore volume", () => {
     const initial = createWorldCreationState();
     expect(creationReadiness(initial).stages).toEqual([
       { stage: "method", ready: false, issueCount: 1 },
@@ -137,6 +160,7 @@ describe("World Creation local workflow", () => {
       { stage: "canon", ready: true, issueCount: 0 },
       { stage: "mechanics", ready: true, issueCount: 0 },
       { stage: "cover", ready: true, issueCount: 0 },
+      { stage: "characters", ready: true, issueCount: 0 },
       { stage: "review", ready: false, issueCount: 2 }
     ]);
 
@@ -185,16 +209,19 @@ describe("World Creation local workflow", () => {
     expect(hasLocalWorldCreationContent(editCreationDraft(empty, ["world", "importedData"], { keep: true }).draft)).toBe(true);
   });
 
-  it("canonicalizes generated previews, removes characters, and records replacement metadata", () => {
-    const local = editCreationDraft(createWorldCreationState(), ["world", "title"], "Local Atlas");
+  it("canonicalizes generated previews without injecting provider characters or replacing the reviewed roster", () => {
+    let local = editCreationDraft(createWorldCreationState(), ["world", "title"], "Local Atlas");
+    local = appendCreationCharacter(local, character("reviewed", "Reviewed Keeper"));
     const generated = applyGeneratedPreview(local, {
       title: "Generated Atlas",
-      content: { ...providerDraft, playableCharacters: [{ id: "forbidden" }] }
+      content: { ...providerDraft, playableCharacters: [character("injected", "Injected Stranger")] }
     });
 
     expect(generated.draft.schemaVersion).toBe(5);
     expect(generated.draft.world.title).toBe("Generated Atlas");
-    expect(generated.draft.playableCharacters).toEqual([]);
+    expect(generated.draft.playableCharacters).toEqual([
+      expect.objectContaining({ id: "reviewed", name: "Reviewed Keeper" })
+    ]);
     expect(generated.provenance).toBe("ai");
     expect(generated.status).toBe("unsaved");
     expect(generated.generationReplacement).toEqual({
@@ -242,7 +269,7 @@ describe("World Creation local workflow", () => {
     expect(setCreationCoverIntent(generated, { mode: "none" }).coverIntent).toEqual({ mode: "none" });
   });
 
-  it("builds a factual review with provenance, readiness, warnings, counts, and no characters", () => {
+  it("builds a factual review with provenance, readiness, warnings, and reviewed character counts", () => {
     let state = selectCreationMethod(createWorldCreationState(), "ai");
     state = editCreationDraft(state, ["world", "title"], "Glass Atlas");
     state = editCreationDraft(state, ["entities"], [{ name: "City" }, { name: "Star" }]);
@@ -251,6 +278,7 @@ describe("World Creation local workflow", () => {
     state = editCreationDraft(state, ["defaultTriggers"], [{ name: "Dusk" }]);
     state = editCreationDraft(state, ["eventTriggers"], [{ name: "Alarm" }]);
     state = editCreationDraft(state, ["assets"], [{ id: "asset-1" }]);
+    state = appendCreationCharacter(state, character("keeper", "Keeper"));
 
     const review = creationReview(state);
 
@@ -265,6 +293,7 @@ describe("World Creation local workflow", () => {
       { stage: "canon", ready: true, issueCount: 0 },
       { stage: "mechanics", ready: true, issueCount: 0 },
       { stage: "cover", ready: true, issueCount: 0 },
+      { stage: "characters", ready: true, issueCount: 0 },
       { stage: "review", ready: true, issueCount: 0 }
     ]);
     expect(review.counts).toEqual({
@@ -273,9 +302,92 @@ describe("World Creation local workflow", () => {
       stats: 1,
       triggers: 2,
       assets: 1,
-      characters: 0
+      characters: 1
     });
-    expect(review.draft.playableCharacters).toEqual([]);
+    expect(review.draft.playableCharacters).toEqual([
+      expect.objectContaining({ id: "keeper", name: "Keeper" })
+    ]);
+  });
+
+  it("appends, replaces, removes, and restores reviewed characters immutably", () => {
+    const initial = createWorldCreationState();
+    const appended = appendCreationCharacter(initial, {
+      ...character("keeper", "Keeper"),
+      ownerUserId: "attacker",
+      customLore: { oath: "North", user_id: "nested-attacker" }
+    });
+    const replaced = replaceCreationCharacter(appended, "keeper", {
+      ...character("keeper", "Keeper Prime"),
+      customLore: { oath: "East" }
+    });
+    const removed = removeCreationCharacter(replaced, "keeper");
+    const removalId = removed.pendingRemovals.at(-1)?.id;
+    if (!removalId) throw new Error("Character removal metadata missing.");
+    const restored = restoreCreationCharacter(removed, removalId);
+
+    expect(initial.draft.playableCharacters).toEqual([]);
+    expect(appended.draft.playableCharacters[0]).toMatchObject({
+      id: "keeper",
+      customLore: { oath: "North" }
+    });
+    expect(appended.draft.playableCharacters[0]).not.toHaveProperty("ownerUserId");
+    expect(appended.draft.playableCharacters[0]).not.toHaveProperty("customLore.user_id");
+    expect(replaced.draft.playableCharacters[0]).toMatchObject({ name: "Keeper Prime", customLore: { oath: "East" } });
+    expect(appended.draft.playableCharacters[0]).toMatchObject({ name: "Keeper", customLore: { oath: "North" } });
+    expect(removed.draft.playableCharacters).toEqual([]);
+    expect(restored.draft.playableCharacters).toEqual(replaced.draft.playableCharacters);
+    expect(removed.draft.playableCharacters).toEqual([]);
+    expect(restored.pendingRemovals).toEqual([]);
+  });
+
+  it("restores multiple character removals to their original roster order", () => {
+    let state = createWorldCreationState();
+    for (const id of ["a", "b", "c"]) state = appendCreationCharacter(state, character(id, id.toUpperCase()));
+    const removedA = removeCreationCharacter(state, "a");
+    const removedB = removeCreationCharacter(removedA, "b");
+    const removalA = removedB.pendingRemovals.find(({ value }) => (value as { id?: unknown }).id === "a");
+    const removalB = removedB.pendingRemovals.find(({ value }) => (value as { id?: unknown }).id === "b");
+    if (!removalA || !removalB) throw new Error("Character removals missing.");
+
+    const restoredA = restoreCreationCharacter(removedB, removalA.id);
+    const restoredB = restoreCreationCharacter(restoredA, removalB.id);
+
+    expect(restoredB.draft.playableCharacters.map((candidate) => (candidate as { id: string }).id))
+      .toEqual(["a", "b", "c"]);
+  });
+
+  it("rejects duplicate, mismatched, missing, malformed, and over-bound reviewed characters", () => {
+    const one = appendCreationCharacter(createWorldCreationState(), character("keeper", "Keeper"));
+    expect(() => appendCreationCharacter(one, character("keeper", "Duplicate"))).toThrow(/unique/u);
+    expect(() => replaceCreationCharacter(one, "keeper", character("other", "Other"))).toThrow(/ID/u);
+    expect(() => replaceCreationCharacter(one, "missing", character("missing", "Missing"))).toThrow(RangeError);
+    expect(() => appendCreationCharacter(one, { id: "broken" })).toThrow(/contract/u);
+
+    const full = {
+      ...createWorldCreationState(),
+      draft: {
+        ...createWorldCreationState().draft,
+        playableCharacters: Array.from({ length: MAX_PLAYABLE_CHARACTERS }, (_, index) =>
+          character(`character-${index}`))
+      }
+    };
+    expect(() => appendCreationCharacter(full, character("overflow"))).toThrow(/more than/u);
+  });
+
+  it("submits the exact reviewed roster while stripping owner keys and retaining safe unknown fields", () => {
+    const state = appendCreationCharacter(createWorldCreationState(), {
+      ...character("keeper", "Keeper"),
+      owner_user_id: "attacker",
+      preservedLore: { oath: "North", ownerUserId: "nested-attacker" }
+    });
+
+    const snapshot = worldCreationSubmissionSnapshot(state.draft);
+
+    expect(snapshot.playableCharacters).toEqual([
+      expect.objectContaining({ id: "keeper", name: "Keeper", preservedLore: { oath: "North" } })
+    ]);
+    expect(snapshot.playableCharacters[0]).not.toHaveProperty("owner_user_id");
+    expect(snapshot.playableCharacters[0]).not.toHaveProperty("preservedLore.ownerUserId");
   });
 
   it("reports completed, current, revisitable, and unavailable stages", () => {
@@ -291,6 +403,7 @@ describe("World Creation local workflow", () => {
       { stage: "canon", state: "revisitable" },
       { stage: "mechanics", state: "upcoming" },
       { stage: "cover", state: "upcoming" },
+      { stage: "characters", state: "upcoming" },
       { stage: "review", state: "upcoming" }
     ]);
   });
