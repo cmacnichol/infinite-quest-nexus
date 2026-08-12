@@ -49,7 +49,10 @@ import {
   type StructuredRecordKind
 } from "./world-editor-fields";
 import {
-  renderWorldCreationCharacterRoster
+  createWorldCreationCharacterHandoffPointerStore,
+  renderWorldCreationCharacterRoster,
+  type WorldCreationCharacterHandoffPointer,
+  type WorldCreationCharacterHandoffPointerStore
 } from "./world-creation-character-roster.js";
 import {
   characterWorkspacePath,
@@ -85,6 +88,7 @@ export interface WorldCreationPageDependencies {
   ) => Promise<GeneratedWorldCoverResponse>;
   navigate?: (path: string) => void;
   characterSessionStore?: CharacterWorkspaceSessionStore;
+  characterHandoffPointerStore?: WorldCreationCharacterHandoffPointerStore;
   characterWorkflowIdFactory?: () => string;
   initialState?: WorldCreationState;
 }
@@ -287,6 +291,15 @@ export function mountWorldCreationPage(
     }
   }
   const characterSessionStore = dependencies.characterSessionStore ?? defaultCharacterSessionStore;
+  let defaultCharacterHandoffPointerStore: WorldCreationCharacterHandoffPointerStore | null = null;
+  if (!dependencies.characterHandoffPointerStore) {
+    try {
+      defaultCharacterHandoffPointerStore = createWorldCreationCharacterHandoffPointerStore(pageView.sessionStorage);
+    } catch {
+      defaultCharacterHandoffPointerStore = null;
+    }
+  }
+  const characterHandoffPointerStore = dependencies.characterHandoffPointerStore ?? defaultCharacterHandoffPointerStore;
   const characterWorkflowIdFactory = dependencies.characterWorkflowIdFactory ?? (() => crypto.randomUUID());
   const pollInterval = Math.max(50, dependencies.generationPollIntervalMs ?? 500);
   const confirmGeneratedReplacement = dependencies.confirmGeneratedReplacement ?? (() => pageView.confirm(
@@ -670,9 +683,12 @@ export function mountWorldCreationPage(
       workflowIdFactory: characterWorkflowIdFactory,
       navigate,
       onSessionCreated: (session) => {
-        activeCharacterHandoff = { key: session.key, workflowId: session.workflowId };
+        const pointer = { key: session.key, workflowId: session.workflowId };
+        if (characterHandoffPointerStore && !characterHandoffPointerStore.write(pointer)) return false;
+        activeCharacterHandoff = pointer;
         characterHandoffError = null;
         characterHandoffResultInvalid = false;
+        return true;
       },
       onRemove: (characterId) => {
         state = removeCreationCharacter(state, characterId);
@@ -1415,6 +1431,41 @@ export function mountWorldCreationPage(
     navigate(destination);
   }
 
+  function clearCharacterHandoffPointer(pointer: WorldCreationCharacterHandoffPointer): void {
+    characterHandoffPointerStore?.clear(pointer);
+  }
+
+  function recoverCharacterHandoffPointer(): void {
+    if (!characterSessionStore || !characterHandoffPointerStore) return;
+    const pointer = characterHandoffPointerStore.read();
+    if (!pointer) return;
+    activeCharacterHandoff = pointer;
+    const session = characterSessionStore.load(pointer.key);
+    if (!session) {
+      clearCharacterHandoffPointer(pointer);
+      activeCharacterHandoff = null;
+      return;
+    }
+    if (session.origin !== "world-creation" || session.workflowId !== pointer.workflowId ||
+        session.parentRoute !== "/app/worlds/new" || session.expectedWorldRevision !== null) {
+      clearCharacterHandoffPointer(pointer);
+      activeCharacterHandoff = null;
+      return;
+    }
+    const restoredMethod = state.method ?? "manual";
+    state = {
+      ...state,
+      stage: "characters",
+      furthestStageIndex: Math.max(state.furthestStageIndex, STAGE_ORDER.indexOf("characters")),
+      method: restoredMethod,
+      provenance: state.provenance ?? restoredMethod,
+      navigationDirty: true,
+      draft: structuredClone(session.parentDraft)
+    };
+    setDirtyGuard(true);
+    consumeCharacterHandoff();
+  }
+
   function consumeCharacterHandoff(useCurrentRoster = false): void {
     if (!activeCharacterHandoff || !characterSessionStore) return;
     const pending = characterSessionStore.peek(
@@ -1471,6 +1522,7 @@ export function mountWorldCreationPage(
       return;
     }
     state = nextState;
+    clearCharacterHandoffPointer(activeCharacterHandoff);
     activeCharacterHandoff = null;
     characterHandoffError = null;
     characterHandoffResultInvalid = false;
@@ -1497,6 +1549,7 @@ export function mountWorldCreationPage(
   root.addEventListener("click", onRootClick);
   document.addEventListener("keydown", onKeyDown);
   pageView.addEventListener("pageshow", onPageShow);
+  recoverCharacterHandoffPointer();
   renderStage();
 
   return {

@@ -31,6 +31,7 @@ export interface CharacterWorkspacePageDependencies {
   confirmGeneratedReplacement?: () => boolean;
   navigate?: (path: string) => void;
   generationPollIntervalMs?: number;
+  generationCompletionTimeoutMs?: number;
 }
 
 const STAGES: readonly CharacterStage[] = ["method", "identity", "story", "appearance", "mechanics", "review"];
@@ -61,8 +62,19 @@ function required<T extends Element>(root: ParentNode, selector: string): T {
 
 function unavailableMarkup(returnPath: string | null): string {
   return `<main id="main-content" class="character-unavailable" data-page="character-workspace-unavailable">
-    <section><h1>Character workspace unavailable</h1><p>This character workspace is unavailable or expired. Return to the world and start again.</p>
+    <section><h1>Character workspace unavailable</h1><p>This character workspace is unavailable or expired. No world data was changed. Return to the world and start again.</p>
     <a href="${returnPath ?? "/app/"}">Return to world</a></section></main>`;
+}
+
+function candidateMethod(session: ReturnType<CharacterWorkspaceSessionStore["load"]>): "manual" | "ai" | null {
+  if (!session?.candidate) return null;
+  const source = session.candidate.source;
+  if (typeof source !== "object" || source === null || Array.isArray(source)) return "manual";
+  const metadata = source as Record<string, unknown>;
+  return metadata.generationApplied === true || metadata.method === "ai" ||
+    typeof metadata.provider === "string" || typeof metadata.model === "string"
+    ? "ai"
+    : "manual";
 }
 
 function workspaceMarkup(returnPath: string): string {
@@ -138,6 +150,7 @@ export function mountCharacterWorkspacePage(
   const readClipboard = dependencies.readClipboardText ?? (() => pageView.navigator.clipboard.readText());
   const writeClipboard = dependencies.writeClipboardText ?? ((value: string) => pageView.navigator.clipboard.writeText(value));
   const pollInterval = Math.max(1, dependencies.generationPollIntervalMs ?? 500);
+  const completionTimeout = Math.max(1, dependencies.generationCompletionTimeoutMs ?? 30_000);
   const roster = activeSession.worldContext.playableCharacters.flatMap((value) => {
     const parsed = playableCharacterSchema.safeParse(value);
     if (!parsed.success) return [];
@@ -147,7 +160,7 @@ export function mountCharacterWorkspacePage(
   let state = createCharacterWorkspaceState({
     roster,
     candidate: activeSession.candidate ?? undefined,
-    method: activeSession.candidate ? "ai" : null
+    method: candidateMethod(activeSession)
   });
   let prompt = "";
   let dirty = false;
@@ -157,6 +170,7 @@ export function mountCharacterWorkspacePage(
   let generationSequence = 0;
   let generationController: AbortController | null = null;
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
+  let completionTimer: ReturnType<typeof setTimeout> | null = null;
   let mechanicsCollection: "rpgStats" | "defaultTriggers" = "rpgStats";
   let mechanicsIndex = 0;
   let dialogOpen = false;
@@ -180,6 +194,8 @@ export function mountCharacterWorkspacePage(
     generationController = null;
     if (pollTimer !== null) clearTimeout(pollTimer);
     pollTimer = null;
+    if (completionTimer !== null) clearTimeout(completionTimer);
+    completionTimer = null;
   }
 
   function updateStageIndex(): void {
@@ -188,8 +204,17 @@ export function mountCharacterWorkspacePage(
       const current = stage === state.stage;
       if (current) button.setAttribute("aria-current", "step"); else button.removeAttribute("aria-current");
       const unavailable = index > state.furthestStageIndex;
+      const stageState = current ? "current" : index < state.furthestStageIndex ? "completed" : unavailable ? "upcoming" : "revisitable";
       button.disabled = unavailable;
-      button.dataset.stageState = current ? "current" : index < state.furthestStageIndex ? "completed" : unavailable ? "upcoming" : "revisitable";
+      button.dataset.stageState = stageState;
+      button.querySelector("[data-stage-completion]")?.remove();
+      if (stageState === "completed") {
+        const completion = document.createElement("span");
+        completion.className = "visually-hidden";
+        completion.dataset.stageCompletion = "";
+        completion.textContent = "Completed: ";
+        button.prepend(completion);
+      }
       if (unavailable) button.setAttribute("aria-disabled", "true"); else button.removeAttribute("aria-disabled");
     });
   }
@@ -221,7 +246,8 @@ export function mountCharacterWorkspacePage(
     const back = document.createElement("button");
     back.type = "button"; back.dataset.action = "back-character"; back.textContent = "Back";
     const next = document.createElement("button");
-    next.type = "button"; next.dataset.action = final ? "accept-character" : "continue-character"; next.textContent = final ? "Use character" : "Continue";
+    next.type = "button"; next.dataset.action = final ? "accept-character" : "continue-character";
+    next.textContent = final ? (activeSession.mode === "edit" ? "Update world draft" : "Add to world draft") : "Continue";
     ledger.append(progress, back, next);
     return ledger;
   }
@@ -230,7 +256,7 @@ export function mountCharacterWorkspacePage(
     canvas.innerHTML = `<div class="character-stage character-method-stage"><header><h2>Choose how to begin</h2><p>Author each field manually or ask the Story Engine for an editable preview.</p></header>
       <fieldset class="character-method-controls"><legend>Character method</legend><label class="character-method-control"><input type="radio" name="characterMethod" value="manual"><span>Manual</span></label><label class="character-method-control"><input type="radio" name="characterMethod" value="ai"><span>AI-assisted</span></label></fieldset>
       <section class="character-prompt-authoring" data-character-ai-prompt hidden><div class="character-prompt-heading"><div><h3>Character concept</h3><p>Describe this character's role, personality, history, and visual identity.</p></div><div class="character-prompt-tools"><button type="button" data-action="copy-character-prompt" aria-label="Copy character concept">${copyIcon}</button><button type="button" data-action="paste-character-prompt" aria-label="Paste character concept">${pasteIcon}</button><button type="button" data-action="expand-character-prompt">${expandIcon}<span>Expand</span></button></div></div>
-      <label class="character-field"><span>Concept prompt</span><textarea rows="7" data-character-prompt="compact"></textarea></label><p data-character-clipboard-status aria-live="polite"></p><div data-character-generation-status aria-live="polite"></div><div class="character-generation-actions"><button type="button" data-action="generate-character" disabled>Generate character</button><button type="button" data-action="cancel-character-generation" hidden>Cancel generation</button></div></section>
+      <label class="character-field"><span>Concept prompt</span><textarea rows="7" data-character-prompt="compact"></textarea></label><p data-character-clipboard-status aria-live="polite"></p><div data-character-generation-status role="status" aria-live="polite"></div><div class="character-generation-actions"><button type="button" data-action="generate-character" disabled>Generate character</button><button type="button" data-action="cancel-character-generation" hidden>Cancel generation</button></div></section>
       <div data-character-manual hidden><p>Begin with an empty character and complete each stage.</p></div></div>`;
     const aiSection = required<HTMLElement>(canvas, "[data-character-ai-prompt]");
     const manual = required<HTMLElement>(canvas, "[data-character-manual]");
@@ -242,6 +268,13 @@ export function mountCharacterWorkspacePage(
       radio.checked = state.method === radio.value;
       function onMethodChange(): void {
         if (disposed || !radio.checked) return;
+        const wasGenerating = generationController !== null;
+        stopGeneration();
+        if (wasGenerating) {
+          const status = canvas.querySelector<HTMLElement>("[data-character-generation-status]");
+          if (status) status.textContent = "Character generation cancelled because the creation method changed.";
+          restoreGenerationActions();
+        }
         state = { ...state, method: radio.value as "manual" | "ai" };
         markDirty();
         aiSection.hidden = state.method !== "ai";
@@ -344,7 +377,10 @@ export function mountCharacterWorkspacePage(
     const facts = document.createElement("dl");
     const values = [
       ["Name", state.candidate.name || "Not provided"],
+      ["Character ID", state.candidate.id],
       ["Method", provenance],
+      ["Target world draft", activeSession.worldContext.world.title || "Untitled world"],
+      ["Aliases", String(review.counts.aliases)],
       ["Story fields", String(review.counts.completedStoryFields)],
       ["Appearance facts", String(review.counts.completedAppearanceFields)],
       ["Mechanics", `${plural(review.counts.stats, "stat")} · ${plural(review.counts.triggers, "tracker")}`],
@@ -356,13 +392,42 @@ export function mountCharacterWorkspacePage(
       const description = document.createElement("dd"); description.textContent = value;
       row.append(term, description); facts.append(row);
     }
+    const readiness = document.createElement("ul");
+    readiness.dataset.characterReviewReadiness = "";
+    for (const item of review.readiness) {
+      const row = document.createElement("li");
+      row.textContent = `${STAGE_LABELS[item.stage]}: ${item.ready ? "ready" : `needs attention · ${item.issueCount} issue${item.issueCount === 1 ? "" : "s"}`}`;
+      readiness.append(row);
+    }
+    const unsaved = document.createElement("p");
+    unsaved.textContent = "This character remains unsaved world-draft content until the parent world action is completed.";
+    const errors = validateCharacterStage(state, "review").issues.filter(({ severity }) => severity === "error");
+    let errorSummary: HTMLElement | null = null;
+    if (errors.length > 0) {
+      errorSummary = document.createElement("nav");
+      errorSummary.dataset.characterReviewErrors = "";
+      errorSummary.setAttribute("aria-label", "Character errors");
+      const list = document.createElement("ul");
+      for (const issue of errors) {
+        const item = document.createElement("li");
+        const link = document.createElement("a");
+        link.href = `#character-${issue.path.replaceAll(".", "-")}-error`;
+        link.dataset.characterReviewErrorStage = issue.stage;
+        link.dataset.characterReviewErrorPath = issue.path;
+        link.textContent = issue.message;
+        item.append(link); list.append(item);
+      }
+      errorSummary.append(list);
+    }
     const returnLink = document.createElement("a");
     returnLink.href = activeSession.parentRoute;
     returnLink.textContent = "Return without using this character";
     const status = document.createElement("p");
     status.dataset.characterAcceptanceStatus = "";
     status.setAttribute("aria-live", "polite");
-    stage.append(facts, returnLink, status);
+    stage.append(facts, readiness, unsaved);
+    if (errorSummary) stage.append(errorSummary);
+    stage.append(returnLink, status);
     canvas.replaceChildren(stage, actions(true));
   }
 
@@ -382,10 +447,11 @@ export function mountCharacterWorkspacePage(
     canvas.querySelectorAll<HTMLElement>("[aria-invalid]").forEach((element) => element.removeAttribute("aria-invalid"));
     canvas.querySelectorAll<HTMLElement>("[data-field-error]").forEach((element) => { element.textContent = ""; });
     function issueControl(path: string): HTMLElement | null {
+      if (path === "method") return canvas.querySelector<HTMLElement>('[name="characterMethod"]');
       const mechanic = path.match(/^candidate\.(rpgStats|defaultTriggers)$/)?.[1];
-      return mechanic
-        ? canvas.querySelector<HTMLElement>(`[data-mechanics-collection="${mechanic}"]`)
-        : canvas.querySelector<HTMLElement>(`[name="${path}"]`);
+      if (mechanic) return canvas.querySelector<HTMLElement>(`[data-mechanics-collection="${mechanic}"]`);
+      return canvas.querySelector<HTMLElement>(`[name="${path}"]`) ??
+        canvas.querySelector<HTMLElement>("input[name], textarea[name], button[data-mechanics-collection]");
     }
     for (const issue of issues) {
       const control = issueControl(issue.path);
@@ -462,6 +528,20 @@ export function mountCharacterWorkspacePage(
     if (cancel) cancel.hidden = true;
   }
 
+  function settleGenerationWithoutPreview(sequence: number): void {
+    if (disposed || sequence !== generationSequence) return;
+    generationSequence += 1;
+    generationController?.abort();
+    generationController = null;
+    if (pollTimer !== null) clearTimeout(pollTimer);
+    pollTimer = null;
+    if (completionTimer !== null) clearTimeout(completionTimer);
+    completionTimer = null;
+    const status = canvas.querySelector<HTMLElement>("[data-character-generation-status]");
+    if (status) status.textContent = "Character generation completed, but its preview did not arrive. Generate again to retry.";
+    restoreGenerationActions();
+  }
+
   function failGeneration(sequence: number): void {
     if (disposed || sequence !== generationSequence) return;
     generationSequence += 1;
@@ -469,9 +549,28 @@ export function mountCharacterWorkspacePage(
     generationController = null;
     if (pollTimer !== null) clearTimeout(pollTimer);
     pollTimer = null;
+    if (completionTimer !== null) clearTimeout(completionTimer);
+    completionTimer = null;
     const status = canvas.querySelector<HTMLElement>("[data-character-generation-status]");
     if (status) status.textContent = "Character generation failed. Review the prompt and retry.";
     restoreGenerationActions();
+  }
+
+  function renderGenerationProgress(progress: Awaited<ReturnType<typeof loadProgress>>): void {
+    const status = canvas.querySelector<HTMLElement>("[data-character-generation-status]");
+    if (!status) return;
+    status.setAttribute("role", "status");
+    status.replaceChildren();
+    const meter = document.createElement("progress");
+    meter.dataset.characterGenerationProgress = "";
+    meter.max = 100;
+    meter.value = Math.max(0, Math.min(100, progress.progressPercent));
+    meter.setAttribute("aria-label", "Character generation progress");
+    const message = document.createElement("p");
+    message.textContent = progress.status === "completed"
+      ? `Finalizing generated character · ${Math.round(meter.value)}%`
+      : `${progress.message} · ${Math.round(meter.value)}%`;
+    status.append(meter, message);
   }
 
   function poll(progressKey: string, sequence: number, signal: AbortSignal): void {
@@ -479,9 +578,14 @@ export function mountCharacterWorkspacePage(
     void loadProgress(progressKey, signal).then((progress) => {
       if (disposed || sequence !== generationSequence || signal.aborted) return;
       if (progress.status === "failed") { failGeneration(sequence); return; }
-      const status = canvas.querySelector<HTMLElement>("[data-character-generation-status]");
-      if (status) status.textContent = `${Math.round(progress.progressPercent)}% · ${progress.message}`;
-      if (progress.status === "processing") pollTimer = setTimeout(() => poll(progressKey, sequence, signal), pollInterval);
+      renderGenerationProgress(progress);
+      if (progress.status === "completed") {
+        if (pollTimer !== null) clearTimeout(pollTimer);
+        pollTimer = null;
+        completionTimer = setTimeout(() => settleGenerationWithoutPreview(sequence), completionTimeout);
+        return;
+      }
+      if (progress.status === "processing" || progress.status === "unknown") pollTimer = setTimeout(() => poll(progressKey, sequence, signal), pollInterval);
     }).catch(function onProgressError(error: unknown) {
       if (disposed || sequence !== generationSequence || signal.aborted) return;
       if (!(error instanceof Error && error.name === "AbortError")) {
@@ -507,6 +611,8 @@ export function mountCharacterWorkspacePage(
       .then(({ character }) => {
         if (disposed || sequence !== generationSequence || controller.signal.aborted) return;
         if (candidateDirty && !confirmReplacement()) return;
+        if (completionTimer !== null) clearTimeout(completionTimer);
+        completionTimer = null;
         state = applyGeneratedCharacter(state, character);
         candidateDirty = true;
         state = setCharacterStage(state, "identity");
@@ -522,6 +628,8 @@ export function mountCharacterWorkspacePage(
         generationController = null;
         if (pollTimer !== null) clearTimeout(pollTimer);
         pollTimer = null;
+        if (completionTimer !== null) clearTimeout(completionTimer);
+        completionTimer = null;
         if (canvas.contains(generate)) { generate.disabled = !prompt.trim(); cancel.hidden = true; }
       });
   }
@@ -550,9 +658,26 @@ export function mountCharacterWorkspacePage(
     }
     const target = eventElement?.closest<HTMLElement>("button, a");
     if (!target) return;
+    const reviewErrorStage = target.dataset.characterReviewErrorStage as CharacterStage | undefined;
+    const reviewErrorPath = target.dataset.characterReviewErrorPath;
+    if (reviewErrorStage && reviewErrorPath) {
+      event.preventDefault();
+      state = { ...state, stage: reviewErrorStage };
+      render();
+      showValidation();
+      return;
+    }
     const action = target.dataset.action;
-    if (target.dataset.characterStage) { state = setCharacterStage(state, target.dataset.characterStage as CharacterStage); render(); return; }
-    if (action === "continue-character") { if (!showValidation()) return; const index = STAGES.indexOf(state.stage); if (index < STAGES.length - 1) { state = setCharacterStage(state, STAGES[index + 1]!); render(); } }
+    if (target.dataset.characterStage) {
+      const destination = target.dataset.characterStage as CharacterStage;
+      if (state.stage === "method" && destination !== "method") stopGeneration();
+      state = destination === "review" && state.furthestStageIndex === STAGES.length - 1
+        ? { ...state, stage: "review" }
+        : setCharacterStage(state, destination);
+      render();
+      return;
+    }
+    if (action === "continue-character") { if (!showValidation()) return; const index = STAGES.indexOf(state.stage); if (index < STAGES.length - 1) { if (state.stage === "method") stopGeneration(); state = setCharacterStage(state, STAGES[index + 1]!); render(); } }
     if (action === "back-character") { const index = STAGES.indexOf(state.stage); if (index > 0) { state = setCharacterStage(state, STAGES[index - 1]!); render(); } }
     if (action === "generate-character") startGeneration();
     if (action === "cancel-character-generation") { stopGeneration(); render(); }
@@ -566,7 +691,16 @@ export function mountCharacterWorkspacePage(
     if (action === "accept-character" && !completed) {
       const candidate = characterHandoffCandidate(state);
       const status = canvas.querySelector<HTMLElement>("[data-character-acceptance-status]");
-      if (!candidate || !sessionStore?.complete(activeSession.key, activeSession.workflowId, { status: "accepted", candidate })) { if (status) status.textContent = "This character could not be accepted. Return to the world and try again."; return; }
+      if (!candidate) {
+        const firstIssue = validateCharacterStage(state, "review").issues.find(({ severity }) => severity === "error");
+        if (firstIssue) {
+          state = { ...state, stage: firstIssue.stage };
+          render();
+          showValidation();
+        } else if (status) status.textContent = "This character could not be accepted. Return to the world and try again.";
+        return;
+      }
+      if (!sessionStore?.complete(activeSession.key, activeSession.workflowId, { status: "accepted", candidate })) { if (status) status.textContent = "This character could not be accepted. Return to the world and try again."; return; }
       completed = true; clearDirty(); navigate(activeSession.parentRoute);
     }
     if (action === "cancel-character" && !completed && sessionStore?.complete(activeSession.key, activeSession.workflowId, { status: "cancelled" })) { completed = true; clearDirty(); navigate(activeSession.parentRoute); }

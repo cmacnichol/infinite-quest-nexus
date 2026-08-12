@@ -88,6 +88,12 @@ async function settle(): Promise<void> {
   await Promise.resolve();
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 function key(window: Window, value: string, shiftKey = false): Event {
   const event = new window.Event("keydown", { bubbles: true, cancelable: true });
   Object.defineProperties(event, { key: { value }, shiftKey: { value: shiftKey } });
@@ -101,15 +107,21 @@ describe("Character Workspace page", () => {
     expect(document.querySelector('[data-page="character-workspace-unavailable"]')).not.toBeNull();
     expect(document.querySelector('a[href="/app/worlds/world-1?tab=characters"]')).not.toBeNull();
     expect(root.textContent).toContain("unavailable or expired");
+    expect(root.textContent).toContain("No world data was changed");
   });
 
-  it("renders six semantic stages and exactly two compact method radios", () => {
-    const { document, root } = fixture();
+  it("renders six semantic stages, completed stage text, and exactly two compact method radios", () => {
+    const { document, window, root } = fixture();
     mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store() });
     expect([...document.querySelectorAll("[data-character-stage]")].map((item) => item.getAttribute("data-character-stage")))
       .toEqual(["method", "identity", "story", "appearance", "mechanics", "review"]);
     expect(document.querySelectorAll('.character-method-control input[type="radio"][name="characterMethod"]')).toHaveLength(2);
     expect(document.querySelector('[data-character-stage="method"]')?.getAttribute("aria-current")).toBe("step");
+    const manual = document.querySelector<HTMLInputElement>('[value="manual"]')!;
+    manual.checked = true;
+    manual.dispatchEvent(new window.Event("change", { bubbles: true }));
+    click(document, '[data-action="continue-character"]');
+    expect(document.querySelector('[data-character-stage="method"] [data-stage-completion]')?.textContent).toBe("Completed: ");
   });
 
   it("synchronizes prompt editors, makes typing local, and generates only explicitly", async () => {
@@ -176,6 +188,51 @@ describe("Character Workspace page", () => {
     expect(name?.getAttribute("aria-invalid")).toBe("true");
   });
 
+  it("invalidates generation when the method changes or the author leaves Method", async () => {
+    const { document, window, root } = fixture();
+    const pending = deferred<{ character: PlayableCharacter }>();
+    const generate = vi.fn((_request, signal: AbortSignal) => pending.promise.then((value) => signal.aborted
+      ? Promise.reject(new DOMException("Aborted", "AbortError"))
+      : value));
+    mountCharacterWorkspacePage(root, "opaque-key", {
+      sessionStore: store(), generateCharacterPreview: generate,
+      loadGenerationProgress: vi.fn().mockResolvedValue({ status: "processing", phase: "generating", progressPercent: 35, message: "Generating" })
+    });
+    const ai = document.querySelector<HTMLInputElement>('[value="ai"]')!;
+    ai.checked = true;
+    ai.dispatchEvent(new window.Event("change", { bubbles: true }));
+    input(document, window, '[data-character-prompt="compact"]', "Create one");
+    click(document, '[data-action="generate-character"]');
+    const manual = document.querySelector<HTMLInputElement>('[value="manual"]')!;
+    manual.checked = true;
+    manual.dispatchEvent(new window.Event("change", { bubbles: true }));
+    pending.resolve({ character: generatedCharacter });
+    await settle();
+    expect(root.textContent).not.toContain("Ilyra Venn");
+    manual.checked = false;
+    ai.checked = true;
+    ai.dispatchEvent(new window.Event("change", { bubbles: true }));
+    expect(document.querySelector<HTMLButtonElement>('[data-action="cancel-character-generation"]')?.hidden).toBe(true);
+    expect(document.querySelector<HTMLButtonElement>('[data-action="generate-character"]')?.disabled).toBe(false);
+
+    const leaving = fixture();
+    const leavingPreview = deferred<{ character: PlayableCharacter }>();
+    mountCharacterWorkspacePage(leaving.root, "opaque-key", {
+      sessionStore: store(), generateCharacterPreview: vi.fn(() => leavingPreview.promise),
+      loadGenerationProgress: vi.fn().mockResolvedValue({ status: "processing", phase: "generating", progressPercent: 35, message: "Generating" })
+    });
+    const leavingAi = leaving.document.querySelector<HTMLInputElement>('[value="ai"]')!;
+    leavingAi.checked = true;
+    leavingAi.dispatchEvent(new leaving.window.Event("change", { bubbles: true }));
+    input(leaving.document, leaving.window as unknown as Window, '[data-character-prompt="compact"]', "Create two");
+    click(leaving.document, '[data-action="generate-character"]');
+    click(leaving.document, '[data-action="continue-character"]');
+    leavingPreview.resolve({ character: generatedCharacter });
+    await settle();
+    expect(leaving.document.querySelector('[data-character-canvas="identity"]')).not.toBeNull();
+    expect(leaving.root.textContent).not.toContain("Ilyra Venn");
+  });
+
   it("supports progress cancellation, retry, terminal failure, and stale-result isolation", async () => {
     const { document, window, root } = fixture();
     let resolveFirst!: (value: { character: PlayableCharacter }) => void;
@@ -232,6 +289,43 @@ describe("Character Workspace page", () => {
     const review = document.querySelector("[data-character-review]");
     expect(review?.textContent).toContain(hostile.name);
     expect(review?.querySelector("img, script")).toBeNull();
+  });
+
+  it("settles completed progress when preview transport remains pending", async () => {
+    vi.useFakeTimers();
+    const { document, window, root } = fixture();
+    const preview = deferred<{ character: PlayableCharacter }>();
+    let signal: AbortSignal | undefined;
+    const progress = vi.fn().mockResolvedValue({
+      status: "completed", phase: "completed", progressPercent: 100, message: "Character prepared"
+    });
+    mountCharacterWorkspacePage(root, "opaque-key", {
+      sessionStore: store(),
+      generateCharacterPreview: vi.fn((_request, requestSignal) => { signal = requestSignal; return preview.promise; }),
+      loadGenerationProgress: progress,
+      generationPollIntervalMs: 1,
+      generationCompletionTimeoutMs: 5
+    });
+    const ai = document.querySelector<HTMLInputElement>('[value="ai"]')!;
+    ai.checked = true;
+    ai.dispatchEvent(new window.Event("change", { bubbles: true }));
+    input(document, window, '[data-character-prompt="compact"]', "Create one");
+    click(document, '[data-action="generate-character"]');
+    await vi.advanceTimersByTimeAsync(1);
+    await settle();
+    expect(document.querySelector<HTMLProgressElement>("[data-character-generation-progress]")?.value).toBe(100);
+    expect(document.querySelector('[data-character-generation-status]')?.getAttribute("role")).toBe("status");
+    expect(root.textContent).toContain("Finalizing generated character");
+    await vi.advanceTimersByTimeAsync(5);
+    expect(signal?.aborted).toBe(true);
+    expect(progress).toHaveBeenCalledTimes(1);
+    expect(root.textContent).toContain("completed, but its preview did not arrive");
+    expect(document.querySelector<HTMLButtonElement>('[data-action="generate-character"]')?.disabled).toBe(false);
+    expect(document.querySelector<HTMLButtonElement>('[data-action="cancel-character-generation"]')?.hidden).toBe(true);
+    preview.resolve({ character: { ...generatedCharacter, name: "Too late" } });
+    await settle();
+    expect(root.textContent).not.toContain("Too late");
+    vi.useRealTimers();
   });
 
   it("treats terminal failed progress as authoritative and ignores a late preview", async () => {
@@ -350,16 +444,44 @@ describe("Character Workspace page", () => {
     expect(error?.textContent).toContain("cannot contain more than");
   });
 
-  it("renders mechanics master-detail and review facts with a safe return link", () => {
-    const { document, root } = fixture();
-    mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(session(generatedCharacter)) });
+  it("renders complete review facts, exact final labels, and linked validation recovery", () => {
+    const { document, window, root } = fixture();
+    const edited = { ...generatedCharacter, source: {} };
+    mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(session(edited)) });
     for (const stage of ["identity", "story", "appearance", "mechanics"] as const) click(document, '[data-action="continue-character"]');
     expect(document.querySelector(".character-mechanics-master")).not.toBeNull();
     expect(document.querySelector(".character-mechanics-detail")).not.toBeNull();
     click(document, '[data-action="continue-character"]');
-    expect(document.querySelector("[data-character-review]")?.textContent).toContain("AI-assisted");
-    expect(document.querySelector("[data-character-review]")?.textContent).toContain("1 stat");
-    expect(document.querySelector('a[href="/app/worlds/world-1?tab=characters"]')).not.toBeNull();
+    const review = document.querySelector("[data-character-review]");
+    expect(review?.textContent).toContain("Manual");
+    expect(review?.textContent).toContain("provider-id");
+    expect(review?.textContent).toContain("Glass Atlas");
+    expect(review?.textContent).toContain("unsaved world-draft content");
+    expect(review?.textContent).toContain("Warnings");
+    expect(review?.textContent).toContain("Aliases");
+    expect(review?.textContent).toContain("Story fields");
+    expect(document.querySelectorAll("[data-character-review-readiness] li")).toHaveLength(6);
+    expect(document.querySelector<HTMLButtonElement>('[data-action="accept-character"]')?.textContent).toBe("Update world draft");
+
+    click(document, '[data-character-stage="story"]');
+    input(document, window, '[name="candidate.characterText"]', "");
+    click(document, '[data-character-stage="review"]');
+    const errorLink = document.querySelector<HTMLAnchorElement>('[data-character-review-error-path="candidate.characterText"]');
+    expect(errorLink?.textContent).toContain("Narrative guidance is required");
+    errorLink?.click();
+    expect(document.activeElement).toBe(document.querySelector('[name="candidate.characterText"]'));
+    expect(document.querySelector('[name="candidate.characterText"]')?.getAttribute("aria-invalid")).toBe("true");
+
+    click(document, '[data-character-stage="review"]');
+    click(document, '[data-action="accept-character"]');
+    expect(document.activeElement).toBe(document.querySelector('[name="candidate.characterText"]'));
+
+    const createFixture = fixture();
+    const createSession = session(generatedCharacter);
+    createSession.mode = "create";
+    mountCharacterWorkspacePage(createFixture.root, "opaque-key", { sessionStore: store(createSession) });
+    for (let index = 0; index < 5; index += 1) click(createFixture.document, '[data-action="continue-character"]');
+    expect(createFixture.document.querySelector<HTMLButtonElement>('[data-action="accept-character"]')?.textContent).toBe("Add to world draft");
   });
 
   it("completes acceptance once, supports cancellation, guards dirty navigation, and disposes", () => {

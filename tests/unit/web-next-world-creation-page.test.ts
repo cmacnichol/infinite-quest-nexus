@@ -18,6 +18,10 @@ import type {
   CreateCharacterWorkspaceSession
 } from "../../apps/web-next/src/character-workspace-session.js";
 import { mountWorldCreationPage } from "../../apps/web-next/src/world-creation-page.js";
+import type {
+  WorldCreationCharacterHandoffPointer,
+  WorldCreationCharacterHandoffPointerStore
+} from "../../apps/web-next/src/world-creation-character-roster.js";
 
 const createdWorld = {
   id: "22222222-2222-4222-8222-222222222222",
@@ -145,6 +149,20 @@ function handoffStore() {
     invalidateResult: (key: string) => { invalidResults.add(key); },
     expire: () => { expired = true; }
   };
+}
+
+function creationHandoffPointerStore() {
+  let pointer: WorldCreationCharacterHandoffPointer | null = null;
+  const store: WorldCreationCharacterHandoffPointerStore = {
+    read: vi.fn(() => pointer ? structuredClone(pointer) : null),
+    write: vi.fn((next) => { pointer = structuredClone(next); return true; }),
+    clear: vi.fn((expected) => {
+      if (expected && (!pointer || pointer.key !== expected.key || pointer.workflowId !== expected.workflowId)) return false;
+      pointer = null;
+      return true;
+    })
+  };
+  return { store, current: () => pointer };
 }
 
 function creationFixture() {
@@ -632,6 +650,92 @@ describe("World Creation Characters stage", () => {
     });
     expect(initial.draft.playableCharacters).toHaveLength(1);
   });
+
+  it("restores an opaque handoff after disposal/remount and clears terminal accepted and cancelled pointers", () => {
+    const fixture = creationFixture();
+    const handoff = handoffStore();
+    const pointer = creationHandoffPointerStore();
+    const first = mountWorldCreationPage(fixture.root, {
+      initialState: characterStageState(reviewedCharacter("keeper", "Keeper")),
+      characterSessionStore: handoff.store,
+      characterHandoffPointerStore: pointer.store,
+      characterWorkflowIdFactory: () => "creation-remount",
+      navigate: vi.fn()
+    });
+    fixture.document.querySelector<HTMLButtonElement>('[data-action="add-character"]')?.click();
+    const acceptedSession = handoff.sessions.get("handoff-1");
+    if (!acceptedSession) throw new Error("Accepted remount session missing.");
+    expect(pointer.current()).toEqual({ key: acceptedSession.key, workflowId: acceptedSession.workflowId });
+    expect(JSON.stringify(pointer.current())).not.toContain("parentDraft");
+    first.dispose();
+    handoff.store.complete(acceptedSession.key, acceptedSession.workflowId, {
+      status: "accepted", candidate: reviewedCharacter("scout", "Scout") as never
+    });
+
+    const remounted = mountWorldCreationPage(fixture.root, {
+      characterSessionStore: handoff.store,
+      characterHandoffPointerStore: pointer.store
+    });
+    expect(fixture.document.querySelector('[data-creation-stage="characters"]')).not.toBeNull();
+    expect(fixture.root.textContent).toContain("Keeper");
+    expect(fixture.root.textContent).toContain("Scout");
+    expect(fixture.document.querySelector('[data-stage="characters"]')?.getAttribute("aria-current")).toBe("step");
+    fixture.document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')?.click();
+    expect(fixture.document.querySelector('[data-creation-stage="review"]')).not.toBeNull();
+    const dirtyUnload = new fixture.window.Event("beforeunload", { cancelable: true });
+    fixture.window.dispatchEvent(dirtyUnload);
+    expect(dirtyUnload.defaultPrevented).toBe(true);
+    expect(pointer.current()).toBeNull();
+    expect(handoff.store.consume).toHaveBeenCalledTimes(1);
+    remounted.dispose();
+
+    const cancelled = handoff.store.create({
+      origin: "world-creation", mode: "create", workflowId: "cancelled-remount", parentRoute: "/app/worlds/new",
+      expectedWorldRevision: null, parentDraft: characterStageState().draft, worldContext: characterStageState().draft,
+      rosterSummaries: [], candidate: null
+    });
+    pointer.store.write({ key: cancelled.key, workflowId: cancelled.workflowId });
+    handoff.store.complete(cancelled.key, cancelled.workflowId, { status: "cancelled" });
+    mountWorldCreationPage(fixture.root, {
+      characterSessionStore: handoff.store,
+      characterHandoffPointerStore: pointer.store
+    });
+    expect(pointer.current()).toBeNull();
+    fixture.document.querySelector<HTMLButtonElement>('[data-stage="foundation"]')?.click();
+    expect(fixture.document.querySelector<HTMLInputElement>('[name="world.title"]')?.value).toBe("Glass Atlas");
+  });
+
+  it.each(["missing", "expired", "origin", "workflow"] as const)(
+    "clears a terminal %s remount pointer without changing the current new-world draft",
+    (outcome) => {
+      const fixture = creationFixture();
+      const handoff = handoffStore();
+      const pointer = creationHandoffPointerStore();
+      const parent = characterStageState(reviewedCharacter("preserved", "Preserved"));
+      const created = handoff.store.create({
+        origin: "world-creation", mode: "create", workflowId: "creation-safe", parentRoute: "/app/worlds/new",
+        expectedWorldRevision: null, parentDraft: parent.draft, worldContext: parent.draft, rosterSummaries: [], candidate: null
+      });
+      pointer.store.write({ key: created.key, workflowId: created.workflowId });
+      if (outcome === "missing") handoff.sessions.delete(created.key);
+      if (outcome === "expired") handoff.expire();
+      if (outcome === "origin") handoff.sessions.get(created.key)!.origin = "world-editor";
+      if (outcome === "workflow") handoff.sessions.get(created.key)!.workflowId = "other-workflow";
+      const current = characterStageState(reviewedCharacter("current", "Current"));
+      current.draft.world.title = "Current unsaved world";
+
+      mountWorldCreationPage(fixture.root, {
+        initialState: current,
+        characterSessionStore: handoff.store,
+        characterHandoffPointerStore: pointer.store
+      });
+
+      expect(pointer.current()).toBeNull();
+      fixture.document.querySelector<HTMLButtonElement>('[data-stage="foundation"]')?.click();
+      expect(fixture.document.querySelector<HTMLInputElement>('[name="world.title"]')?.value).toBe("Current unsaved world");
+      expect(handoff.store.consume).not.toHaveBeenCalled();
+    }
+  );
 
   it("restores the parent draft and consumes accepted append and replace results exactly once after BFCache return", () => {
     const { document, root, window } = creationFixture();

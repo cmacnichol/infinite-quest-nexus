@@ -10,13 +10,70 @@ import {
 } from "./character-workspace-session.js";
 import type { WorldCreationState } from "./world-creation-model.js";
 
+export interface WorldCreationCharacterHandoffPointer {
+  key: string;
+  workflowId: string;
+}
+
+export interface WorldCreationCharacterHandoffPointerStore {
+  read(): WorldCreationCharacterHandoffPointer | null;
+  write(pointer: WorldCreationCharacterHandoffPointer): boolean;
+  clear(pointer?: WorldCreationCharacterHandoffPointer): boolean;
+}
+
+const CREATION_POINTER_KEY = "iqn:world-creation:character-handoff";
+const MAX_POINTER_IDENTITY_LENGTH = 512;
+
+function isPointer(value: unknown): value is WorldCreationCharacterHandoffPointer {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return Object.keys(record).length === 2 &&
+    typeof record.key === "string" && record.key.length > 0 && record.key.length <= MAX_POINTER_IDENTITY_LENGTH &&
+    typeof record.workflowId === "string" && record.workflowId.length > 0 && record.workflowId.length <= MAX_POINTER_IDENTITY_LENGTH;
+}
+
+export function createWorldCreationCharacterHandoffPointerStore(
+  storage: Storage
+): WorldCreationCharacterHandoffPointerStore {
+  return {
+    read() {
+      let raw: string | null;
+      try { raw = storage.getItem(CREATION_POINTER_KEY); } catch { return null; }
+      if (raw === null) return null;
+      try {
+        const parsed = JSON.parse(raw) as unknown;
+        if (isPointer(parsed)) return { key: parsed.key, workflowId: parsed.workflowId };
+      } catch { /* Remove malformed pointers below. */ }
+      try { storage.removeItem(CREATION_POINTER_KEY); } catch { /* Best-effort terminal cleanup. */ }
+      return null;
+    },
+    write(pointer) {
+      if (!isPointer(pointer)) return false;
+      try {
+        storage.setItem(CREATION_POINTER_KEY, JSON.stringify(pointer));
+        return true;
+      } catch { return false; }
+    },
+    clear(pointer) {
+      if (pointer) {
+        const current = this.read();
+        if (!current || current.key !== pointer.key || current.workflowId !== pointer.workflowId) return false;
+      }
+      try {
+        storage.removeItem(CREATION_POINTER_KEY);
+        return storage.getItem(CREATION_POINTER_KEY) === null;
+      } catch { return false; }
+    }
+  };
+}
+
 export interface WorldCreationCharacterRosterInput {
   document: Document;
   state: WorldCreationState;
   sessionStore: CharacterWorkspaceSessionStore | null;
   workflowIdFactory: () => string;
   navigate: (path: string) => void;
-  onSessionCreated: (session: CharacterWorkspaceSession) => void;
+  onSessionCreated: (session: CharacterWorkspaceSession) => void | boolean;
   onRemove: (characterId: string) => void;
   onRestore: (removalId: string) => void;
   handoffRecovery?: {
@@ -143,7 +200,10 @@ export function renderWorldCreationCharacterRoster(
         rosterSummaries: roster.map(({ id, name }) => ({ id, name })),
         candidate
       });
-      input.onSessionCreated(session);
+      if (input.onSessionCreated(session) === false) {
+        status.textContent = "The character workspace could not preserve a safe return pointer. Your world draft is unchanged; try again.";
+        return;
+      }
       input.navigate(characterWorkspacePath(session.key));
     } catch {
       status.textContent = "The character workspace could not be opened. Your world draft is unchanged; try again.";
