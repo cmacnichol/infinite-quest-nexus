@@ -357,6 +357,7 @@ describe("character workspace session store", () => {
     expect(storage.getItem(resultKey)).toBeNull();
     expect(storage.getItem(sessionKey)).not.toBeNull();
     expect(storage.getItem(returnKey)).not.toBeNull();
+    expect(store.resetInvalidResult(session.key, session.origin, session.workflowId)).toBe(false);
 
     const accepted = { status: "accepted" as const, candidate: candidate({ name: "Mara Restored" }) };
     expect(store.complete(session.key, session.workflowId, accepted)).toBe(true);

@@ -171,3 +171,22 @@ Observed the reproducible order defect `b, a, c` instead of `a, b, c`. Character
 - `pnpm --filter @infinite-quest/web-next check` passed.
 - `pnpm --filter @infinite-quest/web-next build` passed; Vite emitted only the existing runtime font-resolution notices.
 - `git diff --check` passed (Git emitted only the existing CRLF normalization warning for `world-creation-page.ts`).
+
+---
+
+## Fix Round 4
+
+### Completed
+
+- Added a direct session-store assertion that `resetInvalidResult` returns `false` when the result key is absent after malformed-result reset and before a valid replacement is completed.
+- Confirmed the existing implementation already satisfies the contract; no production behavior changed.
+
+### Files Changed
+
+- `tests/unit/web-next-character-workspace-session.test.ts` — Added absent-result reset coverage in the replacement recovery path.
+- `.superpowers/sdd/2026-08-12-character-creation-workspace/task-5-report.md` — Appended Fix Round 4 evidence.
+
+### Verification
+
+- Session/page targeted suite: 2 files, 87 tests passed.
+- `pnpm --filter @infinite-quest/web-next check` passed.
