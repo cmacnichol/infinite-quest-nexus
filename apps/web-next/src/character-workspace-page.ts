@@ -126,6 +126,7 @@ export function mountCharacterWorkspacePage(
   const activeSession = session;
   renderAppShell(root, workspaceMarkup(activeSession.parentRoute), "world-library");
   const theme = initializeAppTheme(root);
+  const main = required<HTMLElement>(root, ".character-main");
   const canvas = required<HTMLElement>(root, "[data-character-canvas]");
   const stageButtons = [...root.querySelectorAll<HTMLButtonElement>("[data-character-stage]")];
   const dialog = required<HTMLDialogElement>(root, ".character-prompt-dialog");
@@ -140,7 +141,9 @@ export function mountCharacterWorkspacePage(
   const pollInterval = Math.max(1, dependencies.generationPollIntervalMs ?? 500);
   const roster = activeSession.worldContext.playableCharacters.flatMap((value) => {
     const parsed = playableCharacterSchema.safeParse(value);
-    return parsed.success ? [parsed.data] : [];
+    if (!parsed.success) return [];
+    if (activeSession.mode === "edit" && parsed.data.id === activeSession.candidate?.id) return [];
+    return [parsed.data];
   });
   let state = createCharacterWorkspaceState({
     roster,
@@ -157,10 +160,12 @@ export function mountCharacterWorkspacePage(
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let mechanicsCollection: "rpgStats" | "defaultTriggers" = "rpgStats";
   let mechanicsIndex = 0;
+  let dialogOpen = false;
+  let fallbackModal = false;
 
-  const beforeUnload = (event: Event) => event.preventDefault();
+  function beforeUnload(event: Event): void { event.preventDefault(); }
   function markDirty(): void {
-    if (dirty) return;
+    if (disposed || dirty) return;
     dirty = true;
     pageView.addEventListener("beforeunload", beforeUnload);
   }
@@ -190,6 +195,7 @@ export function mountCharacterWorkspacePage(
   }
 
   function fieldChanged(path: string[], value: unknown): void {
+    if (disposed) return;
     state = editCharacterCandidate(state, path, value);
     candidateDirty = true;
     markDirty();
@@ -197,11 +203,13 @@ export function mountCharacterWorkspacePage(
 
   function bindCandidateInputs(): void {
     canvas.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("[name]").forEach((control) => {
-      control.addEventListener("input", () => {
+      function onCandidateInput(): void {
+        if (disposed) return;
         const path = control.name.split(".");
         if (path[0] !== "candidate") return;
         fieldChanged(path.slice(1), control.value);
-      });
+      }
+      control.addEventListener("input", onCandidateInput);
     });
   }
 
@@ -232,15 +240,16 @@ export function mountCharacterWorkspacePage(
     expandedPrompt.value = prompt;
     canvas.querySelectorAll<HTMLInputElement>('[name="characterMethod"]').forEach((radio) => {
       radio.checked = state.method === radio.value;
-      radio.addEventListener("change", () => {
-        if (!radio.checked) return;
+      function onMethodChange(): void {
+        if (disposed || !radio.checked) return;
         state = { ...state, method: radio.value as "manual" | "ai" };
         markDirty();
         aiSection.hidden = state.method !== "ai";
         manual.hidden = state.method !== "manual";
         generate.disabled = !prompt.trim();
         if (!canvas.querySelector(".character-progress-ledger")) canvas.append(actions());
-      });
+      }
+      radio.addEventListener("change", onMethodChange);
     });
     aiSection.hidden = state.method !== "ai";
     manual.hidden = state.method !== "manual";
@@ -259,7 +268,10 @@ export function mountCharacterWorkspacePage(
       textControl(document, "candidate.profile.identity.aliases", "Aliases (one per line)", state.candidate.profile?.identity.aliases.join("\n") ?? "", true));
     stage.append(form); canvas.replaceChildren(stage, actions()); bindCandidateInputs();
     const aliases = required<HTMLTextAreaElement>(canvas, '[name="candidate.profile.identity.aliases"]');
-    aliases.addEventListener("input", () => fieldChanged(["profile", "identity", "aliases"], aliases.value.split("\n").map((v) => v.trim()).filter(Boolean)));
+    function onAliasesInput(): void {
+      fieldChanged(["profile", "identity", "aliases"], aliases.value.split("\n").map((v) => v.trim()).filter(Boolean));
+    }
+    aliases.addEventListener("input", onAliasesInput);
   }
 
   function renderStory(): void {
@@ -280,12 +292,15 @@ export function mountCharacterWorkspacePage(
     form.append(textControl(document, "candidate.profile.appearance.distinguishingFeatures", "Distinguishing features (one per line)", state.candidate.profile?.appearance.distinguishingFeatures.join("\n") ?? "", true));
     stage.append(form); canvas.replaceChildren(stage, actions()); bindCandidateInputs();
     const features = required<HTMLTextAreaElement>(canvas, '[name="candidate.profile.appearance.distinguishingFeatures"]');
-    features.addEventListener("input", () => fieldChanged(["profile", "appearance", "distinguishingFeatures"], features.value.split("\n").map((v) => v.trim()).filter(Boolean)));
+    function onFeaturesInput(): void {
+      fieldChanged(["profile", "appearance", "distinguishingFeatures"], features.value.split("\n").map((v) => v.trim()).filter(Boolean));
+    }
+    features.addEventListener("input", onFeaturesInput);
   }
 
   function renderMechanics(): void {
     const stage = document.createElement("div"); stage.className = "character-stage";
-    stage.innerHTML = `<header><h2>Mechanics</h2><p>Edit optional stats and default trackers using the same structured field adapters as the world editor.</p></header><div class="character-mechanics"><aside class="character-mechanics-master"><div role="group" aria-label="Mechanics collection"><button type="button" data-mechanics-collection="rpgStats">Stats</button><button type="button" data-mechanics-collection="defaultTriggers">Trackers</button></div><ol data-mechanics-list></ol><button type="button" data-action="add-character-mechanic">Add item</button></aside><section class="character-mechanics-detail" aria-label="Selected mechanic"></section></div>`;
+    stage.innerHTML = `<header><h2>Mechanics</h2><p>Edit optional stats and default trackers using the same structured field adapters as the world editor.</p></header><div class="character-mechanics"><aside class="character-mechanics-master"><div role="group" aria-label="Mechanics collection"><button type="button" data-mechanics-collection="rpgStats" aria-describedby="character-rpgStats-error">Stats</button><button type="button" data-mechanics-collection="defaultTriggers" aria-describedby="character-defaultTriggers-error">Trackers</button></div><small class="character-field-error" id="character-rpgStats-error" data-field-error="candidate.rpgStats"></small><small class="character-field-error" id="character-defaultTriggers-error" data-field-error="candidate.defaultTriggers"></small><ol data-mechanics-list></ol><button type="button" data-action="add-character-mechanic">Add item</button></aside><section class="character-mechanics-detail" aria-label="Selected mechanic"></section></div>`;
     canvas.replaceChildren(stage, actions());
     const list = required<HTMLOListElement>(canvas, "[data-mechanics-list]");
     const detail = required<HTMLElement>(canvas, ".character-mechanics-detail");
@@ -305,12 +320,16 @@ export function mountCharacterWorkspacePage(
         const field = textControl(document, `mechanic.${name}`, label, String(fields[name] ?? ""), name === "note" || name === "condition" || name === "effect");
         detail.append(field);
       }
-      detail.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("[name]").forEach((control) => control.addEventListener("input", () => {
-        const changed = { [control.name.split(".")[1]!]: control.value };
-        const next = [...state.candidate[mechanicsCollection]];
-        next[mechanicsIndex] = mergeStructuredFields(kind, next[mechanicsIndex], changed);
-        fieldChanged([mechanicsCollection], next);
-      }));
+      detail.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("[name]").forEach((control) => {
+        function onMechanicInput(): void {
+          if (disposed) return;
+          const changed = { [control.name.split(".")[1]!]: control.value };
+          const next = [...state.candidate[mechanicsCollection]];
+          next[mechanicsIndex] = mergeStructuredFields(kind, next[mechanicsIndex], changed);
+          fieldChanged([mechanicsCollection], next);
+        }
+        control.addEventListener("input", onMechanicInput);
+      });
     }
   }
 
@@ -318,8 +337,33 @@ export function mountCharacterWorkspacePage(
     const review = characterReview(state);
     const provenance = review.provenance === "ai" ? "AI-assisted" : "Manual";
     const plural = (count: number, singular: string) => `${count} ${singular}${count === 1 ? "" : "s"}`;
-    canvas.innerHTML = `<div class="character-stage character-review" data-character-review><header><h2>Review character</h2><p>Confirm the facts that will return to the world draft.</p></header><dl><div><dt>Name</dt><dd>${state.candidate.name || "Not provided"}</dd></div><div><dt>Method</dt><dd>${provenance}</dd></div><div><dt>Story fields</dt><dd>${review.counts.completedStoryFields}</dd></div><div><dt>Appearance facts</dt><dd>${review.counts.completedAppearanceFields}</dd></div><div><dt>Mechanics</dt><dd>${plural(review.counts.stats, "stat")} · ${plural(review.counts.triggers, "tracker")}</dd></div><div><dt>Warnings</dt><dd>${review.warningCount}</dd></div></dl><a href="${activeSession.parentRoute}">Return without using this character</a><p data-character-acceptance-status aria-live="polite"></p></div>`;
-    canvas.append(actions(true));
+    const stage = document.createElement("div");
+    stage.className = "character-stage character-review";
+    stage.dataset.characterReview = "";
+    stage.innerHTML = "<header><h2>Review character</h2><p>Confirm the facts that will return to the world draft.</p></header>";
+    const facts = document.createElement("dl");
+    const values = [
+      ["Name", state.candidate.name || "Not provided"],
+      ["Method", provenance],
+      ["Story fields", String(review.counts.completedStoryFields)],
+      ["Appearance facts", String(review.counts.completedAppearanceFields)],
+      ["Mechanics", `${plural(review.counts.stats, "stat")} · ${plural(review.counts.triggers, "tracker")}`],
+      ["Warnings", String(review.warningCount)]
+    ];
+    for (const [label, value] of values) {
+      const row = document.createElement("div");
+      const term = document.createElement("dt"); term.textContent = label;
+      const description = document.createElement("dd"); description.textContent = value;
+      row.append(term, description); facts.append(row);
+    }
+    const returnLink = document.createElement("a");
+    returnLink.href = activeSession.parentRoute;
+    returnLink.textContent = "Return without using this character";
+    const status = document.createElement("p");
+    status.dataset.characterAcceptanceStatus = "";
+    status.setAttribute("aria-live", "polite");
+    stage.append(facts, returnLink, status);
+    canvas.replaceChildren(stage, actions(true));
   }
 
   function render(): void {
@@ -337,14 +381,19 @@ export function mountCharacterWorkspacePage(
     const issues = validateCharacterStage(state).issues.filter((issue) => issue.severity === "error");
     canvas.querySelectorAll<HTMLElement>("[aria-invalid]").forEach((element) => element.removeAttribute("aria-invalid"));
     canvas.querySelectorAll<HTMLElement>("[data-field-error]").forEach((element) => { element.textContent = ""; });
+    function issueControl(path: string): HTMLElement | null {
+      const mechanic = path.match(/^candidate\.(rpgStats|defaultTriggers)$/)?.[1];
+      return mechanic
+        ? canvas.querySelector<HTMLElement>(`[data-mechanics-collection="${mechanic}"]`)
+        : canvas.querySelector<HTMLElement>(`[name="${path}"]`);
+    }
     for (const issue of issues) {
-      const name = issue.path;
-      const control = canvas.querySelector<HTMLElement>(`[name="${name}"]`);
+      const control = issueControl(issue.path);
       control?.setAttribute("aria-invalid", "true");
-      const error = canvas.querySelector<HTMLElement>(`[data-field-error="${name}"]`);
+      const error = canvas.querySelector<HTMLElement>(`[data-field-error="${issue.path}"]`);
       if (error) error.textContent = issue.message;
     }
-    if (issues.length > 0) canvas.querySelector<HTMLElement>(`[name="${issues[0]!.path}"]`)?.focus();
+    if (issues.length > 0) issueControl(issues[0]!.path)?.focus();
     return issues.length === 0;
   }
 
@@ -360,20 +409,64 @@ export function mountCharacterWorkspacePage(
     void trigger;
   }
 
-  function closeDialog(): void {
-    dialog.removeAttribute("open");
-    root.removeAttribute("inert");
-    canvas.querySelector<HTMLButtonElement>(expandButtonSelector)?.focus();
+  function openDialog(): void {
+    if (disposed || dialogOpen) return;
+    expandedPrompt.value = prompt;
+    dialogOpen = true;
+    if (typeof dialog.showModal === "function") {
+      dialog.showModal();
+    } else {
+      fallbackModal = true;
+      dialog.setAttribute("open", "");
+      main.setAttribute("inert", "");
+    }
+    expandedPrompt.focus();
+  }
+
+  function closeDialog(restoreFocus = true): void {
+    if (!dialogOpen) return;
+    dialogOpen = false;
+    if (typeof dialog.close === "function" && dialog.hasAttribute("open")) dialog.close();
+    else dialog.removeAttribute("open");
+    main.removeAttribute("inert");
+    fallbackModal = false;
+    if (restoreFocus && !disposed) canvas.querySelector<HTMLButtonElement>(expandButtonSelector)?.focus();
+  }
+
+  function restoreGenerationActions(): void {
+    const generate = canvas.querySelector<HTMLButtonElement>('[data-action="generate-character"]');
+    const cancel = canvas.querySelector<HTMLButtonElement>('[data-action="cancel-character-generation"]');
+    if (generate) generate.disabled = !prompt.trim();
+    if (cancel) cancel.hidden = true;
+  }
+
+  function failGeneration(sequence: number): void {
+    if (disposed || sequence !== generationSequence) return;
+    generationSequence += 1;
+    generationController?.abort();
+    generationController = null;
+    if (pollTimer !== null) clearTimeout(pollTimer);
+    pollTimer = null;
+    const status = canvas.querySelector<HTMLElement>("[data-character-generation-status]");
+    if (status) status.textContent = "Character generation failed. Review the prompt and retry.";
+    restoreGenerationActions();
   }
 
   function poll(progressKey: string, sequence: number, signal: AbortSignal): void {
     if (disposed || sequence !== generationSequence || signal.aborted) return;
     void loadProgress(progressKey, signal).then((progress) => {
       if (disposed || sequence !== generationSequence || signal.aborted) return;
+      if (progress.status === "failed") { failGeneration(sequence); return; }
       const status = canvas.querySelector<HTMLElement>("[data-character-generation-status]");
-      if (status) status.textContent = `${Math.round(progress.progressPercent)}% · ${progress.errorMessage ?? progress.message}`;
+      if (status) status.textContent = `${Math.round(progress.progressPercent)}% · ${progress.message}`;
       if (progress.status === "processing") pollTimer = setTimeout(() => poll(progressKey, sequence, signal), pollInterval);
-    }).catch((error: unknown) => { if (!(error instanceof Error && error.name === "AbortError")) { const status = canvas.querySelector<HTMLElement>("[data-character-generation-status]"); if (status) status.textContent = "Progress is temporarily unavailable."; } });
+    }).catch(function onProgressError(error: unknown) {
+      if (disposed || sequence !== generationSequence || signal.aborted) return;
+      if (!(error instanceof Error && error.name === "AbortError")) {
+        const status = canvas.querySelector<HTMLElement>("[data-character-generation-status]");
+        if (status) status.textContent = "Progress is temporarily unavailable.";
+      }
+    });
   }
 
   function startGeneration(): void {
@@ -411,9 +504,10 @@ export function mountCharacterWorkspacePage(
       });
   }
 
-  root.addEventListener("input", (event) => {
+  function onRootInput(event: Event): void {
+    if (disposed) return;
     const source = event.target;
-    if (!(source instanceof view.HTMLTextAreaElement) || !source.matches("[data-character-prompt]")) return;
+    if (!(source instanceof pageView.HTMLTextAreaElement) || !source.matches("[data-character-prompt]")) return;
     prompt = source.value;
     expandedPrompt.value = prompt;
     const compact = canvas.querySelector<HTMLTextAreaElement>('[data-character-prompt="compact"]');
@@ -421,18 +515,26 @@ export function mountCharacterWorkspacePage(
     const generate = canvas.querySelector<HTMLButtonElement>('[data-action="generate-character"]');
     if (generate) generate.disabled = generationController !== null || !prompt.trim();
     markDirty();
-  });
+  }
 
-  root.addEventListener("click", (event) => {
-    const target = (event.target as Element).closest<HTMLElement>("button, a");
-    if (!target || disposed) return;
+  function onRootClick(event: Event): void {
+    if (disposed) return;
+    const eventElement = event.target instanceof pageView.Element ? event.target : null;
+    if (fallbackModal && eventElement && !dialog.contains(eventElement)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      expandedPrompt.focus();
+      return;
+    }
+    const target = eventElement?.closest<HTMLElement>("button, a");
+    if (!target) return;
     const action = target.dataset.action;
     if (target.dataset.characterStage) { state = setCharacterStage(state, target.dataset.characterStage as CharacterStage); render(); return; }
     if (action === "continue-character") { if (!showValidation()) return; const index = STAGES.indexOf(state.stage); if (index < STAGES.length - 1) { state = setCharacterStage(state, STAGES[index + 1]!); render(); } }
     if (action === "back-character") { const index = STAGES.indexOf(state.stage); if (index > 0) { state = setCharacterStage(state, STAGES[index - 1]!); render(); } }
     if (action === "generate-character") startGeneration();
     if (action === "cancel-character-generation") { stopGeneration(); render(); }
-    if (action === "expand-character-prompt") { expandedPrompt.value = prompt; dialog.setAttribute("open", ""); expandedPrompt.focus(); }
+    if (action === "expand-character-prompt") openDialog();
     if (action === "close-character-prompt") closeDialog();
     if (action === "copy-character-prompt") void clipboard("copy", target);
     if (action === "paste-character-prompt") void clipboard("paste", target);
@@ -446,9 +548,10 @@ export function mountCharacterWorkspacePage(
       completed = true; clearDirty(); navigate(activeSession.parentRoute);
     }
     if (action === "cancel-character" && !completed && sessionStore?.complete(activeSession.key, activeSession.workflowId, { status: "cancelled" })) { completed = true; clearDirty(); navigate(activeSession.parentRoute); }
-  });
+  }
 
-  dialog.addEventListener("keydown", (event) => {
+  function onDialogKeydown(event: KeyboardEvent): void {
+    if (disposed || !dialogOpen) return;
     if (event.key === "Escape") { event.preventDefault(); closeDialog(); return; }
     if (event.key !== "Tab") return;
     const controls = [...dialog.querySelectorAll<HTMLElement>("button, textarea")].filter((control) => !control.hasAttribute("disabled"));
@@ -456,13 +559,28 @@ export function mountCharacterWorkspacePage(
     if (!first || !last) return;
     if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
-  });
+  }
+
+  function onDocumentFocusIn(event: Event): void {
+    if (disposed || !fallbackModal || dialog.contains(event.target as Node)) return;
+    expandedPrompt.focus();
+  }
+
+  root.addEventListener("input", onRootInput);
+  root.addEventListener("click", onRootClick);
+  dialog.addEventListener("keydown", onDialogKeydown);
+  document.addEventListener("focusin", onDocumentFocusIn);
 
   render();
   return {
     dispose() {
       if (disposed) return;
+      closeDialog(false);
       disposed = true;
+      root.removeEventListener("input", onRootInput);
+      root.removeEventListener("click", onRootClick);
+      dialog.removeEventListener("keydown", onDialogKeydown);
+      document.removeEventListener("focusin", onDocumentFocusIn);
       stopGeneration();
       clearDirty();
       theme.dispose();

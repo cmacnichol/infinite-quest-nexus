@@ -129,6 +129,7 @@ describe("Character Workspace page", () => {
     expect(document.querySelector<HTMLTextAreaElement>('[data-character-prompt="expanded"]')?.value).toContain("cartographer");
     input(document, window, '[data-character-prompt="expanded"]', "Create a patient cartographer.");
     expect(document.querySelector<HTMLTextAreaElement>('[data-character-prompt="compact"]')?.value).toContain("patient");
+    click(document, '[data-action="close-character-prompt"]');
     click(document, '[data-action="generate-character"]');
     await settle();
     expect(generate).toHaveBeenCalledTimes(1);
@@ -182,7 +183,7 @@ describe("Character Workspace page", () => {
     const generate = vi.fn()
       .mockImplementationOnce((_request, signal: AbortSignal) => first.then((value) => signal.aborted ? Promise.reject(new DOMException("Aborted", "AbortError")) : value))
       .mockResolvedValueOnce({ character: { ...generatedCharacter, name: "Second Hero" } });
-    const progress = vi.fn().mockResolvedValue({ status: "failed", phase: "failed", progressPercent: 100, message: "Generation failed", errorMessage: "Try again." });
+    const progress = vi.fn().mockResolvedValue({ status: "completed", phase: "completed", progressPercent: 100, message: "Ready" });
     mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(), generateCharacterPreview: generate, loadGenerationProgress: progress, confirmGeneratedReplacement: () => true, generationPollIntervalMs: 1 });
     const ai = document.querySelector<HTMLInputElement>('[value="ai"]')!;
     ai.checked = true;
@@ -223,6 +224,119 @@ describe("Character Workspace page", () => {
     expect(document.activeElement).toBe(expand);
   });
 
+  it("renders untrusted review values as text without creating hostile DOM", () => {
+    const { document, root } = fixture();
+    const hostile = { ...generatedCharacter, name: '<img src=x onerror="alert(1)"><script>bad()</script>' };
+    mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(session(hostile)) });
+    for (let index = 0; index < 5; index += 1) click(document, '[data-action="continue-character"]');
+    const review = document.querySelector("[data-character-review]");
+    expect(review?.textContent).toContain(hostile.name);
+    expect(review?.querySelector("img, script")).toBeNull();
+  });
+
+  it("treats terminal failed progress as authoritative and ignores a late preview", async () => {
+    vi.useFakeTimers();
+    const { document, window, root } = fixture();
+    let resolvePreview!: (value: { character: PlayableCharacter }) => void;
+    const preview = new Promise<{ character: PlayableCharacter }>((resolve) => { resolvePreview = resolve; });
+    let previewSignal: AbortSignal | undefined;
+    const generate = vi.fn((_request, signal: AbortSignal) => { previewSignal = signal; return preview; });
+    const progress = vi.fn().mockResolvedValue({
+      status: "failed", phase: "failed", progressPercent: 100,
+      message: '<img src=x onerror="alert(1)">', errorMessage: "Provider secret detail"
+    });
+    mountCharacterWorkspacePage(root, "opaque-key", {
+      sessionStore: store(), generateCharacterPreview: generate, loadGenerationProgress: progress,
+      confirmGeneratedReplacement: () => true, generationPollIntervalMs: 1
+    });
+    const ai = document.querySelector<HTMLInputElement>('[value="ai"]')!;
+    ai.checked = true;
+    ai.dispatchEvent(new window.Event("change", { bubbles: true }));
+    input(document, window, '[data-character-prompt="compact"]', "Keep this prompt");
+    click(document, '[data-action="generate-character"]');
+    await settle();
+    expect(previewSignal?.aborted).toBe(true);
+    expect(progress).toHaveBeenCalledTimes(1);
+    expect(root.textContent).toContain("Character generation failed. Review the prompt and retry.");
+    expect(root.textContent).not.toContain("Provider secret detail");
+    expect(root.querySelector("img")).toBeNull();
+    expect(document.querySelector<HTMLTextAreaElement>('[data-character-prompt="compact"]')?.value).toBe("Keep this prompt");
+    expect(document.querySelector<HTMLButtonElement>('[data-action="generate-character"]')?.disabled).toBe(false);
+    expect(document.querySelector<HTMLButtonElement>('[data-action="cancel-character-generation"]')?.hidden).toBe(true);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(progress).toHaveBeenCalledTimes(1);
+    resolvePreview({ character: { ...generatedCharacter, name: "Too Late" } });
+    await settle();
+    expect(root.textContent).not.toContain("Too Late");
+    vi.useRealTimers();
+  });
+
+  it("uses native dialog methods and fallback modal focus and pointer protection", () => {
+    const nativeFixture = fixture();
+    const showModal = vi.fn(function (this: HTMLDialogElement) { this.setAttribute("open", ""); });
+    const close = vi.fn(function (this: HTMLDialogElement) { this.removeAttribute("open"); });
+    mountCharacterWorkspacePage(nativeFixture.root, "opaque-key", { sessionStore: store() });
+    const nativeDialog = nativeFixture.document.querySelector<HTMLDialogElement>("dialog")!;
+    nativeDialog.showModal = showModal;
+    nativeDialog.close = close;
+    const nativeAi = nativeFixture.document.querySelector<HTMLInputElement>('[value="ai"]')!;
+    nativeAi.checked = true;
+    nativeAi.dispatchEvent(new nativeFixture.window.Event("change", { bubbles: true }));
+    click(nativeFixture.document, '[data-action="expand-character-prompt"]');
+    expect(showModal).toHaveBeenCalledTimes(1);
+    click(nativeFixture.document, '[data-action="close-character-prompt"]');
+    expect(close).toHaveBeenCalledTimes(1);
+
+    const fallback = fixture();
+    mountCharacterWorkspacePage(fallback.root, "opaque-key", { sessionStore: store() });
+    const fallbackDialog = fallback.document.querySelector<HTMLDialogElement>("dialog")!;
+    Object.defineProperties(fallbackDialog, {
+      showModal: { configurable: true, value: undefined },
+      close: { configurable: true, value: undefined }
+    });
+    const fallbackAi = fallback.document.querySelector<HTMLInputElement>('[value="ai"]')!;
+    fallbackAi.checked = true;
+    fallbackAi.dispatchEvent(new fallback.window.Event("change", { bubbles: true }));
+    click(fallback.document, '[data-action="expand-character-prompt"]');
+    const main = fallback.document.querySelector<HTMLElement>(".character-main")!;
+    const expanded = fallback.document.querySelector<HTMLTextAreaElement>('[data-character-prompt="expanded"]')!;
+    const background = fallback.document.querySelector<HTMLButtonElement>('[data-action="cancel-character"]')!;
+    expect(main.hasAttribute("inert")).toBe(true);
+    background.focus();
+    background.dispatchEvent(new fallback.window.Event("focusin", { bubbles: true }));
+    expect(fallback.document.activeElement).toBe(expanded);
+    background.dispatchEvent(new fallback.window.Event("click", { bubbles: true, cancelable: true }));
+    expect(fallback.document.querySelector("dialog")?.hasAttribute("open")).toBe(true);
+  });
+
+  it("excludes the edited candidate from duplicate roster validation", () => {
+    const { document, root } = fixture();
+    const edited = session(generatedCharacter);
+    edited.worldContext.playableCharacters = [generatedCharacter];
+    mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(edited) });
+    click(document, '[data-action="continue-character"]');
+    expect(document.querySelector('[name="candidate.id"]')?.getAttribute("aria-invalid")).toBeNull();
+    click(document, '[data-action="continue-character"]');
+    expect(document.querySelector('[name="candidate.characterText"]')).not.toBeNull();
+  });
+
+  it("maps mechanics collection errors to the exact visible target and focuses it", () => {
+    const { document, root } = fixture();
+    const overfull = session({
+      ...generatedCharacter,
+      rpgStats: Array.from({ length: 10_001 }, (_, index) => ({ name: `Stat ${index}`, value: index }))
+    });
+    mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(overfull) });
+    for (let index = 0; index < 4; index += 1) click(document, '[data-action="continue-character"]');
+    click(document, '[data-action="continue-character"]');
+    const target = document.querySelector<HTMLButtonElement>('[data-mechanics-collection="rpgStats"]');
+    const error = document.querySelector<HTMLElement>('[data-field-error="candidate.rpgStats"]');
+    expect(document.activeElement).toBe(target);
+    expect(target?.getAttribute("aria-invalid")).toBe("true");
+    expect(target?.getAttribute("aria-describedby")).toBe(error?.id);
+    expect(error?.textContent).toContain("cannot contain more than");
+  });
+
   it("renders mechanics master-detail and review facts with a safe return link", () => {
     const { document, root } = fixture();
     mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(session(generatedCharacter)) });
@@ -245,6 +359,7 @@ describe("Character Workspace page", () => {
     ai.dispatchEvent(new window.Event("change", { bubbles: true }));
     click(document, '[data-action="continue-character"]');
     input(document, window, '[name="candidate.name"]', "Changed");
+    const detachedName = document.querySelector<HTMLInputElement>('[name="candidate.name"]')!;
     const beforeUnload = new window.Event("beforeunload", { cancelable: true });
     window.dispatchEvent(beforeUnload);
     expect(beforeUnload.defaultPrevented).toBe(true);
@@ -255,6 +370,11 @@ describe("Character Workspace page", () => {
     expect(sessionStore.complete).toHaveBeenCalledWith("opaque-key", "workflow-1", expect.objectContaining({ status: "accepted", candidate: expect.objectContaining({ preservedCharacterLore: { oath: "North" } }) }));
     expect(navigate).toHaveBeenCalledWith("/app/worlds/world-1?tab=characters");
     mounted.dispose();
+    detachedName.value = "Cannot resurrect dirty state";
+    detachedName.dispatchEvent(new window.Event("input", { bubbles: true }));
+    const detachedPrompt = document.querySelector<HTMLTextAreaElement>('[data-character-prompt="expanded"]')!;
+    detachedPrompt.value = "Cannot resurrect through root input";
+    detachedPrompt.dispatchEvent(new window.Event("input", { bubbles: true }));
     const afterDispose = new window.Event("beforeunload", { cancelable: true });
     window.dispatchEvent(afterDispose);
     expect(afterDispose.defaultPrevented).toBe(false);

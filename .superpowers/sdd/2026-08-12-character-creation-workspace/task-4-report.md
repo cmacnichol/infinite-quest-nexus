@@ -78,3 +78,39 @@ The Impeccable mechanical detector was run once over all changed UI/test targets
 - The harness exposes no subagent tool, so the optional external visual finish reviewer could not be invoked. Verification used the contract tests, mechanical detector, and in-thread diff review.
 - No browser screenshot harness was available in this task environment; responsive and accessibility behavior is covered through DOM and CSS contract tests rather than screenshot comparison.
 - The pre-existing untracked `.superpowers/brainstorm/` directory remains untouched and excluded from the commit.
+
+## Fix Round 1
+
+Addressed every review finding test-first:
+
+- Replaced Review interpolation of candidate values with DOM construction and `textContent`; hostile character names now remain literal text and cannot create elements.
+- Made terminal failed progress authoritative: it aborts and invalidates the preview request, stops polling, preserves prompt/candidate data, displays fixed safe retry copy, restores Generate, hides Cancel, and ignores late preview completion.
+- Uses native `showModal()` / `close()` when available. The fallback isolates the background with `inert`, blocks background pointer actions, redirects programmatic focus, retains keyboard trapping, and restores focus on close.
+- Excludes the current candidate ID from the edit-mode duplicate roster.
+- Maps mechanics collection bound errors to their visible Stats or Trackers target, with `aria-invalid`, `aria-describedby`, adjacent copy, and exact focus recovery.
+- Named and disposal-guarded listeners, removed root/dialog/document listeners on disposal, and verified detached input cannot restore the `beforeunload` guard.
+- Added a bootstrap integration regression proving `/app/characters/:sessionKey` wins route selection.
+
+### RED evidence
+
+`pnpm vitest run tests/unit/web-next-character-workspace-page.test.ts` initially reported 6 expected failures covering hostile markup, terminal progress, modal protection, edit duplication, mechanics error focus, and post-disposal input. The route precedence test was then added before final verification.
+
+### Fix-round verification
+
+```bash
+pnpm vitest run tests/unit/web-next-character-workspace-model.test.ts tests/unit/web-next-character-workspace-session.test.ts tests/unit/web-next-character-workspace-api.test.ts tests/unit/web-next-character-workspace-page.test.ts tests/unit/web-next-world-library.test.ts tests/unit/web-next-theme.test.ts
+```
+
+Result: 6 files passed; 95 tests passed, 0 failed.
+
+```bash
+pnpm --filter @infinite-quest/web-next check
+```
+
+Result: exit 0 with no TypeScript diagnostics.
+
+```bash
+git diff --check
+```
+
+Result: exit 0 with no whitespace diagnostics.

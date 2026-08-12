@@ -105,6 +105,33 @@ describe("World Library overview", () => {
     }
   });
 
+  it("gives the character workspace route precedence over library and world routes", async () => {
+    const { window } = parseHTML('<html><body><div id="app"></div></body></html>');
+    window.location = { pathname: "/app/characters/opaque-key" } as Location;
+    Object.defineProperty(window, "localStorage", { configurable: true, value: null });
+    Object.defineProperty(window, "sessionStorage", { configurable: true, value: null });
+    const fetch = vi.fn();
+    const previousGlobals = new Map<PropertyKey, PropertyDescriptor | undefined>();
+    for (const [name, value] of [["window", window], ["document", window.document], ["fetch", fetch]] as const) {
+      previousGlobals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+      Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+    }
+
+    try {
+      vi.resetModules();
+      await import("../../apps/web-next/src/bootstrap.js");
+      expect(window.document.querySelectorAll('[data-page="character-workspace-unavailable"]')).toHaveLength(1);
+      expect(window.document.querySelector('[data-page="world-library"], [data-page="world-editor"]')).toBeNull();
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      for (const [name, descriptor] of previousGlobals) {
+        if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+        else Reflect.deleteProperty(globalThis, name);
+      }
+      vi.resetModules();
+    }
+  });
+
   it("keeps the mounted editor and theme control through BFCache transitions, then disposes on non-persisted pagehide", async () => {
     const { window } = parseHTML('<html><body><div id="app"></div></body></html>');
     window.location = { pathname: "/app/worlds/22222222-2222-4222-8222-222222222222" } as Location;
