@@ -398,6 +398,41 @@
       "description": "The sticky bottom drawer and sole draft-status surface, with Save draft anchored in its far-right action cell.",
       "html": "<section class=\"draft-ledger\" aria-label=\"Draft ledger\"><div class=\"draft-ledger-summary\"><span>Draft saved</span><span>Revision 8</span><span>Readiness 4 of 5</span><span>Warnings 1</span><button type=\"button\" aria-expanded=\"false\" aria-controls=\"draft-ledger-details\">Draft details</button><div class=\"editor-save-cell\"><button type=\"button\">Save draft</button></div></div><div id=\"draft-ledger-details\" class=\"draft-ledger-details\" hidden></div></section>",
       "css": ".draft-ledger { position: sticky; bottom: 0; width: 100%; background: var(--surface-entry); border-top: 1px solid var(--rule-strong); border-bottom: 1px solid var(--rule-strong); } .draft-ledger-summary { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)) auto auto; } .draft-ledger-details { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border-top: 1px solid var(--rule); transition: background-color 180ms ease; }"
+    },
+    {
+      "name": "Creation Stage Index",
+      "kind": "nav",
+      "description": "A persistent six-stage creation rail with explicit current, completed, and unavailable states; it becomes a horizontal switcher at the 720px compact breakpoint.",
+      "html": "<nav class=\"creation-stage-index\" aria-label=\"World creation stages\"><span data-stage-state=\"completed\">Method</span><span data-stage-state=\"current\" aria-current=\"step\">Foundation</span><span data-stage-state=\"upcoming\" aria-disabled=\"true\">Canon</span></nav>",
+      "css": ".creation-stage-index { background: var(--surface-entry); border-right: 1px solid var(--rule-strong); } .creation-stage-index [data-stage-state=\"current\"] { color: var(--text-primary); background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }"
+    },
+    {
+      "name": "Compact Method Control",
+      "kind": "input",
+      "description": "One of two 48px radio controls for choosing Manual or AI-assisted creation without card-sized method panels.",
+      "html": "<label class=\"creation-method-control\"><input type=\"radio\" name=\"creationMethod\"><span>Manual</span></label>",
+      "css": ".creation-method-control { height: 48px; box-sizing: border-box; display: inline-flex; align-items: center; color: var(--text-primary); background: var(--surface-entry); border: 1px solid var(--rule-strong); border-radius: 0; } .creation-method-control:has(input:checked) { background: var(--accent-soft); border-color: var(--accent); }"
+    },
+    {
+      "name": "Prompt Toolbar",
+      "kind": "button-group",
+      "description": "The bounded concept toolbar containing only icon-only Copy and Paste plus the compact labelled Expand action, all with authored SVG icons and 44px targets.",
+      "html": "<div class=\"creation-prompt-tools\" aria-label=\"Prompt tools\"><button type=\"button\" aria-label=\"Copy world concept\"><svg aria-hidden=\"true\"></svg></button><button type=\"button\" aria-label=\"Paste into world concept\"><svg aria-hidden=\"true\"></svg></button><button type=\"button\"><svg aria-hidden=\"true\"></svg><span>Expand</span></button></div>",
+      "css": ".creation-prompt-tools { display: flex; } .creation-prompt-tools button { min-width: 44px; min-height: 44px; color: var(--accent-hover); background: transparent; border: 0; border-left: 1px solid var(--rule); border-radius: 0; }"
+    },
+    {
+      "name": "Expanded Prompt Dialog",
+      "kind": "dialog",
+      "description": "A labelled, focus-trapped expansion of the synchronized concept value with a compact square header and full-width mobile composition.",
+      "html": "<dialog class=\"creation-prompt-dialog\" aria-labelledby=\"expanded-prompt-title\"><header><h2 id=\"expanded-prompt-title\">World concept</h2><button type=\"button\" aria-label=\"Close expanded world concept\"><svg aria-hidden=\"true\"></svg></button></header><textarea aria-label=\"Concept prompt\"></textarea></dialog>",
+      "css": ".creation-prompt-dialog { width: min(calc(100% - (var(--edge) * 2)), 960px); max-height: calc(100dvh - (var(--edge) * 2)); color: var(--text-primary); background: var(--surface-entry); border: 1px solid var(--rule-strong); border-radius: 0; }"
+    },
+    {
+      "name": "Creation Progress Ledger",
+      "kind": "status-actions",
+      "description": "The in-flow sticky bottom ledger that keeps visible stage progress beside Back and the current Continue or Create action without covering focused content.",
+      "html": "<div class=\"creation-progress-ledger\"><span>Stage 2 of 6 · Foundation</span><button type=\"button\">Back</button><button type=\"button\">Continue</button></div>",
+      "css": ".creation-progress-ledger { position: sticky; bottom: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; background: var(--surface-entry); border-top: 1px solid var(--rule-strong); border-bottom: 1px solid var(--rule-strong); }"
     }
   ],
   "narrative": {

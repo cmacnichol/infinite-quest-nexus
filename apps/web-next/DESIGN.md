@@ -259,6 +259,26 @@ Components are precise, tactile through state rather than simulated material, an
 - The Draft Ledger is the editor's sticky bottom drawer and single persistent draft-health summary. Its collapsed row exposes state, revision, readiness, and warnings, followed by the labelled details toggle and **Save draft** as the far-right accent action.
 - The drawer remains structurally in document flow while sticking to the viewport edge during editing. Mobile uses a two-column summary, keeps Save draft in the far-right bottom cell, and expands details into a one-column full-width sheet. Drawer transitions are removed under reduced motion.
 
+### Creation Stage Index
+- Use a persistent six-stage rail for Method, Foundation, Canon, Mechanics, Cover, and Review. Current state combines semantic soft-accent fill with a three-pixel orientation rule; completed state adds an authored CSS check mark and hidden completion copy; upcoming stages remain explicitly unavailable.
+- At `720px` and below, preserve the same order and state contract in one horizontally scrollable switcher with complete 52px cells and a bottom active rule.
+
+### Compact Method Control
+- Manual and AI-assisted are a single labelled radio group rendered as exactly two compact 48px controls. They are controls, never descriptive cards: one line of operational copy, a native radio, square rules, and no nested explanation.
+- Checked, hover, focus, and disabled meaning must consume semantic state roles. Both methods converge on the same editable local draft and downstream stages.
+
+### Prompt Toolbar
+- The compact concept toolbar contains only **Copy**, **Paste**, and **Expand**. Copy and Paste are icon-only 44px controls with accessible names; Expand pairs the same authored SVG treatment with its visible label.
+- Clipboard success or failure is announced adjacent to the synchronized prompt without moving focus. Denied or unavailable paste access preserves the prompt and provides direct recovery copy.
+
+### Expanded Prompt Dialog
+- The expanded concept editor is the prompt field's protected-focus form, not a second draft. It uses the same synchronized value, a labelled square header, a 60px close cell, Copy and Paste tools, Escape and Return-to-wizard closure, and focus restoration to Expand.
+- Desktop constrains the dialog to the broad writing measure and viewport height. Compact screens use a full-width, bottom-aligned dialog with no rounded sheet treatment; long prompt content scrolls inside the field rather than pushing actions off-screen.
+
+### Creation Progress Ledger
+- The creation ledger is an in-flow sticky bottom rule that keeps stage position beside **Back** and the current **Continue** or **Create world** boundary. Only the final explicit Create world action may send authoritative world content.
+- Desktop reserves the leading cell for progress and right-aligns compact actions. At `720px` and below, progress spans the row above a two-cell action ledger. The sticky element remains in document flow, so keyboard focus and validation recovery are never obscured by an overlay.
+
 ### Motion
 - Use short state transitions for rules, color, arrows, focus, and the Draft Ledger surface. Filtering may use the View Transitions API to reveal the newly arranged group as one unit, but only when supported and when reduced motion is not requested. Under `prefers-reduced-motion: reduce`, collapse animations and transitions to effectively immediate feedback.
 

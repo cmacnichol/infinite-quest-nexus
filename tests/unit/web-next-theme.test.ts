@@ -260,6 +260,10 @@ describe("web theme integration", () => {
     expect(methodControl).toMatch(/box-sizing:\s*border-box/);
     expect(methodControl).toMatch(/height:\s*48px/);
     expect(methodControl).toMatch(/align-items:\s*center/);
+    expect(methodControl).toMatch(/background:\s*var\(--surface-entry\)/);
+    expect(methodControl).toMatch(/border:\s*1px solid var\(--rule-strong\)/);
+    expect(methodControl).not.toMatch(/border-radius:[^;]*(?!0)/);
+    expect(cssRule(css, ".creation-method-control:has(input:checked)")).toMatch(/background:\s*var\(--accent-soft\)/);
   });
 
   it("uses the shared semantic theme contract for the editor command and conflict surfaces", () => {
