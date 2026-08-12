@@ -10,7 +10,13 @@ import {
 const draft = {
   schemaVersion: 4,
   ownerUserId: "spoofed-draft-owner",
-  safeRootLore: { ownerUserId: "nested provenance stays" },
+  safeRootLore: {
+    ownerUserId: "nested owner must not cross provider boundary",
+    client_secret: "nested credential must not cross provider boundary",
+    secretary: "Aster",
+    tokenizer: "lore tokenizer",
+    passwordlessSociety: "The Open Hand"
+  },
   world: {
     title: "The Glass Observatory",
     genre: "Science fantasy",
@@ -20,14 +26,31 @@ const draft = {
     firstAction: "Open the western dome.",
     rules: "Reflections remember.",
     owner_user_id: "spoofed-world-owner",
-    cosmology: { ownerUserId: "nested world provenance stays", moons: 3 }
+    cosmology: {
+      ownerUserId: "nested world owner must not cross provider boundary",
+      accessToken: "nested world credential must not cross provider boundary",
+      moons: 3,
+      secretary: "Lio"
+    }
   },
   playableCharacters: [{
     id: "trusted-edit-id",
     name: "Mara",
     characterText: "A patient observer.",
     ownerUserId: "spoofed-character-owner",
-    source: { ownerUserId: "nested source provenance stays" }
+    profile: {
+      story: {
+        background: "Raised beneath impossible stars.",
+        apiKey: "nested profile credential must not cross provider boundary",
+        tokenizer: "constellation parser"
+      }
+    },
+    source: {
+      owner_user_id: "nested roster owner must not cross provider boundary",
+      providerToken: "nested roster credential must not cross provider boundary",
+      passwordlessSociety: "The Open Hand",
+      provenance: "safe unknown lore"
+    }
   }],
   entities: [{ id: "lore-1", text: "The mirrors sing." }],
   relationships: [],
@@ -86,9 +109,21 @@ describe("Character Workspace API boundary", () => {
     expect(body.content).not.toHaveProperty("ownerUserId");
     expect(body.content.world).not.toHaveProperty("owner_user_id");
     expect(body.content.playableCharacters[0]).not.toHaveProperty("ownerUserId");
-    expect(body.content.safeRootLore.ownerUserId).toBe("nested provenance stays");
-    expect(body.content.world.cosmology).toEqual({ ownerUserId: "nested world provenance stays", moons: 3 });
-    expect(body.content.playableCharacters[0].source.ownerUserId).toBe("nested source provenance stays");
+    expect(body.content.safeRootLore).toEqual({
+      secretary: "Aster",
+      tokenizer: "lore tokenizer",
+      passwordlessSociety: "The Open Hand"
+    });
+    expect(body.content.world.cosmology).toEqual({ moons: 3, secretary: "Lio" });
+    expect(body.content.playableCharacters[0].profile.story).toMatchObject({
+      background: "Raised beneath impossible stars.",
+      tokenizer: "constellation parser"
+    });
+    expect(body.content.playableCharacters[0].profile.story).not.toHaveProperty("apiKey");
+    expect(body.content.playableCharacters[0].source).toEqual({
+      passwordlessSociety: "The Open Hand",
+      provenance: "safe unknown lore"
+    });
     expect(body.content.entities).toEqual([{ id: "lore-1", text: "The mirrors sing." }]);
     expect(result.character).toMatchObject({ id: "trusted-edit-id", name: "Mara Vale" });
     expect(result.character).not.toHaveProperty("ownerUserId");
@@ -169,6 +204,21 @@ describe("Character Workspace API boundary", () => {
       message: "Add a text provider before generating a character.",
       details: { code: "default_text_provider_unavailable" }
     });
+  });
+
+  it.each([
+    ["preview", () => generateCharacterPreview({ content: draft, prompt: "Create", progressKey: "key" })],
+    ["progress", () => loadCharacterGenerationProgress("key")]
+  ])("propagates AbortError unchanged while parsing the %s response body", async (_boundary, request) => {
+    const reason = new DOMException("Workspace closed during response parsing", "AbortError");
+    const response = {
+      ok: true,
+      status: 200,
+      json: vi.fn().mockRejectedValue(reason)
+    } as unknown as Response;
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+
+    await expect(request()).rejects.toBe(reason);
   });
 
   it("propagates abort without wrapping or falling back to any persistence route", async () => {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   MAX_CHARACTER_MECHANICS_ITEMS,
   MAX_PLAYABLE_CHARACTERS,
@@ -365,6 +365,49 @@ describe("playable character preview progress", () => {
       { ownerUserId: "server-owner", progressKey: "character:key", status: "completed", phase: "completed", progressPercent: 100, message: "Character preview completed." }
     ]);
   });
+
+  it.each(["create", "preparing"] as const)(
+    "attempts safe failed progress when the %s repository step fails without leaking details",
+    async (failureStep) => {
+      const updates: Array<Record<string, unknown>> = [];
+      const rawSecret = `RAW_${failureStep.toUpperCase()}_REPOSITORY_SECRET`;
+      let updateCalls = 0;
+      const execute = vi.fn();
+      const dependencies = {
+        createWorldGenerationProgress: async () => {
+          if (failureStep === "create") throw new Error(rawSecret);
+        },
+        updateWorldGenerationProgress: async (
+          _pool: unknown,
+          _ownerUserId: string,
+          _progressKey: string,
+          progress: Record<string, unknown>
+        ) => {
+          updateCalls += 1;
+          if (failureStep === "preparing" && updateCalls === 1) throw new Error(rawSecret);
+          updates.push(progress);
+        }
+      };
+
+      await expect(generatePlayableCharacterPreviewForOwner(
+        {} as never,
+        "server-owner",
+        { content, prompt: "Create", progressKey: `character:${failureStep}-failed` },
+        providers(execute),
+        dependencies as never
+      )).rejects.toThrow(rawSecret);
+
+      expect(execute).not.toHaveBeenCalled();
+      expect(updates.at(-1)).toEqual({
+        status: "failed",
+        phase: "failed",
+        progressPercent: 100,
+        message: "Character preview generation failed. Check the text provider and try again.",
+        errorMessage: "Character preview generation failed. Check the text provider and try again."
+      });
+      expect(JSON.stringify(updates)).not.toContain(rawSecret);
+    }
+  );
 
   it("records a bounded public failure without leaking provider details", async () => {
     const updates: Array<Record<string, unknown>> = [];

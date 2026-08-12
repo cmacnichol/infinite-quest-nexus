@@ -968,17 +968,16 @@ export async function generatePlayableCharacterPreviewForOwner(
   dependencies: WorldGenerationProviderDependencies,
 ) {
   const progressKey = request.progressKey;
-  if (progressKey) {
-    await dependencies.createWorldGenerationProgress(pool, ownerUserId, progressKey);
-    await dependencies.updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
-      status: "processing",
-      phase: "preparing",
-      progressPercent: 10,
-      message: "Preparing character generation."
-    });
-  }
-
   try {
+    if (progressKey) {
+      await dependencies.createWorldGenerationProgress(pool, ownerUserId, progressKey);
+      await dependencies.updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
+        status: "processing",
+        phase: "preparing",
+        progressPercent: 10,
+        message: "Preparing character generation."
+      });
+    }
     const generated = await generatePlayableCharacterCandidate(
       pool,
       ownerUserId,
@@ -1009,13 +1008,17 @@ export async function generatePlayableCharacterPreviewForOwner(
   } catch (error) {
     if (progressKey) {
       const message = "Character preview generation failed. Check the text provider and try again.";
-      await dependencies.updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
-        status: "failed",
-        phase: "failed",
-        progressPercent: 100,
-        message,
-        errorMessage: message
-      });
+      try {
+        await dependencies.updateWorldGenerationProgress(pool, ownerUserId, progressKey, {
+          status: "failed",
+          phase: "failed",
+          progressPercent: 100,
+          message,
+          errorMessage: message
+        });
+      } catch {
+        logger.warn({ progressKey }, "Could not record safe character preview failure progress");
+      }
     }
     throw error;
   }

@@ -60,3 +60,42 @@ Implemented Character Workspace Task 3 with strict RED/GREEN TDD. Character gene
 - The two new `client-api-routes` cases could not execute on Windows because `buildServer` eagerly creates the Linux-only secure filesystem adapter. They compile under the scoped strict TypeScript check and are included for Linux CI.
 - The repository-wide build remains blocked by documented pre-existing web-next TypeScript issues outside Task 3 scope.
 - The pre-existing untracked `.superpowers/brainstorm/` directory remains untouched and excluded from the commit.
+
+## Fix Round 1
+
+Resolved the first Task 3 review findings test-first.
+
+### RED evidence
+
+`pnpm vitest run tests/unit/web-next-character-workspace-api.test.ts tests/unit/world-library.test.ts` failed 5 tests. The failures reproduced nested owner/credential fields crossing the provider boundary, response-body `AbortError` values being wrapped as invalid responses, and progress repository create/preparing failures escaping before a safe failed update was attempted.
+
+### Corrections
+
+- Extracted the Task 2 recursive handoff sanitizer into a shared Character Workspace sanitizer and reused it for both session handoffs and character-generation provider content.
+- Recursively remove owner and boundary-aware credential keys from nested world lore, roster source data, character profiles, arrays, and safe unknown lore while preserving unrelated `secretary`, `tokenizer`, and `passwordlessSociety` fields.
+- Propagate `AbortError` unchanged when preview or progress response-body JSON parsing aborts, including aborts observed before the request signal state changes.
+- Moved progress creation and preparing 10% updates inside the character preview lifecycle `try`.
+- On create, preparing, provider, validation, or completion failure, attempt a bounded failed 100% update; failure to record that safe update cannot replace the original error or expose repository/provider details.
+- Added focused repository create and preparing-update failure tests proving provider execution does not start and persisted progress contains only safe public copy.
+
+### Verification
+
+- `pnpm vitest run tests/unit/web-next-character-workspace-api.test.ts tests/unit/web-next-character-workspace-session.test.ts tests/unit/world-library.test.ts` — 3 files passed, 49 tests passed.
+- `pnpm vitest run tests/unit/world-generator-service.test.ts tests/unit/runtime-provider-lifecycle.test.ts` — 2 files passed, 33 tests passed.
+- Scoped strict TypeScript check with NodeNext and ES2023 across the changed application, runtime, contract, and test files — exit 0, no diagnostics.
+- `pnpm vitest run tests/unit/client-api-routes.test.ts` — blocked on this Windows host before route execution by the pre-existing Linux-only secure filesystem adapter (`filesystem_platform_unsupported`; 48 tests affected).
+- `git diff --check` — exit 0 before commit.
+
+### Files changed
+
+- `apps/web-next/src/character-workspace-sanitizer.ts`
+- `apps/web-next/src/character-workspace-session.ts`
+- `apps/web-next/src/character-workspace-api.ts`
+- `services/runtime/src/provider-world-generation-adapter.ts`
+- `tests/unit/web-next-character-workspace-api.test.ts`
+- `tests/unit/world-library.test.ts`
+- `.superpowers/sdd/2026-08-12-character-creation-workspace/task-3-report.md`
+
+### Concerns
+
+Projectmem MCP remains unavailable (no configured MCP servers), so required file prechecks and event logging could not be performed. The pre-existing untracked `.superpowers/brainstorm/` directory remains untouched and excluded from the commit.

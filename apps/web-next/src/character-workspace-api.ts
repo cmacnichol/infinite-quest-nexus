@@ -5,6 +5,7 @@ import {
   playableCharacterSchema
 } from "../../../packages/contracts/src/world-library.js";
 import { parseEditableWorldDraft, type EditableWorldDraft } from "./world-editor-model.js";
+import { sanitizeCharacterWorkspaceValue } from "./character-workspace-sanitizer.js";
 
 export interface WorldGenerationProgressResponse {
   status: "processing" | "completed" | "failed" | "unknown";
@@ -64,13 +65,13 @@ function clone<T>(value: T): T {
 
 export function sanitizeCharacterGenerationContent(draft: EditableWorldDraft): EditableWorldDraft {
   const parsed = clone(parseEditableWorldDraft(draft));
-  const content = stripProhibitedRootKeys(parsed);
+  const content = sanitizeCharacterWorkspaceValue(parsed) as Record<string, unknown>;
   content.schemaVersion = WORLD_CONTENT_SCHEMA_VERSION;
-  content.world = stripProhibitedRootKeys(parsed.world);
-  content.playableCharacters = parsed.playableCharacters.map((character) => (
-    isRecord(character) ? stripProhibitedRootKeys(character) : character
-  ));
   return parseEditableWorldDraft(canonicalizeWorldContent(content));
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
 }
 
 async function fetchJson(url: string, init: RequestInit): Promise<{ response: Response; value: unknown }> {
@@ -89,7 +90,8 @@ async function fetchJson(url: string, init: RequestInit): Promise<{ response: Re
   let value: unknown;
   try {
     value = await response.json();
-  } catch {
+  } catch (error) {
+    if (init.signal?.aborted || isAbortError(error)) throw error;
     if (response.ok) {
       throw new CharacterWorkspaceApiError(
         "invalid_response",

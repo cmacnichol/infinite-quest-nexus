@@ -6,6 +6,7 @@ import {
   parseEditableWorldDraft,
   type EditableWorldDraft
 } from "./world-editor-model.js";
+import { sanitizeCharacterWorkspaceValue } from "./character-workspace-sanitizer.js";
 
 export type CharacterWorkspaceOrigin = "world-creation" | "world-editor";
 export type CharacterWorkspaceMode = "create" | "edit";
@@ -78,9 +79,6 @@ const SESSION_LIFETIME_MS = 30 * 60 * 1000;
 const MAX_HANDOFF_BYTES = 512 * 1024;
 const MAX_KEY_ATTEMPTS = 10;
 const MAX_IDENTITY_LENGTH = 512;
-const PROHIBITED_IDENTITY_KEYS = new Set(["user_id", "userId", "owner_user_id", "ownerUserId"]);
-const PROHIBITED_SECRET_TOKENS = new Set(["credential", "credentials", "token", "secret", "password"]);
-const PROHIBITED_WHOLE_SECRET_KEYS = new Set(["apikey"]);
 const RESULT_FIELDS = new Set(["version", "key", "workflowId", "expiresAt", "result"]);
 const SESSION_FIELDS = new Set([
   "version",
@@ -148,32 +146,6 @@ function isSafeParentRoute(value: unknown): value is string {
   }
 }
 
-function semanticKeyTokens(key: string): string[] {
-  return key
-    .replace(/([a-z0-9])([A-Z])/gu, "$1 $2")
-    .replace(/([A-Z]+)([A-Z][a-z])/gu, "$1 $2")
-    .split(/[^a-zA-Z0-9]+/gu)
-    .filter((token) => token.length > 0)
-    .map((token) => token.toLowerCase());
-}
-
-function isProhibitedHandoffKey(key: string): boolean {
-  if (PROHIBITED_IDENTITY_KEYS.has(key)) return true;
-  const tokens = semanticKeyTokens(key);
-  return tokens.some((token) => PROHIBITED_SECRET_TOKENS.has(token)) ||
-    tokens.some((token, index) => token === "api" && tokens[index + 1] === "key") ||
-    (tokens.length === 1 && PROHIBITED_WHOLE_SECRET_KEYS.has(tokens[0] ?? ""));
-}
-
-function sanitizeUnknown(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sanitizeUnknown);
-  if (!isRecord(value)) return value;
-  return Object.fromEntries(
-    Object.entries(value)
-      .filter(([key]) => !isProhibitedHandoffKey(key))
-      .map(([key, child]) => [key, sanitizeUnknown(child)])
-  );
-}
 
 function parseDraft(value: unknown): EditableWorldDraft | null {
   try {
@@ -184,7 +156,7 @@ function parseDraft(value: unknown): EditableWorldDraft | null {
 }
 
 function parseCandidate(value: unknown): PlayableCharacter | null {
-  const parsed = playableCharacterSchema.safeParse(sanitizeUnknown(value));
+  const parsed = playableCharacterSchema.safeParse(sanitizeCharacterWorkspaceValue(value));
   return parsed.success ? parsed.data : null;
 }
 
@@ -204,8 +176,8 @@ function parseSession(value: unknown, expectedKey: string, now: number): Charact
       !isExpiry(value.expiresAt, now)) {
     return null;
   }
-  const parentDraft = parseDraft(sanitizeUnknown(value.parentDraft));
-  const worldContext = parseDraft(sanitizeUnknown(value.worldContext));
+  const parentDraft = parseDraft(sanitizeCharacterWorkspaceValue(value.parentDraft));
+  const worldContext = parseDraft(sanitizeCharacterWorkspaceValue(value.worldContext));
   const summaries = value.rosterSummaries.map(parseSummary);
   const candidate = value.candidate === null ? null : parseCandidate(value.candidate);
   if (parentDraft === null || worldContext === null || summaries.some((summary) => summary === null) ||
@@ -365,7 +337,7 @@ export function createCharacterWorkspaceSessionStore(
       if (key === "") throw new Error("Unable to create an opaque character workspace key.");
 
       const currentTime = now();
-      const sanitized = sanitizeUnknown(input);
+      const sanitized = sanitizeCharacterWorkspaceValue(input);
       const session = parseSession({
         ...sanitized as CreateCharacterWorkspaceSession,
         version: 1,
@@ -407,7 +379,7 @@ export function createCharacterWorkspaceSessionStore(
           safeRead(storage, resultStorageKey(key)) !== null) {
         return false;
       }
-      const sanitizedResult = parseResult(sanitizeUnknown(result));
+      const sanitizedResult = parseResult(sanitizeCharacterWorkspaceValue(result));
       if (sanitizedResult === null) return false;
       const stored: StoredResult = {
         version: 1,
