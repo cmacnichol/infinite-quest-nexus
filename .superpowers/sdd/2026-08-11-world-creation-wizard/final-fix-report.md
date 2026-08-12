@@ -87,3 +87,26 @@ Result: no detector errors. The detector exited 2 for the already documented int
 ## Environment note
 
 Projectmem MCP remained unavailable in this harness (`0/0` configured servers), so mandatory `precheck_file` and event-log operations could not be performed. No `.projectmem` files were edited directly.
+
+## Authorized extra final fix: pending Cover assets stage navigation
+
+Forward Creation Stage Index activation now validates the exact pending World assets JSON before leaving Cover. Pointer clicks and native Enter/Space paths remain on Cover for malformed pending text, preserve that text and its associated error, and focus the Assets textarea. Backward stage navigation and valid forward navigation retain their existing behavior.
+
+### RED evidence
+
+```bash
+pnpm test tests/unit/web-next-world-creation-page.test.ts
+```
+
+Result before implementation: exit 1. The three new pointer, Enter, and Space regression cases all advanced to Review instead of retaining the pending invalid Cover value. This repository script expanded to the full unit suite and also reported unrelated Windows-only filesystem failures.
+
+### GREEN evidence
+
+```bash
+pnpm exec vitest run tests/unit/web-next-world-creation-page.test.ts
+pnpm exec vitest run tests/unit/web-next-world-creation-page.test.ts tests/unit/web-next-world-creation-model.test.ts
+pnpm --filter @infinite-quest/web-next check
+node C:/Users/chris/.pi/agent/skills/impeccable/scripts/detect.mjs --json apps/web-next/src/world-creation-page.ts tests/unit/web-next-world-creation-page.test.ts
+```
+
+Result: exit 0. The page suite passed 55 tests; the combined page/model suite passed 71 tests; the web-next TypeScript check passed; and the UI detector returned no findings.

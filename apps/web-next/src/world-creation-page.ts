@@ -1095,6 +1095,25 @@ export function mountWorldCreationPage(
     renderCollectionEditor();
   }
 
+  function pendingAssetsJsonIsValid(): boolean {
+    if (state.stage !== "cover") return true;
+    const textarea = editingStage.querySelector<HTMLTextAreaElement>("[data-assets-json]");
+    const error = editingStage.querySelector<HTMLElement>("[data-assets-error]");
+    if (!textarea) return true;
+    const parsed = parseAdvancedJson<unknown[]>(textarea.value, "array");
+    if (parsed.error) {
+      assetsJsonInvalid = true;
+      textarea.setAttribute("aria-invalid", "true");
+      if (error) error.textContent = parsed.error;
+      textarea.focus();
+      return false;
+    }
+    assetsJsonInvalid = false;
+    textarea.removeAttribute("aria-invalid");
+    if (error) error.textContent = "";
+    return true;
+  }
+
   function applyAssetsJson(): void {
     const textarea = editingStage.querySelector<HTMLTextAreaElement>("[data-assets-json]");
     const error = editingStage.querySelector<HTMLElement>("[data-assets-error]");
@@ -1206,6 +1225,8 @@ export function mountWorldCreationPage(
       const previousStage = state.stage;
       const previousIndex = STAGE_ORDER.indexOf(previousStage);
       const targetStage = stageButton.dataset.stage as CreationStage;
+      const targetIndex = STAGE_ORDER.indexOf(targetStage);
+      if (targetIndex > previousIndex && !pendingAssetsJsonIsValid()) return;
       state = setCreationStage(state, targetStage);
       if (state.stage !== previousStage) {
         if (assetsJsonInvalid && previousStage === "cover") assetsJsonInvalid = false;

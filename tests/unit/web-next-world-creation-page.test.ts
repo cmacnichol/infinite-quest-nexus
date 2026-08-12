@@ -519,6 +519,33 @@ describe("World Creation Cover and Review stages", () => {
     expect(window).toBeTruthy();
   });
 
+  it.each(["pointer", "Enter", " "] as const)(
+    "keeps pending invalid Cover assets JSON intact when %s activates the forward Review stage",
+    (activation) => {
+      const { document, root, window } = creationFixture();
+      mountWorldCreationPage(root, { initialState: reviewedState() });
+      document.querySelector<HTMLButtonElement>('[data-stage="cover"]')?.click();
+      const assets = document.querySelector<HTMLTextAreaElement>("[data-assets-json]");
+      const reviewStage = document.querySelector<HTMLButtonElement>('[data-stage="review"]');
+      if (!assets || !reviewStage) throw new Error("Cover forward-navigation fixture incomplete.");
+      const pendingText = '{\n  "unfinished": true';
+      assets.value = pendingText;
+      assets.dispatchEvent(new window.Event("input", { bubbles: true }));
+
+      if (activation === "pointer") reviewStage.click();
+      else reviewStage.dispatchEvent(keyboardEvent(window as unknown as Window, activation));
+
+      const retainedAssets = document.querySelector<HTMLTextAreaElement>("[data-assets-json]");
+      const error = document.querySelector<HTMLElement>("[data-assets-error]");
+      expect(document.querySelector('[data-creation-stage="cover"]')).not.toBeNull();
+      expect(retainedAssets?.value).toBe(pendingText);
+      expect(retainedAssets?.getAttribute("aria-invalid")).toBe("true");
+      expect(error?.textContent).toContain("valid JSON");
+      expect(retainedAssets?.getAttribute("aria-describedby")?.split(/\s+/)).toContain(error?.id);
+      expect(document.activeElement).toBe(retainedAssets);
+    }
+  );
+
   it("associates invalid Cover assets JSON with recovery copy without changing assets", () => {
     const { document, root } = creationFixture();
     let state = reviewedState();
