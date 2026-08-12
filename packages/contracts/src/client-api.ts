@@ -171,6 +171,7 @@ const campaignSyncCampaignSchema = z.object({
   activeTurnNumber: z.number().int().min(0),
   worldVersionId: z.uuid(),
   storyLengthProfile: storyLengthProfileSchema,
+  turnControlStyle: turnControlStyleSchema,
   updatedAt: apiTimestampSchema,
   selectedCharacterId: z.string().nullable(),
   selectedCharacterName: z.string(),

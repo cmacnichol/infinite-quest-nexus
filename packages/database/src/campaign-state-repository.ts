@@ -1200,6 +1200,7 @@ type CampaignSyncRow = {
   activeTurnNumber: number;
   worldVersionId: string;
   storyLengthProfile: "brief" | "standard" | "long" | "extended";
+  turnControlStyle: "action_only" | "flexible_auto" | "flexible_action" | "flexible_scene";
   updatedAt: Date | string;
   selectedCharacterId: string | null;
   characterSnapshot: Record<string, unknown> | null;
@@ -1246,7 +1247,8 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
       const client = worldCampaignDatabaseClient(transaction);
       const result = await client.query<CampaignSyncRow>(
         `SELECT c.id, c.title, c.active_turn_number AS "activeTurnNumber", c.world_version_id AS "worldVersionId",
-                c.story_length_profile AS "storyLengthProfile", c.updated_at AS "updatedAt",
+                c.story_length_profile AS "storyLengthProfile", c.turn_control_style AS "turnControlStyle",
+                c.updated_at AS "updatedAt",
                 c.selected_character_id AS "selectedCharacterId", c.character_snapshot AS "characterSnapshot",
                 c.character_profile AS "characterProfile", c.character_profile_revision AS "characterProfileRevision",
                 c.legacy_settings AS "legacySettings", c.status,
@@ -1319,6 +1321,7 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
         activeTurnNumber: row.activeTurnNumber,
         worldVersionId: row.worldVersionId,
         storyLengthProfile: row.storyLengthProfile,
+        turnControlStyle: row.turnControlStyle,
         updatedAt: row.updatedAt,
         selectedCharacterId: row.selectedCharacterId,
         selectedCharacterName: effectiveCharacter.name,

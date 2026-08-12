@@ -1424,13 +1424,18 @@ integration("PostgreSQL campaign sync adapters", () => {
     const adapters = createAdapters();
     const scope = { ownerUserId, campaignId: imported.campaignId };
 
+    await pool.query(
+      "UPDATE campaigns SET turn_control_style = 'flexible_scene' WHERE id = $1 AND owner_user_id = $2",
+      [imported.campaignId, ownerUserId]
+    );
+
     const snapshot = await adapters.transaction.read((transaction) =>
       adapters.sync.readCampaignSyncSnapshot(transaction, scope));
     expect(snapshot.syncToken).toMatch(/^[a-f0-9]{64}$/);
     expect(snapshot.projection.campaign.updatedAt).toBeInstanceOf(Date);
     expect(snapshot.projection).toMatchObject({
       id: imported.campaignId,
-      campaign: { id: imported.campaignId, activeTurnNumber: 2 },
+      campaign: { id: imported.campaignId, activeTurnNumber: 2, turnControlStyle: "flexible_scene" },
       playerConfig: { useRpgStats: false, suppressEventTriggers: false },
       pendingGeneration: null
     });
