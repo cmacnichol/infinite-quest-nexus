@@ -32,17 +32,20 @@ const libraryMarkup = `
         <span class="title-slash" aria-hidden="true"></span>
       </div>
       <p>Browse the worlds that hold your lore, characters, and campaigns.</p>
-      <a class="library-create-action" href="${worldCreationPath()}">Create world</a>
     </section>
 
-    <section class="library-tools" aria-label="Find a world">
+    <section class="library-tools" aria-label="Find or create a world">
       <label class="search-control" for="world-search">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5" /><path d="m16 16 4 4" /></svg>
         <span class="visually-hidden">Search worlds</span>
         <input id="world-search" type="search" autocomplete="off" placeholder="Search by title or description" />
         <kbd aria-hidden="true">/</kbd>
       </label>
-      <p id="result-count" class="result-count" aria-live="polite">Loading worldsâ€¦</p>
+      <p id="result-count" class="result-count" aria-live="polite">Loading worlds…</p>
+      <a class="library-create-action" href="${worldCreationPath()}">
+        <span>Create world</span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+      </a>
     </section>
 
     <section class="world-region" aria-labelledby="results-heading">

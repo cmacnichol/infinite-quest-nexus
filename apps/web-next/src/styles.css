@@ -383,10 +383,48 @@ h1 span:last-child {
   line-height: 1.55;
 }
 
+.library-create-action {
+  min-width: 200px;
+  min-height: 56px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  justify-self: end;
+  gap: 24px;
+  padding: 0 18px;
+  color: var(--text-on-accent);
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  font-family: "Chakra Petch", sans-serif;
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-decoration: none;
+  text-transform: uppercase;
+}
+
+.library-create-action:hover {
+  color: var(--text-on-accent);
+  background: var(--accent-hover);
+}
+
+.library-create-action:focus-visible {
+  outline: 3px solid var(--accent-hover);
+  outline-offset: 3px;
+}
+
+.library-create-action svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+}
+
 .library-tools {
   min-height: calc(var(--cell) * 4);
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: var(--cell);
   border-bottom: 1px solid var(--rule-strong);
@@ -1355,10 +1393,19 @@ footer p:first-child {
 
 .creation-prompt-dialog {
   width: min(calc(100% - (var(--edge) * 2)), 960px);
-  max-width: 960px;
+  min-width: min(560px, calc(100% - (var(--edge) * 2)));
+  max-width: calc(100vw - (var(--edge) * 2));
+  min-height: 420px;
   max-height: calc(100dvh - (var(--edge) * 2));
-  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "header"
+    "tools"
+    "field"
+    "status";
   padding: 0;
+  resize: both;
+  overflow: hidden;
   color: var(--text-primary);
   background: var(--surface-entry);
   border: 1px solid var(--rule-strong);
@@ -1375,10 +1422,11 @@ footer p:first-child {
 }
 
 .creation-prompt-dialog-header {
+  grid-area: header;
   min-height: 60px;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 60px;
   align-items: center;
-  justify-content: space-between;
   padding-left: var(--cell);
   border-bottom: 1px solid var(--rule-strong);
 }
@@ -1403,21 +1451,28 @@ footer p:first-child {
 }
 
 .creation-prompt-dialog-field {
+  grid-area: field;
   min-height: 0;
   overflow: auto;
+  border-top: 1px solid var(--rule);
   border-right: 0;
 }
 
 .creation-prompt-dialog-field textarea {
+  width: 100%;
+  height: 100%;
   min-height: min(42vh, 360px);
+  resize: none;
 }
 
 .creation-prompt-dialog > .creation-prompt-tools {
+  grid-area: tools;
   justify-content: flex-end;
-  border-top: 1px solid var(--rule);
+  border-top: 0;
 }
 
 .creation-prompt-dialog > [data-dialog-clipboard-status] {
+  grid-area: status;
   min-height: 0;
   margin: 0;
   padding: 0 var(--cell);
@@ -2102,12 +2157,19 @@ footer p:first-child {
     border-left: 0;
   }
 
+  .creation-prompt-dialog {
+    min-width: 0;
+    min-height: 0;
+    resize: none;
+  }
+
   .creation-prompt-dialog-field {
     padding: 18px;
   }
 
   .creation-prompt-dialog-field textarea {
     min-height: min(46vh, 320px);
+    resize: none;
   }
 
   .overview-editor {
@@ -2260,11 +2322,21 @@ footer p:first-child {
     max-width: 37ch;
   }
 
+  .library-create-action {
+    width: 100%;
+    min-width: 0;
+    justify-self: stretch;
+  }
+
   .library-tools {
     min-height: 128px;
-    grid-template-columns: 1fr;
+    grid-template-columns: 1fr 1fr;
     align-content: center;
     gap: 14px;
+  }
+
+  .library-tools .search-control {
+    grid-column: 1 / -1;
   }
 
   .search-control {
