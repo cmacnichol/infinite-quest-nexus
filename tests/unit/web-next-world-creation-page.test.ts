@@ -91,6 +91,7 @@ function handoffStore() {
   let expired = false;
   const sessions = new Map<string, CharacterWorkspaceSession>();
   const results = new Map<string, CharacterWorkspaceResult>();
+  const invalidResults = new Set<string>();
   const store: CharacterWorkspaceSessionStore = {
     create: vi.fn((input: CreateCharacterWorkspaceSession) => {
       sequence += 1;
@@ -114,8 +115,10 @@ function handoffStore() {
     peek: vi.fn((key: string, origin: "world-creation" | "world-editor", workflowId: string) => {
       const session = sessions.get(key);
       const result = results.get(key);
-      if (expired || !session || !result || session.origin !== origin || session.workflowId !== workflowId) return null;
-      return { session: structuredClone(session), result: structuredClone(result) };
+      if (expired || !session || session.origin !== origin || session.workflowId !== workflowId) return null;
+      if (invalidResults.has(key)) return { status: "invalid", session: structuredClone(session) };
+      if (!result) return null;
+      return { status: "ready", session: structuredClone(session), result: structuredClone(result) };
     }),
     consume: vi.fn((key: string, origin: "world-creation" | "world-editor", workflowId: string) => {
       const session = sessions.get(key);
@@ -126,7 +129,13 @@ function handoffStore() {
       return { session: structuredClone(session), result: structuredClone(result) };
     })
   };
-  return { store, sessions, results, expire: () => { expired = true; } };
+  return {
+    store,
+    sessions,
+    results,
+    invalidateResult: (key: string) => { invalidResults.add(key); },
+    expire: () => { expired = true; }
+  };
 }
 
 function creationFixture() {
@@ -723,6 +732,35 @@ describe("World Creation Characters stage", () => {
     expect(handoff.store.consume).not.toHaveBeenCalled();
   });
 
+  it("renders recovery for a malformed stored result without applying or consuming it", () => {
+    const { document, root, window } = creationFixture();
+    const handoff = handoffStore();
+    mountWorldCreationPage(root, {
+      initialState: characterStageState(reviewedCharacter("keeper", "Keeper")),
+      characterSessionStore: handoff.store,
+      characterWorkflowIdFactory: () => "workflow-invalid-result",
+      navigate: vi.fn()
+    });
+    document.querySelector<HTMLButtonElement>('[data-action="add-character"]')?.click();
+    const session = handoff.sessions.get("handoff-1");
+    if (!session) throw new Error("Malformed-result handoff missing.");
+    handoff.invalidateResult(session.key);
+
+    pageshow(window as unknown as Window);
+
+    expect(document.querySelectorAll("[data-character-roster-item]")).toHaveLength(1);
+    const error = document.querySelector<HTMLElement>('[data-character-handoff-error]');
+    expect(error?.getAttribute("role")).toBe("alert");
+    expect(error?.textContent).toContain("could not be recovered");
+    expect(error?.querySelector<HTMLAnchorElement>(`a[href="/app/characters/${session.key}"]`)).not.toBeNull();
+    expect(handoff.sessions.has(session.key)).toBe(true);
+    expect(handoff.store.consume).not.toHaveBeenCalled();
+
+    error?.querySelector<HTMLButtonElement>('[data-action="retry-character-result"]')?.click();
+    expect(document.querySelectorAll("[data-character-roster-item]")).toHaveLength(1);
+    expect(handoff.store.consume).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["invalid", (_session: CharacterWorkspaceSession) => {
       return { id: "invalid-only" } as never;
@@ -806,6 +844,9 @@ describe("World Creation Characters stage", () => {
     handoff.store.complete(cancelled.key, cancelled.workflowId, { status: "cancelled" });
     pageshow(window as unknown as Window);
     expect(document.querySelectorAll("[data-character-roster-item]")).toHaveLength(1);
+    expect(handoff.store.consume).toHaveBeenCalledTimes(1);
+    pageshow(window as unknown as Window);
+    expect(handoff.store.consume).toHaveBeenCalledTimes(1);
 
     document.querySelector<HTMLButtonElement>('[data-action="add-character"]')?.click();
     const expired = handoff.sessions.get("handoff-2");

@@ -47,6 +47,10 @@ export interface ConsumedCharacterWorkspaceSession {
   result: CharacterWorkspaceResult;
 }
 
+export type CharacterWorkspaceResultInspection =
+  | ({ status: "ready" } & ConsumedCharacterWorkspaceSession)
+  | { status: "invalid"; session: CharacterWorkspaceSession };
+
 export interface CharacterWorkspaceSessionStore {
   create(input: CreateCharacterWorkspaceSession): CharacterWorkspaceSession;
   load(key: string): CharacterWorkspaceSession | null;
@@ -56,7 +60,7 @@ export interface CharacterWorkspaceSessionStore {
     key: string,
     origin: CharacterWorkspaceOrigin,
     workflowId: string
-  ): ConsumedCharacterWorkspaceSession | null;
+  ): CharacterWorkspaceResultInspection | null;
   consume(
     key: string,
     origin: CharacterWorkspaceOrigin,
@@ -330,15 +334,15 @@ export function createCharacterWorkspaceSessionStore(
     key: string,
     origin: CharacterWorkspaceOrigin,
     workflowId: string
-  ): ConsumedCharacterWorkspaceSession | null {
+  ): CharacterWorkspaceResultInspection | null {
     const session = load(key);
     if (session === null || session.origin !== origin || session.workflowId !== workflowId) return null;
-    const stored = parseStoredResult(
-      decode(safeRead(storage, resultStorageKey(key))),
-      session,
-      now()
-    );
-    return stored === null ? null : { session, result: stored.result };
+    const rawResult = safeRead(storage, resultStorageKey(key));
+    if (rawResult === null) return null;
+    const stored = parseStoredResult(decode(rawResult), session, now());
+    return stored === null
+      ? { status: "invalid", session }
+      : { status: "ready", session, result: stored.result };
   }
 
   return {
@@ -420,7 +424,7 @@ export function createCharacterWorkspaceSessionStore(
 
     consume(key, origin, workflowId) {
       const pending = peek(key, origin, workflowId);
-      if (pending === null) return null;
+      if (pending === null || pending.status !== "ready") return null;
       const { session } = pending;
 
       const sessionKey = sessionStorageKey(key);
@@ -446,7 +450,7 @@ export function createCharacterWorkspaceSessionStore(
       const recordsAreAbsent = [sessionKey, returnKey, resultKey]
         .every((storageKey) => isAbsent(storage, storageKey));
       if (!removalsSucceeded || !recordsAreAbsent) return null;
-      return pending;
+      return { session, result: pending.result };
     }
   };
 }

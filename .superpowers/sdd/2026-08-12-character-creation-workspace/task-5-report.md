@@ -108,3 +108,32 @@ Observed the reproducible order defect `b, a, c` instead of `a, b, c`. Character
 - Full `pnpm test:unit` remains blocked on Windows-only repository baseline failures: 154 files passed, 13 failed, with 1,799 tests passed and 131 failed, principally Linux `/proc` filesystem suites and server composition requiring the Linux secure-filesystem adapter.
 - Root `pnpm check` remains blocked by the pre-existing prohibited console write in `apps/web-next/src/world-library-page.ts`.
 - Root `pnpm build` remains blocked by pre-existing repository-wide NodeNext import/type errors; the scoped `web-next` build succeeds.
+
+---
+
+## Fix Round 2
+
+### RED Evidence
+
+`pnpm vitest run tests/unit/web-next-character-workspace-session.test.ts tests/unit/web-next-world-creation-page.test.ts` failed with the expected 3 regressions: valid production-store inspections lacked the explicit `ready` outcome, malformed stored results were indistinguishable from absent results, and World Creation attempted to read/apply the malformed outcome instead of rendering recovery.
+
+### Completed
+
+- Defined production-store result inspection as `ready`, `invalid`, or `null` for absent/caller-mismatched handoffs.
+- Preserved malformed stored result bytes and all session/return records; neither inspection nor attempted consumption deletes them.
+- Prevented World Creation from applying malformed candidates and rendered the existing recoverable alert with Retry and Return to character workspace actions.
+- Added an explicit page assertion that successful cancellation is consumed exactly once across repeated BFCache returns.
+
+### Files Changed
+
+- `apps/web-next/src/character-workspace-session.ts` — Added discriminated result inspection and non-destructive malformed-result behavior.
+- `apps/web-next/src/world-creation-page.ts` — Handles `invalid` inspection before candidate access or state transition.
+- `tests/unit/web-next-character-workspace-session.test.ts` — Verifies `ready`/`invalid` outcomes and exact malformed-byte preservation.
+- `tests/unit/web-next-world-creation-page.test.ts` — Verifies malformed-result recovery without apply/consume and exactly-once cancellation consumption.
+- `.superpowers/sdd/2026-08-12-character-creation-workspace/task-5-report.md` — Appended Fix Round 2 evidence.
+
+### Verification
+
+- Session/page targeted suite: 2 files, 82 tests passed.
+- `pnpm --filter @infinite-quest/web-next check` passed.
+- `git diff --check` passed (Git emitted only the existing CRLF normalization warning for `world-creation-page.ts`).

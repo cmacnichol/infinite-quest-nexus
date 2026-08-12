@@ -1400,6 +1400,13 @@ export function mountWorldCreationPage(
       activeCharacterHandoff.workflowId
     );
     if (!pending) return;
+    if (pending.status === "invalid") {
+      state = { ...state, stage: "characters" };
+      characterHandoffError = "The stored character result is invalid and could not be recovered. It was not applied or removed; return to the character workspace to review the handoff.";
+      renderStage();
+      setDirtyGuard(state.navigationDirty);
+      return;
+    }
 
     let nextState = state;
     if (pending.result.status === "accepted") {

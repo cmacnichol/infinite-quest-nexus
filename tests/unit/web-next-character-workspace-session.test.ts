@@ -323,10 +323,12 @@ describe("character workspace session store", () => {
     expect(store.peek(session.key, "world-editor", session.workflowId)).toBeNull();
     expect(store.peek(session.key, "world-creation", "wrong-workflow")).toBeNull();
     expect(store.peek(session.key, "world-creation", session.workflowId)).toEqual({
+      status: "ready",
       session,
       result: accepted
     });
     expect(store.peek(session.key, "world-creation", session.workflowId)).toEqual({
+      status: "ready",
       session,
       result: accepted
     });
@@ -380,17 +382,30 @@ describe("character workspace session store", () => {
     const session = store.create(createInput());
     const resultKey = `iqn:character-workspace:result:${session.key}`;
 
-    storage.setItem(resultKey, JSON.stringify({ version: 1, key: session.key, workflowId: session.workflowId }));
+    const malformedResult = JSON.stringify({ version: 1, key: session.key, workflowId: session.workflowId });
+    storage.setItem(resultKey, malformedResult);
+    expect(store.peek(session.key, "world-creation", session.workflowId)).toEqual({
+      status: "invalid",
+      session
+    });
     expect(store.consume(session.key, "world-creation", session.workflowId)).toBeNull();
-    storage.setItem(resultKey, JSON.stringify({
+    expect(storage.getItem(resultKey)).toBe(malformedResult);
+
+    const resultWithUnexpectedCredential = JSON.stringify({
       version: 1,
       key: session.key,
       workflowId: session.workflowId,
       expiresAt: session.expiresAt,
       credential: "must-not-hitchhike",
       result: { status: "cancelled" }
-    }));
+    });
+    storage.setItem(resultKey, resultWithUnexpectedCredential);
+    expect(store.peek(session.key, "world-creation", session.workflowId)).toEqual({
+      status: "invalid",
+      session
+    });
     expect(store.consume(session.key, "world-creation", session.workflowId)).toBeNull();
+    expect(storage.getItem(resultKey)).toBe(resultWithUnexpectedCredential);
 
     storage.setItem(resultKey, JSON.stringify({
       version: 1,
