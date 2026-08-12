@@ -35,6 +35,16 @@ Focused tests were added before production changes. The initial Character Worksp
 - `pnpm test`: 154 files and 1,826 tests passed; 13 files and 131 tests failed on the established Windows/Linux filesystem, `/proc`, Windows path-composition, and `spawnSync pnpm ENOENT` baseline incompatibilities.
 - Final `git diff --check` evidence is recorded in the commit handoff.
 
+## Authorized Narrow Extra Final Fix
+
+- New World now requires an available Character Workspace return-pointer store and a successful pointer write before navigation. Null storage, false writes, and thrown writes keep the author in the wizard, preserve the local draft and created handoff session, and announce a recoverable alert.
+- Terminal `completed` character generation progress now normalizes the native progressbar value and visible percentage to 100 even when the provider reports a lower percentage. The preview grace period and missing-preview settlement remain unchanged.
+- RED evidence: the focused page run failed the four new assertions as expected—null pointer storage navigated, false/throwing writes lacked alert semantics, and completed provider progress rendered 37 instead of 100.
+- GREEN evidence: `pnpm vitest run tests/unit/web-next-character-workspace-model.test.ts tests/unit/web-next-character-workspace-session.test.ts tests/unit/web-next-character-workspace-api.test.ts tests/unit/web-next-character-workspace-page.test.ts tests/unit/web-next-world-creation-model.test.ts tests/unit/web-next-world-creation-api.test.ts tests/unit/web-next-world-creation-page.test.ts` passed 7 files and 172 tests.
+- `pnpm --filter @infinite-quest/web-next check` passed.
+- Impeccable detector over the three changed UI production targets returned `[]`.
+- `git diff --check` passed; the only output was the existing CRLF normalization warning for `world-creation-page.ts`.
+
 ## Concerns
 
 - Projectmem MCP remains unavailable in this harness (`0/0` servers and no `projectmem` server), so mandatory projectmem prechecks and event logging could not be performed.

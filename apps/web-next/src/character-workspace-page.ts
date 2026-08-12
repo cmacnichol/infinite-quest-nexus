@@ -564,7 +564,9 @@ export function mountCharacterWorkspacePage(
     const meter = document.createElement("progress");
     meter.dataset.characterGenerationProgress = "";
     meter.max = 100;
-    meter.value = Math.max(0, Math.min(100, progress.progressPercent));
+    meter.value = progress.status === "completed"
+      ? 100
+      : Math.max(0, Math.min(100, progress.progressPercent));
     meter.setAttribute("aria-label", "Character generation progress");
     const message = document.createElement("p");
     message.textContent = progress.status === "completed"

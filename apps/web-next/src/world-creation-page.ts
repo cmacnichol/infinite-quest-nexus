@@ -88,7 +88,7 @@ export interface WorldCreationPageDependencies {
   ) => Promise<GeneratedWorldCoverResponse>;
   navigate?: (path: string) => void;
   characterSessionStore?: CharacterWorkspaceSessionStore;
-  characterHandoffPointerStore?: WorldCreationCharacterHandoffPointerStore;
+  characterHandoffPointerStore?: WorldCreationCharacterHandoffPointerStore | null;
   characterWorkflowIdFactory?: () => string;
   initialState?: WorldCreationState;
 }
@@ -292,14 +292,16 @@ export function mountWorldCreationPage(
   }
   const characterSessionStore = dependencies.characterSessionStore ?? defaultCharacterSessionStore;
   let defaultCharacterHandoffPointerStore: WorldCreationCharacterHandoffPointerStore | null = null;
-  if (!dependencies.characterHandoffPointerStore) {
+  if (dependencies.characterHandoffPointerStore === undefined) {
     try {
       defaultCharacterHandoffPointerStore = createWorldCreationCharacterHandoffPointerStore(pageView.sessionStorage);
     } catch {
       defaultCharacterHandoffPointerStore = null;
     }
   }
-  const characterHandoffPointerStore = dependencies.characterHandoffPointerStore ?? defaultCharacterHandoffPointerStore;
+  const characterHandoffPointerStore = dependencies.characterHandoffPointerStore === undefined
+    ? defaultCharacterHandoffPointerStore
+    : dependencies.characterHandoffPointerStore;
   const characterWorkflowIdFactory = dependencies.characterWorkflowIdFactory ?? (() => crypto.randomUUID());
   const pollInterval = Math.max(50, dependencies.generationPollIntervalMs ?? 500);
   const confirmGeneratedReplacement = dependencies.confirmGeneratedReplacement ?? (() => pageView.confirm(
@@ -684,7 +686,7 @@ export function mountWorldCreationPage(
       navigate,
       onSessionCreated: (session) => {
         const pointer = { key: session.key, workflowId: session.workflowId };
-        if (characterHandoffPointerStore && !characterHandoffPointerStore.write(pointer)) return false;
+        if (!characterHandoffPointerStore || !characterHandoffPointerStore.write(pointer)) return false;
         activeCharacterHandoff = pointer;
         characterHandoffError = null;
         characterHandoffResultInvalid = false;

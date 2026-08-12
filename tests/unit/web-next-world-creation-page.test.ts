@@ -651,6 +651,61 @@ describe("World Creation Characters stage", () => {
     expect(initial.draft.playableCharacters).toHaveLength(1);
   });
 
+  it("keeps the wizard and draft available when the character handoff pointer store is unavailable", () => {
+    const fixture = creationFixture();
+    const handoff = handoffStore();
+    const navigate = vi.fn();
+    mountWorldCreationPage(fixture.root, {
+      initialState: characterStageState(reviewedCharacter("keeper", "Keeper")),
+      characterSessionStore: handoff.store,
+      characterHandoffPointerStore: null,
+      characterWorkflowIdFactory: () => "workflow-no-pointer-store",
+      navigate
+    });
+
+    fixture.document.querySelector<HTMLButtonElement>('[data-action="add-character"]')?.click();
+
+    expect(navigate).not.toHaveBeenCalled();
+    expect(handoff.sessions.size).toBe(1);
+    const error = fixture.document.querySelector<HTMLElement>("[data-character-roster-status]");
+    expect(error?.getAttribute("role")).toBe("alert");
+    expect(error?.textContent).toContain("safe return pointer");
+    expect(error?.textContent).toContain("try again");
+    fixture.document.querySelector<HTMLButtonElement>('[data-stage="foundation"]')?.click();
+    expect(fixture.document.querySelector<HTMLInputElement>('[name="world.title"]')?.value).toBe("Glass Atlas");
+  });
+
+  it.each(["false", "throw"] as const)(
+    "keeps the wizard and draft available when the character handoff pointer write returns %s",
+    (outcome) => {
+      const fixture = creationFixture();
+      const handoff = handoffStore();
+      const pointer = creationHandoffPointerStore();
+      const navigate = vi.fn();
+      vi.mocked(pointer.store.write).mockImplementation(() => {
+        if (outcome === "throw") throw new Error("storage unavailable");
+        return false;
+      });
+      mountWorldCreationPage(fixture.root, {
+        initialState: characterStageState(reviewedCharacter("keeper", "Keeper")),
+        characterSessionStore: handoff.store,
+        characterHandoffPointerStore: pointer.store,
+        characterWorkflowIdFactory: () => `workflow-pointer-${outcome}`,
+        navigate
+      });
+
+      fixture.document.querySelector<HTMLButtonElement>('[data-action="add-character"]')?.click();
+
+      expect(navigate).not.toHaveBeenCalled();
+      expect(handoff.sessions.size).toBe(1);
+      const error = fixture.document.querySelector<HTMLElement>("[data-character-roster-status]");
+      expect(error?.getAttribute("role")).toBe("alert");
+      expect(error?.textContent).toContain("try again");
+      fixture.document.querySelector<HTMLButtonElement>('[data-stage="foundation"]')?.click();
+      expect(fixture.document.querySelector<HTMLInputElement>('[name="world.title"]')?.value).toBe("Glass Atlas");
+    }
+  );
+
   it("restores an opaque handoff after disposal/remount and clears terminal accepted and cancelled pointers", () => {
     const fixture = creationFixture();
     const handoff = handoffStore();

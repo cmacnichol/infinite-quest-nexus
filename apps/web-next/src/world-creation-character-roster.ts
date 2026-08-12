@@ -180,12 +180,16 @@ export function renderWorldCreationCharacterRoster(
   section.append(removals);
 
   function begin(mode: "create" | "edit", candidate: PlayableCharacter | null): void {
+    const showRecoverableError = (message: string): void => {
+      status.setAttribute("role", "alert");
+      status.textContent = message;
+    };
     if (mode === "create" && roster.length >= MAX_PLAYABLE_CHARACTERS) {
-      status.textContent = `Remove a character before adding another; this roster already has ${MAX_PLAYABLE_CHARACTERS}.`;
+      showRecoverableError(`Remove a character before adding another; this roster already has ${MAX_PLAYABLE_CHARACTERS}.`);
       return;
     }
     if (!input.sessionStore) {
-      status.textContent = "Character editing is unavailable in this browser session. Your world draft is unchanged.";
+      showRecoverableError("Character editing is unavailable in this browser session. Your world draft is unchanged; try again.");
       return;
     }
     try {
@@ -201,12 +205,12 @@ export function renderWorldCreationCharacterRoster(
         candidate
       });
       if (input.onSessionCreated(session) === false) {
-        status.textContent = "The character workspace could not preserve a safe return pointer. Your world draft is unchanged; try again.";
+        showRecoverableError("The character workspace could not preserve a safe return pointer. Your world draft is unchanged; try again.");
         return;
       }
       input.navigate(characterWorkspacePath(session.key));
     } catch {
-      status.textContent = "The character workspace could not be opened. Your world draft is unchanged; try again.";
+      showRecoverableError("The character workspace could not be opened. Your world draft is unchanged; try again.");
     }
   }
 

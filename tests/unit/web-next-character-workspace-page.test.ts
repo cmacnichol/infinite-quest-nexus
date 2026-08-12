@@ -297,7 +297,7 @@ describe("Character Workspace page", () => {
     const preview = deferred<{ character: PlayableCharacter }>();
     let signal: AbortSignal | undefined;
     const progress = vi.fn().mockResolvedValue({
-      status: "completed", phase: "completed", progressPercent: 100, message: "Character prepared"
+      status: "completed", phase: "completed", progressPercent: 37, message: "Character prepared"
     });
     mountCharacterWorkspacePage(root, "opaque-key", {
       sessionStore: store(),
@@ -315,7 +315,7 @@ describe("Character Workspace page", () => {
     await settle();
     expect(document.querySelector<HTMLProgressElement>("[data-character-generation-progress]")?.value).toBe(100);
     expect(document.querySelector('[data-character-generation-status]')?.getAttribute("role")).toBe("status");
-    expect(root.textContent).toContain("Finalizing generated character");
+    expect(root.textContent).toContain("Finalizing generated character · 100%");
     await vi.advanceTimersByTimeAsync(5);
     expect(signal?.aborted).toBe(true);
     expect(progress).toHaveBeenCalledTimes(1);
