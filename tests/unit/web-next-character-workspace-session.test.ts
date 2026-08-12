@@ -386,6 +386,41 @@ describe("character workspace session store", () => {
     expect(storage.getItem(resultKey)).toBe(validResult);
   });
 
+  it("resets a malformed World Editor result without deleting its unsaved-draft session", () => {
+    const storage = new MemoryStorage();
+    const store = createCharacterWorkspaceSessionStore(storage, {
+      now: () => NOW,
+      keyFactory: () => "editor-invalid-reset"
+    });
+    const session = store.create(createInput({
+      origin: "world-editor",
+      mode: "edit",
+      parentRoute: "/app/worlds/world-1",
+      expectedWorldRevision: 8,
+      candidate: candidate()
+    }));
+    const sessionKey = `iqn:character-workspace:session:${session.key}`;
+    const resultKey = `iqn:character-workspace:result:${session.key}`;
+    storage.setItem(resultKey, "{");
+
+    expect(store.peek(session.key, "world-editor", session.workflowId)).toEqual({
+      status: "invalid",
+      session
+    });
+    expect(store.resetInvalidResult(session.key, "world-editor", session.workflowId)).toBe(true);
+    expect(storage.getItem(sessionKey)).not.toBeNull();
+    expect(store.load(session.key)).toEqual(session);
+    expect(store.complete(session.key, session.workflowId, {
+      status: "accepted",
+      candidate: candidate({ name: "Mara Restored" })
+    })).toBe(true);
+    expect(store.consume(session.key, "world-editor", session.workflowId)?.result).toEqual({
+      status: "accepted",
+      candidate: candidate({ name: "Mara Restored" })
+    });
+    expect(store.consume(session.key, "world-editor", session.workflowId)).toBeNull();
+  });
+
   it("fails closed when invalid-result removal fails", () => {
     const storage = new MemoryStorage();
     const store = createCharacterWorkspaceSessionStore(storage, {

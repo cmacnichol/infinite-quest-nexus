@@ -259,8 +259,21 @@ Components are precise, tactile through state rather than simulated material, an
 - The Draft Ledger is the editor's sticky bottom drawer and single persistent draft-health summary. Its collapsed row exposes state, revision, readiness, and warnings, followed by the labelled details toggle and **Save draft** as the far-right accent action.
 - The drawer remains structurally in document flow while sticking to the viewport edge during editing. Mobile uses a two-column summary, keeps Save draft in the far-right bottom cell, and expands details into a one-column full-width sheet. Drawer transitions are removed under reduced motion.
 
+### Character Workspace Stage Index
+- Character authoring is an Operate-mode six-stage workspace: Method, Identity, Story, Appearance, Mechanics, and Review. Keep the persistent rail compact; current state combines semantic soft-accent fill with a three-pixel orientation rule, completed state adds an authored CSS check mark and hidden completion copy, and upcoming stages remain explicitly unavailable.
+- At `720px` and below, preserve stage order and state in one horizontally scrollable switcher with complete 52px cells and a bottom active rule. Long Identity, Story, and Appearance fields stack as complete cells without horizontal page overflow.
+
+### Character Workspace Handoff
+- **Add character** and **Edit in character workspace** snapshot the complete sanitized local world draft into one opaque same-origin session. The workspace returns one reviewed candidate to that local aggregate; it never calls a character-save or world-save API.
+- Accepted create or replace results mark the parent draft unsaved and remain local until **Save draft** in World Editor or **Create world** in New World. Cancellation, expiry, disposal, origin or workflow mismatch, malformed result, and duplicate consumption leave the parent unchanged.
+- Malformed stored results use the shared inspect/reset recovery: show an in-page alert, preserve the session and return tombstone, reset only the invalid result before returning, and fail closed if reset cannot be verified.
+
+### Character Progress Ledger
+- Keep factual stage position and validation status in an in-flow sticky bottom rule beside compact **Back** and **Continue** actions. Review changes the final action to **Add to world draft** or **Update world draft**; neither label implies persistence.
+- Desktop reserves the leading cell for progress and right-aligns compact actions. At `720px` and below, progress spans above two equal action cells. Preserve visible keyboard focus, exact validation recovery, and live generation status without covering focused content.
+
 ### Creation Stage Index
-- Use a persistent six-stage rail for Method, Foundation, Canon, Mechanics, Cover, and Review. Current state combines semantic soft-accent fill with a three-pixel orientation rule; completed state adds an authored CSS check mark and hidden completion copy; upcoming stages remain explicitly unavailable.
+- Use a persistent stage rail for Method, Foundation, Canon, Mechanics, Cover, Characters, and Review. Current state combines semantic soft-accent fill with a three-pixel orientation rule; completed state adds an authored CSS check mark and hidden completion copy; upcoming stages remain explicitly unavailable.
 - At `720px` and below, preserve the same order and state contract in one horizontally scrollable switcher with complete 52px cells and a bottom active rule.
 
 ### Compact Method Control
@@ -280,7 +293,7 @@ Components are precise, tactile through state rather than simulated material, an
 - Desktop reserves the leading cell for progress and right-aligns compact actions. At `720px` and below, progress spans the row above a two-cell action ledger. The sticky element remains in document flow, so keyboard focus and validation recovery are never obscured by an overlay.
 
 ### Motion
-- Use short state transitions for rules, color, arrows, focus, and the Draft Ledger surface. Filtering may use the View Transitions API to reveal the newly arranged group as one unit, but only when supported and when reduced motion is not requested. Under `prefers-reduced-motion: reduce`, collapse animations and transitions to effectively immediate feedback.
+- Use short state transitions for rules, color, arrows, focus, and the Draft Ledger surface. Filtering may use the View Transitions API to reveal the newly arranged group as one unit, but only when supported and when reduced motion is not requested. Under `prefers-reduced-motion: reduce`, collapse dialog, stage, progress, ledger, and other animations or transitions to effectively immediate feedback.
 
 ## Do's and Don'ts
 

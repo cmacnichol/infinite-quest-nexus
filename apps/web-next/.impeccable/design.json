@@ -400,9 +400,30 @@
       "css": ".draft-ledger { position: sticky; bottom: 0; width: 100%; background: var(--surface-entry); border-top: 1px solid var(--rule-strong); border-bottom: 1px solid var(--rule-strong); } .draft-ledger-summary { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)) auto auto; } .draft-ledger-details { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border-top: 1px solid var(--rule); transition: background-color 180ms ease; }"
     },
     {
+      "name": "Character Workspace Stage Index",
+      "kind": "nav",
+      "description": "A compact Operate-mode rail for Method, Identity, Story, Appearance, Mechanics, and Review, recomposed into a horizontal 52px-cell switcher at 720px.",
+      "html": "<nav class=\"character-stage-index\" aria-label=\"Character creation stages\"><button type=\"button\" data-stage-state=\"completed\">Method<span class=\"visually-hidden\"> completed</span></button><button type=\"button\" data-stage-state=\"current\" aria-current=\"step\">Identity</button><button type=\"button\" data-stage-state=\"upcoming\" aria-disabled=\"true\" disabled>Story</button></nav>",
+      "css": ".character-stage-index { background: var(--surface-entry); border-right: 1px solid var(--rule-strong); } .character-stage-index [data-stage-state=\"current\"] { color: var(--text-primary); background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); } @media (max-width: 720px) { .character-stage-index { display: flex; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--rule-strong); } .character-stage-index button { min-width: max-content; min-height: 52px; } }"
+    },
+    {
+      "name": "Character Workspace Handoff",
+      "kind": "status-actions",
+      "description": "The explicit local-only boundary: one reviewed candidate returns through an opaque session and remains unsaved until the parent Save draft or Create world action.",
+      "html": "<section class=\"character-handoff-boundary\" aria-label=\"Character draft handoff\"><p>Updates the unsaved world draft only. Save draft remains required.</p><button type=\"button\">Update world draft</button></section>",
+      "css": ".character-handoff-boundary { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; background: var(--surface-entry); border-top: 1px solid var(--rule-strong); } .character-handoff-boundary button { min-height: 44px; color: var(--text-on-accent); background: var(--accent); border: 1px solid var(--accent); border-radius: 0; }"
+    },
+    {
+      "name": "Character Progress Ledger",
+      "kind": "status-actions",
+      "description": "An in-flow sticky stage and validation ledger with compact Back and Continue actions; Review uses Add to world draft or Update world draft without implying persistence.",
+      "html": "<div class=\"character-progress-ledger\"><span>Stage 5 of 6 · Mechanics</span><button type=\"button\">Back</button><button type=\"button\">Continue</button></div>",
+      "css": ".character-progress-ledger { position: sticky; bottom: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; background: var(--surface-entry); border-top: 1px solid var(--rule-strong); border-bottom: 1px solid var(--rule-strong); } @media (max-width: 720px) { .character-progress-ledger { grid-template-columns: repeat(2, minmax(0, 1fr)); } .character-progress-ledger span { grid-column: 1 / -1; } } @media (prefers-reduced-motion: reduce) { .character-progress-ledger, .character-progress-ledger * { transition-duration: 0.01ms !important; } }"
+    },
+    {
       "name": "Creation Stage Index",
       "kind": "nav",
-      "description": "A persistent six-stage creation rail with explicit current, completed, and unavailable states; it becomes a horizontal switcher at the 720px compact breakpoint.",
+      "description": "A persistent seven-stage creation rail with explicit current, completed, and unavailable states; it becomes a horizontal switcher at the 720px compact breakpoint.",
       "html": "<nav class=\"creation-stage-index\" aria-label=\"World creation stages\"><span data-stage-state=\"completed\">Method</span><span data-stage-state=\"current\" aria-current=\"step\">Foundation</span><span data-stage-state=\"upcoming\" aria-disabled=\"true\">Canon</span></nav>",
       "css": ".creation-stage-index { background: var(--surface-entry); border-right: 1px solid var(--rule-strong); } .creation-stage-index [data-stage-state=\"current\"] { color: var(--text-primary); background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }"
     },

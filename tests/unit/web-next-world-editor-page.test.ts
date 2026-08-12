@@ -1,6 +1,12 @@
 import { parseHTML } from "linkedom";
 import { describe, expect, it, vi } from "vitest";
 import type { EditableWorldDraft, WorldAggregate } from "../../apps/web-next/src/world-editor-model.js";
+import type {
+  CharacterWorkspaceResult,
+  CharacterWorkspaceSession,
+  CharacterWorkspaceSessionStore,
+  CreateCharacterWorkspaceSession
+} from "../../apps/web-next/src/character-workspace-session.js";
 import {
   WorldEditorApiError,
   type WorldCoverAssetResponse,
@@ -45,6 +51,77 @@ const world: WorldAggregate = {
   versions: [],
   campaigns: []
 };
+
+function reviewedCharacter(id: string, name: string, extra: Record<string, unknown> = {}) {
+  return {
+    id,
+    name,
+    characterText: `${name} protects the observatory.`,
+    rpgStats: [],
+    defaultTriggers: [],
+    source: {},
+    ...extra
+  };
+}
+
+function handoffStore() {
+  let sequence = 0;
+  let expired = false;
+  const sessions = new Map<string, CharacterWorkspaceSession>();
+  const results = new Map<string, CharacterWorkspaceResult>();
+  const invalidResults = new Set<string>();
+  const store: CharacterWorkspaceSessionStore = {
+    create: vi.fn((input: CreateCharacterWorkspaceSession) => {
+      sequence += 1;
+      const session: CharacterWorkspaceSession = {
+        ...structuredClone(input),
+        version: 1,
+        key: `editor-handoff-${sequence}`,
+        expiresAt: Date.now() + 30 * 60 * 1000
+      };
+      sessions.set(session.key, session);
+      return structuredClone(session);
+    }),
+    load: vi.fn((key: string) => expired ? null : structuredClone(sessions.get(key) ?? null)),
+    returnPath: vi.fn((key: string) => sessions.get(key)?.parentRoute ?? null),
+    complete: vi.fn((key: string, workflowId: string, result: CharacterWorkspaceResult) => {
+      const session = sessions.get(key);
+      if (expired || !session || session.workflowId !== workflowId || results.has(key) || invalidResults.has(key)) return false;
+      results.set(key, structuredClone(result));
+      return true;
+    }),
+    peek: vi.fn((key: string, origin: "world-creation" | "world-editor", workflowId: string) => {
+      const session = sessions.get(key);
+      const result = results.get(key);
+      if (expired || !session || session.origin !== origin || session.workflowId !== workflowId) return null;
+      if (invalidResults.has(key)) return { status: "invalid", session: structuredClone(session) };
+      if (!result) return null;
+      return { status: "ready", session: structuredClone(session), result: structuredClone(result) };
+    }),
+    resetInvalidResult: vi.fn((key: string, origin: "world-creation" | "world-editor", workflowId: string) => {
+      const session = sessions.get(key);
+      if (expired || !session || session.origin !== origin || session.workflowId !== workflowId ||
+          !invalidResults.has(key) || results.has(key)) return false;
+      invalidResults.delete(key);
+      return true;
+    }),
+    consume: vi.fn((key: string, origin: "world-creation" | "world-editor", workflowId: string) => {
+      const session = sessions.get(key);
+      const result = results.get(key);
+      if (expired || !session || !result || session.origin !== origin || session.workflowId !== workflowId) return null;
+      sessions.delete(key);
+      results.delete(key);
+      return { session: structuredClone(session), result: structuredClone(result) };
+    })
+  };
+  return {
+    store,
+    sessions,
+    results,
+    invalidateResult: (key: string) => { invalidResults.add(key); },
+    expire: () => { expired = true; }
+  };
+}
 
 function editorFixture() {
   const { document, window } = parseHTML('<html><body><div id="app"></div></body></html>');
@@ -1275,6 +1352,204 @@ describe("World Editor Overview page", () => {
     const cleanUnload = new window.Event("beforeunload", { cancelable: true });
     window.dispatchEvent(cleanUnload);
     expect(cleanUnload.defaultPrevented).toBe(false);
+  });
+
+  it("opens Add from the current unsaved draft and applies one accepted character only before explicit save", async () => {
+    const { document, root, window } = editorFixture();
+    const handoff = handoffStore();
+    const navigate = vi.fn();
+    const saveWorldDraft = vi.fn().mockImplementation(async (_id, _revision, content) => savedResponse(content));
+    const authoredDraft = {
+      ...structuredClone(draft),
+      safeRootLore: { archive: "kept" },
+      ownerUserId: "must-not-cross",
+      world: {
+        ...draft.world,
+        safeWorldLore: { constellation: "kept", accessToken: "must-not-cross" }
+      }
+    } as EditableWorldDraft;
+    mountWorldEditorPage(root, worldId, {
+      loadWorld: vi.fn().mockResolvedValue({ ...world, draftContent: authoredDraft }),
+      saveWorldDraft,
+      characterSessionStore: handoff.store,
+      characterWorkflowIdFactory: () => "editor-workflow-add",
+      navigate
+    });
+    await settle();
+    const premise = document.querySelector<HTMLTextAreaElement>('[name="world.premise"]');
+    if (!premise) throw new Error("Premise field missing.");
+    premise.value = "Unsaved glass remembers every visitor.";
+    premise.dispatchEvent(new window.Event("input", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>('[data-section-target="characters"]')?.click();
+
+    document.querySelector<HTMLButtonElement>('[data-action="add-item"]')?.click();
+
+    const session = handoff.sessions.get("editor-handoff-1");
+    expect(session).toMatchObject({
+      origin: "world-editor",
+      mode: "create",
+      workflowId: "editor-workflow-add",
+      parentRoute: `/app/worlds/${worldId}`,
+      expectedWorldRevision: 8,
+      candidate: null,
+      rosterSummaries: []
+    });
+    expect(session?.parentDraft).toMatchObject({
+      safeRootLore: { archive: "kept" },
+      world: {
+        premise: "Unsaved glass remembers every visitor.",
+        safeWorldLore: { constellation: "kept" }
+      }
+    });
+    expect(session?.worldContext).toEqual(session?.parentDraft);
+    expect(session?.parentDraft).not.toBe(authoredDraft);
+    expect(JSON.stringify(session)).not.toMatch(/ownerUserId|accessToken|must-not-cross/u);
+    expect(navigate).toHaveBeenCalledWith("/app/characters/editor-handoff-1");
+    expect(saveWorldDraft).not.toHaveBeenCalled();
+
+    if (!session) throw new Error("Add handoff missing.");
+    expect(handoff.store.complete(session.key, session.workflowId, {
+      status: "accepted",
+      candidate: reviewedCharacter("mara", "Mara", { safeCharacterLore: { oath: "North" } }) as never
+    })).toBe(true);
+    window.dispatchEvent(new window.Event("pageshow"));
+
+    expect(document.querySelector('[data-collection-list]')?.textContent).toContain("Mara");
+    expect(document.querySelector('[data-editor-state]')?.textContent).toContain("Unsaved changes");
+    expect(saveWorldDraft).not.toHaveBeenCalled();
+    window.dispatchEvent(new window.Event("pageshow"));
+    expect(document.querySelectorAll("[data-collection-row]")).toHaveLength(1);
+    expect(handoff.store.consume).toHaveBeenCalledTimes(1);
+
+    document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')?.click();
+    await settle();
+    expect(saveWorldDraft).toHaveBeenCalledWith(worldId, 8, expect.objectContaining({
+      safeRootLore: { archive: "kept" },
+      playableCharacters: [expect.objectContaining({
+        id: "mara",
+        safeCharacterLore: { oath: "North" }
+      })]
+    }), expect.any(AbortSignal));
+  });
+
+  it("opens Edit with a local candidate and replaces only that unsaved character", async () => {
+    const { document, root, window } = editorFixture();
+    const handoff = handoffStore();
+    const saveWorldDraft = vi.fn();
+    const authoredDraft = {
+      ...structuredClone(draft),
+      playableCharacters: [
+        reviewedCharacter("keeper", "Keeper", { importedExtension: { keep: true } }),
+        reviewedCharacter("scout", "Scout")
+      ]
+    } as EditableWorldDraft;
+    mountWorldEditorPage(root, worldId, {
+      loadWorld: vi.fn().mockResolvedValue({ ...world, draftContent: authoredDraft }),
+      saveWorldDraft,
+      characterSessionStore: handoff.store,
+      characterWorkflowIdFactory: () => "editor-workflow-edit",
+      navigate: vi.fn()
+    });
+    await settle();
+    document.querySelector<HTMLButtonElement>('[data-section-target="characters"]')?.click();
+
+    document.querySelector<HTMLButtonElement>('[data-action="edit-character"]')?.click();
+    const session = handoff.sessions.get("editor-handoff-1");
+    expect(session).toMatchObject({
+      origin: "world-editor",
+      mode: "edit",
+      expectedWorldRevision: 8,
+      candidate: expect.objectContaining({ id: "keeper", importedExtension: { keep: true } })
+    });
+    if (!session) throw new Error("Edit handoff missing.");
+    expect(handoff.store.complete(session.key, session.workflowId, {
+      status: "accepted",
+      candidate: reviewedCharacter("keeper", "Keeper Prime", { importedExtension: { keep: true } }) as never
+    })).toBe(true);
+    window.dispatchEvent(new window.Event("pageshow"));
+
+    expect(document.querySelector('[data-collection-list]')?.textContent).toContain("Keeper Prime");
+    expect(document.querySelector('[data-collection-list]')?.textContent).toContain("Scout");
+    expect(document.querySelectorAll("[data-collection-row]")).toHaveLength(2);
+    expect(saveWorldDraft).not.toHaveBeenCalled();
+  });
+
+  it("leaves the unsaved draft unchanged for cancellation, expiry, mismatches, and disposal", async () => {
+    for (const outcome of ["cancelled", "expired", "origin", "workflow", "disposed"] as const) {
+      const { document, root, window } = editorFixture();
+      const handoff = handoffStore();
+      const mounted = mountWorldEditorPage(root, worldId, {
+        loadWorld: vi.fn().mockResolvedValue(world),
+        characterSessionStore: handoff.store,
+        characterWorkflowIdFactory: () => "editor-workflow-safe",
+        navigate: vi.fn()
+      });
+      await settle();
+      document.querySelector<HTMLButtonElement>('[data-section-target="characters"]')?.click();
+      document.querySelector<HTMLButtonElement>('[data-action="add-item"]')?.click();
+      const session = handoff.sessions.get("editor-handoff-1");
+      if (!session) throw new Error(`${outcome} handoff missing.`);
+      if (outcome === "cancelled") {
+        handoff.store.complete(session.key, session.workflowId, { status: "cancelled" });
+      } else {
+        handoff.store.complete(session.key, session.workflowId, {
+          status: "accepted",
+          candidate: reviewedCharacter(outcome, outcome) as never
+        });
+      }
+      if (outcome === "expired") handoff.expire();
+      if (outcome === "origin") session.origin = "world-creation";
+      if (outcome === "workflow") session.workflowId = "different-workflow";
+      if (outcome === "disposed") mounted.dispose();
+
+      window.dispatchEvent(new window.Event("pageshow"));
+
+      expect(document.querySelectorAll("[data-collection-row]"), outcome).toHaveLength(0);
+      if (outcome === "cancelled") expect(handoff.store.consume).toHaveBeenCalledTimes(1);
+      else expect(handoff.store.consume).not.toHaveBeenCalled();
+      mounted.dispose();
+    }
+  });
+
+  it("inspects malformed results, resets them before return, and applies one valid replacement", async () => {
+    const { document, root, window } = editorFixture();
+    const handoff = handoffStore();
+    const navigate = vi.fn();
+    mountWorldEditorPage(root, worldId, {
+      loadWorld: vi.fn().mockResolvedValue(world),
+      characterSessionStore: handoff.store,
+      characterWorkflowIdFactory: () => "editor-workflow-invalid",
+      navigate
+    });
+    await settle();
+    document.querySelector<HTMLButtonElement>('[data-section-target="characters"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-action="add-item"]')?.click();
+    const session = handoff.sessions.get("editor-handoff-1");
+    if (!session) throw new Error("Malformed-result handoff missing.");
+    handoff.invalidateResult(session.key);
+
+    window.dispatchEvent(new window.Event("pageshow"));
+
+    const recovery = document.querySelector<HTMLElement>('[data-character-handoff-error]');
+    expect(recovery?.getAttribute("role")).toBe("alert");
+    expect(recovery?.textContent).toContain("could not be recovered");
+    expect(handoff.store.consume).not.toHaveBeenCalled();
+    recovery?.querySelector<HTMLAnchorElement>(`a[href="/app/characters/${session.key}"]`)?.click();
+    expect(handoff.store.resetInvalidResult).toHaveBeenCalledWith(
+      session.key,
+      "world-editor",
+      session.workflowId
+    );
+    expect(navigate).toHaveBeenCalledWith(`/app/characters/${session.key}`);
+
+    expect(handoff.store.complete(session.key, session.workflowId, {
+      status: "accepted",
+      candidate: reviewedCharacter("restored", "Restored") as never
+    })).toBe(true);
+    window.dispatchEvent(new window.Event("pageshow"));
+    expect(document.querySelector('[data-collection-list]')?.textContent).toContain("Restored");
+    window.dispatchEvent(new window.Event("pageshow"));
+    expect(handoff.store.consume).toHaveBeenCalledTimes(1);
   });
 
   it("expands the ledger drawer and aborts active requests when disposed", async () => {
