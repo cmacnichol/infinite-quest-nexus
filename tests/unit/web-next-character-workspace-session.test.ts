@@ -9,6 +9,7 @@ import {
 
 class MemoryStorage implements Storage {
   readonly values = new Map<string, string>();
+  readonly failingRemovals = new Set<string>();
 
   get length(): number {
     return this.values.size;
@@ -27,6 +28,7 @@ class MemoryStorage implements Storage {
   }
 
   removeItem(key: string): void {
+    if (this.failingRemovals.has(key)) throw new Error("remove failed");
     this.values.delete(key);
   }
 
@@ -65,6 +67,21 @@ const candidate = (extra: Record<string, unknown> = {}): PlayableCharacter => ({
   source: {},
   ...extra
 });
+
+function jsonWithExactUtf8Bytes(
+  value: Record<string, unknown>,
+  paddingTarget: Record<string, unknown>,
+  bytes: number
+): string {
+  paddingTarget.multibyteLore = "";
+  const baseBytes = new TextEncoder().encode(JSON.stringify(value)).byteLength;
+  const remaining = bytes - baseBytes;
+  if (remaining < 0) throw new Error("Fixture exceeds requested size.");
+  paddingTarget.multibyteLore = `${remaining % 2 === 0 ? "" : "x"}${"é".repeat(Math.floor(remaining / 2))}`;
+  const serialized = JSON.stringify(value);
+  expect(new TextEncoder().encode(serialized)).toHaveLength(bytes);
+  return serialized;
+}
 
 function createInput(overrides: Record<string, unknown> = {}) {
   return {
@@ -112,7 +129,55 @@ describe("character workspace session store", () => {
     expect(store.load("opaque-key")).toEqual(session);
   });
 
-  it("rejects records larger than 512 KiB without leaving partial storage", () => {
+  it("accepts an exact 512 KiB multibyte session and rejects one byte beyond it before parsing", () => {
+    const storage = new MemoryStorage();
+    const store = createCharacterWorkspaceSessionStore(storage, {
+      now: () => NOW,
+      keyFactory: () => "bounded"
+    });
+    const session = store.create(createInput());
+    const sessionKey = `iqn:character-workspace:session:${session.key}`;
+    const exactParentDraft = { ...session.parentDraft };
+    const exactRecord = { ...session, parentDraft: exactParentDraft };
+    const exact = jsonWithExactUtf8Bytes(exactRecord, exactParentDraft, 512 * 1024);
+
+    storage.setItem(sessionKey, exact);
+    expect(store.load(session.key)?.parentDraft).toMatchObject({ multibyteLore: expect.stringContaining("é") });
+
+    storage.setItem(sessionKey, `${exact} `);
+    expect(store.load(session.key)).toBeNull();
+    expect(storage.getItem(sessionKey)).toBeNull();
+  });
+
+  it("rejects oversized raw session, result, and tombstone records injected directly into storage", () => {
+    const storage = new MemoryStorage();
+    const store = createCharacterWorkspaceSessionStore(storage, {
+      now: () => NOW,
+      keyFactory: () => "raw-bounds"
+    });
+    const session = store.create(createInput());
+    const oversizedPadding = " ".repeat(512 * 1024);
+    const sessionKey = `iqn:character-workspace:session:${session.key}`;
+    const resultKey = `iqn:character-workspace:result:${session.key}`;
+    const returnKey = `iqn:character-workspace:return:${session.key}`;
+
+    storage.setItem(resultKey, `${JSON.stringify({
+      version: 1,
+      key: session.key,
+      workflowId: session.workflowId,
+      expiresAt: session.expiresAt,
+      result: { status: "cancelled" }
+    })}${oversizedPadding}`);
+    expect(store.consume(session.key, session.origin, session.workflowId)).toBeNull();
+
+    storage.setItem(returnKey, `${storage.getItem(returnKey)}${oversizedPadding}`);
+    expect(store.returnPath(session.key)).toBeNull();
+
+    storage.setItem(sessionKey, `${JSON.stringify(session)}${oversizedPadding}`);
+    expect(store.load(session.key)).toBeNull();
+  });
+
+  it("rejects oversized created records without leaving partial storage", () => {
     const storage = new MemoryStorage();
     const store = createCharacterWorkspaceSessionStore(storage, {
       now: () => NOW,
@@ -152,6 +217,20 @@ describe("character workspace session store", () => {
     expect(store.complete(session.key, session.workflowId, { status: "cancelled" })).toBe(false);
   });
 
+  it("recovers a safe return path from a tombstone when the session is genuinely missing", () => {
+    const storage = new MemoryStorage();
+    const store = createCharacterWorkspaceSessionStore(storage, {
+      now: () => NOW,
+      keyFactory: () => "missing"
+    });
+    const session = store.create(createInput());
+
+    storage.removeItem(`iqn:character-workspace:session:${session.key}`);
+
+    expect(store.load(session.key)).toBeNull();
+    expect(store.returnPath(session.key)).toBe("/app/worlds/new");
+  });
+
   it("retains only a validated same-origin return tombstone when the session is malformed", () => {
     const storage = new MemoryStorage();
     const store = createCharacterWorkspaceSessionStore(storage, {
@@ -173,7 +252,7 @@ describe("character workspace session store", () => {
     expect(store.returnPath("recoverable")).toBeNull();
   });
 
-  it("strips owner-shaped keys throughout stored handoff content", () => {
+  it("recursively strips identity and secret-shaped fields while retaining safe unknown lore", () => {
     const storage = new MemoryStorage();
     const store = createCharacterWorkspaceSessionStore(storage, {
       now: () => NOW,
@@ -182,19 +261,39 @@ describe("character workspace session store", () => {
     const unsafeDraft = {
       ...draft(),
       ownerUserId: "root-owner",
-      world: { ...draft().world, owner_user_id: "nested-owner" },
-      playableCharacters: [candidate({ user_id: "character-owner" })]
+      credential: "root-credential",
+      world: {
+        ...draft().world,
+        owner_user_id: "nested-owner",
+        loreExtension: {
+          keep: "safe lore",
+          accessToken: "token",
+          client_secret: "secret",
+          databasePassword: "password",
+          "api-key": "api key"
+        }
+      },
+      playableCharacters: [candidate({ user_id: "character-owner", credentials: ["credential"] })]
     } as EditableWorldDraft;
 
     const session = store.create(createInput({
       parentDraft: unsafeDraft,
       worldContext: unsafeDraft,
-      candidate: candidate({ userId: "candidate-owner", safeExtension: { keep: true } }),
+      candidate: candidate({
+        userId: "candidate-owner",
+        auth_token: "candidate-token",
+        safeExtension: { keep: true, apiKey: "nested-api-key" }
+      }),
       rosterSummaries: [{ id: "existing", name: "Existing", owner_user_id: "summary-owner" }]
     }));
     const serialized = JSON.stringify(session);
 
-    expect(serialized).not.toMatch(/ownerUserId|owner_user_id|userId|user_id/);
+    expect(serialized).not.toMatch(
+      /ownerUserId|owner_user_id|userId|user_id|credential|accessToken|client_secret|databasePassword|api-key|auth_token|apiKey/u
+    );
+    expect(session.parentDraft).toMatchObject({
+      world: { loreExtension: { keep: "safe lore" } }
+    });
     expect(session.candidate).toMatchObject({ safeExtension: { keep: true } });
   });
 
@@ -219,6 +318,23 @@ describe("character workspace session store", () => {
     });
     expect(store.consume(session.key, "world-creation", session.workflowId)).toBeNull();
     expect(storage.length).toBe(0);
+  });
+
+  it("fails closed and cannot return a result later when storage removal fails", () => {
+    const storage = new MemoryStorage();
+    const store = createCharacterWorkspaceSessionStore(storage, {
+      now: () => NOW,
+      keyFactory: () => "remove-failure"
+    });
+    const session = store.create(createInput());
+    expect(store.complete(session.key, session.workflowId, {
+      status: "accepted",
+      candidate: candidate()
+    })).toBe(true);
+    storage.failingRemovals.add(`iqn:character-workspace:session:${session.key}`);
+
+    expect(store.consume(session.key, session.origin, session.workflowId)).toBeNull();
+    expect(store.consume(session.key, session.origin, session.workflowId)).toBeNull();
   });
 
   it("returns cancellation exactly once", () => {
@@ -262,12 +378,16 @@ describe("character workspace session store", () => {
       expiresAt: session.expiresAt,
       result: {
         status: "accepted",
-        candidate: candidate({ ownerUserId: "tampered-owner", safeExtension: true })
+        candidate: candidate({
+          ownerUserId: "tampered-owner",
+          accessToken: "tampered-token",
+          safeExtension: { keep: true, database_password: "tampered-password" }
+        })
       }
     }));
     expect(store.consume(session.key, "world-creation", session.workflowId)?.result).toEqual({
       status: "accepted",
-      candidate: candidate({ safeExtension: true })
+      candidate: candidate({ safeExtension: { keep: true } })
     });
 
     const recreated = store.create(createInput());

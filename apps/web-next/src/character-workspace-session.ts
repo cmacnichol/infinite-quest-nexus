@@ -79,6 +79,7 @@ const MAX_HANDOFF_BYTES = 512 * 1024;
 const MAX_KEY_ATTEMPTS = 10;
 const MAX_IDENTITY_LENGTH = 512;
 const PROHIBITED_IDENTITY_KEYS = new Set(["user_id", "userId", "owner_user_id", "ownerUserId"]);
+const PROHIBITED_SECRET_KEY_PARTS = ["credential", "token", "secret", "password", "apikey"];
 const RESULT_FIELDS = new Set(["version", "key", "workflowId", "expiresAt", "result"]);
 const SESSION_FIELDS = new Set([
   "version",
@@ -146,12 +147,18 @@ function isSafeParentRoute(value: unknown): value is string {
   }
 }
 
+function isProhibitedHandoffKey(key: string): boolean {
+  if (PROHIBITED_IDENTITY_KEYS.has(key)) return true;
+  const normalized = key.replace(/[^a-zA-Z0-9]/gu, "").toLowerCase();
+  return PROHIBITED_SECRET_KEY_PARTS.some((part) => normalized.includes(part));
+}
+
 function sanitizeUnknown(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sanitizeUnknown);
   if (!isRecord(value)) return value;
   return Object.fromEntries(
     Object.entries(value)
-      .filter(([key]) => !PROHIBITED_IDENTITY_KEYS.has(key))
+      .filter(([key]) => !isProhibitedHandoffKey(key))
       .map(([key, child]) => [key, sanitizeUnknown(child)])
   );
 }
@@ -185,8 +192,8 @@ function parseSession(value: unknown, expectedKey: string, now: number): Charact
       !isExpiry(value.expiresAt, now)) {
     return null;
   }
-  const parentDraft = parseDraft(value.parentDraft);
-  const worldContext = parseDraft(value.worldContext);
+  const parentDraft = parseDraft(sanitizeUnknown(value.parentDraft));
+  const worldContext = parseDraft(sanitizeUnknown(value.worldContext));
   const summaries = value.rosterSummaries.map(parseSummary);
   const candidate = value.candidate === null ? null : parseCandidate(value.candidate);
   if (parentDraft === null || worldContext === null || summaries.some((summary) => summary === null) ||
@@ -267,16 +274,25 @@ function safeRead(storage: Storage, key: string): string | null {
   }
 }
 
-function safeRemove(storage: Storage, key: string): void {
+function safeRemove(storage: Storage, key: string): boolean {
   try {
     storage.removeItem(key);
+    return true;
   } catch {
-    // Storage cleanup is best-effort when browser storage is inaccessible.
+    return false;
+  }
+}
+
+function isAbsent(storage: Storage, key: string): boolean {
+  try {
+    return storage.getItem(key) === null;
+  } catch {
+    return false;
   }
 }
 
 function decode(raw: string | null): unknown {
-  if (raw === null) return null;
+  if (raw === null || new TextEncoder().encode(raw).byteLength > MAX_HANDOFF_BYTES) return null;
   try {
     return JSON.parse(raw) as unknown;
   } catch {
@@ -405,7 +421,30 @@ export function createCharacterWorkspaceSessionStore(
         now()
       );
       if (stored === null) return null;
-      removeAll(key);
+
+      const sessionKey = sessionStorageKey(key);
+      const returnKey = returnStorageKey(key);
+      const resultKey = resultStorageKey(key);
+      const consumedMarker = serializeBounded({
+        version: 1,
+        key,
+        workflowId,
+        expiresAt: session.expiresAt,
+        consumed: true
+      });
+      try {
+        storage.setItem(resultKey, consumedMarker);
+      } catch {
+        return null;
+      }
+      if (safeRead(storage, resultKey) !== consumedMarker) return null;
+
+      const removalsSucceeded = [sessionKey, returnKey, resultKey]
+        .map((storageKey) => safeRemove(storage, storageKey))
+        .every(Boolean);
+      const recordsAreAbsent = [sessionKey, returnKey, resultKey]
+        .every((storageKey) => isAbsent(storage, storageKey));
+      if (!removalsSucceeded || !recordsAreAbsent) return null;
       return { session, result: stored.result };
     }
   };
