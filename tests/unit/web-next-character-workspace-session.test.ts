@@ -6,6 +6,7 @@ import {
   characterWorkspacePath,
   createCharacterWorkspaceSessionStore
 } from "../../apps/web-next/src/character-workspace-session.js";
+import { createWorldEditorCharacterHandoffPointerStore } from "../../apps/web-next/src/world-editor-character-workspace.js";
 
 class MemoryStorage implements Storage {
   readonly values = new Map<string, string>();
@@ -97,6 +98,35 @@ function createInput(overrides: Record<string, unknown> = {}) {
     ...overrides
   };
 }
+
+describe("world editor character handoff pointer store", () => {
+  it("persists only opaque identity and conditionally clears the matching pointer", () => {
+    const storage = new MemoryStorage();
+    const store = createWorldEditorCharacterHandoffPointerStore(storage);
+    const pointer = { key: "opaque-key", workflowId: "opaque-workflow" };
+
+    expect(store.write("world-id", pointer)).toBe(true);
+    expect(store.read("world-id")).toEqual(pointer);
+    expect([...storage.values.values()].join(" ")).toBe(JSON.stringify(pointer));
+    expect(store.clear("world-id", { key: "other", workflowId: "opaque-workflow" })).toBe(false);
+    expect(store.read("world-id")).toEqual(pointer);
+    expect(store.clear("world-id", pointer)).toBe(true);
+    expect(store.read("world-id")).toBeNull();
+  });
+
+  it("removes malformed pointers without exposing them as live identity", () => {
+    const storage = new MemoryStorage();
+    const store = createWorldEditorCharacterHandoffPointerStore(storage);
+    storage.setItem("iqn:world-editor:character-handoff:world-id", JSON.stringify({
+      key: "opaque-key",
+      workflowId: "opaque-workflow",
+      parentDraft: draft()
+    }));
+
+    expect(store.read("world-id")).toBeNull();
+    expect(storage.length).toBe(0);
+  });
+});
 
 describe("character workspace session store", () => {
   it("encodes and decodes one opaque route segment", () => {

@@ -14,6 +14,80 @@ import {
   type EditableWorldDraft
 } from "./world-editor-model.js";
 
+export interface WorldEditorCharacterHandoffPointer {
+  key: string;
+  workflowId: string;
+}
+
+export interface WorldEditorCharacterHandoffPointerStore {
+  read(worldId: string): WorldEditorCharacterHandoffPointer | null;
+  write(worldId: string, pointer: WorldEditorCharacterHandoffPointer): boolean;
+  clear(worldId: string, pointer?: WorldEditorCharacterHandoffPointer): boolean;
+}
+
+const POINTER_PREFIX = "iqn:world-editor:character-handoff";
+const MAX_POINTER_IDENTITY_LENGTH = 512;
+
+function pointerStorageKey(worldId: string): string {
+  return `${POINTER_PREFIX}:${encodeURIComponent(worldId)}`;
+}
+
+function isPointer(value: unknown): value is WorldEditorCharacterHandoffPointer {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return Object.keys(record).length === 2 &&
+    typeof record.key === "string" && record.key.length > 0 && record.key.length <= MAX_POINTER_IDENTITY_LENGTH &&
+    typeof record.workflowId === "string" && record.workflowId.length > 0 &&
+    record.workflowId.length <= MAX_POINTER_IDENTITY_LENGTH;
+}
+
+export function createWorldEditorCharacterHandoffPointerStore(
+  storage: Storage
+): WorldEditorCharacterHandoffPointerStore {
+  return {
+    read(worldId) {
+      const storageKey = pointerStorageKey(worldId);
+      let raw: string | null;
+      try {
+        raw = storage.getItem(storageKey);
+      } catch {
+        return null;
+      }
+      if (raw === null) return null;
+      try {
+        const parsed = JSON.parse(raw) as unknown;
+        if (isPointer(parsed)) return { key: parsed.key, workflowId: parsed.workflowId };
+      } catch {
+        // Remove malformed local pointers below.
+      }
+      try { storage.removeItem(storageKey); } catch { /* Best-effort terminal cleanup. */ }
+      return null;
+    },
+    write(worldId, pointer) {
+      if (!isPointer(pointer)) return false;
+      try {
+        storage.setItem(pointerStorageKey(worldId), JSON.stringify(pointer));
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    clear(worldId, pointer) {
+      const storageKey = pointerStorageKey(worldId);
+      if (pointer) {
+        const current = this.read(worldId);
+        if (current === null || current.key !== pointer.key || current.workflowId !== pointer.workflowId) return false;
+      }
+      try {
+        storage.removeItem(storageKey);
+        return storage.getItem(storageKey) === null;
+      } catch {
+        return false;
+      }
+    }
+  };
+}
+
 function character(value: unknown): PlayableCharacter {
   return playableCharacterSchema.parse(sanitizeCharacterWorkspaceValue(value));
 }

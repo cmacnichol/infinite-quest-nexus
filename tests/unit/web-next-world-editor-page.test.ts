@@ -123,6 +123,26 @@ function handoffStore() {
   };
 }
 
+function handoffPointerStore() {
+  const pointers = new Map<string, { key: string; workflowId: string }>();
+  return {
+    pointers,
+    store: {
+      read: vi.fn((id: string) => structuredClone(pointers.get(id) ?? null)),
+      write: vi.fn((id: string, pointer: { key: string; workflowId: string }) => {
+        pointers.set(id, structuredClone(pointer));
+        return true;
+      }),
+      clear: vi.fn((id: string, pointer?: { key: string; workflowId: string }) => {
+        const current = pointers.get(id);
+        if (pointer && (current?.key !== pointer.key || current.workflowId !== pointer.workflowId)) return false;
+        pointers.delete(id);
+        return true;
+      })
+    }
+  };
+}
+
 function editorFixture() {
   const { document, window } = parseHTML('<html><body><div id="app"></div></body></html>');
   const root = document.querySelector<HTMLElement>("#app");
@@ -1430,6 +1450,171 @@ describe("World Editor Overview page", () => {
         safeCharacterLore: { oath: "North" }
       })]
     }), expect.any(AbortSignal));
+  });
+
+  it("restores an opaque live handoff after disposal/remount and preserves revision conflict recovery", async () => {
+    const fixture = editorFixture();
+    const handoff = handoffStore();
+    const pointer = handoffPointerStore();
+    const navigate = vi.fn();
+    const first = mountWorldEditorPage(fixture.root, worldId, {
+      loadWorld: vi.fn().mockResolvedValue(world),
+      characterSessionStore: handoff.store,
+      characterHandoffPointerStore: pointer.store,
+      characterWorkflowIdFactory: () => "editor-remount-workflow",
+      navigate
+    });
+    await settle();
+    const premise = fixture.document.querySelector<HTMLTextAreaElement>('[name="world.premise"]');
+    if (!premise) throw new Error("Premise field missing.");
+    premise.value = "Unsaved before the production navigation.";
+    premise.dispatchEvent(new fixture.window.Event("input", { bubbles: true }));
+    fixture.document.querySelector<HTMLButtonElement>('[data-section-target="characters"]')?.click();
+    fixture.document.querySelector<HTMLButtonElement>('[data-action="add-item"]')?.click();
+    const session = handoff.sessions.get("editor-handoff-1");
+    if (!session) throw new Error("Remount handoff missing.");
+    expect(pointer.store.write).toHaveBeenCalledWith(worldId, {
+      key: session.key,
+      workflowId: session.workflowId
+    });
+    expect(JSON.stringify(pointer.pointers.get(worldId))).not.toContain("parentDraft");
+    first.dispose();
+
+    expect(handoff.store.complete(session.key, session.workflowId, {
+      status: "accepted",
+      candidate: reviewedCharacter("remounted", "Remounted") as never
+    })).toBe(true);
+    const conflict = new WorldEditorApiError("conflict", "The draft changed elsewhere.", 409);
+    const saveWorldDraft = vi.fn()
+      .mockRejectedValueOnce(conflict)
+      .mockImplementationOnce(async (_id, _revision, content) => savedResponse(content));
+    const remounted = mountWorldEditorPage(fixture.root, worldId, {
+      loadWorld: vi.fn().mockResolvedValue({
+        ...world,
+        draftRevision: 11,
+        draftContent: { ...structuredClone(draft), world: { ...draft.world, premise: "Newer authority" } }
+      }),
+      saveWorldDraft,
+      characterSessionStore: handoff.store,
+      characterHandoffPointerStore: pointer.store,
+      navigate
+    });
+    await settle();
+
+    expect(fixture.document.querySelector('[name="world.premise"]')).toHaveProperty(
+      "value",
+      "Unsaved before the production navigation."
+    );
+    fixture.document.querySelector<HTMLButtonElement>('[data-section-target="characters"]')?.click();
+    expect(fixture.document.querySelector('[data-collection-list]')?.textContent).toContain("Remounted");
+    expect(handoff.store.consume).toHaveBeenCalledTimes(1);
+    expect(pointer.pointers.has(worldId)).toBe(false);
+
+    fixture.document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')?.click();
+    await settle();
+    expect(saveWorldDraft).toHaveBeenNthCalledWith(1, worldId, 8, expect.objectContaining({
+      playableCharacters: [expect.objectContaining({ id: "remounted" })]
+    }), expect.any(AbortSignal));
+    expect(fixture.document.querySelector('[data-save-conflict]')).not.toBeNull();
+    expect(fixture.document.querySelector('[data-collection-list]')?.textContent).toContain("Remounted");
+
+    fixture.document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')?.click();
+    await settle();
+    expect(saveWorldDraft).toHaveBeenNthCalledWith(2, worldId, 8, expect.any(Object), expect.any(AbortSignal));
+    expect(fixture.document.querySelector('[data-save-conflict]')).toBeNull();
+    remounted.dispose();
+  });
+
+  it("restores the parent draft and clears the pointer after a remounted cancellation", async () => {
+    const fixture = editorFixture();
+    const handoff = handoffStore();
+    const pointer = handoffPointerStore();
+    const first = mountWorldEditorPage(fixture.root, worldId, {
+      loadWorld: vi.fn().mockResolvedValue(world),
+      characterSessionStore: handoff.store,
+      characterHandoffPointerStore: pointer.store,
+      characterWorkflowIdFactory: () => "editor-cancel-workflow",
+      navigate: vi.fn()
+    });
+    await settle();
+    const premise = fixture.document.querySelector<HTMLTextAreaElement>('[name="world.premise"]');
+    if (!premise) throw new Error("Premise field missing.");
+    premise.value = "Unsaved before cancellation.";
+    premise.dispatchEvent(new fixture.window.Event("input", { bubbles: true }));
+    fixture.document.querySelector<HTMLButtonElement>('[data-section-target="characters"]')?.click();
+    fixture.document.querySelector<HTMLButtonElement>('[data-action="add-item"]')?.click();
+    const session = handoff.sessions.get("editor-handoff-1");
+    if (!session) throw new Error("Cancellation handoff missing.");
+    first.dispose();
+    expect(handoff.store.complete(session.key, session.workflowId, { status: "cancelled" })).toBe(true);
+
+    const saveWorldDraft = vi.fn().mockImplementation(async (_id, _revision, content) => savedResponse(content));
+    mountWorldEditorPage(fixture.root, worldId, {
+      loadWorld: vi.fn().mockResolvedValue({ ...world, draftRevision: 11 }),
+      saveWorldDraft,
+      characterSessionStore: handoff.store,
+      characterHandoffPointerStore: pointer.store
+    });
+    await settle();
+
+    expect(fixture.document.querySelector('[name="world.premise"]')).toHaveProperty("value", "Unsaved before cancellation.");
+    expect(pointer.pointers.has(worldId)).toBe(false);
+    expect(handoff.store.consume).toHaveBeenCalledTimes(1);
+    fixture.document.querySelector<HTMLButtonElement>('[data-action="save-draft"]')?.click();
+    await settle();
+    expect(saveWorldDraft).toHaveBeenCalledWith(worldId, 8, expect.any(Object), expect.any(AbortSignal));
+  });
+
+  it.each([
+    ["missing", "Character session unavailable", true, false],
+    ["expired", "Character session unavailable", true, false],
+    ["mismatch", "does not match this world editor", true, true],
+    ["workflow mismatch", "does not match this world editor", true, true],
+    ["pending", "has not returned a result yet", false, true]
+  ] as const)("renders safe %s remount recovery without silently applying stale handoffs", async (
+    outcome,
+    message,
+    pointerCleared,
+    sessionPreserved
+  ) => {
+    const fixture = editorFixture();
+    const handoff = handoffStore();
+    const pointer = handoffPointerStore();
+    const created = handoff.store.create({
+      origin: "world-editor",
+      mode: "create",
+      workflowId: `editor-${outcome}`,
+      parentRoute: `/app/worlds/${worldId}`,
+      expectedWorldRevision: 8,
+      parentDraft: structuredClone(draft),
+      worldContext: structuredClone(draft),
+      rosterSummaries: [],
+      candidate: null
+    });
+    pointer.store.write(worldId, { key: created.key, workflowId: created.workflowId });
+    if (outcome === "missing") handoff.sessions.delete(created.key);
+    if (outcome === "expired") {
+      handoff.expire();
+      handoff.sessions.delete(created.key);
+    }
+    if (outcome === "mismatch") handoff.sessions.get(created.key)!.origin = "world-creation";
+    if (outcome === "workflow mismatch") pointer.pointers.set(worldId, {
+      key: created.key,
+      workflowId: "different-workflow"
+    });
+
+    mountWorldEditorPage(fixture.root, worldId, {
+      loadWorld: vi.fn().mockResolvedValue(world),
+      characterSessionStore: handoff.store,
+      characterHandoffPointerStore: pointer.store
+    });
+    await settle();
+
+    expect(fixture.document.querySelector('[data-character-handoff-error]')?.textContent).toContain(message);
+    expect(fixture.document.querySelectorAll("[data-collection-row]")).toHaveLength(0);
+    expect(pointer.pointers.has(worldId)).toBe(!pointerCleared);
+    expect(handoff.sessions.has(created.key)).toBe(sessionPreserved);
+    expect(handoff.store.consume).not.toHaveBeenCalled();
   });
 
   it("opens Edit with a local candidate and replaces only that unsaved character", async () => {

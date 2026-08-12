@@ -31,7 +31,10 @@ import {
 } from "./character-workspace-session.js";
 import {
   applyWorldEditorCharacterResult,
-  beginWorldEditorCharacterSession
+  beginWorldEditorCharacterSession,
+  createWorldEditorCharacterHandoffPointerStore,
+  type WorldEditorCharacterHandoffPointer,
+  type WorldEditorCharacterHandoffPointerStore
 } from "./world-editor-character-workspace.js";
 import {
   addCollectionItem,
@@ -70,6 +73,7 @@ export interface WorldEditorPageDependencies {
   creationStatusSearch?: string;
   navigate?: (path: string) => void;
   characterSessionStore?: CharacterWorkspaceSessionStore;
+  characterHandoffPointerStore?: WorldEditorCharacterHandoffPointerStore;
   characterWorkflowIdFactory?: () => string;
 }
 
@@ -349,6 +353,15 @@ export function mountWorldEditorPage(
     }
   }
   const characterSessionStore = dependencies.characterSessionStore ?? defaultCharacterSessionStore;
+  let defaultCharacterHandoffPointerStore: WorldEditorCharacterHandoffPointerStore | null = null;
+  if (!dependencies.characterHandoffPointerStore) {
+    try {
+      defaultCharacterHandoffPointerStore = createWorldEditorCharacterHandoffPointerStore(pageView.sessionStorage);
+    } catch {
+      defaultCharacterHandoffPointerStore = null;
+    }
+  }
+  const characterHandoffPointerStore = dependencies.characterHandoffPointerStore ?? defaultCharacterHandoffPointerStore;
   const characterWorkflowIdFactory = dependencies.characterWorkflowIdFactory ?? (() => crypto.randomUUID());
   const creationMessage = creationHandoffMessage(
     dependencies.creationStatusSearch ?? pageView.location?.search ?? ""
@@ -983,6 +996,7 @@ export function mountWorldEditorPage(
     renderOverviewFields();
     renderSection();
     renderStatus();
+    recoverCharacterHandoffPointer();
   }
 
   function renderLoadError(error: unknown): void {
@@ -1213,7 +1227,12 @@ export function mountWorldEditorPage(
         draft: state.draft,
         ...(characterId ? { characterId } : {})
       });
-      activeCharacterHandoff = { key: session.key, workflowId: session.workflowId };
+      const pointer = { key: session.key, workflowId: session.workflowId };
+      if (characterHandoffPointerStore && !characterHandoffPointerStore.write(worldId, pointer)) {
+        announcement.textContent = "The character workspace could not preserve a safe return pointer. Your world draft is unchanged; try again.";
+        return;
+      }
+      activeCharacterHandoff = pointer;
       characterHandoffError = null;
       characterHandoffResultInvalid = false;
       navigate(characterWorkspacePath(session.key));
@@ -1240,16 +1259,58 @@ export function mountWorldEditorPage(
     navigate(destination);
   }
 
-  function consumeCharacterHandoff(): void {
-    if (!state || !activeCharacterHandoff || !characterSessionStore) return;
-    const pending = characterSessionStore.peek(
-      activeCharacterHandoff.key,
-      "world-editor",
-      activeCharacterHandoff.workflowId
-    );
-    if (!pending) return;
+  function clearCharacterHandoffPointer(pointer: WorldEditorCharacterHandoffPointer): void {
+    characterHandoffPointerStore?.clear(worldId, pointer);
+  }
+
+  function recoverCharacterHandoffPointer(): void {
+    if (!state || !characterSessionStore || !characterHandoffPointerStore) return;
+    const pointer = characterHandoffPointerStore.read(worldId);
+    if (!pointer) return;
+    activeCharacterHandoff = pointer;
+    const session = characterSessionStore.load(pointer.key);
     activeSection = "characters";
     activeCollection = "playableCharacters";
+    if (!session) {
+      characterHandoffError = "Character session unavailable. It may have expired or been removed. The authoritative world draft is unchanged.";
+      clearCharacterHandoffPointer(pointer);
+      renderSection();
+      renderStatus();
+      return;
+    }
+    if (session.origin !== "world-editor" || session.workflowId !== pointer.workflowId ||
+        session.expectedWorldRevision === null || session.parentRoute !== `/app/worlds/${encodeURIComponent(worldId)}`) {
+      characterHandoffError = "This character handoff does not match this world editor. It was not applied; the stored session is preserved for safe recovery.";
+      clearCharacterHandoffPointer(pointer);
+      renderSection();
+      renderStatus();
+      return;
+    }
+    state = {
+      ...replaceWorldDraft(state, session.parentDraft),
+      revision: session.expectedWorldRevision
+    };
+    resetItemIdentities(state.draft);
+    renderOverviewFields();
+    consumeCharacterHandoff();
+  }
+
+  function consumeCharacterHandoff(): void {
+    if (!state || !activeCharacterHandoff || !characterSessionStore) return;
+    const pointer = activeCharacterHandoff;
+    const pending = characterSessionStore.peek(
+      pointer.key,
+      "world-editor",
+      pointer.workflowId
+    );
+    activeSection = "characters";
+    activeCollection = "playableCharacters";
+    if (!pending) {
+      characterHandoffError = "This character session has not returned a result yet. Your unsaved draft is preserved; return to the character workspace or retry after it completes.";
+      renderSection();
+      renderStatus();
+      return;
+    }
     if (pending.status === "invalid") {
       characterHandoffResultInvalid = true;
       characterHandoffError = "The stored character result is invalid and could not be recovered. It was not applied or removed; return to the character workspace to review the handoff.";
@@ -1258,11 +1319,11 @@ export function mountWorldEditorPage(
       return;
     }
 
-    let nextDraft = state.draft;
+    let nextDraft = pending.session.parentDraft;
     if (pending.result.status === "accepted") {
       try {
         nextDraft = applyWorldEditorCharacterResult({
-          draft: state.draft,
+          draft: pending.session.parentDraft,
           session: pending.session,
           result: pending.result
         });
@@ -1290,7 +1351,10 @@ export function mountWorldEditorPage(
       return;
     }
     if (pending.result.status === "accepted") {
-      state = replaceWorldDraft(state, nextDraft);
+      state = {
+        ...replaceWorldDraft(state, nextDraft),
+        revision: pending.session.expectedWorldRevision
+      };
       clearPendingStructuredValidations("playableCharacters");
       clearPendingJsonInputs("playableCharacters");
       resetItemIdentities(state.draft);
@@ -1303,6 +1367,7 @@ export function mountWorldEditorPage(
         ? "Character updated in the unsaved world draft. Save draft to persist it."
         : "Character added to the unsaved world draft. Save draft to persist it.";
     }
+    clearCharacterHandoffPointer(pointer);
     activeCharacterHandoff = null;
     characterHandoffError = null;
     characterHandoffResultInvalid = false;

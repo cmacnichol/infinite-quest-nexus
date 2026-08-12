@@ -87,3 +87,34 @@ Neither detector target changed in Task 6, so these established warnings were do
 - Projectmem was explicitly unavailable, so required projectmem prechecks and event logging could not be performed.
 - The repository-wide test suite remains platform-blocked on Windows; scoped web-next checks and feature tests are green.
 - The pre-existing untracked `.superpowers/brainstorm/` directory was not modified and must not be committed.
+
+## Round 1 Production-Remount Correction
+
+### Status
+
+Fixed the production navigation/remount gap. The World Editor now stores only an opaque `{ key, workflowId }` pointer in per-world `sessionStorage` before navigating to Character Workspace. No draft content is added to the URL or pointer. A fresh editor mount loads the authoritative world only as a safe base, validates the pointer against the live handoff, restores `session.parentDraft` and `expectedWorldRevision`, then inspects, applies, and consumes the result exactly once.
+
+Accepted and cancelled results clear the matching pointer. Missing/expired sessions and origin, workflow, revision, or parent-route mismatches render an explicit safe editor recovery state and clear the terminal pointer without consuming a preserved mismatched session. A valid handoff with no result renders a recoverable pending state and preserves both pointer and session. Invalid or rejected results retain the existing non-destructive recovery path.
+
+### TDD Evidence
+
+The focused remount tests first failed 4/4 for the expected reason: no pointer was written and missing/mismatched/pending remounts rendered no recovery state. After the minimal implementation, focused World Editor and session coverage passed 72/72 tests across 2 files. Coverage includes disposal/remount, pre-handoff unsaved fields, accepted apply, cancelled restoration, expected revision 8 after an authoritative revision 11 load, conflict preservation and retry, exactly-once consume, malformed pointer rejection, missing, expired, origin mismatch, workflow mismatch, and pending-result recovery.
+
+### Verification Correction
+
+- `pnpm vitest run tests/unit/web-next-world-editor-page.test.ts tests/unit/web-next-character-workspace-session.test.ts`: passed, 2 files and 72 tests.
+- `pnpm --filter @infinite-quest/web-next check`: passed.
+- `pnpm --filter @infinite-quest/web-next build`: passed, 107 modules transformed; only the established runtime font-resolution notices were emitted.
+- `pnpm check`: blocked before scoped checks by the pre-existing direct `console` write in unchanged `apps/web-next/src/world-library-page.ts`.
+- `pnpm build`: blocked in the contracts root check by the repository's pre-existing NodeNext extension/configuration errors and unrelated baseline TypeScript errors. The changed web-next target builds successfully via its package command above.
+- `git diff --check`: passed.
+- Implementation diff before this report append: 4 files, 362 insertions, 8 deletions.
+- Final correction diff: 5 files, 393 insertions, 8 deletions.
+- Worktree status before commit: only the 5 intended correction files are modified; the pre-existing untracked `.superpowers/brainstorm/` directory remains excluded.
+
+### Files Added to the Correction
+
+- `apps/web-next/src/world-editor-character-workspace.ts` — Added strict per-world opaque pointer storage with conditional cleanup and malformed-record removal.
+- `apps/web-next/src/world-editor-page.ts` — Persisted handoff identity before navigation and recovered/validated/restored it after a production remount.
+- `tests/unit/web-next-world-editor-page.test.ts` — Added accepted, cancelled, conflict, missing, expired, mismatch, pending, disposal, and remount coverage.
+- `tests/unit/web-next-character-workspace-session.test.ts` — Added production pointer serialization, matching-clear, and malformed-pointer tests.
