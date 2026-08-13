@@ -18,8 +18,8 @@ importers:
         specifier: workspace:*
         version: link:packages/contracts
       '@sogni-ai/sogni-client':
-        specifier: 5.2.0
-        version: 5.2.0
+        specifier: 5.3.1
+        version: 5.3.1
       '@types/archiver':
         specifier: ^8.0.0
         version: 8.0.0
@@ -987,12 +987,12 @@ packages:
   '@shikijs/vscode-textmate@10.0.2':
     resolution: {integrity: sha512-83yeghZ2xxin3Nj8z1NMd/NCuca+gsYXswywDy5bHvwlWL8tpTQmzGeUuHd9FC3E/SBEMvzJRwWEOz5gGes9Qg==}
 
-  '@sogni-ai/sogni-client@5.2.0':
-    resolution: {integrity: sha512-9EHCuXhbDyX7LOKgTV8CzqZ4FEOOQUCMv2P0sKNdN4pPF8NY4XVjg57XPLGjyJanNwnp5QWq1D2XNJbu0/Q6Ig==}
+  '@sogni-ai/sogni-client@5.3.1':
+    resolution: {integrity: sha512-3JLa/VNrlby30nnDOxKnpEYOVbLjCNBxuciGtq0DCqP/2FZ42zw1JixrVWAlG0ZGjHVpWqG8IbVMiKe7x0nr2w==}
     engines: {node: '>=22'}
 
-  '@sogni-ai/sogni-protocol@1.0.0-alpha.9':
-    resolution: {integrity: sha512-eLgKc5/u7XnAvcb4Vcx3i5gU6E3MuGkKLOxLV1VBoYcuX2ajY7kGcoZ9q47EemcSZt9HjL4NqKgXbFCUIEZxKg==}
+  '@sogni-ai/sogni-protocol@1.0.0-alpha.10':
+    resolution: {integrity: sha512-U/AI3Sj5NUon38FsjvEPwkPixR7H4aphTF12SCMyzi3Q6Yrnp9FdtKtobI8z9pGEq3bzkpTlA9PbtfuFDXr7+A==}
 
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
@@ -3486,10 +3486,10 @@ snapshots:
 
   '@shikijs/vscode-textmate@10.0.2': {}
 
-  '@sogni-ai/sogni-client@5.2.0':
+  '@sogni-ai/sogni-client@5.3.1':
     dependencies:
       '@lukeed/uuid': 2.0.1
-      '@sogni-ai/sogni-protocol': 1.0.0-alpha.9
+      '@sogni-ai/sogni-protocol': 1.0.0-alpha.10
       '@types/js-cookie': 3.0.6
       '@types/lodash': 4.17.24
       '@types/ws': 8.18.1
@@ -3503,7 +3503,7 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  '@sogni-ai/sogni-protocol@1.0.0-alpha.9': {}
+  '@sogni-ai/sogni-protocol@1.0.0-alpha.10': {}
 
   '@standard-schema/spec@1.1.0': {}
 
