@@ -143,8 +143,40 @@ function handoffPointerStore() {
   };
 }
 
+class MemoryStorage implements Storage {
+  private readonly values = new Map<string, string>();
+
+  get length(): number {
+    return this.values.size;
+  }
+
+  clear(): void {
+    this.values.clear();
+  }
+
+  getItem(key: string): string | null {
+    return this.values.get(key) ?? null;
+  }
+
+  key(index: number): string | null {
+    return [...this.values.keys()][index] ?? null;
+  }
+
+  removeItem(key: string): void {
+    this.values.delete(key);
+  }
+
+  setItem(key: string, value: string): void {
+    this.values.set(key, value);
+  }
+}
+
 function editorFixture() {
   const { document, window } = parseHTML('<html><body><div id="app"></div></body></html>');
+  Object.defineProperty(window, "sessionStorage", {
+    configurable: true,
+    value: new MemoryStorage()
+  });
   const root = document.querySelector<HTMLElement>("#app");
   if (!root) throw new Error("Editor fixture is missing.");
   window.HTMLElement.prototype.focus = function focus() {
