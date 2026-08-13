@@ -82,7 +82,31 @@ Record a campaign import event containing the source name and hash, selected sou
 
 ## Stream provisional story narration during generation
 
-**Status:** Deferred. Do not implement as part of the current provider or Story Engine workflow.
+**Status:** Partially implemented — this entry is stale. The core
+capability described in "Goal" below is live in production code today:
+provider adapters stream real token deltas (`onChunk` wired through
+`packages/story-engine/src/providers.ts`), `generation-service.ts`
+persists the accumulating text to `generation_jobs.partial_output` every
+350ms and extracts `partialNarration` via `extractPartialNarration()`,
+`GET /api/v1/generation-jobs/:jobId/stream` (`server.ts:741-780`) polls
+that row and pushes it over SSE, and `story.js:1009-1234`
+(`renderStreamingPreview`) writes the text into a `.streaming-narration`
+DOM node with a "Streaming Live" badge and auto-scroll-follow — see
+`docs/ui/OPEN_QUESTIONS.md` Q1 for the full trace. Durable server-side
+cancellation is also implemented (`POST
+/api/v1/generation-jobs/:jobId/cancel` → `cancelGeneration()`), not just a
+client-side abort.
+
+**Still genuinely deferred / not built:** the more sophisticated
+architecture below — a dedicated `generation_stream_events` table with
+typed `narration_delta`/`draft_reset` events, `Last-Event-ID` replay, and
+PostgreSQL `LISTEN/NOTIFY` — was never implemented. The live
+implementation instead polls a single `partial_output` column on
+`generation_jobs` every 350ms; it works, but doesn't have ordered
+event-sourced reconnect semantics. Treat everything below as a target
+architecture for hardening the existing feature, not as a description of
+an unbuilt one, and update the "Current limitation" section below (which
+still describes the pre-streaming state) before using it to plan work.
 
 ### Goal
 
@@ -90,11 +114,18 @@ For provider/model combinations that support streaming, show the user a provisio
 
 The UI must clearly label streamed content as a draft and replace it with the authoritative database turn after commit. Unsupported providers and models continue through the existing non-streaming workflow without losing functionality.
 
-### Current limitation
+### Current limitation (stale — see status note above)
 
-All provider adapters currently buffer complete responses. LM Studio explicitly sends `stream: false`; OpenRouter, Manifest, and generic OpenAI-compatible profiles use a normal `/chat/completions` JSON response. The worker waits for the complete response before parsing, validation, cost recording, and commit. The player polls durable job status and fetches narration only after the accepted result exists.
-
-The current `generation_jobs.partial_output` field is failure/recovery evidence, not a live transport. Rewriting a growing raw response into that field would create database write amplification, expose unvalidated structured output, and provide no ordered reconnect contract.
+This section describes the pre-streaming state and is no longer accurate.
+Provider adapters that support it now stream real token deltas rather
+than always buffering complete responses, and `generation_jobs.partial_output`
+is actively written as a live transport (updated every 350ms during
+generation via `onChunk`, not only on failure/recovery). What genuinely
+remains missing is the ordered, event-sourced reconnect contract
+(`Last-Event-ID` replay against a dedicated event table) — today's SSE
+endpoint reconnects by re-polling current job state, which loses
+fine-grained delta ordering across a dropped connection even though it
+still recovers the latest snapshot correctly.
 
 ### Provider capability policy
 

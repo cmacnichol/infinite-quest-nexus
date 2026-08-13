@@ -7,6 +7,7 @@ COPY database ./database
 COPY packages ./packages
 COPY services ./services
 COPY apps ./apps
+COPY scripts ./scripts
 COPY tests ./tests
 COPY vitest.integration.config.ts ./vitest.integration.config.ts
 COPY pnpm-lock.yaml ./pnpm-lock.yaml
@@ -14,7 +15,7 @@ RUN pnpm install --frozen-lockfile
 RUN pnpm build
 
 FROM build AS production-dependencies
-RUN pnpm prune --prod
+RUN CI=true pnpm prune --prod
 
 FROM node:24-bookworm-slim AS runtime
 ARG NEXUS_VERSION=0.1.0
@@ -26,18 +27,24 @@ ENV NODE_ENV=production \
     NEXUS_BUILD_DATE=${NEXUS_BUILD_DATE} \
     APP_HOST=0.0.0.0 \
     APP_PORT=8080 \
-    WEB_ROOT=/app/apps/web/public \
+    LEGACY_WEB_ROOT=/app/apps/web/dist \
+    NEXT_WEB_ROOT=/app/apps/web-next/dist \
     MIGRATION_DIRECTORY=/app/database/migrations \
-    ASSET_STORAGE_ROOT=/var/lib/infinitequest/assets
+    ASSET_STORAGE_ROOT=/var/lib/infinitequest/assets \
+    ARCHIVE_STORAGE_ROOT=/var/lib/infinitequest/archives
 WORKDIR /app
 RUN groupadd --system --gid 10001 infinitequest \
     && useradd --system --uid 10001 --gid infinitequest --home-dir /app infinitequest \
-    && mkdir -p /var/lib/infinitequest/assets \
+    && mkdir -p /var/lib/infinitequest/assets /var/lib/infinitequest/archives /var/lib/infinitequest/secrets \
     && chown -R infinitequest:infinitequest /var/lib/infinitequest /app
 COPY --from=production-dependencies --chown=infinitequest:infinitequest /app/node_modules ./node_modules
 COPY --from=build --chown=infinitequest:infinitequest /app/dist ./dist
+COPY --from=build --chown=infinitequest:infinitequest /app/packages/contracts/package.json ./packages/contracts/package.json
+COPY --from=build --chown=infinitequest:infinitequest /app/dist/packages/contracts/src ./packages/contracts/src
 COPY --from=build --chown=infinitequest:infinitequest /app/database/migrations ./database/migrations
-COPY --from=build --chown=infinitequest:infinitequest /app/apps/web/public ./apps/web/public
+COPY --from=build --chown=infinitequest:infinitequest /app/scripts ./scripts
+COPY --from=build --chown=infinitequest:infinitequest /app/apps/web/dist ./apps/web/dist
+COPY --from=build --chown=infinitequest:infinitequest /app/apps/web-next/dist ./apps/web-next/dist
 USER infinitequest
 EXPOSE 8080
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=4 \

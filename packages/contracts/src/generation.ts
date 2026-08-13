@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { apiTimestampSchema } from "./http.js";
 
 export const providerTypeSchema = z.enum(["lmstudio", "openrouter", "manifest", "openai_compatible", "sogni", "sogni_sdk"]);
 export const providerRoleSchema = z.enum(["text", "image", "embedding", "intent"]);
@@ -153,8 +154,7 @@ export const illustrationRequestSchema = z.object({
 });
 
 export const illustrationSegmentRequestSchema = z.object({
-  mode: z.enum(["missing", "rebuild"]).default("missing"),
-  idempotencyKey: z.string().trim().min(8).max(192).default(() => crypto.randomUUID())
+  mode: z.enum(["missing", "rebuild"]).default("missing")
 });
 
 export const illustrationSegmentImageRequestSchema = z.object({
@@ -392,16 +392,16 @@ export const generationJobStatusSchema = z.object({
   id: z.string().uuid(),
   campaignId: z.string().uuid(),
   providerProfileId: z.string().uuid().nullable().optional(),
-  expectedTurnNumber: z.coerce.number().int().min(1),
+  expectedTurnNumber: z.number().int().min(1),
   action: z.string(),
-  requestedInputMode: turnInputSelectionSchema.default("action"),
-  resolvedInputMode: turnInputModeSchema.default("action"),
-  inputModeSource: turnInputModeSourceSchema.default("explicit"),
-  operationKind: z.enum(["append", "replace_latest"]).default("append"),
+  requestedInputMode: turnInputSelectionSchema,
+  resolvedInputMode: turnInputModeSchema,
+  inputModeSource: turnInputModeSourceSchema,
+  operationKind: z.enum(["append", "replace_latest"]),
   replacementTurnId: z.string().uuid().nullable().optional(),
-  baseTurnNumber: z.coerce.number().int().min(0).nullable().optional(),
+  baseTurnNumber: z.number().int().min(0).nullable().optional(),
   status: z.enum(["queued", "replacement_queued", "assessing", "generating", "validating", "committing", "completed", "recoverable", "failed", "discarded", "cancelled"]),
-  attempts: z.coerce.number().int().min(0),
+  attempts: z.number().int().min(0),
   requestedModel: z.string().optional(),
   providerResponseId: z.string().nullable().optional(),
   providerFinishReason: z.string().nullable().optional(),
@@ -409,12 +409,62 @@ export const generationJobStatusSchema = z.object({
   errorCode: z.string().nullable().optional(),
   errorMessage: z.string().nullable().optional(),
   recoveryMetadata: z.record(z.string(), z.unknown()).optional(),
-  createdAt: z.union([z.string(), z.date()]),
-  updatedAt: z.union([z.string(), z.date()]),
-  completedAt: z.union([z.string(), z.date()]).nullable().optional(),
+  createdAt: apiTimestampSchema,
+  updatedAt: apiTimestampSchema,
+  completedAt: apiTimestampSchema.nullable().optional(),
   partialOutput: z.string().nullable().optional(),
   partialNarration: z.string().nullable().optional()
 });
+
+export const PUBLIC_GENERATION_FAILURE_CODE = "generation_failed" as const;
+export const PUBLIC_GENERATION_FAILURE_MESSAGE = "Generation could not be completed." as const;
+
+const publicGenerationFailureFields = {
+  errorCode: z.literal(PUBLIC_GENERATION_FAILURE_CODE).nullable(),
+  errorMessage: z.literal(PUBLIC_GENERATION_FAILURE_MESSAGE).nullable()
+};
+
+const generationJobSnapshotBaseSchema = generationJobStatusSchema.omit({
+  operationKind: true,
+  replacementTurnId: true,
+  partialOutput: true,
+  errorCode: true,
+  errorMessage: true
+}).extend(publicGenerationFailureFields);
+
+export const generationJobSnapshotSchema = z.discriminatedUnion("operationKind", [
+  generationJobSnapshotBaseSchema.extend({
+    operationKind: z.literal("append"),
+    replacementTurnId: z.null()
+  }),
+  generationJobSnapshotBaseSchema.extend({
+    operationKind: z.literal("replace_latest"),
+    replacementTurnId: z.uuid()
+  })
+]);
+
+const generationStreamSnapshotBaseSchema = generationJobStatusSchema.pick({
+  id: true,
+  campaignId: true,
+  expectedTurnNumber: true,
+  status: true,
+  action: true,
+  // Attempts is the monotonic retry-cycle marker used for stream reconciliation.
+  attempts: true,
+  partialNarration: true,
+  resultTurnId: true
+}).extend(publicGenerationFailureFields);
+
+export const generationStreamSnapshotSchema = z.discriminatedUnion("operationKind", [
+  generationStreamSnapshotBaseSchema.extend({
+    operationKind: z.literal("append"),
+    replacementTurnId: z.null()
+  }),
+  generationStreamSnapshotBaseSchema.extend({
+    operationKind: z.literal("replace_latest"),
+    replacementTurnId: z.uuid()
+  })
+]);
 
 export type ProviderProfileInput = z.infer<typeof providerProfileInputSchema>;
 export type ProviderProfileUpdate = z.infer<typeof providerProfileUpdateSchema>;
@@ -451,3 +501,5 @@ export type PlayerEventTrigger = z.infer<typeof playerEventTriggerSchema>;
 export type PendingEventTrigger = z.infer<typeof pendingEventTriggerSchema>;
 export type RpgAssessmentOutput = z.infer<typeof rpgAssessmentOutputSchema>;
 export type GenerationJobStatus = z.infer<typeof generationJobStatusSchema>;
+export type GenerationJobSnapshot = z.infer<typeof generationJobSnapshotSchema>;
+export type GenerationStreamSnapshot = z.infer<typeof generationStreamSnapshotSchema>;

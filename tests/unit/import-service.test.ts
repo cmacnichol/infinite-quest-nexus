@@ -3,14 +3,14 @@ import type { DatabasePool } from "../../packages/database/src/pool.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import { canonicalArchiveJson } from "../../packages/contracts/src/archives.js";
 import { sha256 } from "../../packages/domain/src/text.js";
-import type { FilesystemAssetStore } from "../../services/api/src/asset-service.js";
+import type { FilesystemAssetStore } from "../legacy-api/src/asset-service.js";
 
 const cleanupArchivePreviewStaging = vi.fn();
 const cleanupExpiredArchivePreviews = vi.fn();
 const decodeCampaignArchive = vi.fn();
 const rehydratePersistedStagedArchive = vi.fn();
 
-vi.mock("../../services/api/src/campaign-archive-service.js", () => ({
+vi.mock("../legacy-api/src/campaign-archive-service.js", () => ({
   campaignArchiveApplicationVersion: () => "test-archive-version",
   cleanupArchivePreviewStaging,
   cleanupExpiredArchivePreviews,
@@ -40,7 +40,7 @@ describe("campaign archive import cleanup lifecycle", () => {
   });
 
   it("releases the transaction client before post-commit duplicate import cleanup reacquires the pool", async () => {
-    const { importCampaignArchive } = await import("../../services/api/src/import-service.js");
+    const { importCampaignArchive } = await import("../legacy-api/src/import-service.js");
     let released = false;
     let releasedBeforeCleanup = false;
     const ownerUserId = "00000000-0000-4000-8000-000000000001";

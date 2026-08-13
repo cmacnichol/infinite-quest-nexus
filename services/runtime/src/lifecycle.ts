@@ -1,12 +1,20 @@
 import type { DatabasePool, RuntimeConfig } from "../../../packages/database/src/index.js";
 import type { ProviderTransport } from "../../../packages/story-engine/src/provider-transport.js";
 import { closeDatabasePool } from "./shutdown.js";
+import type { RuntimeGenerationEventSource } from "./generation-event-composition.js";
 
 export type RuntimeLifecycleDependencies = {
   createPool(config: RuntimeConfig): DatabasePool;
   createTransport(config: RuntimeConfig): ProviderTransport;
   configureTransport(transport: ProviderTransport): void;
-  dispatchRole(config: RuntimeConfig, pool: DatabasePool, signal: AbortSignal): Promise<void>;
+  createGenerationEvents(config: RuntimeConfig, pool: DatabasePool): RuntimeGenerationEventSource;
+  dispatchRole(
+    config: RuntimeConfig,
+    pool: DatabasePool,
+    signal: AbortSignal,
+    providerTransport: ProviderTransport,
+    generationEvents: RuntimeGenerationEventSource | undefined
+  ): Promise<void>;
 };
 
 export async function runRuntimeLifecycle(
@@ -16,15 +24,24 @@ export async function runRuntimeLifecycle(
 ): Promise<void> {
   const pool = dependencies.createPool(config);
   let providerTransport: ProviderTransport | undefined;
+  let generationEvents: RuntimeGenerationEventSource | undefined;
   try {
     providerTransport = dependencies.createTransport(config);
     dependencies.configureTransport(providerTransport);
-    await dependencies.dispatchRole(config, pool, abortController.signal);
+    if (config.role === "api" || config.role === "all") {
+      generationEvents = dependencies.createGenerationEvents(config, pool);
+      await generationEvents.start();
+    }
+    await dependencies.dispatchRole(config, pool, abortController.signal, providerTransport, generationEvents);
   } finally {
     try {
       if (providerTransport) await providerTransport.close();
     } finally {
-      await closeDatabasePool(pool);
+      try {
+        if (generationEvents) await generationEvents.close();
+      } finally {
+        await closeDatabasePool(pool);
+      }
     }
   }
 }

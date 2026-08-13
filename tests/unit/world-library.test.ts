@@ -23,7 +23,7 @@ import {
   normalizeGeneratedPlayableCharacter,
   playableCharacterRecoveryInput
 } from "../../packages/domain/src/character-authoring.js";
-import { normalizeRawWorldJson, worldGenerationInputMetadata } from "../../services/api/src/world-generator-service.js";
+import { normalizeRawWorldJson, worldGenerationInputMetadata } from "../../services/runtime/src/provider-world-generation-adapter.js";
 
 describe("World Library contracts", () => {
   it("normalizes new, incomplete drafts without requiring a playable character", () => {

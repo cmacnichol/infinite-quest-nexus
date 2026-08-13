@@ -267,12 +267,28 @@ Everything in this phase was small enough to execute immediately rather than pla
 | 7.1 | AGENTS.md Story Memory Model section stale relative to ADR 0010 (review §5 item 6, §8 item 2) | Rewrote `AGENTS.md`'s response-chain paragraph to match ADR 0010: chains are not persisted cross-turn; `previous_response_id` is same-job recovery only | **DONE** |
 | 7.2 | README/package.json/CI pnpm version mismatch (review §6 Low, §8 item 4) | `README.md` and `docs/installation/requirements.md` corrected to pnpm 11.16.0 (matching `package.json`'s pinned `packageManager` and CI) | **DONE** |
 | 7.3 | Duplicate ADR numbers (review §6 Low, §8 item 3) | Renumbered the later ADR of each pair: `0011-editable-campaign-runtime-state.md` → `0026-...`, `0024-scoped-chronicle-entity-identity.md` → `0027-...`. Updated each file's own header, `docs/architecture/index.md`, and the inbound link in `docs/concepts/chronicle-memory.md` | **DONE** |
-| 7.4 | capabilities.md vs. deferred-improvements.md narration-streaming ambiguity (review §8 item 1) | Verified in code (`generation-service.ts` `onChunk`/`StreamingSegmentTracker`, ADR 0025) that streamed text is consumed server-side only to drive progressive illustration segmentation — the browser never sees provisional narration text. Reworded the capabilities.md bullet to state this precisely and cross-reference ADR 0025 and the deferred-improvements entry | **DONE** |
+| 7.4 | capabilities.md vs. deferred-improvements.md narration-streaming ambiguity (review §8 item 1) | Verified in code (`generation-service.ts` `onChunk`/`StreamingSegmentTracker`, ADR 0025) that streamed text is consumed server-side only to drive progressive illustration segmentation — the browser never sees provisional narration text. Reworded the capabilities.md bullet to state this precisely and cross-reference ADR 0025 and the deferred-improvements entry | **INCORRECT — see correction below** |
 | 7.5 | No documented SSRF/provider-trust policy (review §8 item 5) | Added a "Provider endpoint trust model" section to `docs/operations/security.md` stating provider `baseUrl` values must be treated as untrusted-by-design targets, cross-referencing this plan's §2.1/§2.2 | **DONE** |
 | 7.6 | `docs/development-standards.md` §13 known-unknowns table | Removed the now-resolved "Toolchain version conflict" and "Duplicate ADR numbers" rows | **DONE** |
 | 7.7 | Mechanics-leak detector is a fixed regex list, not a contextual classifier (review §6 Medium) | Not a doc defect — already correctly described. Track as a known heuristic limitation rather than a bug; revisit only if false negatives are observed in production | No action needed |
 | 7.8 | Linter/formatter, coverage threshold, dependency scanning (review §6 Informational) | Already self-documented as open decisions in `docs/development-standards.md` §13 | No action needed |
 | 7.9 | Single-maintainer bus factor (review §6 Informational) | Informational only, not a doc defect | No action needed |
+
+**Correction (2026-07-31, via `docs/ui/OPEN_QUESTIONS.md` Q1):** Item 7.4's
+verification was wrong, and its claimed rewording of `capabilities.md`
+never actually landed (`git blame` shows that bullet unchanged since
+2026-07-21, before this plan was written). The browser *does* receive and
+render provisional narration text: `server.ts:741-780`'s SSE stream sends
+`partialNarration` (populated in `generation-service.ts` via
+`extractPartialNarration(accumulated)` from the same `onChunk` stream this
+item cites), and `story.js:1009-1234`'s `renderStreamingPreview()` writes
+it into a live `.streaming-narration` DOM node. The `onChunk`/
+`StreamingSegmentTracker` path drives illustration segmentation *in
+addition to*, not *instead of*, browser-visible narration streaming — the
+mutual-exclusivity in the original claim was the error. `capabilities.md`
+and `docs/operations/deferred-improvements.md` have since been corrected
+to match; this row is left in place, marked incorrect, as a record of the
+mistake rather than silently rewritten.
 
 ---
 

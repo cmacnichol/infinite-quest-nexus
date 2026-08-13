@@ -9,26 +9,20 @@ import {
   type DatabasePool
 } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
-import { createProviderNetworkPolicy } from "../../packages/security/src/provider-network-policy.js";
 import { MAX_PROVIDER_JSON_RESPONSE_BYTES } from "../../packages/story-engine/src/provider-response.js";
 import {
-  configureDefaultProviderTransport,
-  createProviderTransport,
   type ProviderTransport
 } from "../../packages/story-engine/src/provider-transport.js";
-import { createProvider } from "../../services/api/src/provider-service.js";
+import { createProvider } from "../helpers/provider-application-fixtures.js";
 import { logger } from "../../packages/logger/src/index.js";
 import {
   activeProgressMap,
-  getImportProgress,
-  importInfiniteWorlds
-} from "../../services/api/src/infinite-worlds-import-service.js";
-import { generateWorldPreview } from "../../services/api/src/world-generator-service.js";
+  getImportProgress
+} from "../legacy-api/src/infinite-worlds-import-service.js";
+import { generateWorldPreview, getWorldGenerationProgress, importInfiniteWorlds } from "../helpers/memory-aware-services.js";
 import { PROMPT_TEMPLATE_CATALOG } from "../../packages/contracts/src/prompt-library.js";
-import {
-  getWorldGenerationProgress,
-  type WorldGenerationProgress
-} from "../../services/api/src/world-generation-progress-service.js";
+import type { WorldGenerationProgressView as WorldGenerationProgress } from "../../packages/application/src/world-campaign/index.js";
+import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -158,12 +152,7 @@ integration("generated CYOA world persistence", () => {
   let observedProgressKey = "";
 
   beforeAll(async () => {
-    transport = createProviderTransport({
-      policy: createProviderNetworkPolicy({
-        allowlist: ["127.0.0.0/8"]
-      })
-    });
-    configureDefaultProviderTransport(transport);
+    transport = installIntegrationProviderTransport();
     pool = createDatabasePool(databaseUrl!, 5);
     await migrateDatabase(pool, resolve("database/migrations"));
     ownerUserId = await initialOwnerId(pool);

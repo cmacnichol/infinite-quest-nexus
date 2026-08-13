@@ -10,7 +10,8 @@ import sharp from "sharp";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
-import { calculateContentFingerprint, canonicalArchiveJson } from "../../packages/contracts/src/archives.js";
+import { canonicalArchiveJson } from "../../packages/contracts/src/archives.js";
+import { calculateContentFingerprint } from "../../packages/contracts/src/archives-node.js";
 import {
   inspectArchive,
   readVerifiedEntry,
@@ -18,10 +19,11 @@ import {
   supportsSecureGeneratedArchiveStaging,
   type ArchiveLimits
 } from "../../services/api/src/archive-io.js";
-import { persistOriginalImage } from "../../services/api/src/asset-service.js";
-import { captureCampaignArchiveSnapshot, cleanupExpiredArchivePreviews, exportCampaign, previewCampaignArchive } from "../../services/api/src/campaign-archive-service.js";
-import { importCampaignArchive } from "../../services/api/src/import-service.js";
+import { persistOriginalImage } from "../legacy-api/src/asset-service.js";
+import { captureCampaignArchiveSnapshot, cleanupExpiredArchivePreviews, exportCampaign, previewCampaignArchive } from "../legacy-api/src/campaign-archive-service.js";
+import { importCampaignArchive } from "../legacy-api/src/import-service.js";
 import { buildServer } from "../../services/api/src/server.js";
+import { serverOptions } from "../helpers/build-server-options.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 
 const archiveCleanupTestState = vi.hoisted(() => ({
@@ -253,7 +255,9 @@ integration("campaign archive export", () => {
       allowMaintenanceMigrations: false,
       workerPollIntervalMs: 1_000,
       workerLeaseSeconds: 60,
-      webRoot: resolve("apps/web/public"),
+      workerGenerationConcurrency: 1,
+      legacyWebRoot: resolve("apps/web/public"),
+      nextWebRoot: resolve("apps/web-next"),
       assetStorageDriver: "filesystem",
       assetStorageRoot: root,
       archiveStorageRoot: root,
@@ -360,6 +364,23 @@ integration("campaign archive export", () => {
       [tokenHash]
     )).rows[0]!;
   }
+
+  it("captures a campaign archive snapshot without queuing queries on its transaction client", async () => {
+    const warnings: Error[] = [];
+    const recordWarning = (warning: Error) => {
+      if (warning.message.includes("Calling client.query() when the client is already executing a query")) {
+        warnings.push(warning);
+      }
+    };
+    process.on("warning", recordWarning);
+    try {
+      await captureCampaignArchiveSnapshot(pool, campaignId);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    } finally {
+      process.off("warning", recordWarning);
+    }
+    expect(warnings).toEqual([]);
+  });
 
   secureGeneratedStagingIt("[secure generated staging] exports only the selected campaign and pinned world version as a deterministic manifest archive", async () => {
     const artifact = await exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root, limits });
@@ -486,7 +507,7 @@ integration("campaign archive export", () => {
   });
 
   secureGeneratedStagingIt("[secure generated staging] serves campaign exports as no-store attachments and removes the response artifact", async () => {
-    const app = await buildServer({ config: serverConfig(), pool });
+    const app = await buildServer(serverOptions({ config: serverConfig(), pool }));
     const before = await artifactNames();
     try {
       const response = await app.inject({ method: "GET", url: `/api/v1/campaigns/${campaignId}/export` });
@@ -503,7 +524,7 @@ integration("campaign archive export", () => {
   });
 
   secureGeneratedStagingIt("[secure generated staging] previews multipart Campaign Archives and commits the bound JSON request", async () => {
-    const app = await buildServer({ config: serverConfig(), pool });
+    const app = await buildServer(serverOptions({ config: serverConfig(), pool }));
     const destination = await createCompatibleDestination("Route archive destination");
     const artifact = await exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root, limits });
     const upload = multipartBody([
@@ -552,7 +573,7 @@ integration("campaign archive export", () => {
     const foreignVersion = await pool.query<{ id: string }>("INSERT INTO world_versions (world_id,owner_user_id,version_number,content) VALUES ($1,$2,1,$3::jsonb) RETURNING id", [foreignWorld.rows[0]!.id, foreignUserId, JSON.stringify({ schemaVersion: 4, world: { title: "Foreign archive world" } })]);
     const foreignCampaign = await pool.query<{ id: string }>("INSERT INTO campaigns (owner_user_id,world_version_id,title) VALUES ($1,$2,'Foreign archive campaign') RETURNING id", [foreignUserId, foreignVersion.rows[0]!.id]);
     await pool.query("INSERT INTO campaign_state (campaign_id,owner_user_id) VALUES ($1,$2)", [foreignCampaign.rows[0]!.id, foreignUserId]);
-    const app = await buildServer({ config: serverConfig(), pool });
+    const app = await buildServer(serverOptions({ config: serverConfig(), pool }));
     try {
       const response = await app.inject({ method: "GET", url: `/api/v1/campaigns/${foreignCampaign.rows[0]!.id}/export` });
       expect(response.statusCode).toBe(404);
@@ -562,7 +583,7 @@ integration("campaign archive export", () => {
   });
 
   it("returns the typed safe archive error for malformed archive uploads", async () => {
-    const app = await buildServer({ config: serverConfig(), pool });
+    const app = await buildServer(serverOptions({ config: serverConfig(), pool }));
     const upload = multipartBody([
       { name: "file", filename: "broken.zip", value: Buffer.from("not a zip archive", "utf8") },
       { name: "destination", value: JSON.stringify({ kind: "embedded" }) }
@@ -595,7 +616,7 @@ integration("campaign archive export", () => {
   });
 
   it("keeps legacy JSON imports and manifest-less ZIP previews available", async () => {
-    const app = await buildServer({ config: serverConfig(), pool });
+    const app = await buildServer(serverOptions({ config: serverConfig(), pool }));
     const legacyZipPath = join(root, `legacy-route-${randomUUID()}.zip`);
     const output = createWriteStream(legacyZipPath, { flags: "wx" });
     const archive = new ZipArchive({ zlib: { level: 9 } });
@@ -1190,6 +1211,37 @@ integration("campaign archive export", () => {
     await expect(stat(staged.absolutePath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  secureGeneratedStagingIt("[secure generated staging] legacy drain never deletes a replacement without persisted identity", async () => {
+    const staged = await stagedExport();
+    const preview = await previewCampaignArchive(pool, runtimeConfig(), staged, "legacy-replacement.zip", { kind: "embedded" });
+    const tokenHash = createHash("sha256").update(preview.previewToken, "utf8").digest("hex");
+    const replacement = Buffer.from("replacement-owned-by-another-writer", "utf8");
+    await pool.query(
+      `UPDATE archive_previews
+          SET legacy_drain_policy='retain_until_secure_cleanup',expires_at=now()-interval '1 second'
+        WHERE token_hash=$1`,
+      [tokenHash]
+    );
+    await unlink(staged.absolutePath);
+    await writeFile(staged.absolutePath, replacement, { flag: "wx" });
+
+    await expect(cleanupExpiredArchivePreviews(pool, runtimeConfig(), new Date())).resolves.toEqual({
+      expiredCount: 1,
+      cleanupFailureCount: 0
+    });
+    await expect(readFile(staged.absolutePath)).resolves.toEqual(replacement);
+    await expect(previewRow(preview.previewToken)).resolves.toMatchObject({
+      status: "expired",
+      result: { stagingCleanupPending: true }
+    });
+
+    await expect(cleanupExpiredArchivePreviews(pool, runtimeConfig(), new Date())).resolves.toEqual({
+      expiredCount: 0,
+      cleanupFailureCount: 0
+    });
+    await expect(readFile(staged.absolutePath)).resolves.toEqual(replacement);
+  });
+
   secureGeneratedStagingIt("[secure generated staging] rejects expired, consumed, and application-stale preview tokens", async () => {
     const expiredPreview = await previewCampaignArchive(pool, runtimeConfig(-1), await stagedExport(), "expired.zip", { kind: "embedded" });
     await expect(importCampaignArchive(pool, runtimeConfig(-1), { root }, {
@@ -1284,12 +1336,11 @@ integration("campaign archive export", () => {
     await expect(stat(staged.absolutePath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  secureGeneratedStagingIt("[secure generated staging] preview cleanup marks failed commits failed and removes staging plus newly persisted archive originals", async () => {
+  secureGeneratedStagingIt("[secure generated staging] failed commit cleanup preserves a globally retained source original", async () => {
     const staged = await stagedExport();
     const sourceAsset = await pool.query<{ storage_path: string }>("SELECT storage_path FROM assets WHERE id=$1", [requiredAssetId]);
     const originalPath = resolve(root, sourceAsset.rows[0]!.storage_path);
     await pool.query("DELETE FROM asset_references WHERE asset_id=$1", [requiredAssetId]);
-    await pool.query("DELETE FROM assets WHERE id=$1", [requiredAssetId]);
     await unlink(originalPath);
     const destination = await createCompatibleDestination("Rollback destination");
     const before = await pool.query<{ assets: string; worlds: string; campaigns: string; imports: string }>(
@@ -1325,7 +1376,7 @@ integration("campaign archive export", () => {
               (SELECT count(*)::text FROM imports) AS imports`
     );
     expect(after.rows[0]).toEqual(before.rows[0]);
-    await expect(stat(originalPath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await stat(originalPath)).size).toBeGreaterThan(0);
     expect((await stat(staged.absolutePath)).isFile()).toBe(true);
     await expect(previewRow(failedPreviewToken)).resolves.toMatchObject({
       status: "failed",

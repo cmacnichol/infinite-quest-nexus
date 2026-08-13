@@ -2,23 +2,129 @@ import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { createDatabasePool, type DatabasePool } from "../../packages/database/src/pool.js";
+import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { generationRequestSchema, generationRetryLatestRequestSchema, illustrationConfigSchema } from "../../packages/contracts/src/generation.js";
-import { importLegacyStory } from "../../services/api/src/import-service.js";
-import { setIllustrationConfig } from "../../services/api/src/image-service.js";
-import { createProvider } from "../../services/api/src/provider-service.js";
-import { branchCampaign, cancelGeneration, enqueueGeneration, enqueueLatestReplacement, getGenerationJob, getGenerationResult, retryGeneration, rewindCampaign, runGenerationJob, syncPlayerCampaignConfig } from "../../services/api/src/generation-service.js";
-import { buildContextPreview, setCampaignEmbeddingConfig } from "../../services/api/src/memory-service.js";
-import { getCampaignCostSummary } from "../../services/api/src/cost-service.js";
-import { getCampaignRuntimeState, updateCampaignRuntimeState } from "../../services/api/src/campaign-state-service.js";
+import { setIllustrationConfig } from "../../services/runtime/src/illustration-image-job-adapter.js";
+import { createProvider } from "../helpers/provider-application-fixtures.js";
+import { createApiGenerationApplication } from "../helpers/runtime-application-fixtures.js";
+import { createWorkerGenerationApplication } from "../helpers/runtime-application-fixtures.js";
+import { createWorkerGenerationApplication as composeWorkerGenerationApplication } from "../../services/runtime/src/generation-worker-composition.js";
+import { createApiIllustrationApplication } from "../helpers/runtime-application-fixtures.js";
+import { runWorker } from "../../services/worker/src/worker.js";
+import { startNextGeneration } from "../../services/worker/src/worker.js";
+import type { RuntimeConfig } from "../../packages/database/src/config.js";
+import {
+  branchCampaign,
+  buildContextPreview,
+  importLegacyStory,
+  rewindCampaign,
+  setCampaignEmbeddingConfig,
+  syncPlayerCampaignConfig,
+  getCampaignRuntimeState,
+  updateCampaignRuntimeState
+} from "../helpers/memory-aware-services.js";
+import { getCampaignCostSummary } from "../helpers/provider-application-fixtures.js";
+import { workerProviderGraph } from "../helpers/provider-application-fixtures.js";
 import { logger } from "../../packages/logger/src/index.js";
+import {
+  apiMemoryApplication,
+  inertWorkerIllustration,
+  inertWorkerMemory
+} from "../helpers/memory-applications.js";
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
+import { createGenerationWorkflow } from "../../packages/client-core/src/index.js";
+import { runGenerationJob } from "../helpers/generation-worker-harness.js";
+import {
+  createBrowserGenerationSource,
+  createNexusApiClient,
+  createNoopSessionPort
+} from "../../packages/client-web/src/index.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
 const credentialSecret = "integration-test-credential-secret";
+
+async function generationAuthoritySnapshot(pool: DatabasePool, campaignId: string) {
+  const [campaign, state, turns, memories, canonicalFacts, checkpoints] = await Promise.all([
+    pool.query<{ value: Record<string, unknown> }>(
+      "SELECT to_jsonb(campaign_row) AS value FROM campaigns campaign_row WHERE id = $1",
+      [campaignId]
+    ),
+    pool.query<{ value: Record<string, unknown> }>(
+      "SELECT to_jsonb(state_row) AS value FROM campaign_state state_row WHERE campaign_id = $1",
+      [campaignId]
+    ),
+    pool.query<{ value: Record<string, unknown> }>(
+      `SELECT to_jsonb(turn_row) AS value FROM turns turn_row
+        WHERE campaign_id = $1 ORDER BY turn_number, id`,
+      [campaignId]
+    ),
+    pool.query<{ value: Record<string, unknown> }>(
+      `SELECT to_jsonb(memory_row) AS value FROM chronicle_memories memory_row
+        WHERE campaign_id = $1 ORDER BY ordinal, memory_kind, id`,
+      [campaignId]
+    ),
+    pool.query<{ value: Record<string, unknown> }>(
+      `SELECT to_jsonb(fact_row) AS value FROM campaign_canonical_facts fact_row
+        WHERE campaign_id = $1 ORDER BY source_turn_number, source_fact_index, id`,
+      [campaignId]
+    ),
+    pool.query<{ value: Record<string, unknown> }>(
+      `SELECT to_jsonb(checkpoint_row) AS value FROM summary_checkpoints checkpoint_row
+        WHERE campaign_id = $1 ORDER BY through_turn, id`,
+      [campaignId]
+    )
+  ]);
+  return {
+    campaign: campaign.rows.map((row) => row.value),
+    state: state.rows.map((row) => row.value),
+    turns: turns.rows.map((row) => row.value),
+    memories: memories.rows.map((row) => row.value),
+    canonicalFacts: canonicalFacts.rows.map((row) => row.value),
+    checkpoints: checkpoints.rows.map((row) => row.value)
+  };
+}
+
+async function generationCommands(pool: DatabasePool) {
+  const ownerUserId = await initialOwnerId(pool);
+  const application = createApiGenerationApplication(pool);
+  return {
+    enqueueGeneration: (campaignId: string, request: Parameters<typeof application.enqueueAppend>[1]) =>
+      application.enqueueAppend({ ownerUserId, campaignId }, request),
+    enqueueLatestReplacement: (campaignId: string, request: Parameters<typeof application.enqueueReplacement>[1]) =>
+      application.enqueueReplacement({ ownerUserId, campaignId }, request),
+    getGenerationJob: (jobId: string) => application.getJob({ ownerUserId, jobId }),
+    getGenerationResult: (jobId: string) => application.getResult({ ownerUserId, jobId }),
+    retryGeneration: (jobId: string) => application.retry({ ownerUserId, jobId }),
+    cancelGeneration: (jobId: string) => application.cancel({ ownerUserId, jobId })
+  };
+}
+
+async function enqueueGeneration(pool: DatabasePool, campaignId: string, request: Parameters<Awaited<ReturnType<typeof generationCommands>>["enqueueGeneration"]>[1]) {
+  return (await generationCommands(pool)).enqueueGeneration(campaignId, request);
+}
+
+async function enqueueLatestReplacement(pool: DatabasePool, campaignId: string, request: Parameters<Awaited<ReturnType<typeof generationCommands>>["enqueueLatestReplacement"]>[1]) {
+  return (await generationCommands(pool)).enqueueLatestReplacement(campaignId, request);
+}
+
+async function getGenerationJob(pool: DatabasePool, jobId: string) {
+  return (await generationCommands(pool)).getGenerationJob(jobId);
+}
+
+async function getGenerationResult(pool: DatabasePool, jobId: string) {
+  return (await generationCommands(pool)).getGenerationResult(jobId);
+}
+
+async function retryGeneration(pool: DatabasePool, jobId: string) {
+  return (await generationCommands(pool)).retryGeneration(jobId);
+}
+
+async function cancelGeneration(pool: DatabasePool, jobId: string) {
+  return (await generationCommands(pool)).cancelGeneration(jobId);
+}
 
 type MockReply = {
   content: string;
@@ -129,12 +235,13 @@ integration("durable Story Engine integration", () => {
 
   async function campaign(
     storyLength?: "brief" | "standard" | "long" | "extended",
-    title?: string
+    title?: string,
+    targetPool = pool
   ) {
     const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
     fixture.world.title = title ?? `Generated campaign ${crypto.randomUUID()}`;
     if (storyLength) fixture.settings.storyLength = storyLength;
-    return importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "generation.story", story: fixture }));
+    return importLegacyStory(targetPool, storyImportRequestSchema.parse({ sourceName: "generation.story", story: fixture }));
   }
 
   async function queue(campaignId: string, action = "Open Location Gamma.") {
@@ -289,8 +396,8 @@ integration("durable Story Engine integration", () => {
     expect(conflicts).toHaveLength(1);
     expect(conflicts[0]).toMatchObject({
       reason: {
-        statusCode: 409,
-        details: { code: "active_generation_exists" }
+        kind: "active_job",
+        details: { reason: "active_generation" }
       }
     });
 
@@ -348,6 +455,134 @@ integration("durable Story Engine integration", () => {
       turn_number: 3,
       narration: expect.any(String)
     }]);
+  });
+
+  it("fills configured slots across worker replicas without duplicate campaign turns", async () => {
+    const importedCampaigns = await Promise.all([
+      campaign(undefined, `Concurrent scheduler A ${crypto.randomUUID()}`),
+      campaign(undefined, `Concurrent scheduler B ${crypto.randomUUID()}`),
+      campaign(undefined, `Concurrent scheduler C ${crypto.randomUUID()}`),
+      campaign(undefined, `Concurrent scheduler D ${crypto.randomUUID()}`)
+    ]);
+    let providerRequestsStarted = 0;
+    let signalAllProviderRequests!: () => void;
+    const allProviderRequests = new Promise<void>((resolveStarted) => {
+      signalAllProviderRequests = resolveStarted;
+    });
+    let releaseProviderResponses!: () => void;
+    const providerResponseGate = new Promise<void>((resolveResponses) => {
+      releaseProviderResponses = resolveResponses;
+    });
+    const jobs = await Promise.all(importedCampaigns.map((imported, index) => {
+      replies.push({
+        content: validStory(`Concurrent scheduler campaign ${index + 1} commits exactly once.`),
+        onRequest: () => {
+          providerRequestsStarted += 1;
+          if (providerRequestsStarted === importedCampaigns.length) signalAllProviderRequests();
+        },
+        waitFor: providerResponseGate
+      });
+      return queue(imported.campaignId, `Run concurrent scheduler campaign ${index + 1}.`);
+    }));
+    const controller = new AbortController();
+    const schedulerConfig = {
+      workerGenerationConcurrency: 2,
+      workerLeaseSeconds: 30,
+      workerPollIntervalMs: 10,
+      credentialEncryptionKey: credentialSecret,
+      assetStorageRoot: "/tmp/infinite-quest-worker-integration"
+    } as RuntimeConfig;
+    const optionalLanes = {
+      illustration: async () => false,
+      chronicle: async () => false,
+      asset: async () => false
+    };
+    const workers = [
+      runWorker(pool, schedulerConfig, controller.signal, {
+        generation: createWorkerGenerationApplication(
+          pool,
+          credentialSecret,
+          createApiIllustrationApplication(pool),
+          apiMemoryApplication(pool, credentialSecret),
+        ),
+        illustration: inertWorkerIllustration,
+        memory: inertWorkerMemory,
+        optionalLanes
+      }),
+      runWorker(pool, schedulerConfig, controller.signal, {
+        generation: createWorkerGenerationApplication(
+          pool,
+          credentialSecret,
+          createApiIllustrationApplication(pool),
+          apiMemoryApplication(pool, credentialSecret),
+        ),
+        illustration: inertWorkerIllustration,
+        memory: inertWorkerMemory,
+        optionalLanes
+      })
+    ];
+
+    try {
+      await expect(Promise.race([
+        allProviderRequests,
+        new Promise((_resolve, reject) => {
+          setTimeout(() => reject(new Error("Four generation slots did not reach the provider.")), 5_000);
+        })
+      ])).resolves.toBeUndefined();
+      releaseProviderResponses();
+      await expect.poll(async () => Promise.all(
+        jobs.map(async (job) => (await getGenerationJob(pool, job.id)).status)
+      ), { timeout: 15_000 }).toEqual(["completed", "completed", "completed", "completed"]);
+    } finally {
+      releaseProviderResponses();
+      controller.abort();
+      await Promise.all(workers);
+    }
+
+    expect(providerRequestsStarted).toBe(4);
+    const committed = await pool.query<{ campaign_id: string; count: number; distinct_turns: number }>(
+      `SELECT campaign_id, count(*)::int AS count, count(DISTINCT turn_number)::int AS distinct_turns
+         FROM turns
+        WHERE campaign_id = ANY($1::uuid[]) AND turn_number = 3
+        GROUP BY campaign_id
+        ORDER BY campaign_id`,
+      [importedCampaigns.map((imported) => imported.campaignId)]
+    );
+    expect(committed.rows).toHaveLength(4);
+    expect(committed.rows.every((row) => row.count === 1 && row.distinct_turns === 1)).toBe(true);
+  });
+
+  it("reclaims a process-lost lease and fences the stale worker from a duplicate commit", async () => {
+    const imported = await campaign();
+    const job = await queue(imported.campaignId, "Recover this turn after simulated process loss.");
+    const lostWorker = createWorkerGenerationApplication(
+      pool,
+      credentialSecret,
+      createApiIllustrationApplication(pool),
+      apiMemoryApplication(pool, credentialSecret),
+    );
+    const lostClaim = await lostWorker.claimNext({ workerId: "process-lost-worker", leaseSeconds: 30 });
+    expect(lostClaim).toMatchObject({ jobId: job.id, attempts: 1 });
+    await pool.query(
+      "UPDATE generation_jobs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
+      [job.id]
+    );
+    replies.push({ content: validStory("The reclaimed worker commits this recovered turn exactly once.") });
+
+    expect(await runGenerationJob(pool, "lease-reclaim-worker", 30, credentialSecret)).toBe(true);
+    await expect(lostWorker.executeClaimed({
+      workerId: "process-lost-worker",
+      leaseSeconds: 30,
+      claim: lostClaim!
+    })).resolves.toBe(false);
+
+    expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed", attempts: 2 });
+    const committed = await pool.query<{ count: number; distinct_turns: number }>(
+      `SELECT count(*)::int AS count, count(DISTINCT turn_number)::int AS distinct_turns
+         FROM turns WHERE campaign_id = $1 AND turn_number = 3`,
+      [imported.campaignId]
+    );
+    expect(committed.rows).toEqual([{ count: 1, distinct_turns: 1 }]);
   });
 
   it("commits the accepted turn when illustration enqueue hits a database error", async () => {
@@ -428,7 +663,10 @@ integration("durable Story Engine integration", () => {
     await expect(enqueueLatestReplacement(pool, imported.campaignId, {
       ...request,
       action: "Attempt to reuse the key with different content."
-    })).rejects.toMatchObject({ statusCode: 409 });
+    })).rejects.toMatchObject({
+      kind: "conflict",
+      details: { reason: "idempotency_mismatch" }
+    });
     expect(await pool.query("SELECT id FROM turns WHERE campaign_id = $1 AND turn_number = 2", [imported.campaignId]))
       .toMatchObject({ rows: [{ id: before.rows[0]?.id }] });
 
@@ -446,6 +684,18 @@ integration("durable Story Engine integration", () => {
     expect(after.rows[0]?.narration).not.toBe(before.rows[0]?.narration);
     expect(after.rows[0]?.id).not.toBe(before.rows[0]?.id);
     expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed", operationKind: "replace_latest" });
+
+    const replacementMemory = await pool.query<{ turn_id: string; content: string }>(
+      `SELECT turn_id, content
+         FROM chronicle_memories
+        WHERE campaign_id = $1 AND ordinal = 2 AND memory_kind = 'turn_fiction'`,
+      [imported.campaignId]
+    );
+    expect(replacementMemory.rows).toEqual([{
+      turn_id: after.rows[0]?.id,
+      content: expect.stringContaining("newly validated replacement scene")
+    }]);
+    expect(replacementMemory.rows[0]?.content).not.toContain(before.rows[0]?.narration ?? "");
 
     const replacementRequests = requests.slice(requestCount).map((entry) => JSON.stringify(entry)).join("\n");
     expect(replacementRequests).toContain("Marker One");
@@ -476,6 +726,7 @@ integration("durable Story Engine integration", () => {
         WHERE t.campaign_id = $1 AND t.turn_number = 2`,
       [imported.campaignId]
     );
+    const authorityBefore = await generationAuthoritySnapshot(pool, imported.campaignId);
     const job = await enqueueLatestReplacement(
       pool,
       imported.campaignId,
@@ -484,7 +735,7 @@ integration("durable Story Engine integration", () => {
 
     try {
       expect(await runGenerationJob(pool, "story-worker-replacement-transport", 30, credentialSecret)).toBe(true);
-      expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "failed", errorCode: "provider_transport_error" });
+      expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "failed", errorCode: "generation_failed" });
       const events = [...warnSpy.mock.calls, ...errorSpy.mock.calls]
         .map(([event]) => event)
         .filter((event): event is Record<string, unknown> => {
@@ -494,7 +745,12 @@ integration("durable Story Engine integration", () => {
             && (record.event === "turn_generation_provider_failed" || record.event === "turn_generation_failed");
         });
       expect(events).toEqual(expect.arrayContaining([
-        expect.objectContaining({ event: "turn_generation_provider_failed", errorCode: "transport_failure" }),
+        expect.objectContaining({
+          event: "turn_generation_provider_failed",
+          errorCode: "provider_transport_error",
+          providerCategory: "transport",
+          transportTimedOut: false
+        }),
         expect.objectContaining({ event: "turn_generation_failed", errorCode: "provider_transport_error" })
       ]));
       for (const event of events) {
@@ -506,12 +762,19 @@ integration("durable Story Engine integration", () => {
           jobAttempt: 1
         });
       }
+      const serializedEvents = JSON.stringify(events);
+      expect(serializedEvents).not.toContain("openai_compatible");
+      expect(serializedEvents).not.toContain("unavailable-model");
+      expect(serializedEvents).not.toContain("transport_failure");
+      expect(events).not.toContainEqual(expect.objectContaining({ providerType: expect.anything() }));
+      expect(events).not.toContainEqual(expect.objectContaining({ requestedModel: expect.anything() }));
       expect(await pool.query(
         `SELECT t.id, t.narration, c.active_turn_number
            FROM turns t JOIN campaigns c ON c.id = t.campaign_id
           WHERE t.campaign_id = $1 AND t.turn_number = 2`,
         [imported.campaignId]
       )).toMatchObject({ rows: [before.rows[0]] });
+      expect(await generationAuthoritySnapshot(pool, imported.campaignId)).toEqual(authorityBefore);
     } finally {
       warnSpy.mockRestore();
       errorSpy.mockRestore();
@@ -778,7 +1041,6 @@ integration("durable Story Engine integration", () => {
     const branched = await branchCampaign(pool, imported.campaignId, { targetTurnNumber: 2, title: "My Branch Story" });
     expect(branched).toMatchObject({
       title: "My Branch Story",
-      status: "active",
       activeTurnNumber: 2
     });
     expect(branched.id).not.toBe(imported.campaignId);
@@ -808,6 +1070,34 @@ integration("durable Story Engine integration", () => {
       [branched.id]
     );
     expect(branchTurns.rows.map((row) => row.turn_number)).toEqual([1, 2]);
+    const branchMemories = await pool.query<{
+      campaign_id: string;
+      world_version_id: string;
+      turn_campaign_id: string;
+      ordinal: number;
+    }>(
+      `SELECT memory.campaign_id, memory.world_version_id,
+              turn_row.campaign_id AS turn_campaign_id, memory.ordinal
+         FROM chronicle_memories memory
+         JOIN turns turn_row ON turn_row.id = memory.turn_id
+        WHERE memory.campaign_id = $1 AND memory.memory_kind = 'turn_fiction'
+        ORDER BY memory.ordinal`,
+      [branched.id]
+    );
+    expect(branchMemories.rows).toEqual([
+      {
+        campaign_id: branched.id,
+        world_version_id: imported.worldVersionId,
+        turn_campaign_id: branched.id,
+        ordinal: 1
+      },
+      {
+        campaign_id: branched.id,
+        world_version_id: imported.worldVersionId,
+        turn_campaign_id: branched.id,
+        ordinal: 2
+      }
+    ]);
   });
 
   it("canonicalizes branch materialized tracker state without rewriting accepted turns", async () => {
@@ -1332,7 +1622,7 @@ integration("durable Story Engine integration", () => {
     await runGenerationJob(pool, "story-worker-guidance", 30, credentialSecret);
     expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
     const turnResult = await getGenerationResult(pool, job.id);
-    expect(turnResult.mechanics.roll).toMatchObject({ statId: "test_stat", target: 99 });
+    expect(turnResult.mechanics).toMatchObject({ roll: { statId: "test_stat", target: 99 } });
     const storyRequest = requests.slice(requestOffset).find((request) => JSON.stringify(request).includes("fiction writer for Infinite Quest"));
     const storyUserMessage = storyRequest?.messages?.find((message: any) => message.role === "user");
     const storyPayload = JSON.parse(storyUserMessage?.content || "{}");
@@ -1365,28 +1655,39 @@ integration("durable Story Engine integration", () => {
     const job = await queue(imported.campaignId);
     await runGenerationJob(pool, "story-worker-triggers", 30, credentialSecret);
     const result = await getGenerationResult(pool, job.id);
-    expect(result.mechanics.beforeEvents).toHaveLength(1);
-    expect(result.mechanics.afterEvents).toHaveLength(1);
-    expect(result.stateSnapshot.pendingEventTriggers).toHaveLength(1);
-    expect(result.stateSnapshot.eventTriggers.every((trigger: any) => trigger.triggeredCount === 1)).toBe(true);
+    const beforeEvents = result.mechanics?.beforeEvents;
+    const afterEvents = result.mechanics?.afterEvents;
+    const pendingEventTriggers = result.stateSnapshot.pendingEventTriggers;
+    const eventTriggers = result.stateSnapshot.eventTriggers;
+    expect(Array.isArray(beforeEvents)).toBe(true);
+    expect(Array.isArray(afterEvents)).toBe(true);
+    expect(Array.isArray(pendingEventTriggers)).toBe(true);
+    expect(Array.isArray(eventTriggers)).toBe(true);
+    if (!Array.isArray(beforeEvents) || !Array.isArray(afterEvents)
+        || !Array.isArray(pendingEventTriggers) || !Array.isArray(eventTriggers)) {
+      throw new Error("Expected completed generation result to include trigger arrays.");
+    }
+    expect(beforeEvents).toHaveLength(1);
+    expect(afterEvents).toHaveLength(1);
+    expect(pendingEventTriggers).toHaveLength(1);
+    expect(eventTriggers.every((trigger) => (
+      typeof trigger === "object" && trigger !== null && "triggeredCount" in trigger && trigger.triggeredCount === 1
+    ))).toBe(true);
     const storyRequest = requests.slice(requestOffset).find((request) => JSON.stringify(request).includes("fiction writer for Infinite Quest"));
     expect(JSON.stringify(storyRequest)).toContain("Marker Four becomes active");
     expect(JSON.stringify(storyRequest)).not.toContain("activation_reason");
   });
 
-  it("recovers an output-limited response with a compact second request", async () => {
+  it("accepts a complete validated response even when the provider reports an output limit", async () => {
     const imported = await campaign("long");
     replies.push(
-      { content: '{"narration":"Location Gamma opens', finishReason: "length" },
-      { content: validStory("Location Gamma opens in a compact, complete response.") }
+      { content: validStory("Location Gamma opens in a complete response."), finishReason: "length" }
     );
     const job = await queue(imported.campaignId);
     await runGenerationJob(pool, "story-worker-b", 30, credentialSecret);
     expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
     const attempts = await pool.query<{ recovery_kind: string }>("SELECT recovery_kind FROM generation_attempts WHERE generation_job_id = $1 ORDER BY attempt_number", [job.id]);
-    expect(attempts.rows.map((row) => row.recovery_kind)).toEqual(["initial", "compact_completion"]);
-    expect(JSON.stringify(requests.at(-1))).toContain("compact, complete JSON object");
-    expect(JSON.stringify(requests.at(-1))).toContain("400-600 narration words");
+    expect(attempts.rows.map((row) => row.recovery_kind)).toEqual(["initial"]);
   });
 
   it("rewrites mechanics-contaminated output before committing it", async () => {
@@ -1567,9 +1868,6 @@ integration("durable Story Engine integration", () => {
     const querySpy = vi.spyOn(pool, "query");
     querySpy.mockImplementation((async (...args: any[]) => {
       const statement = String(args[0]);
-      if (statement.includes("INSERT INTO provider_cost_events")) {
-        throw Object.assign(new Error("Synthetic provider cost failure."), { code: unsafeCode });
-      }
       if (statement.includes("UPDATE generation_jobs SET status = 'failed'")) {
         return { rows: [], rowCount: 0 };
       }
@@ -1578,7 +1876,24 @@ integration("durable Story Engine integration", () => {
     try {
       replies.push({ content: validStory("The provider cost write fails after a valid response.") });
       const job = await queue(imported.campaignId);
-      await runGenerationJob(pool, "story-worker-safe-error-codes", 30, credentialSecret);
+      const providerGraph = workerProviderGraph(pool, credentialSecret);
+      const failingProviders = {
+        ...providerGraph.generation,
+        costs: {
+          async recordGenerationCost() {
+            throw Object.assign(new Error("Synthetic provider cost failure."), { code: unsafeCode });
+          }
+        }
+      };
+      const generation = composeWorkerGenerationApplication(
+        pool,
+        createApiIllustrationApplication(pool),
+        apiMemoryApplication(pool, credentialSecret),
+        failingProviders,
+      );
+      const started = await startNextGeneration(generation, "story-worker-safe-error-codes", 30);
+      expect(started?.jobId).toBe(job.id);
+      await started?.execution;
 
       const events = [...infoSpy.mock.calls, ...warnSpy.mock.calls, ...errorSpy.mock.calls]
         .map(([event]) => event)
@@ -1658,7 +1973,8 @@ integration("durable Story Engine integration", () => {
     let jobId = "";
     querySpy.mockImplementation((async (...args: any[]) => {
       const statement = String(args[0]);
-      if (statement.includes("error_code = 'scene_coverage'")) {
+      const parameters = Array.isArray(args[1]) ? args[1] : [];
+      if (statement.includes("SET status = 'recoverable'") && parameters[5] === "scene_coverage") {
         await originalQuery("UPDATE generation_jobs SET lease_owner = 'lost-lease' WHERE id = $1", [jobId]);
         return { rows: [], rowCount: 0 };
       }
@@ -1743,11 +2059,9 @@ integration("durable Story Engine integration", () => {
             && record.event.startsWith("turn_generation_");
         });
       const eventNames = events.map((event) => event.event);
-      expect(eventNames.indexOf("turn_generation_recoverable")).toBeLessThan(eventNames.indexOf("turn_generation_requeued"));
-      expect(eventNames.indexOf("turn_generation_requeued")).toBeLessThan(eventNames.lastIndexOf("turn_generation_claimed"));
+      expect(eventNames.indexOf("turn_generation_recoverable")).toBeLessThan(eventNames.lastIndexOf("turn_generation_claimed"));
       expect(events).toEqual(expect.arrayContaining([
         expect.objectContaining({ event: "turn_generation_recoverable", jobAttempt: 1, errorCode: "output_limit" }),
-        expect.objectContaining({ event: "turn_generation_requeued", jobAttempt: 1 }),
         expect.objectContaining({ event: "turn_generation_claimed", jobAttempt: 2, workerId: "story-worker-requeued-b" }),
         expect.objectContaining({ event: "turn_generation_completed", jobAttempt: 2 })
       ]));
@@ -1778,6 +2092,7 @@ integration("durable Story Engine integration", () => {
 
   it("leaves the accepted ledger unchanged when compact recovery is also truncated", async () => {
     const imported = await campaign();
+    const authorityBefore = await generationAuthoritySnapshot(pool, imported.campaignId);
     replies.push(
       { content: '{"narration":"First partial', finishReason: "length" },
       { content: '{"narration":"Second partial', finishReason: "length" }
@@ -1787,6 +2102,7 @@ integration("durable Story Engine integration", () => {
     expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "recoverable", errorCode: "output_limit" });
     const campaignRow = await pool.query<{ active_turn_number: number }>("SELECT active_turn_number FROM campaigns WHERE id = $1", [imported.campaignId]);
     expect(campaignRow.rows[0]?.active_turn_number).toBe(2);
+    expect(await generationAuthoritySnapshot(pool, imported.campaignId)).toEqual(authorityBefore);
   });
 
   it("retains the first streamed preview and buffers later durable attempts", async () => {
@@ -1975,45 +2291,83 @@ integration("durable Story Engine integration", () => {
     for (const status of terminalStatuses) {
       const job = await queue(imported.campaignId, `Do not cancel ${status}.`);
       await pool.query("UPDATE generation_jobs SET status = $2 WHERE id = $1", [job.id, status]);
-      await expect(cancelGeneration(pool, job.id)).rejects.toMatchObject({ statusCode: 409 });
+      await expect(cancelGeneration(pool, job.id)).rejects.toMatchObject({
+        kind: "invalid_state",
+        details: { reason: "cancel_source_state", generationStatus: status }
+      });
       expect(await getGenerationJob(pool, job.id)).toMatchObject({ status });
     }
 
-    const originalOwner = await pool.query<{ id: string }>("SELECT id FROM users WHERE system_key = 'initial-owner'");
+    const initialOwner = await pool.query<{ id: string }>("SELECT id FROM users WHERE system_key = 'initial-owner'");
     const foreignOwner = await pool.query<{ id: string }>(
       "INSERT INTO users (display_name, status) VALUES ('Cancellation foreign owner', 'active') RETURNING id"
     );
-    let foreignJob: { id: string };
+    let foreignJobId = "";
+    let foreignCampaignId = "";
+    let foreignProviderId = "";
+    let foreignWorldId = "";
+    let foreignWorldVersionId = "";
     try {
-      await pool.query("UPDATE users SET system_key = NULL WHERE id = $1", [originalOwner.rows[0]!.id]);
-      await pool.query("UPDATE users SET system_key = 'initial-owner' WHERE id = $1", [foreignOwner.rows[0]!.id]);
-      const foreignCampaign = await campaign(undefined, `Foreign cancellation campaign ${crypto.randomUUID()}`);
-      const foreignProvider = await createProvider(pool, {
-        name: `Foreign cancellation provider ${crypto.randomUUID()}`,
-        providerType: "openai_compatible",
-        providerRole: "text",
-        baseUrl,
-        defaultModel: "deterministic-mock",
-        contextWindowTokens: 32768,
-        maxOutputTokens: 4096,
-        temperature: 0,
-        enabled: true,
-        configuration: {}
-      }, credentialSecret);
-      foreignJob = await enqueueGeneration(pool, foreignCampaign.campaignId, generationRequestSchema.parse({
-        action: "Foreign generation.",
-        providerProfileId: foreignProvider.id,
-        idempotencyKey: crypto.randomUUID(),
-        context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
-      }));
+      const foreignWorld = await pool.query<{ id: string }>(
+        "INSERT INTO worlds (owner_user_id, title) VALUES ($1, $2) RETURNING id",
+        [foreignOwner.rows[0]!.id, `Foreign cancellation world ${crypto.randomUUID()}`]
+      );
+      foreignWorldId = foreignWorld.rows[0]!.id;
+      const foreignWorldVersion = await pool.query<{ id: string }>(
+        "INSERT INTO world_versions (world_id, owner_user_id, version_number, content) VALUES ($1, $2, 1, '{}'::jsonb) RETURNING id",
+        [foreignWorldId, foreignOwner.rows[0]!.id]
+      );
+      foreignWorldVersionId = foreignWorldVersion.rows[0]!.id;
+      const foreignCampaign = await pool.query<{ id: string }>(
+        "INSERT INTO campaigns (owner_user_id, world_version_id, title) VALUES ($1, $2, $3) RETURNING id",
+        [foreignOwner.rows[0]!.id, foreignWorldVersionId, `Foreign cancellation campaign ${crypto.randomUUID()}`]
+      );
+      foreignCampaignId = foreignCampaign.rows[0]!.id;
+      await pool.query("INSERT INTO campaign_state (campaign_id, owner_user_id) VALUES ($1, $2)", [foreignCampaignId, foreignOwner.rows[0]!.id]);
+      const foreignProvider = await pool.query<{ id: string }>(
+        `INSERT INTO provider_profiles (
+           owner_user_id, name, provider_type, provider_role, base_url, default_model,
+           context_window_tokens, max_output_tokens, temperature, request_timeout_ms, configuration, enabled
+         ) VALUES ($1, $2, 'openai_compatible', 'text', $3, 'deterministic-mock', 32768, 4096, 0, 300000, '{}'::jsonb, true)
+         RETURNING id`,
+        [foreignOwner.rows[0]!.id, `Foreign cancellation provider ${crypto.randomUUID()}`, baseUrl]
+      );
+      foreignProviderId = foreignProvider.rows[0]!.id;
+      const queuedForeignJob = await pool.query<{ id: string }>(
+        `INSERT INTO generation_jobs (
+           owner_user_id, campaign_id, provider_profile_id, idempotency_key, expected_turn_number, action,
+           requested_model, context_options, prompt_protocol_version, prompt_snapshot
+         ) VALUES ($1, $2, $3, $4, 1, 'Foreign generation.', 'deterministic-mock', '{}'::jsonb, 'story-v1', '{}'::jsonb)
+         RETURNING id`,
+        [foreignOwner.rows[0]!.id, foreignCampaignId, foreignProviderId, crypto.randomUUID()]
+      );
+      foreignJobId = queuedForeignJob.rows[0]!.id;
+      await expect(cancelGeneration(pool, foreignJobId)).rejects.toMatchObject({
+        kind: "not_found",
+        details: { jobId: foreignJobId }
+      });
+      const foreignStatus = await pool.query<{
+        status: string;
+        owner_user_id: string;
+        campaign_id: string;
+        provider_profile_id: string;
+      }>("SELECT status, owner_user_id, campaign_id, provider_profile_id FROM generation_jobs WHERE id = $1", [foreignJobId]);
+      expect(foreignStatus.rows).toEqual([{
+        status: "queued",
+        owner_user_id: foreignOwner.rows[0]!.id,
+        campaign_id: foreignCampaignId,
+        provider_profile_id: foreignProviderId
+      }]);
+      await expect(pool.query<{ id: string }>("SELECT id FROM users WHERE system_key = 'initial-owner'"))
+        .resolves.toMatchObject({ rows: [{ id: initialOwner.rows[0]!.id }] });
     } finally {
-      await pool.query("UPDATE users SET system_key = NULL WHERE id = $1", [foreignOwner.rows[0]!.id]);
-      await pool.query("UPDATE users SET system_key = 'initial-owner' WHERE id = $1", [originalOwner.rows[0]!.id]);
+      if (foreignJobId) await pool.query("DELETE FROM generation_jobs WHERE id = $1", [foreignJobId]);
+      if (foreignProviderId) await pool.query("DELETE FROM provider_profiles WHERE id = $1", [foreignProviderId]);
+      if (foreignCampaignId) await pool.query("DELETE FROM campaigns WHERE id = $1", [foreignCampaignId]);
+      if (foreignWorldVersionId) await pool.query("DELETE FROM world_versions WHERE id = $1", [foreignWorldVersionId]);
+      if (foreignWorldId) await pool.query("DELETE FROM worlds WHERE id = $1", [foreignWorldId]);
+      await pool.query("DELETE FROM users WHERE id = $1", [foreignOwner.rows[0]!.id]);
     }
-    await expect(cancelGeneration(pool, foreignJob!.id)).rejects.toMatchObject({ statusCode: 404 });
-    const foreignStatus = await pool.query<{ status: string }>("SELECT status FROM generation_jobs WHERE id = $1", [foreignJob!.id]);
-    expect(foreignStatus.rows).toEqual([{ status: "queued" }]);
-    await pool.query("UPDATE generation_jobs SET status = 'discarded' WHERE id = $1", [foreignJob!.id]);
   });
 
   it("reuses the persisted private roll when a recoverable story job is retried", async () => {
@@ -2052,7 +2406,106 @@ integration("durable Story Engine integration", () => {
     replies.push({ content: validStory("The same resolved attempt now returns a complete scene.") });
     await runGenerationJob(pool, "story-worker-reroll-b", 30, credentialSecret);
     const result = await getGenerationResult(pool, job.id);
-    expect(result.mechanics.roll).toEqual(persistedRoll);
+    expect(result.mechanics).toMatchObject({ roll: persistedRoll });
     expect(requests.length - requestCount).toBe(1);
+  });
+});
+
+describe("generation HTTP route-to-workflow boundary", () => {
+  it("rejects a malformed generation snapshot before the workflow can observe it", async () => {
+    const routeCampaignId = "10000000-0000-4000-8000-000000000001";
+    const routeJobId = "20000000-0000-4000-8000-000000000001";
+    const routeRequests: string[] = [];
+    const routeServer = createServer((request, response) => {
+      routeRequests.push(`${request.method} ${request.url}`);
+      response.setHeader("content-type", "application/json");
+      if (request.method === "POST" && request.url === `/api/v1/campaigns/${routeCampaignId}/generations`) {
+        response.end(JSON.stringify({
+          id: routeJobId,
+          status: "queued",
+          duplicate: false,
+          operationKind: "append",
+          replacementTurnId: null,
+          expectedTurnNumber: 1,
+          createdAt: "2026-08-02T12:00:00.000Z"
+        }));
+        return;
+      }
+      if (request.method === "GET" && request.url === `/api/v1/generation-jobs/${routeJobId}`) {
+        response.setHeader("x-correlation-id", "malformed-snapshot-route");
+        response.end(JSON.stringify({
+          id: routeJobId,
+          campaignId: routeCampaignId,
+          expectedTurnNumber: 1,
+          action: "Open the dome.",
+          status: "generating",
+          attempts: 0,
+          createdAt: "2026-08-02T12:00:00.000Z",
+          updatedAt: "2026-08-02T12:00:00.000Z"
+        }));
+        return;
+      }
+      response.statusCode = 404;
+      response.end(JSON.stringify({ error: "Not found" }));
+    });
+
+    await new Promise<void>((resolveListen) => routeServer.listen(0, "127.0.0.1", resolveListen));
+    try {
+      const address = routeServer.address();
+      if (!address || typeof address === "string") throw new Error("Test route did not expose a TCP address.");
+      const origin = `http://127.0.0.1:${address.port}`;
+      const session = createNoopSessionPort();
+      const api = createNexusApiClient({
+        basePath: "/api/v1",
+        session,
+        fetchImpl: (input, init) => fetch(`${origin}${String(input)}`, init)
+      });
+      const source = createBrowserGenerationSource({
+        api: api.generation,
+        basePath: "/api/v1",
+        session,
+        clock: { now: () => Date.parse("2026-08-02T12:00:00.000Z") },
+        delay: { wait: async () => { throw new Error("Malformed snapshots must not be retried."); } },
+        visibility: { isHidden: () => false, waitUntilVisible: async () => undefined },
+        eventSourceFactory: null,
+        random: () => 0.5
+      });
+      const pending = new Map<string, unknown>();
+      const workflow = createGenerationWorkflow({
+        api: api.generation,
+        source,
+        clock: { now: () => Date.parse("2026-08-02T12:00:00.000Z") },
+        pendingSubmissions: {
+          load: (campaignId) => (pending.get(campaignId) ?? null) as never,
+          save: (campaignId, value) => { pending.set(campaignId, value); },
+          clear: (campaignId) => { pending.delete(campaignId); }
+        }
+      });
+      const run = await workflow.submit(routeCampaignId, {
+        operationKind: "append",
+        expectedTurnNumber: 1,
+        request: generationRequestSchema.parse({
+          action: "Open the dome.",
+          idempotencyKey: "malformed-route-key"
+        })
+      });
+
+      const rejection = await run.watch(new AbortController().signal)[Symbol.asyncIterator]().next()
+        .catch((error: unknown) => error);
+      expect(rejection).toMatchObject({
+        name: "GenerationWorkflowProtocolError",
+        kind: "invalid_snapshot",
+        cause: {
+          name: "ApiContractError",
+          correlationId: "malformed-snapshot-route"
+        }
+      });
+      expect(routeRequests).toEqual([
+        `POST /api/v1/campaigns/${routeCampaignId}/generations`,
+        `GET /api/v1/generation-jobs/${routeJobId}`
+      ]);
+    } finally {
+      await new Promise<void>((resolveClose, reject) => routeServer.close((error) => error ? reject(error) : resolveClose()));
+    }
   });
 });

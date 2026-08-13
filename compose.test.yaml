@@ -31,11 +31,13 @@ services:
       DATABASE_URL: postgresql://infinitequest:${POSTGRES_PASSWORD:-testpassword123}@postgres-test:5432/infinitequest
       ASSET_STORAGE_DRIVER: filesystem
       ASSET_STORAGE_ROOT: /var/lib/infinitequest/assets
+      ARCHIVE_STORAGE_ROOT: /var/lib/infinitequest/archives
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-testkey12345678901234567890123456}
     ports:
       - "8085:8080"
     volumes:
       - infinitequest-test-assets:/var/lib/infinitequest/assets
+      - infinitequest-test-archives:/var/lib/infinitequest/archives
     depends_on:
       postgres-test:
         condition: service_healthy
@@ -71,6 +73,7 @@ services:
 volumes:
   infinitequest-test-postgres:
   infinitequest-test-assets:
+  infinitequest-test-archives:
   infinitequest-integration-postgres-data:
 
 networks:

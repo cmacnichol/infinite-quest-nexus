@@ -2,6 +2,8 @@
 
 Architecture decision records (ADRs) preserve consequential design decisions and their tradeoffs. Concept pages synthesize current behavior across the complete decision history; later decisions may refine a compatibility detail from an earlier record.
 
+See also [Repository Overview](./repository-overview.md) for project-goal/naming/target-architecture/repo-structure context (moved out of `AGENTS.md` on 2026-08-01), [../runbooks/deployment.md](../runbooks/deployment.md) for the Compose/Swarm deployment runbook, and [../workflows/testing.md](../workflows/testing.md) for the detailed test matrix.
+
 ## Persistence, jobs, and migrations
 
 - [ADR 0001: PostgreSQL owns campaigns and Chronicle memory](./0001-postgresql-chronicle.md)
@@ -23,6 +25,7 @@ Architecture decision records (ADRs) preserve consequential design decisions and
 - [ADR 0020: Retire the legacy player from the runtime](./0020-retire-legacy-player-runtime.md)
 - [ADR 0021: Typed turn input and optional intent classification](./0021-turn-input-intent-classification.md)
 - [ADR 0024: Central Prompt Library](./0024-central-prompt-library.md)
+- [Task 10 B1 generation boundary completion audit](../review/2026-08-03-task-10-b1-completion.md)
 
 ## World Library and characters
 
@@ -43,8 +46,14 @@ ADR 0014 supersedes only the backward-compatibility portions of ADR 0013 that al
 - [Proposal: Context-aware image library and PhotoSwipe browser](./image-library-enhancement-proposal.md)
 - [Future enhancement: Image Library Phase 6](./image-library-phase-6-future-enhancement.md)
 
+## Client and application boundaries
+
+- [ADR 0028: Modular client and application boundaries](./0028-modular-client-and-application-boundaries.md)
+
 ## Reading historical decisions
 
 Some early ADRs refer to the legacy player bridge or to provider work that was implemented later. Preserve that chronology when reading the records. For current deployment and product behavior, use the active guides and concept pages and follow their links back to the relevant decisions.
 
 ADR 0020 supersedes ADR 0004's runtime-routing decision. ADR 0004 remains the historical record of the temporary migration bridge.
+
+ADR numbers are not unique across the full history: `0011` and `0024` each name two distinct records, and ADR 0028 was renumbered from a third collision at `0026`. Cite ADRs by filename rather than by number.

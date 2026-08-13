@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { DEFAULT_STORY_LENGTH_PROFILE, storyLengthProfileSchema } from "./story-settings.js";
+import { apiTimestampSchema } from "./http.js";
 
 const coerceToString = (val: unknown): string => {
   if (val === null || val === undefined) return "";
@@ -155,7 +156,8 @@ export const campaignCharacterProfileSchema = z.object({
 
 export const campaignCharacterProfileUpdateSchema = campaignCharacterProfileSchema.extend({
   expectedRevision: z.coerce.number().int().min(0),
-  editSource: characterProfileEditSourceSchema.default("manual")
+  editSource: characterProfileEditSourceSchema.default("manual"),
+  organizerProtocolVersion: z.string().trim().min(1).max(100).optional()
 }).strict();
 
 export const characterProfileOrganizationRequestSchema = z.object({
@@ -238,6 +240,39 @@ export const worldVersionDeleteSchema = z.object({
   expectedVersionNumber: z.coerce.number().int().positive()
 });
 
+const worldSummaryPreviewSchema = z.object({
+  title: z.string(),
+  genre: z.string(),
+  tone: z.string(),
+  premise: z.string(),
+  backgroundStory: z.string(),
+  firstAction: z.string(),
+  rules: z.string().optional()
+}).passthrough();
+
+export const worldSummarySchema = z.object({
+  id: z.uuid(),
+  title: z.string().trim().min(1),
+  status: z.enum(["draft", "active", "archived"]),
+  imageUrl: z.string(),
+  forkedFromWorldId: z.uuid().nullable(),
+  forkedFromWorldVersionId: z.uuid().nullable(),
+  createdAt: apiTimestampSchema,
+  updatedAt: apiTimestampSchema,
+  draftRevision: z.number().int().positive().nullable(),
+  draftUpdatedAt: apiTimestampSchema.nullable(),
+  draftPreview: worldSummaryPreviewSchema.nullable(),
+  latestVersionId: z.uuid().nullable(),
+  latestVersionNumber: z.number().int().positive().nullable(),
+  latestPublishedAt: apiTimestampSchema.nullable(),
+  latestPreview: worldSummaryPreviewSchema.nullable(),
+  campaignCount: z.number().int().min(0)
+});
+
+export const worldListResponseSchema = z.object({
+  worlds: z.array(worldSummarySchema)
+});
+
 export type PlayableCharacter = z.infer<typeof playableCharacterSchema>;
 export type CharacterProfile = z.infer<typeof characterProfileSchema>;
 export type CampaignCharacterProfile = z.infer<typeof campaignCharacterProfileSchema>;
@@ -258,3 +293,5 @@ export type CampaignUpdateRequest = z.infer<typeof campaignUpdateSchema>;
 export type CampaignWorldMigrationRequest = z.infer<typeof campaignWorldMigrationSchema>;
 export type ResourceDeleteRequest = z.infer<typeof resourceDeleteSchema>;
 export type WorldVersionDeleteRequest = z.infer<typeof worldVersionDeleteSchema>;
+export type WorldSummary = z.infer<typeof worldSummarySchema>;
+export type WorldListResponse = z.infer<typeof worldListResponseSchema>;

@@ -39,32 +39,36 @@ world-version deletion). All `/api/v1/*` responses set
 `Cache-Control: no-store` (`server.ts:182`) — never cache API responses
 client-side beyond in-memory app state.
 
-**Implementer requirement:** the replacement frontend's single API client
-(`FRONTEND_IMPLEMENTATION_PLAN.md`) must always surface `correlationId` when
-present in error UI (support/debugging value), consistent with the best
-existing pattern (`nexus.js:266-282`) rather than the weaker one
-(`story.js:124-139`) — see `CURRENT_UI_AUDIT.md` UI-005.
+The shared HTTP adapter in `packages/client-web` validates adopted request and
+response bodies and preserves `statusCode`, domain error code, `details`, and
+`correlationId` in `NexusApiError`/`ApiContractError`. Callers must keep
+surfacing the correlation ID in error UI. Caller-supplied `user_id` and
+`X-User-Id` are not identity and are never synthesized from session state.
+
+Endpoint adoption is incremental. C8 adopts the Story Player prerequisite,
+campaign-projection, generation, rewind, and branch routes through named typed
+methods. It does not claim every server route is adopted. The eight temporarily
+retained illustration routes are isolated behind the named
+`legacy-illustration-api.ts` adapter; each has a concrete success schema and the
+same standard error/correlation behavior.
 
 ## Polling / streaming behavior
 
 | Job family | Mechanism | Endpoint(s) | Interval/limits | Notes |
 |---|---|---|---|---|
-| Turn generation | **SSE preferred**, poll fallback | `GET /api/v1/generation-jobs/:jobId/stream` (SSE), `GET .../generation-jobs/:jobId` (poll) | Server writes a frame every ~350ms only on change (`server.ts:777`); client poll fallback: up to 900 attempts | The **only** endpoint family with a push channel. SSE is server-side polling of Postgres re-exposed as `text/event-stream` — no pub/sub. |
+| Turn generation | **SSE preferred**, poll fallback | `GET /api/v1/generation-jobs/:jobId/stream` (SSE), `GET .../generation-jobs/:jobId` (poll) | Server writes a frame only on change; `packages/client-web` owns bounded backoff/fallback | The **only** endpoint family with a push channel. The legacy app no longer owns an EventSource, poll loop, or timeout policy. |
 | Image jobs | Poll only | `GET /api/v1/image-jobs/:jobId` | Client self-schedules every 5s (`story.js:1527-1556`) | No SSE counterpart. Current implementation swallows poll errors silently — **do not carry this forward** (`CURRENT_UI_AUDIT.md` UI-003). |
 | Chronicle jobs | Poll only | `GET /api/v1/jobs/:jobId` | No fixed client interval observed in source; implement a bounded poll with visible failure state | No SSE counterpart. |
 | World-cover jobs | Poll only | `GET /api/v1/worlds/:worldId/cover-job` | Same as above | No SSE counterpart. |
 | Infinite Worlds import conversion | Poll only, **non-durable** | `GET /api/v1/imports/progress?key=...` | In-memory server-side map, lost on API restart | See `CURRENT_UI_AUDIT.md` UI-004 — disclose this limitation in UI copy. |
-| Resume/reconnect snapshot | Plain fetch, called on load/resume | `GET /api/v1/campaigns/:campaignId/sync-status` | Not a poll loop — called once per page load/resume to detect an in-flight `pendingGeneration` | Use this to reconcile state after a reload before deciding whether to open a new SSE/poll loop. |
+| Resume/reconnect snapshot | Plain fetch, called on load/resume | `GET /api/v1/campaigns/:campaignId/sync-status?since=<syncToken>` | Not a poll loop — called once per page load/resume to reconcile an active job, recovery, and a bounded accepted-turn window | `pendingGeneration` is active-only. Reconcile pending first, then sanitized recovery, then local storage only as a non-authoritative replay hint; use the returned `syncToken` and `turnWindowMode` to retain or replace the window. |
 
-**Contract detail for the SSE stream:** `data: {id,status,action,
-partialOutput,partialNarration,errorMessage,errorCode}\n\n` frames; stream
-closes once `status` reaches a terminal value
-(`completed|failed|recoverable|discarded`, `server.ts:768`). Per
-`docs/reference/capabilities.md`, the browser is documented to never render
-`partialNarration` as progressive text — treat this field as available for
-future use but **do not build an incremental-narration-display feature on
-top of it** without resolving `OPEN_QUESTIONS.md` Q1 (source evidence on
-whether the current frontend already partially does this is contradictory).
+**Contract detail for the SSE stream:** wire frames are runtime-validated by
+`packages/client-web` before the workflow observes them. The headless workflow
+emits progressive text as `GenerationEvent.narration`; the Story Player does
+not read raw `partialNarration` or `partialOutput`. Q1 is resolved: progressive
+narration remains visible, but only through that typed event. Terminal stream
+statuses are `completed|failed|recoverable|cancelled|discarded`.
 
 ## Screen → endpoint index
 
@@ -81,7 +85,7 @@ quick index for implementers wiring one screen at a time.
 | NEX-CAMPAIGN-DETAIL | `PATCH /campaigns/:id`, character-profile endpoints, `GET/PATCH .../state`, `GET .../cost-summary`, `GET .../sync-status`, migrate/transfer endpoints, `/rewind`, `/branch`, `GET .../export`, `DELETE /campaigns/:id` |
 | NEX-PROVIDERS | full `/providers` CRUD + `/models` + `/discover-models` + `/provider-text/generate` |
 | NEX-PROMPTS | `/prompt-library`, `/prompt-library/overrides`, `/prompt-library/preview` |
-| STORY-PLAYER | `/generations`(`/retry-latest`), `/generation-jobs/:id`(`/stream`,`/result`,`/retry`,`/discard`), `/turns/:id/illustration*`, `/illustration-segments/*`, `/campaigns/:id/turns`, `/campaigns/:id/state`, `/campaigns/:id/sync-status`, `/turn-input/classify` |
+| STORY-PLAYER | `/generations`(`/retry-latest`), `/generation-jobs/:id`(`/stream`,`/result`,`/retry`,`/cancel`,`/discard`), `/turns/:id/illustration*`, `/illustration-segments/*`, `/campaigns/:id/turns`, `/campaigns/:id/state`, `/campaigns/:id/sync-status`, `/turn-input/classify` |
 | CHRONICLE-HEALTH | `/memory/metrics`, `/memory/context-preview`, `/memory/reindex`, `/memory/embedding-config`, `/memory/embeddings/reindex`, `/jobs/:jobId` |
 | SYS-ERROR | `GET /health/live`, `GET /health/ready` |
 | Shell (all screens) | `GET /api/v1/meta`, `GET/PATCH /api/v1/users/me`(`/profile`) |
@@ -109,22 +113,50 @@ quick index for implementers wiring one screen at a time.
 - Turn fields (`GET .../turns`, `server.ts:558-579`): `id, turnNumber,
   action, inputMode, inputModeSource, narration, choices, imagePrompt,
   imageUrl, acceptedAt, reportedCost`.
-- `sync-status` response: `{campaign, world, playerConfig,
-  pendingGeneration}` — the resume snapshot; `pendingGeneration` is present
-  only if a job is actively in flight.
+- `sync-status` response always includes `{id, campaign, world, playerConfig,
+  pendingGeneration, syncToken, generationRecovery, turnWindowMode, turns}`.
+  `pendingGeneration` is present only for an active job. `turnWindowMode` is a
+  discriminated contract: `unchanged` has `turns: null` and retains only a
+  previously loaded window for the same campaign; `replace` carries a bounded,
+  self-identifying `TurnListResponse`. The page includes `campaignId`, ordered
+  turn summaries, and an opaque `nextCursor`; it is replaced atomically, while
+  older pages are fetched separately with `GET .../turns?before=<cursor>`.
+  `syncToken` is an opaque freshness marker, not authorization or a cursor.
+- `generationRecovery` is a sanitized summary of a recent `recoverable`,
+  `failed`, or `completed` job when no active job is present. It carries a
+  discriminated operation pair: `append` with `replacementTurnId: null`, or
+  `replace_latest` with a durable target UUID. A completed recovery whose
+  accepted result is outside the returned window is resolved through the
+  result endpoint followed by authoritative sync; it is never treated as a
+  missing or replayable pending submission.
 
 ### Generation jobs
 - Status values (current, `generation.ts:397` + `0023_durable_generation_replacement.sql:15-18`):
   `queued, replacement_queued, assessing, generating, validating,
-  committing, completed, recoverable, failed, discarded`.
-- `operation_kind`: `append | replace_latest`.
-- Job fields for polling: `id, status, action, partialOutput,
-  partialNarration, errorMessage, errorCode, recoveryMetadata,
-  resultTurnId`.
+  committing, completed, recoverable, failed, cancelled, discarded`.
+- `operationKind` is always paired with `replacementTurnId`: `append` requires
+  `null`; `replace_latest` requires the UUID of the accepted turn being
+  replaced. This provenance is preserved on enqueue, polling, streaming,
+  pending sync, recovery, and client-store reconciliation.
+- Job polling snapshots contain durable validated metadata and may contain
+  `partialNarration`, but never raw `partialOutput`. Stream snapshots use the
+  smaller explicit allowlist and carry the same operation pair. Public failure
+  fields are the fixed safe `generation_failed` / `Generation could not be
+  completed.` pair; provider and backend error details never cross this
+  boundary.
 - **Concurrency contract**: only one active (non-terminal) job per campaign
-  — the UI must not allow submitting a second turn while one is in flight;
-  rely on the unique-index-backed 409/conflict behavior, don't just
-  disable-the-button-and-hope (handle the error case too).
+  — the UI must not allow submitting a second turn while one is in flight.
+  On the structured active-job 409, attach/resume the authoritative job from
+  `details.pendingGeneration`, show exactly "a turn is already generating",
+  and do not mint or submit another idempotency key.
+- **Completed result contract**: if `/result` is temporarily unavailable after
+  a completed snapshot, keep the accepted preview visible in a
+  complete-but-loading state. Retry only `GenerationRun.fetchResult()`; never
+  restart generation or its watcher.
+- **Cancel versus detach**: `POST .../cancel` is an explicit durable server
+  action on the active `GenerationRun`. Aborting a watch merely detaches this
+  browser observer and must not cancel the server job. Discard is likewise a
+  command on the active run, not a raw path call.
 
 ### Image jobs / illustration
 - Image job status: `queued, generating, provider_pending, downloading,
@@ -194,14 +226,12 @@ quick index for implementers wiring one screen at a time.
 
 See `OPEN_QUESTIONS.md` for the full write-up of each. Summarized here for
 implementers who only need the API angle:
-- **Q1**: whether `partialNarration` from the SSE stream is actually
-  rendered progressively anywhere today (docs say no; one research pass's
-  reading of `story.js` suggested otherwise) — resolve before building any
-  incremental-narration UI.
-- **Q2**: whether the legacy single-image illustration endpoints
+- **Q1 is resolved**: progressive narration is retained through typed
+  `GenerationEvent.narration`; raw transport fields are not app inputs.
+- **Q2 is resolved**: the legacy single-image illustration endpoints
   (`POST /turns/:turnId/illustrations`, `PUT .../illustration-asset`) are
-  still frontend-reachable, or vestigial — resolve before deciding whether
-  the replacement UI needs to support two illustration interaction models.
+  backend-only vestigial surface. The replacement UI supports the segmented
+  illustration model only.
 - **Q3**: no server-side search/filter endpoint exists for worlds,
   campaigns, turns, or providers beyond asset-library facets — confirm
   whether current catalog sizes make client-side substring filtering

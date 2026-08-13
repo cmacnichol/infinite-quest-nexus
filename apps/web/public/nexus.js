@@ -72,6 +72,7 @@ let promptLibraryPreviewSequence = 0;
 const MIN_MEMORY_CONTEXT_BUDGET_TOKENS = 512;
 const MAX_MEMORY_CONTEXT_BUDGET_TOKENS = 1_000_000;
 const DEFAULT_MEMORY_CONTEXT_BUDGET_TOKENS = 32_000;
+const DEFAULT_LM_STUDIO_BASE_URL = "http://10.11.41.224:1234";
 const CHARACTER_PROFILE_FIELDS = Object.freeze({
   "identity.aliases": "characterAliases",
   "identity.pronouns": "characterPronouns",
@@ -2957,10 +2958,10 @@ function renderProviderProfiles() {
 function resetProviderForm() {
   editingProviderId = "";
   elements.providerForm.reset();
-  elements.providerName.value = "Local LM Studio";
+  elements.providerName.value = nextAvailableProviderName("Local LM Studio");
   elements.providerType.value = "lmstudio";
   elements.providerRole.value = "text";
-  elements.providerBaseUrl.value = "http://host.docker.internal:1234";
+  elements.providerBaseUrl.value = DEFAULT_LM_STUDIO_BASE_URL;
   elements.providerContextTokens.value = "32768";
   elements.providerOutputTokens.value = "4096";
   elements.providerTemperature.value = "0.8";
@@ -2979,6 +2980,14 @@ function resetProviderForm() {
   elements.providerContextSource.textContent = "Editable until model discovery supplies a context length.";
   elements.providerContextSource.className = "field-note";
   syncProviderRoleSettings();
+}
+
+function nextAvailableProviderName(baseName) {
+  const existingNames = new Set(providers.map((provider) => provider.name.trim().toLocaleLowerCase()));
+  if (!existingNames.has(baseName.toLocaleLowerCase())) return baseName;
+  let suffix = 2;
+  while (existingNames.has(`${baseName} ${suffix}`.toLocaleLowerCase())) suffix += 1;
+  return `${baseName} ${suffix}`;
 }
 
 function syncProviderRoleSettings(options = {}) {
@@ -3475,12 +3484,27 @@ function applyProfileModelContext() {
     elements.providerContextTokens.readOnly = true;
     elements.providerContextSource.textContent = `Locked to ${number(contextLength)} tokens advertised by ${model.displayName}.`;
     elements.providerContextSource.className = "field-note api-supplied";
+    constrainProviderOutputReserve(contextLength);
   } else {
     elements.providerContextTokens.readOnly = false;
+    elements.providerOutputTokens.setCustomValidity("");
     elements.providerContextSource.textContent = model
       ? "The endpoint did not advertise a context length for this model; enter it manually."
       : "Editable until a discovered model supplies a context length.";
     elements.providerContextSource.className = contextLength ? "field-note api-supplied" : "field-note manual-entry";
+  }
+}
+
+function constrainProviderOutputReserve(contextLength) {
+  const maximumOutputTokens = contextLength - 513;
+  if (maximumOutputTokens < 128) {
+    elements.providerOutputTokens.setCustomValidity("This model does not leave the required 512 tokens of input context.");
+    return;
+  }
+  elements.providerOutputTokens.setCustomValidity("");
+  const requestedOutputTokens = Number(elements.providerOutputTokens.value);
+  if (!Number.isFinite(requestedOutputTokens) || requestedOutputTokens > maximumOutputTokens) {
+    elements.providerOutputTokens.value = String(maximumOutputTokens);
   }
 }
 
@@ -3537,7 +3561,7 @@ elements.modelSelect.addEventListener("change", () => {
 
 elements.providerType.addEventListener("change", () => {
   const defaults = {
-    lmstudio: "http://host.docker.internal:1234",
+    lmstudio: DEFAULT_LM_STUDIO_BASE_URL,
     openrouter: "https://openrouter.ai/api/v1",
     sogni: "https://api.sogni.ai",
     sogni_sdk: "https://api.sogni.ai"

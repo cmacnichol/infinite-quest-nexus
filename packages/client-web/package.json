@@ -1,0 +1,17 @@
+{
+  "name": "@infinite-quest/client-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@infinite-quest/client-core": "workspace:*",
+    "@infinite-quest/contracts": "workspace:*",
+    "zod": "^4.0.17"
+  },
+  "scripts": {
+    "check": "tsc -p tsconfig.json --noEmit"
+  }
+}

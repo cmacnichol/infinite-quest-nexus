@@ -45,6 +45,9 @@ jobs:
       - name: Build application
         run: pnpm build
 
+      - name: Report web bundle budgets
+        run: pnpm check:web-bundle-budget
+
       - name: Validate Compose configuration
         run: POSTGRES_PASSWORD="$(openssl rand -hex 32)" docker compose config --quiet
 
@@ -53,3 +56,9 @@ jobs:
 
       - name: Build container image
         run: docker build --tag infinitequest-nexus:ci .
+
+      - name: Verify container web artifacts
+        run: >-
+          docker run --rm --entrypoint sh infinitequest-nexus:ci -c
+          'test -f /app/apps/web/dist/index.html &&
+          test -f /app/apps/web-next/dist/index.html'

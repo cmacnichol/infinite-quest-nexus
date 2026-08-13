@@ -6,24 +6,79 @@ import sharp from "sharp";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
 import { sha256 } from "../../packages/domain/src/text.js";
+import { chronicleContentHash } from "../../packages/domain/src/chronicle-memory-helpers.js";
 import { createCanonicalFactId } from "../../packages/domain/src/canonical-facts.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
+import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
-import { importLegacyStory } from "../../services/api/src/import-service.js";
-import { exportCampaign } from "../../services/api/src/world-service.js";
+import { importLegacyStory } from "../helpers/memory-aware-services.js";
+import { exportCampaign } from "../legacy-api/src/campaign-archive-service.js";
 import {
   buildContextPreview,
   enqueueChronicleReindex,
   enqueueEmbeddingReindex,
   getChronicleMetrics,
   rebuildCampaignMemories,
-  runChronicleJob,
+  runNextChronicle,
   setCampaignEmbeddingConfig
-} from "../../services/api/src/memory-service.js";
+} from "../helpers/memory-aware-services.js";
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
+import { buildServer } from "../../services/api/src/server.js";
+import { createApiMemoryApplication } from "../helpers/runtime-application-fixtures.js";
+import { serverOptions } from "../helpers/build-server-options.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
+
+function routeConfig(url: string, storageRoot: string): RuntimeConfig {
+  const archiveLimits = {
+    maxCompressedBytes: 53_687_091_200,
+    maxUncompressedBytes: 214_748_364_800,
+    maxEntries: 1_000_000,
+    maxExpansionRatio: 100,
+    maxManifestBytes: 5_242_880,
+    maxJsonEntryBytes: 1_073_741_824,
+    maxOriginalImageBytes: 26_214_400
+  };
+  return {
+    role: "all",
+    host: "127.0.0.1",
+    port: 8080,
+    databaseUrl: url,
+    databaseMaxConnections: 4,
+    migrationDirectory: resolve("database/migrations"),
+    migrationWaitSeconds: 10,
+    allowMaintenanceMigrations: false,
+    workerPollIntervalMs: 1_000,
+    workerLeaseSeconds: 60,
+    workerGenerationConcurrency: 1,
+    legacyWebRoot: resolve("apps/web/public"),
+    nextWebRoot: resolve("apps/web-next"),
+    assetStorageDriver: "filesystem",
+    assetStorageRoot: storageRoot,
+    archiveStorageRoot: storageRoot,
+    archivePreviewTtlSeconds: 1_800,
+    systemArchiveArtifactTtlSeconds: 86_400,
+    campaignArchiveLimits: { ...archiveLimits, maxCompressedBytes: 2_147_483_648, maxUncompressedBytes: 21_474_836_480, maxEntries: 100_000 },
+    systemArchiveLimits: archiveLimits,
+    credentialEncryptionKey: "memory-route-integration-secret",
+    security: {
+      corsAllowedOrigins: [],
+      providerNetworkAllowlist: ["localhost", "127.0.0.0/8", "::1/128"],
+      cspImageAllowedOrigins: [],
+      apiDefaultBodyLimitBytes: 1_048_576,
+      apiImportBodyLimitBytes: 16_777_216,
+      apiAssetBodyLimitBytes: 33_554_432,
+      apiRateLimitWindowSeconds: 60,
+      apiRateLimitProviderRequests: 10,
+      apiRateLimitGenerationRequests: 12,
+      apiRateLimitImportRequests: 4,
+      apiConcurrencyProviderRequests: 2,
+      apiConcurrencyImportRequests: 1,
+      trustProxyHops: 0
+    }
+  };
+}
 
 integration("legacy import and Chronicle integration", () => {
   let pool: DatabasePool;
@@ -303,6 +358,197 @@ integration("legacy import and Chronicle integration", () => {
     expect(metrics.semanticHealth).toMatchObject({ status: "disabled", enabled: false, totalMemories: 3 });
   });
 
+  it("serves complete owner-scoped metrics with resumable and safe semantic health projections", async () => {
+    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+    fixture.world.title = `Metrics route ${crypto.randomUUID()}`;
+    const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({
+      sourceName: `metrics-route-${crypto.randomUUID()}.story`,
+      story: fixture
+    }));
+    const ownerUserId = await initialOwnerId(pool);
+    const campaign = await pool.query<{ world_version_id: string }>(
+      "SELECT world_version_id FROM campaigns WHERE id = $1 AND owner_user_id = $2",
+      [imported.campaignId, ownerUserId]
+    );
+    const worldVersionId = campaign.rows[0]!.world_version_id;
+    await pool.query("DELETE FROM campaign_memory_configs WHERE campaign_id = $1", [imported.campaignId]);
+    const app = await buildServer(serverOptions({ config: routeConfig(databaseUrl!, assetRoot), pool }));
+    const memory = createApiMemoryApplication(pool, { credentialSecret: "memory-route-integration-secret" });
+    const scope = { ownerUserId, campaignId: imported.campaignId, worldVersionId };
+    const privateDiagnostic = "https://private.embedding.example/v1?token=secret-route-key";
+    let foreignUserId = "";
+    let foreignWorldId = "";
+    let foreignWorldVersionId = "";
+    let foreignCampaignId = "";
+    let metricsProviderProfileId = "";
+    try {
+      const disabledResponse = await app.inject({
+        method: "GET",
+        url: `/api/v1/campaigns/${imported.campaignId}/memory/metrics`
+      });
+      expect(disabledResponse.statusCode).toBe(200);
+      const disabled = disabledResponse.json();
+      expect(Object.keys(disabled).sort()).toEqual([
+        "completeHistoryCharacters", "compressionEstimates", "embeddedMemories",
+        "estimatedCompleteHistoryTokens", "memoryCount", "memoryTokens", "semanticHealth", "turns"
+      ]);
+      expect(disabled).toMatchObject({
+        turns: 2,
+        completeHistoryCharacters: expect.any(Number),
+        estimatedCompleteHistoryTokens: expect.any(Number),
+        memoryCount: 3,
+        memoryTokens: expect.any(Number),
+        embeddedMemories: 0,
+        compressionEstimates: {
+          full: expect.any(Number),
+          balanced: expect.any(Number),
+          compact: expect.any(Number),
+          summary: expect.any(Number)
+        },
+        semanticHealth: {
+          status: "disabled",
+          enabled: false,
+          totalMemories: 3,
+          jobId: null,
+          jobStatus: null,
+          progress: {},
+          lastCompletedAt: null
+        }
+      });
+      expect(disabled.completeHistoryCharacters).toBeGreaterThan(0);
+      expect(disabled.estimatedCompleteHistoryTokens).toBeGreaterThan(0);
+      expect(disabled.memoryTokens).toBeGreaterThan(0);
+      expect(disabled.compressionEstimates.full).toBeGreaterThan(0);
+      expect(disabled.compressionEstimates.balanced).toBe(Math.ceil(disabled.compressionEstimates.full * 0.62));
+      expect(disabled.compressionEstimates.compact).toBe(Math.ceil(disabled.compressionEstimates.full * 0.3));
+      expect(await memory.getMetrics(scope)).toEqual(disabled);
+
+      const provider = await pool.query<{ id: string }>(
+        `INSERT INTO provider_profiles (
+           owner_user_id, name, provider_type, provider_role, base_url, default_model
+         ) VALUES ($1,$2,'lmstudio','embedding','http://embedding.test','metrics-embedding-model') RETURNING id`,
+        [ownerUserId, `Metrics provider ${crypto.randomUUID()}`]
+      );
+      const providerProfileId = provider.rows[0]!.id;
+      metricsProviderProfileId = providerProfileId;
+      await setCampaignEmbeddingConfig(pool, imported.campaignId, {
+        enabled: true,
+        providerProfileId,
+        model: "metrics-embedding-model",
+        batchSize: 2
+      });
+      const memoryRow = await pool.query<{ id: string; content: string }>(
+        `SELECT id, content FROM chronicle_memories
+          WHERE owner_user_id = $1 AND campaign_id = $2 AND world_version_id = $3
+          ORDER BY ordinal, id LIMIT 1`,
+        [ownerUserId, imported.campaignId, worldVersionId]
+      );
+      await pool.query(
+        `UPDATE chronicle_memories
+            SET embedding = '[1,0,0]'::vector,
+                embedding_dimensions = 3,
+                embedding_content_hash = $2,
+                embedding_provider_profile_id = $3,
+                embedding_model = 'metrics-embedding-model',
+                embedding_provider_fingerprint = 'metrics-fingerprint',
+                embedding_updated_at = now()
+          WHERE id = $1`,
+        [memoryRow.rows[0]!.id, chronicleContentHash(memoryRow.rows[0]!.content), providerProfileId]
+      );
+      const queued = await memory.enqueueEmbeddingReindex(scope);
+      expect(queued).toMatchObject({ status: "queued", jobId: expect.any(String) });
+      const queuedJobId = queued!.jobId;
+      await pool.query(
+        `UPDATE chronicle_jobs
+            SET status = 'running', progress = $2::jsonb, attempts = 1, updated_at = now()
+          WHERE id = $1`,
+        [queuedJobId, JSON.stringify({ embedded: 1, total: 3, updated: 1, skipped: 0 })]
+      );
+
+      const indexingResponse = await app.inject({
+        method: "GET",
+        url: `/api/v1/campaigns/${imported.campaignId}/memory/metrics`
+      });
+      expect(indexingResponse.statusCode).toBe(200);
+      expect(indexingResponse.json().semanticHealth).toMatchObject({
+        status: "indexing",
+        enabled: true,
+        providerProfileId,
+        model: "metrics-embedding-model",
+        indexedMemories: 1,
+        totalMemories: 3,
+        coveragePercent: 33,
+        jobId: queuedJobId,
+        jobStatus: "running",
+        progress: { embedded: 1, total: 3, updated: 1, skipped: 0 },
+        lastCompletedAt: null
+      });
+
+      await pool.query(
+        "UPDATE chronicle_jobs SET status = 'failed', error_message = $2, updated_at = now() WHERE id = $1",
+        [queuedJobId, privateDiagnostic]
+      );
+      const failedResponse = await app.inject({
+        method: "GET",
+        url: `/api/v1/campaigns/${imported.campaignId}/memory/metrics`
+      });
+      expect(failedResponse.statusCode).toBe(200);
+      const failed = failedResponse.json();
+      expect(failed.semanticHealth).toMatchObject({
+        status: "failed",
+        message: "Chronicle memory is unavailable.",
+        errorMessage: "Chronicle memory is unavailable.",
+        jobId: queuedJobId,
+        jobStatus: "failed"
+      });
+      expect(JSON.stringify(failed)).not.toContain(privateDiagnostic);
+      expect(await memory.getMetrics(scope)).toEqual(failed);
+
+      const foreignUser = await pool.query<{ id: string }>(
+        "INSERT INTO users (display_name) VALUES ($1) RETURNING id",
+        [`Foreign metrics owner ${crypto.randomUUID()}`]
+      );
+      foreignUserId = foreignUser.rows[0]!.id;
+      const foreignWorld = await pool.query<{ id: string }>(
+        "INSERT INTO worlds (owner_user_id, title) VALUES ($1,$2) RETURNING id",
+        [foreignUserId, "Foreign metrics world"]
+      );
+      foreignWorldId = foreignWorld.rows[0]!.id;
+      const foreignVersion = await pool.query<{ id: string }>(
+        "INSERT INTO world_versions (world_id, owner_user_id, version_number, content) VALUES ($1,$2,1,'{}'::jsonb) RETURNING id",
+        [foreignWorldId, foreignUserId]
+      );
+      foreignWorldVersionId = foreignVersion.rows[0]!.id;
+      const foreignCampaign = await pool.query<{ id: string }>(
+        "INSERT INTO campaigns (owner_user_id, world_version_id, title) VALUES ($1,$2,$3) RETURNING id",
+        [foreignUserId, foreignWorldVersionId, "Foreign metrics campaign"]
+      );
+      foreignCampaignId = foreignCampaign.rows[0]!.id;
+      const [missingResponse, foreignResponse] = await Promise.all([
+        app.inject({ method: "GET", url: `/api/v1/campaigns/${crypto.randomUUID()}/memory/metrics` }),
+        app.inject({ method: "GET", url: `/api/v1/campaigns/${foreignCampaignId}/memory/metrics` })
+      ]);
+      expect(missingResponse.statusCode).toBe(404);
+      expect(foreignResponse.statusCode).toBe(404);
+    } finally {
+      await app.close();
+      await pool.query(
+        `UPDATE chronicle_memories
+            SET embedding = NULL, embedding_provider_profile_id = NULL, embedding_model = NULL,
+                embedding_dimensions = NULL, embedding_content_hash = NULL, embedding_updated_at = NULL,
+                embedding_provider_fingerprint = NULL
+          WHERE campaign_id = $1`,
+        [imported.campaignId]
+      );
+      await pool.query("DELETE FROM campaign_memory_configs WHERE campaign_id = $1", [imported.campaignId]);
+      if (metricsProviderProfileId) await pool.query("DELETE FROM provider_profiles WHERE id = $1", [metricsProviderProfileId]);
+      if (foreignCampaignId) await pool.query("DELETE FROM campaigns WHERE id = $1", [foreignCampaignId]);
+      if (foreignWorldVersionId) await pool.query("DELETE FROM world_versions WHERE id = $1", [foreignWorldVersionId]);
+      if (foreignWorldId) await pool.query("DELETE FROM worlds WHERE id = $1", [foreignWorldId]);
+      if (foreignUserId) await pool.query("DELETE FROM users WHERE id = $1", [foreignUserId]);
+    }
+  });
+
   it("round-trips loadable story settings and history without credentials", async () => {
     const exported = await exportCampaign(pool, campaignId, null) as Record<string, any>;
     expect(exported.format).toBe("infinite-quest-campaign");
@@ -390,7 +636,7 @@ integration("legacy import and Chronicle integration", () => {
         [imported.campaignId]
       );
       if (Number(pending.rows[0]?.count) === 0) break;
-      expect(await runChronicleJob(pool, `temporal-embedding-worker-${attempt}`, 30, "")).toBe(true);
+      expect(await runNextChronicle(pool, `temporal-embedding-worker-${attempt}`, 30, "")).toBe(true);
     }
     const completed = await pool.query<{ status: string }>("SELECT status FROM chronicle_jobs WHERE id = $1", [embeddingJobId]);
     expect(completed.rows[0]?.status).toBe("completed");
@@ -474,7 +720,7 @@ integration("legacy import and Chronicle integration", () => {
       })]
     );
 
-    await withTransaction(pool, (client) => rebuildCampaignMemories(client, ownerUserId, imported.campaignId));
+    await rebuildCampaignMemories(pool, imported.campaignId);
     const facts = await pool.query<{
       id: string;
       content: string;
@@ -510,7 +756,7 @@ integration("legacy import and Chronicle integration", () => {
     expect(JSON.stringify(historical.scopes)).toContain(originalContent);
     expect(JSON.stringify(historical.scopes)).not.toContain(replacementContent);
 
-    await withTransaction(pool, (client) => rebuildCampaignMemories(client, ownerUserId, imported.campaignId));
+    await rebuildCampaignMemories(pool, imported.campaignId);
     const rebuiltIds = await pool.query<{ id: string }>(
       "SELECT id FROM campaign_canonical_facts WHERE campaign_id = $1 ORDER BY source_turn_number",
       [imported.campaignId]
@@ -554,8 +800,8 @@ integration("legacy import and Chronicle integration", () => {
       "UPDATE turns SET narration = $2 WHERE campaign_id = $1 AND turn_number = 2",
       [isolated.campaignId, "Lady Seraphine hid the cross-campaign secret beneath the observatory."]
     );
-    await withTransaction(pool, (client) => rebuildCampaignMemories(client, ownerUserId, imported.campaignId));
-    await withTransaction(pool, (client) => rebuildCampaignMemories(client, ownerUserId, isolated.campaignId));
+    await rebuildCampaignMemories(pool, imported.campaignId);
+    await rebuildCampaignMemories(pool, isolated.campaignId);
 
     const indexed = await pool.query<{ entity_ids: string[] }>(
       `SELECT entity_ids FROM chronicle_memories
@@ -585,7 +831,7 @@ integration("legacy import and Chronicle integration", () => {
     );
     expect(JSON.stringify(historical.scopes)).not.toContain("Lady Seraphine sealed the moonlit archive");
 
-    await withTransaction(pool, (client) => rebuildCampaignMemories(client, ownerUserId, imported.campaignId));
+    await rebuildCampaignMemories(pool, imported.campaignId);
     const rebuilt = await pool.query<{ entity_ids: string[] }>(
       `SELECT entity_ids FROM chronicle_memories
         WHERE campaign_id = $1 AND memory_kind = 'turn_fiction' AND ordinal = 2`,
@@ -722,8 +968,8 @@ integration("legacy import and Chronicle integration", () => {
     const secondJob = await enqueueChronicleReindex(pool, secondCampaign.campaignId);
 
     const claims = await Promise.all([
-      runChronicleJob(pool, "integration-worker-a", 30),
-      runChronicleJob(pool, "integration-worker-b", 30)
+      runNextChronicle(pool, "integration-worker-a", 30),
+      runNextChronicle(pool, "integration-worker-b", 30)
     ]);
     expect(claims).toEqual([true, true]);
 
@@ -763,7 +1009,7 @@ integration("legacy import and Chronicle integration", () => {
     }));
     const jobId = await enqueueEmbeddingReindex(pool, campaignId);
     expect(jobId).toBeTruthy();
-    expect(await runChronicleJob(pool, "embedding-worker", 30, "")).toBe(true);
+    expect(await runNextChronicle(pool, "embedding-worker", 30, "")).toBe(true);
     expect(embeddingInputs.flat().every((input) => input.startsWith("search_document: "))).toBe(true);
     const indexed = await pool.query<{ count: string }>(
       `SELECT count(*)::text AS count FROM chronicle_memories
@@ -790,7 +1036,7 @@ integration("legacy import and Chronicle integration", () => {
     });
     expect(hybrid.retrieval.mode).toBe("hybrid");
     expect(embeddingInputs.at(-1)?.[0]).toMatch(/^search_query: /);
-    expect(hybrid.scopes.chronicle.some((memory) => Number(memory.semanticRelevance) > 0.9)).toBe(true);
+    expect(hybrid.scopes.chronicle.some((memory: Record<string, unknown>) => Number(memory.semanticRelevance) > 0.9)).toBe(true);
 
     vi.stubGlobal("fetch", vi.fn(async () => new Response("offline", { status: 503 })));
     const fallback = await buildContextPreview(pool, campaignId, {
@@ -804,6 +1050,19 @@ integration("legacy import and Chronicle integration", () => {
   });
 
   it("requeues a running embedding job when Chronicle content changes concurrently", async () => {
+    const ownerUserId = await initialOwnerId(pool);
+    const provider = await pool.query<{ id: string }>(
+      `INSERT INTO provider_profiles (
+         owner_user_id, name, provider_type, provider_role, base_url, default_model
+       ) VALUES ($1,$2,'lmstudio','embedding','http://embedding.test','text-embedding-nomic-embed-text-v1.5') RETURNING id`,
+      [ownerUserId, `Embedding race fixture ${crypto.randomUUID()}`]
+    );
+    await setCampaignEmbeddingConfig(pool, campaignId, {
+      enabled: true,
+      providerProfileId: provider.rows[0]!.id,
+      model: "text-embedding-nomic-embed-text-v1.5",
+      batchSize: 2
+    });
     await pool.query(
       `UPDATE chronicle_memories SET content = content || E'\\nRace preparation.'
         WHERE id = (SELECT id FROM chronicle_memories WHERE campaign_id = $1 ORDER BY ordinal LIMIT 1)`,
@@ -827,7 +1086,7 @@ integration("legacy import and Chronicle integration", () => {
     }));
     const jobId = await enqueueEmbeddingReindex(pool, campaignId);
     expect(jobId).toBeTruthy();
-    const firstRun = runChronicleJob(pool, "embedding-race-worker-a", 30, "");
+    const firstRun = runNextChronicle(pool, "embedding-race-worker-a", 30, "");
     await firstBatchStarted;
     await pool.query(
       `UPDATE chronicle_memories SET content = content || E'\\nConcurrent accepted fact.'
@@ -853,7 +1112,7 @@ integration("legacy import and Chronicle integration", () => {
         data: input.map((_content, index) => ({ index, embedding: [1, 0, 0] }))
       }), { status: 200 });
     }));
-    expect(await runChronicleJob(pool, "embedding-race-worker-b", 30, "")).toBe(true);
+    expect(await runNextChronicle(pool, "embedding-race-worker-b", 30, "")).toBe(true);
     const fresh = await pool.query<{ content: string; embedding_content_hash: string | null; embedded: boolean }>(
       `SELECT content, embedding_content_hash, embedding IS NOT NULL AS embedded
          FROM chronicle_memories WHERE campaign_id = $1`,

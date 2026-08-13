@@ -6,8 +6,13 @@ network_access = true
 [mcp_servers.repowise]
 command = "repowise"
 args = ["mcp"]
-cwd = "C:\\Git\\InfiniteQuest"
 startup_timeout_sec = 20
+
+[mcp_servers.repowise.tools.get_answer]
+approval_mode = "approve"
+
+[mcp_servers.repowise.tools.get_overview]
+approval_mode = "approve"
 
 [features]
 hooks = true
