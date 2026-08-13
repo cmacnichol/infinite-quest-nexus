@@ -9,8 +9,9 @@ import {
 } from "../../packages/contracts/src/prompt-library.js";
 import { composeIllustrationProviderPrompt, directIllustrationPrompt } from "../../packages/domain/src/illustrations.js";
 import { buildTemplateWorldPrompt } from "../../packages/domain/src/world-template.js";
-import { promptProtocolVersion, type PromptSnapshot } from "../../services/api/src/prompt-library-service.js";
-import { infiniteWorldsPromptSet } from "../../services/api/src/infinite-worlds-import-service.js";
+import { providerPromptProtocolVersion } from "../helpers/provider-application-fixtures.js";
+import type { PromptSnapshot } from "../../packages/contracts/src/index.js";
+import { infiniteWorldsPromptSet } from "../legacy-api/src/infinite-worlds-import-service.js";
 
 describe("Prompt Library catalog", () => {
   it("separates world seeds from complete generated character profiles", () => {
@@ -76,6 +77,14 @@ describe("Prompt Library catalog", () => {
     }
   });
 
+  it("makes story-writing length a soft goal without permitting invented padding", () => {
+    expect(PROMPT_TEMPLATE_CATALOG.story_system.defaultContent).toContain("The length range is a soft pacing goal, not a requirement.");
+    expect(PROMPT_TEMPLATE_CATALOG.story_recovery_output_limit.defaultContent).toContain("soft pacing goal");
+    expect(PROMPT_TEMPLATE_CATALOG.scene_coverage.defaultContent).toContain("Do not treat extra invented material as evidence of better coverage.");
+    expect(PROMPT_TEMPLATE_CATALOG.scene_coverage_rewrite.defaultContent).toContain("Length is a soft pacing goal");
+    expect(PROMPT_TEMPLATE_CATALOG.event_extension.defaultContent).toContain("Stop once the event is integrated.");
+  });
+
   it("allows only eligible campaign overrides", () => {
     expect(promptTemplateOverrideSchema.safeParse({ key: "story_system", scope: "campaign", campaignId: crypto.randomUUID(), content: "Write safely." }).success).toBe(true);
     expect(promptTemplateOverrideSchema.safeParse({ key: "world_generation", scope: "campaign", campaignId: crypto.randomUUID(), content: "Write safely." }).success).toBe(false);
@@ -125,9 +134,9 @@ describe("Prompt Library catalog", () => {
       template.key,
       { content: template.defaultContent, hash: "ignored", source: "shipped" }
     ])) as PromptSnapshot;
-    const original = promptProtocolVersion(snapshot);
+    const original = providerPromptProtocolVersion(snapshot);
     snapshot.event_trigger = { ...snapshot.event_trigger, content: `${snapshot.event_trigger.content}\nChanged.` };
-    expect(promptProtocolVersion(snapshot)).not.toBe(original);
+    expect(providerPromptProtocolVersion(snapshot)).not.toBe(original);
   });
 
   it("renders editable illustration wrappers after sanitizing structured values", () => {

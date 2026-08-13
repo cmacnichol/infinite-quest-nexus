@@ -16,7 +16,10 @@ export const userProfileSchema = z.object({
 export const userProfileUpdateSchema = z.object({
   displayName: z.string().trim().min(1).max(120).optional(),
   settings: userSettingsSchema.optional()
-});
+}).refine(
+  (value) => value.displayName !== undefined || value.settings !== undefined,
+  "At least one profile field is required."
+);
 
 export type UserSettings = z.infer<typeof userSettingsSchema>;
 export type UserProfile = z.infer<typeof userProfileSchema>;

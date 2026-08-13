@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { z } from "zod";
 
 const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
@@ -266,17 +265,6 @@ export function canonicalArchiveJson(value: unknown): string {
   const json = JSON.stringify(canonicalizeArchiveValue(value));
   if (json === undefined) throw new TypeError("Archive values must be JSON-serializable.");
   return json;
-}
-
-export function calculateContentFingerprint(input: {
-  payloadHashes: readonly string[];
-  originalAssetHashes: readonly string[];
-}): string {
-  const payloadHashes = [...input.payloadHashes].map((hash) => archiveSha256Schema.parse(hash)).sort();
-  const originalAssetHashes = [...new Set(input.originalAssetHashes.map((hash) => archiveSha256Schema.parse(hash)))].sort();
-  return createHash("sha256")
-    .update(canonicalArchiveJson({ payloadHashes, originalAssetHashes }))
-    .digest("hex");
 }
 
 export const campaignArchiveDestinationSchema = z.discriminatedUnion("kind", [

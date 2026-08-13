@@ -1,4 +1,4 @@
-import { createDatabasePool, loadRuntimeConfig, type DatabasePool, type RuntimeConfig } from "../../../packages/database/src/index.js";
+import { createDatabasePool, loadRuntimeConfig } from "../../../packages/database/src/index.js";
 import { migrateDatabase, waitForDatabaseMigrations } from "../../../packages/database/src/migrate.js";
 import { buildServer } from "../../api/src/server.js";
 import { runWorker } from "../../worker/src/worker.js";
@@ -9,6 +9,21 @@ import {
   createProviderTransport
 } from "../../../packages/story-engine/src/provider-transport.js";
 import { runRuntimeLifecycle } from "./lifecycle.js";
+import { createApiGenerationApplication } from "./generation-api-composition.js";
+import { createWorkerGenerationApplication } from "./generation-worker-composition.js";
+import {
+  createApiIllustrationApplication,
+  createWorkerIllustrationApplication
+} from "./illustration-composition.js";
+import { dispatchRuntimeRole } from "./runtime-role.js";
+import { createRuntimeGenerationEventSource } from "./generation-event-composition.js";
+import { createApiMemoryApplication, createWorkerMemoryApplication } from "./memory-composition.js";
+import { createApiWorldCampaignApplication } from "./world-campaign-composition.js";
+import {
+  createApiProviderApplicationComposition,
+  createWorkerProviderApplicationComposition
+} from "./provider-application-composition.js";
+import { createProviderApplicationAdapter } from "../../api/src/provider-application-adapter.js";
 
 const config = loadRuntimeConfig();
 const abortController = new AbortController();
@@ -21,41 +36,6 @@ async function shutdown(signal: string): Promise<void> {
 process.once("SIGINT", () => void shutdown("SIGINT"));
 process.once("SIGTERM", () => void shutdown("SIGTERM"));
 
-async function dispatchRuntimeRole(
-  roleConfig: RuntimeConfig,
-  pool: DatabasePool,
-  signal: AbortSignal
-): Promise<void> {
-  if (roleConfig.role === "migrate") {
-    const applied = await migrateDatabase(pool, roleConfig.migrationDirectory, { allowMaintenanceMigrations: true });
-    logger.info({ event: "migrations_complete", applied });
-  } else {
-    if (roleConfig.role === "worker") {
-      await waitForDatabaseMigrations(pool, roleConfig.migrationDirectory, roleConfig.migrationWaitSeconds * 1000);
-      logger.info({ event: "migrations_verified", role: roleConfig.role });
-    } else {
-      const applied = await migrateDatabase(pool, roleConfig.migrationDirectory, {
-        allowMaintenanceMigrations: roleConfig.allowMaintenanceMigrations
-      });
-      logger.info({ event: "migrations_complete", role: roleConfig.role, applied });
-    }
-  }
-
-  if (roleConfig.role === "api") {
-    const server = await buildServer({ config: roleConfig, pool });
-    await server.listen({ host: roleConfig.host, port: roleConfig.port });
-    await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
-    await server.close();
-  } else if (roleConfig.role === "worker") {
-    await runWorker(pool, roleConfig, signal);
-  } else if (roleConfig.role === "all") {
-    const server = await buildServer({ config: roleConfig, pool });
-    await server.listen({ host: roleConfig.host, port: roleConfig.port });
-    await runWorker(pool, roleConfig, signal);
-    await server.close();
-  }
-}
-
 await runRuntimeLifecycle(config, abortController, {
   createPool: (roleConfig) => createDatabasePool(roleConfig.databaseUrl, roleConfig.databaseMaxConnections),
   createTransport: (roleConfig) => createProviderTransport({
@@ -64,5 +44,27 @@ await runRuntimeLifecycle(config, abortController, {
     })
   }),
   configureTransport: configureDefaultProviderTransport,
-  dispatchRole: dispatchRuntimeRole
+  createGenerationEvents: createRuntimeGenerationEventSource,
+  dispatchRole: (roleConfig, pool, signal, providerTransport, generationEvents) => dispatchRuntimeRole(roleConfig, pool, signal, {
+    migrateDatabase,
+    waitForDatabaseMigrations,
+    createApiProviders: (pool, credentialSecret, transport) => createApiProviderApplicationComposition(
+      pool,
+      { credentialSecret, transport }
+    ),
+    createWorkerProviders: (pool, credentialSecret, transport) => createWorkerProviderApplicationComposition(
+      pool,
+      { credentialSecret, transport }
+    ),
+    createProviderApiAdapter: createProviderApplicationAdapter,
+    createApiGeneration: createApiGenerationApplication,
+    createApiIllustration: createApiIllustrationApplication,
+    createApiMemory: createApiMemoryApplication,
+    createApiWorldCampaign: createApiWorldCampaignApplication,
+    createWorkerMemory: createWorkerMemoryApplication,
+    createWorkerIllustration: createWorkerIllustrationApplication,
+    createWorkerGeneration: createWorkerGenerationApplication,
+    buildServer,
+    runWorker
+  }, providerTransport, generationEvents)
 });

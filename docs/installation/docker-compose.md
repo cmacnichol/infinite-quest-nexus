@@ -10,7 +10,6 @@ notepad .env
 Set:
 
 - `POSTGRES_PASSWORD` to a unique database password
-- `CREDENTIAL_ENCRYPTION_KEY` to a long random value stored in the deployment's secret backup
 - `APP_PORT` when host port 8080 is unavailable
 
 ## Start
@@ -20,6 +19,8 @@ docker compose up --build
 ```
 
 Compose starts `postgres`, waits for its health check, then starts `infinitequest-app` with role `all`. The application applies online migrations before listening and retries database readiness with bounded waits.
+
+Docker Compose generates and persists a local credential-encryption key on first start. Supply `CREDENTIAL_ENCRYPTION_KEY` only when restoring an existing local deployment or when the operator needs to control the value. Back it up securely: changing or losing it makes saved provider credentials unreadable.
 
 ## Open
 

@@ -1,5 +1,17 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { checkClientBoundaries } from "./check-client-boundaries.mjs";
+import {
+  checkAssetImportStorageCompositionInventory,
+  checkPrivateStorageBoundaries,
+  isPrivateStorageInventorySource
+} from "./check-private-storage-boundaries.mjs";
+import { checkPrivateAssetMaintenanceBoundaries } from "./check-private-asset-maintenance-boundaries.mjs";
+import {
+  checkPortableCompositionBoundaries,
+  checkPortableCompositionInventory
+} from "./check-portable-composition-boundaries.mjs";
+import { checkLegacyAuthorityRemoval } from "./check-legacy-authority-removal.mjs";
 
 const output = execFileSync(
   "git",
@@ -8,6 +20,7 @@ const output = execFileSync(
 );
 const files = [...new Set(output.split(/\r?\n/u).filter(Boolean))].sort();
 const violations = [];
+const sourceInventory = [];
 
 // The root client is retained as a historical artifact, but is never shipped or
 // exercised by the application. Compatibility code is limited to explicit data
@@ -17,13 +30,37 @@ const LEGACY_MIGRATION_ALLOWLIST = [
   "apps/web/public/nexus.js",
   "packages/contracts/src/imports.ts",
   "packages/domain/src/infinite-worlds.ts",
+  "packages/domain/src/legacy-story-world.ts",
   "services/api/src/archive-routes.ts",
-  "services/api/src/import-service.ts",
-  "services/api/src/infinite-worlds-import-service.ts",
-  "services/api/src/server.ts"
+  "services/api/src/server.ts",
+  "packages/database/src/portable-import-family-repository.ts",
+  "services/runtime/src/portable-import-export-composition.ts"
 ];
 
-const codeExtension = /\.(?:cjs|html|js|mjs|ts)$/u;
+const RETIRED_WORLD_CAMPAIGN_AUTHORITY = [
+  "services/api/src/campaign-state-service.ts",
+  "services/api/src/campaign-transfer-service.ts",
+  "services/api/src/character-profile-service.ts",
+  "services/api/src/dashboard-service.ts",
+  "services/api/src/generation-service.ts",
+  "services/api/src/user-service.ts",
+  "services/api/src/world-generation-progress-service.ts",
+  "services/api/src/world-generator-service.ts",
+  "services/api/src/world-service.ts"
+];
+const REQUIRED_WORLD_CAMPAIGN_BOUNDARIES = [
+  "packages/database/src/play-loop-read-repository.ts"
+];
+const RETIRED_PROVIDER_AUTHORITY = [
+  "services/api/src/provider-service.ts",
+  "services/api/src/prompt-library-service.ts",
+  "services/api/src/turn-intent-service.ts",
+  "services/api/src/cost-service.ts",
+  "services/api/src/task-14d-character-profile-organizer-bridge.ts",
+  "services/api/src/task-14d-world-generation-bridge.ts"
+];
+
+const codeExtension = /\.(?:cjs|html|js|jsx|mjs|mts|ts|tsx)$/u;
 const activeCode = /^(?:apps|packages|services)\//u;
 const runtimeConfiguration = /^(?:Dockerfile|compose(?:\.[^/]+)?\.ya?ml|\.env\.example|deploy\/.*\.ya?ml|apps\/|packages\/|services\/)/u;
 const consoleWrite = /\bconsole\s*\.\s*(?:debug|error|info|log|trace|warn)\s*\(/u;
@@ -74,6 +111,9 @@ for (const file of files) {
 
   const text = normalizedText(file);
   if (text === null) continue;
+  if (isPrivateStorageInventorySource(normalized)) {
+    sourceInventory.push({ file: normalized, text });
+  }
 
   if (codeExtension.test(normalized) && consoleWrite.test(text) && !HISTORICAL_CLIENT_ALLOWLIST.has(normalized)) {
     violations.push(`${normalized}: direct console writes are prohibited; use the shared logger`);
@@ -88,13 +128,40 @@ for (const file of files) {
   }
 
   if (activeCode.test(normalized)) checkBrowserNetworkCalls(normalized, text);
+  violations.push(...checkPrivateStorageBoundaries(normalized, text));
+  violations.push(...checkPortableCompositionBoundaries(normalized, text));
 }
+
+violations.push(...checkAssetImportStorageCompositionInventory(sourceInventory));
+violations.push(...checkPrivateAssetMaintenanceBoundaries(sourceInventory));
+violations.push(...checkPortableCompositionInventory(sourceInventory));
+violations.push(...checkLegacyAuthorityRemoval(sourceInventory));
 
 for (const migrationFile of LEGACY_MIGRATION_ALLOWLIST) {
   if (!files.includes(migrationFile)) {
     violations.push(`${migrationFile}: stale legacy-migration allowlist entry`);
   }
 }
+
+for (const retiredFile of RETIRED_WORLD_CAMPAIGN_AUTHORITY) {
+  if (normalizedText(retiredFile) !== null) {
+    violations.push(`${retiredFile}: retired Task 14c authority must not remain callable`);
+  }
+}
+
+for (const retiredFile of RETIRED_PROVIDER_AUTHORITY) {
+  if (normalizedText(retiredFile) !== null) {
+    violations.push(`${retiredFile}: retired Task 14d authority must not remain callable`);
+  }
+}
+
+for (const requiredFile of REQUIRED_WORLD_CAMPAIGN_BOUNDARIES) {
+  if (normalizedText(requiredFile) === null) {
+    violations.push(`${requiredFile}: required Task 14c/14d boundary is missing`);
+  }
+}
+
+violations.push(...checkClientBoundaries());
 
 if (violations.length > 0) {
   process.stderr.write("Repository boundary check failed:\n");

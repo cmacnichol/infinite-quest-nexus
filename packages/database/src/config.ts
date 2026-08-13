@@ -40,7 +40,9 @@ export type RuntimeConfig = {
   allowMaintenanceMigrations: boolean;
   workerPollIntervalMs: number;
   workerLeaseSeconds: number;
-  webRoot: string;
+  workerGenerationConcurrency: number;
+  legacyWebRoot: string;
+  nextWebRoot: string;
   assetStorageDriver: "filesystem";
   assetStorageRoot: string;
   archiveStorageRoot: string;
@@ -112,6 +114,20 @@ function requiredIntegerSetting(name: string, fallback: number, minimum: number,
   return parsed;
 }
 
+function workerGenerationConcurrencySetting(): number {
+  const raw = process.env.WORKER_GENERATION_CONCURRENCY;
+  if (raw === undefined) return 1;
+  const normalized = raw.trim();
+  if (!/^\d+$/u.test(normalized)) {
+    throw new Error("WORKER_GENERATION_CONCURRENCY must be an integer between 1 and 4.");
+  }
+  const parsed = Number(normalized);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 4) {
+    throw new Error("WORKER_GENERATION_CONCURRENCY must be an integer between 1 and 4.");
+  }
+  return parsed;
+}
+
 const BUILT_IN_PROVIDER_ALLOWLIST = ["localhost", "127.0.0.0/8", "::1/128"] as const;
 
 function normalizeProviderAllowlistEntry(value: string): string {
@@ -157,19 +173,39 @@ export function loadRuntimeConfig(): RuntimeConfig {
   }
   const databaseUrl = secretSetting("DATABASE_URL");
   if (!databaseUrl) throw new Error("DATABASE_URL is required.");
+  const workerGenerationConcurrency = workerGenerationConcurrencySetting();
+  const databaseMaxConnections = integerSetting(
+    "DATABASE_MAX_CONNECTIONS",
+    roleValue === "worker" ? 8 : 12,
+    2,
+    100
+  );
+  const requiredWorkerConnections = roleValue === "worker"
+    ? workerGenerationConcurrency + 4
+    : roleValue === "all"
+      ? workerGenerationConcurrency + 8
+      : 0;
+  if (databaseMaxConnections < requiredWorkerConnections) {
+    throw new Error(
+      `DATABASE_MAX_CONNECTIONS must be at least ${requiredWorkerConnections} for APP_ROLE=${roleValue} `
+      + `when WORKER_GENERATION_CONCURRENCY=${workerGenerationConcurrency}.`
+    );
+  }
 
   return {
     role: roleValue as RuntimeConfig["role"],
     host: process.env.APP_HOST?.trim() || "0.0.0.0",
     port: integerSetting("APP_PORT", 8080, 1, 65535),
     databaseUrl,
-    databaseMaxConnections: integerSetting("DATABASE_MAX_CONNECTIONS", roleValue === "worker" ? 8 : 12, 2, 100),
+    databaseMaxConnections,
     migrationDirectory: resolve(process.env.MIGRATION_DIRECTORY?.trim() || "database/migrations"),
     migrationWaitSeconds: integerSetting("MIGRATION_WAIT_SECONDS", 120, 10, 3600),
     allowMaintenanceMigrations: booleanSetting("ALLOW_MAINTENANCE_MIGRATIONS", false),
     workerPollIntervalMs: integerSetting("WORKER_POLL_INTERVAL_MS", 2000, 250, 60000),
     workerLeaseSeconds: integerSetting("WORKER_LEASE_SECONDS", 60, 15, 3600),
-    webRoot: resolve(process.env.WEB_ROOT?.trim() || "apps/web/public"),
+    workerGenerationConcurrency,
+    legacyWebRoot: resolve(process.env.LEGACY_WEB_ROOT?.trim() || "apps/web/dist"),
+    nextWebRoot: resolve(process.env.NEXT_WEB_ROOT?.trim() || "apps/web-next/dist"),
     assetStorageDriver: "filesystem",
     assetStorageRoot: resolve(process.env.ASSET_STORAGE_ROOT?.trim() || "local-data/assets"),
     archiveStorageRoot: resolve(process.env.ARCHIVE_STORAGE_ROOT?.trim() || "local-data/archives"),

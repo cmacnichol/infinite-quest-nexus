@@ -17,6 +17,7 @@ import {
   discoverEmbeddingModels,
   discoverImageModels,
   discoverModels,
+  logProviderTransportError,
   pollImageProvider,
   providerTransportErrorDetails,
   reportedProviderCost,
@@ -25,6 +26,7 @@ import {
   type TextProviderProfile
 } from "../../packages/story-engine/src/providers.js";
 import { logger } from "../../packages/logger/src/index.js";
+import { setSogniSdkClientFactoryForTests } from "../../packages/story-engine/src/providers/illustration/sogni-sdk/index.js";
 
 const profile: TextProviderProfile = {
   providerType: "lmstudio",
@@ -75,7 +77,13 @@ describe("text provider adapters", () => {
 
   it("normalizes header timeouts into explicit safe transport diagnostics", async () => {
     const loggerError = vi.spyOn(logger, "error").mockImplementation(() => undefined);
-    const timeoutProfile = { ...profile, requestTimeoutMs: 420_000, apiKey: "synthetic-secret-token" };
+    const timeoutProfile = {
+      ...profile,
+      baseUrl: "http://provider-internal-host.test/private/v1",
+      model: "provider-internal-model",
+      requestTimeoutMs: 420_000,
+      apiKey: "synthetic-secret-token"
+    };
     const fetcher = vi.fn(async () => {
       throw new TypeError("fetch failed", { cause: Object.assign(new Error("Headers Timeout Error Bearer synthetic-secret-token"), { code: "UND_ERR_HEADERS_TIMEOUT" }) });
     });
@@ -93,14 +101,36 @@ describe("text provider adapters", () => {
       transportCode: "UND_ERR_HEADERS_TIMEOUT",
       causeCategory: "timeout",
       causeMessage: "The provider request timed out.",
-      endpoint: "http://lmstudio.test/api/v1/chat"
+      endpoint: "http://provider-internal-host.test/private/api/v1/chat"
     });
     const logged = JSON.stringify(loggerError.mock.calls);
     expect(logged).toContain('"event":"provider_transport_error"');
+    expect(logged).toContain('"diagnosticCode":"provider_request_timeout"');
     expect(logged).not.toContain("Headers Timeout Error");
     expect(logged).not.toContain("secret prompt");
     expect(logged).not.toContain("private action");
     expect(logged).not.toContain("synthetic-secret-token");
+    expect(logged).not.toContain("provider-internal-host");
+    expect(logged).not.toContain("provider-internal-model");
+    expect(logged).not.toContain("UND_ERR_HEADERS_TIMEOUT");
+    expect(logged).not.toContain("420000");
+
+    loggerError.mockClear();
+    logProviderTransportError(thrown, {
+      generationJobId: "job-correlation-id",
+      campaignId: "campaign-correlation-id"
+    });
+    expect(loggerError).toHaveBeenCalledWith(expect.objectContaining({
+      event: "provider_transport_error_correlated",
+      diagnosticCode: "provider_request_timeout",
+      generationJobId: "job-correlation-id",
+      campaignId: "campaign-correlation-id"
+    }));
+    const correlatedLog = JSON.stringify(loggerError.mock.calls);
+    expect(correlatedLog).not.toContain("provider-internal-host");
+    expect(correlatedLog).not.toContain("provider-internal-model");
+    expect(correlatedLog).not.toContain("UND_ERR_HEADERS_TIMEOUT");
+    expect(correlatedLog).not.toContain("420000");
     loggerError.mockRestore();
   });
 
@@ -978,5 +1008,74 @@ describe("text provider adapters", () => {
       instanceId: "z_image_turbo_bf16",
       contextLength: 0
     }]);
+  });
+
+  it("discovers Sogni SDK models only through the injected pinned transport", async () => {
+    const sogniProfile: TextProviderProfile = {
+      ...profile,
+      providerType: "sogni_sdk",
+      baseUrl: "https://api.sogni.ai/v1",
+      model: "flux2",
+      apiKey: "sogni-secret"
+    };
+    const fetch = vi.fn(async (_profile, _operation, url) => {
+      const responses: Record<string, unknown> = {
+        "https://socket.sogni.ai/api/v1/models/list": [
+          { id: "qwen-chat", name: "Qwen chat", SID: 1, media: "text", tier: "text-tier" },
+          { id: "flux2", name: "Flux 2", SID: 2, media: "image", tier: "image-tier" }
+        ],
+        "https://socket.sogni.ai/api/v1/status/network/fast/models": { "2": 7 },
+        "https://socket.sogni.ai/api/v1/status/network/relaxed/models": { "2": 3 },
+        "https://socket.sogni.ai/api/v2/models/tiers": {
+          "image-tier": {
+            steps: { min: 1, max: 20, step: 1, default: 8 },
+            guidance: { min: 0, max: 10, decimals: 1, default: 3.5 },
+            sampler: { allowed: ["Euler a"], default: "Euler a" },
+            scheduler: { allowed: ["Normal"], default: "Normal" }
+          }
+        },
+        "https://socket.sogni.ai/api/v1/size-presets/network/fast/model/flux2": [
+          { id: "small", label: "Small", width: 512, height: 512, ratio: "1:1" }
+        ]
+      };
+      expect(responses).toHaveProperty(url);
+      return new Response(JSON.stringify(responses[url]), { status: 200 });
+    });
+    const transport: ProviderTransport = {
+      fetch,
+      validateSdkEndpoint: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined)
+    };
+    const secondClient = vi.fn(async () => {
+      throw new Error("Sogni inventory created a second network client");
+    });
+    setSogniSdkClientFactoryForTests(secondClient as never);
+    try {
+      await expect(discoverImageModels(sogniProfile, transport)).resolves.toEqual([{
+        id: "flux2",
+        displayName: "Flux 2",
+      loaded: true,
+      instanceId: "flux2",
+      contextLength: 0,
+      workerCount: 7,
+      workerAvailability: [
+        expect.objectContaining({ type: "fast", workerCount: 7 }),
+        expect.objectContaining({ type: "relaxed", workerCount: 3 })
+      ],
+      media: "image",
+      imageOptions: expect.objectContaining({
+        samplers: ["euler_a"],
+        defaultSampler: "euler_a",
+        schedulers: ["normal"],
+        defaultScheduler: "normal",
+        sizePresets: [expect.objectContaining({ id: "small" })]
+      })
+    }]);
+    expect(transport.validateSdkEndpoint).toHaveBeenCalledOnce();
+      expect(fetch).toHaveBeenCalledTimes(5);
+      expect(secondClient).not.toHaveBeenCalled();
+    } finally {
+      setSogniSdkClientFactoryForTests();
+    }
   });
 });

@@ -22,6 +22,19 @@ async function temporaryProjectRoot(): Promise<string> {
   return directory;
 }
 
+// Polls on the real clock while fake timers are installed. A fixed real-time
+// sleep flakes under parallel suite load, where the filesystem work that
+// precedes the first connection attempt can take longer than the sleep.
+async function waitOnRealClock(condition: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error("Condition did not become true on the real clock.");
+    await new Promise<void>((resolvePromise) => {
+      realSetTimeout(resolvePromise, 1);
+    });
+  }
+}
+
 describe("ensureTestDatabase", () => {
   it.each([
     ["win32", "docker.exe"],
@@ -131,15 +144,13 @@ describe("ensureTestDatabase", () => {
       (error: unknown) => ({ settled: true, error })
     );
 
-    await new Promise<void>((resolvePromise) => {
-      realSetTimeout(resolvePromise, 10);
-    });
+    await waitOnRealClock(() => clients.length >= 1);
     expect(clients).toHaveLength(1);
     await vi.runAllTimersAsync();
     const result = await Promise.race([
       outcome,
       new Promise<{ settled: false; error: undefined }>((resolvePromise) => {
-        realSetTimeout(() => resolvePromise({ settled: false, error: undefined }), 50);
+        realSetTimeout(() => resolvePromise({ settled: false, error: undefined }), 5_000);
       })
     ]);
 

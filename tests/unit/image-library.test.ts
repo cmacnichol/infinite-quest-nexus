@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { assetListQuerySchema, assetMetadataUpdateSchema } from "../../packages/contracts/src/assets.js";
-import { scoreLibraryCandidate } from "../../services/api/src/illustration-resolution-service.js";
+import { scoreLibraryCandidate } from "../../services/runtime/src/illustration-resolution-job-adapter.js";
 
 describe("image library contracts", () => {
   it("normalizes custom metadata filters and bounded pagination", () => {

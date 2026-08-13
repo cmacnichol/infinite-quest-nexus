@@ -74,7 +74,7 @@ This page summarizes behavior implemented in the current repository. It is not a
 - Pending-job resume after a browser refresh
 - Typed Action and Scene direction prompt contracts, with required-beat coverage for directed scenes
 - Auto input classification with explicit confirmation for mixed or ambiguous entries
-- Streaming narration progress where the provider supports it
+- Live streaming of provisional narration text to the Story Player during generation, where the provider supports it — token deltas are persisted to `generation_jobs.partial_output` and pushed to the browser over SSE (`GET /generation-jobs/:jobId/stream`), rendered as draft text until the accepted turn commits (see `docs/operations/deferred-improvements.md` "Stream provisional story narration during generation" for what's still missing from the target architecture)
 - Rejected or incomplete generations cannot mutate accepted campaign state
 
 ## Providers

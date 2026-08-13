@@ -184,7 +184,7 @@ describe("story output integrity", () => {
 
   it("handles invalid json by asking for schema-complete json", () => {
     const repair = recoveryInstruction("invalid_json");
-    expect(repair).toContain("The preceding response was not a valid complete Infinite Quest story object. Recover the intended events and return one syntactically valid, schema-complete JSON object.");
+    expect(repair).toContain("Return one syntactically valid, schema-complete replacement JSON object for the same supported turn.");
     expect(repair).toContain('tracker_updates must be an array of JSON objects such as [{"name":"fictional tracker name","value":"new fictional value"}], or [] when unchanged');
 
     const repairWithErrors = recoveryInstruction("invalid_json", ["Unexpected end of JSON input"]);
@@ -213,19 +213,27 @@ describe("story output integrity", () => {
     expect(prompt).toContain("Doors open only when their true names are spoken.");
   });
 
-  it("places the campaign story-length profile in normal and recovery prompts", () => {
+  it("treats the campaign story-length profile as a soft pacing goal", () => {
     const extended = { profile: "extended" as const, minWords: 1200, maxWords: 2000 };
     const prompt = buildStoryUserPrompt({ campaign: { location: "Location Gamma" } }, "Continue.", false, [], extended);
     const payload = JSON.parse(prompt);
-    expect(payload.narration_length).toEqual({ profile: "extended", target_min_words: 1200, target_max_words: 2000 });
-    expect(payload.task).toContain("1200-2000 narration words");
-    expect(recoveryInstruction("output_limit", [], extended)).toContain("450-650 narration words");
+    expect(payload.narration_length).toEqual({
+      profile: "extended",
+      preferred_min_words: 1200,
+      preferred_max_words: 2000,
+      policy: "soft_pacing_goal",
+      early_stop_allowed: true
+    });
+    expect(payload.task).toContain("End early when the turn is complete");
+    expect(payload.instructions.join(" ")).toContain("Fidelity to authoritative context and the current turn input outranks length.");
+    expect(recoveryInstruction("output_limit", [], extended)).toContain("soft pacing goal");
   });
 
   it("privately requests readable narration paragraphs with a versioned protocol", () => {
-    expect(STORY_PROMPT_PROTOCOL_VERSION).toBe("story-v11-structured-character-profile");
+    expect(STORY_PROMPT_PROTOCOL_VERSION).toBe("story-v12-soft-length-goal");
     expect(STORY_SYSTEM_PROMPT).toContain("paragraphs separated by two newline characters");
     expect(STORY_SYSTEM_PROMPT).toContain("change of speaker, scene transition, or meaningful shift in focus");
+    expect(STORY_SYSTEM_PROMPT).toContain("The length range is a soft pacing goal, not a requirement.");
   });
 
   it("extracts partial narration safely from incomplete streaming JSON", () => {

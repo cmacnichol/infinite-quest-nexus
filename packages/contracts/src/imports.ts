@@ -172,14 +172,27 @@ export type CyoaImportPreviewResult = {
   };
 };
 
-export type ImportProgressReport = {
-  importId: string;
-  status: "processing" | "completed" | "failed";
-  phase: string;
-  progressPercent: number;
-  message: string;
-  worldId?: string;
-  worldVersionId?: string;
-  duplicate?: boolean;
-  errorMessage?: string;
-};
+export const importProgressQuerySchema = z.object({
+  key: z.string().trim().min(1).max(1024)
+}).strict();
+
+/** Exact allowlisted `/api/v1/imports/progress` response projection. */
+export const importProgressResponseSchema = z.object({
+  importId: z.uuid().optional(),
+  status: z.enum(["processing", "completed", "failed"]),
+  phase: z.string().trim().min(1).max(200),
+  progressPercent: z.number().finite().min(0).max(100),
+  message: z.string().trim().min(1).max(2000),
+  worldId: z.uuid().optional(),
+  worldVersionId: z.uuid().optional(),
+  duplicate: z.boolean().optional(),
+  errorMessage: z.string().trim().min(1).max(2000).optional()
+}).strict();
+
+export const importProgressNotFoundResponseSchema = z.object({
+  error: z.literal("No active import found for the provided key.")
+}).strict();
+
+export type ImportProgressQuery = z.infer<typeof importProgressQuerySchema>;
+export type ImportProgressReport = z.infer<typeof importProgressResponseSchema>;
+export type ImportProgressNotFoundResponse = z.infer<typeof importProgressNotFoundResponseSchema>;

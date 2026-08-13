@@ -5,6 +5,14 @@ specification, code, tests, API definitions, or existing documentation.
 Each includes a recommended default so implementation isn't blocked while
 waiting for an answer.
 
+**C8 resolution ledger (2026-08-02):** Q1 and Q4 are closed implementation
+contracts, not open design questions. Progressive narration is retained only
+through typed `GenerationEvent.narration`; retry-latest remains visibly distinct
+from append. Explicit server cancellation exists and is distinct from local
+watcher detach. HTTP/Web adapters live in `packages/client-web`, endpoint
+adoption is incremental, and a generic watcher for non-generation jobs remains
+deferred.
+
 ---
 
 ### Q1 — Does the Story Player actually render streamed partial narration text today, or only use the SSE stream for job status?
@@ -46,6 +54,24 @@ and watching Story Player during a real generation, or by reading
 `story.js:1188-1230` line-by-line to confirm what the SSE `onmessage`
 handler actually writes to the DOM.
 
+**RESOLVED (2026-07-31):** Streaming narration text is real and rendered
+today — this reverses the recommended default. `server.ts:753` sends
+`partialNarration` on every SSE tick, populated in
+`generation-service.ts:1850/1880` via `extractPartialNarration(accumulated)`
+as tokens stream in. `story.js:1233-1234` reads `job.partialNarration` and
+calls `renderStreamingPreview()`, which (`story.js:1009-1054`) writes the
+text directly into a `.streaming-narration` DOM node with a "Streaming
+Live" badge, pulsing cursor, and auto-scroll-follow behavior. The two
+docs previously trusted (`capabilities.md`, `deferred-improvements.md`)
+are stale. **Action:** the replacement Story Player's generation-progress
+UI should show live streaming narration text, not staged status copy.
+
+**IMPLEMENTED CONTRACT (C8, 2026-08-02):** Progressive narration remains
+visible, but the app no longer reads raw `partialNarration` or owns the
+EventSource/poll monitor. `packages/client-web` validates transport snapshots,
+`GenerationWorkflow` emits `GenerationEvent.narration`, and the Story Player
+renders that typed text. Raw `partialOutput` is never parsed or rendered.
+
 ---
 
 ### Q2 — Is the legacy single-image illustration path still reachable from the current frontend, or is it vestigial backend surface?
@@ -60,19 +86,36 @@ backend-only concern.
 
 **What was searched:** `server.ts:842-878` (both endpoint families exist
 and are live), ADR 0025 and 0033 (describe the newer segmented model as the
-current design direction), but the frontend research pass did not
-conclusively trace whether `story.js` still calls the legacy
-single-illustration endpoints anywhere.
+current design direction). The initial frontend research pass did not
+conclusively trace whether the then-legacy `story.js` called the
+single-illustration endpoints.
 
-**Current evidence:** Inconclusive from static reading alone — both API
-routes are registered and neither is marked deprecated in code or docs.
+**Current evidence at initial review:** Inconclusive from static reading alone
+— both API routes were registered and neither was marked deprecated in code or
+docs.
 
 **Recommended default assumption:** Design the replacement UI around the
 segmented illustration model only (matches current product direction per
 ADR 0025/0033); do not build UI for the legacy single-image path unless a
 runtime/grep pass confirms it's still called from `story.js`.
 
-**Who should answer:** The maintainer, via `grep -n "illustration-asset\|/illustrations\"" apps/web/public/story.js`.
+**Who should answer:** Resolved; the historical check searched the legacy Story
+Player for `illustration-asset` and `/illustrations` calls.
+
+**RESOLVED (2026-07-31):** Vestigial — the legacy path was not reachable
+from the UI. At the time, `story.js` defined `regenerateIllustration()` (calls
+`POST /turns/:turnId/illustrations`) and `removeIllustration()` (calls
+`PUT /turns/:turnId/illustration-asset`), wired to click-handlers for
+`data-action="regenerate-image"`/`"remove-image"`. But no button anywhere in
+the render templates
+(`renderScene`, `segmentIllustrationMarkup`, `renderStoryIllustration`)
+ever emits those `data-action` values — only segmented-model actions
+(`regenerate-segment-image`, `edit-segment-image-prompt`,
+`why-segment-image`, `rebuild-turn-segments`, `generate-turn-segments`)
+are rendered. The handlers are orphaned dead code. **Action:** proceed
+with the segmented illustration model only, as recommended; the legacy
+endpoints are backend-only surface (candidates for a separate cleanup,
+not something the replacement UI needs to support).
 
 ---
 
@@ -103,6 +146,13 @@ endpoints returning hundreds+ of items.
 **Who should answer:** The product owner/maintainer, based on real
 deployment data (or their own usage expectations).
 
+**RESOLVED (2026-07-31):** Maintainer confirmed the recommended default.
+Re-checked `server.ts:387` (`GET /api/v1/worlds`) and `server.ts:479`
+(`GET /api/v1/campaigns`) — neither has pagination or query parameters.
+**Action:** keep client-side substring filtering for the initial
+replacement; revisit server-side search as a fast-follow only if real
+usage shows list endpoints returning hundreds+ of items.
+
 ---
 
 ### Q4 — Is retry-latest ("replace last turn") already visually distinguished from a normal new-turn generation in the current UI?
@@ -125,6 +175,21 @@ it already exists, the replacement just preserves it more clearly).
 
 **Who should answer:** The maintainer, via a runtime pass triggering
 retry-latest and observing the exact UI copy shown.
+
+**RESOLVED (2026-07-31):** Yes, it's already differentiated — this
+reverses the recommended default. `story.js:388-394` (`renderScene`):
+when `state.pendingGeneration?.operationKind === "replace_latest"`, the
+affected scene renders a dedicated banner — "Replacement in progress" /
+"The accepted turn is preserved until its replacement is validated." On
+failure, `story.js:997` appends "The original turn was preserved." to the
+failure toast for the same `operationKind`. **Action:** the replacement
+UI should preserve and clarify this existing pattern rather than invent
+differentiation from scratch.
+
+**IMPLEMENTED CONTRACT (C8, 2026-08-02):** The typed workflow rewire preserves
+the replacement banner and original-turn-preserved failure copy. A structured
+active-job 409 resumes the authoritative job and cannot turn a replacement into
+an append or mint a second idempotency key.
 
 ---
 
@@ -156,6 +221,19 @@ just a straightforward migration).
 **Who should answer:** The maintainer, via a runtime pass through Campaign
 detail / settings areas in the current Nexus app.
 
+**RESOLVED (2026-07-31):** One consolidated section, not scattered, but
+also not a dedicated top-level screen today. `index.html:288`
+(`#campaignContextSection`, class `chronicle-settings-section`, labelled
+"Chronicle") holds the semantic-memory health badge, embedding provider
+selector, compression setting, "Rebuild memory" (reindex) button, and
+"View context preview" disclosure all together, inside the single
+Campaign Management screen (`nexus.js`). Backed by
+`GET .../memory/context-preview` and `POST .../memory/reindex`
+(`nexus.js:4618,4638`). **Action:** proceed with CHRONICLE-HEALTH as a new
+elevated/consolidated screen as recommended — the current state is
+already grouped, so this is a straightforward migration/elevation, not a
+recovery from scattered panels.
+
 ---
 
 ### Q6 — Is there a cross-campaign "needs attention" indicator anywhere in the current UI (e.g., on the dashboard) for recoverable/failed jobs?
@@ -182,6 +260,13 @@ new one.
 **Who should answer:** The maintainer, via reading `dashboard-service.ts`
 in full or a runtime pass on the current dashboard with a deliberately
 induced `recoverable` job.
+
+**RESOLVED (2026-07-31):** Confirmed absent. Read `dashboard-service.ts`
+in full — `getDashboardStats()` returns only world/campaign/turn counts
+and provider cost totals; there is no field anywhere in the response
+shape for recoverable/failed jobs. **Action:** design NEX-DASH to include
+a "needs attention" summary as a genuine new improvement, as recommended
+— this is not a retained requirement, since nothing like it exists today.
 
 ---
 
@@ -211,6 +296,14 @@ finalizing the illustration recovery flow.
 the intended pattern or whether a dedicated discard endpoint should be
 added.
 
+**RESOLVED (2026-07-31):** Maintainer confirmed the recommended default.
+Re-checked the full `image-jobs` inventory in `server.ts`: only
+`GET /campaigns/:campaignId/image-jobs`, `GET /image-jobs/:jobId`, and
+`POST /image-jobs/:jobId/retry` exist — no discard endpoint. **Action:**
+treat `DELETE /illustration-segments/:segmentId/images/:variantIndex` as
+the practical discard equivalent for image jobs in the replacement UI; no
+new backend endpoint is needed.
+
 ---
 
 ### Q8 — Should the replacement UI support a light theme, or remain dark-only by design?
@@ -234,5 +327,13 @@ decision, not an implicit requirement of this migration.
 
 **Who should answer:** The product owner/maintainer — a product/brand
 decision, not a technical one.
+
+**RESOLVED (2026-07-31):** Maintainer decided to plan for light theme
+support — this overrides the recommended default (dark-only). **Action:**
+`DESIGN_SYSTEM.md` and the replacement token set (successor to
+`tokens.css`) should define both dark and light color roles from the
+start, rather than treating light theme as out-of-scope for this
+migration. Confirm with the maintainer whether light should ship at
+initial launch or as a fast-follow within the same design-system scope.
 
 ---

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { resolve } from "node:path";
 import { buildServer } from "../../services/api/src/server.js";
-import { getSessionUserProfile, updateSessionUserProfile } from "../../services/api/src/user-service.js";
+import { serverOptions } from "../helpers/build-server-options.js";
 import { userProfileSchema, userSettingsSchema, userProfileUpdateSchema } from "../../packages/contracts/src/users.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
@@ -18,7 +18,9 @@ function makeConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
     allowMaintenanceMigrations: false,
     workerPollIntervalMs: 1000,
     workerLeaseSeconds: 60,
-    webRoot: resolve("apps/web/public"),
+    workerGenerationConcurrency: 1,
+    legacyWebRoot: resolve("apps/web/public"),
+    nextWebRoot: resolve("apps/web-next"),
     assetStorageDriver: "filesystem",
     assetStorageRoot: resolve("local-data/assets"),
     archiveStorageRoot: resolve("local-data/archives"),
@@ -140,7 +142,7 @@ describe("user service and API endpoints", () => {
       }
     } as unknown as DatabasePool;
 
-    const app = await buildServer({ config: makeConfig(), pool: mockPool });
+    const app = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool }));
 
     const getSessionRes = await app.inject({
       method: "GET",

@@ -5,8 +5,11 @@ import {
   providerProfileUpdateSchema,
   providerTextRequestSchema,
   generationRequestSchema,
+  generationJobSnapshotSchema,
+  generationStreamSnapshotSchema,
   illustrationConfigSchema,
   illustrationGenerationRequestSchema,
+  illustrationSegmentRequestSchema,
   sogniIllustrationProviderConfigSchema,
   sogniSdkIllustrationProviderConfigSchema,
   storyTurnOutputSchema,
@@ -14,6 +17,60 @@ import {
 } from "../../packages/contracts/src/generation.js";
 
 describe("generation contracts", () => {
+  it("requires operation-matched replacement provenance in stream snapshots", () => {
+    const common = {
+      id: "11111111-1111-4111-8111-111111111111",
+      campaignId: "22222222-2222-4222-8222-222222222222",
+      expectedTurnNumber: 2,
+      status: "generating" as const,
+      action: "Open the gate",
+      attempts: 1,
+      partialNarration: null,
+      errorCode: null,
+      errorMessage: null,
+      resultTurnId: null
+    };
+
+    expect(generationStreamSnapshotSchema.parse({ ...common, operationKind: "append", replacementTurnId: null }))
+      .toMatchObject({ operationKind: "append", replacementTurnId: null });
+    expect(generationStreamSnapshotSchema.parse({ ...common, operationKind: "replace_latest", replacementTurnId: "33333333-3333-4333-8333-333333333333" }))
+      .toMatchObject({ operationKind: "replace_latest", replacementTurnId: "33333333-3333-4333-8333-333333333333" });
+    expect(generationStreamSnapshotSchema.safeParse({ ...common, operationKind: "append", replacementTurnId: "33333333-3333-4333-8333-333333333333" }).success).toBe(false);
+    expect(generationStreamSnapshotSchema.safeParse({ ...common, operationKind: "replace_latest", replacementTurnId: null }).success).toBe(false);
+  });
+
+  it("rejects raw backend failure details from public generation snapshots", () => {
+    const rawFailure = "MODEL_SECRET=distinctive-raw-provider-detail";
+    const common = {
+      id: "11111111-1111-4111-8111-111111111111",
+      campaignId: "22222222-2222-4222-8222-222222222222",
+      expectedTurnNumber: 2,
+      status: "failed" as const,
+      action: "Open the gate",
+      operationKind: "append" as const,
+      replacementTurnId: null,
+      attempts: 1,
+      partialNarration: null,
+      errorCode: "provider_transport_error",
+      errorMessage: rawFailure,
+      resultTurnId: null,
+      requestedInputMode: "action" as const,
+      resolvedInputMode: "action" as const,
+      inputModeSource: "explicit" as const,
+      createdAt: "2026-08-03T00:00:00.000Z",
+      updatedAt: "2026-08-03T00:00:00.000Z"
+    };
+
+    expect(generationJobSnapshotSchema.safeParse(common).success).toBe(false);
+    expect(generationStreamSnapshotSchema.safeParse(common).success).toBe(false);
+  });
+
+  it("accepts and strips a legacy illustration-segment idempotency key", () => {
+    expect(illustrationSegmentRequestSchema.parse({
+      idempotencyKey: "legacy-segment-request-key"
+    })).toEqual({ mode: "missing" });
+  });
+
   describe("providerProfileInputSchema", () => {
     it("accepts valid input with minimum required fields and applies defaults", () => {
       const input = {
