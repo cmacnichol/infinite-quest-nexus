@@ -41,7 +41,7 @@ const libraryMarkup = `
         <input id="world-search" type="search" autocomplete="off" placeholder="Search by title or description" />
         <kbd aria-hidden="true">/</kbd>
       </label>
-      <p id="result-count" class="result-count" aria-live="polite">Loading worlds…</p>
+      <p id="result-count" class="result-count" aria-live="polite">Loading worldsï¿½</p>
       <a class="library-create-action" href="${worldCreationPath()}">
         <span>Create world</span>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
@@ -191,9 +191,8 @@ export function mountWorldLibraryPage(
       if (!response.ok) throw new Error(`Request failed with status ${response.status}.`);
       worlds = parseWorldListResponse(await response.json()).worlds;
       renderWorlds();
-    } catch (error) {
+    } catch {
       if (disposed || controller.signal.aborted) return;
-      console.error("World Library request failed", error);
       worldGrid.setAttribute("aria-busy", "false");
       resultCount.textContent = "Worlds unavailable";
       const message = document.createElement("div");
