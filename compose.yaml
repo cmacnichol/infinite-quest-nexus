@@ -2,7 +2,7 @@ name: infinitequest
 
 services:
   postgres:
-    image: pgvector/pgvector:0.8.5-pg18-trixie
+    image: pgvector/pgvector:0.8.6-pg18-trixie
     environment:
       POSTGRES_DB: infinitequest
       POSTGRES_USER: infinitequest
