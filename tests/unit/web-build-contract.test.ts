@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { beforeAll, describe, expect, test } from "vitest";
@@ -14,7 +14,7 @@ function localAssetPaths(html: string, prefix: string): string[] {
 
 describe("web build contract", () => {
   beforeAll(() => {
-    execFileSync("pnpm", ["build"], {
+    execSync("pnpm build:web:legacy && pnpm build:web:next", {
       cwd: rootDirectory,
       encoding: "utf8",
       stdio: "pipe"
@@ -39,8 +39,12 @@ describe("web build contract", () => {
     const distDirectory = path.join(rootDirectory, "apps/web-next/dist");
     const html = readFileSync(path.join(distDirectory, "index.html"), "utf8");
     const assetPaths = localAssetPaths(html, "/app/");
+    const themeBootstrapPath = "theme-bootstrap.js";
 
     expect(assetPaths).not.toEqual([]);
+    expect(assetPaths).toContain(themeBootstrapPath);
+    expect(existsSync(path.join(distDirectory, themeBootstrapPath))).toBe(true);
+    expect(html.indexOf(`/app/${themeBootstrapPath}`)).toBeLessThan(html.indexOf('type="module"'));
     for (const assetPath of assetPaths) {
       expect(existsSync(path.join(distDirectory, assetPath)), assetPath).toBe(true);
     }

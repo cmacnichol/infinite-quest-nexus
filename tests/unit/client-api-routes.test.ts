@@ -1282,6 +1282,79 @@ describe("client API route contracts without PostgreSQL", () => {
     }
   });
 
+  it("binds character preview generation to the server owner and forwards only the parsed progress key", async () => {
+    const calls: Array<{ scope: Record<string, string>; request: Record<string, unknown> }> = [];
+    const app = await buildServer(serverOptions({
+      config: config(storageRoot),
+      pool: mockPool(),
+      worldCampaign: testWorldCampaignApplication({
+        generatePlayableCharacterPreview: async (scope, request) => {
+          calls.push({ scope: { ...scope }, request: { ...request } });
+          return { character: { id: "trusted-edit-id", name: "Mara", characterText: "A patient observer.", rpgStats: [], defaultTriggers: [], source: {} } };
+        }
+      })
+    }));
+    const payload = {
+      content: WORLD_CONTENT,
+      prompt: "Deepen the observer.",
+      characterId: "observer",
+      progressKey: "character-preview:route-1"
+    };
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/worlds/playable-characters/generate-preview",
+        payload
+      });
+      expect(response.statusCode).toBe(200);
+      expect(calls).toEqual([{
+        scope: { ownerUserId: OWNER_ID },
+        request: expect.objectContaining({
+          prompt: "Deepen the observer.",
+          characterId: "observer",
+          progressKey: "character-preview:route-1"
+        })
+      }]);
+
+      const spoofed = await app.inject({
+        method: "POST",
+        url: "/api/v1/worlds/playable-characters/generate-preview",
+        payload: { ...payload, ownerUserId: "99999999-9999-4999-8999-999999999999" }
+      });
+      expect(spoofed.statusCode).toBe(400);
+      expect(calls).toHaveLength(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects a malformed character preview projection instead of leaking collaborator fields", async () => {
+    const leakMarker = "SERVER_ONLY_OWNER_MARKER";
+    const app = await buildServer(serverOptions({
+      config: config(storageRoot),
+      pool: mockPool(),
+      worldCampaign: testWorldCampaignApplication({
+        generatePlayableCharacterPreview: async () => ({
+          character: { id: "trusted", name: "Mara", characterText: "Guidance", rpgStats: [], defaultTriggers: [], source: {} },
+          ownerUserId: leakMarker
+        }) as never
+      })
+    }));
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/worlds/playable-characters/generate-preview",
+        payload: { content: WORLD_CONTENT, prompt: "Create", progressKey: "character-preview:strict" }
+      });
+      expect(response.statusCode).toBe(500);
+      expect(response.body).not.toContain(leakMarker);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("uses structured envelopes for sync 404s, initial SSE failures, and malformed service projections", async () => {
     const missingSyncApp = await buildServer(serverOptions({
       config: config(storageRoot),
