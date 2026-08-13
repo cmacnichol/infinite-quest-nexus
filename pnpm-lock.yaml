@@ -34,7 +34,7 @@ importers:
         version: 3.10.1
       node-pg-migrate:
         specifier: 9.0.0
-        version: 9.0.0(@types/pg@8.20.0)(pg@8.22.0)
+        version: 9.0.0(@types/pg@8.20.3)(pg@8.22.0)
       pg:
         specifier: ^8.16.3
         version: 8.22.0
@@ -73,8 +73,8 @@ importers:
         specifier: ^24.3.0
         version: 24.13.3
       '@types/pg':
-        specifier: ^8.15.5
-        version: 8.20.0
+        specifier: ^8.20.3
+        version: 8.20.3
       '@types/unzipper':
         specifier: 0.10.11
         version: 0.10.11
@@ -1135,8 +1135,8 @@ packages:
   '@types/node@24.13.3':
     resolution: {integrity: sha512-Dh8vAsV36ig5wa9OX4pXvMc9D3Veibfw2wix0CUwYODLD8nkj9UsLjASr49nPg+2eKzxhBV+v7L8pXvT4e639Q==}
 
-  '@types/pg@8.20.0':
-    resolution: {integrity: sha512-bEPFOaMAHTEP1EzpvHTbmwR8UsFyHSKsRisLIHVMXnpNefSbGA1bD6CVy+qKjGSqmZqNqBDV2azOBo8TgkcVow==}
+  '@types/pg@8.20.3':
+    resolution: {integrity: sha512-4Tvg+HO6+oQaAkpT8GTYoSExzpGGZz532GXgbbCElWJQeQdMozBWxEKNBhJJpHFjWXsMxqPbyypvj/89FWNoSQ==}
 
   '@types/readdir-glob@1.1.5':
     resolution: {integrity: sha512-raiuEPUYqXu+nvtY2Pe8s8FEmZ3x5yAH4VkLdihcPdalvsHltomrRC9BzuStrJ9yk06470hS0Crw0f1pXqD+Hg==}
@@ -3671,7 +3671,7 @@ snapshots:
     dependencies:
       undici-types: 7.18.2
 
-  '@types/pg@8.20.0':
+  '@types/pg@8.20.3':
     dependencies:
       '@types/node': 24.13.3
       pg-protocol: 1.15.0
@@ -4759,14 +4759,14 @@ snapshots:
 
   node-int64@0.4.0: {}
 
-  node-pg-migrate@9.0.0(@types/pg@8.20.0)(pg@8.22.0):
+  node-pg-migrate@9.0.0(@types/pg@8.20.3)(pg@8.22.0):
     dependencies:
       glob: 13.0.6
       jiti: 2.7.0
       pg: 8.22.0
       yargs: 18.0.0
     optionalDependencies:
-      '@types/pg': 8.20.0
+      '@types/pg': 8.20.3
 
   non-layered-tidy-tree-layout@2.0.2:
     optional: true
