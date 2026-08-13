@@ -7,5 +7,14 @@
     "declaration": false,
     "noEmit": false
   },
-  "exclude": ["tests", "**/*.test.ts", "**/*.spec.ts", "vitest*.ts", "packages/client-core", "packages/client-web", "tests/fixtures/client-boundaries"]
+  "exclude": [
+    "apps/web-next",
+    "tests",
+    "**/*.test.ts",
+    "**/*.spec.ts",
+    "vitest*.ts",
+    "packages/client-core",
+    "packages/client-web",
+    "tests/fixtures/client-boundaries"
+  ]
 }
