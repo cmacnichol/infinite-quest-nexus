@@ -96,7 +96,8 @@ env/
 .projectmem/
 .idea/
 .vscode/
-.claude/
+/.claude/*
+!/.claude/CLAUDE.md
 *.swp
 *.swo
 *~

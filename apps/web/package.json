@@ -1,0 +1,17 @@
+{
+  "name": "@infinite-quest/web-legacy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@infinite-quest/client-core": "workspace:*",
+    "@infinite-quest/client-web": "workspace:*"
+  },
+  "devDependencies": {
+    "vite": "^7.3.6"
+  },
+  "scripts": {
+    "build": "vite build",
+    "check": "tsc --ignoreConfig --noEmit --allowJs --checkJs false --target ES2023 --module ESNext --moduleResolution Bundler --lib ES2023,DOM --types vite/client,node src/legacy-client-entry.ts vite.config.ts"
+  }
+}

@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ProviderDestinationNotAllowedError } from "../../packages/security/src/provider-network-policy.js";
-import { imageProviderFailureMetadata } from "../../services/api/src/image-service.js";
+import { imageProviderFailureMetadata } from "../../services/runtime/src/illustration-image-job-adapter.js";
 
 describe("durable asynchronous image jobs", () => {
   it("classifies provider destination denials as permanent image-job failures", () => {
@@ -16,14 +16,14 @@ describe("durable asynchronous image jobs", () => {
   });
 
   it("persists and resumes a provider workflow instead of submitting it twice", async () => {
-    const source = await readFile(resolve("services/api/src/image-service.ts"), "utf8");
+    const source = await readFile(resolve("services/runtime/src/illustration-image-job-adapter.ts"), "utf8");
 
     expect(source).toContain("idempotencyKey: `${job.id}:${job.generation_revision}`");
     expect(source).toContain("generation_revision = generation_revision + 1");
-    expect(source).toContain("if (job.remote_job_id)");
-    expect(source).toContain("pollImageProvider(provider, { remoteJobId: job.remote_job_id })");
-    expect(source).toContain("remote_job_id = $3");
-    expect(source).toContain("response.error.retryable");
+    expect(source).toContain("ports.imageProvider.executeImage");
+    expect(source).toContain("remoteJobId: job.remote_job_id");
+    expect(source).not.toContain("pollImageProvider(");
+    expect(source).toContain("remote_job_id = COALESCE(remote_job_id, $3)");
     expect(source).toContain("retryableRemoteFailure");
     expect(source).toContain("persistedSogniTerminalError");
     expect(source).toContain('["5001", "5002", "5003", "5005"]');
@@ -59,7 +59,7 @@ describe("durable asynchronous image jobs", () => {
 
   it("extends the durable queue with an owner-scoped world-cover target", async () => {
     const migration = await readFile(resolve("database/migrations/0030_world_cover_image_jobs.sql"), "utf8");
-    const source = await readFile(resolve("services/api/src/image-service.ts"), "utf8");
+    const source = await readFile(resolve("services/runtime/src/illustration-image-job-adapter.ts"), "utf8");
 
     expect(migration).toContain("target_type IN ('turn_illustration', 'world_cover')");
     expect(migration).toContain("image_jobs_one_active_world_cover_idx");
@@ -67,29 +67,33 @@ describe("durable asynchronous image jobs", () => {
     expect(source).toContain("export async function enqueueWorldCover");
     expect(source).toContain("export async function getLatestWorldCoverJob");
     expect(source).toContain('targetType: "world_cover"');
-    expect(source).toContain("persistWorldCover");
-    expect(source).toContain("if (job.campaign_id)");
+    expect(source).toContain("publication.completeClaimedImageJob");
+    expect(source).not.toContain("persistWorldCover");
   });
 
   it("derives segment-scoped image work without mutating accepted turns", async () => {
     const migration = await readFile(resolve("database/migrations/0033_segmented_turn_illustrations.sql"), "utf8");
-    const imageService = await readFile(resolve("services/api/src/image-service.ts"), "utf8");
-    const segmentService = await readFile(resolve("services/api/src/segmented-illustration-service.ts"), "utf8");
+    const imageService = await readFile(resolve("services/runtime/src/illustration-image-job-adapter.ts"), "utf8");
+    const segmentService = await readFile(resolve("services/runtime/src/illustration-segment-job-adapter.ts"), "utf8");
+    const publication = await readFile(
+      resolve("services/runtime/src/illustration-asset-publication-composition.ts"),
+      "utf8",
+    );
 
     expect(migration).toContain("CREATE TABLE turn_illustration_sets");
     expect(migration).toContain("CREATE TABLE turn_illustration_segments");
     expect(migration).toContain("CREATE TABLE turn_illustration_segment_assets");
     expect(migration).toContain("CREATE TABLE illustration_prompt_jobs");
     expect(migration).toContain("image_jobs_one_active_segment_idx");
-    expect(imageService).toContain("if (job.segment_id)");
+    expect(imageService).toContain("if (job.segment_id &&");
     expect(segmentService).toContain("enqueueAcceptedTurnIllustrationSegments");
     expect(segmentService).toContain("illustration_prompt_refinement");
     expect(segmentService).toContain("export async function regenerateSegmentIllustration");
     expect(segmentService).toContain("export async function removeSegmentIllustrationVariant");
     expect(segmentService).toContain("turns.turn_number = campaigns.active_turn_number");
     expect(segmentService).toContain("targetVariantIndex: request.variantIndex");
-    expect(imageService).toContain("hasRequestedVariant");
-    expect(imageService).toContain("provider_request_metadata.targetVariantIndex");
+    expect(publication).toContain("job.providerRequestMetadata.targetVariantIndex");
+    expect(publication).toContain("firstVariantIndex + index");
     expect(segmentService).not.toContain("UPDATE turns SET");
   });
 

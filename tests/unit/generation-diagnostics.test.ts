@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  isSafeGenerationDiagnosticErrorCode,
   runTurnGenerationPhase,
   TURN_GENERATION_STALL_INTERVAL_MS
 } from "../../services/api/src/generation-diagnostics.js";
@@ -30,6 +31,14 @@ afterEach(() => {
 });
 
 describe("turn generation phase diagnostics", () => {
+  it("recognizes active generation as a safe diagnostic error code", () => {
+    expect(isSafeGenerationDiagnosticErrorCode("active_generation_exists")).toBe(true);
+  });
+
+  it("rejects private diagnostic error codes", () => {
+    expect(isSafeGenerationDiagnosticErrorCode("private_provider_token")).toBe(false);
+  });
+
   it("logs phase start and completion with correlated durations", async () => {
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
     let now = 1_000;

@@ -14,7 +14,8 @@ The application supports the following runtime settings, but a deployment manife
 | `ALLOW_MAINTENANCE_MIGRATIONS` | `false` | Existing-database maintenance opt-in |
 | `WORKER_POLL_INTERVAL_MS` | `2000` | Durable queue polling interval |
 | `WORKER_LEASE_SECONDS` | `60` | Job lease duration |
-| `WEB_ROOT` | `apps/web/public` | Active web assets |
+| `LEGACY_WEB_ROOT` | `apps/web/dist` | Built Nexus and Story Player assets served under `/nexus/` and `/story` |
+| `NEXT_WEB_ROOT` | `apps/web-next/dist` | Built replacement application assets served under `/app/` |
 | `ASSET_STORAGE_ROOT` | `local-data/assets` | Filesystem asset root |
 | `CREDENTIAL_ENCRYPTION_KEY` / `_FILE` | Empty | Provider-key encryption secret |
 | `CORS_ALLOWED_ORIGINS` | Empty | Comma-separated exact browser origins; empty permits local same-origin access only |
@@ -25,6 +26,8 @@ The application supports the following runtime settings, but a deployment manife
 | `API_ASSET_BODY_LIMIT_BYTES` | `33554432` | Asset request-body limit in bytes |
 
 Direct secret environment values take precedence over `_FILE` values.
+
+For the root local `compose.yaml`, when neither form is supplied, the startup bootstrap creates a random credential-encryption key once in a private named volume and reuses it on later starts. Docker Swarm does not bootstrap this value; it requires the operator-provisioned external secret.
 
 World-generation progress is stored as short-lived, owner-scoped PostgreSQL state so API replicas can serve polling requests interchangeably. Generation logs record operational metadata but omit prompt bodies, imported lore, raw model output, private reasoning, and credentials.
 

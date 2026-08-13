@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { providerProfileInputSchema } from "../../packages/contracts/src/generation.js";
-import { resolveDefaultIntentProviderId } from "../../services/api/src/provider-service.js";
+import type { ProviderResolutionRequest } from "../../packages/application/src/providers/index.js";
 
 describe("turn intent provider role", () => {
   it("accepts an independently configured intent profile", () => {
@@ -17,16 +17,11 @@ describe("turn intent provider role", () => {
     expect(profile.providerRole).toBe("intent");
   });
 
-  it("uses only an explicitly enabled default intent profile", async () => {
-    const queries: Array<{ sql: string; values: unknown[] }> = [];
-    const pool = {
-      query: async (sql: string, values: unknown[]) => {
-        queries.push({ sql, values });
-        return { rows: [] };
-      }
+  it("requires intent resolution to name the intent role explicitly", () => {
+    const request: ProviderResolutionRequest<"intent"> = {
+      ownerUserId: "owner-1",
+      providerRole: "intent",
     };
-    await expect(resolveDefaultIntentProviderId(pool as never, "owner-1")).resolves.toBeNull();
-    expect(queries[0]?.sql).toContain("provider_role = 'intent'");
-    expect(queries[0]?.sql).toContain("is_default = true");
+    expect(request).toEqual({ ownerUserId: "owner-1", providerRole: "intent" });
   });
 });

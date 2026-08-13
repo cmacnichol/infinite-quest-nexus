@@ -59,6 +59,10 @@ const SAFE_ERROR_CODES = new Set([
   "unsafe_turn_input"
 ]);
 
+export function isSafeGenerationDiagnosticErrorCode(value: string): boolean {
+  return SAFE_ERROR_CODES.has(value);
+}
+
 function safeErrorCode(error: unknown): string {
   try {
     const code = typeof error === "object" && error !== null
@@ -66,7 +70,7 @@ function safeErrorCode(error: unknown): string {
       : undefined;
     if (typeof code === "string") {
       const normalized = code.trim().toLowerCase();
-      if (SAFE_ERROR_CODES.has(normalized)) return normalized;
+      if (isSafeGenerationDiagnosticErrorCode(normalized)) return normalized;
     }
   } catch {
     // Provider-controlled metadata accessors must not replace the original failure.

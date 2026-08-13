@@ -24,7 +24,7 @@ describe("campaign story-length settings", () => {
   });
 
   it("renders narration through the active Story Player sanitizer", () => {
-    const storyPlayer = readFileSync("apps/web/public/story.js", "utf8");
+    const storyPlayer = readFileSync("apps/web/src/story.js", "utf8");
     expect(storyPlayer).toContain("const sanitizeNarration = (text) => {");
     expect(storyPlayer).toContain('`<div class="narration">${sanitizeNarration(turn.narration)}</div>`');
     expect(storyPlayer).toContain("sanitizeNarration(narrationText)");

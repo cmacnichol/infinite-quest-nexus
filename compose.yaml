@@ -27,9 +27,15 @@ services:
       APP_ROLE: all
       APP_PORT: 8080
       DATABASE_URL: postgresql://infinitequest:${POSTGRES_PASSWORD}@postgres:5432/infinitequest
+      DATABASE_MAX_CONNECTIONS: ${DATABASE_MAX_CONNECTIONS:-12}
+      WORKER_GENERATION_CONCURRENCY: ${WORKER_GENERATION_CONCURRENCY:-1}
+      LEGACY_WEB_ROOT: /app/apps/web/dist
+      NEXT_WEB_ROOT: /app/apps/web-next/dist
       ASSET_STORAGE_DRIVER: filesystem
       ASSET_STORAGE_ROOT: /var/lib/infinitequest/assets
+      ARCHIVE_STORAGE_ROOT: /var/lib/infinitequest/archives
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-}
+      CREDENTIAL_ENCRYPTION_KEY_FILE: /var/lib/infinitequest/secrets/credential-encryption-key
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
       PROVIDER_NETWORK_ALLOWLIST: ${PROVIDER_NETWORK_ALLOWLIST:-}
       CSP_IMAGE_ALLOWED_ORIGINS: ${CSP_IMAGE_ALLOWED_ORIGINS:-}
@@ -37,9 +43,14 @@ services:
       - "${APP_PORT:-8080}:8080"
     volumes:
       - infinitequest-assets:/var/lib/infinitequest/assets
+      - infinitequest-secrets:/var/lib/infinitequest/secrets
+      - type: volume
+        source: infinitequest-archives
+        target: /var/lib/infinitequest/archives
     depends_on:
       postgres:
         condition: service_healthy
+    command: ["sh", "-c", "node /app/scripts/ensure-local-credential-encryption-key.mjs && exec node dist/services/runtime/src/main.js"]
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 10s
@@ -47,12 +58,15 @@ services:
       retries: 12
       start_period: 20s
     restart: unless-stopped
+    stop_grace_period: 10m
     networks:
       - infinitequest-backend
 
 volumes:
   infinitequest-postgres:
   infinitequest-assets:
+  infinitequest-archives:
+  infinitequest-secrets:
 
 networks:
   infinitequest-backend:

@@ -1,74 +1,59 @@
 # Infinite Quest Nexus Repository Guidelines
 
+## projectmem (MANDATORY)
+
+This project uses projectmem for persistent memory + workflow rules.
+
+SESSION START — call these three MCP tools, in this order, BEFORE
+answering ANY question about this project:
+
+  1. `get_instructions()` — loads the project's mandatory workflow
+     rules. Without this you will not know how to log work
+     correctly, when to use `add_note` vs `add_decision`, or how
+     the event log is structured.
+  2. `get_summary()` — loads project content. Do NOT answer from
+     conversation history or by re-reading package.json / README /
+     source files.
+  3. `get_project_map()` — loads structural layout when relevant.
+
+BEFORE modifying ANY file:
+  - Call `precheck_file(path)` — check failure history first.
+
+DURING work — use MCP write tools, NEVER edit `.projectmem/`
+files directly via filesystem write:
+  - On a bug discovery → `log_issue(summary, location)`.
+  - After each fix attempt → `record_attempt(summary, outcome)`.
+  - After confirmation → `record_fix(summary)`.
+  - On a design choice → `add_decision(summary)`.
+  - On a gotcha / setup detail → `add_note(summary)`.
+
+Editing `.projectmem/summary.md` or `.projectmem/PROJECT_MAP.md`
+directly bypasses event logging and breaks audit replay. The
+summary file regenerates from `events.jsonl` automatically — write
+via the MCP tools and the summary will follow.
+
+Do not re-scan source files when MCP tools can give you the same
+answer in ~500 tokens instead of ~5000. This is not optional.
+
+(Added 2026-08-01 — this repo has a populated `.projectmem/` directory that was previously undocumented; see Decision #3 in `AGENT_INSTRUCTIONS_AUDIT.md`. Wording mirrors `ZoningReview/CLAUDE.md`.)
+
 ## Project Goal
 
 Infinite Quest Nexus is a self-hosted platform for creating reusable, versioned story worlds and running persistent AI-assisted campaigns within them. The platform must preserve authoritative world and campaign state independently of any LLM context window, model instance, browser session, or LM Studio response chain.
 
 Text generation and image generation must be independent provider concerns. Story text uses the configured text-LLM endpoint, while optional illustrations use a separately configured compatible image endpoint with its own base URL, credentials, model inventory, selected model, health state, and retry policy. Never assume that the text endpoint also serves images or automatically reuse its credentials. A missing or unavailable image endpoint must disable or defer illustration work without preventing story generation.
 
-The product domains are:
-
-- **World Library**: author, import, export, fork, version, publish, archive, and browse reusable worlds.
-- **Campaigns**: run isolated, evolving stories from an immutable world version.
-- **Chronicle**: retain accepted turns, canonical facts, state snapshots, summaries, and searchable long-term memory.
-- **Story Engine**: coordinate mechanics assessment, prompt construction, LM Studio generation, validation, recovery, and memory indexing.
-- **Illustration Pipeline**: optionally turn validated fiction-only image prompts into campaign artwork through a separately configured compatible endpoint.
-
-The legacy `index.html` application no longer needs to be kept in parity with the new application (`apps/web`). It is kept for reference only now. Preserve its existing state for historical reference while authoritative state, management workflows, and story generation operate in the backend services and new web application.
-
 Do not embed sample worlds, campaign records, accepted turns, story history, imported lore, or other user content in `index.html` or application source. Runtime world and campaign data belongs in the authoritative database; sanitized regression content belongs only in test fixtures. Legacy exports may be imported through explicit migration code but must not be silently bundled or restored by the client.
 
-## Naming
-
-Use **Infinite Quest Nexus** for the platform and **Infinite Quest** for the player-facing story experience. Use the domain names World Library, Campaigns, Chronicle, and Story Engine in UI and architecture documentation.
-
-Use these deployment names unless an infrastructure constraint requires otherwise:
-
-- `infinitequest-app` for the combined local Compose role
-- `infinitequest-web`
-- `infinitequest-api`
-- `infinitequest-worker`
-
-Use `infinitequest` as the Docker stack name and as the prefix for related networks, configs, and secrets.
+Product domains, naming conventions, and deployment names: see [docs/architecture/repository-overview.md](docs/architecture/repository-overview.md).
 
 ## Target Architecture
 
-Infinite Quest Nexus is a server-backed application packaged for both local Docker Compose and Docker Swarm deployment:
-
-1. **Web client**: serves the browser UI and communicates only with the Nexus API for authoritative operations.
-2. **API service**: owns the request identity context, future authentication boundary, world and campaign APIs, validation, job submission, model inventory, and live generation status. API replicas must be stateless. Until login or OIDC exists, the API resolves every request to the database-backed initial user rather than trusting a browser-supplied user identifier.
-3. **Worker service**: performs LM Studio requests, recovery, summarization, embeddings, retrieval, and other durable background work.
-4. **PostgreSQL database**: the authoritative store for users, worlds, immutable world versions, campaigns, accepted turns, state, memories, jobs, and model-chain metadata. Local Compose starts a dedicated PostgreSQL container. Swarm uses the existing dedicated database infrastructure and must not deploy its own database service.
-5. **Text and embedding endpoint**: LM Studio remains an external inference service reached through a stable private-network DNS name. It supplies story models and embedding models but is never the authoritative memory store.
-6. **Optional image endpoint**: a second compatible endpoint supplies image-capable model discovery and generation. Configure it independently from LM Studio and do not route image requests through the text endpoint unless a future provider profile explicitly supports and selects both roles.
-7. **Vector search**: prefer the existing database's supported vector capability. Add a dedicated vector service only when the database cannot meet measured retrieval requirements.
-
 Store database credentials, text-endpoint tokens, image-endpoint tokens, and other credentials as separate Docker Swarm secrets. Store non-sensitive endpoint and runtime settings in Swarm configs or environment configuration. Do not assume `host.docker.internal` is available from Swarm nodes.
 
-## Compose and Swarm Deployment Modes
+Full service-topology description (web/API/worker/DB/text/image/vector-search breakdown): see [docs/architecture/repository-overview.md](docs/architecture/repository-overview.md#target-architecture).
 
-Build one versioned Nexus application image and use the same runtime configuration contract in both deployment modes. Do not create Compose-only application logic or a separate local implementation. The image should expose explicit roles such as `all`, `api`, `worker`, and `migrate` through its entrypoint or command.
-
-The default local `compose.yaml` steady state contains two containers:
-
-1. **`infinitequest-app`**: runs the web/API and worker roles together for simple local development and testing.
-2. **`postgres`**: runs the pinned PostgreSQL major version and required extensions with a health check and named persistent volume.
-
-The application must connect to PostgreSQL through the Compose service name, retry database readiness with bounded backoff, and expose application liveness and readiness checks. Do not rely solely on startup ordering. Do not publish the PostgreSQL port to the host by default; add an explicit development override when direct database access is needed.
-
-The Swarm stack uses the same application image but runs API and worker roles as separate services so they can scale and roll independently. It receives the external PostgreSQL connection through Swarm secrets/configuration and contains no `postgres` service. Static web assets may be served by the API service or an explicitly introduced web service, but this choice must not change API contracts or persistence behavior.
-
-Use `node-pg-migrate` from the same application image. The combined Compose role and every Swarm API replica run the standard migration check before serving traffic; PostgreSQL advisory locking serializes schema changes so exactly one replica applies pending work while the others wait. Worker-only replicas verify and wait for the current schema rather than applying migrations. A new database is initialized automatically, including the initial user. Online migrations apply automatically; migrations explicitly named with the `.maintenance.sql` suffix require a reviewed backup and operator opt-in on an existing database.
-
-Keep local PostgreSQL compatible with the Swarm database: pin the same supported major version, enable the same required extensions, apply the same migrations, and test the same transaction and isolation behavior. If vector search uses a PostgreSQL extension, include the same extension and version in both environments.
-
-Maintain separate deployment manifests where orchestrator behavior differs:
-
-- Root `compose.yaml` for the two-container local environment.
-- Optional `compose.override.yaml` for developer-only ports or mounts.
-- `deploy/swarm/stack.yaml` for replicated services, configs, secrets, health checks, placement, updates, and rollback policy.
-
-Compose credentials may come from an ignored local environment/secrets file with a committed redacted example. Swarm credentials must use Swarm secrets. The application should support file-based secret inputs so the same image can consume either mechanism without placing credentials in image layers or source control.
+Compose/Swarm build-and-deploy contract, migration-locking strategy, and manifest layout: see [docs/runbooks/deployment.md](docs/runbooks/deployment.md).
 
 ## Domain and Persistence Rules
 
@@ -145,60 +130,11 @@ Illustration generation must run as an optional child job after the associated n
 
 Keep mechanics and fiction in separate typed prompt paths. Rolls, dice, checks, stats, scores, targets, modifiers, difficulty labels, parser diagnostics, rejected output, and internal reasoning must never enter story narration, story memory, embeddings, or fiction-only prompt history. The Story Engine may pass only a sanitized diegetic outcome to the narrative model. Continue validating narrative output for mechanic leakage before display or persistence.
 
-## Repository Structure
+## Repository Structure and Migration Roadmap
 
-The repository contains the legacy self-contained client for reference only:
+Prefer TypeScript for new application services and shared packages so validated logic can move out of the current JavaScript without maintaining separate implementations. Record meaningful architecture changes as short ADRs under `docs/architecture/`. Do not leave undocumented scripts as the only way to operate the project. Keep JSON import and export as a portable backup and migration format even after the database becomes authoritative.
 
-- `index.html`: legacy self-contained Infinite Quest application, kept for reference only and no longer kept in parity with the new application (`apps/web`).
-- `demo_version.html`: smaller demonstration variant.
-
-As the service is scaffolded, prefer this organization:
-
-```text
-compose.yaml             local two-container application and PostgreSQL stack
-compose.override.example.yaml
-apps/
-  web/                 browser client
-services/
-  api/                 HTTP API and live job status
-  worker/              Story Engine and Chronicle jobs
-packages/
-  contracts/           shared request, response, event, and schema definitions
-  domain/              world, campaign, turn, and memory rules
-  story-engine/        prompts, sanitization, parsing, validation, and recovery
-database/
-  migrations/          ordered relational schema migrations
-deploy/
-  swarm/               stack, config, health check, and rollout definitions
-docs/
-  architecture/        diagrams, ADRs, schemas, and operational guidance
-tests/
-  fixtures/            sanitized model responses and story regressions
-```
-
-Prefer TypeScript for new application services and shared packages so validated logic can move out of the current JavaScript without maintaining separate implementations. Record meaningful architecture changes as short ADRs under `docs/architecture/`.
-
-## Development and Migration
-
-To inspect the legacy client directly without the full backend stack, serve it statically:
-
-```powershell
-python -m http.server 8000
-```
-
-Open `http://localhost:8000/index.html` to view the legacy client (kept for reference only; it no longer needs to be kept in parity with the new application). For the active application and API, run the containerized stack or local development services as documented in the root README. Do not leave undocumented scripts as the only way to operate the project.
-
-The future baseline commands should support `docker compose up --build` for local startup and `docker stack deploy` for Swarm using the same built image. Validate both rendered configurations in CI before deployment.
-
-Migrate incrementally:
-
-1. Serve the existing UI and proxy LM Studio through the API.
-2. Add World Library, immutable world versions, campaigns, and a browser-save importer.
-3. Move prompt construction, generation, validation, and recovery into the worker.
-4. Add Chronicle indexing, structured memory, embeddings, and retrieval.
-5. Add multi-replica hardening, migrations, monitoring, backup verification, and rolling deployment policy.
-
-Keep JSON import and export as a portable backup and migration format even after the database becomes authoritative.
+Target directory layout, how to run the legacy client standalone, and the 5-phase incremental migration plan: see [docs/architecture/repository-overview.md](docs/architecture/repository-overview.md#repository-structure).
 
 ## Coding and Contract Conventions
 
@@ -210,31 +146,17 @@ Favor pure domain functions for state transitions, prompt assembly, retrieval ra
 
 ## Testing Requirements
 
-Until automated infrastructure exists, manually exercise startup, world and character selection, story generation, choice handling, model switching, output-limit recovery, save/load, import/export, and responsive layout.
-
 Every code change must include a review of the tests associated with each changed file. Update or add those tests whenever behavior, contracts, fixtures, or expectations change; do not consider the change complete until the related tests reflect it.
-
-New services should introduce:
-
-- Unit tests for domain transitions, prompt sanitization, parser recovery, retrieval ranking, and context budgeting.
-- Contract tests for browser/API, worker/text endpoint, worker/image endpoint, and database boundaries.
-- Integration tests using a real test database and a deterministic mock LM Studio server.
-- End-to-end tests for world creation, version publication, campaign switching, turn generation, restart recovery, and export/import.
-- Regression fixtures for truncated output, malformed JSON, reasoning-only output, missing stateful responses, model switching, duplicate submissions, and RPG-mechanic leakage.
 
 Tests must verify that rejected or incomplete generations do not mutate campaign state or Chronicle memory and that one campaign's data cannot appear in another campaign's prompt.
 Tests must also cover images disabled, image endpoint unavailable, incompatible image models, independent image retries, and successful story completion when illustration generation fails.
 Identity tests must verify initial-user bootstrap idempotency, automatic ownership of pre-auth content, import ownership, rejection of caller-supplied identity spoofing, cross-user query isolation, and explicit OIDC linking to the existing initial user without changing its internal UUID.
 
+Manual test checklist (until automated infrastructure exists) and the required test-type matrix for new services: see [docs/workflows/testing.md](docs/workflows/testing.md).
+
 ## Deployment and Operations
 
-Swarm services must define health checks, resource expectations, restart behavior, and conservative rolling-update and rollback policies. API and worker replicas must coordinate through the database or an explicitly introduced durable queue; do not rely on process-local locks or memory for correctness.
-
-Compose and Swarm must use the same schema migrations, initial-user bootstrap, provider configuration, job semantics, and API contracts. Add deployment smoke tests that start the two-container Compose environment, wait for PostgreSQL and application readiness, verify migrations and initial-user ownership, and exercise one database-backed API operation. Validate the Swarm stack configuration separately even when CI cannot launch a full multi-node swarm.
-
-Use structured logs with correlation IDs for campaign, generation job, model request, and accepted turn. Record prompt size, retrieved-memory identifiers, context utilization, model and endpoint identity, recovery attempts, validation results, and latency without logging credentials, private reasoning, or unnecessary sensitive story content.
-
-Database migrations must be ordered, repeatable, reviewed, and safe for the deployed application version. Prefer backward-compatible expand/contract changes so rolling API replicas can coexist. Applied online migrations are automatic; destructive or downtime-requiring `.maintenance.sql` migrations must remain exceptional and require an explicit operator opt-in on an existing database. Back up authoritative database data and test restoration. Treat embeddings and summaries as rebuildable unless operational requirements later make their backup worthwhile.
+Health checks, logging fields, migration safety rules, and rolling-update/rollback policy: see [docs/runbooks/deployment.md](docs/runbooks/deployment.md).
 
 ## Security
 
@@ -248,78 +170,4 @@ Use short imperative commit summaries naming the affected domain or service. Kee
 
 Before submitting, run the documented tests, check `git diff --check`, review the complete diff for unrelated changes, and include screenshots for visible UI changes.
 
-<!-- REPOWISE_AGENTS:START — Do not edit below this line. Auto-generated by Repowise. -->
-## Codebase Intelligence for InfiniteQuest (Repowise)
-
-Indexed by [Repowise](https://repowise.dev). Last indexed: 2026-07-28 (commit 4890b24). Confidence: 100%.
-The MCP tools below serve pre-verified docs, symbols, history, and health from that index. Every response carries `_meta` freshness fields; a `stale_warning` appears only when a file the response actually serves changed after indexing, so silence means current.
-
-### How to work in this repo
-
-- **Pre-edit phase** (locate, understand, assess) is where these tools win: `get_answer` for how/where/why, `search_codebase` to find, `get_context` for a file's map, `get_risk` before touching a hotspot.
-- **Edit phase**: reading a file before you edit it is correct and expected. Use these tools to decide *which* files to read and edit, not to replace that read.
-- **Noisy commands** (tests, builds, `git log`/`diff`, searches, listings): prefer `repowise distill <cmd>`, the same command with its exit code preserved and errors-first compact output. A `[repowise#<ref>: N lines omitted]` marker is fully recoverable via `repowise expand <ref>` (add `-q <regex>` to filter); never re-run the command to see omitted output.
-
-### Trust protocol
-
-- `verified: true` means the served bytes were checked against the live tree. Never follow it with a re-read of the same lines.
-- `get_answer` at `confidence: "high"` or `grounding: "extracted"` is content-grounded: cite it directly. `symbol_bodies`, `quotes`, and `code_rationale` entries are live source, so use them instead of opening the file.
-- The **only** re-read triggers: `bounds: "approximate"`, `_meta.stale_warning`, `search_method: "bm25"`, `confidence: "low"`. `index_behind: true` alone is informational; the served content is unaffected by the drift.
-- Not valid reasons to re-read: "just to be safe", "to see full context" (use the skeleton or a range read), "the file might have changed" (`verified` already checked).
-- For exhaustive literal sweeps (rename every call site) plain text search is unbeatable, so use it. Reach for `get_context(include=["callers"])` when you need the `callers_total`/`callers_truncated` honesty signal instead of a maybe-incomplete grep.
-
-### Tools
-
-| Tool | When and why |
-|------|--------------|
-| `get_answer(question)` | First call for any how / where / why question. `confidence: "high"` or `grounding: "extracted"` is content-grounded — cite it directly. When the question names an indexed symbol, `symbol_bodies` carries its full live body (skip the `get_symbol` follow-up). Low confidence returns `best_guesses` with one-line justifications plus `code_rationale` (rationale comments mined live from candidate source). |
-| `get_context(targets=[...])` | Triage card for files/modules/symbols: summary, signatures, `symbol_id`s, `hotspot` bit. File targets auto-serve a `verified` skeleton (every signature at a fraction of a full Read); `mostly_full` marks files where Read costs little more. Batch targets in one call. Opt-in blocks: `include=["callers"|"callees"|"ownership"|"decisions"|"metrics"]`. |
-| `get_symbol(id)` | One verified body: `"path.py::Name"` (indexed symbol), `"path.py:140-180"` (live range read), or `"repowise#<hex>"` (omission ref). Source arrives in Read's numbered format — treat it as an already-performed Read. `truncated` responses carry a `continuation` naming the exact next range; ambiguous ids return every match in `candidates`. Index misses fall back to live-grep `fallback_lines`. |
-| `search_codebase(query)` | Hybrid search, auto-routed by query shape: identifier → symbol hits (pipe `symbol_id` into `get_symbol`), path → file pages, prose → wiki-semantic. Force with `mode=symbol|path|concept|hybrid`. Concept hits carry a `sources` list; a hit whose sources are `[fts]` only is a keyword match with no semantic agreement — verify it. |
-| `get_why(query, targets?)` | Why the code is shaped this way: decision records with evidence and supersession lineage, falling back to git archaeology and `code_rationale` comments. Call before refactors or pattern divergences. |
-| `get_risk(targets, changed_files?)` | What history says about touching these files: churn, owners, co-change partners, blast radius. PR mode (`changed_files`) leads with a `directive` block — read `will_break` / `missing_cochanges` / `missing_tests` / `tests_to_run` first. `tests_to_run` is coverage-backed (the tests the per-test map proves exercise the changed files); empty means unknown, never no tests. To score a whole commit or diff range instead, use `get_change_risk`. |
-| `get_change_risk(revspec, extensions?, exclude_patterns?)` | Pre-merge defect score for a whole commit or `base..head` range, computed from its diff shape on the live checkout (no index, no LLM). Lead with `risk_percentile` (this change ranked against sampled recent commits), summarized by `review_priority` and `classification`; `score` / `probability` / `level` are the corpus-calibrated fallback. Distinct from `get_risk`, which scores indexed files by path. A `warning` field flags an empty diff (bad revspec or over-tight extension / exclusion filters). |
-| `get_health(targets?, include?)` | Health scores + findings on three dimensions (defect / maintainability / performance). Self-check the files you touched before finishing; `include=["biomarkers"|"refactoring"|"signals"]` for depth. |
-| `get_dead_code()` | Confidence-tiered unreachable files / unused exports / zombie packages. For cleanup sweeps, not targeted fixes. |
-| `get_overview()` | Architecture map + tool recipes. Call once, first, in an unfamiliar repo; skip it after that. |
-
-**Compose them:** low-confidence `get_answer` then read `best_guesses[0].file`; `get_context` shows `hotspot: true` then `get_risk` before editing; `decision_records` titles then `get_why(targets=[...])`; PR review then `get_risk(targets, changed_files)` and read `directive` first. A `tombstone` error means the file moved, so follow `successor_paths`.
-
-### Architecture
-InfiniteQuest is a server-backed platform that consumes authored worlds, campaign actions, and model-provider requests, transforms them through validated domain, story-generation, persistence, and retrieval pipelines, and produces persistent campaigns, Chronicle records, world-management artifacts, and optional illustrations through web and API interfaces. The repository implements Infinite Quest Nexus, with the player-facing experience referred to as Infinite Quest. The system separates authoritative application state from language-model context. Worlds have immutable versions, campaigns evolve independently from their source worlds, and accepted story turns provide the canonical recovery ledger.
-
-### Key modules
-- `packages/logger/src` — The logging and illustration-provider layer is an application support boundary: it exposes structured logging, Chronicle processing…
-- `packages/contracts/src` — The application data-contract layer is the shared TypeScript boundary between authored world and campaign data, API services, worker…
-- `services/api/src` — The API service layer is the orchestration boundary for campaign-facing metadata, assets, state, transfers, character profiles, generation…
-- `packages/domain/src` — I’m applying the required workflow guidance for this documentation task, then I’ll produce the page directly from the supplied subsystem…
-- `packages/database/src` — The database lifecycle layer is the persistence boundary for connection configuration, pool creation, and schema migration: it consumes…
-- `root` — Runtime composition is the hosting layer for Infinite Quest’s executable entrypoints, browser-facing assets, background worker startup…
-
-### Entry points
-- `services/api/src/server.ts`
-- `services/runtime/src/main.ts`
-
-### Files that need care (bug-fix history first, then churn — check `get_risk` before editing)
-- `tests/unit/management-ui.test.ts` — 7 bug fixes, last fix yesterday (bug magnet); 35 commits/90d
-- `services/api/src/generation-service.ts` — 6 bug fixes, last fix today (bug magnet); 31 commits/90d
-- `apps/web/public/nexus.js` — 6 bug fixes, last fix yesterday (bug magnet); 38 commits/90d
-- `tests/integration/image-pipeline.integration.test.ts` — 5 bug fixes, last fix today (bug magnet); 21 commits/90d
-- `services/api/src/import-service.ts` — 5 bug fixes, last fix yesterday (bug magnet); 33 commits/90d
-
-### Code health
-Three co-equal signals: defect risk 5.87/10 avg, hotspot health 3.95/10 (stable), worst `apps/web/public/nexus.js` at 1.0/10 · maintainability 7.52/10 · performance risk 67 open static I/O-in-loop / N+1 findings. Detail: `get_health()`.
-
-Critical files:
-- `packages/story-engine/src/providers/illustration/sogni/index.ts` — nested complexity (normalizeHttpError) — impact −2.4
-- `packages/contracts/src/imports.ts` — untested hotspot — impact −2.0
-- `packages/database/src/migrate.ts` — untested hotspot — impact −2.0
-- `packages/domain/src/world-characters.ts` — untested hotspot — impact −2.0
-- `services/api/src/provider-service.ts` — untested hotspot — impact −2.0
-
-### Commands
-- Build: `pnpm build`
-- Test: `pnpm test`
-- Dev: `pnpm dev`
-
-<!-- REPOWISE_AGENTS:END -->
+<!-- Repowise's auto-generated "Codebase Intelligence" block was intentionally removed here on 2026-08-01 (editor_files.agents_md: false in .repowise/config.yaml — see AGENT_INSTRUCTIONS_AUDIT.md, Decision #5). It had gone stale the moment it stopped being refreshed, and stale architecture summaries are worse than none. The Repowise MCP tools (get_answer, search_codebase, get_context, get_risk, get_why, get_change_risk, get_health, get_dead_code) remain fully available regardless of this setting — call get_overview() for a live architecture map instead of reading a frozen one here. Build/test/dev commands: pnpm build / pnpm test / pnpm dev. -->

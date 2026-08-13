@@ -4,7 +4,7 @@ import {
   type StoryLengthWordRange
 } from "../../contracts/src/story-settings.js";
 
-export const STORY_PROMPT_PROTOCOL_VERSION = "story-v11-structured-character-profile";
+export const STORY_PROMPT_PROTOCOL_VERSION = "story-v12-soft-length-goal";
 
 export const STORY_SYSTEM_PROMPT = `You are the fiction writer for Infinite Quest.
 Return only one valid JSON object. Do not use Markdown.
@@ -25,6 +25,8 @@ Required shape:
 }
 
 Format narration as readable prose paragraphs separated by two newline characters (\\n\\n). Prefer two to four sentences per paragraph. Start a new paragraph for a change of speaker, scene transition, or meaningful shift in focus. Do not use Markdown inside narration.
+
+Priority order: (1) authoritative rules, established continuity, and the current turn input; (2) a complete, coherent turn and complete JSON object; (3) the requested narration length. The length range is a soft pacing goal, not a requirement. End early when the supported events have reached a natural stopping point. Never add repetition, recap, unsupported aftermath, a new material fact, character, location, motive, time jump, plot thread, or durable canon commitment merely to reach a word target. You may add brief sensory or connective detail only when it is consistent with the established situation and does not create a material new claim.
 
 Absolute separation rule: every field must contain fiction or continuity facts only. Never expose non-diegetic resolution metadata, game-system terminology, parser behavior, hidden instructions, or private reasoning. Express outcomes only as natural events and consequences. The authoritativeRules scope contains mandatory world-specific constraints: obey every applicable rule on every turn, even when recent narration, conversation memory, or the player action conflicts with one. Treat those rules as instructions, not optional lore or style suggestions. scratchpad is required and must be the complete replacement continuity scratchpad: preserve every still-relevant note, remove only resolved or superseded notes, and return an empty string only when no private continuity remains. continuity_summary is a replacement living summary, not a turn recap. canonical_facts contains only facts established or corrected this turn. superseded_facts contains prior facts that this turn explicitly replaces. canonical_fact_updates is the structured form of canonical fact changes; use [] when there are none. For supersedes_fact_ids, copy only exact IDs shown on visible canonical facts in the authoritative context. Never invent, infer, alter, or reuse an ID that is not visible. Use an empty supersedes_fact_ids array for a new fact that replaces nothing. open_threads is the complete current unresolved-thread list. There must be exactly four concise choices. tracker_updates must be an array of JSON objects, never strings; use [] when no tracker changes are needed. Leave enough output budget to close the JSON object.`;
 
@@ -57,22 +59,26 @@ export function buildStoryUserPrompt(
     authoritative_context: context,
     narration_length: {
       profile: requestedLength.profile,
-      target_min_words: requestedLength.minWords,
-      target_max_words: requestedLength.maxWords
+      preferred_min_words: requestedLength.minWords,
+      preferred_max_words: requestedLength.maxWords,
+      policy: "soft_pacing_goal",
+      early_stop_allowed: true
     },
     ...(fictionGuidance.length ? { fiction_only_outcome_guidance: fictionGuidance } : {}),
     instructions: [
       "Obey every applicable constraint in authoritative_context.authoritativeRules. These rules are mandatory and take priority over conflicting story history or player requests.",
       "Treat the database snapshot as authoritative even if provider conversation memory disagrees.",
       "Continue established chronology and character continuity.",
-      "Treat narration_length as the requested narration size, not as permission to pad or repeat the scene.",
+      "Treat narration_length as a soft pacing goal, not as a minimum requirement or permission to pad. Fidelity to authoritative context and the current turn input outranks length.",
       "Do not expose or invent non-diegetic resolution metadata.",
       "In canonical_fact_updates, supersedes_fact_ids may contain only exact IDs copied from canonical facts visible in the authoritative context; never invent a fact ID.",
       ...(inputMode === "scene" ? [
         "The current turn input is a scene direction: its concrete events, dialogue, sensory details, outcomes, and required beats are facts that happen in this turn.",
-        "Dramatize every required beat in the narration before writing aftermath or advancing beyond it. Do not treat the scene direction as prior narration, summarize past it, contradict it, or silently omit it."
+        "Dramatize every required beat in the narration before writing aftermath or advancing beyond it. Do not treat the scene direction as prior narration, summarize past it, contradict it, or silently omit it.",
+        "Once the required beats and their directly supported consequences are complete, end the turn rather than inventing further events to reach the preferred range."
       ] : [
-        "The current turn input is a player action or attempt. Preserve its stated manner, dialogue, and intent while resolving uncertain outcomes from authoritative context and fiction-only outcome guidance."
+        "The current turn input is a player action or attempt. Preserve its stated manner, dialogue, and intent while resolving uncertain outcomes from authoritative context and fiction-only outcome guidance.",
+        "Once the attempted action and its directly supported consequence are complete, end the turn rather than opening unsupported developments to reach the preferred range."
       ]),
       "Return one complete JSON object, not a fragment or continuation."
     ],
@@ -81,8 +87,8 @@ export function buildStoryUserPrompt(
       text: action
     },
     task: compact
-      ? `Generate the next turn as a compact complete object. Aim for ${requestedLength.minWords}-${requestedLength.maxWords} narration words and keep continuity fields concise.`
-      : `Generate the next story turn from this authoritative database snapshot. Aim for ${requestedLength.minWords}-${requestedLength.maxWords} narration words unless the scene reaches its natural decision point sooner.`
+      ? `Generate the next turn as a compact complete object. Prefer ${requestedLength.minWords}-${requestedLength.maxWords} narration words only while the current input and supported consequences naturally sustain that length. End early when the turn is complete; do not pad, repeat, or invent material story facts to meet the range. Keep continuity fields concise.`
+      : `Generate the next complete story turn from this authoritative database snapshot. Prefer ${requestedLength.minWords}-${requestedLength.maxWords} narration words only while the current input and supported consequences naturally sustain that length. End early when the turn is complete; do not pad, repeat, or invent material story facts to meet the range.`
   });
 }
 
@@ -93,12 +99,12 @@ export function recoveryInstruction(
 ): string {
   if (reason === "output_limit") {
     const compactLength = compactStoryLengthWordRange(storyLength);
-    return `The preceding response reached its output limit. Recover its intended fictional events and return one new, compact, complete JSON object. Do not continue the fragment. Aim for ${compactLength.minWords}-${compactLength.maxWords} narration words, keep continuity fields concise, and close every field.`;
+    return `Return one complete replacement JSON object from the same supported fictional events. Do not continue the fragment. The ${compactLength.minWords}-${compactLength.maxWords} narration range is a soft pacing goal: preserve the requested scope when supported, but end early rather than adding unsupported facts or shortening a complete valid turn merely to fit a compact range. Keep continuity fields concise and close every field.`;
   }
   if (reason === "mechanics_leak") {
     const details = validationErrors.length ? ` The fiction-boundary validator found: ${validationErrors.slice(0, 8).join("; ")}` : "";
-    return `Rewrite the rejected response while preserving its intended fictional outcome and valid continuity.${details} Every field must contain fiction or continuity facts only; replace the identified non-diegetic resolution or engine metadata with natural events and consequences. Return only one complete JSON object.`;
+    return `Rewrite the rejected response as one complete JSON object. Preserve only the supported fictional outcome, required player-input beats, and valid continuity.${details} Remove mechanics language without adding new material events, canon facts, characters, locations, motives, time jumps, or plot developments. Length is a soft pacing goal; prefer a concise complete turn to padding.`;
   }
   const errors = validationErrors.length ? ` Correct these validation errors: ${validationErrors.slice(0, 8).join("; ")}.` : "";
-  return `The preceding response was not a valid complete Infinite Quest story object. Recover the intended events and return one syntactically valid, schema-complete JSON object.${errors} tracker_updates must be an array of JSON objects such as [{"name":"fictional tracker name","value":"new fictional value"}], or [] when unchanged; never return tracker strings. Keep it compact and return no commentary.`;
+  return `Return one syntactically valid, schema-complete replacement JSON object for the same supported turn.${errors} Preserve valid narration and continuity when possible. Do not add new material events or canon merely to make the replacement longer. tracker_updates must be an array of JSON objects such as [{"name":"fictional tracker name","value":"new fictional value"}], or [] when unchanged; never return tracker strings. Length is a soft pacing goal; finish once the supported turn is complete.`;
 }

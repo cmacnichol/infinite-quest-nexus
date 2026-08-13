@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const storyHtml = readFileSync("apps/web/public/story.html", "utf8");
-const storyScript = readFileSync("apps/web/public/story.js", "utf8");
+const storyScript = readFileSync("apps/web/src/story.js", "utf8");
 const managementHtml = readFileSync("apps/web/public/index.html", "utf8");
 const managementScript = readFileSync("apps/web/public/nexus.js", "utf8");
 const managementCss = readFileSync("apps/web/public/nexus.css", "utf8");
@@ -171,7 +171,7 @@ describe("Nexus management UI contracts", () => {
     expect(storyHtml).not.toContain('id="assetLibraryDialog"');
     expect(storyScript).not.toContain('choose-image-library');
     expect(storyScript).not.toContain('openTurnAssetLibrary');
-    expect(storyScript).toContain('/illustration-asset`');
+    expect(storyScript).not.toContain('/illustration-asset`');
   });
 
   it("leaves fiction-boundary validation exclusively to the Nexus Story Engine", () => {
@@ -367,7 +367,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain('const hasBody = options.body !== undefined && options.body !== null');
     expect(managementScript).toContain('method: editingProviderId ? "PATCH" : "POST"');
     expect(storyScript).not.toContain('/provider-text/generate');
-    expect(storyScript).toContain('/generation-jobs/${jobId}');
+    expect(storyScript).toContain('composition.workflow.submit');
     expect(managementHtml).toContain('value="text-embedding-nomic-embed-text-v1.5"');
     expect(managementHtml).toContain('id="embeddingDocumentPrefix"');
     expect(managementHtml).toContain('id="embeddingQueryPrefix"');
@@ -613,9 +613,9 @@ describe("Nexus management UI contracts", () => {
     expect(storyHtml).toContain('value="reset" class="primary"');
     expect(storyHtml).toContain('value="copy" class="accent"');
     expect(storyScript).toContain('function promptBranchOrReset(turnIndex)');
-    expect(storyScript).toContain('/rewind`');
+    expect(storyScript).toContain('apiClient.campaigns.rewind(state.campaignId');
     expect(storyScript).toContain('import { branchCampaignFromTurn } from "./story-routing.js";');
-    expect(storyScript).toContain('await branchCampaignFromTurn(state.campaignId, branchDlg._turnIndex, api);');
+    expect(storyScript).toContain('await branchCampaignFromTurn(state.campaignId, branchDlg._targetTurnNumber, apiClient.campaigns.branch);');
     expect(managementScript).toContain('window.location.assign("/story/" + encodeURIComponent(selectedCampaign.id));');
     expect(storyScript).toContain('async function resumePendingGeneration()');
   });

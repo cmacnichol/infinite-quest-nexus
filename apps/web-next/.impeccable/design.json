@@ -1,0 +1,539 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-11T15:13:58.302Z",
+  "title": "Design System: Infinite Quest Nexus",
+  "extensions": {
+    "colorMeta": {
+      "ink": {
+        "role": "neutral",
+        "displayName": "Atlas Ink",
+        "canonical": "#101418",
+        "tonalRamp": [
+          "oklch(15% 0.012 248)",
+          "oklch(27% 0.012 248)",
+          "oklch(39% 0.012 248)",
+          "oklch(51% 0.012 248)",
+          "oklch(63% 0.012 248)",
+          "oklch(75% 0.012 248)",
+          "oklch(87% 0.012 248)",
+          "oklch(95% 0.012 248)"
+        ]
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "Operational Gray",
+        "canonical": "#46515c",
+        "tonalRamp": [
+          "oklch(15% 0.022 248)",
+          "oklch(27% 0.022 248)",
+          "oklch(39% 0.022 248)",
+          "oklch(51% 0.022 248)",
+          "oklch(63% 0.022 248)",
+          "oklch(75% 0.022 248)",
+          "oklch(87% 0.022 248)",
+          "oklch(95% 0.022 248)"
+        ]
+      },
+      "paper": {
+        "role": "neutral",
+        "displayName": "Paper White",
+        "canonical": "#f8fafb",
+        "tonalRamp": [
+          "oklch(15% 0.003 229)",
+          "oklch(27% 0.003 229)",
+          "oklch(39% 0.003 229)",
+          "oklch(51% 0.003 229)",
+          "oklch(63% 0.003 229)",
+          "oklch(75% 0.003 229)",
+          "oklch(87% 0.003 229)",
+          "oklch(95% 0.003 229)"
+        ]
+      },
+      "canvas": {
+        "role": "neutral",
+        "displayName": "Cool Canvas",
+        "canonical": "#dfe7ee",
+        "tonalRamp": [
+          "oklch(15% 0.015 245)",
+          "oklch(27% 0.015 245)",
+          "oklch(39% 0.015 245)",
+          "oklch(51% 0.015 245)",
+          "oklch(63% 0.015 245)",
+          "oklch(75% 0.015 245)",
+          "oklch(87% 0.015 245)",
+          "oklch(95% 0.015 245)"
+        ]
+      },
+      "atmosphere": {
+        "role": "secondary",
+        "displayName": "Atmosphere Plane",
+        "canonical": "#bdcbea",
+        "tonalRamp": [
+          "oklch(15% 0.055 262)",
+          "oklch(27% 0.055 262)",
+          "oklch(39% 0.055 262)",
+          "oklch(51% 0.055 262)",
+          "oklch(63% 0.055 262)",
+          "oklch(75% 0.055 262)",
+          "oklch(87% 0.055 262)",
+          "oklch(95% 0.055 262)"
+        ]
+      },
+      "grid": {
+        "role": "neutral",
+        "displayName": "Construction Grid",
+        "canonical": "#b8c5d0",
+        "tonalRamp": [
+          "oklch(15% 0.019 245)",
+          "oklch(27% 0.019 245)",
+          "oklch(39% 0.019 245)",
+          "oklch(51% 0.019 245)",
+          "oklch(63% 0.019 245)",
+          "oklch(75% 0.019 245)",
+          "oklch(87% 0.019 245)",
+          "oklch(95% 0.019 245)"
+        ]
+      },
+      "grid-strong": {
+        "role": "neutral",
+        "displayName": "Strong Construction Grid",
+        "canonical": "#8798a8",
+        "tonalRamp": [
+          "oklch(15% 0.03 246)",
+          "oklch(27% 0.03 246)",
+          "oklch(39% 0.03 246)",
+          "oklch(51% 0.03 246)",
+          "oklch(63% 0.03 246)",
+          "oklch(75% 0.03 246)",
+          "oklch(87% 0.03 246)",
+          "oklch(95% 0.03 246)"
+        ]
+      },
+      "indigo": {
+        "role": "primary",
+        "displayName": "Editorial Indigo",
+        "canonical": "#2346a8",
+        "tonalRamp": [
+          "oklch(15% 0.15 264)",
+          "oklch(27% 0.15 264)",
+          "oklch(39% 0.15 264)",
+          "oklch(51% 0.15 264)",
+          "oklch(63% 0.15 264)",
+          "oklch(75% 0.15 264)",
+          "oklch(87% 0.15 264)",
+          "oklch(95% 0.15 264)"
+        ]
+      },
+      "indigo-dark": {
+        "role": "primary",
+        "displayName": "Deep Editorial Indigo",
+        "canonical": "#17327f",
+        "tonalRamp": [
+          "oklch(15% 0.12 264)",
+          "oklch(27% 0.12 264)",
+          "oklch(39% 0.12 264)",
+          "oklch(51% 0.12 264)",
+          "oklch(63% 0.12 264)",
+          "oklch(75% 0.12 264)",
+          "oklch(87% 0.12 264)",
+          "oklch(95% 0.12 264)"
+        ]
+      },
+      "indigo-soft": {
+        "role": "secondary",
+        "displayName": "Soft Editorial Indigo",
+        "canonical": "#c8d5f2",
+        "tonalRamp": [
+          "oklch(15% 0.045 264)",
+          "oklch(27% 0.045 264)",
+          "oklch(39% 0.045 264)",
+          "oklch(51% 0.045 264)",
+          "oklch(63% 0.045 264)",
+          "oklch(75% 0.045 264)",
+          "oklch(87% 0.045 264)",
+          "oklch(95% 0.045 264)"
+        ]
+      },
+      "inverse-text": {
+        "role": "neutral",
+        "displayName": "Inverse Text",
+        "canonical": "#f5f7fb",
+        "tonalRamp": [
+          "oklch(15% 0.006 264)",
+          "oklch(27% 0.006 264)",
+          "oklch(39% 0.006 264)",
+          "oklch(51% 0.006 264)",
+          "oklch(63% 0.006 264)",
+          "oklch(75% 0.006 264)",
+          "oklch(87% 0.006 264)",
+          "oklch(95% 0.006 264)"
+        ]
+      },
+      "accent-text": {
+        "role": "neutral",
+        "displayName": "Text on Accent",
+        "canonical": "#f5f7fb",
+        "tonalRamp": [
+          "oklch(15% 0.006 264)",
+          "oklch(27% 0.006 264)",
+          "oklch(39% 0.006 264)",
+          "oklch(51% 0.006 264)",
+          "oklch(63% 0.006 264)",
+          "oklch(75% 0.006 264)",
+          "oklch(87% 0.006 264)",
+          "oklch(95% 0.006 264)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Literary Display",
+        "purpose": "Restrained identity headings for major creative-writing spaces."
+      },
+      "headline": {
+        "displayName": "Literary Headline",
+        "purpose": "Strong state and message headings."
+      },
+      "title": {
+        "displayName": "World Title",
+        "purpose": "Compact literary names for indexed content entries."
+      },
+      "body": {
+        "displayName": "Narrative Body",
+        "purpose": "Descriptions, guidance, and explanatory copy."
+      },
+      "label": {
+        "displayName": "Operational Label",
+        "purpose": "Navigation, coordinates, result counts, and actions."
+      }
+    },
+    "shadows": [
+      {
+        "name": "search-focus",
+        "value": "0 8px 24px var(--focus-shadow)",
+        "purpose": "Concentrates attention on the active primary query field in either theme."
+      },
+      {
+        "name": "cell-focus-inset",
+        "value": "inset 0 0 0 3px var(--accent)",
+        "purpose": "Bounds a complete clickable cell for keyboard focus without shifting layout."
+      }
+    ],
+    "motion": [
+      {
+        "name": "state-fast",
+        "value": "180ms ease",
+        "purpose": "Border and tonal state changes."
+      },
+      {
+        "name": "directional-snap",
+        "value": "220ms cubic-bezier(0.22, 1, 0.36, 1)",
+        "purpose": "Northeast arrow movement and concise directional feedback."
+      },
+      {
+        "name": "media-settle",
+        "value": "420ms cubic-bezier(0.22, 1, 0.36, 1)",
+        "purpose": "Restrained cover-image scale response."
+      },
+      {
+        "name": "grid-reveal",
+        "value": "320ms cubic-bezier(0.22, 1, 0.36, 1)",
+        "purpose": "Whole-group reveal after supported view transitions; disabled for reduced motion."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "editor-compact",
+        "value": "720px"
+      },
+      {
+        "name": "compact",
+        "value": "680px"
+      },
+      {
+        "name": "medium",
+        "value": "1000px"
+      }
+    ],
+    "themePalettes": {
+      "light": {
+        "--surface-page": "{colors.canvas}",
+        "--surface-paper": "rgba(248, 250, 251, 0.84)",
+        "--surface-entry": "rgba(248, 250, 251, 0.96)",
+        "--surface-entry-hover": "#ffffff",
+        "--surface-muted": "#e6ebf0",
+        "--surface-inverse": "{colors.ink}",
+        "--surface-atmosphere": "{colors.atmosphere}",
+        "--text-primary": "{colors.ink}",
+        "--text-secondary": "{colors.muted}",
+        "--text-inverse": "{colors.inverse-text}",
+        "--text-on-accent": "{colors.accent-text}",
+        "--rule": "{colors.grid}",
+        "--rule-strong": "{colors.grid-strong}",
+        "--rule-grid": "color-mix(in srgb, var(--rule-strong) 68%, transparent)",
+        "--accent": "{colors.indigo}",
+        "--accent-hover": "{colors.indigo-dark}",
+        "--accent-soft": "{colors.indigo-soft}",
+        "--accent-grid": "color-mix(in srgb, var(--accent) 16%, transparent)",
+        "--focus-shadow": "rgba(35, 70, 168, 0.2)",
+        "--artwork-fallback": "#e1e7ec",
+        "--artwork-overlay": "rgba(16, 20, 24, 0.18)",
+        "--status-error": "#9e2430",
+        "--status-error-soft": "#f4d9dc"
+      },
+      "dark": {
+        "--surface-page": "#111821",
+        "--surface-paper": "rgba(17, 24, 33, 0.9)",
+        "--surface-entry": "rgba(24, 33, 44, 0.96)",
+        "--surface-entry-hover": "#202c3a",
+        "--surface-muted": "#263342",
+        "--surface-inverse": "#080d13",
+        "--surface-atmosphere": "#1b2b4f",
+        "--text-primary": "#edf2f7",
+        "--text-secondary": "#b7c2cd",
+        "--text-inverse": "#edf2f7",
+        "--text-on-accent": "#101418",
+        "--rule": "#39495a",
+        "--rule-strong": "#5b6c7e",
+        "--rule-grid": "color-mix(in srgb, var(--rule-strong) 68%, transparent)",
+        "--accent": "#8eabff",
+        "--accent-hover": "#b5c7ff",
+        "--accent-soft": "#243760",
+        "--accent-grid": "color-mix(in srgb, var(--accent) 16%, transparent)",
+        "--focus-shadow": "rgba(142, 171, 255, 0.24)",
+        "--artwork-fallback": "#25313d",
+        "--artwork-overlay": "rgba(16, 20, 24, 0.18)",
+        "--status-error": "#ff9da7",
+        "--status-error-soft": "#4b252d"
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "Brand Lockup",
+      "kind": "custom",
+      "description": "The compact product signature for persistent app navigation.",
+      "html": "<a class=\"ds-brand\" href=\"#\" aria-label=\"Infinite Quest Nexus home\"><span class=\"ds-brand-mark\" aria-hidden=\"true\"><i></i><i></i><i></i><i></i><i></i></span><span>Infinite Quest <b>Nexus</b></span></a>",
+      "css": ".ds-brand { display: inline-flex; align-items: center; gap: 12px; color: var(--text-primary, #101418); font-family: 'Chakra Petch', sans-serif; font-size: 0.92rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; text-decoration: none; } .ds-brand:focus-visible { outline: 3px solid var(--accent, #2346a8); outline-offset: 4px; } .ds-brand-mark { width: 27px; height: 24px; display: grid; grid-template-columns: repeat(5, 1fr); gap: 2px; align-items: end; } .ds-brand-mark i { display: block; height: 100%; background: var(--text-primary, #101418); } .ds-brand-mark i:nth-child(2), .ds-brand-mark i:nth-child(4) { height: 48%; background: var(--accent, #2346a8); } .ds-brand-mark i:nth-child(3) { height: 72%; } .ds-brand b { color: var(--accent, #2346a8); font-weight: inherit; }"
+    },
+    {
+      "name": "Navigation Item",
+      "kind": "nav",
+      "refersTo": "navigation-item",
+      "description": "An operational destination marked by a growing accent baseline.",
+      "html": "<a class=\"ds-nav-item\" href=\"#\" aria-current=\"page\">World Library</a>",
+      "css": ".ds-nav-item { position: relative; min-height: 48px; display: inline-flex; align-items: center; padding: 0 20px; color: var(--text-secondary, #46515c); font-family: 'Geologica', sans-serif; font-size: 0.79rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.055em; text-decoration: none; } .ds-nav-item::after { position: absolute; right: 0; bottom: 0; left: 0; height: 3px; content: ''; background: var(--accent, #2346a8); transform: scaleX(0); transform-origin: left; transition: transform 240ms cubic-bezier(0.22, 1, 0.36, 1); } .ds-nav-item:hover, .ds-nav-item:focus-visible, .ds-nav-item[aria-current='page'] { color: var(--text-primary, #101418); outline: none; } .ds-nav-item:hover::after, .ds-nav-item:focus-visible::after, .ds-nav-item[aria-current='page']::after { transform: scaleX(1); } .ds-nav-item:active { color: var(--accent-hover, #17327f); }"
+    },
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "A square accent action for retry and other decisive operations.",
+      "html": "<button class=\"ds-btn-primary\" type=\"button\">Try again</button>",
+      "css": ".ds-btn-primary { padding: 12px 18px; color: var(--text-on-accent, #f5f7fb); background: var(--accent, #2346a8); border: 1px solid var(--accent, #2346a8); border-radius: 0; cursor: pointer; font-family: 'Chakra Petch', sans-serif; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; transition: background-color 180ms ease, border-color 180ms ease; } .ds-btn-primary:hover { color: var(--text-on-accent, #f5f7fb); background: var(--accent-hover, #17327f); border-color: var(--accent-hover, #17327f); } .ds-btn-primary:focus-visible { color: var(--text-on-accent, #f5f7fb); background: var(--accent-hover, #17327f); border-color: var(--accent-hover, #17327f); outline: 3px solid var(--text-primary, #101418); outline-offset: 3px; } .ds-btn-primary:active { color: var(--text-on-accent, #f5f7fb); background: var(--accent-hover, #17327f); border-color: var(--accent-hover, #17327f); }"
+    },
+    {
+      "name": "Search Field",
+      "kind": "input",
+      "refersTo": "search-field",
+      "description": "The focused query control with the system's only lifted shadow.",
+      "html": "<label class=\"ds-search\" for=\"ds-search-input\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><circle cx=\"11\" cy=\"11\" r=\"6.5\"></circle><path d=\"m16 16 4 4\"></path></svg><span class=\"ds-visually-hidden\">Search worlds</span><input id=\"ds-search-input\" type=\"search\" placeholder=\"Search by title or description\"><kbd aria-hidden=\"true\">/</kbd></label>",
+      "css": ".ds-search { width: min(100%, 620px); height: 52px; display: flex; align-items: center; color: var(--text-primary, #101418); background: var(--surface-entry, rgba(248, 250, 251, 0.96)); border: 1px solid var(--text-primary, #101418); border-radius: 0; transition: border-color 180ms ease, box-shadow 180ms ease; } .ds-search:focus-within { border-color: var(--accent, #2346a8); box-shadow: 0 8px 24px var(--focus-shadow, rgba(35, 70, 168, 0.2)); } .ds-search svg { width: 22px; height: 22px; margin-left: 18px; fill: none; stroke: var(--accent, #2346a8); stroke-width: 1.8; stroke-linecap: square; stroke-linejoin: miter; } .ds-search input { min-width: 0; flex: 1; height: 100%; padding: 0 18px; color: var(--text-primary, #101418); background: transparent; border: 0; outline: 0; font-family: 'Geologica', sans-serif; font-size: 1rem; } .ds-search input::placeholder { color: var(--text-secondary, #46515c); opacity: 1; } .ds-search kbd { margin-right: 14px; padding: 4px 8px; color: var(--text-secondary, #46515c); background: var(--surface-muted, #e6ebf0); border: 1px solid var(--rule, #b8c5d0); border-radius: 0; font-family: 'Geologica', sans-serif; font-size: 0.72rem; } .ds-visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }"
+    },
+    {
+      "name": "Indexed Content Entry",
+      "kind": "card",
+      "refersTo": "indexed-entry",
+      "description": "A complete clickable atlas cell pairing distinctive media with concise evidence.",
+      "html": "<a class=\"ds-entry\" href=\"#\" aria-label=\"Open The Glass Frontier, 3 campaigns\"><span class=\"ds-entry-cover\"><span class=\"ds-entry-glyph\" aria-hidden=\"true\">G</span><span class=\"ds-coordinate\" aria-hidden=\"true\">01 / W</span></span><span class=\"ds-entry-copy\"><strong>The Glass Frontier</strong><span class=\"ds-entry-description\">A durable world of contested passages and impossible horizons.</span><span class=\"ds-entry-meta\"><span>3 campaigns</span><span class=\"ds-entry-action\">Open world <svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M7 17 17 7M8 7h9v9\"></path></svg></span></span></span></a>",
+      "css": ".ds-entry { width: min(100%, 390px); display: grid; grid-template-rows: auto 1fr; padding: clamp(13px, 1.33vw, 21px); color: var(--text-primary, #101418); background: var(--surface-entry, rgba(248, 250, 251, 0.96)); border: 1px solid var(--rule-strong, #8798a8); border-radius: 0; text-decoration: none; transition: background-color 180ms ease; } .ds-entry:hover, .ds-entry:focus-visible { background: var(--surface-entry-hover, #ffffff); outline: none; } .ds-entry:focus-visible { box-shadow: inset 0 0 0 3px var(--accent, #2346a8); } .ds-entry:active { background: var(--surface-entry, rgba(248, 250, 251, 0.96)); } .ds-entry-cover { position: relative; aspect-ratio: 16 / 9; overflow: hidden; display: grid; place-items: center; color: var(--accent, #2346a8); background-color: var(--artwork-fallback, #e1e7ec); background-image: linear-gradient(to right, color-mix(in srgb, var(--accent, #2346a8) 16%, transparent) 1px, transparent 1px), linear-gradient(to bottom, color-mix(in srgb, var(--accent, #2346a8) 16%, transparent) 1px, transparent 1px); background-size: 18px 18px; border-bottom: 1px solid var(--text-primary, #101418); clip-path: polygon(0 0, calc(100% - 22px) 0, 100% 22px, 100% 100%, 0 100%); } .ds-entry-glyph { font-family: 'Chakra Petch', sans-serif; font-size: 5rem; font-weight: 600; line-height: 1; } .ds-coordinate { position: absolute; right: 0; bottom: 0; padding: 7px 10px; color: var(--text-on-accent, #f5f7fb); background: var(--accent, #2346a8); font-family: 'Chakra Petch', sans-serif; font-size: 0.72rem; font-weight: 600; letter-spacing: 0.08em; } .ds-entry-copy { min-height: 166px; display: flex; flex-direction: column; padding-top: 18px; } .ds-entry-copy strong { margin-bottom: 0.7rem; font-family: 'Literata', Georgia, serif; font-size: 1.5rem; font-weight: 600; line-height: 1.08; letter-spacing: -0.02em; } .ds-entry-description { margin-bottom: 1.6rem; color: var(--text-secondary, #46515c); font-family: 'Geologica', sans-serif; font-size: 0.9rem; line-height: 1.55; } .ds-entry-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: auto; padding-top: 14px; border-top: 1px solid var(--rule, #b8c5d0); color: var(--text-secondary, #46515c); font-family: 'Geologica', sans-serif; font-size: 0.75rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.055em; } .ds-entry-action { display: inline-flex; align-items: center; gap: 7px; color: var(--accent-hover, #17327f); font-family: 'Chakra Petch', sans-serif; font-weight: 600; } .ds-entry-action svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: square; stroke-linejoin: miter; transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1); } .ds-entry:hover .ds-entry-action svg, .ds-entry:focus-visible .ds-entry-action svg { transform: translate(3px, -3px); }"
+    },
+    {
+      "name": "Coordinate Chip",
+      "kind": "chip",
+      "refersTo": "coordinate-chip",
+      "description": "A square index marker attached to visual content.",
+      "html": "<span class=\"ds-coordinate-chip\">04 / W</span>",
+      "css": ".ds-coordinate-chip { display: inline-flex; align-items: center; min-height: 28px; padding: 7px 10px; color: var(--text-on-accent, #f5f7fb); background: var(--accent, #2346a8); border: 1px solid var(--accent, #2346a8); border-radius: 0; font-family: 'Chakra Petch', sans-serif; font-size: 0.72rem; font-weight: 600; line-height: 1; letter-spacing: 0.08em; text-transform: uppercase; }"
+    },
+    {
+      "name": "Theme Toggle",
+      "kind": "button",
+      "refersTo": "theme-toggle",
+      "description": "A reusable semantic-theme control with one visible authored icon and a 44px minimum target.",
+      "html": "<button class=\"ds-theme-toggle\" type=\"button\" aria-label=\"Use dark theme\" title=\"Use dark theme\"><svg class=\"ds-theme-icon ds-theme-icon-sun\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><circle cx=\"12\" cy=\"12\" r=\"3.5\"></circle></svg><svg class=\"ds-theme-icon ds-theme-icon-moon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M20 15.5A8.5 8.5 0 0 1 8.5 4 8.5 8.5 0 1 0 20 15.5Z\"></path></svg></button>",
+      "css": ".ds-theme-toggle { width: 48px; min-width: 44px; min-height: 44px; display: grid; place-items: center; padding: 0; color: var(--accent, #2346a8); background: transparent; border: 0; border-left: 1px solid var(--rule-strong, #8798a8); border-radius: 0; cursor: pointer; } .ds-theme-toggle:hover { color: var(--accent-hover, #17327f); background: var(--accent-soft, #c8d5f2); } .ds-theme-toggle:focus-visible { outline: 3px solid var(--accent, #2346a8); outline-offset: -3px; } .ds-theme-icon { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; } .ds-theme-icon-moon, :root[data-theme=\"dark\"] .ds-theme-icon-sun { display: none; } :root[data-theme=\"dark\"] .ds-theme-icon-moon { display: block; }"
+    },
+    {
+      "name": "Editor Command Row",
+      "kind": "custom",
+      "description": "A world-identity band with immutable version and campaign context in a separated far-right reference rail.",
+      "html": "<section class=\"editor-command-row\"><div class=\"editor-identity\"><a href=\"/app/\">World Library</a><h1>World Editor</h1><div class=\"editor-readonly-context\"><p>1 published version</p><p>1 active campaign</p></div></div></section>",
+      "css": ".editor-command-row { display: grid; grid-template-columns: minmax(0, 1fr); border-bottom: 1px solid var(--rule-strong); } .editor-identity { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 32%); column-gap: var(--cell); } .editor-readonly-context { grid-column: 2; grid-row: 1 / span 2; padding-left: var(--cell); border-left: 1px solid var(--rule-strong); }"
+    },
+    {
+      "name": "Section Index",
+      "kind": "nav",
+      "description": "A left-side editor index that recomposes into a horizontal compact section switcher without numeric decoration.",
+      "html": "<nav class=\"editor-section-index\" aria-label=\"World editor sections\"><button type=\"button\" aria-current=\"page\">Overview</button><button type=\"button\">Characters</button><button type=\"button\">Canon</button></nav>",
+      "css": ".editor-section-index { min-height: 44px; display: flex; flex-direction: column; border-right: 1px solid var(--rule-strong); } .editor-section-index button { min-height: 56px; color: var(--text-secondary); background: transparent; border: 0; border-bottom: 1px solid var(--rule); border-radius: 0; } .editor-section-index button[aria-current=\"page\"] { color: var(--text-primary); background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }"
+    },
+    {
+      "name": "Master-Detail Collection Editor",
+      "kind": "custom",
+      "description": "One bounded searchable master list and one persistent structured detail editor, stacked as complete cells on compact screens.",
+      "html": "<div class=\"collection-editor\"><div class=\"collection-toolbar\"><h3>Entities</h3><button type=\"button\">Add entity</button></div><div class=\"collection-master\"><input type=\"search\" aria-label=\"Search entities\"><ol><li><button type=\"button\" aria-current=\"true\">North Gate</button></li></ol></div><div class=\"collection-detail-host\"><h3>North Gate</h3></div></div>",
+      "css": ".collection-editor { display: grid; grid-template-columns: minmax(220px, .34fr) minmax(0, 1fr); border-top: 1px solid var(--rule-strong); border-left: 1px solid var(--rule-strong); } .collection-master { max-height: 640px; overflow: auto; border-right: 1px solid var(--rule-strong); }"
+    },
+    {
+      "name": "Editor Field and Error",
+      "kind": "input",
+      "description": "A square semantic field with readable prose measure, visible focus, persistent aria-invalid treatment, and adjacent recovery copy.",
+      "html": "<label class=\"editor-field\"><span>Premise</span><textarea aria-invalid=\"true\" aria-describedby=\"premise-error\"></textarea><small id=\"premise-error\" class=\"field-error\">Enter a premise before saving.</small></label>",
+      "css": ".editor-field textarea { color: var(--text-primary); background: var(--surface-entry); border: 1px solid var(--rule-strong); border-radius: 0; resize: vertical; } .editor-field textarea[aria-invalid=\"true\"] { border-color: var(--status-error); box-shadow: inset 3px 0 0 var(--status-error); } .field-error { color: var(--status-error); }"
+    },
+    {
+      "name": "Draft Ledger",
+      "kind": "disclosure",
+      "description": "The sticky bottom drawer and sole draft-status surface, with Save draft anchored in its far-right action cell.",
+      "html": "<section class=\"draft-ledger\" aria-label=\"Draft ledger\"><div class=\"draft-ledger-summary\"><span>Draft saved</span><span>Revision 8</span><span>Readiness 4 of 5</span><span>Warnings 1</span><button type=\"button\" aria-expanded=\"false\" aria-controls=\"draft-ledger-details\">Draft details</button><div class=\"editor-save-cell\"><button type=\"button\">Save draft</button></div></div><div id=\"draft-ledger-details\" class=\"draft-ledger-details\" hidden></div></section>",
+      "css": ".draft-ledger { position: sticky; bottom: 0; width: 100%; background: var(--surface-entry); border-top: 1px solid var(--rule-strong); border-bottom: 1px solid var(--rule-strong); } .draft-ledger-summary { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)) auto auto; } .draft-ledger-details { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border-top: 1px solid var(--rule); transition: background-color 180ms ease; }"
+    },
+    {
+      "name": "Character Workspace Stage Index",
+      "kind": "nav",
+      "description": "A compact Operate-mode rail for Method, Identity, Story, Appearance, Mechanics, and Review, recomposed into a horizontal 52px-cell switcher at 720px.",
+      "html": "<nav class=\"character-stage-index\" aria-label=\"Character creation stages\"><button type=\"button\" data-stage-state=\"completed\">Method<span class=\"visually-hidden\"> completed</span></button><button type=\"button\" data-stage-state=\"current\" aria-current=\"step\">Identity</button><button type=\"button\" data-stage-state=\"upcoming\" aria-disabled=\"true\" disabled>Story</button></nav>",
+      "css": ".character-stage-index { background: var(--surface-entry); border-right: 1px solid var(--rule-strong); } .character-stage-index [data-stage-state=\"current\"] { color: var(--text-primary); background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); } @media (max-width: 720px) { .character-stage-index { display: flex; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--rule-strong); } .character-stage-index button { min-width: max-content; min-height: 52px; } }"
+    },
+    {
+      "name": "Character Workspace Handoff",
+      "kind": "status-actions",
+      "description": "The explicit local-only boundary: one reviewed candidate returns through an opaque session and remains unsaved until the parent Save draft or Create world action.",
+      "html": "<section class=\"character-handoff-boundary\" aria-label=\"Character draft handoff\"><p>Updates the unsaved world draft only. Save draft remains required.</p><button type=\"button\">Update world draft</button></section>",
+      "css": ".character-handoff-boundary { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; background: var(--surface-entry); border-top: 1px solid var(--rule-strong); } .character-handoff-boundary button { min-height: 44px; color: var(--text-on-accent); background: var(--accent); border: 1px solid var(--accent); border-radius: 0; }"
+    },
+    {
+      "name": "Character Progress Ledger",
+      "kind": "status-actions",
+      "description": "An in-flow sticky stage and validation ledger with compact Back and Continue actions; Review uses Add to world draft or Update world draft without implying persistence.",
+      "html": "<div class=\"character-progress-ledger\"><span>Stage 5 of 6 · Mechanics</span><button type=\"button\">Back</button><button type=\"button\">Continue</button></div>",
+      "css": ".character-progress-ledger { position: sticky; bottom: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; background: var(--surface-entry); border-top: 1px solid var(--rule-strong); border-bottom: 1px solid var(--rule-strong); } @media (max-width: 720px) { .character-progress-ledger { grid-template-columns: repeat(2, minmax(0, 1fr)); } .character-progress-ledger span { grid-column: 1 / -1; } } @media (prefers-reduced-motion: reduce) { .character-progress-ledger, .character-progress-ledger * { transition-duration: 0.01ms !important; } }"
+    },
+    {
+      "name": "Creation Stage Index",
+      "kind": "nav",
+      "description": "A persistent seven-stage creation rail with explicit current, completed, and unavailable states; it becomes a horizontal switcher at the 720px compact breakpoint.",
+      "html": "<nav class=\"creation-stage-index\" aria-label=\"World creation stages\"><span data-stage-state=\"completed\">Method</span><span data-stage-state=\"current\" aria-current=\"step\">Foundation</span><span data-stage-state=\"upcoming\" aria-disabled=\"true\">Canon</span></nav>",
+      "css": ".creation-stage-index { background: var(--surface-entry); border-right: 1px solid var(--rule-strong); } .creation-stage-index [data-stage-state=\"current\"] { color: var(--text-primary); background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }"
+    },
+    {
+      "name": "Compact Method Control",
+      "kind": "input",
+      "description": "One of two 48px radio controls for choosing Manual or AI-assisted creation without card-sized method panels.",
+      "html": "<label class=\"creation-method-control\"><input type=\"radio\" name=\"creationMethod\"><span>Manual</span></label>",
+      "css": ".creation-method-control { height: 48px; box-sizing: border-box; display: inline-flex; align-items: center; color: var(--text-primary); background: var(--surface-entry); border: 1px solid var(--rule-strong); border-radius: 0; } .creation-method-control:has(input:checked) { background: var(--accent-soft); border-color: var(--accent); }"
+    },
+    {
+      "name": "Prompt Toolbar",
+      "kind": "button-group",
+      "description": "The bounded concept toolbar containing only icon-only Copy and Paste plus the compact labelled Expand action, all with authored SVG icons and 44px targets.",
+      "html": "<div class=\"creation-prompt-tools\" aria-label=\"Prompt tools\"><button type=\"button\" aria-label=\"Copy world concept\"><svg aria-hidden=\"true\"></svg></button><button type=\"button\" aria-label=\"Paste into world concept\"><svg aria-hidden=\"true\"></svg></button><button type=\"button\"><svg aria-hidden=\"true\"></svg><span>Expand</span></button></div>",
+      "css": ".creation-prompt-tools { display: flex; } .creation-prompt-tools button { min-width: 44px; min-height: 44px; color: var(--accent-hover); background: transparent; border: 0; border-left: 1px solid var(--rule); border-radius: 0; }"
+    },
+    {
+      "name": "Expanded Prompt Dialog",
+      "kind": "dialog",
+      "description": "A labelled, focus-trapped expansion of the synchronized concept value with a compact square header and full-width mobile composition.",
+      "html": "<dialog class=\"creation-prompt-dialog\" aria-labelledby=\"expanded-prompt-title\"><header><h2 id=\"expanded-prompt-title\">World concept</h2><button type=\"button\" aria-label=\"Close expanded world concept\"><svg aria-hidden=\"true\"></svg></button></header><textarea aria-label=\"Concept prompt\"></textarea></dialog>",
+      "css": ".creation-prompt-dialog { width: min(calc(100% - (var(--edge) * 2)), 960px); max-height: calc(100dvh - (var(--edge) * 2)); color: var(--text-primary); background: var(--surface-entry); border: 1px solid var(--rule-strong); border-radius: 0; }"
+    },
+    {
+      "name": "Creation Progress Ledger",
+      "kind": "status-actions",
+      "description": "The in-flow sticky bottom ledger that keeps visible stage progress beside Back and the current Continue or Create action without covering focused content.",
+      "html": "<div class=\"creation-progress-ledger\"><span>Stage 2 of 6 · Foundation</span><button type=\"button\">Back</button><button type=\"button\">Continue</button></div>",
+      "css": ".creation-progress-ledger { position: sticky; bottom: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; background: var(--surface-entry); border-top: 1px solid var(--rule-strong); border-bottom: 1px solid var(--rule-strong); }"
+    }
+  ],
+  "narrative": {
+    "northStar": "Constructed Atlas Grid",
+    "overview": "Infinite Quest Nexus should feel like an atlas being actively indexed: precise, durable, and visibly assembled from paper, ink, editorial indigo marks, and measured cells. The system makes story records feel authored and persistent without imitating a fantasy manuscript; its confidence comes from modernist construction, disciplined information labels, and artwork given room to remain the richest material.\n\nThe interface is flat, operational, and intentionally square. Grid lines expose the underlying structure instead of hiding it, while a restrained diagonal slash, clipped corner, or semantic accent state creates recognition without turning every surface into decoration. Responsive changes preserve complete cells and complete content units rather than squeezing desktop fragments into narrow columns.",
+    "keyCharacteristics": [
+      "Paper-white fields, near-black ink, cool construction rules, and sparing editorial indigo signals.",
+      "Visible modular cells and square divisions that explain the layout.",
+      "Literata for a restrained literary display voice that connects the interface to reading and writing.",
+      "Geologica for readable prose and Chakra Petch for operational hierarchy.",
+      "Flat tonal depth, clipped cover geometry, and one focused search shadow.",
+      "Whole-cell responsive recomposition with purposeful, reduced-motion-safe reveals."
+    ],
+    "rules": [
+      {
+        "name": "The Indigo Signal Rule",
+        "body": "Editorial indigo is a state and orientation color, not a general surface fill; preserve its authority by using it sparingly.",
+        "section": "colors"
+      },
+      {
+        "name": "The Artwork Priority Rule",
+        "body": "Full-color user-provided world artwork may exceed the restrained interface palette; theme changes never recolor, replace, bundle, or otherwise alter it. Media overlays and image treatment remain theme-invariant, while keyboard focus is shown on the enclosing cell.",
+        "section": "colors"
+      },
+      {
+        "name": "The Semantic Theme Rule",
+        "body": "Future pages and reusable components consume semantic tokens rather than World Library selectors, obsolete aliases, or literal light and dark colors.",
+        "section": "colors"
+      },
+      {
+        "name": "The Literary Display Rule",
+        "body": "Literata names worlds and major spaces; keep it measured, never oversized or ornamental.",
+        "section": "typography"
+      },
+      {
+        "name": "The Three-Voice Rule",
+        "body": "Literata names, Geologica explains, and Chakra Petch orients and operates.",
+        "section": "typography"
+      },
+      {
+        "name": "The Whole-Cell Rule",
+        "body": "At every viewport, move and resize complete cells or content units; never leave controls, labels, or artwork as squeezed remnants of a desktop composition.",
+        "section": "layout"
+      },
+      {
+        "name": "The Visible Construction Rule",
+        "body": "Spacing and one-pixel rules should make the organizing grid legible without overpowering content.",
+        "section": "layout"
+      },
+      {
+        "name": "The Flat-by-Default Rule",
+        "body": "Do not use shadows to manufacture card hierarchy; use construction rules, tonal fields, and explicit focus state instead.",
+        "section": "elevation"
+      },
+      {
+        "name": "The Square Rule",
+        "body": "Buttons, fields, navigation, tags, messages, and content containers remain unrounded.",
+        "section": "shapes"
+      },
+      {
+        "name": "The One Cut Rule",
+        "body": "When a silhouette needs distinction, clip one purposeful corner or add one diagonal mark; do not scatter ornamental angles across every edge.",
+        "section": "shapes"
+      }
+    ],
+    "dos": [
+      "Do build hierarchy with semantic surfaces, text roles, editorial indigo signals, visible rules, and complete modular cells.",
+      "Do use Literata at a restrained scale for major spaces, world names, and literary identity moments.",
+      "Do keep Geologica for explanatory prose and Chakra Petch for operational labels and actions.",
+      "Do preserve square controls, one-pixel construction rules, clipped media corners, and clear keyboard focus.",
+      "Do recompose complete content units for narrow screens and honor reduced-motion preferences.",
+      "Do let world artwork remain richer than the surrounding interface palette."
+    ],
+    "donts": [
+      "Don't introduce rounded-card dashboard styling, pill controls, or soft floating panels.",
+      "Don't spread the accent across large passive surfaces or use it as decoration without state or wayfinding value.",
+      "Don't add ambient card shadows; reserve the focused shadow for active search or an equivalent primary query field.",
+      "Don't make literary display type oversized, ornamental, or faux-antique; it should support reading and creative writing without becoming costume.",
+      "Don't shrink a multi-column composition until its controls and copy become cramped; switch the whole-cell arrangement instead.",
+      "Don't elevate World Library-specific column counts, hero placement, or entry order into global design law."
+    ]
+  }
+}

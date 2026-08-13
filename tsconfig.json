@@ -18,5 +18,12 @@
     "packages/**/*.ts",
     "tests/**/*.ts",
     "vitest*.ts"
+  ],
+  "exclude": [
+    "apps/web-next",
+    "packages/client-core",
+    "packages/client-web",
+    "tests/fixtures/client-boundaries",
+    "tests/unit/web-next-*.test.ts"
   ]
 }

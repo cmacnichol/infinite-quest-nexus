@@ -16,8 +16,8 @@ import {
   verifyAndWriteArchiveAssets,
   type ArchiveIdMap,
   type CampaignAssetInventory
-} from "../../services/api/src/asset-archive-service.js";
-import { persistOriginalImage } from "../../services/api/src/asset-service.js";
+} from "../legacy-api/src/asset-archive-service.js";
+import { persistOriginalImage } from "../legacy-api/src/asset-service.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;

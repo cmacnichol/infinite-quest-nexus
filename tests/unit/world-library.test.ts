@@ -1,8 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  MAX_CHARACTER_MECHANICS_ITEMS,
+  MAX_PLAYABLE_CHARACTERS,
   WORLD_CONTENT_SCHEMA_VERSION,
   campaignCreateSchema,
   canonicalizeWorldContent,
+  characterProfileSchema,
+  playableCharacterGenerationPreviewRequestSchema,
+  playableCharacterGenerationPreviewResponseSchema,
   playableCharacterGenerationRequestSchema,
   portableWorldSchema,
   worldContentSchema,
@@ -23,7 +28,13 @@ import {
   normalizeGeneratedPlayableCharacter,
   playableCharacterRecoveryInput
 } from "../../packages/domain/src/character-authoring.js";
-import { normalizeRawWorldJson, worldGenerationInputMetadata } from "../../services/api/src/world-generator-service.js";
+import { PROMPT_TEMPLATE_CATALOG } from "../../packages/contracts/src/prompt-library.js";
+import type { WorldGenerationProviderCollaborators } from "../../services/runtime/src/provider-application-composition.js";
+import {
+  generatePlayableCharacterPreviewForOwner,
+  normalizeRawWorldJson,
+  worldGenerationInputMetadata
+} from "../../services/runtime/src/provider-world-generation-adapter.js";
 
 describe("World Library contracts", () => {
   it("normalizes new, incomplete drafts without requiring a playable character", () => {
@@ -77,6 +88,82 @@ describe("World Library contracts", () => {
 
   it("requires optimistic revision numbers for draft updates", () => {
     expect(() => worldDraftUpdateSchema.parse({ expectedRevision: 0, content: { world: { title: "Synthetic Test World" } } })).toThrow();
+  });
+
+  it("shares playable-character collection bounds and strictly parses generation previews", () => {
+    expect(playableCharacterGenerationPreviewResponseSchema.parse({
+      character: { id: "trusted-id", name: "Mara", characterText: "A patient observer." }
+    }).character.id).toBe("trusted-id");
+    expect(() => playableCharacterGenerationPreviewResponseSchema.parse({
+      character: { id: "mara", name: "Mara", characterText: "Guidance" },
+      ownerUserId: "spoofed"
+    })).toThrow();
+
+    const characters = Array.from({ length: MAX_PLAYABLE_CHARACTERS }, (_, index) => ({
+      id: `character-${index}`,
+      name: `Character ${index}`,
+      characterText: "Guidance"
+    }));
+    expect(worldContentSchema.parse({ world: { title: "Bounded World" }, playableCharacters: characters }).playableCharacters)
+      .toHaveLength(MAX_PLAYABLE_CHARACTERS);
+    expect(() => worldContentSchema.parse({
+      world: { title: "Overfull World" },
+      playableCharacters: [...characters, { id: "overflow", name: "Overflow", characterText: "Guidance" }]
+    })).toThrow();
+
+    const mechanics = Array.from({ length: MAX_CHARACTER_MECHANICS_ITEMS }, (_, index) => ({ index }));
+    const boundedCharacter = playableCharacterGenerationPreviewResponseSchema.parse({
+      character: {
+        id: "bounded",
+        name: "Bounded",
+        characterText: "Guidance",
+        rpgStats: mechanics,
+        defaultTriggers: mechanics
+      }
+    }).character;
+    expect(boundedCharacter.rpgStats).toHaveLength(MAX_CHARACTER_MECHANICS_ITEMS);
+    expect(boundedCharacter.defaultTriggers).toHaveLength(MAX_CHARACTER_MECHANICS_ITEMS);
+    const boundedWorld = worldContentSchema.parse({
+      world: { title: "Bounded Mechanics World" },
+      rpgStats: mechanics,
+      defaultTriggers: mechanics
+    });
+    expect(boundedWorld.rpgStats).toHaveLength(MAX_CHARACTER_MECHANICS_ITEMS);
+    expect(boundedWorld.defaultTriggers).toHaveLength(MAX_CHARACTER_MECHANICS_ITEMS);
+    for (const collection of ["rpgStats", "defaultTriggers"] as const) {
+      const overflow = [...mechanics, {}];
+      expect(() => playableCharacterGenerationPreviewResponseSchema.parse({
+        character: {
+          id: "overflow",
+          name: "Overflow",
+          characterText: "Guidance",
+          [collection]: overflow
+        }
+      })).toThrow();
+      expect(() => worldContentSchema.parse({
+        world: { title: "Overfull Mechanics World" },
+        [collection]: overflow
+      })).toThrow();
+    }
+  });
+
+  it("strictly accepts a bounded character preview progress key without identity or provider selection", () => {
+    const request = {
+      content: { world: { title: "Synthetic Test World" } },
+      prompt: "  Create a stargazer.  ",
+      characterId: "trusted-edit-id",
+      progressKey: "character-preview:unique-1"
+    };
+
+    expect(playableCharacterGenerationPreviewRequestSchema.parse(request)).toMatchObject({
+      prompt: "Create a stargazer.",
+      characterId: "trusted-edit-id",
+      progressKey: "character-preview:unique-1"
+    });
+    expect(() => playableCharacterGenerationPreviewRequestSchema.parse({ ...request, progressKey: "" })).toThrow();
+    expect(() => playableCharacterGenerationPreviewRequestSchema.parse({ ...request, progressKey: "x".repeat(513) })).toThrow();
+    expect(() => playableCharacterGenerationPreviewRequestSchema.parse({ ...request, ownerUserId: crypto.randomUUID() })).toThrow();
+    expect(() => playableCharacterGenerationPreviewRequestSchema.parse({ ...request, providerProfileId: crypto.randomUUID() })).toThrow();
   });
 
   it("validates character generation requests without accepting provider selection", () => {
@@ -208,6 +295,149 @@ describe("playable character generation", () => {
     expect(() => normalizeGeneratedPlayableCharacter({ name: "Incomplete" }, "new-character")).toThrow();
     expect(playableCharacterRecoveryInput()).toContain("complete replacement JSON object");
     expect(playableCharacterRecoveryInput()).toContain("omit id and source");
+  });
+});
+
+describe("playable character preview progress", () => {
+  const content = worldContentSchema.parse({
+    world: { title: "Progress World" },
+    playableCharacters: [{ id: "existing", name: "Existing", characterText: "Existing guidance." }]
+  });
+
+  function providers(execute: () => Promise<unknown>): WorldGenerationProviderCollaborators {
+    return {
+      resolution: { resolveDirect: async () => ({
+        status: "resolved",
+        requestedRole: "text",
+        resolvedRole: "text",
+        providerProfileId: "provider-id",
+        providerType: "lmstudio",
+        model: "test-model"
+      }) },
+      execution: { text: async () => ({ execute }) },
+      prompts: { loadWorldGenerationPromptSnapshot: async () => ({ snapshot: {} }) },
+      promptTools: {
+        content: (_snapshot: unknown, key: keyof typeof PROMPT_TEMPLATE_CATALOG) =>
+          PROMPT_TEMPLATE_CATALOG[key].defaultContent
+      }
+    } as unknown as WorldGenerationProviderCollaborators;
+  }
+
+  it("records owner-scoped preparing, generating, validating, and completed progress", async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const dependencies = {
+      createWorldGenerationProgress: async (_pool: unknown, ownerUserId: string, progressKey: string) => {
+        updates.push({ create: true, ownerUserId, progressKey });
+      },
+      updateWorldGenerationProgress: async (
+        _pool: unknown,
+        ownerUserId: string,
+        progressKey: string,
+        progress: Record<string, unknown>
+      ) => {
+        updates.push({ ownerUserId, progressKey, ...progress });
+      }
+    };
+    const generatedProfile = characterProfileSchema.parse({});
+
+    await expect(generatePlayableCharacterPreviewForOwner(
+      {} as never,
+      "server-owner",
+      { content, prompt: "Make them cautious.", characterId: "existing", progressKey: "character:key" },
+      providers(async () => ({
+        content: JSON.stringify({ name: "Existing Revised", profile: generatedProfile, rpgStats: [], defaultTriggers: [] }),
+        responseId: "response-id",
+        finishReason: "stop",
+        outputLimited: false,
+        modelInstanceId: "model-instance",
+        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        reportedCost: null,
+        rawMetadata: {}
+      })),
+      dependencies as never
+    )).resolves.toMatchObject({ character: { id: "existing", name: "Existing Revised" } });
+
+    expect(updates).toEqual([
+      { create: true, ownerUserId: "server-owner", progressKey: "character:key" },
+      { ownerUserId: "server-owner", progressKey: "character:key", status: "processing", phase: "preparing", progressPercent: 10, message: "Preparing character generation." },
+      { ownerUserId: "server-owner", progressKey: "character:key", status: "processing", phase: "generating", progressPercent: 35, message: "Generating character preview." },
+      { ownerUserId: "server-owner", progressKey: "character:key", status: "processing", phase: "validating", progressPercent: 80, message: "Validating generated character." },
+      { ownerUserId: "server-owner", progressKey: "character:key", status: "completed", phase: "completed", progressPercent: 100, message: "Character preview completed." }
+    ]);
+  });
+
+  it.each(["create", "preparing"] as const)(
+    "attempts safe failed progress when the %s repository step fails without leaking details",
+    async (failureStep) => {
+      const updates: Array<Record<string, unknown>> = [];
+      const rawSecret = `RAW_${failureStep.toUpperCase()}_REPOSITORY_SECRET`;
+      let updateCalls = 0;
+      const execute = vi.fn();
+      const dependencies = {
+        createWorldGenerationProgress: async () => {
+          if (failureStep === "create") throw new Error(rawSecret);
+        },
+        updateWorldGenerationProgress: async (
+          _pool: unknown,
+          _ownerUserId: string,
+          _progressKey: string,
+          progress: Record<string, unknown>
+        ) => {
+          updateCalls += 1;
+          if (failureStep === "preparing" && updateCalls === 1) throw new Error(rawSecret);
+          updates.push(progress);
+        }
+      };
+
+      await expect(generatePlayableCharacterPreviewForOwner(
+        {} as never,
+        "server-owner",
+        { content, prompt: "Create", progressKey: `character:${failureStep}-failed` },
+        providers(execute),
+        dependencies as never
+      )).rejects.toThrow(rawSecret);
+
+      expect(execute).not.toHaveBeenCalled();
+      expect(updates.at(-1)).toEqual({
+        status: "failed",
+        phase: "failed",
+        progressPercent: 100,
+        message: "Character preview generation failed. Check the text provider and try again.",
+        errorMessage: "Character preview generation failed. Check the text provider and try again."
+      });
+      expect(JSON.stringify(updates)).not.toContain(rawSecret);
+    }
+  );
+
+  it("records a bounded public failure without leaking provider details", async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const rawSecret = "RAW_PROVIDER_SECRET";
+    const dependencies = {
+      createWorldGenerationProgress: async () => undefined,
+      updateWorldGenerationProgress: async (
+        _pool: unknown,
+        _ownerUserId: string,
+        _progressKey: string,
+        progress: Record<string, unknown>
+      ) => { updates.push(progress); }
+    };
+
+    await expect(generatePlayableCharacterPreviewForOwner(
+      {} as never,
+      "server-owner",
+      { content, prompt: "Create", progressKey: "character:failed" },
+      providers(async () => { throw new Error(rawSecret); }),
+      dependencies as never
+    )).rejects.toThrow(rawSecret);
+
+    expect(updates.at(-1)).toEqual({
+      status: "failed",
+      phase: "failed",
+      progressPercent: 100,
+      message: "Character preview generation failed. Check the text provider and try again.",
+      errorMessage: "Character preview generation failed. Check the text provider and try again."
+    });
+    expect(JSON.stringify(updates)).not.toContain(rawSecret);
   });
 });
 

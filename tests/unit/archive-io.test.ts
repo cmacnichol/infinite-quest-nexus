@@ -1,5 +1,5 @@
 import { ZipArchive } from "archiver";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import {
   copyFile,
@@ -34,15 +34,31 @@ import {
   type ArchiveLimits,
   type StagedArchive
 } from "../../services/api/src/archive-io.js";
+import { createFakeDurableFilesystemLifecycle } from "../helpers/private-storage-lifecycle-fake.js";
+import {
+  createPortableArchiveFilesystemAdapter as createPersistedPortableArchiveFilesystemAdapter,
+  type PortableArchiveFilesystemOptions
+} from "../helpers/legacy-portable-archive-filesystem-adapter.js";
 import { loadRuntimeConfig } from "../../packages/database/src/config.js";
 import type { ArchiveEntry, ArchiveManifest } from "../../packages/contracts/src/archives.js";
+
+function createPortableArchiveFilesystemAdapter(
+  options: Omit<PortableArchiveFilesystemOptions, "persistence">
+) {
+  return createPersistedPortableArchiveFilesystemAdapter({
+    ...options,
+    persistence: createFakeDurableFilesystemLifecycle()
+  });
+}
 
 const filesystemRaceHooks = vi.hoisted(() => ({
   beforeOpen: undefined as undefined | ((path: unknown, flags: unknown) => Promise<boolean>),
   afterOpen: undefined as undefined | ((path: unknown, flags: unknown, handle: unknown) => Promise<boolean>),
+  afterHandleStat: undefined as undefined | ((path: unknown, handle: unknown) => Promise<boolean>),
   afterLstat: undefined as undefined | ((path: unknown) => Promise<boolean>),
   beforeRename: undefined as undefined | ((source: unknown, target: unknown) => Promise<boolean>),
-  beforeUnlink: undefined as undefined | ((path: unknown) => Promise<boolean>)
+  beforeUnlink: undefined as undefined | ((path: unknown) => Promise<boolean>),
+  beforeRead: undefined as undefined | ((handle: unknown, position: unknown) => Promise<boolean>)
 }));
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -66,6 +82,17 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       const handle = await actual.open(path as string, flags as string, mode as number | undefined);
       try {
         await runHook("afterOpen", [path, flags, handle]);
+        const read = handle.read.bind(handle);
+        const handleStat = handle.stat.bind(handle);
+        handle.stat = (async (...args: unknown[]) => {
+          const value = await handleStat(...args as Parameters<typeof handleStat>);
+          await runHook("afterHandleStat", [path, handle]);
+          return value;
+        }) as typeof handle.stat;
+        handle.read = (async (...args: unknown[]) => {
+          await runHook("beforeRead", [handle, args[3]]);
+          return read(...args as Parameters<typeof read>);
+        }) as typeof handle.read;
         return handle;
       } catch (error) {
         await handle.close();
@@ -104,9 +131,11 @@ afterEach(async () => {
   process.env = { ...originalEnvironment };
   filesystemRaceHooks.beforeOpen = undefined;
   filesystemRaceHooks.afterOpen = undefined;
+  filesystemRaceHooks.afterHandleStat = undefined;
   filesystemRaceHooks.afterLstat = undefined;
   filesystemRaceHooks.beforeRename = undefined;
   filesystemRaceHooks.beforeUnlink = undefined;
+  filesystemRaceHooks.beforeRead = undefined;
   vi.restoreAllMocks();
   await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
@@ -451,6 +480,60 @@ describe("staged archive uploads", () => {
 
     await expect(stageArchiveUpload(source, root, DEFAULT_LIMITS)).rejects.toThrow("fixture stream failure");
     expect(await readdir(join(root, "staging"))).toEqual([]);
+  });
+
+  it("removes an owned partial after its final metadata settles during failure teardown", async () => {
+    const root = await temporaryRoot();
+    let statCalls = 0;
+    filesystemRaceHooks.afterHandleStat = async (path, handle) => {
+      if (!String(path).endsWith(".zip") || ++statCalls < 2) return false;
+      const timestamp = new Date("2030-01-01T00:00:00.000Z");
+      await (handle as Awaited<ReturnType<typeof import("node:fs/promises")["open"]>>).utimes(timestamp, timestamp);
+      return true;
+    };
+    const source = new Readable({
+      read() {
+        this.push(Buffer.from("partial"));
+        this.destroy(new Error("fixture stream failure"));
+      }
+    });
+
+    await expect(stageArchiveUpload(source, root, DEFAULT_LIMITS)).rejects.toThrow("fixture stream failure");
+    expect(statCalls).toBe(2);
+    expect(await readdir(join(root, "staging"))).toEqual([]);
+  });
+
+  it("does not unlink a substituted partial upload between identity check and deletion", async () => {
+    const root = await temporaryRoot();
+    let ownedPath = "";
+    let substituted = false;
+    const substitute = async (path: string) => {
+      if (substituted || !path.endsWith(".zip")) return false;
+      substituted = true;
+      const descriptorOwnedPath = `${path}.owned`;
+      ownedPath = join(root, "staging", basename(descriptorOwnedPath));
+      await rename(path, descriptorOwnedPath);
+      await writeFile(path, "replacement must survive");
+      return true;
+    };
+    filesystemRaceHooks.beforeUnlink = async (path) => substitute(String(path));
+    filesystemRaceHooks.beforeRename = async (source, target) => String(target).includes(".cleanup-")
+      ? substitute(String(source))
+      : false;
+    const source = new Readable({
+      read() {
+        this.push(Buffer.from("partial"));
+        this.destroy(new Error("fixture stream failure"));
+      }
+    });
+
+    await expect(stageArchiveUpload(source, root, DEFAULT_LIMITS)).rejects.toThrow("fixture stream failure");
+
+    const names = await readdir(join(root, "staging"));
+    const replacement = names.find((name) => name.endsWith(".zip"));
+    expect(replacement).toBeDefined();
+    expect(await readFile(join(root, "staging", replacement!), "utf8")).toBe("replacement must survive");
+    expect(await readFile(ownedPath, "utf8")).toBe("partial");
   });
 
   it("uses a generated root-relative staging path and reports compressed bytes", async () => {
@@ -1156,6 +1239,145 @@ describe("archive artifact writing and cleanup", () => {
       "archive-limit-exceeded"
     );
     expect(await readdir(join(root, "artifacts"))).toEqual([]);
+  });
+
+  it("stops consuming an entry at its uncompressed boundary", async () => {
+    const root = await temporaryRoot();
+    let consumed = 0;
+    const source = Readable.from((async function* boundedFixture() {
+      for (let index = 0; index < 100; index += 1) {
+        consumed += 1;
+        yield Buffer.from([index]);
+      }
+    })());
+
+    await expectArchiveError(
+      writeArchiveArtifact(
+        root,
+        [{ path: "data.json", logicalType: "records", mediaType: "application/json", source }],
+        (entries) => systemManifest(entries),
+        { ...DEFAULT_LIMITS, maxJsonEntryBytes: 4 }
+      ),
+      "archive-limit-exceeded"
+    );
+
+    expect(consumed).toBeLessThanOrEqual(6);
+    expect(await readdir(join(root, "artifacts"))).toEqual([]);
+  });
+
+  it("aborts an infinite-like source when compressed output crosses its boundary", async () => {
+    const root = await temporaryRoot();
+    let consumed = 0;
+    const source = Readable.from((async function* compressedFixture() {
+      for (let index = 0; index < 200; index += 1) {
+        consumed += 1;
+        yield randomBytes(1_024);
+      }
+    })());
+
+    await expectArchiveError(
+      writeArchiveArtifact(
+        root,
+        [{ path: "data.bin", logicalType: "records", mediaType: "application/octet-stream", source }],
+        (entries) => systemManifest(entries),
+        { ...DEFAULT_LIMITS, maxCompressedBytes: 256, maxUncompressedBytes: 500_000 }
+      ),
+      "archive-limit-exceeded"
+    );
+
+    expect(consumed).toBeLessThan(200);
+    expect(await readdir(join(root, "artifacts"))).toEqual([]);
+  });
+
+  it("does not adopt an artifact replaced after writer publication", async () => {
+    const root = await temporaryRoot();
+    const adapter = createPortableArchiveFilesystemAdapter({ archiveRoot: root, assetRoot: root, limits: DEFAULT_LIMITS });
+    let writerArtifactPath = "";
+    let replacementPath = "";
+    filesystemRaceHooks.beforeOpen = async (path) => {
+      const name = basename(String(path));
+      if (!name.endsWith(".zip")) return false;
+      replacementPath = join(root, "artifacts", name);
+      writerArtifactPath = `${replacementPath}.writer`;
+      const bytes = await readFile(replacementPath);
+      await rename(replacementPath, writerArtifactPath);
+      bytes[bytes.byteLength - 1] = bytes[bytes.byteLength - 1]! ^ 0xff;
+      await writeFile(replacementPath, bytes);
+      return true;
+    };
+
+    await expect(adapter.publishArchiveArtifact(
+      { ownerUserId: "11111111-1111-4111-8111-111111111111" },
+      [{ path: "data.bin", logicalType: "records", mediaType: "application/octet-stream", source: Readable.from("safe") }],
+      (entries) => systemManifest(entries)
+    )).rejects.toEqual({ code: "archive_containment_denied" });
+
+    await expect(readFile(writerArtifactPath)).resolves.not.toHaveLength(0);
+    await expect(readFile(replacementPath)).resolves.not.toHaveLength(0);
+  });
+
+  it("rejects concurrent asset growth before an unbounded read can consume it", async () => {
+    const root = await temporaryRoot();
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      "base64"
+    );
+    await mkdir(join(root, "assets"));
+    const assetPath = join(root, "assets", "original.png");
+    await writeFile(assetPath, png);
+    const adapter = createPortableArchiveFilesystemAdapter({ archiveRoot: root, assetRoot: root, limits: DEFAULT_LIMITS });
+    filesystemRaceHooks.beforeRead = async (_handle, position) => {
+      if (position !== 0) return false;
+      await writeFile(assetPath, Buffer.concat([png, Buffer.from([0])]));
+      return true;
+    };
+
+    await expect(adapter.readVerifiedAsset({
+      relativePath: "assets/original.png",
+      mimeType: "image/png",
+      expectedByteLength: png.byteLength,
+      expectedContentHash: createHash("sha256").update(png.toString("base64")).digest("hex"),
+      maximumBytes: png.byteLength
+    })).rejects.toEqual({ code: "asset_too_large" });
+  });
+
+  it("releases the staged-directory anchor when declared-length cleanup is forced to fail", async () => {
+    const root = await temporaryRoot();
+    let stagingAnchor: { stat(): Promise<unknown> } | undefined;
+    let ownedPath = "";
+    filesystemRaceHooks.afterOpen = async (path, _flags, handle) => {
+      if (!String(path).endsWith("/staging")) return false;
+      stagingAnchor = handle as { stat(): Promise<unknown> };
+      return true;
+    };
+    filesystemRaceHooks.beforeRename = async (source, target) => {
+      if (!String(target).includes(".cleanup-")) return false;
+      const sourcePath = String(source);
+      const descriptorOwnedPath = `${sourcePath}.owned`;
+      ownedPath = join(root, "staging", basename(descriptorOwnedPath));
+      await rename(sourcePath, descriptorOwnedPath);
+      await writeFile(sourcePath, "replacement must survive");
+      return true;
+    };
+    const adapter = createPortableArchiveFilesystemAdapter({
+      archiveRoot: root,
+      assetRoot: root,
+      limits: DEFAULT_LIMITS
+    });
+    const upload = adapter.issueOwnerBoundUpload(
+      { ownerUserId: "11111111-1111-4111-8111-111111111111" },
+      Readable.from("x"),
+      2
+    );
+
+    await expect(adapter.stagingPort.stagePortableArchive(upload)).rejects.toEqual({ code: "archive_truncated" });
+
+    const replacement = (await readdir(join(root, "staging"))).find((name) => name.endsWith(".zip"));
+    expect(replacement).toBeDefined();
+    expect(await readFile(join(root, "staging", replacement!), "utf8")).toBe("replacement must survive");
+    expect(await readFile(ownedPath, "utf8")).toBe("x");
+    expect(stagingAnchor).toBeDefined();
+    await expect(stagingAnchor!.stat()).rejects.toMatchObject({ code: "EBADF" });
   });
 
   it("removes a failed writer temporary file and throws a typed error", async () => {

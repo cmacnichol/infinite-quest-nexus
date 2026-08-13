@@ -1,44 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { publicProvider } from "../../services/api/src/provider-service.js";
+import { toSafeProviderConfiguration } from "../../packages/application/src/providers/index.js";
 
-describe("publicProvider", () => {
-  it("preserves legitimate provider configuration values in write responses", () => {
-    const configuration = {
+describe("safe provider configuration", () => {
+  it("drops arbitrary provider settings so secret-bearing fields are unrepresentable", () => {
+    const configuration = toSafeProviderConfiguration({
       apiKey: "secondary-secret",
-      nested: {
-        accessToken: "nested-secret",
-        apiUrl: "https://api.sogni.ai"
-      },
-      projectId: "sogni-project"
-    };
-
-    const provider = publicProvider({
-      id: "provider-1",
-      name: "Illustration provider",
-      provider_type: "sogni",
-      provider_role: "image",
-      base_url: "https://images.example.test",
-      default_model: "sogni-model",
-      context_window_tokens: 8192,
-      max_output_tokens: 1024,
-      temperature: 0.7,
-      request_timeout_ms: 300_000,
-      configuration,
-      encrypted_api_key: "encrypted-primary-secret",
-      credential_nonce: "nonce",
-      credential_auth_tag: "auth-tag",
-      credential_key_version: 1,
-      enabled: true,
-      is_default: false,
-      health_status: "healthy",
-      consecutive_failures: 0,
-      last_health_check_at: null,
-      last_health_error: null,
-      created_at: new Date("2026-01-01T00:00:00Z"),
-      updated_at: new Date("2026-01-01T00:00:00Z")
+      nested: { accessToken: "nested-secret", apiUrl: "https://api.sogni.ai" },
+      projectId: "sogni-project",
     });
 
-    expect(provider.configuration).toEqual(configuration);
-    expect(provider.hasApiKey).toBe(true);
+    expect(configuration).toEqual({});
+    expect(JSON.stringify(configuration)).not.toContain("secret");
   });
 });

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { DEFAULT_STORY_LENGTH_PROFILE, storyLengthProfileSchema } from "./story-settings.js";
+import { apiTimestampSchema } from "./http.js";
 
 const coerceToString = (val: unknown): string => {
   if (val === null || val === undefined) return "";
@@ -20,6 +21,8 @@ const longText = z.preprocess(coerceToString, z.string().max(200_000).default(""
 const characterId = z.string().trim().min(1).max(200);
 
 export const WORLD_CONTENT_SCHEMA_VERSION = 5;
+export const MAX_PLAYABLE_CHARACTERS = 1000;
+export const MAX_CHARACTER_MECHANICS_ITEMS = 10_000;
 
 const profileText = z.preprocess(coerceToString, z.string().trim().max(20_000).default(""));
 const profileShortText = z.preprocess(coerceToString, z.string().trim().max(2_000).default(""));
@@ -71,8 +74,8 @@ export const playableCharacterSchema = z.object({
   name: z.string().trim().min(1).max(200),
   characterText: longText,
   profile: characterProfileSchema.optional(),
-  rpgStats: z.array(z.unknown()).max(10_000).default([]),
-  defaultTriggers: z.array(z.unknown()).max(10_000).default([]),
+  rpgStats: z.array(z.unknown()).max(MAX_CHARACTER_MECHANICS_ITEMS).default([]),
+  defaultTriggers: z.array(z.unknown()).max(MAX_CHARACTER_MECHANICS_ITEMS).default([]),
   source: z.record(z.string(), z.unknown()).default({})
 }).passthrough();
 
@@ -89,11 +92,11 @@ export const worldOverviewSchema = z.object({
 export const worldContentSchema = z.object({
   schemaVersion: z.number().int().positive().default(WORLD_CONTENT_SCHEMA_VERSION),
   world: worldOverviewSchema,
-  playableCharacters: z.array(playableCharacterSchema).max(1000).default([]),
+  playableCharacters: z.array(playableCharacterSchema).max(MAX_PLAYABLE_CHARACTERS).default([]),
   entities: z.array(z.unknown()).max(20_000).default([]),
   relationships: z.array(z.unknown()).max(50_000).default([]),
-  rpgStats: z.array(z.unknown()).max(10_000).default([]),
-  defaultTriggers: z.array(z.unknown()).max(10_000).default([]),
+  rpgStats: z.array(z.unknown()).max(MAX_CHARACTER_MECHANICS_ITEMS).default([]),
+  defaultTriggers: z.array(z.unknown()).max(MAX_CHARACTER_MECHANICS_ITEMS).default([]),
   eventTriggers: z.array(z.unknown()).max(10_000).default([]),
   assets: z.array(z.unknown()).max(10_000).default([]),
   defaults: z.record(z.string(), z.unknown()).default({})
@@ -155,7 +158,8 @@ export const campaignCharacterProfileSchema = z.object({
 
 export const campaignCharacterProfileUpdateSchema = campaignCharacterProfileSchema.extend({
   expectedRevision: z.coerce.number().int().min(0),
-  editSource: characterProfileEditSourceSchema.default("manual")
+  editSource: characterProfileEditSourceSchema.default("manual"),
+  organizerProtocolVersion: z.string().trim().min(1).max(100).optional()
 }).strict();
 
 export const characterProfileOrganizationRequestSchema = z.object({
@@ -181,7 +185,12 @@ export const characterProfileOrganizationResultSchema = z.object({
 export const playableCharacterGenerationPreviewRequestSchema = z.object({
   content: worldContentSchema,
   prompt: z.string().trim().min(1).max(20_000),
-  characterId: characterId.optional()
+  characterId: characterId.optional(),
+  progressKey: z.string().trim().min(1).max(512).optional()
+}).strict();
+
+export const playableCharacterGenerationPreviewResponseSchema = z.object({
+  character: playableCharacterSchema
 }).strict();
 
 export const worldForkSchema = z.object({
@@ -238,6 +247,39 @@ export const worldVersionDeleteSchema = z.object({
   expectedVersionNumber: z.coerce.number().int().positive()
 });
 
+const worldSummaryPreviewSchema = z.object({
+  title: z.string(),
+  genre: z.string(),
+  tone: z.string(),
+  premise: z.string(),
+  backgroundStory: z.string(),
+  firstAction: z.string(),
+  rules: z.string().optional()
+}).passthrough();
+
+export const worldSummarySchema = z.object({
+  id: z.uuid(),
+  title: z.string().trim().min(1),
+  status: z.enum(["draft", "active", "archived"]),
+  imageUrl: z.string(),
+  forkedFromWorldId: z.uuid().nullable(),
+  forkedFromWorldVersionId: z.uuid().nullable(),
+  createdAt: apiTimestampSchema,
+  updatedAt: apiTimestampSchema,
+  draftRevision: z.number().int().positive().nullable(),
+  draftUpdatedAt: apiTimestampSchema.nullable(),
+  draftPreview: worldSummaryPreviewSchema.nullable(),
+  latestVersionId: z.uuid().nullable(),
+  latestVersionNumber: z.number().int().positive().nullable(),
+  latestPublishedAt: apiTimestampSchema.nullable(),
+  latestPreview: worldSummaryPreviewSchema.nullable(),
+  campaignCount: z.number().int().min(0)
+});
+
+export const worldListResponseSchema = z.object({
+  worlds: z.array(worldSummarySchema)
+});
+
 export type PlayableCharacter = z.infer<typeof playableCharacterSchema>;
 export type CharacterProfile = z.infer<typeof characterProfileSchema>;
 export type CampaignCharacterProfile = z.infer<typeof campaignCharacterProfileSchema>;
@@ -250,6 +292,7 @@ export type WorldDraftUpdateRequest = z.infer<typeof worldDraftUpdateSchema>;
 export type WorldPublishRequest = z.infer<typeof worldPublishSchema>;
 export type PlayableCharacterGenerationRequest = z.infer<typeof playableCharacterGenerationRequestSchema>;
 export type PlayableCharacterGenerationPreviewRequest = z.infer<typeof playableCharacterGenerationPreviewRequestSchema>;
+export type PlayableCharacterGenerationPreviewResponse = z.infer<typeof playableCharacterGenerationPreviewResponseSchema>;
 export type WorldForkRequest = z.infer<typeof worldForkSchema>;
 export type WorldStatusUpdateRequest = z.infer<typeof worldStatusUpdateSchema>;
 export type WorldImportRequest = z.infer<typeof worldImportRequestSchema>;
@@ -258,3 +301,5 @@ export type CampaignUpdateRequest = z.infer<typeof campaignUpdateSchema>;
 export type CampaignWorldMigrationRequest = z.infer<typeof campaignWorldMigrationSchema>;
 export type ResourceDeleteRequest = z.infer<typeof resourceDeleteSchema>;
 export type WorldVersionDeleteRequest = z.infer<typeof worldVersionDeleteSchema>;
+export type WorldSummary = z.infer<typeof worldSummarySchema>;
+export type WorldListResponse = z.infer<typeof worldListResponseSchema>;

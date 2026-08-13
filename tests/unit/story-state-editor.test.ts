@@ -11,7 +11,7 @@ import {
   renderEditableStateCollection,
   submitCampaignState
 // @ts-expect-error Browser JavaScript modules intentionally do not publish TypeScript declarations.
-} from "../../apps/web/public/story-state-editor.js";
+} from "../../apps/web/src/story-state-editor.js";
 
 describe("Story Player campaign state editor", () => {
   it("renders structured canonical facts by content", () => {
@@ -114,29 +114,23 @@ describe("Story Player campaign state editor", () => {
   };
 
   it("submits the complete payload and applies the saved state only after success", async () => {
-    const requests: Array<{ path: string; options: { method: string; body: string } }> = [];
+    const requests: Array<{ campaignId: string; value: unknown }> = [];
     const savedStates: unknown[] = [];
     const response = { ...completeRuntimeState, ...completeEditorValues, revision: 8 };
-    const request = async (path: string, options: { method: string; body: string }) => {
-      requests.push({ path, options });
+    const updateState = async (campaignId: string, value: unknown) => {
+      requests.push({ campaignId, value });
       return response;
     };
 
     await submitCampaignState(
-      request,
+      updateState,
       "campaign-id",
       completeRuntimeState,
       completeEditorValues,
       (value: unknown) => savedStates.push(value)
     );
 
-    expect(requests).toEqual([{
-      path: "/campaigns/campaign-id/state",
-      options: {
-        method: "PATCH",
-        body: JSON.stringify(expectedCompletePayload)
-      }
-    }]);
+    expect(requests).toEqual([{ campaignId: "campaign-id", value: expectedCompletePayload }]);
     expect(savedStates).toEqual([response]);
   });
 
