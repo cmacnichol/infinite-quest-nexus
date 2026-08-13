@@ -27,7 +27,7 @@ Create `apps/web-next/src/theme.ts` as the single browser-independent theme poli
 
 `bootstrap.ts` owns rendering the shared header button and wires it to the theme module. Future pages reuse the same module and button contract rather than reimplementing theme state.
 
-The resolved theme is represented on `<html>` as `data-theme="light|dark"` and through `color-scheme`. A small inline bootstrap in `index.html` resolves the initial theme before the application script loads, minimizing incorrect-theme flash. This bootstrap uses the same storage key and validation rules as the module.
+The resolved theme is represented on `<html>` as `data-theme="light|dark"` and through `color-scheme`. A small synchronous same-origin script from `public/theme-bootstrap.js` resolves the initial theme before the application module loads, minimizing incorrect-theme flash while remaining compatible with production `script-src 'self'`. This bootstrap uses the same storage key and validation rules as the module; `index.html` contains no inline executable script.
 
 ## Token Model
 

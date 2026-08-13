@@ -18,6 +18,13 @@ describe("request security helpers", () => {
     expect(evaluateRequestOrigin("https://evil.test", "https://evil.test", [])).toEqual({ allowed: false });
   });
 
+  it("permits same-origin external scripts without allowing inline execution", () => {
+    const policy = buildContentSecurityPolicy([]);
+
+    expect(policy).toContain("script-src 'self'");
+    expect(policy).not.toContain("'unsafe-inline'");
+  });
+
   it("adds only validated external image origins to CSP", () => {
     expect(buildContentSecurityPolicy(["https://images.example"])).toContain(
       "img-src 'self' data: blob: https://images.example"
