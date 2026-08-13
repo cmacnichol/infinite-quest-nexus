@@ -191,8 +191,7 @@ async function loadWorlds(): Promise<void> {
     if (!response.ok) throw new Error(`Request failed with status ${response.status}.`);
     worlds = parseWorldListResponse(await response.json()).worlds;
     renderWorlds();
-  } catch (error) {
-    console.error("World Library request failed", error);
+  } catch {
     grid.setAttribute("aria-busy", "false");
     countOutput.textContent = "Worlds unavailable";
     const message = document.createElement("div");
