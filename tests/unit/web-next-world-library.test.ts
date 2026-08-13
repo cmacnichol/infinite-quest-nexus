@@ -55,9 +55,9 @@ describe("World Library overview", () => {
   });
 
   it("uses published copy before draft copy and provides a neutral fallback", () => {
-    expect(worldDescription(worlds[0])).toBe("A tidebound city of mirrored canals.");
-    expect(worldDescription(worlds[1])).toBe("Keepers recover stories from volcanic ruins.");
-    expect(worldDescription({ ...worlds[0], latestPreview: null })).toBe("Description not available.");
+    expect(worldDescription(worlds[0]!)).toBe("A tidebound city of mirrored canals.");
+    expect(worldDescription(worlds[1]!)).toBe("Keepers recover stories from volcanic ruins.");
+    expect(worldDescription({ ...worlds[0]!, latestPreview: null })).toBe("Description not available.");
   });
 
   it("accepts same-origin and HTTP artwork while rejecting unsafe schemes", () => {

@@ -6,7 +6,7 @@ import {
   safeArtworkUrl,
   worldDescription,
   type WorldSummary
-} from "./world-library";
+} from "./world-library.js";
 
 const root = document.querySelector("#app");
 
