@@ -697,10 +697,15 @@ async function rebuildMemories(
     characterProfile: campaign.character_profile
   });
   const turns = await client.query<RebuildTurnRow>(
-    `SELECT id, turn_number, action, narration, state_snapshot_private
-       FROM turns
-      WHERE owner_user_id = $1 AND campaign_id = $2
-      ORDER BY turn_number`,
+    `SELECT turn_row.id, turn_row.turn_number, turn_row.action,
+            effective.effective_narration AS narration, turn_row.state_snapshot_private
+       FROM turns turn_row
+       JOIN effective_turn_narrations effective
+         ON effective.turn_id = turn_row.id
+        AND effective.campaign_id = turn_row.campaign_id
+        AND effective.owner_user_id = turn_row.owner_user_id
+      WHERE turn_row.owner_user_id = $1 AND turn_row.campaign_id = $2
+      ORDER BY turn_row.turn_number`,
     [scope.ownerUserId, scope.campaignId]
   );
   await client.query(
@@ -1003,12 +1008,18 @@ async function loadContextMetrics(
     `SELECT
        (SELECT count(*) FROM turns WHERE owner_user_id = $1 AND campaign_id = $2
           AND ($4::integer IS NULL OR turn_number <= $4::integer))::text AS turns,
-       (SELECT COALESCE(sum(length(action) + length(narration)), 0) FROM turns
-          WHERE owner_user_id = $1 AND campaign_id = $2
-            AND ($4::integer IS NULL OR turn_number <= $4::integer))::text AS characters,
-       (SELECT COALESCE(sum(CEIL((length(action) + length(narration))::numeric / 4)), 0) FROM turns
-          WHERE owner_user_id = $1 AND campaign_id = $2
-            AND ($4::integer IS NULL OR turn_number <= $4::integer))::text AS estimated_tokens,
+       (SELECT COALESCE(sum(length(turn_row.action) + length(effective.effective_narration)), 0)
+          FROM turns turn_row JOIN effective_turn_narrations effective
+            ON effective.turn_id=turn_row.id AND effective.campaign_id=turn_row.campaign_id
+           AND effective.owner_user_id=turn_row.owner_user_id
+         WHERE turn_row.owner_user_id = $1 AND turn_row.campaign_id = $2
+           AND ($4::integer IS NULL OR turn_row.turn_number <= $4::integer))::text AS characters,
+       (SELECT COALESCE(sum(CEIL((length(turn_row.action) + length(effective.effective_narration))::numeric / 4)), 0)
+          FROM turns turn_row JOIN effective_turn_narrations effective
+            ON effective.turn_id=turn_row.id AND effective.campaign_id=turn_row.campaign_id
+           AND effective.owner_user_id=turn_row.owner_user_id
+         WHERE turn_row.owner_user_id = $1 AND turn_row.campaign_id = $2
+           AND ($4::integer IS NULL OR turn_row.turn_number <= $4::integer))::text AS estimated_tokens,
        count(*)::text AS memory_count,
        COALESCE(sum(token_estimate), 0)::text AS memory_tokens,
        count(embedding)::text AS embedded_memories,

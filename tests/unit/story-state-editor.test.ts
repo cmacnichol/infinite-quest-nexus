@@ -62,6 +62,7 @@ describe("Story Player campaign state editor", () => {
     expect(payload).toEqual({
       expectedTurnNumber: 4,
       expectedRevision: 7,
+      effectiveTurnNumber: 4,
       continuitySummary: " Corrected summary. ",
       openThreads: ["Find the keeper."],
       canonicalFacts: [{
@@ -107,11 +108,24 @@ describe("Story Player campaign state editor", () => {
   const expectedCompletePayload = {
     expectedTurnNumber: 4,
     expectedRevision: 7,
+    effectiveTurnNumber: 4,
     ...completeEditorValues,
     rpgStats: completeRuntimeState.rpgStats,
     eventTriggers: completeRuntimeState.eventTriggers,
     pendingEventTriggers: completeRuntimeState.pendingEventTriggers
   };
+
+  it("targets the viewed turn while retaining current-state concurrency fences", () => {
+    expect(buildCampaignStateUpdate({
+      ...completeRuntimeState,
+      viewedTurnNumber: 2,
+      isCurrent: false
+    }, completeEditorValues)).toMatchObject({
+      expectedTurnNumber: 4,
+      expectedRevision: 7,
+      effectiveTurnNumber: 2
+    });
+  });
 
   it("submits the complete payload and applies the saved state only after success", async () => {
     const requests: Array<{ campaignId: string; value: unknown }> = [];

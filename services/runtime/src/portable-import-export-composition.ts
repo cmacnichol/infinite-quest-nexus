@@ -22,6 +22,7 @@ import {
   parseInfiniteWorldsStory
 } from "../../../packages/domain/src/infinite-worlds.js";
 import { legacyWorldContent } from "../../../packages/domain/src/legacy-story-world.js";
+import { normalizeLegacyCampaign } from "../../../packages/domain/src/legacy-campaign-normalization.js";
 import { extractCyoaLayers, parseCyoaExport, type TemplateWorldInput } from "../../../packages/domain/src/world-template.js";
 import {
   bindPrivateBoundedStreamLimits,
@@ -216,7 +217,10 @@ function worldProjection(world: Readonly<{ title: string; content: WorldContent 
   };
 }
 
-function legacyProjection(story: ReturnType<typeof legacyStorySchema.parse>) {
+function legacyProjection(
+  story: ReturnType<typeof legacyStorySchema.parse>,
+  normalized?: ReturnType<typeof normalizeLegacyCampaign>,
+) {
   const historyCharacters = typeof story.fullHistory === "string" ? story.fullHistory.length : 0;
   return {
     kind: "campaign" as const,
@@ -226,10 +230,10 @@ function legacyProjection(story: ReturnType<typeof legacyStorySchema.parse>) {
     existingCampaignId: null,
     counts: {
       turns: story.turns.length,
-      completeHistoryCharacters: historyCharacters,
-      estimatedHistoryTokens: Math.ceil(historyCharacters / 4)
+      completeHistoryCharacters: normalized?.stats.completeHistoryCharacters ?? historyCharacters,
+      estimatedHistoryTokens: normalized?.stats.estimatedHistoryTokens ?? Math.ceil(historyCharacters / 4)
     },
-    warnings: [] as string[]
+    warnings: [...(normalized?.warnings ?? [])]
   };
 }
 
@@ -1353,6 +1357,33 @@ export function createPortableFamilyPreviewAdapter(
     async previewLegacyStory(source, command, companions = []) {
       const story = legacyStorySchema.parse(jsonText(await boundedBytes(source, MAX_JSON_BYTES)));
       const sourceName = command.sourceName ?? "legacy.story";
+      let targetWorldContent: WorldContent | null = null;
+      if (command.destination.kind === "existing_world_version") {
+        const target = await targets.readTargetWorldVersion({
+          owner: { ownerUserId: command.ownerUserId },
+          worldId: command.destination.worldId,
+          worldVersionId: command.destination.worldVersionId
+        });
+        if (!target
+          || target.ownerUserId !== command.ownerUserId
+          || target.worldId !== command.destination.worldId
+          || target.worldVersionId !== command.destination.worldVersionId) {
+          throw new Error("portable_import_destination_invalid");
+        }
+        targetWorldContent = target.content;
+      }
+      const normalized = normalizeLegacyCampaign({
+        story,
+        destination: command.destination.kind === "create_world"
+          ? { kind: "create_world" }
+          : { kind: "existing_world_version", worldContent: targetWorldContent! },
+        ...(command.selectedCharacterId ? { selectedCharacterId: command.selectedCharacterId } : {}),
+        ...(command.characterStrategy ? { characterStrategy: command.characterStrategy } : {})
+      });
+      const normalizedStory = {
+        ...story,
+        settings: normalized.campaignSeed.legacySettings
+      };
       const inlineAssets = await legacyInlineAssetInventory(story, false);
       const companionAssets = await legacyCompanionAssetInventory(story, companions);
       const groupedRecords = new Map<string, ArchiveAssetRecord[]>();
@@ -1379,7 +1410,8 @@ export function createPortableFamilyPreviewAdapter(
       return {
         authority: authority(command, {
           sourceName,
-          story: asJson(story),
+          story: asJson(normalizedStory),
+          normalizedCampaign: asJson(normalized),
           ...(command.destination.kind === "create_world" ? {
             embeddedWorldImportRequest: asJson(worldImportRequestSchema.parse({
               sourceName,
@@ -1387,13 +1419,13 @@ export function createPortableFamilyPreviewAdapter(
                 format: "infinite-quest-world",
                 formatVersion: 1,
                 title: story.world.title?.trim() || "Imported adventure",
-                content: legacyWorldContent(story, command.selectedCharacterId)
+                content: normalized.worldContent!
               }
             }))
           } : {}),
           assetRecords: exactPortableAssetAuthority(assetRecords)
         }, null, command.selectedCharacterId ?? null),
-        projection: legacyProjection(story)
+        projection: legacyProjection(story, normalized)
       };
     },
     async previewInfiniteWorlds(source, command) {

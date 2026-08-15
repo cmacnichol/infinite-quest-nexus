@@ -396,6 +396,14 @@ function createPostgresCampaignStateRepository(
           actualStateRevision: current.revision
         });
       }
+      const effectiveTurnNumber = parsed.effectiveTurnNumber ?? parsed.expectedTurnNumber;
+      if (effectiveTurnNumber > current.activeTurnNumber) {
+        return failure("active_turn_changed", {
+          campaignId: scope.campaignId,
+          expectedTurnNumber: effectiveTurnNumber,
+          actualTurnNumber: current.activeTurnNumber
+        });
+      }
       const activeJob = await client.query(
         `SELECT 1 FROM generation_jobs
           WHERE campaign_id = $1 AND owner_user_id = $2
@@ -405,22 +413,37 @@ function createPostgresCampaignStateRepository(
       );
       if (activeJob.rowCount) return failure("invalid_transition", { campaignId: scope.campaignId });
 
-      const accepted = current.activeTurnNumber === 0
+      const accepted = effectiveTurnNumber === 0
         ? null
         : await client.query<{ stateSnapshotPrivate: Record<string, unknown> }>(
           `SELECT state_snapshot_private AS "stateSnapshotPrivate"
              FROM turns
             WHERE owner_user_id = $1 AND campaign_id = $2 AND turn_number = $3`,
-          [scope.ownerUserId, scope.campaignId, current.activeTurnNumber]
+          [scope.ownerUserId, scope.campaignId, effectiveTurnNumber]
         );
-      const currentSnapshot = current.activeTurnNumber === 0
+      const acceptedSnapshot = effectiveTurnNumber === 0
         ? current.initialStateSnapshot
         : accepted?.rows[0]?.stateSnapshotPrivate;
-      if (!currentSnapshot || typeof currentSnapshot !== "object" || Array.isArray(currentSnapshot)) {
+      if (!acceptedSnapshot || typeof acceptedSnapshot !== "object" || Array.isArray(acceptedSnapshot)) {
         invalidBoundaryData("unavailable", scope);
       }
+      const priorEdit = await loadEffectiveStateEdit(client, scope, effectiveTurnNumber);
+      const exactPriorEdit = priorEdit?.effectiveTurnNumber === effectiveTurnNumber ? priorEdit : null;
+      const targetSnapshot = exactPriorEdit?.stateSnapshotPrivate ?? acceptedSnapshot;
 
-      const existingFacts = await activeCanonicalFacts(client, scope, current.activeTurnNumber);
+      const persistedFacts = await activeCanonicalFacts(client, scope, effectiveTurnNumber);
+      const priorContent = runtimeStateContent(
+        targetSnapshot,
+        exactPriorEdit && effectiveTurnNumber < current.activeTurnNumber
+          ? undefined
+          : persistedFacts.map((fact) => ({ id: fact.id, content: fact.content })),
+        scope
+      );
+      const existingFacts = exactPriorEdit && effectiveTurnNumber < current.activeTurnNumber
+        ? priorContent.canonicalFacts.flatMap((fact) => fact.id
+          ? [{ id: fact.id, content: fact.content, sourceTurnNumber: effectiveTurnNumber }]
+          : [])
+        : persistedFacts;
       const existingById = new Map(existingFacts.map((fact) => [fact.id, fact]));
       const usedIds = new Set<string>();
       const correctedFacts: Array<{ id: string; content: string }> = [];
@@ -431,7 +454,7 @@ function createPostgresCampaignStateRepository(
         }
         const id = existing && existing.content === fact.content
           ? existing.id
-          : existing && existing.sourceTurnNumber === current.activeTurnNumber
+          : existing && existing.sourceTurnNumber === effectiveTurnNumber
             ? existing.id
             : crypto.randomUUID();
         if (usedIds.has(id)) {
@@ -441,43 +464,55 @@ function createPostgresCampaignStateRepository(
         correctedFacts.push({ id, content: fact.content });
       }
       const correctedContent = { ...content, canonicalFacts: correctedFacts };
-      const currentContent = runtimeStateContent({
-        ...objectValue(currentSnapshot),
-        scratchpad: current.scratchpadPrivate,
-        trackers: current.trackers,
-        rpgStats: current.rpgStats,
-        eventTriggers: current.eventTriggers,
-        pendingEventTriggers: current.pendingEventTriggers
-      }, existingFacts.map((fact) => ({ id: fact.id, content: fact.content })), scope);
+      const currentContent = effectiveTurnNumber === current.activeTurnNumber
+        ? runtimeStateContent({
+          ...objectValue(targetSnapshot),
+          scratchpad: current.scratchpadPrivate,
+          trackers: current.trackers,
+          rpgStats: current.rpgStats,
+          eventTriggers: current.eventTriggers,
+          pendingEventTriggers: current.pendingEventTriggers
+        }, existingFacts.map((fact) => ({ id: fact.id, content: fact.content })), scope)
+        : priorContent;
       const changedFields = (Object.keys(correctedContent) as Array<keyof CampaignRuntimeStateContent>)
         .filter((field) => json(correctedContent[field]) !== json(currentContent[field]));
-      if (!changedFields.length) return success(await loadRuntimeState(client, scope));
+      if (!changedFields.length) {
+        return success(await loadRuntimeState(client, scope, effectiveTurnNumber));
+      }
 
       const nextRevision = current.revision + 1;
-      const snapshot = { ...objectValue(currentSnapshot), ...correctedContent };
+      const snapshot = { ...objectValue(targetSnapshot), ...correctedContent };
       const editId = crypto.randomUUID();
-      await client.query(
-        `UPDATE campaign_state
+      if (effectiveTurnNumber === current.activeTurnNumber) {
+        await client.query(
+          `UPDATE campaign_state
             SET scratchpad_private = $3, scratchpad_safe_for_prompt = true,
                 trackers = $4, rpg_stats = $5, event_triggers = $6,
                 pending_event_triggers = $7, revision = $8, updated_at = now()
-          WHERE campaign_id = $1 AND owner_user_id = $2`,
-        [
-          scope.campaignId,
-          scope.ownerUserId,
-          correctedContent.scratchpad,
-          json(correctedContent.trackers),
-          json(correctedContent.rpgStats),
-          json(correctedContent.eventTriggers),
-          json(correctedContent.pendingEventTriggers),
-          nextRevision
-        ]
-      );
-      if (current.activeTurnNumber === 0) {
+           WHERE campaign_id = $1 AND owner_user_id = $2`,
+          [
+            scope.campaignId,
+            scope.ownerUserId,
+            correctedContent.scratchpad,
+            json(correctedContent.trackers),
+            json(correctedContent.rpgStats),
+            json(correctedContent.eventTriggers),
+            json(correctedContent.pendingEventTriggers),
+            nextRevision
+          ]
+        );
+        if (current.activeTurnNumber === 0) {
+          await client.query(
+            `UPDATE campaign_state SET initial_state_snapshot = $3
+              WHERE campaign_id = $1 AND owner_user_id = $2`,
+            [scope.campaignId, scope.ownerUserId, json(snapshot)]
+          );
+        }
+      } else {
         await client.query(
-          `UPDATE campaign_state SET initial_state_snapshot = $3
+          `UPDATE campaign_state SET revision = $3, updated_at = now()
             WHERE campaign_id = $1 AND owner_user_id = $2`,
-          [scope.campaignId, scope.ownerUserId, json(snapshot)]
+          [scope.campaignId, scope.ownerUserId, nextRevision]
         );
       }
       await client.query(
@@ -489,32 +524,34 @@ function createPostgresCampaignStateRepository(
           editId,
           scope.ownerUserId,
           scope.campaignId,
-          current.activeTurnNumber,
+          effectiveTurnNumber,
           nextRevision,
           json(snapshot),
           json(changedFields)
         ]
       );
-      await collaborators.memory.rebuildCampaignMemories(client, {
-        ownerUserId: scope.ownerUserId,
-        campaignId: scope.campaignId,
-        worldVersionId: current.worldVersionId
-      });
-      await client.query(
-        "DELETE FROM model_chains WHERE campaign_id = $1 AND owner_user_id = $2",
-        [scope.campaignId, scope.ownerUserId]
-      );
+      if (effectiveTurnNumber === current.activeTurnNumber) {
+        await collaborators.memory.rebuildCampaignMemories(client, {
+          ownerUserId: scope.ownerUserId,
+          campaignId: scope.campaignId,
+          worldVersionId: current.worldVersionId
+        });
+        await client.query(
+          "DELETE FROM model_chains WHERE campaign_id = $1 AND owner_user_id = $2",
+          [scope.campaignId, scope.ownerUserId]
+        );
+      }
       await client.query(
         `INSERT INTO activity_events (owner_user_id, campaign_id, event_type, details)
          VALUES ($1,$2,'campaign_state_edited',$3)`,
         [scope.ownerUserId, scope.campaignId, json({
-          effectiveTurnNumber: current.activeTurnNumber,
+          effectiveTurnNumber,
           fromRevision: current.revision,
           toRevision: nextRevision,
           changedFields
         })]
       );
-      return success(await loadRuntimeState(client, scope));
+      return success(await loadRuntimeState(client, scope, effectiveTurnNumber));
     }
   };
 }

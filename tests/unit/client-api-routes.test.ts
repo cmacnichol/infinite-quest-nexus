@@ -430,6 +430,19 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
     }] };
 
     if (sql.includes('AS "historyVersion"') && sql.includes("FROM turns")) return { rows: [{ historyVersion: `1:2:${TURN_ID}` }] };
+    if (sql.includes("FROM effective_turn_narrations effective") && sql.includes('AS "turnNumber"')) return { rows: [{
+      id: TURN_ID,
+      turnNumber: 3,
+      action: "Open the dome.",
+      inputMode: "action",
+      inputModeSource: "explicit",
+      narration: "Emerald light fills the room.",
+      choices: ["Look up.", "Step back.", "Call out.", "Close it."],
+      customActionSuggestion: "Study the constellations.",
+      imagePrompt: "An emerald observatory.",
+      imageUrl: "",
+      acceptedAt: NOW
+    }] };
 
     if (sql.startsWith("SELECT id, turn_number AS")) return { rows: [{
       id: TURN_ID,

@@ -338,7 +338,8 @@ export const campaignRuntimeStateContentSchema = z.object({
 
 export const campaignRuntimeStateUpdateSchema = campaignRuntimeStateContentSchema.extend({
   expectedTurnNumber: z.coerce.number().int().min(0),
-  expectedRevision: z.coerce.number().int().min(0)
+  expectedRevision: z.coerce.number().int().min(0),
+  effectiveTurnNumber: z.coerce.number().int().min(0).optional()
 });
 
 export const campaignRuntimeStateSchema = campaignRuntimeStateContentSchema.extend({

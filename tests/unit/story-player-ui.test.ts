@@ -508,6 +508,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       value: {
           expectedTurnNumber: 4,
           expectedRevision: 7,
+          effectiveTurnNumber: 4,
           continuitySummary: "Corrected summary.",
           openThreads: ["Find the keeper."],
           canonicalFacts: [{ id: "00000000-0000-4000-8000-000000000001", content: "The lens is moon glass." }],
@@ -610,6 +611,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(requests[0]?.value).toEqual({
       expectedTurnNumber: 4,
       expectedRevision: 7,
+      effectiveTurnNumber: 4,
       continuitySummary: "Corrected summary.",
       openThreads: ["Find the keeper."],
       canonicalFacts: [{ id: null, content: "New fact." }],
@@ -640,6 +642,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     });
 
     expect(panel.textContent).toContain("Historical state after turn 3");
+    expect(panel.textContent).toContain("Changes apply only to this saved turn");
     expect(panel.textContent).toContain("The lens is moon glass.");
     expect(panel.textContent).toContain('<img src=x onerror="alert(1)">');
     expect(panel.textContent).not.toContain("[object Object]");
@@ -720,9 +723,9 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyHtml).toContain('id="btnOpenWorldSetup"');
     expect(storyHtml).toContain('id="btnOpenEditState"');
     expect(storyHtml).toContain('id="btnExportMarkdown"');
+    expect(storyHtml).toContain('id="btnExportHtml"');
     expect(storyHtml).toContain('id="btnExportPdf"');
     expect(storyHtml).not.toContain('id="btnExportJson"');
-    expect(storyHtml).not.toContain('id="btnExportHtml"');
     expect(storyHtml).toContain('id="btnOpenActivityLog"');
     expect(storyHtml).toContain('id="btnAboutNexus"');
     expect(storyHtml).toContain('id="btnOpenUserProfile" class="nav-profile-button"');
@@ -751,17 +754,16 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).not.toContain('/provider-text/generate');
   });
 
-  it("implements Markdown and print-to-PDF exports with available story illustrations", () => {
+  it("implements backend-complete Markdown and HTML exports plus print-to-PDF with available story illustrations", () => {
     expect(storyScript).toContain('async function exportMarkdown()');
+    expect(storyScript).toContain('async function exportStandaloneHtml()');
     expect(storyScript).toContain('async function exportPdfWithImages()');
-    expect(storyScript).not.toContain('/campaigns/${state.campaignId}/export');
-    expect(storyScript).toContain('state.turns.forEach((t, i) => {');
-    expect(storyScript).toContain('t.imageAssetUrl || t.imageUrl');
+    expect(storyScript).toContain('/readable-export?format=markdown');
+    expect(storyScript).toContain('/readable-export?format=html');
     expect(storyScript).toContain('turn.imageAssetUrl || turn.imageUrl');
     expect(storyScript).toContain('printWindow.print()');
     expect(storyScript).toContain('function downloadBlob(blob, filename)');
     expect(storyScript).not.toContain('async function exportJson()');
-    expect(storyScript).not.toContain('async function exportHtml()');
   });
 
   it("provides toast notifications, activity logging, and onboarding verification", () => {

@@ -16,3 +16,7 @@ export * from "./migrate.js";
 export * from "./pool.js";
 export * from "./postgres-generation-events.js";
 export * from "./world-repository.js";
+export * from "./effective-turn-narration.js";
+export * from "./turn-correction-repository.js";
+export * from "./world-share-repository.js";
+export * from "./readable-campaign-export-repository.js";

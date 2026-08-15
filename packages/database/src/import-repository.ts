@@ -999,7 +999,14 @@ function resultFor<Kind extends PortableImportKind>(kind: Kind, value: unknown):
         completeHistoryCharacters: stats.completeHistoryCharacters,
         estimatedHistoryTokens: stats.estimatedHistoryTokens,
         importedSummary: stats.importedSummary,
-        sanitizedMemoryCount: stats.sanitizedMemoryCount
+        sanitizedMemoryCount: stats.sanitizedMemoryCount,
+        ...(isNonnegativeInteger(stats.preservedTurnStateCount) ? {
+          preservedTurnStateCount: stats.preservedTurnStateCount
+        } : {}),
+        ...(isNonnegativeInteger(stats.warningCount) ? { warningCount: stats.warningCount } : {}),
+        ...(isNonnegativeInteger(stats.summaryThroughTurn) ? {
+          summaryThroughTurn: stats.summaryThroughTurn
+        } : {})
       }
     };
   } else {

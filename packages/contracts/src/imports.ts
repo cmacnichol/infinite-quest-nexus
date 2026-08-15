@@ -126,6 +126,12 @@ export type StoryImportResult = {
     estimatedHistoryTokens: number;
     importedSummary: boolean;
     sanitizedMemoryCount: number;
+    /** Legacy turns whose complete normalized private-state snapshot was preserved. */
+    preservedTurnStateCount?: number;
+    /** Explicit compatibility translations or unsupported-setting warnings. */
+    warningCount?: number;
+    /** Accepted turn through which the imported continuity seed applies. */
+    summaryThroughTurn?: number;
   };
 };
 

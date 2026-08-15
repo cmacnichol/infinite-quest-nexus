@@ -89,6 +89,12 @@ import {
 import { providerTransportErrorDetails } from "../../../packages/story-engine/src/providers.js";
 import { formatNarrationParagraphs } from "../../../packages/story-engine/src/narration-formatting.js";
 import { readTurnPage } from "../../../packages/database/src/play-loop-read-repository.js";
+import { createWorldShareLinkService } from "../../../packages/database/src/world-share-repository.js";
+import { readReadableCampaignExport } from "../../../packages/database/src/readable-campaign-export-repository.js";
+import { createPostgresTurnCorrectionRepository } from "../../../packages/database/src/turn-correction-repository.js";
+import { renderReadableCampaignExport } from "../../../packages/story-engine/src/readable-campaign-export.js";
+import { createTurnCorrectionApplication, TurnCorrectionApplicationError } from "../../../packages/application/src/turn-corrections/index.js";
+import { acceptedTurnCorrectionRequestSchema } from "../../../packages/contracts/src/turn-corrections.js";
 import { userProfileUpdateSchema } from "../../../packages/contracts/src/users.js";
 import { assetListQuerySchema, assetMetadataUpdateSchema } from "../../../packages/contracts/src/assets.js";
 import {
@@ -152,6 +158,11 @@ export type BuildServerOptions = {
 };
 
 const uuidSchema = z.uuid();
+const worldShareCreateSchema = z.object({
+  worldVersionId: z.uuid(),
+  expiresInSeconds: z.coerce.number().int().min(300).max(2_592_000).default(604_800)
+}).strict();
+const worldShareTokenSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/u);
 const VITE_HASHED_STATIC_ASSET_PATTERN = /(?:^|[\\/])assets[\\/][^\\/]+-[A-Za-z0-9_-]{8,}\.[^\\/]+$/u;
 let lastWorldGenerationProgressCleanupAt = 0;
 
@@ -372,6 +383,9 @@ export async function buildServer({
     genReqId: () => crypto.randomUUID()
   });
   const memoryAdapter = createMemoryApplicationAdapter(pool, memory);
+  const turnCorrections = createTurnCorrectionApplication({
+    corrections: createPostgresTurnCorrectionRepository(pool, { memory: memory.generation })
+  });
   const generationAdapter = createGenerationApplicationAdapter(generation);
   const worldCampaignAdapter = createWorldCampaignApplicationAdapter(worldCampaign);
   const resolveWorldCampaignOwnerScope = async () => worldCampaignAdapter.ownerScope(await initialOwnerId(pool));
@@ -852,12 +866,60 @@ export async function buildServer({
       }));
   });
 
+  const worldShares = createWorldShareLinkService(pool);
+  app.get<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/share-links", async (request, reply) => {
+    if (config.worldSharingEnabled !== true) return reply.code(404).send({ error: "World sharing is disabled." });
+    return { shares: await worldShares.list(await initialOwnerId(pool), uuidSchema.parse(request.params.worldId)) };
+  });
+  app.post<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/share-links", async (request, reply) => {
+    if (config.worldSharingEnabled !== true) return reply.code(404).send({ error: "World sharing is disabled." });
+    const body = worldShareCreateSchema.parse(request.body);
+    const created = await worldShares.create({
+      ownerUserId: await initialOwnerId(pool),
+      worldId: uuidSchema.parse(request.params.worldId),
+      worldVersionId: body.worldVersionId,
+      expiresAt: new Date(Date.now() + body.expiresInSeconds * 1000)
+    });
+    return created
+      ? reply.code(201).send(created)
+      : reply.code(404).send({ error: "The selected published world version was not found." });
+  });
+  app.delete<{ Params: { worldId: string; shareId: string } }>("/api/v1/worlds/:worldId/share-links/:shareId", async (request, reply) => {
+    if (config.worldSharingEnabled !== true) return reply.code(404).send({ error: "World sharing is disabled." });
+    const revoked = await worldShares.revoke(
+      await initialOwnerId(pool),
+      uuidSchema.parse(request.params.worldId),
+      uuidSchema.parse(request.params.shareId)
+    );
+    return revoked ? reply.code(204).send() : reply.code(404).send({ error: "World share link not found." });
+  });
+  app.get<{ Params: { token: string } }>("/api/v1/world-shares/:token", async (request, reply) => {
+    if (config.worldSharingEnabled !== true) return reply.code(404).send({ error: "World share link not found." });
+    const redeemed = await worldShares.redeem(worldShareTokenSchema.parse(request.params.token));
+    return redeemed ? redeemed : reply.code(404).send({ error: "World share link not found." });
+  });
+
   app.get("/api/v1/campaigns", async () => {
     const ownerScope = await resolveWorldCampaignOwnerScope();
     return parseResponseProjection(
       campaignListResponseSchema,
       await worldCampaignAdapter.run(() => worldCampaignAdapter.application.listCampaigns(ownerScope))
     );
+  });
+
+  app.get<{ Params: { campaignId: string }; Querystring: { format?: string } }>("/api/v1/campaigns/:campaignId/readable-export", async (request, reply) => {
+    const format = z.enum(["html", "markdown"]).default("html").parse(request.query.format);
+    const projection = await readReadableCampaignExport(
+      pool,
+      await initialOwnerId(pool),
+      uuidSchema.parse(request.params.campaignId)
+    );
+    if (!projection) return reply.code(404).send({ error: "Campaign not found." });
+    const rendered = renderReadableCampaignExport(projection, format);
+    return reply
+      .type(rendered.contentType)
+      .header("content-disposition", `attachment; filename="${rendered.filename}"`)
+      .send(rendered.body);
   });
 
   app.get<{ Params: { worldVersionId: string } }>("/api/v1/world-versions/:worldVersionId/playable-characters", async (request) => (
@@ -957,6 +1019,32 @@ export async function buildServer({
       })),
       nextCursor: page.nextCursor
     });
+  });
+
+  app.get<{ Params: { campaignId: string; turnId: string } }>("/api/v1/campaigns/:campaignId/turns/:turnId/correction", async (request, reply) => {
+    const scope = {
+      ownerUserId: await initialOwnerId(pool),
+      campaignId: uuidSchema.parse(request.params.campaignId)
+    };
+    const correction = await turnCorrections.getEffectiveNarration(scope, uuidSchema.parse(request.params.turnId));
+    return correction ?? reply.code(404).send({ error: "Turn not found." });
+  });
+
+  app.patch<{ Params: { campaignId: string; turnId: string } }>("/api/v1/campaigns/:campaignId/turns/:turnId/correction", async (request, reply) => {
+    const campaignId = uuidSchema.parse(request.params.campaignId);
+    const turnId = uuidSchema.parse(request.params.turnId);
+    try {
+      return await turnCorrections.correctNarration(
+        { ownerUserId: await initialOwnerId(pool), campaignId },
+        acceptedTurnCorrectionRequestSchema.parse({ ...(request.body as Record<string, unknown>), turnId })
+      );
+    } catch (error) {
+      if (!(error instanceof TurnCorrectionApplicationError)) throw error;
+      const code = error.kind === "not_found" ? 404
+        : error.kind === "stale_state" || error.kind === "conflict" ? 409
+          : 400;
+      return reply.code(code).send({ error: error.reason, details: error.details });
+    }
   });
 
   app.get<{ Params: { campaignId: string }; Querystring: { turnNumber?: string } }>("/api/v1/campaigns/:campaignId/state", async (request) => (

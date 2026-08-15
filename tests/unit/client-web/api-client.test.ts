@@ -80,7 +80,7 @@ describe("createNexusApiClient", () => {
     expect(Object.keys(client).sort()).toEqual(["campaigns", "generation", "meta", "providers", "session", "worlds"]);
     expect(Object.keys(client.worlds).sort()).toEqual(["create", "list", "playableCharacters"]);
     expect(Object.keys(client.campaigns).sort()).toEqual([
-      "branch", "classifyTurnInput", "create", "list", "rewind", "state", "turns", "updateState"
+      "branch", "classifyTurnInput", "correctTurnNarration", "create", "getTurnCorrection", "list", "rewind", "state", "turns", "updateState"
     ]);
     expect(Object.keys(client.generation).sort()).toEqual([
       "cancel",
@@ -105,6 +105,8 @@ describe("createNexusApiClient", () => {
 
     expect(typeof campaigns.state).toBe("function");
     expect(typeof campaigns.updateState).toBe("function");
+    expect(typeof campaigns.getTurnCorrection).toBe("function");
+    expect(typeof campaigns.correctTurnNarration).toBe("function");
     expect(typeof campaigns.classifyTurnInput).toBe("function");
     expect(typeof campaigns.rewind).toBe("function");
     expect(typeof campaigns.branch).toBe("function");
@@ -145,6 +147,13 @@ describe("createNexusApiClient", () => {
         eventTriggers: [],
         pendingEventTriggers: []
       }, signal),
+      () => client.campaigns.getTurnCorrection(campaignId, worldVersionId, signal),
+      () => client.campaigns.correctTurnNarration(campaignId, worldVersionId, {
+        narration: "The gate opens beneath the moon.",
+        expectedCorrectionRevision: 0,
+        expectedActiveTurnNumber: 3,
+        source: "user_edit"
+      }, signal),
       () => client.campaigns.classifyTurnInput(campaignId, { text: "Open the dome.", preferredFallback: "action" }, signal),
       () => client.campaigns.rewind(campaignId, { targetTurnNumber: 2 }, signal),
       () => client.campaigns.branch(campaignId, { targetTurnNumber: 2 }, signal),
@@ -176,6 +185,8 @@ describe("createNexusApiClient", () => {
       "/api/v1/campaigns/campaign%20%2F%20id/state",
       "/api/v1/campaigns/campaign%20%2F%20id/state?turnNumber=3",
       `/api/v1/campaigns/${campaignId}/state`,
+      `/api/v1/campaigns/${campaignId}/turns/${worldVersionId}/correction`,
+      `/api/v1/campaigns/${campaignId}/turns/${worldVersionId}/correction`,
       `/api/v1/campaigns/${campaignId}/turn-input/classify`,
       `/api/v1/campaigns/${campaignId}/rewind`,
       `/api/v1/campaigns/${campaignId}/branch`,
@@ -194,12 +205,12 @@ describe("createNexusApiClient", () => {
       "/api/v1/providers"
     ]);
     expect(queue.options.map((option) => option.method)).toEqual([
-      "GET", "POST", "GET", "GET", "POST", "GET", "GET", "GET", "GET", "PATCH", "POST", "POST", "POST",
+      "GET", "POST", "GET", "GET", "POST", "GET", "GET", "GET", "GET", "PATCH", "GET", "PATCH", "POST", "POST", "POST",
       "GET", "GET", "POST", "POST", "GET", "GET", "POST", "POST", "POST", "GET", "GET", "PATCH", "GET"
     ]);
-    expect(queue.options[15]?.body).toBe(JSON.stringify(generationRequest));
-    expect(queue.options[16]?.body).toBe(JSON.stringify(replacementRequest));
-    expect(queue.options.slice(19, 22).map((option) => option.body)).toEqual([undefined, undefined, undefined]);
+    expect(queue.options[17]?.body).toBe(JSON.stringify(generationRequest));
+    expect(queue.options[18]?.body).toBe(JSON.stringify(replacementRequest));
+    expect(queue.options.slice(21, 24).map((option) => option.body)).toEqual([undefined, undefined, undefined]);
     expect(queue.options.every((option) => option.signal === signal)).toBe(true);
   });
 

@@ -43,6 +43,9 @@ describe("play-loop turn pages", () => {
     expect(fingerprint).toContain("ORDER BY latest_turn.turn_number DESC, latest_turn.id DESC");
     expect(fingerprint).toContain("LIMIT 1");
     expect(fingerprint).not.toContain("ARRAY_AGG");
+    expect(fingerprint).toContain("turn_narration_corrections");
+    const pageQuery = statements.find((statement) => statement.includes("effective_turn_narrations"));
+    expect(pageQuery).toContain("effective.effective_narration AS narration");
   });
 
   it("rejects a cursor after retry-latest replaces the current history boundary", async () => {

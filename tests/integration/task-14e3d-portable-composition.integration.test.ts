@@ -747,6 +747,137 @@ integration("Task 14e3d durable portable composition authority", () => {
     }
   });
 
+  it("commits normalized Legacy Story character, state, metadata, settings, and continuity authority", async () => {
+    const target = await createWorldScope(`14e3d legacy fidelity target ${crypto.randomUUID()}`);
+    const composition = await createRealComposition({
+      archiveRoot: await mkdtemp(`${tmpdir()}/iqn-14e3d-legacy-fidelity-archive-`),
+      assetRoot: await mkdtemp(`${tmpdir()}/iqn-14e3d-legacy-fidelity-assets-`),
+      target,
+      leaseOwner: "14e3d-legacy-fidelity"
+    });
+    const story = {
+      world: {
+        title: `Legacy fidelity ${crypto.randomUUID()}`,
+        character: "Mara Vale\nAn exiled cartographer.",
+        suppressTriggers: true
+      },
+      settings: {
+        storyLength: "long",
+        turnControlStyle: "flexible_scene",
+        useRpgStats: true,
+        memoryManagementMode: "scheduled",
+        storyHistoryTokenLimit: 128_000
+      },
+      rpgStats: [{ name: "Resolve", value: 71 }],
+      defaultTriggers: [{ name: "Map fragments", value: "0" }],
+      turns: [{
+        id: "legacy-fidelity-turn",
+        turnNumber: 9,
+        action: "Open the archive",
+        inputMode: "scene",
+        inputModeSource: "generated_choice",
+        narration: "The bronze doors open.",
+        scratchpadSnapshot: "The key is warm.",
+        trackersSnapshot: [{ name: "Archive", value: "open" }],
+        worldStateSnapshot: { pendingEventTriggers: [{ name: "Bell", timing: "after" }] },
+        roll: { total: 61, target: 70 },
+        llmModelInfo: { model: "legacy-model" },
+        importedFrom: { source: "browser" },
+        createdAt: "2025-01-02T03:04:05.000Z"
+      }],
+      fullHistory: {
+        plotDetails: "Mara reached the archive. DC 15 Wisdom check succeeded.",
+        otherImportantNotes: "The bronze key remains important."
+      },
+      fullHistoryCompressedThroughTurn: 1
+    };
+    try {
+      const staged = await stagedInput(
+        composition,
+        new TextEncoder().encode(JSON.stringify(story)),
+        "14e3d-legacy-fidelity",
+      );
+      const preview = await composition.previewLegacyStory({
+        ownerUserId,
+        stagedInput: staged,
+        kind: "legacy_story",
+        destination: { kind: "create_world" }
+      });
+      expect(preview.projection.warnings).toEqual(expect.arrayContaining([
+        expect.stringContaining("Chronicle replaces legacy memory management mode"),
+        expect.stringContaining("provider context window replaces legacy story history token limit")
+      ]));
+      const committed = await composition.commit({
+        ownerUserId,
+        kind: "legacy_story",
+        destination: preview.destination,
+        previewHandle: preview.previewHandle,
+        idempotencyKey: `14e3d-legacy-fidelity-${crypto.randomUUID()}`
+      });
+      const result = committed.result as Readonly<{ campaignId: string; stats: Record<string, unknown> }>;
+      const campaign = await pool.query<{
+        selected_character_id: string | null;
+        character_snapshot: Record<string, unknown> | null;
+        story_length_profile: string;
+        turn_control_style: string;
+        legacy_settings: Record<string, unknown>;
+      }>(
+        `SELECT selected_character_id,character_snapshot,story_length_profile,turn_control_style,legacy_settings
+           FROM campaigns WHERE owner_user_id=$1 AND id=$2`,
+        [ownerUserId, result.campaignId]
+      );
+      expect(campaign.rows[0]).toMatchObject({
+        selected_character_id: expect.stringMatching(/^legacy-import-character-/u),
+        character_snapshot: { name: "Mara Vale", characterText: "Mara Vale\nAn exiled cartographer." },
+        story_length_profile: "long",
+        turn_control_style: "flexible_scene",
+        legacy_settings: { useRpgStats: true, suppressEventTriggers: true }
+      });
+      const turn = await pool.query<{
+        turn_number: number;
+        input_mode: string;
+        input_mode_source: string;
+        mechanics_private: Record<string, unknown>;
+        state_snapshot_private: Record<string, unknown>;
+        model_metadata: Record<string, unknown>;
+        import_metadata: Record<string, unknown>;
+        accepted_at: Date;
+      }>(
+        `SELECT turn_number,input_mode,input_mode_source,mechanics_private,state_snapshot_private,
+                model_metadata,import_metadata,accepted_at
+           FROM turns WHERE owner_user_id=$1 AND campaign_id=$2`,
+        [ownerUserId, result.campaignId]
+      );
+      expect(turn.rows[0]).toMatchObject({
+        turn_number: 1,
+        input_mode: "scene",
+        input_mode_source: "generated_choice",
+        mechanics_private: { total: 61, target: 70 },
+        state_snapshot_private: {
+          scratchpad: "The key is warm.",
+          trackers: [{ id: "Archive", name: "Archive", value: "open", rules: "" }],
+          continuitySummary: "Plot: Mara reached the archive.\n\nImportant notes: The bronze key remains important."
+        },
+        model_metadata: { model: "legacy-model" },
+        import_metadata: { sourceTurnId: "legacy-fidelity-turn", sourceTurnNumber: 9 }
+      });
+      expect(turn.rows[0]?.accepted_at.toISOString()).toBe("2025-01-02T03:04:05.000Z");
+      const memories = await pool.query<{ memory_kind: string; content: string }>(
+        `SELECT memory_kind,content FROM chronicle_memories
+          WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY memory_kind`,
+        [ownerUserId, result.campaignId]
+      );
+      expect(memories.rows).toEqual(expect.arrayContaining([
+        expect.objectContaining({ memory_kind: "legacy_summary", content: "Plot: Mara reached the archive.\n\nImportant notes: The bronze key remains important." }),
+        expect.objectContaining({ memory_kind: "turn_fiction", content: expect.stringContaining("The bronze doors open.") })
+      ]));
+      expect(memories.rows.map((memory) => memory.content).join("\n")).not.toMatch(/DC 15|Wisdom check/u);
+      expect(result.stats).toMatchObject({ importedSummary: true, preservedTurnStateCount: 1, warningCount: 3, summaryThroughTurn: 1 });
+    } finally {
+      await composition.close();
+    }
+  });
+
   it("commits an embedded Campaign ZIP and its asset through the real composition", async () => {
     const target = await createWorldScope(`14e3d unused campaign target ${crypto.randomUUID()}`);
     const archiveRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-campaign-archive-`);

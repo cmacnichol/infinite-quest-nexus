@@ -113,6 +113,129 @@ integration("campaign state corrections", () => {
     expect(JSON.stringify(context)).toContain("Find the keeper.");
   });
 
+  it("applies a historical correction only to the targeted saved turn", async () => {
+    const imported = await campaign();
+    const beforeCurrent = await getCampaignRuntimeState(pool, imported.campaignId);
+    const beforeHistorical = await getCampaignRuntimeState(pool, imported.campaignId, 0);
+    expect(beforeCurrent.activeTurnNumber).toBeGreaterThan(0);
+
+    const materializedBefore = await pool.query(
+      `SELECT scratchpad_private, scratchpad_safe_for_prompt, trackers, rpg_stats,
+              event_triggers, pending_event_triggers, initial_state_snapshot
+         FROM campaign_state WHERE campaign_id = $1`,
+      [imported.campaignId]
+    );
+    const turnsBefore = await pool.query(
+      `SELECT turn_number, state_snapshot_private FROM turns
+        WHERE campaign_id = $1 ORDER BY turn_number`,
+      [imported.campaignId]
+    );
+    const chronicleBefore = await pool.query(
+      `SELECT memory_kind, ordinal, content, metadata FROM chronicle_memories
+        WHERE campaign_id = $1 ORDER BY id`,
+      [imported.campaignId]
+    );
+    const chainsBefore = await pool.query(
+      `SELECT * FROM model_chains WHERE campaign_id = $1 ORDER BY id`,
+      [imported.campaignId]
+    );
+
+    const corrected = await updateCampaignRuntimeState(pool, imported.campaignId, {
+      expectedTurnNumber: beforeCurrent.activeTurnNumber,
+      expectedRevision: beforeCurrent.revision,
+      effectiveTurnNumber: 0,
+      continuitySummary: "The corrected opening state.",
+      openThreads: ["Meet the keeper."],
+      canonicalFacts: beforeHistorical.canonicalFacts,
+      scratchpad: "The keeper began below the western stair.",
+      trackers: beforeHistorical.trackers,
+      rpgStats: beforeHistorical.rpgStats,
+      eventTriggers: beforeHistorical.eventTriggers,
+      pendingEventTriggers: beforeHistorical.pendingEventTriggers
+    });
+
+    expect(corrected).toMatchObject({
+      activeTurnNumber: beforeCurrent.activeTurnNumber,
+      viewedTurnNumber: 0,
+      isCurrent: false,
+      revision: beforeCurrent.revision + 1,
+      continuitySummary: "The corrected opening state.",
+      scratchpad: "The keeper began below the western stair."
+    });
+    await expect(getCampaignRuntimeState(pool, imported.campaignId, 0)).resolves.toMatchObject({
+      continuitySummary: "The corrected opening state.",
+      openThreads: ["Meet the keeper."],
+      scratchpad: "The keeper began below the western stair."
+    });
+    await expect(getCampaignRuntimeState(pool, imported.campaignId)).resolves.toMatchObject({
+      continuitySummary: beforeCurrent.continuitySummary,
+      openThreads: beforeCurrent.openThreads,
+      scratchpad: beforeCurrent.scratchpad,
+      trackers: beforeCurrent.trackers,
+      revision: beforeCurrent.revision + 1
+    });
+
+    await expect(pool.query(
+      `SELECT scratchpad_private, scratchpad_safe_for_prompt, trackers, rpg_stats,
+              event_triggers, pending_event_triggers, initial_state_snapshot
+         FROM campaign_state WHERE campaign_id = $1`,
+      [imported.campaignId]
+    )).resolves.toMatchObject({ rows: materializedBefore.rows });
+    await expect(pool.query(
+      `SELECT turn_number, state_snapshot_private FROM turns
+        WHERE campaign_id = $1 ORDER BY turn_number`,
+      [imported.campaignId]
+    )).resolves.toMatchObject({ rows: turnsBefore.rows });
+    await expect(pool.query(
+      `SELECT memory_kind, ordinal, content, metadata FROM chronicle_memories
+        WHERE campaign_id = $1 ORDER BY id`,
+      [imported.campaignId]
+    )).resolves.toMatchObject({ rows: chronicleBefore.rows });
+    await expect(pool.query(
+      `SELECT * FROM model_chains WHERE campaign_id = $1 ORDER BY id`,
+      [imported.campaignId]
+    )).resolves.toMatchObject({ rows: chainsBefore.rows });
+
+    await expect(pool.query(
+      `SELECT effective_turn_number, revision, changed_fields FROM campaign_state_edits
+        WHERE campaign_id = $1 ORDER BY revision DESC LIMIT 1`,
+      [imported.campaignId]
+    )).resolves.toMatchObject({
+      rows: [{
+        effective_turn_number: 0,
+        revision: beforeCurrent.revision + 1,
+        changed_fields: expect.arrayContaining(["continuitySummary", "openThreads", "scratchpad"])
+      }]
+    });
+  });
+
+  it("rejects a correction targeted beyond the active turn without writes", async () => {
+    const imported = await campaign();
+    const before = await getCampaignRuntimeState(pool, imported.campaignId);
+
+    await expect(updateCampaignRuntimeState(pool, imported.campaignId, {
+      expectedTurnNumber: before.activeTurnNumber,
+      expectedRevision: before.revision,
+      effectiveTurnNumber: before.activeTurnNumber + 1,
+      continuitySummary: before.continuitySummary,
+      openThreads: before.openThreads,
+      canonicalFacts: before.canonicalFacts,
+      scratchpad: before.scratchpad,
+      trackers: before.trackers,
+      rpgStats: before.rpgStats,
+      eventTriggers: before.eventTriggers,
+      pendingEventTriggers: before.pendingEventTriggers
+    })).rejects.toMatchObject({
+      statusCode: 409,
+      details: { code: "active_turn_changed" }
+    });
+
+    await expect(pool.query(
+      "SELECT * FROM campaign_state_edits WHERE campaign_id = $1",
+      [imported.campaignId]
+    )).resolves.toMatchObject({ rowCount: 0 });
+  });
+
   it("projects multiple manual canonical facts as one Chronicle memory", async () => {
     const imported = await campaign();
     const before = await getCampaignRuntimeState(pool, imported.campaignId);

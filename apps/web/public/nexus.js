@@ -857,6 +857,8 @@ function setWorldEditorDisabled(disabled) {
     elements.createCampaignModalBtn,
     elements.confirmCreateCampaign,
     elements.exportWorld,
+    elements.createWorldShare,
+    elements.revokeWorldShare,
     elements.deleteWorldVersion,
     elements.archiveWorld,
     elements.deleteWorld
@@ -1327,6 +1329,8 @@ async function selectWorld(worldId) {
   elements.createCampaignModalBtn.disabled = true;
   elements.confirmCreateCampaign.disabled = true;
   elements.exportWorld.disabled = !selectedWorld.versions.length;
+  elements.createWorldShare.disabled = !selectedWorld.versions.length;
+  elements.revokeWorldShare.disabled = !selectedWorld.versions.length;
   elements.forkWorldModalBtn.disabled = !selectedWorld.versions.length;
   updateWorldVersionDeleteAvailability();
   elements.deleteWorld.disabled = false;
@@ -2241,6 +2245,45 @@ async function exportSelectedWorld() {
   try {
     await downloadJson(`/api/v1/worlds/${selectedWorld.id}/export?worldVersionId=${encodeURIComponent(selectedWorldVersionId())}`, "infinite-quest-world.json");
     worldMessage("Published world version exported without campaign or provider data.", "success");
+  } catch (error) {
+    worldMessage(error.message || String(error), "error");
+  }
+}
+
+async function createSelectedWorldShare() {
+  if (!selectedWorld || !selectedWorldVersionId()) return;
+  try {
+    const response = await fetch(`/api/v1/worlds/${selectedWorld.id}/share-links`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ worldVersionId: selectedWorldVersionId(), expiresInSeconds: 604800 })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `Share creation failed with HTTP ${response.status}.`);
+    const url = `${location.origin}/api/v1/world-shares/${payload.token}`;
+    await navigator.clipboard.writeText(url);
+    worldMessage(`World share link copied. It expires ${new Date(payload.expiresAt).toLocaleString()}.`, "success");
+  } catch (error) {
+    worldMessage(error.message || String(error), "error");
+  }
+}
+
+async function revokeSelectedWorldShare() {
+  if (!selectedWorld) return;
+  try {
+    const response = await fetch(`/api/v1/worlds/${selectedWorld.id}/share-links`);
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `Share lookup failed with HTTP ${response.status}.`);
+    const active = (payload.shares || []).filter((share) => !share.revokedAt && new Date(share.expiresAt) > new Date());
+    if (!active.length) return worldMessage("This world has no active share links.");
+    const selected = prompt(`Paste the share ID to revoke:\n${active.map((share) => `${share.id} · expires ${new Date(share.expiresAt).toLocaleString()}`).join("\n")}`, active[0].id);
+    if (!selected) return;
+    const revoked = await fetch(`/api/v1/worlds/${selectedWorld.id}/share-links/${encodeURIComponent(selected.trim())}`, { method: "DELETE" });
+    if (!revoked.ok) {
+      const detail = await revoked.json().catch(() => ({}));
+      throw new Error(detail.error || `Revoke failed with HTTP ${revoked.status}.`);
+    }
+    worldMessage("World share link revoked.", "success");
   } catch (error) {
     worldMessage(error.message || String(error), "error");
   }
@@ -4902,6 +4945,8 @@ if (elements.createCampaignModalBtn) {
   elements.createCampaignForm.addEventListener("submit", (e) => { e.preventDefault(); createCampaignFromWorld(); });
 }
 elements.exportWorld.addEventListener("click", exportSelectedWorld);
+elements.createWorldShare.addEventListener("click", createSelectedWorldShare);
+elements.revokeWorldShare.addEventListener("click", revokeSelectedWorldShare);
 elements.deleteWorldVersion.addEventListener("click", deleteSelectedWorldVersion);
 elements.archiveWorld.addEventListener("click", toggleWorldArchive);
 elements.deleteWorld.addEventListener("click", deleteSelectedWorld);

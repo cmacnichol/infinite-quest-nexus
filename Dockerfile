@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 FROM node:25-bookworm-slim AS build
 WORKDIR /app
-RUN corepack enable
+RUN npm install --global pnpm@11.18.0
 COPY package.json pnpm-workspace.yaml tsconfig.json tsconfig.build.json ./
 COPY database ./database
 COPY packages ./packages

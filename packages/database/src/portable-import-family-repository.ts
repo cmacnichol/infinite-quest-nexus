@@ -36,6 +36,7 @@ import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
 import { importPrivatePortableWorldAtExactTarget } from "./world-repository.js";
 import { runPostgresWorldCampaignCommandWithClient } from "./world-campaign-transaction.js";
+import { estimateTokens, stripMechanicsLeakage } from "../../domain/src/text.js";
 
 type WorkRow = Readonly<{
   operation_id: string;
@@ -1356,6 +1357,21 @@ async function commitRichPortableCampaign(
         jsonValue(row.state_snapshot_private, {}), jsonValue(row.changed_fields, []), portableDate(row.created_at)]
     );
   }
+  for (const value of unknownArray(archiveRecords.narrationCorrections)) {
+    const row = unknownRecord(value);
+    const sourceTurnId = row.turn_id;
+    const targetTurnId = requireRichId(maps.turn, sourceTurnId);
+    await database.query(
+      `INSERT INTO turn_narration_corrections (
+         owner_user_id,campaign_id,turn_id,revision,narration,
+         previous_effective_narration_hash,reason,source,created_by_user_id,created_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,'legacy_import',$1,$8)`,
+      [input.owner.ownerUserId, campaignId, targetTurnId, Number(row.revision ?? 1),
+        narration(row), String(row.previous_effective_narration_hash ?? ""),
+        typeof row.reason === "string" && row.reason.trim() ? row.reason : null,
+        portableDate(row.created_at)]
+    );
+  }
   for (const memoryValue of chronicle.memories) {
     const memory = unknownRecord(memoryValue);
     await database.query(
@@ -1543,7 +1559,23 @@ async function commitPortableCampaign(
   );
   const storyValue = input.payload.story ?? input.payload.campaign;
   const story = legacyStorySchema.parse(storyValue);
-  const title = story.campaign?.title?.trim() || story.world.title?.trim() || "Imported campaign";
+  const normalized = sourceType === "portable_legacy_story"
+    ? unknownRecord(input.payload.normalizedCampaign)
+    : {};
+  const campaignSeed = unknownRecord(normalized.campaignSeed);
+  const normalizedState = unknownRecord(normalized.currentState);
+  const normalizedInitialState = unknownRecord(normalized.initialState);
+  const normalizedTurns = unknownArray(normalized.turns).map(unknownRecord);
+  const continuitySeed = unknownRecord(normalized.continuitySeed);
+  const normalizedStats = unknownRecord(normalized.stats);
+  const hasNormalizedCampaign = Object.keys(normalized).length > 0;
+  if (sourceType === "portable_legacy_story"
+    && hasNormalizedCampaign
+    && normalizedTurns.length !== story.turns.length) {
+    throw new Error("portable_import_payload_invalid");
+  }
+  const title = portableString(campaignSeed.title as PortableJsonValue | undefined,
+    story.campaign?.title?.trim() || story.world.title?.trim() || "Imported campaign");
   const imported = await database.query<{ id: string }>(
     `INSERT INTO imports (owner_user_id,source_type,source_name,source_hash,status)
      VALUES ($1,$2,$3,$4,'processing') RETURNING id`,
@@ -1551,11 +1583,49 @@ async function commitPortableCampaign(
   );
   const importId = imported.rows[0]!.id;
   const campaignId = input.targetPlan?.campaignId ?? randomUUID();
+  const legacySettings = Object.keys(campaignSeed).length
+    ? unknownRecord(campaignSeed.legacySettings)
+    : story.settings ?? {};
+  const selectedCharacterId = typeof campaignSeed.selectedCharacterId === "string"
+    && campaignSeed.selectedCharacterId.trim()
+    ? campaignSeed.selectedCharacterId.trim()
+    : null;
+  const characterSnapshot = selectedCharacterId ? unknownRecord(campaignSeed.characterSnapshot) : null;
+  const characterProfile = campaignSeed.characterProfile && typeof campaignSeed.characterProfile === "object"
+    && !Array.isArray(campaignSeed.characterProfile)
+    ? campaignSeed.characterProfile
+    : null;
+  const characterProfileRevision = characterProfile && Number.isInteger(campaignSeed.characterProfileRevision)
+    && Number(campaignSeed.characterProfileRevision) >= 0
+    ? Number(campaignSeed.characterProfileRevision)
+    : characterProfile ? 1 : 0;
+  const storyLengthProfile = ["brief", "standard", "long", "extended"].includes(String(campaignSeed.storyLengthProfile))
+    ? String(campaignSeed.storyLengthProfile)
+    : "standard";
+  const turnControlStyle = ["action_only", "flexible_auto", "flexible_action", "flexible_scene"]
+    .includes(String(campaignSeed.turnControlStyle))
+    ? String(campaignSeed.turnControlStyle)
+    : "flexible_action";
   await database.query(
-    `INSERT INTO campaigns (id,owner_user_id,world_version_id,title,active_turn_number,legacy_settings)
-     VALUES ($1,$2,$3,$4,$5,$6::jsonb)`,
-    [campaignId, input.owner.ownerUserId, input.destination.worldVersionId, title, story.turns.length, JSON.stringify(story.settings ?? {})]
+    `INSERT INTO campaigns (
+       id,owner_user_id,world_version_id,title,active_turn_number,legacy_settings,
+       story_length_profile,turn_control_style,selected_character_id,character_snapshot,
+       character_profile,character_profile_revision
+     ) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10::jsonb,$11::jsonb,$12)`,
+    [campaignId, input.owner.ownerUserId, input.destination.worldVersionId, title, story.turns.length,
+      JSON.stringify(legacySettings), storyLengthProfile, turnControlStyle, selectedCharacterId,
+      characterSnapshot ? JSON.stringify(characterSnapshot) : null,
+      characterProfile ? JSON.stringify(characterProfile) : null,
+      characterProfileRevision]
   );
+  if (characterProfile && characterProfileRevision > 0) {
+    await database.query(
+      `INSERT INTO campaign_character_profile_edits (
+         owner_user_id,campaign_id,revision,previous_profile,next_profile,edit_source
+       ) VALUES ($1,$2,$3,NULL,$4::jsonb,'imported')`,
+      [input.owner.ownerUserId, campaignId, characterProfileRevision, JSON.stringify(characterProfile)]
+    );
+  }
   if (input.targetPlan && input.targetPlan.turns.length !== story.turns.length) {
     throw new Error("portable_import_reference_invalid");
   }
@@ -1568,27 +1638,40 @@ async function commitPortableCampaign(
       for (const key of portableLegacyAssetLookupKeys(sourceKey)) publicationBySourceKey.set(key, publication.result);
     }
   }
+  const currentState = Object.keys(normalizedState).length ? normalizedState : {
+    scratchpad: story.scratchpad ?? "",
+    trackers: story.trackers ?? [],
+    defaultTriggers: story.defaultTriggers ?? [],
+    eventTriggers: story.eventTriggers ?? [],
+    pendingEventTriggers: story.pendingEventTriggers ?? [],
+    rpgStats: story.rpgStats ?? []
+  };
+  const initialState = Object.keys(normalizedInitialState).length
+    ? normalizedInitialState
+    : { scratchpad: "", trackers: story.baseTrackersAtStart ?? story.trackers ?? [] };
   await database.query(
     `INSERT INTO campaign_state (
        campaign_id,owner_user_id,scratchpad_private,trackers,default_triggers,
-       event_triggers,pending_event_triggers,rpg_stats,import_provenance
-     ) VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6::jsonb,$7::jsonb,$8::jsonb,$9::jsonb)`,
+       event_triggers,pending_event_triggers,rpg_stats,import_provenance,initial_state_snapshot
+     ) VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6::jsonb,$7::jsonb,$8::jsonb,$9::jsonb,$10::jsonb)`,
     [
       campaignId,
       input.owner.ownerUserId,
-      story.scratchpad ?? "",
-      JSON.stringify(story.trackers ?? []),
-      JSON.stringify(story.defaultTriggers ?? []),
-      JSON.stringify(story.eventTriggers ?? []),
-      JSON.stringify(story.pendingEventTriggers ?? []),
-      JSON.stringify(story.rpgStats ?? []),
-      JSON.stringify({ sourceType, importId })
+      typeof currentState.scratchpad === "string" ? currentState.scratchpad : "",
+      JSON.stringify(unknownArray(currentState.trackers)),
+      JSON.stringify(unknownArray(currentState.defaultTriggers)),
+      JSON.stringify(unknownArray(currentState.eventTriggers)),
+      JSON.stringify(unknownArray(currentState.pendingEventTriggers)),
+      JSON.stringify(unknownArray(currentState.rpgStats)),
+      JSON.stringify({ sourceType, importId, ...unknownRecord(normalized.provenance) }),
+      JSON.stringify(initialState)
     ]
   );
   const turnIds: string[] = [];
   const sourceTurnIds = new Map<string, string>();
   for (const [index, turnValue] of story.turns.entries()) {
     const turn = turnValue as Readonly<Record<string, unknown>>;
+    const normalizedTurn = normalizedTurns[index] ?? turn;
     const sourceTurnId = typeof turn.id === "string" ? turn.id : null;
     const externalImageUrl = safePortableExternalImageUrl(turn.imageUrl);
     const plannedTurn = input.targetPlan?.turns[index];
@@ -1596,26 +1679,42 @@ async function commitPortableCampaign(
       throw new Error("portable_import_reference_invalid");
     }
     const turnId = plannedTurn?.targetTurnId ?? randomUUID();
+    const stateSnapshot = {
+      ...unknownRecord(normalizedTurn.stateSnapshotPrivate ?? turn.worldStateSnapshot),
+      ...(index === story.turns.length - 1 && typeof continuitySeed.content === "string" && continuitySeed.content.trim()
+        ? { continuitySummary: continuitySeed.content.trim() }
+        : {})
+    };
     await database.query(
       `INSERT INTO turns (
-         id,owner_user_id,campaign_id,turn_number,source_turn_id,action,narration,choices,
+         id,owner_user_id,campaign_id,turn_number,source_turn_id,action,input_mode,input_mode_source,narration,choices,
          custom_action_suggestion,image_prompt,image_url,mechanics_private,
          state_snapshot_private,model_metadata,import_metadata
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,NULL,$12::jsonb,'{}'::jsonb,$13::jsonb)`,
+         ,accepted_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13,$14::jsonb,$15::jsonb,$16::jsonb,$17::jsonb,
+         COALESCE($18::timestamptz,clock_timestamp()))`,
       [
         turnId,
         input.owner.ownerUserId,
         campaignId,
         index + 1,
         sourceTurnId,
-        typeof turn.action === "string" ? turn.action : "",
-        narration(turn),
-        JSON.stringify(Array.isArray(turn.choices) ? turn.choices.slice(0, 4) : []),
-        typeof turn.customActionSuggestion === "string" ? turn.customActionSuggestion : "",
-        typeof turn.imagePrompt === "string" ? turn.imagePrompt : "",
+        typeof normalizedTurn.action === "string" ? normalizedTurn.action : "",
+        normalizedTurn.inputMode === "scene" ? "scene" : "action",
+        ["explicit", "auto", "generated_choice", "opening_action", "fallback"].includes(String(normalizedTurn.inputModeSource))
+          ? normalizedTurn.inputModeSource : "explicit",
+        typeof normalizedTurn.narration === "string" ? normalizedTurn.narration : narration(turn),
+        JSON.stringify(Array.isArray(normalizedTurn.choices) ? normalizedTurn.choices.slice(0, 4) : []),
+        typeof normalizedTurn.customActionSuggestion === "string" ? normalizedTurn.customActionSuggestion : "",
+        typeof normalizedTurn.imagePrompt === "string" ? normalizedTurn.imagePrompt : "",
         externalImageUrl,
-        JSON.stringify(turn.worldStateSnapshot ?? {}),
-        JSON.stringify({ importedFrom: sourceType, sourceTurnId: turn.id ?? null })
+        normalizedTurn.mechanicsPrivate == null ? null : JSON.stringify(normalizedTurn.mechanicsPrivate),
+        JSON.stringify(stateSnapshot),
+        JSON.stringify(unknownRecord(normalizedTurn.modelMetadata)),
+        JSON.stringify(Object.keys(unknownRecord(normalizedTurn.importMetadata)).length
+          ? normalizedTurn.importMetadata
+          : { importedFrom: sourceType, sourceTurnId: turn.id ?? null }),
+        typeof normalizedTurn.acceptedAt === "string" ? normalizedTurn.acceptedAt : null
       ]
     );
     turnIds.push(turnId);
@@ -1650,7 +1749,15 @@ async function commitPortableCampaign(
         [turnId, `/api/v1/assets/${turnAsset.assetId}`, input.owner.ownerUserId]
       );
     }
-    const fiction = narration(turn);
+    const actionMemory = stripMechanicsLeakage(typeof normalizedTurn.action === "string" ? normalizedTurn.action : "");
+    const narrationMemory = stripMechanicsLeakage(
+      typeof normalizedTurn.narration === "string" ? normalizedTurn.narration : narration(turn)
+    );
+    const fiction = [
+      `Turn ${index + 1}`,
+      actionMemory.text ? `Player action: ${actionMemory.text}` : "",
+      narrationMemory.text ? `Narration: ${narrationMemory.text}` : ""
+    ].filter(Boolean).join("\n");
     await database.query(
       `INSERT INTO chronicle_memories (
          owner_user_id,campaign_id,world_version_id,turn_id,memory_kind,ordinal,
@@ -1663,9 +1770,37 @@ async function commitPortableCampaign(
         turnId,
         index + 1,
         fiction,
-        Math.ceil(fiction.length / 4),
-        JSON.stringify({ imported: true })
+        estimateTokens(fiction),
+        JSON.stringify({
+          imported: true,
+          sanitized: actionMemory.changed || narrationMemory.changed,
+          removedMechanicsSegments: actionMemory.removedSegments + narrationMemory.removedSegments
+        })
       ]
+    );
+  }
+  if (typeof continuitySeed.content === "string" && continuitySeed.content.trim()) {
+    const throughTurn = Number.isInteger(continuitySeed.throughTurn)
+      ? Math.min(story.turns.length, Math.max(0, Number(continuitySeed.throughTurn)))
+      : story.turns.length;
+    const summaryContent = continuitySeed.content.trim().slice(0, 20_000);
+    await database.query(
+      `INSERT INTO summary_checkpoints (
+         owner_user_id,campaign_id,through_turn,summary_kind,content,token_estimate
+       ) VALUES ($1,$2,$3,'legacy_full_history',$4::jsonb,$5)`,
+      [input.owner.ownerUserId, campaignId, throughTurn, JSON.stringify({ summary: summaryContent }), estimateTokens(summaryContent)]
+    );
+    await database.query(
+      `INSERT INTO chronicle_memories (
+         owner_user_id,campaign_id,world_version_id,memory_kind,ordinal,content,
+         token_estimate,importance,metadata
+       ) VALUES ($1,$2,$3,'legacy_summary',0,$4,$5,0.75,$6::jsonb)`,
+      [input.owner.ownerUserId, campaignId, input.destination.worldVersionId, summaryContent,
+        estimateTokens(summaryContent), JSON.stringify({
+          derivedFromLegacyFullHistory: true,
+          throughTurn,
+          sanitized: continuitySeed.sanitized === true
+        })]
     );
   }
   const normalizedChildBindings = [];
@@ -1728,11 +1863,20 @@ async function commitPortableCampaign(
   }
   const legacyStats = {
     turnCount: story.turns.length,
-    memoryCount: story.turns.length,
-    completeHistoryCharacters: typeof story.fullHistory === "string" ? story.fullHistory.length : 0,
-    estimatedHistoryTokens: typeof story.fullHistory === "string" ? Math.ceil(story.fullHistory.length / 4) : 0,
-    importedSummary: false,
-    sanitizedMemoryCount: story.turns.length
+    memoryCount: story.turns.length + (typeof continuitySeed.content === "string" && continuitySeed.content.trim() ? 1 : 0),
+    completeHistoryCharacters: sourceType === "portable_legacy_story" && hasNormalizedCampaign
+      ? Number(normalizedStats.completeHistoryCharacters ?? 0)
+      : typeof story.fullHistory === "string" ? story.fullHistory.length : 0,
+    estimatedHistoryTokens: sourceType === "portable_legacy_story" && hasNormalizedCampaign
+      ? Number(normalizedStats.estimatedHistoryTokens ?? 0)
+      : typeof story.fullHistory === "string" ? Math.ceil(story.fullHistory.length / 4) : 0,
+    importedSummary: sourceType === "portable_legacy_story" && hasNormalizedCampaign && normalizedStats.importedSummary === true,
+    sanitizedMemoryCount: sourceType === "portable_legacy_story" && hasNormalizedCampaign
+      ? Number(normalizedStats.sanitizedMemoryCount ?? 0)
+      : story.turns.length,
+    preservedTurnStateCount: hasNormalizedCampaign ? Number(normalizedStats.preservedTurnStateCount ?? 0) : 0,
+    warningCount: hasNormalizedCampaign ? Number(normalizedStats.warningCount ?? 0) : 0,
+    summaryThroughTurn: hasNormalizedCampaign ? Number(normalizedStats.summaryThroughTurn ?? 0) : 0
   };
   const campaignStats = {
     turnCount: story.turns.length,

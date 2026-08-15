@@ -51,6 +51,7 @@ export type RuntimeConfig = {
   campaignArchiveLimits: ArchiveLimits;
   systemArchiveLimits: ArchiveLimits;
   credentialEncryptionKey: string;
+  worldSharingEnabled?: boolean;
   security: RuntimeSecurityConfig;
 };
 
@@ -222,6 +223,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
       maxEntries: 1_000_000
     }),
     credentialEncryptionKey: secretSetting("CREDENTIAL_ENCRYPTION_KEY"),
+    worldSharingEnabled: booleanSetting("WORLD_SHARING_ENABLED", false),
     security: {
       corsAllowedOrigins: parseExactOriginList(process.env.CORS_ALLOWED_ORIGINS, "CORS_ALLOWED_ORIGINS"),
       providerNetworkAllowlist: parseProviderAllowlist(process.env.PROVIDER_NETWORK_ALLOWLIST),

@@ -3,6 +3,7 @@ import {
   loadWorld as loadWorldRequest,
   saveWorldDraft as saveWorldDraftRequest,
   setWorldCoverAsset as setWorldCoverAssetRequest,
+  createWorldShareLink as createWorldShareLinkRequest,
   WorldEditorApiError,
   type WorldCoverAssetResponse,
   type WorldDraftSaveResponse
@@ -67,6 +68,11 @@ export interface WorldEditorPageDependencies {
     assetId: string | null,
     signal?: AbortSignal
   ) => Promise<WorldCoverAssetResponse>;
+  createWorldShareLink?: (
+    worldId: string,
+    worldVersionId: string,
+    signal?: AbortSignal
+  ) => Promise<Readonly<{ id: string; token: string; expiresAt: string }>>;
   copyUnsavedDraft?: (serializedDraft: string) => Promise<void>;
   downloadUnsavedDraft?: (serializedDraft: string, filename: string) => void;
   confirmReload?: () => boolean;
@@ -517,9 +523,29 @@ export function mountWorldEditorPage(
     const versionLink = document.createElement("a");
     versionLink.href = "/nexus/#world-library";
     versionLink.textContent = "Manage published versions";
+    const shareButton = document.createElement("button");
+    shareButton.type = "button";
+    shareButton.textContent = "Share latest version";
+    shareButton.disabled = latestVersion === null;
+    shareButton.addEventListener("click", async () => {
+      if (!latestVersion) return;
+      shareButton.disabled = true;
+      try {
+        const created = await (dependencies.createWorldShareLink ?? createWorldShareLinkRequest)(world.id, latestVersion.id);
+        const url = `${view.location.origin}/api/v1/world-shares/${created.token}`;
+        await view.navigator.clipboard.writeText(url);
+        announcement.textContent = `Share link copied. It expires ${new Date(created.expiresAt).toLocaleString()}.`;
+      } catch (error) {
+        announcement.textContent = error instanceof Error ? error.message : "The share link could not be created.";
+      } finally {
+        shareButton.disabled = false;
+      }
+    });
     versionContext.replaceChildren(
       `${world.versions.length} published version${world.versions.length === 1 ? "" : "s"}${latestVersion ? ` · Latest v${latestVersion.versionNumber}` : ""} · `,
-      versionLink
+      versionLink,
+      " · ",
+      shareButton
     );
     const campaignLink = document.createElement("a");
     campaignLink.href = "/nexus/#campaigns";

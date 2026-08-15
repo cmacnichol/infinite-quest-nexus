@@ -45,4 +45,30 @@ describe("campaign archive export repository", () => {
     expect(snapshot.assets.records).toEqual([]);
     expect(maximumConcurrentQueries).toBe(1);
   });
+
+  it("exports the append-only narration correction ledger separately from base turns", async () => {
+    const statements: string[] = [];
+    const client = {
+      async query(sql: string) {
+        statements.push(sql);
+        if (sql.includes("FROM campaigns c JOIN world_versions")) {
+          return { rows: [{
+            id: "campaign-1", world_id: "world-1", world_version_id: "world-version-1",
+            active_turn_number: 0, state_revision: 0, revision: 0, version_number: 1, content: {}
+          }] };
+        }
+        return { rows: [] };
+      },
+      release() {}
+    };
+    const pool = { async connect() { return client; } } as unknown as DatabasePool;
+
+    const snapshot = await loadCampaignArchiveExportSnapshot(pool, "owner-1", "campaign-1");
+
+    expect(snapshot.narrationCorrections).toEqual([]);
+    expect(statements.some((sql) => sql.includes("FROM turn_narration_corrections"))).toBe(true);
+    const turnQuery = statements.find((sql) => sql.includes("mechanics_private,state_snapshot_private"));
+    expect(turnQuery).toContain("narration");
+    expect(turnQuery).not.toContain("effective_turn_narrations");
+  });
 });

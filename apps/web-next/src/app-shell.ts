@@ -18,9 +18,9 @@ export function renderAppShell(root: HTMLElement, pageMarkup: string, currentNav
         </a>
         <nav class="site-nav" aria-label="Primary navigation">
           <a href="/app/"${currentAttribute(currentNavigation, "world-library")}>World Library</a>
-          <a href="/nexus/?view=campaigns"${currentAttribute(currentNavigation, "campaigns")}>Campaigns</a>
+          <a href="/nexus/#campaigns"${currentAttribute(currentNavigation, "campaigns")}>Campaigns</a>
           <a href="/story"${currentAttribute(currentNavigation, "story")}>Story</a>
-          <a href="/nexus/?view=setup"${currentAttribute(currentNavigation, "setup")}>Setup</a>
+          <a href="/nexus/#providers"${currentAttribute(currentNavigation, "setup")}>Setup</a>
         </nav>
         <a class="story-link" href="/story">
           Enter story

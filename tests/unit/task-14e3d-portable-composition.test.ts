@@ -404,6 +404,65 @@ describe("Task 14e3d private portable composition contract", () => {
     expect(results[4]!.authority.providerConfigurationFingerprint).toBe("b".repeat(64));
   });
 
+  it("uses the canonical legacy campaign normalization in production preview authority", async () => {
+    const result = await previewAdapter.previewLegacyStory(utf8(JSON.stringify({
+      format: "infinite-quest-campaign",
+      world: { title: "Portable source", character: "Source Hero" },
+      campaign: {
+        title: "Bound campaign",
+        selectedCharacterId: "source-hero",
+        characterSnapshot: { id: "source-hero", name: "Source Hero", characterText: "Original guidance" }
+      },
+      settings: {
+        storyLength: "extended",
+        memoryManagementMode: "scheduled",
+        storyHistoryTokenLimit: 64_000
+      },
+      turns: [{
+        id: "source-turn",
+        turnNumber: 4,
+        narration: "The gate opened.",
+        scratchpadSnapshot: "Remember the seal.",
+        trackersSnapshot: [{ name: "Gate", value: "open" }],
+        roll: { total: 42 }
+      }],
+      fullHistory: "The gate is open.",
+      fullHistoryCompressedThroughTurn: 1
+    })), {
+      ownerUserId,
+      stagedInput: toPortableStagedInput("normalized-legacy"),
+      kind: "legacy_story",
+      destination: {
+        kind: "existing_world_version",
+        worldId: "00000000-0000-4000-8000-000000000030",
+        worldVersionId: "00000000-0000-4000-8000-000000000031"
+      },
+      characterStrategy: "preserve_source"
+    });
+
+    expect(result.authority.normalizedPayload.normalizedCampaign).toMatchObject({
+      campaignSeed: {
+        selectedCharacterId: "source-hero",
+        storyLengthProfile: "extended",
+        characterStrategy: "preserve_source"
+      },
+      turns: [{
+        turnNumber: 1,
+        sourceTurnNumber: 4,
+        mechanicsPrivate: { total: 42 },
+        stateSnapshotPrivate: {
+          scratchpad: "Remember the seal.",
+          trackers: [{ id: "Gate", name: "Gate", value: "open" }]
+        }
+      }],
+      continuitySeed: { content: "The gate is open.", throughTurn: 1 }
+    });
+    expect(result.projection.warnings).toEqual(expect.arrayContaining([
+      expect.stringContaining("Chronicle replaces legacy memory management mode"),
+      expect.stringContaining("provider context window replaces legacy story history token limit")
+    ]));
+  });
+
   it("extracts valid Legacy Story inline images while preserving external and malformed optional semantics", async () => {
     const story = {
       campaign: { sourceCampaignId, title: "Legacy image campaign" },

@@ -56,7 +56,11 @@ async function currentHistoryVersion(client: DatabaseClient, ownerUserId: string
                WHERE latest_turn.owner_user_id = $1 AND latest_turn.campaign_id = $2
                ORDER BY latest_turn.turn_number DESC, latest_turn.id DESC
                LIMIT 1
-            ), '') AS "historyVersion"
+            ), '') || ':' || COALESCE((
+              SELECT COUNT(*)::text || ':' || COALESCE(MAX(correction.revision), 0)::text
+                FROM turn_narration_corrections correction
+               WHERE correction.owner_user_id = $1 AND correction.campaign_id = $2
+            ), '0:0') AS "historyVersion"
        FROM turns history_turn
       WHERE history_turn.owner_user_id = $1 AND history_turn.campaign_id = $2`,
     [ownerUserId, campaignId]
@@ -90,14 +94,21 @@ export async function readTurnPage(
     const historyVersion = await currentHistoryVersion(client, ownerUserId, campaignId);
     const cursor = before === undefined ? null : decodeCursor(before, campaignId, historyVersion);
     const result = await client.query<TurnPageRow>(
-      `SELECT id, turn_number AS "turnNumber", action, COALESCE(input_mode, 'action') AS "inputMode",
-              COALESCE(input_mode_source, 'explicit') AS "inputModeSource", narration, choices,
-              custom_action_suggestion AS "customActionSuggestion", image_prompt AS "imagePrompt",
-              image_url AS "imageUrl", accepted_at AS "acceptedAt"
-         FROM turns
-        WHERE owner_user_id = $1 AND campaign_id = $2
-          AND ($3::integer IS NULL OR (turn_number, id) < ($3, $4::uuid))
-        ORDER BY turn_number DESC, id DESC
+      `SELECT effective.turn_id AS id, effective.turn_number AS "turnNumber", turn_row.action,
+              COALESCE(turn_row.input_mode, 'action') AS "inputMode",
+              COALESCE(turn_row.input_mode_source, 'explicit') AS "inputModeSource",
+              effective.effective_narration AS narration, turn_row.choices,
+              turn_row.custom_action_suggestion AS "customActionSuggestion",
+              turn_row.image_prompt AS "imagePrompt", turn_row.image_url AS "imageUrl",
+              turn_row.accepted_at AS "acceptedAt"
+         FROM effective_turn_narrations effective
+         JOIN turns turn_row
+           ON turn_row.id = effective.turn_id
+          AND turn_row.campaign_id = effective.campaign_id
+          AND turn_row.owner_user_id = effective.owner_user_id
+        WHERE effective.owner_user_id = $1 AND effective.campaign_id = $2
+          AND ($3::integer IS NULL OR (effective.turn_number, effective.turn_id) < ($3, $4::uuid))
+        ORDER BY effective.turn_number DESC, effective.turn_id DESC
         LIMIT $5`,
       [ownerUserId, campaignId, cursor?.turnNumber ?? null, cursor?.id ?? null, limit + 1]
     );

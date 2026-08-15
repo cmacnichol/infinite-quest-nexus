@@ -250,7 +250,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       if (sql.includes("FROM campaigns") && sql.includes("world_versions")) {
         return { rows: [campaignRow] };
       }
-      if (sql.includes("FROM turns") && sql.includes("ORDER BY turn_number")) {
+      if (sql.includes("FROM turns turn_row") && sql.includes("effective_turn_narrations")) {
         return { rows: [
           { id: "turn-1", turn_number: 1, action: "Enter.", narration: "The Moon Warden watches.", state_snapshot_private: {} },
           { id: "turn-2", turn_number: 2, action: "Advance.", narration: "The gate opens.", state_snapshot_private: {} }
@@ -290,7 +290,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
           character_profile: null
         }] };
       }
-      if (sql.includes("FROM turns") && sql.includes("ORDER BY turn_number")) return { rows: [] };
+      if (sql.includes("FROM turns turn_row") && sql.includes("effective_turn_narrations")) return { rows: [] };
       if (sql.includes("FROM campaign_state_edits")) {
         return { rows: [{
           id: "state-edit-1",

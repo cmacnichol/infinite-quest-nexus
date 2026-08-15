@@ -28,8 +28,9 @@ describe("complete campaign runtime state", () => {
     expect(campaignRuntimeStateUpdateSchema.parse({
       expectedTurnNumber: 4,
       expectedRevision: 7,
+      effectiveTurnNumber: 2,
       ...fullState
-    })).toMatchObject(fullState);
+    })).toMatchObject({ ...fullState, effectiveTurnNumber: 2 });
   });
 
   it("returns stable canonical fact IDs", () => {
@@ -52,6 +53,7 @@ describe("complete campaign runtime state", () => {
     expect(() => campaignRuntimeStateUpdateSchema.parse({
       expectedTurnNumber: 4,
       expectedRevision: 7,
+      effectiveTurnNumber: 4,
       ...fullState,
       openThreads: [""],
       rpgStats: [{ id: "resolve", name: "Resolve", value: 100, note: "" }]

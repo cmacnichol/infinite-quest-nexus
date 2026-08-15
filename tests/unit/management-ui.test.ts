@@ -17,7 +17,7 @@ function managementFunction<T extends (...args: never[]) => unknown>(name: strin
 
 describe("Nexus management UI contracts", () => {
   it("navigates to provider management with an anchor", () => {
-    expect(storyHtml).toContain('<a id="btnGettingConfigureProviders" class="buttonish accent grow" href="/nexus/">Open Provider Management in Nexus</a>');
+    expect(storyHtml).toContain('<a id="btnGettingConfigureProviders" class="buttonish accent grow" href="/nexus/#providers">Open Provider Management in Nexus</a>');
   });
 
   it("provides one Setup entrypoint for application and campaign prompt templates", () => {

@@ -1873,13 +1873,24 @@ async function openEditState() {
   if (!dlg || !state.campaignId) return;
   const campaignId = state.campaignId;
   try {
-    showBusy("Loading current state…");
-    state.runtimeState = await apiClient.campaigns.state(campaignId);
+    const turnIndex = viewedTurnIndex();
+    const viewedTurnNumber = state.turns[turnIndex]?.turnNumber;
+    const isHistorical = Number.isInteger(viewedTurnNumber)
+      && viewedTurnNumber < Number(state.campaign?.activeTurnNumber || 0);
+    showBusy(isHistorical ? `Loading state after turn ${viewedTurnNumber}…` : "Loading current state…");
+    const editableRuntimeState = await apiClient.campaigns.state(campaignId, isHistorical ? viewedTurnNumber : undefined);
+    if (!isHistorical) state.runtimeState = editableRuntimeState;
     state.editStateSession = Object.freeze({
       campaignId,
-      runtimeState: captureCampaignStateEditSession(state.runtimeState)
+      runtimeState: captureCampaignStateEditSession({
+        ...editableRuntimeState,
+        viewedTurnNumber: isHistorical ? viewedTurnNumber : editableRuntimeState.activeTurnNumber
+      })
     });
+    const previousRuntimeState = state.runtimeState;
+    state.runtimeState = state.editStateSession.runtimeState;
     renderCurrentRuntimeState();
+    state.runtimeState = previousRuntimeState;
     switchEditStateTab("overview");
     openManagedModal(dlg);
   } catch (err) {
@@ -2168,12 +2179,16 @@ async function saveEditState() {
       scratchpad: scratchpadEl,
       trackers: collectTrackerEditorValues()
     }, savedState => {
-      state.runtimeState = savedState;
+      const historical = editSession.runtimeState.viewedTurnNumber < editSession.runtimeState.activeTurnNumber;
+      if (!historical) state.runtimeState = savedState;
       state.editStateSession = null;
       const dlg = $("editStateDialog");
       if (dlg && dlg.close) dlg.close();
     });
-    toast("Current state saved. The next story turn will use these changes.");
+    const historical = editSession.runtimeState.viewedTurnNumber < editSession.runtimeState.activeTurnNumber;
+    toast(historical
+      ? `State after turn ${editSession.runtimeState.viewedTurnNumber} saved without changing the current campaign state.`
+      : "Current state saved. The next story turn will use these changes.");
   } catch (err) {
     toast(`Save failed: ${err.message}`);
   } finally {
@@ -2242,27 +2257,26 @@ function openWorldSetup() {
 async function exportMarkdown() {
   if (!state.campaignId) return;
   try {
-    const title = String(state.campaign?.title || "Story").replace(/[\r\n]+/g, " ");
-    let md = `# ${title}\n\n`;
-    state.turns.forEach((t, i) => {
-      const action = String(t.action || "").replace(/[\r\n]+/g, " ");
-      const turnId = t.id || t.turnId || state.turns[i]?.id || "";
-      const segments = illustrationSegmentsForTurn(turnId);
-      md += `## Turn ${i + 1}${action ? ": " + action : ""}\n\n`;
-      if (segments.length) {
-        segments.forEach((segment) => {
-          md += `${segment.text.trim()}\n\n`;
-          const imageUrl = String(segment.variants?.[0]?.url || "").replace(/>/g, "%3E");
-          if (imageUrl) md += `![Turn ${i + 1}, segment ${segment.ordinal + 1} illustration](<${imageUrl}>)\n\n`;
-        });
-      } else {
-        const imageUrl = String(t.imageAssetUrl || t.imageUrl || "").trim().replace(/>/g, "%3E");
-        if (t.narration) md += t.narration + "\n\n";
-        if (imageUrl) md += `![Turn ${i + 1} illustration](<${imageUrl}>)\n\n`;
-      }
-    });
-    downloadBlob(new Blob([md], { type: "text/markdown" }), `${title.replace(/[^a-zA-Z0-9_-]/g, "_")}.md`);
+    const response = await fetch(`/api/v1/campaigns/${encodeURIComponent(state.campaignId)}/readable-export?format=markdown`);
+    if (!response.ok) throw new Error(`Export failed with HTTP ${response.status}.`);
+    const disposition = response.headers.get("content-disposition") || "";
+    const filename = disposition.match(/filename="([^"]+)"/i)?.[1] || "infinite-quest-story.md";
+    downloadBlob(await response.blob(), filename);
     toast("Markdown export downloaded.");
+  } catch (err) {
+    toast(`Export failed: ${err.message}`);
+  }
+}
+
+async function exportStandaloneHtml() {
+  if (!state.campaignId) return;
+  try {
+    const response = await fetch(`/api/v1/campaigns/${encodeURIComponent(state.campaignId)}/readable-export?format=html`);
+    if (!response.ok) throw new Error(`Export failed with HTTP ${response.status}.`);
+    const disposition = response.headers.get("content-disposition") || "";
+    const filename = disposition.match(/filename="([^"]+)"/i)?.[1] || "infinite-quest-story.html";
+    downloadBlob(await response.blob(), filename);
+    toast("Standalone HTML export downloaded.");
   } catch (err) {
     toast(`Export failed: ${err.message}`);
   }
@@ -2470,6 +2484,8 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnOpenWorldSetup) btnOpenWorldSetup.addEventListener("click", () => { closeNavigationMenus(); openWorldSetup(); });
   const btnExportMarkdown = $("btnExportMarkdown");
   if (btnExportMarkdown) btnExportMarkdown.addEventListener("click", () => { closeNavigationMenus(); exportMarkdown(); });
+  const btnExportHtml = $("btnExportHtml");
+  if (btnExportHtml) btnExportHtml.addEventListener("click", () => { closeNavigationMenus(); exportStandaloneHtml(); });
   const btnExportPdf = $("btnExportPdf");
   if (btnExportPdf) btnExportPdf.addEventListener("click", () => { closeNavigationMenus(); exportPdfWithImages(); });
   const btnOpenEditState = $("btnOpenEditState");
@@ -2710,25 +2726,49 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Edit Response dialog
   const btnEditResponse = $("btnEditResponse");
-  if (btnEditResponse) btnEditResponse.addEventListener("click", () => {
+  if (btnEditResponse) btnEditResponse.addEventListener("click", async () => {
     const dlg = $("editResponseDialog");
     const editor = $("responseEditor");
     if (!dlg || !editor) return;
     const turnIdx = state.viewIndex === -1 ? state.turns.length - 1 : state.viewIndex;
     if (turnIdx < 0) return;
-    editor.value = state.turns[turnIdx].narration || "";
+    const turn = state.turns[turnIdx];
+    try {
+      const correction = await apiClient.campaigns.getTurnCorrection(state.campaignId, turn.id);
+      editor.value = correction.effectiveNarration;
+      dlg._correctionRevision = correction.correctionRevision;
+    } catch (error) {
+      toast(`Response could not be loaded: ${error.message}`);
+      return;
+    }
     dlg._turnIndex = turnIdx;
     openManagedModal(dlg);
   });
   const btnEditResponseSave = $("btnEditResponseSave");
-  if (btnEditResponseSave) btnEditResponseSave.addEventListener("click", () => {
+  if (btnEditResponseSave) btnEditResponseSave.addEventListener("click", async () => {
     const dlg = $("editResponseDialog");
     const editor = $("responseEditor");
     if (!dlg || !editor || dlg._turnIndex === undefined) return;
-    state.turns[dlg._turnIndex].narration = editor.value;
-    renderAllScenes();
-    if (dlg.close) dlg.close();
-    toast("Response updated locally.");
+    const turn = state.turns[dlg._turnIndex];
+    try {
+      showBusy("Saving corrected narration…");
+      const correction = await apiClient.campaigns.correctTurnNarration(state.campaignId, turn.id, {
+        narration: editor.value,
+        expectedCorrectionRevision: Number(dlg._correctionRevision || 0),
+        expectedActiveTurnNumber: Number(state.campaign?.activeTurnNumber || 0),
+        source: "user_edit"
+      });
+      turn.narration = correction.effectiveNarration;
+      renderAllScenes();
+      if (dlg.close) dlg.close();
+      toast(correction.illustrationsMayBeStale
+        ? "Narration corrected. Existing illustrations may no longer match."
+        : "Narration corrected and Chronicle memory rebuilt.");
+    } catch (error) {
+      toast(`Correction failed: ${error.message}`);
+    } finally {
+      hideBusy();
+    }
   });
   const btnEditResponseCancel = $("btnEditResponseCancel");
   if (btnEditResponseCancel) btnEditResponseCancel.addEventListener("click", () => { const d = $("editResponseDialog"); if (d && d.close) d.close(); });

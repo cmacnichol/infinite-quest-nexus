@@ -122,7 +122,7 @@ export function renderCampaignStateInspector(panel, runtimeState) {
     "mini",
     runtime.isCurrent
       ? "Editable from Menu → Edit State."
-      : "Read-only. Reset or branch here to make this state current."
+      : "Changes apply only to this saved turn. Later turns and current state remain unchanged."
   );
   const continuitySummary = createInspectorText(
     document,
@@ -178,6 +178,7 @@ export function buildCampaignStateUpdate(runtimeState, editorValues) {
   return {
     expectedTurnNumber: runtimeState.activeTurnNumber,
     expectedRevision: runtimeState.revision,
+    effectiveTurnNumber: runtimeState.viewedTurnNumber ?? runtimeState.activeTurnNumber,
     continuitySummary: String(editorValues.continuitySummary ?? ""),
     openThreads: normalizeTextItems(editorValues.openThreads),
     canonicalFacts: normalizeCanonicalFacts(editorValues.canonicalFacts),

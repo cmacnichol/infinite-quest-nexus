@@ -53,6 +53,7 @@ export type CampaignArchiveExportSnapshot = Readonly<{
   turns: readonly Record<string, any>[];
   profileEdits: readonly unknown[];
   stateEdits: readonly unknown[];
+  narrationCorrections: readonly unknown[];
   migrations: readonly unknown[];
   illustrationConfig: unknown | null;
   illustrationSets: readonly unknown[];
@@ -243,6 +244,10 @@ export async function loadCampaignArchiveExportSnapshot(
     const values = [ownerUserId, campaignId] as const;
     const profileEdits = await queryRows(client, "SELECT id,revision,previous_profile,next_profile,edit_source,created_at FROM campaign_character_profile_edits WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY revision", values);
     const stateEdits = await queryRows(client, "SELECT id,effective_turn_number,revision,state_snapshot_private,changed_fields,created_at FROM campaign_state_edits WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY revision", values);
+    const narrationCorrections = await queryRows(client, `SELECT id,turn_id,revision,narration,
+      previous_effective_narration_hash,reason,source,created_at
+      FROM turn_narration_corrections WHERE owner_user_id=$1 AND campaign_id=$2
+      ORDER BY turn_id,revision`, values);
     const migrations = await queryRows(client, "SELECT id,from_world_version_id,to_world_version_id,note,created_at FROM campaign_world_migrations WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY created_at,id", values);
     const illustrationConfigs = await queryRows(client, "SELECT enabled,source_policy,matching_scope,confidence_profile,repetition_window,model,size,aspect_ratio,quality,output_format,max_attempts,segment_word_count,images_per_segment,segment_prompt_mode,refinement_prompt,created_at,updated_at FROM campaign_illustration_configs WHERE owner_user_id=$1 AND campaign_id=$2", values);
     const illustrationSets = await queryRows(client, "SELECT id,turn_id,source_text_hash,segment_word_count,images_per_segment,prompt_mode,status,is_active,character_visual_reference,created_at,completed_at FROM turn_illustration_sets WHERE owner_user_id=$1 AND campaign_id=$2 AND turn_id IS NOT NULL ORDER BY created_at,id", values);
@@ -258,7 +263,7 @@ export async function loadCampaignArchiveExportSnapshot(
     if (latestStateRevision > Number(campaign.state_revision)) throw exportError("Campaign state revision does not match the captured state edit ledger.");
     await client.query("COMMIT");
     return {
-      ownerUserId, campaign, turns, profileEdits, stateEdits, migrations,
+      ownerUserId, campaign, turns, profileEdits, stateEdits, narrationCorrections, migrations,
       illustrationConfig: illustrationConfigs[0] ?? null, illustrationSets, illustrationSegments,
       costs, memories, summaries, legacyHistory: legacy.rows[0] ?? null, assets,
     };

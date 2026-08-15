@@ -12,6 +12,15 @@ function serviceEnvironment(source: string, service: string): string {
 }
 
 describe("deployment security configuration", () => {
+  it("installs the package-manager-pinned pnpm without relying on bundled Corepack", () => {
+    const packageManifest = JSON.parse(readFileSync("package.json", "utf8")) as { packageManager?: string };
+    const dockerfile = readFileSync("Dockerfile", "utf8");
+
+    expect(packageManifest.packageManager).toBe("pnpm@11.18.0");
+    expect(dockerfile).toContain("RUN npm install --global pnpm@11.18.0");
+    expect(dockerfile).not.toContain("corepack enable");
+  });
+
   it.each([
     ["Compose combined app", "compose.yaml", "infinitequest-app"],
     ["Swarm API", "deploy/swarm/stack.yaml", "infinitequest-api"]

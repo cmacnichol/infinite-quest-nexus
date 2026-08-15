@@ -147,6 +147,17 @@ describe("web theme integration", () => {
     theme.dispose();
   });
 
+  it("routes unfinished replacement sections to the matching legacy views", () => {
+    const { document } = parseHTML('<html><body><div id="app"></div></body></html>').window;
+    const root = document.querySelector<HTMLElement>("#app");
+    if (!root) throw new Error("Shell fixture is missing.");
+
+    renderAppShell(root, '<main id="main-content">Page</main>', "world-library");
+
+    expect(document.querySelector<HTMLAnchorElement>('a[href="/nexus/#campaigns"]')?.textContent).toBe("Campaigns");
+    expect(document.querySelector<HTMLAnchorElement>('a[href="/nexus/#providers"]')?.textContent).toBe("Setup");
+  });
+
   it("keeps a valid stored choice authoritative when matchMedia access throws", () => {
     const root = runPreRenderThemeBootstrap({
       stored: "dark",

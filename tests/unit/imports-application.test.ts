@@ -51,7 +51,7 @@ const previewProjectionByKind = {
 
 const resultProjectionByKind = {
   campaign_zip: { importId: "import-1", worldId, worldVersionId, campaignId, duplicate: false, stats: { turnCount: 0, memoryCount: 0, summaryCount: 0, assetCount: 0, assetBytes: 0 } },
-  legacy_story: { importId: "import-1", worldId, worldVersionId, campaignId, duplicate: false, stats: { turnCount: 0, memoryCount: 0, completeHistoryCharacters: 0, estimatedHistoryTokens: 0, importedSummary: false, sanitizedMemoryCount: 0 } },
+  legacy_story: { importId: "import-1", worldId, worldVersionId, campaignId, duplicate: false, stats: { turnCount: 0, memoryCount: 0, completeHistoryCharacters: 0, estimatedHistoryTokens: 0, importedSummary: false, sanitizedMemoryCount: 0, preservedTurnStateCount: 0, warningCount: 0, summaryThroughTurn: 0 } },
   infinite_worlds: { kind: "world", importId: "import-1", worldId, worldVersionId, duplicate: false },
   cyoa: { kind: "world", importId: "import-1", worldId, worldVersionId, duplicate: false },
   world_json: { kind: "world", importId: "import-1", worldId, worldVersionId, duplicate: false },

@@ -933,7 +933,14 @@ function mapLegacyStoryCommitResult(
       completeHistoryCharacters: result.stats.completeHistoryCharacters,
       estimatedHistoryTokens: result.stats.estimatedHistoryTokens,
       importedSummary: result.stats.importedSummary,
-      sanitizedMemoryCount: result.stats.sanitizedMemoryCount
+      sanitizedMemoryCount: result.stats.sanitizedMemoryCount,
+      ...(result.stats.preservedTurnStateCount === undefined ? {} : {
+        preservedTurnStateCount: result.stats.preservedTurnStateCount
+      }),
+      ...(result.stats.warningCount === undefined ? {} : { warningCount: result.stats.warningCount }),
+      ...(result.stats.summaryThroughTurn === undefined ? {} : {
+        summaryThroughTurn: result.stats.summaryThroughTurn
+      })
     }
   };
 }

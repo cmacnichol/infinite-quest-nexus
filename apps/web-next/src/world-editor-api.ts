@@ -43,6 +43,12 @@ export interface WorldCoverAssetResponse {
   assetUrl: string;
 }
 
+export interface WorldShareLinkResponse {
+  id: string;
+  token: string;
+  expiresAt: string;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -189,4 +195,21 @@ export async function setWorldCoverAsset(
   } catch (error) {
     return invalidSuccessResponse(response, error);
   }
+}
+
+export async function createWorldShareLink(
+  worldId: string,
+  worldVersionId: string,
+  signal?: AbortSignal
+): Promise<WorldShareLinkResponse> {
+  const { response, value } = await fetchJson(`/api/v1/worlds/${encodeURIComponent(worldId)}/share-links`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({ worldVersionId, expiresInSeconds: 604800 }),
+    signal
+  });
+  if (!isRecord(value) || typeof value.id !== "string" || typeof value.token !== "string" || typeof value.expiresAt !== "string") {
+    return invalidSuccessResponse(response, new Error("The World Editor returned an unexpected share-link response."));
+  }
+  return { id: value.id, token: value.token, expiresAt: value.expiresAt };
 }

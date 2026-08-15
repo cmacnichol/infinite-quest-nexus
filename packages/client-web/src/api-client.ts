@@ -31,6 +31,10 @@ import {
   worldCreateSchema,
   worldListResponseSchema
 } from "@infinite-quest/contracts";
+import {
+  acceptedTurnCorrectionRequestSchema,
+  acceptedTurnCorrectionViewSchema
+} from "@infinite-quest/contracts";
 import type {
   CampaignBranchRequest,
   CampaignBranchResponse,
@@ -63,6 +67,7 @@ import type {
   WorldCreateResponse,
   WorldListResponse
 } from "@infinite-quest/contracts";
+import type { AcceptedTurnCorrectionRequest, AcceptedTurnCorrectionView } from "@infinite-quest/contracts";
 import type { z } from "zod";
 import { createNexusHttpClient } from "./http-client.js";
 import type { HttpMethod, JsonRequestSpec, NexusHttpClientOptions } from "./http-client.js";
@@ -78,6 +83,8 @@ export interface CampaignApi {
   turns(campaignId: string, options?: TurnPageRequest | AbortSignal, signal?: AbortSignal): Promise<TurnListResponse>;
   state(campaignId: string, turnNumber?: number, signal?: AbortSignal): Promise<CampaignRuntimeStateResponse>;
   updateState(campaignId: string, request: CampaignRuntimeStateUpdate, signal?: AbortSignal): Promise<CampaignRuntimeStateResponse>;
+  getTurnCorrection(campaignId: string, turnId: string, signal?: AbortSignal): Promise<AcceptedTurnCorrectionView>;
+  correctTurnNarration(campaignId: string, turnId: string, request: Omit<AcceptedTurnCorrectionRequest, "turnId">, signal?: AbortSignal): Promise<AcceptedTurnCorrectionView>;
   classifyTurnInput(campaignId: string, request: TurnInputClassificationRequest, signal?: AbortSignal): Promise<TurnInputClassificationResponse>;
   rewind(campaignId: string, request: CampaignRewindRequest, signal?: AbortSignal): Promise<CampaignRewindResponse>;
   branch(campaignId: string, request: CampaignBranchRequest, signal?: AbortSignal): Promise<CampaignBranchResponse>;
@@ -192,6 +199,17 @@ export function createNexusApiClient(options: NexusHttpClientOptions): NexusApiC
       const path = `/campaigns/${encodedPathSegment(campaignId)}/state`;
       const body = validatedRequest(campaignRuntimeStateUpdateRequestSchema, request, method, path);
       return http.request(withSignal({ method, path, body: { kind: "json", value: body }, responseSchema: campaignRuntimeStateResponseSchema }, signal));
+    },
+    getTurnCorrection: (campaignId, turnId, signal) => http.request(withSignal({
+      method: "GET",
+      path: `/campaigns/${encodedPathSegment(campaignId)}/turns/${encodedPathSegment(turnId)}/correction`,
+      responseSchema: acceptedTurnCorrectionViewSchema
+    }, signal)),
+    async correctTurnNarration(campaignId, turnId, request, signal) {
+      const method: HttpMethod = "PATCH";
+      const path = `/campaigns/${encodedPathSegment(campaignId)}/turns/${encodedPathSegment(turnId)}/correction`;
+      const body = validatedRequest(acceptedTurnCorrectionRequestSchema, { ...request, turnId }, method, path);
+      return http.request(withSignal({ method, path, body: { kind: "json", value: body }, responseSchema: acceptedTurnCorrectionViewSchema }, signal));
     },
     async classifyTurnInput(campaignId, request, signal) {
       const method: HttpMethod = "POST";

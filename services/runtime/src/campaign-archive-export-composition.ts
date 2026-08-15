@@ -162,6 +162,7 @@ function payloads(snapshot: CampaignArchiveExportSnapshot) {
     formatVersion: 1,
     characterProfileEdits: snapshot.profileEdits,
     stateEdits: snapshot.stateEdits,
+    narrationCorrections: snapshot.narrationCorrections,
     worldMigrations: snapshot.migrations,
     illustrationConfig: snapshot.illustrationConfig,
     illustrationSets: snapshot.illustrationSets,
