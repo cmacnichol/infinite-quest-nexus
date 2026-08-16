@@ -3,12 +3,13 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDatabasePool, initialOwnerId, type DatabasePool, withTransaction } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
+import { createPostgresChronicleGenerationTransactionPort } from "../../packages/database/src/chronicle-repository.js";
+import { chronicleContentHash } from "../../packages/domain/src/chronicle-memory-helpers.js";
 import {
   evaluateChronicleRetrieval,
   type ChronicleRetrievalApplication,
   type ChronicleRetrievalCorpus
 } from "../../scripts/lib/chronicle-retrieval-evaluator.js";
-import { apiMemoryApplication } from "../helpers/memory-applications.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe.sequential : describe.skip;
@@ -70,11 +71,27 @@ integration("Chronicle retrieval evaluation integration seam", () => {
       [randomUUID(), ownerUserId, campaign.rows[0]!.id, version.rows[0]!.id, secondTurn.rows[0]!.id]
     );
     await pool.query("UPDATE campaign_canonical_facts SET superseded_by_fact_id = $1 WHERE id = $2", [replacement.rows[0]!.id, replaced.rows[0]!.id]);
+    const embeddingProvider = await pool.query<{ id: string }>(
+      `INSERT INTO provider_profiles
+         (owner_user_id, name, provider_type, provider_role, base_url, default_model)
+       VALUES ($1,'Chronicle evaluator embedding','openai_compatible','embedding','http://fixture.invalid/v1','fixture-embedding-v1')
+       RETURNING id`,
+      [ownerUserId]
+    );
+    const embeddingProviderId = embeddingProvider.rows[0]!.id;
+    await pool.query(
+      `INSERT INTO campaign_memory_configs
+         (campaign_id, owner_user_id, embedding_enabled, embedding_provider_profile_id, embedding_model)
+       VALUES ($1,$2,true,$3,'fixture-embedding-v1')`,
+      [campaign.rows[0]!.id, ownerUserId, embeddingProviderId]
+    );
     const memory = await pool.query<{ id: string }>(
       `INSERT INTO chronicle_memories
-         (owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content, token_estimate)
-       VALUES ($1,$2,$3,'campaign_summary',1,'scope anchor',4) RETURNING id`,
-      [ownerUserId, campaign.rows[0]!.id, version.rows[0]!.id]
+         (owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content, token_estimate,
+          embedding, embedding_provider_profile_id, embedding_model, embedding_dimensions,
+          embedding_content_hash, embedding_updated_at, embedding_provider_fingerprint)
+       VALUES ($1,$2,$3,'campaign_summary',1,'scope anchor',4,'[1,0]'::vector,$4,'fixture-embedding-v1',2,$5,now(),'evaluation-fingerprint') RETURNING id`,
+      [ownerUserId, campaign.rows[0]!.id, version.rows[0]!.id, embeddingProviderId, chronicleContentHash("scope anchor")]
     );
     const future = await pool.query<{ id: string }>(
       `INSERT INTO chronicle_memories
@@ -82,6 +99,10 @@ integration("Chronicle retrieval evaluation integration seam", () => {
        VALUES ($1,$2,$3,'canonical_fact',3,'scope anchor future decoy',4) RETURNING id`,
       [ownerUserId, campaign.rows[0]!.id, version.rows[0]!.id]
     );
+    // The campaign/owner composite foreign key forbids a different owner on this
+    // campaign. This is the closest valid owner-isolation fixture: every owned
+    // relation is foreign, while campaign and world-version decoys below vary
+    // exactly one eligible boundary each.
     const foreignUser = await pool.query<{ id: string }>("INSERT INTO users (display_name) VALUES ('Scope decoy owner') RETURNING id");
     const foreignWorld = await pool.query<{ id: string }>("INSERT INTO worlds (owner_user_id, title) VALUES ($1,$2) RETURNING id", [foreignUser.rows[0]!.id, "Scope decoy world"]);
     const foreignVersion = await pool.query<{ id: string }>(
@@ -115,16 +136,27 @@ integration("Chronicle retrieval evaluation integration seam", () => {
        VALUES ($1,$2,2,$3::jsonb) RETURNING id`,
       [world.rows[0]!.id, ownerUserId, JSON.stringify({ world: { title: "Scope alternate version" }, entities: [] })]
     );
-    const versionDecoy = await pool.query<{ id: string }>(
-      "INSERT INTO campaigns (owner_user_id, world_version_id, title) VALUES ($1,$2,$3) RETURNING id",
-      [ownerUserId, otherVersion.rows[0]!.id, "Scope world-version decoy"]
-    );
-    await pool.query("INSERT INTO campaign_state (campaign_id, owner_user_id) VALUES ($1,$2)", [versionDecoy.rows[0]!.id, ownerUserId]);
     const versionMemory = await pool.query<{ id: string }>(
       `INSERT INTO chronicle_memories
-         (owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content, token_estimate)
-       VALUES ($1,$2,$3,'campaign_summary',1,'scope anchor semantic world-version decoy',4) RETURNING id`,
-      [ownerUserId, versionDecoy.rows[0]!.id, otherVersion.rows[0]!.id]
+         (owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content, token_estimate,
+          embedding, embedding_provider_profile_id, embedding_model, embedding_dimensions,
+          embedding_content_hash, embedding_updated_at, embedding_provider_fingerprint)
+       VALUES ($1,$2,$3,'open_thread',2,'scope anchor semantic world-version decoy',4,'[1,0]'::vector,$4,'fixture-embedding-v1',2,$5,now(),'evaluation-fingerprint') RETURNING id`,
+      [ownerUserId, campaign.rows[0]!.id, otherVersion.rows[0]!.id, embeddingProviderId, chronicleContentHash("scope anchor semantic world-version decoy")]
+    );
+    const entityDecoyTurn = await pool.query<{ id: string }>(
+      `INSERT INTO turns (owner_user_id, campaign_id, turn_number, action, narration, state_snapshot_private)
+       VALUES ($1,$2,3,'Scope entity action.','Scope entity narration.','{}'::jsonb) RETURNING id`,
+      [ownerUserId, campaign.rows[0]!.id]
+    );
+    const entityMemory = await pool.query<{ id: string }>(
+      `INSERT INTO chronicle_memories
+         (owner_user_id, campaign_id, world_version_id, turn_id, memory_kind, ordinal, content, token_estimate, entities,
+          embedding, embedding_provider_profile_id, embedding_model, embedding_dimensions,
+          embedding_content_hash, embedding_updated_at, embedding_provider_fingerprint)
+       VALUES ($1,$2,$3,$4,'turn_fiction',2,'scope anchor entity world-version decoy',4,ARRAY['scope anchor'],
+               '[1,0]'::vector,$5,'fixture-embedding-v1',2,$6,now(),'evaluation-fingerprint') RETURNING id`,
+      [ownerUserId, campaign.rows[0]!.id, otherVersion.rows[0]!.id, entityDecoyTurn.rows[0]!.id, embeddingProviderId, chronicleContentHash("scope anchor entity world-version decoy")]
     );
     const corpus: ChronicleRetrievalCorpus = {
       version: "v1",
@@ -143,6 +175,7 @@ integration("Chronicle retrieval evaluation integration seam", () => {
           [foreign.rows[0]!.id]: "owner-decoy",
           [campaignMemory.rows[0]!.id]: "entity-campaign-decoy",
           [versionMemory.rows[0]!.id]: "semantic-world-version-decoy",
+          [entityMemory.rows[0]!.id]: "entity-world-version-decoy",
           [replaced.rows[0]!.id]: "superseded-fact",
           [replacement.rows[0]!.id]: "replacement-fact"
         },
@@ -150,12 +183,29 @@ integration("Chronicle retrieval evaluation integration seam", () => {
         excludedLabels: {
           owner: ["owner-decoy"],
           campaign: ["entity-campaign-decoy"],
-          worldVersion: ["semantic-world-version-decoy"]
+          worldVersion: ["semantic-world-version-decoy", "entity-world-version-decoy"]
         }
       }]
     };
-    const application = apiMemoryApplication(pool);
-    const buildContextPreview = vi.spyOn(application.generation, "buildContextPreview");
+    const application: ChronicleRetrievalApplication = {
+      generation: createPostgresChronicleGenerationTransactionPort({
+        embeddings: {
+          async resolve(_database, scope) { return scope.selectedProviderProfileId ?? null; },
+          async load() { return { id: "fixture-embedding", model: "fixture-embedding-v1", providerType: "openai_compatible", async embed(documents: readonly string[]) { return { embeddings: documents.map(() => [1, 0]), responseId: "fixture", usage: {}, reportedCost: null }; } }; },
+          async embed(provider, documents) { return provider.embed(documents); },
+          async fingerprint() { return "evaluation-fingerprint"; },
+          async recordHealth() {},
+          async recordCost() { return null; },
+          logDiagnostic() {}
+        }
+      })
+    };
+    const originalBuildContextPreview = application.generation.buildContextPreview.bind(application.generation);
+    let preview: Record<string, unknown> | undefined;
+    const buildContextPreview = vi.spyOn(application.generation, "buildContextPreview").mockImplementation(async (...args) => {
+      preview = await originalBuildContextPreview(...args) as Record<string, unknown>;
+      return preview;
+    });
     const generation: ChronicleRetrievalApplication["generation"] = new Proxy({ buildContextPreview }, {
       get(target, property, receiver) {
         if (property !== "buildContextPreview") {
@@ -181,6 +231,11 @@ integration("Chronicle retrieval evaluation integration seam", () => {
     expect(report.cases[0]!.retrievedLabels).not.toContain("owner-decoy");
     expect(report.cases[0]!.retrievedLabels).not.toContain("entity-campaign-decoy");
     expect(report.cases[0]!.retrievedLabels).not.toContain("semantic-world-version-decoy");
+    expect(report.cases[0]!.retrievedLabels).not.toContain("entity-world-version-decoy");
     expect(report.cases[0]!.retrievedLabels).not.toContain("superseded-fact");
+    expect(report.cases[0]!.ranks["replacement-fact"]).toBe(2);
+    expect(preview).toEqual(expect.objectContaining({
+      retrieval: expect.objectContaining({ semanticAvailable: true, embeddedCandidates: 1, scopeEligibleCandidates: 2 })
+    }));
   });
 });

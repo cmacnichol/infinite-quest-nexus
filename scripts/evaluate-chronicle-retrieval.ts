@@ -170,7 +170,7 @@ async function seedCorpus(database: DatabaseClient, ownerUserId: string, corpus:
       labelByMemoryId[memory.rows[0]!.id] = label;
     }
     if (fixture.id === "superseded-fact") {
-      labelByMemoryId[replacementFact.rows[0]!.id] = fixture.expectedLabels[0]!;
+      labelByMemoryId[replacementFact.rows[0]!.id] = fixture.expectedLabels[1]!;
       for (const label of fixture.forbiddenLabels?.supersededFact ?? []) {
         labelByMemoryId[replacedFact.rows[0]!.id] = label;
       }
@@ -188,7 +188,14 @@ async function seedCorpus(database: DatabaseClient, ownerUserId: string, corpus:
       await database.query("INSERT INTO campaign_state (campaign_id, owner_user_id) VALUES ($1,$2)", [decoyCampaign.rows[0]!.id, decoyOwnerUserId]);
       return { campaignId: decoyCampaign.rows[0]!.id, worldVersionId: decoyVersionId };
     };
-    const insertDecoy = async (label: string, decoyOwnerUserId: string, decoyCampaignId: string, decoyWorldVersionId: string, kind: "semantic" | "entity" | "lexical" = "lexical") => {
+    const insertDecoy = async (
+      label: string,
+      decoyOwnerUserId: string,
+      decoyCampaignId: string,
+      decoyWorldVersionId: string,
+      kind: "semantic" | "entity" | "lexical" = "lexical",
+      memoryKind: "campaign_summary" | "open_thread" = "campaign_summary",
+    ) => {
       const semanticColumns = kind === "semantic"
         ? ", embedding, embedding_provider_profile_id, embedding_model, embedding_dimensions, embedding_content_hash, embedding_updated_at, embedding_provider_fingerprint"
         : "";
@@ -202,7 +209,7 @@ async function seedCorpus(database: DatabaseClient, ownerUserId: string, corpus:
       const memory = await database.query<{ id: string }>(
         `INSERT INTO chronicle_memories
            (owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content, token_estimate, entities${semanticColumns})
-         VALUES ($1,$2,$3,'campaign_summary',1,$4,1,$${kind === "semantic" ? 7 : 5}::text[]${semanticValues}) RETURNING id`,
+         VALUES ($1,$2,$3,'${memoryKind}',1,$4,1,$${kind === "semantic" ? 7 : 5}::text[]${semanticValues}) RETURNING id`,
         [...values, entities]
       );
       labelByMemoryId[memory.rows[0]!.id] = label;
@@ -236,8 +243,12 @@ async function seedCorpus(database: DatabaseClient, ownerUserId: string, corpus:
       await insertDecoy(label, ownerUserId, decoy.campaignId, decoy.worldVersionId);
     }
     for (const label of excluded.worldVersion ?? []) {
-      const decoy = await createDecoyCampaign(ownerUserId);
-      await insertDecoy(label, ownerUserId, decoy.campaignId, decoy.worldVersionId);
+      const decoyVersion = await database.query<{ id: string }>(
+        `INSERT INTO world_versions (world_id, owner_user_id, version_number, content)
+         VALUES ($1,$2,2,$3::jsonb) RETURNING id`,
+        [world.rows[0]!.id, ownerUserId, JSON.stringify({ world: { title: `${fixture.id} alternate version` }, entities: [] })]
+      );
+      await insertDecoy(label, ownerUserId, campaign.rows[0]!.id, decoyVersion.rows[0]!.id, "lexical", "open_thread");
     }
     for (const label of excluded.semantic ?? []) {
       const decoy = await createDecoyCampaign(ownerUserId, version.rows[0]!.id);
@@ -267,6 +278,17 @@ class EvaluationRollback extends Error {
   }
 }
 
+function assertCorpusResultInvariants(report: Awaited<ReturnType<typeof evaluateChronicleRetrieval>>): void {
+  const supersededFact = report.cases.find((result) => result.id === "superseded-fact");
+  const canonicalReplacementLabel = "superseded-fact-canonical-replacement";
+  if (!supersededFact || supersededFact.ranks[canonicalReplacementLabel] === null) {
+    throw new Error("Chronicle evaluation did not retrieve the canonical replacement fact.");
+  }
+  if (supersededFact.retrievedLabels.filter((label) => label === canonicalReplacementLabel).length !== 1) {
+    throw new Error("Chronicle evaluation retrieved an ambiguous canonical replacement label.");
+  }
+}
+
 const corpus = await loadCorpus();
 const output = resolve(root, argument("--output") ?? defaultOutput);
 const implementation = argument("--implementation") ?? "legacy_hybrid";
@@ -278,7 +300,9 @@ let report: Awaited<ReturnType<typeof evaluateChronicleRetrieval>>;
 try {
   await withTransaction(pool, async (database) => {
     const seededCorpus = await seedCorpus(database, ownerUserId, corpus);
-    throw new EvaluationRollback(await evaluateChronicleRetrieval(legacyApplication(), database, seededCorpus, { implementation }));
+    const evaluated = await evaluateChronicleRetrieval(legacyApplication(), database, seededCorpus, { implementation });
+    assertCorpusResultInvariants(evaluated);
+    throw new EvaluationRollback(evaluated);
   });
   throw new Error("Chronicle evaluation fixtures did not roll back.");
 } catch (error) {

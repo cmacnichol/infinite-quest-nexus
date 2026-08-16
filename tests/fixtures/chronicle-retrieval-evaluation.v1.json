@@ -174,10 +174,12 @@
         }
       },
       "expectedLabels": [
-        "superseded-fact-active"
+        "superseded-fact-memory",
+        "superseded-fact-canonical-replacement"
       ],
       "labelByMemoryId": {
-        "m-superseded-fact-active": "superseded-fact-active",
+        "m-superseded-fact-active": "superseded-fact-memory",
+        "m-superseded-fact-canonical-replacement": "superseded-fact-canonical-replacement",
         "m-superseded-fact-old": "superseded-fact-old"
       },
       "forbiddenLabels": {

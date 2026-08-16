@@ -1194,16 +1194,23 @@ async function buildContext(
   const entityExpandedQuery = expandEntityQuery(scope.request.query, entityCatalog);
   const queryEntityIds = matchEntityReferences(scope.request.query, entityCatalog).map((match) => match.entity.id);
   const memories = await loadContextMemories(client, scope, entityExpandedQuery, queryEntityIds);
+  // Count only the already owner/campaign/world-version/cutoff-filtered rows.
+  // This safe aggregate lets callers verify scope eligibility without exposing
+  // candidate IDs, content, entity names, or provider diagnostics.
+  const scopeEligibleCandidates = memories.length;
   const latestHint = memories.filter((memory) => memory.memory_kind === "turn_fiction").at(-1)?.content ?? "";
   const expandedQuery = [entityExpandedQuery, truncateAtBoundary(latestHint, 1200)].filter(Boolean).join("\n");
-  const retrieval = await applyContextSemanticRelevance(
+  const retrieval = {
+    ...await applyContextSemanticRelevance(
     client,
     scope,
     expandedQuery,
     memories,
     queryEntityIds,
     dependencies
-  );
+    ),
+    scopeEligibleCandidates
+  };
   const metrics = await loadContextMetrics(client, scope);
   const sourceWorld = typeof campaign.world_content.world === "object" && campaign.world_content.world !== null
     ? campaign.world_content.world as Record<string, unknown>
