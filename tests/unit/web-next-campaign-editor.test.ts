@@ -314,6 +314,68 @@ describe("web-next campaign parity inventory", () => {
     expect(html).not.toContain('<option value="embed-1" selected>');
   });
 
+  it("submits the effective default or sole dedicated embedding provider without inventing an ambiguous choice", () => {
+    const markup = campaignEditorPage.chronicleMarkup as (
+      metrics: Record<string, unknown>,
+      config: Record<string, unknown>,
+      providers: unknown[]
+    ) => string;
+    const payload = campaignEditorPage.chronicleEmbeddingConfigPayload as (values: Record<string, string>) => Record<string, unknown>;
+    const cases = [
+      {
+        providers: [
+          { id: "embed-1", name: "First", providerType: "openai_compatible", providerRole: "embedding", enabled: true },
+          { id: "embed-default", name: "Default", providerType: "openai_compatible", providerRole: "embedding", enabled: true, isDefault: true }
+        ],
+        expectedProviderProfileId: "embed-default"
+      },
+      {
+        providers: [{ id: "embed-only", name: "Only", providerType: "openai_compatible", providerRole: "embedding", enabled: true }],
+        expectedProviderProfileId: "embed-only"
+      }
+    ];
+
+    for (const value of cases) {
+      const { document } = parseHTML(`<main>${markup(
+        { semanticHealth: {} },
+        { enabled: true, providerProfileId: null, model: "embed-model", batchSize: 8, retrievalImplementation: "legacy_hybrid", retrievalShadowEnabled: false },
+        value.providers
+      )}</main>`);
+      const selectedProvider = document.querySelector<HTMLOptionElement>('select[name="providerProfileId"] option[selected]')?.value ?? "";
+
+      expect(payload({
+        enabled: "true",
+        providerProfileId: selectedProvider,
+        model: "embed-model",
+        batchSize: "8",
+        documentPrefix: "",
+        queryPrefix: "",
+        retrievalImplementation: "legacy_hybrid",
+        retrievalShadowEnabled: ""
+      })).toEqual({
+        enabled: true,
+        providerProfileId: value.expectedProviderProfileId,
+        model: "embed-model",
+        batchSize: 8,
+        documentPrefix: null,
+        queryPrefix: null,
+        retrievalImplementation: "legacy_hybrid",
+        retrievalShadowEnabled: false
+      });
+    }
+
+    const ambiguous = markup(
+      { semanticHealth: {} },
+      { enabled: false, providerProfileId: null, retrievalImplementation: "legacy_hybrid", retrievalShadowEnabled: false },
+      [
+        { id: "embed-1", name: "First", providerType: "openai_compatible", providerRole: "embedding", enabled: true },
+        { id: "embed-2", name: "Second", providerType: "openai_compatible", providerRole: "embedding", enabled: true }
+      ]
+    );
+    expect(ambiguous).toContain('<option value="" selected>Select an embedding provider</option>');
+    expect(ambiguous).not.toMatch(/<option value="embed-[12]" selected>/u);
+  });
+
   it("normalizes real embed_campaign progress fields", () => {
     const view = campaignEditorPage.semanticRetrievalHealthView as (health: Record<string, unknown>) => Record<string, string>;
     expect(view({ jobStatus: "running", progress: { embedded: 7, total: 11 } }).jobLabel).toBe("Running · 7 of 11 memories");

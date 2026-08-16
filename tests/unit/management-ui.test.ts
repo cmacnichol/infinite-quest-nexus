@@ -534,6 +534,15 @@ describe("Nexus management UI contracts", () => {
     expect(healthView({ status: "fallback_active", coveragePercent: 42, fallbackCode: "<credential>" })).toMatchObject({ fallbackLabel: "Unavailable" });
   });
 
+  it("projects legacy embed_campaign progress through the shared health view", () => {
+    const healthView = managementFunction<(health: Record<string, unknown>) => Record<string, string>>("semanticRetrievalHealthView");
+
+    expect(healthView({
+      jobStatus: "running",
+      progress: { embedded: 7, total: 11, skipped: 2 }
+    }).jobLabel).toBe("Running · 7 of 11 memories · 2 skipped");
+  });
+
   it("sends retrieval selection through the shared embedding configuration payload", () => {
     const payload = managementFunction<(values: Record<string, unknown>) => Record<string, unknown>>("embeddingConfigPayload");
     expect(payload({

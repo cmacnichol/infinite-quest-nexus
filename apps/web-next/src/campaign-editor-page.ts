@@ -47,7 +47,10 @@ function embeddingProviderOptions(providers: ProviderSummary[], selected: unknow
         + disabledOption(configuredTextProvider.id, `Configured text provider is no longer eligible · ${configuredTextProvider.name}`)
         + dedicated.map((provider) => option(provider.id, `${provider.name} · ${provider.providerType}${provider.isDefault ? " · default" : ""}`, "")).join("");
     }
-    return providerOptions(dedicated, "embedding", selectedId, "Select an embedding provider");
+    const selectedDedicated = dedicated.find((provider) => provider.id === selectedId);
+    const effectiveDedicated = selectedDedicated
+      ?? (!selectedId ? dedicated.find((provider) => provider.isDefault) ?? (dedicated.length === 1 ? dedicated[0] : undefined) : undefined);
+    return providerOptions(dedicated, "embedding", effectiveDedicated?.id ?? "", "Select an embedding provider");
   }
   const campaignTextId = String(campaignTextProviderProfileId ?? "");
   const textProviders = providers.filter((provider) => provider.providerRole === "text" && provider.enabled !== false);

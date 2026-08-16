@@ -2663,16 +2663,19 @@ function semanticRetrievalHealthView(health) {
     ? jobStatuses[health.jobStatus]
     : "No active job";
   const progress = health?.progress && typeof health.progress === "object" ? health.progress : {};
-  const processedParents = Number(progress.processedParents);
-  const totalParents = Number(progress.totalParents);
+  const processedParents = Number(progress.processedParents ?? progress.embedded);
+  const totalParents = Number(progress.totalParents ?? progress.total);
   const embeddedChunks = Number(progress.embeddedChunks);
   const skippedChunks = Number(progress.skippedChunks);
+  const skippedMemories = Number(progress.skipped);
   const progressParts = [];
   if (Number.isFinite(processedParents) && Number.isFinite(totalParents) && totalParents >= 0) {
     progressParts.push(`${Math.max(0, processedParents)} of ${Math.max(0, totalParents)} memories`);
   }
   if (Number.isFinite(embeddedChunks) || Number.isFinite(skippedChunks)) {
     progressParts.push(`${Math.max(0, Number.isFinite(embeddedChunks) ? embeddedChunks : 0)} embedded chunks · ${Math.max(0, Number.isFinite(skippedChunks) ? skippedChunks : 0)} skipped`);
+  } else if (Number.isFinite(skippedMemories)) {
+    progressParts.push(`${Math.max(0, skippedMemories)} skipped`);
   }
   return {
     status,
