@@ -376,6 +376,27 @@ describe("web-next campaign parity inventory", () => {
     expect(ambiguous).not.toMatch(/<option value="embed-[12]" selected>/u);
   });
 
+  it("preserves a disabled configured embedding provider instead of selecting an enabled default", () => {
+    const markup = campaignEditorPage.chronicleMarkup as (
+      metrics: Record<string, unknown>,
+      config: Record<string, unknown>,
+      providers: unknown[]
+    ) => string;
+    const html = markup(
+      { semanticHealth: {} },
+      { enabled: true, providerProfileId: "embed-disabled", retrievalImplementation: "legacy_hybrid", retrievalShadowEnabled: false },
+      [
+        { id: "embed-disabled", name: "Disabled original", providerType: "openai_compatible", providerRole: "embedding", enabled: false },
+        { id: "embed-default", name: "Enabled default", providerType: "openai_compatible", providerRole: "embedding", enabled: true, isDefault: true }
+      ]
+    );
+
+    expect(html).toContain('<option value="" selected disabled>Choose an eligible embedding provider</option>');
+    expect(html).toContain('<option value="embed-disabled" disabled>Configured provider is no longer eligible · Disabled original</option>');
+    expect(html).toContain('<option value="embed-default">Enabled default · openai_compatible · default</option>');
+    expect(html).not.toContain('<option value="embed-default" selected>');
+  });
+
   it("normalizes real embed_campaign progress fields", () => {
     const view = campaignEditorPage.semanticRetrievalHealthView as (health: Record<string, unknown>) => Record<string, string>;
     expect(view({ jobStatus: "running", progress: { embedded: 7, total: 11 } }).jobLabel).toBe("Running · 7 of 11 memories");

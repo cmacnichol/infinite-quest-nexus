@@ -114,6 +114,11 @@ describe("Task 14b Chronicle inventory", () => {
     expect(docs.deployment).toContain("pnpm evaluate:chronicle -- --calibrate --baseline tmp/chronicle-evaluation/legacy-baseline.json --write-profile packages/domain/src/generated/chronicle-retrieval-profile-v2.ts");
     expect(docs.decision).toContain("`index_memory_chunks_v2`");
     expect(docs.decision).toContain("There is no reranking stage");
+    for (const document of [docs.concept, docs.embeddings, docs.retrievalModes, docs.recovery, docs.deployment, docs.decision]) {
+      const normalized = document.replace(/\s+/gu, " ");
+      expect(normalized).toContain("at least one current chunk is embedded");
+      expect(normalized).toContain("fully sanitized-skipped index uses the complete legacy path");
+    }
   });
 
   it("never instructs operators to mutate accepted turns or delete legacy embeddings", async () => {

@@ -10,7 +10,7 @@ For a degraded campaign:
 4. If a current `index_memory_chunks_v2` job is queued or running, allow its fenced lease and durable cursor to finish rather than starting competing work.
 5. Select **Rebuild memory** when derived parent text records are inconsistent.
 6. Select **Save & index** after correcting semantic configuration or when health reports `chunk_protocol_outdated`, `rebuild_required`, or persistent partial coverage.
-7. Wait for 100% terminal coverage: every current parent has at least one terminal current-protocol chunk, every current chunk is terminal, and the latest chunk job is completed or absent before opting into chunked production. A fully sanitized-skipped index may serve non-semantic chunked fusion.
+7. Wait for 100% terminal coverage: every current parent has at least one terminal current-protocol chunk, every current chunk is terminal, at least one current chunk is embedded, and the latest chunk job is completed or absent before opting into chunked production. A fully sanitized-skipped index uses the complete legacy path with the existing `chunk_index_not_ready` fallback.
 
 Do not edit accepted turns to repair Chronicle. Accepted narration is authoritative; derived summaries, facts, threads, chunks, and vectors must be rebuilt from effective campaign history. Do not delete legacy embeddings or vectors during recovery. They keep config-only rollback available and require a separate approved cleanup plan.
 

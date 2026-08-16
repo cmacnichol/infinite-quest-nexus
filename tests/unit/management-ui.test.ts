@@ -573,14 +573,76 @@ describe("Nexus management UI contracts", () => {
   });
 
   it("preserves an eligible configured text fallback when no embedding provider exists", () => {
-    expect(managementScript).toContain('provider.id === current && provider.providerRole === "text" && provider.enabled');
+    expect(managementScript).toContain('const selectedTextProvider = textProviders.find((provider) => provider.id === current);');
   });
 
   it("requires an explicit eligible provider when a configured text fallback coexists with embedding providers", () => {
     expect(managementScript).toContain('Configured text provider is no longer eligible · ${configuredTextProvider.name}');
-    expect(managementScript).toContain("configuredTextOption.disabled = true");
+    expect(managementScript).toContain("configuredOption.disabled = true");
     expect(managementScript).toContain('elements.embeddingProvider.value = ""');
     expect(managementScript).toContain("Choose an eligible embedding provider before enabling Semantic Retrieval.");
+  });
+
+  it("preserves a disabled configured embedding provider instead of selecting an enabled default", async () => {
+    const functionNames = ["providerTypeLabel", "enabledProviders", "defaultProvider", "effectiveCampaignProvider", "populateEmbeddingProviderSelect"];
+    const functionSource = functionNames.map((name) => {
+      const start = managementScript.indexOf(`function ${name}(`);
+      const end = managementScript.indexOf("\nfunction ", start + 1);
+      if (start < 0 || end < 0) throw new Error(`Unable to locate management function ${name}.`);
+      return managementScript.slice(start, end);
+    }).join("\n");
+    const loadStart = managementScript.indexOf("async function loadEmbeddingConfig(");
+    const loadEnd = managementScript.indexOf("\nfunction ", loadStart + 1);
+    if (loadStart < 0 || loadEnd < 0) throw new Error("Unable to locate loadEmbeddingConfig.");
+    const source = `${functionSource}\n${managementScript.slice(loadStart, loadEnd)}`;
+    class TestOption {
+      disabled = false;
+      constructor(public text: string, public value: string, public defaultSelected = false, public selected = false) {}
+    }
+    const select = {
+      value: "",
+      options: [] as TestOption[],
+      replaceChildren(...options: TestOption[]) { this.options = options; },
+      append(...options: TestOption[]) { this.options.push(...options); }
+    };
+    const elements = {
+      embeddingProvider: select,
+      embeddingEnabled: { checked: false },
+      embeddingRetrievalImplementation: { value: "" },
+      embeddingRetrievalShadowEnabled: { checked: false },
+      embeddingModel: { value: "", disabled: false },
+      embeddingDocumentPrefix: { value: "" },
+      embeddingQueryPrefix: { value: "" },
+      embeddingBatchSize: { value: "" },
+      reindexEmbeddings: { disabled: false },
+      discoverEmbeddingModels: { disabled: false },
+      embeddingStatus: { className: "", textContent: "" }
+    };
+    const run = Function(
+      "providers", "elements", "Option", "api",
+      `const selectedCampaign={id:"campaign-1"}; let embeddingConfig=null; let discoveredEmbeddingModels=[]; ${source}; return loadEmbeddingConfig().then(() => elements.embeddingProvider);`
+    ) as (providers: unknown[], elements: unknown, Option: unknown, api: unknown) => Promise<typeof select>;
+    const config = {
+      enabled: true,
+      providerProfileId: "embed-disabled",
+      model: "embed-model",
+      batchSize: 8,
+      documentPrefix: null,
+      queryPrefix: null,
+      retrievalImplementation: "legacy_hybrid",
+      retrievalShadowEnabled: false
+    };
+    const actual = await run([
+      { id: "embed-disabled", name: "Disabled original", providerType: "openai_compatible", providerRole: "embedding", enabled: false },
+      { id: "embed-default", name: "Enabled default", providerType: "openai_compatible", providerRole: "embedding", enabled: true, isDefault: true }
+    ], elements, TestOption, async () => config);
+
+    expect(actual.value).toBe("");
+    expect(actual.options.map(({ text, value, disabled, selected }) => ({ text, value, disabled, selected }))).toEqual([
+      { text: "Choose an eligible embedding provider", value: "", disabled: true, selected: true },
+      { text: "Configured provider is no longer eligible · Disabled original", value: "embed-disabled", disabled: true, selected: false },
+      { text: "Enabled default · openai_compatible · default", value: "embed-default", disabled: false, selected: false }
+    ]);
   });
 
   it("shows provider-reported turn and campaign costs without adding a reporting page", () => {

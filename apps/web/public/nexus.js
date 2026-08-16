@@ -2774,7 +2774,6 @@ async function loadEmbeddingConfig() {
   elements.embeddingRetrievalImplementation.value = embeddingConfig.retrievalImplementation;
   elements.embeddingRetrievalShadowEnabled.checked = embeddingConfig.retrievalShadowEnabled;
   populateEmbeddingProviderSelect();
-  if (embeddingConfig.providerProfileId) elements.embeddingProvider.value = embeddingConfig.providerProfileId;
   elements.embeddingModel.value = embeddingConfig.model ?? "";
   elements.embeddingDocumentPrefix.value = embeddingConfig.documentPrefix ?? "";
   elements.embeddingQueryPrefix.value = embeddingConfig.queryPrefix ?? "";
@@ -2969,20 +2968,30 @@ function populateProviderSelect(select, role, label) {
 
 function populateEmbeddingProviderSelect() {
   const current = embeddingConfig?.providerProfileId || elements.embeddingProvider.value;
+  const configuredProvider = current ? providers.find((provider) => provider.id === current) : null;
+  const configuredTextProvider = configuredProvider?.providerRole === "text" ? configuredProvider : null;
   const embeddingProviders = enabledProviders("embedding");
   elements.embeddingProvider.replaceChildren();
+  const showIncompatibleProvider = (eligibleProviders, role) => {
+    const eligiblePlaceholder = new Option("Choose an eligible embedding provider", "", true, true);
+    eligiblePlaceholder.disabled = true;
+    const configuredLabel = configuredTextProvider
+      ? `Configured text provider is no longer eligible · ${configuredTextProvider.name}`
+      : configuredProvider
+        ? `Configured provider is no longer eligible · ${configuredProvider.name}`
+        : "Configured provider is no longer available";
+    const configuredOption = new Option(configuredLabel, current);
+    configuredOption.disabled = true;
+    elements.embeddingProvider.append(eligiblePlaceholder, configuredOption);
+    for (const provider of eligibleProviders) {
+      const prefix = role === "text" ? "Text fallback · " : "";
+      elements.embeddingProvider.append(new Option(`${prefix}${provider.name} · ${providerTypeLabel(provider.providerType)}${provider.isDefault ? " · default" : ""}`, provider.id));
+    }
+    elements.embeddingProvider.value = "";
+  };
   if (embeddingProviders.length) {
-    const configuredTextProvider = providers.find((provider) => provider.id === current && provider.providerRole === "text");
-    if (configuredTextProvider) {
-      const eligiblePlaceholder = new Option("Choose an eligible embedding provider", "", true, true);
-      eligiblePlaceholder.disabled = true;
-      const configuredTextOption = new Option(`Configured text provider is no longer eligible · ${configuredTextProvider.name}`, configuredTextProvider.id);
-      configuredTextOption.disabled = true;
-      elements.embeddingProvider.append(eligiblePlaceholder, configuredTextOption);
-      for (const provider of embeddingProviders) {
-        elements.embeddingProvider.append(new Option(`${provider.name} · ${providerTypeLabel(provider.providerType)}${provider.isDefault ? " · default" : ""}`, provider.id));
-      }
-      elements.embeddingProvider.value = "";
+    if (current && !embeddingProviders.some((provider) => provider.id === current)) {
+      showIncompatibleProvider(embeddingProviders, "embedding");
       return;
     }
     const fallback = defaultProvider("embedding");
@@ -2993,8 +3002,13 @@ function populateEmbeddingProviderSelect() {
     elements.embeddingProvider.value = embeddingProviders.some((provider) => provider.id === current) ? current : (fallback?.id || "");
     return;
   }
-  const textFallback = providers.find((provider) => provider.id === current && provider.providerRole === "text" && provider.enabled)
-    || effectiveCampaignProvider("text");
+  const textProviders = enabledProviders("text");
+  const selectedTextProvider = textProviders.find((provider) => provider.id === current);
+  if (current && !selectedTextProvider) {
+    showIncompatibleProvider(textProviders, "text");
+    return;
+  }
+  const textFallback = selectedTextProvider || effectiveCampaignProvider("text");
   if (textFallback) {
     elements.embeddingProvider.append(new Option(`Text fallback · ${textFallback.name} · ${textFallback.providerType}`, textFallback.id));
     elements.embeddingProvider.value = textFallback.id;

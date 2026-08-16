@@ -9,7 +9,7 @@
 
 Enabling **Shadow comparison** calculates lexical, legacy-hybrid, and proposed chunked results for diagnostics while legacy or chunked production selection continues independently. Shadow comparison never changes production selection. Use it only on selected campaigns after compatible code and the derived chunk schema have been deployed.
 
-Chunked retrieval is eligible at 100% terminal coverage: every current parent has a terminal current-protocol chunk, every current chunk is terminal, and the latest chunk job is completed or absent. A sanitized-skipped index omits semantic scoring but can still fuse lexical, entity, recency, and chronology signals. Available ranks are combined by weighted reciprocal-rank fusion, followed by deterministic duplicate and diversity controls. There is no reranking stage or separate reranker provider.
+Chunked retrieval is eligible at 100% terminal coverage: every current parent has a terminal current-protocol chunk, every current chunk is terminal, at least one current chunk is embedded, and the latest chunk job is completed or absent. A fully sanitized-skipped index uses the complete legacy path with the existing `chunk_index_not_ready` fallback. Available ranks are combined by weighted reciprocal-rank fusion only after the readiness gate, followed by deterministic duplicate and diversity controls. There is no reranking stage or separate reranker provider.
 
 ## Compression
 

@@ -614,12 +614,76 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     expect(JSON.stringify(preview.scopes)).not.toContain("Malformed canonical metadata must not enter context");
   });
 
+  it("uses the complete legacy path without chunk ranks when every current chunk is sanitized-skipped", async () => {
+    const { fixture, providerId } = await configuredFixture("all skipped readiness");
+    const memory = await parent(fixture, {
+      turnId: null,
+      kind: "campaign_summary",
+      ordinal: 1,
+      content: "The all-skipped archive remembers the amber lantern."
+    });
+    await embeddedChunk(fixture, providerId, {
+      parentId: memory.id,
+      parentContentHash: memory.contentHash,
+      kind: "campaign_summary",
+      content: "The all-skipped archive remembers the amber lantern.",
+      vector: [1, 0]
+    });
+    await pool.query(
+      `UPDATE chronicle_memory_chunks
+          SET embedding=NULL,embedding_status='skipped',embedding_skip_reason='chunk_embedding_skipped',
+              embedding_provider_profile_id=NULL,embedding_model=NULL,embedding_dimensions=NULL,
+              embedding_protocol_version=NULL,embedding_provider_fingerprint=NULL,
+              embedding_content_hash=NULL,embedding_updated_at=NULL
+        WHERE parent_memory_id=$1`,
+      [memory.id]
+    );
+    const generation = transaction(providerId, []);
+    const request = {
+      ...fixture,
+      request: { budgetTokens: 4_096, compression: "auto" as const, query: "amber lantern", recentTurns: 1 }
+    };
+    await pool.query(
+      "UPDATE campaign_memory_configs SET retrieval_implementation='legacy_hybrid' WHERE campaign_id=$1",
+      [fixture.campaignId]
+    );
+    const legacy = await generation.buildContextPreview(pool, request);
+    await pool.query(
+      "UPDATE campaign_memory_configs SET retrieval_implementation='chunked_hybrid' WHERE campaign_id=$1",
+      [fixture.campaignId]
+    );
+    const chunkRankStatements: string[] = [];
+    const actual = await withTransaction(pool, async (database) => {
+      const intercepted = new Proxy(database, {
+        get(target, property) {
+          if (property === "query") {
+            return (statement: unknown, values?: readonly unknown[]) => {
+              if (typeof statement === "string" && statement.includes("/* chronicle_rank:")) {
+                chunkRankStatements.push(statement);
+              }
+              return target.query(statement as never, values as never);
+            };
+          }
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+      }) as DatabaseClient;
+      return generation.buildContextPreview(intercepted, request);
+    });
+
+    expect(actual).toMatchObject({ retrieval: { fallbackReason: "chunk_index_not_ready" } });
+    expect(actual.scopes).toEqual(legacy.scopes);
+    expect(actual.budget).toEqual(legacy.budget);
+    expect(actual.metrics).toEqual(legacy.metrics);
+    expect(chunkRankStatements).toEqual([]);
+  });
+
   it("gates chunk retrieval on the complete terminal current-protocol readiness matrix", async () => {
     const cases = [
       { name: "wrong protocol", expected: "fallback" },
       { name: "wrong hash", expected: "fallback" },
       { name: "pending", expected: "fallback" },
-      { name: "sanitized skipped", expected: "chunked" },
+      { name: "embedded plus sanitized skipped", expected: "chunked" },
       { name: "queued job", expected: "fallback" },
       { name: "running job", expected: "fallback" },
       { name: "failed job", expected: "fallback" },
@@ -677,7 +741,7 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
             WHERE parent_memory_id=$1`,
           [second.id]
         );
-      } else if (readinessCase.name === "sanitized skipped") {
+      } else if (readinessCase.name === "embedded plus sanitized skipped") {
         await pool.query(
           `UPDATE chronicle_memory_chunks
               SET embedding=NULL,embedding_status='skipped',embedding_skip_reason='chunk_embedding_skipped',

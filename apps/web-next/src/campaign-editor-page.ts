@@ -39,22 +39,37 @@ function providerOptions(providers: ProviderSummary[], role: string, selected: u
 }
 function embeddingProviderOptions(providers: ProviderSummary[], selected: unknown, campaignTextProviderProfileId: unknown): string {
   const selectedId = String(selected ?? "");
+  const configuredProvider = selectedId ? providers.find((provider) => provider.id === selectedId) : undefined;
+  const configuredTextProvider = configuredProvider?.providerRole === "text" ? configuredProvider : undefined;
+  const incompatibleOptions = (eligible: ProviderSummary[], role: "embedding" | "text"): string => {
+    const label = configuredTextProvider
+      ? `Configured text provider is no longer eligible · ${configuredTextProvider.name}`
+      : configuredProvider
+        ? `Configured provider is no longer eligible · ${configuredProvider.name}`
+        : "Configured provider is no longer available";
+    return disabledOption("", "Choose an eligible embedding provider", true)
+      + disabledOption(selectedId, label)
+      + eligible.map((provider) => option(
+        provider.id,
+        role === "embedding"
+          ? `${provider.name} · ${provider.providerType}${provider.isDefault ? " · default" : ""}`
+          : `Text fallback · ${provider.name} · ${provider.providerType}${provider.isDefault ? " · default" : ""}`,
+        ""
+      )).join("");
+  };
   const dedicated = providers.filter((provider) => provider.providerRole === "embedding" && provider.enabled !== false);
   if (dedicated.length) {
-    const configuredTextProvider = providers.find((provider) => provider.id === selectedId && provider.providerRole === "text");
-    if (configuredTextProvider) {
-      return disabledOption("", "Choose an eligible embedding provider", true)
-        + disabledOption(configuredTextProvider.id, `Configured text provider is no longer eligible · ${configuredTextProvider.name}`)
-        + dedicated.map((provider) => option(provider.id, `${provider.name} · ${provider.providerType}${provider.isDefault ? " · default" : ""}`, "")).join("");
-    }
     const selectedDedicated = dedicated.find((provider) => provider.id === selectedId);
+    if (selectedId && !selectedDedicated) return incompatibleOptions(dedicated, "embedding");
     const effectiveDedicated = selectedDedicated
       ?? (!selectedId ? dedicated.find((provider) => provider.isDefault) ?? (dedicated.length === 1 ? dedicated[0] : undefined) : undefined);
     return providerOptions(dedicated, "embedding", effectiveDedicated?.id ?? "", "Select an embedding provider");
   }
   const campaignTextId = String(campaignTextProviderProfileId ?? "");
   const textProviders = providers.filter((provider) => provider.providerRole === "text" && provider.enabled !== false);
-  const textFallback = textProviders.find((provider) => provider.id === selectedId)
+  const selectedTextProvider = textProviders.find((provider) => provider.id === selectedId);
+  if (selectedId && !selectedTextProvider) return incompatibleOptions(textProviders, "text");
+  const textFallback = selectedTextProvider
     ?? textProviders.find((provider) => provider.id === campaignTextId)
     ?? textProviders.find((provider) => provider.isDefault)
     ?? (textProviders.length === 1 ? textProviders[0] : undefined);

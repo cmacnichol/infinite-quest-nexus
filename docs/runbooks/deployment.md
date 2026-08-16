@@ -45,7 +45,7 @@ Use this sequence:
 
 1. Back up the authoritative database and prove restoration. Deploy compatible API and worker code before enabling shadow comparison. Apply migrations `0072` through `0075` under the normal migration lock, then confirm both old and new replicas tolerate the expanded schema during any rolling overlap.
 2. Leave every campaign on the default `legacy_hybrid` production implementation with shadow disabled. Enqueue `index_memory_chunks_v2` only after the compatible worker is live.
-3. Monitor job leases, progress, provider health, fixed fallback codes, and compatible coverage. Wait for 100% terminal coverage: every current parent hash has at least one current `chronicle-chunk-v1` chunk in terminal `embedded` or sanitized `skipped` status, every current chunk is terminal, and the latest chunk job is completed or absent. A fully sanitized-skipped index may run non-semantic chunked fusion; a partially ready campaign continues through the complete legacy path.
+3. Monitor job leases, progress, provider health, fixed fallback codes, and compatible coverage. Wait for 100% terminal coverage: every current parent hash has at least one current `chronicle-chunk-v1` chunk in terminal `embedded` or sanitized `skipped` status, every current chunk is terminal, at least one current chunk is embedded, and the latest chunk job is completed or absent. A fully sanitized-skipped index uses the complete legacy path with the existing `chunk_index_not_ready` fallback; a partially ready campaign also continues through the complete legacy path.
 4. Establish the deterministic label-only legacy baseline, calibrate the generated production profile, and verify the final chunked result:
 
    ```powershell

@@ -70,10 +70,11 @@ The following decisions govern the implementation.
    post-fusion penalty.
 10. Chunked production is eligible only when every current parent hash has
     current-protocol chunks in terminal `embedded` or sanitized `skipped`
-    status, every current chunk is terminal, and the latest current chunk job
-    is completed or absent. A fully sanitized-skipped index can run the
-    non-semantic chunk signals. Any other state uses the complete legacy path;
-    there is no partially trusted mixed production mode.
+    status, every current chunk is terminal, at least one current chunk is
+    embedded, and the latest current chunk job is completed or absent. A
+    fully sanitized-skipped index uses the complete legacy path with the
+    existing `chunk_index_not_ready` fallback. Any other state also uses the
+    complete legacy path; there is no partially trusted mixed production mode.
 11. Safe shadow metadata is retained for 30 days and capped at 5,000 runs per
     campaign. Query embeddings are retained for 7 days and capped at 256
     entries per campaign.

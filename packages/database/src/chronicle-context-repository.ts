@@ -717,9 +717,7 @@ async function chunkIndexReady(
           AND parent.content_hash=chunk.parent_content_hash
         WHERE chunk.owner_user_id = $1 AND chunk.campaign_id = $2 AND chunk.world_version_id = $3
           AND chunk.chunking_protocol_version='${CHRONICLE_CHUNK_PROTOCOL_VERSION}'
-          AND (chunk.embedding_status='embedded'
-               OR (chunk.embedding_status='skipped'
-                   AND chunk.embedding_skip_reason='chunk_embedding_skipped'))
+          AND chunk.embedding_status='embedded'
        )
        AND NOT EXISTS (
          SELECT 1 FROM current_parents parent

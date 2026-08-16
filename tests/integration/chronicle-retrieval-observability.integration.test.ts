@@ -691,7 +691,7 @@ integration("Chronicle retrieval observability", () => {
       [current.campaignId]
     );
     expect(disabledSemanticShadow.rows[0]).toMatchObject({
-      chunked_hybrid_fallback_code: "semantic_not_configured"
+      chunked_hybrid_fallback_code: "chunk_index_not_ready"
     });
     expect(Number.parseInt(disabledSemanticShadow.rows[0]!.chunked_candidates, 10)).toBeGreaterThan(0);
   });
