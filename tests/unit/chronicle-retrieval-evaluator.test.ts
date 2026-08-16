@@ -5,6 +5,7 @@ import {
   percentile,
   recallAt,
   reciprocalRank,
+  type ChronicleRetrievalApplication,
   type ChronicleRetrievalCorpus
 } from "../../scripts/lib/chronicle-retrieval-evaluator.js";
 
@@ -43,22 +44,27 @@ describe("Chronicle retrieval evaluator metrics", () => {
           ]
         }
       });
-    const privateRankingHelper = vi.fn(() => {
-      throw new Error("The evaluator must not use private ranking helpers.");
+    const generation: ChronicleRetrievalApplication["generation"] = new Proxy({ buildContextPreview }, {
+      get(target, property, receiver) {
+        if (property !== "buildContextPreview") {
+          throw new Error(`The evaluator bypassed the public retrieval seam with ${String(property)}.`);
+        }
+        return Reflect.get(target, property, receiver);
+      }
     });
+    const application: ChronicleRetrievalApplication = { generation };
 
     const report = await evaluateChronicleRetrieval(
-      { generation: { buildContextPreview } },
+      application,
       { transaction: "caller-owned" },
       corpus,
-      { implementation: "legacy_hybrid", now: vi.fn().mockReturnValueOnce(10).mockReturnValueOnce(30), privateRankingHelper } as never
+      { implementation: "legacy_hybrid", now: vi.fn().mockReturnValueOnce(10).mockReturnValueOnce(30) }
     );
 
     expect(buildContextPreview).toHaveBeenCalledWith(
       { transaction: "caller-owned" },
       corpus.cases[0]!.scope
     );
-    expect(privateRankingHelper).not.toHaveBeenCalled();
     expect(report.metrics).toMatchObject({
       recallAt5: 1,
       recallAt10: 1,
@@ -70,8 +76,8 @@ describe("Chronicle retrieval evaluator metrics", () => {
       latencyMs: { p50: 20, p95: 20 },
       embedding: { requests: 1, cost: 0 },
       semanticOnlyHits: 1,
-      promotions: 0,
-      demotions: 0
+      promotions: 1,
+      demotions: 2
     });
     expect(report.cases).toEqual([expect.objectContaining({
       id: "exact-reference",

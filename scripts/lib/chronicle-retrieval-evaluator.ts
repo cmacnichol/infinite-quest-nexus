@@ -22,10 +22,6 @@ export type ChronicleRetrievalCase = Readonly<{
     futureTurn?: readonly string[];
     supersededFact?: readonly string[];
   }>;
-  baselinePreview?: Readonly<{
-    retrieval?: Readonly<{ mode?: string; semanticAvailable?: boolean; embeddingCost?: number }>;
-    scopes?: Readonly<{ chronicle?: readonly ChroniclePreviewEntry[] }>;
-  }>;
 }>;
 
 export type ChronicleRetrievalCorpus = Readonly<{
@@ -163,6 +159,16 @@ function rankLabels(retrievedLabels: readonly string[], expectedLabels: readonly
   }));
 }
 
+function rankingMovements(entries: readonly ChroniclePreviewEntry[]) {
+  return entries.reduce((totals, entry) => {
+    const lexical = Number(entry.lexicalRelevance ?? 0);
+    const semantic = Number(entry.semanticRelevance ?? 0);
+    if (semantic > lexical && semantic > 0) totals.promotions += 1;
+    if (lexical > semantic && lexical > 0) totals.demotions += 1;
+    return totals;
+  }, { promotions: 0, demotions: 0 });
+}
+
 export async function evaluateChronicleRetrieval(
   application: ChronicleRetrievalApplication,
   database: unknown,
@@ -181,6 +187,7 @@ export async function evaluateChronicleRetrieval(
     const semanticOnlyHits = entries.filter((entry) => (
       Number(entry.semanticRelevance ?? 0) > 0 && Number(entry.lexicalRelevance ?? 0) <= 0
     )).length;
+    const movements = rankingMovements(entries);
     cases.push({
       id: fixture.id,
       caseHash: hash({ id: fixture.id, expectedLabels: fixture.expectedLabels, labelByMemoryId: fixture.labelByMemoryId }),
@@ -192,8 +199,8 @@ export async function evaluateChronicleRetrieval(
       embeddingRequests: metadata.semanticAvailable ? 1 : 0,
       embeddingCost: metadata.embeddingCost,
       semanticOnlyHits,
-      promotions: 0,
-      demotions: 0,
+      promotions: movements.promotions,
+      demotions: movements.demotions,
       leakage: caseLeakage(retrievedLabels, fixture)
     });
   }
