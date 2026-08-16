@@ -1,5 +1,6 @@
 import { initializeThemeControl, resolveThemeMediaQuery } from "./theme-control";
 import type { ThemeController } from "./theme";
+import { initializeUserProfileMenu } from "./user-profile-menu";
 
 export type AppNavigation = "world-library" | "world-editor" | "campaigns" | "story" | "setup";
 
@@ -18,7 +19,7 @@ export function renderAppShell(root: HTMLElement, pageMarkup: string, currentNav
         </a>
         <nav class="site-nav" aria-label="Primary navigation">
           <a href="/app/"${currentAttribute(currentNavigation, "world-library")}>World Library</a>
-          <a href="/nexus/#campaigns"${currentAttribute(currentNavigation, "campaigns")}>Campaigns</a>
+          <a href="/app/campaigns"${currentAttribute(currentNavigation, "campaigns")}>Campaigns</a>
           <a href="/story"${currentAttribute(currentNavigation, "story")}>Story</a>
           <a href="/nexus/#providers"${currentAttribute(currentNavigation, "setup")}>Setup</a>
         </nav>
@@ -35,7 +36,37 @@ export function renderAppShell(root: HTMLElement, pageMarkup: string, currentNav
             <path d="M20 15.5A8.5 8.5 0 0 1 8.5 4 8.5 8.5 0 1 0 20 15.5Z" />
           </svg>
         </button>
+        <button class="user-profile-toggle" type="button" aria-label="User profile and settings" title="User profile and settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm-7 8a7 7 0 0 1 14 0" /></svg>
+        </button>
       </header>
+      <dialog class="user-profile-dialog" aria-labelledby="user-profile-title">
+        <form method="dialog">
+          <header>
+            <div>
+              <h2 id="user-profile-title">User profile</h2>
+              <p>Changes save automatically.</p>
+            </div>
+            <button type="button" data-user-profile-close aria-label="Close user profile settings">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
+            </button>
+          </header>
+          <fieldset data-user-profile-fields>
+            <label class="user-profile-field">Display name<input id="user-profile-display-name" type="text" autocomplete="name" maxlength="120" required /></label>
+            <label class="user-profile-check"><input id="user-profile-auto-submit" type="checkbox" />Automatically submit selected story choices</label>
+            <label class="user-profile-check"><input id="user-profile-continuous-reading" type="checkbox" />Keep the full story in view while reading</label>
+            <label class="user-profile-field">Default turn-control style
+              <select id="user-profile-turn-style">
+                <option value="action_only">Player actions only</option>
+                <option value="flexible_auto">Flexible — Auto</option>
+                <option value="flexible_action">Flexible — Player action first</option>
+                <option value="flexible_scene">Flexible — Scene direction first</option>
+              </select>
+            </label>
+          </fieldset>
+          <p class="user-profile-status" data-user-profile-status role="status" aria-live="polite"></p>
+        </form>
+      </dialog>
       ${pageMarkup}
       <footer>
         <p>Infinite Quest Nexus</p>
@@ -43,6 +74,7 @@ export function renderAppShell(root: HTMLElement, pageMarkup: string, currentNav
       </footer>
     </div>
   `;
+  initializeUserProfileMenu(root);
 }
 
 export function initializeAppTheme(root: HTMLElement): ThemeController {

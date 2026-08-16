@@ -330,7 +330,7 @@ describe("World Editor Overview page", () => {
     expect(document.querySelector("[data-version-context]")?.textContent).toContain("1 published version · Latest v2");
     expect(document.querySelector("[data-campaign-context]")?.textContent).toContain("1 active campaign · Turn 12");
     expect(document.querySelector<HTMLAnchorElement>('[data-version-context] a')?.href).toContain("/nexus/#world-library");
-    expect(document.querySelector<HTMLAnchorElement>('[data-campaign-context] a')?.href).toContain("/nexus/#campaigns");
+    expect(document.querySelector<HTMLAnchorElement>('[data-campaign-context] a')?.href).toContain("/app/campaigns");
     expect(document.querySelector<HTMLButtonElement>("[data-version-context] button")?.textContent).toBe("Share latest version");
     expect(document.querySelector("[data-campaign-context] button")).toBeNull();
   });

@@ -154,7 +154,7 @@ describe("web theme integration", () => {
 
     renderAppShell(root, '<main id="main-content">Page</main>', "world-library");
 
-    expect(document.querySelector<HTMLAnchorElement>('a[href="/nexus/#campaigns"]')?.textContent).toBe("Campaigns");
+    expect(document.querySelector<HTMLAnchorElement>('a[href="/app/campaigns"]')?.textContent).toBe("Campaigns");
     expect(document.querySelector<HTMLAnchorElement>('a[href="/nexus/#providers"]')?.textContent).toBe("Setup");
   });
 
@@ -211,13 +211,13 @@ describe("web theme integration", () => {
 
   it("gives the theme control a square touch target and one visible icon per theme", () => {
     const css = fs.readFileSync(path.join(webNextRoot, "src/styles.css"), "utf8");
-    const toggleRule = css.match(/\.theme-toggle\s*\{([^}]*)\}/)?.[1] ?? "";
+    const toggleRule = css.match(/\.theme-toggle,\s*\.user-profile-toggle\s*\{([^}]*)\}/)?.[1] ?? "";
     const iconRule = css.match(/\.theme-icon\s*\{([^}]*)\}/)?.[1] ?? "";
 
     expect(toggleRule).toMatch(/min-width:\s*44px/);
     expect(toggleRule).toMatch(/min-height:\s*44px/);
     expect(toggleRule).toMatch(/border-radius:\s*0/);
-    expect(css).toMatch(/\.theme-toggle:focus-visible\s*\{[^}]*outline:/);
+    expect(css).toMatch(/\.theme-toggle:focus-visible,\s*\.user-profile-toggle:focus-visible\s*\{[^}]*outline:/);
     expect(iconRule).toMatch(/width:\s*20px/);
     expect(iconRule).toMatch(/height:\s*20px/);
     expect(visibleThemeIcons(css, "light")).toEqual(["theme-icon-sun"]);

@@ -849,6 +849,49 @@ function createPostgresCampaignAuthorityRepository(
             ORDER BY turn.turn_number`,
           [branchCampaignId, scope.campaignId, scope.ownerUserId, parsed.targetTurnNumber, branchId]
         );
+        const correctionCopy = await client.query<{
+          sourceCount: number;
+          insertedCount: number;
+        }>(
+          `WITH source_corrections AS MATERIALIZED (
+             SELECT correction.revision, correction.narration,
+                    correction.previous_effective_narration_hash,
+                    correction.reason, correction.source,
+                    correction.created_by_user_id, correction.created_at,
+                    source_turn.turn_number
+               FROM turn_narration_corrections correction
+               JOIN turns source_turn
+                 ON source_turn.id = correction.turn_id
+                AND source_turn.campaign_id = correction.campaign_id
+                AND source_turn.owner_user_id = correction.owner_user_id
+              WHERE correction.campaign_id = $2
+                AND correction.owner_user_id = $3
+                AND source_turn.turn_number <= $4
+           ), inserted AS (
+             INSERT INTO turn_narration_corrections (
+               owner_user_id, campaign_id, turn_id, revision, narration,
+               previous_effective_narration_hash, reason, source,
+               created_by_user_id, created_at
+             )
+             SELECT $3, $1, target_turn.id, correction.revision, correction.narration,
+                    correction.previous_effective_narration_hash, correction.reason,
+                    correction.source, correction.created_by_user_id, correction.created_at
+               FROM source_corrections correction
+               JOIN turns target_turn
+                 ON target_turn.campaign_id = $1
+                AND target_turn.owner_user_id = $3
+                AND target_turn.turn_number = correction.turn_number
+              ORDER BY correction.turn_number, correction.revision
+             RETURNING id
+           )
+           SELECT (SELECT count(*)::int FROM source_corrections) AS "sourceCount",
+                  (SELECT count(*)::int FROM inserted) AS "insertedCount"`,
+          [branchCampaignId, scope.campaignId, scope.ownerUserId, parsed.targetTurnNumber]
+        );
+        if (!correctionCopy.rows[0]
+          || correctionCopy.rows[0].sourceCount !== correctionCopy.rows[0].insertedCount) {
+          invalidBoundaryData("unavailable", scope);
+        }
         await client.query(
           `INSERT INTO summary_checkpoints (
              owner_user_id, campaign_id, through_turn, summary_kind, content,
@@ -880,6 +923,118 @@ function createPostgresCampaignAuthorityRepository(
            ON CONFLICT DO NOTHING`,
           [branchCampaignId, scope.campaignId, scope.ownerUserId, parsed.targetTurnNumber]
         );
+        const illustrationCopy = await client.query<{
+          sourceSetCount: number;
+          insertedSetCount: number;
+          sourceSegmentCount: number;
+          insertedSegmentCount: number;
+          sourceAssetCount: number;
+          insertedAssetCount: number;
+        }>(
+          `WITH source_sets AS MATERIALIZED (
+             SELECT source_set.id AS source_set_id, gen_random_uuid() AS target_set_id,
+                    target_turn.id AS target_turn_id, source_set.source_text_hash,
+                    source_set.segment_word_count, source_set.images_per_segment,
+                    source_set.prompt_mode, source_set.status, source_set.is_active,
+                    source_set.character_visual_reference, source_set.created_at,
+                    source_set.completed_at
+               FROM turn_illustration_sets source_set
+               JOIN turns source_turn
+                 ON source_turn.id = source_set.turn_id
+                AND source_turn.campaign_id = source_set.campaign_id
+                AND source_turn.owner_user_id = source_set.owner_user_id
+               JOIN turns target_turn
+                 ON target_turn.campaign_id = $1
+                AND target_turn.owner_user_id = source_set.owner_user_id
+                AND target_turn.turn_number = source_turn.turn_number
+              WHERE source_set.campaign_id = $2
+                AND source_set.owner_user_id = $3
+                AND source_turn.turn_number <= $4
+           ), inserted_sets AS (
+             INSERT INTO turn_illustration_sets (
+               id, owner_user_id, campaign_id, turn_id, source_text_hash,
+               segment_word_count, images_per_segment, prompt_mode, status,
+               is_active, character_visual_reference, generation_job_id,
+               created_at, completed_at
+             )
+             SELECT source_set.target_set_id, $3, $1, source_set.target_turn_id,
+                    source_set.source_text_hash, source_set.segment_word_count,
+                    source_set.images_per_segment, source_set.prompt_mode,
+                    source_set.status, source_set.is_active,
+                    source_set.character_visual_reference, NULL,
+                    source_set.created_at, source_set.completed_at
+               FROM source_sets source_set
+             RETURNING id
+           ), source_segments AS MATERIALIZED (
+             SELECT source_segment.id AS source_segment_id,
+                    gen_random_uuid() AS target_segment_id,
+                    source_set.target_set_id, source_set.target_turn_id,
+                    source_segment.ordinal, source_segment.start_offset,
+                    source_segment.end_offset, source_segment.start_word,
+                    source_segment.end_word, source_segment.source_text,
+                    source_segment.source_text_hash, source_segment.direct_prompt,
+                    source_segment.resolved_prompt, source_segment.prompt_source,
+                    source_segment.status, source_segment.created_at,
+                    source_segment.updated_at
+               FROM turn_illustration_segments source_segment
+               JOIN source_sets source_set
+                 ON source_set.source_set_id = source_segment.illustration_set_id
+               JOIN inserted_sets inserted_set
+                 ON inserted_set.id = source_set.target_set_id
+              WHERE source_segment.campaign_id = $2
+                AND source_segment.owner_user_id = $3
+           ), inserted_segments AS (
+             INSERT INTO turn_illustration_segments (
+               id, owner_user_id, illustration_set_id, campaign_id, turn_id,
+               ordinal, start_offset, end_offset, start_word, end_word,
+               source_text, source_text_hash, direct_prompt, resolved_prompt,
+               prompt_source, status, generation_job_id, created_at, updated_at
+             )
+             SELECT source_segment.target_segment_id, $3,
+                    source_segment.target_set_id, $1, source_segment.target_turn_id,
+                    source_segment.ordinal, source_segment.start_offset,
+                    source_segment.end_offset, source_segment.start_word,
+                    source_segment.end_word, source_segment.source_text,
+                    source_segment.source_text_hash, source_segment.direct_prompt,
+                    source_segment.resolved_prompt, source_segment.prompt_source,
+                    source_segment.status, NULL, source_segment.created_at,
+                    source_segment.updated_at
+               FROM source_segments source_segment
+             RETURNING id
+           ), source_assets AS MATERIALIZED (
+             SELECT source_segment.target_segment_id, source_asset.asset_id,
+                    source_asset.variant_index, source_asset.created_at
+               FROM turn_illustration_segment_assets source_asset
+               JOIN source_segments source_segment
+                 ON source_segment.source_segment_id = source_asset.segment_id
+              WHERE source_asset.owner_user_id = $3
+           ), inserted_assets AS (
+             INSERT INTO turn_illustration_segment_assets (
+               segment_id, owner_user_id, asset_id, image_job_id,
+               variant_index, created_at
+             )
+             SELECT source_asset.target_segment_id, $3, source_asset.asset_id,
+                    NULL, source_asset.variant_index, source_asset.created_at
+               FROM source_assets source_asset
+               JOIN inserted_segments inserted_segment
+                 ON inserted_segment.id = source_asset.target_segment_id
+             RETURNING segment_id
+           )
+           SELECT (SELECT count(*)::int FROM source_sets) AS "sourceSetCount",
+                  (SELECT count(*)::int FROM inserted_sets) AS "insertedSetCount",
+                  (SELECT count(*)::int FROM source_segments) AS "sourceSegmentCount",
+                  (SELECT count(*)::int FROM inserted_segments) AS "insertedSegmentCount",
+                  (SELECT count(*)::int FROM source_assets) AS "sourceAssetCount",
+                  (SELECT count(*)::int FROM inserted_assets) AS "insertedAssetCount"`,
+          [branchCampaignId, scope.campaignId, scope.ownerUserId, parsed.targetTurnNumber]
+        );
+        const illustrationCounts = illustrationCopy.rows[0];
+        if (!illustrationCounts
+          || illustrationCounts.sourceSetCount !== illustrationCounts.insertedSetCount
+          || illustrationCounts.sourceSegmentCount !== illustrationCounts.insertedSegmentCount
+          || illustrationCounts.sourceAssetCount !== illustrationCounts.insertedAssetCount) {
+          invalidBoundaryData("unavailable", scope);
+        }
       }
       await client.query(
         `INSERT INTO asset_references (

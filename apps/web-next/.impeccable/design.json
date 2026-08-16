@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-08-11T15:13:58.302Z",
+  "generatedAt": "2026-08-15T19:50:05.774Z",
   "title": "Design System: Infinite Quest Nexus",
   "extensions": {
     "colorMeta": {
@@ -372,6 +372,27 @@
       "css": ".editor-command-row { display: grid; grid-template-columns: minmax(0, 1fr); border-bottom: 1px solid var(--rule-strong); } .editor-identity { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 32%); column-gap: var(--cell); } .editor-readonly-context { grid-column: 2; grid-row: 1 / span 2; padding-left: var(--cell); border-left: 1px solid var(--rule-strong); }"
     },
     {
+      "name": "Campaign Folio Command Row",
+      "kind": "custom",
+      "description": "A bound-campaign command row with an explicit return path, immutable campaign context, and a decisive entry back to play.",
+      "html": "<header class=\"ds-campaign-command-row\"><a href=\"/app/campaigns\" class=\"ds-campaign-back\">← Back to campaigns</a><div class=\"ds-campaign-identity\"><h1>The Glass Harbor</h1><span>Active</span><span>Turn 42</span><span>The Drowned Coast v3</span></div><a href=\"/story\" class=\"ds-campaign-enter\">Enter story ↗</a></header>",
+      "css": ".ds-campaign-command-row { display: grid; grid-template-columns: minmax(220px, 290px) minmax(0, 1fr) auto; min-height: 104px; border-bottom: 1px solid var(--rule-strong, #8798a8); } .ds-campaign-back, .ds-campaign-enter { display: flex; align-items: center; justify-content: center; min-height: 44px; padding: 0 18px; color: var(--text-primary, #101418); font-family: 'Chakra Petch', sans-serif; font-size: .78rem; font-weight: 600; letter-spacing: .08em; text-decoration: none; text-transform: uppercase; } .ds-campaign-back { justify-content: flex-start; border-right: 1px solid var(--rule-strong, #8798a8); } .ds-campaign-enter { margin: 20px var(--edge, 20px) 20px 0; color: var(--text-on-accent, #f5f7fb); background: var(--accent, #2346a8); border: 1px solid var(--accent, #2346a8); } .ds-campaign-enter:hover { color: var(--text-on-accent, #f5f7fb); background: var(--accent-hover, #17327f); } .ds-campaign-back:focus-visible, .ds-campaign-enter:focus-visible { outline: 3px solid var(--accent, #2346a8); outline-offset: -3px; } .ds-campaign-identity { display: flex; align-items: center; gap: 18px; min-width: 0; padding: 18px var(--cell, 20px); } .ds-campaign-identity h1 { min-width: 0; margin: 0 auto 0 0; font-family: 'Literata', Georgia, serif; font-size: clamp(1.6rem, 3vw, 2.6rem); line-height: 1; } .ds-campaign-identity span { padding-left: 14px; border-left: 1px solid var(--rule, #b8c5d0); font-family: 'Chakra Petch', sans-serif; font-size: .78rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; } @media (max-width: 980px) { .ds-campaign-command-row { grid-template-columns: minmax(0, 1fr) auto; } .ds-campaign-back { grid-column: 1 / -1; min-height: 48px; border-right: 0; border-bottom: 1px solid var(--rule, #b8c5d0); } .ds-campaign-identity { flex-wrap: wrap; } .ds-campaign-identity h1 { width: 100%; } } @media (max-width: 720px) { .ds-campaign-command-row { grid-template-columns: 1fr; } .ds-campaign-enter { min-height: 52px; margin: 0; } .ds-campaign-identity span { padding-left: 0; border-left: 0; } }"
+    },
+    {
+      "name": "Campaign Folio Spine",
+      "kind": "nav",
+      "description": "A bounded campaign section spine with a narrow inverse coordinate rail and a complete-cell compact switcher.",
+      "html": "<aside class=\"ds-campaign-spine\" aria-label=\"Campaign editor sections\"><div class=\"ds-campaign-coordinate\"><span>Campaign folio</span><strong>042</strong></div><nav><a href=\"#overview\" aria-current=\"page\">Overview</a><a href=\"#history\">History</a><a href=\"#data\">Data</a></nav></aside>",
+      "css": ".ds-campaign-spine { display: grid; grid-template-columns: 52px minmax(0, 1fr); background: var(--surface-paper, #f8fafb); border-right: 1px solid var(--rule-strong, #8798a8); } .ds-campaign-coordinate { display: flex; flex-direction: column; align-items: center; justify-content: space-between; padding: 18px 8px 28px; color: var(--text-inverse, #f5f7fb); background: var(--surface-inverse, #101418); border-right: 1px solid var(--rule, #b8c5d0); } .ds-campaign-coordinate span { writing-mode: vertical-rl; font-family: 'Chakra Petch', sans-serif; font-size: .78rem; letter-spacing: .12em; text-transform: uppercase; } .ds-campaign-coordinate strong { font-family: 'Literata', Georgia, serif; font-size: 1.6rem; font-weight: 500; } .ds-campaign-spine nav { display: flex; flex-direction: column; } .ds-campaign-spine a { display: flex; align-items: center; min-height: 78px; padding: 12px 18px; color: var(--text-primary, #101418); border-bottom: 1px solid var(--rule, #b8c5d0); font-family: 'Chakra Petch', sans-serif; font-size: .78rem; font-weight: 600; letter-spacing: .05em; text-decoration: none; text-transform: uppercase; } .ds-campaign-spine a:hover { background: var(--surface-entry-hover, #f8fafb); } .ds-campaign-spine a[aria-current='page'] { color: var(--accent-hover, #17327f); background: var(--accent-soft, #c8d5f2); box-shadow: inset 3px 0 0 var(--accent, #2346a8); } .ds-campaign-spine a:focus-visible { outline: 3px solid var(--accent, #2346a8); outline-offset: -3px; } @media (max-width: 720px) { .ds-campaign-spine { display: block; overflow: hidden; border-right: 0; border-bottom: 1px solid var(--rule-strong, #8798a8); } .ds-campaign-coordinate { display: none; } .ds-campaign-spine nav { flex-direction: row; overflow-x: auto; } .ds-campaign-spine a { flex: 0 0 auto; min-height: 52px; border-right: 1px solid var(--rule, #b8c5d0); border-bottom: 0; } .ds-campaign-spine a[aria-current='page'] { box-shadow: inset 0 -3px 0 var(--accent, #2346a8); } }"
+    },
+    {
+      "name": "Campaign Action Ledger",
+      "kind": "status-actions",
+      "description": "A scoped in-flow sticky action row that keeps campaign feedback beside explicit current-leaf actions without obscuring editing.",
+      "html": "<div class=\"ds-campaign-action-ledger\"><span role=\"status\">Campaign details saved.</span><button type=\"button\">Export campaign</button><button type=\"button\" class=\"ds-campaign-primary-action\">Save changes</button></div>",
+      "css": ".ds-campaign-action-ledger { position: sticky; bottom: 0; z-index: 2; display: flex; align-items: center; justify-content: flex-end; gap: 12px; min-height: 64px; padding: 10px var(--cell, 20px); background: var(--surface-paper, #f8fafb); border-top: 1px solid var(--rule-strong, #8798a8); } .ds-campaign-action-ledger span { margin-right: auto; color: var(--text-secondary, #46515c); font-family: 'Geologica', sans-serif; } .ds-campaign-action-ledger button { min-height: 44px; padding: 10px 16px; color: var(--text-primary, #101418); background: transparent; border: 1px solid var(--rule-strong, #8798a8); border-radius: 0; font-family: 'Chakra Petch', sans-serif; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; } .ds-campaign-action-ledger .ds-campaign-primary-action { color: var(--text-on-accent, #f5f7fb); background: var(--accent, #2346a8); border-color: var(--accent, #2346a8); } .ds-campaign-action-ledger button:hover { background: var(--surface-entry-hover, #f8fafb); } .ds-campaign-action-ledger .ds-campaign-primary-action:hover { background: var(--accent-hover, #17327f); } .ds-campaign-action-ledger button:focus-visible { outline: 3px solid var(--accent, #2346a8); outline-offset: -3px; } @media (max-width: 720px) { .ds-campaign-action-ledger { position: static; flex-wrap: wrap; padding: 12px 0; } .ds-campaign-action-ledger span { width: 100%; } }"
+    },
+    {
       "name": "Section Index",
       "kind": "nav",
       "description": "A left-side editor index that recomposes into a horizontal compact section switcher without numeric decoration.",
@@ -525,7 +546,8 @@
       "Do keep Geologica for explanatory prose and Chakra Petch for operational labels and actions.",
       "Do preserve square controls, one-pixel construction rules, clipped media corners, and clear keyboard focus.",
       "Do recompose complete content units for narrow screens and honor reduced-motion preferences.",
-      "Do let world artwork remain richer than the surrounding interface palette."
+      "Do let world artwork remain richer than the surrounding interface palette.",
+      "Do use the campaign folio pattern when one durable campaign needs focused configuration: a bound spine, broad working leaf, visible immutable context, and explicit return-to-story action."
     ],
     "donts": [
       "Don't introduce rounded-card dashboard styling, pill controls, or soft floating panels.",
@@ -533,7 +555,8 @@
       "Don't add ambient card shadows; reserve the focused shadow for active search or an equivalent primary query field.",
       "Don't make literary display type oversized, ornamental, or faux-antique; it should support reading and creative writing without becoming costume.",
       "Don't shrink a multi-column composition until its controls and copy become cramped; switch the whole-cell arrangement instead.",
-      "Don't elevate World Library-specific column counts, hero placement, or entry order into global design law."
+      "Don't elevate World Library-specific column counts, hero placement, or entry order into global design law.",
+      "Don't turn a campaign editor into a monolithic settings dashboard, hide campaign context at narrow widths, or let a sticky action row cover active editing controls."
     ]
   }
 }

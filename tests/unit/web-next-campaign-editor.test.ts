@@ -1,0 +1,175 @@
+import { readFileSync } from "node:fs";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { campaignApi, CampaignEditorApiError, loadCampaign } from "../../apps/web-next/src/campaign-editor-api.js";
+import { CAMPAIGN_SECTIONS, campaignEditorPath, campaignRouteFromPath, campaignStateInspectorMarkup, escapeCampaignText, firstNarrationSentence, narrationCorrectionDialogMarkup, withCampaignActionState } from "../../apps/web-next/src/campaign-editor-model.js";
+
+afterEach(() => vi.unstubAllGlobals());
+
+describe("web-next campaign editor routing", () => {
+  it("gives every confirmed editor section its own canonical subpage", () => {
+    expect(CAMPAIGN_SECTIONS).toEqual(["overview", "character", "state", "history", "chronicle", "illustrations", "world-transfer", "data"]);
+    for (const section of CAMPAIGN_SECTIONS) {
+      const path = campaignEditorPath("campaign / one", section);
+      expect(campaignRouteFromPath(path)).toEqual({ campaignId: "campaign / one", section });
+    }
+    expect(campaignRouteFromPath("/app/campaigns")).toEqual({ campaignId: null, section: "overview" });
+    expect(campaignRouteFromPath("/app/worlds/example")).toBeNull();
+  });
+
+  it("escapes untrusted campaign content before it enters markup", () => {
+    expect(escapeCampaignText('<img src=x onerror="alert(1)">')).toBe("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;");
+  });
+
+  it("reduces accepted narration to one readable sentence for the History ledger", () => {
+    expect(firstNarrationSentence("  The gate opens. Beyond it, the road disappears!  ")).toBe("The gate opens.");
+    expect(firstNarrationSentence("A single sentence without punctuation")).toBe("A single sentence without punctuation");
+    expect(firstNarrationSentence("")).toBe("No narration recorded.");
+  });
+});
+
+describe("web-next campaign action feedback", () => {
+  it("renders historical state as labeled read-only fields instead of raw JSON", () => {
+    const markup = campaignStateInspectorMarkup({
+      campaignId: "campaign-1",
+      activeTurnNumber: 4,
+      viewedTurnNumber: 2,
+      isCurrent: false,
+      revision: 7,
+      updatedAt: "2026-08-10T07:14:12.282Z",
+      continuitySummary: "The harbor is quiet.",
+      openThreads: ["Find the keeper."],
+      canonicalFacts: [{ id: "fact-1", content: "The lens is moon glass." }],
+      scratchpad: "Private continuity.",
+      trackers: [{ id: "trust", name: "Trust", value: "Wary", rules: "Changes through dialogue." }],
+      rpgStats: [{ id: "resolve", name: "Resolve", value: 61, note: "Holding steady." }],
+      eventTriggers: [],
+      pendingEventTriggers: []
+    });
+
+    expect(markup).toContain("Historical state after turn 2");
+    expect(markup).toContain("This saved snapshot is immutable and cannot be edited.");
+    expect(markup).toContain("Continuity summary");
+    expect(markup).toContain("Open threads");
+    expect(markup).toContain("Canonical facts");
+    expect(markup).toContain("Trackers");
+    expect(markup).toContain("RPG stats");
+    expect(markup).toContain("readonly");
+    expect(markup).not.toContain("<pre");
+    expect(markup).not.toContain("Edit current state");
+  });
+
+  it("routes current-state changes to the dedicated future-generation editor", () => {
+    const markup = campaignStateInspectorMarkup({
+      campaignId: "campaign / one",
+      activeTurnNumber: 4,
+      viewedTurnNumber: 4,
+      isCurrent: true,
+      revision: 8,
+      updatedAt: "2026-08-15T12:00:00.000Z"
+    });
+
+    expect(markup).toContain("Current state after turn 4");
+    expect(markup).toContain("Changes that affect future generations belong on the Current State page.");
+    expect(markup).toContain('href="/app/campaigns/campaign%20%2F%20one/state"');
+    expect(markup).toContain("Edit current state");
+    expect(markup).not.toContain('contenteditable="true"');
+  });
+
+  it("explains accepted-turn correction semantics in an explicit save-or-cancel modal", () => {
+    const markup = narrationCorrectionDialogMarkup();
+
+    expect(markup).toContain('<dialog id="narration-correction-dialog"');
+    expect(markup).toContain('id="narration-correction-form"');
+    expect(markup).toContain('id="narration-correction-title" tabindex="-1"');
+    expect(markup).toContain("does not reopen or rewrite the completed turn");
+    expect(markup).toContain("original accepted narration remains preserved");
+    expect(markup).toContain('name="narration"');
+    expect(markup).toContain('type="submit"');
+    expect(markup).toContain("Save correction");
+    expect(markup).toContain('data-dialog-close="narration-correction-dialog"');
+    expect(markup).toContain("Cancel");
+  });
+
+  it("marks an async action busy immediately and restores the button afterward", async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const attributes = new Map<string, string>();
+    const button = {
+      disabled: false,
+      textContent: "Edit narration",
+      dataset: {} as DOMStringMap,
+      setAttribute: (name: string, value: string) => attributes.set(name, value),
+      removeAttribute: (name: string) => attributes.delete(name)
+    };
+
+    const running = withCampaignActionState(button, "Loading narration…", () => pending);
+    expect(button).toMatchObject({ disabled: true, textContent: "Loading narration…", dataset: { state: "working" } });
+    expect(attributes.get("aria-busy")).toBe("true");
+    release();
+    await running;
+    expect(button).toMatchObject({ disabled: false, textContent: "Edit narration", dataset: {} });
+    expect(attributes.has("aria-busy")).toBe(false);
+  });
+});
+
+describe("web-next campaign editor API", () => {
+  it("loads a selected campaign from the owner-scoped campaign list", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ campaigns: [{ id: "c-1", title: "Glass Harbor" }] }), { status: 200, headers: { "Content-Type": "application/json" } })));
+    await expect(loadCampaign("c-1")).resolves.toMatchObject({ title: "Glass Harbor" });
+    expect(fetch).toHaveBeenCalledWith("/api/v1/campaigns", expect.objectContaining({ signal: undefined }));
+  });
+
+  it("encodes campaign and child identifiers and preserves API failures", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ message: "Revision conflict", details: { revision: 4 } }), { status: 409 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await campaignApi.patch("campaign / one", "/turns/turn%20one/correction", { narration: "Corrected" });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/v1/campaigns/campaign%20%2F%20one/turns/turn%20one/correction");
+    await expect(campaignApi.patch("c-1", "/state", {})).rejects.toMatchObject<Partial<CampaignEditorApiError>>({ message: "Revision conflict", status: 409 });
+  });
+
+  it("surfaces either supported API error-envelope message", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: "Provider unavailable" }), { status: 503, headers: { "Content-Type": "application/json" } })));
+    await expect(campaignApi.general("/api/v1/providers")).rejects.toMatchObject<Partial<CampaignEditorApiError>>({ message: "Provider unavailable", status: 503 });
+  });
+});
+
+describe("web-next campaign parity inventory", () => {
+  const source = readFileSync("apps/web-next/src/campaign-editor-page.ts", "utf8");
+
+  it("exposes every legacy campaign-management backend seam", () => {
+    for (const seam of [
+      "/character-profile", "/state", "/turns?limit=100", "/memory/metrics", "/memory/embedding-config",
+      "/memory/context-preview", "/memory/reindex", "/illustration-config", "/illustration-backfill/preview",
+      "/illustration-backfill", "/migrate-world", "/transfer-world/preview", "/transfer-world",
+      "/readable-export", "/export", "/branch", "/rewind", "/correction", "/generations/retry-latest",
+      "/illustration-segments"
+    ]) expect(source).toContain(seam);
+  });
+
+  it("keeps destructive and history-changing actions behind confirmation", () => {
+    for (const action of ["Migrate this campaign", "Transfer this campaign", "Create a separate campaign", "Rewind this campaign", "Permanently delete"])
+      expect(source).toContain(action);
+  });
+
+  it("uses owner-scoped selectors instead of exposing opaque configuration identifiers", () => {
+    expect(source).toContain('select name="textProviderProfileId"');
+    expect(source).toContain('select name="providerProfileId"');
+    expect(source).toContain('select name="targetWorldVersionId"');
+    expect(source).not.toContain("Target world-version ID");
+    expect(source).toContain("No other published worlds available");
+  });
+
+  it("places malformed JSON errors beside the exact editor field", () => {
+    expect(source).toContain('setAttribute("aria-invalid", "true")');
+    expect(source).toContain("campaign-field-error");
+    expect(source).toContain("control.focus()");
+  });
+
+  it("keeps full turn content out of the visible History ledger", () => {
+    expect(source).toContain("firstNarrationSentence(turn.narration)");
+    expect(source).toContain("<summary>Manage turn</summary>");
+    expect(source).not.toContain('${text(turn.narration)}</div><div class="turn-actions">');
+  });
+});

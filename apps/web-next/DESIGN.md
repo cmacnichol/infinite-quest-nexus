@@ -239,6 +239,19 @@ Components are precise, tactile through state rather than simulated material, an
 ### Indexed Content Entry
 - Present artwork and text as one complete interactive cell. Keep imagery visually richer than chrome, provide a no-image grid fallback, and use a clipped cover corner, coordinate marker, concise metadata rule, and northeast action arrow as recurring wayfinding details. Exact entry composition remains surface-specific.
 
+### Campaign Folio Command Row
+- Treat one durable campaign as a bound folio: use a persistent command row with the return path at the leading edge, Literata campaign identity and immutable context in the central field, and a decisive **Enter story** action at the trailing edge. Separate each concern with construction rules rather than nested cards.
+- Keep the command row responsive as complete units. At intermediate widths, move the return path to its own ruled row; at compact widths, place the story action in its own full-width cell. Never hide the identity, status, current-turn, or source-world context merely to preserve a desktop line.
+
+### Campaign Spine and Working Leaf
+- Pair the folio command row with a bounded section spine and one broad working leaf. The spine may include a narrow inverse coordinate rail (52px) that names the folio vertically and anchors the active turn; its numbered section controls remain square, rule-separated, and icon-led.
+- Give the active section the semantic soft-accent field and an inset accent orientation rule. At `720px` and below, hide only the decorative coordinate rail and recompose the complete section controls into a horizontally scrollable 52px switcher with a bottom active rule.
+- The working leaf carries the page heading, readable form measure, contextual metrics, and lifecycle controls. Routine forms may use two equal fields or a denser three-field grid, while durable metrics remain as equal ruled cells; each grid becomes one column on compact screens.
+
+### Campaign Action Ledger
+- Use a scoped sticky action ledger for the current campaign leaf: status or recovery copy sits at the leading edge while explicit save, export, or confirmed lifecycle actions stay grouped at the trailing edge. It is part of the page flow and may not cover a focused field.
+- On compact screens, return the ledger to normal flow, let status take its own line, and retain at least 44px square actions. Destructive or irreversible changes remain visibly distinct through copy, confirmation, and a bounded danger region rather than a red dashboard treatment.
+
 ### Editor Command Row
 - Keep the return path and world title in the leading field. Place immutable published-version and campaign context in a compact far-right reference rail, separated by one Strong Construction Rule.
 - On compact screens, recompose the reference rail below the title with a horizontal separator. Draft status and the explicit Save draft action belong only in the persistent Draft Ledger.
@@ -304,6 +317,7 @@ Components are precise, tactile through state rather than simulated material, an
 - **Do** preserve square controls, one-pixel construction rules, clipped media corners, and clear keyboard focus.
 - **Do** recompose complete content units for narrow screens and honor reduced-motion preferences.
 - **Do** let world artwork remain richer than the surrounding interface palette.
+- **Do** use the campaign folio pattern when one durable campaign needs focused configuration: a bound spine, broad working leaf, visible immutable context, and explicit return-to-story action.
 
 ### Don't:
 - **Don't** introduce rounded-card dashboard styling, pill controls, or soft floating panels.
@@ -312,3 +326,4 @@ Components are precise, tactile through state rather than simulated material, an
 - **Don't** make literary display type oversized, ornamental, or faux-antique; it should support reading and creative writing without becoming costume.
 - **Don't** shrink a multi-column composition until its controls and copy become cramped; switch the whole-cell arrangement instead.
 - **Don't** elevate World Library-specific column counts, hero placement, or entry order into global design law.
+- **Don't** turn a campaign editor into a monolithic settings dashboard, hide campaign context at narrow widths, or let a sticky action row cover active editing controls.

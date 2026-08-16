@@ -12,9 +12,14 @@ import {
   type DatabasePool
 } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
+import { sha256 } from "../../packages/domain/src/text.js";
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
 import { memoryGeneration } from "../helpers/memory-applications.js";
-import { readTurnReportedCostsForTest } from "../helpers/provider-application-fixtures.js";
+import {
+  getCampaignCostSummary,
+  readTurnReportedCostsForTest
+} from "../helpers/provider-application-fixtures.js";
+import { listCampaignIllustrationSegments } from "../../services/runtime/src/illustration-segment-job-adapter.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe.sequential : describe.skip;
@@ -426,6 +431,216 @@ integration("PostgreSQL campaign sync adapters", () => {
     expect((target.rows[0]!.eventDetails as { branchId: string }).branchId)
       .toBe((target.rows[0]!.importProvenance.branch as { branchId: string }).branchId);
     expect(await branchSourceSnapshot(imported.campaignId)).toEqual(sourceBefore);
+  });
+
+  it("branches effective narration history without inheriting source campaign costs", async () => {
+    const imported = await createCampaignFixture();
+    const adapters = createAdapters();
+    const scope = { ownerUserId, campaignId: imported.campaignId };
+    const source = await pool.query<{
+      title: string;
+      turnId: string;
+      narration: string;
+    }>(
+      `SELECT campaign.title, turn_row.id AS "turnId", turn_row.narration
+         FROM campaigns campaign
+         JOIN turns turn_row
+           ON turn_row.campaign_id = campaign.id
+          AND turn_row.owner_user_id = campaign.owner_user_id
+          AND turn_row.turn_number = 1
+        WHERE campaign.owner_user_id = $1 AND campaign.id = $2`,
+      [ownerUserId, imported.campaignId]
+    );
+    const sourceTurn = source.rows[0]!;
+    const firstCorrection = "The corrected lantern burns beside the harbor gate.";
+    const finalCorrection = "The corrected lantern burns beside the moonlit harbor gate.";
+    const correctionRows = await pool.query<{ id: string }>(
+      `INSERT INTO turn_narration_corrections (
+         owner_user_id, campaign_id, turn_id, revision, narration,
+         previous_effective_narration_hash, reason, source, created_by_user_id, created_at
+       ) VALUES
+         ($1,$2,$3,1,$4,$5,'Restore accepted prose','user_edit',$1,'2026-01-02T03:04:05Z'),
+         ($1,$2,$3,2,$6,$7,'Polish accepted prose','administrative',$1,'2026-01-02T04:05:06Z')
+       RETURNING id`,
+      [
+        ownerUserId,
+        imported.campaignId,
+        sourceTurn.turnId,
+        firstCorrection,
+        sha256(sourceTurn.narration),
+        finalCorrection,
+        sha256(firstCorrection)
+      ]
+    );
+    await pool.query(
+      `INSERT INTO provider_cost_events (
+         owner_user_id, campaign_id, turn_id, provider_type, category, operation,
+         requested_model, resolved_model, amount, currency, usage_metadata
+       ) VALUES
+         ($1,$2,$3,'openai_compatible','story','story_turn','fixture-model','fixture-model',0.125,'USD','{}'),
+         ($1,$2,NULL,'openai_compatible','memory','summary','fixture-model','fixture-model',0.025,'USD','{}')`,
+      [ownerUserId, imported.campaignId, sourceTurn.turnId]
+    );
+
+    const branched = await adapters.transaction.command((transaction) => adapters.campaigns.branchCampaign(
+      transaction,
+      scope,
+      { targetTurnNumber: 1, expectedCurrentTurnNumber: 2 }
+    ));
+    if (!branched.ok) throw new Error("Expected corrected-history branch creation to succeed.");
+    branchCampaignIds.push(branched.value.id);
+
+    expect(branched.value.title).toBe(`${sourceTurn.title} (Branch Turn 1)`);
+    const branchPage = await adapters.turnPages.readTurnPage(
+      { ownerUserId, campaignId: branched.value.id },
+      { before: undefined, limit: 10 }
+    );
+    expect(branchPage.turns).toHaveLength(1);
+    expect(branchPage.turns[0]).toMatchObject({ turnNumber: 1, narration: finalCorrection });
+    expect(branchPage.turns[0]!.reportedCost).toBeNull();
+
+    const copied = await pool.query<{
+      id: string;
+      turnId: string;
+      revision: number;
+      narration: string;
+      previousEffectiveNarrationHash: string;
+      reason: string | null;
+      source: string;
+      createdAt: Date;
+      baseNarration: string;
+      memoryContent: string;
+    }>(
+      `SELECT correction.id, correction.turn_id AS "turnId", correction.revision,
+              correction.narration,
+              correction.previous_effective_narration_hash AS "previousEffectiveNarrationHash",
+              correction.reason, correction.source, correction.created_at AS "createdAt",
+              turn_row.narration AS "baseNarration", memory.content AS "memoryContent"
+         FROM turn_narration_corrections correction
+         JOIN turns turn_row
+           ON turn_row.id = correction.turn_id
+          AND turn_row.campaign_id = correction.campaign_id
+          AND turn_row.owner_user_id = correction.owner_user_id
+         JOIN chronicle_memories memory
+           ON memory.turn_id = turn_row.id
+          AND memory.campaign_id = turn_row.campaign_id
+          AND memory.owner_user_id = turn_row.owner_user_id
+          AND memory.memory_kind = 'turn_fiction'
+        WHERE correction.owner_user_id = $1 AND correction.campaign_id = $2
+        ORDER BY correction.revision`,
+      [ownerUserId, branched.value.id]
+    );
+    expect(copied.rows).toEqual([
+      {
+        id: expect.any(String),
+        turnId: copied.rows[0]!.turnId,
+        revision: 1,
+        narration: firstCorrection,
+        previousEffectiveNarrationHash: sha256(sourceTurn.narration),
+        reason: "Restore accepted prose",
+        source: "user_edit",
+        createdAt: new Date("2026-01-02T03:04:05Z"),
+        baseNarration: sourceTurn.narration,
+        memoryContent: expect.stringContaining(finalCorrection)
+      },
+      {
+        id: expect.any(String),
+        turnId: copied.rows[0]!.turnId,
+        revision: 2,
+        narration: finalCorrection,
+        previousEffectiveNarrationHash: sha256(firstCorrection),
+        reason: "Polish accepted prose",
+        source: "administrative",
+        createdAt: new Date("2026-01-02T04:05:06Z"),
+        baseNarration: sourceTurn.narration,
+        memoryContent: expect.stringContaining(finalCorrection)
+      }
+    ]);
+    expect(copied.rows[0]!.turnId).not.toBe(sourceTurn.turnId);
+    expect(copied.rows.map(({ id }) => id)).not.toEqual(correctionRows.rows.map(({ id }) => id));
+    await expect(getCampaignCostSummary(pool, branched.value.id)).resolves.toEqual({
+      campaignId: branched.value.id,
+      hasReportedCosts: false,
+      totals: []
+    });
+    await expect(getCampaignCostSummary(pool, imported.campaignId)).resolves.toMatchObject({
+      campaignId: imported.campaignId,
+      hasReportedCosts: true,
+      totals: [{ amount: "0.150000000000", currency: "USD" }]
+    });
+  });
+
+  it("preserves completed illustration segments without cloning their operational jobs", async () => {
+    const imported = await createCampaignFixture();
+    const adapters = createAdapters();
+    const sourceTurn = (await pool.query<{ id: string; narration: string }>(
+      `SELECT id, narration FROM turns
+        WHERE owner_user_id = $1 AND campaign_id = $2 AND turn_number = 1`,
+      [ownerUserId, imported.campaignId]
+    )).rows[0]!;
+    const asset = (await pool.query<{ id: string }>(
+      `INSERT INTO assets (
+         owner_user_id, campaign_id, turn_id, content_hash, storage_driver,
+         storage_path, mime_type, byte_length
+       ) VALUES ($1,$2,$3,$4,'filesystem',$5,'image/png',4) RETURNING id`,
+      [ownerUserId, imported.campaignId, sourceTurn.id,
+        `branch-segment-${crypto.randomUUID()}`, `branch-segment/${crypto.randomUUID()}.png`]
+    )).rows[0]!;
+    await pool.query(
+      `INSERT INTO asset_references (owner_user_id, asset_id, campaign_id, turn_id, asset_role)
+       VALUES ($1,$2,$3,$4,'turn_illustration')`,
+      [ownerUserId, asset.id, imported.campaignId, sourceTurn.id]
+    );
+    const illustrationSet = (await pool.query<{ id: string }>(
+      `INSERT INTO turn_illustration_sets (
+         owner_user_id, campaign_id, turn_id, source_text_hash, segment_word_count,
+         images_per_segment, prompt_mode, status, is_active, completed_at
+       ) VALUES ($1,$2,$3,$4,500,1,'direct','completed',true,now()) RETURNING id`,
+      [ownerUserId, imported.campaignId, sourceTurn.id, sha256(sourceTurn.narration)]
+    )).rows[0]!;
+    const segment = (await pool.query<{ id: string }>(
+      `INSERT INTO turn_illustration_segments (
+         owner_user_id, illustration_set_id, campaign_id, turn_id, ordinal,
+         start_offset, end_offset, start_word, end_word, source_text, source_text_hash,
+         direct_prompt, resolved_prompt, prompt_source, status
+       ) VALUES ($1,$2,$3,$4,0,0,$5,0,8,$6,$7,'A moonlit harbor gate.',
+                 'A moonlit harbor gate.','direct','completed') RETURNING id`,
+      [
+        ownerUserId,
+        illustrationSet.id,
+        imported.campaignId,
+        sourceTurn.id,
+        sourceTurn.narration.length,
+        sourceTurn.narration,
+        sha256(sourceTurn.narration)
+      ]
+    )).rows[0]!;
+    await pool.query(
+      `INSERT INTO turn_illustration_segment_assets (
+         segment_id, owner_user_id, asset_id, variant_index
+       ) VALUES ($1,$2,$3,0)`,
+      [segment.id, ownerUserId, asset.id]
+    );
+
+    const branched = await adapters.transaction.command((transaction) => adapters.campaigns.branchCampaign(
+      transaction,
+      { ownerUserId, campaignId: imported.campaignId },
+      { targetTurnNumber: 1, expectedCurrentTurnNumber: 2 }
+    ));
+    if (!branched.ok) throw new Error("Expected illustrated-history branch creation to succeed.");
+    branchCampaignIds.push(branched.value.id);
+
+    await expect(listCampaignIllustrationSegments(pool, branched.value.id)).resolves.toMatchObject({
+      segments: [{
+        turnId: expect.not.stringMatching(sourceTurn.id),
+        ordinal: 0,
+        text: sourceTurn.narration,
+        status: "completed",
+        imageJobId: null,
+        promptJobStatus: null,
+        variants: [{ assetId: asset.id, variantIndex: 0 }]
+      }]
+    });
   });
 
   it("rejects stale fences and future or missing branch targets without creating a branch", async () => {

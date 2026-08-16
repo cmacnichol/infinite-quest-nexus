@@ -1,5 +1,7 @@
 import "./styles.css";
 import { generateWorldPreview } from "./world-creation-api";
+import { mountCampaignEditorPage } from "./campaign-editor-page";
+import { campaignRouteFromPath } from "./campaign-editor-model";
 import { mountCharacterWorkspacePage } from "./character-workspace-page";
 import { characterSessionKeyFromPath } from "./character-workspace-session";
 import { isWorldCreationPath } from "./world-creation-model";
@@ -12,9 +14,12 @@ const root = document.querySelector<HTMLElement>("#app");
 if (!root) throw new Error("The replacement app root is missing.");
 
 const characterSessionKey = characterSessionKeyFromPath(window.location.pathname);
+const campaignRoute = campaignRouteFromPath(window.location.pathname);
 const worldId = worldIdFromPath(window.location.pathname);
 const mountedPage: MountedPage = characterSessionKey !== null
   ? mountCharacterWorkspacePage(root, characterSessionKey)
+  : campaignRoute !== null
+    ? mountCampaignEditorPage(root, campaignRoute)
   : isWorldCreationPath(window.location.pathname)
     ? mountWorldCreationPage(root, { generateWorldPreview })
     : worldId === null

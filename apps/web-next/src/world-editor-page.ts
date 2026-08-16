@@ -532,8 +532,8 @@ export function mountWorldEditorPage(
       shareButton.disabled = true;
       try {
         const created = await (dependencies.createWorldShareLink ?? createWorldShareLinkRequest)(world.id, latestVersion.id);
-        const url = `${view.location.origin}/api/v1/world-shares/${created.token}`;
-        await view.navigator.clipboard.writeText(url);
+        const url = `${pageView.location.origin}/api/v1/world-shares/${created.token}`;
+        await pageView.navigator.clipboard.writeText(url);
         announcement.textContent = `Share link copied. It expires ${new Date(created.expiresAt).toLocaleString()}.`;
       } catch (error) {
         announcement.textContent = error instanceof Error ? error.message : "The share link could not be created.";
@@ -548,7 +548,7 @@ export function mountWorldEditorPage(
       shareButton
     );
     const campaignLink = document.createElement("a");
-    campaignLink.href = "/nexus/#campaigns";
+    campaignLink.href = "/app/campaigns";
     campaignLink.textContent = "Manage campaigns";
     campaignContext.replaceChildren(
       `${activeCampaigns.length} active campaign${activeCampaigns.length === 1 ? "" : "s"}${world.campaigns.length !== activeCampaigns.length ? ` · ${world.campaigns.length} total` : ""}${world.campaigns.length ? ` · Turn ${latestTurn}` : ""}${latestCampaign ? ` · Latest ${latestCampaign.title}` : ""} · `,
