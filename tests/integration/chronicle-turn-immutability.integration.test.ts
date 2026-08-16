@@ -170,10 +170,21 @@ integration("Chronicle accepted-turn immutability", () => {
     expect(await rebuildCampaignMemories(pool, sourceCampaignId)).toBeGreaterThan(0);
     await expectUnchanged();
 
-    await branchCampaign(pool, sourceCampaignId, {
+    const branch = await branchCampaign(pool, sourceCampaignId, {
       targetTurnNumber: sourceTurnRow.turn_number,
       expectedCurrentTurnNumber: activeTurnNumber.rows[0].active_turn_number
     });
+    const branchIndexingJob = await pool.query<{ id: string }>(
+      `SELECT id
+         FROM chronicle_jobs
+        WHERE owner_user_id = $1 AND campaign_id = $2 AND job_type = 'embed_campaign'
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1`,
+      [ownerUserId, branch.id]
+    );
+    const branchIndexingJobId = branchIndexingJob.rows[0]?.id;
+    expect(branchIndexingJobId).toEqual(expect.any(String));
+    await runChronicleJob(branchIndexingJobId!, "turn-immutability-branch-indexing", "");
     await expectUnchanged();
   });
 });
