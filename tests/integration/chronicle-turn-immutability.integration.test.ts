@@ -170,6 +170,50 @@ integration("Chronicle accepted-turn immutability", () => {
     expect(await rebuildCampaignMemories(pool, sourceCampaignId)).toBeGreaterThan(0);
     await expectUnchanged();
 
+    const staleParent = await pool.query<{
+      id: string;
+      content_hash: string;
+      content: string;
+      token_estimate: number;
+      world_version_id: string;
+    }>(
+      `SELECT id,content_hash,content,token_estimate,world_version_id
+         FROM chronicle_memories
+        WHERE owner_user_id=$1 AND campaign_id=$2 AND turn_id=$3 AND memory_kind='turn_fiction'`,
+      [ownerUserId, sourceCampaignId, sourceTurnRow.id]
+    );
+    const staleParentRow = staleParent.rows[0]!;
+    const staleChunk = await pool.query<{ id: string }>(
+      `INSERT INTO chronicle_memory_chunks (
+         owner_user_id,campaign_id,world_version_id,parent_memory_id,parent_content_hash,
+         chunking_protocol_version,chunk_ordinal,chunk_kind,content,source_end_offset,
+         token_estimate,embedding_status,embedding_skip_reason
+       ) VALUES ($1,$2,$3,$4,$5,'chronicle-chunk-v1',0,'turn_narration',$6,length($6),$7,'skipped','semantic_disabled')
+       RETURNING id`,
+      [ownerUserId, sourceCampaignId, staleParentRow.world_version_id, staleParentRow.id,
+        staleParentRow.content_hash, staleParentRow.content, staleParentRow.token_estimate]
+    );
+    await pool.query("DELETE FROM chronicle_chunk_jobs WHERE campaign_id=$1", [sourceCampaignId]);
+    await corrections.correctNarration(
+      { ownerUserId, campaignId: sourceCampaignId },
+      {
+        turnId: sourceTurnRow.id,
+        narration: "The corrected moon now hangs above the lantern-lit harbor.",
+        expectedCorrectionRevision: 1,
+        expectedActiveTurnNumber: activeTurnNumber.rows[0].active_turn_number,
+        source: "user_edit"
+      }
+    );
+    await expect(pool.query("SELECT id FROM chronicle_memories WHERE id=$1", [staleParentRow.id]))
+      .resolves.toMatchObject({ rows: [] });
+    await expect(pool.query("SELECT id FROM chronicle_memory_chunks WHERE id=$1", [staleChunk.rows[0]!.id]))
+      .resolves.toMatchObject({ rows: [] });
+    await expect(pool.query<{ status: string }>(
+      "SELECT status FROM chronicle_chunk_jobs WHERE campaign_id=$1",
+      [sourceCampaignId]
+    )).resolves.toMatchObject({ rows: [{ status: "queued" }] });
+    await expectUnchanged();
+
     const branch = await branchCampaign(pool, sourceCampaignId, {
       targetTurnNumber: sourceTurnRow.turn_number,
       expectedCurrentTurnNumber: activeTurnNumber.rows[0].active_turn_number
@@ -186,5 +230,9 @@ integration("Chronicle accepted-turn immutability", () => {
     expect(branchIndexingJobId).toEqual(expect.any(String));
     await runChronicleJob(branchIndexingJobId!, "turn-immutability-branch-indexing", "");
     await expectUnchanged();
+    await pool.query(
+      "DELETE FROM chronicle_chunk_jobs WHERE campaign_id IN ($1,$2)",
+      [sourceCampaignId, branch.id]
+    );
   });
 });

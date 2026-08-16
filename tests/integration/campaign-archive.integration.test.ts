@@ -373,13 +373,21 @@ integration("campaign archive export", () => {
       }
     };
     process.on("warning", recordWarning);
+    let snapshot!: Awaited<ReturnType<typeof captureCampaignArchiveSnapshot>>;
     try {
-      await captureCampaignArchiveSnapshot(pool, campaignId);
+      snapshot = await captureCampaignArchiveSnapshot(pool, campaignId);
       await new Promise<void>((resolve) => setImmediate(resolve));
     } finally {
       process.off("warning", recordWarning);
     }
     expect(warnings).toEqual([]);
+    expect(snapshot).not.toHaveProperty("chunks");
+    expect(snapshot).not.toHaveProperty("chunkJobs");
+    expect(snapshot).not.toHaveProperty("retrievalRuns");
+    expect(snapshot).not.toHaveProperty("retrievalCandidates");
+    expect(snapshot).not.toHaveProperty("retrievalTelemetry");
+    expect(snapshot).not.toHaveProperty("queryEmbeddingCache");
+    expect(snapshot.memories[0]).not.toHaveProperty("embedding");
   });
 
   secureGeneratedStagingIt("[secure generated staging] exports only the selected campaign and pinned world version as a deterministic manifest archive", async () => {
@@ -461,6 +469,14 @@ integration("campaign archive export", () => {
       expect.objectContaining({ turn_id: turnId, provider_type: "openai_compatible", category: "image", operation: "illustration", amount: "0.01", currency: "USD" })
     ]);
     const chronicle = JSON.parse((await readVerifiedEntry(archive, "chronicle.json", limits.maxJsonEntryBytes)).toString("utf8"));
+    expect(chronicle).not.toHaveProperty("chunks");
+    expect(chronicle).not.toHaveProperty("chunkJobs");
+    expect(chronicle).not.toHaveProperty("retrievalRuns");
+    expect(chronicle).not.toHaveProperty("retrievalCandidates");
+    expect(chronicle).not.toHaveProperty("queryEmbeddingCache");
+    expect(campaign.archiveRecords).not.toHaveProperty("chunkJobs");
+    expect(campaign.archiveRecords).not.toHaveProperty("retrievalTelemetry");
+    expect(campaign.archiveRecords).not.toHaveProperty("queryEmbeddingCache");
     expect(chronicle.memories).toEqual([
       expect.objectContaining({ memory_kind: "legacy_summary", content: "Chronicle marker" })
     ]);

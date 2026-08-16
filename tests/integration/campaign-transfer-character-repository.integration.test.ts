@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type {
   CampaignTransferRepositoryPort,
   WorldCampaignRepositoryResult
@@ -600,6 +600,12 @@ integration("campaign transfer and character PostgreSQL adapters", () => {
        ) VALUES ($1, $2, 2, 'chronicle', $3, 2)`,
       [ownerUserId, source.campaign.id, JSON.stringify({ summary: "Transferred summary." })],
     );
+    await pool.query(
+      `INSERT INTO campaign_memory_configs (
+         campaign_id, owner_user_id, embedding_enabled, retrieval_implementation, retrieval_shadow_enabled
+       ) VALUES ($1, $2, false, 'chunked_hybrid', true)`,
+      [source.campaign.id, ownerUserId],
+    );
     const asset = await pool.query<{ id: string }>(
       `INSERT INTO assets (
          owner_user_id, campaign_id, turn_id, content_hash, storage_driver,
@@ -614,7 +620,9 @@ integration("campaign transfer and character PostgreSQL adapters", () => {
       [ownerUserId, asset.rows[0]!.id, source.campaign.id, secondTurn.rows[0]!.id],
     );
     const transactions = createPostgresWorldCampaignTransactionPort(pool);
-    const repository = transferRepository();
+    const baseMemory = memoryGeneration(pool);
+    const enqueueChunkIndex = vi.fn(baseMemory.enqueueChunkIndex.bind(baseMemory));
+    const repository = transferRepository({ ...baseMemory, enqueueChunkIndex });
     const previewRequest = campaignTransferPreviewRequestSchema.parse({
       targetWorldVersionId: target.worldVersionId
     });
@@ -647,6 +655,22 @@ integration("campaign transfer and character PostgreSQL adapters", () => {
       transferId: committed.transferId,
       targetCampaignId: committed.targetCampaignId,
       reused: true
+    });
+    expect(enqueueChunkIndex).toHaveBeenCalledOnce();
+    expect(enqueueChunkIndex).toHaveBeenCalledWith(expect.anything(), {
+      ownerUserId,
+      campaignId: committed.targetCampaignId,
+      worldVersionId: target.worldVersionId
+    });
+    await expect(pool.query<{
+      retrieval_implementation: string;
+      retrieval_shadow_enabled: boolean;
+    }>(
+      `SELECT retrieval_implementation,retrieval_shadow_enabled
+         FROM campaign_memory_configs WHERE campaign_id=$1 AND owner_user_id=$2`,
+      [committed.targetCampaignId, ownerUserId]
+    )).resolves.toMatchObject({
+      rows: [{ retrieval_implementation: "chunked_hybrid", retrieval_shadow_enabled: true }]
     });
 
     const copied = await pool.query<{

@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import {
   createPostgresBoundedCampaignTurnPageAdapter,
@@ -14,7 +14,7 @@ import {
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { sha256 } from "../../packages/domain/src/text.js";
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
-import { memoryGeneration } from "../helpers/memory-applications.js";
+import { memoryGeneration, workerMemoryApplication } from "../helpers/memory-applications.js";
 import {
   getCampaignCostSummary,
   readTurnReportedCostsForTest
@@ -435,7 +435,9 @@ integration("PostgreSQL campaign sync adapters", () => {
 
   it("branches effective narration history without inheriting source campaign costs", async () => {
     const imported = await createCampaignFixture();
-    const adapters = createAdapters();
+    const baseMemory = memoryGeneration(pool);
+    const enqueueChunkIndex = vi.fn(baseMemory.enqueueChunkIndex.bind(baseMemory));
+    const adapters = createAdapters({ ...baseMemory, enqueueChunkIndex });
     const scope = { ownerUserId, campaignId: imported.campaignId };
     const source = await pool.query<{
       title: string;
@@ -452,6 +454,38 @@ integration("PostgreSQL campaign sync adapters", () => {
       [ownerUserId, imported.campaignId]
     );
     const sourceTurn = source.rows[0]!;
+    await pool.query(
+      `INSERT INTO campaign_memory_configs
+         (campaign_id,owner_user_id,embedding_enabled,retrieval_shadow_enabled)
+       VALUES ($1,$2,false,true)
+       ON CONFLICT (campaign_id) DO UPDATE
+         SET retrieval_shadow_enabled=EXCLUDED.retrieval_shadow_enabled`,
+      [imported.campaignId, ownerUserId]
+    );
+    const sourceParent = await pool.query<{ id: string; content_hash: string; world_version_id: string; content: string; token_estimate: number }>(
+      `SELECT id,content_hash,world_version_id,content,token_estimate
+         FROM chronicle_memories WHERE campaign_id=$1 AND turn_id=$2 AND memory_kind='turn_fiction'`,
+      [imported.campaignId, sourceTurn.turnId]
+    );
+    const sourceChunk = await pool.query<{ id: string }>(
+      `INSERT INTO chronicle_memory_chunks (
+         owner_user_id,campaign_id,world_version_id,parent_memory_id,parent_content_hash,
+         chunking_protocol_version,chunk_ordinal,chunk_kind,content,source_end_offset,
+         token_estimate,embedding_status,embedding_skip_reason
+       ) VALUES ($1,$2,$3,$4,$5,'chronicle-chunk-v1',0,'turn_narration',$6,length($6),$7,'skipped','semantic_disabled')
+       RETURNING id`,
+      [ownerUserId, imported.campaignId, sourceParent.rows[0]!.world_version_id,
+        sourceParent.rows[0]!.id, sourceParent.rows[0]!.content_hash,
+        sourceParent.rows[0]!.content, sourceParent.rows[0]!.token_estimate]
+    );
+    await pool.query(
+      `INSERT INTO chronicle_retrieval_runs (
+         owner_user_id,campaign_id,world_version_id,query_hash,production_implementation,
+         shadow_enabled,retrieval_version,embedding_protocol_version,chunk_protocol_version,query_token_estimate
+       ) VALUES ($1,$2,$3,repeat('a',64),'legacy_hybrid',true,
+                 'chronicle-retrieval-v1','chronicle-embedding-v1','chronicle-chunk-v1',1)`,
+      [ownerUserId, imported.campaignId, imported.worldVersionId]
+    );
     const firstCorrection = "The corrected lantern burns beside the harbor gate.";
     const finalCorrection = "The corrected lantern burns beside the moonlit harbor gate.";
     const correctionRows = await pool.query<{ id: string }>(
@@ -568,6 +602,42 @@ integration("PostgreSQL campaign sync adapters", () => {
       hasReportedCosts: true,
       totals: [{ amount: "0.150000000000", currency: "USD" }]
     });
+    expect(enqueueChunkIndex).toHaveBeenCalledOnce();
+    expect(enqueueChunkIndex).toHaveBeenCalledWith(expect.anything(), {
+      ownerUserId,
+      campaignId: branched.value.id,
+      worldVersionId: imported.worldVersionId
+    });
+    const worker = workerMemoryApplication(pool);
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const pending = await pool.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM chronicle_chunk_jobs WHERE campaign_id=$1 AND status IN ('queued','running')",
+        [branched.value.id]
+      );
+      if (pending.rows[0]?.count === "0") break;
+      expect(await worker.runNextChronicle({
+        workerId: `branch-chunk-worker-${attempt}`,
+        leaseSeconds: 30,
+        retrieval: { batchLimit: 100 }
+      })).toBe(true);
+    }
+    const branchDerived = await pool.query<{
+      parentIds: string[];
+      chunkIds: string[];
+      retrievalRuns: number;
+      costs: number;
+    }>(
+      `SELECT
+         ARRAY(SELECT id::text FROM chronicle_memories WHERE campaign_id=$1 ORDER BY id) AS "parentIds",
+         ARRAY(SELECT id::text FROM chronicle_memory_chunks WHERE campaign_id=$1 ORDER BY id) AS "chunkIds",
+         (SELECT count(*)::int FROM chronicle_retrieval_runs WHERE campaign_id=$1) AS "retrievalRuns",
+         (SELECT count(*)::int FROM provider_cost_events WHERE campaign_id=$1) AS costs`,
+      [branched.value.id]
+    );
+    expect(branchDerived.rows[0]!.parentIds).not.toContain(sourceParent.rows[0]!.id);
+    expect(branchDerived.rows[0]!.chunkIds).not.toContain(sourceChunk.rows[0]!.id);
+    expect(branchDerived.rows[0]!.chunkIds.length).toBeGreaterThan(0);
+    expect(branchDerived.rows[0]).toMatchObject({ retrievalRuns: 0, costs: 0 });
   });
 
   it("preserves completed illustration segments without cloning their operational jobs", async () => {
@@ -856,7 +926,9 @@ integration("PostgreSQL campaign sync adapters", () => {
 
   it("rewinds accepted history and authoritative state when both fences match", async () => {
     const imported = await createCampaignFixture();
-    const adapters = createAdapters();
+    const baseMemory = memoryGeneration(pool);
+    const enqueueChunkIndex = vi.fn(baseMemory.enqueueChunkIndex.bind(baseMemory));
+    const adapters = createAdapters({ ...baseMemory, enqueueChunkIndex });
     const campaigns = adapters.campaigns;
     const scope = { ownerUserId, campaignId: imported.campaignId };
     const before = await adapters.transaction.read((transaction) =>
@@ -904,6 +976,12 @@ integration("PostgreSQL campaign sync adapters", () => {
       [imported.campaignId, ownerUserId]
     )).resolves.toMatchObject({
       rows: [{ activeTurnNumber: 1, revision: before.revision + 1, turnNumbers: [1] }]
+    });
+    expect(enqueueChunkIndex).toHaveBeenCalledOnce();
+    expect(enqueueChunkIndex).toHaveBeenCalledWith(expect.anything(), {
+      ownerUserId,
+      campaignId: imported.campaignId,
+      worldVersionId: imported.worldVersionId
     });
   });
 

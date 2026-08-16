@@ -1,13 +1,14 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolve } from "node:path";
 import {
   createTurnCorrectionApplication
 } from "../../packages/application/src/turn-corrections/index.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
-import { createDatabasePool, type DatabasePool } from "../../packages/database/src/pool.js";
+import { createDatabasePool, type DatabaseClient, type DatabasePool } from "../../packages/database/src/pool.js";
 import { createPostgresTurnCorrectionRepository } from "../../packages/database/src/turn-correction-repository.js";
 import { readTurnPage } from "../../packages/database/src/play-loop-read-repository.js";
 import { readReadableCampaignExport } from "../../packages/database/src/readable-campaign-export-repository.js";
+import type { MemoryGenerationTransactionPort } from "../../packages/application/src/memory/index.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -17,6 +18,7 @@ integration("accepted-turn narration corrections", () => {
   let ownerUserId: string;
   let campaignId: string;
   let turnId: string;
+  const enqueueChunkIndex = vi.fn(async () => null);
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 4);
@@ -31,6 +33,7 @@ integration("accepted-turn narration corrections", () => {
   });
 
   beforeEach(async () => {
+    enqueueChunkIndex.mockClear();
     const world = await pool.query<{ id: string }>(
       "INSERT INTO worlds (owner_user_id, title) VALUES ($1,'Correction World') RETURNING id",
       [ownerUserId]
@@ -54,9 +57,12 @@ integration("accepted-turn narration corrections", () => {
     turnId = turn.rows[0]!.id;
   });
 
-  function application() {
+  function application(memory: Pick<MemoryGenerationTransactionPort, "rebuildCampaignMemories" | "enqueueChunkIndex"> = {
+    async rebuildCampaignMemories() { return 0; },
+    enqueueChunkIndex
+  }) {
     const repository = createPostgresTurnCorrectionRepository(pool, {
-      memory: { async rebuildCampaignMemories() { return 0; } }
+      memory
     });
     return createTurnCorrectionApplication({ corrections: repository });
   }
@@ -109,6 +115,32 @@ integration("accepted-turn narration corrections", () => {
            WHERE campaign_id = $2 AND event_type = 'turn_narration_corrected') AS events`,
       [turnId, campaignId]
     )).resolves.toMatchObject({ rows: [{ revisions: "2", events: "2" }] });
+    expect(enqueueChunkIndex).toHaveBeenCalledTimes(2);
+    expect(enqueueChunkIndex).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({
+      ownerUserId,
+      campaignId
+    }));
+  });
+
+  it("keeps an accepted correction when chunk enqueue SQL fails", async () => {
+    const failedEnqueue = vi.fn(async (database: DatabaseClient) => {
+      await database.query("SELECT * FROM task_11_missing_chunk_enqueue_relation");
+      return null;
+    });
+    const corrections = application({
+      async rebuildCampaignMemories() { return 0; },
+      enqueueChunkIndex: failedEnqueue
+    });
+
+    await expect(corrections.correctNarration(
+      { ownerUserId, campaignId },
+      request("The silver moon survives a derived indexing outage.")
+    )).resolves.toMatchObject({ correctionRevision: 1 });
+    expect(failedEnqueue).toHaveBeenCalledOnce();
+    await expect(pool.query(
+      "SELECT narration FROM turn_narration_corrections WHERE turn_id = $1",
+      [turnId]
+    )).resolves.toMatchObject({ rows: [{ narration: "The silver moon survives a derived indexing outage." }] });
   });
 
   it("fails closed on stale correction and active-turn fences", async () => {

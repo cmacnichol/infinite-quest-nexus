@@ -1,4 +1,7 @@
-import type { MemoryGenerationTransactionPort } from "../../application/src/memory/index.js";
+import type {
+  CampaignWorldVersionMemoryScope,
+  MemoryGenerationTransactionPort
+} from "../../application/src/memory/index.js";
 import type {
   AcceptedTurnCorrectionView,
   TurnCorrectionFailureReason,
@@ -37,8 +40,23 @@ function failure(
 }
 
 export type PostgresTurnCorrectionCollaborators = Readonly<{
-  memory: Pick<MemoryGenerationTransactionPort, "rebuildCampaignMemories">;
+  memory: Pick<MemoryGenerationTransactionPort, "rebuildCampaignMemories" | "enqueueChunkIndex">;
 }>;
+
+async function enqueueChunkIndexBestEffort(
+  client: DatabaseClient,
+  memory: PostgresTurnCorrectionCollaborators["memory"],
+  scope: CampaignWorldVersionMemoryScope,
+): Promise<void> {
+  await client.query("SAVEPOINT turn_correction_chunk_enqueue");
+  try {
+    await memory.enqueueChunkIndex(client, scope);
+    await client.query("RELEASE SAVEPOINT turn_correction_chunk_enqueue");
+  } catch {
+    await client.query("ROLLBACK TO SAVEPOINT turn_correction_chunk_enqueue");
+    await client.query("RELEASE SAVEPOINT turn_correction_chunk_enqueue");
+  }
+}
 
 async function loadCampaignForUpdate(
   client: DatabaseClient,
@@ -127,11 +145,13 @@ export function createPostgresTurnCorrectionRepository(
           ]
         );
 
-        await collaborators.memory.rebuildCampaignMemories(client, {
+        const memoryScope = {
           ownerUserId: scope.ownerUserId,
           campaignId: scope.campaignId,
           worldVersionId: campaign.worldVersionId
-        });
+        };
+        await collaborators.memory.rebuildCampaignMemories(client, memoryScope);
+        await enqueueChunkIndexBestEffort(client, collaborators.memory, memoryScope);
         await client.query(
           "DELETE FROM model_chains WHERE campaign_id = $1 AND owner_user_id = $2",
           [scope.campaignId, scope.ownerUserId]

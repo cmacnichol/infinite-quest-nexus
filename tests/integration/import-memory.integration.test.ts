@@ -4,17 +4,27 @@ import { resolve } from "node:path";
 import JSZip from "jszip";
 import sharp from "sharp";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
+import {
+  createDatabasePool,
+  initialOwnerId,
+  withTransaction,
+  type DatabaseClient,
+  type DatabasePool
+} from "../../packages/database/src/pool.js";
 import { sha256 } from "../../packages/domain/src/text.js";
 import { chronicleContentHash } from "../../packages/domain/src/chronicle-memory-helpers.js";
 import { createCanonicalFactId } from "../../packages/domain/src/canonical-facts.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
+import { resourceDeleteSchema } from "../../packages/contracts/src/world-library.js";
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
+import { memoryGeneration } from "../helpers/memory-applications.js";
 import { exportCampaign } from "../legacy-api/src/campaign-archive-service.js";
+import { importLegacyStory as importLegacyStoryApplication } from "../legacy-api/src/import-service.js";
 import {
   buildContextPreview,
+  deleteCampaign,
   enqueueChronicleReindex,
   enqueueEmbeddingReindex,
   getChronicleMetrics,
@@ -26,6 +36,8 @@ import { installIntegrationProviderTransport } from "./provider-transport-test-h
 import { buildServer } from "../../services/api/src/server.js";
 import { createApiMemoryApplication } from "../helpers/runtime-application-fixtures.js";
 import { serverOptions } from "../helpers/build-server-options.js";
+import type { MemoryGenerationTransactionPort } from "../../packages/application/src/memory/index.js";
+import { createPostgresProviderRepositories } from "../../packages/database/src/provider-repository.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -124,6 +136,252 @@ integration("legacy import and Chronicle integration", () => {
       [campaignId]
     );
     expect(draft.rows[0]).toMatchObject({ revision: 1 });
+  });
+
+  it("queues destination chunk work only after publishing a new import", async () => {
+    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+    fixture.world.title = `Published chunk import ${crypto.randomUUID()}`;
+    const baseMemory = memoryGeneration(pool);
+    const observedStatuses: string[] = [];
+    const enqueueChunkIndex = vi.fn(async (
+      database: DatabaseClient,
+      scope: Parameters<MemoryGenerationTransactionPort["enqueueChunkIndex"]>[1]
+    ) => {
+      const published = await database.query<{ status: string }>(
+        "SELECT status FROM imports WHERE owner_user_id=$1 AND campaign_id=$2",
+        [scope.ownerUserId, scope.campaignId]
+      );
+      observedStatuses.push(...published.rows.map((row) => row.status));
+      return baseMemory.enqueueChunkIndex(database, scope);
+    });
+
+    const imported = await importLegacyStoryApplication(
+      pool,
+      storyImportRequestSchema.parse({
+        sourceName: `published-chunk-import-${crypto.randomUUID()}.story`,
+        story: fixture
+      }),
+      { ...baseMemory, enqueueChunkIndex }
+    );
+
+    expect(enqueueChunkIndex).toHaveBeenCalledOnce();
+    expect(observedStatuses).toEqual(["completed"]);
+    expect(enqueueChunkIndex).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      campaignId: imported.campaignId,
+      worldVersionId: imported.worldVersionId
+    }));
+  });
+
+  it("keeps a published import committed when derived chunk enqueue fails", async () => {
+    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+    fixture.world.title = `Fail-open chunk import ${crypto.randomUUID()}`;
+    const baseMemory = memoryGeneration(pool);
+    const enqueueChunkIndex = vi.fn(async (database: DatabaseClient) => {
+      await database.query("SELECT * FROM task_11_missing_chunk_enqueue_relation");
+      return null;
+    });
+
+    const imported = await importLegacyStoryApplication(
+      pool,
+      storyImportRequestSchema.parse({
+        sourceName: `fail-open-chunk-import-${crypto.randomUUID()}.story`,
+        story: fixture
+      }),
+      { ...baseMemory, enqueueChunkIndex }
+    );
+
+    expect(enqueueChunkIndex).toHaveBeenCalledOnce();
+    await expect(pool.query<{ status: string }>(
+      "SELECT status FROM imports WHERE campaign_id=$1",
+      [imported.campaignId]
+    )).resolves.toMatchObject({ rows: [{ status: "completed" }] });
+    await expect(pool.query("SELECT id FROM campaigns WHERE id=$1", [imported.campaignId]))
+      .resolves.toMatchObject({ rows: [{ id: imported.campaignId }] });
+  });
+
+  it("deletes an embedding provider without deleting Chronicle text and falls back lexically", async () => {
+    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+    fixture.world.title = `Provider lifecycle ${crypto.randomUUID()}`;
+    const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({
+      sourceName: `provider-lifecycle-${crypto.randomUUID()}.story`,
+      story: fixture
+    }));
+    const ownerUserId = await initialOwnerId(pool);
+    const provider = await pool.query<{ id: string }>(
+      `INSERT INTO provider_profiles (
+         owner_user_id,name,provider_type,provider_role,base_url,default_model
+       ) VALUES ($1,$2,'openai_compatible','embedding','http://embedding.test','task-11-embed') RETURNING id`,
+      [ownerUserId, `Task 11 provider ${crypto.randomUUID()}`]
+    );
+    const providerProfileId = provider.rows[0]!.id;
+    await setCampaignEmbeddingConfig(pool, imported.campaignId, {
+      enabled: true,
+      providerProfileId,
+      model: "task-11-embed",
+      batchSize: 8
+    });
+    const parent = await pool.query<{
+      id: string;
+      world_version_id: string;
+      content: string;
+      content_hash: string;
+      token_estimate: number;
+    }>(
+      `SELECT id,world_version_id,content,content_hash,token_estimate
+         FROM chronicle_memories WHERE campaign_id=$1 AND memory_kind='legacy_summary'`,
+      [imported.campaignId]
+    );
+    const parentRow = parent.rows[0]!;
+    const chunk = await pool.query<{ id: string }>(
+      `INSERT INTO chronicle_memory_chunks (
+         owner_user_id,campaign_id,world_version_id,parent_memory_id,parent_content_hash,
+         chunking_protocol_version,chunk_ordinal,chunk_kind,content,source_end_offset,token_estimate,
+         embedding,embedding_status,embedding_provider_profile_id,embedding_model,embedding_dimensions,
+         embedding_protocol_version,embedding_provider_fingerprint,embedding_content_hash,embedding_updated_at
+       ) VALUES ($1,$2,$3,$4,$5,'chronicle-chunk-v1',0,'legacy_summary',$6,length($6),$7,
+                 '[1,0,0]'::vector,'embedded',$8,'task-11-embed',3,
+                 'chronicle-embedding-v1','task11-provider-fingerprint',encode(digest($6,'sha256'),'hex'),now())
+       RETURNING id`,
+      [ownerUserId, imported.campaignId, parentRow.world_version_id, parentRow.id,
+        parentRow.content_hash, parentRow.content, parentRow.token_estimate, providerProfileId]
+    );
+    await pool.query(
+      `INSERT INTO chronicle_query_embedding_cache (
+         owner_user_id,campaign_id,normalized_query_hash,provider_profile_id,
+         embedding_model_hash,provider_fingerprint_hash,query_prefix_hash,
+         embedding_protocol_version,embedding,embedding_dimensions
+       ) VALUES ($1,$2,repeat('1',64),$3,repeat('2',64),repeat('3',64),repeat('4',64),
+                 'chronicle-embedding-v1','[1,0,0]'::vector,3)`,
+      [ownerUserId, imported.campaignId, providerProfileId]
+    );
+
+    await withTransaction(pool, async (client) => {
+      await createPostgresProviderRepositories(client).profiles.deleteProfile({ ownerUserId, providerProfileId });
+    });
+
+    await expect(pool.query<{ content: string }>(
+      "SELECT content FROM chronicle_memories WHERE id=$1",
+      [parentRow.id]
+    )).resolves.toMatchObject({ rows: [{ content: parentRow.content }] });
+    await expect(pool.query<{ content: string; embedding_status: string; embedded: boolean }>(
+      "SELECT content,embedding_status,embedding IS NOT NULL AS embedded FROM chronicle_memory_chunks WHERE id=$1",
+      [chunk.rows[0]!.id]
+    )).resolves.toMatchObject({ rows: [{
+      content: parentRow.content,
+      embedding_status: "pending",
+      embedded: false
+    }] });
+    await expect(pool.query(
+      "SELECT id FROM chronicle_query_embedding_cache WHERE provider_profile_id=$1",
+      [providerProfileId]
+    )).resolves.toMatchObject({ rows: [] });
+    await expect(pool.query<{ embedding_enabled: boolean; embedding_provider_profile_id: string | null }>(
+      "SELECT embedding_enabled,embedding_provider_profile_id FROM campaign_memory_configs WHERE campaign_id=$1",
+      [imported.campaignId]
+    )).resolves.toMatchObject({ rows: [{ embedding_enabled: false, embedding_provider_profile_id: null }] });
+    const fallback = await buildContextPreview(pool, imported.campaignId, {
+      budgetTokens: 4096,
+      compression: "auto",
+      query: "Location Beta",
+      recentTurns: 1
+    });
+    expect(["lexical", "lexical_fallback"]).toContain(fallback.retrieval.mode);
+    expect(JSON.stringify(fallback.scopes)).toContain("Location Beta");
+  });
+
+  it("cascades deletion through only the selected campaign's derived chunk state", async () => {
+    const fixtureA = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+    const fixtureB = structuredClone(fixtureA);
+    fixtureA.world.title = `Delete derived A ${crypto.randomUUID()}`;
+    fixtureB.world.title = `Delete derived B ${crypto.randomUUID()}`;
+    const [campaignA, campaignB] = await Promise.all([
+      importLegacyStory(pool, storyImportRequestSchema.parse({
+        sourceName: `delete-derived-a-${crypto.randomUUID()}.story`,
+        story: fixtureA
+      })),
+      importLegacyStory(pool, storyImportRequestSchema.parse({
+        sourceName: `delete-derived-b-${crypto.randomUUID()}.story`,
+        story: fixtureB
+      }))
+    ]);
+    const ownerUserId = await initialOwnerId(pool);
+    const provider = await pool.query<{ id: string }>(
+      `INSERT INTO provider_profiles (
+         owner_user_id,name,provider_type,provider_role,base_url,default_model
+       ) VALUES ($1,$2,'openai_compatible','embedding','http://embedding.test','task-11-delete') RETURNING id`,
+      [ownerUserId, `Task 11 deletion provider ${crypto.randomUUID()}`]
+    );
+    const providerProfileId = provider.rows[0]!.id;
+
+    for (const campaign of [campaignA, campaignB]) {
+      await pool.query(
+        `INSERT INTO campaign_memory_configs
+           (campaign_id,owner_user_id,embedding_enabled,retrieval_shadow_enabled)
+         VALUES ($1,$2,false,true)
+         ON CONFLICT (campaign_id) DO UPDATE
+           SET retrieval_shadow_enabled=EXCLUDED.retrieval_shadow_enabled`,
+        [campaign.campaignId, ownerUserId]
+      );
+      await rebuildCampaignMemories(pool, campaign.campaignId);
+      await pool.query(
+        `INSERT INTO chronicle_memory_chunks (
+           owner_user_id,campaign_id,world_version_id,parent_memory_id,parent_content_hash,
+           chunking_protocol_version,chunk_ordinal,chunk_kind,content,source_end_offset,
+           token_estimate,embedding_status,embedding_skip_reason
+         ) SELECT owner_user_id,campaign_id,world_version_id,id,content_hash,
+                  'chronicle-chunk-v1',0,'legacy_summary',content,length(content),
+                  token_estimate,'skipped','semantic_disabled'
+             FROM chronicle_memories
+            WHERE campaign_id=$1 AND memory_kind='legacy_summary'`,
+        [campaign.campaignId]
+      );
+      await pool.query(
+        `INSERT INTO chronicle_retrieval_runs (
+           owner_user_id,campaign_id,world_version_id,query_hash,production_implementation,
+           shadow_enabled,retrieval_version,embedding_protocol_version,chunk_protocol_version,query_token_estimate
+         ) VALUES ($1,$2,$3,repeat('5',64),'legacy_hybrid',true,
+                   'chronicle-retrieval-v1','chronicle-embedding-v1','chronicle-chunk-v1',1)`,
+        [ownerUserId, campaign.campaignId, campaign.worldVersionId]
+      );
+      await pool.query(
+        `INSERT INTO chronicle_query_embedding_cache (
+           owner_user_id,campaign_id,normalized_query_hash,provider_profile_id,
+           embedding_model_hash,provider_fingerprint_hash,query_prefix_hash,
+           embedding_protocol_version,embedding,embedding_dimensions
+         ) VALUES ($1,$2,repeat('6',64),$3,repeat('7',64),repeat('8',64),repeat('9',64),
+                   'chronicle-embedding-v1','[1,0]'::vector,2)`,
+        [ownerUserId, campaign.campaignId, providerProfileId]
+      );
+    }
+    const derivedCounts = async (selectedCampaignId: string) => (await pool.query<{
+      chunks: number;
+      jobs: number;
+      runs: number;
+      cache: number;
+    }>(
+      `SELECT
+         (SELECT count(*)::int FROM chronicle_memory_chunks WHERE campaign_id=$1) AS chunks,
+         (SELECT count(*)::int FROM chronicle_chunk_jobs WHERE campaign_id=$1) AS jobs,
+         (SELECT count(*)::int FROM chronicle_retrieval_runs WHERE campaign_id=$1) AS runs,
+         (SELECT count(*)::int FROM chronicle_query_embedding_cache WHERE campaign_id=$1) AS cache`,
+      [selectedCampaignId]
+    )).rows[0]!;
+    const retainedBefore = await derivedCounts(campaignB.campaignId);
+    expect(Object.values(await derivedCounts(campaignA.campaignId)).every((count) => count > 0)).toBe(true);
+    expect(Object.values(retainedBefore).every((count) => count > 0)).toBe(true);
+    const title = await pool.query<{ title: string }>("SELECT title FROM campaigns WHERE id=$1", [campaignA.campaignId]);
+
+    await deleteCampaign(pool, campaignA.campaignId, resourceDeleteSchema.parse({
+      confirmation: "DELETE",
+      expectedTitle: title.rows[0]!.title
+    }));
+
+    expect(await derivedCounts(campaignA.campaignId)).toEqual({ chunks: 0, jobs: 0, runs: 0, cache: 0 });
+    expect(await derivedCounts(campaignB.campaignId)).toEqual(retainedBefore);
+    await expect(pool.query("SELECT id FROM campaigns WHERE id=$1", [campaignB.campaignId]))
+      .resolves.toMatchObject({ rows: [{ id: campaignB.campaignId }] });
+    await pool.query("DELETE FROM campaigns WHERE id=$1", [campaignB.campaignId]);
+    await pool.query("DELETE FROM provider_profiles WHERE id=$1", [providerProfileId]);
   });
 
   it("indexes scoped entity identities while importing turns and summaries", async () => {
@@ -355,7 +613,7 @@ integration("legacy import and Chronicle integration", () => {
     expect(metrics.turns).toBe(2);
     expect(metrics.memoryCount).toBe(3);
     expect(metrics.estimatedCompleteHistoryTokens).toBeGreaterThan(0);
-    expect(metrics.semanticHealth).toMatchObject({ status: "disabled", enabled: false, totalMemories: 3 });
+    expect(metrics.semanticHealth).toMatchObject({ status: "chronicle_available", enabled: false, totalMemories: 3 });
   });
 
   it("serves complete owner-scoped metrics with resumable and safe semantic health projections", async () => {
@@ -406,7 +664,7 @@ integration("legacy import and Chronicle integration", () => {
           summary: expect.any(Number)
         },
         semanticHealth: {
-          status: "disabled",
+          status: "chronicle_available",
           enabled: false,
           totalMemories: 3,
           jobId: null,

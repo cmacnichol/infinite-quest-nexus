@@ -1,19 +1,26 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { generationRequestSchema } from "../../packages/contracts/src/generation.js";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { generationRequestSchema, storyTurnOutputSchema } from "../../packages/contracts/src/generation.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import {
   createPostgresGenerationExecutionRepository,
+  type AcceptedGenerationCommitCollaborators,
   type GenerationLeaseScope
 } from "../../packages/database/src/generation-execution-repository.js";
 import { createPostgresGenerationCommandRepository } from "../../packages/database/src/generation-repository.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
-import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
+import {
+  createDatabasePool,
+  initialOwnerId,
+  type DatabaseClient,
+  type DatabasePool
+} from "../../packages/database/src/pool.js";
 import { readTurnReportedCostsForTest } from "../helpers/provider-application-fixtures.js";
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
 import { providerPromptProtocolVersion, loadPromptSnapshotForTest } from "../helpers/provider-application-fixtures.js";
 import { createProvider } from "../helpers/provider-application-fixtures.js";
+import { memoryGeneration } from "../helpers/memory-applications.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -237,6 +244,112 @@ integration("PostgreSQL generation execution repository", () => {
       "SELECT attempt_number FROM generation_attempts WHERE generation_job_id = $1",
       [queued.id]
     )).resolves.toMatchObject({ rows: [{ attempt_number: 1 }] });
+  });
+
+  it("queues chunk work after accepting a turn without rewriting the accepted row", async () => {
+    const imported = await campaign();
+    const queued = await queue(imported.campaignId, "Open the chunk lifecycle observatory.");
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const claim = await repository.claimNext({ workerId: "chunk-lifecycle-worker", leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(queued.id);
+    const scope = { jobId: queued.id, ownerUserId, workerId: "chunk-lifecycle-worker" };
+    const job = await repository.loadExecutionPayload({
+      workerId: scope.workerId,
+      leaseSeconds: 30,
+      claim: claim!
+    });
+    if (!job) throw new Error("Expected the accepted-turn lifecycle payload.");
+    expect(await repository.markGenerating(scope)).toBe(true);
+    expect(await repository.markValidating(scope)).toBe(true);
+    expect(await repository.markCommitting(scope)).toBe(true);
+    const baseMemory = memoryGeneration(pool);
+    let acceptedDuringEnqueue: {
+      id: string;
+      narration: string;
+      xmin: string;
+      ctid: string;
+    } | null = null;
+    const enqueueChunkIndex = vi.fn(async (
+      database: DatabaseClient,
+      memoryScope: Parameters<AcceptedGenerationCommitCollaborators["memory"]["enqueueChunkIndex"]>[1]
+    ) => {
+      acceptedDuringEnqueue = (await database.query<{
+        id: string;
+        narration: string;
+        xmin: string;
+        ctid: string;
+      }>(
+        `SELECT id,narration,xmin::text AS xmin,ctid::text AS ctid
+           FROM turns WHERE owner_user_id=$1 AND campaign_id=$2
+           ORDER BY turn_number DESC LIMIT 1`,
+        [memoryScope.ownerUserId, memoryScope.campaignId]
+      )).rows[0] ?? null;
+      return baseMemory.enqueueChunkIndex(database, memoryScope);
+    });
+    const story = storyTurnOutputSchema.parse({
+      narration: "The chunk lifecycle observatory opens beneath a quiet moon.",
+      choices: ["Enter.", "Wait.", "Study the gate.", "Call the keeper."],
+      custom_action_suggestion: "Inspect the observatory lens.",
+      scratchpad: "The observatory is open.",
+      tracker_updates: [],
+      image_prompt: "A quiet moonlit observatory.",
+      continuity_summary: "The observatory has opened.",
+      canonical_facts: ["The observatory is open."],
+      superseded_facts: [],
+      canonical_fact_updates: [],
+      open_threads: ["Learn who opened the observatory."]
+    });
+    const committed = await repository.commitAcceptedTurn({
+      scope,
+      job,
+      story,
+      provider: {
+        id: providerProfileId,
+        name: "Execution repository provider",
+        providerType: "openai_compatible",
+        model: "execution-repository-model"
+      },
+      response: {
+        content: JSON.stringify(story),
+        responseId: crypto.randomUUID(),
+        finishReason: "stop",
+        outputLimited: false,
+        modelInstanceId: "execution-repository-instance",
+        usage: { inputTokens: 10, outputTokens: 20, totalTokens: 30 },
+        reportedCost: null,
+        rawMetadata: {}
+      },
+      contextFingerprint: "task-11-context-fingerprint",
+      contextDiagnostics: {},
+      inputs: job.orchestration_inputs,
+      orchestration: {},
+      fictionAction: job.action,
+      collaborators: {
+        memory: { ...baseMemory, enqueueChunkIndex },
+        illustration: {
+          enqueueAcceptedTurnIllustrationSegments: async () => []
+        } as unknown as AcceptedGenerationCommitCollaborators["illustration"],
+        attributeGenerationCostsToTurn: async () => undefined
+      },
+      onIllustrationEnqueueError: () => undefined
+    });
+
+    expect(enqueueChunkIndex).toHaveBeenCalledOnce();
+    expect(enqueueChunkIndex).toHaveBeenCalledWith(expect.anything(), {
+      ownerUserId,
+      campaignId: imported.campaignId,
+      worldVersionId: imported.worldVersionId
+    });
+    expect(acceptedDuringEnqueue).toMatchObject({
+      id: committed.turnId,
+      narration: story.narration,
+      xmin: expect.any(String),
+      ctid: expect.any(String)
+    });
+    await expect(pool.query(
+      "SELECT id,narration,xmin::text AS xmin,ctid::text AS ctid FROM turns WHERE id=$1",
+      [committed.turnId]
+    )).resolves.toMatchObject({ rows: [acceptedDuringEnqueue] });
   });
 
   it("does not overwrite attempt metadata after cancellation wins the row-lock race", async () => {

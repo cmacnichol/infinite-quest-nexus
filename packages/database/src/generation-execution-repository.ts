@@ -1,4 +1,5 @@
 import type {
+  CampaignWorldVersionMemoryScope,
   ClaimedGeneration,
   GenerationClaimRepository,
   GenerationExecutionRequest,
@@ -31,6 +32,21 @@ import {
 } from "../../domain/src/index.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
+
+async function enqueueChunkIndexBestEffort(
+  client: DatabaseClient,
+  memory: MemoryGenerationTransactionPort,
+  scope: CampaignWorldVersionMemoryScope,
+): Promise<void> {
+  await client.query("SAVEPOINT accepted_turn_chunk_enqueue");
+  try {
+    await memory.enqueueChunkIndex(client, scope);
+    await client.query("RELEASE SAVEPOINT accepted_turn_chunk_enqueue");
+  } catch {
+    await client.query("ROLLBACK TO SAVEPOINT accepted_turn_chunk_enqueue");
+    await client.query("RELEASE SAVEPOINT accepted_turn_chunk_enqueue");
+  }
+}
 
 function json(value: unknown): string {
   return JSON.stringify(value ?? null);
@@ -494,6 +510,11 @@ async function commitAcceptedTurn(
       narration: story.narration
     });
   }
+  await enqueueChunkIndexBestEffort(client, collaborators.memory, {
+    ownerUserId: job.owner_user_id,
+    campaignId: job.campaign_id,
+    worldVersionId: campaign.world_version_id
+  });
   await client.query("SAVEPOINT accepted_turn_illustration_enqueue");
   try {
     if (job.streaming_segments_state?.provisionalSetId) {

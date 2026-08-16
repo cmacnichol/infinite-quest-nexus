@@ -27,7 +27,10 @@ import type {
   WorldCampaignTransitionFailureReason
 } from "../../application/src/world-campaign/index.js";
 import { WorldCampaignApplicationError } from "../../application/src/world-campaign/index.js";
-import type { MemoryGenerationTransactionPort } from "../../application/src/memory/index.js";
+import type {
+  CampaignWorldVersionMemoryScope,
+  MemoryGenerationTransactionPort
+} from "../../application/src/memory/index.js";
 import {
   normalizeCampaignStateSnapshot,
   normalizeCampaignTrackers
@@ -46,9 +49,24 @@ export type CampaignSyncAdapterCollaborators = Readonly<{
   turnPages: BoundedCampaignTurnPagePort;
   memory: Pick<
     MemoryGenerationTransactionPort,
-    "autoEnableCampaignEmbedding" | "enqueueEmbeddingReindex" | "rebuildCampaignMemories"
+    "autoEnableCampaignEmbedding" | "enqueueEmbeddingReindex" | "enqueueChunkIndex" | "rebuildCampaignMemories"
   >;
 }>;
+
+async function enqueueChunkIndexBestEffort(
+  client: DatabaseClient,
+  memory: CampaignSyncAdapterCollaborators["memory"],
+  scope: CampaignWorldVersionMemoryScope,
+): Promise<void> {
+  await client.query("SAVEPOINT campaign_lifecycle_chunk_enqueue");
+  try {
+    await memory.enqueueChunkIndex(client, scope);
+    await client.query("RELEASE SAVEPOINT campaign_lifecycle_chunk_enqueue");
+  } catch {
+    await client.query("ROLLBACK TO SAVEPOINT campaign_lifecycle_chunk_enqueue");
+    await client.query("RELEASE SAVEPOINT campaign_lifecycle_chunk_enqueue");
+  }
+}
 
 type PostgresCampaignAuthorityRepository = Pick<
   CampaignRepositoryPort,
@@ -484,7 +502,7 @@ function createPostgresCampaignStateRepository(
       const snapshot = { ...objectValue(targetSnapshot), ...correctedContent };
       const editId = crypto.randomUUID();
       if (effectiveTurnNumber === current.activeTurnNumber) {
-        await client.query(
+      await client.query(
           `UPDATE campaign_state
             SET scratchpad_private = $3, scratchpad_safe_for_prompt = true,
                 trackers = $4, rpg_stats = $5, event_triggers = $6,
@@ -531,11 +549,13 @@ function createPostgresCampaignStateRepository(
         ]
       );
       if (effectiveTurnNumber === current.activeTurnNumber) {
-        await collaborators.memory.rebuildCampaignMemories(client, {
+        const memoryScope = {
           ownerUserId: scope.ownerUserId,
           campaignId: scope.campaignId,
           worldVersionId: current.worldVersionId
-        });
+        };
+        await collaborators.memory.rebuildCampaignMemories(client, memoryScope);
+        await enqueueChunkIndexBestEffort(client, collaborators.memory, memoryScope);
         await client.query(
           "DELETE FROM model_chains WHERE campaign_id = $1 AND owner_user_id = $2",
           [scope.campaignId, scope.ownerUserId]
@@ -790,11 +810,11 @@ function createPostgresCampaignAuthorityRepository(
         `INSERT INTO campaign_memory_configs (
            campaign_id, owner_user_id, embedding_enabled, embedding_provider_profile_id,
            embedding_model, embedding_batch_size, embedding_document_prefix,
-           embedding_query_prefix
+           embedding_query_prefix, retrieval_implementation, retrieval_shadow_enabled
          )
          SELECT $1, owner_user_id, embedding_enabled, embedding_provider_profile_id,
                 embedding_model, embedding_batch_size, embedding_document_prefix,
-                embedding_query_prefix
+                embedding_query_prefix, retrieval_implementation, retrieval_shadow_enabled
            FROM campaign_memory_configs
           WHERE campaign_id = $2 AND owner_user_id = $3
          ON CONFLICT DO NOTHING`,
@@ -1053,6 +1073,7 @@ function createPostgresCampaignAuthorityRepository(
         worldVersionId: source.worldVersionId
       };
       await collaborators.memory.rebuildCampaignMemories(client, memoryScope);
+      await enqueueChunkIndexBestEffort(client, collaborators.memory, memoryScope);
       await collaborators.memory.enqueueEmbeddingReindex(client, memoryScope);
       await client.query(
         `INSERT INTO activity_events (owner_user_id, campaign_id, event_type, details)
@@ -1241,6 +1262,7 @@ function createPostgresCampaignAuthorityRepository(
         worldVersionId: current.worldVersionId
       };
       await collaborators.memory.rebuildCampaignMemories(client, memoryScope);
+      await enqueueChunkIndexBestEffort(client, collaborators.memory, memoryScope);
       await collaborators.memory.enqueueEmbeddingReindex(client, memoryScope);
       await client.query(
         "DELETE FROM model_chains WHERE campaign_id = $1 AND owner_user_id = $2",

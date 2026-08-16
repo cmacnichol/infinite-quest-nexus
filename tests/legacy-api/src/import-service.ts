@@ -850,6 +850,11 @@ async function importLegacyStoryWithTransaction(
        VALUES ($1,$2,'legacy_story_imported',$3,$4)`,
       [ownerUserId, campaignId, importId, json({ sourceName: request.sourceName, sourceHash, ...stats })]
     );
+    await withOptionalImportStep(client, () => memory.enqueueChunkIndex(client, {
+      ownerUserId,
+      campaignId,
+      worldVersionId
+    }));
 
     return { importId, worldId, worldVersionId, campaignId, duplicate: false, stats };
   });
