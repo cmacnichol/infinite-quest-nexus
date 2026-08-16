@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { z } from "zod";
 import { buildServer } from "../../services/api/src/server.js";
 import { serverOptions, testWorldCampaignApplication } from "../helpers/build-server-options.js";
+import { createProviderApplicationAdapter } from "../../services/api/src/provider-application-adapter.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
 import { logger } from "../../packages/logger/src/index.js";
@@ -142,6 +143,38 @@ describe("API server security and CORS headers", () => {
     });
     expect(response.headers["cache-control"]).toBe("no-store");
 
+    await app.close();
+  });
+
+  it("requests embedding inventory when a text provider is used as the embedding fallback", async () => {
+    const ownerUserId = "11111111-1111-4111-8111-111111111111";
+    const providerProfileId = "66666666-6666-4666-8666-666666666666";
+    const listModels = vi.fn().mockResolvedValue({
+      providerProfileId,
+      providerRole: "embedding",
+      models: []
+    });
+    const providers = createProviderApplicationAdapter({
+      application: {
+        listProfiles: vi.fn().mockResolvedValue([{ id: providerProfileId, providerRole: "text" }]),
+        listModels
+      },
+      runtime: {},
+      transaction: vi.fn()
+    } as never);
+    const app = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool, providers }));
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/v1/providers/${providerProfileId}/models?providerRole=embedding`
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(listModels).toHaveBeenCalledWith({
+      ownerUserId,
+      providerProfileId,
+      providerRole: "embedding"
+    });
     await app.close();
   });
 

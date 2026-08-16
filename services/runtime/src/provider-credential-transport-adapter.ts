@@ -199,7 +199,8 @@ export function createRuntimeProviderAdapter(options: Readonly<{
   const inventory: ProviderModelInventoryPort = {
     async listModels(request) {
       const row = await load(request.ownerUserId, request.providerProfileId);
-      if (row.providerRole !== request.providerRole) {
+      const usesTextEmbeddingFallback = row.providerRole === "text" && request.providerRole === "embedding";
+      if (row.providerRole !== request.providerRole && !usesTextEmbeddingFallback) {
         throw Object.assign(new Error(`Enabled ${request.providerRole} provider profile not found.`), { statusCode: 404 });
       }
       try {

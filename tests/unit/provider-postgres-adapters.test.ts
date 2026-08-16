@@ -152,6 +152,71 @@ describe("provider PostgreSQL adapter boundaries", () => {
     expect(JSON.stringify(database.query.mock.calls)).not.toContain(plaintext);
   });
 
+  test("discovers embedding models through an OpenRouter text fallback profile", async () => {
+    const row = {
+      id: "00000000-0000-4000-8000-000000000013",
+      name: "OpenRouter text fallback",
+      provider_type: "openrouter",
+      provider_role: "text",
+      base_url: "https://openrouter.ai/api/v1",
+      default_model: "openai/gpt-4o-mini",
+      context_window_tokens: 128_000,
+      max_output_tokens: 4_096,
+      temperature: 0.5,
+      request_timeout_ms: 60_000,
+      configuration: {},
+      encrypted_api_key: null,
+      credential_nonce: null,
+      credential_auth_tag: null,
+      credential_key_version: null,
+      enabled: true,
+      is_default: true,
+      health_status: "unknown",
+      consecutive_failures: 0,
+      last_health_check_at: null,
+      created_at: new Date("2026-01-01T00:00:00Z"),
+      updated_at: new Date("2026-01-01T00:00:00Z")
+    };
+    const database = {
+      query: vi.fn().mockResolvedValue({ rows: [row], rowCount: 1 })
+    };
+    const fetch = vi.fn(async (_profile, operation: string, url: string) => {
+      expect(operation).toBe("embedding model discovery");
+      expect(url).toBe("https://openrouter.ai/api/v1/embeddings/models");
+      return new Response(JSON.stringify({
+        data: [{
+          id: "openai/text-embedding-3-small",
+          name: "Text Embedding 3 Small",
+          context_length: 8_192
+        }]
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    const health = { recordHealth: vi.fn() };
+    const adapter = createRuntimeProviderAdapter({
+      database: database as never,
+      credentialSecret: "credential-encryption-secret",
+      transport: { fetch, validateSdkEndpoint: vi.fn(), close: vi.fn() },
+      health
+    });
+
+    const inventory = await adapter.inventory.listModels({
+      ownerUserId: "00000000-0000-4000-8000-000000000012",
+      providerProfileId: row.id,
+      providerRole: "embedding"
+    });
+
+    expect(inventory).toEqual({
+      providerProfileId: row.id,
+      providerRole: "embedding",
+      models: [{
+        id: "openai/text-embedding-3-small",
+        name: "Text Embedding 3 Small",
+        contextWindowTokens: 8_192
+      }]
+    });
+    expect(health.recordHealth).toHaveBeenCalledWith(expect.objectContaining({ outcome: "healthy" }));
+  });
+
   test("normalizes candidate inventory failures without exposing provider details", async () => {
     const transport = {
       fetch: vi.fn(async () => {

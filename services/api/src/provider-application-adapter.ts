@@ -160,14 +160,19 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
       }));
     },
 
-    async models(ownerUserId: string, providerProfileId: string) {
+    async models(ownerUserId: string, providerProfileId: string, requestedRole?: ProviderRole) {
       const profile = (await composition.application.listProfiles({ ownerUserId }))
         .find((candidate) => candidate.id === providerProfileId);
       if (!profile) throw Object.assign(new Error("Provider profile not found."), { statusCode: 404 });
+      const providerRole = requestedRole ?? profile.providerRole;
+      const usesTextEmbeddingFallback = profile.providerRole === "text" && providerRole === "embedding";
+      if (profile.providerRole !== providerRole && !usesTextEmbeddingFallback) {
+        throw Object.assign(new Error("Provider profile role does not support the requested model inventory."), { statusCode: 400 });
+      }
       const inventory = await composition.application.listModels({
         ownerUserId,
         providerProfileId,
-        providerRole: profile.providerRole
+        providerRole
       });
       return inventory.models.map((model) => ({
         id: model.id,

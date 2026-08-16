@@ -643,8 +643,15 @@ export async function buildServer({
     return reply.code(201).send(provider);
   });
 
-  app.get<{ Params: { providerId: string } }>("/api/v1/providers/:providerId/models", async (request) => ({
-    models: await providers.models(await initialOwnerId(pool), uuidSchema.parse(request.params.providerId))
+  app.get<{
+    Params: { providerId: string };
+    Querystring: { providerRole?: string };
+  }>("/api/v1/providers/:providerId/models", async (request) => ({
+    models: await providers.models(
+      await initialOwnerId(pool),
+      uuidSchema.parse(request.params.providerId),
+      z.object({ providerRole: z.literal("embedding").optional() }).parse(request.query).providerRole
+    )
   }));
 
   app.put<{ Params: { providerId: string } }>("/api/v1/providers/:providerId/default", async (request) => (

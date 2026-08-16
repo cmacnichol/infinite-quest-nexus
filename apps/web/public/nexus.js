@@ -3661,7 +3661,7 @@ async function discoverEmbeddingModels() {
   elements.providerModelPickerStatus.textContent = `Discovering active and inactive models from ${provider.name}…`;
   elements.providerModelPickerStatus.className = "status";
   try {
-    const { models } = await api(`/api/v1/providers/${provider.id}/models`);
+    const { models } = await api(`/api/v1/providers/${provider.id}/models?providerRole=embedding`);
     discoveredEmbeddingModels = models || [];
     const current = elements.embeddingModel.value.trim();
     const selected = discoveredEmbeddingModels.find((model) => profileModelValue(model) === current || model.id === current)
