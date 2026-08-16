@@ -25,6 +25,7 @@ import {
   type CampaignEmbeddingConfig,
   type ChronicleHealth
 } from "../../contracts/src/memory.js";
+import type { ChronicleProductionRankFusionProfile } from "../../domain/src/chronicle-rank-fusion.js";
 import {
   CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
   buildAcceptedTurnFictionMemory,
@@ -152,6 +153,7 @@ export type ChronicleTransactionEmbeddingPort = Readonly<{
 
 export type ChronicleGenerationTransactionDependencies = Readonly<{
   embeddings: ChronicleTransactionEmbeddingPort;
+  rankFusionProfile?: ChronicleProductionRankFusionProfile;
 }>;
 
 export type ChronicleEmbeddingBatchInput = Readonly<{

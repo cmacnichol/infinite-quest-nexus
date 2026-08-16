@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { MemoryGenerationContextPreviewScope, MemoryGenerationTransactionPort } from "../../packages/application/src/memory/index.js";
+import type { ChronicleProductionRankFusionProfile } from "../../packages/domain/src/chronicle-rank-fusion.js";
 
 export type ChronicleRetrievalApplication = Readonly<{
   generation: Pick<MemoryGenerationTransactionPort, "buildContextPreview">;
@@ -47,32 +48,75 @@ export type ChronicleEvaluationCaseResult = Readonly<{
   leakage: Readonly<{ crossCampaign: number; futureTurn: number; supersededFact: number }>;
 }>;
 
+export type ChronicleEvaluationMetrics = Readonly<{
+  recallAt5: number;
+  recallAt10: number;
+  recallAt20: number;
+  mrr: number;
+  ndcg: number;
+  duplicateRate: number;
+  relevantMemoriesPerPromptToken: number;
+  leakageCounts: Readonly<{ crossCampaign: number; futureTurn: number; supersededFact: number }>;
+  latencyMs: Readonly<{ p50: number; p95: number }>;
+  embedding: Readonly<{ requests: number; cost: number }>;
+  semanticOnlyHits: number;
+  promotions: number;
+  demotions: number;
+}>;
+
 export type ChronicleEvaluationReport = Readonly<{
   corpusVersion: string;
   corpusHash: string;
   implementation: string;
   cases: readonly ChronicleEvaluationCaseResult[];
-  metrics: Readonly<{
-    recallAt5: number;
-    recallAt10: number;
-    recallAt20: number;
-    mrr: number;
-    ndcg: number;
-    duplicateRate: number;
-    relevantMemoriesPerPromptToken: number;
-    leakageCounts: Readonly<{ crossCampaign: number; futureTurn: number; supersededFact: number }>;
-    latencyMs: Readonly<{ p50: number; p95: number }>;
-    embedding: Readonly<{ requests: number; cost: number }>;
-    semanticOnlyHits: number;
-    promotions: number;
-    demotions: number;
-  }>;
+  metrics: ChronicleEvaluationMetrics;
 }>;
 
 export type ChronicleRetrievalEvaluationOptions = Readonly<{
   implementation?: string;
   now?: () => number;
+  corpusHash?: string;
 }>;
+
+export type ChronicleRetrievalProfileParameters = Readonly<{
+  rrfK: number;
+  semanticVariantWeight: number;
+  lexicalEntityWeight: number;
+  recencyChronologyWeight: number;
+  candidateLimit: number;
+}>;
+
+export type ChronicleCalibrationCandidate = Readonly<{
+  profile: ChronicleRetrievalProfileParameters;
+  metrics: ChronicleEvaluationMetrics;
+}>;
+
+export type ChronicleRetrievalProfileV2 = ChronicleProductionRankFusionProfile & Readonly<{
+  version: "chronicle-retrieval-profile-v2";
+  corpusHash: string;
+  metrics: ChronicleEvaluationMetrics;
+  generatedAt: string;
+}>;
+
+const RRF_K_GRID = [20, 40, 60] as const;
+const SEMANTIC_VARIANT_WEIGHT_GRID = [0.5, 0.75, 1] as const;
+const LEXICAL_ENTITY_WEIGHT_GRID = [0.75, 1, 1.25] as const;
+const RECENCY_CHRONOLOGY_WEIGHT_GRID = [0.25, 0.5, 0.75] as const;
+const CANDIDATE_LIMIT_GRID = [32, 64, 96] as const;
+
+export const CHRONICLE_RETRIEVAL_CALIBRATION_GRID: readonly ChronicleRetrievalProfileParameters[] = Object.freeze(
+  RRF_K_GRID.flatMap((rrfK) => SEMANTIC_VARIANT_WEIGHT_GRID.flatMap((semanticVariantWeight) => (
+    LEXICAL_ENTITY_WEIGHT_GRID.flatMap((lexicalEntityWeight) => RECENCY_CHRONOLOGY_WEIGHT_GRID.flatMap(
+      (recencyChronologyWeight) => CANDIDATE_LIMIT_GRID.map((candidateLimit) => Object.freeze({
+        rrfK,
+        semanticVariantWeight,
+        lexicalEntityWeight,
+        recencyChronologyWeight,
+        candidateLimit
+      }))
+    ))
+  )))
+);
 
 type LeakCategory = keyof ReturnType<typeof emptyLeakage>;
 
@@ -84,8 +128,150 @@ function hash(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
+export function deterministicChronicleEvaluationUuid(
+  corpusVersion: string,
+  caseId: string,
+  role: string,
+): string {
+  const digest = hash({ corpusVersion, caseId, role });
+  return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-5${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+}
+
 function average(values: readonly number[]): number {
   return values.length === 0 ? 0 : values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function serializedProfile(profile: ChronicleRetrievalProfileParameters): string {
+  return JSON.stringify(profile);
+}
+
+export function chronicleProductionRankFusionProfile(
+  parameters: ChronicleRetrievalProfileParameters,
+): ChronicleProductionRankFusionProfile {
+  return Object.freeze({
+    rrfK: parameters.rrfK,
+    weights: Object.freeze({
+      signals: Object.freeze({
+        semantic: 1,
+        full_text: parameters.lexicalEntityWeight,
+        entity: parameters.lexicalEntityWeight,
+        recency: parameters.recencyChronologyWeight,
+        chronology: parameters.recencyChronologyWeight,
+        importance: 1,
+        kind: 1,
+        temporal: 1
+      }),
+      variants: Object.freeze({
+        action: 1,
+        entity_expanded: parameters.semanticVariantWeight,
+        scene: parameters.semanticVariantWeight,
+        open_thread: parameters.semanticVariantWeight
+      })
+    }),
+    candidateLimits: Object.freeze({ perSignal: parameters.candidateLimit }),
+    diversityPolicy: Object.freeze({
+      maximumParents: 16,
+      maximumParentsPerTurn: 2,
+      includeAdjacentNarration: true,
+      semanticSimilarityPenalty: 4,
+      kindDiversityBonus: 1,
+      entityDiversityBonus: 0.5
+    })
+  });
+}
+
+function productionProfile(
+  corpusHash: string,
+  candidate: ChronicleCalibrationCandidate,
+  generatedAt: string,
+): ChronicleRetrievalProfileV2 {
+  if (!/^[a-f0-9]{64}$/u.test(corpusHash)) {
+    throw new Error("Chronicle retrieval corpus hash must be a lowercase SHA-256 digest.");
+  }
+  if (!Number.isFinite(Date.parse(generatedAt))) {
+    throw new Error("Chronicle retrieval profile generation timestamp must be an ISO date.");
+  }
+  return Object.freeze({
+    version: "chronicle-retrieval-profile-v2",
+    corpusHash,
+    ...chronicleProductionRankFusionProfile(candidate.profile),
+    metrics: candidate.metrics,
+    generatedAt
+  });
+}
+
+export function chronicleRetrievalCorpusHash(corpus: ChronicleRetrievalCorpus): string {
+  return hash(corpus);
+}
+
+export function chronicleProfilePassesGates(
+  candidate: ChronicleEvaluationMetrics,
+  legacy: ChronicleEvaluationMetrics,
+): boolean {
+  const leakage = candidate.leakageCounts;
+  const maximumP95 = Math.max(legacy.latencyMs.p95 * 1.2, legacy.latencyMs.p95 + 25);
+  return leakage.crossCampaign === 0
+    && leakage.futureTurn === 0
+    && leakage.supersededFact === 0
+    && candidate.recallAt10 >= legacy.recallAt10
+    && candidate.ndcg >= legacy.ndcg
+    && candidate.duplicateRate <= legacy.duplicateRate
+    && candidate.latencyMs.p95 <= maximumP95;
+}
+
+function compareCalibrationCandidates(
+  left: ChronicleCalibrationCandidate,
+  right: ChronicleCalibrationCandidate,
+): number {
+  return right.metrics.recallAt10 - left.metrics.recallAt10
+    || right.metrics.ndcg - left.metrics.ndcg
+    || right.metrics.relevantMemoriesPerPromptToken - left.metrics.relevantMemoriesPerPromptToken
+    || left.metrics.embedding.requests - right.metrics.embedding.requests
+    || left.metrics.latencyMs.p95 - right.metrics.latencyMs.p95
+    || left.metrics.duplicateRate - right.metrics.duplicateRate
+    || compareText(serializedProfile(left.profile), serializedProfile(right.profile));
+}
+
+export function selectChronicleRetrievalProfile(input: Readonly<{
+  corpusHash: string;
+  baselineMetrics: ChronicleEvaluationMetrics;
+  candidates: readonly ChronicleCalibrationCandidate[];
+  generatedAt: string;
+}>): ChronicleRetrievalProfileV2 {
+  const selected = input.candidates
+    .filter((candidate) => chronicleProfilePassesGates(candidate.metrics, input.baselineMetrics))
+    .sort(compareCalibrationCandidates)[0];
+  if (!selected) {
+    throw new Error("No Chronicle retrieval profile satisfied every calibration gate.");
+  }
+  return productionProfile(input.corpusHash, selected, input.generatedAt);
+}
+
+export async function calibrateChronicleRetrievalProfile(input: Readonly<{
+  corpusHash: string;
+  baselineMetrics: ChronicleEvaluationMetrics;
+  generatedAt?: string;
+  evaluate(profile: ChronicleRetrievalProfileParameters): Promise<ChronicleEvaluationMetrics>;
+}>): Promise<ChronicleRetrievalProfileV2> {
+  const candidates: ChronicleCalibrationCandidate[] = [];
+  for (const profile of CHRONICLE_RETRIEVAL_CALIBRATION_GRID) {
+    candidates.push({ profile, metrics: await input.evaluate(profile) });
+  }
+  return selectChronicleRetrievalProfile({
+    corpusHash: input.corpusHash,
+    baselineMetrics: input.baselineMetrics,
+    candidates,
+    generatedAt: input.generatedAt ?? new Date().toISOString()
+  });
+}
+
+export function renderChronicleRetrievalProfileModule(profile: ChronicleRetrievalProfileV2): string {
+  return `// Generated by pnpm evaluate:chronicle -- --calibrate. Do not edit by hand.\n`
+    + `export const CHRONICLE_RETRIEVAL_PROFILE_V2 = Object.freeze(${JSON.stringify(profile, null, 2)} as const);\n`;
 }
 
 function readChronicleEntries(preview: unknown): readonly ChroniclePreviewEntry[] {
@@ -225,7 +411,7 @@ export async function evaluateChronicleRetrieval(
   const promptTokens = cases.reduce((sum, result) => sum + result.promptTokens, 0);
   return {
     corpusVersion: corpus.version,
-    corpusHash: hash(corpus),
+    corpusHash: options.corpusHash ?? chronicleRetrievalCorpusHash(corpus),
     implementation: options.implementation ?? "legacy_hybrid",
     cases,
     metrics: {

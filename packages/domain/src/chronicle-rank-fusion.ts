@@ -1,4 +1,5 @@
 import type { ChronicleMemoryKind } from "./chronicle-chunking.js";
+import type { ChronicleParentSelectionPolicy } from "./chronicle-diversity.js";
 import type { ChronicleQueryKind } from "./chronicle-query-plan.js";
 
 export type ChronicleRankSignal =
@@ -34,6 +35,11 @@ export type ChronicleRankFusionWeights = Readonly<{
 export type ChronicleRankFusionProfile = Readonly<{
   rrfK: number;
   weights: ChronicleRankFusionWeights;
+}>;
+
+export type ChronicleProductionRankFusionProfile = ChronicleRankFusionProfile & Readonly<{
+  candidateLimits: Readonly<{ perSignal: number }>;
+  diversityPolicy: Omit<ChronicleParentSelectionPolicy, "latestSceneParentMemoryId">;
 }>;
 
 export type ChronicleRankContribution = Readonly<{

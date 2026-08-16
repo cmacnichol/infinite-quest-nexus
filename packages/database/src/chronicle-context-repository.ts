@@ -41,6 +41,7 @@ import {
   type ChronicleRankInput,
   type ChronicleRankSignal
 } from "../../domain/src/chronicle-rank-fusion.js";
+import { CHRONICLE_RETRIEVAL_PROFILE_V2 } from "../../domain/src/generated/chronicle-retrieval-profile-v2.js";
 import { estimateTokens, stableStringify, truncateAtBoundary } from "../../domain/src/text.js";
 import { characterNarrativeContext } from "../../domain/src/world-characters.js";
 import { compressTurnMemory } from "../../story-engine/src/chronicle.js";
@@ -141,24 +142,6 @@ type RetrievalExecution = Readonly<{
   costIds: readonly string[];
   telemetryCandidates?: readonly ChronicleRetrievalCandidate[];
 }>;
-
-const CHUNK_CANDIDATE_LIMIT = 96;
-const CHUNK_FUSION_PROFILE = Object.freeze({
-  rrfK: 60,
-  weights: {
-    signals: {
-      semantic: 1,
-      full_text: 1,
-      entity: 1,
-      recency: 1,
-      chronology: 1,
-      importance: 1,
-      kind: 1,
-      temporal: 1
-    },
-    variants: { action: 1, entity_expanded: 1, scene: 1, open_thread: 1 }
-  }
-} as const);
 
 type ContextMetricRow = Readonly<{
   turns: string;
@@ -766,6 +749,7 @@ async function loadAuthorizedChunkRank(
   client: DatabaseClient,
   scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
   request: ChunkRankRequest,
+  candidateLimit: number,
 ): Promise<readonly ChunkCandidateRow[]> {
   const baseValues: unknown[] = [
     scope.ownerUserId,
@@ -807,7 +791,7 @@ async function loadAuthorizedChunkRank(
     baseValues.push(request.temporalAnchor ?? 0);
     limitParameter = 6;
   }
-  baseValues.push(CHUNK_CANDIDATE_LIMIT);
+  baseValues.push(candidateLimit);
   const result = await client.query<ChunkCandidateRow>(
     `/* chronicle_rank:${request.signal}:${request.variant.kind} */
      WITH ${authorizedChunkCte()}, ranked AS (
@@ -917,6 +901,11 @@ async function applyChunkedRankFusion(
   dependencies: ChronicleGenerationTransactionDependencies,
   diagnosticMode: RetrievalDiagnosticMode = "production",
 ): Promise<ChunkedRankFusionResult> {
+  const rankFusionProfile = dependencies.rankFusionProfile ?? CHRONICLE_RETRIEVAL_PROFILE_V2;
+  const candidateLimit = Math.max(1, Math.floor(rankFusionProfile.candidateLimits.perSignal));
+  const loadRank = (request: ChunkRankRequest): Promise<readonly ChunkCandidateRow[]> => (
+    loadAuthorizedChunkRank(client, scope, request, candidateLimit)
+  );
   const variants = plannedChunkQueries(scope, memories, entityCatalog);
   const actionVariant: ChronicleQueryVariant = variants[0] ?? { kind: "action", query: "", entityIds: [] };
   const inputs: ChronicleRankInput[] = [];
@@ -985,7 +974,7 @@ async function applyChunkedRankFusion(
           const variant = variants[index]!;
           const vector = result.embeddings[index];
           if (!vector?.length) throw new Error("Embedding provider returned an empty Chronicle query vector.");
-          const rows = await loadAuthorizedChunkRank(client, scope, {
+          const rows = await loadRank({
             signal: "semantic",
             variant,
             vector,
@@ -1042,25 +1031,25 @@ async function applyChunkedRankFusion(
   }
 
   for (const variant of variants) {
-    addRank("full_text", variant, await loadAuthorizedChunkRank(client, scope, {
+    addRank("full_text", variant, await loadRank({
       signal: "full_text", variant, query: variant.query
     }));
     if (variant.entityIds.length) {
-      addRank("entity", variant, await loadAuthorizedChunkRank(client, scope, {
+      addRank("entity", variant, await loadRank({
         signal: "entity", variant, entityIds: variant.entityIds
       }));
     }
   }
   for (const signal of ["recency", "chronology", "importance", "kind"] as const) {
-    addRank(signal, actionVariant, await loadAuthorizedChunkRank(client, scope, { signal, variant: actionVariant }));
+    addRank(signal, actionVariant, await loadRank({ signal, variant: actionVariant }));
   }
-  addRank("temporal", actionVariant, await loadAuthorizedChunkRank(client, scope, {
+  addRank("temporal", actionVariant, await loadRank({
     signal: "temporal",
     variant: actionVariant,
     temporalAnchor: scope.request.throughTurnNumber ?? campaign.active_turn_number
   }));
 
-  const fused = fuseChronicleRanks(inputs, CHUNK_FUSION_PROFILE);
+  const fused = fuseChronicleRanks(inputs, rankFusionProfile);
   const fusedRankByCandidateId = new Map<string, number>();
   let previousFusedScore: number | null = null;
   let currentFusedRank = 0;
@@ -1120,9 +1109,7 @@ async function applyChunkedRankFusion(
     ...rankedChunkParents,
     ...historicalCanonicalParents
   ], {
-    maximumParents: 16,
-    maximumParentsPerTurn: 2,
-    includeAdjacentNarration: true,
+    ...rankFusionProfile.diversityPolicy,
     latestSceneParentMemoryId
   });
   const selectedParentContent = new Map(parentSelection.parents.map((parent) => (

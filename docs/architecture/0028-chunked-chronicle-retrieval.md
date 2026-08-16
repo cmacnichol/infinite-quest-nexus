@@ -118,18 +118,43 @@ UPDATE campaign_memory_configs
 
 ## Legacy baseline
 
-The deterministic `chronicle-retrieval-evaluation.v1` corpus establishes the
-following label-only baseline for `legacy_hybrid` (generated locally at
-`tmp/chronicle-evaluation/legacy-baseline.json`, which is not committed):
+The deterministic `chronicle-retrieval-evaluation.v1` corpus (SHA-256
+`f1942b9d57c5d45aadc02922c80aa5c7915071d75945c9d63bb2c170917631ed`)
+establishes the following label-only baseline for `legacy_hybrid` (generated
+locally at `tmp/chronicle-evaluation/legacy-baseline.json`, which is not
+committed):
 
-- recall@5/10/20: 1 / 1 / 1; MRR: 0.8529411764705882;
-  NDCG: 0.9348699565126102.
-- duplicate rate: 0; relevant memories per prompt token: 0.0823045267489712.
+- recall@5/10/20: 0.9117647058823529 / 0.9117647058823529 /
+  0.9117647058823529; MRR: 0.9411764705882353;
+  NDCG: 0.9317318575468456.
+- duplicate rate: 0; relevant memories per prompt token: 0.11258278145695365.
 - cross-campaign, future-turn, and superseded-fact leakage: 0 / 0 / 0.
-- p50/p95 evaluator latency: 5 ms / 14 ms; embedding requests/cost: 3 / 0;
-  semantic-only hits: 3; promotions/demotions: 6 / 6. A promotion or
+- p50/p95 evaluator latency: 6 ms / 19 ms; embedding requests/cost: 3 / 0;
+  semantic-only hits: 3; promotions/demotions: 1 / 1. A promotion or
   demotion is an entry whose selected rank improves or worsens, respectively,
   against the deterministic lexical-only ordering for that same preview.
 
 The report contains fixture labels, hashes, ranks, and aggregates only; it
 does not persist prompt or Chronicle content.
+
+## Calibrated production profile
+
+The exhaustive 243-profile grid selected the checked-in
+`chronicle-retrieval-profile-v2` profile: RRF `k=20`; semantic query-variant
+weight `0.75`; lexical/entity signal weights `0.75`; recency/chronology signal
+weights `0.75`; and a per-signal candidate limit of `32`. Its diversity policy
+selects at most 16 parents and two parents per turn, includes adjacent
+narration, and uses semantic/kind/entity values `4 / 1 / 0.5`.
+
+Against the same corpus, the selected profile produced recall@5/10/20 of
+`0.9705882352941176 / 0.9705882352941176 / 0.9705882352941176`, MRR
+`0.9411764705882353`, NDCG `0.9772439525156154`, duplicate rate `0`, and
+`0.11377245508982035` relevant memories per prompt token. Leakage remained
+`0 / 0 / 0`; p50/p95 evaluator latency was `12 ms / 15 ms`, below the
+`44 ms` legacy-derived gate; embedding requests/cost were `3 / 0`; and
+semantic-only hits and promotions/demotions were `3` and `0 / 0`.
+
+Generation uses this profile only when a campaign is explicitly configured
+for `chunked_hybrid`. Calibration does not update campaign configuration, so
+existing and newly defaulted campaigns remain on `legacy_hybrid` until an
+operator or future explicit product action opts them in.

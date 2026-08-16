@@ -1,16 +1,26 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createPostgresChronicleGenerationTransactionPort } from "../packages/database/src/chronicle-repository.js";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabaseClient } from "../packages/database/src/pool.js";
 import { migrateDatabase } from "../packages/database/src/migrate.js";
-import { chronicleContentHash } from "../packages/domain/src/chronicle-memory-helpers.js";
+import { CHRONICLE_CHUNK_PROTOCOL_VERSION } from "../packages/domain/src/chronicle-chunking.js";
+import {
+  CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
+  chronicleContentHash
+} from "../packages/domain/src/chronicle-memory-helpers.js";
 import { ensureTestDatabase } from "./ensure-test-database.mjs";
 import {
+  calibrateChronicleRetrievalProfile,
+  chronicleProductionRankFusionProfile,
+  chronicleRetrievalCorpusHash,
+  deterministicChronicleEvaluationUuid,
   evaluateChronicleRetrieval,
+  renderChronicleRetrievalProfileModule,
+  type ChronicleEvaluationReport,
   type ChronicleRetrievalApplication,
-  type ChronicleRetrievalCorpus
+  type ChronicleRetrievalCorpus,
+  type ChronicleRetrievalProfileV2
 } from "./lib/chronicle-retrieval-evaluator.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -25,7 +35,9 @@ async function loadCorpus(): Promise<ChronicleRetrievalCorpus> {
   return JSON.parse(await readFile(resolve(root, "tests/fixtures/chronicle-retrieval-evaluation.v1.json"), "utf8")) as ChronicleRetrievalCorpus;
 }
 
-function legacyApplication(): ChronicleRetrievalApplication {
+function retrievalApplication(
+  rankFusionProfile?: Parameters<typeof createPostgresChronicleGenerationTransactionPort>[0]["rankFusionProfile"],
+): ChronicleRetrievalApplication {
   const vectorFor = (text: string): readonly number[] => (
     text.includes("amber agreement") ? [1, 0] : [0, 1]
   );
@@ -39,6 +51,7 @@ function legacyApplication(): ChronicleRetrievalApplication {
   };
   return {
     generation: createPostgresChronicleGenerationTransactionPort({
+      ...(rankFusionProfile ? { rankFusionProfile } : {}),
       embeddings: {
         async resolve(_database, scope) { return scope.selectedProviderProfileId ?? null; },
         async load() { return provider; },
@@ -52,22 +65,31 @@ function legacyApplication(): ChronicleRetrievalApplication {
   };
 }
 
-async function seedCorpus(database: DatabaseClient, ownerUserId: string, corpus: ChronicleRetrievalCorpus): Promise<ChronicleRetrievalCorpus> {
+async function seedCorpus(
+  database: DatabaseClient,
+  ownerUserId: string,
+  corpus: ChronicleRetrievalCorpus,
+  retrievalImplementation: "legacy_hybrid" | "chunked_hybrid",
+): Promise<ChronicleRetrievalCorpus> {
   const cases: ChronicleRetrievalCorpus["cases"][number][] = [];
   for (const fixture of corpus.cases) {
+    const evaluationUuid = (role: string): string => (
+      deterministicChronicleEvaluationUuid(corpus.version, fixture.id, role)
+    );
     const semantic = fixture.id === "paraphrase" || fixture.id === "character-alias" || fixture.id === "location-alias";
+    const fixtureTitle = fixture.id === "superseded-fact" ? "E" : `Chronicle evaluator ${fixture.id}`;
     const world = await database.query<{ id: string }>(
       "INSERT INTO worlds (owner_user_id, title) VALUES ($1,$2) RETURNING id",
-      [ownerUserId, `Chronicle evaluator ${fixture.id}`]
+      [ownerUserId, fixtureTitle]
     );
     const version = await database.query<{ id: string }>(
       `INSERT INTO world_versions (world_id, owner_user_id, version_number, content)
        VALUES ($1,$2,1,$3::jsonb) RETURNING id`,
-      [world.rows[0]!.id, ownerUserId, JSON.stringify({ world: { title: fixture.id }, entities: [] })]
+      [world.rows[0]!.id, ownerUserId, JSON.stringify({ world: { title: fixture.id === "superseded-fact" ? "E" : fixture.id }, entities: [] })]
     );
     const campaign = await database.query<{ id: string }>(
       "INSERT INTO campaigns (owner_user_id, world_version_id, title) VALUES ($1,$2,$3) RETURNING id",
-      [ownerUserId, version.rows[0]!.id, `Chronicle evaluator ${fixture.id}`]
+      [ownerUserId, version.rows[0]!.id, fixtureTitle]
     );
     await database.query(
       "INSERT INTO campaign_state (campaign_id, owner_user_id) VALUES ($1,$2)",
@@ -88,14 +110,31 @@ async function seedCorpus(database: DatabaseClient, ownerUserId: string, corpus:
          (id, owner_user_id, campaign_id, world_version_id, source_turn_id, source_turn_number, source_fact_index,
           content, normalized_content, valid_from_turn, valid_until_turn)
        VALUES ($1,$2,$3,$4,$5,1,0,'Sanitized replaced fact.','sanitized replaced fact.',1,2) RETURNING id`,
-      [randomUUID(), ownerUserId, campaign.rows[0]!.id, version.rows[0]!.id, firstTurn.rows[0]!.id]
+      [
+        evaluationUuid("fact:replaced"),
+        ownerUserId,
+        campaign.rows[0]!.id,
+        version.rows[0]!.id,
+        firstTurn.rows[0]!.id
+      ]
     );
+    const replacementFactContent = fixture.id === "superseded-fact"
+      ? "Superseded fact."
+      : "Sanitized replacement fact.";
     const replacementFact = await database.query<{ id: string }>(
       `INSERT INTO campaign_canonical_facts
          (id, owner_user_id, campaign_id, world_version_id, source_turn_id, source_turn_number, source_fact_index,
           content, normalized_content, valid_from_turn)
-       VALUES ($1,$2,$3,$4,$5,2,0,'Sanitized replacement fact.','sanitized replacement fact.',2) RETURNING id`,
-      [randomUUID(), ownerUserId, campaign.rows[0]!.id, version.rows[0]!.id, secondTurn.rows[0]!.id]
+       VALUES ($1,$2,$3,$4,$5,2,0,$6,$7,2) RETURNING id`,
+      [
+        evaluationUuid("fact:replacement"),
+        ownerUserId,
+        campaign.rows[0]!.id,
+        version.rows[0]!.id,
+        secondTurn.rows[0]!.id,
+        replacementFactContent,
+        replacementFactContent.toLowerCase()
+      ]
     );
     await database.query(
       "UPDATE campaign_canonical_facts SET superseded_by_fact_id = $1 WHERE id = $2",
@@ -111,12 +150,6 @@ async function seedCorpus(database: DatabaseClient, ownerUserId: string, corpus:
         [ownerUserId, `Chronicle evaluator embedding ${fixture.id}`]
       );
       embeddingProviderId = profile.rows[0]!.id;
-      await database.query(
-        `INSERT INTO campaign_memory_configs
-           (campaign_id, owner_user_id, embedding_enabled, embedding_provider_profile_id, embedding_model)
-         VALUES ($1,$2,true,$3,'fixture-embedding-v1')`,
-        [campaign.rows[0]!.id, ownerUserId, embeddingProviderId]
-      );
       const lexicalDecoyCount = fixture.id === "paraphrase" ? 6 : fixture.id === "character-alias" ? 6 : 5;
       for (let index = 0; index < lexicalDecoyCount; index += 1) {
         const turn = await database.query<{ id: string }>(
@@ -129,10 +162,20 @@ async function seedCorpus(database: DatabaseClient, ownerUserId: string, corpus:
           `INSERT INTO chronicle_memories
              (owner_user_id, campaign_id, world_version_id, turn_id, memory_kind, ordinal, content, token_estimate,
               embedding, embedding_provider_profile_id, embedding_model, embedding_dimensions,
-              embedding_content_hash, embedding_updated_at, embedding_provider_fingerprint)
-           VALUES ($1,$2,$3,$4,'turn_fiction',$5,$6,1,'[0,1]'::vector,$7,'fixture-embedding-v1',2,$8,now(),'fixture-embedding-fingerprint')
+              embedding_content_hash, embedding_updated_at, embedding_provider_fingerprint, id)
+           VALUES ($1,$2,$3,$4,'turn_fiction',$5,$6,1,'[0,1]'::vector,$7,'fixture-embedding-v1',2,$8,now(),'fixture-embedding-fingerprint',$9)
            RETURNING id`,
-          [ownerUserId, campaign.rows[0]!.id, version.rows[0]!.id, turn.rows[0]!.id, index + 2, content, embeddingProviderId, chronicleContentHash(content)]
+          [
+            ownerUserId,
+            campaign.rows[0]!.id,
+            version.rows[0]!.id,
+            turn.rows[0]!.id,
+            index + 2,
+            content,
+            embeddingProviderId,
+            chronicleContentHash(content),
+            evaluationUuid(`memory:semantic-lexical-decoy:${index}`)
+          ]
         );
         labelByMemoryId[decoy.rows[0]!.id] = `semantic-lexical-decoy-${index + 1}`;
       }
@@ -142,30 +185,53 @@ async function seedCorpus(database: DatabaseClient, ownerUserId: string, corpus:
       const ordinal = semantic ? index + 32 : index + 1;
       const memory = semantic
         ? await database.query<{ id: string }>(
-        `INSERT INTO chronicle_memories
-           (owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content, token_estimate,
+         `INSERT INTO chronicle_memories
+           (owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content, token_estimate, metadata,
             embedding, embedding_provider_profile_id, embedding_model, embedding_dimensions,
-            embedding_content_hash, embedding_updated_at, embedding_provider_fingerprint)
-         VALUES ($1,$2,$3,$4,$5,$6,1,$7::vector,$8,$9,$10,$11,now(),$12) RETURNING id`,
+            embedding_content_hash, embedding_updated_at, embedding_provider_fingerprint, id)
+         VALUES ($1,$2,$3,$4,$5,$6,1,$7::jsonb,$8::vector,$9,$10,$11,$12,now(),$13,$14) RETURNING id`,
         [
           ownerUserId, campaign.rows[0]!.id, version.rows[0]!.id, index === 0 ? "campaign_summary" : "canonical_fact", ordinal,
-          content, "[1,0]", embeddingProviderId, "fixture-embedding-v1", 2, chronicleContentHash(content), "fixture-embedding-fingerprint"
+          content,
+          JSON.stringify(index === 0 || retrievalImplementation === "legacy_hybrid"
+            ? {}
+            : { structuredFactIds: [replacementFact.rows[0]!.id] }),
+          "[1,0]", embeddingProviderId, "fixture-embedding-v1", 2, chronicleContentHash(content), "fixture-embedding-fingerprint",
+          evaluationUuid(`memory:expected:${index}`)
         ]
       )
         : await database.query<{ id: string }>(
           `INSERT INTO chronicle_memories
-             (owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content, token_estimate)
-           VALUES ($1,$2,$3,$4,$5,$6,1) RETURNING id`,
-          [ownerUserId, campaign.rows[0]!.id, version.rows[0]!.id, index === 0 ? "campaign_summary" : "canonical_fact", ordinal, content]
+             (owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content, token_estimate, metadata, id)
+           VALUES ($1,$2,$3,$4,$5,$6,1,$7::jsonb,$8) RETURNING id`,
+          [
+            ownerUserId,
+            campaign.rows[0]!.id,
+            version.rows[0]!.id,
+            index === 0 ? "campaign_summary" : "canonical_fact",
+            ordinal,
+            content,
+            JSON.stringify(index === 0 || retrievalImplementation === "legacy_hybrid"
+              ? {}
+              : { structuredFactIds: [replacementFact.rows[0]!.id] }),
+            evaluationUuid(`memory:expected:${index}`)
+          ]
         );
       labelByMemoryId[memory.rows[0]!.id] = label;
     }
-    for (const label of fixture.forbiddenLabels?.futureTurn ?? []) {
+    for (const [index, label] of (fixture.forbiddenLabels?.futureTurn ?? []).entries()) {
       const memory = await database.query<{ id: string }>(
         `INSERT INTO chronicle_memories
-           (owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content, token_estimate)
-         VALUES ($1,$2,$3,'canonical_fact',$4,$5,1) RETURNING id`,
-        [ownerUserId, campaign.rows[0]!.id, version.rows[0]!.id, (fixture.scope.request.throughTurnNumber ?? 0) + 1, label]
+           (owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content, token_estimate, id)
+         VALUES ($1,$2,$3,'canonical_fact',$4,$5,1,$6) RETURNING id`,
+        [
+          ownerUserId,
+          campaign.rows[0]!.id,
+          version.rows[0]!.id,
+          (fixture.scope.request.throughTurnNumber ?? 0) + 1,
+          label,
+          evaluationUuid(`memory:future:${index}`)
+        ]
       );
       labelByMemoryId[memory.rows[0]!.id] = label;
     }
@@ -189,6 +255,7 @@ async function seedCorpus(database: DatabaseClient, ownerUserId: string, corpus:
       return { campaignId: decoyCampaign.rows[0]!.id, worldVersionId: decoyVersionId };
     };
     const insertDecoy = async (
+      identityRole: string,
       label: string,
       decoyOwnerUserId: string,
       decoyCampaignId: string,
@@ -208,14 +275,14 @@ async function seedCorpus(database: DatabaseClient, ownerUserId: string, corpus:
       if (kind === "semantic") values.push(embeddingProviderId, chronicleContentHash(content));
       const memory = await database.query<{ id: string }>(
         `INSERT INTO chronicle_memories
-           (owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content, token_estimate, entities${semanticColumns})
-         VALUES ($1,$2,$3,'${memoryKind}',1,$4,1,$${kind === "semantic" ? 7 : 5}::text[]${semanticValues}) RETURNING id`,
-        [...values, entities]
+           (owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content, token_estimate, entities${semanticColumns}, id)
+         VALUES ($1,$2,$3,'${memoryKind}',1,$4,1,$${kind === "semantic" ? 7 : 5}::text[]${semanticValues},$${kind === "semantic" ? 8 : 6}) RETURNING id`,
+        [...values, entities, evaluationUuid(identityRole)]
       );
       labelByMemoryId[memory.rows[0]!.id] = label;
     };
     const excluded = fixture.excludedLabels ?? {};
-    for (const label of excluded.owner ?? []) {
+    for (const [index, label] of (excluded.owner ?? []).entries()) {
       const foreignUser = await database.query<{ id: string }>(
         "INSERT INTO users (display_name) VALUES ('Chronicle evaluator decoy owner') RETURNING id"
       );
@@ -236,27 +303,87 @@ async function seedCorpus(database: DatabaseClient, ownerUserId: string, corpus:
         "INSERT INTO campaign_state (campaign_id, owner_user_id) VALUES ($1,$2)",
         [foreignCampaign.rows[0]!.id, foreignUser.rows[0]!.id]
       );
-      await insertDecoy(label, foreignUser.rows[0]!.id, foreignCampaign.rows[0]!.id, foreignVersion.rows[0]!.id);
+      await insertDecoy(`memory:excluded-owner:${index}`, label, foreignUser.rows[0]!.id, foreignCampaign.rows[0]!.id, foreignVersion.rows[0]!.id);
     }
-    for (const label of excluded.campaign ?? []) {
+    for (const [index, label] of (excluded.campaign ?? []).entries()) {
       const decoy = await createDecoyCampaign(ownerUserId, version.rows[0]!.id);
-      await insertDecoy(label, ownerUserId, decoy.campaignId, decoy.worldVersionId);
+      await insertDecoy(`memory:excluded-campaign:${index}`, label, ownerUserId, decoy.campaignId, decoy.worldVersionId);
     }
-    for (const label of excluded.worldVersion ?? []) {
+    for (const [index, label] of (excluded.worldVersion ?? []).entries()) {
       const decoyVersion = await database.query<{ id: string }>(
         `INSERT INTO world_versions (world_id, owner_user_id, version_number, content)
          VALUES ($1,$2,2,$3::jsonb) RETURNING id`,
         [world.rows[0]!.id, ownerUserId, JSON.stringify({ world: { title: `${fixture.id} alternate version` }, entities: [] })]
       );
-      await insertDecoy(label, ownerUserId, campaign.rows[0]!.id, decoyVersion.rows[0]!.id, "lexical", "open_thread");
+      await insertDecoy(`memory:excluded-world:${index}`, label, ownerUserId, campaign.rows[0]!.id, decoyVersion.rows[0]!.id, "lexical", "open_thread");
     }
-    for (const label of excluded.semantic ?? []) {
+    for (const [index, label] of (excluded.semantic ?? []).entries()) {
       const decoy = await createDecoyCampaign(ownerUserId, version.rows[0]!.id);
-      await insertDecoy(label, ownerUserId, decoy.campaignId, decoy.worldVersionId, "semantic");
+      await insertDecoy(`memory:excluded-semantic:${index}`, label, ownerUserId, decoy.campaignId, decoy.worldVersionId, "semantic");
     }
-    for (const label of excluded.entity ?? []) {
+    for (const [index, label] of (excluded.entity ?? []).entries()) {
       const decoy = await createDecoyCampaign(ownerUserId, version.rows[0]!.id);
-      await insertDecoy(label, ownerUserId, decoy.campaignId, decoy.worldVersionId, "entity");
+      await insertDecoy(`memory:excluded-entity:${index}`, label, ownerUserId, decoy.campaignId, decoy.worldVersionId, "entity");
+    }
+    if (semantic || retrievalImplementation === "chunked_hybrid") {
+      await database.query(
+        `INSERT INTO campaign_memory_configs
+           (campaign_id, owner_user_id, embedding_enabled, embedding_provider_profile_id, embedding_model,
+            retrieval_implementation)
+         VALUES ($1,$2,$3,$4,$5,$6)`,
+        [
+          campaign.rows[0]!.id,
+          ownerUserId,
+          semantic,
+          embeddingProviderId,
+          semantic ? "fixture-embedding-v1" : "",
+          retrievalImplementation
+        ]
+      );
+    }
+    if (retrievalImplementation === "chunked_hybrid") {
+      await database.query(
+        `INSERT INTO chronicle_memory_chunks
+           (id, owner_user_id, campaign_id, world_version_id, parent_memory_id, parent_content_hash,
+            chunking_protocol_version, chunk_ordinal, chunk_kind, content, source_start_offset,
+            source_end_offset, token_estimate, entities, entity_ids, metadata, embedding,
+            embedding_status, embedding_skip_reason, embedding_provider_profile_id, embedding_model,
+            embedding_dimensions, embedding_protocol_version, embedding_provider_fingerprint,
+            embedding_content_hash, embedding_updated_at)
+         SELECT (
+                  substr(md5('chronicle-evaluation-chunk-v1:' || parent.id::text),1,8) || '-' ||
+                  substr(md5('chronicle-evaluation-chunk-v1:' || parent.id::text),9,4) || '-5' ||
+                  substr(md5('chronicle-evaluation-chunk-v1:' || parent.id::text),14,3) || '-a' ||
+                  substr(md5('chronicle-evaluation-chunk-v1:' || parent.id::text),18,3) || '-' ||
+                  substr(md5('chronicle-evaluation-chunk-v1:' || parent.id::text),21,12)
+                )::uuid,
+                parent.owner_user_id,parent.campaign_id,parent.world_version_id,parent.id,parent.content_hash,
+                $4,0,
+                CASE parent.memory_kind
+                  WHEN 'turn_fiction' THEN 'turn_narration'
+                  WHEN 'legacy_summary' THEN 'legacy_summary'
+                  WHEN 'campaign_summary' THEN 'campaign_summary'
+                  WHEN 'canonical_fact' THEN 'canonical_fact'
+                  ELSE 'open_thread'
+                END,
+                parent.content,0,length(parent.content),parent.token_estimate,parent.entities,parent.entity_ids,parent.metadata,
+                parent.embedding,CASE WHEN parent.embedding IS NULL THEN 'skipped' ELSE 'embedded' END,
+                CASE WHEN parent.embedding IS NULL THEN 'chunk_embedding_skipped' ELSE NULL END,
+                parent.embedding_provider_profile_id,parent.embedding_model,parent.embedding_dimensions,
+                CASE WHEN parent.embedding IS NULL THEN NULL ELSE $5 END,
+                parent.embedding_provider_fingerprint,
+                CASE WHEN parent.embedding IS NULL THEN NULL ELSE parent.content_hash END,
+                CASE WHEN parent.embedding IS NULL THEN NULL ELSE now() END
+           FROM chronicle_memories parent
+          WHERE parent.owner_user_id=$1 AND parent.campaign_id=$2 AND parent.world_version_id=$3`,
+        [
+          ownerUserId,
+          campaign.rows[0]!.id,
+          version.rows[0]!.id,
+          CHRONICLE_CHUNK_PROTOCOL_VERSION,
+          CHRONICLE_EMBEDDING_PROTOCOL_VERSION
+        ]
+      );
     }
     cases.push({
       ...fixture,
@@ -272,8 +399,8 @@ async function seedCorpus(database: DatabaseClient, ownerUserId: string, corpus:
   return { ...corpus, cases };
 }
 
-class EvaluationRollback extends Error {
-  constructor(readonly report: Awaited<ReturnType<typeof evaluateChronicleRetrieval>>) {
+class EvaluationRollback<T> extends Error {
+  constructor(readonly result: T) {
     super("Rollback deterministic Chronicle evaluation fixtures.");
   }
 }
@@ -290,27 +417,77 @@ function assertCorpusResultInvariants(report: Awaited<ReturnType<typeof evaluate
 }
 
 const corpus = await loadCorpus();
+const corpusHash = chronicleRetrievalCorpusHash(corpus);
+const calibrate = process.argv.includes("--calibrate");
+const baselineArgument = argument("--baseline");
+const profileArgument = argument("--write-profile");
+if (calibrate && (!baselineArgument || !profileArgument)) {
+  throw new Error("Chronicle calibration requires both --baseline and --write-profile.");
+}
 const output = resolve(root, argument("--output") ?? defaultOutput);
 const implementation = argument("--implementation") ?? "legacy_hybrid";
-const databaseConfig = await ensureTestDatabase({ projectRoot: root });
+let baseline: ChronicleEvaluationReport | undefined;
+if (calibrate) {
+  baseline = JSON.parse(await readFile(resolve(root, baselineArgument!), "utf8")) as ChronicleEvaluationReport;
+  if (baseline.implementation !== "legacy_hybrid" || baseline.corpusHash !== corpusHash) {
+    throw new Error("Chronicle calibration baseline does not match the current fixture corpus.");
+  }
+}
+const databaseConfig = process.env.TEST_DATABASE_URL
+  ? { databaseUrl: process.env.TEST_DATABASE_URL }
+  : await ensureTestDatabase({ projectRoot: root });
 const pool = createDatabasePool(databaseConfig.databaseUrl, 4);
 await migrateDatabase(pool, resolve(root, "database/migrations"));
 const ownerUserId = await initialOwnerId(pool);
-let report: Awaited<ReturnType<typeof evaluateChronicleRetrieval>>;
+let result: ChronicleEvaluationReport | ChronicleRetrievalProfileV2;
 try {
   await withTransaction(pool, async (database) => {
-    const seededCorpus = await seedCorpus(database, ownerUserId, corpus);
-    const evaluated = await evaluateChronicleRetrieval(legacyApplication(), database, seededCorpus, { implementation });
+    const seededCorpus = await seedCorpus(
+      database,
+      ownerUserId,
+      corpus,
+      calibrate ? "chunked_hybrid" : implementation === "chunked_hybrid" ? "chunked_hybrid" : "legacy_hybrid"
+    );
+    if (calibrate) {
+      const profile = await calibrateChronicleRetrievalProfile({
+        corpusHash,
+        baselineMetrics: baseline!.metrics,
+        async evaluate(parameters) {
+          const evaluated = await evaluateChronicleRetrieval(
+            retrievalApplication(chronicleProductionRankFusionProfile(parameters)),
+            database,
+            seededCorpus,
+            { implementation: "chunked_hybrid", corpusHash }
+          );
+          assertCorpusResultInvariants(evaluated);
+          return evaluated.metrics;
+        }
+      });
+      throw new EvaluationRollback(profile);
+    }
+    const evaluated = await evaluateChronicleRetrieval(
+      retrievalApplication(),
+      database,
+      seededCorpus,
+      { implementation, corpusHash }
+    );
     assertCorpusResultInvariants(evaluated);
     throw new EvaluationRollback(evaluated);
   });
   throw new Error("Chronicle evaluation fixtures did not roll back.");
 } catch (error) {
   if (!(error instanceof EvaluationRollback)) throw error;
-  report = error.report;
+  result = error.result as ChronicleEvaluationReport | ChronicleRetrievalProfileV2;
 } finally {
   await pool.end();
 }
-await mkdir(dirname(output), { recursive: true });
-await writeFile(output, `${JSON.stringify(report, null, 2)}\n`, "utf8");
-process.stdout.write(`${output}\n`);
+if (calibrate) {
+  const profileOutput = resolve(root, profileArgument!);
+  await mkdir(dirname(profileOutput), { recursive: true });
+  await writeFile(profileOutput, renderChronicleRetrievalProfileModule(result as ChronicleRetrievalProfileV2), "utf8");
+  process.stdout.write(`${profileOutput}\n`);
+} else {
+  await mkdir(dirname(output), { recursive: true });
+  await writeFile(output, `${JSON.stringify(result, null, 2)}\n`, "utf8");
+  process.stdout.write(`${output}\n`);
+}

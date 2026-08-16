@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  deterministicChronicleEvaluationUuid,
   evaluateChronicleRetrieval,
   leakageCounts,
   percentile,
@@ -84,5 +85,44 @@ describe("Chronicle retrieval evaluator metrics", () => {
       retrievedLabels: ["x", "a", "b"],
       ranks: { a: 2, b: 3 }
     })]);
+  });
+
+  it("keeps independently constructed evaluation identities, case hashes, and metrics repeatable", async () => {
+    const memoryId = deterministicChronicleEvaluationUuid("v1", "repeatable", "memory:expected:0");
+    expect(memoryId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-a[0-9a-f]{3}-[0-9a-f]{12}$/u);
+    expect(deterministicChronicleEvaluationUuid("v1", "repeatable", "memory:expected:0")).toBe(memoryId);
+    expect(deterministicChronicleEvaluationUuid("v1", "repeatable", "memory:expected:1")).not.toBe(memoryId);
+    const buildCorpus = (): ChronicleRetrievalCorpus => ({
+      version: "v1",
+      cases: [{
+        id: "repeatable",
+        scope: {
+          ownerUserId: "runtime-owner",
+          campaignId: "runtime-campaign",
+          worldVersionId: "runtime-world",
+          request: { budgetTokens: 100, compression: "auto", query: "repeatable", recentTurns: 1 }
+        },
+        expectedLabels: ["repeatable-label"],
+        labelByMemoryId: { [memoryId]: "repeatable-label" }
+      }]
+    });
+    const evaluate = () => {
+      const timestamps = [10, 20];
+      return evaluateChronicleRetrieval({
+        generation: {
+          async buildContextPreview() {
+            return {
+              retrieval: { semanticAvailable: false },
+              scopes: { chronicle: [{ id: memoryId, estimatedTokens: 2, relevance: 1 }] }
+            };
+          }
+        }
+      }, {}, buildCorpus(), { now: () => timestamps.shift() ?? 20 });
+    };
+
+    const first = await evaluate();
+    const second = await evaluate();
+    expect(second.cases.map((result) => result.caseHash)).toEqual(first.cases.map((result) => result.caseHash));
+    expect(second.metrics).toEqual(first.metrics);
   });
 });

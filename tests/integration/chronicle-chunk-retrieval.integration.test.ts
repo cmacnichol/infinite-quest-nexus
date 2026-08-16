@@ -2,8 +2,15 @@ import { resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createPostgresChronicleGenerationTransactionPort } from "../../packages/database/src/chronicle-repository.js";
 import { chronicleContentHash } from "../../packages/domain/src/chronicle-memory-helpers.js";
+import { CHRONICLE_RETRIEVAL_PROFILE_V2 } from "../../packages/domain/src/generated/chronicle-retrieval-profile-v2.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
-import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
+import {
+  createDatabasePool,
+  initialOwnerId,
+  type DatabaseClient,
+  type DatabasePool,
+  withTransaction
+} from "../../packages/database/src/pool.js";
 import { snapshotTurnRows } from "../helpers/turn-row-snapshot.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -438,6 +445,67 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     expect(fallback.budget).toEqual(legacy.budget);
     expect(fallback.metrics).toEqual(legacy.metrics);
     expect(await snapshotTurnRows(pool, ownerUserId, fixture.campaignId)).toEqual(before);
+  });
+
+  it("uses the generated profile only after a campaign explicitly opts into chunked retrieval", async () => {
+    const { fixture, providerId } = await configuredFixture("generated profile gate");
+    const summary = await parent(fixture, {
+      turnId: null,
+      kind: "campaign_summary",
+      ordinal: 1,
+      content: "The generated profile gate remembers the moonlit crossing."
+    });
+    await embeddedChunk(fixture, providerId, {
+      parentId: summary.id,
+      parentContentHash: summary.contentHash,
+      kind: "campaign_summary",
+      content: "The generated profile gate remembers the moonlit crossing.",
+      vector: [1, 0]
+    });
+    const rankLimits: number[] = [];
+    const generation = transaction(providerId, []);
+    const preview = async () => withTransaction(pool, async (database) => {
+      const intercepted = new Proxy(database, {
+        get(target, property) {
+          if (property === "query") {
+            return (statement: unknown, values?: readonly unknown[]) => {
+              if (typeof statement === "string" && statement.includes("/* chronicle_rank:")) {
+                rankLimits.push(Number(values?.at(-1)));
+              }
+              return target.query(statement as never, values as never);
+            };
+          }
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+      }) as DatabaseClient;
+      return generation.buildContextPreview(intercepted, {
+        ...fixture,
+        request: {
+          budgetTokens: 4_096,
+          compression: "auto",
+          query: "Where is the moonlit crossing?",
+          recentTurns: 1
+        }
+      });
+    });
+
+    await pool.query(
+      "UPDATE campaign_memory_configs SET retrieval_implementation='legacy_hybrid' WHERE campaign_id=$1",
+      [fixture.campaignId]
+    );
+    const legacy = await preview();
+    expect(legacy).toMatchObject({ retrieval: { implementation: "legacy_hybrid" } });
+    expect(rankLimits).toEqual([]);
+
+    await pool.query(
+      "UPDATE campaign_memory_configs SET retrieval_implementation='chunked_hybrid' WHERE campaign_id=$1",
+      [fixture.campaignId]
+    );
+    const chunked = await preview();
+    expect(chunked).toMatchObject({ retrieval: { implementation: "chunked_hybrid" } });
+    expect(rankLimits.length).toBeGreaterThan(0);
+    expect(new Set(rankLimits)).toEqual(new Set([CHRONICLE_RETRIEVAL_PROFILE_V2.candidateLimits.perSignal]));
   });
 
   it("applies one effective diversity selection to cutoff-valid historical canonical parents", async () => {
