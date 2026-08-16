@@ -45,15 +45,22 @@ function safeOverride(provider: EmbeddingCapabilityProvider, key: SafeOverrideKe
 }
 
 function unknownInputCapacity(contextWindowTokens: number): number {
-  const halfContext = Math.floor(contextWindowTokens / 2);
-  return Math.min(8_192, Number.isSafeInteger(halfContext) && halfContext > 0 ? halfContext : 8_192);
+  if (!Number.isSafeInteger(contextWindowTokens) || contextWindowTokens <= 0) {
+    throw new Error("Embedding provider context window cannot provide a positive input capacity.");
+  }
+  const capacity = Math.min(8_192, Math.floor(contextWindowTokens / 2));
+  if (capacity <= 0) {
+    throw new Error("Embedding provider context window cannot provide a positive input capacity.");
+  }
+  return capacity;
 }
 
 /** Resolves only declared safe capability controls; credentials are not representable by this projection. */
 export function resolveEmbeddingCapability(provider: EmbeddingCapabilityProvider): EmbeddingCapability {
   const prefixes = modelAwareEmbeddingPrefixes(provider.model, null, null);
+  const unknownCapacity = unknownInputCapacity(provider.contextWindowTokens);
   const maxInputTokens = safeOverride(provider, "embeddingMaxInputTokens")
-    ?? unknownInputCapacity(provider.contextWindowTokens);
+    ?? unknownCapacity;
   const documentPrefixTokens = estimateTokens(prefixes.documentPrefix);
   const queryPrefixTokens = estimateTokens(prefixes.queryPrefix);
   return Object.freeze({
@@ -75,26 +82,38 @@ function contentBudget(capability: EmbeddingCapability): number {
   return Math.max(1, capability.maxInputTokens - capability.documentPrefixTokens - capability.safetyMarginTokens);
 }
 
-function splitContent(content: string, maximumTokens: number): string[] {
-  if (estimateTokens(content) <= maximumTokens) return [content];
-  const words = content.split(/\s+/u).filter(Boolean);
-  const chunks: string[] = [];
-  let current = "";
-  for (const word of words) {
-    const candidate = current ? `${current} ${word}` : word;
-    if (current && estimateTokens(candidate) > maximumTokens) {
-      chunks.push(current);
-      current = "";
-    }
-    if (!current && estimateTokens(word) > maximumTokens) {
-      const characters = Math.max(1, maximumTokens * 4);
-      for (let offset = 0; offset < word.length; offset += characters) chunks.push(word.slice(offset, offset + characters));
-    } else {
-      current = current ? `${current} ${word}` : word;
-    }
+type ContentSpan = Readonly<{ startOffset: number; endOffset: number }>;
+
+function splitContent(content: string, maximumTokens: number): readonly ContentSpan[] {
+  if (estimateTokens(content) <= maximumTokens) {
+    return [{ startOffset: 0, endOffset: content.length }];
   }
-  if (current) chunks.push(current);
-  return chunks;
+  const spans: ContentSpan[] = [];
+  let currentStart: number | null = null;
+  let currentEnd = 0;
+  for (const match of content.matchAll(/\S+/gu)) {
+    const word = match[0];
+    const wordStart = match.index!;
+    const wordEnd = wordStart + word.length;
+    if (currentStart !== null && estimateTokens(content.slice(currentStart, wordEnd)) > maximumTokens) {
+      spans.push({ startOffset: currentStart, endOffset: currentEnd });
+      currentStart = null;
+    }
+    if (currentStart === null && estimateTokens(word) > maximumTokens) {
+      const characters = Math.max(1, maximumTokens * 4);
+      for (let offset = 0; offset < word.length; offset += characters) {
+        spans.push({
+          startOffset: wordStart + offset,
+          endOffset: Math.min(wordEnd, wordStart + offset + characters)
+        });
+      }
+      continue;
+    }
+    if (currentStart === null) currentStart = wordStart;
+    currentEnd = wordEnd;
+  }
+  if (currentStart !== null) spans.push({ startOffset: currentStart, endOffset: currentEnd });
+  return spans;
 }
 
 /** Replaces one draft with input-safe deterministic subchunks for a provider capability. */
@@ -102,21 +121,18 @@ export function splitChunkForCapability(
   chunk: ChronicleChunkDraft,
   capability: EmbeddingCapability,
 ): readonly ChronicleChunkDraft[] {
-  const pieces = splitContent(chunk.content, contentBudget(capability));
-  let cursor = 0;
-  return Object.freeze(pieces.map((content, chunkIndex) => {
-    const found = chunk.content.indexOf(content, cursor);
-    const localStart = found < 0 ? cursor : found;
-    cursor = localStart + content.length;
+  const spans = splitContent(chunk.content, contentBudget(capability));
+  return Object.freeze(spans.map((span, splitIndex) => {
+    const content = chunk.content.slice(span.startOffset, span.endOffset);
     return Object.freeze({
       ...chunk,
       protocolVersion: CHRONICLE_CHUNK_PROTOCOL_VERSION,
-      chunkIndex,
+      chunkIndex: chunk.chunkIndex + splitIndex,
       content,
       contentHash: chronicleContentHash(content),
       estimatedTokens: estimateTokens(content),
-      sourceStartOffset: chunk.sourceStartOffset + localStart,
-      sourceEndOffset: chunk.sourceStartOffset + localStart + content.length
+      sourceStartOffset: chunk.sourceStartOffset + span.startOffset,
+      sourceEndOffset: chunk.sourceStartOffset + span.endOffset
     });
   }));
 }
