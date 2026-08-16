@@ -17,6 +17,7 @@ import type {
 } from "../../application/src/memory/index.js";
 import { MEMORY_PUBLIC_FAILURE_MESSAGE } from "../../application/src/memory/index.js";
 import { requireCampaignWorldVersionScope } from "../../application/src/memory/helpers.js";
+import { toSafeProviderConfiguration } from "../../application/src/providers/index.js";
 import {
   CHRONICLE_RETRIEVAL_VERSION,
   chronicleHealthSchema,
@@ -46,6 +47,10 @@ import { estimateTokens } from "../../domain/src/text.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
 import { enqueuePostgresChronicleChunkIndex } from "./chronicle-chunk-repository.js";
+import {
+  CHRONICLE_HEALTH_COMPATIBLE_EMBEDDING_SQL,
+  CHRONICLE_HEALTH_EMBEDDING_IDENTITY_SQL
+} from "./chronicle-embedding-compatibility.js";
 import {
   buildPostgresChronicleContextPreview,
   loadPostgresChronicleContextMetrics
@@ -1122,6 +1127,8 @@ type MetricsEmbeddingConfigRow = EmbeddingConfigRow & Readonly<{ updated_at: Dat
 type MetricsProviderRow = Readonly<{
   id: string;
   name: string;
+  provider_type: string;
+  configuration: unknown;
   enabled: boolean;
   health_status: "unknown" | "healthy" | "degraded" | "unavailable";
 }>;
@@ -1209,15 +1216,31 @@ async function semanticHealth(
     });
   }
 
-  const [providerResult, embeddedResult, legacyJobResult, chunkResult, chunkJobResult, fallbackResult] = await Promise.all([
-    config.embedding_provider_profile_id
-      ? pool.query<MetricsProviderRow>(
-        `SELECT id, name, enabled, health_status
-           FROM provider_profiles
-          WHERE id = $1 AND owner_user_id = $2 AND provider_role IN ('embedding','text')`,
-        [config.embedding_provider_profile_id, scope.ownerUserId]
-      )
-      : Promise.resolve({ rows: [] as MetricsProviderRow[] }),
+  const providerResult = config.embedding_provider_profile_id
+    ? await pool.query<MetricsProviderRow>(
+      `SELECT id, name, provider_type, configuration, enabled, health_status
+         FROM provider_profiles
+        WHERE id = $1 AND owner_user_id = $2 AND provider_role IN ('embedding','text')`,
+      [config.embedding_provider_profile_id, scope.ownerUserId]
+    )
+    : { rows: [] as MetricsProviderRow[] };
+  const provider = providerResult.rows[0];
+  const providerConfiguration = toSafeProviderConfiguration(provider?.configuration);
+  const configuredDimensions = providerConfiguration.embeddingDimensions ?? null;
+  const currentProviderFingerprint = provider
+    ? providerModelFingerprint({
+      providerType: provider.provider_type,
+      baseUrl: provider.id,
+      model: config.embedding_model,
+      configuration: providerConfiguration,
+      protocolVersion: CHRONICLE_EMBEDDING_PROTOCOL_VERSION
+    }, modelAwareEmbeddingPrefixes(
+      config.embedding_model,
+      config.embedding_document_prefix,
+      config.embedding_query_prefix
+    ))
+    : null;
+  const [embeddedResult, legacyJobResult, chunkResult, chunkJobResult, fallbackResult] = await Promise.all([
     config.embedding_provider_profile_id
       ? pool.query<Readonly<{ content: string; embedding_content_hash: string | null }>>(
         `SELECT content, embedding_content_hash
@@ -1237,11 +1260,27 @@ async function semanticHealth(
       [scope.ownerUserId, scope.campaignId]
     ),
     pool.query<MetricsChunkRow>(
-      `SELECT
+      `WITH compatible_dimension AS (
+         SELECT CASE
+           WHEN $7::integer IS NOT NULL THEN $7::integer
+           WHEN count(DISTINCT chunk.embedding_dimensions) = 1 THEN min(chunk.embedding_dimensions)
+           ELSE NULL
+         END AS expected_dimensions
+           FROM chronicle_memory_chunks chunk
+           JOIN chronicle_memories parent
+             ON parent.id = chunk.parent_memory_id
+            AND parent.owner_user_id = chunk.owner_user_id
+            AND parent.campaign_id = chunk.campaign_id
+            AND parent.world_version_id = chunk.world_version_id
+            AND parent.content_hash = chunk.parent_content_hash
+          WHERE chunk.owner_user_id = $1 AND chunk.campaign_id = $2 AND chunk.world_version_id = $3
+            AND chunk.chunking_protocol_version = $4
+            AND ${CHRONICLE_HEALTH_EMBEDDING_IDENTITY_SQL}
+       )
+       SELECT
          count(DISTINCT parent.id) FILTER (
            WHERE chunk.chunking_protocol_version = $4
-             AND chunk.embedding_status = 'embedded'
-             AND chunk.embedding_content_hash = chunk.content_hash
+              AND ${CHRONICLE_HEALTH_COMPATIBLE_EMBEDDING_SQL}
          )::text AS indexed_parents,
          count(chunk.id) FILTER (WHERE chunk.chunking_protocol_version = $4)::text AS current_chunks,
          count(chunk.id) FILTER (WHERE chunk.chunking_protocol_version <> $4)::text AS outdated_chunks
@@ -1253,7 +1292,9 @@ async function semanticHealth(
         AND chunk.world_version_id = parent.world_version_id
         AND chunk.parent_content_hash = parent.content_hash
       WHERE parent.owner_user_id = $1 AND parent.campaign_id = $2 AND parent.world_version_id = $3`,
-      [scope.ownerUserId, scope.campaignId, scope.worldVersionId, CHRONICLE_CHUNK_PROTOCOL_VERSION]
+      [scope.ownerUserId, scope.campaignId, scope.worldVersionId, CHRONICLE_CHUNK_PROTOCOL_VERSION,
+        config.embedding_provider_profile_id, config.embedding_model, configuredDimensions,
+        currentProviderFingerprint]
     ),
     pool.query<MetricsJobRow>(
       `SELECT id,status,progress,completed_at
@@ -1280,7 +1321,6 @@ async function semanticHealth(
         CHRONICLE_CHUNK_PROTOCOL_VERSION, config.updated_at]
     )
   ]);
-  const provider = providerResult.rows[0];
   const legacyIndexedMemories = embeddedResult.rows.filter((row) => (
     row.embedding_content_hash === chronicleContentHash(row.content)
   )).length;

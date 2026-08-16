@@ -1,7 +1,10 @@
 import { resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import * as memoryContracts from "../../packages/contracts/src/memory.js";
-import { createPostgresChronicleGenerationTransactionPort } from "../../packages/database/src/chronicle-repository.js";
+import {
+  createPostgresChronicleGenerationTransactionPort,
+  createPostgresChronicleQueryRepository
+} from "../../packages/database/src/chronicle-repository.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import {
   createDatabasePool,
@@ -9,7 +12,12 @@ import {
   type DatabasePool,
   withTransaction
 } from "../../packages/database/src/pool.js";
-import { chronicleContentHash } from "../../packages/domain/src/chronicle-memory-helpers.js";
+import {
+  CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
+  chronicleContentHash,
+  modelAwareEmbeddingPrefixes,
+  providerModelFingerprint
+} from "../../packages/domain/src/chronicle-memory-helpers.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe.sequential : describe.skip;
@@ -221,6 +229,181 @@ integration("Chronicle retrieval observability", () => {
       "SELECT count(*)::text AS count FROM chronicle_retrieval_candidates WHERE campaign_id = $1",
       [current.campaignId]
     )).resolves.toMatchObject({ rows: [{ count: "0" }] });
+  });
+
+  it("does not report incompatible chunk vectors healthy and falls open to lexical ranking", async () => {
+    const current = await fixture("vector compatibility health");
+    const providerConfiguration = { embeddingDimensions: 2 };
+    const provider = await pool.query<{ id: string }>(
+      `INSERT INTO provider_profiles
+         (owner_user_id,name,provider_type,provider_role,base_url,default_model,configuration,health_status)
+       VALUES ($1,$2,'openai_compatible','embedding','http://compatibility.invalid/v1',
+               'compatibility-model',$3::jsonb,'healthy')
+       RETURNING id`,
+      [ownerUserId, "Current compatibility provider", JSON.stringify(providerConfiguration)]
+    );
+    const incompatibleProvider = await pool.query<{ id: string }>(
+      `INSERT INTO provider_profiles
+         (owner_user_id,name,provider_type,provider_role,base_url,default_model,health_status)
+       VALUES ($1,$2,'openai_compatible','embedding','http://stale-compatibility.invalid/v1',
+               'compatibility-model','healthy')
+       RETURNING id`,
+      [ownerUserId, "Stale compatibility provider"]
+    );
+    const providerId = provider.rows[0]!.id;
+    const currentFingerprint = providerModelFingerprint({
+      providerType: "openai_compatible",
+      baseUrl: providerId,
+      model: "compatibility-model",
+      configuration: providerConfiguration,
+      protocolVersion: CHRONICLE_EMBEDDING_PROTOCOL_VERSION
+    }, modelAwareEmbeddingPrefixes("compatibility-model", null, null));
+    await pool.query(
+      `INSERT INTO campaign_memory_configs
+         (campaign_id,owner_user_id,embedding_enabled,embedding_provider_profile_id,embedding_model,
+          retrieval_implementation,retrieval_shadow_enabled,updated_at)
+       VALUES ($1,$2,true,$3,'compatibility-model','chunked_hybrid',false,clock_timestamp())`,
+      [current.campaignId, ownerUserId, providerId]
+    );
+
+    const mismatches = [
+      {
+        providerProfileId: incompatibleProvider.rows[0]!.id,
+        model: "compatibility-model",
+        dimensions: 2,
+        vector: "[1,0]",
+        protocolVersion: CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
+        fingerprint: currentFingerprint
+      },
+      {
+        providerProfileId: providerId,
+        model: "stale-compatibility-model",
+        dimensions: 2,
+        vector: "[1,0]",
+        protocolVersion: CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
+        fingerprint: currentFingerprint
+      },
+      {
+        providerProfileId: providerId,
+        model: "compatibility-model",
+        dimensions: 3,
+        vector: "[1,0,0]",
+        protocolVersion: CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
+        fingerprint: currentFingerprint
+      },
+      {
+        providerProfileId: providerId,
+        model: "compatibility-model",
+        dimensions: 2,
+        vector: "[1,0]",
+        protocolVersion: "chronicle-embedding-v0",
+        fingerprint: currentFingerprint
+      },
+      {
+        providerProfileId: providerId,
+        model: "compatibility-model",
+        dimensions: 2,
+        vector: "[1,0]",
+        protocolVersion: CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
+        fingerprint: "stale-provider-fingerprint"
+      }
+    ] as const;
+    for (const [index, mismatch] of mismatches.entries()) {
+      const content = `Astral key compatibility record ${index + 1}.`;
+      const turn = await pool.query<{ id: string }>(
+        `INSERT INTO turns (owner_user_id,campaign_id,turn_number,action,narration)
+         VALUES ($1,$2,$3,'Compatibility fixture action',$4) RETURNING id`,
+        [ownerUserId, current.campaignId, index + 1, content]
+      );
+      const memory = await pool.query<{ id: string; content_hash: string }>(
+        `INSERT INTO chronicle_memories
+           (owner_user_id,campaign_id,world_version_id,turn_id,memory_kind,ordinal,content,token_estimate,importance)
+         VALUES ($1,$2,$3,$4,'turn_fiction',$5,$6,8,0.8)
+         RETURNING id,content_hash`,
+        [ownerUserId, current.campaignId, current.worldVersionId, turn.rows[0]!.id, index + 1, content]
+      );
+      await pool.query(
+        `INSERT INTO chronicle_memory_chunks
+           (owner_user_id,campaign_id,world_version_id,parent_memory_id,parent_content_hash,
+            chunking_protocol_version,chunk_ordinal,chunk_kind,content,source_start_offset,source_end_offset,
+            token_estimate,embedding,embedding_status,embedding_provider_profile_id,embedding_model,
+            embedding_dimensions,embedding_protocol_version,embedding_provider_fingerprint,
+            embedding_content_hash,embedding_updated_at)
+         VALUES ($1,$2,$3,$4,$5,'chronicle-chunk-v1',0,'turn_narration',$6,0,length($6),8,
+                 $7::vector,'embedded',$8,$9,$10,$11,$12,$13,clock_timestamp())`,
+        [ownerUserId, current.campaignId, current.worldVersionId, memory.rows[0]!.id,
+          memory.rows[0]!.content_hash, content, mismatch.vector, mismatch.providerProfileId,
+          mismatch.model, mismatch.dimensions, mismatch.protocolVersion, mismatch.fingerprint,
+          chronicleContentHash(content)]
+      );
+    }
+    await pool.query(
+      `INSERT INTO chronicle_chunk_jobs
+         (owner_user_id,campaign_id,status,progress,completed_at,created_at,updated_at)
+       VALUES ($1,$2,'completed',$3::jsonb,clock_timestamp(),clock_timestamp(),clock_timestamp())`,
+      [ownerUserId, current.campaignId, JSON.stringify({
+        processedParents: mismatches.length,
+        totalParents: mismatches.length,
+        embeddedChunks: mismatches.length,
+        skippedChunks: 0
+      })]
+    );
+
+    const queryRepository = createPostgresChronicleQueryRepository(pool, {
+      embeddings: {
+        async resolve() { return providerId; },
+        async load() {
+          return {
+            id: providerId,
+            model: "compatibility-model",
+            providerType: "openai_compatible",
+            configuration: providerConfiguration,
+            async embed(documents: readonly string[]) {
+              return {
+                embeddings: documents.map(() => [1, 0]),
+                responseId: "compatibility-response",
+                usage: {},
+                reportedCost: null
+              };
+            }
+          };
+        },
+        async embed(loaded, documents) { return loaded.embed(documents); },
+        async fingerprint() { return currentFingerprint; },
+        async recordHealth() {},
+        async recordCost() { return null; },
+        logDiagnostic() {}
+      }
+    });
+    const memoryScope = {
+      ownerUserId,
+      campaignId: current.campaignId,
+      worldVersionId: current.worldVersionId
+    };
+    const metrics = await queryRepository.getMetrics(memoryScope);
+    if ("failure" in metrics) throw new Error("Expected Chronicle metrics for the compatibility fixture.");
+    expect(metrics.semanticHealth).toMatchObject({
+      status: "rebuild_required",
+      indexedMemories: 0,
+      totalMemories: mismatches.length
+    });
+
+    const preview = await queryRepository.previewContext(memoryScope, {
+      budgetTokens: 4_096,
+      compression: "auto",
+      query: "Where is the astral key?",
+      recentTurns: 2
+    });
+    if ("failure" in preview) throw new Error("Expected Chronicle preview for the compatibility fixture.");
+    expect(preview.retrieval).toMatchObject({
+      implementation: "chunked_hybrid",
+      mode: "lexical_fallback",
+      semanticAvailable: false,
+      fallbackReason: "incompatible_chunk_embeddings",
+      embeddedCandidates: 0
+    });
+    const scopes = preview.scopes as { chronicle: readonly unknown[] };
+    expect(scopes.chronicle.length).toBeGreaterThan(0);
   });
 
   it("runs lexical, legacy, and chunked comparisons while preserving the configured production selection", async () => {

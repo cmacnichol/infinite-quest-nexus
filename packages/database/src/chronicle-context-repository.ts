@@ -45,6 +45,7 @@ import { estimateTokens, stableStringify, truncateAtBoundary } from "../../domai
 import { characterNarrativeContext } from "../../domain/src/world-characters.js";
 import { compressTurnMemory } from "../../story-engine/src/chronicle.js";
 import type { ChronicleGenerationTransactionDependencies } from "./chronicle-repository.js";
+import { CHRONICLE_RANK_COMPATIBLE_EMBEDDING_SQL } from "./chronicle-embedding-compatibility.js";
 import { recordRetrievalComparison } from "./chronicle-retrieval-observability-repository.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 
@@ -776,10 +777,7 @@ async function loadAuthorizedChunkRank(
   let order = "parent_memory_id,candidate_id";
   let limitParameter = 5;
   if (request.signal === "semantic") {
-    predicate = `embedding_status='embedded' AND embedding IS NOT NULL
-      AND embedding_provider_profile_id=$6 AND embedding_model=$7
-      AND embedding_dimensions=$8 AND embedding_protocol_version='${CHRONICLE_EMBEDDING_PROTOCOL_VERSION}'
-      AND embedding_provider_fingerprint=$9 AND embedding_content_hash=content_hash`;
+    predicate = CHRONICLE_RANK_COMPATIBLE_EMBEDDING_SQL;
     order = "embedding <=> $5::vector,parent_memory_id,candidate_id";
     baseValues.push(vectorLiteral(request.vector ?? []), request.providerProfileId, request.model,
       request.vector?.length ?? 0, request.fingerprint);
@@ -1004,7 +1002,11 @@ async function applyChunkedRankFusion(
           embeddedCandidates += rows.length;
           addRank("semantic", variant, rows);
         });
-        semanticAvailable = true;
+        if (embeddedCandidates > 0) {
+          semanticAvailable = true;
+        } else {
+          semanticFallbackReason = "incompatible_chunk_embeddings";
+        }
       }
     } catch (error) {
       semanticFallbackReason = "semantic_retrieval_unavailable";
@@ -1154,7 +1156,10 @@ async function applyChunkedRankFusion(
   return {
     retrieval: {
       implementation: "chunked_hybrid",
-      mode: semanticAvailable ? "hybrid" : semanticFallbackReason === "semantic_retrieval_unavailable"
+      mode: semanticAvailable ? "hybrid" : [
+        "semantic_retrieval_unavailable",
+        "incompatible_chunk_embeddings"
+      ].includes(semanticFallbackReason ?? "")
         ? "lexical_fallback"
         : "lexical",
       semanticAvailable,
