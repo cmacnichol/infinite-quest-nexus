@@ -46,18 +46,33 @@ const textValues = (value: unknown): string[] => {
 export function normalizeEntityTerm(value: string): string {
   return String(value ?? "")
     .normalize("NFKC")
+    .toLowerCase()
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+function compareDeterministically(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+// Fallback IDs were persisted using the host locale before query matching was
+// made locale-independent. Keep that identity contract separate from matching
+// so existing Turkish/Azeri-locale rows remain addressable after an upgrade.
+function legacyFallbackIdTerm(value: string): string {
+  return String(value ?? "")
+    .normalize("NFKC")
     .toLocaleLowerCase()
     .replace(/\s+/gu, " ")
     .trim();
 }
 
 function fallbackId(source: EntityReferenceSource, kind: string, displayName: string): string {
-  const slug = normalizeEntityTerm(displayName)
+  const slug = legacyFallbackIdTerm(displayName)
     .normalize("NFKD")
     .replace(/\p{M}/gu, "")
     .replace(/[^\p{L}\p{N}]+/gu, "-")
     .replace(/^-+|-+$/gu, "") || "unnamed";
-  return `${source}:${normalizeEntityTerm(kind).replace(/\s+/gu, "-") || "entity"}:${slug}`;
+  return `${source}:${legacyFallbackIdTerm(kind).replace(/\s+/gu, "-") || "entity"}:${slug}`;
 }
 
 function uniqueAliases(values: unknown[]): string[] {
@@ -173,7 +188,7 @@ function unambiguousAliases(catalog: readonly EntityReference[]): AliasCandidate
     .map(([entry]) => entry!)
     .sort((left, right) => (
       right.normalized.length - left.normalized.length
-      || left.normalized.localeCompare(right.normalized)
+      || compareDeterministically(left.normalized, right.normalized)
     ));
   unambiguousAliasesCache.set(catalog, result);
   return result;

@@ -468,7 +468,7 @@ async function applyContextSemanticRelevance(
          FROM chronicle_memories
         WHERE owner_user_id = $1 AND campaign_id = $2 AND world_version_id = $3
           AND ($9::integer IS NULL OR ordinal <= $9::integer)
-          AND ($9::integer IS NULL OR memory_kind <> 'legacy_summary')
+          AND ($9::integer IS NULL OR memory_kind NOT IN ('legacy_summary','canonical_fact'))
           AND embedding_provider_profile_id = $4 AND embedding_model = $5
           AND embedding_dimensions = $7 AND embedding_provider_fingerprint = $8
           AND embedding IS NOT NULL

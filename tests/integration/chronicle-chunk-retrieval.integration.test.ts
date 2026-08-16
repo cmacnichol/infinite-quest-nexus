@@ -304,6 +304,15 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
       content: "The silver key opens the gate.",
       vector: [1, 0]
     });
+    await pool.query(
+      `UPDATE chronicle_memories
+          SET embedding='[1,0]'::vector,embedding_provider_profile_id=$2,
+              embedding_model='chunk-embed-v1',embedding_dimensions=2,
+              embedding_provider_fingerprint='chunk-fingerprint',
+              embedding_content_hash=content_hash,embedding_updated_at=now()
+        WHERE id=$1`,
+      [supersededFactParent.id, providerId]
+    );
 
     const decoy = await campaignFixture("cross campaign decoy");
     const decoyParent = await parent(decoy, {
@@ -380,7 +389,7 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     );
     const legacy = await generation.buildContextPreview(pool, {
       ...fixture,
-      request: { budgetTokens: 4_096, compression: "auto", query: "Shade seeks the key.", recentTurns: 1, throughTurnNumber: 2 }
+      request: { budgetTokens: 4_096, compression: "auto", query: "iron key opens the gate", recentTurns: 1, throughTurnNumber: 2 }
     });
     await pool.query(
       "UPDATE campaign_memory_configs SET retrieval_implementation='chunked_hybrid' WHERE campaign_id=$1",
@@ -389,10 +398,13 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     await pool.query("DELETE FROM chronicle_memory_chunks WHERE parent_memory_id=$1", [current.id]);
     const fallback = await generation.buildContextPreview(pool, {
       ...fixture,
-      request: { budgetTokens: 4_096, compression: "auto", query: "Shade seeks the key.", recentTurns: 1, throughTurnNumber: 2 }
+      request: { budgetTokens: 4_096, compression: "auto", query: "iron key opens the gate", recentTurns: 1, throughTurnNumber: 2 }
     });
 
     expect(fallback).toMatchObject({ retrieval: { fallbackReason: "chunk_index_not_ready" } });
+    expect(legacy).toMatchObject({ retrieval: { semanticAvailable: true } });
+    expect(JSON.stringify(legacy.scopes)).not.toContain("The iron key opens the gate");
+    expect(JSON.stringify(fallback.scopes)).not.toContain("The iron key opens the gate");
     expect(fallback.scopes).toEqual(legacy.scopes);
     expect(fallback.budget).toEqual(legacy.budget);
     expect(fallback.metrics).toEqual(legacy.metrics);
