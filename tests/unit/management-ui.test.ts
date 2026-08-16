@@ -368,10 +368,11 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain('method: editingProviderId ? "PATCH" : "POST"');
     expect(storyScript).not.toContain('/provider-text/generate');
     expect(storyScript).toContain('composition.workflow.submit');
-    expect(managementHtml).toContain('value="text-embedding-nomic-embed-text-v1.5"');
+    expect(managementHtml).not.toContain('value="text-embedding-nomic-embed-text-v1.5"');
+    expect(managementScript).toContain('elements.embeddingModel.value = embeddingConfig.model ?? "";');
     expect(managementHtml).toContain('id="embeddingDocumentPrefix"');
     expect(managementHtml).toContain('id="embeddingQueryPrefix"');
-    expect(managementHtml).toContain('id="embeddingModel" maxlength="500" value="text-embedding-nomic-embed-text-v1.5" readonly role="button" aria-haspopup="dialog" aria-controls="providerModelDialog"');
+    expect(managementHtml).toContain('id="embeddingModel" maxlength="500" readonly role="button" aria-haspopup="dialog" aria-controls="providerModelDialog"');
     expect(managementHtml).not.toContain('id="embeddingModels"');
     expect(managementScript).toContain("function populateEmbeddingProviderSelect()");
     expect(managementScript).toContain('providerModelPickerTarget === "embedding"');
@@ -496,6 +497,81 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("text provider's available input space");
     expect(managementScript).not.toContain("applyEmbeddingModelContextBudget");
     expect(managementScript).not.toContain("modelContextTokens - 512");
+  });
+
+  it("exposes the shared Semantic Retrieval contract and safe health projection", () => {
+    expect(managementHtml).toContain("Semantic Retrieval");
+    expect(managementHtml).toContain('id="embeddingRetrievalImplementation"');
+    expect(managementHtml).toContain('<option value="legacy_hybrid">Legacy hybrid</option>');
+    expect(managementHtml).toContain('<option value="chunked_hybrid">Chunked hybrid</option>');
+    expect(managementHtml).toContain('id="embeddingRetrievalShadowEnabled"');
+    expect(managementHtml).toContain("Chronicle local memory remains available when semantic retrieval is off.");
+    expect(managementHtml).toContain('id="reindexEmbeddings"');
+    expect(managementScript).toContain('/memory/embeddings/reindex`');
+    expect(managementScript).toContain('/memory/context-preview?${parameters}`');
+    expect(managementScript).toContain('/memory/reindex`');
+
+    const healthView = managementFunction<(health: Record<string, unknown>) => Record<string, string>>("semanticRetrievalHealthView");
+    const expectedLabels = {
+      chronicle_available: "Chronicle available",
+      semantic_disabled: "Semantic Retrieval off",
+      indexing: "Indexing",
+      healthy: "Ready",
+      partially_indexed: "Partially indexed",
+      provider_degraded: "Provider degraded",
+      provider_unavailable: "Provider unavailable",
+      fallback_active: "Fallback active",
+      chunk_protocol_outdated: "Chunk protocol outdated",
+      rebuild_required: "Rebuild required"
+    };
+    for (const [status, label] of Object.entries(expectedLabels)) {
+      expect(healthView({ status, coveragePercent: 42, fallbackCode: null })).toMatchObject({ status, label });
+    }
+    expect(healthView({ status: "fallback_active", coveragePercent: 42, fallbackCode: "provider_unavailable" })).toMatchObject({
+      fallbackLabel: "provider unavailable",
+      coverageLabel: "42% compatible vector coverage"
+    });
+    expect(healthView({ status: "fallback_active", coveragePercent: 42, fallbackCode: "<credential>" })).toMatchObject({ fallbackLabel: "Unavailable" });
+  });
+
+  it("sends retrieval selection through the shared embedding configuration payload", () => {
+    const payload = managementFunction<(values: Record<string, unknown>) => Record<string, unknown>>("embeddingConfigPayload");
+    expect(payload({
+      enabled: true,
+      providerProfileId: "provider-1",
+      model: "embed-model",
+      batchSize: "24",
+      documentPrefix: "document: ",
+      queryPrefix: "query: ",
+      retrievalImplementation: "chunked_hybrid",
+      retrievalShadowEnabled: true
+    })).toEqual({
+      enabled: true,
+      providerProfileId: "provider-1",
+      model: "embed-model",
+      batchSize: 24,
+      documentPrefix: "document: ",
+      queryPrefix: "query: ",
+      retrievalImplementation: "chunked_hybrid",
+      retrievalShadowEnabled: true
+    });
+    expect(storyScript).toContain('memory: "Semantic retrieval"');
+  });
+
+  it("describes Semantic Retrieval disablement without claiming retained rollback vectors are deleted", () => {
+    expect(managementScript).toContain("Semantic Retrieval disabled. Chronicle local lexical retrieval remains available; retained legacy embeddings remain available for rollback.");
+    expect(managementScript).not.toContain("Semantic retrieval disabled and derived vectors removed");
+  });
+
+  it("preserves an eligible configured text fallback when no embedding provider exists", () => {
+    expect(managementScript).toContain('provider.id === current && provider.providerRole === "text" && provider.enabled');
+  });
+
+  it("requires an explicit eligible provider when a configured text fallback coexists with embedding providers", () => {
+    expect(managementScript).toContain('Configured text provider is no longer eligible · ${configuredTextProvider.name}');
+    expect(managementScript).toContain("configuredTextOption.disabled = true");
+    expect(managementScript).toContain('elements.embeddingProvider.value = ""');
+    expect(managementScript).toContain("Choose an eligible embedding provider before enabling Semantic Retrieval.");
   });
 
   it("shows provider-reported turn and campaign costs without adding a reporting page", () => {

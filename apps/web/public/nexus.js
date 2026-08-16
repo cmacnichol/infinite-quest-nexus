@@ -2368,6 +2368,7 @@ async function selectCampaign(campaign) {
   elements.reindexMemory.disabled = false;
   elements.previewContext.disabled = false;
   elements.saveEmbeddingConfig.disabled = false;
+  elements.reindexEmbeddings.disabled = true;
   elements.saveIllustrationConfig.disabled = false;
   elements.campaignTitle.value = campaign.title;
   elements.campaignStatus.value = campaign.status;
@@ -2628,27 +2629,86 @@ async function deleteSelectedCampaign() {
   }
 }
 
-function renderSemanticMemoryHealth(health) {
-  const state = health?.status || "disabled";
+function semanticRetrievalHealthView(health) {
   const labels = {
-    disabled: "Disabled",
+    chronicle_available: "Chronicle available",
+    semantic_disabled: "Semantic Retrieval off",
     indexing: "Indexing",
-    healthy: "Healthy",
-    degraded: "Degraded",
-    failed: "Failed",
-    unavailable: "Unavailable"
+    healthy: "Ready",
+    partially_indexed: "Partially indexed",
+    provider_degraded: "Provider degraded",
+    provider_unavailable: "Provider unavailable",
+    fallback_active: "Fallback active",
+    chunk_protocol_outdated: "Chunk protocol outdated",
+    rebuild_required: "Rebuild required"
   };
-  elements.semanticMemoryHealth.dataset.state = state;
-  elements.semanticMemoryHealthBadge.textContent = labels[state] || state;
-  elements.semanticMemoryHealthTitle.textContent = state === "healthy"
-    ? `Semantic memory healthy · ${number(health.coveragePercent)}% coverage`
-    : state === "indexing"
-      ? `Semantic indexing in progress · ${number(health.coveragePercent)}% available`
-      : state === "disabled"
-        ? "Semantic memory disabled"
-        : `Semantic memory ${labels[state]?.toLowerCase() || state}`;
+  const status = typeof health?.status === "string" && Object.hasOwn(labels, health.status) ? health.status : "";
+  const coverageValue = Number(health?.coveragePercent);
+  const coveragePercent = Number.isFinite(coverageValue) ? Math.min(100, Math.max(0, Math.round(coverageValue))) : null;
+  const implementationLabels = {
+    legacy_hybrid: "Legacy hybrid",
+    chunked_hybrid: "Chunked hybrid"
+  };
+  const implementation = typeof health?.retrievalImplementation === "string"
+    ? implementationLabels[health.retrievalImplementation]
+    : undefined;
+  const shadow = typeof health?.retrievalShadowEnabled === "boolean"
+    ? health.retrievalShadowEnabled ? "On" : "Off"
+    : "Unavailable";
+  const fallbackCode = typeof health?.fallbackCode === "string" && /^[a-z0-9][a-z0-9_.:-]{0,199}$/u.test(health.fallbackCode)
+    ? health.fallbackCode.replace(/[_:.-]+/gu, " ")
+    : health?.fallbackCode ? "Unavailable" : "None";
+  const jobStatuses = { queued: "Queued", running: "Running", completed: "Completed", failed: "Failed" };
+  const jobStatus = typeof health?.jobStatus === "string" && Object.hasOwn(jobStatuses, health.jobStatus)
+    ? jobStatuses[health.jobStatus]
+    : "No active job";
+  const progress = health?.progress && typeof health.progress === "object" ? health.progress : {};
+  const processedParents = Number(progress.processedParents);
+  const totalParents = Number(progress.totalParents);
+  const embeddedChunks = Number(progress.embeddedChunks);
+  const skippedChunks = Number(progress.skippedChunks);
+  const progressParts = [];
+  if (Number.isFinite(processedParents) && Number.isFinite(totalParents) && totalParents >= 0) {
+    progressParts.push(`${Math.max(0, processedParents)} of ${Math.max(0, totalParents)} memories`);
+  }
+  if (Number.isFinite(embeddedChunks) || Number.isFinite(skippedChunks)) {
+    progressParts.push(`${Math.max(0, Number.isFinite(embeddedChunks) ? embeddedChunks : 0)} embedded chunks · ${Math.max(0, Number.isFinite(skippedChunks) ? skippedChunks : 0)} skipped`);
+  }
+  return {
+    status,
+    label: status ? labels[status] : "Status unavailable",
+    coverageLabel: coveragePercent === null ? "Coverage unavailable" : `${coveragePercent}% compatible vector coverage`,
+    productionLabel: `Production · ${implementation || "Unavailable"}`,
+    shadowLabel: `Shadow comparison · ${shadow}`,
+    fallbackLabel: fallbackCode,
+    jobLabel: progressParts.length ? `${jobStatus} · ${progressParts.join(" · ")}` : jobStatus
+  };
+}
+
+function renderSemanticMemoryHealth(health) {
+  const view = semanticRetrievalHealthView(health);
+  if (view.status) elements.semanticMemoryHealth.dataset.state = view.status;
+  else delete elements.semanticMemoryHealth.dataset.state;
+  elements.semanticMemoryHealthBadge.textContent = view.label;
+  elements.semanticMemoryHealthTitle.textContent = view.label;
   const provider = health?.providerName ? ` Provider: ${health.providerName}${health.model ? ` · ${health.model}` : ""}.` : "";
-  elements.semanticMemoryHealthMessage.textContent = `${health?.message || "Semantic memory status is unavailable."}${provider}`;
+  elements.semanticMemoryHealthMessage.textContent = `${health?.message || "Semantic Retrieval status is unavailable."}${provider}`;
+  const details = [
+    ["Coverage", view.coverageLabel],
+    ["Production", view.productionLabel.replace("Production · ", "")],
+    ["Shadow comparison", view.shadowLabel.replace("Shadow comparison · ", "")],
+    ["Index job", view.jobLabel]
+  ];
+  if (health?.fallbackCode) details.push(["Fallback reason", view.fallbackLabel]);
+  elements.semanticMemoryHealthDetails.replaceChildren(...details.map(([label, value]) => {
+    const wrapper = document.createElement("div");
+    const term = document.createElement("dt");
+    const description = document.createElement("dd");
+    term.textContent = label;
+    description.textContent = value;
+    wrapper.append(term, description);
+    return wrapper;
+  }));
 }
 
 async function refreshCampaignMemoryMetrics() {
@@ -2697,7 +2757,7 @@ async function refreshCampaignCostSummary() {
     appendCostMetric(money(total.amount, total.currency), `campaign total${suffix}`);
     appendCostMetric(money(total.byCategory?.story || 0, total.currency), `text generation${suffix}`);
     appendCostMetric(money(total.byCategory?.image || 0, total.currency), `image generation${suffix}`);
-    appendCostMetric(money(total.byCategory?.memory || 0, total.currency), `semantic memory${suffix}`);
+    appendCostMetric(money(total.byCategory?.memory || 0, total.currency), `Semantic retrieval${suffix}`);
     appendCostMetric(money(total.historicalAndUnattributedOperations || total.otherCampaignOperations || 0, total.currency), `historical & unattributed operations${suffix}`);
   }
   return summary;
@@ -2708,20 +2768,23 @@ async function loadEmbeddingConfig() {
   embeddingConfig = await api(`/api/v1/campaigns/${selectedCampaign.id}/memory/embedding-config`);
   discoveredEmbeddingModels = [];
   elements.embeddingEnabled.checked = embeddingConfig.enabled;
+  elements.embeddingRetrievalImplementation.value = embeddingConfig.retrievalImplementation;
+  elements.embeddingRetrievalShadowEnabled.checked = embeddingConfig.retrievalShadowEnabled;
   populateEmbeddingProviderSelect();
   if (embeddingConfig.providerProfileId) elements.embeddingProvider.value = embeddingConfig.providerProfileId;
-  elements.embeddingModel.value = embeddingConfig.model || "text-embedding-nomic-embed-text-v1.5";
+  elements.embeddingModel.value = embeddingConfig.model ?? "";
   elements.embeddingDocumentPrefix.value = embeddingConfig.documentPrefix ?? "";
   elements.embeddingQueryPrefix.value = embeddingConfig.queryPrefix ?? "";
-  elements.embeddingBatchSize.value = String(embeddingConfig.batchSize || 16);
+  elements.embeddingBatchSize.value = String(embeddingConfig.batchSize ?? "");
+  elements.reindexEmbeddings.disabled = !embeddingConfig.enabled;
   elements.discoverEmbeddingModels.disabled = !elements.embeddingProvider.value;
   elements.embeddingModel.disabled = !elements.embeddingProvider.value;
   const embeddingProvider = providers.find((provider) => provider.id === elements.embeddingProvider.value);
   const fallbackLabel = embeddingProvider?.providerRole === "text" ? `text provider ${embeddingProvider.name}` : embeddingProvider?.name;
   elements.embeddingStatus.className = "status";
   elements.embeddingStatus.textContent = embeddingConfig.enabled
-    ? `Hybrid retrieval is enabled with ${fallbackLabel || "the selected provider"} and ${embeddingConfig.model}. Effective task prefixes: document “${embeddingConfig.effectiveDocumentPrefix || "none"}”, query “${embeddingConfig.effectiveQueryPrefix || "none"}”. New accepted memories are indexed by a durable worker job.`
-    : `Semantic retrieval is disabled for this campaign. When enabled, it will use ${fallbackLabel || "the selected provider"} with ${embeddingConfig.model}; deterministic lexical and chronological retrieval remains active.`;
+    ? `Semantic Retrieval is enabled with ${fallbackLabel || "the selected provider"} and ${embeddingConfig.model}. Effective task prefixes: document “${embeddingConfig.effectiveDocumentPrefix || "none"}”, query “${embeddingConfig.effectiveQueryPrefix || "none"}”. New accepted memories are indexed by a durable worker job.`
+    : `Semantic Retrieval is off for this campaign. Chronicle local memory remains available when semantic retrieval is off.`;
 }
 
 async function loadIllustrationConfig() {
@@ -2906,6 +2969,19 @@ function populateEmbeddingProviderSelect() {
   const embeddingProviders = enabledProviders("embedding");
   elements.embeddingProvider.replaceChildren();
   if (embeddingProviders.length) {
+    const configuredTextProvider = providers.find((provider) => provider.id === current && provider.providerRole === "text");
+    if (configuredTextProvider) {
+      const eligiblePlaceholder = new Option("Choose an eligible embedding provider", "", true, true);
+      eligiblePlaceholder.disabled = true;
+      const configuredTextOption = new Option(`Configured text provider is no longer eligible · ${configuredTextProvider.name}`, configuredTextProvider.id);
+      configuredTextOption.disabled = true;
+      elements.embeddingProvider.append(eligiblePlaceholder, configuredTextOption);
+      for (const provider of embeddingProviders) {
+        elements.embeddingProvider.append(new Option(`${provider.name} · ${providerTypeLabel(provider.providerType)}${provider.isDefault ? " · default" : ""}`, provider.id));
+      }
+      elements.embeddingProvider.value = "";
+      return;
+    }
     const fallback = defaultProvider("embedding");
     elements.embeddingProvider.append(new Option(fallback ? `Use default · ${fallback.name}` : "Select an embedding provider", ""));
     for (const provider of embeddingProviders) {
@@ -2914,7 +2990,8 @@ function populateEmbeddingProviderSelect() {
     elements.embeddingProvider.value = embeddingProviders.some((provider) => provider.id === current) ? current : (fallback?.id || "");
     return;
   }
-  const textFallback = effectiveCampaignProvider("text");
+  const textFallback = providers.find((provider) => provider.id === current && provider.providerRole === "text" && provider.enabled)
+    || effectiveCampaignProvider("text");
   if (textFallback) {
     elements.embeddingProvider.append(new Option(`Text fallback · ${textFallback.name} · ${textFallback.providerType}`, textFallback.id));
     elements.embeddingProvider.value = textFallback.id;
@@ -3687,14 +3764,28 @@ async function discoverEmbeddingModels() {
   }
 }
 
+function embeddingConfigPayload(values) {
+  return {
+    enabled: values.enabled === true,
+    providerProfileId: values.providerProfileId || null,
+    model: String(values.model ?? ""),
+    batchSize: Number(values.batchSize),
+    documentPrefix: values.documentPrefix || null,
+    queryPrefix: values.queryPrefix || null,
+    retrievalImplementation: String(values.retrievalImplementation ?? ""),
+    retrievalShadowEnabled: values.retrievalShadowEnabled === true
+  };
+}
+
 function renderEmbeddingJobProgress(job) {
   const progress = job?.progress || {};
-  const embedded = Number(progress.embedded || 0);
-  const total = Number(progress.total || 0);
+  const embedded = Number(progress.embeddedChunks ?? progress.embedded ?? 0);
+  const total = Number(progress.totalParents ?? progress.total ?? 0);
+  const processed = Number(progress.processedParents ?? progress.updated ?? embedded);
   elements.embeddingProgress.classList.remove("hidden");
   if (total > 0) {
     elements.embeddingProgressBar.max = total;
-    elements.embeddingProgressBar.value = Math.min(total, embedded);
+    elements.embeddingProgressBar.value = Math.min(total, processed);
   } else if (["completed", "failed"].includes(job.status)) {
     elements.embeddingProgressBar.max = 1;
     elements.embeddingProgressBar.value = job.status === "completed" ? 1 : 0;
@@ -3703,24 +3794,26 @@ function renderEmbeddingJobProgress(job) {
   }
   const labels = {
     queued: "Indexing queued; waiting for a Chronicle worker…",
-    running: total ? `Indexing semantic memory: ${number(embedded)} of ${number(total)} memories…` : "Indexing semantic memory…",
-    completed: total ? `Semantic indexing complete: ${number(total)} memories are ready.` : "Semantic indexing completed successfully.",
-    failed: `Semantic indexing failed${job.errorMessage ? `: ${job.errorMessage}` : "."}`
+    running: total ? `Indexing Semantic Retrieval: ${number(processed)} of ${number(total)} memories…` : "Indexing Semantic Retrieval…",
+    completed: total ? `Semantic Retrieval indexing complete: ${number(total)} memories processed.` : "Semantic Retrieval indexing completed successfully.",
+    failed: `Semantic Retrieval indexing failed${job.errorMessage ? `: ${job.errorMessage}` : "."}`
   };
   elements.embeddingProgressLabel.textContent = labels[job.status] || "Checking semantic indexing status…";
   elements.saveEmbeddingConfig.textContent = job.status === "queued"
     ? "Index queued…"
     : job.status === "running"
-      ? total ? `Indexing ${embedded}/${total}…` : "Indexing…"
+      ? total ? `Indexing ${processed}/${total}…` : "Indexing…"
       : job.status === "completed" ? "Index complete ✓" : "Index failed";
   elements.saveEmbeddingConfig.classList.toggle("busy", ["queued", "running"].includes(job.status));
   if (["queued", "running"].includes(job.status)) {
-    elements.semanticMemoryHealth.dataset.state = "indexing";
-    elements.semanticMemoryHealthBadge.textContent = "Indexing";
-    elements.semanticMemoryHealthTitle.textContent = total
-      ? `Semantic indexing in progress · ${number(Math.round(embedded / total * 100))}%`
-      : "Semantic indexing in progress";
-    elements.semanticMemoryHealthMessage.textContent = labels[job.status];
+    renderSemanticMemoryHealth({
+      ...embeddingConfig,
+      status: "indexing",
+      message: labels[job.status],
+      coveragePercent: total ? Math.round(processed / total * 100) : 0,
+      jobStatus: job.status,
+      progress
+    });
   }
 }
 
@@ -3737,8 +3830,8 @@ async function monitorEmbeddingJob(jobId, campaignId, sequence) {
       await refreshCampaignMemoryMetrics();
       elements.embeddingStatus.className = `status ${job.status === "completed" ? "success" : "error"}`;
       elements.embeddingStatus.textContent = job.status === "completed"
-        ? "Semantic memory indexing completed. Hybrid retrieval is ready for the indexed Chronicle coverage shown above."
-        : `${job.errorMessage || "Semantic memory indexing failed."} Lexical Chronicle retrieval remains active; correct the provider or model and save again to retry.`;
+        ? "Semantic Retrieval indexing completed. Current compatible vector coverage is shown above."
+        : `${job.errorMessage || "Semantic Retrieval indexing failed."} Chronicle local memory remains available when semantic retrieval is off or unavailable.`;
       return job;
     }
     await embeddingPollDelay(1000);
@@ -3749,6 +3842,7 @@ async function monitorEmbeddingJob(jobId, campaignId, sequence) {
 async function resumeEmbeddingJobProgress(jobId, campaignId) {
   const sequence = ++embeddingJobPollSequence;
   elements.saveEmbeddingConfig.disabled = true;
+  elements.reindexEmbeddings.disabled = true;
   elements.saveEmbeddingConfig.classList.add("busy");
   try {
     await monitorEmbeddingJob(jobId, campaignId, sequence);
@@ -3760,6 +3854,7 @@ async function resumeEmbeddingJobProgress(jobId, campaignId) {
   } finally {
     if (sequence === embeddingJobPollSequence && selectedCampaign?.id === campaignId) {
       elements.saveEmbeddingConfig.disabled = false;
+      elements.reindexEmbeddings.disabled = !embeddingConfig?.enabled;
       elements.saveEmbeddingConfig.classList.remove("busy");
       elements.saveEmbeddingConfig.textContent = "Save & index";
     }
@@ -3778,27 +3873,34 @@ async function saveEmbeddingConfig(event) {
   elements.embeddingStatus.className = "status";
   elements.embeddingStatus.textContent = "Saving campaign memory configuration…";
   try {
+    if (elements.embeddingEnabled.checked && !elements.embeddingProvider.value) {
+      throw new Error("Choose an eligible embedding provider before enabling Semantic Retrieval.");
+    }
     const saved = await api(`/api/v1/campaigns/${selectedCampaign.id}/memory/embedding-config`, {
       method: "PUT",
-      body: JSON.stringify({
+      body: JSON.stringify(embeddingConfigPayload({
         enabled: elements.embeddingEnabled.checked,
         providerProfileId: elements.embeddingProvider.value || null,
         model: elements.embeddingModel.value,
         batchSize: elements.embeddingBatchSize.value,
         documentPrefix: elements.embeddingDocumentPrefix.value || null,
-        queryPrefix: elements.embeddingQueryPrefix.value || null
-      })
+        queryPrefix: elements.embeddingQueryPrefix.value || null,
+        retrievalImplementation: elements.embeddingRetrievalImplementation.value,
+        retrievalShadowEnabled: elements.embeddingRetrievalShadowEnabled.checked
+      }))
     });
     embeddingConfig = saved;
-    if (saved.enabled && !saved.jobId) throw new Error("Semantic memory was enabled, but the indexing job was not created.");
+    elements.embeddingRetrievalImplementation.value = saved.retrievalImplementation;
+    elements.embeddingRetrievalShadowEnabled.checked = saved.retrievalShadowEnabled;
+    if (saved.enabled && !saved.jobId) throw new Error("Semantic Retrieval was enabled, but the indexing job was not created.");
     if (saved.enabled && saved.jobId) {
-      elements.embeddingStatus.textContent = `Semantic indexing queued as durable job ${saved.jobId}. Live progress will remain here until it completes or fails.`;
+      elements.embeddingStatus.textContent = `Semantic Retrieval indexing queued as durable job ${saved.jobId}. Live progress will remain here until it completes or fails.`;
       await monitorEmbeddingJob(saved.jobId, campaignId, sequence);
     } else {
       elements.embeddingProgress.classList.add("hidden");
       await refreshCampaignMemoryMetrics();
       elements.embeddingStatus.className = "status success";
-      elements.embeddingStatus.textContent = "Semantic retrieval disabled and derived vectors removed. Lexical Chronicle retrieval remains available.";
+      elements.embeddingStatus.textContent = "Semantic Retrieval disabled. Chronicle local lexical retrieval remains available; retained legacy embeddings remain available for rollback.";
     }
   } catch (error) {
     elements.embeddingStatus.className = "status error";
@@ -3808,6 +3910,36 @@ async function saveEmbeddingConfig(event) {
       elements.saveEmbeddingConfig.disabled = false;
       elements.saveEmbeddingConfig.classList.remove("busy");
       elements.saveEmbeddingConfig.textContent = "Save & index";
+      elements.reindexEmbeddings.disabled = !embeddingConfig?.enabled;
+    }
+  }
+}
+
+async function reindexSemanticRetrieval() {
+  if (!selectedCampaign || !embeddingConfig?.enabled) return;
+  const campaignId = selectedCampaign.id;
+  const sequence = ++embeddingJobPollSequence;
+  elements.reindexEmbeddings.disabled = true;
+  elements.saveEmbeddingConfig.disabled = true;
+  elements.embeddingStatus.className = "status";
+  elements.embeddingStatus.textContent = "Queueing a Semantic Retrieval reindex…";
+  try {
+    const queued = await api(`/api/v1/campaigns/${campaignId}/memory/embeddings/reindex`, {
+      method: "POST",
+      body: "{}"
+    });
+    if (!queued.jobId) throw new Error("The Semantic Retrieval reindex did not return a job identifier.");
+    elements.embeddingStatus.textContent = `Semantic Retrieval reindex job ${queued.jobId} queued.`;
+    await monitorEmbeddingJob(queued.jobId, campaignId, sequence);
+  } catch (error) {
+    if (sequence === embeddingJobPollSequence && selectedCampaign?.id === campaignId) {
+      elements.embeddingStatus.className = "status error";
+      elements.embeddingStatus.textContent = error.message || String(error);
+    }
+  } finally {
+    if (sequence === embeddingJobPollSequence && selectedCampaign?.id === campaignId) {
+      elements.reindexEmbeddings.disabled = !embeddingConfig?.enabled;
+      elements.saveEmbeddingConfig.disabled = false;
     }
   }
 }
@@ -4975,6 +5107,7 @@ elements.campaignWorldVersion.addEventListener("change", () => {
 });
 elements.contextForm.addEventListener("submit", previewContext);
 elements.reindexMemory.addEventListener("click", rebuildMemory);
+elements.reindexEmbeddings.addEventListener("click", reindexSemanticRetrieval);
 if (elements.newProviderButton) {
   elements.newProviderButton.addEventListener("click", () => {
     resetProviderForm();

@@ -4,6 +4,14 @@ import path from "node:path";
 import { beforeAll, describe, expect, test } from "vitest";
 
 const rootDirectory = process.cwd();
+const activeUiImplementationFiles = [
+  "apps/web/public/index.html",
+  "apps/web/public/nexus.js",
+  "apps/web/public/nexus.css",
+  "apps/web/src/story.js",
+  "apps/web-next/src/campaign-editor-page.ts",
+  "apps/web-next/src/styles.css"
+] as const;
 
 function localAssetPaths(html: string, prefix: string): string[] {
   return [...html.matchAll(/(?:href|src)="([^"]+)"/gu)]
@@ -33,6 +41,14 @@ describe("web build contract", () => {
     expect(existsSync(path.join(distDirectory, "legacy-client.js"))).toBe(true);
     expect(storyHtml).toContain('src="/nexus/legacy-client.js"');
     expect(existsSync(path.join(distDirectory, "story.js"))).toBe(false);
+    const emitted = [html, ...localAssetPaths(html, "/nexus/")
+      .filter((assetPath) => assetPath.endsWith(".js"))
+      .map((assetPath) => readFileSync(path.join(distDirectory, assetPath), "utf8"))].join("\n");
+    expect(emitted).toContain("Semantic Retrieval");
+    expect(emitted).toContain("embeddingRetrievalImplementation");
+    expect(emitted).toContain("embeddingRetrievalShadowEnabled");
+    expect(emitted).toContain("retrievalImplementation");
+    expect(emitted).toContain("retrievalShadowEnabled");
   });
 
   test("replacement build emits HTML whose hashed assets exist", () => {
@@ -48,5 +64,15 @@ describe("web build contract", () => {
     for (const assetPath of assetPaths) {
       expect(existsSync(path.join(distDirectory, assetPath)), assetPath).toBe(true);
     }
+    const emitted = [html, ...assetPaths.filter((assetPath) => assetPath.endsWith(".js"))
+      .map((assetPath) => readFileSync(path.join(distDirectory, assetPath), "utf8"))].join("\n");
+    expect(emitted).toContain("Semantic Retrieval");
+    expect(emitted).toContain("retrievalImplementation");
+    expect(emitted).toContain("retrievalShadowEnabled");
+  });
+
+  test("keeps the reference-only root client outside the active UI implementation set", () => {
+    expect(activeUiImplementationFiles).not.toContain("index.html");
+    expect(activeUiImplementationFiles).toHaveLength(6);
   });
 });

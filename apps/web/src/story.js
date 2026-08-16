@@ -368,7 +368,7 @@ function formatReportedCost(cost) {
 }
 
 function reportedCostTooltip(cost) {
-  const labels = { story: "Story", image: "Images", memory: "Semantic memory" };
+  const labels = { story: "Story", image: "Images", memory: "Semantic retrieval" };
   const details = Object.entries(cost?.byCategory || {})
     .filter(([, amount]) => Number(amount) > 0)
     .map(([category, amount]) => `${labels[category] || category}: ${formatReportedCost({ amount, currency: cost.currency })}`);

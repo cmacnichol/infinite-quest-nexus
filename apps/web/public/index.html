@@ -292,44 +292,61 @@
             <div>
               <p class="eyebrow">Chronicle</p>
               <h3 id="campaignContextTitle">Memory and context</h3>
-              <p>Control semantic lookup and preview the campaign context sent to story generation.</p>
+              <p>Control optional Semantic Retrieval and preview the campaign context sent to story generation.</p>
             </div>
             <button id="reindexMemory" class="button secondary" type="button" disabled>Rebuild memory</button>
           </div>
 
         <div id="memoryMetrics" class="metrics" aria-live="polite"></div>
 
-        <div id="semanticMemoryHealth" class="semantic-memory-health" data-state="disabled" role="status" aria-live="polite">
-          <span id="semanticMemoryHealthBadge" class="health-badge">Disabled</span>
+        <div id="semanticMemoryHealth" class="semantic-memory-health" role="status" aria-live="polite" aria-atomic="true">
+          <span id="semanticMemoryHealthBadge" class="health-badge">Chronicle available</span>
           <div>
-            <strong id="semanticMemoryHealthTitle">Semantic memory disabled</strong>
-            <p id="semanticMemoryHealthMessage">Chronicle is using deterministic lexical and chronological retrieval.</p>
+            <strong id="semanticMemoryHealthTitle">Chronicle local memory is available</strong>
+            <p id="semanticMemoryHealthMessage">Semantic Retrieval status will appear after a campaign is selected.</p>
           </div>
+          <dl id="semanticMemoryHealthDetails" class="chronicle-health-details"></dl>
+          <p class="chronicle-availability-note">Chronicle local memory remains available when semantic retrieval is off.</p>
         </div>
 
         <form id="embeddingForm" class="embedding-controls">
-          <label class="toggle-field"><input id="embeddingEnabled" type="checkbox"> Enable hybrid semantic memory for this campaign</label>
+          <fieldset class="semantic-retrieval-controls">
+            <legend>Semantic Retrieval</legend>
+            <label class="toggle-field"><input id="embeddingEnabled" type="checkbox"> Enable Semantic Retrieval for this campaign</label>
+            <label>Production implementation
+              <select id="embeddingRetrievalImplementation" required>
+                <option value="" disabled selected>Configuration unavailable</option>
+                <option value="legacy_hybrid">Legacy hybrid</option>
+                <option value="chunked_hybrid">Chunked hybrid</option>
+              </select>
+            </label>
+            <label class="toggle-field"><input id="embeddingRetrievalShadowEnabled" type="checkbox"> Compare retrieval implementations in shadow</label>
+            <p class="field-note">Shadow comparison records safe diagnostics only. It never changes production selection.</p>
+          </fieldset>
           <label title="Selects the endpoint used to create Chronicle vectors. If no embedding profile is enabled, this automatically uses the campaign's effective text provider.">Embedding provider<select id="embeddingProvider"><option value="">Uses the campaign text provider when no embedding provider is enabled</option></select></label>
           <label class="model-discovery-field" title="Names the embedding model sent to the selected endpoint. Refresh to load the selected provider's model inventory.">
             <span class="field-label-row"><span>Embedding model</span><button id="discoverEmbeddingModels" class="mini-icon-button" type="button" aria-label="Refresh embedding models from endpoint" title="Refresh active and inactive models from the selected embedding endpoint">↻</button></span>
-            <input id="embeddingModel" maxlength="500" value="text-embedding-nomic-embed-text-v1.5" readonly role="button" aria-haspopup="dialog" aria-controls="providerModelDialog" placeholder="Click to choose an embedding model">
+            <input id="embeddingModel" maxlength="500" readonly role="button" aria-haspopup="dialog" aria-controls="providerModelDialog" placeholder="Click to choose an embedding model">
           </label>
           <label title="Optional document-task prefix. Leave blank to use the model-aware default, including search_document for Nomic retrieval models.">Document prefix<input id="embeddingDocumentPrefix" maxlength="200" placeholder="Automatic for selected model"></label>
           <label title="Optional query-task prefix. Leave blank to use the model-aware default, including search_query for Nomic retrieval models.">Query prefix<input id="embeddingQueryPrefix" maxlength="200" placeholder="Automatic for selected model"></label>
-          <label>Batch size<input id="embeddingBatchSize" type="number" min="1" max="128" value="16"></label>
-          <button id="saveEmbeddingConfig" class="button primary" type="submit" disabled>Save &amp; index</button>
+          <label>Batch size<input id="embeddingBatchSize" type="number" min="1" max="128"></label>
+          <div class="chronicle-index-actions">
+            <button id="reindexEmbeddings" class="button secondary" type="button" disabled>Reindex Semantic Retrieval</button>
+            <button id="saveEmbeddingConfig" class="button primary" type="submit" disabled>Save &amp; index</button>
+          </div>
         </form>
         <div id="embeddingProgress" class="embedding-progress hidden" aria-live="polite">
           <progress id="embeddingProgressBar" max="100" value="0"></progress>
-          <span id="embeddingProgressLabel">Waiting to index semantic memory…</span>
+          <span id="embeddingProgressLabel">Waiting to index Semantic Retrieval…</span>
         </div>
-        <div id="embeddingStatus" class="status">Semantic retrieval is optional. Without it, Chronicle uses full-text, entity, chronology, and recency retrieval.</div>
+        <div id="embeddingStatus" class="status" role="status" aria-live="polite">Semantic Retrieval is optional. Without it, Chronicle local memory uses full-text, entity, chronology, and recency retrieval.</div>
 
         <form id="contextForm" class="context-controls">
           <label>
             Context budget
             <input id="budgetTokens" type="number" min="512" max="1000000" step="1024" value="32000" aria-describedby="budgetTokensSource">
-            <span id="budgetTokensSource" class="field-note">Select a discovered embedding model to apply an advertised context limit automatically.</span>
+            <span id="budgetTokensSource" class="field-note">The selected text provider supplies the available input limit.</span>
           </label>
           <label>
             Compression
@@ -358,7 +375,7 @@
           </dl>
         </details>
 
-        <div id="contextSummary" class="status hidden"></div>
+        <div id="contextSummary" class="status hidden" role="status" aria-live="polite"></div>
         <details class="context-preview-details">
           <summary>View context preview</summary>
           <pre id="contextPreview" class="context-preview" tabindex="0">The preview deliberately excludes rolls, mechanics records, private scratchpad content, rejected output, and credentials.</pre>

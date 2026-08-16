@@ -1,7 +1,11 @@
 import { readFileSync } from "node:fs";
+import { parseHTML } from "linkedom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { campaignApi, CampaignEditorApiError, loadCampaign } from "../../apps/web-next/src/campaign-editor-api.js";
+import * as campaignEditorPageModule from "../../apps/web-next/src/campaign-editor-page.js";
 import { CAMPAIGN_SECTIONS, campaignEditorPath, campaignRouteFromPath, campaignStateInspectorMarkup, escapeCampaignText, firstNarrationSentence, narrationCorrectionDialogMarkup, withCampaignActionState } from "../../apps/web-next/src/campaign-editor-model.js";
+
+const campaignEditorPage = campaignEditorPageModule as Record<string, unknown>;
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -141,7 +145,7 @@ describe("web-next campaign parity inventory", () => {
   it("exposes every legacy campaign-management backend seam", () => {
     for (const seam of [
       "/character-profile", "/state", "/turns?limit=100", "/memory/metrics", "/memory/embedding-config",
-      "/memory/context-preview", "/memory/reindex", "/illustration-config", "/illustration-backfill/preview",
+      "/memory/context-preview", "/memory/reindex", "/memory/embeddings/reindex", "/illustration-config", "/illustration-backfill/preview",
       "/illustration-backfill", "/migrate-world", "/transfer-world/preview", "/transfer-world",
       "/readable-export", "/export", "/branch", "/rewind", "/correction", "/generations/retry-latest",
       "/illustration-segments"
@@ -171,5 +175,203 @@ describe("web-next campaign parity inventory", () => {
     expect(source).toContain("firstNarrationSentence(turn.narration)");
     expect(source).toContain("<summary>Manage turn</summary>");
     expect(source).not.toContain('${text(turn.narration)}</div><div class="turn-actions">');
+  });
+
+  it("renders the shared Semantic Retrieval controls and every health meaning", () => {
+    const markup = campaignEditorPage.chronicleMarkup;
+    const healthView = campaignEditorPage.semanticRetrievalHealthView;
+    expect(typeof markup).toBe("function");
+    expect(typeof healthView).toBe("function");
+    if (typeof markup !== "function" || typeof healthView !== "function") return;
+
+    const html = (markup as (metrics: Record<string, unknown>, config: Record<string, unknown>, providers: unknown[]) => string)(
+      { turns: 4, memoryCount: 8, semanticHealth: { status: "healthy", message: "Ready.", coveragePercent: 100, indexedMemories: 8, totalMemories: 8, jobStatus: "completed", progress: {}, retrievalImplementation: "chunked_hybrid", retrievalShadowEnabled: true, fallbackCode: null, chunkProtocolVersion: "chronicle-chunk-v1" } },
+      { enabled: true, providerProfileId: null, model: "embed-model", batchSize: 16, documentPrefix: null, queryPrefix: null, retrievalImplementation: "chunked_hybrid", retrievalShadowEnabled: true },
+      []
+    );
+    expect(html).toContain("Semantic Retrieval");
+    expect(html).toContain('name="retrievalImplementation"');
+    expect(html).toContain('value="legacy_hybrid"');
+    expect(html).toContain('value="chunked_hybrid" selected');
+    expect(html).toContain('name="retrievalShadowEnabled" checked');
+    expect(html).toContain("100% compatible vector coverage");
+    expect(html).toContain("Production · Chunked hybrid");
+    expect(html).toContain("Shadow comparison · On");
+    expect(html).toContain("Chronicle local memory remains available when semantic retrieval is off.");
+    expect(html).toContain('data-action="reindex-embeddings"');
+
+    const expectedLabels = {
+      chronicle_available: "Chronicle available",
+      semantic_disabled: "Semantic Retrieval off",
+      indexing: "Indexing",
+      healthy: "Ready",
+      partially_indexed: "Partially indexed",
+      provider_degraded: "Provider degraded",
+      provider_unavailable: "Provider unavailable",
+      fallback_active: "Fallback active",
+      chunk_protocol_outdated: "Chunk protocol outdated",
+      rebuild_required: "Rebuild required"
+    };
+    for (const [status, label] of Object.entries(expectedLabels)) {
+      expect((healthView as (health: Record<string, unknown>) => Record<string, string>)({ status, coveragePercent: 50, fallbackCode: null })).toMatchObject({ status, label });
+    }
+    expect((healthView as (health: Record<string, unknown>) => Record<string, string>)({ status: "fallback_active", coveragePercent: 50, fallbackCode: "<raw-error>" })).toMatchObject({ fallbackLabel: "Unavailable" });
+  });
+
+  it("sends the shared retrieval fields without adding UI defaults", () => {
+    const payload = campaignEditorPage.chronicleEmbeddingConfigPayload;
+    expect(typeof payload).toBe("function");
+    if (typeof payload !== "function") return;
+    expect((payload as (values: Record<string, string>) => Record<string, unknown>)({
+      enabled: "true",
+      providerProfileId: "provider-1",
+      model: "embed-model",
+      batchSize: "24",
+      documentPrefix: "document: ",
+      queryPrefix: "query: ",
+      retrievalImplementation: "chunked_hybrid",
+      retrievalShadowEnabled: "on"
+    })).toEqual({
+      enabled: true,
+      providerProfileId: "provider-1",
+      model: "embed-model",
+      batchSize: 24,
+      documentPrefix: "document: ",
+      queryPrefix: "query: ",
+      retrievalImplementation: "chunked_hybrid",
+      retrievalShadowEnabled: true
+    });
+  });
+
+  it("offers the effective campaign text provider when no dedicated embedding provider exists", () => {
+    const markup = campaignEditorPage.chronicleMarkup;
+    expect(typeof markup).toBe("function");
+    if (typeof markup !== "function") return;
+
+    const html = (markup as (
+      metrics: Record<string, unknown>,
+      config: Record<string, unknown>,
+      providers: unknown[],
+      campaignTextProviderProfileId: string | null
+    ) => string)(
+      { semanticHealth: {} },
+      { enabled: false, providerProfileId: null, retrievalImplementation: "legacy_hybrid", retrievalShadowEnabled: false },
+      [{ id: "text-1", name: "Campaign text", providerType: "openai_compatible", providerRole: "text", enabled: true }],
+      "text-1"
+    );
+
+    expect(html).toContain('<option value="text-1" selected>Text fallback · Campaign text · openai_compatible</option>');
+    expect(html).not.toContain("No embedding provider profiles available");
+  });
+
+  it("preserves an explicitly configured text fallback and escapes provider option markup", () => {
+    const markup = campaignEditorPage.chronicleMarkup;
+    expect(typeof markup).toBe("function");
+    if (typeof markup !== "function") return;
+
+    const html = (markup as (
+      metrics: Record<string, unknown>,
+      config: Record<string, unknown>,
+      providers: unknown[],
+      campaignTextProviderProfileId: string | null
+    ) => string)(
+      { semanticHealth: {} },
+      { enabled: true, providerProfileId: "text-2", retrievalImplementation: "legacy_hybrid", retrievalShadowEnabled: false },
+      [
+        { id: "text-1", name: "Campaign text", providerType: "openai_compatible", providerRole: "text", enabled: true },
+        { id: "text-2", name: '</option><img src=x onerror="alert(1)">', providerType: "openai_compatible", providerRole: "text", enabled: true }
+      ],
+      "text-1"
+    );
+
+    expect(html).toContain('<option value="text-2" selected>Text fallback · &lt;/option&gt;&lt;img src=x onerror=&quot;alert(1)&quot;&gt; · openai_compatible</option>');
+    expect(html).not.toContain('<img src=x onerror="alert(1)">');
+  });
+
+  it("surfaces a configured text provider as incompatible when a dedicated provider now exists", () => {
+    const markup = campaignEditorPage.chronicleMarkup;
+    expect(typeof markup).toBe("function");
+    if (typeof markup !== "function") return;
+
+    const html = (markup as (
+      metrics: Record<string, unknown>,
+      config: Record<string, unknown>,
+      providers: unknown[],
+      campaignTextProviderProfileId: string | null
+    ) => string)(
+      { semanticHealth: {} },
+      { enabled: true, providerProfileId: "text-2", retrievalImplementation: "legacy_hybrid", retrievalShadowEnabled: false },
+      [
+        { id: "text-2", name: "Previously selected text", providerType: "openai_compatible", providerRole: "text", enabled: true },
+        { id: "embed-1", name: "Dedicated embeddings", providerType: "openai_compatible", providerRole: "embedding", enabled: true }
+      ],
+      "text-2"
+    );
+
+    expect(html).toContain('<option value="" selected disabled>Choose an eligible embedding provider</option>');
+    expect(html).toContain('<option value="text-2" disabled>Configured text provider is no longer eligible · Previously selected text</option>');
+    expect(html).toContain('<option value="embed-1">Dedicated embeddings · openai_compatible</option>');
+    expect(html).not.toContain('<option value="embed-1" selected>');
+  });
+
+  it("normalizes real embed_campaign progress fields", () => {
+    const view = campaignEditorPage.semanticRetrievalHealthView as (health: Record<string, unknown>) => Record<string, string>;
+    expect(view({ jobStatus: "running", progress: { embedded: 7, total: 11 } }).jobLabel).toBe("Running · 7 of 11 memories");
+  });
+
+  it("refreshes Chronicle status in place without discarding unsaved fields or re-enabling busy actions", () => {
+    const refresh = campaignEditorPage.refreshChronicleStatusProjection;
+    const setBusy = campaignEditorPage.setChronicleOperationBusy;
+    expect(typeof refresh).toBe("function");
+    expect(typeof setBusy).toBe("function");
+    if (typeof refresh !== "function" || typeof setBusy !== "function") return;
+    const { document } = parseHTML("<div id=target></div>");
+    const target = document.querySelector<HTMLElement>("#target")!;
+    const markup = campaignEditorPage.chronicleMarkup as (metrics: Record<string, unknown>, config: Record<string, unknown>, providers: unknown[]) => string;
+    target.innerHTML = markup(
+      { memoryCount: 4, semanticHealth: { status: "healthy", message: "Ready", coveragePercent: 100 } },
+      { enabled: true, providerProfileId: "embed-1", model: "saved-model", batchSize: 8, retrievalImplementation: "chunked_hybrid", retrievalShadowEnabled: false },
+      [{ id: "embed-1", name: "Embeddings", providerType: "openai_compatible", providerRole: "embedding", enabled: true }]
+    );
+    const form = target.querySelector<HTMLFormElement>("#chronicle-form")!;
+    const model = form.querySelector<HTMLInputElement>('input[name="model"]')!;
+    model.value = "unsaved-model";
+    (setBusy as (target: HTMLElement, busy: boolean, enabled: boolean) => void)(target, true, true);
+
+    (refresh as (target: HTMLElement, markup: string) => void)(target, markup(
+      { memoryCount: 4, semanticHealth: { status: "indexing", message: "Indexing", coveragePercent: 50, jobStatus: "running", progress: { embedded: 2, total: 4 } } },
+      { enabled: true, providerProfileId: "embed-1", model: "saved-model", batchSize: 8, retrievalImplementation: "chunked_hybrid", retrievalShadowEnabled: false },
+      []
+    ));
+
+    expect(target.querySelector("#chronicle-form")).toBe(form);
+    expect(model.value).toBe("unsaved-model");
+    expect(target.textContent).toContain("2 of 4 memories");
+    expect(Array.from(form.querySelectorAll<HTMLButtonElement>('button[type="submit"], button[data-action="rebuild-memory"], button[data-action="reindex-embeddings"]')).every((button) => button.disabled)).toBe(true);
+  });
+
+  it("polls a durable Chronicle job through completion and refreshes each progress response", async () => {
+    const monitor = campaignEditorPage.monitorChronicleJob;
+    expect(typeof monitor).toBe("function");
+    if (typeof monitor !== "function") return;
+    const jobs = [{ status: "queued", progress: {} }, { status: "running", progress: { embedded: 2, total: 4 } }, { status: "completed", progress: { embedded: 4, total: 4 } }];
+    const loadJob = vi.fn(async () => jobs.shift());
+    const refresh = vi.fn(async () => undefined);
+    const onProgress = vi.fn();
+    const wait = vi.fn(async () => undefined);
+
+    await expect((monitor as (jobId: string, dependencies: Record<string, unknown>) => Promise<unknown>)("job-1", { loadJob, refresh, onProgress, wait, maximumPolls: 4 })).resolves.toMatchObject({ status: "completed" });
+    expect(loadJob).toHaveBeenCalledTimes(3);
+    expect(refresh).toHaveBeenCalledTimes(3);
+    expect(onProgress.mock.calls.map(([job]) => job.status)).toEqual(["queued", "running", "completed"]);
+    expect(wait).toHaveBeenCalledTimes(2);
+  });
+
+  it("wires every Chronicle enqueue response into durable job monitoring and metrics refresh", () => {
+    expect(source).toContain('/api/v1/jobs/${encodeURIComponent(jobId)}');
+    expect(source).toContain('await monitorAndRefreshChronicle(saved.jobId, "Semantic Retrieval indexing")');
+    expect(source).toContain('await monitorAndRefreshChronicle(queued.jobId, "Chronicle rebuild")');
+    expect(source).toContain('await monitorAndRefreshChronicle(queued.jobId, "Semantic Retrieval reindex")');
+    expect(source).toContain('campaignApi.get<JsonRecord>(campaign.id,"/memory/metrics",controller.signal)');
   });
 });
