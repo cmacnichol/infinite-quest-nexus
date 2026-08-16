@@ -108,3 +108,18 @@ UPDATE campaign_memory_configs
   for production context construction.
 - Disabling chunked retrieval is a bounded configuration operation rather than
   a destructive database migration or historical-state recovery procedure.
+
+## Legacy baseline
+
+The deterministic `chronicle-retrieval-evaluation.v1` corpus establishes the
+following label-only baseline for `legacy_hybrid` (generated locally at
+`tmp/chronicle-evaluation/legacy-baseline.json`, which is not committed):
+
+- recall@5/10/20: 1.0 / 1.0 / 1.0; MRR: 0.9411764705882353; NDCG: 1.0.
+- duplicate rate: 0; relevant memories per prompt token: 0.22727272727272727.
+- cross-campaign, future-turn, and superseded-fact leakage: 0 / 0 / 0.
+- p50/p95 evaluator latency: 4 ms / 14 ms; embedding requests/cost: 0 / 0;
+  semantic-only hits: 0; promotions/demotions: 0 / 0.
+
+The report contains fixture labels, hashes, ranks, and aggregates only; it
+does not persist prompt or Chronicle content.
