@@ -74,8 +74,7 @@ function normalizedContentHash(content: string): string {
 }
 
 function canonicalFactIds(candidate: ChronicleParentCandidate): readonly string[] {
-  if (candidate.memoryKind !== "canonical_fact") return [];
-  const value = candidate.parentMetadata.structuredFactIds;
+  const value = candidate.parentMetadata?.structuredFactIds;
   if (!Array.isArray(value)) return [];
   return [...new Set(value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0))]
     .sort(compareText);

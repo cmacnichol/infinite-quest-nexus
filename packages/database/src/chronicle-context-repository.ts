@@ -970,10 +970,13 @@ async function applyChunkedRankFusion(
     fusedRankByCandidateId.set(candidate.candidateId, currentFusedRank);
     previousFusedScore = candidate.score;
   });
+  const historicalCanonicalFusedRank = (fusedRankByCandidateId.size > 0
+    ? Math.max(...fusedRankByCandidateId.values())
+    : 0) + 1;
   const latestSceneParentMemoryId = memories.filter((memory) => memory.memory_kind === "turn_fiction")
     .sort((left, right) => left.ordinal - right.ordinal || compareDeterministically(left.id, right.id))
     .at(-1)?.id ?? null;
-  const parentSelection = selectDiverseChronicleParents(fused.flatMap((candidate, index) => {
+  const rankedChunkParents = fused.flatMap((candidate, index) => {
     const row = candidateRows.get(candidate.candidateId);
     return row ? [{
       candidateId: candidate.candidateId,
@@ -991,7 +994,31 @@ async function applyChunkedRankFusion(
       embedding: parseVector(row.chunk_embedding),
       fusedRank: fusedRankByCandidateId.get(candidate.candidateId) ?? index + 1
     }] : [];
-  }), {
+  });
+  // Cutoff-mode canonical rows come from loadContextMemories' independently scoped validity-window query.
+  const historicalCanonicalParents = scope.request.throughTurnNumber === undefined
+    ? []
+    : memories.filter((memory) => memory.memory_kind === "canonical_fact")
+      .map((memory) => ({
+        candidateId: `historical-canonical:${memory.id}`,
+        parentMemoryId: memory.id,
+        parentTurnId: memory.turn_id,
+        ordinal: memory.ordinal,
+        memoryKind: memory.memory_kind,
+        parentContent: memory.content,
+        parentMetadata: memory.metadata,
+        entities: memory.entities,
+        entityIds: memory.entity_ids,
+        chunkOrdinal: 0,
+        chunkKind: "canonical_fact" as const,
+        chunkContent: memory.content,
+        embedding: null,
+        fusedRank: historicalCanonicalFusedRank
+      }));
+  const parentSelection = selectDiverseChronicleParents([
+    ...rankedChunkParents,
+    ...historicalCanonicalParents
+  ], {
     maximumParents: 16,
     maximumParentsPerTurn: 2,
     includeAdjacentNarration: true,
@@ -1000,11 +1027,6 @@ async function applyChunkedRankFusion(
   const selectedParentContent = new Map(parentSelection.parents.map((parent) => (
     [parent.parentMemoryId, parent.content] as const
   )));
-  if (scope.request.throughTurnNumber !== undefined) {
-    for (const memory of memories) {
-      if (memory.memory_kind === "canonical_fact") selectedParentContent.set(memory.id, memory.content);
-    }
-  }
   const selectedParentIds = new Set(selectedParentContent.keys());
   const maximumScore = fused[0]?.score ?? 0;
   const memoriesById = new Map(memories.map((memory) => [memory.id, memory]));

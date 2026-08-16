@@ -440,6 +440,94 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     expect(await snapshotTurnRows(pool, ownerUserId, fixture.campaignId)).toEqual(before);
   });
 
+  it("applies one effective diversity selection to cutoff-valid historical canonical parents", async () => {
+    const { fixture, providerId } = await configuredFixture("historical canonical diversity");
+    const sameTurnId = await turn(
+      fixture,
+      2,
+      "Review the moon court records.",
+      "Three surviving facts are written beneath the arch."
+    );
+    const duplicateFactId = crypto.randomUUID();
+    const lineageFactId = crypto.randomUUID();
+    const turnLimitFactId = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO campaign_canonical_facts
+         (id,owner_user_id,campaign_id,world_version_id,source_turn_id,source_turn_number,source_fact_index,
+          content,normalized_content,valid_from_turn,valid_until_turn,superseded_by_fact_id)
+       VALUES ($1,$4,$5,$6,$7,2,0,'Café gate opens.','café gate opens.',2,null,null),
+              ($2,$4,$5,$6,$7,2,1,'The river oath binds the Moon Warden.',
+               'the river oath binds the moon warden.',2,null,null),
+              ($3,$4,$5,$6,$7,2,2,'The third surviving fact remains distinct.',
+               'the third surviving fact remains distinct.',2,null,null)`,
+      [duplicateFactId, lineageFactId, turnLimitFactId, fixture.ownerUserId, fixture.campaignId,
+        fixture.worldVersionId, sameTurnId]
+    );
+    const duplicateParent = await parent(fixture, {
+      turnId: sameTurnId,
+      kind: "open_thread",
+      ordinal: 2,
+      content: `- [fact_id: ${duplicateFactId}] CAFE\u0301 GATE OPENS.`,
+      metadata: { structuredFactIds: [duplicateFactId] }
+    });
+    const lineageParent = await parent(fixture, {
+      turnId: sameTurnId,
+      kind: "campaign_summary",
+      ordinal: 2,
+      content: "An unrelated inscription is filed here.",
+      metadata: { structuredFactIds: [lineageFactId] }
+    });
+    await embeddedChunk(fixture, providerId, {
+      parentId: duplicateParent.id,
+      parentContentHash: duplicateParent.contentHash,
+      kind: "open_thread",
+      content: "CAFE\u0301 GATE OPENS.",
+      vector: [1, 0]
+    });
+    await embeddedChunk(fixture, providerId, {
+      parentId: lineageParent.id,
+      parentContentHash: lineageParent.contentHash,
+      kind: "campaign_summary",
+      content: "An unrelated inscription is filed here.",
+      vector: [0, 1]
+    });
+
+    const preview = await transaction(providerId, []).buildContextPreview(pool, {
+      ...fixture,
+      request: {
+        budgetTokens: 4_096,
+        compression: "auto",
+        query: "café gate",
+        recentTurns: 1,
+        throughTurnNumber: 2
+      }
+    });
+    const renderedParents = (preview.scopes as {
+      chronicle: Array<{ id: string; turnId: string | null; kind: string }>;
+    }).chronicle;
+    const retrieval = preview.retrieval as {
+      implementation: string;
+      diversity: Record<string, number>;
+    };
+
+    expect(renderedParents).toHaveLength(2);
+    expect(renderedParents.every((memory) => memory.turnId === sameTurnId)).toBe(true);
+    expect(retrieval.implementation).toBe("chunked_hybrid");
+    expect(retrieval.diversity).toEqual({
+      candidateChunks: 5,
+      candidateParents: 5,
+      collapsedChunks: 0,
+      canonicalLineagesCollapsed: 1,
+      normalizedDuplicatesRemoved: 1,
+      latestSceneParentsProtected: 0,
+      semanticPenaltiesApplied: 0,
+      selectedKinds: 2,
+      selectedEntityIds: 0,
+      turnLimitParentsRemoved: 1,
+      selectedParents: 2
+    });
+  });
+
   it("fails closed instead of throwing for malformed canonical parent metadata", async () => {
     const { fixture, providerId } = await configuredFixture("malformed canonical metadata");
     await parent(fixture, {
