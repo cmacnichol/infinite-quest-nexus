@@ -1,6 +1,13 @@
 import type { MemoryGenerationTransactionPort } from "../../application/src/memory/index.js";
 import { requireCampaignWorldVersionScope } from "../../application/src/memory/helpers.js";
-import type { CompressionLevel } from "../../contracts/src/memory.js";
+import {
+  CHRONICLE_RETRIEVAL_VERSION,
+  type ChronicleRetrievalCandidate,
+  type ChronicleRetrievalComparison,
+  type CompressionLevel
+} from "../../contracts/src/memory.js";
+type RetrievalDiagnosticMode = "production" | "shadow";
+const CHRONICLE_TELEMETRY_CANDIDATE_LIMIT = 1_000;
 import {
   buildChronicleEntityCatalog,
   CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
@@ -38,6 +45,7 @@ import { estimateTokens, stableStringify, truncateAtBoundary } from "../../domai
 import { characterNarrativeContext } from "../../domain/src/world-characters.js";
 import { compressTurnMemory } from "../../story-engine/src/chronicle.js";
 import type { ChronicleGenerationTransactionDependencies } from "./chronicle-repository.js";
+import { recordRetrievalComparison } from "./chronicle-retrieval-observability-repository.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 
 type EmbeddingConfigRow = Readonly<{
@@ -111,6 +119,26 @@ type ChunkCandidateRow = Readonly<{
 type ChunkedRankFusionResult = Readonly<{
   retrieval: Record<string, unknown>;
   selectedParentContent: ReadonlyMap<string, string>;
+  providerFingerprint: string | null;
+  costIds: readonly string[];
+  telemetryCandidates: readonly ChronicleRetrievalCandidate[];
+}>;
+
+type LegacyRetrievalResult = Readonly<{
+  retrieval: Record<string, unknown>;
+  providerFingerprint: string | null;
+  costIds: readonly string[];
+}>;
+
+type RetrievalExecution = Readonly<{
+  implementation: ChronicleRetrievalComparison["implementation"];
+  memories: ContextMemoryRow[];
+  retrieval: Record<string, unknown>;
+  selectedParentContent: ReadonlyMap<string, string> | null;
+  latencyMs: number;
+  providerFingerprint: string | null;
+  costIds: readonly string[];
+  telemetryCandidates?: readonly ChronicleRetrievalCandidate[];
 }>;
 
 const CHUNK_CANDIDATE_LIMIT = 96;
@@ -464,7 +492,9 @@ async function applyContextSemanticRelevance(
   queryEntityIds: string[],
   dependencies: ChronicleGenerationTransactionDependencies,
   config: EmbeddingConfigRow | undefined,
-): Promise<Record<string, unknown>> {
+  diagnosticMode: RetrievalDiagnosticMode = "production",
+  diagnosticImplementation: RetrievalExecution["implementation"] = "legacy_hybrid",
+): Promise<LegacyRetrievalResult> {
   const normalizedQuery = query.toLowerCase();
   const queryEntityIdSet = new Set(queryEntityIds);
   const newestOrdinal = memories.reduce((maximum, memory) => Math.max(maximum, memory.ordinal), 0);
@@ -480,16 +510,28 @@ async function applyContextSemanticRelevance(
       ? lexical * 0.65 + entityScore * 0.15 + recencyScore * 0.1 + memory.importance * 0.1
       : 0;
   }
-  if (!query.trim()) return { mode: "lexical", semanticAvailable: false, fallbackReason: "empty_query" };
+  if (!query.trim()) return {
+    retrieval: { mode: "lexical", semanticAvailable: false, fallbackReason: "empty_query" },
+    providerFingerprint: null,
+    costIds: []
+  };
   if (!config?.embedding_enabled || !config.embedding_provider_profile_id || !config.embedding_model) {
-    return { mode: "lexical", semanticAvailable: false, fallbackReason: "semantic_not_configured" };
+    return {
+      retrieval: { mode: "lexical", semanticAvailable: false, fallbackReason: "semantic_not_configured" },
+      providerFingerprint: null,
+      costIds: []
+    };
   }
   const providerProfileId = await dependencies.embeddings.resolve(client, {
     ownerUserId: scope.ownerUserId,
     campaignId: scope.campaignId,
     selectedProviderProfileId: config.embedding_provider_profile_id
   });
-  if (!providerProfileId) return { mode: "lexical", semanticAvailable: false, fallbackReason: "provider_unavailable" };
+  if (!providerProfileId) return {
+    retrieval: { mode: "lexical", semanticAvailable: false, fallbackReason: "provider_unavailable" },
+    providerFingerprint: null,
+    costIds: []
+  };
   const providerScope = { ownerUserId: scope.ownerUserId, providerProfileId, model: config.embedding_model };
   try {
     const provider = await dependencies.embeddings.load(client, providerScope);
@@ -500,7 +542,7 @@ async function applyContextSemanticRelevance(
     );
     const fingerprint = await dependencies.embeddings.fingerprint(provider, prefixes);
     const result = await dependencies.embeddings.embed(provider, [`${prefixes.queryPrefix}${query.trim()}`]);
-    await dependencies.embeddings.recordCost(client, provider, {
+    const costId = await dependencies.embeddings.recordCost(client, provider, {
       ownerUserId: scope.ownerUserId,
       campaignId: scope.campaignId,
       ...(scope.costAttribution?.generationJobId
@@ -549,24 +591,55 @@ async function applyContextSemanticRelevance(
         ? semanticScore * 0.55 + lexical * 0.25 + entityScore * 0.1 + recencyScore * 0.05 + memory.importance * 0.05
         : 0;
     }
-    await dependencies.embeddings.recordHealth(client, providerScope, true);
+    if (diagnosticMode === "production") {
+      await dependencies.embeddings.recordHealth(client, providerScope, true);
+    }
     return {
-      mode: "hybrid",
-      semanticAvailable: true,
-      embeddedCandidates: freshScores.length,
-      model: config.embedding_model,
-      queryExpanded: true,
-      effectiveQueryPrefix: prefixes.queryPrefix
+      retrieval: {
+        mode: "hybrid",
+        semanticAvailable: true,
+        embeddedCandidates: freshScores.length,
+        model: config.embedding_model,
+        queryExpanded: true,
+        effectiveQueryPrefix: prefixes.queryPrefix
+      },
+      providerFingerprint: fingerprint,
+      costIds: costId ? [costId] : []
     };
   } catch (error) {
-    dependencies.embeddings.logDiagnostic(error, {
-      campaignId: scope.campaignId,
-      providerProfileId,
-      generationJobId: scope.costAttribution?.generationJobId ?? null,
-      memoryOperation: scope.costAttribution?.operation ?? "context_preview_embedding"
-    });
-    await dependencies.embeddings.recordHealth(client, providerScope, false, "chronicle_retrieval_failed").catch(() => undefined);
-    return { mode: "lexical_fallback", semanticAvailable: false, fallbackReason: "semantic_retrieval_unavailable" };
+    if (diagnosticMode === "shadow") {
+      try {
+        dependencies.embeddings.logDiagnostic(new Error("chronicle_retrieval_shadow_failed"), {
+          campaignId: scope.campaignId,
+          generationJobId: scope.costAttribution?.generationJobId ?? null,
+          memoryOperation: "chronicle_retrieval_shadow",
+          retrievalImplementation: diagnosticImplementation
+        });
+      } catch {
+        // Shadow diagnostics are best-effort and cannot affect production retrieval.
+      }
+    } else {
+      try {
+        dependencies.embeddings.logDiagnostic(new Error("chronicle_retrieval_failed"), {
+          campaignId: scope.campaignId,
+          providerProfileId,
+          generationJobId: scope.costAttribution?.generationJobId ?? null,
+          memoryOperation: scope.costAttribution?.operation ?? "context_preview_embedding"
+        });
+      } catch {
+        // Diagnostics are best-effort; semantic failures must retain lexical fallback.
+      }
+      await dependencies.embeddings.recordHealth(client, providerScope, false, "chronicle_retrieval_failed").catch(() => undefined);
+    }
+    return {
+      retrieval: {
+        mode: "lexical_fallback",
+        semanticAvailable: false,
+        fallbackReason: "semantic_retrieval_unavailable"
+      },
+      providerFingerprint: null,
+      costIds: []
+    };
   }
 }
 
@@ -591,7 +664,9 @@ async function chunkIndexReady(
           AND parent.content_hash=chunk.parent_content_hash
         WHERE chunk.owner_user_id = $1 AND chunk.campaign_id = $2 AND chunk.world_version_id = $3
           AND chunk.chunking_protocol_version='${CHRONICLE_CHUNK_PROTOCOL_VERSION}'
-          AND chunk.embedding_status='embedded'
+          AND (chunk.embedding_status='embedded'
+               OR (chunk.embedding_status='skipped'
+                   AND chunk.embedding_skip_reason='chunk_embedding_skipped'))
        )
        AND NOT EXISTS (
          SELECT 1 FROM current_parents parent
@@ -842,6 +917,7 @@ async function applyChunkedRankFusion(
   entityCatalog: readonly EntityReference[],
   config: EmbeddingConfigRow,
   dependencies: ChronicleGenerationTransactionDependencies,
+  diagnosticMode: RetrievalDiagnosticMode = "production",
 ): Promise<ChunkedRankFusionResult> {
   const variants = plannedChunkQueries(scope, memories, entityCatalog);
   const actionVariant: ChronicleQueryVariant = variants[0] ?? { kind: "action", query: "", entityIds: [] };
@@ -860,6 +936,8 @@ async function applyChunkedRankFusion(
   let semanticFallbackReason: string | undefined;
   let effectiveQueryPrefix = "";
   let embeddedCandidates = 0;
+  let providerFingerprint: string | null = null;
+  const costIds: string[] = [];
   if (!variants.length) {
     semanticFallbackReason = "empty_query";
   } else if (!config.embedding_enabled || !config.embedding_provider_profile_id || !config.embedding_model) {
@@ -884,11 +962,12 @@ async function applyChunkedRankFusion(
         );
         effectiveQueryPrefix = prefixes.queryPrefix;
         const fingerprint = await dependencies.embeddings.fingerprint(provider, prefixes);
+        providerFingerprint = fingerprint;
         const result = await dependencies.embeddings.embed(
           provider,
           variants.map((variant) => `${prefixes.queryPrefix}${variant.query}`)
         );
-        await dependencies.embeddings.recordCost(client, provider, {
+        const costId = await dependencies.embeddings.recordCost(client, provider, {
           ownerUserId: scope.ownerUserId,
           campaignId: scope.campaignId,
           ...(scope.costAttribution?.generationJobId
@@ -896,6 +975,7 @@ async function applyChunkedRankFusion(
             : {}),
           operation: scope.costAttribution?.operation ?? "context_preview_embedding"
         }, result);
+        if (costId) costIds.push(costId);
         if (result.embeddings.length !== variants.length) {
           throw new Error("Embedding provider returned an incomplete Chronicle query batch.");
         }
@@ -917,7 +997,9 @@ async function applyChunkedRankFusion(
           });
           semanticRanks.push({ variant, rows });
         }
-        await dependencies.embeddings.recordHealth(client, providerScope, true);
+        if (diagnosticMode === "production") {
+          await dependencies.embeddings.recordHealth(client, providerScope, true);
+        }
         semanticRanks.forEach(({ variant, rows }) => {
           embeddedCandidates += rows.length;
           addRank("semantic", variant, rows);
@@ -926,17 +1008,34 @@ async function applyChunkedRankFusion(
       }
     } catch (error) {
       semanticFallbackReason = "semantic_retrieval_unavailable";
-      dependencies.embeddings.logDiagnostic(error, {
-        campaignId: scope.campaignId,
-        providerProfileId: selectedProviderProfileId,
-        generationJobId: scope.costAttribution?.generationJobId ?? null,
-        memoryOperation: scope.costAttribution?.operation ?? "context_preview_embedding"
-      });
-      await dependencies.embeddings.recordHealth(client, {
-        ownerUserId: scope.ownerUserId,
-        providerProfileId: selectedProviderProfileId,
-        model: config.embedding_model
-      }, false, "chronicle_retrieval_failed").catch(() => undefined);
+      if (diagnosticMode === "shadow") {
+        try {
+          dependencies.embeddings.logDiagnostic(new Error("chronicle_retrieval_shadow_failed"), {
+            campaignId: scope.campaignId,
+            generationJobId: scope.costAttribution?.generationJobId ?? null,
+            memoryOperation: "chronicle_retrieval_shadow",
+            retrievalImplementation: "chunked_hybrid"
+          });
+        } catch {
+          // Shadow diagnostics are best-effort and cannot affect production retrieval.
+        }
+      } else {
+        try {
+          dependencies.embeddings.logDiagnostic(new Error("chronicle_retrieval_failed"), {
+            campaignId: scope.campaignId,
+            providerProfileId: selectedProviderProfileId,
+            generationJobId: scope.costAttribution?.generationJobId ?? null,
+            memoryOperation: scope.costAttribution?.operation ?? "context_preview_embedding"
+          });
+        } catch {
+          // Diagnostics are best-effort; semantic failures must retain lexical fallback.
+        }
+        await dependencies.embeddings.recordHealth(client, {
+          ownerUserId: scope.ownerUserId,
+          providerProfileId: selectedProviderProfileId,
+          model: config.embedding_model
+        }, false, "chronicle_retrieval_failed").catch(() => undefined);
+      }
     }
   }
 
@@ -1066,8 +1165,51 @@ async function applyChunkedRankFusion(
       effectiveQueryPrefix,
       diversity: parentSelection.diagnostics satisfies ChronicleParentSelectionDiagnostics
     },
-    selectedParentContent
+    selectedParentContent,
+    providerFingerprint,
+    costIds,
+    telemetryCandidates: rankedChunkParents.slice(0, CHRONICLE_TELEMETRY_CANDIDATE_LIMIT).map((candidate) => ({
+      candidateId: candidate.candidateId,
+      parentMemoryId: candidate.parentMemoryId,
+      rank: candidate.fusedRank,
+      reason: "fused_rank",
+      tokenEstimate: Math.max(0, estimateTokens(candidate.parentContent)),
+      selected: selectedParentIds.has(candidate.parentMemoryId)
+    }))
   };
+}
+
+function cloneContextMemories(memories: readonly ContextMemoryRow[]): ContextMemoryRow[] {
+  return memories.map((memory) => ({
+    ...memory,
+    entities: [...memory.entities],
+    entity_ids: [...memory.entity_ids],
+    metadata: { ...memory.metadata }
+  }));
+}
+
+function retrievalFallbackCode(retrieval: Readonly<Record<string, unknown>>): string | null {
+  return typeof retrieval.fallbackReason === "string" ? retrieval.fallbackReason : null;
+}
+
+function rankedMemoryTelemetryCandidates(
+  memories: readonly ContextMemoryRow[],
+  selectedParentIds?: ReadonlySet<string>,
+): readonly ChronicleRetrievalCandidate[] {
+  return [...memories]
+    .sort((left, right) => (right.relevance - left.relevance)
+      || (right.importance - left.importance)
+      || (right.ordinal - left.ordinal)
+      || compareDeterministically(left.id, right.id))
+    .slice(0, 1_000)
+    .map((memory, index) => ({
+      candidateId: memory.id,
+      parentMemoryId: memory.id,
+      rank: index + 1,
+      reason: "memory_rank",
+      tokenEstimate: Math.max(0, memory.token_estimate),
+      selected: selectedParentIds?.has(memory.id) ?? (memory.relevance > 0 && index < 16)
+    }));
 }
 
 export async function buildPostgresChronicleContextPreview(
@@ -1112,46 +1254,216 @@ export async function buildPostgresChronicleContextPreview(
   const latestHint = memories.filter((memory) => memory.memory_kind === "turn_fiction").at(-1)?.content ?? "";
   const expandedQuery = [entityExpandedQuery, truncateAtBoundary(latestHint, 1200)].filter(Boolean).join("\n");
   const config = await loadContextConfig(client, scope);
-  let retrievalResult: Record<string, unknown>;
-  let selectedParentContent: ReadonlyMap<string, string> | null = null;
-  if (config?.retrieval_implementation === "chunked_hybrid") {
-    if (await chunkIndexReady(client, scope)) {
-      const chunked = await applyChunkedRankFusion(
-        client,
-        campaign,
-        scope,
-        memories,
-        entityCatalog,
-        config,
-        dependencies
-      );
-      retrievalResult = chunked.retrieval;
-      selectedParentContent = chunked.selectedParentContent;
-    } else {
-      retrievalResult = {
-        ...await applyContextSemanticRelevance(
-          client,
-          scope,
-          expandedQuery,
-          memories,
-          queryEntityIds,
-          dependencies,
-          config
-        ),
-        fallbackReason: "chunk_index_not_ready"
-      };
-    }
-  } else {
-    retrievalResult = await applyContextSemanticRelevance(
+  const productionImplementation = config?.retrieval_implementation ?? "legacy_hybrid";
+  const executeLegacy = async (
+    implementation: "lexical" | "legacy_hybrid",
+    executionConfig: EmbeddingConfigRow | undefined,
+    diagnosticMode: RetrievalDiagnosticMode = "production",
+  ): Promise<RetrievalExecution> => {
+    const executionMemories = cloneContextMemories(memories);
+    const startedAt = performance.now();
+    const result = await applyContextSemanticRelevance(
       client,
       scope,
       expandedQuery,
-      memories,
+      executionMemories,
       queryEntityIds,
       dependencies,
-      config
+      executionConfig,
+      diagnosticMode,
+      implementation
     );
+    return {
+      implementation,
+      memories: executionMemories,
+      retrieval: { ...result.retrieval, implementation },
+      selectedParentContent: null,
+      latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
+      providerFingerprint: result.providerFingerprint,
+      costIds: result.costIds
+    };
+  };
+  let readyForChunked: boolean | undefined;
+  const executeChunked = async (
+    diagnosticMode: RetrievalDiagnosticMode = "production",
+  ): Promise<RetrievalExecution> => {
+    readyForChunked ??= await chunkIndexReady(client, scope);
+    const executionMemories = cloneContextMemories(memories);
+    const startedAt = performance.now();
+    if (readyForChunked && config) {
+      const result = await applyChunkedRankFusion(
+        client,
+        campaign,
+        scope,
+        executionMemories,
+        entityCatalog,
+        config,
+        dependencies,
+        diagnosticMode
+      );
+      return {
+        implementation: "chunked_hybrid",
+        memories: executionMemories,
+        retrieval: result.retrieval,
+        selectedParentContent: result.selectedParentContent,
+        latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
+        providerFingerprint: result.providerFingerprint,
+        costIds: result.costIds,
+        telemetryCandidates: result.telemetryCandidates
+      };
+    }
+    const fallback = await applyContextSemanticRelevance(
+      client,
+      scope,
+      expandedQuery,
+      executionMemories,
+      queryEntityIds,
+      dependencies,
+      config,
+      diagnosticMode,
+      "chunked_hybrid"
+    );
+    return {
+      implementation: "chunked_hybrid",
+      memories: executionMemories,
+      retrieval: {
+        ...fallback.retrieval,
+        implementation: "chunked_hybrid",
+        fallbackReason: "chunk_index_not_ready"
+      },
+      selectedParentContent: null,
+      latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
+      providerFingerprint: fallback.providerFingerprint,
+      costIds: fallback.costIds
+    };
+  };
+  const executeShadow = async (
+    implementation: RetrievalExecution["implementation"],
+    execute: () => Promise<RetrievalExecution>,
+  ): Promise<RetrievalExecution> => {
+    const startedAt = performance.now();
+    const savepoint = `chronicle_retrieval_shadow_${implementation}`;
+    await client.query(`SAVEPOINT ${savepoint}`);
+    try {
+      const execution = await execute();
+      await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+      return execution;
+    } catch {
+      await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+      await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+      try {
+        dependencies.embeddings.logDiagnostic(new Error("chronicle_retrieval_shadow_failed"), {
+          campaignId: scope.campaignId,
+          generationJobId: scope.costAttribution?.generationJobId ?? null,
+          memoryOperation: "chronicle_retrieval_shadow",
+          retrievalImplementation: implementation
+        });
+      } catch {
+        // Shadow diagnostics are best-effort and must not affect production retrieval.
+      }
+      return {
+        implementation,
+        memories: cloneContextMemories(memories),
+        retrieval: {
+          mode: "shadow_unavailable",
+          semanticAvailable: false,
+          fallbackReason: "shadow_execution_failed",
+          implementation
+        },
+        selectedParentContent: null,
+        latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
+        providerFingerprint: null,
+        costIds: []
+      };
+    }
+  };
+  const executeProduction = async (
+    implementation: RetrievalExecution["implementation"],
+    execute: () => Promise<RetrievalExecution>,
+  ): Promise<RetrievalExecution> => {
+    const startedAt = performance.now();
+    const savepoint = `chronicle_retrieval_production_${implementation}`;
+    await client.query(`SAVEPOINT ${savepoint}`);
+    try {
+      const execution = await execute();
+      await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+      return execution;
+    } catch {
+      await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+      await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+      try {
+        dependencies.embeddings.logDiagnostic(new Error("chronicle_retrieval_failed"), {
+          campaignId: scope.campaignId,
+          generationJobId: scope.costAttribution?.generationJobId ?? null,
+          memoryOperation: "chronicle_retrieval",
+          retrievalImplementation: implementation
+        });
+      } catch {
+        // Diagnostics are best-effort; semantic failures must retain lexical fallback.
+      }
+      return {
+        implementation,
+        memories: cloneContextMemories(memories),
+        retrieval: {
+          mode: "lexical_fallback",
+          semanticAvailable: false,
+          fallbackReason: "semantic_retrieval_unavailable",
+          implementation
+        },
+        selectedParentContent: null,
+        latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
+        providerFingerprint: null,
+        costIds: []
+      };
+    }
+  };
+
+  let retrievalExecutions: RetrievalExecution[];
+  if (config?.retrieval_shadow_enabled) {
+    const lexicalConfig = config ? { ...config, embedding_enabled: false } : undefined;
+    const productionExecution = await executeProduction(
+      productionImplementation,
+      productionImplementation === "chunked_hybrid"
+        ? () => executeChunked()
+        : () => executeLegacy("legacy_hybrid", config)
+    );
+    const executions = new Map<RetrievalExecution["implementation"], RetrievalExecution>([
+      [productionExecution.implementation, productionExecution]
+    ]);
+    if (!executions.has("lexical")) {
+      executions.set("lexical", await executeShadow(
+        "lexical",
+        () => executeLegacy("lexical", lexicalConfig, "shadow")
+      ));
+    }
+    if (!executions.has("legacy_hybrid")) {
+      executions.set("legacy_hybrid", await executeShadow(
+        "legacy_hybrid",
+        () => executeLegacy("legacy_hybrid", config, "shadow")
+      ));
+    }
+    if (!executions.has("chunked_hybrid")) {
+      executions.set("chunked_hybrid", await executeShadow(
+        "chunked_hybrid",
+        () => executeChunked("shadow")
+      ));
+    }
+    retrievalExecutions = (["lexical", "legacy_hybrid", "chunked_hybrid"] as const)
+      .map((implementation) => executions.get(implementation)!);
+  } else {
+    retrievalExecutions = [await executeProduction(
+      productionImplementation,
+      productionImplementation === "chunked_hybrid"
+        ? () => executeChunked()
+        : () => executeLegacy("legacy_hybrid", config)
+    )];
   }
+  const productionExecution = retrievalExecutions.find((execution) => (
+    execution.implementation === productionImplementation
+  ))!;
+  memories = productionExecution.memories;
+  const retrievalResult = productionExecution.retrieval;
+  const selectedParentContent = productionExecution.selectedParentContent;
   const retrieval = {
     ...retrievalResult,
     scopeEligibleCandidates
@@ -1286,6 +1598,50 @@ export async function buildPostgresChronicleContextPreview(
     actualTokens = budgetTokenEstimate(stableStringify(scopes));
   }
   const expectedForLevel = metrics.compressionEstimates[selectedLevel];
+  if (config?.retrieval_shadow_enabled) {
+    const productionSelectedParentIds = new Set(selected.keys());
+    const comparisons: ChronicleRetrievalComparison[] = retrievalExecutions.map((execution) => ({
+      implementation: execution.implementation,
+      latencyMs: execution.latencyMs,
+      fallbackCode: retrievalFallbackCode(execution.retrieval),
+      selectedForProduction: execution.implementation === productionImplementation,
+      candidates: (execution.telemetryCandidates
+        ?? rankedMemoryTelemetryCandidates(execution.memories)).map((candidate) => ({
+        ...candidate,
+        selected: execution.implementation === productionImplementation
+          ? productionSelectedParentIds.has(candidate.parentMemoryId)
+          : candidate.selected
+      }))
+    }));
+    try {
+      await recordRetrievalComparison(client, {
+        ownerUserId: scope.ownerUserId,
+        campaignId: scope.campaignId,
+        worldVersionId: scope.worldVersionId,
+        queryHash: chronicleContentHash(scope.request.query),
+        productionImplementation,
+        shadowEnabled: true,
+        retrievalVersion: CHRONICLE_RETRIEVAL_VERSION,
+        embeddingProtocolVersion: CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
+        chunkProtocolVersion: CHRONICLE_CHUNK_PROTOCOL_VERSION,
+        providerFingerprint: productionExecution.providerFingerprint
+          ?? retrievalExecutions.find((execution) => execution.providerFingerprint)?.providerFingerprint
+          ?? null,
+        queryTokenEstimate: Math.max(0, estimateTokens(scope.request.query)),
+        costIds: [...new Set(retrievalExecutions.flatMap((execution) => execution.costIds))],
+        comparisons
+      });
+    } catch {
+      try {
+        dependencies.embeddings.logDiagnostic(new Error("chronicle_retrieval_telemetry_failed"), {
+          campaignId: scope.campaignId,
+          memoryOperation: "chronicle_retrieval_telemetry"
+        });
+      } catch {
+        // Telemetry and its diagnostics are best-effort and cannot affect retrieval.
+      }
+    }
+  }
   return {
     campaign: {
       id: campaign.id,

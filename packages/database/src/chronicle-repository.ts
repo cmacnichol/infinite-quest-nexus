@@ -18,8 +18,11 @@ import type {
 import { MEMORY_PUBLIC_FAILURE_MESSAGE } from "../../application/src/memory/index.js";
 import { requireCampaignWorldVersionScope } from "../../application/src/memory/helpers.js";
 import {
+  CHRONICLE_RETRIEVAL_VERSION,
+  chronicleHealthSchema,
   DEFAULT_EMBEDDING_MODEL,
-  type CampaignEmbeddingConfig
+  type CampaignEmbeddingConfig,
+  type ChronicleHealth
 } from "../../contracts/src/memory.js";
 import {
   CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
@@ -34,6 +37,7 @@ import {
   sanitizeChronicleMemoryLines
 } from "../../domain/src/chronicle-memory-helpers.js";
 import { canonicalFactDeduplicationKey } from "../../domain/src/canonical-facts.js";
+import { CHRONICLE_CHUNK_PROTOCOL_VERSION } from "../../domain/src/chronicle-chunking.js";
 import {
   resolveEntityMetadata,
   type EntityReference
@@ -206,6 +210,15 @@ function transactionClient(database: MemoryTransactionContext): DatabaseClient {
     throw new TypeError("Chronicle transaction operations require the caller-owned database client.");
   }
   return database as DatabaseClient;
+}
+
+function transactionPool(database: MemoryTransactionContext): DatabasePool | null {
+  const candidate = database as Partial<DatabasePool>;
+  return typeof candidate.query === "function"
+      && typeof candidate.connect === "function"
+      && typeof candidate.totalCount === "number"
+    ? database as DatabasePool
+    : null;
 }
 
 function json(value: unknown): string {
@@ -874,6 +887,10 @@ export function createPostgresChronicleGenerationTransactionPort(
       return rebuilt;
     },
     async buildContextPreview(database, scope) {
+      const pool = transactionPool(database);
+      if (pool) {
+        return withTransaction(pool, (client) => buildPostgresChronicleContextPreview(client, scope, dependencies));
+      }
       return buildPostgresChronicleContextPreview(transactionClient(database), scope, dependencies);
     }
   } as MemoryGenerationTransactionPort;
@@ -1111,15 +1128,43 @@ type MetricsProviderRow = Readonly<{
 type MetricsJobRow = Readonly<{
   id: string;
   status: "queued" | "running" | "completed" | "failed";
-  progress: ChronicleMetricsView["semanticHealth"]["progress"];
+  progress: Record<string, unknown>;
   completed_at: Date | null;
 }>;
+
+type MetricsChunkRow = Readonly<{
+  indexed_parents: string;
+  current_chunks: string;
+  outdated_chunks: string;
+}>;
+
+type MetricsFallbackRow = Readonly<{
+  fallback_code: string | null;
+}>;
+
+function safeHealthProgress(progress: Readonly<Record<string, unknown>> | undefined): ChronicleHealth["progress"] {
+  const safe: Record<string, number> = {};
+  for (const key of [
+    "embedded",
+    "total",
+    "updated",
+    "skipped",
+    "processedParents",
+    "totalParents",
+    "embeddedChunks",
+    "skippedChunks"
+  ]) {
+    const value = progress?.[key];
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) safe[key] = value;
+  }
+  return safe;
+}
 
 async function semanticHealth(
   pool: DatabasePool,
   scope: CampaignWorldVersionMemoryScope,
   metrics: Omit<ChronicleMetricsView, "semanticHealth">,
-): Promise<ChronicleMetricsView["semanticHealth"]> {
+): Promise<ChronicleHealth> {
   const configResult = await pool.query<MetricsEmbeddingConfigRow>(
     `SELECT embedding_enabled, embedding_provider_profile_id, embedding_model, embedding_batch_size,
             embedding_document_prefix, embedding_query_prefix, retrieval_implementation,
@@ -1129,9 +1174,8 @@ async function semanticHealth(
     [scope.campaignId, scope.ownerUserId]
   );
   const config = configResult.rows[0];
-  const disabled: ChronicleMetricsView["semanticHealth"] = {
-    status: "disabled",
-    message: "Semantic memory is disabled. Chronicle is using lexical, entity, chronology, and recency retrieval.",
+  const disabledBase = {
+    chronicleAvailable: true as const,
     enabled: false,
     providerProfileId: null,
     providerName: "",
@@ -1144,11 +1188,28 @@ async function semanticHealth(
     jobStatus: null,
     progress: {},
     errorMessage: "",
-    lastCompletedAt: null
+    lastCompletedAt: null,
+    retrievalImplementation: config?.retrieval_implementation ?? "legacy_hybrid",
+    retrievalShadowEnabled: config?.retrieval_shadow_enabled ?? false,
+    fallbackCode: null,
+    chunkProtocolVersion: CHRONICLE_CHUNK_PROTOCOL_VERSION
   };
-  if (!config?.embedding_enabled) return disabled;
+  if (!config) {
+    return chronicleHealthSchema.parse({
+      ...disabledBase,
+      status: "chronicle_available",
+      message: "Chronicle local memory is available; semantic retrieval has not been configured."
+    });
+  }
+  if (!config.embedding_enabled) {
+    return chronicleHealthSchema.parse({
+      ...disabledBase,
+      status: "semantic_disabled",
+      message: "Semantic retrieval is disabled. Chronicle local retrieval remains available."
+    });
+  }
 
-  const [providerResult, embeddedResult, jobResult] = await Promise.all([
+  const [providerResult, embeddedResult, legacyJobResult, chunkResult, chunkJobResult, fallbackResult] = await Promise.all([
     config.embedding_provider_profile_id
       ? pool.query<MetricsProviderRow>(
         `SELECT id, name, enabled, health_status
@@ -1174,17 +1235,69 @@ async function semanticHealth(
         WHERE owner_user_id = $1 AND campaign_id = $2 AND job_type = 'embed_campaign'
         ORDER BY created_at DESC, updated_at DESC, id DESC LIMIT 1`,
       [scope.ownerUserId, scope.campaignId]
+    ),
+    pool.query<MetricsChunkRow>(
+      `SELECT
+         count(DISTINCT parent.id) FILTER (
+           WHERE chunk.chunking_protocol_version = $4
+             AND chunk.embedding_status = 'embedded'
+             AND chunk.embedding_content_hash = chunk.content_hash
+         )::text AS indexed_parents,
+         count(chunk.id) FILTER (WHERE chunk.chunking_protocol_version = $4)::text AS current_chunks,
+         count(chunk.id) FILTER (WHERE chunk.chunking_protocol_version <> $4)::text AS outdated_chunks
+       FROM chronicle_memories parent
+       LEFT JOIN chronicle_memory_chunks chunk
+         ON chunk.parent_memory_id = parent.id
+        AND chunk.owner_user_id = parent.owner_user_id
+        AND chunk.campaign_id = parent.campaign_id
+        AND chunk.world_version_id = parent.world_version_id
+        AND chunk.parent_content_hash = parent.content_hash
+      WHERE parent.owner_user_id = $1 AND parent.campaign_id = $2 AND parent.world_version_id = $3`,
+      [scope.ownerUserId, scope.campaignId, scope.worldVersionId, CHRONICLE_CHUNK_PROTOCOL_VERSION]
+    ),
+    pool.query<MetricsJobRow>(
+      `SELECT id,status,progress,completed_at
+         FROM chronicle_chunk_jobs
+        WHERE owner_user_id = $1 AND campaign_id = $2
+        ORDER BY created_at DESC,updated_at DESC,id DESC LIMIT 1`,
+      [scope.ownerUserId, scope.campaignId]
+    ),
+    pool.query<MetricsFallbackRow>(
+      `SELECT CASE production_implementation
+         WHEN 'chunked_hybrid' THEN chunked_hybrid_fallback_code
+         ELSE legacy_hybrid_fallback_code
+       END AS fallback_code
+        FROM chronicle_retrieval_runs
+        WHERE owner_user_id = $1 AND campaign_id = $2 AND world_version_id = $3
+          AND production_implementation = $4
+          AND retrieval_version = $5
+          AND embedding_protocol_version = $6
+          AND chunk_protocol_version = $7
+          AND created_at >= $8
+        ORDER BY created_at DESC,id DESC LIMIT 1`,
+      [scope.ownerUserId, scope.campaignId, scope.worldVersionId, config.retrieval_implementation,
+        CHRONICLE_RETRIEVAL_VERSION, CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
+        CHRONICLE_CHUNK_PROTOCOL_VERSION, config.updated_at]
     )
   ]);
   const provider = providerResult.rows[0];
-  const indexedMemories = embeddedResult.rows.filter((row) => (
+  const legacyIndexedMemories = embeddedResult.rows.filter((row) => (
     row.embedding_content_hash === chronicleContentHash(row.content)
   )).length;
+  const chunks = chunkResult.rows[0];
+  const indexedMemories = config.retrieval_implementation === "chunked_hybrid"
+    ? Number.parseInt(chunks?.indexed_parents ?? "0", 10)
+    : legacyIndexedMemories;
   const coveragePercent = metrics.memoryCount
     ? Math.min(100, Math.round(indexedMemories / metrics.memoryCount * 100))
     : 100;
-  const job = jobResult.rows[0];
+  const fullyIndexed = indexedMemories >= metrics.memoryCount;
+  const job = config.retrieval_implementation === "chunked_hybrid"
+    ? chunkJobResult.rows[0]
+    : legacyJobResult.rows[0];
+  const fallbackCode = fallbackResult.rows[0]?.fallback_code ?? null;
   const base = {
+    chronicleAvailable: true as const,
     enabled: true,
     providerProfileId: config.embedding_provider_profile_id,
     providerName: provider?.name ?? "",
@@ -1195,51 +1308,82 @@ async function semanticHealth(
     coveragePercent,
     jobId: job?.id ?? null,
     jobStatus: job?.status ?? null,
-    progress: job?.progress ?? {},
+    progress: safeHealthProgress(job?.progress),
     errorMessage: "",
-    lastCompletedAt: iso(job?.completed_at ?? null)
+    lastCompletedAt: iso(job?.completed_at ?? null),
+    retrievalImplementation: config.retrieval_implementation,
+    retrievalShadowEnabled: config.retrieval_shadow_enabled,
+    fallbackCode,
+    chunkProtocolVersion: CHRONICLE_CHUNK_PROTOCOL_VERSION
   };
   if (job?.status === "queued" || job?.status === "running") {
     const completed = Number(job.progress?.embedded ?? 0);
     const total = Number(job.progress?.total ?? metrics.memoryCount);
-    return {
+    return chronicleHealthSchema.parse({
       ...base,
       status: "indexing",
       message: job.status === "queued"
         ? "Semantic indexing is queued and waiting for a Chronicle worker."
         : `Semantic indexing is running${total ? `: ${completed} of ${total} memories processed` : ""}.`
-    };
-  }
-  if (job?.status === "failed") {
-    return { ...base, status: "failed", message: MEMORY_PUBLIC_FAILURE_MESSAGE, errorMessage: MEMORY_PUBLIC_FAILURE_MESSAGE };
+    });
   }
   if (!provider || !provider.enabled || provider.health_status === "unavailable") {
-    return {
+    return chronicleHealthSchema.parse({
       ...base,
-      status: "unavailable",
+      status: "provider_unavailable",
       message: "The configured embedding provider is disabled or unavailable. Lexical Chronicle retrieval remains active."
-    };
+    });
+  }
+  if (provider.health_status === "degraded") {
+    return chronicleHealthSchema.parse({
+      ...base,
+      status: "provider_degraded",
+      message: "The embedding provider is reporting degraded health. Chronicle local retrieval remains available."
+    });
+  }
+  if (fallbackCode) {
+    return chronicleHealthSchema.parse({
+      ...base,
+      status: "fallback_active",
+      message: "The configured semantic retrieval path fell back safely to Chronicle local retrieval."
+    });
+  }
+  if (config.retrieval_implementation === "chunked_hybrid"
+    && Number.parseInt(chunks?.outdated_chunks ?? "0", 10) > 0
+    && !fullyIndexed) {
+    return chronicleHealthSchema.parse({
+      ...base,
+      status: "chunk_protocol_outdated",
+      message: "Stored Chronicle chunks use an outdated protocol and must be rebuilt."
+    });
   }
   const configIsFresh = Boolean(job?.completed_at && job.completed_at.getTime() >= config.updated_at.getTime());
-  if (!configIsFresh || coveragePercent < 100 || provider.health_status === "degraded") {
-    const reason = !configIsFresh
-      ? "The current semantic configuration has not completed indexing."
-      : provider.health_status === "degraded"
-        ? "The embedding provider is reporting degraded health."
-        : `${indexedMemories} of ${metrics.memoryCount} Chronicle memories are indexed.`;
-    return {
+  const currentChunks = Number.parseInt(chunks?.current_chunks ?? "0", 10);
+  if (job?.status === "failed"
+    || (metrics.memoryCount > 0 && indexedMemories === 0)
+    || (config.retrieval_implementation === "chunked_hybrid" && metrics.memoryCount > 0 && currentChunks === 0)
+    || (!configIsFresh && metrics.memoryCount > 0)) {
+    return chronicleHealthSchema.parse({
       ...base,
-      status: "degraded",
-      message: `${reason} Lexical retrieval remains available while semantic coverage recovers.`
-    };
+      status: "rebuild_required",
+      message: "Semantic retrieval requires a Chronicle index rebuild.",
+      errorMessage: job?.status === "failed" ? MEMORY_PUBLIC_FAILURE_MESSAGE : ""
+    });
   }
-  return {
+  if (!fullyIndexed) {
+    return chronicleHealthSchema.parse({
+      ...base,
+      status: "partially_indexed",
+      message: `${indexedMemories} of ${metrics.memoryCount} Chronicle memories are indexed. Chronicle local retrieval remains available.`
+    });
+  }
+  return chronicleHealthSchema.parse({
     ...base,
     status: "healthy",
     message: metrics.memoryCount
-      ? `All ${metrics.memoryCount} Chronicle memories are indexed with ${config.embedding_model}.`
-      : `Semantic memory is ready with ${config.embedding_model}; memories will be indexed as turns are accepted.`
-  };
+      ? `All ${metrics.memoryCount} Chronicle memories are indexed.`
+      : "Semantic memory is ready; memories will be indexed as turns are accepted."
+  });
 }
 
 export function createPostgresChronicleQueryRepository(

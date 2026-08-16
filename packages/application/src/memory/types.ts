@@ -1,4 +1,9 @@
-import type { CampaignEmbeddingConfig, MemoryContextQuery, RetrievalImplementation } from "@infinite-quest/contracts";
+import type {
+  CampaignEmbeddingConfig,
+  ChronicleHealth,
+  MemoryContextQuery,
+  RetrievalImplementation
+} from "@infinite-quest/contracts";
 
 /** Resolved at the API boundary or read from a claimed worker job; never caller supplied. */
 export type MemoryOwnerScope = Readonly<{
@@ -51,23 +56,7 @@ export type ChronicleMetricsView = Readonly<{
     compact: number;
     summary: number;
   }>;
-  semanticHealth: Readonly<{
-    status: "disabled" | "indexing" | "healthy" | "degraded" | "failed" | "unavailable";
-    message: string;
-    enabled: boolean;
-    providerProfileId: string | null;
-    providerName: string;
-    providerHealth: "unknown" | "healthy" | "degraded" | "unavailable";
-    model: string;
-    indexedMemories: number;
-    totalMemories: number;
-    coveragePercent: number;
-    jobId: string | null;
-    jobStatus: "queued" | "running" | "completed" | "failed" | null;
-    progress: Readonly<{ embedded?: number; total?: number; updated?: number; skipped?: number }>;
-    errorMessage: string;
-    lastCompletedAt: string | null;
-  }>;
+  semanticHealth: ChronicleHealth;
 }>;
 export type ChronicleContextPreview = Readonly<Record<string, unknown>>;
 

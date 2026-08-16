@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
+import { chronicleHealthSchema, chronicleHealthStatusSchema } from "../../packages/contracts/src/memory.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
@@ -11,6 +12,33 @@ import { createWorkerMemoryApplication } from "../helpers/runtime-application-fi
 import { serverOptions } from "../helpers/build-server-options.js";
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
+
+vi.mock("../../services/runtime/src/api-asset-composition.js", () => ({
+  createApiAssetComposition: async () => ({
+    assets: new Proxy({}, {
+      get: () => async () => { throw new Error("Unexpected asset route call in Chronicle audit."); }
+    }),
+    storage: {
+      adapter: {
+        openAssetSession: async () => null
+      }
+    },
+    close: async () => undefined
+  })
+}));
+
+vi.mock("../../services/runtime/src/api-portable-import-export-composition.js", async (loadOriginal) => {
+  const original = await loadOriginal<typeof import("../../services/runtime/src/api-portable-import-export-composition.js")>();
+  const unexpected = async () => { throw new Error("Unexpected portable route call in Chronicle audit."); };
+  return {
+    ...original,
+    createApiPortableImportExportComposition: async () => ({
+      portable: new Proxy({}, { get: () => unexpected }),
+      progress: new Proxy({}, { get: () => unexpected }),
+      close: async () => undefined
+    })
+  };
+});
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -340,6 +368,258 @@ integration("Task 14b4 Chronicle HTTP completion audit", () => {
       url: `/api/v1/campaigns/${campaignId}/memory/embeddings/reindex`
     });
     expect(conflict.statusCode).toBe(409);
+  });
+
+  it("projects every shared Chronicle health state without provider or credential details", async () => {
+    const expectedStatuses = [
+      "chronicle_available",
+      "semantic_disabled",
+      "indexing",
+      "healthy",
+      "partially_indexed",
+      "provider_degraded",
+      "provider_unavailable",
+      "fallback_active",
+      "chunk_protocol_outdated",
+      "rebuild_required"
+    ] as const;
+    expect(chronicleHealthStatusSchema.options).toEqual(expectedStatuses);
+    const campaignId = await campaign();
+    const campaignScope = await pool.query<{ world_version_id: string }>(
+      "SELECT world_version_id FROM campaigns WHERE id = $1 AND owner_user_id = $2",
+      [campaignId, ownerUserId]
+    );
+    const worldVersionId = campaignScope.rows[0]!.world_version_id;
+    const memories = await pool.query<{
+      id: string;
+      content_hash: string;
+      memory_kind: string;
+    }>(
+      `SELECT id,content_hash,memory_kind
+         FROM chronicle_memories
+        WHERE campaign_id = $1 AND owner_user_id = $2
+        ORDER BY ordinal,id`,
+      [campaignId, ownerUserId]
+    );
+    expect(memories.rowCount).toBeGreaterThan(1);
+    const privateEndpoint = "http://private-health.invalid/v1?credential=never-public";
+    const provider = await pool.query<{ id: string }>(
+      `INSERT INTO provider_profiles (
+         owner_user_id,name,provider_type,provider_role,base_url,default_model,enabled,is_default,health_status
+       ) VALUES ($1,$2,'openai_compatible','embedding',$3,'health-model',true,false,'unavailable')
+       RETURNING id`,
+      [ownerUserId, `Health projection ${crypto.randomUUID()}`, privateEndpoint]
+    );
+    testProviderIds.add(provider.rows[0]!.id);
+    const providerId = provider.rows[0]!.id;
+    const observedStatuses = new Set<string>();
+    const readHealth = async () => {
+      const response = await app.inject({
+        method: "GET",
+        url: `/api/v1/campaigns/${campaignId}/memory/metrics`
+      });
+      expect(response.statusCode).toBe(200);
+      const health = chronicleHealthSchema.parse(response.json().semanticHealth);
+      observedStatuses.add(health.status);
+      expect(response.body).not.toContain(privateEndpoint);
+      expect(response.body).not.toContain("credential");
+      for (const forbidden of ["query", "action", "narration", "prompt", "response", "baseUrl", "credential"]) {
+        expect(health).not.toHaveProperty(forbidden);
+      }
+      return health;
+    };
+    const writeConfig = async (
+      enabled: boolean,
+      implementation: "legacy_hybrid" | "chunked_hybrid",
+      model = "health-model",
+    ) => {
+      await pool.query(
+        `INSERT INTO campaign_memory_configs (
+           campaign_id,owner_user_id,embedding_enabled,embedding_provider_profile_id,embedding_model,
+           retrieval_implementation,retrieval_shadow_enabled,updated_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,true,now())
+         ON CONFLICT (campaign_id) DO UPDATE SET
+           embedding_enabled=EXCLUDED.embedding_enabled,
+           embedding_provider_profile_id=EXCLUDED.embedding_provider_profile_id,
+           embedding_model=EXCLUDED.embedding_model,
+           retrieval_implementation=EXCLUDED.retrieval_implementation,
+           retrieval_shadow_enabled=EXCLUDED.retrieval_shadow_enabled,
+           updated_at=EXCLUDED.updated_at`,
+        [campaignId, ownerUserId, enabled, enabled ? providerId : null, enabled ? model : "", implementation]
+      );
+    };
+
+    await pool.query("DELETE FROM campaign_memory_configs WHERE campaign_id = $1", [campaignId]);
+    expect((await readHealth()).status).toBe("chronicle_available");
+
+    await writeConfig(false, "legacy_hybrid");
+    expect((await readHealth()).status).toBe("semantic_disabled");
+
+    await writeConfig(true, "legacy_hybrid");
+    await pool.query(
+      "INSERT INTO chronicle_jobs (owner_user_id,campaign_id,job_type,status) VALUES ($1,$2,'embed_campaign','queued')",
+      [ownerUserId, campaignId]
+    );
+    expect((await readHealth()).status).toBe("indexing");
+
+    await pool.query("DELETE FROM chronicle_jobs WHERE campaign_id = $1", [campaignId]);
+    expect((await readHealth()).status).toBe("provider_unavailable");
+
+    await pool.query("UPDATE provider_profiles SET health_status = 'degraded' WHERE id = $1", [providerId]);
+    expect((await readHealth()).status).toBe("provider_degraded");
+
+    await pool.query("UPDATE provider_profiles SET health_status = 'healthy' WHERE id = $1", [providerId]);
+    await pool.query(
+      `INSERT INTO chronicle_retrieval_runs (
+         owner_user_id,campaign_id,world_version_id,query_hash,production_implementation,shadow_enabled,
+         retrieval_version,embedding_protocol_version,chunk_protocol_version,query_token_estimate,
+         legacy_hybrid_fallback_code
+       ) VALUES ($1,$2,$3,$4,'legacy_hybrid',true,'chronicle-retrieval-v1','chronicle-embedding-v1',
+                 'chronicle-chunk-v1',1,'provider_unavailable')`,
+      [ownerUserId, campaignId, worldVersionId, "a".repeat(64)]
+    );
+    expect((await readHealth()).status).toBe("fallback_active");
+
+    await writeConfig(true, "chunked_hybrid");
+    const outdated = memories.rows.find((memory) => [
+      "turn_fiction",
+      "legacy_summary",
+      "campaign_summary",
+      "canonical_fact",
+      "open_thread"
+    ].includes(memory.memory_kind))!;
+    const outdatedChunkKind = outdated.memory_kind === "turn_fiction" ? "turn_narration" : outdated.memory_kind;
+    await pool.query(
+      `INSERT INTO chronicle_memory_chunks (
+         owner_user_id,campaign_id,world_version_id,parent_memory_id,parent_content_hash,
+         chunking_protocol_version,chunk_ordinal,chunk_kind,content,source_start_offset,source_end_offset,token_estimate
+       ) VALUES ($1,$2,$3,$4,$5,'chronicle-chunk-v0',0,$6,'Outdated protocol fixture.',0,26,6)`,
+      [ownerUserId, campaignId, worldVersionId, outdated.id, outdated.content_hash, outdatedChunkKind]
+    );
+    expect((await readHealth()).status).toBe("chunk_protocol_outdated");
+
+    await pool.query("DELETE FROM chronicle_memory_chunks WHERE campaign_id = $1", [campaignId]);
+    await writeConfig(true, "legacy_hybrid");
+    expect((await readHealth()).status).toBe("rebuild_required");
+
+    const firstMemory = memories.rows[0]!;
+    await pool.query(
+      `UPDATE chronicle_memories
+          SET embedding = '[1,0]'::vector,
+              embedding_provider_profile_id = $1,
+              embedding_model = 'health-model',
+              embedding_dimensions = 2,
+              embedding_content_hash = content_hash,
+              embedding_updated_at = now(),
+              embedding_provider_fingerprint = 'health-fingerprint'
+        WHERE id = $2`,
+      [providerId, firstMemory.id]
+    );
+    await pool.query(
+      `INSERT INTO chronicle_jobs (owner_user_id,campaign_id,job_type,status,completed_at,created_at,updated_at)
+       VALUES ($1,$2,'embed_campaign','completed',now(),now(),now())`,
+      [ownerUserId, campaignId]
+    );
+    expect((await readHealth()).status).toBe("partially_indexed");
+
+    const currentMemoryCount = await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM chronicle_memories WHERE campaign_id = $1 AND owner_user_id = $2",
+      [campaignId, ownerUserId]
+    );
+    const additionalMemories = 200 - Number.parseInt(currentMemoryCount.rows[0]!.count, 10);
+    expect(additionalMemories).toBeGreaterThan(0);
+    await pool.query(
+      `WITH generated_turns AS (
+         INSERT INTO turns (owner_user_id,campaign_id,turn_number,action,narration)
+         SELECT $1,$2,10000 + value,'Coverage fixture action','Coverage fixture narration'
+           FROM generate_series(1,$4::integer) AS value
+         RETURNING id,turn_number
+       )
+       INSERT INTO chronicle_memories (
+         owner_user_id,campaign_id,world_version_id,turn_id,memory_kind,ordinal,content,
+         token_estimate,importance,entities,entity_ids,metadata
+       )
+       SELECT $1,$2,$3,id,'turn_fiction',turn_number,'Coverage fixture ' || turn_number,
+              4,0.5,ARRAY[]::text[],ARRAY[]::text[],'{}'::jsonb
+         FROM generated_turns`,
+      [ownerUserId, campaignId, worldVersionId, additionalMemories]
+    );
+    await pool.query(
+      `UPDATE chronicle_memories
+          SET embedding = '[1,0]'::vector,
+              embedding_provider_profile_id = $1,
+              embedding_model = 'health-model',
+              embedding_dimensions = 2,
+              embedding_content_hash = content_hash,
+              embedding_updated_at = now(),
+              embedding_provider_fingerprint = 'health-fingerprint'
+        WHERE campaign_id = $2 AND owner_user_id = $3`,
+      [providerId, campaignId, ownerUserId]
+    );
+    await pool.query(
+      `UPDATE chronicle_memories
+          SET embedding = NULL,
+              embedding_provider_profile_id = NULL,
+              embedding_model = NULL,
+              embedding_dimensions = NULL,
+              embedding_content_hash = NULL,
+              embedding_updated_at = NULL,
+              embedding_provider_fingerprint = NULL
+        WHERE id = (
+          SELECT id FROM chronicle_memories
+           WHERE campaign_id = $1 AND owner_user_id = $2
+           ORDER BY ordinal DESC,id DESC LIMIT 1
+        )`,
+      [campaignId, ownerUserId]
+    );
+    expect(await readHealth()).toMatchObject({
+      status: "partially_indexed",
+      indexedMemories: 199,
+      totalMemories: 200,
+      coveragePercent: 100
+    });
+
+    await pool.query(
+      `UPDATE chronicle_memories
+          SET embedding = '[1,0]'::vector,
+              embedding_provider_profile_id = $1,
+              embedding_model = 'health-model',
+              embedding_dimensions = 2,
+              embedding_content_hash = content_hash,
+              embedding_updated_at = now(),
+              embedding_provider_fingerprint = 'health-fingerprint'
+        WHERE campaign_id = $2 AND owner_user_id = $3`,
+      [providerId, campaignId, ownerUserId]
+    );
+    const longModel = "m".repeat(500);
+    await writeConfig(true, "legacy_hybrid", longModel);
+    await pool.query(
+      `UPDATE chronicle_memories
+          SET embedding_model = $1
+        WHERE campaign_id = $2 AND owner_user_id = $3`,
+      [longModel, campaignId, ownerUserId]
+    );
+    await pool.query(
+      `UPDATE chronicle_jobs
+          SET completed_at = clock_timestamp(),updated_at = clock_timestamp()
+        WHERE id = (
+          SELECT id FROM chronicle_jobs
+           WHERE campaign_id = $1 AND owner_user_id = $2 AND job_type = 'embed_campaign'
+           ORDER BY created_at DESC,updated_at DESC,id DESC LIMIT 1
+        )`,
+      [campaignId, ownerUserId]
+    );
+    const healthy = await readHealth();
+    expect(healthy).toMatchObject({
+      status: "healthy",
+      chronicleAvailable: true,
+      enabled: true,
+      retrievalImplementation: "legacy_hybrid",
+      retrievalShadowEnabled: true,
+      fallbackCode: null
+    });
+    expect(healthy.message.length).toBeLessThanOrEqual(500);
+    expect(observedStatuses).toEqual(new Set(expectedStatuses));
   });
 
   it("atomically persists composed embedding vectors, reported costs, progress, and completion", async () => {

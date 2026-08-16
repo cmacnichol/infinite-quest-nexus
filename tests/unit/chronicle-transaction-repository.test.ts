@@ -17,7 +17,14 @@ type QueryResult = Readonly<{
 function databaseClient(
   query: (sql: string, values: readonly unknown[]) => QueryResult | Promise<QueryResult>
 ): DatabaseClient {
-  return { query: vi.fn(query) } as unknown as DatabaseClient;
+  return {
+    query: vi.fn((sql: string, values: readonly unknown[]) => {
+      if (/^(?:SAVEPOINT|RELEASE SAVEPOINT|ROLLBACK TO SAVEPOINT) chronicle_retrieval_/.test(sql)) {
+        return { rows: [], rowCount: 0 };
+      }
+      return query(sql, values);
+    })
+  } as unknown as DatabaseClient;
 }
 
 function databasePool(
