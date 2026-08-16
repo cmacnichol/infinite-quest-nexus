@@ -27,6 +27,7 @@ import type {
 } from "./types.js";
 
 export interface MemoryConfigurationRepository {
+  /** Includes retrieval selection controls; the generation-facing retrieval seam remains buildContextPreview. */
   getEmbeddingConfig(scope: CampaignMemoryScope): Promise<EmbeddingConfigView>;
   setEmbeddingConfig(scope: CampaignMemoryScope, input: MemoryEmbeddingConfigInput): Promise<EmbeddingConfigView>;
 }

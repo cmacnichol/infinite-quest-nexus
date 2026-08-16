@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { campaignEmbeddingConfigSchema } from "../../packages/contracts/src/memory.js";
 import {
   createMemoryApplication,
   createMemoryWorkerApplication,
@@ -13,6 +14,14 @@ const scope = {
 } as const;
 
 describe("MemoryApplication", () => {
+  it("defaults new retrieval controls while preserving the context-preview transaction seam", () => {
+    expect(campaignEmbeddingConfigSchema.parse({})).toMatchObject({
+      enabled: false,
+      retrievalImplementation: "legacy_hybrid",
+      retrievalShadowEnabled: false
+    });
+  });
+
   it("delegates owner-scoped API operations without exposing raw failures", async () => {
     const publicFailure = { code: "memory_unavailable", message: "Chronicle memory is unavailable." } as const;
     const dependencies: MemoryApplicationDependencies = {

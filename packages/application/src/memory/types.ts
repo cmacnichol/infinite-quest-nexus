@@ -1,4 +1,4 @@
-import type { CampaignEmbeddingConfig, MemoryContextQuery } from "@infinite-quest/contracts";
+import type { CampaignEmbeddingConfig, MemoryContextQuery, RetrievalImplementation } from "@infinite-quest/contracts";
 
 /** Resolved at the API boundary or read from a claimed worker job; never caller supplied. */
 export type MemoryOwnerScope = Readonly<{
@@ -34,6 +34,8 @@ export type EmbeddingConfigView = Readonly<{
   effectiveDocumentPrefix?: string;
   effectiveQueryPrefix?: string;
   prefixesAutomatic?: boolean;
+  retrievalImplementation?: RetrievalImplementation;
+  retrievalShadowEnabled?: boolean;
 }>;
 
 export type ChronicleMetricsView = Readonly<{
