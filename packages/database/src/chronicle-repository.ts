@@ -1345,6 +1345,21 @@ async function buildContext(
 export function createPostgresChronicleGenerationTransactionPort(
   dependencies: ChronicleGenerationTransactionDependencies,
 ): MemoryGenerationTransactionPort {
+  async function enqueueDerivedChunkIndex(
+    client: DatabaseClient,
+    scope: CampaignWorldVersionMemoryScope,
+  ): Promise<void> {
+    await client.query("SAVEPOINT automatic_chronicle_chunk_enqueue");
+    try {
+      await enqueuePostgresChronicleChunkIndex(client, scope);
+    } catch {
+      await client.query("ROLLBACK TO SAVEPOINT automatic_chronicle_chunk_enqueue");
+      await client.query("RELEASE SAVEPOINT automatic_chronicle_chunk_enqueue");
+      return;
+    }
+    await client.query("RELEASE SAVEPOINT automatic_chronicle_chunk_enqueue");
+  }
+
   return {
     async autoEnableCampaignEmbedding(database, scope) {
       const client = transactionClient(database);
@@ -1419,7 +1434,7 @@ export function createPostgresChronicleGenerationTransactionPort(
     async writeAcceptedTurnFiction(database, scope) {
       const client = transactionClient(database);
       await writeAcceptedFiction(client, scope);
-      await enqueuePostgresChronicleChunkIndex(client, scope);
+      await enqueueDerivedChunkIndex(client, scope);
     },
     async storeDerivedTurnMemories(database, scope) {
       await storeDerivedMemories(transactionClient(database), scope);
@@ -1427,7 +1442,7 @@ export function createPostgresChronicleGenerationTransactionPort(
     async rebuildCampaignMemories(database, scope) {
       const client = transactionClient(database);
       const rebuilt = await rebuildMemories(client, scope);
-      await enqueuePostgresChronicleChunkIndex(client, scope);
+      await enqueueDerivedChunkIndex(client, scope);
       return rebuilt;
     },
     async buildContextPreview(database, scope) {
@@ -1578,7 +1593,11 @@ export function createPostgresChronicleConfigurationRepository(pool: DatabasePoo
             [scope.ownerUserId, scope.campaignId]
           );
         }
-        await enqueuePostgresChronicleChunkIndex(client, { ...scope, worldVersionId });
+        await enqueuePostgresChronicleChunkIndex(
+          client,
+          { ...scope, worldVersionId },
+          { forceNewWork: capabilityChanged }
+        );
         return saved;
       });
     }

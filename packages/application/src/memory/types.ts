@@ -217,6 +217,8 @@ export type ClaimedChronicleChunkJob = CampaignWorldVersionMemoryScope & Readonl
   jobType: "index_memory_chunks_v2";
   workVersion: number;
   workerId: string;
+  /** Opaque per-claim authority; regenerated even when the same worker reclaims unchanged work. */
+  leaseToken: string;
   leaseSeconds: number;
   progress: ChronicleChunkJobProgress;
 }>;

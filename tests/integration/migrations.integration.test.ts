@@ -1210,7 +1210,8 @@ integration("standard database migration runner", () => {
         "0069_import_progress_status",
         "0070_turn_narration_corrections",
         "0071_world_share_links",
-        "0072_chronicle_memory_chunks"
+        "0072_chronicle_memory_chunks",
+        "0073_chronicle_chunk_job_fencing"
       ]);
 
       const scrubbed = await isolatedPool.query<{ technical_metadata: Record<string, unknown> }>(
@@ -1577,6 +1578,7 @@ integration("standard database migration runner", () => {
 
   it("adds isolated Chronicle chunks without changing accepted turns", async () => {
     const migrationName = "0072_chronicle_memory_chunks";
+    const fencingMigrationName = "0073_chronicle_chunk_job_fencing";
     const databaseName = `infinitequest_chronicle_chunks_${crypto.randomUUID().replaceAll("-", "")}`;
     const databaseUrlValue = new URL(databaseUrl!);
     databaseUrlValue.pathname = `/${databaseName}`;
@@ -1677,6 +1679,55 @@ integration("standard database migration runner", () => {
       );
       await expect(migrateDatabase(isolatedPool, migrationDirectory)).resolves.toEqual([migrationName]);
 
+      await expect(isolatedPool.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns
+          WHERE table_schema='public' AND table_name='chronicle_chunk_jobs'
+            AND column_name IN ('lease_token','work_signature')`
+      )).resolves.toMatchObject({ rows: [] });
+      const legacyClaim = await isolatedPool.query<{ id: string; work_version: string }>(
+        `UPDATE chronicle_chunk_jobs
+            SET status='running',lease_owner='legacy-worker',
+                lease_expires_at=clock_timestamp()+interval '5 minutes',
+                progress='{"processedParents":1}'::jsonb
+          WHERE campaign_id=$1
+          RETURNING id,work_version::text`,
+        [firstCampaign.rows[0]!.id]
+      );
+      expect(legacyClaim.rows).toHaveLength(1);
+      const parentContentHash = createHash("sha256")
+        .update("The bridge is safe.", "utf8")
+        .digest("hex");
+      const expectedWorkSignature = createHash("sha256")
+        .update(`${firstVersion.rows[0]!.id}\x1f2:${parentMemory.rows[0]!.id}:${parentContentHash}`, "utf8")
+        .digest("hex");
+
+      await copyFile(
+        resolve(`database/migrations/${fencingMigrationName}.sql`),
+        join(migrationDirectory, `${fencingMigrationName}.sql`)
+      );
+      await expect(migrateDatabase(isolatedPool, migrationDirectory)).resolves.toEqual([fencingMigrationName]);
+      await expect(isolatedPool.query<{
+        status: string;
+        work_version: string;
+        lease_owner: string | null;
+        lease_token: string | null;
+        lease_expires_at: string | null;
+        progress: Record<string, unknown>;
+        work_signature: string;
+      }>(
+        `SELECT status,work_version::text,lease_owner,lease_token,lease_expires_at,progress,work_signature
+           FROM chronicle_chunk_jobs WHERE id=$1`,
+        [legacyClaim.rows[0]!.id]
+      )).resolves.toMatchObject({ rows: [{
+        status: "queued",
+        work_version: "2",
+        lease_owner: null,
+        lease_token: null,
+        lease_expires_at: null,
+        progress: {},
+        work_signature: expectedWorkSignature
+      }] });
+
       expect(await snapshotTurnRows(isolatedPool, ownerUserId, firstCampaign.rows[0]!.id)).toEqual(beforeTurns);
       await expect(isolatedPool.query(
         `SELECT column_name, data_type, is_nullable, column_default
@@ -1774,10 +1825,14 @@ integration("standard database migration runner", () => {
       );
       expect(jobColumns.rows.map((row) => row.column_name)).toEqual([
         "id", "owner_user_id", "campaign_id", "job_type", "status", "attempts", "work_version", "lease_owner",
-        "lease_expires_at", "progress", "error_message", "created_at", "updated_at", "completed_at"
+        "lease_expires_at", "progress", "error_message", "created_at", "updated_at", "completed_at", "lease_token",
+        "work_signature"
       ]);
       expect(jobColumns.rows.find((row) => row.column_name === "job_type")).toMatchObject({
         column_default: "'index_memory_chunks_v2'::text", is_nullable: "NO"
+      });
+      expect(jobColumns.rows.find((row) => row.column_name === "work_signature")).toMatchObject({
+        is_nullable: "NO"
       });
 
       const constraints = await isolatedPool.query<{ table_name: string; constraint_name: string; definition: string }>(
@@ -1928,7 +1983,7 @@ integration("standard database migration runner", () => {
         {
           table_name: "chronicle_chunk_jobs",
           constraint_name: "chronicle_chunk_jobs_lease_check",
-          definition: "CHECK ((((status = 'running'::text) AND (lease_owner IS NOT NULL) AND (btrim(lease_owner) <> ''::text) AND (lease_expires_at IS NOT NULL)) OR ((status <> 'running'::text) AND (lease_owner IS NULL) AND (lease_expires_at IS NULL))))"
+          definition: "CHECK ((((status = 'running'::text) AND (lease_owner IS NOT NULL) AND (btrim(lease_owner) <> ''::text) AND (lease_token IS NOT NULL) AND (lease_expires_at IS NOT NULL)) OR ((status <> 'running'::text) AND (lease_owner IS NULL) AND (lease_token IS NULL) AND (lease_expires_at IS NULL))))"
         },
         {
           table_name: "chronicle_chunk_jobs",
@@ -1942,12 +1997,17 @@ integration("standard database migration runner", () => {
         },
         {
           table_name: "chronicle_chunk_jobs",
+          constraint_name: "chronicle_chunk_jobs_work_signature_check",
+          definition: "CHECK ((work_signature ~ '^[0-9a-f]{64}$'::text))"
+        },
+        {
+          table_name: "chronicle_chunk_jobs",
           constraint_name: "chronicle_chunk_jobs_work_version_check",
           definition: "CHECK ((work_version > 0))"
         },
         ...expectedNotNullConstraints("chronicle_chunk_jobs", [
-          "id", "owner_user_id", "campaign_id", "job_type", "status", "attempts", "work_version", "progress",
-          "created_at", "updated_at"
+          "id", "owner_user_id", "campaign_id", "job_type", "status", "attempts", "work_version",
+          "work_signature", "progress", "created_at", "updated_at"
         ])
       ];
       const compareConstraints = (left: { table_name: string; constraint_name: string }, right: { table_name: string; constraint_name: string }) =>

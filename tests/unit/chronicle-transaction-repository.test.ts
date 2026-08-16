@@ -20,6 +20,31 @@ function databaseClient(
   return { query: vi.fn(query) } as unknown as DatabaseClient;
 }
 
+function databasePool(
+  query: (sql: string, values: readonly unknown[]) => QueryResult | Promise<QueryResult>
+): DatabasePool {
+  const client = {
+    ...databaseClient((sql, values) => {
+      if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql)) return { rows: [], rowCount: 0 };
+      return query(sql, values);
+    }),
+    release: vi.fn()
+  } as unknown as DatabaseClient;
+  return {
+    connect: vi.fn(async () => client),
+    query: vi.fn(query)
+  } as unknown as DatabasePool;
+}
+
+function acceptsDisabledAutomaticChunkEnqueue(sql: string): QueryResult | null {
+  if (sql === "SAVEPOINT automatic_chronicle_chunk_enqueue"
+    || sql === "RELEASE SAVEPOINT automatic_chronicle_chunk_enqueue") {
+    return { rows: [], rowCount: 0 };
+  }
+  if (sql.includes("JOIN campaign_memory_configs config")) return { rows: [] };
+  return null;
+}
+
 function embeddingPort(
   overrides: Partial<ChronicleTransactionEmbeddingPort> = {}
 ): ChronicleTransactionEmbeddingPort {
@@ -135,6 +160,8 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
   it("writes only sanitized accepted fiction with owner, campaign, and world-version scope", async () => {
     let inserted: readonly unknown[] = [];
     const client = databaseClient((sql, values) => {
+      const automaticChunkEnqueue = acceptsDisabledAutomaticChunkEnqueue(sql);
+      if (automaticChunkEnqueue) return automaticChunkEnqueue;
       if (sql.includes("FROM campaigns") && sql.includes("world_versions")) {
         return { rows: [{
           id: scope.campaignId,
@@ -247,6 +274,8 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     };
     const client = databaseClient((sql, values) => {
       sqlStatements.push(sql);
+      const automaticChunkEnqueue = acceptsDisabledAutomaticChunkEnqueue(sql);
+      if (automaticChunkEnqueue) return automaticChunkEnqueue;
       if (sql.includes("FROM campaigns") && sql.includes("world_versions")) {
         return { rows: [campaignRow] };
       }
@@ -281,6 +310,8 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     const canonicalWrites: Array<{ sql: string; values: readonly unknown[] }> = [];
     const memoryWrites: Array<{ sql: string; values: readonly unknown[] }> = [];
     const client = databaseClient((sql, values) => {
+      const automaticChunkEnqueue = acceptsDisabledAutomaticChunkEnqueue(sql);
+      if (automaticChunkEnqueue) return automaticChunkEnqueue;
       if (sql.includes("FROM campaigns") && sql.includes("world_versions")) {
         return { rows: [{
           id: scope.campaignId,
@@ -518,10 +549,11 @@ describe("PostgreSQL Chronicle embedding configuration policy", () => {
 
   it("rejects an image provider before persisting embedding configuration", async () => {
     let persisted = false;
-    const pool = databaseClient((sql) => {
+    const pool = databasePool((sql) => {
       if (sql.includes("SELECT world_version_id FROM campaigns")) {
         return { rows: [{ world_version_id: scope.worldVersionId }] };
       }
+      if (sql.includes("FROM campaign_memory_configs")) return { rows: [] };
       if (sql.includes("provider_role = 'embedding'")) return { rows: [] };
       if (sql.includes("SELECT provider_role FROM provider_profiles")) {
         return { rows: [{ provider_role: "image" }] };
@@ -538,7 +570,7 @@ describe("PostgreSQL Chronicle embedding configuration policy", () => {
         }] };
       }
       throw new Error(`Unexpected SQL: ${sql}`);
-    }) as unknown as DatabasePool;
+    });
     const configuration = createPostgresChronicleConfigurationRepository(pool);
 
     await expect(configuration.setEmbeddingConfig(scope, {
@@ -550,10 +582,11 @@ describe("PostgreSQL Chronicle embedding configuration policy", () => {
 
   it("rejects a text provider while a dedicated embedding provider is enabled", async () => {
     let persisted = false;
-    const pool = databaseClient((sql) => {
+    const pool = databasePool((sql) => {
       if (sql.includes("SELECT world_version_id FROM campaigns")) {
         return { rows: [{ world_version_id: scope.worldVersionId }] };
       }
+      if (sql.includes("FROM campaign_memory_configs")) return { rows: [] };
       if (sql.includes("provider_role = 'embedding'")) {
         return { rows: [{ id: "embedding-profile", is_default: true }] };
       }
@@ -565,7 +598,7 @@ describe("PostgreSQL Chronicle embedding configuration policy", () => {
         return { rows: [] };
       }
       throw new Error(`Unexpected SQL: ${sql}`);
-    }) as unknown as DatabasePool;
+    });
     const configuration = createPostgresChronicleConfigurationRepository(pool);
 
     await expect(configuration.setEmbeddingConfig(scope, {
@@ -577,12 +610,24 @@ describe("PostgreSQL Chronicle embedding configuration policy", () => {
 
   it("persists the enabled dedicated default when the provider is omitted", async () => {
     let persistedProviderId: unknown;
-    const pool = databaseClient((sql, values) => {
+    const pool = databasePool((sql, values) => {
       if (sql.includes("SELECT world_version_id FROM campaigns")) {
         return { rows: [{ world_version_id: scope.worldVersionId }] };
       }
       if (sql.includes("provider_role = 'embedding'")) {
         return { rows: [{ id: "embedding-default", is_default: true }] };
+      }
+      if (sql.includes("FROM campaign_memory_configs")) {
+        return { rows: [{
+          embedding_enabled: false,
+          embedding_provider_profile_id: null,
+          embedding_model: null,
+          embedding_batch_size: 16,
+          embedding_document_prefix: null,
+          embedding_query_prefix: null,
+          retrieval_implementation: "legacy_hybrid",
+          retrieval_shadow_enabled: false
+        }] };
       }
       if (sql.includes("INSERT INTO campaign_memory_configs")) {
         persistedProviderId = values[3];
@@ -595,8 +640,23 @@ describe("PostgreSQL Chronicle embedding configuration policy", () => {
           embedding_query_prefix: null
         }] };
       }
+      if (sql.includes("UPDATE chronicle_memory_chunks")) return { rows: [], rowCount: 0 };
+      if (sql.includes("JOIN campaign_memory_configs config")) {
+        return { rows: [{
+          world_version_id: scope.worldVersionId,
+          embedding_enabled: true,
+          embedding_provider_profile_id: "embedding-default",
+          embedding_model: "embed-v1",
+          embedding_batch_size: 16,
+          embedding_document_prefix: null,
+          embedding_query_prefix: null,
+          retrieval_implementation: "legacy_hybrid",
+          retrieval_shadow_enabled: false
+        }] };
+      }
+      if (sql.includes("INSERT INTO chronicle_chunk_jobs")) return { rows: [{ id: "chunk-job-1" }] };
       throw new Error(`Unexpected SQL: ${sql}`);
-    }) as unknown as DatabasePool;
+    });
     const configuration = createPostgresChronicleConfigurationRepository(pool);
 
     await expect(configuration.setEmbeddingConfig(scope, {

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type {
   CampaignWorldVersionMemoryScope,
   ChronicleChunkBatchPort,
@@ -82,7 +83,12 @@ function durableProgress(value: Record<string, unknown> | null | undefined): Chr
   });
 }
 
-function claimed(row: ChunkJobRow, workerId: string, leaseSeconds: number): ChronicleChunkLeaseScope {
+function claimed(
+  row: ChunkJobRow,
+  workerId: string,
+  leaseToken: string,
+  leaseSeconds: number,
+): ChronicleChunkLeaseScope {
   return {
     jobId: row.id,
     ownerUserId: row.owner_user_id,
@@ -91,6 +97,7 @@ function claimed(row: ChunkJobRow, workerId: string, leaseSeconds: number): Chro
     jobType: "index_memory_chunks_v2",
     workVersion: Number(row.work_version),
     workerId,
+    leaseToken,
     leaseSeconds,
     progress: durableProgress(row.progress)
   };
@@ -134,10 +141,11 @@ async function loadConfig(
   return result.rows[0] ?? null;
 }
 
-/** Enqueues only the separate v2 job table and always clears stale cursor state for newer work. */
+/** Enqueues only the separate v2 job table, preserving progress when authoritative parents are unchanged. */
 export async function enqueuePostgresChronicleChunkIndex(
   database: DatabasePool | DatabaseClient,
   scope: CampaignWorldVersionMemoryScope,
+  options: Readonly<{ forceNewWork?: boolean }> = {},
 ): Promise<string | null> {
   const eligibility = await database.query<ChunkConfigRow & Readonly<{ world_version_id: string }>>(
     `SELECT c.world_version_id, config.embedding_enabled, config.embedding_provider_profile_id,
@@ -152,16 +160,45 @@ export async function enqueuePostgresChronicleChunkIndex(
   const config = eligibility.rows[0];
   if (!config || (!config.embedding_enabled && !config.retrieval_shadow_enabled)) return null;
   const result = await database.query<{ id: string }>(
-    `INSERT INTO chronicle_chunk_jobs (owner_user_id, campaign_id, job_type, status, progress)
-     VALUES ($1,$2,'index_memory_chunks_v2','queued','{}'::jsonb)
-     ON CONFLICT (campaign_id) WHERE status IN ('queued','running')
-     DO UPDATE SET work_version = chronicle_chunk_jobs.work_version + 1,
-                   progress = '{}'::jsonb,
-                   error_message = NULL,
-                   completed_at = NULL,
-                   updated_at = clock_timestamp()
-     RETURNING id`,
-    [scope.ownerUserId, scope.campaignId]
+    `WITH desired AS (
+       SELECT encode(digest(
+                c.world_version_id::text || E'\\x1f' ||
+                COALESCE(string_agg(
+                  m.ordinal::text || ':' || m.id::text || ':' || m.content_hash,
+                  E'\\x1e' ORDER BY m.ordinal,m.id
+                ), ''),
+                'sha256'
+              ), 'hex') AS work_signature
+         FROM campaigns c
+         LEFT JOIN chronicle_memories m
+           ON m.campaign_id=c.id AND m.owner_user_id=c.owner_user_id
+          AND m.world_version_id=c.world_version_id
+        WHERE c.id=$2 AND c.owner_user_id=$1 AND c.world_version_id=$3
+        GROUP BY c.world_version_id
+     ), upserted AS (
+       INSERT INTO chronicle_chunk_jobs
+         (owner_user_id,campaign_id,job_type,status,progress,work_signature)
+       SELECT $1,$2,'index_memory_chunks_v2','queued','{}'::jsonb,work_signature
+         FROM desired
+       ON CONFLICT (campaign_id) WHERE status IN ('queued','running')
+       DO UPDATE SET work_version=chronicle_chunk_jobs.work_version+1,
+                     work_signature=EXCLUDED.work_signature,
+                     progress='{}'::jsonb,error_message=NULL,completed_at=NULL,
+                     updated_at=clock_timestamp()
+       WHERE $4::boolean
+          OR chronicle_chunk_jobs.work_signature IS DISTINCT FROM EXCLUDED.work_signature
+       RETURNING id
+     )
+     SELECT id FROM upserted
+     UNION ALL
+     SELECT j.id
+       FROM chronicle_chunk_jobs j
+       JOIN desired d ON d.work_signature=j.work_signature
+      WHERE j.campaign_id=$2 AND j.owner_user_id=$1
+        AND j.status IN ('queued','running')
+        AND NOT EXISTS (SELECT 1 FROM upserted)
+     LIMIT 1`,
+    [scope.ownerUserId, scope.campaignId, scope.worldVersionId, options.forceNewWork === true]
   );
   return result.rows[0]?.id ?? null;
 }
@@ -173,6 +210,7 @@ export function createPostgresChronicleChunkJobStatePort(pool: DatabasePool): Ch
         throw invalid("Chronicle chunk claim parameters are invalid.");
       }
       return withTransaction(pool, async (client) => {
+        const leaseToken = randomUUID();
         const result = await client.query<ChunkJobRow>(
           `WITH candidate AS (
              SELECT j.id
@@ -185,7 +223,7 @@ export function createPostgresChronicleChunkJobStatePort(pool: DatabasePool): Ch
               LIMIT 1
            )
            UPDATE chronicle_chunk_jobs j
-              SET status = 'running', attempts = attempts + 1, lease_owner = $1,
+              SET status = 'running', attempts = attempts + 1, lease_owner = $1, lease_token=$3,
                   lease_expires_at = clock_timestamp() + ($2::text || ' seconds')::interval,
                   updated_at = clock_timestamp()
              FROM candidate
@@ -194,10 +232,10 @@ export function createPostgresChronicleChunkJobStatePort(pool: DatabasePool): Ch
                      (SELECT c.world_version_id FROM campaigns c
                        WHERE c.id = j.campaign_id AND c.owner_user_id = j.owner_user_id) AS world_version_id,
                      j.work_version, j.progress`,
-          [request.workerId, request.leaseSeconds]
+          [request.workerId, request.leaseSeconds, leaseToken]
         );
         const row = result.rows[0];
-        return row ? claimed(row, request.workerId, request.leaseSeconds) : null;
+        return row ? claimed(row, request.workerId, leaseToken, request.leaseSeconds) : null;
       });
     },
     async loadClaimedJob(scope) {
@@ -207,12 +245,13 @@ export function createPostgresChronicleChunkJobStatePort(pool: DatabasePool): Ch
            JOIN campaigns c ON c.id=j.campaign_id AND c.owner_user_id=j.owner_user_id
           WHERE j.id=$1 AND j.owner_user_id=$2 AND j.campaign_id=$3 AND c.world_version_id=$4
             AND j.job_type='index_memory_chunks_v2' AND j.status='running'
-            AND j.lease_owner=$5 AND j.work_version=$6 AND j.lease_expires_at>=clock_timestamp()`,
+            AND j.lease_owner=$5 AND j.work_version=$6 AND j.lease_token=$7
+            AND j.lease_expires_at>=clock_timestamp()`,
         [scope.jobId, scope.ownerUserId, scope.campaignId, scope.worldVersionId,
-          scope.workerId, scope.workVersion]
+          scope.workerId, scope.workVersion, scope.leaseToken]
       );
       const row = result.rows[0];
-      return row ? claimed(row, scope.workerId, scope.leaseSeconds) : null;
+      return row ? claimed(row, scope.workerId, scope.leaseToken, scope.leaseSeconds) : null;
     },
     async heartbeatClaim(scope) {
       const result = await pool.query(
@@ -220,11 +259,12 @@ export function createPostgresChronicleChunkJobStatePort(pool: DatabasePool): Ch
             SET lease_expires_at=clock_timestamp()+($7::text || ' seconds')::interval,
                 updated_at=clock_timestamp()
           WHERE j.id=$1 AND j.owner_user_id=$2 AND j.campaign_id=$3 AND j.lease_owner=$4
-            AND j.status='running' AND j.work_version=$5 AND j.lease_expires_at>=clock_timestamp()
+            AND j.status='running' AND j.work_version=$5 AND j.lease_token=$8
+            AND j.lease_expires_at>=clock_timestamp()
             AND EXISTS (SELECT 1 FROM campaigns c
                          WHERE c.id=$3 AND c.owner_user_id=$2 AND c.world_version_id=$6)`,
         [scope.jobId, scope.ownerUserId, scope.campaignId, scope.workerId, scope.workVersion,
-          scope.worldVersionId, scope.leaseSeconds]
+          scope.worldVersionId, scope.leaseSeconds, scope.leaseToken]
       );
       return result.rowCount === 1;
     },
@@ -234,27 +274,30 @@ export function createPostgresChronicleChunkJobStatePort(pool: DatabasePool): Ch
             SET status=CASE WHEN work_version>$5 THEN 'queued' ELSE 'completed' END,
                 completed_at=CASE WHEN work_version>$5 THEN NULL ELSE clock_timestamp() END,
                 progress=CASE WHEN work_version>$5 THEN '{}'::jsonb ELSE $6::jsonb END,
-                lease_owner=NULL, lease_expires_at=NULL, error_message=NULL, updated_at=clock_timestamp()
+                lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL, error_message=NULL,
+                updated_at=clock_timestamp()
           WHERE j.id=$1 AND j.owner_user_id=$2 AND j.campaign_id=$3 AND j.lease_owner=$4
-            AND j.status='running' AND j.work_version>=$5 AND j.lease_expires_at>=clock_timestamp()
+            AND j.status='running' AND j.work_version>=$5 AND j.lease_token=$8
+            AND j.lease_expires_at>=clock_timestamp()
             AND EXISTS (SELECT 1 FROM campaigns c
                          WHERE c.id=$3 AND c.owner_user_id=$2 AND c.world_version_id=$7)`,
         [scope.jobId, scope.ownerUserId, scope.campaignId, scope.workerId, scope.workVersion,
-          JSON.stringify(completion.progress), scope.worldVersionId]
+          JSON.stringify(completion.progress), scope.worldVersionId, scope.leaseToken]
       );
       return result.rowCount === 1;
     },
     async failClaim(scope, failure) {
       const result = await pool.query(
         `UPDATE chronicle_chunk_jobs j
-            SET status='failed',error_message=$6,lease_owner=NULL,lease_expires_at=NULL,
+            SET status='failed',error_message=$6,lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,
                 updated_at=clock_timestamp()
           WHERE j.id=$1 AND j.owner_user_id=$2 AND j.campaign_id=$3 AND j.lease_owner=$4
-            AND j.status='running' AND j.work_version=$5 AND j.lease_expires_at>=clock_timestamp()
+            AND j.status='running' AND j.work_version=$5 AND j.lease_token=$8
+            AND j.lease_expires_at>=clock_timestamp()
             AND EXISTS (SELECT 1 FROM campaigns c
                          WHERE c.id=$3 AND c.owner_user_id=$2 AND c.world_version_id=$7)`,
         [scope.jobId, scope.ownerUserId, scope.campaignId, scope.workerId, scope.workVersion,
-          failure.diagnosticCode.slice(0, 128), scope.worldVersionId]
+          failure.diagnosticCode.slice(0, 128), scope.worldVersionId, scope.leaseToken]
       );
       return result.rowCount === 1;
     }
@@ -362,11 +405,16 @@ export function createPostgresChronicleChunkBatchPort(
       if (!input.capabilityFingerprint.trim()) throw invalid("Chronicle chunk capability fingerprint is required.");
       return withTransaction(pool, async (client) => {
         const active = await client.query<Pick<ChunkJobRow, "progress">>(
-          `SELECT progress FROM chronicle_chunk_jobs
-            WHERE id=$1 AND owner_user_id=$2 AND campaign_id=$3 AND lease_owner=$4
-              AND status='running' AND work_version=$5 AND lease_expires_at>=clock_timestamp()
-            FOR UPDATE`,
-          [scope.jobId, scope.ownerUserId, scope.campaignId, scope.workerId, scope.workVersion]
+          `SELECT j.progress
+             FROM chronicle_chunk_jobs j
+             JOIN campaigns c ON c.id=j.campaign_id AND c.owner_user_id=j.owner_user_id
+            WHERE j.id=$1 AND j.owner_user_id=$2 AND j.campaign_id=$3 AND j.lease_owner=$4
+              AND j.status='running' AND j.work_version=$5
+              AND j.lease_expires_at>=clock_timestamp() AND c.world_version_id=$6
+              AND j.lease_token=$7
+            FOR UPDATE OF j,c`,
+          [scope.jobId, scope.ownerUserId, scope.campaignId, scope.workerId, scope.workVersion,
+            scope.worldVersionId, scope.leaseToken]
         );
         const row = active.rows[0];
         if (!row) return "requeued";
@@ -384,25 +432,33 @@ export function createPostgresChronicleChunkBatchPort(
           await client.query(
             `UPDATE chronicle_chunk_jobs
                 SET status='queued',work_version=work_version+1,progress='{}'::jsonb,
-                    lease_owner=NULL,lease_expires_at=NULL,completed_at=NULL,error_message=NULL,
+                    lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,completed_at=NULL,error_message=NULL,
                     updated_at=clock_timestamp()
-              WHERE id=$1`,
-            [scope.jobId]
+              WHERE id=$1 AND owner_user_id=$2 AND campaign_id=$3 AND lease_owner=$4
+                AND status='running' AND work_version=$5 AND lease_token=$7
+                AND lease_expires_at>=clock_timestamp()
+                AND EXISTS (SELECT 1 FROM campaigns c
+                             WHERE c.id=$3 AND c.owner_user_id=$2 AND c.world_version_id=$6)`,
+            [scope.jobId, scope.ownerUserId, scope.campaignId, scope.workerId,
+              scope.workVersion, scope.worldVersionId, scope.leaseToken]
           );
           return "requeued";
         }
         const prepared = { ...progress, capabilityFingerprint: input.capabilityFingerprint };
-        await client.query(
+        const updated = await client.query(
           `UPDATE chronicle_chunk_jobs
               SET progress=$6::jsonb,
                   lease_expires_at=clock_timestamp()+($7::text || ' seconds')::interval,
                   updated_at=clock_timestamp()
             WHERE id=$1 AND owner_user_id=$2 AND campaign_id=$3 AND lease_owner=$4
-              AND status='running' AND work_version=$5 AND lease_expires_at>=clock_timestamp()`,
+              AND status='running' AND work_version=$5 AND lease_token=$9
+              AND lease_expires_at>=clock_timestamp()
+              AND EXISTS (SELECT 1 FROM campaigns c
+                           WHERE c.id=$3 AND c.owner_user_id=$2 AND c.world_version_id=$8)`,
           [scope.jobId, scope.ownerUserId, scope.campaignId, scope.workerId, scope.workVersion,
-            JSON.stringify(prepared), scope.leaseSeconds]
+            JSON.stringify(prepared), scope.leaseSeconds, scope.worldVersionId, scope.leaseToken]
         );
-        return "ready";
+        return updated.rowCount === 1 ? "ready" : "requeued";
       });
     },
     async commitParentBatch(scope, input) {
@@ -436,11 +492,16 @@ export function createPostgresChronicleChunkBatchPort(
 
       return withTransaction(pool, async (client) => {
         const active = await client.query<Pick<ChunkJobRow, "progress">>(
-          `SELECT progress FROM chronicle_chunk_jobs
-            WHERE id=$1 AND owner_user_id=$2 AND campaign_id=$3 AND lease_owner=$4
-              AND status='running' AND work_version=$5 AND lease_expires_at>=clock_timestamp()
-            FOR UPDATE`,
-          [scope.jobId, scope.ownerUserId, scope.campaignId, scope.workerId, scope.workVersion]
+          `SELECT j.progress
+             FROM chronicle_chunk_jobs j
+             JOIN campaigns c ON c.id=j.campaign_id AND c.owner_user_id=j.owner_user_id
+            WHERE j.id=$1 AND j.owner_user_id=$2 AND j.campaign_id=$3 AND j.lease_owner=$4
+              AND j.status='running' AND j.work_version=$5
+              AND j.lease_expires_at>=clock_timestamp() AND c.world_version_id=$6
+              AND j.lease_token=$7
+            FOR UPDATE OF j,c`,
+          [scope.jobId, scope.ownerUserId, scope.campaignId, scope.workerId, scope.workVersion,
+            scope.worldVersionId, scope.leaseToken]
         );
         const job = active.rows[0];
         if (!job) return false;
@@ -570,9 +631,12 @@ export function createPostgresChronicleChunkBatchPort(
                   lease_expires_at=clock_timestamp()+($7::text || ' seconds')::interval,
                   updated_at=clock_timestamp()
             WHERE id=$1 AND owner_user_id=$2 AND campaign_id=$3 AND lease_owner=$4
-              AND status='running' AND work_version=$5 AND lease_expires_at>=clock_timestamp()`,
+              AND status='running' AND work_version=$5 AND lease_token=$9
+              AND lease_expires_at>=clock_timestamp()
+              AND EXISTS (SELECT 1 FROM campaigns c
+                           WHERE c.id=$3 AND c.owner_user_id=$2 AND c.world_version_id=$8)`,
           [scope.jobId, scope.ownerUserId, scope.campaignId, scope.workerId, scope.workVersion,
-            JSON.stringify(input.progress), scope.leaseSeconds]
+            JSON.stringify(input.progress), scope.leaseSeconds, scope.worldVersionId, scope.leaseToken]
         );
         if (updated.rowCount !== 1) throw new Error("Chronicle chunk lease was lost before batch commit.");
         return true;

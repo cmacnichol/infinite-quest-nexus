@@ -70,7 +70,13 @@ export function createWorkerMemoryApplication(
       execution: createChronicleChunkWorkerExecution({
         parents: chunkParents,
         batches: chunkBatches,
-        embeddings: bindings.embeddings
+        embeddings: {
+          load: (scope) => bindings.embeddings.load(pool, scope),
+          embed: (provider, documents) => bindings.embeddings.embed(provider, documents),
+          fingerprint: (provider, prefixes) => bindings.embeddings.fingerprint(provider, prefixes),
+          recordHealth: (scope, healthy, diagnostic) =>
+            bindings.embeddings.recordHealth(pool, scope, healthy, diagnostic)
+        }
       })
     },
     logProviderTransportError

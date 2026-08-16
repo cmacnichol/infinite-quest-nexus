@@ -84,6 +84,9 @@ integration("PostgreSQL Chronicle chunk repository", () => {
     const duplicate = await enqueuePostgresChronicleChunkIndex(pool, locked);
     const availableJob = await enqueuePostgresChronicleChunkIndex(pool, available);
     expect(duplicate).toBe(lockedJob);
+    expect(await pool.query<{ work_version: string; progress: Record<string, unknown> }>(
+      "SELECT work_version::text,progress FROM chronicle_chunk_jobs WHERE id=$1", [lockedJob]
+    )).toMatchObject({ rows: [{ work_version: "1", progress: {} }] });
     expect(await pool.query<{ count: string }>(
       "SELECT count(*)::text AS count FROM chronicle_chunk_jobs WHERE campaign_id=$1 AND status IN ('queued','running')",
       [locked.campaignId]
@@ -114,6 +117,10 @@ integration("PostgreSQL Chronicle chunk repository", () => {
     const state = createPostgresChronicleChunkJobStatePort(pool);
     const first = await state.claimNext({ workerId: "chunk-resume-a", leaseSeconds: 30 });
     if (!first) throw new Error("chunk job was not claimed");
+    const firstPage = await createPostgresChronicleChunkParentPort(pool).loadForClaim(
+      first,
+      { batchLimit: 1, cursor: null }
+    );
     await pool.query(
       `UPDATE chronicle_chunk_jobs
           SET progress=$2::jsonb, lease_expires_at=now()-interval '1 second'
@@ -127,8 +134,60 @@ integration("PostgreSQL Chronicle chunk repository", () => {
         capabilityFingerprint: "fingerprint-a"
       })]
     );
-    const reclaimed = await state.claimNext({ workerId: "chunk-resume-b", leaseSeconds: 30 });
+    const reclaimed = await state.claimNext({ workerId: "chunk-resume-a", leaseSeconds: 30 });
     expect(reclaimed?.progress.parentCursor).toBe(`1:${value.parents[0]!.id}`);
+    expect(reclaimed?.leaseToken).not.toBe(first.leaseToken);
+    await expect(state.loadClaimedJob(first)).resolves.toBeNull();
+    await expect(state.heartbeatClaim(first)).resolves.toBe(false);
+    await expect(state.completeClaim(first, { progress: first.progress })).resolves.toBe(false);
+    await expect(state.failClaim(first, { diagnosticCode: "stale_executor" })).resolves.toBe(false);
+    const staleBatches = createPostgresChronicleChunkBatchPort(pool, {
+      recordCost: async () => null
+    });
+    await expect(staleBatches.prepareClaim(first, {
+      capabilityFingerprint: "fingerprint-a"
+    })).resolves.toBe("requeued");
+    const staleParent = firstPage.parents[0]!;
+    await expect(staleBatches.commitParentBatch(first, {
+      parent: staleParent,
+      previousParentCursor: null,
+      provider: null,
+      providerFingerprint: null,
+      capabilityFingerprint: "fingerprint-a",
+      embeddingProtocolVersion: "chronicle-embedding-v1",
+      chunks: [{
+        protocolVersion: "chronicle-chunk-v1",
+        parentMemoryId: staleParent.id,
+        kind: "campaign_summary",
+        chunkIndex: 0,
+        content: staleParent.content,
+        contentHash: staleParent.contentHash,
+        estimatedTokens: 4,
+        sourceStartOffset: 0,
+        sourceEndOffset: staleParent.content.length,
+        embedding: null,
+        skipReason: "semantic_disabled"
+      }],
+      results: [],
+      progress: {
+        parentCursor: `1:${staleParent.id}`,
+        processedParents: 1,
+        embeddedChunks: 0,
+        skippedChunks: 1,
+        totalParents: 2,
+        capabilityFingerprint: "fingerprint-a"
+      }
+    })).resolves.toBe(false);
+
+    await enqueuePostgresChronicleChunkIndex(pool, value);
+    expect(await pool.query<{ progress: Record<string, unknown>; work_version: string }>(
+      "SELECT progress,work_version::text FROM chronicle_chunk_jobs WHERE id=$1", [first.jobId]
+    )).toMatchObject({
+      rows: [{
+        work_version: "1",
+        progress: expect.objectContaining({ parentCursor: `1:${value.parents[0]!.id}` })
+      }]
+    });
 
     await pool.query(
       "UPDATE chronicle_memories SET content='First safe parent changed.' WHERE id=$1",
@@ -221,7 +280,7 @@ integration("PostgreSQL Chronicle chunk repository", () => {
     const stableChunk = await pool.query<{ id: string }>(
       "SELECT id FROM chronicle_memory_chunks WHERE parent_memory_id=$1", [parent.id]
     );
-    await enqueuePostgresChronicleChunkIndex(pool, value);
+    await enqueuePostgresChronicleChunkIndex(pool, value, { forceNewWork: true });
     await expect(state.completeClaim(claim, { progress })).resolves.toBe(true);
     const replay = await state.claimNext({ workerId: "chunk-replay", leaseSeconds: 30 });
     if (!replay) throw new Error("replayed chunk job was not claimed");
@@ -230,6 +289,28 @@ integration("PostgreSQL Chronicle chunk repository", () => {
     expect(await pool.query<{ id: string }>(
       "SELECT id FROM chronicle_memory_chunks WHERE parent_memory_id=$1", [parent.id]
     )).toEqual(stableChunk);
+
+    await expect(state.completeClaim(replay, { progress })).resolves.toBe(true);
+    await enqueuePostgresChronicleChunkIndex(pool, value, { forceNewWork: true });
+    const worldRace = await state.claimNext({ workerId: "chunk-world-race", leaseSeconds: 30 });
+    if (!worldRace) throw new Error("world-race chunk job was not claimed");
+    await batches.prepareClaim(worldRace, { capabilityFingerprint: "capability-a" });
+    const world = await pool.query<{ world_id: string }>(
+      "SELECT world_id FROM world_versions WHERE id=$1", [value.worldVersionId]
+    );
+    const movedVersion = await pool.query<{ id: string }>(
+      `INSERT INTO world_versions (world_id,owner_user_id,version_number,content)
+       VALUES ($1,$2,2,'{}') RETURNING id`,
+      [world.rows[0]!.world_id, value.ownerUserId]
+    );
+    await pool.query(
+      "UPDATE campaigns SET world_version_id=$2 WHERE id=$1 AND owner_user_id=$3",
+      [value.campaignId, movedVersion.rows[0]!.id, value.ownerUserId]
+    );
+    await expect(batches.commitParentBatch(worldRace, input)).resolves.toBe(false);
+    await expect(batches.prepareClaim(worldRace, {
+      capabilityFingerprint: "capability-a"
+    })).resolves.toBe("requeued");
   });
 
   it("rolls back an incomplete batch and cascades chunk work with its campaign", async () => {

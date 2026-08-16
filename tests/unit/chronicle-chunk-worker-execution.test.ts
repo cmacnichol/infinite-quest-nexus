@@ -16,6 +16,7 @@ const claim: ClaimedChronicleChunkJob = {
   jobType: "index_memory_chunks_v2",
   workVersion: 4,
   workerId: "chunk-worker-1",
+  leaseToken: "77777777-7777-4777-8777-777777777777",
   leaseSeconds: 30,
   progress: {
     parentCursor: "6:44444444-4444-4444-8444-444444444444",
@@ -46,7 +47,7 @@ function parentPage() {
         embeddingMaxBatchItems: 2,
         embeddingMaxBatchTokens: 70,
         embeddingDimensions: 2,
-        embeddingMaxRetries: 2
+        embeddingMaxRetries: 5
       }
     },
     parents: [{
@@ -84,7 +85,7 @@ function dependencies(overrides: Readonly<Record<string, unknown>> = {}) {
         embeddingMaxBatchItems: 2,
         embeddingMaxBatchTokens: 128,
       embeddingDimensions: 2,
-      embeddingMaxRetries: 2
+      embeddingMaxRetries: 5
     },
     embed: vi.fn().mockImplementation(async (documents: readonly string[]) => ({
       embeddings: documents.map(() => [0.1, 0.2]),

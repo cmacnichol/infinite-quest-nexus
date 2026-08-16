@@ -68,7 +68,7 @@ export interface MemoryGenerationTransactionPort {
     database: MemoryTransactionContext,
     scope: CampaignWorldVersionMemoryScope,
   ): Promise<string | null>;
-  enqueueChunkIndex?(
+  enqueueChunkIndex(
     database: MemoryTransactionContext,
     scope: CampaignWorldVersionMemoryScope,
   ): Promise<string | null>;

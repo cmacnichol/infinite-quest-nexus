@@ -31,8 +31,15 @@ and evaluation modules are not added to `MemoryGenerationTransactionPort`.
 The following decisions govern the implementation.
 
 1. Migrations are named `0072_chronicle_memory_chunks.sql`,
-   `0073_chronicle_retrieval_observability.sql`, and
-   `0074_chronicle_query_embedding_cache.sql`.
+   `0073_chronicle_chunk_job_fencing.sql`,
+   `0074_chronicle_retrieval_observability.sql`, and
+   `0075_chronicle_query_embedding_cache.sql`. Fencing is an additive migration
+   because `0072` may already be recorded on a deployed database. It adds token
+   storage, backfills deterministic work signatures, and requeues tokenless
+   running claims with a new work version and cleared cursor so no pre-upgrade
+   executor retains authority. A unique token is generated when the job is next
+   claimed. Editing `0072` in place would upgrade only fresh databases and leave
+   previously migrated installations incompatible with the token-fenced worker.
 2. `chronicle_memory_chunks` owns a chunk's text metadata and nullable vector
    together so content/vector eligibility is atomic. Retrieval continues to use
    exact campaign-scoped pgvector scans; no ANN index is added.

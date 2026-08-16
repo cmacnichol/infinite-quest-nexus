@@ -23,12 +23,37 @@ import {
   modelAwareEmbeddingPrefixes
 } from "../../../packages/domain/src/chronicle-memory-helpers.js";
 import { estimateTokens, stableStringify } from "../../../packages/domain/src/text.js";
-import type { ChronicleTransactionEmbeddingPort } from "../../../packages/database/src/chronicle-repository.js";
+import type {
+  ChronicleTransactionEmbeddingExecution,
+  ChronicleTransactionEmbeddingProvider,
+  ChronicleTransactionEmbeddingResult
+} from "../../../packages/database/src/chronicle-repository.js";
+
+export type ChronicleChunkEmbeddingWorkerPort = Readonly<{
+  load(scope: Readonly<{
+    ownerUserId: string;
+    providerProfileId: string;
+    model: string;
+  }>): Promise<ChronicleTransactionEmbeddingExecution>;
+  embed(
+    provider: ChronicleTransactionEmbeddingExecution,
+    documents: readonly string[],
+  ): Promise<ChronicleTransactionEmbeddingResult>;
+  fingerprint(
+    provider: ChronicleTransactionEmbeddingProvider,
+    prefixes: Readonly<{ documentPrefix: string; queryPrefix: string; automatic: boolean }>,
+  ): Promise<string>;
+  recordHealth(
+    scope: Readonly<{ ownerUserId: string; providerProfileId: string; model: string }>,
+    healthy: boolean,
+    diagnostic?: string,
+  ): Promise<void>;
+}>;
 
 export type ChronicleChunkWorkerExecutionDependencies = Readonly<{
   parents: ChronicleChunkParentPort;
   batches: ChronicleChunkBatchPort;
-  embeddings: ChronicleTransactionEmbeddingPort;
+  embeddings: ChronicleChunkEmbeddingWorkerPort;
   sleep?: (milliseconds: number) => Promise<void>;
 }>;
 
@@ -107,7 +132,7 @@ function boundedBatches(
 
 async function embedWithRetry(
   dependencies: ChronicleChunkWorkerExecutionDependencies,
-  provider: Awaited<ReturnType<ChronicleTransactionEmbeddingPort["load"]>>,
+  provider: ChronicleTransactionEmbeddingExecution,
   documents: readonly string[],
   capability: EmbeddingCapability,
 ) {
@@ -121,7 +146,7 @@ async function embedWithRetry(
       assertCompleteEmbeddingBatch(result.embeddings, documents.length, capability);
       return result;
     } catch (error) {
-      if (attempt >= capability.maxRetries) throw error;
+      if (attempt >= Math.min(2, capability.maxRetries)) throw error;
       await sleep(250 * 2 ** attempt);
     }
   }
@@ -171,14 +196,14 @@ export function createChronicleChunkWorkerExecution(
         throw new Error("Chronicle chunk indexing is no longer enabled for this campaign.");
       }
 
-      let provider: Awaited<ReturnType<ChronicleTransactionEmbeddingPort["load"]>> | null = null;
+      let provider: ChronicleTransactionEmbeddingExecution | null = null;
       let capability: EmbeddingCapability | null = null;
       let providerFingerprint: string | null = null;
       if (semanticEnabled) {
         if (!page.providerCapability) {
           throw new Error("Chronicle chunk embedding provider capability is unavailable.");
         }
-        provider = await dependencies.embeddings.load({} as never, {
+        provider = await dependencies.embeddings.load({
           ownerUserId: claim.ownerUserId,
           providerProfileId: page.config.providerProfileId!,
           model: page.config.model!
@@ -230,7 +255,7 @@ export function createChronicleChunkWorkerExecution(
               results.push(result);
               vectors.push(...result.embeddings);
             } catch (error) {
-              await dependencies.embeddings.recordHealth({} as never, {
+              await dependencies.embeddings.recordHealth({
                 ownerUserId: claim.ownerUserId,
                 providerProfileId: provider.id,
                 model: provider.model
@@ -276,7 +301,7 @@ export function createChronicleChunkWorkerExecution(
         }
       }
       if (provider) {
-        await dependencies.embeddings.recordHealth({} as never, {
+        await dependencies.embeddings.recordHealth({
           ownerUserId: claim.ownerUserId,
           providerProfileId: provider.id,
           model: provider.model

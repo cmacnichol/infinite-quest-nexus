@@ -806,6 +806,27 @@ integration("PostgreSQL Chronicle contract matrix", () => {
       retrievalImplementation: "chunked_hybrid",
       retrievalShadowEnabled: true
     });
+    await pool.query(
+      `UPDATE chronicle_chunk_jobs SET progress='{"processedParents":1}'::jsonb
+        WHERE campaign_id=$1`,
+      [fixture.campaignId]
+    );
+    const unchanged = await pool.query<{ work_version: string; progress: Record<string, unknown> }>(
+      "SELECT work_version::text,progress FROM chronicle_chunk_jobs WHERE campaign_id=$1",
+      [fixture.campaignId]
+    );
+    await expect(configuration.setEmbeddingConfig(fixture, {
+      ...input,
+      retrievalImplementation: "chunked_hybrid",
+      retrievalShadowEnabled: true
+    })).resolves.toMatchObject({
+      retrievalImplementation: "chunked_hybrid",
+      retrievalShadowEnabled: true
+    });
+    await expect(pool.query<{ work_version: string; progress: Record<string, unknown> }>(
+      "SELECT work_version::text,progress FROM chronicle_chunk_jobs WHERE campaign_id=$1",
+      [fixture.campaignId]
+    )).resolves.toEqual(unchanged);
     await expect(configuration.setEmbeddingConfig(fixture, input)).resolves.toMatchObject({
       retrievalImplementation: "legacy_hybrid",
       retrievalShadowEnabled: false
@@ -874,6 +895,62 @@ integration("PostgreSQL Chronicle contract matrix", () => {
       `SELECT to_jsonb(t)-'state_snapshot_private' AS row,xmin::text
          FROM turns t WHERE id=$1`, [turn.rows[0]!.id]
     )).toEqual(before);
+  });
+
+  it("commits accepted turns and parent memories when automatic chunk enqueue fails", async () => {
+    const fixture = await campaignFixture("accepted enqueue failure");
+    const providerId = await providerFixture("accepted enqueue failure");
+    await configureEmbedding(fixture.campaignId, providerId, "embed-v1");
+    const transaction = createPostgresChronicleGenerationTransactionPort({
+      embeddings: {
+        async resolve() { return providerId; },
+        async load() {
+          return {
+            id: providerId, model: "embed-v1", providerType: "openai_compatible",
+            embed: async () => ({ embeddings: [], responseId: "unused", usage: {}, reportedCost: null })
+          };
+        },
+        async embed() { return { embeddings: [], responseId: "unused", usage: {}, reportedCost: null }; },
+        async fingerprint() { return "unused"; },
+        async recordHealth() {},
+        async recordCost() { return null; },
+        logDiagnostic() {}
+      }
+    });
+    await pool.query(`CREATE OR REPLACE FUNCTION test_fail_chunk_enqueue() RETURNS trigger
+      LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'private enqueue failure token'; END $$`);
+    await pool.query(`CREATE TRIGGER test_fail_chunk_enqueue
+      BEFORE INSERT OR UPDATE ON chronicle_chunk_jobs
+      FOR EACH ROW EXECUTE FUNCTION test_fail_chunk_enqueue()`);
+    try {
+      await expect(withTransaction(pool, async (client) => {
+        const turn = await client.query<{ id: string }>(
+          `INSERT INTO turns
+             (owner_user_id,campaign_id,turn_number,action,narration,state_snapshot_private)
+           VALUES ($1,$2,1,'Enter the archive.','The archive opens.','{}'::jsonb) RETURNING id`,
+          [ownerUserId, fixture.campaignId]
+        );
+        await transaction.writeAcceptedTurnFiction(client, {
+          ownerUserId,
+          campaignId: fixture.campaignId,
+          worldVersionId: fixture.worldVersionId,
+          turnId: turn.rows[0]!.id,
+          ordinal: 1,
+          action: "Enter the archive.",
+          narration: "The archive opens."
+        });
+      })).resolves.toBeUndefined();
+      await expect(pool.query<{ turns: string; memories: string; jobs: string }>(
+        `SELECT
+           (SELECT count(*)::text FROM turns WHERE campaign_id=$1) AS turns,
+           (SELECT count(*)::text FROM chronicle_memories WHERE campaign_id=$1) AS memories,
+           (SELECT count(*)::text FROM chronicle_chunk_jobs WHERE campaign_id=$1) AS jobs`,
+        [fixture.campaignId]
+      )).resolves.toMatchObject({ rows: [{ turns: "1", memories: "1", jobs: "0" }] });
+    } finally {
+      await pool.query("DROP TRIGGER IF EXISTS test_fail_chunk_enqueue ON chronicle_chunk_jobs");
+      await pool.query("DROP FUNCTION IF EXISTS test_fail_chunk_enqueue()");
+    }
   });
 
   it("rolls back every direct Chronicle generation operation with its caller-owned transaction", async () => {
@@ -1024,7 +1101,7 @@ integration("PostgreSQL Chronicle contract matrix", () => {
       [fixture.campaignId]
     )).resolves.toMatchObject({ rows: [{ count: "0" }] });
     await expectForcedRollback(async (client) => {
-      await transaction.enqueueChunkIndex!(client, scope);
+      await transaction.enqueueChunkIndex(client, scope);
       throw rollback;
     });
     await expect(pool.query<{ count: string }>(

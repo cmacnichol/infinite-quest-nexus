@@ -24,6 +24,8 @@ export function createMemoryApplication(
         dependencies.transaction.buildContextPreview(database, scope),
       enqueueEmbeddingReindex: (database, scope) =>
         dependencies.transaction.enqueueEmbeddingReindex(database, scope),
+      enqueueChunkIndex: (database, scope) =>
+        dependencies.transaction.enqueueChunkIndex(database, scope),
       rebuildCampaignMemories: (database, scope) =>
         dependencies.transaction.rebuildCampaignMemories(database, scope),
       storeDerivedTurnMemories: (database, scope) =>

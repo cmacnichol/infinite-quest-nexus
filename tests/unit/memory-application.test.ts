@@ -42,6 +42,7 @@ describe("MemoryApplication", () => {
         autoEnableCampaignEmbedding: vi.fn().mockResolvedValue({ enabled: true }),
         buildContextPreview: vi.fn().mockResolvedValue({ scopes: { campaignCanon: [] } }),
         enqueueEmbeddingReindex: vi.fn().mockResolvedValue("embedding-1"),
+        enqueueChunkIndex: vi.fn().mockResolvedValue("chunk-1"),
         rebuildCampaignMemories: vi.fn().mockResolvedValue(3),
         storeDerivedTurnMemories: vi.fn().mockResolvedValue(undefined),
         writeAcceptedTurnFiction: vi.fn().mockResolvedValue(undefined)
@@ -67,12 +68,13 @@ describe("MemoryApplication", () => {
     expect(dependencies.jobs.getJob).toHaveBeenCalledWith({ ownerUserId: scope.ownerUserId, jobId: "chronicle-1" });
   });
 
-  it("keeps all six generation memory operations on the caller-owned transaction", async () => {
+  it("keeps all seven generation memory operations on the caller-owned transaction", async () => {
     const transaction = { transactionId: "outer-transaction" };
     const callbacks = {
       autoEnableCampaignEmbedding: vi.fn().mockResolvedValue({ enabled: true }),
       buildContextPreview: vi.fn().mockResolvedValue({ scopes: { campaignCanon: [] } }),
       enqueueEmbeddingReindex: vi.fn().mockResolvedValue("embedding-1"),
+      enqueueChunkIndex: vi.fn().mockResolvedValue("chunk-1"),
       rebuildCampaignMemories: vi.fn().mockResolvedValue(2),
       storeDerivedTurnMemories: vi.fn().mockResolvedValue(undefined),
       writeAcceptedTurnFiction: vi.fn().mockResolvedValue(undefined)
@@ -99,6 +101,7 @@ describe("MemoryApplication", () => {
       }
     });
     await application.generation.enqueueEmbeddingReindex(transaction, scope);
+    await application.generation.enqueueChunkIndex(transaction, scope);
     await application.generation.rebuildCampaignMemories(transaction, scope);
     await application.generation.storeDerivedTurnMemories(transaction, {
       ...scope,

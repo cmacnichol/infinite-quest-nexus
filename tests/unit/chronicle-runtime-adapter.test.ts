@@ -278,7 +278,8 @@ describe("Chronicle runtime adapters", () => {
           storeDerivedTurnMemories: vi.fn(),
           writeAcceptedTurnFiction: vi.fn(),
           rebuildCampaignMemories: vi.fn(),
-          enqueueEmbeddingReindex: vi.fn()
+          enqueueEmbeddingReindex: vi.fn(),
+          enqueueChunkIndex: vi.fn()
         },
 
       });

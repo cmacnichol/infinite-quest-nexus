@@ -146,13 +146,30 @@ async function invalidateEmbeddingProfile(client: DatabaseClient, ownerUserId: s
     [ownerUserId, providerProfileId]
   );
   await client.query(
-    `INSERT INTO chronicle_chunk_jobs (owner_user_id, campaign_id, job_type, progress)
-     SELECT owner_user_id, campaign_id, 'index_memory_chunks_v2', '{}'::jsonb
-       FROM campaign_memory_configs
-      WHERE owner_user_id = $1 AND embedding_provider_profile_id = $2
-        AND (embedding_enabled = true OR retrieval_shadow_enabled = true)
+    `INSERT INTO chronicle_chunk_jobs
+       (owner_user_id,campaign_id,job_type,progress,work_signature)
+     SELECT config.owner_user_id,config.campaign_id,'index_memory_chunks_v2','{}'::jsonb,
+            encode(digest(
+              campaigns.world_version_id::text || E'\\x1f' || COALESCE((
+                SELECT string_agg(
+                  memories.ordinal::text || ':' || memories.id::text || ':' || memories.content_hash,
+                  E'\\x1e' ORDER BY memories.ordinal,memories.id
+                )
+                  FROM chronicle_memories memories
+                 WHERE memories.owner_user_id=config.owner_user_id
+                   AND memories.campaign_id=config.campaign_id
+                   AND memories.world_version_id=campaigns.world_version_id
+              ), ''),
+              'sha256'
+            ), 'hex')
+       FROM campaign_memory_configs config
+       JOIN campaigns
+         ON campaigns.id=config.campaign_id AND campaigns.owner_user_id=config.owner_user_id
+      WHERE config.owner_user_id = $1 AND config.embedding_provider_profile_id = $2
+        AND (config.embedding_enabled = true OR config.retrieval_shadow_enabled = true)
      ON CONFLICT (campaign_id) WHERE status IN ('queued', 'running')
      DO UPDATE SET work_version = chronicle_chunk_jobs.work_version + 1,
+                   work_signature = EXCLUDED.work_signature,
                    progress = '{}'::jsonb, updated_at = now(), error_message = NULL`,
     [ownerUserId, providerProfileId]
   );
