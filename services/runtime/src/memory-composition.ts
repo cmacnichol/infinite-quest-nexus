@@ -11,11 +11,17 @@ import {
   createPostgresChronicleWorkerAdapters,
   type ChronicleGenerationTransactionDependencies
 } from "../../../packages/database/src/chronicle-repository.js";
+import {
+  createPostgresChronicleChunkBatchPort,
+  createPostgresChronicleChunkJobStatePort,
+  createPostgresChronicleChunkParentPort
+} from "../../../packages/database/src/chronicle-chunk-repository.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { logProviderTransportError } from "../../../packages/story-engine/src/providers.js";
 import { createChronicleWorkerExecutor } from "./chronicle-platform-adapter.js";
 import { createChroniclePlatformBindings } from "./chronicle-platform-bindings.js";
 import { createChronicleClaimExecution } from "./chronicle-worker-execution.js";
+import { createChronicleChunkWorkerExecution } from "./chronicle-chunk-worker-execution.js";
 import type { ChronicleProviderCollaborators } from "./provider-application-composition.js";
 
 export type ApiMemoryCompositionDependencies = Readonly<{
@@ -46,6 +52,11 @@ export function createWorkerMemoryApplication(
   const batches = createPostgresChronicleEmbeddingBatchPort(pool, {
     recordCost: bindings.embeddings.recordCost
   });
+  const chunkState = createPostgresChronicleChunkJobStatePort(pool);
+  const chunkParents = createPostgresChronicleChunkParentPort(pool);
+  const chunkBatches = createPostgresChronicleChunkBatchPort(pool, {
+    recordCost: bindings.embeddings.recordCost
+  });
   const executor = createChronicleWorkerExecutor({
     ...adapters,
     execution: createChronicleClaimExecution(pool, {
@@ -54,6 +65,14 @@ export function createWorkerMemoryApplication(
       batches,
       generation
     }),
+    chunks: {
+      state: chunkState,
+      execution: createChronicleChunkWorkerExecution({
+        parents: chunkParents,
+        batches: chunkBatches,
+        embeddings: bindings.embeddings
+      })
+    },
     logProviderTransportError
   });
   return createMemoryWorkerApplication({ ...adapters, executor });

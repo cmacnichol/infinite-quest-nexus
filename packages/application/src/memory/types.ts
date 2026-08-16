@@ -203,6 +203,90 @@ export type ChronicleWorkerRetrieval = Readonly<{
   nextCursor: string | null;
 }>;
 
+export type ChronicleChunkJobProgress = Readonly<{
+  parentCursor: string | null;
+  processedParents: number;
+  embeddedChunks: number;
+  skippedChunks: number;
+  totalParents: number;
+  capabilityFingerprint: string | null;
+}>;
+
+export type ClaimedChronicleChunkJob = CampaignWorldVersionMemoryScope & Readonly<{
+  jobId: string;
+  jobType: "index_memory_chunks_v2";
+  workVersion: number;
+  workerId: string;
+  leaseSeconds: number;
+  progress: ChronicleChunkJobProgress;
+}>;
+
+export type ChronicleChunkLeaseScope = ClaimedChronicleChunkJob;
+
+export type ChronicleChunkParent = Readonly<{
+  id: string;
+  ordinal: number;
+  memoryKind: "turn_fiction" | "legacy_summary" | "campaign_summary" | "canonical_fact" | "open_thread";
+  content: string;
+  contentHash: string;
+  entities: readonly string[];
+  entityIds: readonly string[];
+  metadata: Readonly<Record<string, unknown>>;
+}>;
+
+export type ChronicleChunkParentPage = Readonly<{
+  config: EmbeddingConfigView;
+  providerCapability: Readonly<{
+    model: string;
+    contextWindowTokens: number;
+    requestTimeoutMs: number;
+    configuration: Readonly<Record<string, unknown>>;
+  }> | null;
+  parents: readonly ChronicleChunkParent[];
+  totalParents: number;
+  batchLimit: number;
+  nextCursor: string | null;
+}>;
+
+export type ChronicleChunkDraftCommit = Readonly<{
+  protocolVersion: "chronicle-chunk-v1";
+  parentMemoryId: string;
+  kind: "turn_action" | "turn_narration" | "legacy_summary" | "campaign_summary" | "canonical_fact" | "open_thread";
+  chunkIndex: number;
+  content: string;
+  contentHash: string;
+  estimatedTokens: number;
+  sourceStartOffset: number;
+  sourceEndOffset: number;
+  embedding: readonly number[] | null;
+  skipReason: string | null;
+}>;
+
+export type ChronicleChunkEmbeddingProvider = Readonly<{
+  id: string;
+  model: string;
+  providerType: string;
+}>;
+
+export type ChronicleChunkEmbeddingResult = Readonly<{
+  embeddings: readonly (readonly number[])[];
+  responseId: string;
+  usage: unknown;
+  reportedCost: Readonly<{ amount: string; currency: string }> | null;
+}>;
+
+export type ChronicleChunkBatchCommit = Readonly<{
+  parent: ChronicleChunkParent;
+  previousParentCursor: string | null;
+  provider: ChronicleChunkEmbeddingProvider | null;
+  providerFingerprint: string | null;
+  capabilityFingerprint: string;
+  embeddingProtocolVersion: string;
+  chunks: readonly ChronicleChunkDraftCommit[];
+  results: readonly ChronicleChunkEmbeddingResult[];
+  progress: ChronicleChunkJobProgress;
+}>;
+
 export type MemoryContextPreviewRequest = MemoryContextQuery & Readonly<{
   /** API preview is pinned to a world-version even when campaign version later changes. */
   throughTurnNumber?: number;

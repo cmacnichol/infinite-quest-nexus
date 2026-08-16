@@ -1,0 +1,382 @@
+import { resolve } from "node:path";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import {
+  createPostgresChronicleChunkBatchPort,
+  createPostgresChronicleChunkJobStatePort,
+  createPostgresChronicleChunkParentPort,
+  enqueuePostgresChronicleChunkIndex
+} from "../../packages/database/src/chronicle-chunk-repository.js";
+import { createPostgresChronicleConfigurationRepository } from "../../packages/database/src/chronicle-repository.js";
+import { createPostgresProviderRepositories } from "../../packages/database/src/provider-repository.js";
+import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
+import { migrateDatabase } from "../../packages/database/src/migrate.js";
+
+const databaseUrl = process.env.TEST_DATABASE_URL;
+const integration = databaseUrl ? describe.sequential : describe.skip;
+
+integration("PostgreSQL Chronicle chunk repository", () => {
+  let pool: DatabasePool;
+  let ownerUserId = "";
+
+  beforeAll(async () => {
+    pool = createDatabasePool(databaseUrl!, 8);
+    await migrateDatabase(pool, resolve("database/migrations"));
+    ownerUserId = await initialOwnerId(pool);
+  });
+
+  afterEach(async () => {
+    await pool.query("DELETE FROM campaigns");
+    await pool.query("DELETE FROM provider_profiles");
+    await pool.query("DELETE FROM world_versions");
+    await pool.query("DELETE FROM worlds");
+  });
+
+  afterAll(async () => {
+    await pool?.end();
+  });
+
+  async function fixture(label: string) {
+    const world = await pool.query<{ id: string }>(
+      "INSERT INTO worlds (owner_user_id, title) VALUES ($1,$2) RETURNING id",
+      [ownerUserId, `Chunk ${label} ${crypto.randomUUID()}`]
+    );
+    const version = await pool.query<{ id: string }>(
+      "INSERT INTO world_versions (world_id, owner_user_id, version_number, content) VALUES ($1,$2,1,'{}') RETURNING id",
+      [world.rows[0]!.id, ownerUserId]
+    );
+    const campaign = await pool.query<{ id: string }>(
+      "INSERT INTO campaigns (owner_user_id, world_version_id, title) VALUES ($1,$2,$3) RETURNING id",
+      [ownerUserId, version.rows[0]!.id, `Chunk ${label}`]
+    );
+    const provider = await pool.query<{ id: string }>(
+      `INSERT INTO provider_profiles
+         (owner_user_id, name, provider_type, provider_role, base_url, default_model)
+       VALUES ($1,$2,'openai_compatible','embedding','http://provider.invalid/v1','embed-v1') RETURNING id`,
+      [ownerUserId, `Chunk provider ${label}`]
+    );
+    await pool.query(
+      `INSERT INTO campaign_memory_configs
+         (campaign_id, owner_user_id, embedding_enabled, embedding_provider_profile_id, embedding_model)
+       VALUES ($1,$2,true,$3,'embed-v1')`,
+      [campaign.rows[0]!.id, ownerUserId, provider.rows[0]!.id]
+    );
+    const parents = await pool.query<{ id: string; content_hash: string }>(
+      `INSERT INTO chronicle_memories
+         (owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content, token_estimate, entities, entity_ids)
+       VALUES ($1,$2,$3,'campaign_summary',1,'First safe parent.',4,ARRAY['Gate'],ARRAY['gate']),
+              ($1,$2,$3,'open_thread',2,'Who opened the gate?',5,ARRAY['Gate'],ARRAY['gate'])
+       RETURNING id, content_hash`,
+      [ownerUserId, campaign.rows[0]!.id, version.rows[0]!.id]
+    );
+    return {
+      ownerUserId,
+      campaignId: campaign.rows[0]!.id,
+      worldVersionId: version.rows[0]!.id,
+      providerId: provider.rows[0]!.id,
+      parents: parents.rows
+    };
+  }
+
+  it("idempotently enqueues one active job and claims with campaign-scoped SKIP LOCKED fencing", async () => {
+    const locked = await fixture("locked");
+    const available = await fixture("available");
+    const lockedJob = await enqueuePostgresChronicleChunkIndex(pool, locked);
+    const duplicate = await enqueuePostgresChronicleChunkIndex(pool, locked);
+    const availableJob = await enqueuePostgresChronicleChunkIndex(pool, available);
+    expect(duplicate).toBe(lockedJob);
+    expect(await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM chronicle_chunk_jobs WHERE campaign_id=$1 AND status IN ('queued','running')",
+      [locked.campaignId]
+    )).toMatchObject({ rows: [{ count: "1" }] });
+
+    const locker = await pool.connect();
+    try {
+      await locker.query("BEGIN");
+      await locker.query("SELECT id FROM chronicle_chunk_jobs WHERE id=$1 FOR UPDATE", [lockedJob]);
+      const state = createPostgresChronicleChunkJobStatePort(pool);
+      const claim = await state.claimNext({ workerId: "chunk-claim-worker", leaseSeconds: 30 });
+      expect(claim?.jobId).toBe(availableJob);
+      if (!claim) throw new Error("available chunk job was not claimed");
+      await expect(state.heartbeatClaim(claim)).resolves.toBe(true);
+      await expect(state.heartbeatClaim({ ...claim, workerId: "wrong-worker" })).resolves.toBe(false);
+      await expect(state.heartbeatClaim({ ...claim, ownerUserId: crypto.randomUUID() })).resolves.toBe(false);
+      await expect(state.heartbeatClaim({ ...claim, campaignId: locked.campaignId })).resolves.toBe(false);
+      await expect(state.heartbeatClaim({ ...claim, worldVersionId: locked.worldVersionId })).resolves.toBe(false);
+    } finally {
+      await locker.query("ROLLBACK");
+      locker.release();
+    }
+  });
+
+  it("preserves a durable cursor on unchanged lease reclaim and clears it for newer work", async () => {
+    const value = await fixture("resume");
+    await enqueuePostgresChronicleChunkIndex(pool, value);
+    const state = createPostgresChronicleChunkJobStatePort(pool);
+    const first = await state.claimNext({ workerId: "chunk-resume-a", leaseSeconds: 30 });
+    if (!first) throw new Error("chunk job was not claimed");
+    await pool.query(
+      `UPDATE chronicle_chunk_jobs
+          SET progress=$2::jsonb, lease_expires_at=now()-interval '1 second'
+        WHERE id=$1`,
+      [first.jobId, JSON.stringify({
+        parentCursor: `1:${value.parents[0]!.id}`,
+        processedParents: 1,
+        embeddedChunks: 1,
+        skippedChunks: 0,
+        totalParents: 2,
+        capabilityFingerprint: "fingerprint-a"
+      })]
+    );
+    const reclaimed = await state.claimNext({ workerId: "chunk-resume-b", leaseSeconds: 30 });
+    expect(reclaimed?.progress.parentCursor).toBe(`1:${value.parents[0]!.id}`);
+
+    await pool.query(
+      "UPDATE chronicle_memories SET content='First safe parent changed.' WHERE id=$1",
+      [value.parents[0]!.id]
+    );
+    await enqueuePostgresChronicleChunkIndex(pool, value);
+    expect(await pool.query<{ progress: Record<string, unknown>; work_version: string }>(
+      "SELECT progress, work_version::text FROM chronicle_chunk_jobs WHERE id=$1",
+      [first.jobId]
+    )).toMatchObject({ rows: [{ progress: {}, work_version: "2" }] });
+    if (!reclaimed) throw new Error("chunk job was not reclaimed");
+    await expect(state.completeClaim(reclaimed, { progress: reclaimed.progress })).resolves.toBe(true);
+    expect(await pool.query<{ status: string; progress: Record<string, unknown> }>(
+      "SELECT status, progress FROM chronicle_chunk_jobs WHERE id=$1", [first.jobId]
+    )).toMatchObject({ rows: [{ status: "queued", progress: {} }] });
+  });
+
+  it("pages parents by ordinal and id and atomically upserts chunks, vectors, cost, progress, and lease", async () => {
+    const value = await fixture("commit");
+    await enqueuePostgresChronicleChunkIndex(pool, value);
+    const state = createPostgresChronicleChunkJobStatePort(pool);
+    const claim = await state.claimNext({ workerId: "chunk-commit", leaseSeconds: 30 });
+    if (!claim) throw new Error("chunk job was not claimed");
+    const parents = createPostgresChronicleChunkParentPort(pool);
+    const page = await parents.loadForClaim(claim, { batchLimit: 1, cursor: null });
+    expect(page.parents.map((parent) => parent.id)).toEqual([value.parents[0]!.id]);
+    expect(page.nextCursor).toBe(`1:${value.parents[0]!.id}`);
+
+    const recordCost = async (database: object) => {
+      await (database as DatabasePool).query(
+        `INSERT INTO provider_cost_events
+           (owner_user_id,campaign_id,provider_profile_id,provider_type,operation,category,amount,currency)
+         VALUES ($1,$2,$3,'openai_compatible','memory_embedding','memory',0.01,'USD')`,
+        [value.ownerUserId, value.campaignId, value.providerId]
+      );
+      return null;
+    };
+    const batches = createPostgresChronicleChunkBatchPort(pool, { recordCost });
+    await expect(batches.prepareClaim(claim, { capabilityFingerprint: "capability-a" })).resolves.toBe("ready");
+    const parent = page.parents[0]!;
+    const progress = {
+      parentCursor: `1:${parent.id}`,
+      processedParents: 1,
+      embeddedChunks: 1,
+      skippedChunks: 0,
+      totalParents: 2,
+      capabilityFingerprint: "capability-a"
+    };
+    const input = {
+      parent,
+      previousParentCursor: null,
+      provider: {
+        id: value.providerId,
+        model: "embed-v1",
+        providerType: "openai_compatible",
+        contextWindowTokens: 1_024,
+        requestTimeoutMs: 10_000,
+        configuration: {}
+      },
+      providerFingerprint: "provider-a",
+      capabilityFingerprint: "capability-a",
+      embeddingProtocolVersion: "chronicle-embedding-v1",
+      chunks: [{
+        protocolVersion: "chronicle-chunk-v1" as const,
+        parentMemoryId: parent.id,
+        kind: "campaign_summary" as const,
+        chunkIndex: 0,
+        content: "First safe parent.",
+        contentHash: parent.contentHash,
+        estimatedTokens: 4,
+        sourceStartOffset: 0,
+        sourceEndOffset: 18,
+        embedding: [0.1, 0.2],
+        skipReason: null
+      }],
+      results: [{ embeddings: [[0.1, 0.2]], responseId: "response-a", usage: {}, reportedCost: null }],
+      progress
+    };
+    await expect(batches.commitParentBatch(claim, input)).resolves.toBe(true);
+    await expect(batches.commitParentBatch(claim, input)).rejects.toMatchObject({ statusCode: 400 });
+    expect(await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM chronicle_memory_chunks WHERE parent_memory_id=$1",
+      [parent.id]
+    )).toMatchObject({ rows: [{ count: "1" }] });
+    expect(await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM provider_cost_events WHERE campaign_id=$1 AND operation='memory_embedding'",
+      [value.campaignId]
+    )).toMatchObject({ rows: [{ count: "1" }] });
+
+    const stableChunk = await pool.query<{ id: string }>(
+      "SELECT id FROM chronicle_memory_chunks WHERE parent_memory_id=$1", [parent.id]
+    );
+    await enqueuePostgresChronicleChunkIndex(pool, value);
+    await expect(state.completeClaim(claim, { progress })).resolves.toBe(true);
+    const replay = await state.claimNext({ workerId: "chunk-replay", leaseSeconds: 30 });
+    if (!replay) throw new Error("replayed chunk job was not claimed");
+    await batches.prepareClaim(replay, { capabilityFingerprint: "capability-a" });
+    await expect(batches.commitParentBatch(replay, input)).resolves.toBe(true);
+    expect(await pool.query<{ id: string }>(
+      "SELECT id FROM chronicle_memory_chunks WHERE parent_memory_id=$1", [parent.id]
+    )).toEqual(stableChunk);
+  });
+
+  it("rolls back an incomplete batch and cascades chunk work with its campaign", async () => {
+    const value = await fixture("rollback cascade");
+    await enqueuePostgresChronicleChunkIndex(pool, value);
+    const state = createPostgresChronicleChunkJobStatePort(pool);
+    const claim = await state.claimNext({ workerId: "chunk-rollback", leaseSeconds: 30 });
+    if (!claim) throw new Error("chunk job was not claimed");
+    const page = await createPostgresChronicleChunkParentPort(pool).loadForClaim(claim, { batchLimit: 1 });
+    const batches = createPostgresChronicleChunkBatchPort(pool, { recordCost: async () => null });
+    await batches.prepareClaim(claim, { capabilityFingerprint: "capability-b" });
+    const parent = page.parents[0]!;
+    await expect(batches.commitParentBatch(claim, {
+      parent,
+      previousParentCursor: null,
+      provider: { id: value.providerId, model: "embed-v1", providerType: "openai_compatible" },
+      providerFingerprint: "provider-b",
+      capabilityFingerprint: "capability-b",
+      embeddingProtocolVersion: "chronicle-embedding-v1",
+      chunks: [{
+        protocolVersion: "chronicle-chunk-v1", parentMemoryId: parent.id, kind: "campaign_summary",
+        chunkIndex: 0, content: "First safe parent.", contentHash: parent.contentHash,
+        estimatedTokens: 4, sourceStartOffset: 0, sourceEndOffset: 18,
+        embedding: [0.1, 0.2], skipReason: null
+      }],
+      results: [{ embeddings: [], responseId: "incomplete", usage: {}, reportedCost: null }],
+      progress: {
+        parentCursor: `1:${parent.id}`, processedParents: 1, embeddedChunks: 1,
+        skippedChunks: 0, totalParents: 2, capabilityFingerprint: "capability-b"
+      }
+    })).rejects.toMatchObject({ statusCode: 400 });
+    expect(await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM chronicle_memory_chunks WHERE parent_memory_id=$1", [parent.id]
+    )).toMatchObject({ rows: [{ count: "0" }] });
+    expect(await pool.query<{ progress: Record<string, unknown> }>(
+      "SELECT progress FROM chronicle_chunk_jobs WHERE id=$1", [claim.jobId]
+    )).toMatchObject({ rows: [{ progress: { parentCursor: null, processedParents: 0 } }] });
+
+    await expect(batches.commitParentBatch(claim, {
+      parent,
+      previousParentCursor: null,
+      provider: {
+        id: value.providerId, model: "embed-v1", providerType: "openai_compatible"
+      },
+      providerFingerprint: "provider-b",
+      capabilityFingerprint: "capability-b",
+      embeddingProtocolVersion: "chronicle-embedding-v1",
+      chunks: [{
+        protocolVersion: "chronicle-chunk-v1", parentMemoryId: parent.id, kind: "campaign_summary",
+        chunkIndex: 0, content: "First safe parent.", contentHash: parent.contentHash,
+        estimatedTokens: 4, sourceStartOffset: 0, sourceEndOffset: 18,
+        embedding: null, skipReason: "https://provider.invalid?token=must-not-persist"
+      }],
+      results: [],
+      progress: {
+        parentCursor: `1:${parent.id}`, processedParents: 1, embeddedChunks: 0,
+        skippedChunks: 1, totalParents: 2, capabilityFingerprint: "capability-b"
+      }
+    })).resolves.toBe(true);
+    expect(await pool.query<{ embedding_skip_reason: string }>(
+      "SELECT embedding_skip_reason FROM chronicle_memory_chunks WHERE parent_memory_id=$1", [parent.id]
+    )).toMatchObject({ rows: [{ embedding_skip_reason: "chunk_embedding_skipped" }] });
+
+    await pool.query("DELETE FROM campaigns WHERE id=$1 AND owner_user_id=$2", [value.campaignId, value.ownerUserId]);
+    expect(await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM chronicle_chunk_jobs WHERE campaign_id=$1", [value.campaignId]
+    )).toMatchObject({ rows: [{ count: "0" }] });
+    expect(await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM chronicle_memory_chunks WHERE campaign_id=$1", [value.campaignId]
+    )).toMatchObject({ rows: [{ count: "0" }] });
+  });
+
+  it("clears only chunk vector metadata and requeues on provider, model, and fingerprint invalidation", async () => {
+    const value = await fixture("invalidate");
+    const jobId = await enqueuePostgresChronicleChunkIndex(pool, value);
+    await pool.query(
+      `INSERT INTO chronicle_memory_chunks
+         (owner_user_id,campaign_id,world_version_id,parent_memory_id,parent_content_hash,
+          chunking_protocol_version,chunk_ordinal,chunk_kind,content,token_estimate,
+          embedding,embedding_status,embedding_provider_profile_id,embedding_model,embedding_dimensions,
+          embedding_protocol_version,embedding_provider_fingerprint,embedding_content_hash,embedding_updated_at)
+       VALUES ($1,$2,$3,$4,$5,'chronicle-chunk-v1',0,'campaign_summary','First safe parent.',4,
+               '[0.1,0.2]'::vector,'embedded',$6,'embed-v1',2,'chronicle-embedding-v1','old',$5,now())`,
+      [value.ownerUserId, value.campaignId, value.worldVersionId, value.parents[0]!.id,
+        value.parents[0]!.content_hash, value.providerId]
+    );
+    const persistedChunk = await pool.query<{ id: string }>(
+      "SELECT id FROM chronicle_memory_chunks WHERE campaign_id=$1", [value.campaignId]
+    );
+    const providerClient = await pool.connect();
+    try {
+      await providerClient.query("BEGIN");
+      await createPostgresProviderRepositories(providerClient).profiles.updateProfile({
+        ownerUserId: value.ownerUserId,
+        providerProfileId: value.providerId,
+        changes: { contextWindowTokens: 8_192 }
+      });
+      await providerClient.query("COMMIT");
+    } catch (error) {
+      await providerClient.query("ROLLBACK");
+      throw error;
+    } finally {
+      providerClient.release();
+    }
+    expect(await pool.query<{ id: string; content: string; embedding_status: string; embedding: string | null }>(
+      "SELECT id,content,embedding_status,embedding::text FROM chronicle_memory_chunks WHERE campaign_id=$1",
+      [value.campaignId]
+    )).toMatchObject({ rows: [{
+      id: persistedChunk.rows[0]!.id, content: "First safe parent.", embedding_status: "pending", embedding: null
+    }] });
+
+    await pool.query(
+      `UPDATE chronicle_memory_chunks
+          SET embedding='[0.2,0.3]'::vector,embedding_status='embedded',
+              embedding_provider_profile_id=$2,embedding_model='embed-v1',embedding_dimensions=2,
+              embedding_protocol_version='chronicle-embedding-v1',embedding_provider_fingerprint='old',
+              embedding_content_hash=parent_content_hash,embedding_updated_at=now()
+        WHERE campaign_id=$1`,
+      [value.campaignId, value.providerId]
+    );
+    await createPostgresChronicleConfigurationRepository(pool).setEmbeddingConfig(value, {
+      enabled: true,
+      providerProfileId: value.providerId,
+      model: "embed-v2",
+      batchSize: 16,
+      documentPrefix: null,
+      queryPrefix: null
+    });
+    expect(await pool.query<{ id: string; content: string; embedding_status: string; embedding: string | null }>(
+      "SELECT id,content,embedding_status,embedding::text FROM chronicle_memory_chunks WHERE campaign_id=$1",
+      [value.campaignId]
+    )).toMatchObject({ rows: [{
+      id: persistedChunk.rows[0]!.id, content: "First safe parent.", embedding_status: "pending", embedding: null
+    }] });
+
+    const batch = createPostgresChronicleChunkBatchPort(pool, { recordCost: async () => null });
+    const state = createPostgresChronicleChunkJobStatePort(pool);
+    const claim = await state.claimNext({ workerId: "chunk-invalidate", leaseSeconds: 30 });
+    if (!claim) throw new Error("chunk job was not claimed");
+    await pool.query(
+      "UPDATE chronicle_chunk_jobs SET progress=jsonb_build_object('capabilityFingerprint','old') WHERE id=$1",
+      [jobId]
+    );
+    await expect(batch.prepareClaim(claim, { capabilityFingerprint: "new" })).resolves.toBe("requeued");
+    expect(await pool.query<{ content: string; embedding_status: string; embedding: string | null }>(
+      "SELECT content,embedding_status,embedding::text FROM chronicle_memory_chunks WHERE campaign_id=$1",
+      [value.campaignId]
+    )).toMatchObject({ rows: [{ content: "First safe parent.", embedding_status: "pending", embedding: null }] });
+  });
+});

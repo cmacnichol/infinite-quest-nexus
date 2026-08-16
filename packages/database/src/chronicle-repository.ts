@@ -47,6 +47,7 @@ import { characterNarrativeContext } from "../../domain/src/world-characters.js"
 import { compressTurnMemory } from "../../story-engine/src/chronicle.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
+import { enqueuePostgresChronicleChunkIndex } from "./chronicle-chunk-repository.js";
 
 type ChronicleJobRow = Readonly<{
   id: string;
@@ -1412,14 +1413,22 @@ export function createPostgresChronicleGenerationTransactionPort(
       );
       return result.rows[0]?.id ?? null;
     },
+    async enqueueChunkIndex(database, scope) {
+      return enqueuePostgresChronicleChunkIndex(transactionClient(database), scope);
+    },
     async writeAcceptedTurnFiction(database, scope) {
-      await writeAcceptedFiction(transactionClient(database), scope);
+      const client = transactionClient(database);
+      await writeAcceptedFiction(client, scope);
+      await enqueuePostgresChronicleChunkIndex(client, scope);
     },
     async storeDerivedTurnMemories(database, scope) {
       await storeDerivedMemories(transactionClient(database), scope);
     },
     async rebuildCampaignMemories(database, scope) {
-      return rebuildMemories(transactionClient(database), scope);
+      const client = transactionClient(database);
+      const rebuilt = await rebuildMemories(client, scope);
+      await enqueuePostgresChronicleChunkIndex(client, scope);
+      return rebuilt;
     },
     async buildContextPreview(database, scope) {
       return buildContext(transactionClient(database), scope, dependencies);
@@ -1519,39 +1528,59 @@ export function createPostgresChronicleConfigurationRepository(pool: DatabasePoo
   return {
     getEmbeddingConfig: (scope) => loadConfig(pool, scope),
     async setEmbeddingConfig(scope, input: CampaignEmbeddingConfig) {
-      await requireCampaign(pool, scope);
-      const providerProfileId = await resolvePermittedEmbeddingProviderId(
-        pool,
-        scope,
-        input.providerProfileId
-      );
-      if (input.enabled && !providerProfileId) {
-        throw invalid("Add a text or embedding provider before enabling semantic memory.");
-      }
-      const result = await pool.query<EmbeddingConfigRow>(
-        `INSERT INTO campaign_memory_configs (
-           campaign_id, owner_user_id, embedding_enabled, embedding_provider_profile_id, embedding_model,
-           embedding_batch_size, embedding_document_prefix, embedding_query_prefix,
-           retrieval_implementation, retrieval_shadow_enabled
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-         ON CONFLICT (campaign_id) DO UPDATE SET
-           embedding_enabled = EXCLUDED.embedding_enabled,
-           embedding_provider_profile_id = EXCLUDED.embedding_provider_profile_id,
-           embedding_model = EXCLUDED.embedding_model,
-           embedding_batch_size = EXCLUDED.embedding_batch_size,
-           embedding_document_prefix = EXCLUDED.embedding_document_prefix,
-           embedding_query_prefix = EXCLUDED.embedding_query_prefix,
-           retrieval_implementation = EXCLUDED.retrieval_implementation,
-           retrieval_shadow_enabled = EXCLUDED.retrieval_shadow_enabled,
-           updated_at = now()
-         RETURNING embedding_enabled, embedding_provider_profile_id, embedding_model, embedding_batch_size,
-                   embedding_document_prefix, embedding_query_prefix, retrieval_implementation,
-                   retrieval_shadow_enabled`,
-        [scope.campaignId, scope.ownerUserId, input.enabled, providerProfileId, input.model,
-          input.batchSize, input.documentPrefix ?? null, input.queryPrefix ?? null,
-          input.retrievalImplementation ?? "legacy_hybrid", input.retrievalShadowEnabled ?? false]
-      );
-      return configView(result.rows[0]);
+      return withTransaction(pool, async (client) => {
+        const worldVersionId = await requireCampaign(client, scope);
+        const previous = await loadConfig(client, scope);
+        const providerProfileId = await resolvePermittedEmbeddingProviderId(
+          client,
+          scope,
+          input.providerProfileId
+        );
+        if (input.enabled && !providerProfileId) {
+          throw invalid("Add a text or embedding provider before enabling semantic memory.");
+        }
+        const result = await client.query<EmbeddingConfigRow>(
+          `INSERT INTO campaign_memory_configs (
+             campaign_id, owner_user_id, embedding_enabled, embedding_provider_profile_id, embedding_model,
+             embedding_batch_size, embedding_document_prefix, embedding_query_prefix,
+             retrieval_implementation, retrieval_shadow_enabled
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+           ON CONFLICT (campaign_id) DO UPDATE SET
+             embedding_enabled = EXCLUDED.embedding_enabled,
+             embedding_provider_profile_id = EXCLUDED.embedding_provider_profile_id,
+             embedding_model = EXCLUDED.embedding_model,
+             embedding_batch_size = EXCLUDED.embedding_batch_size,
+             embedding_document_prefix = EXCLUDED.embedding_document_prefix,
+             embedding_query_prefix = EXCLUDED.embedding_query_prefix,
+             retrieval_implementation = EXCLUDED.retrieval_implementation,
+             retrieval_shadow_enabled = EXCLUDED.retrieval_shadow_enabled,
+             updated_at = now()
+           RETURNING embedding_enabled, embedding_provider_profile_id, embedding_model, embedding_batch_size,
+                     embedding_document_prefix, embedding_query_prefix, retrieval_implementation,
+                     retrieval_shadow_enabled`,
+          [scope.campaignId, scope.ownerUserId, input.enabled, providerProfileId, input.model,
+            input.batchSize, input.documentPrefix ?? null, input.queryPrefix ?? null,
+            input.retrievalImplementation ?? "legacy_hybrid", input.retrievalShadowEnabled ?? false]
+        );
+        const saved = configView(result.rows[0]);
+        const capabilityChanged = previous.providerProfileId !== saved.providerProfileId
+          || previous.model !== saved.model
+          || previous.documentPrefix !== saved.documentPrefix
+          || previous.queryPrefix !== saved.queryPrefix;
+        if (capabilityChanged) {
+          await client.query(
+            `UPDATE chronicle_memory_chunks SET embedding=NULL,embedding_status='pending',
+               embedding_skip_reason=NULL,embedding_provider_profile_id=NULL,embedding_model=NULL,
+               embedding_dimensions=NULL,embedding_protocol_version=NULL,
+               embedding_provider_fingerprint=NULL,embedding_content_hash=NULL,
+               embedding_updated_at=NULL,updated_at=clock_timestamp()
+             WHERE owner_user_id=$1 AND campaign_id=$2`,
+            [scope.ownerUserId, scope.campaignId]
+          );
+        }
+        await enqueuePostgresChronicleChunkIndex(client, { ...scope, worldVersionId });
+        return saved;
+      });
     }
   };
 }

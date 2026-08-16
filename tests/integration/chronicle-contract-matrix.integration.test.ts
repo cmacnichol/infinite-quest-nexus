@@ -810,6 +810,70 @@ integration("PostgreSQL Chronicle contract matrix", () => {
       retrievalImplementation: "legacy_hybrid",
       retrievalShadowEnabled: false
     });
+    await expect(pool.query<{ count: string; job_type: string }>(
+      `SELECT count(*)::text AS count, min(job_type) AS job_type
+         FROM chronicle_chunk_jobs WHERE campaign_id=$1`,
+      [fixture.campaignId]
+    )).resolves.toMatchObject({ rows: [{ count: "1", job_type: "index_memory_chunks_v2" }] });
+  });
+
+  it("enqueues only v2 chunk work after an accepted parent write and rebuild", async () => {
+    const fixture = await campaignFixture("accepted chunk enqueue");
+    const providerId = await providerFixture("accepted chunk enqueue");
+    await configureEmbedding(fixture.campaignId, providerId, "embed-v1");
+    const turn = await pool.query<{ id: string }>(
+      `INSERT INTO turns
+         (owner_user_id,campaign_id,turn_number,action,narration,state_snapshot_private)
+       VALUES ($1,$2,1,'Open the gate.','The gate opens.','{}'::jsonb) RETURNING id`,
+      [ownerUserId, fixture.campaignId]
+    );
+    const transaction = createPostgresChronicleGenerationTransactionPort({
+      embeddings: {
+        async resolve() { return providerId; },
+        async load() {
+          return {
+            id: providerId, model: "embed-v1", providerType: "openai_compatible",
+            embed: async () => ({ embeddings: [], responseId: "unused", usage: {}, reportedCost: null })
+          };
+        },
+        async embed() { return { embeddings: [], responseId: "unused", usage: {}, reportedCost: null }; },
+        async fingerprint() { return "unused"; },
+        async recordHealth() {},
+        async recordCost() { return null; },
+        logDiagnostic() {}
+      }
+    });
+    const scope = { ...fixture, ownerUserId };
+    const before = await pool.query<{ row: Record<string, unknown>; xmin: string }>(
+      `SELECT to_jsonb(t)-'state_snapshot_private' AS row,xmin::text
+         FROM turns t WHERE id=$1`, [turn.rows[0]!.id]
+    );
+
+    await withTransaction(pool, async (client) => {
+      await transaction.writeAcceptedTurnFiction(client, {
+        ...scope, turnId: turn.rows[0]!.id, ordinal: 1,
+        action: "Open the gate.", narration: "The gate opens."
+      });
+    });
+    const first = await pool.query<{ id: string; work_version: string }>(
+      "SELECT id,work_version::text FROM chronicle_chunk_jobs WHERE campaign_id=$1",
+      [fixture.campaignId]
+    );
+    expect(first.rows).toEqual([{ id: expect.any(String), work_version: "1" }]);
+    expect(await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM chronicle_jobs WHERE campaign_id=$1 AND job_type='index_memory_chunks_v2'",
+      [fixture.campaignId]
+    )).toMatchObject({ rows: [{ count: "0" }] });
+
+    await withTransaction(pool, (client) => transaction.rebuildCampaignMemories(client, scope));
+    expect(await pool.query<{ id: string; work_version: string; progress: Record<string, unknown> }>(
+      "SELECT id,work_version::text,progress FROM chronicle_chunk_jobs WHERE campaign_id=$1",
+      [fixture.campaignId]
+    )).toMatchObject({ rows: [{ id: first.rows[0]!.id, work_version: "2", progress: {} }] });
+    expect(await pool.query<{ row: Record<string, unknown>; xmin: string }>(
+      `SELECT to_jsonb(t)-'state_snapshot_private' AS row,xmin::text
+         FROM turns t WHERE id=$1`, [turn.rows[0]!.id]
+    )).toEqual(before);
   });
 
   it("rolls back every direct Chronicle generation operation with its caller-owned transaction", async () => {
@@ -957,6 +1021,14 @@ integration("PostgreSQL Chronicle contract matrix", () => {
     });
     await expect(pool.query<{ count: string }>(
       "SELECT count(*)::text AS count FROM chronicle_jobs WHERE campaign_id = $1",
+      [fixture.campaignId]
+    )).resolves.toMatchObject({ rows: [{ count: "0" }] });
+    await expectForcedRollback(async (client) => {
+      await transaction.enqueueChunkIndex!(client, scope);
+      throw rollback;
+    });
+    await expect(pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM chronicle_chunk_jobs WHERE campaign_id = $1",
       [fixture.campaignId]
     )).resolves.toMatchObject({ rows: [{ count: "0" }] });
 
