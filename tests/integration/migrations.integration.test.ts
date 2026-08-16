@@ -1660,6 +1660,16 @@ integration("standard database migration runner", () => {
           WHERE table_schema = 'public' AND table_name = 'turns'
           ORDER BY ordinal_position`
       );
+      const beforeConstraints = await isolatedPool.query<{
+        table_name: string;
+        constraint_name: string;
+        definition: string;
+      }>(
+        `SELECT conrelid::regclass::text AS table_name, conname AS constraint_name, pg_get_constraintdef(oid) AS definition
+           FROM pg_constraint
+          WHERE conrelid IN ('chronicle_memories'::regclass, 'campaign_memory_configs'::regclass)
+          ORDER BY conrelid::regclass::text, conname`
+      );
 
       await copyFile(
         resolve(`database/migrations/${migrationName}.sql`),
@@ -1775,12 +1785,30 @@ integration("standard database migration runner", () => {
            FROM pg_constraint
           WHERE conrelid IN (
             'chronicle_memories'::regclass,
+            'campaign_memory_configs'::regclass,
             'chronicle_memory_chunks'::regclass,
             'chronicle_chunk_jobs'::regclass
           )
           ORDER BY conrelid::regclass::text, conname`
       );
-      expect(constraints.rows).toEqual(expect.arrayContaining([
+      const beforeConstraintKeys = new Set(beforeConstraints.rows.map((row) => `${row.table_name}:${row.constraint_name}`));
+      const migrationConstraints = constraints.rows.filter(
+        (row) => !beforeConstraintKeys.has(`${row.table_name}:${row.constraint_name}`)
+      );
+      const expectedNotNullConstraints = (tableName: string, columns: readonly string[]) => columns.map((columnName) => ({
+        table_name: tableName,
+        constraint_name: `${tableName}_${columnName}_not_null`,
+        definition: `NOT NULL ${columnName}`
+      }));
+      const expectedMigrationConstraints = [
+        {
+          table_name: "campaign_memory_configs",
+          constraint_name: "campaign_memory_configs_retrieval_implementation_check",
+          definition: "CHECK ((retrieval_implementation = ANY (ARRAY['legacy_hybrid'::text, 'chunked_hybrid'::text])))"
+        },
+        ...expectedNotNullConstraints("campaign_memory_configs", [
+          "retrieval_implementation", "retrieval_shadow_enabled"
+        ]),
         {
           table_name: "chronicle_memories",
           constraint_name: "chronicle_memories_chunk_parent_scope_unique",
@@ -1788,17 +1816,145 @@ integration("standard database migration runner", () => {
         },
         {
           table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_campaign_id_owner_user_id_fkey",
+          definition: "FOREIGN KEY (campaign_id, owner_user_id) REFERENCES campaigns(id, owner_user_id) ON DELETE CASCADE"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_check",
+          definition: "CHECK ((source_end_offset >= source_start_offset))"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_chunk_kind_check",
+          definition: "CHECK ((chunk_kind = ANY (ARRAY['turn_action'::text, 'turn_narration'::text, 'legacy_summary'::text, 'campaign_summary'::text, 'canonical_fact'::text, 'open_thread'::text])))"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_chunk_ordinal_check",
+          definition: "CHECK ((chunk_ordinal >= 0))"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_chunking_protocol_version_check",
+          definition: "CHECK (((length(btrim(chunking_protocol_version)) >= 1) AND (length(btrim(chunking_protocol_version)) <= 200)))"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_embedding_dimensions_check",
+          definition: "CHECK ((embedding_dimensions > 0))"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_embedding_metadata_check",
+          definition: "CHECK ((((embedding_status = 'pending'::text) AND (embedding IS NULL) AND (embedding_skip_reason IS NULL) AND (embedding_provider_profile_id IS NULL) AND (embedding_model IS NULL) AND (embedding_dimensions IS NULL) AND (embedding_protocol_version IS NULL) AND (embedding_provider_fingerprint IS NULL) AND (embedding_content_hash IS NULL) AND (embedding_updated_at IS NULL)) OR ((embedding_status = 'embedded'::text) AND (embedding IS NOT NULL) AND (embedding_skip_reason IS NULL) AND (embedding_provider_profile_id IS NOT NULL) AND (embedding_model IS NOT NULL) AND (embedding_dimensions IS NOT NULL) AND (embedding_protocol_version IS NOT NULL) AND (embedding_provider_fingerprint IS NOT NULL) AND (embedding_content_hash = content_hash) AND (embedding_updated_at IS NOT NULL)) OR ((embedding_status = 'skipped'::text) AND (embedding IS NULL) AND (embedding_skip_reason IS NOT NULL) AND (embedding_provider_profile_id IS NULL) AND (embedding_model IS NULL) AND (embedding_dimensions IS NULL) AND (embedding_protocol_version IS NULL) AND (embedding_provider_fingerprint IS NULL) AND (embedding_content_hash IS NULL) AND (embedding_updated_at IS NULL))))"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_embedding_provider_profile_id_owne_fkey",
+          definition: "FOREIGN KEY (embedding_provider_profile_id, owner_user_id) REFERENCES provider_profiles(id, owner_user_id)"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_embedding_skip_reason_check",
+          definition: "CHECK (((embedding_skip_reason IS NULL) OR ((length(btrim(embedding_skip_reason)) >= 1) AND (length(btrim(embedding_skip_reason)) <= 512))))"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_embedding_status_check",
+          definition: "CHECK ((embedding_status = ANY (ARRAY['pending'::text, 'embedded'::text, 'skipped'::text])))"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_parent_content_hash_check",
+          definition: "CHECK ((parent_content_hash ~ '^[0-9a-f]{64}$'::text))"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_parent_memory_id_owner_user_id_cam_fkey",
+          definition: "FOREIGN KEY (parent_memory_id, owner_user_id, campaign_id, world_version_id) REFERENCES chronicle_memories(id, owner_user_id, campaign_id, world_version_id) ON DELETE CASCADE"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
           constraint_name: "chronicle_memory_chunks_parent_version_ordinal_key",
           definition: "UNIQUE (parent_memory_id, parent_content_hash, chunking_protocol_version, chunk_ordinal)"
-        }
-      ]));
-      const definitions = constraints.rows.map((row) => `${row.table_name}:${row.constraint_name}:${row.definition}`).join("\n");
-      expect(definitions).toMatch(/FOREIGN KEY \(parent_memory_id, owner_user_id, campaign_id, world_version_id\).*ON DELETE CASCADE/i);
-      expect(definitions).toMatch(/FOREIGN KEY \(campaign_id, owner_user_id\).*ON DELETE CASCADE/i);
-      expect(definitions).toMatch(/UNIQUE \(parent_memory_id, parent_content_hash, chunking_protocol_version, chunk_ordinal\)/i);
-      expect(definitions).toMatch(/embedding_status.*pending.*embedded.*skipped/i);
-      expect(definitions).toMatch(/job_type.*index_memory_chunks_v2/i);
-      expect(definitions).toMatch(/status.*queued.*running.*completed.*failed/i);
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_pkey",
+          definition: "PRIMARY KEY (id)"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_source_start_offset_check",
+          definition: "CHECK ((source_start_offset >= 0))"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_token_estimate_check",
+          definition: "CHECK ((token_estimate >= 0))"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_world_version_id_owner_user_id_fkey",
+          definition: "FOREIGN KEY (world_version_id, owner_user_id) REFERENCES world_versions(id, owner_user_id)"
+        },
+        ...expectedNotNullConstraints("chronicle_memory_chunks", [
+          "id", "owner_user_id", "campaign_id", "world_version_id", "parent_memory_id", "parent_content_hash",
+          "chunking_protocol_version", "chunk_ordinal", "chunk_kind", "content", "source_start_offset",
+          "source_end_offset", "token_estimate", "entities", "entity_ids", "metadata", "embedding_status",
+          "created_at", "updated_at"
+        ]),
+        {
+          table_name: "chronicle_chunk_jobs",
+          constraint_name: "chronicle_chunk_jobs_attempts_check",
+          definition: "CHECK ((attempts >= 0))"
+        },
+        {
+          table_name: "chronicle_chunk_jobs",
+          constraint_name: "chronicle_chunk_jobs_campaign_id_owner_user_id_fkey",
+          definition: "FOREIGN KEY (campaign_id, owner_user_id) REFERENCES campaigns(id, owner_user_id) ON DELETE CASCADE"
+        },
+        {
+          table_name: "chronicle_chunk_jobs",
+          constraint_name: "chronicle_chunk_jobs_completed_check",
+          definition: "CHECK ((((status = 'completed'::text) AND (completed_at IS NOT NULL)) OR ((status <> 'completed'::text) AND (completed_at IS NULL))))"
+        },
+        {
+          table_name: "chronicle_chunk_jobs",
+          constraint_name: "chronicle_chunk_jobs_job_type_check",
+          definition: "CHECK ((job_type = 'index_memory_chunks_v2'::text))"
+        },
+        {
+          table_name: "chronicle_chunk_jobs",
+          constraint_name: "chronicle_chunk_jobs_lease_check",
+          definition: "CHECK ((((status = 'running'::text) AND (lease_owner IS NOT NULL) AND (btrim(lease_owner) <> ''::text) AND (lease_expires_at IS NOT NULL)) OR ((status <> 'running'::text) AND (lease_owner IS NULL) AND (lease_expires_at IS NULL))))"
+        },
+        {
+          table_name: "chronicle_chunk_jobs",
+          constraint_name: "chronicle_chunk_jobs_pkey",
+          definition: "PRIMARY KEY (id)"
+        },
+        {
+          table_name: "chronicle_chunk_jobs",
+          constraint_name: "chronicle_chunk_jobs_status_check",
+          definition: "CHECK ((status = ANY (ARRAY['queued'::text, 'running'::text, 'completed'::text, 'failed'::text])))"
+        },
+        {
+          table_name: "chronicle_chunk_jobs",
+          constraint_name: "chronicle_chunk_jobs_work_version_check",
+          definition: "CHECK ((work_version > 0))"
+        },
+        ...expectedNotNullConstraints("chronicle_chunk_jobs", [
+          "id", "owner_user_id", "campaign_id", "job_type", "status", "attempts", "work_version", "progress",
+          "created_at", "updated_at"
+        ])
+      ];
+      const compareConstraints = (left: { table_name: string; constraint_name: string }, right: { table_name: string; constraint_name: string }) =>
+        `${left.table_name}:${left.constraint_name}`.localeCompare(`${right.table_name}:${right.constraint_name}`);
+      expect([...migrationConstraints].sort(compareConstraints)).toEqual(
+        [...expectedMigrationConstraints].sort(compareConstraints)
+      );
 
       const indexes = await isolatedPool.query<{ indexname: string; indexdef: string }>(
         `SELECT indexname, indexdef
