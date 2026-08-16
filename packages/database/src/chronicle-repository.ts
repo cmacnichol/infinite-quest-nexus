@@ -19,8 +19,7 @@ import { MEMORY_PUBLIC_FAILURE_MESSAGE } from "../../application/src/memory/inde
 import { requireCampaignWorldVersionScope } from "../../application/src/memory/helpers.js";
 import {
   DEFAULT_EMBEDDING_MODEL,
-  type CampaignEmbeddingConfig,
-  type CompressionLevel
+  type CampaignEmbeddingConfig
 } from "../../contracts/src/memory.js";
 import {
   CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
@@ -32,22 +31,21 @@ import {
   modelAwareEmbeddingPrefixes,
   providerModelFingerprint,
   sanitizeChronicleFictionString,
-  sanitizeChronicleFictionValue,
   sanitizeChronicleMemoryLines
 } from "../../domain/src/chronicle-memory-helpers.js";
 import { canonicalFactDeduplicationKey } from "../../domain/src/canonical-facts.js";
 import {
-  expandEntityQuery,
-  matchEntityReferences,
   resolveEntityMetadata,
   type EntityReference
 } from "../../domain/src/entity-references.js";
-import { estimateTokens, stableStringify, truncateAtBoundary } from "../../domain/src/text.js";
-import { characterNarrativeContext } from "../../domain/src/world-characters.js";
-import { compressTurnMemory } from "../../story-engine/src/chronicle.js";
+import { estimateTokens } from "../../domain/src/text.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
 import { enqueuePostgresChronicleChunkIndex } from "./chronicle-chunk-repository.js";
+import {
+  buildPostgresChronicleContextPreview,
+  loadPostgresChronicleContextMetrics
+} from "./chronicle-context-repository.js";
 
 type ChronicleJobRow = Readonly<{
   id: string;
@@ -212,6 +210,10 @@ function transactionClient(database: MemoryTransactionContext): DatabaseClient {
 
 function json(value: unknown): string {
   return JSON.stringify(value ?? null);
+}
+
+function vectorLiteral(vector: readonly number[]): string {
+  return `[${vector.join(",")}]`;
 }
 
 async function loadCampaignProjection(
@@ -772,576 +774,6 @@ async function rebuildMemories(
   return turns.rows.length;
 }
 
-type ContextCampaignRow = CampaignProjectionRow & Readonly<{
-  title: string;
-  active_turn_number: number;
-  selected_character_id: string | null;
-  character_profile_revision: number;
-  scratchpad_private: string;
-  scratchpad_safe_for_prompt: boolean;
-  trackers: unknown;
-}>;
-
-type ContextMemoryRow = Readonly<{
-  id: string;
-  turn_id: string | null;
-  memory_kind: "turn_fiction" | "legacy_summary" | "campaign_summary" | "canonical_fact" | "open_thread";
-  ordinal: number;
-  content: string;
-  token_estimate: number;
-  importance: number;
-  entities: string[];
-  entity_ids: string[];
-  relevance: number;
-  embedding_content_hash?: string;
-  semantic_relevance?: number;
-}> & {
-  lexicalRelevance?: number;
-  semanticRelevance?: number;
-  relevance: number;
-};
-
-type ContextMetricRow = Readonly<{
-  turns: string;
-  characters: string;
-  estimated_tokens: string;
-  memory_count: string;
-  memory_tokens: string;
-  embedded_memories: string;
-  turn_memory_tokens: string;
-  recent_turn_tokens: string;
-  summary_tokens: string;
-}>;
-
-type ContextMetrics = Readonly<{
-  turns: number;
-  completeHistoryCharacters: number;
-  estimatedCompleteHistoryTokens: number;
-  memoryCount: number;
-  memoryTokens: number;
-  embeddedMemories: number;
-  compressionEstimates: Readonly<Record<Exclude<CompressionLevel, "auto">, number>>;
-}>;
-
-function budgetTokenEstimate(text: string): number {
-  return Math.max(estimateTokens(text), Math.ceil(text.length / 3));
-}
-
-function relevanceTerms(query: string): string[] {
-  return [...new Set(query.toLocaleLowerCase().match(/[\p{L}\p{N}_'-]{3,}/gu) ?? [])].slice(0, 64);
-}
-
-function selectWorldItems(items: unknown, query: string, limit: number): unknown[] {
-  if (!Array.isArray(items)) return [];
-  const terms = relevanceTerms(query);
-  return items.map((item, index) => {
-    const serialized = stableStringify(item).toLocaleLowerCase();
-    const score = terms.reduce((total, term) => total + (serialized.includes(term) ? 1 : 0), 0);
-    return { item, index, score };
-  }).sort((left, right) => (right.score - left.score) || (left.index - right.index))
-    .slice(0, limit)
-    .map(({ item }) => sanitizeChronicleFictionValue(item))
-    .filter((item) => item !== undefined);
-}
-
-function worldFictionCanon(
-  content: Record<string, unknown>,
-  characterProfile: unknown,
-  characterSnapshot: unknown,
-  query: string,
-  maximumTokens: number,
-): Record<string, unknown> {
-  const sourceWorld = typeof content.world === "object" && content.world !== null
-    ? content.world as Record<string, unknown>
-    : content;
-  const { character: _storedCharacter, ...world } = sourceWorld;
-  const allowed = ["title", "genre", "tone", "backgroundStory", "premise", "firstAction"];
-  const perOverviewLimit = Math.max(300, Math.floor(maximumTokens * 2.6 / allowed.length));
-  const result: Record<string, unknown> = Object.fromEntries(allowed.flatMap((key) => {
-    const sanitized = sanitizeChronicleFictionString(world[key], perOverviewLimit);
-    return sanitized ? [[key, sanitized]] : [];
-  }));
-  const playerCharacter = sanitizeChronicleFictionValue(characterNarrativeContext(
-    characterProfile,
-    characterSnapshot,
-    Math.max(800, Math.floor(maximumTokens * 3.2)),
-    Math.max(240, Math.floor(maximumTokens * 0.42))
-  ));
-  if (playerCharacter && typeof playerCharacter === "object") result.playerCharacter = playerCharacter;
-  for (const [key, items] of [["entities", content.entities], ["relationships", content.relationships]] as const) {
-    const accepted: unknown[] = [];
-    for (const item of selectWorldItems(items, query, 16)) {
-      if (budgetTokenEstimate(stableStringify({ ...result, [key]: [...accepted, item] })) > maximumTokens) break;
-      accepted.push(item);
-    }
-    if (accepted.length) result[key] = accepted;
-  }
-  return result;
-}
-
-function campaignFictionCanon(campaign: ContextCampaignRow, maximumTokens: number): Record<string, unknown> {
-  const result: Record<string, unknown> = {
-    campaignTitle: campaign.title,
-    acceptedTurns: campaign.active_turn_number
-  };
-  const scratchpad = campaign.scratchpad_safe_for_prompt
-    ? sanitizeChronicleFictionString(campaign.scratchpad_private, Math.max(400, Math.floor(maximumTokens * 1.8)))
-    : "";
-  if (scratchpad) result.continuityScratchpad = scratchpad;
-  const trackers = Array.isArray(campaign.trackers) ? campaign.trackers : [];
-  const accepted: unknown[] = [];
-  for (const tracker of trackers.slice(0, 200)) {
-    const sanitized = sanitizeChronicleFictionValue(tracker);
-    if (sanitized === undefined) continue;
-    if (budgetTokenEstimate(stableStringify({ ...result, trackers: [...accepted, sanitized] })) > maximumTokens) break;
-    accepted.push(sanitized);
-  }
-  if (accepted.length) result.trackers = accepted;
-  return result;
-}
-
-async function loadContextCampaign(
-  client: DatabaseClient,
-  scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
-): Promise<ContextCampaignRow> {
-  const result = await client.query<ContextCampaignRow>(
-    `SELECT c.id, c.title, c.active_turn_number, c.world_version_id, c.selected_character_id,
-            c.character_snapshot, c.character_profile, c.character_profile_revision,
-            wv.content AS world_content,
-            cs.scratchpad_private, cs.scratchpad_safe_for_prompt, cs.trackers
-       FROM campaigns c
-       JOIN world_versions wv ON wv.id = c.world_version_id AND wv.owner_user_id = c.owner_user_id
-       JOIN campaign_state cs ON cs.campaign_id = c.id AND cs.owner_user_id = c.owner_user_id
-      WHERE c.id = $1 AND c.owner_user_id = $2`,
-    [scope.campaignId, scope.ownerUserId]
-  );
-  const campaign = requireCampaignWorldVersionScope(scope, result.rows[0]);
-  return {
-    ...campaign,
-    ...(scope.request.throughTurnNumber === undefined
-      ? {}
-      : { active_turn_number: scope.request.throughTurnNumber }),
-    ...(scope.stateOverride ? {
-      scratchpad_private: typeof scope.stateOverride.scratchpad === "string" ? scope.stateOverride.scratchpad : "",
-      scratchpad_safe_for_prompt: scope.scratchpadSafeForPrompt === true,
-      trackers: Array.isArray(scope.stateOverride.trackers) ? scope.stateOverride.trackers : []
-    } : {})
-  };
-}
-
-async function loadContextMemories(
-  client: DatabaseClient,
-  scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
-  query: string,
-  queryEntityIds: string[],
-): Promise<ContextMemoryRow[]> {
-  const result = await client.query<ContextMemoryRow>(
-    `WITH base AS (
-       SELECT id, turn_id, memory_kind, ordinal, content, token_estimate, importance, entities, entity_ids, created_at,
-              CASE WHEN $4 = '' THEN 0::real
-                   ELSE ts_rank_cd(search_document, websearch_to_tsquery('english', $4)) END AS relevance
-         FROM chronicle_memories
-        WHERE owner_user_id = $1 AND campaign_id = $2 AND world_version_id = $3
-          AND ($6::integer IS NULL OR ordinal <= $6::integer)
-          AND ($6::integer IS NULL OR memory_kind NOT IN ('legacy_summary','canonical_fact'))
-     ), ranked AS (
-       SELECT *,
-              row_number() OVER (PARTITION BY memory_kind ORDER BY ordinal DESC, created_at DESC) AS recent_rank,
-              row_number() OVER (PARTITION BY memory_kind ORDER BY ordinal ASC, created_at ASC) AS sequence_rank,
-              count(*) OVER (PARTITION BY memory_kind) AS kind_count,
-              row_number() OVER (PARTITION BY memory_kind ORDER BY relevance DESC, ordinal DESC) AS lexical_rank,
-              row_number() OVER (PARTITION BY memory_kind ORDER BY CASE WHEN entity_ids && $7::text[] THEN 1 ELSE 0 END DESC, ordinal DESC) AS entity_rank
-         FROM base
-     )
-     SELECT id, turn_id, memory_kind, ordinal, content, token_estimate, importance, entities, entity_ids, relevance
-       FROM ranked
-      WHERE memory_kind IN ('campaign_summary','legacy_summary','open_thread')
-         OR (memory_kind = 'canonical_fact' AND (recent_rank <= 64 OR ($4 <> '' AND lexical_rank <= 64)
-              OR (entity_ids && $7::text[] AND entity_rank <= 64)))
-         OR (memory_kind = 'turn_fiction' AND (
-              recent_rank <= GREATEST(32, $5::integer * 2) OR sequence_rank <= 8
-              OR mod(sequence_rank - 1, GREATEST(1, CEIL(kind_count / 32.0)::integer)) = 0
-              OR ($4 <> '' AND lexical_rank <= 96) OR (entity_ids && $7::text[] AND entity_rank <= 64)))
-      ORDER BY ordinal ASC, memory_kind, id
-      LIMIT 512`,
-    [scope.ownerUserId, scope.campaignId, scope.worldVersionId, query.trim(), scope.request.recentTurns,
-      scope.request.throughTurnNumber ?? null, queryEntityIds]
-  );
-  if (scope.request.throughTurnNumber === undefined) return [...result.rows];
-  const historical = await client.query<ContextMemoryRow>(
-    `SELECT id, source_turn_id AS turn_id, 'canonical_fact'::text AS memory_kind,
-            source_turn_number AS ordinal, '- [fact_id: ' || id || '] ' || content AS content,
-            GREATEST(1, CEIL(length(content) / 4.0))::integer AS token_estimate,
-            0.85::real AS importance, entities, entity_ids,
-            CASE WHEN $4 = '' THEN 0::real
-                 ELSE ts_rank_cd(to_tsvector('english', content), websearch_to_tsquery('english', $4)) END AS relevance
-       FROM campaign_canonical_facts
-      WHERE owner_user_id = $1 AND campaign_id = $2 AND world_version_id = $3
-        AND valid_from_turn <= $5 AND (valid_until_turn IS NULL OR valid_until_turn > $5)
-      ORDER BY source_turn_number DESC, source_fact_index
-      LIMIT 256`,
-    [scope.ownerUserId, scope.campaignId, scope.worldVersionId, query.trim(), scope.request.throughTurnNumber]
-  );
-  return [...result.rows, ...historical.rows];
-}
-
-function contextMetrics(row: ContextMetricRow): ContextMetrics {
-  const turnTokens = Number(row.turn_memory_tokens);
-  const recent = Number(row.recent_turn_tokens);
-  const summaryTokens = Number(row.summary_tokens);
-  return {
-    turns: Number(row.turns),
-    completeHistoryCharacters: Number(row.characters),
-    estimatedCompleteHistoryTokens: Number(row.estimated_tokens),
-    memoryCount: Number(row.memory_count),
-    memoryTokens: Number(row.memory_tokens),
-    embeddedMemories: Number(row.embedded_memories),
-    compressionEstimates: {
-      full: turnTokens,
-      balanced: Math.ceil(turnTokens * 0.62),
-      compact: Math.ceil(turnTokens * 0.3),
-      summary: summaryTokens + recent
-    }
-  };
-}
-
-async function loadContextMetrics(
-  client: DatabasePool | DatabaseClient,
-  scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
-): Promise<ContextMetrics> {
-  const result = await client.query<ContextMetricRow>(
-    `SELECT
-       (SELECT count(*) FROM turns WHERE owner_user_id = $1 AND campaign_id = $2
-          AND ($4::integer IS NULL OR turn_number <= $4::integer))::text AS turns,
-       (SELECT COALESCE(sum(length(turn_row.action) + length(effective.effective_narration)), 0)
-          FROM turns turn_row JOIN effective_turn_narrations effective
-            ON effective.turn_id=turn_row.id AND effective.campaign_id=turn_row.campaign_id
-           AND effective.owner_user_id=turn_row.owner_user_id
-         WHERE turn_row.owner_user_id = $1 AND turn_row.campaign_id = $2
-           AND ($4::integer IS NULL OR turn_row.turn_number <= $4::integer))::text AS characters,
-       (SELECT COALESCE(sum(CEIL((length(turn_row.action) + length(effective.effective_narration))::numeric / 4)), 0)
-          FROM turns turn_row JOIN effective_turn_narrations effective
-            ON effective.turn_id=turn_row.id AND effective.campaign_id=turn_row.campaign_id
-           AND effective.owner_user_id=turn_row.owner_user_id
-         WHERE turn_row.owner_user_id = $1 AND turn_row.campaign_id = $2
-           AND ($4::integer IS NULL OR turn_row.turn_number <= $4::integer))::text AS estimated_tokens,
-       count(*)::text AS memory_count,
-       COALESCE(sum(token_estimate), 0)::text AS memory_tokens,
-       count(embedding)::text AS embedded_memories,
-       COALESCE(sum(token_estimate) FILTER (WHERE memory_kind = 'turn_fiction'), 0)::text AS turn_memory_tokens,
-       (SELECT COALESCE(sum(token_estimate), 0) FROM (
-          SELECT token_estimate FROM chronicle_memories
-           WHERE owner_user_id = $1 AND campaign_id = $2 AND world_version_id = $3
-             AND memory_kind = 'turn_fiction' AND ($4::integer IS NULL OR ordinal <= $4::integer)
-           ORDER BY ordinal DESC LIMIT 4
-        ) recent)::text AS recent_turn_tokens,
-       COALESCE(
-         (SELECT token_estimate FROM chronicle_memories
-           WHERE owner_user_id = $1 AND campaign_id = $2 AND world_version_id = $3
-             AND memory_kind = 'campaign_summary' AND ($4::integer IS NULL OR ordinal <= $4::integer)
-           ORDER BY ordinal DESC, updated_at DESC LIMIT 1),
-         (SELECT token_estimate FROM chronicle_memories
-           WHERE owner_user_id = $1 AND campaign_id = $2 AND world_version_id = $3
-             AND memory_kind = 'legacy_summary' ORDER BY created_at DESC LIMIT 1), 0
-       )::text AS summary_tokens
-     FROM chronicle_memories
-     WHERE owner_user_id = $1 AND campaign_id = $2 AND world_version_id = $3
-       AND ($4::integer IS NULL OR ordinal <= $4::integer)`,
-    [scope.ownerUserId, scope.campaignId, scope.worldVersionId, scope.request.throughTurnNumber ?? null]
-  );
-  const row = result.rows[0];
-  if (!row) throw new Error("Could not calculate Chronicle metrics.");
-  return contextMetrics(row);
-}
-
-function automaticCompression(metrics: ContextMetrics, availableTokens: number): Exclude<CompressionLevel, "auto"> {
-  if (metrics.compressionEstimates.full <= availableTokens) return "full";
-  if (metrics.compressionEstimates.balanced <= availableTokens) return "balanced";
-  if (metrics.compressionEstimates.compact <= availableTokens) return "compact";
-  return "summary";
-}
-
-function vectorLiteral(vector: readonly number[]): string {
-  return `[${vector.join(",")}]`;
-}
-
-async function applyContextSemanticRelevance(
-  client: DatabaseClient,
-  scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
-  query: string,
-  memories: ContextMemoryRow[],
-  queryEntityIds: string[],
-  dependencies: ChronicleGenerationTransactionDependencies,
-): Promise<Record<string, unknown>> {
-  const normalizedQuery = query.toLocaleLowerCase();
-  const queryEntityIdSet = new Set(queryEntityIds);
-  const newestOrdinal = memories.reduce((maximum, memory) => Math.max(maximum, memory.ordinal), 0);
-  for (const memory of memories) {
-    memory.lexicalRelevance = Number(memory.relevance);
-    const lexical = Math.min(1, Math.max(0, Number(memory.lexicalRelevance || 0) * 8));
-    const entityScore = memory.entity_ids.some((id) => queryEntityIdSet.has(id))
-      || memory.entities.some((entity) => normalizedQuery.includes(entity.toLocaleLowerCase())) ? 1 : 0;
-    const recencyScore = newestOrdinal > 0
-      ? Math.max(0, 1 - (newestOrdinal - memory.ordinal) / Math.max(20, newestOrdinal))
-      : 0;
-    memory.relevance = lexical > 0 || entityScore > 0
-      ? lexical * 0.65 + entityScore * 0.15 + recencyScore * 0.1 + memory.importance * 0.1
-      : 0;
-  }
-  const configResult = await client.query<EmbeddingConfigRow>(
-    `SELECT embedding_enabled, embedding_provider_profile_id, embedding_model, embedding_batch_size,
-            embedding_document_prefix, embedding_query_prefix, retrieval_implementation,
-            retrieval_shadow_enabled
-       FROM campaign_memory_configs WHERE campaign_id = $1 AND owner_user_id = $2`,
-    [scope.campaignId, scope.ownerUserId]
-  );
-  const config = configResult.rows[0];
-  if (!query.trim()) return { mode: "lexical", semanticAvailable: false, fallbackReason: "empty_query" };
-  if (!config?.embedding_enabled || !config.embedding_provider_profile_id || !config.embedding_model) {
-    return { mode: "lexical", semanticAvailable: false, fallbackReason: "semantic_not_configured" };
-  }
-  const providerProfileId = await dependencies.embeddings.resolve(client, {
-    ownerUserId: scope.ownerUserId,
-    campaignId: scope.campaignId,
-    selectedProviderProfileId: config.embedding_provider_profile_id
-  });
-  if (!providerProfileId) return { mode: "lexical", semanticAvailable: false, fallbackReason: "provider_unavailable" };
-  const providerScope = { ownerUserId: scope.ownerUserId, providerProfileId, model: config.embedding_model };
-  try {
-    const provider = await dependencies.embeddings.load(client, providerScope);
-    const prefixes = modelAwareEmbeddingPrefixes(
-      config.embedding_model,
-      config.embedding_document_prefix,
-      config.embedding_query_prefix
-    );
-    const fingerprint = await dependencies.embeddings.fingerprint(provider, prefixes);
-    const result = await dependencies.embeddings.embed(provider, [`${prefixes.queryPrefix}${query.trim()}`]);
-    await dependencies.embeddings.recordCost(client, provider, {
-      ownerUserId: scope.ownerUserId,
-      campaignId: scope.campaignId,
-      ...(scope.costAttribution?.generationJobId
-        ? { generationJobId: scope.costAttribution.generationJobId }
-        : {}),
-      operation: scope.costAttribution?.operation ?? "context_preview_embedding"
-    }, result);
-    const queryVector = result.embeddings[0];
-    if (!queryVector?.length) throw new Error("Embedding provider returned no query vector.");
-    const scored = await client.query<ContextMemoryRow>(
-      `SELECT id, turn_id, memory_kind, ordinal, content, token_estimate, importance, entities, entity_ids,
-              0::real AS relevance, embedding_content_hash,
-              (1 - (embedding <=> $6::vector))::real AS semantic_relevance
-         FROM chronicle_memories
-        WHERE owner_user_id = $1 AND campaign_id = $2 AND world_version_id = $3
-          AND ($9::integer IS NULL OR ordinal <= $9::integer)
-          AND ($9::integer IS NULL OR memory_kind <> 'legacy_summary')
-          AND embedding_provider_profile_id = $4 AND embedding_model = $5
-          AND embedding_dimensions = $7 AND embedding_provider_fingerprint = $8
-          AND embedding IS NOT NULL
-         ORDER BY embedding <=> $6::vector
-         LIMIT 96`,
-      [scope.ownerUserId, scope.campaignId, scope.worldVersionId, providerProfileId, config.embedding_model,
-        vectorLiteral(queryVector), queryVector.length, fingerprint, scope.request.throughTurnNumber ?? null]
-    );
-    const freshScores = scored.rows.filter((row) => row.embedding_content_hash
-      && row.embedding_content_hash === chronicleContentHash(row.content));
-    const existingIds = new Set(memories.map((memory) => memory.id));
-    for (const row of freshScores) {
-      if (!existingIds.has(row.id)) {
-        memories.push({ ...row, relevance: 0, lexicalRelevance: 0 });
-        existingIds.add(row.id);
-      }
-    }
-    const semantic = new Map(freshScores.map((row) => [row.id, Number(row.semantic_relevance)]));
-    for (const memory of memories) {
-      const lexical = Math.min(1, Math.max(0, Number(memory.lexicalRelevance || 0) * 8));
-      const semanticScore = Math.max(0, semantic.get(memory.id) ?? 0);
-      const entityScore = memory.entity_ids.some((id) => queryEntityIdSet.has(id))
-        || memory.entities.some((entity) => normalizedQuery.includes(entity.toLocaleLowerCase())) ? 1 : 0;
-      const recencyScore = newestOrdinal > 0
-        ? Math.max(0, 1 - (newestOrdinal - memory.ordinal) / Math.max(20, newestOrdinal))
-        : 0;
-      memory.semanticRelevance = semanticScore;
-      memory.relevance = semanticScore >= 0.2 || lexical > 0 || entityScore > 0
-        ? semanticScore * 0.55 + lexical * 0.25 + entityScore * 0.1 + recencyScore * 0.05 + memory.importance * 0.05
-        : 0;
-    }
-    await dependencies.embeddings.recordHealth(client, providerScope, true);
-    return {
-      mode: "hybrid",
-      semanticAvailable: true,
-      embeddedCandidates: freshScores.length,
-      model: config.embedding_model,
-      queryExpanded: true,
-      effectiveQueryPrefix: prefixes.queryPrefix
-    };
-  } catch (error) {
-    dependencies.embeddings.logDiagnostic(error, {
-      campaignId: scope.campaignId,
-      providerProfileId,
-      generationJobId: scope.costAttribution?.generationJobId ?? null,
-      memoryOperation: scope.costAttribution?.operation ?? "context_preview_embedding"
-    });
-    await dependencies.embeddings.recordHealth(client, providerScope, false, "chronicle_retrieval_failed").catch(() => undefined);
-    return { mode: "lexical_fallback", semanticAvailable: false, fallbackReason: "semantic_retrieval_unavailable" };
-  }
-}
-
-async function buildContext(
-  client: DatabaseClient,
-  scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
-  dependencies: ChronicleGenerationTransactionDependencies,
-): Promise<Record<string, unknown>> {
-  const campaign = await loadContextCampaign(client, scope);
-  const entityCatalog = buildChronicleEntityCatalog({
-    worldContent: campaign.world_content,
-    characterSnapshot: campaign.character_snapshot,
-    characterProfile: campaign.character_profile
-  });
-  const entityExpandedQuery = expandEntityQuery(scope.request.query, entityCatalog);
-  const queryEntityIds = matchEntityReferences(scope.request.query, entityCatalog).map((match) => match.entity.id);
-  const memories = await loadContextMemories(client, scope, entityExpandedQuery, queryEntityIds);
-  // Count only the already owner/campaign/world-version/cutoff-filtered rows.
-  // This safe aggregate lets callers verify scope eligibility without exposing
-  // candidate IDs, content, entity names, or provider diagnostics.
-  const scopeEligibleCandidates = memories.length;
-  const latestHint = memories.filter((memory) => memory.memory_kind === "turn_fiction").at(-1)?.content ?? "";
-  const expandedQuery = [entityExpandedQuery, truncateAtBoundary(latestHint, 1200)].filter(Boolean).join("\n");
-  const retrieval = {
-    ...await applyContextSemanticRelevance(
-    client,
-    scope,
-    expandedQuery,
-    memories,
-    queryEntityIds,
-    dependencies
-    ),
-    scopeEligibleCandidates
-  };
-  const metrics = await loadContextMetrics(client, scope);
-  const sourceWorld = typeof campaign.world_content.world === "object" && campaign.world_content.world !== null
-    ? campaign.world_content.world as Record<string, unknown>
-    : campaign.world_content;
-  const authoritativeRules = sanitizeChronicleFictionString(
-    sourceWorld.rules,
-    Math.max(1200, Math.floor(scope.request.budgetTokens * 0.18 * 3.2))
-  );
-  const worldCanon = worldFictionCanon(
-    campaign.world_content,
-    campaign.character_profile,
-    campaign.character_snapshot,
-    expandedQuery,
-    Math.max(384, Math.floor(scope.request.budgetTokens * 0.30))
-  );
-  const campaignCanon = campaignFictionCanon(campaign, Math.max(256, Math.floor(scope.request.budgetTokens * 0.18)));
-  const turnMemories = memories.filter((memory) => memory.memory_kind === "turn_fiction");
-  const latest = turnMemories.at(-1) ?? null;
-  const currentScene = latest ? {
-    memoryId: latest.id,
-    ordinal: latest.ordinal,
-    content: truncateAtBoundary(latest.content, Math.max(800, Math.floor(scope.request.budgetTokens * 0.18 * 3.2)))
-  } : null;
-  const fixedScopes = { authoritativeRules, worldCanon, campaignCanon, chronicle: [], currentScene };
-  const fixedScopeTokens = budgetTokenEstimate(stableStringify(fixedScopes));
-  const availableTokens = Math.max(0, scope.request.budgetTokens - fixedScopeTokens);
-  const selectedLevel = scope.request.compression === "auto"
-    ? automaticCompression(metrics, availableTokens)
-    : scope.request.compression;
-  const selected = new Map<string, { memory: ContextMemoryRow; rendered: string; reason: string }>();
-  let consumedTokens = 0;
-  const addMemory = (memory: ContextMemoryRow, rendered: string, reason: string): void => {
-    if (selected.has(memory.id) || memory.id === latest?.id) return;
-    const tokens = budgetTokenEstimate(stableStringify({
-      id: memory.id,
-      turnId: memory.turn_id,
-      ordinal: memory.ordinal,
-      kind: memory.memory_kind,
-      reason,
-      relevance: memory.relevance,
-      entities: memory.entities,
-      content: rendered,
-      estimatedTokens: estimateTokens(rendered)
-    }));
-    if (consumedTokens + tokens > availableTokens) return;
-    selected.set(memory.id, { memory, rendered, reason });
-    consumedTokens += tokens;
-  };
-  const renderLevel = selectedLevel === "summary" ? "compact" : selectedLevel;
-  const summary = memories.filter((memory) => memory.memory_kind === "campaign_summary")
-    .sort((left, right) => right.ordinal - left.ordinal)[0]
-    ?? (selectedLevel === "summary" ? memories.find((memory) => memory.memory_kind === "legacy_summary") : undefined);
-  if (summary) addMemory(summary, summary.content, "summary_checkpoint");
-  const openThreads = memories.filter((memory) => memory.memory_kind === "open_thread")
-    .sort((left, right) => right.ordinal - left.ordinal)[0];
-  if (openThreads) addMemory(openThreads, openThreads.content, "open_threads");
-  memories.filter((memory) => memory.memory_kind === "canonical_fact")
-    .forEach((memory) => addMemory(memory, memory.content, "canonical_fact"));
-  for (const memory of turnMemories.slice(-Math.max(1, scope.request.recentTurns))) {
-    const rendered = memory.ordinal > campaign.active_turn_number - 3
-      ? memory.content
-      : compressTurnMemory(memory.content, renderLevel);
-    addMemory(memory, rendered, "recent");
-  }
-  const selectedIds = new Set(selected.keys());
-  memories.filter((memory) => ["turn_fiction", "canonical_fact", "open_thread"].includes(memory.memory_kind)
-    && !selectedIds.has(memory.id) && memory.relevance > 0)
-    .sort((left, right) => (right.relevance - left.relevance)
-      || (right.importance - left.importance) || (right.ordinal - left.ordinal))
-    .slice(0, 16)
-    .forEach((memory) => addMemory(memory, compressTurnMemory(memory.content, renderLevel), "relevant"));
-  if (selectedLevel !== "summary") {
-    turnMemories.forEach((memory) => addMemory(memory, compressTurnMemory(memory.content, renderLevel), "chronological"));
-  }
-  const chronicle = [...selected.values()]
-    .sort((left, right) => left.memory.ordinal - right.memory.ordinal)
-    .map(({ memory, rendered, reason }) => ({
-      id: memory.id,
-      turnId: memory.turn_id,
-      ordinal: memory.ordinal,
-      kind: memory.memory_kind,
-      reason,
-      relevance: Number(memory.relevance),
-      lexicalRelevance: Number(memory.lexicalRelevance ?? memory.relevance),
-      semanticRelevance: memory.semanticRelevance ?? null,
-      entities: memory.entities,
-      content: rendered,
-      estimatedTokens: estimateTokens(rendered)
-    }));
-  const scopes = { authoritativeRules, worldCanon, campaignCanon, chronicle, currentScene };
-  const actualTokens = budgetTokenEstimate(stableStringify(scopes));
-  const expectedForLevel = metrics.compressionEstimates[selectedLevel];
-  return {
-    campaign: {
-      id: campaign.id,
-      title: campaign.title,
-      activeTurnNumber: campaign.active_turn_number,
-      worldVersionId: campaign.world_version_id,
-      selectedCharacterId: campaign.selected_character_id,
-      characterProfileRevision: campaign.character_profile_revision
-    },
-    selectedCompression: selectedLevel,
-    requestedCompression: scope.request.compression,
-    budget: {
-      configuredTokens: scope.request.budgetTokens,
-      reservedCanonTokens: fixedScopeTokens,
-      fixedScopeTokens,
-      availableChronicleTokens: availableTokens,
-      estimatedSelectedTokens: actualTokens,
-      completeHistoryTokens: metrics.estimatedCompleteHistoryTokens,
-      expectedTokensForCompression: expectedForLevel,
-      truncated: actualTokens > scope.request.budgetTokens || expectedForLevel > availableTokens
-    },
-    metrics,
-    retrieval,
-    scopes,
-    exclusions: [
-      "mechanics and roll records",
-      "private scratchpad",
-      "parser diagnostics and rejected output",
-      "provider credentials"
-    ]
-  };
-}
-
 export function createPostgresChronicleGenerationTransactionPort(
   dependencies: ChronicleGenerationTransactionDependencies,
 ): MemoryGenerationTransactionPort {
@@ -1446,7 +878,7 @@ export function createPostgresChronicleGenerationTransactionPort(
       return rebuilt;
     },
     async buildContextPreview(database, scope) {
-      return buildContext(transactionClient(database), scope, dependencies);
+      return buildPostgresChronicleContextPreview(transactionClient(database), scope, dependencies);
     }
   } as MemoryGenerationTransactionPort;
 }
@@ -1821,7 +1253,7 @@ export function createPostgresChronicleQueryRepository(
   return {
     async getMetrics(scope): Promise<MemoryPublicResult<ChronicleMetricsView>> {
       await requireCampaign(pool, scope);
-      const metrics = await loadContextMetrics(pool, {
+      const metrics = await loadPostgresChronicleContextMetrics(pool, {
         ...scope,
         request: {
           query: "",
@@ -1833,7 +1265,11 @@ export function createPostgresChronicleQueryRepository(
       return { ...metrics, semanticHealth: await semanticHealth(pool, scope, metrics) };
     },
     async previewContext(scope, request) {
-      return withTransaction(pool, (client) => buildContext(client, { ...scope, request }, transactionDependencies));
+      return withTransaction(pool, (client) => buildPostgresChronicleContextPreview(
+        client,
+        { ...scope, request },
+        transactionDependencies
+      ));
     }
   };
 }
