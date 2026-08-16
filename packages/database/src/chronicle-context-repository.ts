@@ -10,12 +10,19 @@ import {
   sanitizeChronicleFictionValue
 } from "../../domain/src/chronicle-memory-helpers.js";
 import {
+  selectDiverseChronicleParents,
+  type ChronicleParentSelectionDiagnostics
+} from "../../domain/src/chronicle-diversity.js";
+import {
   expandEntityQuery,
   matchEntityReferences,
   normalizeEntityTerm,
   type EntityReference
 } from "../../domain/src/entity-references.js";
-import { CHRONICLE_CHUNK_PROTOCOL_VERSION } from "../../domain/src/chronicle-chunking.js";
+import {
+  CHRONICLE_CHUNK_PROTOCOL_VERSION,
+  type ChronicleChunkKind
+} from "../../domain/src/chronicle-chunking.js";
 import {
   planChronicleQueries,
   type ChronicleQueryKind,
@@ -72,6 +79,7 @@ type ContextMemoryRow = Readonly<{
   importance: number;
   entities: string[];
   entity_ids: string[];
+  metadata: Record<string, unknown>;
   relevance: number;
   embedding_content_hash?: string;
   semantic_relevance?: number;
@@ -92,7 +100,17 @@ type ChunkCandidateRow = Readonly<{
   parent_importance: number;
   parent_entities: string[];
   parent_entity_ids: string[];
+  parent_metadata: Record<string, unknown>;
+  chunk_ordinal: number;
+  chunk_kind: ChronicleChunkKind;
+  chunk_content: string;
+  chunk_embedding: unknown;
   active_fact: boolean;
+}>;
+
+type ChunkedRankFusionResult = Readonly<{
+  retrieval: Record<string, unknown>;
+  selectedParentContent: ReadonlyMap<string, string>;
 }>;
 
 const CHUNK_CANDIDATE_LIMIT = 96;
@@ -172,18 +190,24 @@ function worldFictionCanon(
     : content;
   const { character: _storedCharacter, ...world } = sourceWorld;
   const allowed = ["title", "genre", "tone", "backgroundStory", "premise", "firstAction"];
-  const perOverviewLimit = Math.max(300, Math.floor(maximumTokens * 2.6 / allowed.length));
-  const result: Record<string, unknown> = Object.fromEntries(allowed.flatMap((key) => {
+  const perOverviewLimit = Math.max(24, Math.floor(maximumTokens * 2.4 / allowed.length));
+  const result: Record<string, unknown> = {};
+  for (const key of allowed) {
     const sanitized = sanitizeChronicleFictionString(world[key], perOverviewLimit);
-    return sanitized ? [[key, sanitized]] : [];
-  }));
+    if (!sanitized) continue;
+    const next = { ...result, [key]: sanitized };
+    if (budgetTokenEstimate(stableStringify(next)) <= maximumTokens) result[key] = sanitized;
+  }
   const playerCharacter = sanitizeChronicleFictionValue(characterNarrativeContext(
     characterProfile,
     characterSnapshot,
-    Math.max(800, Math.floor(maximumTokens * 3.2)),
-    Math.max(240, Math.floor(maximumTokens * 0.42))
+    Math.max(80, Math.floor(maximumTokens * 2.4)),
+    Math.max(24, Math.floor(maximumTokens * 0.32))
   ));
-  if (playerCharacter && typeof playerCharacter === "object") result.playerCharacter = playerCharacter;
+  if (playerCharacter && typeof playerCharacter === "object"
+    && budgetTokenEstimate(stableStringify({ ...result, playerCharacter })) <= maximumTokens) {
+    result.playerCharacter = playerCharacter;
+  }
   for (const [key, items] of [["entities", content.entities], ["relationships", content.relationships]] as const) {
     const accepted: unknown[] = [];
     for (const item of selectWorldItems(items, query, 16)) {
@@ -197,13 +221,19 @@ function worldFictionCanon(
 
 function campaignFictionCanon(campaign: ContextCampaignRow, maximumTokens: number): Record<string, unknown> {
   const result: Record<string, unknown> = {
-    campaignTitle: campaign.title,
+    campaignTitle: sanitizeChronicleFictionString(
+      campaign.title,
+      Math.max(24, Math.floor(maximumTokens * 1.5))
+    ),
     acceptedTurns: campaign.active_turn_number
   };
   const scratchpad = campaign.scratchpad_safe_for_prompt
-    ? sanitizeChronicleFictionString(campaign.scratchpad_private, Math.max(400, Math.floor(maximumTokens * 1.8)))
+    ? sanitizeChronicleFictionString(campaign.scratchpad_private, Math.max(24, Math.floor(maximumTokens * 1.4)))
     : "";
-  if (scratchpad) result.continuityScratchpad = scratchpad;
+  if (scratchpad
+    && budgetTokenEstimate(stableStringify({ ...result, continuityScratchpad: scratchpad })) <= maximumTokens) {
+    result.continuityScratchpad = scratchpad;
+  }
   const trackers = Array.isArray(campaign.trackers) ? campaign.trackers : [];
   const accepted: unknown[] = [];
   for (const tracker of trackers.slice(0, 200)) {
@@ -253,7 +283,8 @@ async function loadContextMemories(
 ): Promise<ContextMemoryRow[]> {
   const result = await client.query<ContextMemoryRow>(
     `WITH base AS (
-       SELECT id, turn_id, memory_kind, ordinal, content, token_estimate, importance, entities, entity_ids, created_at,
+       SELECT id, turn_id, memory_kind, ordinal, content, token_estimate, importance, entities, entity_ids, metadata,
+              created_at,
               CASE WHEN $4 = '' THEN 0::real
                    ELSE ts_rank_cd(search_document, websearch_to_tsquery('english', $4)) END AS relevance
          FROM chronicle_memories
@@ -281,7 +312,8 @@ async function loadContextMemories(
               row_number() OVER (PARTITION BY memory_kind ORDER BY CASE WHEN entity_ids && $7::text[] THEN 1 ELSE 0 END DESC, ordinal DESC) AS entity_rank
          FROM base
      )
-     SELECT id, turn_id, memory_kind, ordinal, content, token_estimate, importance, entities, entity_ids, relevance
+     SELECT id, turn_id, memory_kind, ordinal, content, token_estimate, importance, entities, entity_ids, metadata,
+            relevance
        FROM ranked
       WHERE memory_kind IN ('campaign_summary','legacy_summary','open_thread')
          OR (memory_kind = 'canonical_fact' AND (recent_rank <= 64 OR ($4 <> '' AND lexical_rank <= 64)
@@ -301,6 +333,7 @@ async function loadContextMemories(
             source_turn_number AS ordinal, '- [fact_id: ' || id || '] ' || content AS content,
             GREATEST(1, CEIL(length(content) / 4.0))::integer AS token_estimate,
             0.85::real AS importance, entities, entity_ids,
+            jsonb_build_object('structuredFactIds', jsonb_build_array(id::text)) AS metadata,
             CASE WHEN $4 = '' THEN 0::real
                  ELSE ts_rank_cd(to_tsvector('english', content), websearch_to_tsquery('english', $4)) END AS relevance
        FROM campaign_canonical_facts
@@ -391,6 +424,22 @@ function automaticCompression(metrics: ContextMetrics, availableTokens: number):
 
 function vectorLiteral(vector: readonly number[]): string {
   return `[${vector.join(",")}]`;
+}
+
+function parseVector(value: unknown): readonly number[] | null {
+  let parsed = value;
+  if (typeof value === "string") {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0
+    || !parsed.every((entry) => typeof entry === "number" && Number.isFinite(entry))) {
+    return null;
+  }
+  return parsed;
 }
 
 async function loadContextConfig(
@@ -580,6 +629,8 @@ function authorizedChunkCte(): string {
               parent.ordinal AS parent_ordinal,parent.content AS parent_content,
               parent.token_estimate AS parent_token_estimate,parent.importance AS parent_importance,
               parent.entities AS parent_entities,parent.entity_ids AS parent_entity_ids,
+              parent.metadata AS parent_metadata,chunk.chunk_ordinal,chunk.chunk_kind,
+              chunk.content AS chunk_content,chunk.embedding::text AS chunk_embedding,
               chunk.entities,chunk.entity_ids,chunk.search_document,chunk.embedding,
               chunk.embedding_status,chunk.embedding_provider_profile_id,chunk.embedding_model,
               chunk.embedding_dimensions,chunk.embedding_protocol_version,
@@ -692,7 +743,8 @@ async function loadAuthorizedChunkRank(
         WHERE ${predicate}
      )
      SELECT candidate_id,parent_memory_id,parent_turn_id,parent_memory_kind,parent_ordinal,
-            parent_content,parent_token_estimate,parent_importance,parent_entities,parent_entity_ids,active_fact
+            parent_content,parent_token_estimate,parent_importance,parent_entities,parent_entity_ids,parent_metadata,
+            chunk_ordinal,chunk_kind,chunk_content,chunk_embedding,active_fact
        FROM ranked
       ORDER BY signal_rank,parent_memory_id,candidate_id
       LIMIT $${limitParameter}`,
@@ -776,6 +828,7 @@ function contextMemoryFromChunk(row: ChunkCandidateRow): ContextMemoryRow {
     importance: Number(row.parent_importance),
     entities: row.parent_entities,
     entity_ids: row.parent_entity_ids,
+    metadata: row.parent_metadata,
     relevance: 0,
     lexicalRelevance: 0
   };
@@ -789,7 +842,7 @@ async function applyChunkedRankFusion(
   entityCatalog: readonly EntityReference[],
   config: EmbeddingConfigRow,
   dependencies: ChronicleGenerationTransactionDependencies,
-): Promise<Record<string, unknown>> {
+): Promise<ChunkedRankFusionResult> {
   const variants = plannedChunkQueries(scope, memories, entityCatalog);
   const actionVariant: ChronicleQueryVariant = variants[0] ?? { kind: "action", query: "", entityIds: [] };
   const inputs: ChronicleRankInput[] = [];
@@ -907,9 +960,56 @@ async function applyChunkedRankFusion(
   }));
 
   const fused = fuseChronicleRanks(inputs, CHUNK_FUSION_PROFILE);
+  const fusedRankByCandidateId = new Map<string, number>();
+  let previousFusedScore: number | null = null;
+  let currentFusedRank = 0;
+  fused.forEach((candidate, index) => {
+    if (previousFusedScore === null || candidate.score !== previousFusedScore) {
+      currentFusedRank = index + 1;
+    }
+    fusedRankByCandidateId.set(candidate.candidateId, currentFusedRank);
+    previousFusedScore = candidate.score;
+  });
+  const latestSceneParentMemoryId = memories.filter((memory) => memory.memory_kind === "turn_fiction")
+    .sort((left, right) => left.ordinal - right.ordinal || compareDeterministically(left.id, right.id))
+    .at(-1)?.id ?? null;
+  const parentSelection = selectDiverseChronicleParents(fused.flatMap((candidate, index) => {
+    const row = candidateRows.get(candidate.candidateId);
+    return row ? [{
+      candidateId: candidate.candidateId,
+      parentMemoryId: candidate.parentMemoryId,
+      parentTurnId: candidate.parentTurnId,
+      ordinal: candidate.parentOrdinal,
+      memoryKind: candidate.memoryKind,
+      parentContent: row.parent_content,
+      parentMetadata: row.parent_metadata,
+      entities: row.parent_entities,
+      entityIds: row.parent_entity_ids,
+      chunkOrdinal: row.chunk_ordinal,
+      chunkKind: row.chunk_kind,
+      chunkContent: row.chunk_content,
+      embedding: parseVector(row.chunk_embedding),
+      fusedRank: fusedRankByCandidateId.get(candidate.candidateId) ?? index + 1
+    }] : [];
+  }), {
+    maximumParents: 16,
+    maximumParentsPerTurn: 2,
+    includeAdjacentNarration: true,
+    latestSceneParentMemoryId
+  });
+  const selectedParentContent = new Map(parentSelection.parents.map((parent) => (
+    [parent.parentMemoryId, parent.content] as const
+  )));
+  if (scope.request.throughTurnNumber !== undefined) {
+    for (const memory of memories) {
+      if (memory.memory_kind === "canonical_fact") selectedParentContent.set(memory.id, memory.content);
+    }
+  }
+  const selectedParentIds = new Set(selectedParentContent.keys());
   const maximumScore = fused[0]?.score ?? 0;
   const memoriesById = new Map(memories.map((memory) => [memory.id, memory]));
   for (const candidate of fused) {
+    if (!selectedParentIds.has(candidate.parentMemoryId)) continue;
     const row = candidateRows.get(candidate.candidateId);
     if (!row) continue;
     const memory = memoriesById.get(candidate.parentMemoryId) ?? contextMemoryFromChunk(row);
@@ -931,16 +1031,20 @@ async function applyChunkedRankFusion(
   }
 
   return {
-    implementation: "chunked_hybrid",
-    mode: semanticAvailable ? "hybrid" : semanticFallbackReason === "semantic_retrieval_unavailable"
-      ? "lexical_fallback"
-      : "lexical",
-    semanticAvailable,
-    ...(semanticFallbackReason ? { fallbackReason: semanticFallbackReason } : {}),
-    embeddedCandidates,
-    rankedCandidates: fused.length,
-    queryExpanded: variants.length > 1,
-    effectiveQueryPrefix
+    retrieval: {
+      implementation: "chunked_hybrid",
+      mode: semanticAvailable ? "hybrid" : semanticFallbackReason === "semantic_retrieval_unavailable"
+        ? "lexical_fallback"
+        : "lexical",
+      semanticAvailable,
+      ...(semanticFallbackReason ? { fallbackReason: semanticFallbackReason } : {}),
+      embeddedCandidates,
+      rankedCandidates: fused.length,
+      queryExpanded: variants.length > 1,
+      effectiveQueryPrefix,
+      diversity: parentSelection.diagnostics satisfies ChronicleParentSelectionDiagnostics
+    },
+    selectedParentContent
   };
 }
 
@@ -987,9 +1091,10 @@ export async function buildPostgresChronicleContextPreview(
   const expandedQuery = [entityExpandedQuery, truncateAtBoundary(latestHint, 1200)].filter(Boolean).join("\n");
   const config = await loadContextConfig(client, scope);
   let retrievalResult: Record<string, unknown>;
+  let selectedParentContent: ReadonlyMap<string, string> | null = null;
   if (config?.retrieval_implementation === "chunked_hybrid") {
     if (await chunkIndexReady(client, scope)) {
-      retrievalResult = await applyChunkedRankFusion(
+      const chunked = await applyChunkedRankFusion(
         client,
         campaign,
         scope,
@@ -998,6 +1103,8 @@ export async function buildPostgresChronicleContextPreview(
         config,
         dependencies
       );
+      retrievalResult = chunked.retrieval;
+      selectedParentContent = chunked.selectedParentContent;
     } else {
       retrievalResult = {
         ...await applyContextSemanticRelevance(
@@ -1031,32 +1138,56 @@ export async function buildPostgresChronicleContextPreview(
   const sourceWorld = typeof campaign.world_content.world === "object" && campaign.world_content.world !== null
     ? campaign.world_content.world as Record<string, unknown>
     : campaign.world_content;
-  const authoritativeRules = sanitizeChronicleFictionString(
-    sourceWorld.rules,
-    Math.max(1200, Math.floor(scope.request.budgetTokens * 0.18 * 3.2))
-  );
-  const worldCanon = worldFictionCanon(
-    campaign.world_content,
-    campaign.character_profile,
-    campaign.character_snapshot,
-    expandedQuery,
-    Math.max(384, Math.floor(scope.request.budgetTokens * 0.30))
-  );
-  const campaignCanon = campaignFictionCanon(campaign, Math.max(256, Math.floor(scope.request.budgetTokens * 0.18)));
-  const turnMemories = memories.filter((memory) => memory.memory_kind === "turn_fiction")
+  const allTurnMemories = memories.filter((memory) => memory.memory_kind === "turn_fiction")
     .sort((left, right) => left.ordinal - right.ordinal || compareDeterministically(left.id, right.id));
-  const latest = turnMemories.at(-1) ?? null;
-  const currentScene = latest ? {
-    memoryId: latest.id,
-    ordinal: latest.ordinal,
-    content: truncateAtBoundary(latest.content, Math.max(800, Math.floor(scope.request.budgetTokens * 0.18 * 3.2)))
-  } : null;
-  const fixedScopes = { authoritativeRules, worldCanon, campaignCanon, chronicle: [], currentScene };
-  const fixedScopeTokens = budgetTokenEstimate(stableStringify(fixedScopes));
+  const latest = allTurnMemories.at(-1) ?? null;
+  const buildFixedScopes = (scale: number) => {
+    const authoritativeRules = sanitizeChronicleFictionString(
+      sourceWorld.rules,
+      Math.max(32, Math.floor(scope.request.budgetTokens * 0.18 * 3.2 * scale))
+    );
+    const worldCanon = worldFictionCanon(
+      campaign.world_content,
+      campaign.character_profile,
+      campaign.character_snapshot,
+      expandedQuery,
+      Math.max(64, Math.floor(scope.request.budgetTokens * 0.30 * scale))
+    );
+    const campaignCanon = campaignFictionCanon(
+      campaign,
+      Math.max(48, Math.floor(scope.request.budgetTokens * 0.18 * scale))
+    );
+    const currentScene = latest ? {
+      memoryId: latest.id,
+      ordinal: latest.ordinal,
+      content: truncateAtBoundary(
+        latest.content,
+        Math.max(64, Math.floor(scope.request.budgetTokens * 0.18 * 3.2 * scale))
+      )
+    } : null;
+    return { authoritativeRules, worldCanon, campaignCanon, chronicle: [], currentScene };
+  };
+  let fixedScale = 1;
+  let fixedScopes = buildFixedScopes(fixedScale);
+  let fixedScopeTokens = budgetTokenEstimate(stableStringify(fixedScopes));
+  while (fixedScopeTokens > scope.request.budgetTokens && fixedScale > 0.08) {
+    fixedScale *= 0.78;
+    fixedScopes = buildFixedScopes(fixedScale);
+    fixedScopeTokens = budgetTokenEstimate(stableStringify(fixedScopes));
+  }
+  const { authoritativeRules, worldCanon, campaignCanon, currentScene } = fixedScopes;
   const availableTokens = Math.max(0, scope.request.budgetTokens - fixedScopeTokens);
   const selectedLevel = scope.request.compression === "auto"
     ? automaticCompression(metrics, availableTokens)
     : scope.request.compression;
+  const optionalMemories = selectedParentContent === null
+    ? memories
+    : memories.filter((memory) => selectedParentContent.has(memory.id));
+  const turnMemories = optionalMemories.filter((memory) => memory.memory_kind === "turn_fiction")
+    .sort((left, right) => left.ordinal - right.ordinal || compareDeterministically(left.id, right.id));
+  const parentContent = (memory: ContextMemoryRow): string => (
+    selectedParentContent?.get(memory.id) ?? memory.content
+  );
   const selected = new Map<string, { memory: ContextMemoryRow; rendered: string; reason: string }>();
   let consumedTokens = 0;
   const addMemory = (memory: ContextMemoryRow, rendered: string, reason: string): void => {
@@ -1077,32 +1208,35 @@ export async function buildPostgresChronicleContextPreview(
     consumedTokens += tokens;
   };
   const renderLevel = selectedLevel === "summary" ? "compact" : selectedLevel;
-  const summary = memories.filter((memory) => memory.memory_kind === "campaign_summary")
+  const summary = optionalMemories.filter((memory) => memory.memory_kind === "campaign_summary")
     .sort((left, right) => right.ordinal - left.ordinal || compareDeterministically(left.id, right.id))[0]
-    ?? (selectedLevel === "summary" ? memories.find((memory) => memory.memory_kind === "legacy_summary") : undefined);
-  if (summary) addMemory(summary, summary.content, "summary_checkpoint");
-  const openThreads = memories.filter((memory) => memory.memory_kind === "open_thread")
+    ?? (selectedLevel === "summary"
+      ? optionalMemories.find((memory) => memory.memory_kind === "legacy_summary")
+      : undefined);
+  if (summary) addMemory(summary, parentContent(summary), "summary_checkpoint");
+  const openThreads = optionalMemories.filter((memory) => memory.memory_kind === "open_thread")
     .sort((left, right) => right.ordinal - left.ordinal || compareDeterministically(left.id, right.id))[0];
-  if (openThreads) addMemory(openThreads, openThreads.content, "open_threads");
-  memories.filter((memory) => memory.memory_kind === "canonical_fact")
-    .forEach((memory) => addMemory(memory, memory.content, "canonical_fact"));
+  if (openThreads) addMemory(openThreads, parentContent(openThreads), "open_threads");
+  optionalMemories.filter((memory) => memory.memory_kind === "canonical_fact")
+    .forEach((memory) => addMemory(memory, parentContent(memory), "canonical_fact"));
   for (const memory of turnMemories.slice(-Math.max(1, scope.request.recentTurns))) {
+    const content = parentContent(memory);
     const rendered = memory.ordinal > campaign.active_turn_number - 3
-      ? memory.content
-      : compressTurnMemory(memory.content, renderLevel);
+      ? content
+      : compressTurnMemory(content, renderLevel);
     addMemory(memory, rendered, "recent");
   }
   const selectedIds = new Set(selected.keys());
-  memories.filter((memory) => ["turn_fiction", "canonical_fact", "open_thread"].includes(memory.memory_kind)
+  optionalMemories.filter((memory) => ["turn_fiction", "canonical_fact", "open_thread"].includes(memory.memory_kind)
     && !selectedIds.has(memory.id) && memory.relevance > 0)
     .sort((left, right) => (right.relevance - left.relevance)
       || (right.importance - left.importance) || (right.ordinal - left.ordinal))
     .slice(0, 16)
-    .forEach((memory) => addMemory(memory, compressTurnMemory(memory.content, renderLevel), "relevant"));
+    .forEach((memory) => addMemory(memory, compressTurnMemory(parentContent(memory), renderLevel), "relevant"));
   if (selectedLevel !== "summary") {
-    turnMemories.forEach((memory) => addMemory(memory, compressTurnMemory(memory.content, renderLevel), "chronological"));
+    turnMemories.forEach((memory) => addMemory(memory, compressTurnMemory(parentContent(memory), renderLevel), "chronological"));
   }
-  const chronicle = [...selected.values()]
+  const renderChronicle = () => [...selected.values()]
     .sort((left, right) => left.memory.ordinal - right.memory.ordinal
       || compareDeterministically(left.memory.id, right.memory.id))
     .map(({ memory, rendered, reason }) => ({
@@ -1118,8 +1252,17 @@ export async function buildPostgresChronicleContextPreview(
       content: rendered,
       estimatedTokens: estimateTokens(rendered)
     }));
-  const scopes = { authoritativeRules, worldCanon, campaignCanon, chronicle, currentScene };
-  const actualTokens = budgetTokenEstimate(stableStringify(scopes));
+  let chronicle = renderChronicle();
+  let scopes = { authoritativeRules, worldCanon, campaignCanon, chronicle, currentScene };
+  let actualTokens = budgetTokenEstimate(stableStringify(scopes));
+  while (actualTokens > scope.request.budgetTokens && selected.size > 0) {
+    const lowestPriorityMemoryId = [...selected.keys()].at(-1);
+    if (!lowestPriorityMemoryId) break;
+    selected.delete(lowestPriorityMemoryId);
+    chronicle = renderChronicle();
+    scopes = { authoritativeRules, worldCanon, campaignCanon, chronicle, currentScene };
+    actualTokens = budgetTokenEstimate(stableStringify(scopes));
+  }
   const expectedForLevel = metrics.compressionEstimates[selectedLevel];
   return {
     campaign: {

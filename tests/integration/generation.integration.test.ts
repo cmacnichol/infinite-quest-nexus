@@ -346,6 +346,74 @@ integration("durable Story Engine integration", () => {
     expect(nextSerialized).toContain("Determine what Marker Three unlocks");
   });
 
+  it("preserves every fixed fiction scope before optional history under a 512-token request", async () => {
+    const imported = await campaign(undefined, `Minimum context budget ${crypto.randomUUID()}`);
+    const oversizedCanon = "Authoritative world detail ".repeat(400);
+    await pool.query(
+      `UPDATE world_versions
+          SET content = jsonb_set(content, '{world}',
+            COALESCE(content->'world','{}'::jsonb) || $2::jsonb, true)
+        WHERE id = (SELECT world_version_id FROM campaigns WHERE id = $1)`,
+      [imported.campaignId, JSON.stringify({
+        title: oversizedCanon,
+        genre: oversizedCanon,
+        tone: oversizedCanon,
+        backgroundStory: oversizedCanon,
+        premise: oversizedCanon,
+        firstAction: oversizedCanon,
+        rules: oversizedCanon
+      })]
+    );
+    await pool.query(
+      `UPDATE campaign_state
+          SET scratchpad_private=$2,scratchpad_safe_for_prompt=true
+        WHERE campaign_id=$1`,
+      [imported.campaignId, oversizedCanon]
+    );
+    await pool.query(
+      `UPDATE chronicle_memories
+          SET content=$2
+        WHERE campaign_id=$1 AND memory_kind='turn_fiction' AND ordinal=2`,
+      [imported.campaignId, `Turn 2\nPlayer action: Hold position.\nNarration: ${oversizedCanon}`]
+    );
+    const before = await generationAuthoritySnapshot(pool, imported.campaignId);
+
+    const preview = await buildContextPreview(pool, imported.campaignId, {
+      budgetTokens: 512,
+      compression: "auto",
+      query: "Object Gamma at Location Beta",
+      recentTurns: 8
+    });
+    const scopes = preview.scopes as {
+      authoritativeRules: string;
+      worldCanon: Record<string, unknown>;
+      campaignCanon: Record<string, unknown>;
+      chronicle: unknown[];
+      currentScene: { content: string } | null;
+    };
+    const budget = preview.budget as {
+      configuredTokens: number;
+      fixedScopeTokens: number;
+      estimatedSelectedTokens: number;
+    };
+
+    expect(Object.keys(scopes).sort()).toEqual([
+      "authoritativeRules",
+      "campaignCanon",
+      "chronicle",
+      "currentScene",
+      "worldCanon"
+    ]);
+    expect(scopes.authoritativeRules.length).toBeGreaterThan(0);
+    expect(Object.keys(scopes.worldCanon).length).toBeGreaterThan(0);
+    expect(scopes.campaignCanon).toMatchObject({ campaignTitle: expect.any(String), acceptedTurns: 2 });
+    expect(scopes.currentScene?.content.length).toBeGreaterThan(0);
+    expect(budget).toMatchObject({ configuredTokens: 512 });
+    expect(budget.fixedScopeTokens).toBeLessThanOrEqual(512);
+    expect(budget.estimatedSelectedTokens).toBeLessThanOrEqual(512);
+    expect(await generationAuthoritySnapshot(pool, imported.campaignId)).toEqual(before);
+  });
+
   it("assigns tracker IDs when committing an unchanged generated tracker snapshot", async () => {
     const imported = await campaign();
     await pool.query(

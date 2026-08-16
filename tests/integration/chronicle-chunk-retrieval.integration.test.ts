@@ -111,7 +111,8 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     value: Readonly<{
       parentId: string;
       parentContentHash: string;
-      kind: "turn_narration" | "open_thread" | "campaign_summary" | "canonical_fact";
+      chunkOrdinal?: number;
+      kind: "turn_action" | "turn_narration" | "open_thread" | "campaign_summary" | "canonical_fact";
       content: string;
       vector: readonly [number, number];
       entities?: readonly string[];
@@ -125,11 +126,11 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
           token_estimate,entities,entity_ids,embedding,embedding_status,embedding_provider_profile_id,
           embedding_model,embedding_dimensions,embedding_protocol_version,embedding_provider_fingerprint,
           embedding_content_hash,embedding_updated_at)
-       VALUES ($1,$2,$3,$4,$5,'chronicle-chunk-v1',0,$6,$7,0,length($7),
-               CEIL(length($7::text)/4.0),$8::text[],$9::text[],$10::vector,'embedded',$11,
-               'chunk-embed-v1',2,'chronicle-embedding-v1','chunk-fingerprint',$12,now())`,
+       VALUES ($1,$2,$3,$4,$5,'chronicle-chunk-v1',$6,$7,$8,0,length($8),
+               CEIL(length($8::text)/4.0),$9::text[],$10::text[],$11::vector,'embedded',$12,
+               'chunk-embed-v1',2,'chronicle-embedding-v1','chunk-fingerprint',$13,now())`,
       [fixture.ownerUserId, fixture.campaignId, fixture.worldVersionId, value.parentId,
-        value.parentContentHash, value.kind, value.content, [...(value.entities ?? [])],
+        value.parentContentHash, value.chunkOrdinal ?? 0, value.kind, value.content, [...(value.entities ?? [])],
         [...(value.entityIds ?? [])], `[${value.vector.join(",")}]`, providerId,
         chronicleContentHash(value.content)]
     );
@@ -227,6 +228,16 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     await embeddedChunk(fixture, providerId, {
       parentId: target.id,
       parentContentHash: target.contentHash,
+      kind: "turn_action",
+      content: "Enter the moon court.",
+      vector: [1, 0],
+      entities: ["Moon Warden"],
+      entityIds: ["world:moon-warden"]
+    });
+    await embeddedChunk(fixture, providerId, {
+      parentId: target.id,
+      parentContentHash: target.contentHash,
+      chunkOrdinal: 1,
       kind: "turn_narration",
       content: "The Moon Warden carries the silver key.",
       vector: [1, 0],
@@ -371,8 +382,26 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     const serialized = JSON.stringify(preview.scopes);
 
     expect(preview).toMatchObject({
-      retrieval: { implementation: "chunked_hybrid", mode: "hybrid", semanticAvailable: true }
+      retrieval: {
+        implementation: "chunked_hybrid",
+        mode: "hybrid",
+        semanticAvailable: true,
+        diversity: {
+          candidateChunks: expect.any(Number),
+          candidateParents: expect.any(Number),
+          collapsedChunks: expect.any(Number),
+          selectedParents: expect.any(Number),
+          latestSceneParentsProtected: 1
+        }
+      }
     });
+    const diversity = (preview.retrieval as { diversity: { collapsedChunks: number } }).diversity;
+    expect(diversity.collapsedChunks).toBeGreaterThan(0);
+    const targetParents = (preview.scopes as { chronicle: Array<{ id: string; content: string }> }).chronicle
+      .filter((memory) => memory.id === target.id);
+    expect(targetParents).toHaveLength(1);
+    expect(targetParents[0]?.content).toMatch(/Player action:[\s\S]+Narration:/);
+    expect(targetParents[0]?.content).not.toBe("The Moon Warden carries the silver key.");
     expect(serialized).toContain("Moon Warden carries the silver key");
     expect(serialized).toContain("The silver key opens the gate");
     expect(serialized).not.toMatch(/future vault answer|Cross campaign silver key answer|iron key opens|private future traitor/i);
