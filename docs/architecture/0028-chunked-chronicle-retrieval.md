@@ -115,12 +115,14 @@ The deterministic `chronicle-retrieval-evaluation.v1` corpus establishes the
 following label-only baseline for `legacy_hybrid` (generated locally at
 `tmp/chronicle-evaluation/legacy-baseline.json`, which is not committed):
 
-- recall@5/10/20: 0.9705882352941176 / 0.9705882352941176 / 0.9705882352941176;
-  MRR: 0.8529411764705882; NDCG: 0.9205124890810269.
-- duplicate rate: 0; relevant memories per prompt token: 0.08636363636363636.
+- recall@5/10/20: 1 / 1 / 1; MRR: 0.8529411764705882;
+  NDCG: 0.9719834714285783.
+- duplicate rate: 0.04; relevant memories per prompt token: 0.0823045267489712.
 - cross-campaign, future-turn, and superseded-fact leakage: 0 / 0 / 0.
 - p50/p95 evaluator latency: 4 ms / 15 ms; embedding requests/cost: 3 / 0;
-  semantic-only hits: 3; promotions/demotions: 3 / 17.
+  semantic-only hits: 3; promotions/demotions: 6 / 6. A promotion or
+  demotion is an entry whose selected rank improves or worsens, respectively,
+  against the deterministic lexical-only ordering for that same preview.
 
 The report contains fixture labels, hashes, ranks, and aggregates only; it
 does not persist prompt or Chronicle content.

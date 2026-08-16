@@ -8,6 +8,7 @@ export type ChronicleRetrievalApplication = Readonly<{
 type ChroniclePreviewEntry = Readonly<{
   id: string;
   estimatedTokens?: number;
+  relevance?: number | null;
   lexicalRelevance?: number | null;
   semanticRelevance?: number | null;
 }>;
@@ -22,6 +23,7 @@ export type ChronicleRetrievalCase = Readonly<{
     futureTurn?: readonly string[];
     supersededFact?: readonly string[];
   }>;
+  excludedLabels?: Readonly<Record<string, readonly string[]>>;
 }>;
 
 export type ChronicleRetrievalCorpus = Readonly<{
@@ -159,12 +161,21 @@ function rankLabels(retrievedLabels: readonly string[], expectedLabels: readonly
   }));
 }
 
+function orderedRanks(entries: readonly ChroniclePreviewEntry[], score: (entry: ChroniclePreviewEntry) => number): ReadonlyMap<string, number> {
+  return new Map(entries
+    .map((entry, index) => ({ entry, index, score: score(entry) }))
+    .sort((left, right) => right.score - left.score || left.index - right.index)
+    .map(({ entry }, index) => [entry.id, index + 1]));
+}
+
 function rankingMovements(entries: readonly ChroniclePreviewEntry[]) {
+  const lexicalRanks = orderedRanks(entries, (entry) => Number(entry.lexicalRelevance ?? 0));
+  const selectedRanks = orderedRanks(entries, (entry) => Number(entry.relevance ?? entry.lexicalRelevance ?? 0));
   return entries.reduce((totals, entry) => {
-    const lexical = Number(entry.lexicalRelevance ?? 0);
-    const semantic = Number(entry.semanticRelevance ?? 0);
-    if (semantic > lexical && semantic > 0) totals.promotions += 1;
-    if (lexical > semantic && lexical > 0) totals.demotions += 1;
+    const lexicalRank = lexicalRanks.get(entry.id)!;
+    const selectedRank = selectedRanks.get(entry.id)!;
+    if (selectedRank < lexicalRank) totals.promotions += 1;
+    if (selectedRank > lexicalRank) totals.demotions += 1;
     return totals;
   }, { promotions: 0, demotions: 0 });
 }

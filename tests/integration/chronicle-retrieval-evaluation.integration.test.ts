@@ -79,7 +79,7 @@ integration("Chronicle retrieval evaluation integration seam", () => {
     const future = await pool.query<{ id: string }>(
       `INSERT INTO chronicle_memories
          (owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content, token_estimate)
-       VALUES ($1,$2,$3,'canonical_fact',2,'scope anchor future decoy',4) RETURNING id`,
+       VALUES ($1,$2,$3,'canonical_fact',3,'scope anchor future decoy',4) RETURNING id`,
       [ownerUserId, campaign.rows[0]!.id, version.rows[0]!.id]
     );
     const foreignUser = await pool.query<{ id: string }>("INSERT INTO users (display_name) VALUES ('Scope decoy owner') RETURNING id");
@@ -99,6 +99,33 @@ integration("Chronicle retrieval evaluation integration seam", () => {
        VALUES ($1,$2,$3,'campaign_summary',1,'scope anchor foreign decoy',4) RETURNING id`,
       [foreignUser.rows[0]!.id, foreignCampaign.rows[0]!.id, foreignVersion.rows[0]!.id]
     );
+    const campaignDecoy = await pool.query<{ id: string }>(
+      "INSERT INTO campaigns (owner_user_id, world_version_id, title) VALUES ($1,$2,$3) RETURNING id",
+      [ownerUserId, version.rows[0]!.id, "Scope same-owner campaign decoy"]
+    );
+    await pool.query("INSERT INTO campaign_state (campaign_id, owner_user_id) VALUES ($1,$2)", [campaignDecoy.rows[0]!.id, ownerUserId]);
+    const campaignMemory = await pool.query<{ id: string }>(
+      `INSERT INTO chronicle_memories
+         (owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content, token_estimate, entities)
+       VALUES ($1,$2,$3,'campaign_summary',1,'scope anchor entity campaign decoy',4,ARRAY['scope anchor']) RETURNING id`,
+      [ownerUserId, campaignDecoy.rows[0]!.id, version.rows[0]!.id]
+    );
+    const otherVersion = await pool.query<{ id: string }>(
+      `INSERT INTO world_versions (world_id, owner_user_id, version_number, content)
+       VALUES ($1,$2,2,$3::jsonb) RETURNING id`,
+      [world.rows[0]!.id, ownerUserId, JSON.stringify({ world: { title: "Scope alternate version" }, entities: [] })]
+    );
+    const versionDecoy = await pool.query<{ id: string }>(
+      "INSERT INTO campaigns (owner_user_id, world_version_id, title) VALUES ($1,$2,$3) RETURNING id",
+      [ownerUserId, otherVersion.rows[0]!.id, "Scope world-version decoy"]
+    );
+    await pool.query("INSERT INTO campaign_state (campaign_id, owner_user_id) VALUES ($1,$2)", [versionDecoy.rows[0]!.id, ownerUserId]);
+    const versionMemory = await pool.query<{ id: string }>(
+      `INSERT INTO chronicle_memories
+         (owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content, token_estimate)
+       VALUES ($1,$2,$3,'campaign_summary',1,'scope anchor semantic world-version decoy',4) RETURNING id`,
+      [ownerUserId, versionDecoy.rows[0]!.id, otherVersion.rows[0]!.id]
+    );
     const corpus: ChronicleRetrievalCorpus = {
       version: "v1",
       cases: [{
@@ -107,15 +134,24 @@ integration("Chronicle retrieval evaluation integration seam", () => {
           ownerUserId,
           campaignId: campaign.rows[0]!.id,
           worldVersionId: version.rows[0]!.id,
-          request: { budgetTokens: 4_096, compression: "auto", query: "scope anchor", recentTurns: 2, throughTurnNumber: 1 }
+          request: { budgetTokens: 4_096, compression: "auto", query: "scope anchor", recentTurns: 2, throughTurnNumber: 2 }
         },
-        expectedLabels: ["fixture-summary"],
+        expectedLabels: ["fixture-summary", "replacement-fact"],
         labelByMemoryId: {
           [memory.rows[0]!.id]: "fixture-summary",
           [future.rows[0]!.id]: "future-decoy",
-          [foreign.rows[0]!.id]: "foreign-decoy"
+          [foreign.rows[0]!.id]: "owner-decoy",
+          [campaignMemory.rows[0]!.id]: "entity-campaign-decoy",
+          [versionMemory.rows[0]!.id]: "semantic-world-version-decoy",
+          [replaced.rows[0]!.id]: "superseded-fact",
+          [replacement.rows[0]!.id]: "replacement-fact"
         },
-        forbiddenLabels: { futureTurn: ["future-decoy"], crossCampaign: ["foreign-decoy"] }
+        forbiddenLabels: { futureTurn: ["future-decoy"], crossCampaign: ["owner-decoy"], supersededFact: ["superseded-fact"] },
+        excludedLabels: {
+          owner: ["owner-decoy"],
+          campaign: ["entity-campaign-decoy"],
+          worldVersion: ["semantic-world-version-decoy"]
+        }
       }]
     };
     const application = apiMemoryApplication(pool);
@@ -139,9 +175,12 @@ integration("Chronicle retrieval evaluation integration seam", () => {
     expect(buildContextPreview).toHaveBeenCalledOnce();
     expect(report).toMatchObject({
       metrics: { recallAt5: 1, leakageCounts: { crossCampaign: 0, futureTurn: 0, supersededFact: 0 } },
-      cases: [expect.objectContaining({ retrievedLabels: expect.arrayContaining(["fixture-summary"]) })]
+      cases: [expect.objectContaining({ retrievedLabels: expect.arrayContaining(["fixture-summary", "replacement-fact"]) })]
     });
     expect(report.cases[0]!.retrievedLabels).not.toContain("future-decoy");
-    expect(report.cases[0]!.retrievedLabels).not.toContain("foreign-decoy");
+    expect(report.cases[0]!.retrievedLabels).not.toContain("owner-decoy");
+    expect(report.cases[0]!.retrievedLabels).not.toContain("entity-campaign-decoy");
+    expect(report.cases[0]!.retrievedLabels).not.toContain("semantic-world-version-decoy");
+    expect(report.cases[0]!.retrievedLabels).not.toContain("superseded-fact");
   });
 });

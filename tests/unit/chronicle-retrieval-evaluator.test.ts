@@ -38,9 +38,9 @@ describe("Chronicle retrieval evaluator metrics", () => {
         retrieval: { mode: "hybrid", semanticAvailable: true },
         scopes: {
           chronicle: [
-            { id: "memory-x", estimatedTokens: 2, lexicalRelevance: 0.8, semanticRelevance: 0.1 },
-            { id: "memory-a", estimatedTokens: 3, lexicalRelevance: 0, semanticRelevance: 0.9 },
-            { id: "memory-b", estimatedTokens: 4, lexicalRelevance: 0.4, semanticRelevance: 0.3 }
+            { id: "memory-x", estimatedTokens: 2, relevance: 0.4, lexicalRelevance: 0.8, semanticRelevance: 0.1 },
+            { id: "memory-a", estimatedTokens: 3, relevance: 0.9, lexicalRelevance: 0, semanticRelevance: 0.9 },
+            { id: "memory-b", estimatedTokens: 4, relevance: 0.6, lexicalRelevance: 0.4, semanticRelevance: 0.3 }
           ]
         }
       });
@@ -77,7 +77,7 @@ describe("Chronicle retrieval evaluator metrics", () => {
       embedding: { requests: 1, cost: 0 },
       semanticOnlyHits: 1,
       promotions: 1,
-      demotions: 2
+      demotions: 1
     });
     expect(report.cases).toEqual([expect.objectContaining({
       id: "exact-reference",

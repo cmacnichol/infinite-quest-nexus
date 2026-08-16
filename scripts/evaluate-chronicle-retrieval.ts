@@ -117,20 +117,29 @@ async function seedCorpus(database: DatabaseClient, ownerUserId: string, corpus:
          VALUES ($1,$2,true,$3,'fixture-embedding-v1')`,
         [campaign.rows[0]!.id, ownerUserId, embeddingProviderId]
       );
-      const decoy = await database.query<{ id: string }>(
-        `INSERT INTO chronicle_memories
-           (owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content, token_estimate,
-            embedding, embedding_provider_profile_id, embedding_model, embedding_dimensions,
-            embedding_content_hash, embedding_updated_at, embedding_provider_fingerprint)
-         VALUES ($1,$2,$3,'open_thread',1,'amber agreement distractor',4,'[0,1]'::vector,$4,'fixture-embedding-v1',2,$5,now(),'fixture-embedding-fingerprint')
-         RETURNING id`,
-        [ownerUserId, campaign.rows[0]!.id, version.rows[0]!.id, embeddingProviderId, chronicleContentHash("amber agreement distractor")]
-      );
-      labelByMemoryId[decoy.rows[0]!.id] = "semantic-decoy";
+      const lexicalDecoyCount = fixture.id === "paraphrase" ? 6 : fixture.id === "character-alias" ? 6 : 5;
+      for (let index = 0; index < lexicalDecoyCount; index += 1) {
+        const turn = await database.query<{ id: string }>(
+          `INSERT INTO turns (owner_user_id, campaign_id, turn_number, action, narration, state_snapshot_private)
+           VALUES ($1,$2,$3,'Sanitized lexical fixture action.','Sanitized lexical fixture narration.','{}'::jsonb) RETURNING id`,
+          [ownerUserId, campaign.rows[0]!.id, index + 3]
+        );
+        const content = `amber agreement lexical relay ${index + 1}`;
+        const decoy = await database.query<{ id: string }>(
+          `INSERT INTO chronicle_memories
+             (owner_user_id, campaign_id, world_version_id, turn_id, memory_kind, ordinal, content, token_estimate,
+              embedding, embedding_provider_profile_id, embedding_model, embedding_dimensions,
+              embedding_content_hash, embedding_updated_at, embedding_provider_fingerprint)
+           VALUES ($1,$2,$3,$4,'turn_fiction',$5,$6,1,'[0,1]'::vector,$7,'fixture-embedding-v1',2,$8,now(),'fixture-embedding-fingerprint')
+           RETURNING id`,
+          [ownerUserId, campaign.rows[0]!.id, version.rows[0]!.id, turn.rows[0]!.id, index + 2, content, embeddingProviderId, chronicleContentHash(content)]
+        );
+        labelByMemoryId[decoy.rows[0]!.id] = `semantic-lexical-decoy-${index + 1}`;
+      }
     }
     for (const [index, label] of fixture.expectedLabels.entries()) {
       const content = semantic ? "azure beacon confirmation" : `sanitized record ${fixture.id} ${index + 1}`;
-      const ordinal = semantic ? index + 2 : index + 1;
+      const ordinal = semantic ? index + 32 : index + 1;
       const memory = semantic
         ? await database.query<{ id: string }>(
         `INSERT INTO chronicle_memories
@@ -160,16 +169,46 @@ async function seedCorpus(database: DatabaseClient, ownerUserId: string, corpus:
       );
       labelByMemoryId[memory.rows[0]!.id] = label;
     }
-    for (const label of fixture.forbiddenLabels?.supersededFact ?? []) {
+    if (fixture.id === "superseded-fact") {
+      labelByMemoryId[replacementFact.rows[0]!.id] = fixture.expectedLabels[0]!;
+      for (const label of fixture.forbiddenLabels?.supersededFact ?? []) {
+        labelByMemoryId[replacedFact.rows[0]!.id] = label;
+      }
+    }
+    const createDecoyCampaign = async (decoyOwnerUserId: string, decoyWorldVersionId?: string) => {
+      const decoyVersionId = decoyWorldVersionId ?? (await database.query<{ id: string }>(
+        `INSERT INTO world_versions (world_id, owner_user_id, version_number, content)
+         VALUES ($1,$2,2,$3::jsonb) RETURNING id`,
+        [world.rows[0]!.id, decoyOwnerUserId, JSON.stringify({ world: { title: `${fixture.id} decoy` }, entities: [] })]
+      )).rows[0]!.id;
+      const decoyCampaign = await database.query<{ id: string }>(
+        "INSERT INTO campaigns (owner_user_id, world_version_id, title) VALUES ($1,$2,$3) RETURNING id",
+        [decoyOwnerUserId, decoyVersionId, `Chronicle evaluator decoy ${fixture.id}`]
+      );
+      await database.query("INSERT INTO campaign_state (campaign_id, owner_user_id) VALUES ($1,$2)", [decoyCampaign.rows[0]!.id, decoyOwnerUserId]);
+      return { campaignId: decoyCampaign.rows[0]!.id, worldVersionId: decoyVersionId };
+    };
+    const insertDecoy = async (label: string, decoyOwnerUserId: string, decoyCampaignId: string, decoyWorldVersionId: string, kind: "semantic" | "entity" | "lexical" = "lexical") => {
+      const semanticColumns = kind === "semantic"
+        ? ", embedding, embedding_provider_profile_id, embedding_model, embedding_dimensions, embedding_content_hash, embedding_updated_at, embedding_provider_fingerprint"
+        : "";
+      const semanticValues = kind === "semantic"
+        ? ", '[1,0]'::vector, $5, 'fixture-embedding-v1', 2, $6, now(), 'fixture-embedding-fingerprint'"
+        : "";
+      const entities = kind === "entity" ? ["amber agreement"] : [];
+      const content = kind === "semantic" ? "azure beacon confirmation" : "amber agreement scope anchor";
+      const values: unknown[] = [decoyOwnerUserId, decoyCampaignId, decoyWorldVersionId, content];
+      if (kind === "semantic") values.push(embeddingProviderId, chronicleContentHash(content));
       const memory = await database.query<{ id: string }>(
         `INSERT INTO chronicle_memories
-           (owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content, token_estimate)
-         VALUES ($1,$2,$3,'legacy_summary',1,$4,1) RETURNING id`,
-        [ownerUserId, campaign.rows[0]!.id, version.rows[0]!.id, label]
+           (owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content, token_estimate, entities${semanticColumns})
+         VALUES ($1,$2,$3,'campaign_summary',1,$4,1,$${kind === "semantic" ? 7 : 5}::text[]${semanticValues}) RETURNING id`,
+        [...values, entities]
       );
       labelByMemoryId[memory.rows[0]!.id] = label;
-    }
-    for (const label of fixture.forbiddenLabels?.crossCampaign ?? []) {
+    };
+    const excluded = fixture.excludedLabels ?? {};
+    for (const label of excluded.owner ?? []) {
       const foreignUser = await database.query<{ id: string }>(
         "INSERT INTO users (display_name) VALUES ('Chronicle evaluator decoy owner') RETURNING id"
       );
@@ -190,13 +229,23 @@ async function seedCorpus(database: DatabaseClient, ownerUserId: string, corpus:
         "INSERT INTO campaign_state (campaign_id, owner_user_id) VALUES ($1,$2)",
         [foreignCampaign.rows[0]!.id, foreignUser.rows[0]!.id]
       );
-      const memory = await database.query<{ id: string }>(
-        `INSERT INTO chronicle_memories
-           (owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content, token_estimate)
-         VALUES ($1,$2,$3,'campaign_summary',1,$4,1) RETURNING id`,
-        [foreignUser.rows[0]!.id, foreignCampaign.rows[0]!.id, foreignVersion.rows[0]!.id, label]
-      );
-      labelByMemoryId[memory.rows[0]!.id] = label;
+      await insertDecoy(label, foreignUser.rows[0]!.id, foreignCampaign.rows[0]!.id, foreignVersion.rows[0]!.id);
+    }
+    for (const label of excluded.campaign ?? []) {
+      const decoy = await createDecoyCampaign(ownerUserId, version.rows[0]!.id);
+      await insertDecoy(label, ownerUserId, decoy.campaignId, decoy.worldVersionId);
+    }
+    for (const label of excluded.worldVersion ?? []) {
+      const decoy = await createDecoyCampaign(ownerUserId);
+      await insertDecoy(label, ownerUserId, decoy.campaignId, decoy.worldVersionId);
+    }
+    for (const label of excluded.semantic ?? []) {
+      const decoy = await createDecoyCampaign(ownerUserId, version.rows[0]!.id);
+      await insertDecoy(label, ownerUserId, decoy.campaignId, decoy.worldVersionId, "semantic");
+    }
+    for (const label of excluded.entity ?? []) {
+      const decoy = await createDecoyCampaign(ownerUserId, version.rows[0]!.id);
+      await insertDecoy(label, ownerUserId, decoy.campaignId, decoy.worldVersionId, "entity");
     }
     cases.push({
       ...fixture,

@@ -33,16 +33,18 @@
           "budgetTokens": 256,
           "compression": "auto",
           "query": "amber agreement",
-          "recentTurns": 4
+          "recentTurns": 32
         }
       },
       "expectedLabels": [
-        "paraphrase-a",
-        "paraphrase-b"
+        "paraphrase-a"
       ],
       "labelByMemoryId": {
-        "m-paraphrase-a": "paraphrase-a",
-        "m-paraphrase-b": "paraphrase-b"
+        "m-paraphrase-a": "paraphrase-a"
+      },
+      "excludedLabels": {
+        "semantic": ["paraphrase-semantic-scope-decoy"],
+        "entity": ["paraphrase-entity-scope-decoy"]
       }
     },
     {
@@ -55,7 +57,7 @@
           "budgetTokens": 256,
           "compression": "auto",
           "query": "amber agreement",
-          "recentTurns": 4
+          "recentTurns": 32
         }
       },
       "expectedLabels": [
@@ -63,6 +65,10 @@
       ],
       "labelByMemoryId": {
         "m-character-alias-a": "character-alias-a"
+      },
+      "excludedLabels": {
+        "semantic": ["character-alias-semantic-scope-decoy"],
+        "entity": ["character-alias-entity-scope-decoy"]
       }
     },
     {
@@ -75,7 +81,7 @@
           "budgetTokens": 256,
           "compression": "auto",
           "query": "amber agreement",
-          "recentTurns": 4
+          "recentTurns": 32
         }
       },
       "expectedLabels": [
@@ -83,6 +89,10 @@
       ],
       "labelByMemoryId": {
         "m-location-alias-a": "location-alias-a"
+      },
+      "excludedLabels": {
+        "semantic": ["location-alias-semantic-scope-decoy"],
+        "entity": ["location-alias-entity-scope-decoy"]
       }
     },
     {
@@ -159,7 +169,8 @@
           "budgetTokens": 256,
           "compression": "auto",
           "query": "superseded fact",
-          "recentTurns": 4
+          "recentTurns": 4,
+          "throughTurnNumber": 2
         }
       },
       "expectedLabels": [
@@ -326,6 +337,11 @@
         "crossCampaign": [
           "cross-campaign-foreign"
         ]
+      },
+      "excludedLabels": {
+        "owner": ["cross-campaign-foreign"],
+        "campaign": ["cross-campaign-same-owner-decoy"],
+        "worldVersion": ["cross-campaign-world-version-decoy"]
       }
     },
     {
