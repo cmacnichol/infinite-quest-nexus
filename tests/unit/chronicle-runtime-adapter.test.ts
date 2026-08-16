@@ -3,6 +3,7 @@ import {
   createChronicleEmbeddingProviderPort,
   createChronicleWorkerExecutor
 } from "../../services/runtime/src/chronicle-platform-adapter.js";
+import { createChroniclePlatformBindings } from "../../services/runtime/src/chronicle-platform-bindings.js";
 import { createChronicleClaimExecution } from "../../services/runtime/src/chronicle-worker-execution.js";
 import {
   type ChronicleWorkerStatePort
@@ -366,6 +367,47 @@ describe("Chronicle runtime adapters", () => {
     expect(resolveEmbeddingProviderId).toHaveBeenCalledWith(database, "owner-1", "campaign-1", null);
     const prefixes = { documentPrefix: "search_document: ", queryPrefix: "search_query: ", automatic: true };
     await expect(port.fingerprint(provider, prefixes)).resolves.toEqual(expect.stringMatching(/^[a-f0-9]{64}$/));
+  });
+
+  it("projects only reviewed embedding capability values into Chronicle provider execution", async () => {
+    const bindings = createChroniclePlatformBindings({
+      resolution: {
+        resolveEmbedding: vi.fn().mockResolvedValue({
+          status: "resolved", providerProfileId: "embedding-profile", resolvedRole: "embedding", model: "embed-v1"
+        })
+      },
+      execution: {
+        embedding: vi.fn().mockResolvedValue({
+          id: "embedding-profile",
+          model: "embed-v1",
+          providerType: "openai_compatible",
+          contextWindowTokens: 16_384,
+          requestTimeoutMs: 30_000,
+          configuration: {
+            embeddingMaxInputTokens: 1_024,
+            embeddingDimensions: 768,
+            apiKey: "must-not-project"
+          },
+          embed: vi.fn()
+        })
+      },
+      health: { recordHealth: vi.fn() },
+      costs: { recordChronicleCost: vi.fn() },
+      costContext: vi.fn()
+    } as never);
+
+    const provider = await bindings.embeddings.load({} as never, {
+      ownerUserId: "owner-1",
+      providerProfileId: "embedding-profile",
+      model: "embed-v1"
+    });
+
+    expect(provider).toMatchObject({
+      id: "embedding-profile",
+      model: "embed-v1",
+      configuration: { embeddingMaxInputTokens: 1_024, embeddingDimensions: 768 }
+    });
+    expect(JSON.stringify(provider)).not.toContain("must-not-project");
   });
 
   it("turns provider failures into private diagnostics while the worker lease is safely failed", async () => {

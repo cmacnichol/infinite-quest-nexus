@@ -328,6 +328,31 @@ describe("provider application contracts", () => {
     expect(Object.isFrozen(configuration)).toBe(true);
   });
 
+  it("keeps only in-range Chronicle embedding capability overrides", () => {
+    const configuration = toSafeProviderConfiguration({
+      embeddingMaxInputTokens: 1_024,
+      embeddingMaxBatchItems: 8,
+      embeddingMaxBatchTokens: 4_096,
+      embeddingDimensions: 768,
+      embeddingMaxRetries: 4,
+      tooSmallInput: 127,
+      apiKey: "must-not-cross"
+    });
+
+    expect(configuration).toEqual({
+      embeddingMaxInputTokens: 1_024,
+      embeddingMaxBatchItems: 8,
+      embeddingMaxBatchTokens: 4_096,
+      embeddingDimensions: 768,
+      embeddingMaxRetries: 4
+    });
+    expect(toSafeProviderConfiguration({ embeddingMaxInputTokens: 127 })).toEqual({});
+    expect(toSafeProviderConfiguration({ embeddingMaxBatchItems: 129 })).toEqual({});
+    expect(toSafeProviderConfiguration({ embeddingMaxBatchTokens: 4_000_001 })).toEqual({});
+    expect(toSafeProviderConfiguration({ embeddingDimensions: 16_001 })).toEqual({});
+    expect(toSafeProviderConfiguration({ embeddingMaxRetries: 6 })).toEqual({});
+  });
+
   it("models embedding text fallback explicitly while direct roles cannot cross roles", async () => {
     const application = createProviderApplication(dependencies());
     const image = await application.resolveDirect({ ...owner, providerRole: "image" });

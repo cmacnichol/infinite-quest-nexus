@@ -1,4 +1,7 @@
-import type { ProviderCostRecordCommand } from "../../../packages/application/src/providers/index.js";
+import {
+  toSafeProviderConfiguration,
+  type ProviderCostRecordCommand
+} from "../../../packages/application/src/providers/index.js";
 import type { DatabaseClient } from "../../../packages/database/src/pool.js";
 import { logProviderTransportError } from "../../../packages/story-engine/src/index.js";
 import {
@@ -33,7 +36,7 @@ export function createChroniclePlatformBindings(
           id: execution.id,
           model: execution.model,
           providerType: execution.providerType,
-          configuration: execution.configuration,
+          configuration: toSafeProviderConfiguration(execution.configuration),
           embed: execution.embed,
         };
       },
