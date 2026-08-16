@@ -80,4 +80,22 @@ describe("Chronicle reciprocal-rank fusion", () => {
     expect(fused.map((value) => value.parentMemoryId)).toEqual(["parent-semantic", "parent-exact"]);
     expect(fused.find((value) => value.parentMemoryId === "parent-exact")?.contributions).toHaveLength(2);
   });
+
+  it("breaks Unicode ties by stable code points instead of the host locale", () => {
+    const fused = fuseChronicleRanks([{
+      signal: "recency",
+      variant: "action",
+      candidates: [
+        candidate("chunk-ä", "parent-ä"),
+        candidate("chunk-z", "parent-z")
+      ]
+    }], { rrfK: 0, weights: {} });
+
+    expect(fused.map((value) => value.parentMemoryId)).toEqual(["parent-ä", "parent-z"]);
+    const tied = fuseChronicleRanks([
+      { signal: "recency", variant: "action", candidates: [candidate("chunk-ä", "parent-ä")] },
+      { signal: "chronology", variant: "action", candidates: [candidate("chunk-z", "parent-z")] }
+    ], { rrfK: 60, weights: {} });
+    expect(tied.map((value) => value.parentMemoryId)).toEqual(["parent-z", "parent-ä"]);
+  });
 });

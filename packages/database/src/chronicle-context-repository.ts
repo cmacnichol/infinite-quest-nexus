@@ -139,15 +139,19 @@ function budgetTokenEstimate(text: string): number {
   return Math.max(estimateTokens(text), Math.ceil(text.length / 3));
 }
 
+function compareDeterministically(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function relevanceTerms(query: string): string[] {
-  return [...new Set(query.toLocaleLowerCase().match(/[\p{L}\p{N}_'-]{3,}/gu) ?? [])].slice(0, 64);
+  return [...new Set(query.toLowerCase().match(/[\p{L}\p{N}_'-]{3,}/gu) ?? [])].slice(0, 64);
 }
 
 function selectWorldItems(items: unknown, query: string, limit: number): unknown[] {
   if (!Array.isArray(items)) return [];
   const terms = relevanceTerms(query);
   return items.map((item, index) => {
-    const serialized = stableStringify(item).toLocaleLowerCase();
+    const serialized = stableStringify(item).toLowerCase();
     const score = terms.reduce((total, term) => total + (serialized.includes(term) ? 1 : 0), 0);
     return { item, index, score };
   }).sort((left, right) => (right.score - left.score) || (left.index - right.index))
@@ -256,6 +260,18 @@ async function loadContextMemories(
         WHERE owner_user_id = $1 AND campaign_id = $2 AND world_version_id = $3
           AND ($6::integer IS NULL OR ordinal <= $6::integer)
           AND ($6::integer IS NULL OR memory_kind NOT IN ('legacy_summary','canonical_fact'))
+          AND (memory_kind <> 'canonical_fact' OR CASE WHEN jsonb_typeof(metadata->'structuredFactIds')='array' THEN
+              jsonb_array_length(metadata->'structuredFactIds')>0
+              AND NOT EXISTS (
+                SELECT 1
+                  FROM jsonb_array_elements_text(metadata->'structuredFactIds') fact_id(value)
+                  LEFT JOIN campaign_canonical_facts fact
+                    ON fact.id::text=fact_id.value
+                   AND fact.owner_user_id = $1 AND fact.campaign_id = $2 AND fact.world_version_id = $3
+                 WHERE fact.id IS NULL OR fact.valid_until_turn IS NOT NULL
+              )
+            ELSE false
+          END)
      ), ranked AS (
        SELECT *,
               row_number() OVER (PARTITION BY memory_kind ORDER BY ordinal DESC, created_at DESC) AS recent_rank,
@@ -400,14 +416,14 @@ async function applyContextSemanticRelevance(
   dependencies: ChronicleGenerationTransactionDependencies,
   config: EmbeddingConfigRow | undefined,
 ): Promise<Record<string, unknown>> {
-  const normalizedQuery = query.toLocaleLowerCase();
+  const normalizedQuery = query.toLowerCase();
   const queryEntityIdSet = new Set(queryEntityIds);
   const newestOrdinal = memories.reduce((maximum, memory) => Math.max(maximum, memory.ordinal), 0);
   for (const memory of memories) {
     memory.lexicalRelevance = Number(memory.relevance);
     const lexical = Math.min(1, Math.max(0, Number(memory.lexicalRelevance || 0) * 8));
     const entityScore = memory.entity_ids.some((id) => queryEntityIdSet.has(id))
-      || memory.entities.some((entity) => normalizedQuery.includes(entity.toLocaleLowerCase())) ? 1 : 0;
+      || memory.entities.some((entity) => normalizedQuery.includes(entity.toLowerCase())) ? 1 : 0;
     const recencyScore = newestOrdinal > 0
       ? Math.max(0, 1 - (newestOrdinal - memory.ordinal) / Math.max(20, newestOrdinal))
       : 0;
@@ -475,7 +491,7 @@ async function applyContextSemanticRelevance(
       const lexical = Math.min(1, Math.max(0, Number(memory.lexicalRelevance || 0) * 8));
       const semanticScore = Math.max(0, semantic.get(memory.id) ?? 0);
       const entityScore = memory.entity_ids.some((id) => queryEntityIdSet.has(id))
-        || memory.entities.some((entity) => normalizedQuery.includes(entity.toLocaleLowerCase())) ? 1 : 0;
+        || memory.entities.some((entity) => normalizedQuery.includes(entity.toLowerCase())) ? 1 : 0;
       const recencyScore = newestOrdinal > 0
         ? Math.max(0, 1 - (newestOrdinal - memory.ordinal) / Math.max(20, newestOrdinal))
         : 0;
@@ -579,20 +595,20 @@ function authorizedChunkCte(): string {
           AND (chunk.embedding_status='embedded'
                OR (chunk.embedding_status='skipped' AND chunk.embedding_skip_reason='chunk_embedding_skipped'))
           AND ($4::integer IS NULL OR parent.ordinal <= $4::integer)
-          AND ($4::integer IS NULL OR parent.memory_kind <> 'canonical_fact')
-          AND (parent.memory_kind <> 'canonical_fact' OR (
-            $4::integer IS NULL
-            AND jsonb_typeof(parent.metadata->'structuredFactIds')='array'
-            AND jsonb_array_length(parent.metadata->'structuredFactIds')>0
-            AND NOT EXISTS (
-              SELECT 1
-                FROM jsonb_array_elements_text(parent.metadata->'structuredFactIds') fact_id(value)
-                LEFT JOIN campaign_canonical_facts fact
-                  ON fact.id::text=fact_id.value
-                 AND fact.owner_user_id = $1 AND fact.campaign_id = $2 AND fact.world_version_id = $3
-               WHERE fact.id IS NULL OR fact.valid_until_turn IS NOT NULL
-            )
-          ))
+          AND ($4::integer IS NULL OR parent.memory_kind NOT IN ('legacy_summary','canonical_fact'))
+          AND (parent.memory_kind <> 'canonical_fact' OR CASE WHEN jsonb_typeof(parent.metadata->'structuredFactIds')='array'
+             AND $4::integer IS NULL THEN
+              jsonb_array_length(parent.metadata->'structuredFactIds')>0
+              AND NOT EXISTS (
+                SELECT 1
+                  FROM jsonb_array_elements_text(parent.metadata->'structuredFactIds') fact_id(value)
+                  LEFT JOIN campaign_canonical_facts fact
+                    ON fact.id::text=fact_id.value
+                   AND fact.owner_user_id = $1 AND fact.campaign_id = $2 AND fact.world_version_id = $3
+                 WHERE fact.id IS NULL OR fact.valid_until_turn IS NOT NULL
+              )
+            ELSE false
+          END)
      )`;
 }
 
@@ -685,6 +701,36 @@ async function loadAuthorizedChunkRank(
   return result.rows;
 }
 
+function aliasAttestedByMemories(
+  entity: EntityReference,
+  alias: string,
+  memories: readonly ContextMemoryRow[],
+): boolean {
+  const aliasKey = normalizeEntityTerm(alias);
+  const aliasOnlyReference: EntityReference = { ...entity, displayName: alias, aliases: [alias] };
+  return memories.some((memory) => (
+    memory.entities.some((term) => normalizeEntityTerm(term) === aliasKey)
+    || matchEntityReferences(memory.content, [aliasOnlyReference]).length > 0
+  ));
+}
+
+function cutoffSafeEntityCatalog(
+  catalog: readonly EntityReference[],
+  memories: readonly ContextMemoryRow[],
+  throughTurnNumber: number | undefined,
+): readonly EntityReference[] {
+  if (throughTurnNumber === undefined) return catalog;
+  return catalog.flatMap((entity) => {
+    if (entity.source === "world") return [entity];
+    const aliases = entity.aliases.filter((alias) => aliasAttestedByMemories(entity, alias, memories));
+    if (!aliases.length) return [];
+    const displayName = aliases.some((alias) => normalizeEntityTerm(alias) === normalizeEntityTerm(entity.displayName))
+      ? entity.displayName
+      : aliases[0]!;
+    return [{ ...entity, displayName, aliases }];
+  });
+}
+
 function plannedChunkQueries(
   scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
   memories: readonly ContextMemoryRow[],
@@ -693,20 +739,15 @@ function plannedChunkQueries(
   const entityHints = matchEntityReferences(scope.request.query, entityCatalog).flatMap(({ entity, matchedAlias }) => {
     const authorizedMemories = memories.filter((memory) => memory.entity_ids.includes(entity.id));
     if (!authorizedMemories.length) return [];
-    const aliasKey = normalizeEntityTerm(matchedAlias);
     const historicallyAttested = scope.request.throughTurnNumber === undefined
       || entity.source === "world"
-      || authorizedMemories.some((memory) => (
-        memory.entities.some((term) => normalizeEntityTerm(term) === aliasKey)
-        || matchEntityReferences(memory.content, [entity])
-          .some((match) => normalizeEntityTerm(match.matchedAlias) === aliasKey)
-      ));
+      || aliasAttestedByMemories(entity, matchedAlias, authorizedMemories);
     if (!historicallyAttested) return [];
     const catalogTerms = new Set([entity.displayName, ...entity.aliases]
       .map(normalizeEntityTerm));
     const terms = [...new Set(authorizedMemories.flatMap((memory) => memory.entities)
       .filter((term) => catalogTerms.has(normalizeEntityTerm(term))))]
-      .sort((left, right) => left.localeCompare(right));
+      .sort(compareDeterministically);
     return terms.length === 0 ? [] : [{
       ordinal: Math.min(...authorizedMemories.map((memory) => memory.ordinal)),
       entityId: entity.id,
@@ -909,14 +950,35 @@ export async function buildPostgresChronicleContextPreview(
   dependencies: ChronicleGenerationTransactionDependencies,
 ): Promise<Record<string, unknown>> {
   const campaign = await loadContextCampaign(client, scope);
-  const entityCatalog = buildChronicleEntityCatalog({
+  const completeEntityCatalog = buildChronicleEntityCatalog({
     worldContent: campaign.world_content,
     characterSnapshot: campaign.character_snapshot,
     characterProfile: campaign.character_profile
   });
-  const entityExpandedQuery = expandEntityQuery(scope.request.query, entityCatalog);
-  const queryEntityIds = matchEntityReferences(scope.request.query, entityCatalog).map((match) => match.entity.id);
-  const memories = await loadContextMemories(client, scope, entityExpandedQuery, queryEntityIds);
+  let entityCatalog: readonly EntityReference[] = completeEntityCatalog;
+  let entityExpandedQuery: string;
+  let queryEntityIds: string[];
+  let memories: ContextMemoryRow[];
+  if (scope.request.throughTurnNumber !== undefined
+    && completeEntityCatalog.some((entity) => entity.source === "character")) {
+    const immutableWorldCatalog = completeEntityCatalog.filter((entity) => entity.source === "world");
+    const preliminaryQuery = expandEntityQuery(scope.request.query, immutableWorldCatalog);
+    const preliminaryEntityIds = matchEntityReferences(scope.request.query, immutableWorldCatalog)
+      .map((match) => match.entity.id);
+    const cutoffMemories = await loadContextMemories(client, scope, preliminaryQuery, preliminaryEntityIds);
+    entityCatalog = cutoffSafeEntityCatalog(
+      completeEntityCatalog,
+      cutoffMemories,
+      scope.request.throughTurnNumber
+    );
+    entityExpandedQuery = expandEntityQuery(scope.request.query, entityCatalog);
+    queryEntityIds = matchEntityReferences(scope.request.query, entityCatalog).map((match) => match.entity.id);
+    memories = await loadContextMemories(client, scope, entityExpandedQuery, queryEntityIds);
+  } else {
+    entityExpandedQuery = expandEntityQuery(scope.request.query, entityCatalog);
+    queryEntityIds = matchEntityReferences(scope.request.query, entityCatalog).map((match) => match.entity.id);
+    memories = await loadContextMemories(client, scope, entityExpandedQuery, queryEntityIds);
+  }
   // Count only the already owner/campaign/world-version/cutoff-filtered rows.
   // This safe aggregate lets callers verify scope eligibility without exposing
   // candidate IDs, content, entity names, or provider diagnostics.
@@ -981,7 +1043,8 @@ export async function buildPostgresChronicleContextPreview(
     Math.max(384, Math.floor(scope.request.budgetTokens * 0.30))
   );
   const campaignCanon = campaignFictionCanon(campaign, Math.max(256, Math.floor(scope.request.budgetTokens * 0.18)));
-  const turnMemories = memories.filter((memory) => memory.memory_kind === "turn_fiction");
+  const turnMemories = memories.filter((memory) => memory.memory_kind === "turn_fiction")
+    .sort((left, right) => left.ordinal - right.ordinal || compareDeterministically(left.id, right.id));
   const latest = turnMemories.at(-1) ?? null;
   const currentScene = latest ? {
     memoryId: latest.id,
@@ -1015,11 +1078,11 @@ export async function buildPostgresChronicleContextPreview(
   };
   const renderLevel = selectedLevel === "summary" ? "compact" : selectedLevel;
   const summary = memories.filter((memory) => memory.memory_kind === "campaign_summary")
-    .sort((left, right) => right.ordinal - left.ordinal)[0]
+    .sort((left, right) => right.ordinal - left.ordinal || compareDeterministically(left.id, right.id))[0]
     ?? (selectedLevel === "summary" ? memories.find((memory) => memory.memory_kind === "legacy_summary") : undefined);
   if (summary) addMemory(summary, summary.content, "summary_checkpoint");
   const openThreads = memories.filter((memory) => memory.memory_kind === "open_thread")
-    .sort((left, right) => right.ordinal - left.ordinal)[0];
+    .sort((left, right) => right.ordinal - left.ordinal || compareDeterministically(left.id, right.id))[0];
   if (openThreads) addMemory(openThreads, openThreads.content, "open_threads");
   memories.filter((memory) => memory.memory_kind === "canonical_fact")
     .forEach((memory) => addMemory(memory, memory.content, "canonical_fact"));
@@ -1040,7 +1103,8 @@ export async function buildPostgresChronicleContextPreview(
     turnMemories.forEach((memory) => addMemory(memory, compressTurnMemory(memory.content, renderLevel), "chronological"));
   }
   const chronicle = [...selected.values()]
-    .sort((left, right) => left.memory.ordinal - right.memory.ordinal)
+    .sort((left, right) => left.memory.ordinal - right.memory.ordinal
+      || compareDeterministically(left.memory.id, right.memory.id))
     .map(({ memory, rendered, reason }) => ({
       id: memory.id,
       turnId: memory.turn_id,

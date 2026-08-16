@@ -586,6 +586,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
 
   it("creates every chunk rank input only after owner, campaign, version, and cutoff authorization", async () => {
     const rankQueries: string[] = [];
+    const memoryQueries: string[] = [];
     const client = databaseClient((sql) => {
       if (sql.includes("FROM campaigns c") && sql.includes("campaign_state")) {
         return { rows: [{
@@ -607,6 +608,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
         }] };
       }
       if (sql.includes("WITH base AS") && sql.includes("chronicle_memories")) {
+        memoryQueries.push(sql);
         return { rows: [{
           id: "authorized-memory",
           turn_id: "turn-3",
@@ -660,6 +662,10 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     });
 
     expect(preview).toMatchObject({ retrieval: { implementation: "chunked_hybrid" } });
+    expect(memoryQueries.length).toBeGreaterThan(0);
+    expect(memoryQueries.every((sql) => sql.includes(
+      "CASE WHEN jsonb_typeof(metadata->'structuredFactIds')='array'"
+    ))).toBe(true);
     expect(rankQueries.length).toBeGreaterThan(0);
     expect(rankQueries.filter((sql) => sql.includes("chronicle_rank:entity"))).toHaveLength(1);
     for (const sql of rankQueries) {
@@ -669,6 +675,9 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       expect(ranking).toBeGreaterThan(authorization);
       expect(sql.slice(authorization, ranking)).toMatch(
         /owner_user_id\s*=\s*\$1[\s\S]*campaign_id\s*=\s*\$2[\s\S]*world_version_id\s*=\s*\$3[\s\S]*parent\.ordinal\s*<=\s*\$4/i
+      );
+      expect(sql.slice(authorization, ranking)).toContain(
+        "CASE WHEN jsonb_typeof(parent.metadata->'structuredFactIds')='array'"
       );
     }
   });
@@ -747,6 +756,99 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
 
     expect(rankQueries.filter(({ sql }) => sql.includes("chronicle_rank:entity"))).toHaveLength(0);
     expect(rankQueries.flatMap(({ values }) => values).join("\n")).not.toContain("Moon Warden");
+  });
+
+  it("keeps post-cutoff character aliases out of legacy and readiness-fallback provider inputs", async () => {
+    for (const retrievalImplementation of ["legacy_hybrid", "chunked_hybrid"] as const) {
+      const providerInputs: string[] = [];
+      const client = databaseClient((sql) => {
+        if (sql.includes("FROM campaigns c") && sql.includes("campaign_state")) {
+          return { rows: [{
+            id: scope.campaignId,
+            title: "Historical Provider Alias Gate",
+            active_turn_number: 4,
+            world_version_id: scope.worldVersionId,
+            selected_character_id: "hero",
+            character_profile_revision: 2,
+            world_content: { world: { title: "Historical Provider Alias Gate" } },
+            character_snapshot: { id: "hero", name: "Moon Warden" },
+            character_profile: { profile: { identity: { aliases: ["Future Codename"] } } },
+            scratchpad_private: "",
+            scratchpad_safe_for_prompt: false,
+            trackers: []
+          }] };
+        }
+        if (sql.includes("WITH base AS") && sql.includes("chronicle_memories")) {
+          return { rows: [{
+            id: "historical-memory",
+            turn_id: "turn-1",
+            memory_kind: "turn_fiction",
+            ordinal: 1,
+            content: "Turn 1\nNarration: The moonlit court is quiet.",
+            token_estimate: 12,
+            importance: 0.8,
+            entities: ["Moon Warden"],
+            entity_ids: ["character:hero"],
+            relevance: 0
+          }] };
+        }
+        if (sql.includes("FROM campaign_canonical_facts")) return { rows: [] };
+        if (sql.includes("FROM campaign_memory_configs")) {
+          return { rows: [{
+            embedding_enabled: true,
+            embedding_provider_profile_id: "embedding-profile",
+            embedding_model: "embed-v1",
+            embedding_batch_size: 8,
+            embedding_document_prefix: null,
+            embedding_query_prefix: null,
+            retrieval_implementation: retrievalImplementation,
+            retrieval_shadow_enabled: false
+          }] };
+        }
+        if (sql.includes("AS chunk_index_ready")) return { rows: [{ chunk_index_ready: false }] };
+        if (sql.includes("1 - (embedding <=>")) return { rows: [] };
+        if (sql.includes("estimated_tokens") && sql.includes("memory_count")) {
+          return { rows: [{
+            turns: "1", characters: "60", estimated_tokens: "15", memory_count: "1", memory_tokens: "12",
+            embedded_memories: "0", turn_memory_tokens: "12", recent_turn_tokens: "12", summary_tokens: "0"
+          }] };
+        }
+        throw new Error(`Unexpected SQL: ${sql}`);
+      });
+      const transaction = createPostgresChronicleGenerationTransactionPort({
+        embeddings: embeddingPort({
+          resolve: async () => "embedding-profile",
+          load: async () => ({
+            id: "embedding-profile",
+            model: "embed-v1",
+            providerType: "openai_compatible",
+            embed: async () => ({ embeddings: [], responseId: "unused", usage: {}, reportedCost: null })
+          }),
+          embed: async (_provider, documents) => {
+            providerInputs.push(...documents);
+            return { embeddings: [[1, 0]], responseId: "legacy-query", usage: {}, reportedCost: null };
+          },
+          fingerprint: async () => "fingerprint",
+          recordCost: async () => null,
+          recordHealth: async () => undefined
+        })
+      });
+
+      await transaction.buildContextPreview(client, {
+        ...scope,
+        request: {
+          budgetTokens: 4_000,
+          compression: "auto",
+          recentTurns: 1,
+          query: "Future Codename",
+          throughTurnNumber: 1
+        }
+      });
+
+      expect(providerInputs).toHaveLength(1);
+      expect(providerInputs[0]).toContain("Future Codename");
+      expect(providerInputs[0]).not.toContain("Moon Warden");
+    }
   });
 
   it("keeps nonsemantic fused candidates out of semantic and lexical diagnostics", async () => {
@@ -850,6 +952,9 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     const chronicle = (preview.scopes as { chronicle: Array<Record<string, unknown>> }).chronicle;
     const nonsemantic = chronicle.find((memory) => memory.id === "skipped-parent");
 
+    expect(preview.scopes).toMatchObject({
+      currentScene: { memoryId: "current-memory", ordinal: 3 }
+    });
     expect(nonsemantic?.relevance).toEqual(expect.any(Number));
     expect(Number(nonsemantic?.relevance)).toBeGreaterThan(0);
     expect(nonsemantic).toMatchObject({ semanticRelevance: 0, lexicalRelevance: 0 });

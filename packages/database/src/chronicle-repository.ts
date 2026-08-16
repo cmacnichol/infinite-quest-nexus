@@ -212,10 +212,6 @@ function json(value: unknown): string {
   return JSON.stringify(value ?? null);
 }
 
-function vectorLiteral(vector: readonly number[]): string {
-  return `[${vector.join(",")}]`;
-}
-
 async function loadCampaignProjection(
   client: DatabaseClient,
   scope: CampaignWorldVersionMemoryScope,
@@ -1530,7 +1526,7 @@ export function createPostgresChronicleEmbeddingBatchPort(
           }
         }
 
-        const vectors = input.result.embeddings.map(vectorLiteral);
+        const vectors = input.result.embeddings.map((vector) => `[${vector.join(",")}]`);
         const hashes = input.memories.map((memory) => memory.contentHash);
         const contents = input.memories.map((memory) => memory.content);
         const updated = await client.query(

@@ -84,21 +84,23 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     fixture: CampaignFixture,
     input: Readonly<{
       turnId: string | null;
-      kind: "turn_fiction" | "open_thread" | "campaign_summary";
+      kind: "turn_fiction" | "open_thread" | "campaign_summary" | "legacy_summary" | "canonical_fact";
       ordinal: number;
       content: string;
       entities?: readonly string[];
       entityIds?: readonly string[];
+      metadata?: Readonly<Record<string, unknown>>;
     }>
   ): Promise<Readonly<{ id: string; contentHash: string }>> {
     const result = await pool.query<{ id: string; content_hash: string }>(
       `INSERT INTO chronicle_memories
          (owner_user_id,campaign_id,world_version_id,turn_id,memory_kind,ordinal,content,
-          token_estimate,importance,entities,entity_ids)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,CEIL(length($7::text)/4.0),0.8,$8::text[],$9::text[])
+          token_estimate,importance,entities,entity_ids,metadata)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,CEIL(length($7::text)/4.0),0.8,$8::text[],$9::text[],$10::jsonb)
        RETURNING id,content_hash`,
       [fixture.ownerUserId, fixture.campaignId, fixture.worldVersionId, input.turnId, input.kind,
-        input.ordinal, input.content, [...(input.entities ?? [])], [...(input.entityIds ?? [])]]
+        input.ordinal, input.content, [...(input.entities ?? [])], [...(input.entityIds ?? [])],
+        JSON.stringify(input.metadata ?? {})]
     );
     return { id: result.rows[0]!.id, contentHash: result.rows[0]!.content_hash };
   }
@@ -109,7 +111,7 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     value: Readonly<{
       parentId: string;
       parentContentHash: string;
-      kind: "turn_narration" | "open_thread" | "campaign_summary";
+      kind: "turn_narration" | "open_thread" | "campaign_summary" | "canonical_fact";
       content: string;
       vector: readonly [number, number];
       entities?: readonly string[];
@@ -216,6 +218,12 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
       entities: ["Moon Warden"],
       entityIds: ["world:moon-warden"]
     });
+    const staleLegacySummary = await parent(fixture, {
+      turnId: null,
+      kind: "legacy_summary",
+      ordinal: 0,
+      content: "Full history: a later turn reveals the obsidian vault answer."
+    });
     await embeddedChunk(fixture, providerId, {
       parentId: target.id,
       parentContentHash: target.contentHash,
@@ -224,6 +232,13 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
       vector: [1, 0],
       entities: ["Moon Warden"],
       entityIds: ["world:moon-warden"]
+    });
+    await embeddedChunk(fixture, providerId, {
+      parentId: staleLegacySummary.id,
+      parentContentHash: staleLegacySummary.contentHash,
+      kind: "campaign_summary",
+      content: "Full history: a later turn reveals the obsidian vault answer.",
+      vector: [1, 0]
     });
     await embeddedChunk(fixture, providerId, {
       parentId: current.id,
@@ -261,6 +276,34 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
               ($6,$2,$3,$4,$7,2,0,'The silver key opens the gate.','the silver key opens the gate.',2,null,null)`,
       [replacedId, ownerUserId, fixture.campaignId, fixture.worldVersionId, firstTurn, replacementId, secondTurn]
     );
+    const supersededFactParent = await parent(fixture, {
+      turnId: firstTurn,
+      kind: "canonical_fact",
+      ordinal: 1,
+      content: `- [fact_id: ${replacedId}] The iron key opens the gate.`,
+      metadata: { structuredFactIds: [replacedId] }
+    });
+    const activeFactParent = await parent(fixture, {
+      turnId: secondTurn,
+      kind: "canonical_fact",
+      ordinal: 2,
+      content: `- [fact_id: ${replacementId}] The silver key opens the gate.`,
+      metadata: { structuredFactIds: [replacementId] }
+    });
+    await embeddedChunk(fixture, providerId, {
+      parentId: supersededFactParent.id,
+      parentContentHash: supersededFactParent.contentHash,
+      kind: "canonical_fact",
+      content: "The iron key opens the gate.",
+      vector: [1, 0]
+    });
+    await embeddedChunk(fixture, providerId, {
+      parentId: activeFactParent.id,
+      parentContentHash: activeFactParent.contentHash,
+      kind: "canonical_fact",
+      content: "The silver key opens the gate.",
+      vector: [1, 0]
+    });
 
     const decoy = await campaignFixture("cross campaign decoy");
     const decoyParent = await parent(decoy, {
@@ -280,6 +323,32 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     const embeddingQueries: string[] = [];
     const generation = transaction(providerId, embeddingQueries);
     const before = await snapshotTurnRows(pool, ownerUserId, fixture.campaignId);
+    const currentFacts = await generation.buildContextPreview(pool, {
+      ...fixture,
+      request: { budgetTokens: 4_096, compression: "auto", query: "key opens the gate", recentTurns: 1 }
+    });
+    const currentFactChronicle = (currentFacts.scopes as {
+      chronicle: Array<{ content: string; semanticRelevance: number | null }>;
+    }).chronicle;
+    const activeFact = currentFactChronicle.find((memory) => memory.content.includes("The silver key opens the gate"));
+    expect(activeFact?.semanticRelevance).toEqual(expect.any(Number));
+    expect(Number(activeFact?.semanticRelevance)).toBeGreaterThan(0);
+    expect(currentFactChronicle.some((memory) => memory.content.includes("The iron key opens the gate"))).toBe(false);
+
+    embeddingQueries.length = 0;
+    const historicalSummary = await generation.buildContextPreview(pool, {
+      ...fixture,
+      request: {
+        budgetTokens: 4_096,
+        compression: "summary",
+        query: "obsidian vault answer",
+        recentTurns: 1,
+        throughTurnNumber: 2
+      }
+    });
+    expect.soft(JSON.stringify(historicalSummary.scopes)).not.toContain("later turn reveals the obsidian vault answer");
+
+    embeddingQueries.length = 0;
     const preview = await generation.buildContextPreview(pool, {
       ...fixture,
       request: {
@@ -328,5 +397,166 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     expect(fallback.budget).toEqual(legacy.budget);
     expect(fallback.metrics).toEqual(legacy.metrics);
     expect(await snapshotTurnRows(pool, ownerUserId, fixture.campaignId)).toEqual(before);
+  });
+
+  it("fails closed instead of throwing for malformed canonical parent metadata", async () => {
+    const { fixture, providerId } = await configuredFixture("malformed canonical metadata");
+    await parent(fixture, {
+      turnId: null,
+      kind: "canonical_fact",
+      ordinal: 1,
+      content: "Malformed canonical metadata must not enter context.",
+      metadata: { structuredFactIds: "not-an-array" }
+    });
+
+    const preview = await transaction(providerId, []).buildContextPreview(pool, {
+      ...fixture,
+      request: { budgetTokens: 4_096, compression: "auto", query: "malformed canonical", recentTurns: 1 }
+    });
+
+    expect(JSON.stringify(preview.scopes)).not.toContain("Malformed canonical metadata must not enter context");
+  });
+
+  it("gates chunk retrieval on the complete terminal current-protocol readiness matrix", async () => {
+    const cases = [
+      { name: "wrong protocol", expected: "fallback" },
+      { name: "wrong hash", expected: "fallback" },
+      { name: "pending", expected: "fallback" },
+      { name: "sanitized skipped", expected: "chunked" },
+      { name: "queued job", expected: "fallback" },
+      { name: "running job", expected: "fallback" },
+      { name: "failed job", expected: "fallback" },
+      { name: "completed job", expected: "chunked" }
+    ] as const;
+
+    for (const readinessCase of cases) {
+      const { fixture, providerId } = await configuredFixture(`readiness ${readinessCase.name}`);
+      const firstTurn = await turn(fixture, 1, "Enter the archive.", "The first lantern is lit.");
+      const secondTurn = await turn(fixture, 2, "Read the old oath.", "The second lantern is lit.");
+      const first = await parent(fixture, {
+        turnId: firstTurn,
+        kind: "turn_fiction",
+        ordinal: 1,
+        content: "Turn 1\nNarration: The first lantern is lit."
+      });
+      const second = await parent(fixture, {
+        turnId: secondTurn,
+        kind: "turn_fiction",
+        ordinal: 2,
+        content: "Turn 2\nNarration: The second lantern is lit."
+      });
+      await embeddedChunk(fixture, providerId, {
+        parentId: first.id,
+        parentContentHash: first.contentHash,
+        kind: "turn_narration",
+        content: "The first lantern is lit.",
+        vector: [1, 0]
+      });
+      await embeddedChunk(fixture, providerId, {
+        parentId: second.id,
+        parentContentHash: second.contentHash,
+        kind: "turn_narration",
+        content: "The second lantern is lit.",
+        vector: [0, 1]
+      });
+
+      if (readinessCase.name === "wrong protocol") {
+        await pool.query(
+          "UPDATE chronicle_memory_chunks SET chunking_protocol_version='chronicle-chunk-v0' WHERE parent_memory_id=$1",
+          [second.id]
+        );
+      } else if (readinessCase.name === "wrong hash") {
+        await pool.query(
+          "UPDATE chronicle_memory_chunks SET parent_content_hash=repeat('a',64) WHERE parent_memory_id=$1",
+          [second.id]
+        );
+      } else if (readinessCase.name === "pending") {
+        await pool.query(
+          `UPDATE chronicle_memory_chunks
+              SET embedding=NULL,embedding_status='pending',embedding_skip_reason=NULL,
+                  embedding_provider_profile_id=NULL,embedding_model=NULL,embedding_dimensions=NULL,
+                  embedding_protocol_version=NULL,embedding_provider_fingerprint=NULL,
+                  embedding_content_hash=NULL,embedding_updated_at=NULL
+            WHERE parent_memory_id=$1`,
+          [second.id]
+        );
+      } else if (readinessCase.name === "sanitized skipped") {
+        await pool.query(
+          `UPDATE chronicle_memory_chunks
+              SET embedding=NULL,embedding_status='skipped',embedding_skip_reason='chunk_embedding_skipped',
+                  embedding_provider_profile_id=NULL,embedding_model=NULL,embedding_dimensions=NULL,
+                  embedding_protocol_version=NULL,embedding_provider_fingerprint=NULL,
+                  embedding_content_hash=NULL,embedding_updated_at=NULL
+            WHERE parent_memory_id=$1`,
+          [second.id]
+        );
+      } else if (readinessCase.name === "queued job") {
+        await pool.query(
+          "INSERT INTO chronicle_chunk_jobs (owner_user_id,campaign_id,status) VALUES ($1,$2,'queued')",
+          [ownerUserId, fixture.campaignId]
+        );
+      } else if (readinessCase.name === "running job") {
+        await pool.query(
+          `INSERT INTO chronicle_chunk_jobs
+             (owner_user_id,campaign_id,status,lease_owner,lease_token,lease_expires_at)
+           VALUES ($1,$2,'running','readiness-worker',gen_random_uuid(),now()+interval '5 minutes')`,
+          [ownerUserId, fixture.campaignId]
+        );
+      } else if (readinessCase.name === "failed job") {
+        await pool.query(
+          "INSERT INTO chronicle_chunk_jobs (owner_user_id,campaign_id,status,error_message) VALUES ($1,$2,'failed','fixture')",
+          [ownerUserId, fixture.campaignId]
+        );
+      } else if (readinessCase.name === "completed job") {
+        await pool.query(
+          "INSERT INTO chronicle_chunk_jobs (owner_user_id,campaign_id,status,completed_at) VALUES ($1,$2,'completed',now())",
+          [ownerUserId, fixture.campaignId]
+        );
+      }
+
+      const queries: string[] = [];
+      const generation = transaction(providerId, queries);
+      await pool.query(
+        "UPDATE campaign_memory_configs SET retrieval_implementation='legacy_hybrid' WHERE campaign_id=$1",
+        [fixture.campaignId]
+      );
+      const legacy = await generation.buildContextPreview(pool, {
+        ...fixture,
+        request: {
+          budgetTokens: 4_096,
+          compression: "auto",
+          query: "old oath",
+          recentTurns: 1,
+          throughTurnNumber: 2
+        }
+      });
+      await pool.query(
+        "UPDATE campaign_memory_configs SET retrieval_implementation='chunked_hybrid' WHERE campaign_id=$1",
+        [fixture.campaignId]
+      );
+      const actual = await generation.buildContextPreview(pool, {
+        ...fixture,
+        request: {
+          budgetTokens: 4_096,
+          compression: "auto",
+          query: "old oath",
+          recentTurns: 1,
+          throughTurnNumber: 2
+        }
+      });
+
+      if (readinessCase.expected === "chunked") {
+        expect(actual, readinessCase.name).toMatchObject({
+          retrieval: { implementation: "chunked_hybrid" }
+        });
+      } else {
+        expect(actual, readinessCase.name).toMatchObject({
+          retrieval: { fallbackReason: "chunk_index_not_ready" }
+        });
+        expect(actual.scopes, readinessCase.name).toEqual(legacy.scopes);
+        expect(actual.budget, readinessCase.name).toEqual(legacy.budget);
+        expect(actual.metrics, readinessCase.name).toEqual(legacy.metrics);
+      }
+    }
   });
 });

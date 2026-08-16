@@ -38,7 +38,11 @@ const DEFAULT_LIMITS: ChronicleQueryLimits = Object.freeze({
 });
 
 function normalized(value: string): string {
-  return value.normalize("NFKC").toLocaleLowerCase().replace(/\s+/gu, " ").trim();
+  return value.normalize("NFKC").toLowerCase().replace(/\s+/gu, " ").trim();
+}
+
+function compareDeterministically(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function safeLimit(value: number | undefined, fallback: number): number {
@@ -78,7 +82,8 @@ export function planChronicleQueries(input: ChronicleQueryPlanInput): readonly C
 
   const entityHints = [...(input.entityHints ?? [])]
     .filter((hint) => eligible(hint.ordinal, input.throughTurnNumber))
-    .sort((left, right) => left.ordinal - right.ordinal || left.entityId.localeCompare(right.entityId));
+    .sort((left, right) => left.ordinal - right.ordinal
+      || compareDeterministically(left.entityId, right.entityId));
   const actionTerms = normalized(action);
   const entityTerms: string[] = [];
   const entityIds: string[] = [];
@@ -103,11 +108,13 @@ export function planChronicleQueries(input: ChronicleQueryPlanInput): readonly C
 
   const sceneParts = [...(input.sceneHints ?? [])]
     .filter((hint) => eligible(hint.ordinal, input.throughTurnNumber))
-    .sort((left, right) => right.ordinal - left.ordinal || left.content.localeCompare(right.content))
+    .sort((left, right) => right.ordinal - left.ordinal
+      || compareDeterministically(normalized(left.content), normalized(right.content)))
     .map((hint) => hint.content);
   const openThreadParts = [...(input.openThreadHints ?? [])]
     .filter((hint) => eligible(hint.ordinal, input.throughTurnNumber))
-    .sort((left, right) => right.ordinal - left.ordinal || left.content.localeCompare(right.content))
+    .sort((left, right) => right.ordinal - left.ordinal
+      || compareDeterministically(normalized(left.content), normalized(right.content)))
     .map((hint) => hint.content);
 
   const planned: ChronicleQueryVariant[] = [

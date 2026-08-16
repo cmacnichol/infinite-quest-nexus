@@ -53,6 +53,10 @@ function finiteWeight(value: number | undefined): number {
   return value === undefined ? 1 : Number.isFinite(value) && value >= 0 ? value : 0;
 }
 
+function compareDeterministically(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function eligible(candidate: ChronicleRankCandidate): boolean {
   return candidate.memoryKind !== "canonical_fact" || candidate.activeFact;
 }
@@ -92,12 +96,12 @@ export function fuseChronicleRanks(
       ...candidate,
       score,
       contributions: Object.freeze([...contributions].sort((left, right) => (
-        left.signal.localeCompare(right.signal)
-        || left.variant.localeCompare(right.variant)
+        compareDeterministically(left.signal, right.signal)
+        || compareDeterministically(left.variant, right.variant)
         || left.rank - right.rank
       )))
     }))
     .sort((left, right) => right.score - left.score
-      || left.parentMemoryId.localeCompare(right.parentMemoryId)
-      || left.candidateId.localeCompare(right.candidateId)));
+      || compareDeterministically(left.parentMemoryId, right.parentMemoryId)
+      || compareDeterministically(left.candidateId, right.candidateId)));
 }

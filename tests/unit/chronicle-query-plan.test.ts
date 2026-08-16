@@ -69,4 +69,20 @@ describe("Chronicle query planning", () => {
       entityIds: ["world:moon-warden"]
     }]);
   });
+
+  it("orders normalized Unicode terms by stable code points instead of the host locale", () => {
+    const plan = planChronicleQueries({
+      action: "Seek the herald",
+      entityHints: [
+        { ordinal: 1, entityId: "world:äther", terms: ["Äther"] },
+        { ordinal: 1, entityId: "world:zeta", terms: ["Zeta"] }
+      ]
+    });
+
+    expect(plan.find((variant) => variant.kind === "entity_expanded")).toEqual({
+      kind: "entity_expanded",
+      query: "Seek the herald Zeta Äther",
+      entityIds: ["world:zeta", "world:äther"]
+    });
+  });
 });
