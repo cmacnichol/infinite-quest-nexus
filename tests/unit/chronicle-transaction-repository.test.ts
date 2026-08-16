@@ -19,7 +19,14 @@ function databaseClient(
 ): DatabaseClient {
   return {
     query: vi.fn((sql: string, values: readonly unknown[]) => {
-      if (/^(?:SAVEPOINT|RELEASE SAVEPOINT|ROLLBACK TO SAVEPOINT) chronicle_retrieval_/.test(sql)) {
+      if (/^(?:SAVEPOINT|RELEASE SAVEPOINT|ROLLBACK TO SAVEPOINT) chronicle_(?:retrieval|query_embedding_cache)_/.test(sql)) {
+        return { rows: [], rowCount: 0 };
+      }
+      if (sql.includes("UPDATE chronicle_query_embedding_cache")) return { rows: [], rowCount: 0 };
+      if (sql.includes("INSERT INTO chronicle_query_embedding_cache")
+        || sql.includes("DELETE FROM chronicle_query_embedding_cache")
+        || (sql.includes("pg_advisory_xact_lock")
+          && typeof values[0] === "string" && values[0].startsWith("chronicle-query-cache:"))) {
         return { rows: [], rowCount: 0 };
       }
       return query(sql, values);
@@ -505,7 +512,13 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
 
     expect(preview).toMatchObject({
       campaign: { id: scope.campaignId, worldVersionId: scope.worldVersionId },
-      retrieval: { mode: "hybrid", semanticAvailable: true },
+      retrieval: {
+        mode: "hybrid",
+        semanticAvailable: true,
+        embeddingRequests: 1,
+        queryCacheHits: 0,
+        queryCacheMisses: 1
+      },
       scopes: {
         campaignCanon: { continuityScratchpad: "The Moon Warden is alert." },
         currentScene: { memoryId: "memory-1" }

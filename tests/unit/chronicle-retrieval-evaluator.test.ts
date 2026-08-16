@@ -36,7 +36,7 @@ describe("Chronicle retrieval evaluator metrics", () => {
   it("evaluates only through the generation context-preview seam", async () => {
     const buildContextPreview = vi.fn()
       .mockResolvedValue({
-        retrieval: { mode: "hybrid", semanticAvailable: true },
+        retrieval: { mode: "hybrid", semanticAvailable: true, embeddingRequests: 0 },
         scopes: {
           chronicle: [
             { id: "memory-x", estimatedTokens: 2, relevance: 0.4, lexicalRelevance: 0.8, semanticRelevance: 0.1 },
@@ -75,7 +75,7 @@ describe("Chronicle retrieval evaluator metrics", () => {
       relevantMemoriesPerPromptToken: 2 / 9,
       leakageCounts: { crossCampaign: 0, futureTurn: 0, supersededFact: 0 },
       latencyMs: { p50: 20, p95: 20 },
-      embedding: { requests: 1, cost: 0 },
+      embedding: { requests: 0, cost: 0 },
       semanticOnlyHits: 1,
       promotions: 1,
       demotions: 1
@@ -85,6 +85,19 @@ describe("Chronicle retrieval evaluator metrics", () => {
       retrievedLabels: ["x", "a", "b"],
       ranks: { a: 2, b: 3 }
     })]);
+  });
+
+  it("preserves the legacy semantic request estimate when a preview omits the explicit counter", async () => {
+    const report = await evaluateChronicleRetrieval({
+      generation: {
+        async buildContextPreview() {
+          return { retrieval: { semanticAvailable: true }, scopes: { chronicle: [] } };
+        }
+      }
+    }, {}, corpus, { now: vi.fn().mockReturnValue(10) });
+
+    expect(report.metrics.embedding.requests).toBe(1);
+    expect(report.cases[0]?.embeddingRequests).toBe(1);
   });
 
   it("keeps independently constructed evaluation identities, case hashes, and metrics repeatable", async () => {

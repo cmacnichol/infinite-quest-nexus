@@ -1212,7 +1212,8 @@ integration("standard database migration runner", () => {
         "0071_world_share_links",
         "0072_chronicle_memory_chunks",
         "0073_chronicle_chunk_job_fencing",
-        "0074_chronicle_retrieval_observability"
+        "0074_chronicle_retrieval_observability",
+        "0075_chronicle_query_embedding_cache"
       ]);
 
       const scrubbed = await isolatedPool.query<{ technical_metadata: Record<string, unknown> }>(

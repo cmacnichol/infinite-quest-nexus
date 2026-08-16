@@ -510,6 +510,13 @@ integration("Chronicle retrieval observability", () => {
     remainingSuccessfulResolutions = 1;
     const withoutShadow = await withTransaction(pool, (database) => generation.buildContextPreview(database, scope));
     remainingSuccessfulResolutions = Number.POSITIVE_INFINITY;
+    const caseDistinctChunked = await withTransaction(pool, (database) => generation.buildContextPreview(database, {
+      ...scope,
+      request: { ...scope.request, query: "WHERE IS THE OBSERVATORY KEY?" }
+    }));
+    expect(caseDistinctChunked.retrieval).toMatchObject({ embeddingRequests: 1 });
+    expect(embeddedQueries).toHaveLength(2);
+    await pool.query("DELETE FROM chronicle_query_embedding_cache WHERE campaign_id=$1", [current.campaignId]);
     remainingSuccessfulEmbeddings = 0;
     const productionFallbackWithPrivateProviderFailure = await withTransaction(
       pool,
@@ -555,7 +562,7 @@ integration("Chronicle retrieval observability", () => {
 
     expect(withShadow.scopes).toEqual(withoutShadow.scopes);
     expect(withShadow.retrieval).toMatchObject({ implementation: "chunked_hybrid" });
-    expect(embeddedQueries).toHaveLength(2);
+    expect(embeddedQueries).toHaveLength(3);
     expect(diagnostics).toEqual([expect.objectContaining({ message: "chronicle_retrieval_shadow_failed" })]);
     expect(JSON.stringify(diagnostics)).not.toContain(privateShadowFailure);
 
@@ -566,6 +573,7 @@ integration("Chronicle retrieval observability", () => {
     expect(directPoolPreview.retrieval).toMatchObject({ implementation: "chunked_hybrid" });
 
     remainingSuccessfulResolutions = Number.POSITIVE_INFINITY;
+    await pool.query("DELETE FROM chronicle_query_embedding_cache WHERE campaign_id=$1", [current.campaignId]);
     remainingSuccessfulEmbeddings = 1;
     const previewDespitePrivateProviderFailure = await withTransaction(
       pool,

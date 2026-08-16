@@ -173,6 +173,10 @@ async function invalidateEmbeddingProfile(client: DatabaseClient, ownerUserId: s
                    progress = '{}'::jsonb, updated_at = now(), error_message = NULL`,
     [ownerUserId, providerProfileId]
   );
+  await client.query(
+    "DELETE FROM chronicle_query_embedding_cache WHERE owner_user_id=$1 AND provider_profile_id=$2",
+    [ownerUserId, providerProfileId]
+  );
 }
 
 export type PostgresProviderRepositories = Readonly<{

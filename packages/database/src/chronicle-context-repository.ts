@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { MemoryGenerationTransactionPort } from "../../application/src/memory/index.js";
 import { requireCampaignWorldVersionScope } from "../../application/src/memory/helpers.js";
 import {
@@ -47,6 +48,10 @@ import { characterNarrativeContext } from "../../domain/src/world-characters.js"
 import { compressTurnMemory } from "../../story-engine/src/chronicle.js";
 import type { ChronicleGenerationTransactionDependencies } from "./chronicle-repository.js";
 import { CHRONICLE_RANK_COMPATIBLE_EMBEDDING_SQL } from "./chronicle-embedding-compatibility.js";
+import {
+  createPostgresChronicleQueryCacheRepository,
+  type ChronicleQueryEmbeddingCacheKey
+} from "./chronicle-query-cache-repository.js";
 import { recordRetrievalComparison } from "./chronicle-retrieval-observability-repository.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 
@@ -454,6 +459,50 @@ function parseVector(value: unknown): readonly number[] | null {
   return parsed;
 }
 
+function queryHash(value: string): string {
+  // `value` is the normalized expanded-query fragment sent to the provider.
+  // Hash its exact bytes so cache hits can never substitute a different input.
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function exactHash(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function queryCache(
+  client: DatabaseClient,
+  scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
+  dependencies: ChronicleGenerationTransactionDependencies,
+) {
+  return createPostgresChronicleQueryCacheRepository(client, {
+    logDiagnostic(error, context) {
+      dependencies.embeddings.logDiagnostic(error, {
+        campaignId: scope.campaignId,
+        generationJobId: scope.costAttribution?.generationJobId ?? null,
+        memoryOperation: "chronicle_query_embedding_cache",
+        cacheOperation: context.cacheOperation
+      });
+    }
+  });
+}
+
+function queryCacheKey(
+  query: string,
+  providerProfileId: string,
+  model: string,
+  providerFingerprint: string,
+  queryPrefix: string,
+): ChronicleQueryEmbeddingCacheKey {
+  return {
+    normalizedQueryHash: queryHash(query),
+    providerProfileId,
+    model,
+    providerFingerprint,
+    queryPrefixHash: exactHash(queryPrefix),
+    embeddingProtocolVersion: CHRONICLE_EMBEDDING_PROTOCOL_VERSION
+  };
+}
+
 async function loadContextConfig(
   client: DatabaseClient,
   scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
@@ -506,6 +555,9 @@ async function applyContextSemanticRelevance(
       costIds: []
     };
   }
+  let embeddingRequests = 0;
+  let queryCacheHits = 0;
+  let queryCacheMisses = 0;
   const providerProfileId = await dependencies.embeddings.resolve(client, {
     ownerUserId: scope.ownerUserId,
     campaignId: scope.campaignId,
@@ -525,17 +577,28 @@ async function applyContextSemanticRelevance(
       config.embedding_query_prefix
     );
     const fingerprint = await dependencies.embeddings.fingerprint(provider, prefixes);
-    const result = await dependencies.embeddings.embed(provider, [`${prefixes.queryPrefix}${query.trim()}`]);
-    const costId = await dependencies.embeddings.recordCost(client, provider, {
-      ownerUserId: scope.ownerUserId,
-      campaignId: scope.campaignId,
-      ...(scope.costAttribution?.generationJobId
-        ? { generationJobId: scope.costAttribution.generationJobId }
-        : {}),
-      operation: scope.costAttribution?.operation ?? "context_preview_embedding"
-    }, result);
-    const queryVector = result.embeddings[0];
-    if (!queryVector?.length) throw new Error("Embedding provider returned no query vector.");
+    const cache = queryCache(client, scope, dependencies);
+    const cacheKey = queryCacheKey(query.trim(), providerProfileId, config.embedding_model, fingerprint, prefixes.queryPrefix);
+    let queryVector = await cache.getQueryEmbedding(scope, cacheKey);
+    let costId: string | null = null;
+    if (queryVector) {
+      queryCacheHits = 1;
+    } else {
+      queryCacheMisses = 1;
+      embeddingRequests = 1;
+      const result = await dependencies.embeddings.embed(provider, [`${prefixes.queryPrefix}${query.trim()}`]);
+      costId = await dependencies.embeddings.recordCost(client, provider, {
+        ownerUserId: scope.ownerUserId,
+        campaignId: scope.campaignId,
+        ...(scope.costAttribution?.generationJobId
+          ? { generationJobId: scope.costAttribution.generationJobId }
+          : {}),
+        operation: scope.costAttribution?.operation ?? "context_preview_embedding"
+      }, result);
+      queryVector = result.embeddings[0] ?? null;
+      if (!queryVector?.length) throw new Error("Embedding provider returned no query vector.");
+      await cache.putQueryEmbedding(scope, cacheKey, queryVector);
+    }
     const scored = await client.query<ContextMemoryRow>(
       `SELECT id, turn_id, memory_kind, ordinal, content, token_estimate, importance, entities, entity_ids,
               0::real AS relevance, embedding_content_hash,
@@ -585,7 +648,10 @@ async function applyContextSemanticRelevance(
         embeddedCandidates: freshScores.length,
         model: config.embedding_model,
         queryExpanded: true,
-        effectiveQueryPrefix: prefixes.queryPrefix
+        effectiveQueryPrefix: prefixes.queryPrefix,
+        embeddingRequests,
+        queryCacheHits,
+        queryCacheMisses
       },
       providerFingerprint: fingerprint,
       costIds: costId ? [costId] : []
@@ -619,7 +685,10 @@ async function applyContextSemanticRelevance(
       retrieval: {
         mode: "lexical_fallback",
         semanticAvailable: false,
-        fallbackReason: "semantic_retrieval_unavailable"
+        fallbackReason: "semantic_retrieval_unavailable",
+        embeddingRequests,
+        queryCacheHits,
+        queryCacheMisses
       },
       providerFingerprint: null,
       costIds: []
@@ -924,6 +993,9 @@ async function applyChunkedRankFusion(
   let effectiveQueryPrefix = "";
   let embeddedCandidates = 0;
   let providerFingerprint: string | null = null;
+  let embeddingRequests = 0;
+  let queryCacheHits = 0;
+  let queryCacheMisses = 0;
   const costIds: string[] = [];
   if (!variants.length) {
     semanticFallbackReason = "empty_query";
@@ -950,21 +1022,51 @@ async function applyChunkedRankFusion(
         effectiveQueryPrefix = prefixes.queryPrefix;
         const fingerprint = await dependencies.embeddings.fingerprint(provider, prefixes);
         providerFingerprint = fingerprint;
-        const result = await dependencies.embeddings.embed(
-          provider,
-          variants.map((variant) => `${prefixes.queryPrefix}${variant.query}`)
-        );
-        const costId = await dependencies.embeddings.recordCost(client, provider, {
-          ownerUserId: scope.ownerUserId,
-          campaignId: scope.campaignId,
-          ...(scope.costAttribution?.generationJobId
-            ? { generationJobId: scope.costAttribution.generationJobId }
-            : {}),
-          operation: scope.costAttribution?.operation ?? "context_preview_embedding"
-        }, result);
-        if (costId) costIds.push(costId);
-        if (result.embeddings.length !== variants.length) {
-          throw new Error("Embedding provider returned an incomplete Chronicle query batch.");
+        const cache = queryCache(client, scope, dependencies);
+        const cacheKeys = variants.map((variant) => queryCacheKey(
+          variant.query,
+          providerProfileId,
+          config.embedding_model,
+          fingerprint,
+          prefixes.queryPrefix
+        ));
+        const queryVectors: Array<readonly number[] | null> = [];
+        const missedIndexes: number[] = [];
+        for (let index = 0; index < variants.length; index += 1) {
+          const vector = await cache.getQueryEmbedding(scope, cacheKeys[index]!);
+          queryVectors.push(vector);
+          if (vector) {
+            queryCacheHits += 1;
+          } else {
+            queryCacheMisses += 1;
+            missedIndexes.push(index);
+          }
+        }
+        if (missedIndexes.length > 0) {
+          embeddingRequests = 1;
+          const result = await dependencies.embeddings.embed(
+            provider,
+            missedIndexes.map((index) => `${prefixes.queryPrefix}${variants[index]!.query}`)
+          );
+          const costId = await dependencies.embeddings.recordCost(client, provider, {
+            ownerUserId: scope.ownerUserId,
+            campaignId: scope.campaignId,
+            ...(scope.costAttribution?.generationJobId
+              ? { generationJobId: scope.costAttribution.generationJobId }
+              : {}),
+            operation: scope.costAttribution?.operation ?? "context_preview_embedding"
+          }, result);
+          if (costId) costIds.push(costId);
+          if (result.embeddings.length !== missedIndexes.length) {
+            throw new Error("Embedding provider returned an incomplete Chronicle query batch.");
+          }
+          for (let resultIndex = 0; resultIndex < missedIndexes.length; resultIndex += 1) {
+            const variantIndex = missedIndexes[resultIndex]!;
+            const vector = result.embeddings[resultIndex];
+            if (!vector?.length) throw new Error("Embedding provider returned an empty Chronicle query vector.");
+            queryVectors[variantIndex] = vector;
+            await cache.putQueryEmbedding(scope, cacheKeys[variantIndex]!, vector);
+          }
         }
         const semanticRanks: Array<Readonly<{
           variant: ChronicleQueryVariant;
@@ -972,7 +1074,7 @@ async function applyChunkedRankFusion(
         }>> = [];
         for (let index = 0; index < variants.length; index += 1) {
           const variant = variants[index]!;
-          const vector = result.embeddings[index];
+          const vector = queryVectors[index];
           if (!vector?.length) throw new Error("Embedding provider returned an empty Chronicle query vector.");
           const rows = await loadRank({
             signal: "semantic",
@@ -1155,6 +1257,9 @@ async function applyChunkedRankFusion(
       rankedCandidates: fused.length,
       queryExpanded: variants.length > 1,
       effectiveQueryPrefix,
+      embeddingRequests,
+      queryCacheHits,
+      queryCacheMisses,
       diversity: parentSelection.diagnostics satisfies ChronicleParentSelectionDiagnostics
     },
     selectedParentContent,

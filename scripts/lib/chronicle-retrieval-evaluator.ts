@@ -285,14 +285,28 @@ function readChronicleEntries(preview: unknown): readonly ChroniclePreviewEntry[
   ));
 }
 
-function safePreviewMetadata(preview: unknown): Readonly<{ semanticAvailable: boolean; embeddingCost: number }> {
-  if (!preview || typeof preview !== "object") return { semanticAvailable: false, embeddingCost: 0 };
+function safePreviewMetadata(preview: unknown): Readonly<{
+  semanticAvailable: boolean;
+  embeddingCost: number;
+  embeddingRequests: number;
+}> {
+  if (!preview || typeof preview !== "object") {
+    return { semanticAvailable: false, embeddingCost: 0, embeddingRequests: 0 };
+  }
   const retrieval = (preview as { retrieval?: unknown }).retrieval;
-  if (!retrieval || typeof retrieval !== "object") return { semanticAvailable: false, embeddingCost: 0 };
-  const value = retrieval as { semanticAvailable?: unknown; embeddingCost?: unknown };
+  if (!retrieval || typeof retrieval !== "object") {
+    return { semanticAvailable: false, embeddingCost: 0, embeddingRequests: 0 };
+  }
+  const value = retrieval as { semanticAvailable?: unknown; embeddingCost?: unknown; embeddingRequests?: unknown };
+  const semanticAvailable = value.semanticAvailable === true;
   return {
-    semanticAvailable: value.semanticAvailable === true,
-    embeddingCost: typeof value.embeddingCost === "number" && Number.isFinite(value.embeddingCost) ? value.embeddingCost : 0
+    semanticAvailable,
+    embeddingCost: typeof value.embeddingCost === "number" && Number.isFinite(value.embeddingCost) ? value.embeddingCost : 0,
+    embeddingRequests: typeof value.embeddingRequests === "number"
+      && Number.isInteger(value.embeddingRequests)
+      && value.embeddingRequests >= 0
+      ? value.embeddingRequests
+      : semanticAvailable ? 1 : 0
   };
 }
 
@@ -393,7 +407,7 @@ export async function evaluateChronicleRetrieval(
       ranks: rankLabels(retrievedLabels, fixture.expectedLabels),
       promptTokens: entries.reduce((sum, entry) => sum + Math.max(0, Number(entry.estimatedTokens ?? 0)), 0),
       latencyMs,
-      embeddingRequests: metadata.semanticAvailable ? 1 : 0,
+      embeddingRequests: metadata.embeddingRequests,
       embeddingCost: metadata.embeddingCost,
       semanticOnlyHits,
       promotions: movements.promotions,
