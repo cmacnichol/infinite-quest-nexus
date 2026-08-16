@@ -1699,6 +1699,44 @@ integration("standard database migration runner", () => {
           is_nullable: "NO"
         }
       ]);
+      await expect(isolatedPool.query<{ retrieval_implementation: string; retrieval_shadow_enabled: boolean }>(
+        `UPDATE campaign_memory_configs
+            SET retrieval_implementation = 'chunked_hybrid', retrieval_shadow_enabled = true
+          WHERE campaign_id = $1
+          RETURNING retrieval_implementation, retrieval_shadow_enabled`,
+        [firstCampaign.rows[0]!.id]
+      )).resolves.toMatchObject({
+        rows: [{ retrieval_implementation: "chunked_hybrid", retrieval_shadow_enabled: true }]
+      });
+      await expect(isolatedPool.query(
+        "UPDATE campaign_memory_configs SET retrieval_implementation = 'unsupported' WHERE campaign_id = $1",
+        [firstCampaign.rows[0]!.id]
+      )).rejects.toMatchObject({ code: "23514" });
+
+      const generatedColumns = await isolatedPool.query<{
+        table_name: string;
+        column_name: string;
+        data_type: string;
+        is_generated: string;
+      }>(
+        `SELECT table_name, column_name, data_type, is_generated
+           FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND (table_name = 'chronicle_memories' AND column_name = 'content_hash'
+              OR table_name = 'chronicle_memory_chunks' AND column_name IN ('content_hash', 'search_document'))
+          ORDER BY table_name, column_name`
+      );
+      expect(generatedColumns.rows).toEqual([
+        { table_name: "chronicle_memories", column_name: "content_hash", data_type: "text", is_generated: "ALWAYS" },
+        { table_name: "chronicle_memory_chunks", column_name: "content_hash", data_type: "text", is_generated: "ALWAYS" },
+        { table_name: "chronicle_memory_chunks", column_name: "search_document", data_type: "tsvector", is_generated: "ALWAYS" }
+      ]);
+      await expect(isolatedPool.query<{ content_hash: string }>(
+        "SELECT content_hash FROM chronicle_memories WHERE id = $1",
+        [parentMemory.rows[0]!.id]
+      )).resolves.toMatchObject({
+        rows: [{ content_hash: createHash("sha256").update("The bridge is safe.", "utf8").digest("hex") }]
+      });
 
       const chunkColumns = await isolatedPool.query<{ column_name: string; column_default: string | null; is_nullable: string }>(
         `SELECT column_name, column_default, is_nullable
@@ -1735,9 +1773,25 @@ integration("standard database migration runner", () => {
       const constraints = await isolatedPool.query<{ table_name: string; constraint_name: string; definition: string }>(
         `SELECT conrelid::regclass::text AS table_name, conname AS constraint_name, pg_get_constraintdef(oid) AS definition
            FROM pg_constraint
-          WHERE conrelid IN ('chronicle_memory_chunks'::regclass, 'chronicle_chunk_jobs'::regclass)
+          WHERE conrelid IN (
+            'chronicle_memories'::regclass,
+            'chronicle_memory_chunks'::regclass,
+            'chronicle_chunk_jobs'::regclass
+          )
           ORDER BY conrelid::regclass::text, conname`
       );
+      expect(constraints.rows).toEqual(expect.arrayContaining([
+        {
+          table_name: "chronicle_memories",
+          constraint_name: "chronicle_memories_chunk_parent_scope_unique",
+          definition: "UNIQUE (id, owner_user_id, campaign_id, world_version_id)"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_parent_version_ordinal_key",
+          definition: "UNIQUE (parent_memory_id, parent_content_hash, chunking_protocol_version, chunk_ordinal)"
+        }
+      ]));
       const definitions = constraints.rows.map((row) => `${row.table_name}:${row.constraint_name}:${row.definition}`).join("\n");
       expect(definitions).toMatch(/FOREIGN KEY \(parent_memory_id, owner_user_id, campaign_id, world_version_id\).*ON DELETE CASCADE/i);
       expect(definitions).toMatch(/FOREIGN KEY \(campaign_id, owner_user_id\).*ON DELETE CASCADE/i);
@@ -1752,16 +1806,18 @@ integration("standard database migration runner", () => {
           WHERE schemaname = 'public' AND tablename IN ('chronicle_memory_chunks', 'chronicle_chunk_jobs')
           ORDER BY indexname`
       );
-      expect(indexes.rows.map((row) => row.indexname)).toEqual(expect.arrayContaining([
-        "chronicle_memory_chunks_parent_version_ordinal_key",
-        "chronicle_memory_chunks_scope_idx",
-        "chronicle_memory_chunks_search_idx",
-        "chronicle_memory_chunks_entity_ids_idx",
-        "chronicle_memory_chunks_embedded_scope_idx",
-        "chronicle_chunk_jobs_one_active_campaign_idx",
+      expect(indexes.rows.map((row) => row.indexname)).toEqual([
         "chronicle_chunk_jobs_claim_idx",
-        "chronicle_chunk_jobs_running_lease_idx"
-      ]));
+        "chronicle_chunk_jobs_one_active_campaign_idx",
+        "chronicle_chunk_jobs_pkey",
+        "chronicle_chunk_jobs_running_lease_idx",
+        "chronicle_memory_chunks_embedded_scope_idx",
+        "chronicle_memory_chunks_entity_ids_idx",
+        "chronicle_memory_chunks_parent_version_ordinal_key",
+        "chronicle_memory_chunks_pkey",
+        "chronicle_memory_chunks_scope_idx",
+        "chronicle_memory_chunks_search_idx"
+      ]);
       expect(indexes.rows.find((row) => row.indexname === "chronicle_memory_chunks_search_idx")?.indexdef)
         .toMatch(/USING gin \(search_document\)/i);
       expect(indexes.rows.find((row) => row.indexname === "chronicle_memory_chunks_entity_ids_idx")?.indexdef)
@@ -1786,13 +1842,13 @@ integration("standard database migration runner", () => {
         status: "queued"
       }]);
 
-      const validChunk = await isolatedPool.query<{ id: string }>(
+      const validChunk = await isolatedPool.query<{ id: string; content_hash: string; search_document: string }>(
         `INSERT INTO chronicle_memory_chunks (
            owner_user_id, campaign_id, world_version_id, parent_memory_id, parent_content_hash,
            chunking_protocol_version, chunk_ordinal, chunk_kind, content, token_estimate
          ) VALUES ($1, $2, $3, $4, encode(digest('The bridge is safe.', 'sha256'), 'hex'),
                    'chronicle-chunk-v1', 0, 'campaign_summary', 'The bridge is safe.', 5)
-         RETURNING id`,
+         RETURNING id, content_hash, search_document::text`,
         [ownerUserId, firstCampaign.rows[0]!.id, firstVersion.rows[0]!.id, parentMemory.rows[0]!.id]
       );
       const invalidChunk = (ownerId: string, campaignId: string, worldVersionId: string) => isolatedPool!.query(
@@ -1805,7 +1861,10 @@ integration("standard database migration runner", () => {
       await expect(invalidChunk(ownerUserId, secondCampaign.rows[0]!.id, firstVersion.rows[0]!.id)).rejects.toThrow();
       await expect(invalidChunk(ownerUserId, firstCampaign.rows[0]!.id, secondVersion.rows[0]!.id)).rejects.toThrow();
       await expect(invalidChunk(otherOwner.rows[0]!.id, firstCampaign.rows[0]!.id, firstVersion.rows[0]!.id)).rejects.toThrow();
-      expect(validChunk.rows).toHaveLength(1);
+      expect(validChunk.rows).toEqual([expect.objectContaining({
+        content_hash: createHash("sha256").update("The bridge is safe.", "utf8").digest("hex"),
+        search_document: expect.stringContaining("bridg")
+      })]);
 
       await isolatedPool.query("DELETE FROM campaigns WHERE id = $1", [firstCampaign.rows[0]!.id]);
       await expect(isolatedPool.query<{ count: string }>("SELECT count(*)::text AS count FROM chronicle_memory_chunks"))

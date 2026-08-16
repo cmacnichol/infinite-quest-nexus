@@ -70,6 +70,8 @@ type EmbeddingConfigRow = Readonly<{
   embedding_batch_size: number;
   embedding_document_prefix: string | null;
   embedding_query_prefix: string | null;
+  retrieval_implementation: "legacy_hybrid" | "chunked_hybrid";
+  retrieval_shadow_enabled: boolean;
 }>;
 
 type CampaignProjectionRow = Readonly<{
@@ -192,6 +194,8 @@ function configView(row?: EmbeddingConfigRow): EmbeddingConfigView {
     batchSize: row?.embedding_batch_size ?? 16,
     documentPrefix: row?.embedding_document_prefix ?? null,
     queryPrefix: row?.embedding_query_prefix ?? null,
+    retrievalImplementation: row?.retrieval_implementation ?? "legacy_hybrid",
+    retrievalShadowEnabled: row?.retrieval_shadow_enabled ?? false,
     effectiveDocumentPrefix: prefixes.documentPrefix,
     effectiveQueryPrefix: prefixes.queryPrefix,
     prefixesAutomatic: prefixes.automatic
@@ -1085,7 +1089,8 @@ async function applyContextSemanticRelevance(
   }
   const configResult = await client.query<EmbeddingConfigRow>(
     `SELECT embedding_enabled, embedding_provider_profile_id, embedding_model, embedding_batch_size,
-            embedding_document_prefix, embedding_query_prefix
+            embedding_document_prefix, embedding_query_prefix, retrieval_implementation,
+            retrieval_shadow_enabled
        FROM campaign_memory_configs WHERE campaign_id = $1 AND owner_user_id = $2`,
     [scope.campaignId, scope.ownerUserId]
   );
@@ -1370,7 +1375,8 @@ export function createPostgresChronicleGenerationTransactionPort(
            embedding_query_prefix = EXCLUDED.embedding_query_prefix,
            updated_at = now()
          RETURNING embedding_enabled, embedding_provider_profile_id, embedding_model, embedding_batch_size,
-                   embedding_document_prefix, embedding_query_prefix`,
+                   embedding_document_prefix, embedding_query_prefix, retrieval_implementation,
+                   retrieval_shadow_enabled`,
         [scope.campaignId, scope.ownerUserId, providerProfileId, model]
       );
       await client.query(
@@ -1440,7 +1446,8 @@ async function loadConfig(pool: DatabasePool | DatabaseClient, scope: CampaignMe
   await requireCampaign(pool, scope);
   const result = await pool.query<EmbeddingConfigRow>(
     `SELECT embedding_enabled, embedding_provider_profile_id, embedding_model, embedding_batch_size,
-            embedding_document_prefix, embedding_query_prefix
+            embedding_document_prefix, embedding_query_prefix, retrieval_implementation,
+            retrieval_shadow_enabled
        FROM campaign_memory_configs WHERE campaign_id = $1 AND owner_user_id = $2`,
     [scope.campaignId, scope.ownerUserId]
   );
@@ -1524,8 +1531,9 @@ export function createPostgresChronicleConfigurationRepository(pool: DatabasePoo
       const result = await pool.query<EmbeddingConfigRow>(
         `INSERT INTO campaign_memory_configs (
            campaign_id, owner_user_id, embedding_enabled, embedding_provider_profile_id, embedding_model,
-           embedding_batch_size, embedding_document_prefix, embedding_query_prefix
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+           embedding_batch_size, embedding_document_prefix, embedding_query_prefix,
+           retrieval_implementation, retrieval_shadow_enabled
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
          ON CONFLICT (campaign_id) DO UPDATE SET
            embedding_enabled = EXCLUDED.embedding_enabled,
            embedding_provider_profile_id = EXCLUDED.embedding_provider_profile_id,
@@ -1533,11 +1541,15 @@ export function createPostgresChronicleConfigurationRepository(pool: DatabasePoo
            embedding_batch_size = EXCLUDED.embedding_batch_size,
            embedding_document_prefix = EXCLUDED.embedding_document_prefix,
            embedding_query_prefix = EXCLUDED.embedding_query_prefix,
+           retrieval_implementation = EXCLUDED.retrieval_implementation,
+           retrieval_shadow_enabled = EXCLUDED.retrieval_shadow_enabled,
            updated_at = now()
          RETURNING embedding_enabled, embedding_provider_profile_id, embedding_model, embedding_batch_size,
-                   embedding_document_prefix, embedding_query_prefix`,
+                   embedding_document_prefix, embedding_query_prefix, retrieval_implementation,
+                   retrieval_shadow_enabled`,
         [scope.campaignId, scope.ownerUserId, input.enabled, providerProfileId, input.model,
-          input.batchSize, input.documentPrefix ?? null, input.queryPrefix ?? null]
+          input.batchSize, input.documentPrefix ?? null, input.queryPrefix ?? null,
+          input.retrievalImplementation ?? "legacy_hybrid", input.retrievalShadowEnabled ?? false]
       );
       return configView(result.rows[0]);
     }
@@ -1633,7 +1645,8 @@ async function semanticHealth(
 ): Promise<ChronicleMetricsView["semanticHealth"]> {
   const configResult = await pool.query<MetricsEmbeddingConfigRow>(
     `SELECT embedding_enabled, embedding_provider_profile_id, embedding_model, embedding_batch_size,
-            embedding_document_prefix, embedding_query_prefix, updated_at
+            embedding_document_prefix, embedding_query_prefix, retrieval_implementation,
+            retrieval_shadow_enabled, updated_at
        FROM campaign_memory_configs
       WHERE campaign_id = $1 AND owner_user_id = $2`,
     [scope.campaignId, scope.ownerUserId]

@@ -777,6 +777,41 @@ integration("PostgreSQL Chronicle contract matrix", () => {
     expect(JSON.stringify(publicJob)).not.toContain("internal.provider.invalid");
   });
 
+  it("round-trips chunked retrieval controls while omitted controls retain legacy defaults", async () => {
+    const fixture = await campaignFixture("retrieval configuration");
+    const embeddingProviderId = await providerFixture("retrieval configuration");
+    const configuration = createPostgresChronicleConfigurationRepository(pool);
+    const input = {
+      enabled: true,
+      providerProfileId: embeddingProviderId,
+      model: "retrieval-model",
+      batchSize: 16,
+      documentPrefix: null,
+      queryPrefix: null
+    };
+
+    await expect(configuration.getEmbeddingConfig(fixture)).resolves.toMatchObject({
+      retrievalImplementation: "legacy_hybrid",
+      retrievalShadowEnabled: false
+    });
+    await expect(configuration.setEmbeddingConfig(fixture, {
+      ...input,
+      retrievalImplementation: "chunked_hybrid",
+      retrievalShadowEnabled: true
+    })).resolves.toMatchObject({
+      retrievalImplementation: "chunked_hybrid",
+      retrievalShadowEnabled: true
+    });
+    await expect(configuration.getEmbeddingConfig(fixture)).resolves.toMatchObject({
+      retrievalImplementation: "chunked_hybrid",
+      retrievalShadowEnabled: true
+    });
+    await expect(configuration.setEmbeddingConfig(fixture, input)).resolves.toMatchObject({
+      retrievalImplementation: "legacy_hybrid",
+      retrievalShadowEnabled: false
+    });
+  });
+
   it("rolls back every direct Chronicle generation operation with its caller-owned transaction", async () => {
     const fixture = await campaignFixture("direct rollback");
     const providerId = await providerFixture("direct rollback");
