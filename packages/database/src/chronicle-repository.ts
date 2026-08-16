@@ -1578,7 +1578,8 @@ export function createPostgresChronicleConfigurationRepository(pool: DatabasePoo
             input.retrievalImplementation ?? "legacy_hybrid", input.retrievalShadowEnabled ?? false]
         );
         const saved = configView(result.rows[0]);
-        const capabilityChanged = previous.providerProfileId !== saved.providerProfileId
+        const capabilityChanged = previous.enabled !== saved.enabled
+          || previous.providerProfileId !== saved.providerProfileId
           || previous.model !== saved.model
           || previous.documentPrefix !== saved.documentPrefix
           || previous.queryPrefix !== saved.queryPrefix;

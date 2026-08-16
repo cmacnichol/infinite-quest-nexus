@@ -8,6 +8,11 @@ import {
   createPostgresChronicleWorkerAdapters
 } from "../../packages/database/src/chronicle-repository.js";
 import {
+  createPostgresChronicleChunkBatchPort,
+  createPostgresChronicleChunkJobStatePort,
+  createPostgresChronicleChunkParentPort
+} from "../../packages/database/src/chronicle-chunk-repository.js";
+import {
   createDatabasePool,
   initialOwnerId,
   type DatabaseClient,
@@ -836,6 +841,92 @@ integration("PostgreSQL Chronicle contract matrix", () => {
          FROM chronicle_chunk_jobs WHERE campaign_id=$1`,
       [fixture.campaignId]
     )).resolves.toMatchObject({ rows: [{ count: "1", job_type: "index_memory_chunks_v2" }] });
+  });
+
+  it("versions active shadow chunk work across semantic enable and disable transitions", async () => {
+    const fixture = await campaignFixture("semantic mode transition");
+    const providerId = await providerFixture("semantic mode transition");
+    await pool.query(
+      `INSERT INTO chronicle_memories
+         (owner_user_id,campaign_id,world_version_id,memory_kind,ordinal,content,token_estimate)
+       VALUES ($1,$2,$3,'campaign_summary',1,'The shadow index remains resumable.',6)`,
+      [ownerUserId, fixture.campaignId, fixture.worldVersionId]
+    );
+    const configuration = createPostgresChronicleConfigurationRepository(pool);
+    const input = {
+      providerProfileId: providerId,
+      model: "semantic-mode-model",
+      batchSize: 16,
+      documentPrefix: null,
+      queryPrefix: null,
+      retrievalImplementation: "legacy_hybrid" as const,
+      retrievalShadowEnabled: true
+    };
+    await configuration.setEmbeddingConfig(fixture, { ...input, enabled: false });
+
+    const state = createPostgresChronicleChunkJobStatePort(pool);
+    const parents = createPostgresChronicleChunkParentPort(pool);
+    const batches = createPostgresChronicleChunkBatchPort(pool, {
+      recordCost: async () => null
+    });
+    const enablingClaim = await state.claimNext({ workerId: "semantic-mode-worker", leaseSeconds: 30 });
+    if (!enablingClaim) throw new Error("shadow chunk job was not claimed before enable");
+
+    await configuration.setEmbeddingConfig(fixture, { ...input, enabled: true });
+    await expect(pool.query<{ status: string; work_version: string }>(
+      "SELECT status,work_version::text FROM chronicle_chunk_jobs WHERE id=$1",
+      [enablingClaim.jobId]
+    )).resolves.toMatchObject({ rows: [{ status: "running", work_version: "2" }] });
+    await expect(state.failClaim(enablingClaim, {
+      diagnosticCode: "stale_enable_transition"
+    })).resolves.toBe(false);
+    await expect(state.completeClaim(enablingClaim, {
+      progress: enablingClaim.progress
+    })).resolves.toBe(true);
+
+    const enabledClaim = await state.claimNext({ workerId: "semantic-mode-worker", leaseSeconds: 30 });
+    if (!enabledClaim) throw new Error("replacement chunk job was not claimed after enable");
+    expect(enabledClaim.workVersion).toBe(2);
+    await expect(parents.loadForClaim(enabledClaim, {
+      batchLimit: 1,
+      cursor: null
+    })).resolves.toMatchObject({
+      config: { enabled: true, retrievalShadowEnabled: true },
+      parents: [{ content: "The shadow index remains resumable." }]
+    });
+
+    await configuration.setEmbeddingConfig(fixture, { ...input, enabled: false });
+    await expect(pool.query<{ status: string; work_version: string }>(
+      "SELECT status,work_version::text FROM chronicle_chunk_jobs WHERE id=$1",
+      [enabledClaim.jobId]
+    )).resolves.toMatchObject({ rows: [{ status: "running", work_version: "3" }] });
+    await expect(state.failClaim(enabledClaim, {
+      diagnosticCode: "stale_disable_transition"
+    })).resolves.toBe(false);
+    await expect(state.completeClaim(enabledClaim, {
+      progress: enabledClaim.progress
+    })).resolves.toBe(true);
+
+    const disabledClaim = await state.claimNext({ workerId: "semantic-mode-worker", leaseSeconds: 30 });
+    if (!disabledClaim) throw new Error("replacement chunk job was not claimed after disable");
+    expect(disabledClaim.workVersion).toBe(3);
+    await expect(parents.loadForClaim(disabledClaim, {
+      batchLimit: 1,
+      cursor: null
+    })).resolves.toMatchObject({
+      config: { enabled: false, retrievalShadowEnabled: true },
+      parents: [{ content: "The shadow index remains resumable." }]
+    });
+    await expect(batches.prepareClaim(disabledClaim, {
+      capabilityFingerprint: "semantic-disabled-shadow"
+    })).resolves.toBe("ready");
+    const prepared = await state.loadClaimedJob(disabledClaim);
+    if (!prepared) throw new Error("disabled replacement claim was not prepared");
+    await expect(state.completeClaim(prepared, { progress: prepared.progress })).resolves.toBe(true);
+    await expect(pool.query<{ status: string; work_version: string }>(
+      "SELECT status,work_version::text FROM chronicle_chunk_jobs WHERE id=$1",
+      [disabledClaim.jobId]
+    )).resolves.toMatchObject({ rows: [{ status: "completed", work_version: "3" }] });
   });
 
   it("enqueues only v2 chunk work after an accepted parent write and rebuild", async () => {
