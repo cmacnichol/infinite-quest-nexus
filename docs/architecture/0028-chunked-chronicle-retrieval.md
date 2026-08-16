@@ -70,8 +70,9 @@ The following decisions govern the implementation.
    post-fusion penalty.
 10. Chunked production is eligible only when every current parent hash has
     current-protocol chunks in terminal `embedded` or sanitized `skipped`
-    status, at least one chunk is embedded, and no current chunk job is
-    queued, running, or failed. Any other state uses the complete legacy path;
+    status, every current chunk is terminal, and the latest current chunk job
+    is completed or absent. A fully sanitized-skipped index can run the
+    non-semantic chunk signals. Any other state uses the complete legacy path;
     there is no partially trusted mixed production mode.
 11. Safe shadow metadata is retained for 30 days and capped at 5,000 runs per
     campaign. Query embeddings are retained for 7 days and capped at 256
@@ -79,18 +80,43 @@ The following decisions govern the implementation.
 12. Rollback changes configuration to legacy retrieval and disables shadowing;
     it never changes accepted turns, parent Chronicle memories, or legacy
     vectors.
+13. Rollout deploys compatible code and the derived schema before any shadow
+    work, leaves all campaigns on legacy production while chunk jobs reach 100%
+    terminal coverage, calibrates the generated profile, then enables shadow
+    and production for explicitly selected campaigns only.
 
 Derived chunk rows, vectors, chunk jobs, cache entries, telemetry, and
 evaluation data are owner-, campaign-, and world-version-scoped and excluded
 from portable exports. `throughTurnNumber` applies before semantic scoring and
-entity/scene expansion. Optional semantic, cache, telemetry, evaluation, and
-reranking failures fail open to the existing lexical/entity/recency/chronology
-path; they never mutate campaign state or block a validated story result.
+entity/scene expansion. Optional semantic, cache, telemetry, and evaluation
+failures fail open to the existing lexical/entity/recency/chronology path; they
+never mutate campaign state or block a validated story result.
+
+There is no reranking stage and no reranker-provider request. Weighted
+reciprocal-rank fusion combines the independent signals, and deterministic
+duplicate/diversity rules apply a post-fusion penalty without invoking another
+model.
 
 Text and embedding providers remain independently configured. Retrieval
 telemetry never stores credentials, raw prompts, actions, narration, provider
 responses, or raw provider errors. The legacy `embed_campaign` path and its
 vectors remain available until a separately approved removal plan exists.
+
+## Rollout
+
+The migration sequence is expand-only and creates derived schema and job kinds;
+it does not alter production retrieval selection. Operators first deploy
+compatible API and worker code, apply migrations, leave all campaigns on
+`legacy_hybrid`, and build chunks through `index_memory_chunks_v2`. A campaign
+must reach the complete readiness gate in decision 10 before shadow is enabled.
+
+Release engineers then run the deterministic legacy evaluation, calibrate and
+review the generated profile, and exercise shadow comparison on selected ready
+campaigns. Shadow metadata is diagnostic only and its `selectedForProduction`
+flags prove that it did not affect production context. Only after the release
+criteria pass does an operator explicitly configure a selected campaign for
+`chunked_hybrid`; no migration, evaluator, worker, or startup path converts a
+campaign automatically.
 
 ## Rollback
 
