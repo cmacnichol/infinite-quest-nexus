@@ -1,5 +1,8 @@
 export function discoverIntegrationTestFiles(root?: string): Promise<string[]>;
 
-export function integrationTestArguments(testFile: string): string[];
+export function integrationTestCommand(testFile: string): {
+  executable: string;
+  arguments: string[];
+};
 
 export function runIsolatedIntegrationSuite(): Promise<void>;

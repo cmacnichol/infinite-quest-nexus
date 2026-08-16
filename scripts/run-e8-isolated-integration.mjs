@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { vitestCommand } from "./node-tool-command.mjs";
 
 // Each focused matrix intentionally uses stable initial-owner and lease fixture
 // values. Run one Vitest invocation per file so its setup-isolated-database
@@ -16,11 +17,10 @@ const E8_MATRIX_FILES = Object.freeze([
   "tests/integration/task-14e3e8-private-parity.integration.test.ts",
 ]);
 
-const pnpm = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
-
 for (const testFile of E8_MATRIX_FILES) {
   await new Promise((resolve, reject) => {
-    const child = spawn(pnpm, ["exec", "vitest", "run", "--config", "vitest.integration.config.ts", testFile], {
+    const command = vitestCommand(["run", "--config", "vitest.integration.config.ts", testFile]);
+    const child = spawn(command.executable, command.arguments, {
       stdio: "inherit",
       env: process.env,
     });

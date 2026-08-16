@@ -17,9 +17,10 @@ import {
   type DatabaseClient,
   type DatabasePool
 } from "../../packages/database/src/pool.js";
+import { supportsSecureGeneratedArchiveStaging } from "../../services/api/src/archive-io.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
-const integration = databaseUrl ? describe : describe.skip;
+const integration = databaseUrl && supportsSecureGeneratedArchiveStaging() ? describe : describe.skip;
 
 type OpaqueHandle = Readonly<Record<never, never>>;
 type OpaqueFinalizationHandle = string;

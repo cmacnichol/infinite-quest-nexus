@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
+// @ts-expect-error Repository runner scripts intentionally have no declaration files.
+import { tsxCommand } from "../../scripts/node-tool-command.mjs";
 import type {
   ClaimedGeneration,
   GenerationWorkerApplication
@@ -333,9 +335,10 @@ describe("worker concurrency scheduler", () => {
 
 describe("worker concurrency benchmark", () => {
   it("executes its self-test and rejects duplicate campaign turn commits", () => {
+    const command = tsxCommand(["scripts/benchmark-worker-concurrency.mjs", "--self-test"]);
     const output = execFileSync(
-      "pnpm",
-      ["exec", "tsx", "scripts/benchmark-worker-concurrency.mjs", "--self-test"],
+      command.executable,
+      command.arguments,
       { encoding: "utf8" }
     );
     const result = JSON.parse(output) as {

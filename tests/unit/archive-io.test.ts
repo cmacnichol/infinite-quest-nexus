@@ -1289,7 +1289,7 @@ describe("archive artifact writing and cleanup", () => {
     expect(await readdir(join(root, "artifacts"))).toEqual([]);
   });
 
-  it("does not adopt an artifact replaced after writer publication", async () => {
+  it.runIf(supportsSecureGeneratedArchiveStaging())("does not adopt an artifact replaced after writer publication", async () => {
     const root = await temporaryRoot();
     const adapter = createPortableArchiveFilesystemAdapter({ archiveRoot: root, assetRoot: root, limits: DEFAULT_LIMITS });
     let writerArtifactPath = "";
@@ -1316,7 +1316,7 @@ describe("archive artifact writing and cleanup", () => {
     await expect(readFile(replacementPath)).resolves.not.toHaveLength(0);
   });
 
-  it("rejects concurrent asset growth before an unbounded read can consume it", async () => {
+  it.runIf(supportsSecureGeneratedArchiveStaging())("rejects concurrent asset growth before an unbounded read can consume it", async () => {
     const root = await temporaryRoot();
     const png = Buffer.from(
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
@@ -1341,7 +1341,7 @@ describe("archive artifact writing and cleanup", () => {
     })).rejects.toEqual({ code: "asset_too_large" });
   });
 
-  it("releases the staged-directory anchor when declared-length cleanup is forced to fail", async () => {
+  it.runIf(supportsSecureGeneratedArchiveStaging())("releases the staged-directory anchor when declared-length cleanup is forced to fail", async () => {
     const root = await temporaryRoot();
     let stagingAnchor: { stat(): Promise<unknown> } | undefined;
     let ownedPath = "";

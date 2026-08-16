@@ -1,7 +1,7 @@
 import type {
   AcceptedTurnCorrectionRequest,
   AcceptedTurnCorrectionView
-} from "../../../contracts/src/turn-corrections.js";
+} from "@infinite-quest/contracts";
 
 export type TurnCorrectionScope = Readonly<{
   ownerUserId: string;

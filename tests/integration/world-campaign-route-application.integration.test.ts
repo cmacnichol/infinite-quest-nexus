@@ -8,12 +8,15 @@ import {
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
+import { supportsSecureGeneratedArchiveStaging } from "../../services/api/src/archive-io.js";
 import { buildServer } from "../../services/api/src/server.js";
 import { createApiWorldCampaignApplication } from "../helpers/runtime-application-fixtures.js";
-import { serverOptions } from "../helpers/build-server-options.js";
+import { inertStorageServerOptions, serverOptions } from "../helpers/build-server-options.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe.sequential : describe.skip;
+const secureFilesystemSupported = supportsSecureGeneratedArchiveStaging();
+const secureFilesystemIt = it.runIf(secureFilesystemSupported);
 
 function worldContent(title: string, marker = "One") {
   return {
@@ -319,7 +322,9 @@ integration("world campaign Fastify production application cutover", () => {
       credentialSecret: config.credentialEncryptionKey
     });
     app = await buildServer({
-      ...serverOptions({ config, pool }),
+      ...(secureFilesystemSupported
+        ? serverOptions({ config, pool })
+        : inertStorageServerOptions({ config, pool })),
       worldCampaign
     });
   });
@@ -767,7 +772,7 @@ integration("world campaign Fastify production application cutover", () => {
     trackCampaign(branch.json().id, branchTitle);
   });
 
-  it("exercises Infinite Worlds preview/import through the production owner-bound portable port", async () => {
+  secureFilesystemIt("exercises Infinite Worlds preview/import through the production owner-bound portable port", async () => {
     const title = `14c3 portable import ${crypto.randomUUID()}`;
     const body = {
       sourceName: `${title}.json`,

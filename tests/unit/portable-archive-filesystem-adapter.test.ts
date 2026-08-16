@@ -21,7 +21,10 @@ import { once } from "node:events";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ArchiveEntry, ArchiveManifest } from "../../packages/contracts/src/archives.js";
 import { createFakeDurableFilesystemLifecycle } from "../helpers/private-storage-lifecycle-fake.js";
-import type { ArchiveLimits } from "../../services/api/src/archive-io.js";
+import {
+  supportsSecureGeneratedArchiveStaging,
+  type ArchiveLimits,
+} from "../../services/api/src/archive-io.js";
 import {
   createPortableArchiveFilesystemAdapter as createPersistedPortableArchiveFilesystemAdapter,
   type PortableArchiveFilesystemOptions,
@@ -40,6 +43,7 @@ const limits: ArchiveLimits = {
   maxOriginalImageBytes: 25 * 1024 * 1024
 };
 const roots: string[] = [];
+const secureFilesystemIt = it.runIf(supportsSecureGeneratedArchiveStaging());
 
 function createPortableArchiveFilesystemAdapter(
   options: Omit<PortableArchiveFilesystemOptions, "persistence">
@@ -162,7 +166,7 @@ function expectSafeThrown(
 }
 
 describe("portable archive filesystem adapter", () => {
-  it("stages only an issued one-shot owner-bound upload and exposes no path or owner", async () => {
+  secureFilesystemIt("stages only an issued one-shot owner-bound upload and exposes no path or owner", async () => {
     const archiveRoot = await temporaryRoot("iq-portable-archive-");
     const sourcePath = await portableZip(archiveRoot);
     const sourceBytes = await readFile(sourcePath);
@@ -182,7 +186,7 @@ describe("portable archive filesystem adapter", () => {
     await adapter.cleanupStagedInput(owner, stagedInput);
   });
 
-  it("enforces claimed and configured upload bounds and removes partial uploads deterministically", async () => {
+  secureFilesystemIt("enforces claimed and configured upload bounds and removes partial uploads deterministically", async () => {
     const archiveRoot = await temporaryRoot("iq-portable-bounds-");
     const adapter = createPortableArchiveFilesystemAdapter({
       archiveRoot,
@@ -226,7 +230,7 @@ describe("portable archive filesystem adapter", () => {
     expect(await readdir(archiveRoot)).toEqual([]);
   });
 
-  it("reuses bounded archive inspection and extracts only a reverified entry", async () => {
+  secureFilesystemIt("reuses bounded archive inspection and extracts only a reverified entry", async () => {
     const archiveRoot = await temporaryRoot("iq-portable-inspect-");
     const sourcePath = await portableZip(archiveRoot);
     const sourceBytes = await readFile(sourcePath);
@@ -257,7 +261,7 @@ describe("portable archive filesystem adapter", () => {
     await adapter.cleanupStagedInput(owner, stagedInput);
   });
 
-  it("rejects a staging-root alias installed before inspection", async () => {
+  secureFilesystemIt("rejects a staging-root alias installed before inspection", async () => {
     const archiveRoot = await temporaryRoot("iq-portable-root-before-");
     const sourcePath = await portableZip(archiveRoot);
     const sourceBytes = await readFile(sourcePath);
@@ -278,7 +282,7 @@ describe("portable archive filesystem adapter", () => {
     await adapter.cleanupStagedInput(owner, stagedInput);
   });
 
-  it("rejects a staging-root alias installed between inspection and extraction", async () => {
+  secureFilesystemIt("rejects a staging-root alias installed between inspection and extraction", async () => {
     const archiveRoot = await temporaryRoot("iq-portable-root-between-");
     const sourcePath = await portableZip(archiveRoot);
     const sourceBytes = await readFile(sourcePath);
@@ -300,7 +304,7 @@ describe("portable archive filesystem adapter", () => {
     await adapter.cleanupStagedInput(owner, stagedInput);
   });
 
-  it("maps traversal, links, and aggregate expansion failures to allowlisted diagnostics", async () => {
+  secureFilesystemIt("maps traversal, links, and aggregate expansion failures to allowlisted diagnostics", async () => {
     const archiveRoot = await temporaryRoot("iq-portable-attacks-");
     const adapter = createPortableArchiveFilesystemAdapter({ archiveRoot, assetRoot: archiveRoot, limits });
     const zipPath = join(archiveRoot, "unsafe.zip");
@@ -347,7 +351,7 @@ describe("portable archive filesystem adapter", () => {
     await bounded.cleanupStagedInput(owner, largeStaged);
   });
 
-  it("publishes a read-only verified artifact behind an opaque owner-bound retrieval and cleans it safely", async () => {
+  secureFilesystemIt("publishes a read-only verified artifact behind an opaque owner-bound retrieval and cleans it safely", async () => {
     const archiveRoot = await temporaryRoot("iq-portable-export-");
     const adapter = createPortableArchiveFilesystemAdapter({ archiveRoot, assetRoot: archiveRoot, limits });
     const content = Buffer.from('{"exported":true}', "utf8");
@@ -374,7 +378,7 @@ describe("portable archive filesystem adapter", () => {
     expect(await readdir(join(archiveRoot, "artifacts"))).toEqual([]);
   });
 
-  it("does not delete a substituted staged file during identity-safe cleanup", async () => {
+  secureFilesystemIt("does not delete a substituted staged file during identity-safe cleanup", async () => {
     const archiveRoot = await temporaryRoot("iq-portable-cleanup-");
     const sourcePath = await portableZip(archiveRoot);
     const sourceBytes = await readFile(sourcePath);
@@ -395,7 +399,7 @@ describe("portable archive filesystem adapter", () => {
     await adapter.cleanupStagedInput(owner, staged);
   });
 
-  it("rejects a staging-parent junction replacement without touching the outside target", async () => {
+  secureFilesystemIt("rejects a staging-parent junction replacement without touching the outside target", async () => {
     const archiveRoot = await temporaryRoot("iq-portable-parent-race-");
     const outside = await temporaryRoot("iq-portable-parent-outside-");
     const sourcePath = await portableZip(archiveRoot);
@@ -416,7 +420,7 @@ describe("portable archive filesystem adapter", () => {
     await adapter.cleanupStagedInput(owner, staged);
   });
 
-  it("verifies bounded asset MIME, signature, decoder metadata, and legacy content hash through anchored segments", async () => {
+  secureFilesystemIt("verifies bounded asset MIME, signature, decoder metadata, and legacy content hash through anchored segments", async () => {
     const archiveRoot = await temporaryRoot("iq-portable-assets-archive-");
     const assetRoot = await temporaryRoot("iq-portable-assets-");
     const png = Buffer.from(
@@ -468,7 +472,7 @@ describe("portable archive filesystem adapter", () => {
     }), "filesystem_path_invalid");
   });
 
-  it("rejects an image whose header parses but whose pixels cannot be fully decoded", async () => {
+  secureFilesystemIt("rejects an image whose header parses but whose pixels cannot be fully decoded", async () => {
     const archiveRoot = await temporaryRoot("iq-portable-truncated-archive-");
     const assetRoot = await temporaryRoot("iq-portable-truncated-assets-");
     const png = Buffer.from(
@@ -488,7 +492,7 @@ describe("portable archive filesystem adapter", () => {
     }), "asset_content_invalid");
   });
 
-  it("enforces decoded image pixel and page limits before accepting content", async () => {
+  secureFilesystemIt("enforces decoded image pixel and page limits before accepting content", async () => {
     const archiveRoot = await temporaryRoot("iq-portable-image-limits-archive-");
     const assetRoot = await temporaryRoot("iq-portable-image-limits-assets-");
     const twoPixelPng = Buffer.from(
@@ -532,7 +536,7 @@ describe("portable archive filesystem adapter", () => {
     }), "asset_content_invalid");
   });
 
-  it("rejects symlink, directory, and post-publication artifact identity changes without leaking storage details", async () => {
+  secureFilesystemIt("rejects symlink, directory, and post-publication artifact identity changes without leaking storage details", async () => {
     const archiveRoot = await temporaryRoot("iq-portable-identity-archive-");
     const assetRoot = await temporaryRoot("iq-portable-identity-assets-");
     const outside = await temporaryRoot("iq-portable-identity-outside-");

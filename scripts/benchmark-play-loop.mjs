@@ -145,6 +145,50 @@ function inertGenerationEvents() {
   };
 }
 
+async function unexpectedBenchmarkStorageCall() {
+  throw new Error("Unexpected storage call from the play-loop read benchmark.");
+}
+
+function createBenchmarkApiAssets(pool, dependencies) {
+  return {
+    assets: dependencies.createAssetApplication(dependencies.createPostgresAssetRepositories(pool)),
+    storage: {
+      adapter: { openAssetSession: unexpectedBenchmarkStorageCall }
+    },
+    close: async () => undefined
+  };
+}
+
+function createBenchmarkApiPortable() {
+  const portable = {
+    stageInput: unexpectedBenchmarkStorageCall,
+    previewCampaignZip: unexpectedBenchmarkStorageCall,
+    previewLegacyStory: unexpectedBenchmarkStorageCall,
+    previewInfiniteWorlds: unexpectedBenchmarkStorageCall,
+    previewCyoa: unexpectedBenchmarkStorageCall,
+    previewWorldJson: unexpectedBenchmarkStorageCall,
+    previewWorldText: unexpectedBenchmarkStorageCall,
+    previewStoryText: unexpectedBenchmarkStorageCall,
+    commit: unexpectedBenchmarkStorageCall,
+    createCampaignExport: unexpectedBenchmarkStorageCall,
+    createWorldExport: unexpectedBenchmarkStorageCall,
+    openExportSession: unexpectedBenchmarkStorageCall,
+    progress: unexpectedBenchmarkStorageCall,
+    abort: unexpectedBenchmarkStorageCall,
+    reap: unexpectedBenchmarkStorageCall,
+    close: async () => undefined
+  };
+  return {
+    portable,
+    progress: {
+      create: unexpectedBenchmarkStorageCall,
+      update: unexpectedBenchmarkStorageCall,
+      read: unexpectedBenchmarkStorageCall
+    },
+    close: async () => undefined
+  };
+}
+
 function statementText(query) {
   if (typeof query === "string") return query;
   if (query && typeof query === "object" && typeof query.text === "string") return query.text;
@@ -476,7 +520,9 @@ async function benchmarkDatabase(pool, databaseUrl, settings, dependencies) {
     memory,
     worldCampaign: dependencies.createApiWorldCampaignApplication(measuredPool, providerGraph),
     generationEvents: inertGenerationEvents(),
-    providers
+    providers,
+    createApiAssets: async (assetPool) => createBenchmarkApiAssets(assetPool, dependencies),
+    createApiPortable: async () => createBenchmarkApiPortable()
   });
   try {
     await dependencies.initialOwnerId(measuredPool);
@@ -644,7 +690,9 @@ export async function runPlayLoopBenchmark(options = {}) {
     providerCompositionModule,
     providerAdapterModule,
     providerTransportModule,
-    providerNetworkPolicyModule
+    providerNetworkPolicyModule,
+    assetApplicationModule,
+    assetRepositoryModule
   ] = await Promise.all([
     import("../packages/database/src/pool.ts"),
     import("../packages/database/src/migrate.ts"),
@@ -656,7 +704,9 @@ export async function runPlayLoopBenchmark(options = {}) {
     import("../services/runtime/src/provider-application-composition.ts"),
     import("../services/api/src/provider-application-adapter.ts"),
     import("../packages/story-engine/src/provider-transport.ts"),
-    import("../packages/security/src/provider-network-policy.ts")
+    import("../packages/security/src/provider-network-policy.ts"),
+    import("../packages/application/src/assets/index.ts"),
+    import("../packages/database/src/asset-repository.ts")
   ]);
   const adminPool = poolModule.createDatabasePool(databaseUrl, 1);
   const databaseName = temporaryDatabaseName();
@@ -678,7 +728,9 @@ export async function runPlayLoopBenchmark(options = {}) {
       createApiProviderApplicationComposition: providerCompositionModule.createApiProviderApplicationComposition,
       createProviderApplicationAdapter: providerAdapterModule.createProviderApplicationAdapter,
       createProviderTransport: providerTransportModule.createProviderTransport,
-      createProviderNetworkPolicy: providerNetworkPolicyModule.createProviderNetworkPolicy
+      createProviderNetworkPolicy: providerNetworkPolicyModule.createProviderNetworkPolicy,
+      createAssetApplication: assetApplicationModule.createAssetApplication,
+      createPostgresAssetRepositories: assetRepositoryModule.createPostgresAssetRepositories
     });
     const cpuCount = availableParallelism();
     const memoryLimitGiB = cgroupMemoryLimitGiB();

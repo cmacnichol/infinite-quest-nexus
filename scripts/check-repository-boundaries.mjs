@@ -12,6 +12,10 @@ import {
   checkPortableCompositionInventory
 } from "./check-portable-composition-boundaries.mjs";
 import { checkLegacyAuthorityRemoval } from "./check-legacy-authority-removal.mjs";
+import {
+  LEGACY_MIGRATION_ALLOWLIST,
+  legacyMigrationBoundaryViolations
+} from "./legacy-migration-boundary.mjs";
 
 const output = execFileSync(
   "git",
@@ -26,17 +30,6 @@ const sourceInventory = [];
 // exercised by the application. Compatibility code is limited to explicit data
 // migration boundaries; it does not permit loading or serving the historical UI.
 const HISTORICAL_CLIENT_ALLOWLIST = new Set(["index.html"]);
-const LEGACY_MIGRATION_ALLOWLIST = [
-  "apps/web/public/nexus.js",
-  "packages/contracts/src/imports.ts",
-  "packages/domain/src/infinite-worlds.ts",
-  "packages/domain/src/legacy-story-world.ts",
-  "services/api/src/archive-routes.ts",
-  "services/api/src/server.ts",
-  "packages/database/src/portable-import-family-repository.ts",
-  "services/runtime/src/portable-import-export-composition.ts"
-];
-
 const RETIRED_WORLD_CAMPAIGN_AUTHORITY = [
   "services/api/src/campaign-state-service.ts",
   "services/api/src/campaign-transfer-service.ts",
@@ -65,7 +58,6 @@ const activeCode = /^(?:apps|packages|services)\//u;
 const runtimeConfiguration = /^(?:Dockerfile|compose(?:\.[^/]+)?\.ya?ml|\.env\.example|deploy\/.*\.ya?ml|apps\/|packages\/|services\/)/u;
 const consoleWrite = /\bconsole\s*\.\s*(?:debug|error|info|log|trace|warn)\s*\(/u;
 const historicalRuntimeReference = /\blegacyIndex(?:Path|Cache)?\b|\bLEGACY_INDEX_PATH\b|(?:COPY|ADD)\s+(?:\.\/)?index\.html\b|\/app\/index\.html\b|\b(?:readFile|resolve)\s*\(\s*["']index\.html["']/u;
-const legacyMigrationMarker = /infiniteQuestNexusClientState\.v1|\/imports\/legacy-story|\bLegacyStory\b|\blegacyStorySchema\b/u;
 
 const browserNetworkAllowlist = new Map([
   ["apps/web/public/image-library-browser.js", new Set(["fetch(path,"])],
@@ -123,9 +115,7 @@ for (const file of files) {
     violations.push(`${normalized}: the historical root index.html must not be loaded or shipped at runtime`);
   }
 
-  if (activeCode.test(normalized) && legacyMigrationMarker.test(text) && !LEGACY_MIGRATION_ALLOWLIST.includes(normalized)) {
-    violations.push(`${normalized}: legacy client compatibility must remain inside the reviewed migration boundary`);
-  }
+  violations.push(...legacyMigrationBoundaryViolations(normalized, text));
 
   if (activeCode.test(normalized)) checkBrowserNetworkCalls(normalized, text);
   violations.push(...checkPrivateStorageBoundaries(normalized, text));

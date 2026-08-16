@@ -28,6 +28,7 @@ import { createPrivateAssetMetadataBackfillComposition } from "../../services/ru
 import { createAssetImportStorageComposition } from "../../services/runtime/src/asset-import-composition.js";
 import { createPrivateFilesystemRecoveryComposition } from "../../services/runtime/src/private-filesystem-recovery-composition.js";
 import { createPortableImportExportComposition } from "../../services/runtime/src/portable-import-export-composition.js";
+import { supportsSecureGeneratedArchiveStaging } from "../../services/api/src/archive-io.js";
 import { buildServer } from "../../services/api/src/server.js";
 import { runWorker } from "../../services/worker/src/worker.js";
 import { serverOptions } from "../helpers/build-server-options.js";
@@ -42,7 +43,7 @@ import {
 } from "../helpers/runtime-application-fixtures.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
-const integration = databaseUrl ? describe : describe.skip;
+const integration = databaseUrl && supportsSecureGeneratedArchiveStaging() ? describe : describe.skip;
 const credentialSecret = "task-14e3f-production-composed-parity";
 
 function config(assetStorageRoot: string, role: RuntimeConfig["role"] = "all"): RuntimeConfig {

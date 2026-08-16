@@ -9,9 +9,11 @@ import {
   initialOwnerId,
   type DatabasePool
 } from "../../packages/database/src/pool.js";
+import { supportsSecureGeneratedArchiveStaging } from "../../services/api/src/archive-io.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
+const secureFilesystemIt = it.runIf(supportsSecureGeneratedArchiveStaging());
 
 function randomHash(): string {
   return crypto.randomUUID().replaceAll("-", "").padEnd(64, "0");
@@ -311,7 +313,7 @@ integration("Task 14e3e3 illustration publication", () => {
     }
   });
 
-  it("publishes a claimed world-cover artifact through the normalized private composition", async () => {
+  secureFilesystemIt("publishes a claimed world-cover artifact through the normalized private composition", async () => {
     const provider = await pool.query<{ id: string }>(
       `INSERT INTO provider_profiles (
          owner_user_id,name,provider_type,provider_role,base_url,default_model
@@ -427,7 +429,7 @@ integration("Task 14e3e3 illustration publication", () => {
     }
   });
 
-  it("does not download or mutate a job when the caller does not hold its lease", async () => {
+  secureFilesystemIt("does not download or mutate a job when the caller does not hold its lease", async () => {
     const provider = await pool.query<{ id: string }>(
       `INSERT INTO provider_profiles (
          owner_user_id,name,provider_type,provider_role,base_url,default_model
@@ -490,7 +492,7 @@ integration("Task 14e3e3 illustration publication", () => {
     }
   });
 
-  it("rejects an artifact-count mismatch without mutating the claimed job", async () => {
+  secureFilesystemIt("rejects an artifact-count mismatch without mutating the claimed job", async () => {
     const provider = await pool.query<{ id: string }>(
       `INSERT INTO provider_profiles (
          owner_user_id,name,provider_type,provider_role,base_url,default_model

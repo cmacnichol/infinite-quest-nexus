@@ -12,11 +12,13 @@ import type {
   DurableFilesystemRecoveryRecord,
   PrivateStorageDescriptor,
 } from "../../packages/application/src/assets/private-storage-lifecycle.js";
+import { supportsSecureGeneratedArchiveStaging } from "../../services/api/src/archive-io.js";
 import { createAssetImportStorageComposition } from "../../services/runtime/src/asset-import-composition.js";
 import { createPrivateFilesystemRecoveryComposition } from "../../services/runtime/src/private-filesystem-recovery-composition.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
+const secureFilesystemIt = it.runIf(supportsSecureGeneratedArchiveStaging());
 
 integration("Task 14e3e6 private filesystem recovery", () => {
   let pool: DatabasePool;
@@ -256,7 +258,7 @@ integration("Task 14e3e6 private filesystem recovery", () => {
     await expect(repository.journal.heartbeatRecoveryClaim(renewed!, 30)).resolves.toMatchObject({ operationId: record.operation.operationId });
   });
 
-  it("keeps an expired portable cleanup fenced through a blocked short lease and refreshes its acknowledgement", async () => {
+  secureFilesystemIt("keeps an expired portable cleanup fenced through a blocked short lease and refreshes its acknowledgement", async () => {
     const staged = await expiredPortableStage("heartbeat");
     let physicalDeleteStarted!: () => void;
     const physicalDeleteStartedPromise = new Promise<void>((resolve) => { physicalDeleteStarted = resolve; });
@@ -296,7 +298,7 @@ integration("Task 14e3e6 private filesystem recovery", () => {
     }
   });
 
-  it("does not let a rotated foreign portable claimant delete bytes or acknowledge cleanup", async () => {
+  secureFilesystemIt("does not let a rotated foreign portable claimant delete bytes or acknowledge cleanup", async () => {
     let staged: Awaited<ReturnType<typeof expiredPortableStage>>;
     let foreignRecovery: DurableFilesystemRecoveryRecord | undefined;
     let rotateToForeign = true;
@@ -350,7 +352,7 @@ integration("Task 14e3e6 private filesystem recovery", () => {
     }
   });
 
-  it("quarantines an expired target-only prewrite from a fresh private composition", async () => {
+  secureFilesystemIt("quarantines an expired target-only prewrite from a fresh private composition", async () => {
     const contentHash = createHash("sha256").update(crypto.randomUUID()).digest("hex");
     const asset = await pool.query<{ id: string }>(
       `INSERT INTO assets (owner_user_id,content_hash,storage_driver,storage_path,mime_type,byte_length)
@@ -390,7 +392,7 @@ integration("Task 14e3e6 private filesystem recovery", () => {
     }
   });
 
-  it("finalizes an attached post-commit operation exactly once from a fresh composition", async () => {
+  secureFilesystemIt("finalizes an attached post-commit operation exactly once from a fresh composition", async () => {
     const attached = await attachedAsset("finalize", { domainReference: true });
     await expire(attached.operation.operationId);
     const composition = await createPrivateFilesystemRecoveryComposition(pool, { archiveRoot, assetRoot });
@@ -408,7 +410,7 @@ integration("Task 14e3e6 private filesystem recovery", () => {
     }
   });
 
-  it("reconciles an exact e5 attached publication only after its filesystem operation finalizes", async () => {
+  secureFilesystemIt("reconciles an exact e5 attached publication only after its filesystem operation finalizes", async () => {
     const attached = await attachedAsset("e5-reconcile", { domainReference: true });
     await pool.query(
       `INSERT INTO asset_metadata_backfill_jobs (owner_user_id,asset_id,status,next_attempt_at)
@@ -438,7 +440,7 @@ integration("Task 14e3e6 private filesystem recovery", () => {
     }
   });
 
-  it("removes only unreferenced cleanup descriptors and retains a foreign shared path", async () => {
+  secureFilesystemIt("removes only unreferenced cleanup descriptors and retains a foreign shared path", async () => {
     const removablePath = `assets/recovery/${crypto.randomUUID()}.pending`;
     const removable = await attachedAsset("cleanup-removable", { cleanupPath: removablePath, domainReference: false });
     const retainedPath = `assets/recovery/${crypto.randomUUID()}.shared`;
@@ -468,7 +470,7 @@ integration("Task 14e3e6 private filesystem recovery", () => {
     }
   });
 
-  it("expires paired original and derivative cleanup authority without leaving either descriptor behind", async () => {
+  secureFilesystemIt("expires paired original and derivative cleanup authority without leaving either descriptor behind", async () => {
     const pair = await attachedCleanupPair("paired-expiry");
     await Promise.all(pair.operations.map((operation) => expire(operation.operationId)));
     const composition = await createPrivateFilesystemRecoveryComposition(pool, { archiveRoot, assetRoot });
@@ -490,7 +492,7 @@ integration("Task 14e3e6 private filesystem recovery", () => {
     }
   });
 
-  it("claims paired cleanup work once across concurrent private recovery compositions", async () => {
+  secureFilesystemIt("claims paired cleanup work once across concurrent private recovery compositions", async () => {
     const pair = await attachedCleanupPair("concurrent-cleanup");
     await Promise.all(pair.operations.map((operation) => expire(operation.operationId)));
     const first = await createPrivateFilesystemRecoveryComposition(pool, { archiveRoot, assetRoot });
@@ -516,7 +518,7 @@ integration("Task 14e3e6 private filesystem recovery", () => {
     }
   });
 
-  it("persists a safe cleanup diagnostic across a fault and finishes on a fresh retry without duplicate deletion", async () => {
+  secureFilesystemIt("persists a safe cleanup diagnostic across a fault and finishes on a fresh retry without duplicate deletion", async () => {
     const cleanupPath = `assets/recovery/${crypto.randomUUID()}.retry`;
     const attached = await attachedAsset("cleanup-retry", { cleanupPath, domainReference: false });
     await pool.query(`

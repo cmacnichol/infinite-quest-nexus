@@ -5,7 +5,7 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { getDashboardStats } from "../helpers/memory-aware-services.js";
 import { buildServer } from "../../services/api/src/server.js";
 import { createApiWorldCampaignApplication } from "../helpers/runtime-application-fixtures.js";
-import { serverOptions } from "../helpers/build-server-options.js";
+import { inertStorageServerOptions as serverOptions } from "../helpers/build-server-options.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;

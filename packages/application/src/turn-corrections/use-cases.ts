@@ -1,7 +1,7 @@
 import {
   acceptedTurnCorrectionRequestSchema,
   acceptedTurnCorrectionViewSchema
-} from "../../../contracts/src/turn-corrections.js";
+} from "@infinite-quest/contracts";
 import { TurnCorrectionApplicationError, mapTurnCorrectionFailure } from "./errors.js";
 import type {
   TurnCorrectionApplication,

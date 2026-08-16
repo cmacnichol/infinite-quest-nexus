@@ -37,7 +37,7 @@ import {
   worldListResponseSchema
 } from "../../packages/contracts/src/index.js";
 import { buildServer } from "../../services/api/src/server.js";
-import { serverOptions, testWorldCampaignApplication } from "../helpers/build-server-options.js";
+import { inertStorageServerOptions as serverOptions, testWorldCampaignApplication } from "../helpers/build-server-options.js";
 import { legacyDashboardRouteContracts, legacyStoryRouteContracts } from "../helpers/legacy-ui-route-contracts.js";
 
 const OWNER_ID = "00000000-0000-4000-8000-000000000001";

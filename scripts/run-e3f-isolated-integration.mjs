@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
+import { vitestCommand } from "./node-tool-command.mjs";
 
-const pnpm = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
 const E3F_MATRIX_FILES = Object.freeze([
   // Active Fastify legacy-contract families. Each file uses a fresh database
   // because previews, leases, initial-owner fixtures, and generated archives
@@ -31,14 +31,16 @@ function run(command, args) {
 // The private e3e0–e8 matrix is a prerequisite rather than an implicit shared
 // fixture. It owns its own per-file database lifecycle before this active
 // production-binding matrix opens another isolated database.
-await run(pnpm, ["exec", "vitest", "run",
+const unitCommand = vitestCommand(["run",
   "tests/unit/runtime-role-composition.test.ts",
   "tests/unit/task-14e3e8-composition-parity-boundaries.test.ts",
   "tests/unit/task-14e3f-production-composed-boundaries.test.ts",
   "tests/unit/task-14e3f-export-stream-abort.test.ts",
 ]);
-await run(pnpm, ["test:e8:integration"]);
+await run(unitCommand.executable, unitCommand.arguments);
+await run(process.execPath, ["scripts/run-e8-isolated-integration.mjs"]);
 
 for (const testFile of E3F_MATRIX_FILES) {
-  await run(pnpm, ["exec", "vitest", "run", "--config", "vitest.integration.config.ts", testFile]);
+  const command = vitestCommand(["run", "--config", "vitest.integration.config.ts", testFile]);
+  await run(command.executable, command.arguments);
 }

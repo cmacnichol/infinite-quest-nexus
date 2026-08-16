@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { BuildServerOptions } from "../../services/api/src/server.js";
 import type {
   GenerationEventSource,
@@ -8,11 +9,162 @@ import { createApiIllustrationApplication } from "../../services/runtime/src/ill
 import { createApiMemoryApplication } from "../../services/runtime/src/memory-composition.js";
 import type { ProviderApiTransportAdapter } from "../../services/api/src/provider-application-adapter.js";
 import { apiProviderGraph } from "./provider-application-fixtures.js";
+import { createAssetApplication } from "../../packages/application/src/assets/index.js";
+import type { PortableImportExportComposition } from "../../packages/application/src/imports/private-portable-composition.js";
+import { createPostgresAssetRepositories } from "../../packages/database/src/asset-repository.js";
+import type { DatabasePool } from "../../packages/database/src/pool.js";
+import type { ApiAssetComposition } from "../../services/runtime/src/api-asset-composition.js";
+import type {
+  ApiPortableImportExportComposition,
+  ApiPortableImportExportCompositionOptions,
+} from "../../services/runtime/src/api-portable-import-export-composition.js";
+import {
+  toPortableImportedRecordId,
+  toPortableImportResultRetrieval,
+  toPortablePreviewHandle,
+  toPortableStagedInput,
+  type PortableImportPreviewCommand,
+} from "../../packages/application/src/imports/types.js";
+import type { StoryImportRequest } from "../../packages/contracts/src/imports.js";
+import {
+  importLegacyStory,
+  previewLegacyStoryImport,
+} from "../legacy-api/src/import-service.js";
 
 export type ServerOptionsOverrides = Readonly<
   Pick<BuildServerOptions, "config" | "pool"> &
-  Partial<Pick<BuildServerOptions, "generation" | "illustration" | "memory" | "generationEvents" | "worldCampaign" | "providers" | "infiniteWorldsProviders">>
+  Partial<Pick<BuildServerOptions, "generation" | "illustration" | "memory" | "generationEvents" | "worldCampaign" | "providers" | "infiniteWorldsProviders" | "createApiAssets" | "createApiPortable">>
 >;
+
+async function unexpectedPortableCall(): Promise<never> {
+  throw new Error("Unexpected test portable composition call.");
+}
+
+async function createTestApiAssets(pool: DatabasePool): Promise<ApiAssetComposition> {
+  return {
+    assets: createAssetApplication(createPostgresAssetRepositories(pool)),
+    storage: {
+      adapter: { openAssetSession: unexpectedPortableCall },
+    } as unknown as ApiAssetComposition["storage"],
+    close: async () => undefined,
+  };
+}
+
+async function createTestApiPortable(
+  _options: ApiPortableImportExportCompositionOptions,
+): Promise<ApiPortableImportExportComposition> {
+  const portable = {
+    async stageInput(input: { source: AsyncIterable<Uint8Array> | Iterable<Uint8Array> }) {
+      for await (const _chunk of input.source) {
+        // Consume the transport-owned upload while leaving storage behavior out
+        // of API route tests that do not exercise the Linux filesystem adapter.
+      }
+      return { stagedInput: "test-staged-input" };
+    },
+    async previewCampaignZip() {
+      throw new Error("archive_format_invalid");
+    },
+    previewLegacyStory: unexpectedPortableCall,
+    previewInfiniteWorlds: unexpectedPortableCall,
+    previewCyoa: unexpectedPortableCall,
+    previewWorldJson: unexpectedPortableCall,
+    previewWorldText: unexpectedPortableCall,
+    previewStoryText: unexpectedPortableCall,
+    commit: unexpectedPortableCall,
+    createCampaignExport: unexpectedPortableCall,
+    createWorldExport: unexpectedPortableCall,
+    openExportSession: unexpectedPortableCall,
+    progress: unexpectedPortableCall,
+    abort: unexpectedPortableCall,
+    reap: unexpectedPortableCall,
+    close: async () => undefined,
+  } as unknown as PortableImportExportComposition;
+  return {
+    portable,
+    progress: {
+      create: unexpectedPortableCall,
+      update: unexpectedPortableCall,
+      read: unexpectedPortableCall,
+    } as unknown as ApiPortableImportExportComposition["progress"],
+    close: async () => undefined,
+  };
+}
+
+async function createLegacyStoryTestApiPortable(
+  options: ApiPortableImportExportCompositionOptions,
+): Promise<ApiPortableImportExportComposition> {
+  const stagedInputs = new Map<string, Uint8Array>();
+  const previews = new Map<string, StoryImportRequest>();
+  const portable = {
+    async stageInput(input: { source: AsyncIterable<Uint8Array> | Iterable<Uint8Array> }) {
+      const chunks: Uint8Array[] = [];
+      for await (const chunk of input.source) chunks.push(chunk);
+      const handle = `test-staged-${randomUUID()}`;
+      stagedInputs.set(handle, Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))));
+      return { stagedInput: toPortableStagedInput(handle) };
+    },
+    async previewLegacyStory(command: Extract<PortableImportPreviewCommand, { kind: "legacy_story" }>) {
+      const bytes = stagedInputs.get(command.stagedInput);
+      if (bytes === undefined) throw new Error("test_staged_input_missing");
+      const request: StoryImportRequest = {
+        sourceName: command.sourceName ?? "test-legacy-story.json",
+        story: JSON.parse(new TextDecoder().decode(bytes)),
+        ...(command.destination.kind === "existing_world_version"
+          ? { targetWorldVersionId: command.destination.worldVersionId }
+          : {}),
+        ...(command.selectedCharacterId === undefined ? {} : { selectedCharacterId: command.selectedCharacterId }),
+        ...(command.characterStrategy === undefined ? {} : { characterStrategy: command.characterStrategy }),
+      };
+      const token = `test-preview-${randomUUID()}`;
+      previews.set(token, request);
+      return {
+        previewHandle: toPortablePreviewHandle(token, command.destination),
+        kind: "legacy_story" as const,
+        destination: command.destination,
+        expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+        cleanupOwner: "application" as const,
+        diagnostics: [],
+        projection: await previewLegacyStoryImport(options.pool, request),
+      };
+    },
+    async commit(command: { kind: string; previewHandle: { token: string } }) {
+      if (command.kind !== "legacy_story") throw new Error("Unexpected test portable composition call.");
+      const request = previews.get(command.previewHandle.token);
+      if (request === undefined) throw new Error("test_preview_handle_missing");
+      const result = await importLegacyStory(options.pool, request, options.memory);
+      return {
+        importedRecordId: toPortableImportedRecordId(result.importId),
+        retrieval: toPortableImportResultRetrieval<"legacy_story">(`test-result-${randomUUID()}`),
+        kind: "legacy_story" as const,
+        duplicate: result.duplicate,
+        diagnostics: [],
+        result,
+      };
+    },
+    previewCampaignZip: unexpectedPortableCall,
+    previewInfiniteWorlds: unexpectedPortableCall,
+    previewCyoa: unexpectedPortableCall,
+    previewWorldJson: unexpectedPortableCall,
+    previewWorldText: unexpectedPortableCall,
+    previewStoryText: unexpectedPortableCall,
+    createCampaignExport: unexpectedPortableCall,
+    createWorldExport: unexpectedPortableCall,
+    openExportSession: unexpectedPortableCall,
+    progress: unexpectedPortableCall,
+    abort: unexpectedPortableCall,
+    reap: unexpectedPortableCall,
+    close: async () => undefined,
+  } as unknown as PortableImportExportComposition;
+  return {
+    portable,
+    progress: {
+      create: unexpectedPortableCall,
+      update: unexpectedPortableCall,
+      read: unexpectedPortableCall,
+    } as unknown as ApiPortableImportExportComposition["progress"],
+    close: async () => undefined,
+  };
+}
 
 export const inertProviders = {
   application: {
@@ -376,6 +528,24 @@ export function serverOptions(overrides: ServerOptionsOverrides): BuildServerOpt
     worldCampaign: overrides.worldCampaign ?? testWorldCampaignApplication(),
     providers: overrides.providers ?? inertProviders,
     infiniteWorldsProviders: overrides.infiniteWorldsProviders ?? providerGraph.infiniteWorlds,
-    generationEvents: overrides.generationEvents ?? inertGenerationEvents
+    generationEvents: overrides.generationEvents ?? inertGenerationEvents,
+    ...(overrides.createApiAssets === undefined ? {} : { createApiAssets: overrides.createApiAssets }),
+    ...(overrides.createApiPortable === undefined ? {} : { createApiPortable: overrides.createApiPortable }),
   };
+}
+
+export function inertStorageServerOptions(overrides: ServerOptionsOverrides): BuildServerOptions {
+  return serverOptions({
+    ...overrides,
+    createApiAssets: overrides.createApiAssets ?? createTestApiAssets,
+    createApiPortable: overrides.createApiPortable ?? createTestApiPortable,
+  });
+}
+
+export function legacyStoryImportServerOptions(overrides: ServerOptionsOverrides): BuildServerOptions {
+  return serverOptions({
+    ...overrides,
+    createApiAssets: overrides.createApiAssets ?? createTestApiAssets,
+    createApiPortable: overrides.createApiPortable ?? createLegacyStoryTestApiPortable,
+  });
 }

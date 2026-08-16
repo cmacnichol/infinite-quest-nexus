@@ -20,7 +20,7 @@ import { createApiGenerationApplication } from "../helpers/runtime-application-f
 import { createApiWorldCampaignApplication } from "../helpers/runtime-application-fixtures.js";
 import { createApiIllustrationApplication } from "../helpers/runtime-application-fixtures.js";
 import { apiMemoryApplication } from "../helpers/memory-applications.js";
-import { inertProviders } from "../helpers/build-server-options.js";
+import { inertProviders, inertStorageServerOptions } from "../helpers/build-server-options.js";
 import { apiProviderGraph } from "../helpers/provider-application-fixtures.js";
 import { dropTestDatabaseWhenIdle } from "./database-test-helpers.js";
 
@@ -303,7 +303,7 @@ integration("generation job notification delivery", () => {
       }
     }) as DatabasePool;
     const source = createPostgresGenerationEventSource(countedPool, databaseUrl!);
-    const app = await buildServer({
+    const app = await buildServer(inertStorageServerOptions({
       config: runtimeConfig(3),
       pool: countedPool,
       generation: createApiGenerationApplication(countedPool),
@@ -313,7 +313,7 @@ integration("generation job notification delivery", () => {
       infiniteWorldsProviders: apiProviderGraph(countedPool, runtimeConfig(3).credentialEncryptionKey).infiniteWorlds,
       worldCampaign: createApiWorldCampaignApplication(countedPool, { credentialSecret: runtimeConfig(3).credentialEncryptionKey }),
       generationEvents: source
-    });
+    }));
     let stream: Awaited<ReturnType<typeof openGenerationStream>> | undefined;
     try {
       await source.start();
@@ -369,7 +369,7 @@ integration("generation job notification delivery", () => {
     const jobId = await job(campaignId);
     const routePool = createDatabasePool(databaseUrl!, 3);
     const source = createPostgresGenerationEventSource(routePool, databaseUrl!);
-    const app = await buildServer({
+    const app = await buildServer(inertStorageServerOptions({
       config: runtimeConfig(3),
       pool: routePool,
       generation: createApiGenerationApplication(routePool),
@@ -379,7 +379,7 @@ integration("generation job notification delivery", () => {
       infiniteWorldsProviders: apiProviderGraph(routePool, runtimeConfig(3).credentialEncryptionKey).infiniteWorlds,
       worldCampaign: createApiWorldCampaignApplication(routePool, { credentialSecret: runtimeConfig(3).credentialEncryptionKey }),
       generationEvents: source
-    });
+    }));
     const streams: Array<Awaited<ReturnType<typeof openGenerationStream>>> = [];
     try {
       await source.start();
@@ -411,9 +411,20 @@ integration("generation job notification delivery", () => {
     try {
       await pool.query(`CREATE DATABASE ${databaseName}`);
       migrationPool = createDatabasePool(isolatedUrl.toString(), 2);
-      await migrateDatabase(migrationPool, resolve("database/migrations"));
       const client = await migrationPool.connect();
       try {
+        const initiallyApplied = await runner({
+          dbClient: client,
+          dir: resolve("database/migrations"),
+          direction: "up",
+          count: 69,
+          migrationsTable: "schema_migrations",
+          checkOrder: true,
+          singleTransaction: true,
+          verbose: false,
+          logger: { info: () => undefined, warn: () => undefined, error: () => undefined }
+        });
+        expect(initiallyApplied.at(-1)?.name).toBe("0069_import_progress_status");
         await client.query("SET session_replication_role = 'replica'");
         const legacyOperationId = crypto.randomUUID();
         const legacyOwnerId = crypto.randomUUID();
@@ -576,7 +587,13 @@ integration("generation job notification delivery", () => {
           "0066_portable_normalized_asset_publications",
           "0067_asset_metadata_backfill_executor",
           "0068_portable_legacy_story_create_world",
-          "0069_import_progress_status"
+          "0069_import_progress_status",
+          "0070_turn_narration_corrections",
+          "0071_world_share_links",
+          "0072_chronicle_memory_chunks",
+          "0073_chronicle_chunk_job_fencing",
+          "0074_chronicle_retrieval_observability",
+          "0075_chronicle_query_embedding_cache"
         ]);
       await expect(migrationPool.query<{ trigger_name: string | null; function_name: string | null }>(
          `SELECT (

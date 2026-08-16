@@ -18,9 +18,10 @@ import {
   createAssetPublicationComposition,
   type AssetPublicationComposition
 } from "../../services/runtime/src/asset-import-composition.js";
+import { supportsSecureGeneratedArchiveStaging } from "../../services/api/src/archive-io.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
-const integration = databaseUrl ? describe : describe.skip;
+const integration = databaseUrl && supportsSecureGeneratedArchiveStaging() ? describe : describe.skip;
 
 type WorldScope = Readonly<{
   campaignId: string;

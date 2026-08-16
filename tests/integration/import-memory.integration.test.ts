@@ -35,12 +35,14 @@ import {
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 import { buildServer } from "../../services/api/src/server.js";
 import { createApiMemoryApplication } from "../helpers/runtime-application-fixtures.js";
-import { serverOptions } from "../helpers/build-server-options.js";
+import { inertStorageServerOptions as serverOptions } from "../helpers/build-server-options.js";
 import type { MemoryGenerationTransactionPort } from "../../packages/application/src/memory/index.js";
 import { createPostgresProviderRepositories } from "../../packages/database/src/provider-repository.js";
+import { supportsSecureGeneratedArchiveStaging } from "../../services/api/src/archive-io.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
+const secureGeneratedArchiveIt = it.runIf(supportsSecureGeneratedArchiveStaging());
 
 function routeConfig(url: string, storageRoot: string): RuntimeConfig {
   const archiveLimits = {
@@ -753,8 +755,8 @@ integration("legacy import and Chronicle integration", () => {
       expect(failedResponse.statusCode).toBe(200);
       const failed = failedResponse.json();
       expect(failed.semanticHealth).toMatchObject({
-        status: "failed",
-        message: "Chronicle memory is unavailable.",
+        status: "rebuild_required",
+        message: "Semantic retrieval requires a Chronicle index rebuild.",
         errorMessage: "Chronicle memory is unavailable.",
         jobId: queuedJobId,
         jobStatus: "failed"
@@ -1166,7 +1168,7 @@ integration("legacy import and Chronicle integration", () => {
     expect(segAssetRes.rows[0]?.asset_id).toBeDefined();
   });
 
-  it("rejects a path-traversal asset record when exporting a portable campaign ZIP", async () => {
+  secureGeneratedArchiveIt("rejects a path-traversal asset record when exporting a portable campaign ZIP", async () => {
     const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
     fixture.world.title = `Asset traversal export ${crypto.randomUUID()}`;
     fixture.turns[0].imageUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";

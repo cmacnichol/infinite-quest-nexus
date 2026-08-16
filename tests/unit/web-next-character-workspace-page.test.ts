@@ -370,9 +370,12 @@ describe("Character Workspace page", () => {
     const showModal = vi.fn(function (this: HTMLDialogElement) { this.setAttribute("open", ""); });
     const close = vi.fn(function (this: HTMLDialogElement) { this.removeAttribute("open"); });
     mountCharacterWorkspacePage(nativeFixture.root, "opaque-key", { sessionStore: store() });
-    const nativeDialog = nativeFixture.document.querySelector<HTMLDialogElement>("dialog")!;
-    nativeDialog.showModal = showModal;
-    nativeDialog.close = close;
+    const nativeDialog = nativeFixture.document.querySelector<HTMLDialogElement>(".character-prompt-dialog")!;
+    const dialogPrototype = Object.getPrototypeOf(nativeDialog) as object;
+    Object.defineProperties(dialogPrototype, {
+      showModal: { configurable: true, value: showModal },
+      close: { configurable: true, value: close }
+    });
     const nativeAi = nativeFixture.document.querySelector<HTMLInputElement>('[value="ai"]')!;
     nativeAi.checked = true;
     nativeAi.dispatchEvent(new nativeFixture.window.Event("change", { bubbles: true }));
@@ -380,40 +383,53 @@ describe("Character Workspace page", () => {
     expect(showModal).toHaveBeenCalledTimes(1);
     click(nativeFixture.document, '[data-action="close-character-prompt"]');
     expect(close).toHaveBeenCalledTimes(1);
+    delete (dialogPrototype as { showModal?: unknown }).showModal;
+    delete (dialogPrototype as { close?: unknown }).close;
 
     const fallback = fixture();
     const mounted = mountCharacterWorkspacePage(fallback.root, "opaque-key", { sessionStore: store() });
-    const fallbackDialog = fallback.document.querySelector<HTMLDialogElement>("dialog")!;
+    const fallbackDialog = fallback.document.querySelector<HTMLDialogElement>(".character-prompt-dialog")!;
     Object.defineProperties(fallbackDialog, {
       showModal: { configurable: true, value: undefined },
       close: { configurable: true, value: undefined }
     });
+    const setAttribute = vi.spyOn(fallbackDialog, "setAttribute");
+    const removeAttribute = vi.spyOn(fallbackDialog, "removeAttribute");
     const fallbackAi = fallback.document.querySelector<HTMLInputElement>('[value="ai"]')!;
     fallbackAi.checked = true;
     fallbackAi.dispatchEvent(new fallback.window.Event("change", { bubbles: true }));
     const workspace = fallback.document.querySelector<HTMLElement>(".character-workspace")!;
-    workspace.setAttribute("inert", "preserved");
-    click(fallback.document, '[data-action="expand-character-prompt"]');
+    const preservedBackground = fallback.document.querySelector<HTMLElement>(".character-command-row")!;
+    preservedBackground.setAttribute("inert", "preserved");
+    const expand = fallback.document.querySelector<HTMLButtonElement>('[data-action="expand-character-prompt"]')!;
+    expand.dispatchEvent(new fallback.window.Event("click", { bubbles: true, cancelable: true }));
     const expanded = fallback.document.querySelector<HTMLTextAreaElement>('[data-character-prompt="expanded"]')!;
-    const background = fallback.document.querySelector<HTMLButtonElement>('[data-action="cancel-character"]')!;
+    const background = fallback.document.querySelector<HTMLButtonElement>('[data-character-stage="identity"]')!;
     expect([...function * ancestors(element: Element) {
       for (let ancestor = element.parentElement; ancestor; ancestor = ancestor.parentElement) yield ancestor;
     }(fallbackDialog)].some((ancestor) => ancestor.hasAttribute("inert"))).toBe(false);
     expect(background.closest<HTMLElement>("[inert]")).not.toBeNull();
     expect(workspace.hasAttribute("inert")).toBe(true);
+    expect(setAttribute).toHaveBeenCalledWith("open", "");
+    expect(removeAttribute).not.toHaveBeenCalledWith("open");
+    expect(fallbackDialog.hasAttribute("open")).toBe(true);
     expect(fallback.document.activeElement).toBe(expanded);
     background.focus();
     background.dispatchEvent(new fallback.window.Event("focusin", { bubbles: true }));
     expect(fallback.document.activeElement).toBe(expanded);
-    background.dispatchEvent(new fallback.window.Event("click", { bubbles: true, cancelable: true }));
+    const blockedBackgroundClick = new fallback.window.Event("click", { bubbles: true, cancelable: true });
+    background.dispatchEvent(blockedBackgroundClick);
+    expect(blockedBackgroundClick.defaultPrevented).toBe(true);
     expect(fallbackDialog.hasAttribute("open")).toBe(true);
     click(fallback.document, '[data-action="close-character-prompt"]');
     expect(background.closest<HTMLElement>("[inert]")).toBeNull();
-    expect(workspace.getAttribute("inert")).toBe("preserved");
+    expect(workspace.hasAttribute("inert")).toBe(false);
+    expect(preservedBackground.getAttribute("inert")).toBe("preserved");
     click(fallback.document, '[data-action="expand-character-prompt"]');
     mounted.dispose();
     expect(background.closest<HTMLElement>("[inert]")).toBeNull();
-    expect(workspace.getAttribute("inert")).toBe("preserved");
+    expect(workspace.hasAttribute("inert")).toBe(false);
+    expect(preservedBackground.getAttribute("inert")).toBe("preserved");
   });
 
   it("excludes the edited candidate from duplicate roster validation", () => {

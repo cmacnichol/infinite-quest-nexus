@@ -24,8 +24,21 @@ import {
   bindLegacyPathV1PreviewDescriptor,
   createSecureFilesystemAdapter
 } from "../../services/api/src/portable-archive-filesystem-adapter.js";
+import { supportsSecureGeneratedArchiveStaging } from "../../services/api/src/archive-io.js";
 
 const FUTURE = new Date(Date.now() + 60_000).toISOString();
+const secureFilesystemIt = it.runIf(supportsSecureGeneratedArchiveStaging());
+
+it.runIf(!supportsSecureGeneratedArchiveStaging())(
+  "rejects secure filesystem construction on an unsupported host",
+  async () => {
+    await expect(createSecureFilesystemAdapter({
+      archiveRoot: "unused-archive-root",
+      assetRoot: "unused-asset-root",
+      transactions: { async run(work) { return work({}); } },
+    })).rejects.toThrow("filesystem_platform_unsupported");
+  },
+);
 
 function sha256(value: Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
@@ -179,7 +192,7 @@ async function timeoutExportFixture(input: Readonly<{
 }
 
 describe("Task 14e3b4 secure filesystem adapter", () => {
-  it("records durable target intent before O_EXCL and binds node identity before writing staged bytes", async () => {
+  secureFilesystemIt("records durable target intent before O_EXCL and binds node identity before writing staged bytes", async () => {
     const archiveRoot = await mkdtemp(join(tmpdir(), "iqn-b4-stage-"));
     const assetRoot = await mkdtemp(join(tmpdir(), "iqn-b4-assets-"));
     const content = Buffer.from("staged archive bytes");
@@ -290,7 +303,7 @@ describe("Task 14e3b4 secure filesystem adapter", () => {
     await adapter.close();
   });
 
-  it("leaves target-only O_EXCL failure pending without deleting or completing cleanup", async () => {
+  secureFilesystemIt("leaves target-only O_EXCL failure pending without deleting or completing cleanup", async () => {
     const archiveRoot = await mkdtemp(join(tmpdir(), "iqn-b4-target-collision-"));
     const assetRoot = await mkdtemp(join(tmpdir(), "iqn-b4-assets-"));
     await mkdir(join(archiveRoot, "staging"));
@@ -359,7 +372,7 @@ describe("Task 14e3b4 secure filesystem adapter", () => {
     await adapter.close();
   });
 
-  it("runs one identity-safe rollback when later atomic staged issuance fails", async () => {
+  secureFilesystemIt("runs one identity-safe rollback when later atomic staged issuance fails", async () => {
     const archiveRoot = await mkdtemp(join(tmpdir(), "iqn-b4-rollback-"));
     const assetRoot = await mkdtemp(join(tmpdir(), "iqn-b4-assets-"));
     const content = Buffer.from("rollback bytes");
@@ -429,7 +442,7 @@ describe("Task 14e3b4 secure filesystem adapter", () => {
     await adapter.close();
   });
 
-  it("prepares export cleanup before streaming and memoizes close-delete-ack finalization", async () => {
+  secureFilesystemIt("prepares export cleanup before streaming and memoizes close-delete-ack finalization", async () => {
     const archiveRoot = await mkdtemp(join(tmpdir(), "iqn-b4-export-"));
     const assetRoot = await mkdtemp(join(tmpdir(), "iqn-b4-assets-"));
     await mkdir(join(archiveRoot, "exports"));
@@ -516,7 +529,7 @@ describe("Task 14e3b4 secure filesystem adapter", () => {
     await adapter.close();
   });
 
-  it("autonomously times out idle and between-chunk exports, cleans once, and denies late pulls", async () => {
+  secureFilesystemIt("autonomously times out idle and between-chunk exports, cleans once, and denies late pulls", async () => {
     vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
     try {
       vi.setSystemTime("2026-08-08T12:00:00.000Z");
@@ -550,7 +563,7 @@ describe("Task 14e3b4 secure filesystem adapter", () => {
     }
   });
 
-  it("autonomously closes timed-out asset sessions without deleting assets and denies late pulls", async () => {
+  secureFilesystemIt("autonomously closes timed-out asset sessions without deleting assets and denies late pulls", async () => {
     vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
     try {
       vi.setSystemTime("2026-08-08T14:00:00.000Z");
@@ -611,7 +624,7 @@ describe("Task 14e3b4 secure filesystem adapter", () => {
     }
   });
 
-  it("streams durable and legacy assets without granting cleanup authority", async () => {
+  secureFilesystemIt("streams durable and legacy assets without granting cleanup authority", async () => {
     const archiveRoot = await mkdtemp(join(tmpdir(), "iqn-b4-preview-"));
     const assetRoot = await mkdtemp(join(tmpdir(), "iqn-b4-assets-"));
     await mkdir(join(assetRoot, "assets"));
@@ -704,7 +717,7 @@ describe("Task 14e3b4 secure filesystem adapter", () => {
     await expect(stat(join(archiveRoot, previewPath))).resolves.toBeTruthy();
   });
 
-  it("verifies legacy asset hashes across non-base64-aligned stream chunks", async () => {
+  secureFilesystemIt("verifies legacy asset hashes across non-base64-aligned stream chunks", async () => {
     const archiveRoot = await mkdtemp(join(tmpdir(), "iqn-b4-preview-"));
     const assetRoot = await mkdtemp(join(tmpdir(), "iqn-b4-assets-"));
     await mkdir(join(assetRoot, "legacy"));
@@ -755,7 +768,7 @@ describe("Task 14e3b4 secure filesystem adapter", () => {
     await adapter.close();
   });
 
-  it("anchors reads to the opened root and rejects symlinked intermediate segments", async () => {
+  secureFilesystemIt("anchors reads to the opened root and rejects symlinked intermediate segments", async () => {
     const archiveRoot = await mkdtemp(join(tmpdir(), "iqn-b4-root-"));
     const assetRoot = await mkdtemp(join(tmpdir(), "iqn-b4-assets-"));
     await mkdir(join(archiveRoot, "legacy"));
@@ -812,7 +825,7 @@ describe("Task 14e3b4 secure filesystem adapter", () => {
     await symlinkAdapter.close();
   });
 
-  it("fails closed on partial, growing, and hash-mismatched positional streams", async () => {
+  secureFilesystemIt("fails closed on partial, growing, and hash-mismatched positional streams", async () => {
     const limits = bindPrivateBoundedStreamLimits({
       maximumBytes: 1024,
       chunkBytes: 4,
@@ -848,7 +861,7 @@ describe("Task 14e3b4 secure filesystem adapter", () => {
     }
   });
 
-  it("closes before fail-closed export fault cleanup and only acknowledges an identity-safe delete", async () => {
+  secureFilesystemIt("closes before fail-closed export fault cleanup and only acknowledges an identity-safe delete", async () => {
     for (const fault of ["partial", "growing", "hash"] as const) {
       const fixture = await timeoutExportFixture({
         deadlineAt: FUTURE,
@@ -874,7 +887,7 @@ describe("Task 14e3b4 secure filesystem adapter", () => {
     }
   });
 
-  it("fails an asset open racing shutdown and closes the unpublished handle", async () => {
+  secureFilesystemIt("fails an asset open racing shutdown and closes the unpublished handle", async () => {
     const archiveRoot = await mkdtemp(join(tmpdir(), "iqn-b4-close-race-"));
     const assetRoot = await mkdtemp(join(tmpdir(), "iqn-b4-assets-"));
     const bytes = Buffer.from("shutdown race asset");
@@ -1026,7 +1039,7 @@ describe("Task 14e3b4 secure filesystem adapter", () => {
     await adapter.close();
   });
 
-  it("reaps bearer-free expired export work by deleting before b2c acknowledgement", async () => {
+  secureFilesystemIt("reaps bearer-free expired export work by deleting before b2c acknowledgement", async () => {
     const archiveRoot = await mkdtemp(join(tmpdir(), "iqn-b4-reaper-"));
     const assetRoot = await mkdtemp(join(tmpdir(), "iqn-b4-assets-"));
     await mkdir(join(archiveRoot, "exports"));

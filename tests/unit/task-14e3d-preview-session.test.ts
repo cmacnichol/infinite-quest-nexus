@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { bindPrivateBoundedStreamLimits } from "../../packages/application/src/assets/private-secure-storage.js";
+import { supportsSecureGeneratedArchiveStaging } from "../../services/api/src/archive-io.js";
 import type {
   AttachedFilesystemOperation,
   DurableFilesystemRecoveryClaim,
@@ -78,8 +79,10 @@ async function collect(source: AsyncIterable<Uint8Array>): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
+const secureFilesystemIt = it.runIf(supportsSecureGeneratedArchiveStaging());
+
 describe("Task 14e3d preview-handle staged session", () => {
-  it("anchors the exact descriptor and close does not consume preview staging", async () => {
+  secureFilesystemIt("anchors the exact descriptor and close does not consume preview staging", async () => {
     const value = await fixture();
     const session = await value.adapter.openPreviewInputSession({
       owner: { ownerUserId: "owner-1" },
@@ -94,7 +97,7 @@ describe("Task 14e3d preview-handle staged session", () => {
     await value.adapter.close();
   });
 
-  it("denies descriptor substitution and leaves the replacement unconsumed", async () => {
+  secureFilesystemIt("denies descriptor substitution and leaves the replacement unconsumed", async () => {
     const value = await fixture();
     await rename(value.path, `${value.path}.original`);
     const replacement = Buffer.from("replacement must not gain authority");

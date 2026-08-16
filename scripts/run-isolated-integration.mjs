@@ -2,8 +2,8 @@ import { spawn } from "node:child_process";
 import { readdir } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
+import { vitestCommand } from "./node-tool-command.mjs";
 
-const pnpm = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
 const INTEGRATION_ROOT = resolve("tests/integration");
 
 export async function discoverIntegrationTestFiles(root = INTEGRATION_ROOT) {
@@ -25,15 +25,13 @@ export async function discoverIntegrationTestFiles(root = INTEGRATION_ROOT) {
   return files.sort((left, right) => left.localeCompare(right, "en-US"));
 }
 
-export function integrationTestArguments(testFile) {
-  return [
-    "exec",
-    "vitest",
+export function integrationTestCommand(testFile) {
+  return vitestCommand([
     "run",
     "--config",
     "vitest.integration.config.ts",
     testFile,
-  ];
+  ]);
 }
 
 function run(command, argumentsList) {
@@ -61,7 +59,8 @@ export async function runIsolatedIntegrationSuite() {
   for (const [index, relativeFile] of relativeFiles.entries()) {
     const testFile = `tests/integration/${relativeFile}`;
     process.stdout.write(`[integration ${index + 1}/${relativeFiles.length}] ${testFile}\n`);
-    await run(pnpm, integrationTestArguments(testFile));
+    const command = integrationTestCommand(testFile);
+    await run(command.executable, command.arguments);
   }
 }
 

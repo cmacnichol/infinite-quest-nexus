@@ -947,8 +947,11 @@ async function executeLoadedGeneration(
       callCampaignTextProvider(dependencies, provider, job, "story_generation", primaryRequest));
     let validation = await phase("story_validation", async () => {
       const parsed = parseStoryOutput(result.content, storyMemoryDefaults);
-      const firstReason: "output_limit" | "invalid_json" | "invalid_schema" | "mechanics_leak" | null =
+      const firstReason: "invalid_json" | "invalid_schema" | "mechanics_leak" | null =
         !parsed.ok ? parsed.code : null;
+      const validationCode = !parsed.ok && result.outputLimited
+        ? "output_limit"
+        : firstReason;
       const initialValidationErrors = parsed.ok ? [] : parsed.errors;
       const initialAttemptNumber = job.attempts * 2 - 1;
       logger.info({
@@ -957,7 +960,7 @@ async function executeLoadedGeneration(
         storyOperation: "story_generation",
         valid: parsed.ok,
         outputLimited: result.outputLimited,
-        validationCode: firstReason,
+        validationCode,
         validationErrorCount: initialValidationErrors.length,
         attemptNumber: initialAttemptNumber
       });
@@ -985,11 +988,13 @@ async function executeLoadedGeneration(
       return { parsed, firstReason, initialValidationErrors, initialAttemptNumber };
     });
     let { parsed, firstReason, initialValidationErrors, initialAttemptNumber } = validation;
+    let recoveryAttempted = false;
     // A provider can report a length finish after it has delivered a complete
     // structured response.  Accept that response when validation succeeds;
     // an incomplete output remains recoverable rather than being silently
     // replaced with a shorter turn.
     if (firstReason && !result.outputLimited) {
+      recoveryAttempted = true;
       const recoveryReason = firstReason;
       const recoveryKind = recoveryReason === "mechanics_leak"
         ? "mechanics_cleanup"
@@ -1071,7 +1076,9 @@ async function executeLoadedGeneration(
     }
     const validationFailure = "code" in parsed ? parsed : null;
     if (validationFailure) {
-      const code = validationFailure.code || "invalid_schema";
+      const code = result.outputLimited
+        ? "output_limit"
+        : (validationFailure.code || "invalid_schema");
       const messages = validationFailure.errors || ["Story validation failed."];
       assertActiveGenerationUpdate(await repository.markRecoverable({
         ...scope,
@@ -1079,13 +1086,13 @@ async function executeLoadedGeneration(
         providerFinishReason: result.finishReason || null,
         errorCode: code,
         errorMessage: messages.join(" ").slice(0, 4000),
-        recoveryMetadata: { retryable: true, attemptCount: firstReason ? 2 : 1 }
+        recoveryMetadata: { retryable: true, attemptCount: recoveryAttempted ? 2 : 1 }
       }), "saving recovery state");
       logger.warn({
         event: "turn_generation_recoverable",
         ...generationLogContext(job, workerId),
         errorCode: code,
-        attemptCount: firstReason ? 2 : 1,
+        attemptCount: recoveryAttempted ? 2 : 1,
         durationMs: Date.now() - generationStartedAt
       });
       return true;

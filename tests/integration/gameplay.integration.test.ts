@@ -7,7 +7,7 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { readTurnPage } from "../../packages/database/src/play-loop-read-repository.js";
 import { buildServer } from "../../services/api/src/server.js";
 import { createApiWorldCampaignApplication } from "../helpers/runtime-application-fixtures.js";
-import { serverOptions } from "../helpers/build-server-options.js";
+import { legacyStoryImportServerOptions as serverOptions } from "../helpers/build-server-options.js";
 import { createProvider } from "../helpers/provider-application-fixtures.js";
 import { runGenerationJob } from "../helpers/generation-worker-harness.js";
 import { runImageJob } from "../../services/runtime/src/illustration-image-job-adapter.js";
@@ -484,9 +484,9 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     expect(unchangedSync).toMatchObject({ turnWindowMode: "unchanged", turns: null, campaign: { id: campaignId } });
     const initialPayloadBytes = Buffer.byteLength(initialSyncResponse.body);
     const unchangedPayloadBytes = Buffer.byteLength(unchangedSyncResponse.body);
-    // Measured against this deterministic 55-turn fixture after adding the
-    // synchronized turn-control style: 17,176 B initial and 2,283 B unchanged.
-    expect({ initialPayloadBytes, unchangedPayloadBytes }).toEqual({ initialPayloadBytes: 17_176, unchangedPayloadBytes: 2_283 });
+    // Measured against this deterministic 55-turn fixture with the current
+    // synchronized campaign and Chronicle configuration contract.
+    expect({ initialPayloadBytes, unchangedPayloadBytes }).toEqual({ initialPayloadBytes: 18_082, unchangedPayloadBytes: 3_183 });
     expect(unchangedPayloadBytes).toBeLessThan(initialPayloadBytes);
 
     replies.push({ content: validStory("A replacement changes the current history boundary.") });

@@ -4,7 +4,7 @@ import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, type DatabasePool } from "../../packages/database/src/pool.js";
 import { buildServer } from "../../services/api/src/server.js";
-import { serverOptions } from "../helpers/build-server-options.js";
+import { inertStorageServerOptions as serverOptions } from "../helpers/build-server-options.js";
 import { createProviderNetworkPolicy } from "../../packages/security/src/provider-network-policy.js";
 import { createProviderTransport, type ProviderTransport } from "../../packages/story-engine/src/provider-transport.js";
 import { createApiProviderApplicationComposition } from "../../services/runtime/src/provider-application-composition.js";

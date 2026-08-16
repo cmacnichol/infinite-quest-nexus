@@ -30,9 +30,11 @@ import {
 } from "../helpers/illustration-job-fixtures.js";
 import { getCampaignCostSummary } from "../helpers/provider-application-fixtures.js";
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
+import { supportsSecureGeneratedArchiveStaging } from "../../services/api/src/archive-io.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
+const secureGeneratedAssetsIt = it.runIf(supportsSecureGeneratedArchiveStaging());
 const credentialSecret = "synthetic-image-integration-secret";
 const tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 let imageArtifactPayloads = [tinyPng];
@@ -386,7 +388,7 @@ integration("independent illustration pipeline", () => {
     };
   }
 
-  it("does not complete a stale streaming image worker after parent cancellation", async () => {
+  secureGeneratedAssetsIt("does not complete a stale streaming image worker after parent cancellation", async () => {
     const imported = await campaign();
     const generation = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
       action: "Cancel the stale streaming worker.", providerProfileId: textProviderId, idempotencyKey: crypto.randomUUID(),
@@ -429,7 +431,7 @@ integration("independent illustration pipeline", () => {
     expect(await completionWriteCounts(imageJob.rows[0]!.id)).toEqual({ contexts: 0, references: 0, assets: 0 });
   });
 
-  it("does not persist typed completion artifacts after a replacement worker takes the lease", async () => {
+  secureGeneratedAssetsIt("does not persist typed completion artifacts after a replacement worker takes the lease", async () => {
     const imported = await campaign();
     const generation = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
       action: "Fence the replaced image worker.", providerProfileId: textProviderId, idempotencyKey: crypto.randomUUID(),
@@ -967,7 +969,7 @@ integration("independent illustration pipeline", () => {
       .resolves.toMatchObject({ rows: [] });
   });
 
-  it("cancels a streaming image completion that holds its row lock without retaining provisional artwork", async () => {
+  secureGeneratedAssetsIt("cancels a streaming image completion that holds its row lock without retaining provisional artwork", async () => {
     const imported = await campaign();
     const generation = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
       action: "Cancel the streaming image completion.",
@@ -1223,7 +1225,7 @@ integration("independent illustration pipeline", () => {
     expect(memoriesAfter.rows).toEqual(memoriesBefore.rows);
   });
 
-  it("sends the visual reference to AI refinement and appends it once to the provider prompt", async () => {
+  secureGeneratedAssetsIt("sends the visual reference to AI refinement and appends it once to the provider prompt", async () => {
     const imported = await campaign();
     const ownerUserId = await initialOwnerId(pool);
     const privateScratchpad = `PRIVATE_ILLUSTRATION_SCRATCHPAD_${crypto.randomUUID()}`;
@@ -1340,7 +1342,7 @@ integration("independent illustration pipeline", () => {
     }
   });
 
-  it("keeps typed multi-artifact variant provenance with normalized segment asset references", async () => {
+  secureGeneratedAssetsIt("keeps typed multi-artifact variant provenance with normalized segment asset references", async () => {
     const firstArtifact = await sharp({
       create: { width: 2, height: 2, channels: 4, background: "#5d3fd3" }
     }).png().toBuffer();
@@ -1414,7 +1416,7 @@ integration("independent illustration pipeline", () => {
     }
   });
 
-  it("rejects extra provider artifacts for a targeted variant replacement without persistence", async () => {
+  secureGeneratedAssetsIt("rejects extra provider artifacts for a targeted variant replacement without persistence", async () => {
     const firstArtifact = await sharp({
       create: { width: 2, height: 2, channels: 4, background: "#2d5d93" }
     }).png().toBuffer();
@@ -1489,7 +1491,7 @@ integration("independent illustration pipeline", () => {
     }
   });
 
-  it("generates a world cover with the default image provider without campaign cost attribution", async () => {
+  secureGeneratedAssetsIt("generates a world cover with the default image provider without campaign cost attribution", async () => {
     failImages = false;
     // This title is copied into the fiction-only cover prompt. Keep the prompt
     // fixture deterministic: a UUID can rarely contain a mechanics token such
@@ -1537,7 +1539,7 @@ integration("independent illustration pipeline", () => {
     expect(costs.rowCount).toBe(0);
   });
 
-  it("reuses retained generated assets for world covers and turn illustrations", async () => {
+  secureGeneratedAssetsIt("reuses retained generated assets for world covers and turn illustrations", async () => {
     failImages = false;
     const sourceTitle = "Synthetic library source Moonlit Archive";
     const sourceWorld = await createWorld(pool, worldCreateSchema.parse({ title: sourceTitle }));
@@ -1725,7 +1727,7 @@ integration("independent illustration pipeline", () => {
     });
   });
 
-  it("queues after story commit, sends only the fiction prompt, and stores generated bytes", async () => {
+  secureGeneratedAssetsIt("queues after story commit, sends only the fiction prompt, and stores generated bytes", async () => {
     failImages = false;
     const imported = await campaign();
     await generate(imported.campaignId);
@@ -1840,7 +1842,7 @@ integration("independent illustration pipeline", () => {
     });
   });
 
-  it("leaves an accepted story unchanged when its configured image model is incompatible", async () => {
+  secureGeneratedAssetsIt("leaves an accepted story unchanged when its configured image model is incompatible", async () => {
     const imported = await campaign(1);
     await setIllustrationConfig(pool, imported.campaignId, illustrationConfigSchema.parse({
       enabled: true,
@@ -1864,7 +1866,7 @@ integration("independent illustration pipeline", () => {
     expect(await acceptedStorySnapshot(imported.campaignId, storyJob.id)).toEqual(acceptedBefore);
   });
 
-  it("retries an unsuccessful image independently without rerunning or mutating its accepted story", async () => {
+  secureGeneratedAssetsIt("retries an unsuccessful image independently without rerunning or mutating its accepted story", async () => {
     failImages = true;
     try {
       const imported = await campaign(1);
@@ -1892,7 +1894,7 @@ integration("independent illustration pipeline", () => {
     }
   });
 
-  it("exhausts automatic image attempts without retrying narration or mutating its accepted story", async () => {
+  secureGeneratedAssetsIt("exhausts automatic image attempts without retrying narration or mutating its accepted story", async () => {
     failImages = true;
     try {
       const imported = await campaign(2);
@@ -1949,7 +1951,7 @@ integration("independent illustration pipeline", () => {
     }
   });
 
-  it("preserves the accepted story when the independent image endpoint fails", async () => {
+  secureGeneratedAssetsIt("preserves the accepted story when the independent image endpoint fails", async () => {
     failImages = true;
     try {
       const imported = await campaign(1);
@@ -1966,7 +1968,7 @@ integration("independent illustration pipeline", () => {
     }
   });
 
-  it("persists a Sogni workflow ID, resumes polling, and stores the downloaded artifact", async () => {
+  secureGeneratedAssetsIt("persists a Sogni workflow ID, resumes polling, and stores the downloaded artifact", async () => {
     const sogniProviderId = (await createProvider(pool, {
       name: `Synthetic Sogni ${crypto.randomUUID()}`,
       providerType: "sogni",

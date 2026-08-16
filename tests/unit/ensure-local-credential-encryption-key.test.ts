@@ -37,6 +37,13 @@ describe("local credential encryption-key bootstrap", () => {
 
     const key = (await readFile(keyPath, "utf8")).trim();
     expect(key).toMatch(/^[a-f0-9]{64}$/u);
+  });
+
+  it.runIf(process.platform !== "win32")("creates the local key with owner-only POSIX permissions", async () => {
+    const keyPath = await temporaryKeyPath();
+
+    await runBootstrap(keyPath);
+
     expect((await stat(keyPath)).mode & 0o777).toBe(0o600);
   });
 

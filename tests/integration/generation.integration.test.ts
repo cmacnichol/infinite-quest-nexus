@@ -1660,8 +1660,10 @@ integration("durable Story Engine integration", () => {
     const storyPayload = JSON.parse(storyUserMessage?.content || "{}");
     expect(storyPayload.narration_length).toEqual({
       profile: "extended",
-      target_min_words: 1200,
-      target_max_words: 2000
+      preferred_min_words: 1200,
+      preferred_max_words: 2000,
+      policy: "soft_pacing_goal",
+      early_stop_allowed: true
     });
   });
 
@@ -2103,8 +2105,7 @@ integration("durable Story Engine integration", () => {
     const errorSpy = vi.spyOn(logger, "error");
     try {
       replies.push(
-        { content: '{"narration":"First partial', finishReason: "length" },
-        { content: '{"narration":"Second partial', finishReason: "length" }
+        { content: '{"narration":"First partial', finishReason: "length" }
       );
       const job = await queue(imported.campaignId);
       await runGenerationJob(pool, "story-worker-requeued-a", 30, credentialSecret);
@@ -2158,12 +2159,11 @@ integration("durable Story Engine integration", () => {
     expect(requests.length - requestCount).toBe(1);
   });
 
-  it("leaves the accepted ledger unchanged when compact recovery is also truncated", async () => {
+  it("leaves the accepted ledger unchanged when output-limited JSON is truncated", async () => {
     const imported = await campaign();
     const authorityBefore = await generationAuthoritySnapshot(pool, imported.campaignId);
     replies.push(
-      { content: '{"narration":"First partial', finishReason: "length" },
-      { content: '{"narration":"Second partial', finishReason: "length" }
+      { content: '{"narration":"First partial', finishReason: "length" }
     );
     const job = await queue(imported.campaignId);
     await runGenerationJob(pool, "story-worker-d", 30, credentialSecret);
@@ -2456,8 +2456,7 @@ integration("durable Story Engine integration", () => {
         favorable_outcome: "Marker Five becomes active.",
         setback_outcome: "Marker Five remains inactive."
       }) },
-      { content: '{"narration":"First partial', finishReason: "length" },
-      { content: '{"narration":"Second partial', finishReason: "length" }
+      { content: '{"narration":"First partial', finishReason: "length" }
     );
     const job = await queue(imported.campaignId);
     await runGenerationJob(pool, "story-worker-reroll-a", 30, credentialSecret);
