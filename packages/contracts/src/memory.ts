@@ -21,8 +21,17 @@ const safeAuditProviderValueSchema = z.string().trim().min(1).max(500)
   .refine((value) => !/^[A-Za-z][A-Za-z0-9+.-]*:\/\//u.test(value), {
     message: "Provider audit values must not contain an endpoint URI."
   })
+  .refine((value) => !/^\/\//u.test(value), {
+    message: "Provider audit values must not contain a scheme-relative endpoint."
+  })
   .refine((value) => !/^(?:localhost|(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})(?::\d+)?(?:\/|$)/u.test(value), {
     message: "Provider audit values must not contain an endpoint-like host."
+  })
+  .refine((value) => !/^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?::\d+)?(?:\/|$)/u.test(value), {
+    message: "Provider audit values must not contain an IP endpoint."
+  })
+  .refine((value) => !/^\[[0-9A-Fa-f:.]+\](?::\d+)?(?:\/|$)/u.test(value), {
+    message: "Provider audit values must not contain an IP endpoint."
   });
 
 export const CHRONICLE_RETRIEVAL_VERSION = "chronicle-retrieval-v1";

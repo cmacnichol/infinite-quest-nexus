@@ -70,6 +70,20 @@ describe("Chronicle retrieval audit contract", () => {
     }
   });
 
+  it("rejects IP and scheme-relative endpoint model labels", () => {
+    for (const model of [
+      "127.0.0.1:8080/v1",
+      "[::1]:8080/v1",
+      "//provider.example/v1",
+      "//127.0.0.1:8080/v1"
+    ] as const) {
+      expect(chronicleRetrievalAuditSchema.safeParse({
+        ...DEDICATED_CHUNKED_AUDIT,
+        provider: { ...DEDICATED_CHUNKED_AUDIT.provider, model }
+      }).success).toBe(false);
+    }
+  });
+
   it("derives query vector path exactly from live requests and cache hits", () => {
     expect(() => chronicleRetrievalAuditSchema.parse({
       ...DEDICATED_CHUNKED_AUDIT,
