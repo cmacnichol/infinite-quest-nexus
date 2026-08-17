@@ -14,6 +14,7 @@ export const chronicleRetrievalComparisonImplementationSchema = z.enum([
 const safeTelemetryCodeSchema = z.string().min(1).max(200).regex(/^[a-z0-9][a-z0-9_.:-]*$/u);
 const safeFingerprintSchema = z.string().min(1).max(512).regex(/^[A-Za-z0-9_.:-]+$/u);
 const nonnegativeIntegerSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
+const safeAuditProviderValueSchema = z.string().min(1).max(200).regex(/^[A-Za-z0-9][A-Za-z0-9_.:/-]*$/u);
 
 export const CHRONICLE_RETRIEVAL_VERSION = "chronicle-retrieval-v1";
 
@@ -76,6 +77,109 @@ export const chronicleRetrievalRunSchema = z.object({
     });
   }
 });
+
+const chronicleRetrievalAuditProviderSchema = z.discriminatedUnion("resolutionSource", [
+  z.object({
+    resolutionSource: z.literal("none"),
+    resolvedRole: z.null(),
+    providerType: z.null(),
+    model: z.null()
+  }).strict(),
+  z.object({
+    resolutionSource: z.literal("dedicated_embedding"),
+    resolvedRole: z.literal("embedding"),
+    providerType: safeAuditProviderValueSchema,
+    model: safeAuditProviderValueSchema
+  }).strict(),
+  z.object({
+    resolutionSource: z.literal("text_fallback"),
+    resolvedRole: z.literal("text"),
+    providerType: safeAuditProviderValueSchema,
+    model: safeAuditProviderValueSchema
+  }).strict()
+]);
+
+export const chronicleRetrievalAuditSchema = z.object({
+  auditVersion: z.literal("chronicle-retrieval-audit-v1"),
+  configuredImplementation: retrievalImplementationSchema,
+  effectiveImplementation: retrievalImplementationSchema,
+  effectiveMode: z.enum(["semantic_hybrid", "lexical_only"]),
+  fallbackCode: z.enum([
+    "empty_query",
+    "semantic_not_configured",
+    "provider_unavailable",
+    "semantic_retrieval_unavailable",
+    "chunk_index_not_ready",
+    "incompatible_chunk_embeddings"
+  ]).nullable(),
+  provider: chronicleRetrievalAuditProviderSchema,
+  queryVectorPath: z.enum(["none", "cache_only", "provider_only", "cache_and_provider"]),
+  providerCallOutcome: z.enum(["not_attempted", "succeeded", "failed", "mixed"]),
+  queryEmbeddingRequests: nonnegativeIntegerSchema,
+  queryCacheHits: nonnegativeIntegerSchema,
+  queryCacheMisses: nonnegativeIntegerSchema
+}).strict().superRefine((audit, context) => {
+  const expectedQueryVectorPath = audit.queryEmbeddingRequests > 0
+    ? audit.queryCacheHits > 0 ? "cache_and_provider" : "provider_only"
+    : audit.queryCacheHits > 0 ? "cache_only" : "none";
+  if (audit.queryVectorPath !== expectedQueryVectorPath) {
+    context.addIssue({
+      code: "custom",
+      path: ["queryVectorPath"],
+      message: "Query vector path must match the observed request and cache-hit counts."
+    });
+  }
+  if (audit.provider.resolutionSource === "none" && (
+    audit.queryVectorPath !== "none" ||
+    audit.providerCallOutcome !== "not_attempted" ||
+    audit.queryEmbeddingRequests !== 0 ||
+    audit.queryCacheHits !== 0
+  )) {
+    context.addIssue({
+      code: "custom",
+      path: ["provider"],
+      message: "An unresolved provider cannot produce query vectors or live embedding calls."
+    });
+  }
+  if (audit.providerCallOutcome === "not_attempted" && audit.queryEmbeddingRequests !== 0) {
+    context.addIssue({
+      code: "custom",
+      path: ["providerCallOutcome"],
+      message: "A non-attempted provider call cannot have embedding requests."
+    });
+  }
+  if (audit.providerCallOutcome !== "not_attempted" && audit.queryEmbeddingRequests === 0) {
+    context.addIssue({
+      code: "custom",
+      path: ["providerCallOutcome"],
+      message: "An attempted provider call requires at least one embedding request."
+    });
+  }
+  if (audit.providerCallOutcome === "failed" && audit.effectiveMode !== "lexical_only") {
+    context.addIssue({
+      code: "custom",
+      path: ["effectiveMode"],
+      message: "A failed provider call cannot produce semantic retrieval."
+    });
+  }
+  if (audit.effectiveMode === "semantic_hybrid" && (
+    audit.provider.resolutionSource === "none" ||
+    (audit.providerCallOutcome !== "succeeded" &&
+      audit.providerCallOutcome !== "mixed" &&
+      audit.queryCacheHits === 0)
+  )) {
+    context.addIssue({
+      code: "custom",
+      path: ["effectiveMode"],
+      message: "Semantic retrieval requires resolved provider provenance and a successful provider call or cache hit."
+    });
+  }
+});
+
+export function parseStoredChronicleRetrievalAudit(value: unknown): ChronicleRetrievalAudit | null {
+  const parsed = chronicleRetrievalAuditSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
 
 export const chronicleHealthStatusSchema = z.enum([
   "chronicle_available",
@@ -168,6 +272,7 @@ export type ChronicleRetrievalComparisonImplementation = z.infer<typeof chronicl
 export type ChronicleRetrievalCandidate = z.infer<typeof chronicleRetrievalCandidateSchema>;
 export type ChronicleRetrievalComparison = z.infer<typeof chronicleRetrievalComparisonSchema>;
 export type ChronicleRetrievalRun = z.infer<typeof chronicleRetrievalRunSchema>;
+export type ChronicleRetrievalAudit = z.infer<typeof chronicleRetrievalAuditSchema>;
 export type ChronicleHealthStatus = z.infer<typeof chronicleHealthStatusSchema>;
 export type ChronicleHealth = z.infer<typeof chronicleHealthSchema>;
 export type MemoryContextQuery = z.infer<typeof memoryContextQuerySchema>;

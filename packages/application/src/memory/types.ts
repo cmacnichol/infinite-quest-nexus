@@ -1,6 +1,7 @@
 import type {
   CampaignEmbeddingConfig,
   ChronicleHealth,
+  ChronicleRetrievalAudit,
   MemoryContextQuery,
   RetrievalImplementation
 } from "@infinite-quest/contracts";
@@ -58,7 +59,9 @@ export type ChronicleMetricsView = Readonly<{
   }>;
   semanticHealth: ChronicleHealth;
 }>;
-export type ChronicleContextPreview = Readonly<Record<string, unknown>>;
+export type ChronicleContextPreview = Readonly<Record<string, unknown> & {
+  chronicleRetrieval: ChronicleRetrievalAudit;
+}>;
 
 /** Fixed public projection: adapters must keep diagnostics and provider details private. */
 export const MEMORY_PUBLIC_FAILURE_CODE = "memory_unavailable" as const;
