@@ -60,6 +60,21 @@ describe("Chronicle retrieval audit presentation", () => {
     });
   });
 
+  it("does not call a valid chunked lexical fallback semantic retrieval", () => {
+    const audit: ChronicleRetrievalAudit = {
+      ...DEDICATED_CHUNKED_AUDIT,
+      effectiveMode: "lexical_only",
+      fallbackCode: "semantic_retrieval_unavailable",
+      queryVectorPath: "provider_only",
+      providerCallOutcome: "failed",
+      queryEmbeddingRequests: 1,
+      queryCacheHits: 0,
+      queryCacheMisses: 1
+    };
+
+    expect(formatChronicleRetrievalAudit(audit).searchPath).toBe("Chunked lexical retrieval");
+  });
+
   it("distinguishes cache-only query reuse from a mixed cache and provider path", () => {
     const cacheOnly: ChronicleRetrievalAudit = {
       ...DEDICATED_CHUNKED_AUDIT,

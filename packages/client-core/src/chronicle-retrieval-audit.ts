@@ -26,8 +26,9 @@ const unknownPresentation: ChronicleRetrievalAuditPresentation = {
 };
 
 function searchPath(audit: ChronicleRetrievalAudit): string {
-  if (audit.effectiveImplementation === "chunked_hybrid") return "Chunked semantic retrieval";
-  return audit.effectiveMode === "lexical_only" ? "Legacy lexical retrieval" : "Legacy semantic retrieval";
+  const implementation = audit.effectiveImplementation === "chunked_hybrid" ? "Chunked" : "Legacy";
+  const mode = audit.effectiveMode === "lexical_only" ? "lexical" : "semantic";
+  return `${implementation} ${mode} retrieval`;
 }
 
 function provider(audit: ChronicleRetrievalAudit): string {
