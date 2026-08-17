@@ -41,7 +41,6 @@ import {
   createNexusApiClient,
   createNoopSessionPort
 } from "../../packages/client-web/src/index.js";
-import { LEXICAL_NO_PROVIDER_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -720,6 +719,24 @@ integration("durable Story Engine integration", () => {
 
   it("stages an idempotent latest-turn replacement and swaps it only after validated commit", async () => {
     const imported = await campaign();
+    const expectedReplacementAudit = {
+      auditVersion: "chronicle-retrieval-audit-v1",
+      configuredImplementation: "legacy_hybrid",
+      effectiveImplementation: "legacy_hybrid",
+      effectiveMode: "lexical_only",
+      fallbackCode: "semantic_retrieval_unavailable",
+      provider: {
+        resolutionSource: "text_fallback",
+        resolvedRole: "text",
+        providerType: "openai_compatible",
+        model: "deterministic-mock"
+      },
+      queryVectorPath: "provider_only",
+      providerCallOutcome: "failed",
+      queryEmbeddingRequests: 1,
+      queryCacheHits: 0,
+      queryCacheMisses: 1
+    };
     const before = await pool.query<{
       id: string;
       narration: string;
@@ -732,6 +749,10 @@ integration("durable Story Engine integration", () => {
       [imported.campaignId]
     );
     const originalAudit = before.rows[0]?.model_metadata.chronicleRetrieval ?? null;
+    const retainedTurn = await pool.query<{ id: string }>(
+      "SELECT id FROM turns WHERE campaign_id = $1 AND turn_number = 1",
+      [imported.campaignId]
+    );
     const request = replacementRequest("Take the eastern path instead.");
     const job = await enqueueLatestReplacement(pool, imported.campaignId, request);
     const replay = await enqueueLatestReplacement(pool, imported.campaignId, request);
@@ -776,7 +797,24 @@ integration("durable Story Engine integration", () => {
     });
     expect(after.rows[0]?.narration).not.toBe(before.rows[0]?.narration);
     expect(after.rows[0]?.id).not.toBe(before.rows[0]?.id);
-    expect(after.rows[0]?.model_metadata.chronicleRetrieval).toStrictEqual(LEXICAL_NO_PROVIDER_AUDIT);
+    expect(after.rows[0]?.model_metadata.chronicleRetrieval).toStrictEqual(expectedReplacementAudit);
+    const acceptedTurns = await pool.query<{
+      id: string;
+      turn_number: number;
+      model_metadata: Record<string, unknown>;
+    }>(
+      "SELECT id, turn_number, model_metadata FROM turns WHERE campaign_id = $1 ORDER BY turn_number",
+      [imported.campaignId]
+    );
+    expect(acceptedTurns.rows).toEqual([
+      expect.objectContaining({ id: retainedTurn.rows[0]?.id, turn_number: 1 }),
+      expect.objectContaining({
+        id: after.rows[0]?.id,
+        turn_number: 2,
+        model_metadata: expect.objectContaining({ chronicleRetrieval: expectedReplacementAudit })
+      })
+    ]);
+    expect(acceptedTurns.rows.map((turn) => turn.id)).not.toContain(before.rows[0]?.id);
     expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed", operationKind: "replace_latest" });
 
     const replacementMemory = await pool.query<{ turn_id: string; content: string }>(

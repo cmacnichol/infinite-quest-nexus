@@ -25,6 +25,7 @@ import {
 import * as repositoryModule from "../../packages/database/src/campaign-transfer-character-repository.js";
 import { createPostgresWorldRepositoryAdapters } from "../../packages/database/src/world-repository.js";
 import { createPostgresWorldCampaignTransactionPort } from "../../packages/database/src/world-campaign-transaction.js";
+import { readTurnPage } from "../../packages/database/src/play-loop-read-repository.js";
 import { memoryGeneration } from "../helpers/memory-applications.js";
 import { DEDICATED_CHUNKED_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
 
@@ -753,6 +754,12 @@ integration("campaign transfer and character PostgreSQL adapters", () => {
         }
       }
     ]);
+    await expect(readTurnPage(pool, ownerUserId, committed.targetCampaignId, undefined, 10)).resolves.toMatchObject({
+      turns: [
+        { turnNumber: 1, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT },
+        { turnNumber: 2, chronicleRetrieval: null }
+      ]
+    });
     expect(committed).toMatchObject({
       sourceCampaignId: source.campaign.id,
       targetWorldVersionId: target.worldVersionId,

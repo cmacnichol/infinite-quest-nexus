@@ -12,6 +12,7 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
 import { canonicalArchiveJson } from "../../packages/contracts/src/archives.js";
 import { calculateContentFingerprint } from "../../packages/contracts/src/archives-node.js";
+import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import {
   inspectArchive,
   readVerifiedEntry,
@@ -29,6 +30,7 @@ import { buildServer } from "../../services/api/src/server.js";
 import { inertStorageServerOptions, legacyStoryImportServerOptions, serverOptions } from "../helpers/build-server-options.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import { DEDICATED_CHUNKED_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
+import { importLegacyStory } from "../helpers/memory-aware-services.js";
 
 const archiveCleanupTestState = vi.hoisted(() => ({
   failOncePaths: new Set<string>()
@@ -502,6 +504,27 @@ integration("campaign archive export", () => {
       await pool.query("DELETE FROM chronicle_memory_chunks WHERE campaign_id=$1", [campaignId]);
       await pool.query("DELETE FROM provider_profiles WHERE id=$1", [provider.id]);
     }
+  });
+
+  it("keeps retrieval provenance local when portable payloads are re-imported", async () => {
+    const snapshot = await loadCampaignArchiveExportSnapshot(pool, ownerUserId, campaignId);
+    const portableCampaign = structuredClone(storyImportRequestSchema.parse({
+      sourceName: "portable-retrieval-audit.source",
+      story: campaignArchivePayloads(snapshot).campaign
+    }).story);
+    if (!portableCampaign.campaign) throw new Error("Portable campaign export must contain campaign metadata.");
+    portableCampaign.campaign.title = `Portable retrieval audit ${randomUUID()}`;
+    const serialized = canonicalArchiveJson(portableCampaign);
+    expect(serialized).not.toContain("chronicleRetrieval");
+    expect(serialized).not.toContain("must-not-export");
+
+    const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({
+      sourceName: `portable-retrieval-audit-${randomUUID()}.story`,
+      story: portableCampaign
+    }));
+    await expect(readTurnPage(pool, ownerUserId, imported.campaignId, undefined, 10)).resolves.toMatchObject({
+      turns: [{ chronicleRetrieval: null }]
+    });
   });
 
   secureGeneratedStagingIt("[secure generated staging] exports only the selected campaign and pinned world version as a deterministic manifest archive", async () => {

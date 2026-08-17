@@ -166,6 +166,15 @@ describe("Task 14b Chronicle inventory", () => {
     expect(docs.retrievalAudit).toContain("[ADR 0029](../architecture/0029-chronicle-turn-retrieval-audit.md)");
     expect(docs.retrievalAudit).toContain("[implementation plan](../superpowers/plans/2026-08-16-chronicle-turn-retrieval-audit.md)");
     expect(docs.retrievalAudit).toContain("Operational telemetry retention is not turn-history retention.");
+    expect(docs.retrievalAudit).toContain("## Approved implementation");
+    expect(docs.retrievalAudit).toContain("Historical research below is superseded where it conflicts with ADR 0029.");
+    expect(docs.retrievalAudit).toContain("The accepted-turn audit contains only the approved safe provider labels and");
+    expect(docs.retrievalAudit).toContain("never a provider account identifier, endpoint, credential, or raw retrieval");
+    expect(docs.retrievalAudit).not.toContain("providerProfileId");
+    expect(docs.retrievalAudit).not.toContain("provider profile ID");
+    expect(docs.retrievalAudit).not.toContain("fingerprint");
+    expect(docs.retrievalAudit).not.toContain("## Recommended audit contract");
+    expect(docs.retrievalAudit).not.toContain("## Proposed implementation sequence");
     expect(docs.architectureIndex).toContain("[ADR 0029: Chronicle turn retrieval audits are versioned, atomic provenance](./0029-chronicle-turn-retrieval-audit.md)");
   });
 });
