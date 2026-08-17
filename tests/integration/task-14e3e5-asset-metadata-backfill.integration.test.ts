@@ -12,6 +12,7 @@ import {
   type DatabasePool
 } from "../../packages/database/src/pool.js";
 import { createPostgresAssetMetadataBackfillExecutorRepository } from "../../packages/database/src/asset-metadata-backfill-executor-repository.js";
+import { supportsSecureGeneratedArchiveStaging } from "../../services/api/src/archive-io.js";
 import { createAssetImportStorageComposition } from "../../services/runtime/src/asset-import-composition.js";
 import { createPrivateAssetMetadataBackfillComposition } from "../../services/runtime/src/private-asset-metadata-backfill-composition.js";
 import { normalizePrivateImageArtifact } from "../../services/runtime/src/private-image-normalization.js";
@@ -34,7 +35,7 @@ vi.mock("../../services/runtime/src/private-image-normalization.js", async (impo
 });
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
-const integration = databaseUrl ? describe : describe.skip;
+const integration = databaseUrl && supportsSecureGeneratedArchiveStaging() ? describe : describe.skip;
 
 integration("Task 14e3e5 private asset metadata backfill", () => {
   let pool: DatabasePool;

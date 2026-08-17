@@ -10,7 +10,14 @@ import {
   waitForDatabaseMigrations
 } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, type DatabasePool } from "../../packages/database/src/pool.js";
+import {
+  createPostgresChronicleChunkBatchPort,
+  createPostgresChronicleChunkJobStatePort,
+  createPostgresChronicleChunkParentPort,
+  enqueuePostgresChronicleChunkIndex
+} from "../../packages/database/src/chronicle-chunk-repository.js";
 import { dropTestDatabaseWhenIdle } from "./database-test-helpers.js";
+import { snapshotTurnRows } from "../helpers/turn-row-snapshot.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -1206,7 +1213,15 @@ integration("standard database migration runner", () => {
         "0066_portable_normalized_asset_publications",
         "0067_asset_metadata_backfill_executor",
         "0068_portable_legacy_story_create_world",
-        "0069_import_progress_status"
+        "0069_import_progress_status",
+        "0070_turn_narration_corrections",
+        "0071_world_share_links",
+        "0072_chronicle_memory_chunks",
+        "0073_chronicle_chunk_job_fencing",
+        "0074_chronicle_retrieval_observability",
+        "0075_chronicle_query_embedding_cache",
+        "0076_chronicle_chunk_skip_reasons",
+        "0077_chronicle_chunk_processed_signature"
       ]);
 
       const scrubbed = await isolatedPool.query<{ technical_metadata: Record<string, unknown> }>(
@@ -1568,6 +1583,682 @@ integration("standard database migration runner", () => {
       if (isolatedPool) await isolatedPool.end();
       await dropTestDatabaseWhenIdle(pool, databaseName);
       await rm(migrationDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("adds isolated Chronicle chunks without changing accepted turns", async () => {
+    const migrationName = "0072_chronicle_memory_chunks";
+    const fencingMigrationName = "0073_chronicle_chunk_job_fencing";
+    const databaseName = `infinitequest_chronicle_chunks_${crypto.randomUUID().replaceAll("-", "")}`;
+    const databaseUrlValue = new URL(databaseUrl!);
+    databaseUrlValue.pathname = `/${databaseName}`;
+    const migrationDirectory = await mkdtemp(join(tmpdir(), "infinitequest-chronicle-chunks-"));
+    let isolatedPool: DatabasePool | null = null;
+    try {
+      await pool.query(`CREATE DATABASE ${databaseName}`);
+      for (const file of await readdir(resolve("database/migrations"))) {
+        if (file.endsWith(".sql") && file <= "0071_world_share_links.sql") {
+          await copyFile(join(resolve("database/migrations"), file), join(migrationDirectory, file));
+        }
+      }
+      isolatedPool = createDatabasePool(databaseUrlValue.toString(), 2);
+      await migrateDatabase(isolatedPool, migrationDirectory);
+
+      const owner = await isolatedPool.query<{ id: string }>("SELECT id FROM users WHERE system_key = 'initial-owner'");
+      const ownerUserId = owner.rows[0]!.id;
+      const otherOwner = await isolatedPool.query<{ id: string }>(
+        "INSERT INTO users (system_key, display_name) VALUES ('chunk-other-owner', 'Chunk Other Owner') RETURNING id"
+      );
+      const firstWorld = await isolatedPool.query<{ id: string }>(
+        "INSERT INTO worlds (owner_user_id, title) VALUES ($1, 'Chunk World One') RETURNING id",
+        [ownerUserId]
+      );
+      const secondWorld = await isolatedPool.query<{ id: string }>(
+        "INSERT INTO worlds (owner_user_id, title) VALUES ($1, 'Chunk World Two') RETURNING id",
+        [ownerUserId]
+      );
+      const firstVersion = await isolatedPool.query<{ id: string }>(
+        `INSERT INTO world_versions (world_id, owner_user_id, version_number, content)
+         VALUES ($1, $2, 1, '{"schemaVersion":2}'::jsonb) RETURNING id`,
+        [firstWorld.rows[0]!.id, ownerUserId]
+      );
+      const secondVersion = await isolatedPool.query<{ id: string }>(
+        `INSERT INTO world_versions (world_id, owner_user_id, version_number, content)
+         VALUES ($1, $2, 1, '{"schemaVersion":2}'::jsonb) RETURNING id`,
+        [secondWorld.rows[0]!.id, ownerUserId]
+      );
+      const firstCampaign = await isolatedPool.query<{ id: string }>(
+        "INSERT INTO campaigns (owner_user_id, world_version_id, title) VALUES ($1, $2, 'Chunk Campaign One') RETURNING id",
+        [ownerUserId, firstVersion.rows[0]!.id]
+      );
+      const secondCampaign = await isolatedPool.query<{ id: string }>(
+        "INSERT INTO campaigns (owner_user_id, world_version_id, title) VALUES ($1, $2, 'Chunk Campaign Two') RETURNING id",
+        [ownerUserId, secondVersion.rows[0]!.id]
+      );
+      await isolatedPool.query(
+        `INSERT INTO turns (owner_user_id, campaign_id, turn_number, action, narration, choices, state_snapshot_private, model_metadata, import_metadata)
+         VALUES ($1, $2, 1, 'Listen', 'The lantern flickers.', '[{"id":"choice-1"}]'::jsonb, '{"place":"bridge"}'::jsonb, '{"model":"fixture"}'::jsonb, '{"source":"fixture"}'::jsonb),
+                ($1, $2, 2, 'Cross', 'The bridge holds.', '[]'::jsonb, '{"place":"far-bank"}'::jsonb, '{"model":"fixture"}'::jsonb, '{"source":"fixture"}'::jsonb)`,
+        [ownerUserId, firstCampaign.rows[0]!.id]
+      );
+      const parentMemory = await isolatedPool.query<{ id: string }>(
+        `INSERT INTO chronicle_memories (
+           owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content, token_estimate, metadata
+         ) VALUES ($1, $2, $3, 'campaign_summary', 2, 'The bridge is safe.', 5, '{"fixture":"parent"}'::jsonb)
+         RETURNING id`,
+        [ownerUserId, firstCampaign.rows[0]!.id, firstVersion.rows[0]!.id]
+      );
+      const embeddingProvider = await isolatedPool.query<{ id: string }>(
+        `INSERT INTO provider_profiles (owner_user_id, name, provider_type, provider_role, base_url, default_model)
+         VALUES ($1, 'Chunk embedding provider', 'openai_compatible', 'embedding', 'http://example.test', 'chunk-model')
+         RETURNING id`,
+        [ownerUserId]
+      );
+      await isolatedPool.query(
+        `INSERT INTO campaign_memory_configs (
+           campaign_id, owner_user_id, embedding_enabled, embedding_provider_profile_id, embedding_model
+         ) VALUES ($1, $2, true, $3, 'chunk-model')`,
+        [firstCampaign.rows[0]!.id, ownerUserId, embeddingProvider.rows[0]!.id]
+      );
+      const beforeTurns = await snapshotTurnRows(isolatedPool, ownerUserId, firstCampaign.rows[0]!.id);
+      const beforeTurnColumns = await isolatedPool.query<{
+        column_name: string;
+        data_type: string;
+        is_nullable: string;
+        column_default: string | null;
+      }>(
+        `SELECT column_name, data_type, is_nullable, column_default
+           FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = 'turns'
+          ORDER BY ordinal_position`
+      );
+      const beforeConstraints = await isolatedPool.query<{
+        table_name: string;
+        constraint_name: string;
+        definition: string;
+      }>(
+        `SELECT conrelid::regclass::text AS table_name, conname AS constraint_name, pg_get_constraintdef(oid) AS definition
+           FROM pg_constraint
+          WHERE conrelid IN ('chronicle_memories'::regclass, 'campaign_memory_configs'::regclass)
+          ORDER BY conrelid::regclass::text, conname`
+      );
+
+      await copyFile(
+        resolve(`database/migrations/${migrationName}.sql`),
+        join(migrationDirectory, `${migrationName}.sql`)
+      );
+      await expect(migrateDatabase(isolatedPool, migrationDirectory)).resolves.toEqual([migrationName]);
+
+      await expect(isolatedPool.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns
+          WHERE table_schema='public' AND table_name='chronicle_chunk_jobs'
+            AND column_name IN ('lease_token','work_signature')`
+      )).resolves.toMatchObject({ rows: [] });
+      const legacyClaim = await isolatedPool.query<{ id: string; work_version: string }>(
+        `UPDATE chronicle_chunk_jobs
+            SET status='running',lease_owner='legacy-worker',
+                lease_expires_at=clock_timestamp()+interval '5 minutes',
+                progress='{"processedParents":1}'::jsonb
+          WHERE campaign_id=$1
+          RETURNING id,work_version::text`,
+        [firstCampaign.rows[0]!.id]
+      );
+      expect(legacyClaim.rows).toHaveLength(1);
+      const parentContentHash = createHash("sha256")
+        .update("The bridge is safe.", "utf8")
+        .digest("hex");
+      const expectedWorkSignature = createHash("sha256")
+        .update(`${firstVersion.rows[0]!.id}\x1f2:${parentMemory.rows[0]!.id}:${parentContentHash}`, "utf8")
+        .digest("hex");
+
+      await copyFile(
+        resolve(`database/migrations/${fencingMigrationName}.sql`),
+        join(migrationDirectory, `${fencingMigrationName}.sql`)
+      );
+      await expect(migrateDatabase(isolatedPool, migrationDirectory)).resolves.toEqual([fencingMigrationName]);
+      await expect(isolatedPool.query<{
+        status: string;
+        work_version: string;
+        lease_owner: string | null;
+        lease_token: string | null;
+        lease_expires_at: string | null;
+        progress: Record<string, unknown>;
+        work_signature: string;
+      }>(
+        `SELECT status,work_version::text,lease_owner,lease_token,lease_expires_at,progress,work_signature
+           FROM chronicle_chunk_jobs WHERE id=$1`,
+        [legacyClaim.rows[0]!.id]
+      )).resolves.toMatchObject({ rows: [{
+        status: "queued",
+        work_version: "2",
+        lease_owner: null,
+        lease_token: null,
+        lease_expires_at: null,
+        progress: {},
+        work_signature: expectedWorkSignature
+      }] });
+
+      expect(await snapshotTurnRows(isolatedPool, ownerUserId, firstCampaign.rows[0]!.id)).toEqual(beforeTurns);
+      await expect(isolatedPool.query(
+        `SELECT column_name, data_type, is_nullable, column_default
+           FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = 'turns'
+          ORDER BY ordinal_position`
+      )).resolves.toEqual(beforeTurnColumns);
+
+      const retrievalColumns = await isolatedPool.query<{
+        column_name: string;
+        column_default: string | null;
+        is_nullable: string;
+      }>(
+        `SELECT column_name, column_default, is_nullable
+           FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND table_name = 'campaign_memory_configs'
+            AND column_name IN ('retrieval_implementation', 'retrieval_shadow_enabled')
+          ORDER BY column_name`
+      );
+      expect(retrievalColumns.rows).toEqual([
+        {
+          column_name: "retrieval_implementation",
+          column_default: "'legacy_hybrid'::text",
+          is_nullable: "NO"
+        },
+        {
+          column_name: "retrieval_shadow_enabled",
+          column_default: "false",
+          is_nullable: "NO"
+        }
+      ]);
+      await expect(isolatedPool.query<{ retrieval_implementation: string; retrieval_shadow_enabled: boolean }>(
+        `UPDATE campaign_memory_configs
+            SET retrieval_implementation = 'chunked_hybrid', retrieval_shadow_enabled = true
+          WHERE campaign_id = $1
+          RETURNING retrieval_implementation, retrieval_shadow_enabled`,
+        [firstCampaign.rows[0]!.id]
+      )).resolves.toMatchObject({
+        rows: [{ retrieval_implementation: "chunked_hybrid", retrieval_shadow_enabled: true }]
+      });
+      await expect(isolatedPool.query(
+        "UPDATE campaign_memory_configs SET retrieval_implementation = 'unsupported' WHERE campaign_id = $1",
+        [firstCampaign.rows[0]!.id]
+      )).rejects.toMatchObject({ code: "23514" });
+
+      const generatedColumns = await isolatedPool.query<{
+        table_name: string;
+        column_name: string;
+        data_type: string;
+        is_generated: string;
+      }>(
+        `SELECT table_name, column_name, data_type, is_generated
+           FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND (table_name = 'chronicle_memories' AND column_name = 'content_hash'
+              OR table_name = 'chronicle_memory_chunks' AND column_name IN ('content_hash', 'search_document'))
+          ORDER BY table_name, column_name`
+      );
+      expect(generatedColumns.rows).toEqual([
+        { table_name: "chronicle_memories", column_name: "content_hash", data_type: "text", is_generated: "ALWAYS" },
+        { table_name: "chronicle_memory_chunks", column_name: "content_hash", data_type: "text", is_generated: "ALWAYS" },
+        { table_name: "chronicle_memory_chunks", column_name: "search_document", data_type: "tsvector", is_generated: "ALWAYS" }
+      ]);
+      await expect(isolatedPool.query<{ content_hash: string }>(
+        "SELECT content_hash FROM chronicle_memories WHERE id = $1",
+        [parentMemory.rows[0]!.id]
+      )).resolves.toMatchObject({
+        rows: [{ content_hash: createHash("sha256").update("The bridge is safe.", "utf8").digest("hex") }]
+      });
+
+      const chunkColumns = await isolatedPool.query<{ column_name: string; column_default: string | null; is_nullable: string }>(
+        `SELECT column_name, column_default, is_nullable
+           FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = 'chronicle_memory_chunks'
+          ORDER BY ordinal_position`
+      );
+      expect(chunkColumns.rows.map((row) => row.column_name)).toEqual([
+        "id", "owner_user_id", "campaign_id", "world_version_id", "parent_memory_id", "parent_content_hash",
+        "chunking_protocol_version", "chunk_ordinal", "chunk_kind", "content", "content_hash", "source_start_offset",
+        "source_end_offset", "token_estimate", "entities", "entity_ids", "metadata", "embedding", "embedding_status",
+        "embedding_skip_reason", "embedding_provider_profile_id", "embedding_model", "embedding_dimensions",
+        "embedding_protocol_version", "embedding_provider_fingerprint", "embedding_content_hash", "embedding_updated_at",
+        "search_document", "created_at", "updated_at"
+      ]);
+      expect(chunkColumns.rows.find((row) => row.column_name === "embedding_status")).toMatchObject({
+        column_default: "'pending'::text", is_nullable: "NO"
+      });
+
+      const jobColumns = await isolatedPool.query<{ column_name: string; column_default: string | null; is_nullable: string }>(
+        `SELECT column_name, column_default, is_nullable
+           FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = 'chronicle_chunk_jobs'
+          ORDER BY ordinal_position`
+      );
+      expect(jobColumns.rows.map((row) => row.column_name)).toEqual([
+        "id", "owner_user_id", "campaign_id", "job_type", "status", "attempts", "work_version", "lease_owner",
+        "lease_expires_at", "progress", "error_message", "created_at", "updated_at", "completed_at", "lease_token",
+        "work_signature"
+      ]);
+      expect(jobColumns.rows.find((row) => row.column_name === "job_type")).toMatchObject({
+        column_default: "'index_memory_chunks_v2'::text", is_nullable: "NO"
+      });
+      expect(jobColumns.rows.find((row) => row.column_name === "work_signature")).toMatchObject({
+        is_nullable: "NO"
+      });
+
+      const constraints = await isolatedPool.query<{ table_name: string; constraint_name: string; definition: string }>(
+        `SELECT conrelid::regclass::text AS table_name, conname AS constraint_name, pg_get_constraintdef(oid) AS definition
+           FROM pg_constraint
+          WHERE conrelid IN (
+            'chronicle_memories'::regclass,
+            'campaign_memory_configs'::regclass,
+            'chronicle_memory_chunks'::regclass,
+            'chronicle_chunk_jobs'::regclass
+          )
+          ORDER BY conrelid::regclass::text, conname`
+      );
+      const beforeConstraintKeys = new Set(beforeConstraints.rows.map((row) => `${row.table_name}:${row.constraint_name}`));
+      const migrationConstraints = constraints.rows.filter(
+        (row) => !beforeConstraintKeys.has(`${row.table_name}:${row.constraint_name}`)
+      );
+      const expectedNotNullConstraints = (tableName: string, columns: readonly string[]) => columns.map((columnName) => ({
+        table_name: tableName,
+        constraint_name: `${tableName}_${columnName}_not_null`,
+        definition: `NOT NULL ${columnName}`
+      }));
+      const expectedMigrationConstraints = [
+        {
+          table_name: "campaign_memory_configs",
+          constraint_name: "campaign_memory_configs_retrieval_implementation_check",
+          definition: "CHECK ((retrieval_implementation = ANY (ARRAY['legacy_hybrid'::text, 'chunked_hybrid'::text])))"
+        },
+        ...expectedNotNullConstraints("campaign_memory_configs", [
+          "retrieval_implementation", "retrieval_shadow_enabled"
+        ]),
+        {
+          table_name: "chronicle_memories",
+          constraint_name: "chronicle_memories_chunk_parent_scope_unique",
+          definition: "UNIQUE (id, owner_user_id, campaign_id, world_version_id)"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_campaign_id_owner_user_id_fkey",
+          definition: "FOREIGN KEY (campaign_id, owner_user_id) REFERENCES campaigns(id, owner_user_id) ON DELETE CASCADE"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_check",
+          definition: "CHECK ((source_end_offset >= source_start_offset))"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_chunk_kind_check",
+          definition: "CHECK ((chunk_kind = ANY (ARRAY['turn_action'::text, 'turn_narration'::text, 'legacy_summary'::text, 'campaign_summary'::text, 'canonical_fact'::text, 'open_thread'::text])))"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_chunk_ordinal_check",
+          definition: "CHECK ((chunk_ordinal >= 0))"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_chunking_protocol_version_check",
+          definition: "CHECK (((length(btrim(chunking_protocol_version)) >= 1) AND (length(btrim(chunking_protocol_version)) <= 200)))"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_embedding_dimensions_check",
+          definition: "CHECK ((embedding_dimensions > 0))"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_embedding_metadata_check",
+          definition: "CHECK ((((embedding_status = 'pending'::text) AND (embedding IS NULL) AND (embedding_skip_reason IS NULL) AND (embedding_provider_profile_id IS NULL) AND (embedding_model IS NULL) AND (embedding_dimensions IS NULL) AND (embedding_protocol_version IS NULL) AND (embedding_provider_fingerprint IS NULL) AND (embedding_content_hash IS NULL) AND (embedding_updated_at IS NULL)) OR ((embedding_status = 'embedded'::text) AND (embedding IS NOT NULL) AND (embedding_skip_reason IS NULL) AND (embedding_provider_profile_id IS NOT NULL) AND (embedding_model IS NOT NULL) AND (embedding_dimensions IS NOT NULL) AND (embedding_protocol_version IS NOT NULL) AND (embedding_provider_fingerprint IS NOT NULL) AND (embedding_content_hash = content_hash) AND (embedding_updated_at IS NOT NULL)) OR ((embedding_status = 'skipped'::text) AND (embedding IS NULL) AND (embedding_skip_reason IS NOT NULL) AND (embedding_provider_profile_id IS NULL) AND (embedding_model IS NULL) AND (embedding_dimensions IS NULL) AND (embedding_protocol_version IS NULL) AND (embedding_provider_fingerprint IS NULL) AND (embedding_content_hash IS NULL) AND (embedding_updated_at IS NULL))))"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_embedding_provider_profile_id_owne_fkey",
+          definition: "FOREIGN KEY (embedding_provider_profile_id, owner_user_id) REFERENCES provider_profiles(id, owner_user_id)"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_embedding_skip_reason_check",
+          definition: "CHECK (((embedding_skip_reason IS NULL) OR ((length(btrim(embedding_skip_reason)) >= 1) AND (length(btrim(embedding_skip_reason)) <= 512))))"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_embedding_status_check",
+          definition: "CHECK ((embedding_status = ANY (ARRAY['pending'::text, 'embedded'::text, 'skipped'::text])))"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_parent_content_hash_check",
+          definition: "CHECK ((parent_content_hash ~ '^[0-9a-f]{64}$'::text))"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_parent_memory_id_owner_user_id_cam_fkey",
+          definition: "FOREIGN KEY (parent_memory_id, owner_user_id, campaign_id, world_version_id) REFERENCES chronicle_memories(id, owner_user_id, campaign_id, world_version_id) ON DELETE CASCADE"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_parent_version_ordinal_key",
+          definition: "UNIQUE (parent_memory_id, parent_content_hash, chunking_protocol_version, chunk_ordinal)"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_pkey",
+          definition: "PRIMARY KEY (id)"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_source_start_offset_check",
+          definition: "CHECK ((source_start_offset >= 0))"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_token_estimate_check",
+          definition: "CHECK ((token_estimate >= 0))"
+        },
+        {
+          table_name: "chronicle_memory_chunks",
+          constraint_name: "chronicle_memory_chunks_world_version_id_owner_user_id_fkey",
+          definition: "FOREIGN KEY (world_version_id, owner_user_id) REFERENCES world_versions(id, owner_user_id)"
+        },
+        ...expectedNotNullConstraints("chronicle_memory_chunks", [
+          "id", "owner_user_id", "campaign_id", "world_version_id", "parent_memory_id", "parent_content_hash",
+          "chunking_protocol_version", "chunk_ordinal", "chunk_kind", "content", "source_start_offset",
+          "source_end_offset", "token_estimate", "entities", "entity_ids", "metadata", "embedding_status",
+          "created_at", "updated_at"
+        ]),
+        {
+          table_name: "chronicle_chunk_jobs",
+          constraint_name: "chronicle_chunk_jobs_attempts_check",
+          definition: "CHECK ((attempts >= 0))"
+        },
+        {
+          table_name: "chronicle_chunk_jobs",
+          constraint_name: "chronicle_chunk_jobs_campaign_id_owner_user_id_fkey",
+          definition: "FOREIGN KEY (campaign_id, owner_user_id) REFERENCES campaigns(id, owner_user_id) ON DELETE CASCADE"
+        },
+        {
+          table_name: "chronicle_chunk_jobs",
+          constraint_name: "chronicle_chunk_jobs_completed_check",
+          definition: "CHECK ((((status = 'completed'::text) AND (completed_at IS NOT NULL)) OR ((status <> 'completed'::text) AND (completed_at IS NULL))))"
+        },
+        {
+          table_name: "chronicle_chunk_jobs",
+          constraint_name: "chronicle_chunk_jobs_job_type_check",
+          definition: "CHECK ((job_type = 'index_memory_chunks_v2'::text))"
+        },
+        {
+          table_name: "chronicle_chunk_jobs",
+          constraint_name: "chronicle_chunk_jobs_lease_check",
+          definition: "CHECK ((((status = 'running'::text) AND (lease_owner IS NOT NULL) AND (btrim(lease_owner) <> ''::text) AND (lease_token IS NOT NULL) AND (lease_expires_at IS NOT NULL)) OR ((status <> 'running'::text) AND (lease_owner IS NULL) AND (lease_token IS NULL) AND (lease_expires_at IS NULL))))"
+        },
+        {
+          table_name: "chronicle_chunk_jobs",
+          constraint_name: "chronicle_chunk_jobs_pkey",
+          definition: "PRIMARY KEY (id)"
+        },
+        {
+          table_name: "chronicle_chunk_jobs",
+          constraint_name: "chronicle_chunk_jobs_status_check",
+          definition: "CHECK ((status = ANY (ARRAY['queued'::text, 'running'::text, 'completed'::text, 'failed'::text])))"
+        },
+        {
+          table_name: "chronicle_chunk_jobs",
+          constraint_name: "chronicle_chunk_jobs_work_signature_check",
+          definition: "CHECK ((work_signature ~ '^[0-9a-f]{64}$'::text))"
+        },
+        {
+          table_name: "chronicle_chunk_jobs",
+          constraint_name: "chronicle_chunk_jobs_work_version_check",
+          definition: "CHECK ((work_version > 0))"
+        },
+        ...expectedNotNullConstraints("chronicle_chunk_jobs", [
+          "id", "owner_user_id", "campaign_id", "job_type", "status", "attempts", "work_version",
+          "work_signature", "progress", "created_at", "updated_at"
+        ])
+      ];
+      const compareConstraints = (left: { table_name: string; constraint_name: string }, right: { table_name: string; constraint_name: string }) =>
+        `${left.table_name}:${left.constraint_name}`.localeCompare(`${right.table_name}:${right.constraint_name}`);
+      expect([...migrationConstraints].sort(compareConstraints)).toEqual(
+        [...expectedMigrationConstraints].sort(compareConstraints)
+      );
+
+      const indexes = await isolatedPool.query<{ indexname: string; indexdef: string }>(
+        `SELECT indexname, indexdef
+           FROM pg_indexes
+          WHERE schemaname = 'public' AND tablename IN ('chronicle_memory_chunks', 'chronicle_chunk_jobs')
+          ORDER BY indexname`
+      );
+      expect(indexes.rows.map((row) => row.indexname)).toEqual([
+        "chronicle_chunk_jobs_claim_idx",
+        "chronicle_chunk_jobs_one_active_campaign_idx",
+        "chronicle_chunk_jobs_pkey",
+        "chronicle_chunk_jobs_running_lease_idx",
+        "chronicle_memory_chunks_embedded_scope_idx",
+        "chronicle_memory_chunks_entity_ids_idx",
+        "chronicle_memory_chunks_parent_version_ordinal_key",
+        "chronicle_memory_chunks_pkey",
+        "chronicle_memory_chunks_scope_idx",
+        "chronicle_memory_chunks_search_idx"
+      ]);
+      expect(indexes.rows.find((row) => row.indexname === "chronicle_memory_chunks_search_idx")?.indexdef)
+        .toMatch(/USING gin \(search_document\)/i);
+      expect(indexes.rows.find((row) => row.indexname === "chronicle_memory_chunks_entity_ids_idx")?.indexdef)
+        .toMatch(/USING gin \(entity_ids\)/i);
+      expect(indexes.rows.find((row) => row.indexname === "chronicle_memory_chunks_embedded_scope_idx")?.indexdef)
+        .toMatch(/WHERE \(embedding_status = 'embedded'::text\)/i);
+      expect(indexes.rows.find((row) => row.indexname === "chronicle_chunk_jobs_one_active_campaign_idx")?.indexdef)
+        .toMatch(/WHERE \(status = ANY \(ARRAY\['queued'::text, 'running'::text\]\)\)/i);
+
+      const legacyJobConstraints = await isolatedPool.query<{ definition: string }>(
+        "SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conrelid = 'chronicle_jobs'::regclass"
+      );
+      expect(legacyJobConstraints.rows.map((row) => row.definition).join("\n")).not.toContain("index_memory_chunks_v2");
+
+      const job = await isolatedPool.query<{ campaign_id: string; job_type: string; status: string }>(
+        "SELECT campaign_id, job_type, status FROM chronicle_chunk_jobs WHERE campaign_id = $1",
+        [firstCampaign.rows[0]!.id]
+      );
+      expect(job.rows).toEqual([{
+        campaign_id: firstCampaign.rows[0]!.id,
+        job_type: "index_memory_chunks_v2",
+        status: "queued"
+      }]);
+
+      const validChunk = await isolatedPool.query<{ id: string; content_hash: string; search_document: string }>(
+        `INSERT INTO chronicle_memory_chunks (
+           owner_user_id, campaign_id, world_version_id, parent_memory_id, parent_content_hash,
+           chunking_protocol_version, chunk_ordinal, chunk_kind, content, token_estimate
+         ) VALUES ($1, $2, $3, $4, encode(digest('The bridge is safe.', 'sha256'), 'hex'),
+                   'chronicle-chunk-v1', 0, 'campaign_summary', 'The bridge is safe.', 5)
+         RETURNING id, content_hash, search_document::text`,
+        [ownerUserId, firstCampaign.rows[0]!.id, firstVersion.rows[0]!.id, parentMemory.rows[0]!.id]
+      );
+      const invalidChunk = (ownerId: string, campaignId: string, worldVersionId: string) => isolatedPool!.query(
+        `INSERT INTO chronicle_memory_chunks (
+           owner_user_id, campaign_id, world_version_id, parent_memory_id, parent_content_hash,
+           chunking_protocol_version, chunk_ordinal, chunk_kind, content, token_estimate
+         ) VALUES ($1, $2, $3, $4, repeat('a', 64), 'chronicle-chunk-v1', 99, 'campaign_summary', 'mismatch', 1)`,
+        [ownerId, campaignId, worldVersionId, parentMemory.rows[0]!.id]
+      );
+      await expect(invalidChunk(ownerUserId, secondCampaign.rows[0]!.id, firstVersion.rows[0]!.id)).rejects.toThrow();
+      await expect(invalidChunk(ownerUserId, firstCampaign.rows[0]!.id, secondVersion.rows[0]!.id)).rejects.toThrow();
+      await expect(invalidChunk(otherOwner.rows[0]!.id, firstCampaign.rows[0]!.id, firstVersion.rows[0]!.id)).rejects.toThrow();
+      expect(validChunk.rows).toEqual([expect.objectContaining({
+        content_hash: createHash("sha256").update("The bridge is safe.", "utf8").digest("hex"),
+        search_document: expect.stringContaining("bridg")
+      })]);
+
+      await isolatedPool.query("DELETE FROM campaigns WHERE id = $1", [firstCampaign.rows[0]!.id]);
+      await expect(isolatedPool.query<{ count: string }>("SELECT count(*)::text AS count FROM chronicle_memory_chunks"))
+        .resolves.toMatchObject({ rows: [{ count: "0" }] });
+      await expect(isolatedPool.query<{ count: string }>("SELECT count(*)::text AS count FROM chronicle_chunk_jobs"))
+        .resolves.toMatchObject({ rows: [{ count: "0" }] });
+    } finally {
+      if (isolatedPool) await isolatedPool.end();
+      await dropTestDatabaseWhenIdle(pool, databaseName);
+      await rm(migrationDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("upgrades an already-indexed Chronicle database without rewriting turns, chunks, or vectors", async () => {
+    const databaseName = `infinitequest_chunk_upgrade_${crypto.randomUUID().replaceAll("-", "")}`;
+    const databaseUrlValue = new URL(databaseUrl!);
+    databaseUrlValue.pathname = `/${databaseName}`;
+    const beforeDirectory = await mkdtemp(join(tmpdir(), "infinitequest-chunk-upgrade-before-"));
+    let isolatedPool: DatabasePool | null = null;
+    try {
+      await pool.query(`CREATE DATABASE ${databaseName}`);
+      // A database that predates the incremental-indexing work: migrated only through 0075.
+      for (const file of await readdir(resolve("database/migrations"))) {
+        if (file.endsWith(".sql") && file < "0076_") {
+          await copyFile(join(resolve("database/migrations"), file), join(beforeDirectory, file));
+        }
+      }
+      isolatedPool = createDatabasePool(databaseUrlValue.toString(), 2);
+      await migrateDatabase(isolatedPool, beforeDirectory);
+      const ownerUserId = (await isolatedPool.query<{ id: string }>(
+        "SELECT id FROM users WHERE system_key = 'initial-owner'"
+      )).rows[0]!.id;
+
+      const world = await isolatedPool.query<{ id: string }>(
+        "INSERT INTO worlds (owner_user_id,title) VALUES ($1,'Upgrade world') RETURNING id", [ownerUserId]
+      );
+      const version = await isolatedPool.query<{ id: string }>(
+        `INSERT INTO world_versions (world_id,owner_user_id,version_number,content)
+         VALUES ($1,$2,1,'{"world":{"title":"Upgrade world"}}'::jsonb) RETURNING id`,
+        [world.rows[0]!.id, ownerUserId]
+      );
+      const campaign = await isolatedPool.query<{ id: string }>(
+        `INSERT INTO campaigns (owner_user_id,world_version_id,title,active_turn_number)
+         VALUES ($1,$2,'Upgrade campaign',1) RETURNING id`,
+        [ownerUserId, version.rows[0]!.id]
+      );
+      await isolatedPool.query("INSERT INTO campaign_state (campaign_id,owner_user_id) VALUES ($1,$2)",
+        [campaign.rows[0]!.id, ownerUserId]);
+      const provider = await isolatedPool.query<{ id: string }>(
+        `INSERT INTO provider_profiles (owner_user_id,name,provider_type,provider_role,base_url,default_model)
+         VALUES ($1,'Upgrade provider','openai_compatible','embedding','http://upgrade.invalid/v1','embed-v1')
+         RETURNING id`, [ownerUserId]
+      );
+      await isolatedPool.query(
+        `INSERT INTO campaign_memory_configs
+           (campaign_id,owner_user_id,embedding_enabled,embedding_provider_profile_id,embedding_model,
+            retrieval_implementation)
+         VALUES ($1,$2,true,$3,'embed-v1','chunked_hybrid')`,
+        [campaign.rows[0]!.id, ownerUserId, provider.rows[0]!.id]
+      );
+      const turnRow = await isolatedPool.query<{ id: string }>(
+        `INSERT INTO turns (owner_user_id,campaign_id,turn_number,action,narration,state_snapshot_private,accepted_at)
+         VALUES ($1,$2,1,'Cross the bridge.','The bridge holds.','{}'::jsonb,now()) RETURNING id`,
+        [ownerUserId, campaign.rows[0]!.id]
+      );
+      const parents = await isolatedPool.query<{ id: string; content_hash: string }>(
+        `INSERT INTO chronicle_memories
+           (owner_user_id,campaign_id,world_version_id,turn_id,memory_kind,ordinal,content,token_estimate)
+         VALUES ($1,$2,$3,$4,'turn_fiction',1,'The bridge holds.',5),
+                ($1,$2,$3,NULL,'campaign_summary',2,'The party crossed safely.',6)
+         RETURNING id,content_hash`,
+        [ownerUserId, campaign.rows[0]!.id, version.rows[0]!.id, turnRow.rows[0]!.id]
+      );
+      // Pre-upgrade chunk rows: one embedded, one skipped with the only reason the old writer
+      // could produce. Both must remain valid under the closed-set constraint added by 0076.
+      await isolatedPool.query(
+        `INSERT INTO chronicle_memory_chunks
+           (owner_user_id,campaign_id,world_version_id,parent_memory_id,parent_content_hash,
+            chunking_protocol_version,chunk_ordinal,chunk_kind,content,token_estimate,
+            embedding,embedding_status,embedding_provider_profile_id,embedding_model,embedding_dimensions,
+            embedding_protocol_version,embedding_provider_fingerprint,embedding_content_hash,embedding_updated_at)
+         VALUES ($1,$2,$3,$4,$5,'chronicle-chunk-v1',0,'turn_narration','The bridge holds.',5,
+                 '[0.5,0.5]'::vector,'embedded',$6,'embed-v1',2,'chronicle-embedding-v1','legacy-fingerprint',$7,now())`,
+        [ownerUserId, campaign.rows[0]!.id, version.rows[0]!.id, parents.rows[0]!.id,
+          parents.rows[0]!.content_hash, provider.rows[0]!.id,
+          createHash("sha256").update("The bridge holds.", "utf8").digest("hex")]
+      );
+      await isolatedPool.query(
+        `INSERT INTO chronicle_memory_chunks
+           (owner_user_id,campaign_id,world_version_id,parent_memory_id,parent_content_hash,
+            chunking_protocol_version,chunk_ordinal,chunk_kind,content,token_estimate,
+            embedding_status,embedding_skip_reason)
+         VALUES ($1,$2,$3,$4,$5,'chronicle-chunk-v1',0,'campaign_summary','The party crossed safely.',6,
+                 'skipped','chunk_embedding_skipped')`,
+        [ownerUserId, campaign.rows[0]!.id, version.rows[0]!.id, parents.rows[1]!.id,
+          parents.rows[1]!.content_hash]
+      );
+      await isolatedPool.query(
+        `INSERT INTO chronicle_chunk_jobs (owner_user_id,campaign_id,status,completed_at,work_signature,progress)
+         VALUES ($1,$2,'completed',now(),repeat('b',64),
+                 '{"parentCursor":"2:x","processedParents":2,"embeddedChunks":1,"skippedChunks":1,
+                   "totalParents":2,"capabilityFingerprint":"legacy-capability"}'::jsonb)`,
+        [ownerUserId, campaign.rows[0]!.id]
+      );
+
+      const beforeTurns = await snapshotTurnRows(isolatedPool, ownerUserId, campaign.rows[0]!.id);
+      const beforeChunks = await isolatedPool.query(
+        `SELECT id,embedding::text AS embedding,embedding_status,embedding_skip_reason,content_hash
+           FROM chronicle_memory_chunks ORDER BY chunk_kind`
+      );
+
+      const applied = await migrateDatabase(isolatedPool, resolve("database/migrations"));
+      expect(applied).toEqual([
+        "0076_chronicle_chunk_skip_reasons",
+        "0077_chronicle_chunk_processed_signature"
+      ]);
+
+      // Accepted turns and every derived vector survive the upgrade untouched.
+      expect(await snapshotTurnRows(isolatedPool, ownerUserId, campaign.rows[0]!.id)).toEqual(beforeTurns);
+      expect(await isolatedPool.query(
+        `SELECT id,embedding::text AS embedding,embedding_status,embedding_skip_reason,content_hash
+           FROM chronicle_memory_chunks ORDER BY chunk_kind`
+      )).toMatchObject({ rows: beforeChunks.rows });
+
+      // The pre-existing skip reason is inside the closed set; anything else is now rejected.
+      await expect(isolatedPool.query(
+        "UPDATE chronicle_memory_chunks SET embedding_skip_reason='provider refused' WHERE embedding_status='skipped'"
+      )).rejects.toMatchObject({ constraint: "chronicle_memory_chunks_embedding_skip_reason_check" });
+
+      // Jobs carried over from before the upgrade have no recorded prefix, so the next enqueue
+      // conservatively restarts them rather than trusting a cursor it cannot verify.
+      expect(await isolatedPool.query<{ processed_signature: string | null }>(
+        "SELECT processed_signature FROM chronicle_chunk_jobs"
+      )).toMatchObject({ rows: [{ processed_signature: null }] });
+
+      // The upgraded worker must recognise the pre-upgrade index as current. Enqueueing after
+      // the upgrade creates a job that finds no parent needing work, so an existing campaign is
+      // not re-embedded just because the code changed.
+      const upgradedJob = await enqueuePostgresChronicleChunkIndex(isolatedPool, {
+        ownerUserId, campaignId: campaign.rows[0]!.id, worldVersionId: version.rows[0]!.id
+      });
+      expect(upgradedJob).not.toBeNull();
+      const claim = await createPostgresChronicleChunkJobStatePort(isolatedPool)
+        .claimNext({ workerId: "upgrade-worker", leaseSeconds: 30 });
+      if (!claim) throw new Error("upgraded chunk job was not claimed");
+      const page = await createPostgresChronicleChunkParentPort(isolatedPool)
+        .loadForClaim(claim, { batchLimit: 10, cursor: null });
+      expect(page.parents).toEqual([]);
+      expect(page.totalParents).toBe(2);
+
+      // A job that was mid-flight at upgrade time carries an older capability fingerprint. That
+      // is the one case that still costs a rebuild, and it clears vectors rather than silently
+      // mixing embeddings produced under different capabilities.
+      await isolatedPool.query(
+        `UPDATE chronicle_chunk_jobs
+            SET progress=jsonb_set(progress,'{capabilityFingerprint}','"legacy-capability"')
+          WHERE id=$1`,
+        [claim.jobId]
+      );
+      await expect(createPostgresChronicleChunkBatchPort(isolatedPool, { recordCost: async () => null })
+        .prepareClaim(claim, { capabilityFingerprint: "upgraded-capability" })).resolves.toBe("requeued");
+      expect(await isolatedPool.query<{ pending: string }>(
+        "SELECT count(*)::text AS pending FROM chronicle_memory_chunks WHERE embedding_status='pending'"
+      )).toMatchObject({ rows: [{ pending: "2" }] });
+    } finally {
+      if (isolatedPool) await isolatedPool.end();
+      await dropTestDatabaseWhenIdle(pool, databaseName);
+      await rm(beforeDirectory, { recursive: true, force: true });
     }
   });
 });

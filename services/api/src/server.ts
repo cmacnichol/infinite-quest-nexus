@@ -130,9 +130,12 @@ import { applicationMetadata } from "./app-metadata.js";
 import { installRequestSecurity } from "./request-security.js";
 import { registerArchiveRoutes } from "./archive-routes.js";
 import { createApiAssetComposition } from "../../runtime/src/api-asset-composition.js";
+import type { ApiAssetComposition } from "../../runtime/src/api-asset-composition.js";
 import {
   createApiCampaignArchiveAssetReader,
   createApiPortableImportExportComposition,
+  type ApiPortableImportExportComposition,
+  type ApiPortableImportExportCompositionOptions,
 } from "../../runtime/src/api-portable-import-export-composition.js";
 import { createAssetDeliveryStream } from "./asset-route-stream.js";
 import { importPortableWorldJson, previewPortableWorldJson } from "./portable-world-import-route.js";
@@ -155,6 +158,8 @@ export type BuildServerOptions = {
   worldCampaign: import("../../../packages/application/src/world-campaign/index.js").WorldCampaignApplication;
   providers: ProviderApiTransportAdapter;
   infiniteWorldsProviders: InfiniteWorldsImportProviderCollaborators;
+  createApiAssets?: (pool: DatabasePool, roots: Readonly<{ archiveRoot: string; assetRoot: string }>) => Promise<ApiAssetComposition>;
+  createApiPortable?: (options: ApiPortableImportExportCompositionOptions) => Promise<ApiPortableImportExportComposition>;
 };
 
 const uuidSchema = z.uuid();
@@ -353,6 +358,8 @@ export async function buildServer({
   worldCampaign,
   providers,
   infiniteWorldsProviders,
+  createApiAssets = createApiAssetComposition,
+  createApiPortable = createApiPortableImportExportComposition,
 }: BuildServerOptions): Promise<FastifyInstance> {
   const illustrationTurnScope = async (turnId: string) => {
     const ownerUserId = await initialOwnerId(pool);
@@ -451,11 +458,11 @@ export async function buildServer({
   await mkdir(config.assetStorageRoot, { recursive: true });
   await mkdir(config.archiveStorageRoot, { recursive: true });
   const assetStore: FilesystemAssetStore = { root: config.assetStorageRoot };
-  const apiAssets = await createApiAssetComposition(pool, {
+  const apiAssets = await createApiAssets(pool, {
     archiveRoot: config.archiveStorageRoot,
     assetRoot: config.assetStorageRoot
   });
-  const apiPortable = await createApiPortableImportExportComposition({
+  const apiPortable = await createApiPortable({
     pool,
     config,
     memory: memory.generation,

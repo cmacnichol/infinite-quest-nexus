@@ -9,7 +9,7 @@ import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../pac
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
 import { createProvider } from "../helpers/provider-application-fixtures.js";
 import { buildServer } from "../../services/api/src/server.js";
-import { serverOptions } from "../helpers/build-server-options.js";
+import { inertStorageServerOptions as serverOptions } from "../helpers/build-server-options.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;

@@ -25,6 +25,7 @@ import {
 import { createPostgresWorldRepositoryAdapters } from "../../packages/database/src/world-repository.js";
 import { createPortableImportExportComposition } from "../../services/runtime/src/portable-import-export-composition.js";
 import { createAssetPublicationComposition } from "../../services/runtime/src/asset-import-composition.js";
+import { supportsSecureGeneratedArchiveStaging } from "../../services/api/src/archive-io.js";
 import {
   createDatabasePool,
   initialOwnerId,
@@ -34,6 +35,7 @@ import {
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
+const secureFilesystemIt = it.runIf(supportsSecureGeneratedArchiveStaging());
 
 function hash(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -628,7 +630,7 @@ integration("Task 14e3d durable portable composition authority", () => {
     });
   });
 
-  it("wires every non-ZIP family through real preview, commit, and same-key replay", async () => {
+  secureFilesystemIt("wires every non-ZIP family through real preview, commit, and same-key replay", async () => {
     const target = await createWorldScope(`14e3d family target ${crypto.randomUUID()}`);
     const archiveRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-family-archive-`);
     const assetRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-family-assets-`);
@@ -747,7 +749,7 @@ integration("Task 14e3d durable portable composition authority", () => {
     }
   });
 
-  it("commits normalized Legacy Story character, state, metadata, settings, and continuity authority", async () => {
+  secureFilesystemIt("commits normalized Legacy Story character, state, metadata, settings, and continuity authority", async () => {
     const target = await createWorldScope(`14e3d legacy fidelity target ${crypto.randomUUID()}`);
     const composition = await createRealComposition({
       archiveRoot: await mkdtemp(`${tmpdir()}/iqn-14e3d-legacy-fidelity-archive-`),
@@ -878,7 +880,7 @@ integration("Task 14e3d durable portable composition authority", () => {
     }
   });
 
-  it("commits an embedded Campaign ZIP and its asset through the real composition", async () => {
+  secureFilesystemIt("commits an embedded Campaign ZIP and its asset through the real composition", async () => {
     const target = await createWorldScope(`14e3d unused campaign target ${crypto.randomUUID()}`);
     const archiveRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-campaign-archive-`);
     const assetRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-campaign-assets-`);
@@ -931,7 +933,7 @@ integration("Task 14e3d durable portable composition authority", () => {
     }
   });
 
-  it("restores current manifest campaign records, rich asset metadata, and source bindings", async () => {
+  secureFilesystemIt("restores current manifest campaign records, rich asset metadata, and source bindings", async () => {
     const target = await createWorldScope(`14e3d unused rich target ${crypto.randomUUID()}`);
     const archiveRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-rich-archive-`);
     const assetRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-rich-assets-`);
@@ -1005,7 +1007,7 @@ integration("Task 14e3d durable portable composition authority", () => {
     }
   });
 
-  it("recovers attached imported assets before returning committed replay after restart", async () => {
+  secureFilesystemIt("recovers attached imported assets before returning committed replay after restart", async () => {
     const target = await createWorldScope(`14e3d finalize recovery target ${crypto.randomUUID()}`);
     const archiveRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-finalize-archive-`);
     const assetRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-finalize-assets-`);
@@ -1060,7 +1062,7 @@ integration("Task 14e3d durable portable composition authority", () => {
     }
   });
 
-  it("returns a different-key duplicate without stealing canonical or unrelated recovery claims", async () => {
+  secureFilesystemIt("returns a different-key duplicate without stealing canonical or unrelated recovery claims", async () => {
     const target = await createWorldScope(`14e3d duplicate recovery target ${crypto.randomUUID()}`);
     const archiveRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-duplicate-recovery-archive-`);
     const assetRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-duplicate-recovery-assets-`);
@@ -1200,7 +1202,7 @@ integration("Task 14e3d durable portable composition authority", () => {
     }
   });
 
-  it("does not recover an unrelated attached campaign asset during portable replay", async () => {
+  secureFilesystemIt("does not recover an unrelated attached campaign asset during portable replay", async () => {
     const target = await createWorldScope(`14e3d exact recovery target ${crypto.randomUUID()}`);
     const archiveRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-exact-recovery-archive-`);
     const assetRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-exact-recovery-assets-`);
@@ -1311,7 +1313,7 @@ integration("Task 14e3d durable portable composition authority", () => {
     }
   });
 
-  it("does not attach assets for a distinct-key duplicate Campaign ZIP authority", async () => {
+  secureFilesystemIt("does not attach assets for a distinct-key duplicate Campaign ZIP authority", async () => {
     const target = await createWorldScope(`14e3d duplicate target ${crypto.randomUUID()}`);
     const archiveRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-duplicate-archive-`);
     const assetRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-duplicate-assets-`);
@@ -1382,7 +1384,7 @@ integration("Task 14e3d durable portable composition authority", () => {
 
   // Normalized prewrite crash/reap authority is exercised by the e3e4 matrix;
   // the retired 0062 identity-intent path is no longer callable after e3g.
-  it("imports a Campaign ZIP without exhausting a two-connection pool", async () => {
+  secureFilesystemIt("imports a Campaign ZIP without exhausting a two-connection pool", async () => {
     const twoConnectionPool = createDatabasePool(databaseUrl!, 2);
     const target = await createWorldScope(`14e3d pool target ${crypto.randomUUID()}`);
     const composition = await createRealComposition({
@@ -1411,7 +1413,7 @@ integration("Task 14e3d durable portable composition authority", () => {
     }
   }, 20_000);
 
-  it("discards durable asset reservations only after a caller transaction rollback", async () => {
+  secureFilesystemIt("discards durable asset reservations only after a caller transaction rollback", async () => {
     const target = await createWorldScope(`14e3d reservation rollback target ${crypto.randomUUID()}`);
     const archiveRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-reservation-rollback-archive-`);
     const assetRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-reservation-rollback-assets-`);
@@ -1477,7 +1479,7 @@ integration("Task 14e3d durable portable composition authority", () => {
     }
   });
 
-  it("compensates earlier durable reservations when a later asset reservation fails", async () => {
+  secureFilesystemIt("compensates earlier durable reservations when a later asset reservation fails", async () => {
     const target = await createWorldScope(`14e3d partial reservation target ${crypto.randomUUID()}`);
     const archiveRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-partial-reservation-archive-`);
     const assetRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-partial-reservation-assets-`);
@@ -1540,7 +1542,7 @@ integration("Task 14e3d durable portable composition authority", () => {
     }
   });
 
-  it("returns the committed replay to a concurrent same-command loser without cleaning the winner", async () => {
+  secureFilesystemIt("returns the committed replay to a concurrent same-command loser without cleaning the winner", async () => {
     const target = await createWorldScope(`14e3d concurrent replay target ${crypto.randomUUID()}`);
     const archiveRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-concurrent-replay-archive-`);
     const assetRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-concurrent-replay-assets-`);
@@ -1662,7 +1664,7 @@ integration("Task 14e3d durable portable composition authority", () => {
     }
   }, 20_000);
 
-  it("rejects foreign preview scope and wrong same-owner destination pairs again inside commit", async () => {
+  secureFilesystemIt("rejects foreign preview scope and wrong same-owner destination pairs again inside commit", async () => {
     const foreignWorld = await pool.query<{ id: string }>(
       "INSERT INTO worlds (owner_user_id,title) VALUES ($1,'Foreign portable world') RETURNING id",
       [foreignOwnerUserId],
@@ -1706,7 +1708,7 @@ integration("Task 14e3d durable portable composition authority", () => {
     }
   });
 
-  it("preserves Legacy Story inline, safe external, and malformed optional image semantics in caller-client mutation", async () => {
+  secureFilesystemIt("preserves Legacy Story inline, safe external, and malformed optional image semantics in caller-client mutation", async () => {
     const target = await createWorldScope(`14e3d legacy images ${crypto.randomUUID()}`);
     const archiveRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-legacy-image-archive-`);
     const assetRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-legacy-image-assets-`);
@@ -1780,7 +1782,7 @@ integration("Task 14e3d durable portable composition authority", () => {
     }
   });
 
-  it("publishes staged Legacy Story inline and validated companion images through the real composition", async () => {
+  secureFilesystemIt("publishes staged Legacy Story inline and validated companion images through the real composition", async () => {
     const target = await createWorldScope(`14e3d composed legacy assets ${crypto.randomUUID()}`);
     const archiveRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-composed-legacy-archive-`);
     const assetRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-composed-legacy-assets-`);
@@ -1921,7 +1923,7 @@ integration("Task 14e3d durable portable composition authority", () => {
     }
   });
 
-  it("resumes a persisted preview after composition restart and preserves replay", async () => {
+  secureFilesystemIt("resumes a persisted preview after composition restart and preserves replay", async () => {
     const target = await createWorldScope(`14e3d restart target ${crypto.randomUUID()}`);
     const archiveRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-restart-archive-`);
     const assetRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-restart-assets-`);
@@ -1952,7 +1954,7 @@ integration("Task 14e3d durable portable composition authority", () => {
     }
   });
 
-  it("expires persisted preview/work authority across composition restart", async () => {
+  secureFilesystemIt("expires persisted preview/work authority across composition restart", async () => {
     const target = await createWorldScope(`14e3d expiry target ${crypto.randomUUID()}`);
     const archiveRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-expiry-archive-`);
     const assetRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-expiry-assets-`);
@@ -2004,7 +2006,7 @@ integration("Task 14e3d durable portable composition authority", () => {
     }
   });
 
-  it("publishes a Campaign ZIP export through a bounded one-shot session", async () => {
+  secureFilesystemIt("publishes a Campaign ZIP export through a bounded one-shot session", async () => {
     const target = await createWorldScope(`14e3d campaign export ${crypto.randomUUID()}`);
     const campaign = await pool.query<{ id: string }>(
       "INSERT INTO campaigns (owner_user_id,world_version_id,title) VALUES ($1,$2,'14e3d campaign export') RETURNING id",
@@ -2044,7 +2046,7 @@ integration("Task 14e3d durable portable composition authority", () => {
     }
   });
 
-  it("publishes a world JSON export through a bounded one-shot session", async () => {
+  secureFilesystemIt("publishes a world JSON export through a bounded one-shot session", async () => {
     const target = await createWorldScope(`14e3d world export ${crypto.randomUUID()}`);
     const expected = new TextEncoder().encode('{"format":"infinite-quest-world"}');
     const composition = await createRealComposition({

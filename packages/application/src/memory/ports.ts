@@ -6,6 +6,10 @@ import type {
   ChronicleClaimFailure,
   ChronicleClaimRetry,
   ChronicleContextPreview,
+  ChronicleChunkBatchCommit,
+  ChronicleChunkJobProgress,
+  ChronicleChunkLeaseScope,
+  ChronicleChunkParentPage,
   ChronicleJobScope,
   ChronicleJobView,
   ChronicleLeaseScope,
@@ -27,6 +31,7 @@ import type {
 } from "./types.js";
 
 export interface MemoryConfigurationRepository {
+  /** Includes retrieval selection controls; the generation-facing retrieval seam remains buildContextPreview. */
   getEmbeddingConfig(scope: CampaignMemoryScope): Promise<EmbeddingConfigView>;
   setEmbeddingConfig(scope: CampaignMemoryScope, input: MemoryEmbeddingConfigInput): Promise<EmbeddingConfigView>;
 }
@@ -63,6 +68,10 @@ export interface MemoryGenerationTransactionPort {
     database: MemoryTransactionContext,
     scope: CampaignWorldVersionMemoryScope,
   ): Promise<string | null>;
+  enqueueChunkIndex(
+    database: MemoryTransactionContext,
+    scope: CampaignWorldVersionMemoryScope,
+  ): Promise<string | null>;
   rebuildCampaignMemories(
     database: MemoryTransactionContext,
     scope: CampaignWorldVersionMemoryScope,
@@ -75,6 +84,32 @@ export interface MemoryGenerationTransactionPort {
     database: MemoryTransactionContext,
     scope: AcceptedTurnFictionScope,
   ): Promise<void>;
+}
+
+/** Worker-only state for index_memory_chunks_v2; legacy workers never see this table. */
+export interface ChronicleChunkJobStatePort {
+  claimNext(request: MemoryWorkerClaimRequest): Promise<ChronicleChunkLeaseScope | null>;
+  loadClaimedJob(scope: ChronicleChunkLeaseScope): Promise<ChronicleChunkLeaseScope | null>;
+  heartbeatClaim(scope: ChronicleChunkLeaseScope): Promise<boolean>;
+  completeClaim(scope: ChronicleChunkLeaseScope, completion: Readonly<{ progress: ChronicleChunkJobProgress }>): Promise<boolean>;
+  failClaim(scope: ChronicleChunkLeaseScope, failure: ChronicleClaimFailure): Promise<boolean>;
+}
+
+/** Parent reads stay bounded and ordered by (ordinal,id) inside the claimed scope. */
+export interface ChronicleChunkParentPort {
+  loadForClaim(
+    scope: ChronicleChunkLeaseScope,
+    request: ChronicleWorkerRetrievalRequest,
+  ): Promise<ChronicleChunkParentPage>;
+}
+
+/** Chunk text, vectors, cost, progress, and lease are committed as one fenced unit. */
+export interface ChronicleChunkBatchPort {
+  prepareClaim(
+    scope: ChronicleChunkLeaseScope,
+    input: Readonly<{ capabilityFingerprint: string }>,
+  ): Promise<"ready" | "requeued">;
+  commitParentBatch(scope: ChronicleChunkLeaseScope, input: ChronicleChunkBatchCommit): Promise<boolean>;
 }
 
 export interface ChronicleWorkerStatePort {

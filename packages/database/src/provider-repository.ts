@@ -136,6 +136,47 @@ async function invalidateEmbeddingProfile(client: DatabaseClient, ownerUserId: s
      DO UPDATE SET work_version = chronicle_jobs.work_version + 1, updated_at = now()`,
     [ownerUserId, providerProfileId]
   );
+  await client.query(
+    `UPDATE chronicle_memory_chunks SET embedding = NULL, embedding_status = 'pending',
+            embedding_skip_reason = NULL, embedding_provider_profile_id = NULL,
+            embedding_model = NULL, embedding_dimensions = NULL,
+            embedding_protocol_version = NULL, embedding_provider_fingerprint = NULL,
+            embedding_content_hash = NULL, embedding_updated_at = NULL, updated_at = now()
+      WHERE owner_user_id = $1 AND embedding_provider_profile_id = $2`,
+    [ownerUserId, providerProfileId]
+  );
+  await client.query(
+    `INSERT INTO chronicle_chunk_jobs
+       (owner_user_id,campaign_id,job_type,progress,work_signature)
+     SELECT config.owner_user_id,config.campaign_id,'index_memory_chunks_v2','{}'::jsonb,
+            encode(digest(
+              campaigns.world_version_id::text || E'\\x1f' || COALESCE((
+                SELECT string_agg(
+                  memories.ordinal::text || ':' || memories.id::text || ':' || memories.content_hash,
+                  E'\\x1e' ORDER BY memories.ordinal,memories.id
+                )
+                  FROM chronicle_memories memories
+                 WHERE memories.owner_user_id=config.owner_user_id
+                   AND memories.campaign_id=config.campaign_id
+                   AND memories.world_version_id=campaigns.world_version_id
+              ), ''),
+              'sha256'
+            ), 'hex')
+       FROM campaign_memory_configs config
+       JOIN campaigns
+         ON campaigns.id=config.campaign_id AND campaigns.owner_user_id=config.owner_user_id
+      WHERE config.owner_user_id = $1 AND config.embedding_provider_profile_id = $2
+        AND (config.embedding_enabled = true OR config.retrieval_shadow_enabled = true)
+     ON CONFLICT (campaign_id) WHERE status IN ('queued', 'running')
+     DO UPDATE SET work_version = chronicle_chunk_jobs.work_version + 1,
+                   work_signature = EXCLUDED.work_signature,
+                   progress = '{}'::jsonb, updated_at = now(), error_message = NULL`,
+    [ownerUserId, providerProfileId]
+  );
+  await client.query(
+    "DELETE FROM chronicle_query_embedding_cache WHERE owner_user_id=$1 AND provider_profile_id=$2",
+    [ownerUserId, providerProfileId]
+  );
 }
 
 export type PostgresProviderRepositories = Readonly<{
@@ -272,6 +313,14 @@ export function createPostgresProviderRepositories(client: DatabaseClient): Post
       if (row.provider_role === "text" || row.provider_role === "embedding") {
         await client.query("UPDATE campaign_memory_configs SET embedding_enabled=false,embedding_provider_profile_id=NULL WHERE owner_user_id=$1 AND embedding_provider_profile_id=$2", [command.ownerUserId, row.id]);
         await client.query(`UPDATE chronicle_memories SET embedding=NULL,embedding_provider_profile_id=NULL,embedding_model=NULL,embedding_dimensions=NULL,embedding_content_hash=NULL,embedding_updated_at=NULL,embedding_provider_fingerprint=NULL WHERE owner_user_id=$1 AND embedding_provider_profile_id=$2`, [command.ownerUserId, row.id]);
+        await client.query(
+          `UPDATE chronicle_memory_chunks SET embedding=NULL,embedding_status='pending',embedding_skip_reason=NULL,
+             embedding_provider_profile_id=NULL,embedding_model=NULL,embedding_dimensions=NULL,
+             embedding_protocol_version=NULL,embedding_provider_fingerprint=NULL,
+             embedding_content_hash=NULL,embedding_updated_at=NULL,updated_at=now()
+           WHERE owner_user_id=$1 AND embedding_provider_profile_id=$2`,
+          [command.ownerUserId, row.id]
+        );
       }
       await client.query("DELETE FROM provider_profiles WHERE id=$1 AND owner_user_id=$2", [row.id, command.ownerUserId]);
       return { id: row.id, name: row.name, providerRole: row.provider_role, deleted: true };

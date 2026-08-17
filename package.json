@@ -21,6 +21,7 @@
     "dev:web": "pnpm --filter @infinite-quest/web-next dev",
     "start": "node dist/services/runtime/src/main.js",
     "migrate": "tsx packages/database/src/migrate-cli.ts",
+    "evaluate:chronicle": "tsx scripts/evaluate-chronicle-retrieval.ts",
     "test": "pnpm test:unit && pnpm test:integration",
     "test:unit": "vitest run tests/unit",
     "test:watch": "vitest",

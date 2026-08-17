@@ -346,6 +346,74 @@ integration("durable Story Engine integration", () => {
     expect(nextSerialized).toContain("Determine what Marker Three unlocks");
   });
 
+  it("preserves every fixed fiction scope before optional history under a 512-token request", async () => {
+    const imported = await campaign(undefined, `Minimum context budget ${crypto.randomUUID()}`);
+    const oversizedCanon = "Authoritative world detail ".repeat(400);
+    await pool.query(
+      `UPDATE world_versions
+          SET content = jsonb_set(content, '{world}',
+            COALESCE(content->'world','{}'::jsonb) || $2::jsonb, true)
+        WHERE id = (SELECT world_version_id FROM campaigns WHERE id = $1)`,
+      [imported.campaignId, JSON.stringify({
+        title: oversizedCanon,
+        genre: oversizedCanon,
+        tone: oversizedCanon,
+        backgroundStory: oversizedCanon,
+        premise: oversizedCanon,
+        firstAction: oversizedCanon,
+        rules: oversizedCanon
+      })]
+    );
+    await pool.query(
+      `UPDATE campaign_state
+          SET scratchpad_private=$2,scratchpad_safe_for_prompt=true
+        WHERE campaign_id=$1`,
+      [imported.campaignId, oversizedCanon]
+    );
+    await pool.query(
+      `UPDATE chronicle_memories
+          SET content=$2
+        WHERE campaign_id=$1 AND memory_kind='turn_fiction' AND ordinal=2`,
+      [imported.campaignId, `Turn 2\nPlayer action: Hold position.\nNarration: ${oversizedCanon}`]
+    );
+    const before = await generationAuthoritySnapshot(pool, imported.campaignId);
+
+    const preview = await buildContextPreview(pool, imported.campaignId, {
+      budgetTokens: 512,
+      compression: "auto",
+      query: "Object Gamma at Location Beta",
+      recentTurns: 8
+    });
+    const scopes = preview.scopes as {
+      authoritativeRules: string;
+      worldCanon: Record<string, unknown>;
+      campaignCanon: Record<string, unknown>;
+      chronicle: unknown[];
+      currentScene: { content: string } | null;
+    };
+    const budget = preview.budget as {
+      configuredTokens: number;
+      fixedScopeTokens: number;
+      estimatedSelectedTokens: number;
+    };
+
+    expect(Object.keys(scopes).sort()).toEqual([
+      "authoritativeRules",
+      "campaignCanon",
+      "chronicle",
+      "currentScene",
+      "worldCanon"
+    ]);
+    expect(scopes.authoritativeRules.length).toBeGreaterThan(0);
+    expect(Object.keys(scopes.worldCanon).length).toBeGreaterThan(0);
+    expect(scopes.campaignCanon).toMatchObject({ campaignTitle: expect.any(String), acceptedTurns: 2 });
+    expect(scopes.currentScene?.content.length).toBeGreaterThan(0);
+    expect(budget).toMatchObject({ configuredTokens: 512 });
+    expect(budget.fixedScopeTokens).toBeLessThanOrEqual(512);
+    expect(budget.estimatedSelectedTokens).toBeLessThanOrEqual(512);
+    expect(await generationAuthoritySnapshot(pool, imported.campaignId)).toEqual(before);
+  });
+
   it("assigns tracker IDs when committing an unchanged generated tracker snapshot", async () => {
     const imported = await campaign();
     await pool.query(
@@ -651,8 +719,38 @@ integration("durable Story Engine integration", () => {
 
   it("stages an idempotent latest-turn replacement and swaps it only after validated commit", async () => {
     const imported = await campaign();
-    const before = await pool.query<{ id: string; narration: string }>(
-      "SELECT id, narration FROM turns WHERE campaign_id = $1 AND turn_number = 2",
+    const expectedReplacementAudit = {
+      auditVersion: "chronicle-retrieval-audit-v1",
+      configuredImplementation: "legacy_hybrid",
+      effectiveImplementation: "legacy_hybrid",
+      effectiveMode: "lexical_only",
+      fallbackCode: "semantic_retrieval_unavailable",
+      provider: {
+        resolutionSource: "text_fallback",
+        resolvedRole: "text",
+        providerType: "openai_compatible",
+        model: "deterministic-mock"
+      },
+      queryVectorPath: "provider_only",
+      providerCallOutcome: "failed",
+      queryEmbeddingRequests: 1,
+      queryCacheHits: 0,
+      queryCacheMisses: 1
+    };
+    const before = await pool.query<{
+      id: string;
+      narration: string;
+      xmin: string;
+      model_metadata: Record<string, unknown>;
+    }>(
+      `SELECT id, narration, xmin::text AS xmin, model_metadata
+         FROM turns
+        WHERE campaign_id = $1 AND turn_number = 2`,
+      [imported.campaignId]
+    );
+    const originalAudit = before.rows[0]?.model_metadata.chronicleRetrieval ?? null;
+    const retainedTurn = await pool.query<{ id: string }>(
+      "SELECT id FROM turns WHERE campaign_id = $1 AND turn_number = 1",
       [imported.campaignId]
     );
     const request = replacementRequest("Take the eastern path instead.");
@@ -667,15 +765,31 @@ integration("durable Story Engine integration", () => {
       kind: "conflict",
       details: { reason: "idempotency_mismatch" }
     });
-    expect(await pool.query("SELECT id FROM turns WHERE campaign_id = $1 AND turn_number = 2", [imported.campaignId]))
-      .toMatchObject({ rows: [{ id: before.rows[0]?.id }] });
+    const stagedOriginal = await pool.query<{
+      id: string;
+      narration: string;
+      xmin: string;
+      model_metadata: Record<string, unknown>;
+    }>(
+      `SELECT id, narration, xmin::text AS xmin, model_metadata
+         FROM turns
+        WHERE campaign_id = $1 AND turn_number = 2`,
+      [imported.campaignId]
+    );
+    expect(stagedOriginal).toEqual(before);
+    expect(stagedOriginal.rows[0]?.model_metadata.chronicleRetrieval ?? null).toStrictEqual(originalAudit);
 
     replies.push({ content: validStory("The eastern path opens into a newly validated replacement scene.") });
     const requestCount = requests.length;
     expect(await runGenerationJob(pool, "story-worker-replacement", 30, credentialSecret)).toBe(true);
 
-    const after = await pool.query<{ id: string; action: string; narration: string }>(
-      "SELECT id, action, narration FROM turns WHERE campaign_id = $1 AND turn_number = 2",
+    const after = await pool.query<{
+      id: string;
+      action: string;
+      narration: string;
+      model_metadata: Record<string, unknown>;
+    }>(
+      "SELECT id, action, narration, model_metadata FROM turns WHERE campaign_id = $1 AND turn_number = 2",
       [imported.campaignId]
     );
     expect(after.rows[0]).toMatchObject({
@@ -683,6 +797,24 @@ integration("durable Story Engine integration", () => {
     });
     expect(after.rows[0]?.narration).not.toBe(before.rows[0]?.narration);
     expect(after.rows[0]?.id).not.toBe(before.rows[0]?.id);
+    expect(after.rows[0]?.model_metadata.chronicleRetrieval).toStrictEqual(expectedReplacementAudit);
+    const acceptedTurns = await pool.query<{
+      id: string;
+      turn_number: number;
+      model_metadata: Record<string, unknown>;
+    }>(
+      "SELECT id, turn_number, model_metadata FROM turns WHERE campaign_id = $1 ORDER BY turn_number",
+      [imported.campaignId]
+    );
+    expect(acceptedTurns.rows).toEqual([
+      expect.objectContaining({ id: retainedTurn.rows[0]?.id, turn_number: 1 }),
+      expect.objectContaining({
+        id: after.rows[0]?.id,
+        turn_number: 2,
+        model_metadata: expect.objectContaining({ chronicleRetrieval: expectedReplacementAudit })
+      })
+    ]);
+    expect(acceptedTurns.rows.map((turn) => turn.id)).not.toContain(before.rows[0]?.id);
     expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed", operationKind: "replace_latest" });
 
     const replacementMemory = await pool.query<{ turn_id: string; content: string }>(
@@ -1592,8 +1724,10 @@ integration("durable Story Engine integration", () => {
     const storyPayload = JSON.parse(storyUserMessage?.content || "{}");
     expect(storyPayload.narration_length).toEqual({
       profile: "extended",
-      target_min_words: 1200,
-      target_max_words: 2000
+      preferred_min_words: 1200,
+      preferred_max_words: 2000,
+      policy: "soft_pacing_goal",
+      early_stop_allowed: true
     });
   });
 
@@ -2035,8 +2169,7 @@ integration("durable Story Engine integration", () => {
     const errorSpy = vi.spyOn(logger, "error");
     try {
       replies.push(
-        { content: '{"narration":"First partial', finishReason: "length" },
-        { content: '{"narration":"Second partial', finishReason: "length" }
+        { content: '{"narration":"First partial', finishReason: "length" }
       );
       const job = await queue(imported.campaignId);
       await runGenerationJob(pool, "story-worker-requeued-a", 30, credentialSecret);
@@ -2090,12 +2223,11 @@ integration("durable Story Engine integration", () => {
     expect(requests.length - requestCount).toBe(1);
   });
 
-  it("leaves the accepted ledger unchanged when compact recovery is also truncated", async () => {
+  it("leaves the accepted ledger unchanged when output-limited JSON is truncated", async () => {
     const imported = await campaign();
     const authorityBefore = await generationAuthoritySnapshot(pool, imported.campaignId);
     replies.push(
-      { content: '{"narration":"First partial', finishReason: "length" },
-      { content: '{"narration":"Second partial', finishReason: "length" }
+      { content: '{"narration":"First partial', finishReason: "length" }
     );
     const job = await queue(imported.campaignId);
     await runGenerationJob(pool, "story-worker-d", 30, credentialSecret);
@@ -2388,8 +2520,7 @@ integration("durable Story Engine integration", () => {
         favorable_outcome: "Marker Five becomes active.",
         setback_outcome: "Marker Five remains inactive."
       }) },
-      { content: '{"narration":"First partial', finishReason: "length" },
-      { content: '{"narration":"Second partial', finishReason: "length" }
+      { content: '{"narration":"First partial', finishReason: "length" }
     );
     const job = await queue(imported.campaignId);
     await runGenerationJob(pool, "story-worker-reroll-a", 30, credentialSecret);

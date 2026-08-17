@@ -1,11 +1,14 @@
 import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
+// @ts-expect-error Repository runner scripts intentionally have no declaration files.
+import { tsxCommand } from "../../scripts/node-tool-command.mjs";
 
 describe("client-contract benchmark", () => {
   it("labels serialized JSON measurements as payload bytes", () => {
+    const command = tsxCommand(["scripts/benchmark-client-contracts.ts"]);
     const output = execFileSync(
-      "pnpm",
-      ["exec", "tsx", "scripts/benchmark-client-contracts.ts"],
+      command.executable,
+      command.arguments,
       { encoding: "utf8" }
     );
     const result = JSON.parse(output) as Record<string, unknown>;

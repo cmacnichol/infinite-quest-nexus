@@ -40,8 +40,20 @@ const STRING_CONFIGURATION_KEYS = new Set([
   "defaultSampler",
   "defaultScheduler"
 ]);
+const EMBEDDING_NUMBER_CONFIGURATION_RANGES = new Map<string, readonly [number, number]>([
+  ["embeddingMaxInputTokens", [128, 1_000_000]],
+  ["embeddingMaxBatchItems", [1, 128]],
+  ["embeddingMaxBatchTokens", [128, 4_000_000]],
+  ["embeddingDimensions", [1, 16_000]],
+  ["embeddingMaxRetries", [0, 5]]
+]);
 
 function isSafeConfigurationEntry(key: string, value: unknown): boolean {
+  const embeddingRange = EMBEDDING_NUMBER_CONFIGURATION_RANGES.get(key);
+  if (embeddingRange) {
+    return typeof value === "number" && Number.isSafeInteger(value)
+      && value >= embeddingRange[0] && value <= embeddingRange[1];
+  }
   if (BOOLEAN_CONFIGURATION_KEYS.has(key)) return typeof value === "boolean";
   if (NUMBER_CONFIGURATION_KEYS.has(key)) return typeof value === "number" && Number.isFinite(value);
   if (STRING_CONFIGURATION_KEYS.has(key)) return typeof value === "string";

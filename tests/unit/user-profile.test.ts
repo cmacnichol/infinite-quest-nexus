@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { resolve } from "node:path";
 import { buildServer } from "../../services/api/src/server.js";
-import { serverOptions } from "../helpers/build-server-options.js";
+import { inertStorageServerOptions as serverOptions } from "../helpers/build-server-options.js";
 import { userProfileSchema, userSettingsSchema, userProfileUpdateSchema } from "../../packages/contracts/src/users.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";

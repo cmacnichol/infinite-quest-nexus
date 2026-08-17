@@ -37,6 +37,51 @@ Use structured logs with correlation IDs for campaign, generation job, model req
 
 Database migrations must be ordered, repeatable, reviewed, and safe for the deployed application version. Prefer backward-compatible expand/contract changes so rolling API replicas can coexist. Applied online migrations are automatic; destructive or downtime-requiring `.maintenance.sql` migrations must remain exceptional and require an explicit operator opt-in on an existing database. Back up authoritative database data and test restoration. Treat embeddings and summaries as rebuildable unless operational requirements later make their backup worthwhile.
 
+## Chronicle chunked retrieval staged rollout
+
+Chunked Chronicle retrieval is an explicit campaign-level opt-in. Database migrations add only derived chunk, fencing, observability, and query-cache schema and jobs; they do not rewrite accepted turns or change a campaign's production retrieval implementation.
+
+Use this sequence:
+
+1. Back up the authoritative database and prove restoration. Deploy compatible API and worker code before enabling shadow comparison. Apply migrations `0072` through `0077` under the normal migration lock, then confirm both old and new replicas tolerate the expanded schema during any rolling overlap. All of these are ordinary online migrations; none carries the `.maintenance.sql` suffix, so none requires operator opt-in.
+
+   Upgrading a database that already holds a chunk index is additive and does not rebuild it. `0076` narrows `embedding_skip_reason` to the closed sanitized set, which every previously written value already satisfies, and `0077` adds a nullable `processed_signature`. No turn, Chronicle memory, chunk, or vector is rewritten. Indexing is incremental, so the first job enqueued after the upgrade finds no parent needing work on an already-covered campaign. Two bounded one-time effects are expected. A job that was queued or running at upgrade time has no recorded prefix, so its durable cursor is cleared and it rescans from the first parent; because indexing is incremental this rescans rather than re-embeds, and parents already chunked at their current content are skipped. Separately, a job resumed with a capability fingerprint recorded before the batching default changed clears that campaign's chunk vectors and re-embeds them once, which is the existing behaviour for any capability change. The campaign continues on its complete legacy retrieval path while either completes. Older replicas tolerate the new schema during a rolling overlap because they only write values the new constraint accepts and ignore the added column.
+2. Leave every campaign on the default `legacy_hybrid` production implementation with shadow disabled. Enqueue `index_memory_chunks_v2` only after the compatible worker is live.
+3. Monitor job leases, progress, provider health, fixed fallback codes, and compatible coverage. Wait for 100% terminal coverage: every current parent hash has at least one current `chronicle-chunk-v1` chunk in terminal `embedded` or sanitized `skipped` status, every current chunk is terminal, at least one current chunk is embedded, and the latest chunk job is completed or absent. A fully sanitized-skipped index uses the complete legacy path with the existing `chunk_index_not_ready` fallback; a partially ready campaign also continues through the complete legacy path.
+4. Establish the deterministic label-only legacy baseline, calibrate the generated production profile, and verify the final chunked result:
+
+   ```powershell
+   pnpm evaluate:chronicle -- --implementation legacy_hybrid --output tmp/chronicle-evaluation/legacy-baseline.json
+   pnpm evaluate:chronicle -- --calibrate --baseline tmp/chronicle-evaluation/legacy-baseline.json --write-profile packages/domain/src/generated/chronicle-retrieval-profile-v2.ts
+   pnpm evaluate:chronicle -- --implementation chunked_hybrid --output tmp/chronicle-evaluation/final-chunked.json
+   ```
+
+   Run these commands only against a dedicated non-production calibration database. Never point `TEST_DATABASE_URL` at a production or shared authoritative database: the fixture data is rolled back, but the evaluator applies pending migrations before opening that transaction. When `TEST_DATABASE_URL` is unset, the evaluator starts the repository's dedicated local test PostgreSQL service and uses its test database. Calibration evaluates the deterministic fixture corpus in a PostgreSQL transaction, writes a source profile only when requested, and does not update campaign configuration. Review recall, NDCG, duplicate rate, leakage, prompt-token efficiency, latency, and embedding-request gates before deploying a changed generated profile.
+5. Enable shadow comparison for a small set of ready campaigns while keeping their production implementation on `legacy_hybrid`. Compare lexical, legacy-hybrid, and proposed chunked ranks, fixed fallback codes, selection flags, latency, token estimates, and provider/cache cost identifiers. Shadow execution and telemetry are best-effort and never change production selection.
+6. After diagnostics meet the release criteria, explicitly set only the selected ready campaigns to `chunked_hybrid`. Recheck context previews, production selection flags, provider health, fallback rate, generation latency, and continuity. Do not automatically convert existing or newly created campaigns.
+
+There is no reranking stage and no reranker provider dependency. The generated chunked profile combines semantic, lexical, entity, recency, and chronology ranks with weighted reciprocal-rank fusion, followed by deterministic duplicate and diversity controls.
+
+### Retention and sensitive-data boundary
+
+The independent query-embedding cache retains entries for 7 days and enforces at most 256 entries per campaign. Safe retrieval telemetry retains runs for 30 days and enforces at most 5,000 runs per campaign. Cache and telemetry cleanup are derived-data operations and must not lock or rewrite accepted turns.
+
+Telemetry may contain hashes, scoped IDs, ranks, fixed reason and fallback codes, protocol/profile versions, latency, token estimates, provider fingerprints, selection flags, and cost identifiers. It must not contain raw queries, actions, narration, prompts, responses, credentials, provider endpoints, or raw errors. Logs follow the same boundary.
+
+### Configuration rollback
+
+Rollback does not require a down migration or deletion. Return all opted-in campaigns to legacy production and disable shadowing:
+
+```sql
+UPDATE campaign_memory_configs
+   SET retrieval_implementation = 'legacy_hybrid',
+       retrieval_shadow_enabled = false,
+       updated_at = now()
+ WHERE retrieval_implementation <> 'legacy_hybrid' OR retrieval_shadow_enabled;
+```
+
+This leaves accepted turns, parent Chronicle memories, chunk rows, and vectors intact. Keep legacy vectors until a separately reviewed removal plan is approved; their presence preserves immediate configuration-only recovery. Repair or rebuild derived chunks after the application is stable, shadow selected campaigns again, and require a new explicit opt-in before returning to chunked production.
+
 ## Worker Concurrency and Graceful Shutdown
 
 `WORKER_GENERATION_CONCURRENCY` controls the number of story generations that one worker process may execute concurrently. It accepts integers from `1` through `4` and defaults to `1`. Keep it at `1` for behavior equivalent to the original serial worker; raise it only after checking text-provider capacity and database connection headroom. Illustration, Chronicle, and asset work use separate scheduler lanes with capacity `1` each, so an unavailable image provider cannot block or invalidate a completed story turn.

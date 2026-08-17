@@ -1,4 +1,7 @@
-import type { ProviderCostRecordCommand } from "../../../packages/application/src/providers/index.js";
+import {
+  toSafeProviderConfiguration,
+  type ProviderCostRecordCommand
+} from "../../../packages/application/src/providers/index.js";
 import type { DatabaseClient } from "../../../packages/database/src/pool.js";
 import { logProviderTransportError } from "../../../packages/story-engine/src/index.js";
 import {
@@ -33,17 +36,32 @@ export function createChroniclePlatformBindings(
           id: execution.id,
           model: execution.model,
           providerType: execution.providerType,
-          configuration: execution.configuration,
+          configuration: toSafeProviderConfiguration(execution.configuration),
           embed: execution.embed,
         };
       },
-      resolveEmbeddingProviderId: async (_database, ownerUserId, _campaignId, selectedProviderProfileId) => {
+      resolveEmbeddingProvider: async (_database, ownerUserId, _campaignId, selectedProviderProfileId, model) => {
         const resolution = await providers.resolution.resolveEmbedding({
           ownerUserId,
           ...(selectedProviderProfileId === undefined ? {} : { selectedProviderProfileId }),
+          ...(model === undefined ? {} : { model }),
           allowTextFallback: true,
         });
-        return resolution.status === "resolved" ? resolution.providerProfileId : null;
+        if (resolution.status === "unconfigured") {
+          return {
+            status: "unconfigured",
+            resolutionSource: "none",
+            resolvedRole: null,
+          };
+        }
+        return {
+          status: "resolved",
+          resolutionSource: resolution.source,
+          resolvedRole: resolution.resolvedRole,
+          providerProfileId: resolution.providerProfileId,
+          providerType: resolution.providerType,
+          model: resolution.model,
+        };
       },
       recordProviderHealth: (_database, ownerUserId, providerProfileId, healthy) =>
         providers.health.recordHealth({

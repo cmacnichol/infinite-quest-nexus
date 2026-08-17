@@ -22,6 +22,7 @@ See also [Repository Overview](./repository-overview.md) for project-goal/naming
 - [ADR 0017: Staged latest-turn replacement](./0017-staged-latest-turn-replacement.md)
 - [ADR 0018: Canonical facts use structured, rebuildable projections](./0018-structured-canonical-fact-projections.md)
 - [ADR 0024: Chronicle entity identity is scoped and derived](./0024-scoped-chronicle-entity-identity.md)
+- [ADR 0029: Chronicle turn retrieval audits are versioned, atomic provenance](./0029-chronicle-turn-retrieval-audit.md)
 - [ADR 0020: Retire the legacy player from the runtime](./0020-retire-legacy-player-runtime.md)
 - [ADR 0021: Typed turn input and optional intent classification](./0021-turn-input-intent-classification.md)
 - [ADR 0024: Central Prompt Library](./0024-central-prompt-library.md)

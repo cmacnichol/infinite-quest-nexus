@@ -17,6 +17,7 @@ import {
   turnInputModeSourceSchema
 } from "./generation.js";
 import { apiTimestampSchema } from "./http.js";
+import { chronicleRetrievalAuditSchema } from "./memory.js";
 import { storyLengthProfileSchema } from "./story-settings.js";
 import { userProfileSchema, userProfileUpdateSchema } from "./users.js";
 import { campaignCreateSchema, playableCharacterSchema, worldCreateSchema } from "./world-library.js";
@@ -278,6 +279,7 @@ export const turnSummarySchema = z.object({
   imagePrompt: z.string(),
   imageUrl: z.string().nullable(),
   acceptedAt: apiTimestampSchema,
+  chronicleRetrieval: chronicleRetrievalAuditSchema.nullable(),
   reportedCost: reportedCostSchema.nullable()
 });
 
@@ -347,6 +349,7 @@ export const generationResultSchema = z.object({
   choices: z.array(z.string()),
   customActionSuggestion: z.string(),
   imagePrompt: z.string(),
+  chronicleRetrieval: chronicleRetrievalAuditSchema.nullable(),
   modelMetadata: nullableObjectSchema,
   mechanics: nullableObjectSchema,
   acceptedAt: apiTimestampSchema,

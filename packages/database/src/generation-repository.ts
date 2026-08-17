@@ -11,6 +11,7 @@ import {
 } from "../../application/src/index.js";
 import type { PromptSnapshot } from "../../contracts/src/prompt-library.js";
 import { storyLengthProfileFromUnknown, storyLengthWordRange } from "../../contracts/src/story-settings.js";
+import { parseStoredChronicleRetrievalAudit } from "../../contracts/src/memory.js";
 import { sha256, stableStringify } from "../../domain/src/index.js";
 import { extractPartialNarration, formatNarrationParagraphs, STORY_PROMPT_PROTOCOL_VERSION } from "../../story-engine/src/index.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
@@ -567,6 +568,7 @@ export function createPostgresGenerationCommandRepository(
         choices: row.choices || [],
         customActionSuggestion: row.customActionSuggestion || "",
         imagePrompt: row.imagePrompt || "",
+        chronicleRetrieval: parseStoredChronicleRetrievalAudit(row.modelMetadata?.chronicleRetrieval),
         modelMetadata: row.modelMetadata,
         mechanics: row.mechanics,
         acceptedAt: row.acceptedAt!,

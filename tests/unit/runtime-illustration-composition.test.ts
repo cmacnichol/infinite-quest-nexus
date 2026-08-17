@@ -1,5 +1,6 @@
 import { access, readdir, readFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import type {
   IllustrationApplication,
@@ -144,13 +145,14 @@ function sourceTokens(source: string): SourceToken[] {
 }
 
 function hasRuntimeImport(source: string, apiFilePath: string): boolean {
-  const apiSourceMarker = `${sep}services${sep}api${sep}src${sep}`;
-  const apiSourceOffset = apiFilePath.lastIndexOf(apiSourceMarker);
+  const normalizedApiFilePath = apiFilePath.replaceAll("\\", "/");
+  const apiSourceMarker = "/services/api/src/";
+  const apiSourceOffset = normalizedApiFilePath.lastIndexOf(apiSourceMarker);
   if (apiSourceOffset === -1) return false;
-  const runtimeRoot = resolve(apiFilePath.slice(0, apiSourceOffset), "services/runtime");
+  const runtimeRoot = resolve(normalizedApiFilePath.slice(0, apiSourceOffset), "services/runtime");
   const isRuntimeSpecifier = (specifier: string): boolean => {
     if (!specifier.startsWith(".")) return false;
-    const importedPath = resolve(dirname(apiFilePath), specifier);
+    const importedPath = resolve(dirname(normalizedApiFilePath), specifier);
     return importedPath === runtimeRoot || importedPath.startsWith(`${runtimeRoot}${sep}`);
   };
   const tokens = sourceTokens(source);
@@ -173,7 +175,7 @@ function hasRuntimeImport(source: string, apiFilePath: string): boolean {
 
 describe("createApiIllustrationApplication", () => {
   it("keeps API-to-runtime imports confined to the audited e3g composition roots", async () => {
-    const apiRoot = dirname(new URL("../../services/api/src/illustration-application-adapter.ts", import.meta.url).pathname);
+    const apiRoot = dirname(fileURLToPath(new URL("../../services/api/src/illustration-application-adapter.ts", import.meta.url)));
     const productionFiles = await productionTypeScriptFiles(apiRoot);
 
     // The scan intentionally excludes test and generated output only. Every
@@ -228,7 +230,7 @@ describe("createApiIllustrationApplication", () => {
   });
 
   it("terminates while scanning the production server source", async () => {
-    const serverPath = new URL("../../services/api/src/server.ts", import.meta.url).pathname;
+    const serverPath = fileURLToPath(new URL("../../services/api/src/server.ts", import.meta.url));
 
     await expect(Promise.race([
       readFile(serverPath, "utf8").then((source) => hasRuntimeImport(source, serverPath)),

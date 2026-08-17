@@ -15,6 +15,7 @@ import type { GenerationProjectionSession, GenerationRun } from "../../../packag
 import type { GenerationApiPort, GenerationSnapshotSource } from "../../../packages/client-core/src/generation/types.js";
 import type { AbortSignalLike, PendingSubmissionStore } from "../../../packages/client-core/src/ports.js";
 import { ApiContractError, NexusApiError } from "../../../packages/client-core/src/index.js";
+import { DEDICATED_CHUNKED_AUDIT } from "../../fixtures/chronicle-retrieval-audits.js";
 
 const campaignId = "11111111-1111-4111-8111-111111111111";
 const otherCampaignId = "22222222-2222-4222-8222-222222222222";
@@ -37,6 +38,7 @@ function turn(turnNumber: number, id = turnNumber === 1 ? turnOneId : turnTwoId)
     imagePrompt: "",
     imageUrl: null,
     acceptedAt: "2026-08-03T12:00:00.000Z",
+    chronicleRetrieval: null,
     reportedCost: null
   };
 }
@@ -183,6 +185,7 @@ function result(overrides: Partial<GenerationResult> = {}): GenerationResult {
     choices: ["accepted choice"],
     customActionSuggestion: "",
     imagePrompt: "",
+    chronicleRetrieval: null,
     modelMetadata: null,
     mechanics: null,
     acceptedAt: "2026-08-03T12:00:00.000Z",
@@ -203,6 +206,21 @@ function expectProtocol(action: () => void, kind: string): void {
 }
 
 describe("campaign store hydration", () => {
+  it("preserves the recorded retrieval audit on the immediate accepted turn", async () => {
+    const completed = result({ chronicleRetrieval: DEDICATED_CHUNKED_AUDIT });
+    const controller = createCampaignStore();
+    controller.load(sync());
+    const session = controller.attachGeneration({
+      ...run(),
+      fetchResult: async () => ({ type: "settled", outcome: "completed", result: completed })
+    });
+
+    session.apply({ type: "result_unavailable", jobId, error: new Error("test") });
+    await session.retryResult();
+
+    expect(controller.store.get().turns.at(-1)?.chronicleRetrieval).toEqual(DEDICATED_CHUNKED_AUDIT);
+  });
+
   it("starts with the complete empty campaign projection", () => {
     const state = createCampaignStore().store.get();
 

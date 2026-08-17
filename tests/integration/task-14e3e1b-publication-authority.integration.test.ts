@@ -41,6 +41,27 @@ async function migrateNormalizedAuthorityDown(pool: DatabasePool): Promise<void>
   }
 }
 
+async function migrateNormalizedAuthorityUp(pool: DatabasePool, count: number): Promise<void> {
+  const client = await pool.connect();
+  try {
+    const applied = await runner({
+      dbClient: client,
+      dir: resolve("database/migrations"),
+      direction: "up",
+      count,
+      migrationsTable: "schema_migrations",
+      checkOrder: true,
+      singleTransaction: true,
+      advisoryLockMode: "wait",
+      verbose: false,
+      logger: { info: () => undefined, warn: () => undefined, error: () => undefined }
+    });
+    expect(applied.at(-1)?.name).toBe("0069_import_progress_status");
+  } finally {
+    client.release();
+  }
+}
+
 integration("Task 14e3e1b normalized publication migration", () => {
   let pool: DatabasePool;
 
@@ -154,7 +175,7 @@ integration("Task 14e3e1b normalized publication migration", () => {
         ],
       );
 
-      await migrateDatabase(isolated, resolve("database/migrations"));
+      await migrateNormalizedAuthorityUp(isolated, 6);
 
       await expect(isolated.query<{
         content_hash: string;
@@ -441,7 +462,7 @@ integration("Task 14e3e1b normalized publication migration", () => {
     try {
       await pool.query(`CREATE DATABASE ${databaseName}`);
       isolated = createDatabasePool(databaseUrlValue.toString(), 4);
-      await migrateDatabase(isolated, resolve("database/migrations"));
+      await migrateNormalizedAuthorityUp(isolated, 69);
       await migrateNormalizedAuthorityDown(isolated);
       const requestColumn = await isolated.query<{ column_name: string }>(
         `SELECT column_name

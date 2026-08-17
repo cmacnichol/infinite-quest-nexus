@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildScopedEntityCatalog,
   entityQueryTerms,
@@ -51,6 +51,24 @@ describe("scoped entity references", () => {
     expect(normalizeEntityTerm("  ＴHE\tCafé  ")).toBe("the café");
   });
 
+  it("preserves locale-shaped persisted fallback IDs while query normalization stays stable", () => {
+    const original = String.prototype.toLocaleLowerCase;
+    const localeSpy = vi.spyOn(String.prototype, "toLocaleLowerCase")
+      .mockImplementation(function (this: string) {
+        return original.call(this, "tr");
+      });
+    try {
+      const catalog = buildScopedEntityCatalog({ worldContent: { entities: [
+        { name: "IRON GATE" }
+      ] } });
+
+      expect(catalog[0]?.id).toBe("world:entity:ıron-gate");
+      expect(normalizeEntityTerm("IRON GATE")).toBe("iron gate");
+    } finally {
+      localeSpy.mockRestore();
+    }
+  });
+
   it("matches whole phrases longest-first", () => {
     const catalog = buildScopedEntityCatalog({ worldContent: { entities: [
       { id: "guard", name: "Guard" },
@@ -81,6 +99,16 @@ describe("scoped entity references", () => {
       .toEqual(["The Ashen Guard", "Ash Guard", "Cinder Shields"]);
     expect(expandEntityQuery("Where did the Ash Guard go?", catalog))
       .toBe("Where did the Ash Guard go? The Ashen Guard Ash Guard Cinder Shields");
+  });
+
+  it("expands equal-length Unicode entity names in locale-independent code-unit order", () => {
+    const catalog = buildScopedEntityCatalog({ worldContent: { entities: [
+      { id: "aether", name: "Äther" },
+      { id: "zebra", name: "Zebra" }
+    ] } });
+
+    expect(expandEntityQuery("Seek Äther and Zebra", catalog))
+      .toBe("Seek Äther and Zebra Zebra Äther");
   });
 
   it("returns capitalization-based discoveries separately from known references", () => {

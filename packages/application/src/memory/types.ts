@@ -1,4 +1,10 @@
-import type { CampaignEmbeddingConfig, MemoryContextQuery } from "@infinite-quest/contracts";
+import type {
+  CampaignEmbeddingConfig,
+  ChronicleHealth,
+  ChronicleRetrievalAudit,
+  MemoryContextQuery,
+  RetrievalImplementation
+} from "@infinite-quest/contracts";
 
 /** Resolved at the API boundary or read from a claimed worker job; never caller supplied. */
 export type MemoryOwnerScope = Readonly<{
@@ -34,6 +40,8 @@ export type EmbeddingConfigView = Readonly<{
   effectiveDocumentPrefix?: string;
   effectiveQueryPrefix?: string;
   prefixesAutomatic?: boolean;
+  retrievalImplementation?: RetrievalImplementation;
+  retrievalShadowEnabled?: boolean;
 }>;
 
 export type ChronicleMetricsView = Readonly<{
@@ -49,25 +57,11 @@ export type ChronicleMetricsView = Readonly<{
     compact: number;
     summary: number;
   }>;
-  semanticHealth: Readonly<{
-    status: "disabled" | "indexing" | "healthy" | "degraded" | "failed" | "unavailable";
-    message: string;
-    enabled: boolean;
-    providerProfileId: string | null;
-    providerName: string;
-    providerHealth: "unknown" | "healthy" | "degraded" | "unavailable";
-    model: string;
-    indexedMemories: number;
-    totalMemories: number;
-    coveragePercent: number;
-    jobId: string | null;
-    jobStatus: "queued" | "running" | "completed" | "failed" | null;
-    progress: Readonly<{ embedded?: number; total?: number; updated?: number; skipped?: number }>;
-    errorMessage: string;
-    lastCompletedAt: string | null;
-  }>;
+  semanticHealth: ChronicleHealth;
 }>;
-export type ChronicleContextPreview = Readonly<Record<string, unknown>>;
+export type ChronicleContextPreview = Readonly<Record<string, unknown> & {
+  chronicleRetrieval: ChronicleRetrievalAudit;
+}>;
 
 /** Fixed public projection: adapters must keep diagnostics and provider details private. */
 export const MEMORY_PUBLIC_FAILURE_CODE = "memory_unavailable" as const;
@@ -199,6 +193,92 @@ export type ChronicleWorkerRetrieval = Readonly<{
   totalMemories: number;
   batchLimit: number;
   nextCursor: string | null;
+}>;
+
+export type ChronicleChunkJobProgress = Readonly<{
+  parentCursor: string | null;
+  processedParents: number;
+  embeddedChunks: number;
+  skippedChunks: number;
+  totalParents: number;
+  capabilityFingerprint: string | null;
+}>;
+
+export type ClaimedChronicleChunkJob = CampaignWorldVersionMemoryScope & Readonly<{
+  jobId: string;
+  jobType: "index_memory_chunks_v2";
+  workVersion: number;
+  workerId: string;
+  /** Opaque per-claim authority; regenerated even when the same worker reclaims unchanged work. */
+  leaseToken: string;
+  leaseSeconds: number;
+  progress: ChronicleChunkJobProgress;
+}>;
+
+export type ChronicleChunkLeaseScope = ClaimedChronicleChunkJob;
+
+export type ChronicleChunkParent = Readonly<{
+  id: string;
+  ordinal: number;
+  memoryKind: "turn_fiction" | "legacy_summary" | "campaign_summary" | "canonical_fact" | "open_thread";
+  content: string;
+  contentHash: string;
+  entities: readonly string[];
+  entityIds: readonly string[];
+  metadata: Readonly<Record<string, unknown>>;
+}>;
+
+export type ChronicleChunkParentPage = Readonly<{
+  config: EmbeddingConfigView;
+  providerCapability: Readonly<{
+    model: string;
+    contextWindowTokens: number;
+    requestTimeoutMs: number;
+    configuration: Readonly<Record<string, unknown>>;
+  }> | null;
+  parents: readonly ChronicleChunkParent[];
+  totalParents: number;
+  batchLimit: number;
+  nextCursor: string | null;
+}>;
+
+export type ChronicleChunkDraftCommit = Readonly<{
+  protocolVersion: "chronicle-chunk-v1";
+  parentMemoryId: string;
+  kind: "turn_action" | "turn_narration" | "legacy_summary" | "campaign_summary" | "canonical_fact" | "open_thread";
+  chunkIndex: number;
+  content: string;
+  contentHash: string;
+  estimatedTokens: number;
+  sourceStartOffset: number;
+  sourceEndOffset: number;
+  embedding: readonly number[] | null;
+  skipReason: string | null;
+}>;
+
+export type ChronicleChunkEmbeddingProvider = Readonly<{
+  id: string;
+  model: string;
+  providerType: string;
+}>;
+
+export type ChronicleChunkEmbeddingResult = Readonly<{
+  embeddings: readonly (readonly number[])[];
+  responseId: string;
+  usage: unknown;
+  reportedCost: Readonly<{ amount: string; currency: string }> | null;
+}>;
+
+export type ChronicleChunkBatchCommit = Readonly<{
+  parent: ChronicleChunkParent;
+  previousParentCursor: string | null;
+  provider: ChronicleChunkEmbeddingProvider | null;
+  providerFingerprint: string | null;
+  capabilityFingerprint: string;
+  embeddingProtocolVersion: string;
+  chunks: readonly ChronicleChunkDraftCommit[];
+  results: readonly ChronicleChunkEmbeddingResult[];
+  progress: ChronicleChunkJobProgress;
 }>;
 
 export type MemoryContextPreviewRequest = MemoryContextQuery & Readonly<{

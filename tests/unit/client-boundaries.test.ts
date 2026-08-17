@@ -4,6 +4,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { gzipSync } from "node:zlib";
+// @ts-expect-error Repository runner scripts intentionally have no declaration files.
+import { typescriptCommand } from "../../scripts/node-tool-command.mjs";
 import {
   createBrowserGenerationSource,
   createNoopSessionPort
@@ -27,20 +29,21 @@ import {
 import { formatWebBundleBudgetReport, inspectWebBundleBudget } from "../../scripts/check-web-bundle-budget.mjs";
 
 function typecheckFixture(tsconfigPath: string): { succeeded: boolean; output: string } {
+  const command = typescriptCommand(["--noEmit", "--project", tsconfigPath]);
   try {
     return {
       succeeded: true,
-      output: execFileSync("pnpm", ["exec", "tsc", "--noEmit", "--project", tsconfigPath], {
+      output: execFileSync(command.executable, command.arguments, {
         cwd: process.cwd(),
         encoding: "utf8",
         stdio: "pipe"
       })
     };
   } catch (error) {
-    const commandError = error as { stderr?: string; stdout?: string };
+    const commandError = error as { message?: string; stderr?: string; stdout?: string };
     return {
       succeeded: false,
-      output: `${commandError.stdout || ""}${commandError.stderr || ""}`
+      output: `${commandError.stdout || ""}${commandError.stderr || ""}${commandError.message || ""}`
     };
   }
 }

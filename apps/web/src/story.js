@@ -28,8 +28,31 @@ import {
   resumeActiveGenerationConflict
 } from "./story-generation-monitor.js";
 import { handleStoryEscape } from "./story-keyboard.js";
+import { formatChronicleRetrievalAudit } from "@infinite-quest/client-core";
 
 "use strict";
+
+function escapeChronicleRetrievalHtml(value) {
+  return String(value)
+    .replace(/&/gu, "&amp;")
+    .replace(/</gu, "&lt;")
+    .replace(/>/gu, "&gt;")
+    .replace(/"/gu, "&quot;")
+    .replace(/'/gu, "&#39;");
+}
+
+export function chronicleRetrievalHistoryMarkup(audit) {
+  const presentation = formatChronicleRetrievalAudit(audit ?? null);
+  const rows = [
+    ["Search", presentation.searchPath],
+    ["Provider", presentation.provider],
+    ["Query vector", presentation.queryVector],
+    ...(presentation.fallback ? [["Fallback", presentation.fallback]] : [])
+  ];
+  return `<dl class="turn-chronicle-audit" aria-label="Chronicle retrieval">${rows
+    .map(([label, value]) => `<div><dt>${label}</dt><dd>${escapeChronicleRetrievalHtml(value)}</dd></div>`)
+    .join("")}</dl>`;
+}
 
 export function startStoryPlayer(composition) {
 
@@ -368,7 +391,7 @@ function formatReportedCost(cost) {
 }
 
 function reportedCostTooltip(cost) {
-  const labels = { story: "Story", image: "Images", memory: "Semantic memory" };
+  const labels = { story: "Story", image: "Images", memory: "Semantic retrieval" };
   const details = Object.entries(cost?.byCategory || {})
     .filter(([, amount]) => Number(amount) > 0)
     .map(([category, amount]) => `${labels[category] || category}: ${formatReportedCost({ amount, currency: cost.currency })}`);
@@ -2106,6 +2129,7 @@ function populateHistoryContainer(container) {
         <span class="turn-input-mode-pill ${inputMode}" title="Story Engine interpreted this prompt as ${inputModeLabel}" aria-label="Prompt interpretation: ${inputModeLabel}">${inputModeLabel}</span>
       </div>
       <p>${escapeHtml(preview)}</p>
+      ${chronicleRetrievalHistoryMarkup(t.chronicleRetrieval)}
     `;
     card.addEventListener("click", () => selectHistoryTurn(i));
     card.addEventListener("keydown", (event) => {

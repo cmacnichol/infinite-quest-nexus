@@ -8,6 +8,11 @@ import {
   createPostgresChronicleWorkerAdapters
 } from "../../packages/database/src/chronicle-repository.js";
 import {
+  createPostgresChronicleChunkBatchPort,
+  createPostgresChronicleChunkJobStatePort,
+  createPostgresChronicleChunkParentPort
+} from "../../packages/database/src/chronicle-chunk-repository.js";
+import {
   createDatabasePool,
   initialOwnerId,
   type DatabaseClient,
@@ -777,6 +782,268 @@ integration("PostgreSQL Chronicle contract matrix", () => {
     expect(JSON.stringify(publicJob)).not.toContain("internal.provider.invalid");
   });
 
+  it("round-trips chunked retrieval controls while omitted controls retain legacy defaults", async () => {
+    const fixture = await campaignFixture("retrieval configuration");
+    const embeddingProviderId = await providerFixture("retrieval configuration");
+    const configuration = createPostgresChronicleConfigurationRepository(pool);
+    const input = {
+      enabled: true,
+      providerProfileId: embeddingProviderId,
+      model: "retrieval-model",
+      batchSize: 16,
+      documentPrefix: null,
+      queryPrefix: null
+    };
+
+    await expect(configuration.getEmbeddingConfig(fixture)).resolves.toMatchObject({
+      retrievalImplementation: "legacy_hybrid",
+      retrievalShadowEnabled: false
+    });
+    await expect(configuration.setEmbeddingConfig(fixture, {
+      ...input,
+      retrievalImplementation: "chunked_hybrid",
+      retrievalShadowEnabled: true
+    })).resolves.toMatchObject({
+      retrievalImplementation: "chunked_hybrid",
+      retrievalShadowEnabled: true
+    });
+    await expect(configuration.getEmbeddingConfig(fixture)).resolves.toMatchObject({
+      retrievalImplementation: "chunked_hybrid",
+      retrievalShadowEnabled: true
+    });
+    await pool.query(
+      `UPDATE chronicle_chunk_jobs SET progress='{"processedParents":1}'::jsonb
+        WHERE campaign_id=$1`,
+      [fixture.campaignId]
+    );
+    const unchanged = await pool.query<{ work_version: string; progress: Record<string, unknown> }>(
+      "SELECT work_version::text,progress FROM chronicle_chunk_jobs WHERE campaign_id=$1",
+      [fixture.campaignId]
+    );
+    await expect(configuration.setEmbeddingConfig(fixture, {
+      ...input,
+      retrievalImplementation: "chunked_hybrid",
+      retrievalShadowEnabled: true
+    })).resolves.toMatchObject({
+      retrievalImplementation: "chunked_hybrid",
+      retrievalShadowEnabled: true
+    });
+    await expect(pool.query<{ work_version: string; progress: Record<string, unknown> }>(
+      "SELECT work_version::text,progress FROM chronicle_chunk_jobs WHERE campaign_id=$1",
+      [fixture.campaignId]
+    )).resolves.toEqual(unchanged);
+    await expect(configuration.setEmbeddingConfig(fixture, input)).resolves.toMatchObject({
+      retrievalImplementation: "legacy_hybrid",
+      retrievalShadowEnabled: false
+    });
+    await expect(pool.query<{ count: string; job_type: string }>(
+      `SELECT count(*)::text AS count, min(job_type) AS job_type
+         FROM chronicle_chunk_jobs WHERE campaign_id=$1`,
+      [fixture.campaignId]
+    )).resolves.toMatchObject({ rows: [{ count: "1", job_type: "index_memory_chunks_v2" }] });
+  });
+
+  it("versions active shadow chunk work across semantic enable and disable transitions", async () => {
+    const fixture = await campaignFixture("semantic mode transition");
+    const providerId = await providerFixture("semantic mode transition");
+    await pool.query(
+      `INSERT INTO chronicle_memories
+         (owner_user_id,campaign_id,world_version_id,memory_kind,ordinal,content,token_estimate)
+       VALUES ($1,$2,$3,'campaign_summary',1,'The shadow index remains resumable.',6)`,
+      [ownerUserId, fixture.campaignId, fixture.worldVersionId]
+    );
+    const configuration = createPostgresChronicleConfigurationRepository(pool);
+    const input = {
+      providerProfileId: providerId,
+      model: "semantic-mode-model",
+      batchSize: 16,
+      documentPrefix: null,
+      queryPrefix: null,
+      retrievalImplementation: "legacy_hybrid" as const,
+      retrievalShadowEnabled: true
+    };
+    await configuration.setEmbeddingConfig(fixture, { ...input, enabled: false });
+
+    const state = createPostgresChronicleChunkJobStatePort(pool);
+    const parents = createPostgresChronicleChunkParentPort(pool);
+    const batches = createPostgresChronicleChunkBatchPort(pool, {
+      recordCost: async () => null
+    });
+    const enablingClaim = await state.claimNext({ workerId: "semantic-mode-worker", leaseSeconds: 30 });
+    if (!enablingClaim) throw new Error("shadow chunk job was not claimed before enable");
+
+    await configuration.setEmbeddingConfig(fixture, { ...input, enabled: true });
+    await expect(pool.query<{ status: string; work_version: string }>(
+      "SELECT status,work_version::text FROM chronicle_chunk_jobs WHERE id=$1",
+      [enablingClaim.jobId]
+    )).resolves.toMatchObject({ rows: [{ status: "running", work_version: "2" }] });
+    await expect(state.failClaim(enablingClaim, {
+      diagnosticCode: "stale_enable_transition"
+    })).resolves.toBe(false);
+    await expect(state.completeClaim(enablingClaim, {
+      progress: enablingClaim.progress
+    })).resolves.toBe(true);
+
+    const enabledClaim = await state.claimNext({ workerId: "semantic-mode-worker", leaseSeconds: 30 });
+    if (!enabledClaim) throw new Error("replacement chunk job was not claimed after enable");
+    expect(enabledClaim.workVersion).toBe(2);
+    await expect(parents.loadForClaim(enabledClaim, {
+      batchLimit: 1,
+      cursor: null
+    })).resolves.toMatchObject({
+      config: { enabled: true, retrievalShadowEnabled: true },
+      parents: [{ content: "The shadow index remains resumable." }]
+    });
+
+    await configuration.setEmbeddingConfig(fixture, { ...input, enabled: false });
+    await expect(pool.query<{ status: string; work_version: string }>(
+      "SELECT status,work_version::text FROM chronicle_chunk_jobs WHERE id=$1",
+      [enabledClaim.jobId]
+    )).resolves.toMatchObject({ rows: [{ status: "running", work_version: "3" }] });
+    await expect(state.failClaim(enabledClaim, {
+      diagnosticCode: "stale_disable_transition"
+    })).resolves.toBe(false);
+    await expect(state.completeClaim(enabledClaim, {
+      progress: enabledClaim.progress
+    })).resolves.toBe(true);
+
+    const disabledClaim = await state.claimNext({ workerId: "semantic-mode-worker", leaseSeconds: 30 });
+    if (!disabledClaim) throw new Error("replacement chunk job was not claimed after disable");
+    expect(disabledClaim.workVersion).toBe(3);
+    await expect(parents.loadForClaim(disabledClaim, {
+      batchLimit: 1,
+      cursor: null
+    })).resolves.toMatchObject({
+      config: { enabled: false, retrievalShadowEnabled: true },
+      parents: [{ content: "The shadow index remains resumable." }]
+    });
+    await expect(batches.prepareClaim(disabledClaim, {
+      capabilityFingerprint: "semantic-disabled-shadow"
+    })).resolves.toBe("ready");
+    const prepared = await state.loadClaimedJob(disabledClaim);
+    if (!prepared) throw new Error("disabled replacement claim was not prepared");
+    await expect(state.completeClaim(prepared, { progress: prepared.progress })).resolves.toBe(true);
+    await expect(pool.query<{ status: string; work_version: string }>(
+      "SELECT status,work_version::text FROM chronicle_chunk_jobs WHERE id=$1",
+      [disabledClaim.jobId]
+    )).resolves.toMatchObject({ rows: [{ status: "completed", work_version: "3" }] });
+  });
+
+  it("enqueues only v2 chunk work after an accepted parent write and rebuild", async () => {
+    const fixture = await campaignFixture("accepted chunk enqueue");
+    const providerId = await providerFixture("accepted chunk enqueue");
+    await configureEmbedding(fixture.campaignId, providerId, "embed-v1");
+    const turn = await pool.query<{ id: string }>(
+      `INSERT INTO turns
+         (owner_user_id,campaign_id,turn_number,action,narration,state_snapshot_private)
+       VALUES ($1,$2,1,'Open the gate.','The gate opens.','{}'::jsonb) RETURNING id`,
+      [ownerUserId, fixture.campaignId]
+    );
+    const transaction = createPostgresChronicleGenerationTransactionPort({
+      embeddings: {
+        async resolve() { return { status: "resolved" as const, resolutionSource: "dedicated_embedding" as const, resolvedRole: "embedding" as const, providerProfileId: providerId, providerType: "openai_compatible", model: "contract-model" }; },
+        async load() {
+          return {
+            id: providerId, model: "embed-v1", providerType: "openai_compatible",
+            embed: async () => ({ embeddings: [], responseId: "unused", usage: {}, reportedCost: null })
+          };
+        },
+        async embed() { return { embeddings: [], responseId: "unused", usage: {}, reportedCost: null }; },
+        async fingerprint() { return "unused"; },
+        async recordHealth() {},
+        async recordCost() { return null; },
+        logDiagnostic() {}
+      }
+    });
+    const scope = { ...fixture, ownerUserId };
+    const before = await pool.query<{ row: Record<string, unknown>; xmin: string }>(
+      `SELECT to_jsonb(t)-'state_snapshot_private' AS row,xmin::text
+         FROM turns t WHERE id=$1`, [turn.rows[0]!.id]
+    );
+
+    await withTransaction(pool, async (client) => {
+      await transaction.writeAcceptedTurnFiction(client, {
+        ...scope, turnId: turn.rows[0]!.id, ordinal: 1,
+        action: "Open the gate.", narration: "The gate opens."
+      });
+    });
+    const first = await pool.query<{ id: string; work_version: string }>(
+      "SELECT id,work_version::text FROM chronicle_chunk_jobs WHERE campaign_id=$1",
+      [fixture.campaignId]
+    );
+    expect(first.rows).toEqual([{ id: expect.any(String), work_version: "1" }]);
+    expect(await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM chronicle_jobs WHERE campaign_id=$1 AND job_type='index_memory_chunks_v2'",
+      [fixture.campaignId]
+    )).toMatchObject({ rows: [{ count: "0" }] });
+
+    await withTransaction(pool, (client) => transaction.rebuildCampaignMemories(client, scope));
+    expect(await pool.query<{ id: string; work_version: string; progress: Record<string, unknown> }>(
+      "SELECT id,work_version::text,progress FROM chronicle_chunk_jobs WHERE campaign_id=$1",
+      [fixture.campaignId]
+    )).toMatchObject({ rows: [{ id: first.rows[0]!.id, work_version: "2", progress: {} }] });
+    expect(await pool.query<{ row: Record<string, unknown>; xmin: string }>(
+      `SELECT to_jsonb(t)-'state_snapshot_private' AS row,xmin::text
+         FROM turns t WHERE id=$1`, [turn.rows[0]!.id]
+    )).toEqual(before);
+  });
+
+  it("commits accepted turns and parent memories when automatic chunk enqueue fails", async () => {
+    const fixture = await campaignFixture("accepted enqueue failure");
+    const providerId = await providerFixture("accepted enqueue failure");
+    await configureEmbedding(fixture.campaignId, providerId, "embed-v1");
+    const transaction = createPostgresChronicleGenerationTransactionPort({
+      embeddings: {
+        async resolve() { return { status: "resolved" as const, resolutionSource: "dedicated_embedding" as const, resolvedRole: "embedding" as const, providerProfileId: providerId, providerType: "openai_compatible", model: "contract-model" }; },
+        async load() {
+          return {
+            id: providerId, model: "embed-v1", providerType: "openai_compatible",
+            embed: async () => ({ embeddings: [], responseId: "unused", usage: {}, reportedCost: null })
+          };
+        },
+        async embed() { return { embeddings: [], responseId: "unused", usage: {}, reportedCost: null }; },
+        async fingerprint() { return "unused"; },
+        async recordHealth() {},
+        async recordCost() { return null; },
+        logDiagnostic() {}
+      }
+    });
+    await pool.query(`CREATE OR REPLACE FUNCTION test_fail_chunk_enqueue() RETURNS trigger
+      LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'private enqueue failure token'; END $$`);
+    await pool.query(`CREATE TRIGGER test_fail_chunk_enqueue
+      BEFORE INSERT OR UPDATE ON chronicle_chunk_jobs
+      FOR EACH ROW EXECUTE FUNCTION test_fail_chunk_enqueue()`);
+    try {
+      await expect(withTransaction(pool, async (client) => {
+        const turn = await client.query<{ id: string }>(
+          `INSERT INTO turns
+             (owner_user_id,campaign_id,turn_number,action,narration,state_snapshot_private)
+           VALUES ($1,$2,1,'Enter the archive.','The archive opens.','{}'::jsonb) RETURNING id`,
+          [ownerUserId, fixture.campaignId]
+        );
+        await transaction.writeAcceptedTurnFiction(client, {
+          ownerUserId,
+          campaignId: fixture.campaignId,
+          worldVersionId: fixture.worldVersionId,
+          turnId: turn.rows[0]!.id,
+          ordinal: 1,
+          action: "Enter the archive.",
+          narration: "The archive opens."
+        });
+      })).resolves.toBeUndefined();
+      await expect(pool.query<{ turns: string; memories: string; jobs: string }>(
+        `SELECT
+           (SELECT count(*)::text FROM turns WHERE campaign_id=$1) AS turns,
+           (SELECT count(*)::text FROM chronicle_memories WHERE campaign_id=$1) AS memories,
+           (SELECT count(*)::text FROM chronicle_chunk_jobs WHERE campaign_id=$1) AS jobs`,
+        [fixture.campaignId]
+      )).resolves.toMatchObject({ rows: [{ turns: "1", memories: "1", jobs: "0" }] });
+    } finally {
+      await pool.query("DROP TRIGGER IF EXISTS test_fail_chunk_enqueue ON chronicle_chunk_jobs");
+      await pool.query("DROP FUNCTION IF EXISTS test_fail_chunk_enqueue()");
+    }
+  });
+
   it("rolls back every direct Chronicle generation operation with its caller-owned transaction", async () => {
     const fixture = await campaignFixture("direct rollback");
     const providerId = await providerFixture("direct rollback");
@@ -800,7 +1067,7 @@ integration("PostgreSQL Chronicle contract matrix", () => {
     const transaction = createPostgresChronicleGenerationTransactionPort({
       embeddings: {
         async resolve(_database, scope) {
-          return scope.selectedProviderProfileId ?? providerId;
+          return { status: "resolved" as const, resolutionSource: "dedicated_embedding" as const, resolvedRole: "embedding" as const, providerProfileId: scope.selectedProviderProfileId ?? providerId, providerType: "openai_compatible", model: "contract-model" };
         },
         async load() {
           return provider;
@@ -924,6 +1191,14 @@ integration("PostgreSQL Chronicle contract matrix", () => {
       "SELECT count(*)::text AS count FROM chronicle_jobs WHERE campaign_id = $1",
       [fixture.campaignId]
     )).resolves.toMatchObject({ rows: [{ count: "0" }] });
+    await expectForcedRollback(async (client) => {
+      await transaction.enqueueChunkIndex(client, scope);
+      throw rollback;
+    });
+    await expect(pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM chronicle_chunk_jobs WHERE campaign_id = $1",
+      [fixture.campaignId]
+    )).resolves.toMatchObject({ rows: [{ count: "0" }] });
 
     await pool.query(
       `INSERT INTO chronicle_memories
@@ -977,7 +1252,7 @@ integration("PostgreSQL Chronicle contract matrix", () => {
     );
     const transaction = createPostgresChronicleGenerationTransactionPort({
       embeddings: {
-        async resolve() { return null; },
+        async resolve() { return { status: "unconfigured" as const, resolutionSource: "none" as const, resolvedRole: null }; },
         async load() { throw new Error("not used by rebuild"); },
         async embed() { throw new Error("not used by rebuild"); },
         async fingerprint() { throw new Error("not used by rebuild"); },

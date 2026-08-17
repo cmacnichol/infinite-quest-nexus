@@ -8,11 +8,12 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createPostgresDurableFilesystemRepository } from "../../packages/database/src/durable-filesystem-repository.js";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
 import type { PrivateStorageDescriptor } from "../../packages/application/src/assets/private-storage-lifecycle.js";
+import { supportsSecureGeneratedArchiveStaging } from "../../services/api/src/archive-io.js";
 import { createAssetImportStorageComposition } from "../../services/runtime/src/asset-import-composition.js";
 import { createPrivateAssetMaintenanceComposition } from "../../services/runtime/src/private-asset-maintenance-composition.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
-const integration = databaseUrl ? describe : describe.skip;
+const integration = databaseUrl && supportsSecureGeneratedArchiveStaging() ? describe : describe.skip;
 
 integration("Task 14e3e7 private asset-maintenance composition", () => {
   let pool: DatabasePool;

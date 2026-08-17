@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { parseHTML } from "linkedom";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   captureCampaignStateEditSession,
   renderCampaignStateInspector,
@@ -13,6 +13,8 @@ import {
   syncCancelGenerationButton
 // @ts-expect-error Browser JavaScript modules intentionally do not publish TypeScript declarations.
 } from "../../apps/web/src/story-generation-cancellation.js";
+import * as storyModule from "../../apps/web/src/story.js";
+import { DEDICATED_CHUNKED_AUDIT, TEXT_FALLBACK_LEGACY_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
 
 const storyHtml = readFileSync("apps/web/public/story.html", "utf8");
 const storyScript = readFileSync("apps/web/src/story.js", "utf8");
@@ -673,6 +675,93 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('aria-label="Prompt interpretation: ${inputModeLabel}"');
     expect(storyCss).toContain('.turn-input-mode-pill {');
     expect(storyCss).toContain('.turn-input-mode-pill.scene {');
+  });
+
+  it("renders recorded and Unknown Chronicle retrieval details as escaped, labelled turn-history metadata", () => {
+    const markup = (storyModule as Record<string, unknown>).chronicleRetrievalHistoryMarkup;
+    expect(typeof markup).toBe("function");
+    if (typeof markup !== "function") return;
+    const hostileAudit = {
+      ...DEDICATED_CHUNKED_AUDIT,
+      provider: {
+        ...DEDICATED_CHUNKED_AUDIT.provider,
+        providerType: '<img data-hostile="provider">',
+        model: '<script data-hostile="model"></script>'
+      }
+    };
+    const { document } = parseHTML(`<section>
+      <article class="history-card" role="button" tabindex="0">${(markup as (audit: unknown) => string)(TEXT_FALLBACK_LEGACY_AUDIT)}</article>
+      <article class="history-card" role="button" tabindex="0">${(markup as (audit: unknown) => string)(null)}</article>
+      <article class="history-card" role="button" tabindex="0">${(markup as (audit: unknown) => string)(hostileAudit)}</article>
+    </section>`);
+    const audits = document.querySelectorAll('dl[aria-label="Chronicle retrieval"]');
+
+    expect(audits).toHaveLength(3);
+    expect(audits[0]?.textContent).toContain("Legacy semantic retrieval");
+    expect(audits[0]?.textContent).toContain("Text-role provider used for embeddings: openrouter · text-embedding-nomic-embed-text-v1.5");
+    expect(audits[0]?.textContent).toContain("chunk index not ready");
+    expect(audits[1]?.textContent).toContain("Unknown — this turn predates retrieval auditing or came from an import without audit metadata.");
+    expect(audits[1]?.textContent).toContain("ProviderUnknown");
+    expect(audits[2]?.textContent).toContain('<img data-hostile="provider">');
+    expect(audits[2]?.textContent).toContain('<script data-hostile="model"></script>');
+    expect(audits[2]?.querySelector("img, script")).toBeNull();
+    expect(document.querySelectorAll('.history-card[role="button"][tabindex="0"]')).toHaveLength(3);
+  });
+
+  it("opens the real Turn History modal with recorded and Unknown retrieval details that remain keyboard-selectable", async () => {
+    const { document, window } = parseHTML(storyHtml);
+    Object.defineProperty(window, "location", { value: { pathname: "/story/campaign-1" }, configurable: true });
+    for (const dialog of document.querySelectorAll("dialog")) {
+      (dialog as unknown as { showModal: () => void; close: () => void }).showModal = () => dialog.setAttribute("open", "");
+      (dialog as unknown as { showModal: () => void; close: () => void }).close = () => dialog.removeAttribute("open");
+    }
+    vi.stubGlobal("window", window);
+    vi.stubGlobal("document", document);
+    vi.stubGlobal("Element", window.Element);
+    vi.stubGlobal("HTMLElement", window.HTMLElement);
+    vi.stubGlobal("localStorage", { getItem: () => null, removeItem: () => undefined, setItem: () => undefined });
+
+    try {
+      const turns = [
+        { id: "turn-1", turnNumber: 1, action: "Look around", narration: "The harbor waits.", chronicleRetrieval: TEXT_FALLBACK_LEGACY_AUDIT },
+        { id: "turn-2", turnNumber: 2, action: "Listen", narration: "A bell rings.", chronicleRetrieval: null }
+      ];
+      const start = storyModule.startStoryPlayer as (composition: unknown) => void;
+      start({
+        api: {
+          session: { get: async () => ({ user: { settings: { continuousReading: false, autoSubmitTurnChoices: false, defaultTurnControlStyle: "flexible_auto" } } }) },
+          providers: { list: async () => ({ providers: [{ providerRole: "text" }] }) },
+          generation: { syncStatus: async () => ({ campaign: { title: "Audit campaign", activeTurnNumber: 2 }, world: {}, turns: { turns } }) },
+          campaigns: { state: async () => ({ activeTurnNumber: 2 }), turns: async () => ({ turns }) },
+          meta: { get: async () => ({}) }
+        },
+        illustrations: { config: async () => ({ enabled: false, sourcePolicy: "off" }), segments: async () => ({ segments: [] }), imageJobs: async () => ({ jobs: [] }) },
+        workflow: { resume: async () => null }
+      });
+      document.dispatchEvent(new window.Event("DOMContentLoaded"));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      const dialog = document.getElementById("turnHistoryDialog");
+      const cards = document.querySelectorAll<HTMLElement>("#turnHistoryModalList .history-card");
+      const audits = document.querySelectorAll('dl[aria-label="Chronicle retrieval"]');
+
+      expect(dialog?.hasAttribute("open")).toBe(true);
+      expect(audits).toHaveLength(2);
+      expect(audits[0]?.textContent).toContain("Legacy semantic retrieval");
+      expect(audits[1]?.textContent).toContain("Unknown — this turn predates retrieval auditing or came from an import without audit metadata.");
+      expect(cards).toHaveLength(2);
+      expect(cards[1]?.getAttribute("aria-pressed")).toBe("true");
+      const enter = new window.Event("keydown", { bubbles: true, cancelable: true });
+      Object.defineProperty(enter, "key", { value: "Enter" });
+      cards[0]?.dispatchEvent(enter);
+      expect(cards[0]?.getAttribute("aria-pressed")).toBe("true");
+      expect(cards[1]?.getAttribute("aria-pressed")).toBe("false");
+      expect(enter.defaultPrevented).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("manages World Setup fields and RPG percentile stats view as static read-only modal", () => {

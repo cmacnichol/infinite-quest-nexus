@@ -37,8 +37,9 @@ import {
   worldListResponseSchema
 } from "../../packages/contracts/src/index.js";
 import { buildServer } from "../../services/api/src/server.js";
-import { serverOptions, testWorldCampaignApplication } from "../helpers/build-server-options.js";
+import { inertStorageServerOptions as serverOptions, testWorldCampaignApplication } from "../helpers/build-server-options.js";
 import { legacyDashboardRouteContracts, legacyStoryRouteContracts } from "../helpers/legacy-ui-route-contracts.js";
+import { DEDICATED_CHUNKED_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
 
 const OWNER_ID = "00000000-0000-4000-8000-000000000001";
 const CAMPAIGN_ID = "11111111-1111-4111-8111-111111111111";
@@ -102,6 +103,8 @@ type MockPoolOptions = {
   streamReadFailure?: boolean;
   streamReadFailureAfterReads?: number;
   streamSnapshots?: Array<Record<string, unknown>>;
+  modelMetadata?: Record<string, unknown> | null;
+  storedChronicleRetrieval?: unknown;
 };
 
 function config(storageRoot: string): RuntimeConfig {
@@ -441,7 +444,8 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
       customActionSuggestion: "Study the constellations.",
       imagePrompt: "An emerald observatory.",
       imageUrl: "",
-      acceptedAt: NOW
+      acceptedAt: NOW,
+      storedChronicleRetrieval: options.storedChronicleRetrieval
     }] };
 
     if (sql.startsWith("SELECT id, turn_number AS")) return { rows: [{
@@ -499,7 +503,7 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
       choices: ["Look up.", "Step back.", "Call out.", "Close it."],
       customActionSuggestion: "Study the constellations.",
       imagePrompt: "An emerald observatory.",
-      modelMetadata: {},
+      modelMetadata: options.modelMetadata ?? {},
       mechanics: {},
       acceptedAt: NOW,
       stateSnapshot: {},
@@ -686,6 +690,7 @@ describe("client API route contracts without PostgreSQL", () => {
       const turns = turnListResponseSchema.parse((await app.inject({ method: "GET", url: `/api/v1/campaigns/${CAMPAIGN_ID}/turns?limit=50` })).json());
       expect(turns.campaignId).toBe(CAMPAIGN_ID);
       expect(turns.turns).toHaveLength(1);
+      expect(turns.turns[0]?.chronicleRetrieval).toBeNull();
       expect(turns.nextCursor).toBeNull();
       const snapshotResponse = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}` });
       expect(generationJobSnapshotSchema.parse(snapshotResponse.json())).toMatchObject({ id: JOB_ID, operationKind: "append", updatedAt: NOW.toISOString() });
@@ -693,6 +698,37 @@ describe("client API route contracts without PostgreSQL", () => {
       expect(generationResultSchema.parse((await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}/result` })).json()).resultTurnId).toBe(TURN_ID);
     } finally {
       await app.close();
+    }
+  });
+
+  it("exposes a recorded audit through bounded turn history without returning model metadata", async () => {
+    const app = await buildServer(serverOptions({
+      config: config(storageRoot),
+      pool: mockPool({ storedChronicleRetrieval: DEDICATED_CHUNKED_AUDIT })
+    }));
+    try {
+      const response = await app.inject({ method: "GET", url: `/api/v1/campaigns/${CAMPAIGN_ID}/turns?limit=50` });
+      expect(response.statusCode).toBe(200);
+      expect(response.json().turns[0]).toMatchObject({ chronicleRetrieval: DEDICATED_CHUNKED_AUDIT });
+      expect(response.json().turns[0]).not.toHaveProperty("modelMetadata");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("projects recorded or malformed completed-generation audits without exposing the stored metadata as the audit", async () => {
+    for (const [modelMetadata, expectedAudit] of [
+      [{ chronicleRetrieval: DEDICATED_CHUNKED_AUDIT }, DEDICATED_CHUNKED_AUDIT],
+      [{ chronicleRetrieval: { auditVersion: "obsolete" } }, null]
+    ] as const) {
+      const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool({ modelMetadata }) }));
+      try {
+        const response = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}/result` });
+        expect(response.statusCode).toBe(200);
+        expect(response.json().chronicleRetrieval).toEqual(expectedAudit);
+      } finally {
+        await app.close();
+      }
     }
   });
 
@@ -1116,6 +1152,7 @@ describe("client API route contracts without PostgreSQL", () => {
           choices: ["Look up.", "Step back.", "Call out.", "Close it."],
           customActionSuggestion: "Study the constellations.",
           imagePrompt: "An emerald observatory.",
+          chronicleRetrieval: null,
           modelMetadata: {},
           mechanics: {},
           acceptedAt: NOW,

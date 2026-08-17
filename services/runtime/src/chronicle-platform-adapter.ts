@@ -1,6 +1,8 @@
 import type {
   ChronicleClaimExecutionPort,
   ChronicleClaimFailure,
+  ChronicleChunkJobStatePort,
+  ChronicleChunkLeaseScope,
   ChronicleLeaseScope,
   ChronicleWorkerExecutor,
   ChronicleWorkerRetrieval,
@@ -9,10 +11,12 @@ import type {
   ChronicleWorkerStatePort,
   MemoryTransactionContext
 } from "../../../packages/application/src/memory/index.js";
+import type { ChronicleChunkWorkerExecution } from "./chronicle-chunk-worker-execution.js";
 import type {
   ChronicleTransactionEmbeddingPort,
   ChronicleTransactionEmbeddingExecution,
   ChronicleTransactionEmbeddingProvider,
+  ChronicleTransactionEmbeddingResolution,
   ChronicleTransactionEmbeddingResult
 } from "../../../packages/database/src/chronicle-repository.js";
 import { providerModelFingerprint } from "../../../packages/domain/src/chronicle-memory-helpers.js";
@@ -42,12 +46,13 @@ export type ChronicleEmbeddingProviderDependencies = Readonly<{
     providerProfileId: string,
     model: string,
   ): Promise<ChronicleEmbeddingProvider>;
-  resolveEmbeddingProviderId(
+  resolveEmbeddingProvider(
     database: MemoryTransactionContext,
     ownerUserId: string,
     campaignId: string,
     selectedProviderProfileId?: string | null,
-  ): Promise<string | null>;
+    model?: string,
+  ): Promise<ChronicleTransactionEmbeddingResolution>;
   recordProviderHealth(
     database: MemoryTransactionContext,
     ownerUserId: string,
@@ -76,12 +81,18 @@ export function createChronicleEmbeddingProviderPort(
   dependencies: ChronicleEmbeddingProviderDependencies,
 ): ChronicleEmbeddingProviderPort {
   return {
-    resolve: (database, scope) => dependencies.resolveEmbeddingProviderId(
-      database,
-      scope.ownerUserId,
-      scope.campaignId,
-      scope.selectedProviderProfileId ?? null,
-    ),
+    resolve: async (database, scope) => {
+      const resolution = await dependencies.resolveEmbeddingProvider(
+        database,
+        scope.ownerUserId,
+        scope.campaignId,
+        scope.selectedProviderProfileId ?? null,
+        scope.model,
+      );
+      return resolution.status === "resolved" && scope.model
+        ? { ...resolution, model: scope.model }
+        : resolution;
+    },
     load: (_database, scope) => dependencies.loadEmbeddingExecution(
       scope.ownerUserId,
       scope.providerProfileId,
@@ -114,7 +125,15 @@ export type ChronicleWorkerExecutorDependencies = Readonly<{
   state: ChronicleWorkerStatePort;
   retrieval: ChronicleWorkerRetrievalPort;
   execution: ChronicleClaimExecutionPort;
+  chunks?: Readonly<{
+    state: ChronicleChunkJobStatePort;
+    execution: ChronicleChunkWorkerExecution;
+  }>;
   logProviderTransportError(error: unknown, context: Readonly<Record<string, unknown>>): void;
+}>;
+
+type HeartbeatState<T> = Readonly<{
+  heartbeatClaim(scope: T): Promise<boolean>;
 }>;
 
 function privateFailure(): ChronicleClaimFailure {
@@ -125,9 +144,9 @@ function leaseHeartbeatLost(cause?: unknown): Error {
   return new Error("Chronicle job lease heartbeat was lost.", cause === undefined ? undefined : { cause });
 }
 
-function startClaimHeartbeat(
-  state: ChronicleWorkerStatePort,
-  claim: ChronicleLeaseScope,
+function startClaimHeartbeat<T extends Readonly<{ leaseSeconds: number }>>(
+  state: HeartbeatState<T>,
+  claim: T,
 ): Readonly<{
   lifecycle: Readonly<{
     readonly leaseLost: boolean;
@@ -268,6 +287,41 @@ export function createChronicleWorkerExecutor(
     claim,
     () => dependencies.retrieval.loadForClaim(claim, { batchLimit: 128 }),
   );
+  const executeChunkClaim = async (claim: ChronicleChunkLeaseScope): Promise<boolean> => {
+    const chunks = dependencies.chunks;
+    if (!chunks) return false;
+    const heartbeat = startClaimHeartbeat(chunks.state, claim);
+    let progress = null;
+    let executionError: unknown = null;
+    try {
+      progress = await chunks.execution.execute(claim, heartbeat.lifecycle);
+      heartbeat.lifecycle.throwIfLeaseLost();
+    } catch (error) {
+      executionError = error;
+    }
+    const heartbeatLoss = await heartbeat.stop();
+    if (heartbeatLoss) executionError = heartbeatLoss;
+    if (executionError === null && progress !== null) {
+      if (await chunks.state.completeClaim(claim, { progress })) return true;
+      executionError = new Error("Chronicle chunk job lease was lost before completion could be recorded.");
+    }
+    try {
+      if (await chunks.state.loadClaimedJob(claim) === null) {
+        await chunks.state.completeClaim(claim, { progress: claim.progress }).catch(() => false);
+        return true;
+      }
+    } catch {
+      // Preserve the private execution failure and use the guarded failure path.
+    }
+    dependencies.logProviderTransportError(executionError, {
+      chronicleJobId: claim.jobId,
+      campaignId: claim.campaignId,
+      jobType: claim.jobType,
+      workerId: claim.workerId
+    });
+    await chunks.state.failClaim(claim, privateFailure());
+    return true;
+  };
 
   return {
     async runNextChronicle(request: ChronicleWorkerRunRequest): Promise<boolean> {
@@ -275,7 +329,13 @@ export function createChronicleWorkerExecutor(
         workerId: request.workerId,
         leaseSeconds: request.leaseSeconds
       });
-      if (!claim) return false;
+      if (!claim) {
+        const chunkClaim = await dependencies.chunks?.state.claimNext({
+          workerId: request.workerId,
+          leaseSeconds: request.leaseSeconds
+        }) ?? null;
+        return chunkClaim ? executeChunkClaim(chunkClaim) : false;
+      }
       return executeClaim(claim, async () => {
         // Validate the bounded retrieval contract inside the same lease-fenced
         // failure path that owns dispatch and terminalization.

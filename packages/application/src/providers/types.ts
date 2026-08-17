@@ -44,6 +44,11 @@ export type SafeProviderConfigurationFields = Readonly<{
   generationTimeoutMs?: number;
   maximumAttempts?: number;
   allowPrivateArtifactHosts?: boolean;
+  embeddingMaxInputTokens?: number;
+  embeddingMaxBatchItems?: number;
+  embeddingMaxBatchTokens?: number;
+  embeddingDimensions?: number;
+  embeddingMaxRetries?: number;
 }>;
 
 declare const safeProviderConfigurationBrand: unique symbol;

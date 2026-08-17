@@ -1,4 +1,5 @@
 import type {
+  CampaignWorldVersionMemoryScope,
   ClaimedGeneration,
   GenerationClaimRepository,
   GenerationExecutionRequest,
@@ -14,7 +15,11 @@ import {
   type PlayerRpgStat,
   type StoryTurnOutput
 } from "../../contracts/src/generation.js";
-import type { MemoryContextQuery } from "../../contracts/src/memory.js";
+import {
+  chronicleRetrievalAuditSchema,
+  type ChronicleRetrievalAudit,
+  type MemoryContextQuery
+} from "../../contracts/src/memory.js";
 import type { PromptSnapshot } from "../../contracts/src/prompt-library.js";
 import type { StoryLengthProfile } from "../../contracts/src/story-settings.js";
 import {
@@ -31,6 +36,21 @@ import {
 } from "../../domain/src/index.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
+
+async function enqueueChunkIndexBestEffort(
+  client: DatabaseClient,
+  memory: MemoryGenerationTransactionPort,
+  scope: CampaignWorldVersionMemoryScope,
+): Promise<void> {
+  await client.query("SAVEPOINT accepted_turn_chunk_enqueue");
+  try {
+    await memory.enqueueChunkIndex(client, scope);
+    await client.query("RELEASE SAVEPOINT accepted_turn_chunk_enqueue");
+  } catch {
+    await client.query("ROLLBACK TO SAVEPOINT accepted_turn_chunk_enqueue");
+    await client.query("RELEASE SAVEPOINT accepted_turn_chunk_enqueue");
+  }
+}
 
 function json(value: unknown): string {
   return JSON.stringify(value ?? null);
@@ -161,6 +181,7 @@ export type AcceptedGenerationCommit = Readonly<{
   response: ProviderResult;
   contextFingerprint: string;
   contextDiagnostics: Record<string, unknown>;
+  chronicleRetrieval: ChronicleRetrievalAudit;
   inputs: GenerationOrchestrationInputs;
   orchestration: GenerationOrchestrationState;
   fictionAction: string;
@@ -279,6 +300,7 @@ async function commitAcceptedTurn(
   client: DatabaseClient,
   input: AcceptedGenerationCommit
 ): Promise<{ turnId: string }> {
+  const chronicleRetrieval = chronicleRetrievalAuditSchema.parse(input.chronicleRetrieval);
   const { job, scope, story, provider, response, inputs, orchestration, collaborators } = input;
   const lease = await client.query<{ id: string }>(
     `SELECT id FROM generation_jobs
@@ -425,7 +447,8 @@ async function commitAcceptedTurn(
         usage: response.usage,
         promptProtocolVersion: job.prompt_protocol_version,
         contextFingerprint: input.contextFingerprint,
-        contextDiagnostics: input.contextDiagnostics
+        contextDiagnostics: input.contextDiagnostics,
+        chronicleRetrieval
       })]
   );
   const turnId = turnResult.rows[0]?.id;
@@ -494,6 +517,11 @@ async function commitAcceptedTurn(
       narration: story.narration
     });
   }
+  await enqueueChunkIndexBestEffort(client, collaborators.memory, {
+    ownerUserId: job.owner_user_id,
+    campaignId: job.campaign_id,
+    worldVersionId: campaign.world_version_id
+  });
   await client.query("SAVEPOINT accepted_turn_illustration_enqueue");
   try {
     if (job.streaming_segments_state?.provisionalSetId) {

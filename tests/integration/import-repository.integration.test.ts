@@ -166,12 +166,6 @@ integration("PostgreSQL portable import repository", () => {
     };
   }
 
-  async function waitUntilExpired(expiresAt: string): Promise<void> {
-    await new Promise((resolvePromise) => {
-      setTimeout(resolvePromise, Math.max(0, Date.parse(expiresAt) - Date.now() + 25));
-    });
-  }
-
   async function completedImport(scopedOwner: string, sourceHash: string, target: WorldScope) {
     const created = await pool.query<{ id: string }>(
       `INSERT INTO imports (
@@ -351,7 +345,13 @@ integration("PostgreSQL portable import repository", () => {
     expect(persisted.rows[0]!.handle_token_hash).not.toBe(staged.stagedInput);
 
     const expiring = await stagedInput(ownerUserId, hash(crypto.randomUUID()), 100);
-    await waitUntilExpired(expiring.expiresAt);
+    await expect.poll(async () => ({
+      applicationExpired: Date.now() >= Date.parse(expiring.expiresAt),
+      databaseExpired: (await pool.query<{ expired: boolean }>(
+        "SELECT expires_at <= clock_timestamp() AS expired FROM portable_staged_inputs WHERE filesystem_operation_id=$1",
+        [expiring.operationId]
+      )).rows[0]?.expired
+    }), { interval: 10, timeout: 2_000 }).toEqual({ applicationExpired: true, databaseExpired: true });
     expect(await repository.retrieveStagedPayload({ ownerUserId }, expiring.stagedInput)).toBeNull();
   });
 
@@ -706,7 +706,13 @@ integration("PostgreSQL portable import repository", () => {
       expect(retry.outcome).toBe("ready");
       await client.query("ROLLBACK");
 
-      await waitUntilExpired(staged.expiresAt);
+      await expect.poll(async () => ({
+        applicationExpired: Date.now() >= Date.parse(staged.expiresAt),
+        databaseExpired: (await client.query<{ expired: boolean }>(
+          "SELECT expires_at <= clock_timestamp() AS expired FROM portable_staged_inputs WHERE filesystem_operation_id=$1",
+          [staged.operationId]
+        )).rows[0]?.expired
+      }), { interval: 10, timeout: 2_000 }).toEqual({ applicationExpired: true, databaseExpired: true });
       await client.query("BEGIN");
       await expect(repository.beginImport(client, command)).rejects.toMatchObject({ code: "archive_expired" });
       await client.query("COMMIT");
@@ -1555,7 +1561,7 @@ integration("PostgreSQL portable import repository", () => {
       contentHash,
       1_024,
     );
-    const exportExpiresAt = new Date(Date.now() + 100).toISOString();
+    const exportExpiresAt = new Date(Date.now() + 1_500).toISOString();
     const exported = await repository.registerExportArtifact({
       ownerUserId,
       filesystemOperationId: operationId,
@@ -1605,7 +1611,13 @@ integration("PostgreSQL portable import repository", () => {
     );
     expect(persisted.rows[0]!.retrieval_token_hash).toBe(hash(exported.retrieval));
     expect(persisted.rows[0]!.retrieval_token_hash).not.toBe(exported.retrieval);
-    await waitUntilExpired(exportExpiresAt);
+    await expect.poll(async () => ({
+      applicationExpired: Date.now() >= Date.parse(exportExpiresAt),
+      databaseExpired: (await pool.query<{ expired: boolean }>(
+        "SELECT expires_at <= clock_timestamp() AS expired FROM portable_export_artifacts WHERE filesystem_operation_id=$1",
+        [operationId]
+      )).rows[0]?.expired
+    }), { interval: 10, timeout: 2_000 }).toEqual({ applicationExpired: true, databaseExpired: true });
     expect(await repository.retrieveExportArtifact({
       ownerUserId,
       exportKind: "campaign_zip",

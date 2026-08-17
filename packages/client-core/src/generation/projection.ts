@@ -64,6 +64,7 @@ export function turnFromGenerationResult(result: GenerationResult): TurnSummary 
     imagePrompt: result.imagePrompt,
     imageUrl: null,
     acceptedAt: result.acceptedAt,
+    chronicleRetrieval: copyValue(result.chronicleRetrieval),
     reportedCost: copyValue(result.reportedCost)
   };
 }

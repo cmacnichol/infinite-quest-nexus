@@ -25,12 +25,14 @@ import {
 } from "../../packages/database/src/pool.js";
 import { createPostgresPortableNormalizedAssetPublicationRepository } from "../../packages/database/src/portable-normalized-asset-publication-repository.js";
 import { createPostgresWorldRepositoryAdapters } from "../../packages/database/src/world-repository.js";
+import { supportsSecureGeneratedArchiveStaging } from "../../services/api/src/archive-io.js";
 import { createPortableImportExportComposition } from "../../services/runtime/src/portable-import-export-composition.js";
 import { createPrivateFilesystemRecoveryComposition } from "../../services/runtime/src/private-filesystem-recovery-composition.js";
 import { createPrivatePortableNormalizedAssetPublicationComposition } from "../../services/runtime/src/portable-normalized-asset-publication-composition.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
+const secureFilesystemIt = it.runIf(supportsSecureGeneratedArchiveStaging());
 const UUID_PATTERN_FOR_TEST = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 
 integration("Task 14e3e4 portable normalized publication", () => {
@@ -630,7 +632,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     expect(definitions).toContain("'abandoned'::text");
   });
 
-  it("retires an unbound normalized prewrite intent when its preview expires", async () => {
+  secureFilesystemIt("retires an unbound normalized prewrite intent when its preview expires", async () => {
     const { scope } = await previewOperation("campaign_zip", 1_000);
     const { request } = await normalizedImportRequest(scope, "14e3e4-expired-intent");
     const repository = createPostgresPortableNormalizedAssetPublicationRepository(pool);
@@ -663,7 +665,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     }] });
   }, 30_000);
 
-  it("recovers a crash-bound normalized reservation through terminal abort retirement after exact cleanup", async () => {
+  secureFilesystemIt("recovers a crash-bound normalized reservation through terminal abort retirement after exact cleanup", async () => {
     const { scope, previewToken } = await previewOperation();
     const { bytes, request } = await normalizedImportRequest(scope, "14e3e4-abandoned-crash");
     const first = await compose();
@@ -784,7 +786,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     }] });
   }, 30_000);
 
-  it("lets a fresh e6 filesystem recovery reconcile an e4 abandonment only after its exact cleanup", async () => {
+  secureFilesystemIt("lets a fresh e6 filesystem recovery reconcile an e4 abandonment only after its exact cleanup", async () => {
     const { scope, previewToken } = await previewOperation();
     const { bytes, request } = await normalizedImportRequest(scope, "14e3e6-e4-retirement-bridge");
     const first = await compose();
@@ -869,7 +871,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     }] });
   }, 30_000);
 
-  it("serializes terminal abort after the filesystem lifecycle guard and reconciles cleanup", async () => {
+  secureFilesystemIt("serializes terminal abort after the filesystem lifecycle guard and reconciles cleanup", async () => {
     const { scope, previewToken } = await previewOperation("campaign_zip");
     const { bytes, request } = await normalizedImportRequest(scope, "14e3e4-terminal-journal-race");
     const composition = await compose();
@@ -1360,7 +1362,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     }
   });
 
-  it("records source intent before e2 reserve, attaches atomically, and finalizes after a fresh composition", async () => {
+  secureFilesystemIt("records source intent before e2 reserve, attaches atomically, and finalizes after a fresh composition", async () => {
     const { scope, previewToken } = await previewOperation();
     const target = await createWorldScope(`14e3e4 exact child authority ${crypto.randomUUID()}`);
     const campaign = await pool.query<{ id: string }>(
@@ -1664,7 +1666,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     }]);
   }, 30_000);
 
-  it("keeps committed finalization recoverable after progress TTL and completes replay", async () => {
+  secureFilesystemIt("keeps committed finalization recoverable after progress TTL and completes replay", async () => {
     const target = await createWorldScope(`14e3e4 committed ttl target ${crypto.randomUUID()}`);
     let composition = await composePortable(
       target,
@@ -1745,7 +1747,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     )).resolves.toMatchObject({ status: "completed", phase: "completed" });
   }, 30_000);
 
-  it("keeps Legacy story completion nonfatal when slow post-commit finalization outlives its lease", async () => {
+  secureFilesystemIt("keeps Legacy story completion nonfatal when slow post-commit finalization outlives its lease", async () => {
     const target = await createWorldScope(`14e3e4 legacy slow finalize ${crypto.randomUUID()}`);
     let composition = await composePortable(
       target,
@@ -1847,7 +1849,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     }] });
   }, 30_000);
 
-  it("publishes Campaign ZIP images only through normalized 0064/0066 authority and replays exactly", async () => {
+  secureFilesystemIt("publishes Campaign ZIP images only through normalized 0064/0066 authority and replays exactly", async () => {
     const target = await createWorldScope(`14e3e4 campaign target ${crypto.randomUUID()}`);
     const composition = await composePortable(target, "14e3e4-campaign");
     const sourceAssetId = crypto.randomUUID();
@@ -1937,7 +1939,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     }] });
   }, 30_000);
 
-  it("rewrites legacy Campaign ZIP pointers by ordinal for non-UUID source turn IDs", async () => {
+  secureFilesystemIt("rewrites legacy Campaign ZIP pointers by ordinal for non-UUID source turn IDs", async () => {
     const target = await createWorldScope(`14e3e4 legacy-zip-ordinal ${crypto.randomUUID()}`);
     const composition = await composePortable(target, "14e3e4-legacy-zip-ordinal");
     const sourceAssetId = crypto.randomUUID();
@@ -1992,7 +1994,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     }] });
   }, 30_000);
 
-  it("maps shared legacy ZIP assets and duplicate UUID source turns by exact ordinal", async () => {
+  secureFilesystemIt("maps shared legacy ZIP assets and duplicate UUID source turns by exact ordinal", async () => {
     const target = await createWorldScope(`14e3e4 legacy-zip-shared ${crypto.randomUUID()}`);
     const composition = await composePortable(target, "14e3e4-legacy-zip-shared");
     const firstSourceAssetId = crypto.randomUUID();
@@ -2077,7 +2079,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     ]));
   }, 30_000);
 
-  it("retains distinct grouped source provenance while deduplicating one live reference", async () => {
+  secureFilesystemIt("retains distinct grouped source provenance while deduplicating one live reference", async () => {
     const target = await createWorldScope(`14e3e4 grouped provenance ${crypto.randomUUID()}`);
     const composition = await composePortable(target, "14e3e4-grouped-provenance");
     const firstSourceAssetId = crypto.randomUUID();
@@ -2141,7 +2143,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     })));
   }, 30_000);
 
-  it("deduplicates normalized assets within one owner and isolates the same bytes across owners", async () => {
+  secureFilesystemIt("deduplicates normalized assets within one owner and isolates the same bytes across owners", async () => {
     const foreign = await pool.query<{ id: string }>(
       "INSERT INTO users (system_key,display_name) VALUES ($1,'Task 14e3e4 foreign') RETURNING id",
       [`task-14e3e4-owner-${crypto.randomUUID()}`],
@@ -2254,7 +2256,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     )).resolves.toMatchObject({ rows: [{ count: 0 }] });
   }, 60_000);
 
-  it("freezes exact embedded world targets before rich Campaign ZIP publication", async () => {
+  secureFilesystemIt("freezes exact embedded world targets before rich Campaign ZIP publication", async () => {
     const target = await createWorldScope(`14e3e4 embedded target ${crypto.randomUUID()}`);
     const composition = await composePortable(target, "14e3e4-embedded-targets");
     const archive = await richCampaignZip(`embedded-${crypto.randomUUID()}`);
@@ -2324,7 +2326,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     }] });
   }, 30_000);
 
-  it("publishes every image in a valid 101-image Campaign ZIP atomically", async () => {
+  secureFilesystemIt("publishes every image in a valid 101-image Campaign ZIP atomically", async () => {
     const target = await createWorldScope(`14e3e4 cardinality target ${crypto.randomUUID()}`);
     const composition = await composePortable(target, "14e3e4-cardinality");
     const images = await Promise.all(Array.from({ length: 101 }, async (_, index) => ({
@@ -2368,7 +2370,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     )).resolves.toMatchObject({ rows: [{ count: 101 }] });
   }, 60_000);
 
-  it("serializes a concurrent Campaign ZIP replay before normalized reservation", async () => {
+  secureFilesystemIt("serializes a concurrent Campaign ZIP replay before normalized reservation", async () => {
     const target = await createWorldScope(`14e3e4 duplicate target ${crypto.randomUUID()}`);
     const firstComposition = await composePortable(target, "14e3e4-duplicate-a");
     const secondRuntimePool = createDatabasePool(databaseUrl!, 2);
@@ -2483,7 +2485,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     });
   }, 30_000);
 
-  it("reconciles a bound late-duplicate retirement after a cleanup fault and fresh composition", async () => {
+  secureFilesystemIt("reconciles a bound late-duplicate retirement after a cleanup fault and fresh composition", async () => {
     const target = await createWorldScope(`14e3e4 retirement target ${crypto.randomUUID()}`);
     let composition = await composePortable(target, "14e3e4-retirement-a");
     const sourceAssetId = crypto.randomUUID();
@@ -2680,7 +2682,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     )).resolves.toMatchObject({ rows: [{ count: 1 }] });
   }, 30_000);
 
-  it("publishes exact Legacy image references and applies a companion world cover atomically", async () => {
+  secureFilesystemIt("publishes exact Legacy image references and applies a companion world cover atomically", async () => {
     const target = await createWorldScope(`14e3e4 legacy target ${crypto.randomUUID()}`);
     let composition = await composePortable(target, "14e3e4-legacy-a");
     const inlineImage = await sharp({
@@ -2919,7 +2921,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     )).resolves.toMatchObject({ rows: [{ reservation_count: 0, publication_count: 0 }] });
   }, 30_000);
 
-  it("preserves external Legacy URLs and ignores absolute or traversal companion aliases", async () => {
+  secureFilesystemIt("preserves external Legacy URLs and ignores absolute or traversal companion aliases", async () => {
     const target = await createWorldScope(`14e3e4 external aliases ${crypto.randomUUID()}`);
     const composition = await composePortable(target, "14e3e4-external-aliases");
     const companion = await sharp({
@@ -3053,7 +3055,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     }] });
   }, 30_000);
 
-  it("commits Legacy narration image-free when normalized request reservation is unavailable", async () => {
+  secureFilesystemIt("commits Legacy narration image-free when normalized request reservation is unavailable", async () => {
     const target = await createWorldScope(`14e3e4 optional-reserve target ${crypto.randomUUID()}`);
     const composition = await composePortable(target, "14e3e4-optional-reserve");
     const image = await sharp({
@@ -3136,7 +3138,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     }] });
   }, 30_000);
 
-  it("retires a prior Legacy prewrite when fresh normalization is unavailable", async () => {
+  secureFilesystemIt("retires a prior Legacy prewrite when fresh normalization is unavailable", async () => {
     const target = await createWorldScope(`14e3e4 prior prewrite ${crypto.randomUUID()}`);
     let composition = await composePortable(target, "14e3e4-prior-prewrite-a");
     const decodable = await sharp({
@@ -3254,7 +3256,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     }] });
   }, 30_000);
 
-  it("keeps optional omission terminal evidence when Legacy reservation faults before a late duplicate", async () => {
+  secureFilesystemIt("keeps optional omission terminal evidence when Legacy reservation faults before a late duplicate", async () => {
     const target = await createWorldScope(`14e3e4 optional duplicate ${crypto.randomUUID()}`);
     const composition = await composePortable(target, "14e3e4-optional-duplicate");
     const image = await sharp({
@@ -3405,7 +3407,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     }] });
   }, 30_000);
 
-  it("keeps a committed Legacy late duplicate non-fatal across retirement fault and fresh replay", async () => {
+  secureFilesystemIt("keeps a committed Legacy late duplicate non-fatal across retirement fault and fresh replay", async () => {
     const target = await createWorldScope(`14e3e4 legacy retirement ${crypto.randomUUID()}`);
     let composition = await composePortable(target, "14e3e4-legacy-retirement-a");
     const image = await sharp({
@@ -3591,7 +3593,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     }] });
   }, 30_000);
 
-  it("omits oversized and undecodable optional Legacy images without failing story authority", async () => {
+  secureFilesystemIt("omits oversized and undecodable optional Legacy images without failing story authority", async () => {
     const target = await createWorldScope(`14e3e4 optional-image target ${crypto.randomUUID()}`);
     const composition = await composePortable(target, "14e3e4-optional-images");
     const oversized = await sharp({
@@ -3682,7 +3684,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     )).resolves.toMatchObject({ rows: [{ count: 0 }] });
   }, 30_000);
 
-  it("enforces aggregate image pixels strictly for Campaign ZIP and optionally for Legacy story", async () => {
+  secureFilesystemIt("enforces aggregate image pixels strictly for Campaign ZIP and optionally for Legacy story", async () => {
     const target = await createWorldScope(`14e3e4 aggregate pixels ${crypto.randomUUID()}`);
     const composition = await composePortable(target, "14e3e4-aggregate-pixels");
     const firstImage = await sharp({
@@ -3769,7 +3771,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     ] });
   }, 60_000);
 
-  it("omits excessive repeated Legacy inline images before normalization", async () => {
+  secureFilesystemIt("omits excessive repeated Legacy inline images before normalization", async () => {
     const target = await createWorldScope(`14e3e4 excessive-inline target ${crypto.randomUUID()}`);
     const composition = await composePortable(target, "14e3e4-excessive-inline");
     const image = await sharp({
@@ -3823,7 +3825,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     )).resolves.toMatchObject({ rows: [{ count: 0 }] });
   }, 30_000);
 
-  it("publishes inline Legacy covers and omits ambiguous companion cover aliases", async () => {
+  secureFilesystemIt("publishes inline Legacy covers and omits ambiguous companion cover aliases", async () => {
     const inlineTarget = await createWorldScope(`14e3e4 inline-cover target ${crypto.randomUUID()}`);
     const composition = await composePortable(inlineTarget, "14e3e4-inline-cover");
     const inlineCover = await sharp({
@@ -3933,7 +3935,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     )).resolves.toMatchObject({ rows: [{ count: 0 }] });
   }, 30_000);
 
-  it("treats every image-free import family as a normalized publication no-op", async () => {
+  secureFilesystemIt("treats every image-free import family as a normalized publication no-op", async () => {
     const target = await createWorldScope(`14e3e4 image-free target ${crypto.randomUUID()}`);
     const composition = await composePortable(target, "14e3e4-image-free");
     const campaignBytes = await campaignZip(`image-free-${crypto.randomUUID()}`);
@@ -4150,7 +4152,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     })));
   }, 30_000);
 
-  it("rolls normalized attachment and family rows back together, then retries from durable prewrite intent", async () => {
+  secureFilesystemIt("rolls normalized attachment and family rows back together, then retries from durable prewrite intent", async () => {
     const target = await createWorldScope(`14e3e4 rollback target ${crypto.randomUUID()}`);
     let composition = await composePortable(target, "14e3e4-rollback-a");
     const sourceAssetId = crypto.randomUUID();
@@ -4260,7 +4262,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     });
   }, 30_000);
 
-  it("recovers committed normalized finalization after a fresh composition", async () => {
+  secureFilesystemIt("recovers committed normalized finalization after a fresh composition", async () => {
     const target = await createWorldScope(`14e3e4 finalize target ${crypto.randomUUID()}`);
     let composition = await composePortable(target, "14e3e4-finalize-a");
     const sourceAssetId = crypto.randomUUID();

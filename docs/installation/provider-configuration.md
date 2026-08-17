@@ -12,6 +12,22 @@ Configure providers from **Setup → Provider Setup** after installation.
 
 Create separate profiles for **Story text**, **Chronicle embeddings**, and **Illustrations**. Optionally add a **Turn intent classification** profile when a small model should classify Auto input instead of the campaign Story text model. Never reuse an endpoint or key across roles merely because the provider brand is the same.
 
+## Chronicle embedding capabilities
+
+The Chronicle embedding worker starts with the provider's runtime descriptor and applies only reviewed, bounded non-secret overrides. Campaign document/query prefixes may override model-aware defaults, but credentials stay inside the embedding-provider boundary and are never projected into retrieval configuration or telemetry.
+
+| Safe override | Allowed value and default |
+| --- | --- |
+| `embeddingMaxInputTokens` | Integer from 128 through 1,000,000. Default: half the configured context window, capped at 8,192. |
+| `embeddingMaxBatchItems` | Integer from 1 through 128. Default: 1 when batch support is unknown. |
+| `embeddingMaxBatchTokens` | Integer from 128 through 4,000,000. Default: the effective maximum input tokens. |
+| `embeddingDimensions` | Integer from 1 through 16,000. Otherwise dimensions are learned from the first complete batch and pinned for compatibility. |
+| `embeddingMaxRetries` | Integer from 0 through 5. Default: 2. |
+
+Invalid or out-of-range overrides are ignored by the safe capability projection. Provider request timeout continues to use the existing provider-profile timeout; it is not a Chronicle capability override. Changing provider, model, dimensions, prefix protocol, or other fingerprinted capability makes old chunk vectors incompatible and requires a derived rebuild. Production falls open to legacy retrieval until the new index is complete.
+
+Disabling or deleting an embedding profile does not affect the story-text or illustration credentials and must not stop story generation. Reassign the campaign to a valid Chronicle embedding profile and rebuild. Do not delete legacy embeddings or vectors as part of provider rotation; retain them for config-only rollback until a separate cleanup is approved.
+
 An Intent profile is used only after it is explicitly made the system default; being the sole enabled profile is insufficient. Without one, no additional provider configuration is required because Auto uses the campaign's Story text provider.
 
 For Docker Desktop host services, `host.docker.internal` is commonly available. Linux Engine and Swarm installations need a stable address resolvable and reachable from the container or every worker node.

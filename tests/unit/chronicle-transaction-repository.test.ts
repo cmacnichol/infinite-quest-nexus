@@ -17,7 +17,49 @@ type QueryResult = Readonly<{
 function databaseClient(
   query: (sql: string, values: readonly unknown[]) => QueryResult | Promise<QueryResult>
 ): DatabaseClient {
-  return { query: vi.fn(query) } as unknown as DatabaseClient;
+  return {
+    query: vi.fn((sql: string, values: readonly unknown[]) => {
+      if (/^(?:SAVEPOINT|RELEASE SAVEPOINT|ROLLBACK TO SAVEPOINT) chronicle_(?:retrieval|query_embedding_cache)_/.test(sql)) {
+        return { rows: [], rowCount: 0 };
+      }
+      if (sql.includes("UPDATE chronicle_query_embedding_cache")) return { rows: [], rowCount: 0 };
+      if (sql.includes("END AS expected_dimensions") && !sql.includes("AS chunk_index_ready")) {
+        return { rows: [{ expected_dimensions: 2 }], rowCount: 1 };
+      }
+      if (sql.includes("INSERT INTO chronicle_query_embedding_cache")
+        || sql.includes("DELETE FROM chronicle_query_embedding_cache")
+        || (sql.includes("pg_advisory_xact_lock")
+          && typeof values[0] === "string" && values[0].startsWith("chronicle-query-cache:"))) {
+        return { rows: [], rowCount: 0 };
+      }
+      return query(sql, values);
+    })
+  } as unknown as DatabaseClient;
+}
+
+function databasePool(
+  query: (sql: string, values: readonly unknown[]) => QueryResult | Promise<QueryResult>
+): DatabasePool {
+  const client = {
+    ...databaseClient((sql, values) => {
+      if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql)) return { rows: [], rowCount: 0 };
+      return query(sql, values);
+    }),
+    release: vi.fn()
+  } as unknown as DatabaseClient;
+  return {
+    connect: vi.fn(async () => client),
+    query: vi.fn(query)
+  } as unknown as DatabasePool;
+}
+
+function acceptsDisabledAutomaticChunkEnqueue(sql: string): QueryResult | null {
+  if (sql === "SAVEPOINT automatic_chronicle_chunk_enqueue"
+    || sql === "RELEASE SAVEPOINT automatic_chronicle_chunk_enqueue") {
+    return { rows: [], rowCount: 0 };
+  }
+  if (sql.includes("JOIN campaign_memory_configs config")) return { rows: [] };
+  return null;
 }
 
 function embeddingPort(
@@ -81,7 +123,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
             campaignId: scope.campaignId,
             selectedProviderProfileId: null
           });
-          return "embedding-profile";
+          return { status: "resolved", resolutionSource: "dedicated_embedding", resolvedRole: "embedding", providerProfileId: "embedding-profile", providerType: "openrouter", model: "embed-v1" };
         }
       })
     });
@@ -124,7 +166,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
         resolve: async (database, requestedScope) => {
           expect(database).toBe(callerClient);
           expect(requestedScope.selectedProviderProfileId).toBe("embedding-profile");
-          return "embedding-profile";
+          return { status: "resolved", resolutionSource: "dedicated_embedding", resolvedRole: "embedding", providerProfileId: "embedding-profile", providerType: "openrouter", model: "embed-v1" };
         }
       })
     });
@@ -135,6 +177,8 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
   it("writes only sanitized accepted fiction with owner, campaign, and world-version scope", async () => {
     let inserted: readonly unknown[] = [];
     const client = databaseClient((sql, values) => {
+      const automaticChunkEnqueue = acceptsDisabledAutomaticChunkEnqueue(sql);
+      if (automaticChunkEnqueue) return automaticChunkEnqueue;
       if (sql.includes("FROM campaigns") && sql.includes("world_versions")) {
         return { rows: [{
           id: scope.campaignId,
@@ -247,6 +291,8 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     };
     const client = databaseClient((sql, values) => {
       sqlStatements.push(sql);
+      const automaticChunkEnqueue = acceptsDisabledAutomaticChunkEnqueue(sql);
+      if (automaticChunkEnqueue) return automaticChunkEnqueue;
       if (sql.includes("FROM campaigns") && sql.includes("world_versions")) {
         return { rows: [campaignRow] };
       }
@@ -281,6 +327,8 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     const canonicalWrites: Array<{ sql: string; values: readonly unknown[] }> = [];
     const memoryWrites: Array<{ sql: string; values: readonly unknown[] }> = [];
     const client = databaseClient((sql, values) => {
+      const automaticChunkEnqueue = acceptsDisabledAutomaticChunkEnqueue(sql);
+      if (automaticChunkEnqueue) return automaticChunkEnqueue;
       if (sql.includes("FROM campaigns") && sql.includes("world_versions")) {
         return { rows: [{
           id: scope.campaignId,
@@ -421,7 +469,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       embeddings: embeddingPort({
         resolve: async (database) => {
           expect(database).toBe(callerClient);
-          return "embedding-profile";
+          return { status: "resolved", resolutionSource: "dedicated_embedding", resolvedRole: "embedding", providerProfileId: "embedding-profile", providerType: "openai-compatible", model: "embed-v1" };
         },
         load: async (database) => {
           expect(database).toBe(callerClient);
@@ -467,13 +515,680 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
 
     expect(preview).toMatchObject({
       campaign: { id: scope.campaignId, worldVersionId: scope.worldVersionId },
-      retrieval: { mode: "hybrid", semanticAvailable: true },
+      retrieval: {
+        mode: "hybrid",
+        semanticAvailable: true,
+        embeddingRequests: 1,
+        queryCacheHits: 0,
+        queryCacheMisses: 1
+      },
+      chronicleRetrieval: {
+        configuredImplementation: "legacy_hybrid",
+        effectiveImplementation: "legacy_hybrid",
+        effectiveMode: "semantic_hybrid",
+        provider: { resolutionSource: "dedicated_embedding", resolvedRole: "embedding", providerType: "openai-compatible", model: "embed-v1" },
+        queryVectorPath: "provider_only",
+        providerCallOutcome: "succeeded"
+      },
       scopes: {
         campaignCanon: { continuityScratchpad: "The Moon Warden is alert." },
         currentScene: { memoryId: "memory-1" }
       }
     });
+
+    const originalQuery = vi.mocked(client.query).getMockImplementation()!;
+    let failProductionRelease = true;
+    vi.mocked(client.query).mockImplementation((sql, values = []) => {
+      if (failProductionRelease && sql === "RELEASE SAVEPOINT chronicle_retrieval_production_legacy_hybrid") {
+        failProductionRelease = false;
+        throw new Error("late production savepoint failure");
+      }
+      return (originalQuery as unknown as (text: string, parameters: readonly unknown[]) => unknown)(sql, values);
+    });
+    const fallback = await transaction.buildContextPreview(client, {
+      ...scope,
+      request: { budgetTokens: 4_000, compression: "auto", recentTurns: 4, query: "Moon Warden after the storm" },
+      costAttribution: { generationJobId: "generation-1", operation: "retrieval_embedding" }
+    });
+    expect(fallback).toMatchObject({
+      retrieval: { semanticAvailable: false, fallbackReason: "semantic_retrieval_unavailable" },
+      chronicleRetrieval: {
+        effectiveImplementation: "legacy_hybrid",
+        effectiveMode: "lexical_only",
+        fallbackCode: "semantic_retrieval_unavailable",
+        provider: { resolutionSource: "dedicated_embedding", resolvedRole: "embedding" },
+        queryVectorPath: "provider_only",
+        providerCallOutcome: "succeeded",
+        queryEmbeddingRequests: 1,
+        queryCacheMisses: 1
+      }
+    });
     expect(JSON.stringify(preview)).not.toMatch(/diceResult|privateReasoning|credential-secret|embedding\.example/i);
+  });
+
+  it("uses the complete legacy preview with an explicit fallback when the current chunk index is not terminal", async () => {
+    const queries: Array<{ sql: string; values: readonly unknown[] }> = [];
+    const client = databaseClient((sql, values) => {
+      queries.push({ sql, values });
+      if (sql.includes("FROM campaigns c") && sql.includes("campaign_state")) {
+        return { rows: [{
+          id: scope.campaignId,
+          title: "Fallback Gate",
+          active_turn_number: 2,
+          world_version_id: scope.worldVersionId,
+          selected_character_id: null,
+          character_profile_revision: 0,
+          world_content: { world: { title: "Fallback Gate" } },
+          character_snapshot: null,
+          character_profile: null,
+          scratchpad_private: "",
+          scratchpad_safe_for_prompt: false,
+          trackers: []
+        }] };
+      }
+      if (sql.includes("WITH base AS") && sql.includes("chronicle_memories")) {
+        return { rows: [{
+          id: "legacy-memory",
+          turn_id: "turn-2",
+          memory_kind: "turn_fiction",
+          ordinal: 2,
+          content: "Turn 2\nNarration: The fallback gate opens.",
+          token_estimate: 12,
+          importance: 0.8,
+          entities: ["Fallback Gate"],
+          entity_ids: ["world:fallback-gate"],
+          relevance: 0.4
+        }] };
+      }
+      if (sql.includes("FROM campaign_memory_configs")) {
+        return { rows: [{
+          embedding_enabled: false,
+          embedding_provider_profile_id: null,
+          embedding_model: "embed-v1",
+          embedding_batch_size: 8,
+          embedding_document_prefix: null,
+          embedding_query_prefix: null,
+          retrieval_implementation: "chunked_hybrid",
+          retrieval_shadow_enabled: true
+        }] };
+      }
+      if (sql.includes("AS chunk_index_ready")) {
+        return { rows: [{ chunk_index_ready: false }] };
+      }
+      if (sql.includes("estimated_tokens") && sql.includes("memory_count")) {
+        return { rows: [{
+          turns: "2", characters: "80", estimated_tokens: "20", memory_count: "1", memory_tokens: "12",
+          embedded_memories: "0", turn_memory_tokens: "12", recent_turn_tokens: "12", summary_tokens: "0"
+        }] };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+    const transaction = createPostgresChronicleGenerationTransactionPort({ embeddings: embeddingPort() });
+
+    const preview = await transaction.buildContextPreview(client, {
+      ...scope,
+      request: { budgetTokens: 4_000, compression: "auto", recentTurns: 2, query: "fallback gate" }
+    });
+
+    expect(preview).toMatchObject({
+      retrieval: {
+        mode: "lexical",
+        semanticAvailable: false,
+        fallbackReason: "semantic_not_configured"
+      },
+      chronicleRetrieval: {
+        configuredImplementation: "chunked_hybrid",
+        effectiveImplementation: "legacy_hybrid",
+        effectiveMode: "lexical_only",
+        fallbackCode: "semantic_not_configured",
+        provider: { resolutionSource: "none" },
+        queryVectorPath: "none"
+      },
+      scopes: { currentScene: { memoryId: "legacy-memory" } }
+    });
+    expect(queries.some(({ sql }) => sql.includes("AS chunk_index_ready"))).toBe(false);
+    expect(queries.some(({ sql }) => sql.includes("chronicle_rank:"))).toBe(false);
+  });
+
+  it("creates every chunk rank input only after owner, campaign, version, and cutoff authorization", async () => {
+    const rankQueries: string[] = [];
+    const memoryQueries: string[] = [];
+    const client = databaseClient((sql) => {
+      if (sql.includes("FROM campaigns c") && sql.includes("campaign_state")) {
+        return { rows: [{
+          id: scope.campaignId,
+          title: "Authorized Gate",
+          active_turn_number: 3,
+          world_version_id: scope.worldVersionId,
+          selected_character_id: null,
+          character_profile_revision: 0,
+          world_content: {
+            world: { title: "Authorized Gate" },
+            entities: [{ id: "moon-warden", name: "Moon Warden", aliases: ["Shade"] }]
+          },
+          character_snapshot: null,
+          character_profile: null,
+          scratchpad_private: "",
+          scratchpad_safe_for_prompt: false,
+          trackers: []
+        }] };
+      }
+      if (sql.includes("WITH base AS") && sql.includes("chronicle_memories")) {
+        memoryQueries.push(sql);
+        return { rows: [{
+          id: "authorized-memory",
+          turn_id: "turn-3",
+          memory_kind: "turn_fiction",
+          ordinal: 3,
+          content: "Turn 3\nNarration: The Moon Warden waits at the gate.",
+          token_estimate: 14,
+          importance: 0.8,
+          entities: ["Moon Warden"],
+          entity_ids: ["world:moon-warden"],
+          relevance: 0.5
+        }] };
+      }
+      if (sql.includes("FROM campaign_canonical_facts")) return { rows: [] };
+      if (sql.includes("FROM campaign_memory_configs")) {
+        return { rows: [{
+          embedding_enabled: true,
+          embedding_provider_profile_id: "embedding-profile",
+          embedding_model: "embed-v1",
+          embedding_batch_size: 8,
+          embedding_document_prefix: null,
+          embedding_query_prefix: null,
+          retrieval_implementation: "chunked_hybrid",
+          retrieval_shadow_enabled: false
+        }] };
+      }
+      if (sql.includes("FROM chronicle_query_embedding_cache")) return { rows: [] };
+      if (sql.includes("AS chunk_index_ready")) return { rows: [{ chunk_index_ready: true }] };
+      // Fused candidate vectors are loaded once per preview instead of being rendered
+      // inside every rank query.
+      if (sql.includes("embedding::text AS embedding")) return { rows: [] };
+      if (sql.includes("chronicle_rank:")) {
+        rankQueries.push(sql);
+        return { rows: [{
+          candidate_id: "authorized-chunk",
+          parent_memory_id: "authorized-memory",
+          parent_turn_id: "turn-3",
+          parent_memory_kind: "turn_fiction",
+          parent_ordinal: 3,
+          parent_content: "Turn 3\nNarration: The Moon Warden waits at the gate.",
+          parent_token_estimate: 14,
+          parent_importance: 0.8,
+          parent_entities: ["Moon Warden"],
+          parent_entity_ids: ["world:moon-warden"],
+          parent_metadata: {},
+          chunk_ordinal: 0,
+          chunk_kind: "turn_narration",
+          chunk_content: "The Moon Warden waits at the gate.",
+          active_fact: true
+        }] };
+      }
+      if (sql.includes("estimated_tokens") && sql.includes("memory_count")) {
+        return { rows: [{
+          turns: "3", characters: "120", estimated_tokens: "30", memory_count: "1", memory_tokens: "14",
+          embedded_memories: "0", turn_memory_tokens: "14", recent_turn_tokens: "14", summary_tokens: "0"
+        }] };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+    const transaction = createPostgresChronicleGenerationTransactionPort({
+      embeddings: embeddingPort({
+        resolve: async () => ({ status: "resolved", resolutionSource: "dedicated_embedding", resolvedRole: "embedding", providerProfileId: "embedding-profile", providerType: "openrouter", model: "embed-v1" }),
+        load: async () => ({
+          id: "embedding-profile",
+          model: "embed-v1",
+          providerType: "openai_compatible",
+          configuration: { embeddingDimensions: 2 },
+          embed: async () => ({ embeddings: [], responseId: "unused", usage: {}, reportedCost: null })
+        }),
+        embed: async (_provider, documents) => ({
+          embeddings: documents.map(() => [1, 0]),
+          responseId: "query-batch",
+          usage: {},
+          reportedCost: null
+        }),
+        fingerprint: async () => "fingerprint",
+        recordCost: async () => null,
+        recordHealth: async () => undefined
+      })
+    });
+
+    const preview = await transaction.buildContextPreview(client, {
+      ...scope,
+      request: {
+        budgetTokens: 4_000,
+        compression: "auto",
+        recentTurns: 2,
+        query: "Moon Warden",
+        throughTurnNumber: 3
+      }
+    });
+
+    expect(preview).toMatchObject({ retrieval: { implementation: "chunked_hybrid" } });
+    expect(memoryQueries.length).toBeGreaterThan(0);
+    expect(memoryQueries.every((sql) => sql.includes(
+      "CASE WHEN jsonb_typeof(metadata->'structuredFactIds')='array'"
+    ))).toBe(true);
+    expect(rankQueries.length).toBeGreaterThan(0);
+    expect(rankQueries.filter((sql) => sql.includes("chronicle_rank:entity"))).toHaveLength(1);
+    for (const sql of rankQueries) {
+      const authorization = sql.indexOf("authorized AS MATERIALIZED");
+      const ranking = sql.indexOf("ranked AS");
+      expect(authorization).toBeGreaterThanOrEqual(0);
+      expect(ranking).toBeGreaterThan(authorization);
+      expect(sql.slice(authorization, ranking)).toMatch(
+        /owner_user_id\s*=\s*\$1[\s\S]*campaign_id\s*=\s*\$2[\s\S]*world_version_id\s*=\s*\$3[\s\S]*parent\.ordinal\s*<=\s*\$4/i
+      );
+      expect(sql.slice(authorization, ranking)).toContain(
+        "CASE WHEN jsonb_typeof(parent.metadata->'structuredFactIds')='array'"
+      );
+    }
+  });
+
+  it("does not derive historical entity ranks from a current character-profile-only alias", async () => {
+    const rankQueries: Array<{ sql: string; values: readonly unknown[] }> = [];
+    const client = databaseClient((sql, values) => {
+      if (sql.includes("FROM campaigns c") && sql.includes("campaign_state")) {
+        return { rows: [{
+          id: scope.campaignId,
+          title: "Historical Alias Gate",
+          active_turn_number: 4,
+          world_version_id: scope.worldVersionId,
+          selected_character_id: "hero",
+          character_profile_revision: 2,
+          world_content: { world: { title: "Historical Alias Gate" } },
+          character_snapshot: { id: "hero", name: "Moon Warden" },
+          character_profile: { profile: { identity: { aliases: ["Future Codename"] } } },
+          scratchpad_private: "",
+          scratchpad_safe_for_prompt: false,
+          trackers: []
+        }] };
+      }
+      if (sql.includes("WITH base AS") && sql.includes("chronicle_memories")) {
+        return { rows: [{
+          id: "historical-memory",
+          turn_id: "turn-1",
+          memory_kind: "turn_fiction",
+          ordinal: 1,
+          content: "Turn 1\nNarration: The moonlit court is quiet.",
+          token_estimate: 12,
+          importance: 0.8,
+          entities: ["Moon Warden"],
+          entity_ids: ["character:hero"],
+          relevance: 0
+        }] };
+      }
+      if (sql.includes("FROM campaign_canonical_facts")) return { rows: [] };
+      if (sql.includes("FROM campaign_memory_configs")) {
+        return { rows: [{
+          embedding_enabled: false,
+          embedding_provider_profile_id: null,
+          embedding_model: "embed-v1",
+          embedding_batch_size: 8,
+          embedding_document_prefix: null,
+          embedding_query_prefix: null,
+          retrieval_implementation: "chunked_hybrid",
+          retrieval_shadow_enabled: false
+        }] };
+      }
+      if (sql.includes("AS chunk_index_ready")) return { rows: [{ chunk_index_ready: true }] };
+      // Fused candidate vectors are loaded once per preview instead of being rendered
+      // inside every rank query.
+      if (sql.includes("embedding::text AS embedding")) return { rows: [] };
+      if (sql.includes("chronicle_rank:")) {
+        rankQueries.push({ sql, values });
+        return { rows: [] };
+      }
+      if (sql.includes("estimated_tokens") && sql.includes("memory_count")) {
+        return { rows: [{
+          turns: "1", characters: "60", estimated_tokens: "15", memory_count: "1", memory_tokens: "12",
+          embedded_memories: "0", turn_memory_tokens: "12", recent_turn_tokens: "12", summary_tokens: "0"
+        }] };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+    const transaction = createPostgresChronicleGenerationTransactionPort({ embeddings: embeddingPort() });
+
+    await transaction.buildContextPreview(client, {
+      ...scope,
+      request: {
+        budgetTokens: 4_000,
+        compression: "auto",
+        recentTurns: 1,
+        query: "Future Codename",
+        throughTurnNumber: 1
+      }
+    });
+
+    expect(rankQueries.filter(({ sql }) => sql.includes("chronicle_rank:entity"))).toHaveLength(0);
+    expect(rankQueries.flatMap(({ values }) => values).join("\n")).not.toContain("Moon Warden");
+  });
+
+  it("keeps post-cutoff character aliases out of legacy and readiness-fallback provider inputs", async () => {
+    for (const retrievalImplementation of ["legacy_hybrid", "chunked_hybrid"] as const) {
+      const providerInputs: string[] = [];
+      const client = databaseClient((sql) => {
+        if (sql.includes("FROM campaigns c") && sql.includes("campaign_state")) {
+          return { rows: [{
+            id: scope.campaignId,
+            title: "Historical Provider Alias Gate",
+            active_turn_number: 4,
+            world_version_id: scope.worldVersionId,
+            selected_character_id: "hero",
+            character_profile_revision: 2,
+            world_content: { world: { title: "Historical Provider Alias Gate" } },
+            character_snapshot: { id: "hero", name: "Moon Warden" },
+            character_profile: { profile: { identity: { aliases: ["Future Codename"] } } },
+            scratchpad_private: "",
+            scratchpad_safe_for_prompt: false,
+            trackers: []
+          }] };
+        }
+        if (sql.includes("WITH base AS") && sql.includes("chronicle_memories")) {
+          return { rows: [{
+            id: "historical-memory",
+            turn_id: "turn-1",
+            memory_kind: "turn_fiction",
+            ordinal: 1,
+            content: "Turn 1\nNarration: The moonlit court is quiet.",
+            token_estimate: 12,
+            importance: 0.8,
+            entities: ["Moon Warden"],
+            entity_ids: ["character:hero"],
+            relevance: 0
+          }] };
+        }
+        if (sql.includes("FROM campaign_canonical_facts")) return { rows: [] };
+        if (sql.includes("FROM campaign_memory_configs")) {
+          return { rows: [{
+            embedding_enabled: true,
+            embedding_provider_profile_id: "embedding-profile",
+            embedding_model: "embed-v1",
+            embedding_batch_size: 8,
+            embedding_document_prefix: null,
+            embedding_query_prefix: null,
+            retrieval_implementation: retrievalImplementation,
+            retrieval_shadow_enabled: false
+          }] };
+        }
+        if (sql.includes("AS chunk_index_ready")) return { rows: [{ chunk_index_ready: false }] };
+        if (sql.includes("1 - (embedding <=>")) return { rows: [] };
+        if (sql.includes("estimated_tokens") && sql.includes("memory_count")) {
+          return { rows: [{
+            turns: "1", characters: "60", estimated_tokens: "15", memory_count: "1", memory_tokens: "12",
+            embedded_memories: "0", turn_memory_tokens: "12", recent_turn_tokens: "12", summary_tokens: "0"
+          }] };
+        }
+        throw new Error(`Unexpected SQL: ${sql}`);
+      });
+      const transaction = createPostgresChronicleGenerationTransactionPort({
+        embeddings: embeddingPort({
+          resolve: async () => ({ status: "resolved", resolutionSource: "dedicated_embedding", resolvedRole: "embedding", providerProfileId: "embedding-profile", providerType: "openrouter", model: "embed-v1" }),
+          load: async () => ({
+            id: "embedding-profile",
+            model: "embed-v1",
+            providerType: "openai_compatible",
+            embed: async () => ({ embeddings: [], responseId: "unused", usage: {}, reportedCost: null })
+          }),
+          embed: async (_provider, documents) => {
+            providerInputs.push(...documents);
+            return { embeddings: [[1, 0]], responseId: "legacy-query", usage: {}, reportedCost: null };
+          },
+          fingerprint: async () => "fingerprint",
+          recordCost: async () => null,
+          recordHealth: async () => undefined
+        })
+      });
+
+      await transaction.buildContextPreview(client, {
+        ...scope,
+        request: {
+          budgetTokens: 4_000,
+          compression: "auto",
+          recentTurns: 1,
+          query: "Future Codename",
+          throughTurnNumber: 1
+        }
+      });
+
+      expect(providerInputs).toHaveLength(1);
+      expect(providerInputs[0]).toContain("Future Codename");
+      expect(providerInputs[0]).not.toContain("Moon Warden");
+    }
+  });
+
+  it("keeps nonsemantic fused candidates out of semantic and lexical diagnostics", async () => {
+    const candidate = (id: string, kind: "turn_fiction" | "open_thread", content: string) => ({
+      candidate_id: `${id}-chunk`,
+      parent_memory_id: id,
+      parent_turn_id: kind === "turn_fiction" ? "turn-1" : null,
+      parent_memory_kind: kind,
+      parent_ordinal: kind === "turn_fiction" ? 1 : 2,
+      parent_content: content,
+      parent_token_estimate: 12,
+      parent_importance: 0.8,
+      parent_entities: [],
+      parent_entity_ids: [],
+      active_fact: true
+    });
+    const client = databaseClient((sql) => {
+      if (sql.includes("FROM campaigns c") && sql.includes("campaign_state")) {
+        return { rows: [{
+          id: scope.campaignId,
+          title: "Signal Diagnostics",
+          active_turn_number: 3,
+          world_version_id: scope.worldVersionId,
+          selected_character_id: null,
+          character_profile_revision: 0,
+          world_content: { world: { title: "Signal Diagnostics" } },
+          character_snapshot: null,
+          character_profile: null,
+          scratchpad_private: "",
+          scratchpad_safe_for_prompt: false,
+          trackers: []
+        }] };
+      }
+      if (sql.includes("WITH base AS") && sql.includes("chronicle_memories")) {
+        return { rows: [{
+          id: "current-memory",
+          turn_id: "turn-3",
+          memory_kind: "turn_fiction",
+          ordinal: 3,
+          content: "Turn 3\nNarration: The current scene remains quiet.",
+          token_estimate: 12,
+          importance: 0.8,
+          entities: [],
+          entity_ids: [],
+          relevance: 0
+        }] };
+      }
+      if (sql.includes("FROM campaign_memory_configs")) {
+        return { rows: [{
+          embedding_enabled: true,
+          embedding_provider_profile_id: "embedding-profile",
+          embedding_model: "embed-v1",
+          embedding_batch_size: 8,
+          embedding_document_prefix: null,
+          embedding_query_prefix: null,
+          retrieval_implementation: "chunked_hybrid",
+          retrieval_shadow_enabled: false
+        }] };
+      }
+      if (sql.includes("AS chunk_index_ready")) return { rows: [{ chunk_index_ready: true }] };
+      // Fused candidate vectors are loaded once per preview instead of being rendered
+      // inside every rank query.
+      if (sql.includes("embedding::text AS embedding")) return { rows: [] };
+      if (sql.includes("chronicle_rank:semantic")) {
+        return { rows: [candidate("semantic-parent", "turn_fiction", "A semantically related memory.")] };
+      }
+      if (sql.includes("chronicle_rank:full_text") || sql.includes("chronicle_rank:entity")) return { rows: [] };
+      if (sql.includes("chronicle_rank:")) {
+        return { rows: [candidate("skipped-parent", "open_thread", "A nonsemantic open thread.")] };
+      }
+      if (sql.includes("estimated_tokens") && sql.includes("memory_count")) {
+        return { rows: [{
+          turns: "3", characters: "120", estimated_tokens: "30", memory_count: "1", memory_tokens: "12",
+          embedded_memories: "0", turn_memory_tokens: "12", recent_turn_tokens: "12", summary_tokens: "0"
+        }] };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+    const transaction = createPostgresChronicleGenerationTransactionPort({
+      embeddings: embeddingPort({
+        resolve: async () => ({ status: "resolved", resolutionSource: "dedicated_embedding", resolvedRole: "embedding", providerProfileId: "embedding-profile", providerType: "openrouter", model: "embed-v1" }),
+        load: async () => ({
+          id: "embedding-profile",
+          model: "embed-v1",
+          providerType: "openai_compatible",
+          embed: async () => ({ embeddings: [], responseId: "unused", usage: {}, reportedCost: null })
+        }),
+        embed: async (_provider, documents) => ({
+          embeddings: documents.map(() => [1, 0]),
+          responseId: "query-batch",
+          usage: {},
+          reportedCost: null
+        }),
+        fingerprint: async () => "fingerprint",
+        recordCost: async () => null,
+        recordHealth: async () => undefined
+      })
+    });
+
+    const preview = await transaction.buildContextPreview(client, {
+      ...scope,
+      request: { budgetTokens: 4_000, compression: "auto", recentTurns: 1, query: "find the old oath" }
+    });
+    const chronicle = (preview.scopes as { chronicle: Array<Record<string, unknown>> }).chronicle;
+    const nonsemantic = chronicle.find((memory) => memory.id === "skipped-parent");
+
+    expect(preview.scopes).toMatchObject({
+      currentScene: { memoryId: "current-memory", ordinal: 3 }
+    });
+    expect(nonsemantic?.relevance).toEqual(expect.any(Number));
+    expect(Number(nonsemantic?.relevance)).toBeGreaterThan(0);
+    expect(nonsemantic).toMatchObject({ semanticRelevance: 0, lexicalRelevance: 0 });
+  });
+
+  it("discards all semantic rank inputs when one query variant fails", async () => {
+    let semanticQueries = 0;
+    let nonsemanticRankQueries = 0;
+    const client = databaseClient((sql) => {
+      if (sql.includes("FROM campaigns c") && sql.includes("campaign_state")) {
+        return { rows: [{
+          id: scope.campaignId,
+          title: "Semantic Failure Gate",
+          active_turn_number: 2,
+          world_version_id: scope.worldVersionId,
+          selected_character_id: null,
+          character_profile_revision: 0,
+          world_content: { world: { title: "Semantic Failure Gate" } },
+          character_snapshot: null,
+          character_profile: null,
+          scratchpad_private: "",
+          scratchpad_safe_for_prompt: false,
+          trackers: []
+        }] };
+      }
+      if (sql.includes("WITH base AS") && sql.includes("chronicle_memories")) {
+        return { rows: [{
+          id: "current-memory",
+          turn_id: "turn-2",
+          memory_kind: "turn_fiction",
+          ordinal: 2,
+          content: "Turn 2\nNarration: The current scene remains quiet.",
+          token_estimate: 12,
+          importance: 0.8,
+          entities: [],
+          entity_ids: [],
+          relevance: 0
+        }] };
+      }
+      if (sql.includes("FROM campaign_memory_configs")) {
+        return { rows: [{
+          embedding_enabled: true,
+          embedding_provider_profile_id: "embedding-profile",
+          embedding_model: "embed-v1",
+          embedding_batch_size: 8,
+          embedding_document_prefix: null,
+          embedding_query_prefix: null,
+          retrieval_implementation: "chunked_hybrid",
+          retrieval_shadow_enabled: false
+        }] };
+      }
+      if (sql.includes("AS chunk_index_ready")) return { rows: [{ chunk_index_ready: true }] };
+      // Fused candidate vectors are loaded once per preview instead of being rendered
+      // inside every rank query.
+      if (sql.includes("embedding::text AS embedding")) return { rows: [] };
+      if (sql.includes("chronicle_rank:semantic")) {
+        semanticQueries += 1;
+        if (semanticQueries === 2) throw new Error("second semantic rank failed");
+        return { rows: [{
+          candidate_id: "partial-semantic-chunk",
+          parent_memory_id: "partial-semantic-parent",
+          parent_turn_id: "turn-1",
+          parent_memory_kind: "turn_fiction",
+          parent_ordinal: 1,
+          parent_content: "Turn 1\nNarration: Partial semantic content must not survive.",
+          parent_token_estimate: 12,
+          parent_importance: 0.8,
+          parent_entities: [],
+          parent_entity_ids: [],
+          active_fact: true
+        }] };
+      }
+      // Fused candidate vectors are loaded once per preview instead of being rendered
+      // inside every rank query.
+      if (sql.includes("embedding::text AS embedding")) return { rows: [] };
+      if (sql.includes("chronicle_rank:")) {
+        nonsemanticRankQueries += 1;
+        return { rows: [] };
+      }
+      if (sql.includes("estimated_tokens") && sql.includes("memory_count")) {
+        return { rows: [{
+          turns: "2", characters: "80", estimated_tokens: "20", memory_count: "1", memory_tokens: "12",
+          embedded_memories: "0", turn_memory_tokens: "12", recent_turn_tokens: "12", summary_tokens: "0"
+        }] };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+    const transaction = createPostgresChronicleGenerationTransactionPort({
+      embeddings: embeddingPort({
+        resolve: async () => ({ status: "resolved", resolutionSource: "dedicated_embedding", resolvedRole: "embedding", providerProfileId: "embedding-profile", providerType: "openrouter", model: "embed-v1" }),
+        load: async () => ({
+          id: "embedding-profile",
+          model: "embed-v1",
+          providerType: "openai_compatible",
+          embed: async () => ({ embeddings: [], responseId: "unused", usage: {}, reportedCost: null })
+        }),
+        embed: async (_provider, documents) => ({
+          embeddings: documents.map(() => [1, 0]),
+          responseId: "query-batch",
+          usage: {},
+          reportedCost: null
+        }),
+        fingerprint: async () => "fingerprint",
+        recordCost: async () => null,
+        recordHealth: async () => undefined
+      })
+    });
+
+    const preview = await transaction.buildContextPreview(client, {
+      ...scope,
+      request: { budgetTokens: 4_000, compression: "auto", recentTurns: 1, query: "quiet scene" }
+    });
+
+    expect(semanticQueries).toBe(2);
+    expect(preview).toMatchObject({
+      retrieval: {
+        semanticAvailable: false,
+        fallbackReason: "semantic_retrieval_unavailable"
+      }
+    });
+    expect(nonsemanticRankQueries).toBe(0);
+    expect(JSON.stringify(preview.scopes)).not.toContain("Partial semantic content must not survive");
   });
 });
 
@@ -518,10 +1233,11 @@ describe("PostgreSQL Chronicle embedding configuration policy", () => {
 
   it("rejects an image provider before persisting embedding configuration", async () => {
     let persisted = false;
-    const pool = databaseClient((sql) => {
+    const pool = databasePool((sql) => {
       if (sql.includes("SELECT world_version_id FROM campaigns")) {
         return { rows: [{ world_version_id: scope.worldVersionId }] };
       }
+      if (sql.includes("FROM campaign_memory_configs")) return { rows: [] };
       if (sql.includes("provider_role = 'embedding'")) return { rows: [] };
       if (sql.includes("SELECT provider_role FROM provider_profiles")) {
         return { rows: [{ provider_role: "image" }] };
@@ -538,7 +1254,7 @@ describe("PostgreSQL Chronicle embedding configuration policy", () => {
         }] };
       }
       throw new Error(`Unexpected SQL: ${sql}`);
-    }) as unknown as DatabasePool;
+    });
     const configuration = createPostgresChronicleConfigurationRepository(pool);
 
     await expect(configuration.setEmbeddingConfig(scope, {
@@ -550,10 +1266,11 @@ describe("PostgreSQL Chronicle embedding configuration policy", () => {
 
   it("rejects a text provider while a dedicated embedding provider is enabled", async () => {
     let persisted = false;
-    const pool = databaseClient((sql) => {
+    const pool = databasePool((sql) => {
       if (sql.includes("SELECT world_version_id FROM campaigns")) {
         return { rows: [{ world_version_id: scope.worldVersionId }] };
       }
+      if (sql.includes("FROM campaign_memory_configs")) return { rows: [] };
       if (sql.includes("provider_role = 'embedding'")) {
         return { rows: [{ id: "embedding-profile", is_default: true }] };
       }
@@ -565,7 +1282,7 @@ describe("PostgreSQL Chronicle embedding configuration policy", () => {
         return { rows: [] };
       }
       throw new Error(`Unexpected SQL: ${sql}`);
-    }) as unknown as DatabasePool;
+    });
     const configuration = createPostgresChronicleConfigurationRepository(pool);
 
     await expect(configuration.setEmbeddingConfig(scope, {
@@ -577,12 +1294,24 @@ describe("PostgreSQL Chronicle embedding configuration policy", () => {
 
   it("persists the enabled dedicated default when the provider is omitted", async () => {
     let persistedProviderId: unknown;
-    const pool = databaseClient((sql, values) => {
+    const pool = databasePool((sql, values) => {
       if (sql.includes("SELECT world_version_id FROM campaigns")) {
         return { rows: [{ world_version_id: scope.worldVersionId }] };
       }
       if (sql.includes("provider_role = 'embedding'")) {
         return { rows: [{ id: "embedding-default", is_default: true }] };
+      }
+      if (sql.includes("FROM campaign_memory_configs")) {
+        return { rows: [{
+          embedding_enabled: false,
+          embedding_provider_profile_id: null,
+          embedding_model: null,
+          embedding_batch_size: 16,
+          embedding_document_prefix: null,
+          embedding_query_prefix: null,
+          retrieval_implementation: "legacy_hybrid",
+          retrieval_shadow_enabled: false
+        }] };
       }
       if (sql.includes("INSERT INTO campaign_memory_configs")) {
         persistedProviderId = values[3];
@@ -595,8 +1324,23 @@ describe("PostgreSQL Chronicle embedding configuration policy", () => {
           embedding_query_prefix: null
         }] };
       }
+      if (sql.includes("UPDATE chronicle_memory_chunks")) return { rows: [], rowCount: 0 };
+      if (sql.includes("JOIN campaign_memory_configs config")) {
+        return { rows: [{
+          world_version_id: scope.worldVersionId,
+          embedding_enabled: true,
+          embedding_provider_profile_id: "embedding-default",
+          embedding_model: "embed-v1",
+          embedding_batch_size: 16,
+          embedding_document_prefix: null,
+          embedding_query_prefix: null,
+          retrieval_implementation: "legacy_hybrid",
+          retrieval_shadow_enabled: false
+        }] };
+      }
+      if (sql.includes("INSERT INTO chronicle_chunk_jobs")) return { rows: [{ id: "chunk-job-1" }] };
       throw new Error(`Unexpected SQL: ${sql}`);
-    }) as unknown as DatabasePool;
+    });
     const configuration = createPostgresChronicleConfigurationRepository(pool);
 
     await expect(configuration.setEmbeddingConfig(scope, {

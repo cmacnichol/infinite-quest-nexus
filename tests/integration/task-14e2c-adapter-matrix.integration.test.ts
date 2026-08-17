@@ -24,7 +24,11 @@ import { PROMPT_TEMPLATE_CATALOG, type PromptSnapshot } from "../../packages/con
 import { convertInfiniteWorldsWorld } from "../../packages/domain/src/infinite-worlds.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
-import { writeArchiveArtifact, type ArchiveLimits } from "../../services/api/src/archive-io.js";
+import {
+  supportsSecureGeneratedArchiveStaging,
+  writeArchiveArtifact,
+  type ArchiveLimits
+} from "../../services/api/src/archive-io.js";
 import {
   persistArchiveAssets,
   restoreAssetBindings,
@@ -45,6 +49,7 @@ import {
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
+const secureFilesystemIt = it.runIf(supportsSecureGeneratedArchiveStaging());
 
 const limits: ArchiveLimits = {
   maxCompressedBytes: 2_000_000,
@@ -153,7 +158,6 @@ integration("Task 14e2c additive adapter contract matrix", () => {
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 8);
-    await migrateDatabase(pool, resolve("database/migrations"));
     // This matrix freezes the historical 14e2c split-transaction test helper.
     // Current 0055 split-state rejection, 0056 current-clock fences, and
     // 0057 finalized-delivery authority, 0058 secure storage lifecycle, and
@@ -164,6 +168,18 @@ integration("Task 14e2c additive adapter contract matrix", () => {
     // require the 0061 authority columns and durable work row.
     const migrationClient = await pool.connect();
     try {
+      const initiallyApplied = await runner({
+        dbClient: migrationClient,
+        dir: resolve("database/migrations"),
+        direction: "up",
+        count: 69,
+        migrationsTable: "schema_migrations",
+        checkOrder: true,
+        singleTransaction: true,
+        verbose: false,
+        logger: { info: () => undefined, warn: () => undefined, error: () => undefined }
+      });
+      expect(initiallyApplied.at(-1)?.name).toBe("0069_import_progress_status");
       const reverted = await runner({
         dbClient: migrationClient,
         dir: resolve("database/migrations"),
@@ -240,7 +256,15 @@ integration("Task 14e2c additive adapter contract matrix", () => {
         "0066_portable_normalized_asset_publications",
         "0067_asset_metadata_backfill_executor",
         "0068_portable_legacy_story_create_world",
-        "0069_import_progress_status"
+        "0069_import_progress_status",
+        "0070_turn_narration_corrections",
+        "0071_world_share_links",
+        "0072_chronicle_memory_chunks",
+        "0073_chronicle_chunk_job_fencing",
+        "0074_chronicle_retrieval_observability",
+        "0075_chronicle_query_embedding_cache",
+        "0076_chronicle_chunk_skip_reasons",
+        "0077_chronicle_chunk_processed_signature"
       ]);
     } finally {
       await pool.end();
@@ -419,7 +443,7 @@ integration("Task 14e2c additive adapter contract matrix", () => {
     };
   }
 
-  it("reserves durable staging before filesystem mutation and denies the resulting handle to another owner", async () => {
+  secureFilesystemIt("reserves durable staging before filesystem mutation and denies the resulting handle to another owner", async () => {
     const storageRoot = await root("iq-14e2c-storage-");
     const adapters = createTask14e2cAdapters({
       pool,
@@ -605,7 +629,7 @@ integration("Task 14e2c additive adapter contract matrix", () => {
     expect(diagnostic.rows[0]).toEqual({ diagnostic_code: "asset_metadata_unavailable", leaked: null });
   });
 
-  it("parses and commits all eight legacy variants through durable adapters and remaps campaign assets", async () => {
+  secureFilesystemIt("parses and commits all eight legacy variants through durable adapters and remaps campaign assets", async () => {
     const storageRoot = await root("iq-14e2c-portable-");
     const adapters = createTask14e2cAdapters({ pool, archiveRoot: storageRoot, assetRoot: storageRoot, limits });
     const scope = await worldScope();
@@ -965,7 +989,7 @@ The durable record is verified.`;
     expect(provenance.rows).toEqual([{ owner_user_id: ownerUserId, source_installation_id: foreignOwnerUserId }]);
   });
 
-  it("rolls back real import domain state with portable completion, then succeeds and replays exactly", async () => {
+  secureFilesystemIt("rolls back real import domain state with portable completion, then succeeds and replays exactly", async () => {
     const storageRoot = await root("iq-14e2c-transaction-bound-import-");
     const adapters = createTask14e2cAdapters({ pool, archiveRoot: storageRoot, assetRoot: storageRoot, limits });
     const scope = await worldScope();
@@ -1058,7 +1082,7 @@ The durable record is verified.`;
     await adapters.archive.cleanup({ ownerUserId }, stagedInput);
   });
 
-  it("cleans superseded, expired, aborted, rolled-back, and crash-recovered portable work", async () => {
+  secureFilesystemIt("cleans superseded, expired, aborted, rolled-back, and crash-recovered portable work", async () => {
     const storageRoot = await root("iq-14e2c-lifecycle-");
     const adapters = createTask14e2cAdapters({ pool, archiveRoot: storageRoot, assetRoot: storageRoot, limits });
     const scope = await worldScope();
@@ -1185,7 +1209,7 @@ The durable record is verified.`;
     expect(remainingFiles).toHaveLength(0);
   });
 
-  it("publishes and redeems a campaign ZIP with exact owner/scope and idempotent cleanup", async () => {
+  secureFilesystemIt("publishes and redeems a campaign ZIP with exact owner/scope and idempotent cleanup", async () => {
     const storageRoot = await root("iq-14e2c-export-");
     const adapters = createTask14e2cAdapters({ pool, archiveRoot: storageRoot, assetRoot: storageRoot, limits });
     const scope = await worldScope();
@@ -1249,7 +1273,7 @@ The durable record is verified.`;
     expect(persisted.rows.at(-1)).toEqual({ status: "cleaned" });
   });
 
-  it("persists verified image metadata atomically and leaves no reachable partial file on rollback", async () => {
+  secureFilesystemIt("persists verified image metadata atomically and leaves no reachable partial file on rollback", async () => {
     const storageRoot = await root("iq-14e2c-images-");
     const adapters = createTask14e2cAdapters({ pool, archiveRoot: storageRoot, assetRoot: storageRoot, limits });
     const completedAsset = await asset();

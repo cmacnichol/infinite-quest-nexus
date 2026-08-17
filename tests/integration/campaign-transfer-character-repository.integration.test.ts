@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type {
   CampaignTransferRepositoryPort,
   WorldCampaignRepositoryResult
@@ -25,7 +25,9 @@ import {
 import * as repositoryModule from "../../packages/database/src/campaign-transfer-character-repository.js";
 import { createPostgresWorldRepositoryAdapters } from "../../packages/database/src/world-repository.js";
 import { createPostgresWorldCampaignTransactionPort } from "../../packages/database/src/world-campaign-transaction.js";
+import { readTurnPage } from "../../packages/database/src/play-loop-read-repository.js";
 import { memoryGeneration } from "../helpers/memory-applications.js";
+import { DEDICATED_CHUNKED_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -548,9 +550,9 @@ integration("campaign transfer and character PostgreSQL adapters", () => {
          owner_user_id, campaign_id, turn_number, source_turn_id, action, narration,
          choices, state_snapshot_private, model_metadata, import_metadata
        ) VALUES ($1, $2, 1, 'portable-source-one', 'Enter.', 'Entered.', '[]',
-                 '{}', '{"protocol":"synthetic"}', '{"legacy":{"batch":"one"}}')
+                 '{}', $3::jsonb, '{"legacy":{"batch":"one"}}')
        RETURNING id`,
-      [ownerUserId, source.campaign.id],
+      [ownerUserId, source.campaign.id, JSON.stringify({ protocol: "synthetic", chronicleRetrieval: DEDICATED_CHUNKED_AUDIT })],
     );
     const secondTurn = await pool.query<{ id: string }>(
       `INSERT INTO turns (
@@ -600,6 +602,12 @@ integration("campaign transfer and character PostgreSQL adapters", () => {
        ) VALUES ($1, $2, 2, 'chronicle', $3, 2)`,
       [ownerUserId, source.campaign.id, JSON.stringify({ summary: "Transferred summary." })],
     );
+    await pool.query(
+      `INSERT INTO campaign_memory_configs (
+         campaign_id, owner_user_id, embedding_enabled, retrieval_implementation, retrieval_shadow_enabled
+       ) VALUES ($1, $2, false, 'chunked_hybrid', true)`,
+      [source.campaign.id, ownerUserId],
+    );
     const asset = await pool.query<{ id: string }>(
       `INSERT INTO assets (
          owner_user_id, campaign_id, turn_id, content_hash, storage_driver,
@@ -614,7 +622,9 @@ integration("campaign transfer and character PostgreSQL adapters", () => {
       [ownerUserId, asset.rows[0]!.id, source.campaign.id, secondTurn.rows[0]!.id],
     );
     const transactions = createPostgresWorldCampaignTransactionPort(pool);
-    const repository = transferRepository();
+    const baseMemory = memoryGeneration(pool);
+    const enqueueChunkIndex = vi.fn(baseMemory.enqueueChunkIndex.bind(baseMemory));
+    const repository = transferRepository({ ...baseMemory, enqueueChunkIndex });
     const previewRequest = campaignTransferPreviewRequestSchema.parse({
       targetWorldVersionId: target.worldVersionId
     });
@@ -648,6 +658,22 @@ integration("campaign transfer and character PostgreSQL adapters", () => {
       targetCampaignId: committed.targetCampaignId,
       reused: true
     });
+    expect(enqueueChunkIndex).toHaveBeenCalledOnce();
+    expect(enqueueChunkIndex).toHaveBeenCalledWith(expect.anything(), {
+      ownerUserId,
+      campaignId: committed.targetCampaignId,
+      worldVersionId: target.worldVersionId
+    });
+    await expect(pool.query<{
+      retrieval_implementation: string;
+      retrieval_shadow_enabled: boolean;
+    }>(
+      `SELECT retrieval_implementation,retrieval_shadow_enabled
+         FROM campaign_memory_configs WHERE campaign_id=$1 AND owner_user_id=$2`,
+      [committed.targetCampaignId, ownerUserId]
+    )).resolves.toMatchObject({
+      rows: [{ retrieval_implementation: "chunked_hybrid", retrieval_shadow_enabled: true }]
+    });
 
     const copied = await pool.query<{
       worldVersionId: string;
@@ -667,7 +693,8 @@ integration("campaign transfer and character PostgreSQL adapters", () => {
               cs.import_provenance AS "importProvenance",
               (SELECT jsonb_agg(jsonb_build_object(
                  'sourceTurnId', t.source_turn_id,
-                 'importMetadata', t.import_metadata
+                 'importMetadata', t.import_metadata,
+                 'chronicleRetrieval', t.model_metadata -> 'chronicleRetrieval'
                ) ORDER BY t.turn_number)
                  FROM turns t WHERE t.campaign_id = c.id) AS turns,
               (SELECT count(*)::int FROM campaign_state_edits WHERE campaign_id = c.id) AS "stateEdits",
@@ -702,6 +729,7 @@ integration("campaign transfer and character PostgreSQL adapters", () => {
     expect(copied.rows[0]?.turns).toEqual([
       {
         sourceTurnId: "portable-source-one",
+        chronicleRetrieval: DEDICATED_CHUNKED_AUDIT,
         importMetadata: {
           legacy: { batch: "one" },
           transfer: expect.objectContaining({
@@ -714,6 +742,7 @@ integration("campaign transfer and character PostgreSQL adapters", () => {
       },
       {
         sourceTurnId: "portable-source-two",
+        chronicleRetrieval: null,
         importMetadata: {
           legacy: { batch: "two" },
           transfer: expect.objectContaining({
@@ -725,6 +754,12 @@ integration("campaign transfer and character PostgreSQL adapters", () => {
         }
       }
     ]);
+    await expect(readTurnPage(pool, ownerUserId, committed.targetCampaignId, undefined, 10)).resolves.toMatchObject({
+      turns: [
+        { turnNumber: 1, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT },
+        { turnNumber: 2, chronicleRetrieval: null }
+      ]
+    });
     expect(committed).toMatchObject({
       sourceCampaignId: source.campaign.id,
       targetWorldVersionId: target.worldVersionId,

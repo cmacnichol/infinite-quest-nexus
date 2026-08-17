@@ -1,5 +1,5 @@
 import type { MemoryApplication } from "../../../packages/application/src/memory/index.js";
-import type { MemoryContextQuery } from "../../../packages/contracts/src/memory.js";
+import { chronicleHealthSchema, type MemoryContextQuery } from "../../../packages/contracts/src/memory.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 
 export type MemoryApplicationAdapter = Readonly<{
@@ -30,7 +30,9 @@ export function createMemoryApplicationAdapter(
 ): MemoryApplicationAdapter {
   return {
     async metrics(ownerUserId, campaignId) {
-      return application.getMetrics(await campaignScope(pool, ownerUserId, campaignId));
+      const metrics = await application.getMetrics(await campaignScope(pool, ownerUserId, campaignId));
+      if ("failure" in metrics) return metrics;
+      return { ...metrics, semanticHealth: chronicleHealthSchema.parse(metrics.semanticHealth) };
     },
     async contextPreview(ownerUserId, campaignId, request) {
       const scope = await campaignScope(pool, ownerUserId, campaignId);

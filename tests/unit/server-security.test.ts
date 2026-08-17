@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { z } from "zod";
 import { buildServer } from "../../services/api/src/server.js";
-import { serverOptions, testWorldCampaignApplication } from "../helpers/build-server-options.js";
+import { inertStorageServerOptions as serverOptions, testWorldCampaignApplication } from "../helpers/build-server-options.js";
 import { createProviderApplicationAdapter } from "../../services/api/src/provider-application-adapter.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";

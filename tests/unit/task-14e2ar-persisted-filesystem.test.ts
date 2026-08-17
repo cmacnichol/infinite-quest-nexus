@@ -28,6 +28,7 @@ import {
 } from "../helpers/legacy-portable-archive-filesystem-adapter.js";
 import type { LegacyDurableFilesystemJournalPort } from "../helpers/legacy-private-storage-lifecycle-contracts.js";
 import {
+  supportsSecureGeneratedArchiveStaging,
   writeArchiveArtifact,
   type ArchiveLimits
 } from "../../services/api/src/archive-io.js";
@@ -53,6 +54,7 @@ const png = Buffer.from(
   "base64"
 );
 const roots: string[] = [];
+const secureFilesystemIt = it.runIf(supportsSecureGeneratedArchiveStaging());
 
 const filesystemFaultHooks = vi.hoisted(() => ({
   afterLink: undefined as undefined | ((source: string, target: string) => Promise<boolean>),
@@ -166,7 +168,7 @@ function publicationPreparation(descriptor: PrivateStorageDescriptor) {
 }
 
 describe("Task 14e2aR persisted filesystem capability", () => {
-  it("rehydrates a database-issued staged handle after restart without storing its raw token", async () => {
+  secureFilesystemIt("rehydrates a database-issued staged handle after restart without storing its raw token", async () => {
     const archiveRoot = await temporaryRoot("iq-persisted-staged-");
     const archivePath = await systemArchive(archiveRoot);
     const archiveBytes = await readFile(archivePath);
@@ -199,7 +201,7 @@ describe("Task 14e2aR persisted filesystem capability", () => {
     await restarted.cleanupStagedInput(owner, staged);
   });
 
-  it("rejects stale staged identity and preserves a cleanup-pending record for retry after restart", async () => {
+  secureFilesystemIt("rejects stale staged identity and preserves a cleanup-pending record for retry after restart", async () => {
     const archiveRoot = await temporaryRoot("iq-persisted-stale-");
     const archivePath = await systemArchive(archiveRoot);
     const archiveBytes = await readFile(archivePath);
@@ -230,7 +232,7 @@ describe("Task 14e2aR persisted filesystem capability", () => {
     ]));
   });
 
-  it("rehydrates owner-bound export retrieval after restart and cleans it idempotently", async () => {
+  secureFilesystemIt("rehydrates owner-bound export retrieval after restart and cleans it idempotently", async () => {
     const archiveRoot = await temporaryRoot("iq-persisted-export-");
     const persistence = createFakeDurableFilesystemLifecycle();
     const first = createPortableArchiveFilesystemAdapter({ archiveRoot, assetRoot: archiveRoot, limits, persistence });
@@ -261,7 +263,7 @@ describe("Task 14e2aR persisted filesystem capability", () => {
     await expect(restarted.cleanupExportArtifact(owner, exported.retrieval)).resolves.toBeUndefined();
   });
 
-  it.each(["asset_original", "asset_derivative"] as const)(
+  secureFilesystemIt.each(["asset_original", "asset_derivative"] as const)(
     "reserves, attaches, and finalizes an opaque identity-bound %s publication across restart",
     async (purpose) => {
       const archiveRoot = await temporaryRoot("iq-persisted-publication-archive-");
@@ -305,7 +307,7 @@ describe("Task 14e2aR persisted filesystem capability", () => {
     }
   );
 
-  it("rehydrates a cleanup-pending publication operation and retries identity-safe cleanup", async () => {
+  secureFilesystemIt("rehydrates a cleanup-pending publication operation and retries identity-safe cleanup", async () => {
     const archiveRoot = await temporaryRoot("iq-publication-cleanup-archive-");
     const assetRoot = await temporaryRoot("iq-publication-cleanup-assets-");
     const persistence = createFakeDurableFilesystemLifecycle();
@@ -345,7 +347,7 @@ describe("Task 14e2aR persisted filesystem capability", () => {
       .resolves.toEqual({ outcome: "already_cleaned" });
   });
 
-  it("rehydrates an attached operation with a newly fenced claim after restart", async () => {
+  secureFilesystemIt("rehydrates an attached operation with a newly fenced claim after restart", async () => {
     const archiveRoot = await temporaryRoot("iq-operation-recovery-archive-");
     const assetRoot = await temporaryRoot("iq-operation-recovery-assets-");
     const persistence = createFakeDurableFilesystemLifecycle();
@@ -545,7 +547,7 @@ describe("Task 14e2aR persisted filesystem capability", () => {
     await expect(persistence.redeemStorageLocator(assetScope, attached.locator)).resolves.toBeNull();
   });
 
-  it("persists cleanup authority while the publication is still an exclusive temporary file", async () => {
+  secureFilesystemIt("persists cleanup authority while the publication is still an exclusive temporary file", async () => {
     const archiveRoot = await temporaryRoot("iq-pre-adoption-archive-");
     const assetRoot = await temporaryRoot("iq-pre-adoption-assets-");
     const persistence = createFakeDurableFilesystemLifecycle();
@@ -569,7 +571,7 @@ describe("Task 14e2aR persisted filesystem capability", () => {
     })).resolves.toEqual(expect.any(String));
   });
 
-  it.each(["after_link", "before_temporary_unlink"] as const)(
+  secureFilesystemIt.each(["after_link", "before_temporary_unlink"] as const)(
     "recovers both publication aliases after a %s interruption and retries without EEXIST",
     async (fault) => {
       const archiveRoot = await temporaryRoot("iq-adoption-fault-archive-");

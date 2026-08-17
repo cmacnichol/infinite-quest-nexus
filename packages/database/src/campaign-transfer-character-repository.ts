@@ -7,7 +7,10 @@ import type {
   WorldCampaignRepositoryResult,
   WorldCampaignTransitionFailureReason
 } from "../../application/src/world-campaign/index.js";
-import type { MemoryGenerationTransactionPort } from "../../application/src/memory/index.js";
+import type {
+  CampaignWorldVersionMemoryScope,
+  MemoryGenerationTransactionPort
+} from "../../application/src/memory/index.js";
 import { WorldCampaignApplicationError } from "../../application/src/world-campaign/index.js";
 import {
   campaignTransferCommitRequestSchema,
@@ -355,7 +358,25 @@ function transferCompatibility(source: SourceRow, target: TargetRow, counts: Cou
   }));
 }
 
-type TransferMemory = Pick<MemoryGenerationTransactionPort, "rebuildCampaignMemories" | "enqueueEmbeddingReindex">;
+type TransferMemory = Pick<
+  MemoryGenerationTransactionPort,
+  "rebuildCampaignMemories" | "enqueueEmbeddingReindex" | "enqueueChunkIndex"
+>;
+
+async function enqueueChunkIndexBestEffort(
+  client: DatabaseClient,
+  memory: TransferMemory,
+  scope: CampaignWorldVersionMemoryScope,
+): Promise<void> {
+  await client.query("SAVEPOINT campaign_transfer_chunk_enqueue");
+  try {
+    await memory.enqueueChunkIndex(client, scope);
+    await client.query("RELEASE SAVEPOINT campaign_transfer_chunk_enqueue");
+  } catch {
+    await client.query("ROLLBACK TO SAVEPOINT campaign_transfer_chunk_enqueue");
+    await client.query("RELEASE SAVEPOINT campaign_transfer_chunk_enqueue");
+  }
+}
 
 async function cloneTransferredCampaign(
   client: DatabaseClient,
@@ -481,9 +502,11 @@ async function cloneTransferredCampaign(
   await client.query(
     `INSERT INTO campaign_memory_configs (
        campaign_id, owner_user_id, embedding_enabled, embedding_provider_profile_id, embedding_model,
-       embedding_batch_size, embedding_document_prefix, embedding_query_prefix, created_at, updated_at
+       embedding_batch_size, embedding_document_prefix, embedding_query_prefix,
+       retrieval_implementation, retrieval_shadow_enabled, created_at, updated_at
      ) SELECT $1, owner_user_id, embedding_enabled, embedding_provider_profile_id, embedding_model,
-              embedding_batch_size, embedding_document_prefix, embedding_query_prefix, created_at, updated_at
+              embedding_batch_size, embedding_document_prefix, embedding_query_prefix,
+              retrieval_implementation, retrieval_shadow_enabled, created_at, updated_at
          FROM campaign_memory_configs WHERE owner_user_id = $2 AND campaign_id = $3`,
     [campaignId, scope.ownerUserId, source.id],
   );
@@ -503,6 +526,7 @@ async function cloneTransferredCampaign(
   }
   const memoryScope = { ownerUserId: scope.ownerUserId, campaignId, worldVersionId: target.id };
   const memoryCount = await memory.rebuildCampaignMemories(client, memoryScope);
+  await enqueueChunkIndexBestEffort(client, memory, memoryScope);
   const embeddingJobId = await memory.enqueueEmbeddingReindex(client, memoryScope);
   return { campaignId, memoryCount, embeddingJobId };
 }

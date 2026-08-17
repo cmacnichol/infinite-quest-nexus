@@ -1,10 +1,11 @@
+import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   discoverIntegrationTestFiles,
-  integrationTestArguments,
+  integrationTestCommand,
 } from "../../scripts/run-isolated-integration.mjs";
 
 describe("isolated integration runner", () => {
@@ -29,14 +30,21 @@ describe("isolated integration runner", () => {
     }
   });
 
-  it("runs one Vitest process for exactly one integration file", () => {
-    expect(integrationTestArguments("tests/integration/example.integration.test.ts")).toEqual([
-      "exec",
-      "vitest",
+  it("runs one shell-free Vitest process for exactly one integration file", () => {
+    const command = integrationTestCommand("tests/integration/example.integration.test.ts");
+    const vitestCli = command.arguments[0];
+
+    expect(command.executable).toBe(process.execPath);
+    expect(vitestCli).toMatch(/[\\/]vitest[\\/]vitest\.mjs$/u);
+    expect(command.arguments.slice(1)).toEqual([
       "run",
       "--config",
       "vitest.integration.config.ts",
       "tests/integration/example.integration.test.ts",
     ]);
+    if (!vitestCli) throw new Error("The Vitest JS CLI was not resolved.");
+    expect(execFileSync(command.executable, [vitestCli, "--version"], {
+      encoding: "utf8",
+    })).toMatch(/^vitest\/4\./u);
   });
 });

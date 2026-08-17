@@ -203,7 +203,7 @@ describe("Task 14e3f production-composed boundary inventory", () => {
 
     expect(runner).toContain('"tests/unit/task-14e3e8-composition-parity-boundaries.test.ts"');
     expect(runner.indexOf('"tests/unit/task-14e3e8-composition-parity-boundaries.test.ts"')).toBeLessThan(
-      runner.indexOf('["test:e8:integration"]'),
+      runner.indexOf('["scripts/run-e8-isolated-integration.mjs"]'),
     );
   });
 });

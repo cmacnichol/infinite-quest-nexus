@@ -7,7 +7,7 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { readTurnPage } from "../../packages/database/src/play-loop-read-repository.js";
 import { buildServer } from "../../services/api/src/server.js";
 import { createApiWorldCampaignApplication } from "../helpers/runtime-application-fixtures.js";
-import { serverOptions } from "../helpers/build-server-options.js";
+import { legacyStoryImportServerOptions as serverOptions } from "../helpers/build-server-options.js";
 import { createProvider } from "../helpers/provider-application-fixtures.js";
 import { runGenerationJob } from "../helpers/generation-worker-harness.js";
 import { runImageJob } from "../../services/runtime/src/illustration-image-job-adapter.js";
@@ -30,6 +30,24 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
 const secureGeneratedStagingIt = supportsSecureGeneratedArchiveStaging() ? it : it.skip;
 const credentialSecret = "integration-test-credential-secret";
+const lexicalTextFallbackAudit = {
+  auditVersion: "chronicle-retrieval-audit-v1",
+  configuredImplementation: "legacy_hybrid",
+  effectiveImplementation: "legacy_hybrid",
+  effectiveMode: "lexical_only",
+  fallbackCode: "semantic_retrieval_unavailable",
+  provider: {
+    resolutionSource: "text_fallback",
+    resolvedRole: "text",
+    providerType: "openai_compatible",
+    model: "deterministic-mock"
+  },
+  queryVectorPath: "provider_only",
+  providerCallOutcome: "failed",
+  queryEmbeddingRequests: 1,
+  queryCacheHits: 0,
+  queryCacheMisses: 1
+} as const;
 
 function makeConfig(databaseUrl: string): RuntimeConfig {
   return {
@@ -290,7 +308,8 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     expect(generationResultSchema.parse(resultResponse.json())).toMatchObject({
       id: job.id,
       campaignId,
-      status: "completed"
+      status: "completed",
+      chronicleRetrieval: lexicalTextFallbackAudit
     });
 
     // 6. Verify that the turn list now contains the generated turn with structured choices and trackers
@@ -304,7 +323,11 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     if (!latestTurn) throw new Error("Expected the completed generation to append a turn.");
     expect(latestTurn.narration).toContain("Ancient Observatory");
     expect(latestTurn.choices).toContain("Examine the telescope.");
-    expect(latestTurn).toMatchObject({ inputMode: "action", inputModeSource: "explicit" });
+    expect(latestTurn).toMatchObject({
+      inputMode: "action",
+      inputModeSource: "explicit",
+      chronicleRetrieval: lexicalTextFallbackAudit
+    });
 
     const campaignList = await app.inject({ method: "GET", url: "/api/v1/campaigns" });
     expect(campaignList.statusCode).toBe(200);
@@ -339,7 +362,12 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     expect(await runGenerationJob(pool, "worker-generation-route-cutover", 30, credentialSecret)).toBe(true);
     const recovered = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${appendJob.id}/result` });
     expect(recovered.statusCode).toBe(200);
-    expect(generationResultSchema.parse(recovered.json())).toMatchObject({ id: appendJob.id, campaignId, status: "completed" });
+    expect(generationResultSchema.parse(recovered.json())).toMatchObject({
+      id: appendJob.id,
+      campaignId,
+      status: "completed",
+      chronicleRetrieval: lexicalTextFallbackAudit
+    });
 
     const replacement = await app.inject({
       method: "POST",
@@ -484,9 +512,9 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     expect(unchangedSync).toMatchObject({ turnWindowMode: "unchanged", turns: null, campaign: { id: campaignId } });
     const initialPayloadBytes = Buffer.byteLength(initialSyncResponse.body);
     const unchangedPayloadBytes = Buffer.byteLength(unchangedSyncResponse.body);
-    // Measured against this deterministic 55-turn fixture after adding the
-    // synchronized turn-control style: 17,176 B initial and 2,283 B unchanged.
-    expect({ initialPayloadBytes, unchangedPayloadBytes }).toEqual({ initialPayloadBytes: 17_176, unchangedPayloadBytes: 2_283 });
+    // Measured against this deterministic 55-turn fixture with the current
+    // synchronized campaign and Chronicle configuration contract.
+    expect({ initialPayloadBytes, unchangedPayloadBytes }).toEqual({ initialPayloadBytes: 19_382, unchangedPayloadBytes: 3_183 });
     expect(unchangedPayloadBytes).toBeLessThan(initialPayloadBytes);
 
     replies.push({ content: validStory("A replacement changes the current history boundary.") });

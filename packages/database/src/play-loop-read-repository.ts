@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { parseStoredChronicleRetrievalAudit, type ChronicleRetrievalAudit } from "../../contracts/src/memory.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 
 const cursorSchema = z.object({
@@ -20,6 +21,11 @@ export type TurnPageRow = {
   imagePrompt: string;
   imageUrl: string | null;
   acceptedAt: Date | string;
+  chronicleRetrieval: ChronicleRetrievalAudit | null;
+};
+
+type TurnPageQueryRow = Omit<TurnPageRow, "chronicleRetrieval"> & {
+  storedChronicleRetrieval: unknown;
 };
 
 export type TurnPage = { turns: TurnPageRow[]; nextCursor: string | null };
@@ -93,14 +99,15 @@ export async function readTurnPage(
   return withTurnPageSnapshot(pool, async (client) => {
     const historyVersion = await currentHistoryVersion(client, ownerUserId, campaignId);
     const cursor = before === undefined ? null : decodeCursor(before, campaignId, historyVersion);
-    const result = await client.query<TurnPageRow>(
+    const result = await client.query<TurnPageQueryRow>(
       `SELECT effective.turn_id AS id, effective.turn_number AS "turnNumber", turn_row.action,
               COALESCE(turn_row.input_mode, 'action') AS "inputMode",
               COALESCE(turn_row.input_mode_source, 'explicit') AS "inputModeSource",
               effective.effective_narration AS narration, turn_row.choices,
               turn_row.custom_action_suggestion AS "customActionSuggestion",
               turn_row.image_prompt AS "imagePrompt", turn_row.image_url AS "imageUrl",
-              turn_row.accepted_at AS "acceptedAt"
+              turn_row.accepted_at AS "acceptedAt",
+              turn_row.model_metadata -> 'chronicleRetrieval' AS "storedChronicleRetrieval"
          FROM effective_turn_narrations effective
          JOIN turns turn_row
            ON turn_row.id = effective.turn_id
@@ -115,8 +122,12 @@ export async function readTurnPage(
     const hasMore = result.rows.length > limit;
     const selected = result.rows.slice(0, limit).reverse();
     const earliest = selected[0];
+    const turns = selected.map(({ storedChronicleRetrieval, ...turn }) => ({
+      ...turn,
+      chronicleRetrieval: parseStoredChronicleRetrievalAudit(storedChronicleRetrieval)
+    }));
     return {
-      turns: selected,
+      turns,
       nextCursor: hasMore && earliest ? encodeCursor({ campaignId, turnNumber: earliest.turnNumber, id: earliest.id, historyVersion }) : null
     };
   });

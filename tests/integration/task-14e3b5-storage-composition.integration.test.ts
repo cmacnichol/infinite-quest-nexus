@@ -43,9 +43,10 @@ import {
   createAssetImportStorageComposition,
   type AssetImportStorageComposition
 } from "../../services/runtime/src/asset-import-composition.js";
+import { supportsSecureGeneratedArchiveStaging } from "../../services/api/src/archive-io.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
-const integration = databaseUrl ? describe : describe.skip;
+const integration = databaseUrl && supportsSecureGeneratedArchiveStaging() ? describe : describe.skip;
 
 type WorldScope = Readonly<{
   campaignId: string;
@@ -103,7 +104,7 @@ async function openDescriptorFor(path: string): Promise<number> {
   throw new Error("open_descriptor_missing");
 }
 
-integration("Task 14e3b5 production storage composition", () => {
+integration("Task 14e3b5 production storage composition (requires Linux descriptor anchors)", () => {
   let pool: DatabasePool;
   let ownerUserId = "";
   let world: WorldScope;
