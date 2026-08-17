@@ -12,6 +12,7 @@ const turns = (first: number, last: number) => Array.from(
     narration: `Narration ${first + offset}`
   })
 );
+type StoryTurnFixture = ReturnType<typeof turns>[number];
 
 describe("legacy Story complete-history loader", () => {
   it("drains every cursor sequentially and returns turns 1 through 100", async () => {
@@ -91,7 +92,8 @@ describe("legacy Story complete-history loader", () => {
 
   it("deduplicates an identical boundary turn without replacing the richer existing object", () => {
     const existing = [{ id: "turn-51", turnNumber: 51, narration: "rich" }];
-    const merged = mergeStoryTurnPages(existing, [{ id: "turn-51", turnNumber: 51 }]);
+    const boundaryTurn = { id: "turn-51", turnNumber: 51 } as unknown as typeof existing[number];
+    const merged = mergeStoryTurnPages(existing, [boundaryTurn]);
     expect(merged).toEqual(existing);
     expect(merged).not.toBe(existing);
   });
@@ -110,11 +112,15 @@ describe("legacy Story complete-history loader", () => {
   });
 
   it("rejects malformed page turns and cursors before merging", async () => {
+    const missingTurnsPage = {
+      campaignId: "campaign-1",
+      nextCursor: null
+    } as unknown as { campaignId: string; turns: StoryTurnFixture[]; nextCursor: string | null };
     await expect(loadCompleteStoryHistory({
       campaignId: "campaign-1",
       turns: turns(1, 1),
       nextCursor: "before-1",
-      fetchPage: async () => ({ campaignId: "campaign-1", nextCursor: null })
+      fetchPage: async () => missingTurnsPage
     })).rejects.toThrow("turns");
 
     await expect(loadCompleteStoryHistory({
@@ -126,7 +132,8 @@ describe("legacy Story complete-history loader", () => {
   });
 
   it("rejects missing ids and non-positive or non-integer turn numbers", () => {
-    expect(() => mergeStoryTurnPages([], [{ turnNumber: 1 }])).toThrow("missing an id");
+    const missingIdTurn = { turnNumber: 1 } as unknown as StoryTurnFixture;
+    expect(() => mergeStoryTurnPages([], [missingIdTurn])).toThrow("missing an id");
     expect(() => mergeStoryTurnPages([], [{ id: "turn-0", turnNumber: 0 }])).toThrow("invalid turn number");
     expect(() => mergeStoryTurnPages([], [{ id: "turn-fraction", turnNumber: 1.5 }])).toThrow("invalid turn number");
   });
