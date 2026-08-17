@@ -51,6 +51,7 @@ export type ChronicleEmbeddingProviderDependencies = Readonly<{
     ownerUserId: string,
     campaignId: string,
     selectedProviderProfileId?: string | null,
+    model?: string,
   ): Promise<ChronicleTransactionEmbeddingResolution>;
   recordProviderHealth(
     database: MemoryTransactionContext,
@@ -80,12 +81,18 @@ export function createChronicleEmbeddingProviderPort(
   dependencies: ChronicleEmbeddingProviderDependencies,
 ): ChronicleEmbeddingProviderPort {
   return {
-    resolve: (database, scope) => dependencies.resolveEmbeddingProvider(
-      database,
-      scope.ownerUserId,
-      scope.campaignId,
-      scope.selectedProviderProfileId ?? null,
-    ),
+    resolve: async (database, scope) => {
+      const resolution = await dependencies.resolveEmbeddingProvider(
+        database,
+        scope.ownerUserId,
+        scope.campaignId,
+        scope.selectedProviderProfileId ?? null,
+        scope.model,
+      );
+      return resolution.status === "resolved" && scope.model
+        ? { ...resolution, model: scope.model }
+        : resolution;
+    },
     load: (_database, scope) => dependencies.loadEmbeddingExecution(
       scope.ownerUserId,
       scope.providerProfileId,

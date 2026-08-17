@@ -652,7 +652,8 @@ async function applyContextSemanticRelevance(
   const resolution = await dependencies.embeddings.resolve(client, {
     ownerUserId: scope.ownerUserId,
     campaignId: scope.campaignId,
-    selectedProviderProfileId: config.embedding_provider_profile_id
+    selectedProviderProfileId: config.embedding_provider_profile_id,
+    model: config.embedding_model
   });
   auditTrace = auditTraceFromResolution(resolution);
   if (resolution.status === "unconfigured") return {
@@ -734,6 +735,33 @@ async function applyContextSemanticRelevance(
     );
     const freshScores = scored.rows.filter((row) => row.embedding_content_hash
       && row.embedding_content_hash === chronicleContentHash(row.content));
+    if (freshScores.length === 0) {
+      if (diagnosticMode === "production") {
+        await dependencies.embeddings.recordHealth(client, providerScope, true);
+      }
+      return {
+        retrieval: {
+          mode: "lexical_fallback",
+          semanticAvailable: false,
+          fallbackReason: "semantic_retrieval_unavailable",
+          embeddedCandidates: 0,
+          model: config.embedding_model,
+          queryExpanded: true,
+          effectiveQueryPrefix: prefixes.queryPrefix,
+          embeddingRequests,
+          queryCacheHits,
+          queryCacheMisses
+        },
+        providerFingerprint: fingerprint,
+        costIds: costId ? [costId] : [],
+        auditTrace: {
+          ...auditTrace,
+          queryEmbeddingRequests: embeddingRequests,
+          queryCacheHits,
+          queryCacheMisses
+        }
+      };
+    }
     const existingIds = new Set(memories.map((memory) => memory.id));
     for (const row of freshScores) {
       if (!existingIds.has(row.id)) {
@@ -1249,7 +1277,8 @@ async function applyChunkedRankFusion(
       const resolution = embeddingIdentity ? null : await dependencies.embeddings.resolve(client, {
         ownerUserId: scope.ownerUserId,
         campaignId: scope.campaignId,
-        selectedProviderProfileId
+        selectedProviderProfileId,
+        model: config.embedding_model
       });
       if (resolution) auditTrace = auditTraceFromResolution(resolution);
       const providerProfileId = embeddingIdentity?.providerProfileId
@@ -1768,7 +1797,8 @@ export async function buildPostgresChronicleContextPreview(
       chunkEmbeddingResolution ??= dependencies.embeddings.resolve(client, {
         ownerUserId: scope.ownerUserId,
         campaignId: scope.campaignId,
-        selectedProviderProfileId: config.embedding_provider_profile_id
+        selectedProviderProfileId: config.embedding_provider_profile_id,
+        model: config.embedding_model
       });
       const resolution = await chunkEmbeddingResolution;
       chunkAttemptTrace = auditTraceFromResolution(resolution);

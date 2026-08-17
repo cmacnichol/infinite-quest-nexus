@@ -370,16 +370,20 @@ describe("Chronicle runtime adapters", () => {
       "embed-v1"
     );
     expect(load.mock.calls[0]).not.toContain("image");
-    await expect(port.resolve(database, { ownerUserId: "owner-1", campaignId: "campaign-1" }))
+    await expect(port.resolve(database, {
+      ownerUserId: "owner-1", campaignId: "campaign-1", model: "campaign-configured-model"
+    }))
       .resolves.toEqual({
         status: "resolved",
         resolutionSource: "dedicated_embedding",
         resolvedRole: "embedding",
         providerProfileId: "embedding-profile",
         providerType: "openai-compatible",
-        model: "embed-v1"
+        model: "campaign-configured-model"
       });
-    expect(resolveEmbeddingProvider).toHaveBeenCalledWith(database, "owner-1", "campaign-1", null);
+    expect(resolveEmbeddingProvider).toHaveBeenCalledWith(
+      database, "owner-1", "campaign-1", null, "campaign-configured-model"
+    );
     const prefixes = { documentPrefix: "search_document: ", queryPrefix: "search_query: ", automatic: true };
     await expect(port.fingerprint(provider, prefixes)).resolves.toEqual(expect.stringMatching(/^[a-f0-9]{64}$/));
   });
@@ -459,7 +463,11 @@ describe("Chronicle runtime adapters", () => {
       costContext: vi.fn()
     } as never);
     const database = { transaction: "accepted-turn" } as never;
-    const scope = { ownerUserId: "owner-1", campaignId: "campaign-1" };
+    const scope = {
+      ownerUserId: "owner-1",
+      campaignId: "campaign-1",
+      model: "campaign-configured-model"
+    };
 
     await expect(bindings.embeddings.resolve(database, scope)).resolves.toEqual({
       status: "resolved",
@@ -467,7 +475,7 @@ describe("Chronicle runtime adapters", () => {
       resolvedRole: "embedding",
       providerProfileId: "embedding-profile",
       providerType: "openrouter",
-      model: "embed-model"
+      model: "campaign-configured-model"
     });
     await expect(bindings.embeddings.resolve(database, scope)).resolves.toEqual({
       status: "resolved",
@@ -475,12 +483,18 @@ describe("Chronicle runtime adapters", () => {
       resolvedRole: "text",
       providerProfileId: "text-profile",
       providerType: "openrouter",
-      model: "text-model"
+      model: "campaign-configured-model"
     });
     await expect(bindings.embeddings.resolve(database, scope)).resolves.toEqual({
       status: "unconfigured",
       resolutionSource: "none",
       resolvedRole: null
+    });
+    expect(resolveEmbedding).toHaveBeenNthCalledWith(1, {
+      ownerUserId: "owner-1",
+      selectedProviderProfileId: null,
+      model: "campaign-configured-model",
+      allowTextFallback: true
     });
   });
 

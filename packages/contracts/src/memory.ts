@@ -14,10 +14,15 @@ export const chronicleRetrievalComparisonImplementationSchema = z.enum([
 const safeTelemetryCodeSchema = z.string().min(1).max(200).regex(/^[a-z0-9][a-z0-9_.:-]*$/u);
 const safeFingerprintSchema = z.string().min(1).max(512).regex(/^[A-Za-z0-9_.:-]+$/u);
 const nonnegativeIntegerSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
-const safeAuditProviderValueSchema = z.string().min(1).max(200)
-  .regex(/^[A-Za-z0-9][A-Za-z0-9_.:/-]*$/u)
+const safeAuditProviderValueSchema = z.string().trim().min(1).max(500)
+  .refine((value) => !/[\u0000-\u001F\u007F-\u009F]/u.test(value), {
+    message: "Provider audit values must not contain control characters."
+  })
   .refine((value) => !/^[A-Za-z][A-Za-z0-9+.-]*:\/\//u.test(value), {
     message: "Provider audit values must not contain an endpoint URI."
+  })
+  .refine((value) => !/^(?:localhost|(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})(?::\d+)?(?:\/|$)/u.test(value), {
+    message: "Provider audit values must not contain an endpoint-like host."
   });
 
 export const CHRONICLE_RETRIEVAL_VERSION = "chronicle-retrieval-v1";

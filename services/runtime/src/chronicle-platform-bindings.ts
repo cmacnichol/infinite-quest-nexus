@@ -40,10 +40,11 @@ export function createChroniclePlatformBindings(
           embed: execution.embed,
         };
       },
-      resolveEmbeddingProvider: async (_database, ownerUserId, _campaignId, selectedProviderProfileId) => {
+      resolveEmbeddingProvider: async (_database, ownerUserId, _campaignId, selectedProviderProfileId, model) => {
         const resolution = await providers.resolution.resolveEmbedding({
           ownerUserId,
           ...(selectedProviderProfileId === undefined ? {} : { selectedProviderProfileId }),
+          ...(model === undefined ? {} : { model }),
           allowTextFallback: true,
         });
         if (resolution.status === "unconfigured") {

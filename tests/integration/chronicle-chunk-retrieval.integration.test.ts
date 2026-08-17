@@ -464,11 +464,13 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
       chronicleRetrieval: {
         configuredImplementation: "chunked_hybrid",
         effectiveImplementation: "legacy_hybrid",
-        effectiveMode: "semantic_hybrid",
+        effectiveMode: "lexical_only",
         fallbackCode: "chunk_index_not_ready"
       }
     });
-    expect(legacy).toMatchObject({ retrieval: { semanticAvailable: true } });
+    expect(legacy).toMatchObject({
+      retrieval: { semanticAvailable: false, fallbackReason: "semantic_retrieval_unavailable" }
+    });
     expect(JSON.stringify(legacy.scopes)).not.toContain("The iron key opens the gate");
     expect(JSON.stringify(fallback.scopes)).not.toContain("The iron key opens the gate");
     expect(fallback.scopes).toEqual(legacy.scopes);
@@ -757,7 +759,8 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     expect(preview.chronicleRetrieval).toMatchObject({
       configuredImplementation: "legacy_hybrid",
       effectiveImplementation: "legacy_hybrid",
-      effectiveMode: "semantic_hybrid",
+      effectiveMode: "lexical_only",
+      fallbackCode: "semantic_retrieval_unavailable",
       provider: { resolutionSource: "text_fallback", resolvedRole: "text" },
       queryVectorPath: "provider_only",
       providerCallOutcome: "succeeded",

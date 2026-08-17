@@ -39,6 +39,37 @@ describe("Chronicle retrieval audit contract", () => {
     }
   });
 
+  it("accepts existing model identifiers while normalizing bounded safe labels", () => {
+    const validModels = [
+      "openai/text-embedding-3-large",
+      "nomic-ai/nomic-embed-text-v1.5@f32",
+      "provider model + revision 2026"
+    ];
+    for (const model of validModels) {
+      expect(chronicleRetrievalAuditSchema.parse({
+        ...DEDICATED_CHUNKED_AUDIT,
+        provider: { ...DEDICATED_CHUNKED_AUDIT.provider, model }
+      }).provider.model).toBe(model);
+    }
+    expect(chronicleRetrievalAuditSchema.parse({
+      ...DEDICATED_CHUNKED_AUDIT,
+      provider: { ...DEDICATED_CHUNKED_AUDIT.provider, model: "  local/model + revision@f32  " }
+    }).provider.model).toBe("local/model + revision@f32");
+    expect(chronicleRetrievalAuditSchema.safeParse({
+      ...DEDICATED_CHUNKED_AUDIT,
+      provider: { ...DEDICATED_CHUNKED_AUDIT.provider, model: "m".repeat(500) }
+    }).success).toBe(true);
+  });
+
+  it("rejects unsafe model-label boundaries without relaxing other audit fields", () => {
+    for (const model of ["", "   ", "m".repeat(501), "model\nname", "https://provider.example/v1"] as const) {
+      expect(chronicleRetrievalAuditSchema.safeParse({
+        ...DEDICATED_CHUNKED_AUDIT,
+        provider: { ...DEDICATED_CHUNKED_AUDIT.provider, model }
+      }).success).toBe(false);
+    }
+  });
+
   it("derives query vector path exactly from live requests and cache hits", () => {
     expect(() => chronicleRetrievalAuditSchema.parse({
       ...DEDICATED_CHUNKED_AUDIT,

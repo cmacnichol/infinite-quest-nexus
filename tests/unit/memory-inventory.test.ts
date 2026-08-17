@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { CHRONICLE_CHUNK_SKIP_REASONS } from "../../packages/domain/src/chronicle-chunking.js";
 
 const inventoryUrl = new URL("../../docs/review/2026-08-05-task-14b-memory-inventory.md", import.meta.url);
+const retrievalAuditUrl = new URL("../../docs/review/chronicle-retrieval-audit-future-enhancement.md", import.meta.url);
 const chronicleDocumentationUrls = {
   concept: new URL("../../docs/concepts/chronicle-memory.md", import.meta.url),
   embeddings: new URL("../../docs/nexus-guide/chronicle/embeddings.md", import.meta.url),
@@ -27,6 +28,14 @@ async function chronicleDocumentation() {
   return Object.fromEntries(await Promise.all(Object.entries(chronicleDocumentationUrls).map(async ([name, url]) => (
     [name, await readFile(fileURLToPath(url), "utf8")]
   )))) as Record<keyof typeof chronicleDocumentationUrls, string>;
+}
+
+async function linkedMarkdownDocument(sourceUrl: URL, label: string): Promise<string> {
+  const source = await readFile(fileURLToPath(sourceUrl), "utf8");
+  const link = [...source.matchAll(/\[([^\]]+)\]\(([^)]+)\)/gu)]
+    .find((match) => match[1] === label)?.[2];
+  if (!link) throw new Error(`Missing ${label} link in ${fileURLToPath(sourceUrl)}.`);
+  return readFile(fileURLToPath(new URL(link, sourceUrl)), "utf8");
 }
 
 describe("Task 14b Chronicle inventory", () => {
@@ -176,5 +185,10 @@ describe("Task 14b Chronicle inventory", () => {
     expect(docs.retrievalAudit).not.toContain("## Recommended audit contract");
     expect(docs.retrievalAudit).not.toContain("## Proposed implementation sequence");
     expect(docs.architectureIndex).toContain("[ADR 0029: Chronicle turn retrieval audits are versioned, atomic provenance](./0029-chronicle-turn-retrieval-audit.md)");
+  });
+
+  it("resolves the retrieval-audit implementation plan from its review link", async () => {
+    await expect(linkedMarkdownDocument(retrievalAuditUrl, "implementation plan"))
+      .resolves.toContain("# Chronicle Turn Retrieval Audit Implementation Plan");
   });
 });

@@ -131,6 +131,7 @@ export type ChronicleTransactionEmbeddingPort = Readonly<{
       ownerUserId: string;
       campaignId: string;
       selectedProviderProfileId?: string | null;
+      model?: string;
     }>,
   ): Promise<ChronicleTransactionEmbeddingResolution>;
   load(

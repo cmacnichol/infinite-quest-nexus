@@ -380,6 +380,89 @@ integration("PostgreSQL Chronicle query embedding cache", () => {
     expect(comparable(second)).toEqual(comparable(first));
   });
 
+  it("uses complete Legacy lexical fallback when fresh semantic candidates contribute nothing", async () => {
+    const fixture = await createCampaign("zero fresh legacy candidates");
+    await pool.query(
+      `INSERT INTO campaign_memory_configs
+         (campaign_id,owner_user_id,embedding_enabled,embedding_provider_profile_id,embedding_model,
+          retrieval_implementation)
+       VALUES($1,$2,true,$3,'campaign-selected-embed-v2','legacy_hybrid')`,
+      [fixture.campaignId, ownerUserId, providerA]
+    );
+    await pool.query(
+      `INSERT INTO chronicle_memories
+         (owner_user_id,campaign_id,world_version_id,memory_kind,ordinal,content,token_estimate)
+       VALUES($1,$2,$3,'campaign_summary',1,'The cobalt beacon marks the hidden crossing.',12)`,
+      [ownerUserId, fixture.campaignId, fixture.worldVersionId]
+    );
+    let providerRequests = 0;
+    const recordHealth = vi.fn();
+    const generation = createPostgresChronicleGenerationTransactionPort({
+      embeddings: {
+        async resolve(_database, scope) {
+          return {
+            status: "resolved" as const,
+            resolutionSource: "dedicated_embedding" as const,
+            resolvedRole: "embedding" as const,
+            providerProfileId: providerA,
+            providerType: "openai_compatible",
+            model: scope.model ?? "provider-default-embed-v1"
+          };
+        },
+        async load(_database, scope) {
+          return {
+            id: providerA,
+            model: scope.model,
+            providerType: "openai_compatible",
+            async embed(documents: readonly string[]) {
+              providerRequests += 1;
+              return { embeddings: documents.map(() => [1, 0]), responseId: "zero-candidate-query", usage: {}, reportedCost: null };
+            }
+          };
+        },
+        async embed(provider, documents) { return provider.embed(documents); },
+        async fingerprint() { return "zero-candidate-fingerprint"; },
+        recordHealth,
+        async recordCost() { return null; },
+        logDiagnostic() {}
+      }
+    });
+    const request = {
+      ...fixture,
+      request: { budgetTokens: 4_096, compression: "auto" as const, query: "Where is the cobalt beacon?", recentTurns: 2 }
+    };
+
+    await pool.query("UPDATE campaign_memory_configs SET embedding_enabled=false WHERE campaign_id=$1", [fixture.campaignId]);
+    const lexicalOnly = await generation.buildContextPreview(pool, request);
+    await pool.query("UPDATE campaign_memory_configs SET embedding_enabled=true WHERE campaign_id=$1", [fixture.campaignId]);
+    const actual = await generation.buildContextPreview(pool, request);
+
+    expect(actual.scopes).toEqual(lexicalOnly.scopes);
+    expect(actual.budget).toEqual(lexicalOnly.budget);
+    expect(actual.chronicleRetrieval).toMatchObject({
+      configuredImplementation: "legacy_hybrid",
+      effectiveImplementation: "legacy_hybrid",
+      effectiveMode: "lexical_only",
+      fallbackCode: "semantic_retrieval_unavailable",
+      provider: {
+        resolutionSource: "dedicated_embedding",
+        resolvedRole: "embedding",
+        model: "campaign-selected-embed-v2"
+      },
+      queryVectorPath: "provider_only",
+      providerCallOutcome: "succeeded",
+      queryEmbeddingRequests: 1,
+      queryCacheHits: 0,
+      queryCacheMisses: 1
+    });
+    expect(providerRequests).toBe(1);
+    expect(recordHealth).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ model: "campaign-selected-embed-v2" }),
+      true
+    );
+  });
+
   it("replaces a stale incompatible cached legacy vector using dimensions inferred from current parent embeddings", async () => {
     const fixture = await createCampaign("stale legacy vector");
     await pool.query(
