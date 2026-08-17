@@ -23,6 +23,9 @@ function databaseClient(
         return { rows: [], rowCount: 0 };
       }
       if (sql.includes("UPDATE chronicle_query_embedding_cache")) return { rows: [], rowCount: 0 };
+      if (sql.includes("END AS expected_dimensions") && !sql.includes("AS chunk_index_ready")) {
+        return { rows: [{ expected_dimensions: 2 }], rowCount: 1 };
+      }
       if (sql.includes("INSERT INTO chronicle_query_embedding_cache")
         || sql.includes("DELETE FROM chronicle_query_embedding_cache")
         || (sql.includes("pg_advisory_xact_lock")

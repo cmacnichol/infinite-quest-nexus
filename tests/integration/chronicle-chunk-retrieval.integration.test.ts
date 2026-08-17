@@ -166,7 +166,8 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
   function transaction(
     providerId: string,
     queries: string[],
-    providerRole: "embedding" | "text" = "embedding"
+    providerRole: "embedding" | "text" = "embedding",
+    configuredDimensions: number | null = 2
   ) {
     return createPostgresChronicleGenerationTransactionPort({
       embeddings: {
@@ -187,7 +188,7 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
             id: providerId,
             model: "chunk-embed-v1",
             providerType: "openai_compatible",
-            configuration: { embeddingDimensions: 2 },
+            configuration: configuredDimensions === null ? {} : { embeddingDimensions: configuredDimensions },
             async embed(documents: readonly string[]) {
               return { embeddings: documents.map(() => [1, 0]), responseId: "unused", usage: {}, reportedCost: null };
             }
@@ -831,6 +832,10 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     {
       failure: "returns an incompatible vector dimension",
       embed: async () => ({ embeddings: [[1, 0, 0]], responseId: "wrong-dimension", usage: {}, reportedCost: null })
+    },
+    {
+      failure: "returns an all-zero vector",
+      embed: async () => ({ embeddings: [[0, 0]], responseId: "zero-vector", usage: {}, reportedCost: null })
     }
   ])("uses the complete legacy path when an eligible text provider $failure for a ready chunk query", async ({ failure, embed }) => {
     const { fixture, providerId } = await configuredFixture(`text provider runtime fallback ${failure}`, "text");
@@ -869,7 +874,7 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
             id: providerId,
             model: "chunk-embed-v1",
             providerType: "openai_compatible",
-            configuration: { embeddingDimensions: 2 },
+            configuration: {},
             embed
           };
         },
@@ -940,6 +945,73 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     expect(actual.metrics).toEqual(legacy.metrics);
     expect(embeddingAttempts).toBe(1);
     expect(chunkRankStatements).toEqual([]);
+    const cached = await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM chronicle_query_embedding_cache WHERE campaign_id=$1",
+      [fixture.campaignId]
+    );
+    expect(cached.rows[0]?.count).toBe("0");
+  });
+
+  it("treats a stale incompatible cached chunk query vector as a miss and replaces it from the provider", async () => {
+    const { fixture, providerId } = await configuredFixture("stale chunk query cache");
+    const memory = await parent(fixture, {
+      turnId: null,
+      kind: "campaign_summary",
+      ordinal: 1,
+      content: "The amber lantern marks the safe archive crossing."
+    });
+    await embeddedChunk(fixture, providerId, {
+      parentId: memory.id,
+      parentContentHash: memory.contentHash,
+      kind: "campaign_summary",
+      content: "The amber lantern marks the safe archive crossing.",
+      vector: [1, 0]
+    });
+    const queries: string[] = [];
+    const generation = transaction(providerId, queries, "embedding", null);
+    const request = {
+      ...fixture,
+      request: { budgetTokens: 4_096, compression: "auto" as const, query: "amber lantern", recentTurns: 1 }
+    };
+
+    const initial = await generation.buildContextPreview(pool, request);
+    expect(initial.chronicleRetrieval).toMatchObject({
+      effectiveImplementation: "chunked_hybrid",
+      effectiveMode: "semantic_hybrid",
+      queryVectorPath: "provider_only",
+      providerCallOutcome: "succeeded",
+      queryEmbeddingRequests: 1,
+      queryCacheHits: 0,
+      queryCacheMisses: 1
+    });
+    await pool.query(
+      `UPDATE chronicle_query_embedding_cache
+          SET embedding='[1,0,0]'::vector,embedding_dimensions=3
+        WHERE campaign_id=$1`,
+      [fixture.campaignId]
+    );
+    queries.length = 0;
+
+    const recovered = await generation.buildContextPreview(pool, request);
+
+    expect(recovered.scopes).toEqual(initial.scopes);
+    expect(recovered.budget).toEqual(initial.budget);
+    expect(recovered.chronicleRetrieval).toMatchObject({
+      effectiveImplementation: "chunked_hybrid",
+      effectiveMode: "semantic_hybrid",
+      queryVectorPath: "provider_only",
+      providerCallOutcome: "succeeded",
+      queryEmbeddingRequests: 1,
+      queryCacheHits: 0,
+      queryCacheMisses: 1
+    });
+    expect(queries).toHaveLength(1);
+    const cached = await pool.query<{ embedding: string; embedding_dimensions: number }>(
+      `SELECT embedding::text AS embedding,embedding_dimensions
+         FROM chronicle_query_embedding_cache WHERE campaign_id=$1`,
+      [fixture.campaignId]
+    );
+    expect(cached.rows).toEqual([{ embedding: "[1,0]", embedding_dimensions: 2 }]);
   });
 
   it("gates chunk retrieval on the complete terminal current-protocol readiness matrix", async () => {

@@ -379,4 +379,104 @@ integration("PostgreSQL Chronicle query embedding cache", () => {
     });
     expect(comparable(second)).toEqual(comparable(first));
   });
+
+  it("replaces a stale incompatible cached legacy vector using dimensions inferred from current parent embeddings", async () => {
+    const fixture = await createCampaign("stale legacy vector");
+    await pool.query(
+      `INSERT INTO campaign_memory_configs
+         (campaign_id,owner_user_id,embedding_enabled,embedding_provider_profile_id,embedding_model,
+          retrieval_implementation)
+       VALUES($1,$2,true,$3,'embed-v1','legacy_hybrid')`,
+      [fixture.campaignId, ownerUserId, providerA]
+    );
+    const content = "The cobalt beacon identifies the northern crossing.";
+    await pool.query(
+      `INSERT INTO chronicle_memories
+         (owner_user_id,campaign_id,world_version_id,memory_kind,ordinal,content,token_estimate,
+          embedding,embedding_provider_profile_id,embedding_model,embedding_dimensions,
+          embedding_content_hash,embedding_updated_at,embedding_provider_fingerprint)
+       VALUES($1,$2,$3,'campaign_summary',1,$4,12,'[1,0]'::vector,$5,'embed-v1',2,$6,now(),
+              'context-fingerprint')`,
+      [ownerUserId, fixture.campaignId, fixture.worldVersionId, content, providerA, chronicleContentHash(content)]
+    );
+    let providerRequests = 0;
+    const generation = createPostgresChronicleGenerationTransactionPort({
+      embeddings: {
+        async resolve() {
+          return {
+            status: "resolved" as const,
+            resolutionSource: "dedicated_embedding" as const,
+            resolvedRole: "embedding" as const,
+            providerProfileId: providerA,
+            providerType: "openai_compatible",
+            model: "embed-v1"
+          };
+        },
+        async load() {
+          return {
+            id: providerA,
+            model: "embed-v1",
+            providerType: "openai_compatible",
+            async embed(documents: readonly string[]) {
+              providerRequests += 1;
+              return { embeddings: documents.map(() => [1, 0]), responseId: "query", usage: {}, reportedCost: null };
+            }
+          };
+        },
+        async embed(provider, documents) { return provider.embed(documents); },
+        async fingerprint() { return "context-fingerprint"; },
+        async recordHealth() {},
+        async recordCost() { return null; },
+        logDiagnostic() {}
+      }
+    });
+    const request = {
+      ...fixture,
+      request: {
+        budgetTokens: 4_096,
+        compression: "auto" as const,
+        query: "Where is the cobalt beacon?",
+        recentTurns: 1
+      }
+    };
+
+    const initial = await withTransaction(pool, (client) => generation.buildContextPreview(client, request));
+    expect(initial.chronicleRetrieval).toMatchObject({
+      effectiveImplementation: "legacy_hybrid",
+      effectiveMode: "semantic_hybrid",
+      queryVectorPath: "provider_only",
+      providerCallOutcome: "succeeded",
+      queryEmbeddingRequests: 1,
+      queryCacheHits: 0,
+      queryCacheMisses: 1
+    });
+    await pool.query(
+      `UPDATE chronicle_query_embedding_cache
+          SET embedding='[1,0,0]'::vector,embedding_dimensions=3
+        WHERE campaign_id=$1`,
+      [fixture.campaignId]
+    );
+    providerRequests = 0;
+
+    const recovered = await withTransaction(pool, (client) => generation.buildContextPreview(client, request));
+
+    expect(recovered.scopes).toEqual(initial.scopes);
+    expect(recovered.budget).toEqual(initial.budget);
+    expect(recovered.chronicleRetrieval).toMatchObject({
+      effectiveImplementation: "legacy_hybrid",
+      effectiveMode: "semantic_hybrid",
+      queryVectorPath: "provider_only",
+      providerCallOutcome: "succeeded",
+      queryEmbeddingRequests: 1,
+      queryCacheHits: 0,
+      queryCacheMisses: 1
+    });
+    expect(providerRequests).toBe(1);
+    const cached = await pool.query<{ embedding: string; embedding_dimensions: number }>(
+      `SELECT embedding::text AS embedding,embedding_dimensions
+         FROM chronicle_query_embedding_cache WHERE campaign_id=$1`,
+      [fixture.campaignId]
+    );
+    expect(cached.rows).toEqual([{ embedding: "[1,0]", embedding_dimensions: 2 }]);
+  });
 });

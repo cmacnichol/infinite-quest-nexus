@@ -521,7 +521,29 @@ function requireUsableQueryVector(
   if (expectedDimensions !== null && vector.length !== expectedDimensions) {
     throw new Error("Embedding provider returned an incompatible Chronicle query vector.");
   }
+  const maximumMagnitude = vector.reduce((maximum, value) => Math.max(maximum, Math.abs(value)), 0);
+  const scaledNorm = maximumMagnitude === 0
+    ? 0
+    : maximumMagnitude * Math.sqrt(vector.reduce(
+      (sum, value) => sum + (value / maximumMagnitude) ** 2,
+      0
+    ));
+  if (!Number.isFinite(scaledNorm) || scaledNorm === 0) {
+    throw new Error("Embedding provider returned an invalid Chronicle query vector.");
+  }
   return vector;
+}
+
+function usableCachedQueryVector(
+  vector: readonly number[] | null,
+  expectedDimensions: number | null
+): readonly number[] | null {
+  if (!vector) return null;
+  try {
+    return requireUsableQueryVector(vector, expectedDimensions);
+  } catch {
+    return null;
+  }
 }
 
 function queryHash(value: string): string {
@@ -642,19 +664,37 @@ async function applyContextSemanticRelevance(
   const providerScope = { ownerUserId: scope.ownerUserId, providerProfileId, model: config.embedding_model };
   try {
     const provider = await dependencies.embeddings.load(client, providerScope);
-    const expectedDimensions = toSafeProviderConfiguration(provider.configuration).embeddingDimensions ?? null;
     const prefixes = modelAwareEmbeddingPrefixes(
       config.embedding_model,
       config.embedding_document_prefix,
       config.embedding_query_prefix
     );
     const fingerprint = await dependencies.embeddings.fingerprint(provider, prefixes);
+    const configuredDimensions = toSafeProviderConfiguration(provider.configuration).embeddingDimensions ?? null;
+    const inferredDimensions = configuredDimensions === null
+      ? await client.query<{ expected_dimensions: number | null }>(
+        `SELECT CASE
+           WHEN count(DISTINCT embedding_dimensions) = 1 THEN min(embedding_dimensions)
+           ELSE NULL
+         END AS expected_dimensions
+           FROM chronicle_memories
+          WHERE owner_user_id=$1 AND campaign_id=$2 AND world_version_id=$3
+            AND embedding_provider_profile_id=$4 AND embedding_model=$5
+            AND embedding_provider_fingerprint=$6 AND embedding IS NOT NULL
+            AND embedding_dimensions IS NOT NULL AND embedding_content_hash=content_hash
+            AND ($7::integer IS NULL OR ordinal <= $7::integer)
+            AND ($7::integer IS NULL OR memory_kind NOT IN ('legacy_summary','canonical_fact'))`,
+        [scope.ownerUserId, scope.campaignId, scope.worldVersionId, providerProfileId,
+          config.embedding_model, fingerprint, scope.request.throughTurnNumber ?? null]
+      )
+      : null;
+    const expectedDimensions = configuredDimensions
+      ?? inferredDimensions?.rows[0]?.expected_dimensions
+      ?? null;
     const cache = queryCache(client, scope, dependencies);
     const cacheKey = queryCacheKey(query.trim(), providerProfileId, config.embedding_model, fingerprint, prefixes.queryPrefix);
     const cachedQueryVector = await cache.getQueryEmbedding(scope, cacheKey);
-    let queryVector = cachedQueryVector
-      ? requireUsableQueryVector(cachedQueryVector, expectedDimensions)
-      : null;
+    let queryVector = usableCachedQueryVector(cachedQueryVector, expectedDimensions);
     let costId: string | null = null;
     if (queryVector) {
       queryCacheHits = 1;
@@ -848,7 +888,31 @@ async function resolveChunkEmbeddingIdentity(
     config.embedding_query_prefix
   );
   const fingerprint = await dependencies.embeddings.fingerprint(provider, prefixes);
-  const dimensions = toSafeProviderConfiguration(provider.configuration).embeddingDimensions ?? null;
+  const configuredDimensions = toSafeProviderConfiguration(provider.configuration).embeddingDimensions ?? null;
+  const inferredDimensions = configuredDimensions === null
+    ? await client.query<{ expected_dimensions: number | null }>(
+      `SELECT CASE
+         WHEN count(DISTINCT chunk.embedding_dimensions) = 1 THEN min(chunk.embedding_dimensions)
+         ELSE NULL
+       END AS expected_dimensions
+         FROM chronicle_memory_chunks chunk
+         JOIN chronicle_memories parent
+           ON parent.id=chunk.parent_memory_id
+          AND parent.owner_user_id=$1 AND parent.campaign_id=$2 AND parent.world_version_id=$3
+          AND parent.content_hash=chunk.parent_content_hash
+        WHERE chunk.owner_user_id=$1 AND chunk.campaign_id=$2 AND chunk.world_version_id=$3
+          AND chunk.chunking_protocol_version=${CHUNK_PROTOCOL_LITERAL}
+          AND chunk.embedding_status='embedded' AND chunk.embedding IS NOT NULL
+          AND chunk.embedding_provider_profile_id=$4 AND chunk.embedding_model=$5
+          AND chunk.embedding_protocol_version=$6 AND chunk.embedding_provider_fingerprint=$7
+          AND chunk.embedding_dimensions IS NOT NULL`,
+      [scope.ownerUserId, scope.campaignId, scope.worldVersionId, providerProfileId,
+        config.embedding_model, CHRONICLE_EMBEDDING_PROTOCOL_VERSION, fingerprint]
+    )
+    : null;
+  const dimensions = configuredDimensions
+    ?? inferredDimensions?.rows[0]?.expected_dimensions
+    ?? null;
   return {
     providerProfileId,
     model: config.embedding_model,
@@ -1216,9 +1280,7 @@ async function applyChunkedRankFusion(
         const missedIndexes: number[] = [];
         for (let index = 0; index < variants.length; index += 1) {
           const cachedVector = await cache.getQueryEmbedding(scope, cacheKeys[index]!);
-          const vector = cachedVector
-            ? requireUsableQueryVector(cachedVector, expectedDimensions)
-            : null;
+          const vector = usableCachedQueryVector(cachedVector, expectedDimensions);
           queryVectors.push(vector);
           if (vector) {
             queryCacheHits += 1;
