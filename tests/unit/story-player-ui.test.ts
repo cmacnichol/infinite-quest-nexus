@@ -13,6 +13,8 @@ import {
   syncCancelGenerationButton
 // @ts-expect-error Browser JavaScript modules intentionally do not publish TypeScript declarations.
 } from "../../apps/web/src/story-generation-cancellation.js";
+import * as storyModule from "../../apps/web/src/story.js";
+import { DEDICATED_CHUNKED_AUDIT, TEXT_FALLBACK_LEGACY_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
 
 const storyHtml = readFileSync("apps/web/public/story.html", "utf8");
 const storyScript = readFileSync("apps/web/src/story.js", "utf8");
@@ -673,6 +675,37 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('aria-label="Prompt interpretation: ${inputModeLabel}"');
     expect(storyCss).toContain('.turn-input-mode-pill {');
     expect(storyCss).toContain('.turn-input-mode-pill.scene {');
+  });
+
+  it("renders recorded and Unknown Chronicle retrieval details as escaped, labelled turn-history metadata", () => {
+    const markup = (storyModule as Record<string, unknown>).chronicleRetrievalHistoryMarkup;
+    expect(typeof markup).toBe("function");
+    if (typeof markup !== "function") return;
+    const hostileAudit = {
+      ...DEDICATED_CHUNKED_AUDIT,
+      provider: {
+        ...DEDICATED_CHUNKED_AUDIT.provider,
+        providerType: '<img data-hostile="provider">',
+        model: '<script data-hostile="model"></script>'
+      }
+    };
+    const { document } = parseHTML(`<section>
+      <article class="history-card" role="button" tabindex="0">${(markup as (audit: unknown) => string)(TEXT_FALLBACK_LEGACY_AUDIT)}</article>
+      <article class="history-card" role="button" tabindex="0">${(markup as (audit: unknown) => string)(null)}</article>
+      <article class="history-card" role="button" tabindex="0">${(markup as (audit: unknown) => string)(hostileAudit)}</article>
+    </section>`);
+    const audits = document.querySelectorAll('dl[aria-label="Chronicle retrieval"]');
+
+    expect(audits).toHaveLength(3);
+    expect(audits[0]?.textContent).toContain("Legacy semantic retrieval");
+    expect(audits[0]?.textContent).toContain("Text-role provider used for embeddings: openrouter · text-embedding-nomic-embed-text-v1.5");
+    expect(audits[0]?.textContent).toContain("chunk index not ready");
+    expect(audits[1]?.textContent).toContain("Unknown — this turn predates retrieval auditing or came from an import without audit metadata.");
+    expect(audits[1]?.textContent).toContain("ProviderUnknown");
+    expect(audits[2]?.textContent).toContain('<img data-hostile="provider">');
+    expect(audits[2]?.textContent).toContain('<script data-hostile="model"></script>');
+    expect(audits[2]?.querySelector("img, script")).toBeNull();
+    expect(document.querySelectorAll('.history-card[role="button"][tabindex="0"]')).toHaveLength(3);
   });
 
   it("manages World Setup fields and RPG percentile stats view as static read-only modal", () => {

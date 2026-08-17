@@ -258,6 +258,10 @@ button.history-card:hover, button.history-card:focus-visible, .history-card[role
 .track-card p, .history-card p { margin: 0; color: var(--dim); font-size: .86rem; line-height: 1.45; }
 .history-card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .history-card-heading h4 { min-width: 0; overflow-wrap: anywhere; }
+.turn-chronicle-audit { display: grid; gap: 6px; min-width: 0; margin: 2px 0 0; color: var(--dim); font-size: .78rem; line-height: 1.4; }
+.turn-chronicle-audit > div { display: grid; grid-template-columns: minmax(5.75rem, auto) minmax(0, 1fr); gap: 8px; min-width: 0; }
+.turn-chronicle-audit dt { color: var(--muted); font-weight: 800; }
+.turn-chronicle-audit dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
 .turn-input-mode-pill { flex: none; border: 1px solid #6c81b8; border-radius: 999px; padding: 4px 9px; background: #32416766; color: #cbd8ff; font-size: .7rem; font-weight: 850; letter-spacing: .04em; text-transform: uppercase; }
 .turn-input-mode-pill.scene { border-color: #9171c6; background: #4b326766; color: #e2ceff; }
 .runtime-tracker-card { grid-template-columns: minmax(160px, .8fr) minmax(220px, 1fr) minmax(220px, 1fr) auto; align-items: end; }
@@ -265,6 +269,7 @@ button.history-card:hover, button.history-card:focus-visible, .history-card[role
 .runtime-tracker-card textarea { min-height: 72px; }
 .state-inspector-pre { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); line-height: 1.5; }
 @media (max-width: 820px) { .runtime-tracker-card { grid-template-columns: 1fr; } }
+@media (max-width: 390px) { .turn-chronicle-audit > div { grid-template-columns: 1fr; gap: 1px; } }
 
 details { border: 1px solid rgba(255,255,255,.12); border-radius: 15px; background: rgba(255,255,255,.04); overflow: hidden; }
 summary { cursor: pointer; padding: 12px; color: var(--muted); font-weight: 700; }

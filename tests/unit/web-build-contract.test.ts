@@ -41,7 +41,7 @@ describe("web build contract", () => {
     expect(existsSync(path.join(distDirectory, "legacy-client.js"))).toBe(true);
     expect(storyHtml).toContain('src="/nexus/legacy-client.js"');
     expect(existsSync(path.join(distDirectory, "story.js"))).toBe(false);
-    const emitted = [html, ...localAssetPaths(html, "/nexus/")
+    const emitted = [html, storyHtml, ...Array.from(new Set([...localAssetPaths(html, "/nexus/"), ...localAssetPaths(storyHtml, "/nexus/")]))
       .filter((assetPath) => assetPath.endsWith(".js"))
       .map((assetPath) => readFileSync(path.join(distDirectory, assetPath), "utf8"))].join("\n");
     expect(emitted).toContain("Semantic Retrieval");
@@ -49,6 +49,8 @@ describe("web build contract", () => {
     expect(emitted).toContain("embeddingRetrievalShadowEnabled");
     expect(emitted).toContain("retrievalImplementation");
     expect(emitted).toContain("retrievalShadowEnabled");
+    expect(emitted).toContain("Chronicle retrieval");
+    expect(emitted).toContain("this turn predates retrieval auditing");
   });
 
   test("replacement build emits HTML whose hashed assets exist", () => {
@@ -69,6 +71,8 @@ describe("web build contract", () => {
     expect(emitted).toContain("Semantic Retrieval");
     expect(emitted).toContain("retrievalImplementation");
     expect(emitted).toContain("retrievalShadowEnabled");
+    expect(emitted).toContain("Chronicle retrieval");
+    expect(emitted).toContain("this turn predates retrieval auditing");
   });
 
   test("keeps the reference-only root client outside the active UI implementation set", () => {

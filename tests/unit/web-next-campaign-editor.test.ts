@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { campaignApi, CampaignEditorApiError, loadCampaign } from "../../apps/web-next/src/campaign-editor-api.js";
 import * as campaignEditorPageModule from "../../apps/web-next/src/campaign-editor-page.js";
 import { CAMPAIGN_SECTIONS, campaignEditorPath, campaignRouteFromPath, campaignStateInspectorMarkup, escapeCampaignText, firstNarrationSentence, narrationCorrectionDialogMarkup, withCampaignActionState } from "../../apps/web-next/src/campaign-editor-model.js";
+import { DEDICATED_CHUNKED_AUDIT, TEXT_FALLBACK_LEGACY_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
 
 const campaignEditorPage = campaignEditorPageModule as Record<string, unknown>;
 
@@ -28,6 +29,41 @@ describe("web-next campaign editor routing", () => {
     expect(firstNarrationSentence("  The gate opens. Beyond it, the road disappears!  ")).toBe("The gate opens.");
     expect(firstNarrationSentence("A single sentence without punctuation")).toBe("A single sentence without punctuation");
     expect(firstNarrationSentence("")).toBe("No narration recorded.");
+  });
+
+  it("renders the same recorded and Unknown Chronicle retrieval details as labelled escaped History metadata", () => {
+    const markup = campaignEditorPage.historyMarkup;
+    expect(typeof markup).toBe("function");
+    if (typeof markup !== "function") return;
+    const hostileAudit = {
+      ...DEDICATED_CHUNKED_AUDIT,
+      provider: {
+        ...DEDICATED_CHUNKED_AUDIT.provider,
+        providerType: '<img data-hostile="provider">',
+        model: '<script data-hostile="model"></script>'
+      }
+    };
+    const { document } = parseHTML(`<main>${(markup as (
+      value: Record<string, unknown>,
+      campaign: Record<string, unknown>
+    ) => string)({
+      campaignId: "campaign-1",
+      turns: [
+        { id: "turn-1", turnNumber: 1, acceptedAt: "2026-08-17T00:00:00.000Z", action: "Look", narration: "The harbor waits.", chronicleRetrieval: TEXT_FALLBACK_LEGACY_AUDIT },
+        { id: "turn-2", turnNumber: 2, acceptedAt: "2026-08-17T00:01:00.000Z", action: "Listen", narration: "A bell rings.", chronicleRetrieval: null },
+        { id: "turn-3", turnNumber: 3, acceptedAt: "2026-08-17T00:02:00.000Z", action: "Watch", narration: "A gull turns.", chronicleRetrieval: hostileAudit }
+      ]
+    }, { activeTurnNumber: 3 })}</main>`);
+    const audits = document.querySelectorAll('dl[aria-label="Chronicle retrieval"]');
+
+    expect(audits).toHaveLength(3);
+    expect(audits[0]?.textContent).toContain("Legacy semantic retrieval");
+    expect(audits[0]?.textContent).toContain("Text-role provider used for embeddings: openrouter · text-embedding-nomic-embed-text-v1.5");
+    expect(audits[0]?.textContent).toContain("chunk index not ready");
+    expect(audits[1]?.textContent).toContain("Unknown — this turn predates retrieval auditing or came from an import without audit metadata.");
+    expect(audits[2]?.textContent).toContain('<img data-hostile="provider">');
+    expect(audits[2]?.textContent).toContain('<script data-hostile="model"></script>');
+    expect(audits[2]?.querySelector("img, script")).toBeNull();
   });
 });
 
