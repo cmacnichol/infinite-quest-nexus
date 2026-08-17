@@ -829,7 +829,7 @@ git commit -m "Show Chronicle retrieval audit on turns"
 **Interfaces:**
 - Verifies the complete delivered contract.
 
-- [ ] **Step 1: Run repository checks and the complete unit suite**
+- [x] **Step 1: Run repository checks and the complete unit suite**
 
 ```powershell
 pnpm check
@@ -840,7 +840,7 @@ git diff --check
 
 Expected: all commands exit zero.
 
-- [ ] **Step 2: Run the isolated PostgreSQL suite**
+- [x] **Step 2: Run the isolated PostgreSQL suite**
 
 ```powershell
 node scripts/run-isolated-integration.mjs
@@ -848,7 +848,7 @@ node scripts/run-isolated-integration.mjs
 
 Expected: every discovered integration file completes with exit zero against real PostgreSQL. Platform capability skips must remain explicit and unrelated to Chronicle retrieval/audit cases; no audit case may skip.
 
-- [ ] **Step 3: Re-run both production retrieval evaluators**
+- [x] **Step 3: Re-run both production retrieval evaluators**
 
 ```powershell
 pnpm evaluate:chronicle -- --implementation legacy_hybrid --output tmp/chronicle-evaluation/final-audit-legacy.json
@@ -857,7 +857,7 @@ pnpm evaluate:chronicle -- --implementation chunked_hybrid --output tmp/chronicl
 
 Expected: rankings, leakage counts, and retrieval-quality gates remain within the checked-in profile/baseline contract. Audit construction must not change selected memories, prompt tokens, or fallback behavior.
 
-- [ ] **Step 4: Verify long-campaign and provider-failure behavior explicitly**
+- [x] **Step 4: Verify long-campaign and provider-failure behavior explicitly**
 
 Using the existing long-campaign retrieval fixture, assert:
 
@@ -867,7 +867,7 @@ Using the existing long-campaign retrieval fixture, assert:
 4. If legacy parent embeddings also cannot be used, lexical/entity/recency/chronology retrieval still supplies the prompt and records lexical-only with a sanitized fallback.
 5. Selected-memory IDs, token budget, and cross-campaign/world-version isolation match the pre-audit behavior.
 
-- [ ] **Step 5: Review the final diff and audit privacy**
+- [x] **Step 5: Review the final diff and audit privacy**
 
 Search staged changes for forbidden data paths:
 
@@ -879,7 +879,7 @@ git status --short
 
 Manually confirm each match is either an existing non-audit path, an exclusion/assertion, or absent from the persisted/public audit object. Confirm only intended paths are staged and unrelated dirty work remains untouched.
 
-- [ ] **Step 6: Record completion evidence**
+- [x] **Step 6: Record completion evidence**
 
 Append executed commands, test counts, PostgreSQL database identity, evaluator metrics, rendered UI evidence, exact commits, and any platform skips to `docs/review/chronicle-retrieval-audit-future-enhancement.md`. Do not mark the enhancement implemented until all eight tasks and both UI surfaces pass.
 

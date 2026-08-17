@@ -137,19 +137,26 @@ pnpm evaluate:chronicle -- --implementation chunked_hybrid --output tmp/chronicl
 git diff --check
 ```
 
-- `pnpm check` validated the repository boundary/data checks across 1,187 files
+- `pnpm check` validated the repository boundary/data checks across 1,022 files
   and all TypeScript/web checks.
-- The unit suite completed 185 files with 2,072 passed and 44 explicitly skipped
-  tests (2,116 total). The skipped cases were existing platform-capability cases,
+- The unit suite completed 185 files with 2,076 passed and 44 explicitly skipped
+  tests (2,120 total). The skipped cases were existing platform-capability cases,
   not Chronicle retrieval/audit cases.
 - Both Legacy and replacement production web bundles built successfully.
-- The isolated integration runner completed all 65 discovered files against
-  real PostgreSQL: 519 passed and 177 explicitly skipped tests (696 total).
-  No Chronicle retrieval or audit test skipped. The skips were limited to
+- The isolated integration runner completed all 65 discovered files with exit
+  zero against real PostgreSQL. The runner reports per-file test totals rather
+  than one aggregate test count; every discovered file completed, and no
+  Chronicle retrieval or audit test skipped. Explicit skips were limited to
   unrelated platform/archive/image/secure-filesystem capability cases.
 - Database identity was container `infinitequest-integration-postgres`, database
   and role `infinitequest_test`, PostgreSQL 18.4 (Debian, x86_64). Credentials
   are intentionally omitted.
+
+The complete repository, unit, build, and PostgreSQL commands above were rerun
+after the final production repair at commit `527c3fb` and the owning
+observability-fixture correction at commit `192a3ae`. The first evaluator
+attempt from the restricted sandbox could not read Docker configuration; the
+same two commands were rerun with approved Docker access and both exited zero.
 
 ### Evaluator results
 
@@ -166,7 +173,7 @@ Both evaluators used corpus version `v2`, 17 cases, and corpus hash
 | Duplicate rate | 0 | 0 |
 | Relevant memories per prompt token | 0.0054557124518613605 | 0.007233273056057866 |
 | Cross-campaign/future-turn/superseded-fact leakage | 0 / 0 / 0 | 0 / 0 / 0 |
-| Latency p50 / p95 (ms) | 6 / 22 | 6 / 40 |
+| Latency p50 / p95 (ms) | 6 / 23 | 6 / 43 |
 | Embedding requests / cost | 3 / 0 | 3 / 0 |
 | Semantic-only hits | 3 | 3 |
 | Promotions / demotions | 164 / 164 | 138 / 141 |
@@ -184,12 +191,25 @@ retrieval still fills the prompt and reports lexical-only.
 
 The assertions also prove identical selected scopes and token budget across the
 provider-failure cases, preserve campaign/world-version isolation, and prove
-that chunk ranking SQL is not used after fallback. A verification RED exposed
-that a provider vector with the wrong dimensions could be cached before it was
-known to be usable. Commit `fb177c1` (`Reject unusable Chronicle query vectors`)
-adds the minimal owning validation before caching or success attribution. The
-focused PostgreSQL test moved from 10 passed / 1 failed to 11 passed / 0 failed;
-valid-vector selection and budget semantics are unchanged.
+that chunk ranking SQL is not used after fallback. Verification REDs found and
+the owning repairs fixed five edge cases without changing valid-vector
+selection or token-budget semantics:
+
+- `fb177c1` rejects malformed, all-zero, and wrong-dimension live vectors before
+  caching or success attribution.
+- `616803c` treats stale incompatible cached vectors as misses and replaces them
+  with a valid live vector while retaining truthful counters.
+- `43fb6d4` ignores stale chunk embeddings when inferring the current compatible
+  dimension.
+- `55fede7` records the campaign's actual configured embedding model and reports
+  semantic use only when fresh semantic candidates contribute to selection.
+- `527c3fb` accepts valid model identifiers while rejecting URI, scheme-relative,
+  hostname, IPv4, and bracketed-IPv6 endpoint values from audit labels.
+
+The final focused real-PostgreSQL suites were green: query cache 8/8, chunk
+retrieval 14/14, provider adapters 8/8, and observability 4/4. The last suite
+first reproduced a stale expectation after the semantic-contribution repair
+(1/4 failed), then moved to 4/4 after the test-only correction in `192a3ae`.
 
 ### Privacy review
 
@@ -248,6 +268,13 @@ a27f4a6 Align Chronicle fallback audit expectation
 18dc606 Refresh Chronicle migration test contracts
 cbefa9b Repair Chronicle evaluator provider resolution
 fb177c1 Reject unusable Chronicle query vectors
+868f0a2 Record Chronicle audit verification
+de3502f Align Chronicle audit inventory status
+616803c Recover Chronicle query vector cache
+43fb6d4 Align Chronicle chunk dimension inference
+55fede7 Repair Chronicle retrieval audit provenance
+527c3fb Harden Chronicle audit endpoint labels
+192a3ae Align Chronicle observability fallback test
 ```
 
 Two Task 5 test-only cleanups remain intentionally deferred and do not weaken
