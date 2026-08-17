@@ -95,4 +95,39 @@ describe("legacy Story complete-history loader", () => {
     expect(merged).toEqual(existing);
     expect(merged).not.toBe(existing);
   });
+
+  it("rejects a page limit other than the bounded default before fetching", async () => {
+    const fetchPage = vi.fn();
+
+    await expect(loadCompleteStoryHistory({
+      campaignId: "campaign-1",
+      turns: turns(1, 1),
+      nextCursor: "before-1",
+      pageLimit: 201,
+      fetchPage
+    })).rejects.toThrow("200");
+    expect(fetchPage).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed page turns and cursors before merging", async () => {
+    await expect(loadCompleteStoryHistory({
+      campaignId: "campaign-1",
+      turns: turns(1, 1),
+      nextCursor: "before-1",
+      fetchPage: async () => ({ campaignId: "campaign-1", nextCursor: null })
+    })).rejects.toThrow("turns");
+
+    await expect(loadCompleteStoryHistory({
+      campaignId: "campaign-1",
+      turns: turns(1, 1),
+      nextCursor: "before-1",
+      fetchPage: async () => ({ campaignId: "campaign-1", turns: turns(2, 2), nextCursor: "" })
+    })).rejects.toThrow("cursor");
+  });
+
+  it("rejects missing ids and non-positive or non-integer turn numbers", () => {
+    expect(() => mergeStoryTurnPages([], [{ turnNumber: 1 }])).toThrow("missing an id");
+    expect(() => mergeStoryTurnPages([], [{ id: "turn-0", turnNumber: 0 }])).toThrow("invalid turn number");
+    expect(() => mergeStoryTurnPages([], [{ id: "turn-fraction", turnNumber: 1.5 }])).toThrow("invalid turn number");
+  });
 });

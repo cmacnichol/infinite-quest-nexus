@@ -10,6 +10,18 @@ function turnIdentity(turn) {
   return { id, turnNumber };
 }
 
+function validateHistoryPage(page) {
+  if (!page || typeof page !== "object") {
+    throw new Error("Story history page is invalid.");
+  }
+  if (!Array.isArray(page.turns)) {
+    throw new Error("Story history page turns must be an array.");
+  }
+  if (page.nextCursor !== null && (typeof page.nextCursor !== "string" || page.nextCursor.trim().length === 0)) {
+    throw new Error("Story history page cursor must be null or a non-empty string.");
+  }
+}
+
 export function mergeStoryTurnPages(existingTurns, incomingTurns) {
   const byId = new Map();
   const byNumber = new Map();
@@ -42,6 +54,9 @@ export async function loadCompleteStoryHistory({
   pageLimit = COMPLETE_HISTORY_PAGE_LIMIT,
   onProgress = () => undefined
 }) {
+  if (pageLimit !== COMPLETE_HISTORY_PAGE_LIMIT) {
+    throw new Error(`Story history page limit must be ${COMPLETE_HISTORY_PAGE_LIMIT}.`);
+  }
   let loadedTurns = mergeStoryTurnPages([], turns);
   let cursor = nextCursor || null;
   const requestedCursors = new Set();
@@ -52,11 +67,12 @@ export async function loadCompleteStoryHistory({
     }
     requestedCursors.add(cursor);
     const page = await fetchPage({ before: cursor, limit: pageLimit });
+    validateHistoryPage(page);
     if (page.campaignId !== campaignId) {
       throw new Error(`Story history page belongs to ${page.campaignId}, expected ${campaignId}.`);
     }
-    loadedTurns = mergeStoryTurnPages(loadedTurns, page.turns || []);
-    cursor = page.nextCursor || null;
+    loadedTurns = mergeStoryTurnPages(loadedTurns, page.turns);
+    cursor = page.nextCursor;
     onProgress({ loadedTurnCount: loadedTurns.length, nextCursor: cursor });
   }
 
