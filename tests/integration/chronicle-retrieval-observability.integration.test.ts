@@ -397,13 +397,14 @@ integration("Chronicle retrieval observability", () => {
     if ("failure" in preview) throw new Error("Expected Chronicle preview for the compatibility fixture.");
     expect(preview.retrieval).toMatchObject({
       implementation: "chunked_hybrid",
-      mode: "hybrid",
-      semanticAvailable: true,
+      mode: "lexical_fallback",
+      semanticAvailable: false,
       fallbackReason: "chunk_index_not_ready"
     });
     expect(preview.chronicleRetrieval).toMatchObject({
       configuredImplementation: "chunked_hybrid",
       effectiveImplementation: "legacy_hybrid",
+      effectiveMode: "lexical_only",
       fallbackCode: "chunk_index_not_ready"
     });
     const scopes = preview.scopes as { chronicle: readonly unknown[] };
