@@ -48,3 +48,12 @@ one vector per requested document is always rejected rather than trusted.
 A skipped chunk always records one sanitized reason from the closed set `semantic_retrieval_disabled`, `chunk_exceeds_provider_capacity`, or `chunk_embedding_skipped`. Every member counts as terminal for the readiness gate, and provider text, endpoints, and credentials are never stored in the reason. `chunk_exceeds_provider_capacity` marks a chunk that could not fit one provider request; its sibling chunks still index normally.
 
 Disabling or losing the embedding provider does not block story generation. Chronicle uses lexical/entity, relevance, recency, and chronology signals and reports the degradation in health. Re-enable the provider and select **Save & index** to rebuild derived chunks; do not repair them by changing story history.
+
+## Turn-history retrieval audit
+
+Each newly accepted turn can retain a privacy-safe record of the retrieval path
+that actually supplied its prompt context. A missing `chronicleRetrieval` value
+means the provenance is unknown because the turn is historical, imported, or
+contains malformed legacy metadata; do not infer or backfill it from the current
+embedding configuration. Reindexing changes only derived memory and never
+changes the audit stored with an accepted turn.

@@ -26,6 +26,7 @@ import * as repositoryModule from "../../packages/database/src/campaign-transfer
 import { createPostgresWorldRepositoryAdapters } from "../../packages/database/src/world-repository.js";
 import { createPostgresWorldCampaignTransactionPort } from "../../packages/database/src/world-campaign-transaction.js";
 import { memoryGeneration } from "../helpers/memory-applications.js";
+import { DEDICATED_CHUNKED_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -548,9 +549,9 @@ integration("campaign transfer and character PostgreSQL adapters", () => {
          owner_user_id, campaign_id, turn_number, source_turn_id, action, narration,
          choices, state_snapshot_private, model_metadata, import_metadata
        ) VALUES ($1, $2, 1, 'portable-source-one', 'Enter.', 'Entered.', '[]',
-                 '{}', '{"protocol":"synthetic"}', '{"legacy":{"batch":"one"}}')
+                 '{}', $3::jsonb, '{"legacy":{"batch":"one"}}')
        RETURNING id`,
-      [ownerUserId, source.campaign.id],
+      [ownerUserId, source.campaign.id, JSON.stringify({ protocol: "synthetic", chronicleRetrieval: DEDICATED_CHUNKED_AUDIT })],
     );
     const secondTurn = await pool.query<{ id: string }>(
       `INSERT INTO turns (
@@ -691,7 +692,8 @@ integration("campaign transfer and character PostgreSQL adapters", () => {
               cs.import_provenance AS "importProvenance",
               (SELECT jsonb_agg(jsonb_build_object(
                  'sourceTurnId', t.source_turn_id,
-                 'importMetadata', t.import_metadata
+                 'importMetadata', t.import_metadata,
+                 'chronicleRetrieval', t.model_metadata -> 'chronicleRetrieval'
                ) ORDER BY t.turn_number)
                  FROM turns t WHERE t.campaign_id = c.id) AS turns,
               (SELECT count(*)::int FROM campaign_state_edits WHERE campaign_id = c.id) AS "stateEdits",
@@ -726,6 +728,7 @@ integration("campaign transfer and character PostgreSQL adapters", () => {
     expect(copied.rows[0]?.turns).toEqual([
       {
         sourceTurnId: "portable-source-one",
+        chronicleRetrieval: DEDICATED_CHUNKED_AUDIT,
         importMetadata: {
           legacy: { batch: "one" },
           transfer: expect.objectContaining({
@@ -738,6 +741,7 @@ integration("campaign transfer and character PostgreSQL adapters", () => {
       },
       {
         sourceTurnId: "portable-source-two",
+        chronicleRetrieval: null,
         importMetadata: {
           legacy: { batch: "two" },
           transfer: expect.objectContaining({

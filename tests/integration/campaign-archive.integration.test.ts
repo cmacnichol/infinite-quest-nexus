@@ -24,9 +24,11 @@ import { captureCampaignArchiveSnapshot, cleanupExpiredArchivePreviews, exportCa
 import { importCampaignArchive } from "../legacy-api/src/import-service.js";
 import { campaignArchivePayloads } from "../../services/runtime/src/campaign-archive-export-composition.js";
 import { loadCampaignArchiveExportSnapshot } from "../../packages/database/src/campaign-archive-export-repository.js";
+import { readTurnPage } from "../../packages/database/src/play-loop-read-repository.js";
 import { buildServer } from "../../services/api/src/server.js";
 import { inertStorageServerOptions, legacyStoryImportServerOptions, serverOptions } from "../helpers/build-server-options.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
+import { DEDICATED_CHUNKED_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
 
 const archiveCleanupTestState = vi.hoisted(() => ({
   failOncePaths: new Set<string>()
@@ -90,12 +92,13 @@ integration("campaign archive export", () => {
   let sourceWorldVersionId = "";
   let mismatchedWorldVersionId = "";
   let segmentId = "";
+  let ownerUserId = "";
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 4);
     await migrateDatabase(pool, resolve("database/migrations"));
     root = await mkdtemp(join(tmpdir(), "infinitequest-campaign-archive-"));
-    const ownerUserId = await initialOwnerId(pool);
+    ownerUserId = await initialOwnerId(pool);
     const world = await pool.query<{ id: string }>(
       "INSERT INTO worlds (owner_user_id, title) VALUES ($1,$2) RETURNING id",
       [ownerUserId, "Archive world"]
@@ -128,9 +131,14 @@ integration("campaign archive export", () => {
       [ownerUserId, secondVersion.rows[0]!.id]
     );
     const turn = await pool.query<{ id: string }>(
-      `INSERT INTO turns (owner_user_id, campaign_id, turn_number, action, narration, accepted_at)
-       VALUES ($1,$2,1,'Open the door.','The archive door opens.',now()) RETURNING id`,
-      [ownerUserId, campaignId]
+      `INSERT INTO turns (owner_user_id, campaign_id, turn_number, action, narration, model_metadata, accepted_at)
+       VALUES ($1,$2,1,'Open the door.','The archive door opens.',$3::jsonb,now()) RETURNING id`,
+      [ownerUserId, campaignId, JSON.stringify({
+        providerProfileId: "must-not-export",
+        providerFingerprint: "must-not-export",
+        endpoint: "https://must-not-export.invalid",
+        chronicleRetrieval: DEDICATED_CHUNKED_AUDIT
+      })]
     );
     turnId = turn.rows[0]!.id;
     await pool.query(
@@ -539,6 +547,8 @@ integration("campaign archive export", () => {
     )));
     const combined = serialized.join("\n");
     expect(combined).not.toContain("nested-secret");
+    expect(combined).not.toContain("chronicleRetrieval");
+    expect(combined).not.toContain("must-not-export");
     expect(combined).not.toMatch(/credential|thumbnail|embedding|providerProfile|responseChain|private reasoning/i);
     expect(campaign.archiveRecords.worldMigrations).toHaveLength(1);
     expect(campaign.archiveRecords.worldMigrations[0]).toMatchObject({ note: "Fixture migration provenance" });
@@ -918,6 +928,9 @@ integration("campaign archive export", () => {
     );
     expect(importedTurn.rows).toHaveLength(1);
     expect(importedTurn.rows[0]!.id).not.toBe(turnId);
+    await expect(readTurnPage(pool, ownerUserId, imported.campaignId, undefined, 10)).resolves.toMatchObject({
+      turns: [{ chronicleRetrieval: null }]
+    });
     expect(imported.stats).toMatchObject({ turnCount: 1, memoryCount: 1 });
     await expect(stat(resolve(root, stagedPath))).rejects.toMatchObject({ code: "ENOENT" });
     await expect(previewRow(preview.previewToken)).resolves.toMatchObject({ status: "consumed" });

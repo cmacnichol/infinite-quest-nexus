@@ -20,6 +20,8 @@ import {
   readTurnReportedCostsForTest
 } from "../helpers/provider-application-fixtures.js";
 import { listCampaignIllustrationSegments } from "../../services/runtime/src/illustration-segment-job-adapter.js";
+import { readTurnPage } from "../../packages/database/src/play-loop-read-repository.js";
+import { DEDICATED_CHUNKED_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe.sequential : describe.skip;
@@ -433,6 +435,38 @@ integration("PostgreSQL campaign sync adapters", () => {
     expect(await branchSourceSnapshot(imported.campaignId)).toEqual(sourceBefore);
   });
 
+  it("copies recorded retrieval provenance while leaving historical branch turns unknown", async () => {
+    const imported = await createCampaignFixture();
+    const adapters = createAdapters();
+    await pool.query(
+      `UPDATE turns
+          SET model_metadata = jsonb_set(model_metadata, '{chronicleRetrieval}', $3::jsonb)
+        WHERE owner_user_id = $1 AND campaign_id = $2 AND turn_number = 2`,
+      [ownerUserId, imported.campaignId, JSON.stringify(DEDICATED_CHUNKED_AUDIT)]
+    );
+
+    const branched = await adapters.transaction.command((transaction) => adapters.campaigns.branchCampaign(
+      transaction,
+      { ownerUserId, campaignId: imported.campaignId },
+      { targetTurnNumber: 2, expectedCurrentTurnNumber: 2 }
+    ));
+    if (!branched.ok) throw new Error("Expected branch creation to succeed.");
+    branchCampaignIds.push(branched.value.id);
+
+    await expect(readTurnPage(pool, ownerUserId, branched.value.id, undefined, 10)).resolves.toMatchObject({
+      turns: [
+        { turnNumber: 1, chronicleRetrieval: null },
+        { turnNumber: 2, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT }
+      ]
+    });
+    await expect(pool.query<{ chronicleRetrieval: unknown }>(
+      `SELECT model_metadata -> 'chronicleRetrieval' AS "chronicleRetrieval"
+         FROM turns
+        WHERE owner_user_id = $1 AND campaign_id = $2 AND turn_number = 2`,
+      [ownerUserId, branched.value.id]
+    )).resolves.toMatchObject({ rows: [{ chronicleRetrieval: DEDICATED_CHUNKED_AUDIT }] });
+  });
+
   it("branches effective narration history without inheriting source campaign costs", async () => {
     const imported = await createCampaignFixture();
     const baseMemory = memoryGeneration(pool);
@@ -472,7 +506,7 @@ integration("PostgreSQL campaign sync adapters", () => {
          owner_user_id,campaign_id,world_version_id,parent_memory_id,parent_content_hash,
          chunking_protocol_version,chunk_ordinal,chunk_kind,content,source_end_offset,
          token_estimate,embedding_status,embedding_skip_reason
-       ) VALUES ($1,$2,$3,$4,$5,'chronicle-chunk-v1',0,'turn_narration',$6,length($6),$7,'skipped','semantic_disabled')
+       ) VALUES ($1,$2,$3,$4,$5,'chronicle-chunk-v1',0,'turn_narration',$6,length($6),$7,'skipped','semantic_retrieval_disabled')
        RETURNING id`,
       [ownerUserId, imported.campaignId, sourceParent.rows[0]!.world_version_id,
         sourceParent.rows[0]!.id, sourceParent.rows[0]!.content_hash,
@@ -983,6 +1017,51 @@ integration("PostgreSQL campaign sync adapters", () => {
       campaignId: imported.campaignId,
       worldVersionId: imported.worldVersionId
     });
+  });
+
+  it("preserves a retained turn's retrieval audit through correction and rewind", async () => {
+    const imported = await createCampaignFixture();
+    const adapters = createAdapters();
+    const scope = { ownerUserId, campaignId: imported.campaignId };
+    await pool.query(
+      `UPDATE turns
+          SET model_metadata = jsonb_set(model_metadata, '{chronicleRetrieval}', $3::jsonb)
+        WHERE owner_user_id = $1 AND campaign_id = $2 AND turn_number = 1`,
+      [ownerUserId, imported.campaignId, JSON.stringify(DEDICATED_CHUNKED_AUDIT)]
+    );
+    const original = await pool.query<{ id: string; narration: string; xmin: string; chronicleRetrieval: unknown }>(
+      `SELECT id, narration, xmin::text AS xmin, model_metadata -> 'chronicleRetrieval' AS "chronicleRetrieval"
+         FROM turns
+        WHERE owner_user_id = $1 AND campaign_id = $2 AND turn_number = 1`,
+      [ownerUserId, imported.campaignId]
+    );
+    const turn = original.rows[0]!;
+    await pool.query(
+      `INSERT INTO turn_narration_corrections (
+         owner_user_id, campaign_id, turn_id, revision, narration,
+         previous_effective_narration_hash, source, created_by_user_id
+       ) VALUES ($1,$2,$3,1,$4,$5,'user_edit',$1)`,
+      [ownerUserId, imported.campaignId, turn.id, "A corrected accepted narration.", sha256(turn.narration)]
+    );
+    const correctedPage = await readTurnPage(pool, ownerUserId, imported.campaignId, undefined, 10);
+    expect(correctedPage.turns).toContainEqual(expect.objectContaining({
+      turnNumber: 1,
+      narration: "A corrected accepted narration.",
+      chronicleRetrieval: DEDICATED_CHUNKED_AUDIT
+    }));
+
+    const before = await adapters.transaction.read((transaction) => adapters.state.getCampaignRuntimeState(transaction, scope));
+    await expect(adapters.transaction.command((transaction) => adapters.campaigns.rewindCampaign(
+      transaction,
+      scope,
+      { targetTurnNumber: 1, expectedCurrentTurnNumber: before.activeTurnNumber, expectedStateRevision: before.revision }
+    ))).resolves.toMatchObject({ ok: true, value: { activeTurnNumber: 1 } });
+    await expect(pool.query<{ xmin: string; chronicleRetrieval: unknown }>(
+      `SELECT xmin::text AS xmin, model_metadata -> 'chronicleRetrieval' AS "chronicleRetrieval"
+         FROM turns
+        WHERE owner_user_id = $1 AND campaign_id = $2 AND turn_number = 1`,
+      [ownerUserId, imported.campaignId]
+    )).resolves.toMatchObject({ rows: [{ xmin: turn.xmin, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT }] });
   });
 
   it("rejects stale rewind fences without mutating history or state", async () => {

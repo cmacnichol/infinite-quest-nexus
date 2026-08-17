@@ -12,7 +12,9 @@ const chronicleDocumentationUrls = {
   recovery: new URL("../../docs/operations/recovery/chronicle-indexing.md", import.meta.url),
   providerConfiguration: new URL("../../docs/installation/provider-configuration.md", import.meta.url),
   deployment: new URL("../../docs/runbooks/deployment.md", import.meta.url),
-  decision: new URL("../../docs/architecture/0028-chunked-chronicle-retrieval.md", import.meta.url)
+  decision: new URL("../../docs/architecture/0028-chunked-chronicle-retrieval.md", import.meta.url),
+  retrievalAudit: new URL("../../docs/review/chronicle-retrieval-audit-future-enhancement.md", import.meta.url),
+  architectureIndex: new URL("../../docs/architecture/index.md", import.meta.url)
 } as const;
 
 const rollbackSql = `UPDATE campaign_memory_configs
@@ -147,5 +149,23 @@ describe("Task 14b Chronicle inventory", () => {
     const combined = operatorGuides.join("\n");
     expect(combined).toContain("Do not edit accepted turns");
     expect(combined).toContain("Do not delete legacy embeddings or vectors");
+  });
+
+  it("documents Chronicle retrieval audit lifecycle, privacy, and unknown-history semantics", async () => {
+    const docs = await chronicleDocumentation();
+    expect(docs.retrievalModes).toContain("## Turn retrieval audit");
+    expect(docs.retrievalModes).toContain("`chronicleRetrieval: null`");
+    expect(docs.retrievalModes).toContain("Dedicated embedding provider contributed semantic ranking");
+    expect(docs.retrievalModes).toContain("Text-role provider was explicitly used through the embedding interface");
+    expect(docs.retrievalModes).toContain("Complete legacy fallback supplied the accepted prompt context");
+    expect(docs.retrievalModes).toContain("No semantic rank contributed; inspect sanitized `fallbackCode`");
+    expect(docs.retrievalModes).toContain("Semantic rank used cached query vectors; no live embedding call occurred");
+    expect(docs.embeddings).toContain("Turn-history retrieval audit");
+    expect(docs.embeddings).toContain("do not infer or backfill");
+    expect(docs.retrievalAudit).toContain("Implementation in progress");
+    expect(docs.retrievalAudit).toContain("[ADR 0029](../architecture/0029-chronicle-turn-retrieval-audit.md)");
+    expect(docs.retrievalAudit).toContain("[implementation plan](../superpowers/plans/2026-08-16-chronicle-turn-retrieval-audit.md)");
+    expect(docs.retrievalAudit).toContain("Operational telemetry retention is not turn-history retention.");
+    expect(docs.architectureIndex).toContain("[ADR 0029: Chronicle turn retrieval audits are versioned, atomic provenance](./0029-chronicle-turn-retrieval-audit.md)");
   });
 });
