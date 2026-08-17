@@ -952,6 +952,137 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     expect(cached.rows[0]?.count).toBe("0");
   });
 
+  it("excludes a stale mixed-dimension chunk from inference before Legacy fallback embeds the query", async () => {
+    const { fixture, providerId } = await configuredFixture("stale chunk dimension inference", "text");
+    const memory = await parent(fixture, {
+      turnId: null,
+      kind: "campaign_summary",
+      ordinal: 1,
+      content: "The legacy fallback ledger remembers the violet lantern."
+    });
+    await embeddedChunk(fixture, providerId, {
+      parentId: memory.id,
+      parentContentHash: memory.contentHash,
+      kind: "campaign_summary",
+      content: "The legacy fallback ledger remembers the violet lantern.",
+      vector: [1, 0]
+    });
+    await embeddedChunk(fixture, providerId, {
+      parentId: memory.id,
+      parentContentHash: memory.contentHash,
+      chunkOrdinal: 1,
+      kind: "campaign_summary",
+      content: "A stale duplicate chunk must not influence inferred dimensions.",
+      vector: [0, 1]
+    });
+    await pool.query(
+      `UPDATE chronicle_memory_chunks
+          SET embedding='[1,0,0]'::vector,embedding_dimensions=3,embedding_content_hash=NULL
+        WHERE parent_memory_id=$1 AND chunk_ordinal=1`,
+      [memory.id]
+    );
+    const request = {
+      ...fixture,
+      request: {
+        budgetTokens: 4_096,
+        compression: "auto" as const,
+        query: "violet lantern",
+        recentTurns: 1
+      }
+    };
+    let embeddingAttempts = 0;
+    const generation = createPostgresChronicleGenerationTransactionPort({
+      embeddings: {
+        async resolve() {
+          return {
+            status: "resolved" as const,
+            resolutionSource: "text_fallback" as const,
+            resolvedRole: "text" as const,
+            providerProfileId: providerId,
+            providerType: "openai_compatible",
+            model: "chunk-embed-v1"
+          };
+        },
+        async load() {
+          return {
+            id: providerId,
+            model: "chunk-embed-v1",
+            providerType: "openai_compatible",
+            configuration: {},
+            async embed() {
+              return { embeddings: [[1, 0, 0]], responseId: "wrong-dimension", usage: {}, reportedCost: null };
+            }
+          };
+        },
+        async embed(provider, documents) {
+          embeddingAttempts += 1;
+          return provider.embed(documents);
+        },
+        async fingerprint() { return "chunk-fingerprint"; },
+        async recordHealth() {},
+        async recordCost() { return null; },
+        logDiagnostic() {}
+      }
+    });
+    await pool.query(
+      "UPDATE campaign_memory_configs SET retrieval_implementation='legacy_hybrid',embedding_enabled=false WHERE campaign_id=$1",
+      [fixture.campaignId]
+    );
+    const legacy = await generation.buildContextPreview(pool, request);
+    await pool.query(
+      "UPDATE campaign_memory_configs SET retrieval_implementation='chunked_hybrid',embedding_enabled=true WHERE campaign_id=$1",
+      [fixture.campaignId]
+    );
+    const inferredDimensionRows: unknown[] = [];
+    const chunkRankStatements: string[] = [];
+    const actual = await withTransaction(pool, async (database) => {
+      const intercepted = new Proxy(database, {
+        get(target, property) {
+          if (property === "query") {
+            return async (statement: unknown, values?: readonly unknown[]) => {
+              if (typeof statement === "string" && statement.includes("/* chronicle_rank:")) {
+                chunkRankStatements.push(statement);
+              }
+              const result = await target.query(statement as never, values as never);
+              if (typeof statement === "string" && statement.includes("FROM chronicle_memory_chunks chunk")
+                && statement.includes("END AS expected_dimensions")
+                && !statement.includes("AS chunk_index_ready")) {
+                inferredDimensionRows.push(...result.rows);
+              }
+              return result;
+            };
+          }
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+      }) as DatabaseClient;
+      return generation.buildContextPreview(intercepted, request);
+    });
+
+    expect(inferredDimensionRows).toEqual([{ expected_dimensions: 2 }]);
+    expect(actual.scopes).toEqual(legacy.scopes);
+    expect(actual.budget).toEqual(legacy.budget);
+    expect(actual.chronicleRetrieval).toMatchObject({
+      configuredImplementation: "chunked_hybrid",
+      effectiveImplementation: "legacy_hybrid",
+      effectiveMode: "lexical_only",
+      fallbackCode: "chunk_index_not_ready",
+      provider: { resolutionSource: "text_fallback", resolvedRole: "text" },
+      queryVectorPath: "provider_only",
+      providerCallOutcome: "failed",
+      queryEmbeddingRequests: 1,
+      queryCacheHits: 0,
+      queryCacheMisses: 1
+    });
+    expect(embeddingAttempts).toBe(1);
+    expect(chunkRankStatements).toEqual([]);
+    const cached = await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM chronicle_query_embedding_cache WHERE campaign_id=$1",
+      [fixture.campaignId]
+    );
+    expect(cached.rows[0]?.count).toBe("0");
+  });
+
   it("treats a stale incompatible cached chunk query vector as a miss and replaces it from the provider", async () => {
     const { fixture, providerId } = await configuredFixture("stale chunk query cache");
     const memory = await parent(fixture, {

@@ -614,6 +614,7 @@ async function applyContextSemanticRelevance(
   config: EmbeddingConfigRow | undefined,
   diagnosticMode: RetrievalDiagnosticMode = "production",
   diagnosticImplementation: RetrievalExecution["implementation"] = "legacy_hybrid",
+  expectedDimensionsOverride: number | null = null,
 ): Promise<LegacyRetrievalResult> {
   const normalizedQuery = query.toLowerCase();
   const queryEntityIdSet = new Set(queryEntityIds);
@@ -671,7 +672,7 @@ async function applyContextSemanticRelevance(
     );
     const fingerprint = await dependencies.embeddings.fingerprint(provider, prefixes);
     const configuredDimensions = toSafeProviderConfiguration(provider.configuration).embeddingDimensions ?? null;
-    const inferredDimensions = configuredDimensions === null
+    const inferredDimensions = configuredDimensions === null && expectedDimensionsOverride === null
       ? await client.query<{ expected_dimensions: number | null }>(
         `SELECT CASE
            WHEN count(DISTINCT embedding_dimensions) = 1 THEN min(embedding_dimensions)
@@ -689,6 +690,7 @@ async function applyContextSemanticRelevance(
       )
       : null;
     const expectedDimensions = configuredDimensions
+      ?? expectedDimensionsOverride
       ?? inferredDimensions?.rows[0]?.expected_dimensions
       ?? null;
     const cache = queryCache(client, scope, dependencies);
@@ -902,12 +904,11 @@ async function resolveChunkEmbeddingIdentity(
           AND parent.content_hash=chunk.parent_content_hash
         WHERE chunk.owner_user_id=$1 AND chunk.campaign_id=$2 AND chunk.world_version_id=$3
           AND chunk.chunking_protocol_version=${CHUNK_PROTOCOL_LITERAL}
-          AND chunk.embedding_status='embedded' AND chunk.embedding IS NOT NULL
-          AND chunk.embedding_provider_profile_id=$4 AND chunk.embedding_model=$5
-          AND chunk.embedding_protocol_version=$6 AND chunk.embedding_provider_fingerprint=$7
+          AND $6::integer IS NULL
+          AND ${CHRONICLE_READINESS_EMBEDDING_IDENTITY_SQL}
           AND chunk.embedding_dimensions IS NOT NULL`,
       [scope.ownerUserId, scope.campaignId, scope.worldVersionId, providerProfileId,
-        config.embedding_model, CHRONICLE_EMBEDDING_PROTOCOL_VERSION, fingerprint]
+        config.embedding_model, null, fingerprint]
     )
     : null;
   const dimensions = configuredDimensions
@@ -1676,6 +1677,7 @@ export async function buildPostgresChronicleContextPreview(
     implementation: "lexical" | "legacy_hybrid",
     executionConfig: EmbeddingConfigRow | undefined,
     diagnosticMode: RetrievalDiagnosticMode = "production",
+    expectedDimensionsOverride: number | null = null,
   ): Promise<RetrievalExecution> => {
     const executionMemories = cloneContextMemories(memories);
     const startedAt = performance.now();
@@ -1688,7 +1690,8 @@ export async function buildPostgresChronicleContextPreview(
       dependencies,
       executionConfig,
       diagnosticMode,
-      implementation
+      implementation,
+      expectedDimensionsOverride
     );
     return {
       implementation,
@@ -1715,8 +1718,14 @@ export async function buildPostgresChronicleContextPreview(
       priorCostIds: readonly string[] = [],
       priorFingerprint: string | null = null,
       priorAuditTrace: ChronicleRetrievalAuditTrace = emptyChronicleRetrievalAuditTrace(),
+      expectedDimensionsOverride: number | null = null,
     ): Promise<RetrievalExecution> => {
-      const legacy = await executeLegacy("legacy_hybrid", executionConfig, diagnosticMode);
+      const legacy = await executeLegacy(
+        "legacy_hybrid",
+        executionConfig,
+        diagnosticMode,
+        expectedDimensionsOverride
+      );
       return {
         ...legacy,
         implementation: "chunked_hybrid",
@@ -1746,6 +1755,7 @@ export async function buildPostgresChronicleContextPreview(
       costIds?: readonly string[];
       fingerprint?: string | null;
       auditTrace?: ChronicleRetrievalAuditTrace;
+      expectedDimensions?: number | null;
     }> | Readonly<{
       kind: "chunked";
       executionMemories: ContextMemoryRow[];
@@ -1774,7 +1784,13 @@ export async function buildPostgresChronicleContextPreview(
       } else {
         readyForChunked ??= await chunkIndexReady(client, scope, identity);
         if (!readyForChunked) {
-          attempt = { kind: "fallback", reason: "chunk_index_not_ready", executionConfig: config, auditTrace: identity.auditTrace };
+          attempt = {
+            kind: "fallback",
+            reason: "chunk_index_not_ready",
+            executionConfig: config,
+            auditTrace: identity.auditTrace,
+            expectedDimensions: identity.dimensions
+          };
         } else {
           const executionMemories = cloneContextMemories(memories);
           const result = await applyChunkedRankFusion(
@@ -1797,7 +1813,8 @@ export async function buildPostgresChronicleContextPreview(
                 : config,
               costIds: result.costIds,
               fingerprint: result.providerFingerprint,
-              auditTrace: result.auditTrace
+              auditTrace: result.auditTrace,
+              expectedDimensions: identity.dimensions
             };
           } else {
             attempt = { kind: "chunked", executionMemories, result };
@@ -1833,7 +1850,8 @@ export async function buildPostgresChronicleContextPreview(
         attempt.executionConfig,
         attempt.costIds,
         attempt.fingerprint,
-        attempt.auditTrace
+        attempt.auditTrace,
+        attempt.expectedDimensions
       );
     }
     return {
