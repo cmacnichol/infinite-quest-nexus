@@ -153,7 +153,7 @@ integration("campaign state corrections", () => {
          token_estimate,embedding_status,embedding_skip_reason
        ) SELECT owner_user_id,campaign_id,world_version_id,id,content_hash,
                 'chronicle-chunk-v1',0,'canonical_fact',content,length(content),
-                token_estimate,'skipped','semantic_disabled'
+                token_estimate,'skipped','semantic_retrieval_disabled'
            FROM chronicle_memories WHERE id=$1 RETURNING id`,
       [oldParentRow.id]
     );

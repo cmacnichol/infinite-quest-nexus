@@ -188,7 +188,7 @@ integration("Chronicle accepted-turn immutability", () => {
          owner_user_id,campaign_id,world_version_id,parent_memory_id,parent_content_hash,
          chunking_protocol_version,chunk_ordinal,chunk_kind,content,source_end_offset,
          token_estimate,embedding_status,embedding_skip_reason
-       ) VALUES ($1,$2,$3,$4,$5,'chronicle-chunk-v1',0,'turn_narration',$6,length($6),$7,'skipped','semantic_disabled')
+       ) VALUES ($1,$2,$3,$4,$5,'chronicle-chunk-v1',0,'turn_narration',$6,length($6),$7,'skipped','semantic_retrieval_disabled')
        RETURNING id`,
       [ownerUserId, sourceCampaignId, staleParentRow.world_version_id, staleParentRow.id,
         staleParentRow.content_hash, staleParentRow.content, staleParentRow.token_estimate]

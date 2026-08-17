@@ -332,7 +332,7 @@ integration("legacy import and Chronicle integration", () => {
            token_estimate,embedding_status,embedding_skip_reason
          ) SELECT owner_user_id,campaign_id,world_version_id,id,content_hash,
                   'chronicle-chunk-v1',0,'legacy_summary',content,length(content),
-                  token_estimate,'skipped','semantic_disabled'
+                  token_estimate,'skipped','semantic_retrieval_disabled'
              FROM chronicle_memories
             WHERE campaign_id=$1 AND memory_kind='legacy_summary'`,
         [campaign.campaignId]
