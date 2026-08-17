@@ -511,6 +511,19 @@ function parseVector(value: unknown): readonly number[] | null {
   return parsed;
 }
 
+function requireUsableQueryVector(
+  vector: readonly number[] | null | undefined,
+  expectedDimensions: number | null
+): readonly number[] {
+  if (!vector?.length || !vector.every(Number.isFinite)) {
+    throw new Error("Embedding provider returned an invalid Chronicle query vector.");
+  }
+  if (expectedDimensions !== null && vector.length !== expectedDimensions) {
+    throw new Error("Embedding provider returned an incompatible Chronicle query vector.");
+  }
+  return vector;
+}
+
 function queryHash(value: string): string {
   // `value` is the normalized expanded-query fragment sent to the provider.
   // Hash its exact bytes so cache hits can never substitute a different input.
@@ -629,6 +642,7 @@ async function applyContextSemanticRelevance(
   const providerScope = { ownerUserId: scope.ownerUserId, providerProfileId, model: config.embedding_model };
   try {
     const provider = await dependencies.embeddings.load(client, providerScope);
+    const expectedDimensions = toSafeProviderConfiguration(provider.configuration).embeddingDimensions ?? null;
     const prefixes = modelAwareEmbeddingPrefixes(
       config.embedding_model,
       config.embedding_document_prefix,
@@ -637,7 +651,10 @@ async function applyContextSemanticRelevance(
     const fingerprint = await dependencies.embeddings.fingerprint(provider, prefixes);
     const cache = queryCache(client, scope, dependencies);
     const cacheKey = queryCacheKey(query.trim(), providerProfileId, config.embedding_model, fingerprint, prefixes.queryPrefix);
-    let queryVector = await cache.getQueryEmbedding(scope, cacheKey);
+    const cachedQueryVector = await cache.getQueryEmbedding(scope, cacheKey);
+    let queryVector = cachedQueryVector
+      ? requireUsableQueryVector(cachedQueryVector, expectedDimensions)
+      : null;
     let costId: string | null = null;
     if (queryVector) {
       queryCacheHits = 1;
@@ -653,8 +670,7 @@ async function applyContextSemanticRelevance(
           : {}),
         operation: scope.costAttribution?.operation ?? "context_preview_embedding"
       }, result);
-      queryVector = result.embeddings[0] ?? null;
-      if (!queryVector?.length) throw new Error("Embedding provider returned no query vector.");
+      queryVector = requireUsableQueryVector(result.embeddings[0], expectedDimensions);
       auditTrace = { ...auditTrace, providerCallOutcome: "succeeded", queryEmbeddingRequests: embeddingRequests };
       await cache.putQueryEmbedding(scope, cacheKey, queryVector);
     }
@@ -1184,6 +1200,9 @@ async function applyChunkedRankFusion(
         effectiveQueryPrefix = prefixes.queryPrefix;
         const fingerprint = embeddingIdentity?.fingerprint
           ?? await dependencies.embeddings.fingerprint(provider, prefixes);
+        const expectedDimensions = embeddingIdentity?.dimensions
+          ?? toSafeProviderConfiguration(provider.configuration).embeddingDimensions
+          ?? null;
         providerFingerprint = fingerprint;
         const cache = queryCache(client, scope, dependencies);
         const cacheKeys = variants.map((variant) => queryCacheKey(
@@ -1196,7 +1215,10 @@ async function applyChunkedRankFusion(
         const queryVectors: Array<readonly number[] | null> = [];
         const missedIndexes: number[] = [];
         for (let index = 0; index < variants.length; index += 1) {
-          const vector = await cache.getQueryEmbedding(scope, cacheKeys[index]!);
+          const cachedVector = await cache.getQueryEmbedding(scope, cacheKeys[index]!);
+          const vector = cachedVector
+            ? requireUsableQueryVector(cachedVector, expectedDimensions)
+            : null;
           queryVectors.push(vector);
           if (vector) {
             queryCacheHits += 1;
@@ -1225,8 +1247,7 @@ async function applyChunkedRankFusion(
           }
           for (let resultIndex = 0; resultIndex < missedIndexes.length; resultIndex += 1) {
             const variantIndex = missedIndexes[resultIndex]!;
-            const vector = result.embeddings[resultIndex];
-            if (!vector?.length) throw new Error("Embedding provider returned an empty Chronicle query vector.");
+            const vector = requireUsableQueryVector(result.embeddings[resultIndex], expectedDimensions);
             queryVectors[variantIndex] = vector;
             await cache.putQueryEmbedding(scope, cacheKeys[variantIndex]!, vector);
           }
@@ -1238,8 +1259,7 @@ async function applyChunkedRankFusion(
         }>> = [];
         for (let index = 0; index < variants.length; index += 1) {
           const variant = variants[index]!;
-          const vector = queryVectors[index];
-          if (!vector?.length) throw new Error("Embedding provider returned an empty Chronicle query vector.");
+          const vector = requireUsableQueryVector(queryVectors[index], expectedDimensions);
           const rows = await loadRank({
             signal: "semantic",
             variant,

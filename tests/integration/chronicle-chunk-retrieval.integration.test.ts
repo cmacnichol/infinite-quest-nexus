@@ -163,12 +163,23 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     return { fixture, providerId };
   }
 
-  function transaction(providerId: string, queries: string[]) {
+  function transaction(
+    providerId: string,
+    queries: string[],
+    providerRole: "embedding" | "text" = "embedding"
+  ) {
     return createPostgresChronicleGenerationTransactionPort({
       embeddings: {
         async resolve(_database, requested) {
           return requested.selectedProviderProfileId === providerId
-            ? { status: "resolved" as const, resolutionSource: "dedicated_embedding" as const, resolvedRole: "embedding" as const, providerProfileId: providerId, providerType: "openai_compatible", model: "chunk-embed-v1" }
+            ? {
+                status: "resolved" as const,
+                resolutionSource: providerRole === "embedding" ? "dedicated_embedding" as const : "text_fallback" as const,
+                resolvedRole: providerRole,
+                providerProfileId: providerId,
+                providerType: "openai_compatible",
+                model: "chunk-embed-v1"
+              }
             : { status: "unconfigured" as const, resolutionSource: "none" as const, resolvedRole: null };
         },
         async load() {
@@ -720,7 +731,7 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     await pool.query("UPDATE campaigns SET active_turn_number=$2 WHERE id=$1", [fixture.campaignId, turnCount]);
 
     const embeddingQueries: string[] = [];
-    const preview = await transaction(providerId, embeddingQueries).buildContextPreview(pool, {
+    const preview = await transaction(providerId, embeddingQueries, "text").buildContextPreview(pool, {
       ...fixture,
       request: { budgetTokens: 32_000, compression: "auto" as const, query: "passage", recentTurns: 8 }
     });
@@ -742,6 +753,15 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     // so recency selection reaches the turn immediately before it.
     expect(chronicle.some((entry) => entry.ordinal >= turnCount - 1)).toBe(true);
     expect(embeddingQueries).toHaveLength(1);
+    expect(preview.chronicleRetrieval).toMatchObject({
+      configuredImplementation: "legacy_hybrid",
+      effectiveImplementation: "legacy_hybrid",
+      effectiveMode: "semantic_hybrid",
+      provider: { resolutionSource: "text_fallback", resolvedRole: "text" },
+      queryVectorPath: "provider_only",
+      providerCallOutcome: "succeeded",
+      queryEmbeddingRequests: 1
+    });
   });
 
   it("loads candidate vectors once instead of rendering them in every rank query", async () => {
@@ -799,8 +819,21 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     expect(vectorLoads).toHaveLength(1);
   });
 
-  it("uses the complete legacy path when an eligible text provider cannot embed a ready chunk query", async () => {
-    const { fixture, providerId } = await configuredFixture("text provider runtime fallback", "text");
+  it.each([
+    {
+      failure: "times out",
+      embed: async () => { throw new Error("fixture text embedding request timed out"); }
+    },
+    {
+      failure: "returns a malformed vector",
+      embed: async () => ({ embeddings: [[]], responseId: "malformed", usage: {}, reportedCost: null })
+    },
+    {
+      failure: "returns an incompatible vector dimension",
+      embed: async () => ({ embeddings: [[1, 0, 0]], responseId: "wrong-dimension", usage: {}, reportedCost: null })
+    }
+  ])("uses the complete legacy path when an eligible text provider $failure for a ready chunk query", async ({ failure, embed }) => {
+    const { fixture, providerId } = await configuredFixture(`text provider runtime fallback ${failure}`, "text");
     const memory = await parent(fixture, {
       turnId: null,
       kind: "campaign_summary",
@@ -828,7 +861,7 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
       embeddings: {
         async resolve(_database, requested) {
           return requested.selectedProviderProfileId === providerId
-            ? { status: "resolved" as const, resolutionSource: "dedicated_embedding" as const, resolvedRole: "embedding" as const, providerProfileId: providerId, providerType: "openai_compatible", model: "chunk-embed-v1" }
+            ? { status: "resolved" as const, resolutionSource: "text_fallback" as const, resolvedRole: "text" as const, providerProfileId: providerId, providerType: "openai_compatible", model: "chunk-embed-v1" }
             : { status: "unconfigured" as const, resolutionSource: "none" as const, resolvedRole: null };
         },
         async load() {
@@ -837,9 +870,7 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
             model: "chunk-embed-v1",
             providerType: "openai_compatible",
             configuration: { embeddingDimensions: 2 },
-            async embed() {
-              throw new Error("fixture text embedding endpoint unavailable");
-            }
+            embed
           };
         },
         async embed(provider, documents) {
@@ -890,6 +921,18 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
         mode: "lexical_fallback",
         semanticAvailable: false,
         fallbackReason: "semantic_retrieval_unavailable"
+      },
+      chronicleRetrieval: {
+        configuredImplementation: "chunked_hybrid",
+        effectiveImplementation: "legacy_hybrid",
+        effectiveMode: "lexical_only",
+        fallbackCode: "semantic_retrieval_unavailable",
+        provider: { resolutionSource: "text_fallback", resolvedRole: "text" },
+        queryVectorPath: "provider_only",
+        providerCallOutcome: "failed",
+        queryEmbeddingRequests: 1,
+        queryCacheHits: 0,
+        queryCacheMisses: 1
       }
     });
     expect(actual.scopes).toEqual(legacy.scopes);
