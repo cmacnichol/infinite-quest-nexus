@@ -41,6 +41,7 @@ import {
   createNexusApiClient,
   createNoopSessionPort
 } from "../../packages/client-web/src/index.js";
+import { LEXICAL_NO_PROVIDER_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -719,10 +720,18 @@ integration("durable Story Engine integration", () => {
 
   it("stages an idempotent latest-turn replacement and swaps it only after validated commit", async () => {
     const imported = await campaign();
-    const before = await pool.query<{ id: string; narration: string }>(
-      "SELECT id, narration FROM turns WHERE campaign_id = $1 AND turn_number = 2",
+    const before = await pool.query<{
+      id: string;
+      narration: string;
+      xmin: string;
+      model_metadata: Record<string, unknown>;
+    }>(
+      `SELECT id, narration, xmin::text AS xmin, model_metadata
+         FROM turns
+        WHERE campaign_id = $1 AND turn_number = 2`,
       [imported.campaignId]
     );
+    const originalAudit = before.rows[0]?.model_metadata.chronicleRetrieval ?? null;
     const request = replacementRequest("Take the eastern path instead.");
     const job = await enqueueLatestReplacement(pool, imported.campaignId, request);
     const replay = await enqueueLatestReplacement(pool, imported.campaignId, request);
@@ -735,15 +744,31 @@ integration("durable Story Engine integration", () => {
       kind: "conflict",
       details: { reason: "idempotency_mismatch" }
     });
-    expect(await pool.query("SELECT id FROM turns WHERE campaign_id = $1 AND turn_number = 2", [imported.campaignId]))
-      .toMatchObject({ rows: [{ id: before.rows[0]?.id }] });
+    const stagedOriginal = await pool.query<{
+      id: string;
+      narration: string;
+      xmin: string;
+      model_metadata: Record<string, unknown>;
+    }>(
+      `SELECT id, narration, xmin::text AS xmin, model_metadata
+         FROM turns
+        WHERE campaign_id = $1 AND turn_number = 2`,
+      [imported.campaignId]
+    );
+    expect(stagedOriginal).toEqual(before);
+    expect(stagedOriginal.rows[0]?.model_metadata.chronicleRetrieval ?? null).toStrictEqual(originalAudit);
 
     replies.push({ content: validStory("The eastern path opens into a newly validated replacement scene.") });
     const requestCount = requests.length;
     expect(await runGenerationJob(pool, "story-worker-replacement", 30, credentialSecret)).toBe(true);
 
-    const after = await pool.query<{ id: string; action: string; narration: string }>(
-      "SELECT id, action, narration FROM turns WHERE campaign_id = $1 AND turn_number = 2",
+    const after = await pool.query<{
+      id: string;
+      action: string;
+      narration: string;
+      model_metadata: Record<string, unknown>;
+    }>(
+      "SELECT id, action, narration, model_metadata FROM turns WHERE campaign_id = $1 AND turn_number = 2",
       [imported.campaignId]
     );
     expect(after.rows[0]).toMatchObject({
@@ -751,6 +776,7 @@ integration("durable Story Engine integration", () => {
     });
     expect(after.rows[0]?.narration).not.toBe(before.rows[0]?.narration);
     expect(after.rows[0]?.id).not.toBe(before.rows[0]?.id);
+    expect(after.rows[0]?.model_metadata.chronicleRetrieval).toStrictEqual(LEXICAL_NO_PROVIDER_AUDIT);
     expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed", operationKind: "replace_latest" });
 
     const replacementMemory = await pool.query<{ turn_id: string; content: string }>(
