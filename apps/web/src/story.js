@@ -149,6 +149,22 @@ function isCompleteHistorySuperseded(error) {
   return error?.code === COMPLETE_HISTORY_SUPERSEDED;
 }
 
+function publishStoryTurnWindow(turns, nextCursor, options = {}) {
+  state.turns = turns;
+  state.historyNextCursor = nextCursor || null;
+  storyTurnWindowEpoch += 1;
+  if (completeHistoryLoad !== options.completeHistoryRequest) {
+    completeHistoryLoad = null;
+    setTurnHistoryLoadStatus("");
+  }
+}
+
+function storyTurnWindowIsCurrent(campaignId, epoch, cursor) {
+  return state.campaignId === campaignId
+    && storyTurnWindowEpoch === epoch
+    && state.historyNextCursor === cursor;
+}
+
 function modalFormSnapshot(dialog) {
   return [...dialog.querySelectorAll("input, select, textarea")].map((control) => {
     if (control instanceof HTMLInputElement && ["checkbox", "radio"].includes(control.type)) {
@@ -237,9 +253,9 @@ function ensureCompleteTurnHistory() {
   }).then(
     (result) => {
       if (!requestIsCurrent()) throw completeHistorySupersededError();
-      state.turns = result.turns;
-      state.historyNextCursor = null;
+      publishStoryTurnWindow(result.turns, null, { completeHistoryRequest: request });
       setTurnHistoryLoadStatus(`All ${result.turns.length} turns loaded.`);
+      if (state.user?.settings?.continuousReading) renderAllScenes({ autoScroll: false });
       return state.turns;
     },
     (error) => {
@@ -364,8 +380,6 @@ async function loadCampaign(campaignId, options = {}) {
     const turnData = syncData.turns || await apiClient.campaigns.turns(campaignId);
     if (state.campaignId !== campaignId || storyTurnWindowEpoch !== loadEpoch) return;
 
-    storyTurnWindowEpoch += 1;
-    completeHistoryLoad = null;
     setTurnHistoryLoadStatus("");
     state.campaign = syncData.campaign || syncData;
     state.world = syncData.world || state.campaign.world || null;
@@ -373,8 +387,7 @@ async function loadCampaign(campaignId, options = {}) {
     state.pendingGeneration = syncData.pendingGeneration || null;
     syncTurnInputModeFromCampaign();
 
-    state.turns = turnData.turns || [];
-    state.historyNextCursor = turnData.nextCursor || null;
+    publishStoryTurnWindow(turnData.turns || [], turnData.nextCursor || null);
     state.runtimeState = await apiClient.campaigns.state(campaignId);
     try {
       state.illustrationConfig = await illustrationApi.config(campaignId);
@@ -1318,10 +1331,11 @@ function replaceStreamingPreviewWithAcceptedTurn(result, preserveViewport) {
   if (!preview || !result.resultTurnId) return false;
 
   const completedTurn = { ...result, id: result.resultTurnId };
-  state.turns = state.turns
+  const acceptedTurns = state.turns
     .filter((turn) => turn.id !== result.resultTurnId && Number(turn.turnNumber) !== Number(result.turnNumber))
     .concat(completedTurn)
     .sort((left, right) => Number(left.turnNumber) - Number(right.turnNumber));
+  publishStoryTurnWindow(acceptedTurns, state.historyNextCursor);
   const completedTurnIndex = state.turns.findIndex((turn) => turn.id === result.resultTurnId);
   if (completedTurnIndex < 0) return false;
 
@@ -1507,20 +1521,25 @@ function navigateToTurn(turnNumber) {
 
 async function loadOlderTurnPage() {
   if (!state.historyNextCursor || state.busy) return false;
+  const campaignId = state.campaignId;
+  const epoch = storyTurnWindowEpoch;
+  const requestedCursor = state.historyNextCursor;
+  const turns = state.turns;
   showBusy("Loading older turns…");
   try {
-    const page = await apiClient.campaigns.turns(state.campaignId, { before: state.historyNextCursor });
-    if (page.campaignId !== state.campaignId) {
+    const page = await apiClient.campaigns.turns(campaignId, { before: requestedCursor });
+    if (!storyTurnWindowIsCurrent(campaignId, epoch, requestedCursor)) return false;
+    if (page.campaignId !== campaignId) {
       throw new Error(`Story history page belongs to ${page.campaignId}.`);
     }
-    const previousTurnCount = state.turns.length;
-    state.turns = mergeStoryTurnPages(state.turns, page.turns || []);
-    state.historyNextCursor = page.nextCursor || null;
-    if (state.turns.length === previousTurnCount) return false;
+    const mergedTurns = mergeStoryTurnPages(turns, page.turns || []);
+    publishStoryTurnWindow(mergedTurns, page.nextCursor || null);
+    if (mergedTurns.length === turns.length) return false;
     renderAllScenes();
     updateStatusBar();
     return true;
   } catch (error) {
+    if (!storyTurnWindowIsCurrent(campaignId, epoch, requestedCursor)) return false;
     toast(`Unable to load older turns: ${error.message}`);
     recordActivity("error", "Older turn page failed", error.message);
     return false;
