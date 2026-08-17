@@ -15,7 +15,11 @@ import {
   type PlayerRpgStat,
   type StoryTurnOutput
 } from "../../contracts/src/generation.js";
-import type { MemoryContextQuery } from "../../contracts/src/memory.js";
+import {
+  chronicleRetrievalAuditSchema,
+  type ChronicleRetrievalAudit,
+  type MemoryContextQuery
+} from "../../contracts/src/memory.js";
 import type { PromptSnapshot } from "../../contracts/src/prompt-library.js";
 import type { StoryLengthProfile } from "../../contracts/src/story-settings.js";
 import {
@@ -177,6 +181,7 @@ export type AcceptedGenerationCommit = Readonly<{
   response: ProviderResult;
   contextFingerprint: string;
   contextDiagnostics: Record<string, unknown>;
+  chronicleRetrieval: ChronicleRetrievalAudit;
   inputs: GenerationOrchestrationInputs;
   orchestration: GenerationOrchestrationState;
   fictionAction: string;
@@ -295,6 +300,7 @@ async function commitAcceptedTurn(
   client: DatabaseClient,
   input: AcceptedGenerationCommit
 ): Promise<{ turnId: string }> {
+  const chronicleRetrieval = chronicleRetrievalAuditSchema.parse(input.chronicleRetrieval);
   const { job, scope, story, provider, response, inputs, orchestration, collaborators } = input;
   const lease = await client.query<{ id: string }>(
     `SELECT id FROM generation_jobs
@@ -441,7 +447,8 @@ async function commitAcceptedTurn(
         usage: response.usage,
         promptProtocolVersion: job.prompt_protocol_version,
         contextFingerprint: input.contextFingerprint,
-        contextDiagnostics: input.contextDiagnostics
+        contextDiagnostics: input.contextDiagnostics,
+        chronicleRetrieval
       })]
   );
   const turnId = turnResult.rows[0]?.id;

@@ -21,6 +21,7 @@ import { importLegacyStory } from "../helpers/memory-aware-services.js";
 import { providerPromptProtocolVersion, loadPromptSnapshotForTest } from "../helpers/provider-application-fixtures.js";
 import { createProvider } from "../helpers/provider-application-fixtures.js";
 import { memoryGeneration } from "../helpers/memory-applications.js";
+import { DEDICATED_CHUNKED_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -82,6 +83,21 @@ integration("PostgreSQL generation execution repository", () => {
         context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 }
       })
     );
+  }
+
+  async function turnVersionSnapshot(campaignId: string) {
+    const result = await pool.query<{
+      id: string;
+      xmin: string;
+      model_metadata: Record<string, unknown>;
+    }>(
+      `SELECT id, xmin::text AS xmin, model_metadata
+         FROM turns
+        WHERE owner_user_id = $1 AND campaign_id = $2
+        ORDER BY turn_number, id`,
+      [ownerUserId, campaignId]
+    );
+    return result.rows;
   }
 
   function attemptInput(scope: GenerationLeaseScope, attemptNumber = 1) {
@@ -248,6 +264,7 @@ integration("PostgreSQL generation execution repository", () => {
 
   it("queues chunk work after accepting a turn without rewriting the accepted row", async () => {
     const imported = await campaign();
+    const earlierTurns = await turnVersionSnapshot(imported.campaignId);
     const queued = await queue(imported.campaignId, "Open the chunk lifecycle observatory.");
     const repository = createPostgresGenerationExecutionRepository(pool);
     const claim = await repository.claimNext({ workerId: "chunk-lifecycle-worker", leaseSeconds: 30 });
@@ -320,7 +337,8 @@ integration("PostgreSQL generation execution repository", () => {
         rawMetadata: {}
       },
       contextFingerprint: "task-11-context-fingerprint",
-      contextDiagnostics: {},
+      contextDiagnostics: { retrieval: { selectedMemoryCount: 4, fallbackReason: "chunk_index_not_ready" } },
+      chronicleRetrieval: DEDICATED_CHUNKED_AUDIT,
       inputs: job.orchestration_inputs,
       orchestration: {},
       fictionAction: job.action,
@@ -350,6 +368,92 @@ integration("PostgreSQL generation execution repository", () => {
       "SELECT id,narration,xmin::text AS xmin,ctid::text AS ctid FROM turns WHERE id=$1",
       [committed.turnId]
     )).resolves.toMatchObject({ rows: [acceptedDuringEnqueue] });
+    const stored = await pool.query<{ model_metadata: Record<string, unknown> }>(
+      "SELECT model_metadata FROM turns WHERE id = $1",
+      [committed.turnId]
+    );
+    expect(stored.rows[0]?.model_metadata).toMatchObject({
+      chronicleRetrieval: DEDICATED_CHUNKED_AUDIT,
+      contextDiagnostics: { retrieval: { selectedMemoryCount: 4, fallbackReason: "chunk_index_not_ready" } }
+    });
+    expect(await turnVersionSnapshot(imported.campaignId)).toEqual([
+      ...earlierTurns,
+      expect.objectContaining({ id: committed.turnId })
+    ]);
+  });
+
+  it("rejects malformed retrieval audit before inserting a turn or touching earlier accepted rows", async () => {
+    const imported = await campaign();
+    const earlierTurns = await turnVersionSnapshot(imported.campaignId);
+    const queued = await queue(imported.campaignId, "Refuse malformed Chronicle audit metadata.");
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const claim = await repository.claimNext({ workerId: "malformed-audit-worker", leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(queued.id);
+    const scope = { jobId: queued.id, ownerUserId, workerId: "malformed-audit-worker" };
+    const job = await repository.loadExecutionPayload({
+      workerId: scope.workerId,
+      leaseSeconds: 30,
+      claim: claim!
+    });
+    if (!job) throw new Error("Expected a claimed job for malformed audit rejection.");
+    expect(await repository.markGenerating(scope)).toBe(true);
+    expect(await repository.markValidating(scope)).toBe(true);
+    expect(await repository.markCommitting(scope)).toBe(true);
+    const story = storyTurnOutputSchema.parse({
+      narration: "The malformed record must not become an accepted turn.",
+      choices: ["Wait.", "Leave.", "Inspect the archive.", "Call the keeper."],
+      custom_action_suggestion: "Study the archive seal.",
+      scratchpad: "No turn was accepted.",
+      tracker_updates: [],
+      image_prompt: "A sealed archive.",
+      continuity_summary: "The archive remains sealed.",
+      canonical_facts: ["The archive remains sealed."],
+      superseded_facts: [],
+      canonical_fact_updates: [],
+      open_threads: ["Determine why the archive rejected the record."]
+    });
+    const malformedAudit = {
+      ...DEDICATED_CHUNKED_AUDIT,
+      provider: { ...DEDICATED_CHUNKED_AUDIT.provider, resolutionSource: "none" }
+    };
+
+    await expect(repository.commitAcceptedTurn({
+      scope,
+      job,
+      story,
+      provider: {
+        id: providerProfileId,
+        name: "Execution repository provider",
+        providerType: "openai_compatible",
+        model: "execution-repository-model"
+      },
+      response: {
+        content: JSON.stringify(story),
+        responseId: crypto.randomUUID(),
+        finishReason: "stop",
+        outputLimited: false,
+        modelInstanceId: "execution-repository-instance",
+        usage: { inputTokens: 10, outputTokens: 20, totalTokens: 30 },
+        reportedCost: null,
+        rawMetadata: {}
+      },
+      contextFingerprint: "malformed-audit-context-fingerprint",
+      contextDiagnostics: { retrieval: { selectedMemoryCount: 0 } },
+      chronicleRetrieval: malformedAudit,
+      inputs: job.orchestration_inputs,
+      orchestration: {},
+      fictionAction: job.action,
+      collaborators: {
+        memory: memoryGeneration(pool),
+        illustration: {
+          enqueueAcceptedTurnIllustrationSegments: async () => []
+        } as unknown as AcceptedGenerationCommitCollaborators["illustration"],
+        attributeGenerationCostsToTurn: async () => undefined
+      },
+      onIllustrationEnqueueError: () => undefined
+    } as unknown as Parameters<typeof repository.commitAcceptedTurn>[0])).rejects.toThrow();
+
+    expect(await turnVersionSnapshot(imported.campaignId)).toEqual(earlierTurns);
   });
 
   it("does not overwrite attempt metadata after cancellation wins the row-lock race", async () => {

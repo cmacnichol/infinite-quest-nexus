@@ -10,7 +10,11 @@ import {
   type PlayerEventTrigger,
   type StoryTurnOutput
 } from "../../../packages/contracts/src/generation.js";
-import type { MemoryContextQuery } from "../../../packages/contracts/src/memory.js";
+import {
+  chronicleRetrievalAuditSchema,
+  type ChronicleRetrievalAudit,
+  type MemoryContextQuery
+} from "../../../packages/contracts/src/memory.js";
 import type {
   PromptSnapshot,
   PromptTemplateKey
@@ -80,6 +84,7 @@ type GenerationContextPreview = {
   };
   selectedCompression: unknown;
   retrieval: unknown;
+  chronicleRetrieval: ChronicleRetrievalAudit;
   scopes: Record<string, unknown> & {
     chronicle: Array<{
       id: string;
@@ -640,6 +645,7 @@ async function executeLoadedGeneration(
           : {})
       }
     ))) as unknown as GenerationContextPreview;
+    const chronicleRetrieval = chronicleRetrievalAuditSchema.parse(context.chronicleRetrieval);
     const promptContext = context.scopes;
     const inputs = await phase("orchestration_loading", async () => job.orchestration_inputs);
     let orchestration = job.orchestration_private || {};
@@ -1312,6 +1318,7 @@ async function executeLoadedGeneration(
       response: result,
       contextFingerprint,
       contextDiagnostics,
+      chronicleRetrieval,
       inputs,
       orchestration,
       fictionAction: safeAction,
@@ -1335,6 +1342,17 @@ async function executeLoadedGeneration(
       resultTurnId: turnId,
       providerResponseId: result.responseId || null,
       finishReason: result.finishReason || null,
+      chronicleRetrieval: {
+        configuredImplementation: chronicleRetrieval.configuredImplementation,
+        effectiveImplementation: chronicleRetrieval.effectiveImplementation,
+        effectiveMode: chronicleRetrieval.effectiveMode,
+        providerSource: chronicleRetrieval.provider.resolutionSource,
+        providerType: chronicleRetrieval.provider.providerType,
+        model: chronicleRetrieval.provider.model,
+        queryVectorPath: chronicleRetrieval.queryVectorPath,
+        providerCallOutcome: chronicleRetrieval.providerCallOutcome,
+        fallbackCode: chronicleRetrieval.fallbackCode
+      },
       durationMs: Date.now() - generationStartedAt
     });
   } catch (error) {
