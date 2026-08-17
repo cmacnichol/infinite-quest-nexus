@@ -9,6 +9,10 @@ import {
   undoTargetTurnNumber
 } from "./story-turn-window.js";
 import {
+  loadCompleteStoryHistory,
+  mergeStoryTurnPages
+} from "./story-history-loader.js";
+import {
   cancelGeneration,
   reconcileRemoteGenerationCancellation,
   syncCancelGenerationButton
@@ -131,6 +135,7 @@ const state = {
 
 const modalBaselines = new WeakMap();
 let discardModalTarget = null;
+let completeHistoryLoad = null;
 
 function modalFormSnapshot(dialog) {
   return [...dialog.querySelectorAll("input, select, textarea")].map((control) => {
@@ -185,6 +190,44 @@ function toast(msg, duration) {
   el.classList.add("show");
   if (state.toastTimer) clearTimeout(state.toastTimer);
   state.toastTimer = setTimeout(() => el.classList.remove("show"), duration || TOAST_DURATION);
+}
+
+function setTurnHistoryLoadStatus(message, kind = "") {
+  const status = $("turnHistoryLoadStatus");
+  if (!status) return;
+  status.textContent = message;
+  status.classList.toggle("hidden", !message);
+  status.classList.toggle("loading", kind === "loading");
+  status.classList.toggle("error", kind === "error");
+}
+
+function ensureCompleteTurnHistory() {
+  if (!state.historyNextCursor) return Promise.resolve(state.turns);
+  if (completeHistoryLoad?.campaignId === state.campaignId) return completeHistoryLoad.promise;
+
+  const campaignId = state.campaignId;
+  const request = { campaignId, promise: null };
+  request.promise = loadCompleteStoryHistory({
+    campaignId,
+    turns: state.turns,
+    nextCursor: state.historyNextCursor,
+    fetchPage: ({ before, limit }) => apiClient.campaigns.turns(campaignId, { before, limit }),
+    onProgress: ({ loadedTurnCount }) => {
+      if (state.campaignId === campaignId) {
+        setTurnHistoryLoadStatus(`Loading earlier turns… ${loadedTurnCount} loaded`, "loading");
+      }
+    }
+  }).then((result) => {
+    if (state.campaignId !== campaignId) return state.turns;
+    state.turns = result.turns;
+    state.historyNextCursor = null;
+    setTurnHistoryLoadStatus(`All ${result.turns.length} turns loaded.`);
+    return state.turns;
+  }).finally(() => {
+    if (completeHistoryLoad === request) completeHistoryLoad = null;
+  });
+  completeHistoryLoad = request;
+  return request.promise;
 }
 
 function showBusy(msg) {
@@ -288,6 +331,8 @@ async function checkOnboarding() {
 
 // ── Campaign Loading ──────────────────────────────────────────
 async function loadCampaign(campaignId, options = {}) {
+  state.campaignId = campaignId;
+  if (completeHistoryLoad?.campaignId !== campaignId) completeHistoryLoad = null;
   showBusy("Loading campaign…");
   try {
     const syncData = await apiClient.generation.syncStatus(campaignId);
@@ -317,6 +362,13 @@ async function loadCampaign(campaignId, options = {}) {
     document.title = `${name} — Infinite Quest`;
 
     state.viewTurnNumber = null;
+    if (state.user?.settings?.continuousReading && state.historyNextCursor) {
+      try {
+        await ensureCompleteTurnHistory();
+      } catch (error) {
+        toast(`Continuous reading is showing the loaded window: ${error.message}`);
+      }
+    }
     renderAllScenes({ autoScroll: options.autoScroll });
     updateStatusBar();
 
@@ -1426,14 +1478,13 @@ async function loadOlderTurnPage() {
   showBusy("Loading older turns…");
   try {
     const page = await apiClient.campaigns.turns(state.campaignId, { before: state.historyNextCursor });
-    const knownIds = new Set(state.turns.map((turn) => turn.id));
-    const olderTurns = (page.turns || []).filter((turn) => !knownIds.has(turn.id));
-    if (!olderTurns.length) {
-      state.historyNextCursor = null;
-      return false;
+    if (page.campaignId !== state.campaignId) {
+      throw new Error(`Story history page belongs to ${page.campaignId}.`);
     }
-    state.turns = [...olderTurns, ...state.turns];
+    const previousTurnCount = state.turns.length;
+    state.turns = mergeStoryTurnPages(state.turns, page.turns || []);
     state.historyNextCursor = page.nextCursor || null;
+    if (state.turns.length === previousTurnCount) return false;
     renderAllScenes();
     updateStatusBar();
     return true;
@@ -1450,9 +1501,8 @@ async function goToPrevious() {
   const curr = viewedTurnIndex();
   if (state.busy || state.turns.length === 0) return;
   if (curr <= 0) {
-    const viewedTurnNumber = currentViewTurnNumber();
     if (!await loadOlderTurnPage()) return;
-    const viewedIndex = turnIndexForNumber(state.turns, viewedTurnNumber);
+    const viewedIndex = viewedTurnIndex();
     if (viewedIndex > 0) navigateToTurn(state.turns[viewedIndex - 1]?.turnNumber ?? null);
     return;
   }
@@ -2076,6 +2126,7 @@ async function saveUserProfile() {
   const autoSubmitTurnChoices = cbSubmit ? cbSubmit.checked : true;
   const continuousReading = cbContinuous ? cbContinuous.checked : false;
   const defaultTurnControlStyle = defaultTurnStyle ? defaultTurnStyle.value : "flexible_auto";
+  const wasContinuousReading = Boolean(state.user?.settings?.continuousReading);
 
   if (!displayName) {
     toast("Display name is required.", 2600);
@@ -2102,6 +2153,13 @@ async function saveUserProfile() {
         state.user.settings.defaultTurnControlStyle = defaultTurnControlStyle;
       }
     }
+    if (!wasContinuousReading && continuousReading && state.historyNextCursor) {
+      try {
+        await ensureCompleteTurnHistory();
+      } catch (error) {
+        toast(`Continuous reading is showing the loaded window: ${error.message}`);
+      }
+    }
     renderAllScenes();
     updateStatusBar();
     const dlg = $("userProfileDialog");
@@ -2113,9 +2171,21 @@ async function saveUserProfile() {
 }
 
 async function openTurnHistoryModal() {
-  const dlg = $("turnHistoryDialog");
-  openManagedModal(dlg);
+  const dialog = $("turnHistoryDialog");
+  openManagedModal(dialog);
   populateHistoryContainer($("turnHistoryModalList"));
+  if (!state.historyNextCursor) {
+    setTurnHistoryLoadStatus(`All ${state.turns.length} turns loaded.`);
+    return;
+  }
+  setTurnHistoryLoadStatus(`Loading earlier turns… ${state.turns.length} loaded`, "loading");
+  try {
+    await ensureCompleteTurnHistory();
+    populateHistoryContainer($("turnHistoryModalList"));
+  } catch (error) {
+    setTurnHistoryLoadStatus(`Could not load complete history: ${error.message}`, "error");
+    toast(`Could not load complete history: ${error.message}`);
+  }
 }
 
 function populateHistoryContainer(container) {
@@ -2328,17 +2398,18 @@ async function exportStandaloneHtml() {
   }
 }
 
-async function exportPdfWithImages() {
+async function printStory() {
   if (!state.campaignId) return;
-  const printWindow = window.open("", "_blank", "width=1000,height=800");
+  const printWindow = window.open("", "_blank");
   if (!printWindow) {
-    toast("Allow pop-ups to export the story as PDF.");
+    toast("Allow pop-ups to print this story.");
     return;
   }
   printWindow.opener = null;
   printWindow.document.write("<!doctype html><title>Preparing story…</title><p>Preparing your story for PDF export…</p>");
 
   try {
+    await ensureCompleteTurnHistory();
     const titleText = state.campaign?.title || "Infinite Quest Story";
     const title = escapeHtml(titleText);
     const turns = state.turns.map((turn) => {
@@ -2533,7 +2604,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const btnExportHtml = $("btnExportHtml");
   if (btnExportHtml) btnExportHtml.addEventListener("click", () => { closeNavigationMenus(); exportStandaloneHtml(); });
   const btnExportPdf = $("btnExportPdf");
-  if (btnExportPdf) btnExportPdf.addEventListener("click", () => { closeNavigationMenus(); exportPdfWithImages(); });
+  if (btnExportPdf) btnExportPdf.addEventListener("click", () => { closeNavigationMenus(); printStory(); });
   const btnOpenEditState = $("btnOpenEditState");
   if (btnOpenEditState) btnOpenEditState.addEventListener("click", () => { closeNavigationMenus(); openEditState(); });
   const btnOpenActivityLog = $("btnOpenActivityLog");

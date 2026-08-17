@@ -63,6 +63,16 @@ async function bootLegacyStory({
   return { document, window, fetchTurns };
 }
 
+const makeTurns = (first: number, last: number) => Array.from(
+  { length: last - first + 1 },
+  (_, offset) => ({
+    id: `turn-${first + offset}`,
+    turnNumber: first + offset,
+    action: `Action ${first + offset}`,
+    narration: `Narration ${first + offset}`
+  })
+);
+
 describe("story-player: new Story Player UI contracts & gameplay logic", () => {
   it("uses semantic progress and a served stylesheet for printable story documents", () => {
     expect(storyScript).toContain('<progress class="turn-progress-meter" max="100" value="${percent}"');
@@ -422,6 +432,10 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('await branchCampaignFromTurn(state.campaignId, branchDlg._targetTurnNumber, apiClient.campaigns.branch);');
     expect(storyScript).toContain('function openTurnHistoryModal()');
     expect(storyScript).toContain('el.addEventListener("click", openTurnHistoryModal);');
+    expect(storyScript).toContain("await ensureCompleteTurnHistory();");
+    expect(storyScript).toContain("async function printStory()");
+    expect(storyScript).toContain("loadCompleteStoryHistory({");
+    expect(storyHtml).toContain('id="turnHistoryLoadStatus"');
   });
 
   it("uses authoritative turn numbers for persistent view and History selection", () => {
@@ -801,6 +815,81 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     }
   });
 
+  it("loads every older page when Turn History opens and preserves absolute selection", async () => {
+    const fetchTurns = vi.fn().mockResolvedValue({
+      campaignId: "campaign-1",
+      turns: makeTurns(1, 50),
+      nextCursor: null
+    });
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeTurns(51, 100),
+        nextCursor: "before-51",
+        fetchTurns
+      });
+      document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const cards = document.querySelectorAll<HTMLElement>("#turnHistoryModalList .history-card");
+      expect(fetchTurns).toHaveBeenCalledTimes(1);
+      expect(fetchTurns).toHaveBeenCalledWith("campaign-1", { before: "before-51", limit: 200 });
+      expect(cards).toHaveLength(100);
+      expect(cards[0]?.textContent).toContain("Turn 1");
+      expect(cards[99]?.textContent).toContain("Turn 100");
+      expect(cards[99]?.getAttribute("aria-pressed")).toBe("true");
+      expect(document.getElementById("turnHistoryLoadStatus")?.textContent).toContain("All 100 turns loaded");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("loads all pages before rendering continuous reading", async () => {
+    const fetchTurns = vi.fn().mockResolvedValue({
+      campaignId: "campaign-1",
+      turns: makeTurns(1, 50),
+      nextCursor: null
+    });
+    try {
+      const { document } = await bootLegacyStory({
+        turns: makeTurns(51, 100),
+        nextCursor: "before-51",
+        continuousReading: true,
+        fetchTurns
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(fetchTurns).toHaveBeenCalledTimes(1);
+      const scenes = document.querySelectorAll<HTMLElement>("#storyContainer .scene");
+      expect(scenes).toHaveLength(100);
+      expect(scenes[0]?.id).toBe("scene-1");
+      expect(scenes[99]?.id).toBe("scene-100");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("shares an in-flight page walk and preserves the bounded window on failure", async () => {
+    let rejectPage!: (reason: Error) => void;
+    const fetchTurns = vi.fn(() => new Promise((_resolve, reject) => { rejectPage = reject; }));
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeTurns(51, 100),
+        nextCursor: "before-51",
+        fetchTurns
+      });
+      const pill = document.getElementById("turnPill");
+      pill?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      pill?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      expect(fetchTurns).toHaveBeenCalledTimes(1);
+      rejectPage(new Error("older page unavailable"));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(document.querySelectorAll("#turnHistoryModalList .history-card")).toHaveLength(50);
+      expect(document.getElementById("turnHistoryLoadStatus")?.textContent).toContain("older page unavailable");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("renders persisted turn numbers when the loaded window starts at turn 51", async () => {
     try {
       const windowTurns = Array.from({ length: 50 }, (_, offset) => ({
@@ -835,7 +924,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
         action: `Action ${offset + 1}`,
         narration: `Narration ${offset + 1}`
       }));
-      const fetchTurns = vi.fn().mockResolvedValue({ turns: olderTurns, nextCursor: null });
+      const fetchTurns = vi.fn().mockResolvedValue({ campaignId: "campaign-1", turns: olderTurns, nextCursor: null });
       const { document, window } = await bootLegacyStory({
         turns: loadedTurns,
         nextCursor: "before-turn-51",
@@ -955,7 +1044,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
   it("implements backend-complete Markdown and HTML exports plus print-to-PDF with available story illustrations", () => {
     expect(storyScript).toContain('async function exportMarkdown()');
     expect(storyScript).toContain('async function exportStandaloneHtml()');
-    expect(storyScript).toContain('async function exportPdfWithImages()');
+    expect(storyScript).toContain('async function printStory()');
     expect(storyScript).toContain('/readable-export?format=markdown');
     expect(storyScript).toContain('/readable-export?format=html');
     expect(storyScript).toContain('turn.imageAssetUrl || turn.imageUrl');
