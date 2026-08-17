@@ -30,6 +30,24 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
 const secureGeneratedStagingIt = supportsSecureGeneratedArchiveStaging() ? it : it.skip;
 const credentialSecret = "integration-test-credential-secret";
+const lexicalTextFallbackAudit = {
+  auditVersion: "chronicle-retrieval-audit-v1",
+  configuredImplementation: "legacy_hybrid",
+  effectiveImplementation: "legacy_hybrid",
+  effectiveMode: "lexical_only",
+  fallbackCode: "semantic_retrieval_unavailable",
+  provider: {
+    resolutionSource: "text_fallback",
+    resolvedRole: "text",
+    providerType: "openai_compatible",
+    model: "deterministic-mock"
+  },
+  queryVectorPath: "provider_only",
+  providerCallOutcome: "failed",
+  queryEmbeddingRequests: 1,
+  queryCacheHits: 0,
+  queryCacheMisses: 1
+} as const;
 
 function makeConfig(databaseUrl: string): RuntimeConfig {
   return {
@@ -291,7 +309,7 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
       id: job.id,
       campaignId,
       status: "completed",
-      chronicleRetrieval: null
+      chronicleRetrieval: lexicalTextFallbackAudit
     });
 
     // 6. Verify that the turn list now contains the generated turn with structured choices and trackers
@@ -305,7 +323,11 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     if (!latestTurn) throw new Error("Expected the completed generation to append a turn.");
     expect(latestTurn.narration).toContain("Ancient Observatory");
     expect(latestTurn.choices).toContain("Examine the telescope.");
-    expect(latestTurn).toMatchObject({ inputMode: "action", inputModeSource: "explicit", chronicleRetrieval: null });
+    expect(latestTurn).toMatchObject({
+      inputMode: "action",
+      inputModeSource: "explicit",
+      chronicleRetrieval: lexicalTextFallbackAudit
+    });
 
     const campaignList = await app.inject({ method: "GET", url: "/api/v1/campaigns" });
     expect(campaignList.statusCode).toBe(200);
@@ -340,7 +362,12 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     expect(await runGenerationJob(pool, "worker-generation-route-cutover", 30, credentialSecret)).toBe(true);
     const recovered = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${appendJob.id}/result` });
     expect(recovered.statusCode).toBe(200);
-    expect(generationResultSchema.parse(recovered.json())).toMatchObject({ id: appendJob.id, campaignId, status: "completed", chronicleRetrieval: null });
+    expect(generationResultSchema.parse(recovered.json())).toMatchObject({
+      id: appendJob.id,
+      campaignId,
+      status: "completed",
+      chronicleRetrieval: lexicalTextFallbackAudit
+    });
 
     const replacement = await app.inject({
       method: "POST",
@@ -487,7 +514,7 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     const unchangedPayloadBytes = Buffer.byteLength(unchangedSyncResponse.body);
     // Measured against this deterministic 55-turn fixture with the current
     // synchronized campaign and Chronicle configuration contract.
-    expect({ initialPayloadBytes, unchangedPayloadBytes }).toEqual({ initialPayloadBytes: 18_082, unchangedPayloadBytes: 3_183 });
+    expect({ initialPayloadBytes, unchangedPayloadBytes }).toEqual({ initialPayloadBytes: 19_382, unchangedPayloadBytes: 3_183 });
     expect(unchangedPayloadBytes).toBeLessThan(initialPayloadBytes);
 
     replies.push({ content: validStory("A replacement changes the current history boundary.") });
