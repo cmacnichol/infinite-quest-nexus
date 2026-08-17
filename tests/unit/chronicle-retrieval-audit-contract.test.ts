@@ -30,6 +30,15 @@ describe("Chronicle retrieval audit contract", () => {
     })).toBeNull();
   });
 
+  it("treats endpoint-shaped provider labels as unknown", () => {
+    for (const field of ["providerType", "model"] as const) {
+      expect(parseStoredChronicleRetrievalAudit({
+        ...DEDICATED_CHUNKED_AUDIT,
+        provider: { ...DEDICATED_CHUNKED_AUDIT.provider, [field]: "https://provider.example/v1" }
+      })).toBeNull();
+    }
+  });
+
   it("derives query vector path exactly from live requests and cache hits", () => {
     expect(() => chronicleRetrievalAuditSchema.parse({
       ...DEDICATED_CHUNKED_AUDIT,
