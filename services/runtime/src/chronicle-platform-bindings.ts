@@ -40,13 +40,27 @@ export function createChroniclePlatformBindings(
           embed: execution.embed,
         };
       },
-      resolveEmbeddingProviderId: async (_database, ownerUserId, _campaignId, selectedProviderProfileId) => {
+      resolveEmbeddingProvider: async (_database, ownerUserId, _campaignId, selectedProviderProfileId) => {
         const resolution = await providers.resolution.resolveEmbedding({
           ownerUserId,
           ...(selectedProviderProfileId === undefined ? {} : { selectedProviderProfileId }),
           allowTextFallback: true,
         });
-        return resolution.status === "resolved" ? resolution.providerProfileId : null;
+        if (resolution.status === "unconfigured") {
+          return {
+            status: "unconfigured",
+            resolutionSource: "none",
+            resolvedRole: null,
+          };
+        }
+        return {
+          status: "resolved",
+          resolutionSource: resolution.source,
+          resolvedRole: resolution.resolvedRole,
+          providerProfileId: resolution.providerProfileId,
+          providerType: resolution.providerType,
+          model: resolution.model,
+        };
       },
       recordProviderHealth: (_database, ownerUserId, providerProfileId, healthy) =>
         providers.health.recordHealth({

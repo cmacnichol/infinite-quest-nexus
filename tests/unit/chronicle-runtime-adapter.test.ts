@@ -336,14 +336,21 @@ describe("Chronicle runtime adapters", () => {
       configuration: { dimensions: 768 },
       embed: vi.fn(),
     });
-    const resolveEmbeddingProviderId = vi.fn().mockResolvedValue("embedding-profile");
+    const resolveEmbeddingProvider = vi.fn().mockResolvedValue({
+      status: "resolved",
+      resolutionSource: "dedicated_embedding",
+      resolvedRole: "embedding",
+      providerProfileId: "embedding-profile",
+      providerType: "openai-compatible",
+      model: "embed-v1"
+    });
     const database = { transaction: "accepted-turn" } as never;
     const port = createChronicleEmbeddingProviderPort({
       loadEmbeddingExecution: load,
       recordProviderHealth: vi.fn(),
       recordProfileCost: vi.fn(),
       logProviderTransportError: vi.fn(),
-      resolveEmbeddingProviderId
+      resolveEmbeddingProvider
     });
 
     const provider = await port.load(database, {
@@ -364,8 +371,15 @@ describe("Chronicle runtime adapters", () => {
     );
     expect(load.mock.calls[0]).not.toContain("image");
     await expect(port.resolve(database, { ownerUserId: "owner-1", campaignId: "campaign-1" }))
-      .resolves.toBe("embedding-profile");
-    expect(resolveEmbeddingProviderId).toHaveBeenCalledWith(database, "owner-1", "campaign-1", null);
+      .resolves.toEqual({
+        status: "resolved",
+        resolutionSource: "dedicated_embedding",
+        resolvedRole: "embedding",
+        providerProfileId: "embedding-profile",
+        providerType: "openai-compatible",
+        model: "embed-v1"
+      });
+    expect(resolveEmbeddingProvider).toHaveBeenCalledWith(database, "owner-1", "campaign-1", null);
     const prefixes = { documentPrefix: "search_document: ", queryPrefix: "search_query: ", automatic: true };
     await expect(port.fingerprint(provider, prefixes)).resolves.toEqual(expect.stringMatching(/^[a-f0-9]{64}$/));
   });
@@ -409,6 +423,65 @@ describe("Chronicle runtime adapters", () => {
       configuration: { embeddingMaxInputTokens: 1_024, embeddingDimensions: 768 }
     });
     expect(JSON.stringify(provider)).not.toContain("must-not-project");
+  });
+
+  it("preserves dedicated, text-fallback, and unconfigured embedding resolution provenance", async () => {
+    const resolveEmbedding = vi.fn()
+      .mockResolvedValueOnce({
+        status: "resolved",
+        requestedRole: "embedding",
+        source: "dedicated_embedding",
+        resolvedRole: "embedding",
+        providerProfileId: "embedding-profile",
+        providerType: "openrouter",
+        model: "embed-model"
+      })
+      .mockResolvedValueOnce({
+        status: "resolved",
+        requestedRole: "embedding",
+        source: "text_fallback",
+        resolvedRole: "text",
+        providerProfileId: "text-profile",
+        providerType: "openrouter",
+        model: "text-model"
+      })
+      .mockResolvedValueOnce({
+        status: "unconfigured",
+        requestedRole: "embedding",
+        source: "none",
+        resolvedRole: null
+      });
+    const bindings = createChroniclePlatformBindings({
+      resolution: { resolveEmbedding },
+      execution: { embedding: vi.fn() },
+      health: { recordHealth: vi.fn() },
+      costs: { recordChronicleCost: vi.fn() },
+      costContext: vi.fn()
+    } as never);
+    const database = { transaction: "accepted-turn" } as never;
+    const scope = { ownerUserId: "owner-1", campaignId: "campaign-1" };
+
+    await expect(bindings.embeddings.resolve(database, scope)).resolves.toEqual({
+      status: "resolved",
+      resolutionSource: "dedicated_embedding",
+      resolvedRole: "embedding",
+      providerProfileId: "embedding-profile",
+      providerType: "openrouter",
+      model: "embed-model"
+    });
+    await expect(bindings.embeddings.resolve(database, scope)).resolves.toEqual({
+      status: "resolved",
+      resolutionSource: "text_fallback",
+      resolvedRole: "text",
+      providerProfileId: "text-profile",
+      providerType: "openrouter",
+      model: "text-model"
+    });
+    await expect(bindings.embeddings.resolve(database, scope)).resolves.toEqual({
+      status: "unconfigured",
+      resolutionSource: "none",
+      resolvedRole: null
+    });
   });
 
   it("turns provider failures into private diagnostics while the worker lease is safely failed", async () => {
@@ -534,7 +607,7 @@ describe("Chronicle runtime adapters", () => {
     const recordProfileCost = vi.fn().mockResolvedValue("cost-1");
     const port = createChronicleEmbeddingProviderPort({
       loadEmbeddingExecution: vi.fn(),
-      resolveEmbeddingProviderId: vi.fn(),
+      resolveEmbeddingProvider: vi.fn(),
       recordProviderHealth,
       recordProfileCost,
       logProviderTransportError: vi.fn()

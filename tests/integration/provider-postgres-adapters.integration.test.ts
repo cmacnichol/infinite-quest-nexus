@@ -153,7 +153,15 @@ integration("provider PostgreSQL adapters", () => {
         ownerUserId: first.ownerUserId,
         selectedProviderProfileId: created.embedding.id,
         allowTextFallback: false
-      })).toMatchObject({ status: "resolved", source: "dedicated_embedding", resolvedRole: "embedding" });
+      })).toEqual({
+        status: "resolved",
+        requestedRole: "embedding",
+        source: "dedicated_embedding",
+        resolvedRole: "embedding",
+        providerProfileId: created.embedding.id,
+        providerType: "openai_compatible",
+        model: "embedding-model"
+      });
     });
 
     const fallbackOwner = await fixture("fallback");
@@ -162,22 +170,33 @@ integration("provider PostgreSQL adapters", () => {
     );
     await inTransaction(async (client) => {
       const resolution = createPostgresProviderRepositories(client).resolution;
-      expect(await resolution.resolveEmbedding({ ownerUserId: fallbackOwner.ownerUserId })).toMatchObject({ status: "unconfigured", source: "none" });
-      expect(await resolution.resolveEmbedding({ ownerUserId: fallbackOwner.ownerUserId, allowTextFallback: true })).toMatchObject({
+      expect(await resolution.resolveEmbedding({ ownerUserId: fallbackOwner.ownerUserId })).toEqual({
+        status: "unconfigured",
+        requestedRole: "embedding",
+        source: "none",
+        resolvedRole: null
+      });
+      expect(await resolution.resolveEmbedding({ ownerUserId: fallbackOwner.ownerUserId, allowTextFallback: true })).toEqual({
         status: "resolved",
+        requestedRole: "embedding",
         source: "text_fallback",
         resolvedRole: "text",
-        providerProfileId: fallbackText.id
+        providerProfileId: fallbackText.id,
+        providerType: "openai_compatible",
+        model: "text-model"
       });
       expect(await resolution.resolveEmbedding({
         ownerUserId: fallbackOwner.ownerUserId,
         selectedProviderProfileId: fallbackText.id,
         allowTextFallback: true,
-      })).toMatchObject({
+      })).toEqual({
         status: "resolved",
+        requestedRole: "embedding",
         source: "text_fallback",
         resolvedRole: "text",
         providerProfileId: fallbackText.id,
+        providerType: "openai_compatible",
+        model: "text-model"
       });
       await expect(resolution.resolveEmbedding({
         ownerUserId: fallbackOwner.ownerUserId,

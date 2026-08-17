@@ -109,6 +109,21 @@ export type ChronicleTransactionEmbeddingResult = Readonly<{
   reportedCost: Readonly<{ amount: string; currency: string }> | null;
 }>;
 
+export type ChronicleTransactionEmbeddingResolution =
+  | Readonly<{
+      status: "resolved";
+      resolutionSource: "dedicated_embedding" | "text_fallback";
+      resolvedRole: "embedding" | "text";
+      providerProfileId: string;
+      providerType: string;
+      model: string;
+    }>
+  | Readonly<{
+      status: "unconfigured";
+      resolutionSource: "none";
+      resolvedRole: null;
+    }>;
+
 export type ChronicleTransactionEmbeddingPort = Readonly<{
   resolve(
     database: MemoryTransactionContext,
@@ -117,7 +132,7 @@ export type ChronicleTransactionEmbeddingPort = Readonly<{
       campaignId: string;
       selectedProviderProfileId?: string | null;
     }>,
-  ): Promise<string | null>;
+  ): Promise<ChronicleTransactionEmbeddingResolution>;
   load(
     database: MemoryTransactionContext,
     scope: Readonly<{ ownerUserId: string; providerProfileId: string; model: string }>,
@@ -812,12 +827,13 @@ export function createPostgresChronicleGenerationTransactionPort(
     async autoEnableCampaignEmbedding(database, scope) {
       const client = transactionClient(database);
       await requireCampaign(client, scope);
-      const providerProfileId = await dependencies.embeddings.resolve(client, {
+      const resolution = await dependencies.embeddings.resolve(client, {
         ownerUserId: scope.ownerUserId,
         campaignId: scope.campaignId,
         selectedProviderProfileId: null
       });
-      if (!providerProfileId) return loadConfig(client, scope);
+      if (resolution.status !== "resolved") return loadConfig(client, scope);
+      const providerProfileId = resolution.providerProfileId;
       const provider = await client.query<{ default_model: string }>(
         `SELECT default_model FROM provider_profiles
           WHERE id = $1 AND owner_user_id = $2 AND enabled = true
@@ -856,11 +872,12 @@ export function createPostgresChronicleGenerationTransactionPort(
       const client = transactionClient(database);
       const config = await loadConfig(client, scope);
       if (!config.enabled) return null;
-      const providerProfileId = await dependencies.embeddings.resolve(client, {
+      const resolution = await dependencies.embeddings.resolve(client, {
         ownerUserId: scope.ownerUserId,
         campaignId: scope.campaignId,
         selectedProviderProfileId: config.providerProfileId ?? null
       });
+      const providerProfileId = resolution.status === "resolved" ? resolution.providerProfileId : null;
       if (!embeddingEligibility({
         enabled: config.enabled,
         providerProfileId,

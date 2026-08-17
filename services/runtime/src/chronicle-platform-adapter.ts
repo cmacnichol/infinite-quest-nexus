@@ -16,6 +16,7 @@ import type {
   ChronicleTransactionEmbeddingPort,
   ChronicleTransactionEmbeddingExecution,
   ChronicleTransactionEmbeddingProvider,
+  ChronicleTransactionEmbeddingResolution,
   ChronicleTransactionEmbeddingResult
 } from "../../../packages/database/src/chronicle-repository.js";
 import { providerModelFingerprint } from "../../../packages/domain/src/chronicle-memory-helpers.js";
@@ -45,12 +46,12 @@ export type ChronicleEmbeddingProviderDependencies = Readonly<{
     providerProfileId: string,
     model: string,
   ): Promise<ChronicleEmbeddingProvider>;
-  resolveEmbeddingProviderId(
+  resolveEmbeddingProvider(
     database: MemoryTransactionContext,
     ownerUserId: string,
     campaignId: string,
     selectedProviderProfileId?: string | null,
-  ): Promise<string | null>;
+  ): Promise<ChronicleTransactionEmbeddingResolution>;
   recordProviderHealth(
     database: MemoryTransactionContext,
     ownerUserId: string,
@@ -79,7 +80,7 @@ export function createChronicleEmbeddingProviderPort(
   dependencies: ChronicleEmbeddingProviderDependencies,
 ): ChronicleEmbeddingProviderPort {
   return {
-    resolve: (database, scope) => dependencies.resolveEmbeddingProviderId(
+    resolve: (database, scope) => dependencies.resolveEmbeddingProvider(
       database,
       scope.ownerUserId,
       scope.campaignId,
