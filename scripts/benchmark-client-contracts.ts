@@ -63,7 +63,8 @@ const turn = {
   imagePrompt: "An emerald observatory.",
   imageUrl: null,
   acceptedAt: TIMESTAMP,
-  reportedCost: null
+  reportedCost: null,
+  chronicleRetrieval: null
 };
 const turns = Array.from({ length: TURN_COUNT }, (_, index) => ({
   ...turn,

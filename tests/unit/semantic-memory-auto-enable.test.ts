@@ -28,7 +28,14 @@ describe("Semantic memory auto-enabling on campaign creation", () => {
       })
     } as unknown as DatabaseClient;
     const embeddings = {
-      resolve: vi.fn().mockResolvedValue("embed-provider-1")
+      resolve: vi.fn().mockResolvedValue({
+        status: "resolved",
+        resolutionSource: "dedicated_embedding",
+        resolvedRole: "embedding",
+        providerProfileId: "embed-provider-1",
+        providerType: "openai_compatible",
+        model: "custom-nomic-v1.5"
+      })
     } as unknown as ChronicleEmbeddingProviderPort;
     const memory = createPostgresChronicleGenerationTransactionPort({ embeddings });
 
@@ -50,7 +57,13 @@ describe("Semantic memory auto-enabling on campaign creation", () => {
         return { rows: [] };
       })
     } as unknown as DatabaseClient;
-    const embeddings = { resolve: vi.fn().mockResolvedValue(null) } as unknown as ChronicleEmbeddingProviderPort;
+    const embeddings = {
+      resolve: vi.fn().mockResolvedValue({
+        status: "unconfigured",
+        resolutionSource: "none",
+        resolvedRole: null
+      })
+    } as unknown as ChronicleEmbeddingProviderPort;
     const memory = createPostgresChronicleGenerationTransactionPort({ embeddings });
 
     await expect(memory.autoEnableCampaignEmbedding(database, scope)).resolves.toMatchObject({
