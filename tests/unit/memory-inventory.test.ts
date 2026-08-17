@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { CHRONICLE_CHUNK_SKIP_REASONS } from "../../packages/domain/src/chronicle-chunking.js";
 
 const inventoryUrl = new URL("../../docs/review/2026-08-05-task-14b-memory-inventory.md", import.meta.url);
 const chronicleDocumentationUrls = {
@@ -119,6 +120,12 @@ describe("Task 14b Chronicle inventory", () => {
       expect(normalized).toContain("at least one current chunk is embedded");
       expect(normalized).toContain("fully sanitized-skipped index uses the complete legacy path");
     }
+    for (const document of [docs.embeddings, docs.decision]) {
+      for (const reason of CHRONICLE_CHUNK_SKIP_REASONS) {
+        expect(document).toContain("`" + reason + "`");
+      }
+    }
+    expect(docs.decision).toContain("`0076_chronicle_chunk_skip_reasons.sql`");
   });
 
   it("never instructs operators to mutate accepted turns or delete legacy embeddings", async () => {

@@ -4,7 +4,10 @@ import type {
   ChronicleChunkBatchPort,
   ChronicleChunkParentPort
 } from "../../packages/application/src/memory/index.js";
-import { createChronicleChunkWorkerExecution } from "../../services/runtime/src/chronicle-chunk-worker-execution.js";
+import {
+  createChronicleChunkWorkerExecution,
+  partitionEmbeddableChunks
+} from "../../services/runtime/src/chronicle-chunk-worker-execution.js";
 import { createChronicleWorkerExecutor } from "../../services/runtime/src/chronicle-platform-adapter.js";
 import { estimateTokens } from "../../packages/domain/src/text.js";
 
@@ -170,6 +173,59 @@ describe("Chronicle chunk worker execution", () => {
     await expect(execution.execute({ ...claim, progress: { ...claim.progress, parentCursor: null, processedParents: 0 } }))
       .rejects.toThrow("Embedding response did not include every requested document.");
     expect(values.batches.commitParentBatch).not.toHaveBeenCalled();
+  });
+
+  it("skips only the chunks that cannot fit one provider request and keeps their siblings embeddable", () => {
+    const capability = {
+      maxInputTokens: 60,
+      maxBatchItems: 4,
+      maxBatchTokens: 60,
+      expectedDimensions: 2,
+      documentPrefix: "search_document: ",
+      queryPrefix: "search_query: ",
+      documentPrefixTokens: 5,
+      queryPrefixTokens: 5,
+      safetyMarginTokens: 5,
+      requestTimeoutMs: 10_000,
+      maxRetries: 2
+    };
+    const draft = (chunkIndex: number, estimatedTokens: number) => ({
+      protocolVersion: "chronicle-chunk-v1" as const,
+      parentMemoryId: "66666666-6666-4666-8666-666666666666",
+      kind: "campaign_summary" as const,
+      chunkIndex,
+      content: `chunk-${chunkIndex}`,
+      contentHash: "b".repeat(64),
+      estimatedTokens,
+      sourceStartOffset: 0,
+      sourceEndOffset: 1,
+      entities: [],
+      entityIds: []
+    });
+
+    const partition = partitionEmbeddableChunks([draft(0, 10), draft(1, 400), draft(2, 20)], capability);
+
+    expect(partition.embeddable.map((chunk) => chunk.chunkIndex)).toEqual([0, 2]);
+    expect([...partition.oversizedIndexes]).toEqual([1]);
+    expect(partition.embeddable.every((chunk) =>
+      chunk.estimatedTokens + capability.documentPrefixTokens
+        <= Math.min(capability.maxInputTokens, capability.maxBatchTokens)
+    )).toBe(true);
+  });
+
+  it("does not misfire the capacity guard on deterministically split production chunks", async () => {
+    const values = dependencies();
+    const execution = createChronicleChunkWorkerExecution(values);
+
+    await execution.execute({ ...claim, progress: { ...claim.progress, parentCursor: null, processedParents: 0 } });
+
+    const committed = values.batches.commitParentBatch.mock.calls.flatMap(([, input]) => input.chunks);
+    expect(committed.length).toBeGreaterThan(1);
+    expect(committed.every((chunk: { skipReason: string | null }) => chunk.skipReason === null)).toBe(true);
+    expect(values.batches.commitParentBatch).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ progress: expect.objectContaining({ skippedChunks: 0 }) })
+    );
   });
 
   it("records a fixed per-chunk skip reason when shadow indexing has no semantic provider", async () => {

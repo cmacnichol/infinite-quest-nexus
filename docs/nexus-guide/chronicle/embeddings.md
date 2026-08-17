@@ -33,4 +33,18 @@ Coverage is configuration-specific: provider, model, dimensions, embedding proto
 
 Chunked production requires 100% terminal coverage: every current parent hash has at least one current `chronicle-chunk-v1` chunk in terminal `embedded` or sanitized `skipped` status, every current chunk is terminal, at least one current chunk is embedded, and the latest chunk job is completed or absent. A fully sanitized-skipped index uses the complete legacy path with the existing `chunk_index_not_ready` fallback. Until the gate is met, `chunked_hybrid` falls open to the complete legacy implementation; it never combines a partial chunk index with production results.
 
+Indexing is incremental. A job only re-embeds parents whose current content is not already
+terminally chunked, so an accepted turn costs work proportional to what changed rather than a
+full campaign re-embed. Long campaigns therefore keep reaching the readiness gate while being
+actively played. If an accepted turn arrives during a long initial backfill, the job resumes
+from its durable cursor whenever the already-processed parents are unchanged, and restarts only
+when one of them was edited.
+
+Embedding requests are batched. Providers that do not declare a batch limit are assumed to accept
+16 documents per request; the campaign batch size lowers this, and `embeddingMaxBatchItems: 1`
+restores one request per document for providers that require it. A response that does not return
+one vector per requested document is always rejected rather than trusted.
+
+A skipped chunk always records one sanitized reason from the closed set `semantic_retrieval_disabled`, `chunk_exceeds_provider_capacity`, or `chunk_embedding_skipped`. Every member counts as terminal for the readiness gate, and provider text, endpoints, and credentials are never stored in the reason. `chunk_exceeds_provider_capacity` marks a chunk that could not fit one provider request; its sibling chunks still index normally.
+
 Disabling or losing the embedding provider does not block story generation. Chronicle uses lexical/entity, relevance, recency, and chronology signals and reports the degradation in health. Re-enable the provider and select **Save & index** to rebuild derived chunks; do not repair them by changing story history.

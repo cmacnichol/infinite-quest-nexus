@@ -4,7 +4,7 @@
 
 | Implementation | Behavior |
 | --- | --- |
-| Legacy hybrid | Default. Uses the established memory-level lexical, entity, semantic, recency, and chronology path. |
+| Legacy hybrid | Default. Uses the established memory-level lexical, entity, semantic, recency, and chronology path. Chronological coverage is a deterministic evenly-spaced sample of at most 32 memories, so a long campaign does not fill the prompt with every past turn and crowd out relevance-selected entries. |
 | Chunked hybrid | Explicit opt-in. Uses current deterministic chunks, the generated weighted reciprocal-rank-fusion profile, and deterministic diversity limits. It falls back to the complete legacy path unless the chunk index meets the readiness gate. |
 
 Enabling **Shadow comparison** calculates lexical, legacy-hybrid, and proposed chunked results for diagnostics while legacy or chunked production selection continues independently. Shadow comparison never changes production selection. Use it only on selected campaigns after compatible code and the derived chunk schema have been deployed.

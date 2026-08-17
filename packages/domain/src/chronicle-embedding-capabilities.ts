@@ -44,6 +44,16 @@ function safeOverride(provider: EmbeddingCapabilityProvider, key: SafeOverrideKe
   return typeof value === "number" && Number.isSafeInteger(value) && value >= minimum && value <= maximum ? value : null;
 }
 
+/**
+ * Unknown batch capacity used to mean one document per request, which made a full campaign
+ * reindex cost one HTTP round trip per chunk and dominated indexing time on long campaigns.
+ * OpenAI-compatible embedding endpoints accept a document array, and `assertCompleteEmbeddingBatch`
+ * rejects any response that does not return one vector per requested document, so an under-
+ * delivering provider fails loudly instead of being silently trusted. Campaign batch size still
+ * lowers this, and `embeddingMaxBatchItems: 1` restores per-document requests.
+ */
+const UNKNOWN_MAX_BATCH_ITEMS = 16;
+
 function unknownInputCapacity(contextWindowTokens: number): number {
   if (!Number.isSafeInteger(contextWindowTokens) || contextWindowTokens <= 0) {
     throw new Error("Embedding provider context window cannot provide a positive input capacity.");
@@ -65,7 +75,7 @@ export function resolveEmbeddingCapability(provider: EmbeddingCapabilityProvider
   const queryPrefixTokens = estimateTokens(prefixes.queryPrefix);
   return Object.freeze({
     maxInputTokens,
-    maxBatchItems: safeOverride(provider, "embeddingMaxBatchItems") ?? 1,
+    maxBatchItems: safeOverride(provider, "embeddingMaxBatchItems") ?? UNKNOWN_MAX_BATCH_ITEMS,
     maxBatchTokens: safeOverride(provider, "embeddingMaxBatchTokens") ?? maxInputTokens,
     expectedDimensions: safeOverride(provider, "embeddingDimensions"),
     documentPrefix: prefixes.documentPrefix,

@@ -17,7 +17,10 @@ describe("Chronicle embedding capabilities", () => {
 
     expect(capability).toMatchObject({
       maxInputTokens: 8_192,
-      maxBatchItems: 1,
+      // Batched by default. One document per request made a full campaign reindex cost one
+      // round trip per chunk, which dominated indexing time on long campaigns. Incomplete
+      // batch responses are still rejected, and embeddingMaxBatchItems can lower this.
+      maxBatchItems: 16,
       maxBatchTokens: 8_192,
       expectedDimensions: null,
       documentPrefix: "",
@@ -25,6 +28,15 @@ describe("Chronicle embedding capabilities", () => {
       requestTimeoutMs: 12_000,
       maxRetries: 2
     });
+  });
+
+  it("still honours an explicit per-document batch override", () => {
+    expect(resolveEmbeddingCapability({
+      model: "custom-embed-v1",
+      contextWindowTokens: 20_000,
+      requestTimeoutMs: 12_000,
+      configuration: { embeddingMaxBatchItems: 1 }
+    }).maxBatchItems).toBe(1);
   });
 
   it.each([0, 1])("rejects a context window of %i before resolving an unknown capacity", (contextWindowTokens) => {

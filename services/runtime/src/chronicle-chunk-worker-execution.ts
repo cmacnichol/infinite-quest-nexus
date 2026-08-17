@@ -15,7 +15,8 @@ import {
 import {
   CHRONICLE_CHUNK_PROTOCOL_VERSION,
   chunkChronicleMemory,
-  type ChronicleChunkDraft
+  type ChronicleChunkDraft,
+  type ChronicleChunkSkipReason
 } from "../../../packages/domain/src/chronicle-chunking.js";
 import {
   CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
@@ -106,6 +107,29 @@ function finalChunks(parent: ChronicleChunkParent, capability?: EmbeddingCapabil
     ? drafted.flatMap((chunk) => splitChunkForCapability(chunk, splitCapability))
     : drafted;
   return Object.freeze(split.map((chunk, chunkIndex) => Object.freeze({ ...chunk, chunkIndex })));
+}
+
+/**
+ * Splits drafts into the items that provably fit one provider request and the items that
+ * do not. Deterministic chunk splitting normally leaves this empty; keeping the guard means
+ * an unrepresentable chunk is skipped with a sanitized reason and its siblings still index,
+ * rather than being submitted over the limit and silently truncated by the provider.
+ */
+export function partitionEmbeddableChunks(
+  chunks: readonly ChronicleChunkDraft[],
+  capability: EmbeddingCapability,
+): Readonly<{ embeddable: readonly ChronicleChunkDraft[]; oversizedIndexes: ReadonlySet<number> }> {
+  const embeddable: ChronicleChunkDraft[] = [];
+  const oversizedIndexes = new Set<number>();
+  const singleItemLimit = Math.min(capability.maxInputTokens, capability.maxBatchTokens);
+  for (const [index, chunk] of chunks.entries()) {
+    if (chunk.estimatedTokens + capability.documentPrefixTokens > singleItemLimit) {
+      oversizedIndexes.add(index);
+      continue;
+    }
+    embeddable.push(chunk);
+  }
+  return Object.freeze({ embeddable: Object.freeze(embeddable), oversizedIndexes });
 }
 
 function boundedBatches(
@@ -240,10 +264,13 @@ export function createChronicleChunkWorkerExecution(
         throwIfLeaseLost(lifecycle);
         const parent = page.parents[0]!;
         const drafts = finalChunks(parent, capability ?? undefined);
+        const partition = capability
+          ? partitionEmbeddableChunks(drafts, capability)
+          : { embeddable: [] as readonly ChronicleChunkDraft[], oversizedIndexes: new Set<number>() };
         const results = [];
         const vectors: (readonly number[])[] = [];
         if (provider && capability) {
-          for (const batch of boundedBatches(drafts, capability)) {
+          for (const batch of boundedBatches(partition.embeddable, capability)) {
             throwIfLeaseLost(lifecycle);
             try {
               const result = await embedWithRetry(
@@ -264,16 +291,25 @@ export function createChronicleChunkWorkerExecution(
             }
           }
         }
-        const chunks = drafts.map((chunk, index) => ({
-          ...chunk,
-          embedding: provider ? vectors[index]! : null,
-          skipReason: provider ? null : "semantic_retrieval_disabled"
-        }));
+        let vectorIndex = 0;
+        const chunks = drafts.map((chunk, index) => {
+          const skipReason: ChronicleChunkSkipReason | null = !provider
+            ? "semantic_retrieval_disabled"
+            : partition.oversizedIndexes.has(index)
+              ? "chunk_exceeds_provider_capacity"
+              : null;
+          return {
+            ...chunk,
+            embedding: skipReason === null ? vectors[vectorIndex++]! : null,
+            skipReason
+          };
+        });
+        const embeddedCount = chunks.filter((chunk) => chunk.skipReason === null).length;
         const nextProgress: ChronicleChunkJobProgress = {
           parentCursor: `${parent.ordinal}:${parent.id}`,
           processedParents: progress.processedParents + 1,
-          embeddedChunks: progress.embeddedChunks + (provider ? chunks.length : 0),
-          skippedChunks: progress.skippedChunks + (provider ? 0 : chunks.length),
+          embeddedChunks: progress.embeddedChunks + embeddedCount,
+          skippedChunks: progress.skippedChunks + (chunks.length - embeddedCount),
           totalParents: progress.totalParents,
           capabilityFingerprint: fingerprint
         };

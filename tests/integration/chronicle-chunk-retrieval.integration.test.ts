@@ -143,14 +143,14 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     );
   }
 
-  async function configuredFixture(label: string) {
+  async function configuredFixture(label: string, providerRole: "embedding" | "text" = "embedding") {
     const fixture = await campaignFixture(label);
     const provider = await pool.query<{ id: string }>(
       `INSERT INTO provider_profiles
          (owner_user_id,name,provider_type,provider_role,base_url,default_model)
-       VALUES ($1,$2,'openai_compatible','embedding','http://fixture.invalid/v1','chunk-embed-v1')
+       VALUES ($1,$2,'openai_compatible',$3,'http://fixture.invalid/v1','chunk-embed-v1')
        RETURNING id`,
-      [ownerUserId, `${label} provider`]
+      [ownerUserId, `${label} provider`, providerRole]
     );
     const providerId = provider.rows[0]!.id;
     await pool.query(
@@ -174,6 +174,7 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
             id: providerId,
             model: "chunk-embed-v1",
             providerType: "openai_compatible",
+            configuration: { embeddingDimensions: 2 },
             async embed(documents: readonly string[]) {
               return { embeddings: documents.map(() => [1, 0]), responseId: "unused", usage: {}, reportedCost: null };
             }
@@ -678,12 +679,220 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     expect(chunkRankStatements).toEqual([]);
   });
 
+  it("bounds legacy chronological coverage with a text-role embedding provider while still spanning long history", async () => {
+    const { fixture, providerId } = await configuredFixture("long legacy campaign", "text");
+    await pool.query(
+      "UPDATE campaign_memory_configs SET retrieval_implementation='legacy_hybrid' WHERE campaign_id=$1",
+      [fixture.campaignId]
+    );
+    const turnCount = 120;
+    for (let turn = 1; turn <= turnCount; turn += 1) {
+      const created = await pool.query<{ id: string }>(
+        `INSERT INTO turns (owner_user_id,campaign_id,turn_number,action,narration,state_snapshot_private,accepted_at)
+         VALUES ($1,$2,$3,$4,$5,'{}'::jsonb,now()) RETURNING id`,
+        [fixture.ownerUserId, fixture.campaignId, turn, `Action ${turn}.`, `The company records passage ${turn}.`]
+      );
+      await pool.query(
+        `INSERT INTO chronicle_memories
+           (owner_user_id,campaign_id,world_version_id,turn_id,memory_kind,ordinal,content,token_estimate,importance)
+         VALUES ($1,$2,$3,$4,'turn_fiction',$5,$6,12,0.5)`,
+        [fixture.ownerUserId, fixture.campaignId, fixture.worldVersionId, created.rows[0]!.id, turn,
+          `The company records passage ${turn}.`]
+      );
+    }
+    await pool.query("UPDATE campaigns SET active_turn_number=$2 WHERE id=$1", [fixture.campaignId, turnCount]);
+
+    const embeddingQueries: string[] = [];
+    const preview = await transaction(providerId, embeddingQueries).buildContextPreview(pool, {
+      ...fixture,
+      request: { budgetTokens: 32_000, compression: "auto" as const, query: "passage", recentTurns: 8 }
+    });
+
+    const chronicle = (preview.scopes as {
+      chronicle: readonly Readonly<{ ordinal: number; reason: string }>[];
+    }).chronicle;
+    const chronological = chronicle.filter((entry) => entry.reason === "chronological");
+    // Previously every turn memory was added and only the token budget trimmed the prompt, so
+    // the Chronicle scope grew with campaign length and crowded out relevance-selected entries.
+    expect(chronological.length).toBeLessThanOrEqual(32);
+    expect(chronicle.length).toBeLessThan(turnCount);
+    // The sweep reaches the start of the campaign and most of the way to its end; the final
+    // turns are claimed earlier by the dedicated recency selection rather than by this sweep.
+    const ordinals = chronological.map((entry) => entry.ordinal);
+    expect(Math.min(...ordinals)).toBeLessThanOrEqual(5);
+    expect(Math.max(...ordinals)).toBeGreaterThanOrEqual(Math.floor(turnCount * 0.7));
+    // The newest accepted turn is rendered as the current scene rather than Chronicle history,
+    // so recency selection reaches the turn immediately before it.
+    expect(chronicle.some((entry) => entry.ordinal >= turnCount - 1)).toBe(true);
+    expect(embeddingQueries).toHaveLength(1);
+  });
+
+  it("loads candidate vectors once instead of rendering them in every rank query", async () => {
+    const { fixture, providerId } = await configuredFixture("vector loading");
+    const memory = await parent(fixture, {
+      turnId: null,
+      kind: "campaign_summary",
+      ordinal: 1,
+      content: "The lantern keeper recorded the amber ledger."
+    });
+    await embeddedChunk(fixture, providerId, {
+      parentId: memory.id,
+      parentContentHash: memory.contentHash,
+      kind: "campaign_summary",
+      content: "The lantern keeper recorded the amber ledger.",
+      vector: [1, 0]
+    });
+    await pool.query(
+      "UPDATE campaign_memory_configs SET retrieval_implementation='chunked_hybrid' WHERE campaign_id=$1",
+      [fixture.campaignId]
+    );
+
+    const rankStatements: string[] = [];
+    const vectorLoads: string[] = [];
+    const generation = transaction(providerId, []);
+    const preview = await withTransaction(pool, async (database) => {
+      const intercepted = new Proxy(database, {
+        get(target, property) {
+          if (property === "query") {
+            return (statement: unknown, values?: readonly unknown[]) => {
+              if (typeof statement === "string") {
+                if (statement.includes("/* chronicle_rank:")) rankStatements.push(statement);
+                if (statement.includes("embedding::text AS embedding")) vectorLoads.push(statement);
+              }
+              return target.query(statement as never, values as never);
+            };
+          }
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+      });
+      return generation.buildContextPreview(intercepted as typeof database, {
+        ...fixture,
+        request: { budgetTokens: 4_096, compression: "auto" as const, query: "amber ledger", recentTurns: 1 }
+      });
+    });
+
+    expect(preview.retrieval).toMatchObject({ implementation: "chunked_hybrid" });
+    expect(rankStatements.length).toBeGreaterThan(1);
+    // Rendering the campaign's vectors as text inside each rank query made retrieval latency
+    // grow with campaign length; they are now fetched once for the fused candidate set.
+    for (const statement of rankStatements) {
+      expect(statement).not.toContain("embedding::text");
+    }
+    expect(vectorLoads).toHaveLength(1);
+  });
+
+  it("uses the complete legacy path when an eligible text provider cannot embed a ready chunk query", async () => {
+    const { fixture, providerId } = await configuredFixture("text provider runtime fallback", "text");
+    const memory = await parent(fixture, {
+      turnId: null,
+      kind: "campaign_summary",
+      ordinal: 1,
+      content: "The legacy fallback ledger remembers the cobalt lantern."
+    });
+    await embeddedChunk(fixture, providerId, {
+      parentId: memory.id,
+      parentContentHash: memory.contentHash,
+      kind: "campaign_summary",
+      content: "The legacy fallback ledger remembers the cobalt lantern.",
+      vector: [1, 0]
+    });
+    const request = {
+      ...fixture,
+      request: {
+        budgetTokens: 4_096,
+        compression: "auto" as const,
+        query: "cobalt lantern",
+        recentTurns: 1
+      }
+    };
+    let embeddingAttempts = 0;
+    const generation = createPostgresChronicleGenerationTransactionPort({
+      embeddings: {
+        async resolve(_database, requested) {
+          return requested.selectedProviderProfileId === providerId ? providerId : null;
+        },
+        async load() {
+          return {
+            id: providerId,
+            model: "chunk-embed-v1",
+            providerType: "openai_compatible",
+            configuration: { embeddingDimensions: 2 },
+            async embed() {
+              throw new Error("fixture text embedding endpoint unavailable");
+            }
+          };
+        },
+        async embed(provider, documents) {
+          embeddingAttempts += 1;
+          return provider.embed(documents);
+        },
+        async fingerprint() { return "chunk-fingerprint"; },
+        async recordHealth() {},
+        async recordCost() { return null; },
+        logDiagnostic() {}
+      }
+    });
+    await pool.query(
+      `UPDATE campaign_memory_configs
+          SET retrieval_implementation='legacy_hybrid',embedding_enabled=false
+        WHERE campaign_id=$1`,
+      [fixture.campaignId]
+    );
+    const legacy = await generation.buildContextPreview(pool, request);
+    await pool.query(
+      `UPDATE campaign_memory_configs
+          SET retrieval_implementation='chunked_hybrid',embedding_enabled=true
+        WHERE campaign_id=$1`,
+      [fixture.campaignId]
+    );
+    const chunkRankStatements: string[] = [];
+    const actual = await withTransaction(pool, async (database) => {
+      const intercepted = new Proxy(database, {
+        get(target, property) {
+          if (property === "query") {
+            return (statement: unknown, values?: readonly unknown[]) => {
+              if (typeof statement === "string" && statement.includes("/* chronicle_rank:")) {
+                chunkRankStatements.push(statement);
+              }
+              return target.query(statement as never, values as never);
+            };
+          }
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+      }) as DatabaseClient;
+      return generation.buildContextPreview(intercepted, request);
+    });
+
+    expect(actual).toMatchObject({
+      retrieval: {
+        implementation: "chunked_hybrid",
+        mode: "lexical_fallback",
+        semanticAvailable: false,
+        fallbackReason: "semantic_retrieval_unavailable"
+      }
+    });
+    expect(actual.scopes).toEqual(legacy.scopes);
+    expect(actual.budget).toEqual(legacy.budget);
+    expect(actual.metrics).toEqual(legacy.metrics);
+    expect(embeddingAttempts).toBe(1);
+    expect(chunkRankStatements).toEqual([]);
+  });
+
   it("gates chunk retrieval on the complete terminal current-protocol readiness matrix", async () => {
     const cases = [
       { name: "wrong protocol", expected: "fallback" },
       { name: "wrong hash", expected: "fallback" },
+      { name: "wrong provider", expected: "fallback" },
+      { name: "wrong model", expected: "fallback" },
+      { name: "wrong dimensions", expected: "fallback" },
+      { name: "wrong embedding protocol", expected: "fallback" },
+      { name: "wrong fingerprint", expected: "fallback" },
       { name: "pending", expected: "fallback" },
       { name: "embedded plus sanitized skipped", expected: "chunked" },
+      { name: "embedded plus semantic disabled skip", expected: "chunked" },
+      { name: "embedded plus capacity skip", expected: "chunked" },
       { name: "queued job", expected: "fallback" },
       { name: "running job", expected: "fallback" },
       { name: "failed job", expected: "fallback" },
@@ -731,6 +940,38 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
           "UPDATE chronicle_memory_chunks SET parent_content_hash=repeat('a',64) WHERE parent_memory_id=$1",
           [second.id]
         );
+      } else if (readinessCase.name === "wrong provider") {
+        const staleProvider = await pool.query<{ id: string }>(
+          `INSERT INTO provider_profiles
+             (owner_user_id,name,provider_type,provider_role,base_url,default_model)
+           VALUES ($1,$2,'openai_compatible','embedding','http://stale.invalid/v1','chunk-embed-v1')
+           RETURNING id`,
+          [ownerUserId, `readiness stale provider ${fixture.campaignId}`]
+        );
+        await pool.query(
+          "UPDATE chronicle_memory_chunks SET embedding_provider_profile_id=$2 WHERE parent_memory_id=$1",
+          [second.id, staleProvider.rows[0]!.id]
+        );
+      } else if (readinessCase.name === "wrong model") {
+        await pool.query(
+          "UPDATE chronicle_memory_chunks SET embedding_model='chunk-embed-v0' WHERE parent_memory_id=$1",
+          [second.id]
+        );
+      } else if (readinessCase.name === "wrong dimensions") {
+        await pool.query(
+          "UPDATE chronicle_memory_chunks SET embedding_dimensions=3 WHERE parent_memory_id=$1",
+          [second.id]
+        );
+      } else if (readinessCase.name === "wrong embedding protocol") {
+        await pool.query(
+          "UPDATE chronicle_memory_chunks SET embedding_protocol_version='chronicle-embedding-v0' WHERE parent_memory_id=$1",
+          [second.id]
+        );
+      } else if (readinessCase.name === "wrong fingerprint") {
+        await pool.query(
+          "UPDATE chronicle_memory_chunks SET embedding_provider_fingerprint='stale-fingerprint' WHERE parent_memory_id=$1",
+          [second.id]
+        );
       } else if (readinessCase.name === "pending") {
         await pool.query(
           `UPDATE chronicle_memory_chunks
@@ -741,15 +982,22 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
             WHERE parent_memory_id=$1`,
           [second.id]
         );
-      } else if (readinessCase.name === "embedded plus sanitized skipped") {
+      } else if (readinessCase.name === "embedded plus sanitized skipped"
+        || readinessCase.name === "embedded plus semantic disabled skip"
+        || readinessCase.name === "embedded plus capacity skip") {
+        const reason = readinessCase.name === "embedded plus semantic disabled skip"
+          ? "semantic_retrieval_disabled"
+          : readinessCase.name === "embedded plus capacity skip"
+            ? "chunk_exceeds_provider_capacity"
+            : "chunk_embedding_skipped";
         await pool.query(
           `UPDATE chronicle_memory_chunks
-              SET embedding=NULL,embedding_status='skipped',embedding_skip_reason='chunk_embedding_skipped',
+              SET embedding=NULL,embedding_status='skipped',embedding_skip_reason=$2,
                   embedding_provider_profile_id=NULL,embedding_model=NULL,embedding_dimensions=NULL,
                   embedding_protocol_version=NULL,embedding_provider_fingerprint=NULL,
                   embedding_content_hash=NULL,embedding_updated_at=NULL
             WHERE parent_memory_id=$1`,
-          [second.id]
+          [second.id, reason]
         );
       } else if (readinessCase.name === "queued job") {
         await pool.query(
@@ -795,15 +1043,32 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
         "UPDATE campaign_memory_configs SET retrieval_implementation='chunked_hybrid' WHERE campaign_id=$1",
         [fixture.campaignId]
       );
-      const actual = await generation.buildContextPreview(pool, {
-        ...fixture,
-        request: {
-          budgetTokens: 4_096,
-          compression: "auto",
-          query: "old oath",
-          recentTurns: 1,
-          throughTurnNumber: 2
-        }
+      const chunkRankStatements: string[] = [];
+      const actual = await withTransaction(pool, async (database) => {
+        const intercepted = new Proxy(database, {
+          get(target, property) {
+            if (property === "query") {
+              return (statement: unknown, values?: readonly unknown[]) => {
+                if (typeof statement === "string" && statement.includes("/* chronicle_rank:")) {
+                  chunkRankStatements.push(statement);
+                }
+                return target.query(statement as never, values as never);
+              };
+            }
+            const value = Reflect.get(target, property, target) as unknown;
+            return typeof value === "function" ? value.bind(target) : value;
+          }
+        }) as DatabaseClient;
+        return generation.buildContextPreview(intercepted, {
+          ...fixture,
+          request: {
+            budgetTokens: 4_096,
+            compression: "auto",
+            query: "old oath",
+            recentTurns: 1,
+            throughTurnNumber: 2
+          }
+        });
       });
 
       if (readinessCase.expected === "chunked") {
@@ -817,6 +1082,7 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
         expect(actual.scopes, readinessCase.name).toEqual(legacy.scopes);
         expect(actual.budget, readinessCase.name).toEqual(legacy.budget);
         expect(actual.metrics, readinessCase.name).toEqual(legacy.metrics);
+        expect(chunkRankStatements, readinessCase.name).toEqual([]);
       }
     }
   });

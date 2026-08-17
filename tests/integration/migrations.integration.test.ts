@@ -10,6 +10,12 @@ import {
   waitForDatabaseMigrations
 } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, type DatabasePool } from "../../packages/database/src/pool.js";
+import {
+  createPostgresChronicleChunkBatchPort,
+  createPostgresChronicleChunkJobStatePort,
+  createPostgresChronicleChunkParentPort,
+  enqueuePostgresChronicleChunkIndex
+} from "../../packages/database/src/chronicle-chunk-repository.js";
 import { dropTestDatabaseWhenIdle } from "./database-test-helpers.js";
 import { snapshotTurnRows } from "../helpers/turn-row-snapshot.js";
 
@@ -1213,7 +1219,9 @@ integration("standard database migration runner", () => {
         "0072_chronicle_memory_chunks",
         "0073_chronicle_chunk_job_fencing",
         "0074_chronicle_retrieval_observability",
-        "0075_chronicle_query_embedding_cache"
+        "0075_chronicle_query_embedding_cache",
+        "0076_chronicle_chunk_skip_reasons",
+        "0077_chronicle_chunk_processed_signature"
       ]);
 
       const scrubbed = await isolatedPool.query<{ technical_metadata: Record<string, unknown> }>(
@@ -2093,6 +2101,164 @@ integration("standard database migration runner", () => {
       if (isolatedPool) await isolatedPool.end();
       await dropTestDatabaseWhenIdle(pool, databaseName);
       await rm(migrationDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("upgrades an already-indexed Chronicle database without rewriting turns, chunks, or vectors", async () => {
+    const databaseName = `infinitequest_chunk_upgrade_${crypto.randomUUID().replaceAll("-", "")}`;
+    const databaseUrlValue = new URL(databaseUrl!);
+    databaseUrlValue.pathname = `/${databaseName}`;
+    const beforeDirectory = await mkdtemp(join(tmpdir(), "infinitequest-chunk-upgrade-before-"));
+    let isolatedPool: DatabasePool | null = null;
+    try {
+      await pool.query(`CREATE DATABASE ${databaseName}`);
+      // A database that predates the incremental-indexing work: migrated only through 0075.
+      for (const file of await readdir(resolve("database/migrations"))) {
+        if (file.endsWith(".sql") && file < "0076_") {
+          await copyFile(join(resolve("database/migrations"), file), join(beforeDirectory, file));
+        }
+      }
+      isolatedPool = createDatabasePool(databaseUrlValue.toString(), 2);
+      await migrateDatabase(isolatedPool, beforeDirectory);
+      const ownerUserId = (await isolatedPool.query<{ id: string }>(
+        "SELECT id FROM users WHERE system_key = 'initial-owner'"
+      )).rows[0]!.id;
+
+      const world = await isolatedPool.query<{ id: string }>(
+        "INSERT INTO worlds (owner_user_id,title) VALUES ($1,'Upgrade world') RETURNING id", [ownerUserId]
+      );
+      const version = await isolatedPool.query<{ id: string }>(
+        `INSERT INTO world_versions (world_id,owner_user_id,version_number,content)
+         VALUES ($1,$2,1,'{"world":{"title":"Upgrade world"}}'::jsonb) RETURNING id`,
+        [world.rows[0]!.id, ownerUserId]
+      );
+      const campaign = await isolatedPool.query<{ id: string }>(
+        `INSERT INTO campaigns (owner_user_id,world_version_id,title,active_turn_number)
+         VALUES ($1,$2,'Upgrade campaign',1) RETURNING id`,
+        [ownerUserId, version.rows[0]!.id]
+      );
+      await isolatedPool.query("INSERT INTO campaign_state (campaign_id,owner_user_id) VALUES ($1,$2)",
+        [campaign.rows[0]!.id, ownerUserId]);
+      const provider = await isolatedPool.query<{ id: string }>(
+        `INSERT INTO provider_profiles (owner_user_id,name,provider_type,provider_role,base_url,default_model)
+         VALUES ($1,'Upgrade provider','openai_compatible','embedding','http://upgrade.invalid/v1','embed-v1')
+         RETURNING id`, [ownerUserId]
+      );
+      await isolatedPool.query(
+        `INSERT INTO campaign_memory_configs
+           (campaign_id,owner_user_id,embedding_enabled,embedding_provider_profile_id,embedding_model,
+            retrieval_implementation)
+         VALUES ($1,$2,true,$3,'embed-v1','chunked_hybrid')`,
+        [campaign.rows[0]!.id, ownerUserId, provider.rows[0]!.id]
+      );
+      const turnRow = await isolatedPool.query<{ id: string }>(
+        `INSERT INTO turns (owner_user_id,campaign_id,turn_number,action,narration,state_snapshot_private,accepted_at)
+         VALUES ($1,$2,1,'Cross the bridge.','The bridge holds.','{}'::jsonb,now()) RETURNING id`,
+        [ownerUserId, campaign.rows[0]!.id]
+      );
+      const parents = await isolatedPool.query<{ id: string; content_hash: string }>(
+        `INSERT INTO chronicle_memories
+           (owner_user_id,campaign_id,world_version_id,turn_id,memory_kind,ordinal,content,token_estimate)
+         VALUES ($1,$2,$3,$4,'turn_fiction',1,'The bridge holds.',5),
+                ($1,$2,$3,NULL,'campaign_summary',2,'The party crossed safely.',6)
+         RETURNING id,content_hash`,
+        [ownerUserId, campaign.rows[0]!.id, version.rows[0]!.id, turnRow.rows[0]!.id]
+      );
+      // Pre-upgrade chunk rows: one embedded, one skipped with the only reason the old writer
+      // could produce. Both must remain valid under the closed-set constraint added by 0076.
+      await isolatedPool.query(
+        `INSERT INTO chronicle_memory_chunks
+           (owner_user_id,campaign_id,world_version_id,parent_memory_id,parent_content_hash,
+            chunking_protocol_version,chunk_ordinal,chunk_kind,content,token_estimate,
+            embedding,embedding_status,embedding_provider_profile_id,embedding_model,embedding_dimensions,
+            embedding_protocol_version,embedding_provider_fingerprint,embedding_content_hash,embedding_updated_at)
+         VALUES ($1,$2,$3,$4,$5,'chronicle-chunk-v1',0,'turn_narration','The bridge holds.',5,
+                 '[0.5,0.5]'::vector,'embedded',$6,'embed-v1',2,'chronicle-embedding-v1','legacy-fingerprint',$7,now())`,
+        [ownerUserId, campaign.rows[0]!.id, version.rows[0]!.id, parents.rows[0]!.id,
+          parents.rows[0]!.content_hash, provider.rows[0]!.id,
+          createHash("sha256").update("The bridge holds.", "utf8").digest("hex")]
+      );
+      await isolatedPool.query(
+        `INSERT INTO chronicle_memory_chunks
+           (owner_user_id,campaign_id,world_version_id,parent_memory_id,parent_content_hash,
+            chunking_protocol_version,chunk_ordinal,chunk_kind,content,token_estimate,
+            embedding_status,embedding_skip_reason)
+         VALUES ($1,$2,$3,$4,$5,'chronicle-chunk-v1',0,'campaign_summary','The party crossed safely.',6,
+                 'skipped','chunk_embedding_skipped')`,
+        [ownerUserId, campaign.rows[0]!.id, version.rows[0]!.id, parents.rows[1]!.id,
+          parents.rows[1]!.content_hash]
+      );
+      await isolatedPool.query(
+        `INSERT INTO chronicle_chunk_jobs (owner_user_id,campaign_id,status,completed_at,work_signature,progress)
+         VALUES ($1,$2,'completed',now(),repeat('b',64),
+                 '{"parentCursor":"2:x","processedParents":2,"embeddedChunks":1,"skippedChunks":1,
+                   "totalParents":2,"capabilityFingerprint":"legacy-capability"}'::jsonb)`,
+        [ownerUserId, campaign.rows[0]!.id]
+      );
+
+      const beforeTurns = await snapshotTurnRows(isolatedPool, ownerUserId, campaign.rows[0]!.id);
+      const beforeChunks = await isolatedPool.query(
+        `SELECT id,embedding::text AS embedding,embedding_status,embedding_skip_reason,content_hash
+           FROM chronicle_memory_chunks ORDER BY chunk_kind`
+      );
+
+      const applied = await migrateDatabase(isolatedPool, resolve("database/migrations"));
+      expect(applied).toEqual([
+        "0076_chronicle_chunk_skip_reasons",
+        "0077_chronicle_chunk_processed_signature"
+      ]);
+
+      // Accepted turns and every derived vector survive the upgrade untouched.
+      expect(await snapshotTurnRows(isolatedPool, ownerUserId, campaign.rows[0]!.id)).toEqual(beforeTurns);
+      expect(await isolatedPool.query(
+        `SELECT id,embedding::text AS embedding,embedding_status,embedding_skip_reason,content_hash
+           FROM chronicle_memory_chunks ORDER BY chunk_kind`
+      )).toMatchObject({ rows: beforeChunks.rows });
+
+      // The pre-existing skip reason is inside the closed set; anything else is now rejected.
+      await expect(isolatedPool.query(
+        "UPDATE chronicle_memory_chunks SET embedding_skip_reason='provider refused' WHERE embedding_status='skipped'"
+      )).rejects.toMatchObject({ constraint: "chronicle_memory_chunks_embedding_skip_reason_check" });
+
+      // Jobs carried over from before the upgrade have no recorded prefix, so the next enqueue
+      // conservatively restarts them rather than trusting a cursor it cannot verify.
+      expect(await isolatedPool.query<{ processed_signature: string | null }>(
+        "SELECT processed_signature FROM chronicle_chunk_jobs"
+      )).toMatchObject({ rows: [{ processed_signature: null }] });
+
+      // The upgraded worker must recognise the pre-upgrade index as current. Enqueueing after
+      // the upgrade creates a job that finds no parent needing work, so an existing campaign is
+      // not re-embedded just because the code changed.
+      const upgradedJob = await enqueuePostgresChronicleChunkIndex(isolatedPool, {
+        ownerUserId, campaignId: campaign.rows[0]!.id, worldVersionId: version.rows[0]!.id
+      });
+      expect(upgradedJob).not.toBeNull();
+      const claim = await createPostgresChronicleChunkJobStatePort(isolatedPool)
+        .claimNext({ workerId: "upgrade-worker", leaseSeconds: 30 });
+      if (!claim) throw new Error("upgraded chunk job was not claimed");
+      const page = await createPostgresChronicleChunkParentPort(isolatedPool)
+        .loadForClaim(claim, { batchLimit: 10, cursor: null });
+      expect(page.parents).toEqual([]);
+      expect(page.totalParents).toBe(2);
+
+      // A job that was mid-flight at upgrade time carries an older capability fingerprint. That
+      // is the one case that still costs a rebuild, and it clears vectors rather than silently
+      // mixing embeddings produced under different capabilities.
+      await isolatedPool.query(
+        `UPDATE chronicle_chunk_jobs
+            SET progress=jsonb_set(progress,'{capabilityFingerprint}','"legacy-capability"')
+          WHERE id=$1`,
+        [claim.jobId]
+      );
+      await expect(createPostgresChronicleChunkBatchPort(isolatedPool, { recordCost: async () => null })
+        .prepareClaim(claim, { capabilityFingerprint: "upgraded-capability" })).resolves.toBe("requeued");
+      expect(await isolatedPool.query<{ pending: string }>(
+        "SELECT count(*)::text AS pending FROM chronicle_memory_chunks WHERE embedding_status='pending'"
+      )).toMatchObject({ rows: [{ pending: "2" }] });
+    } finally {
+      if (isolatedPool) await isolatedPool.end();
+      await dropTestDatabaseWhenIdle(pool, databaseName);
+      await rm(beforeDirectory, { recursive: true, force: true });
     }
   });
 });

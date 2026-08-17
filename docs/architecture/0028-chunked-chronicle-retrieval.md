@@ -75,6 +75,13 @@ The following decisions govern the implementation.
     fully sanitized-skipped index uses the complete legacy path with the
     existing `chunk_index_not_ready` fallback. Any other state also uses the
     complete legacy path; there is no partially trusted mixed production mode.
+    Skip reasons are the closed set `semantic_retrieval_disabled`,
+    `chunk_exceeds_provider_capacity`, and the generic `chunk_embedding_skipped`
+    bucket, enforced by `0076_chronicle_chunk_skip_reasons.sql`. Every member is
+    terminal, so adding a reason can never silently make a campaign ineligible,
+    and any unrecognized reason collapses into the generic bucket rather than
+    persisting provider text. A chunk that cannot fit one provider request is
+    skipped individually while its siblings continue indexing.
 11. Safe shadow metadata is retained for 30 days and capped at 5,000 runs per
     campaign. Query embeddings are retained for 7 days and capped at 256
     entries per campaign.
@@ -145,21 +152,27 @@ UPDATE campaign_memory_configs
 
 ## Legacy baseline
 
-The deterministic `chronicle-retrieval-evaluation.v1` corpus (SHA-256
-`f1942b9d57c5d45aadc02922c80aa5c7915071d75945c9d63bb2c170917631ed`)
+The deterministic `chronicle-retrieval-evaluation.v2` corpus (SHA-256
+`1cd534c1585a81865572beb4fd7748e7ac817d248269a3c0c7ebcb93d415951f`)
 establishes the following label-only baseline for `legacy_hybrid` (generated
 locally at `tmp/chronicle-evaluation/legacy-baseline.json`, which is not
 committed):
 
-- recall@5/10/20: 0.9117647058823529 / 0.9117647058823529 /
-  0.9117647058823529; MRR: 0.9411764705882353;
-  NDCG: 0.9317318575468456.
-- duplicate rate: 0; relevant memories per prompt token: 0.11258278145695365.
+- recall@5/10/20: 0.7352941176470589 / 0.7352941176470589 /
+  0.7352941176470589; MRR: 0.7706558485463151;
+  NDCG: 0.7552612693115515.
+- duplicate rate: 0; relevant memories per prompt token: 0.0054557124518613605.
 - cross-campaign, future-turn, and superseded-fact leakage: 0 / 0 / 0.
-- p50/p95 evaluator latency: 6 ms / 19 ms; embedding requests/cost: 3 / 0;
-  semantic-only hits: 3; promotions/demotions: 1 / 1. A promotion or
+- p50/p95 evaluator latency: 6 ms / 20 ms; embedding requests/cost: 3 / 0;
+  semantic-only hits: 3; promotions/demotions: 164 / 164. A promotion or
   demotion is an entry whose selected rank improves or worsens, respectively,
   against the deterministic lexical-only ordering for that same preview.
+
+Each ranking case declares `distractorCount` in-scope authorized memories that
+compete for the same prompt slots, and requests a 4,096-token budget so more
+candidates are eligible than the diversity policy can select. Without both, every
+grid candidate scored a perfect recall, the quality keys tied, and profile
+selection collapsed onto tie-breakers instead of retrieval quality.
 
 The report contains fixture labels, hashes, ranks, and aggregates only; it
 does not persist prompt or Chronicle content.
@@ -167,21 +180,107 @@ does not persist prompt or Chronicle content.
 ## Calibrated production profile
 
 The exhaustive 243-profile grid selected the checked-in
-`chronicle-retrieval-profile-v2` profile: RRF `k=20`; semantic query-variant
-weight `0.75`; lexical/entity signal weights `0.75`; recency/chronology signal
-weights `0.75`; and a per-signal candidate limit of `32`. Its diversity policy
+`chronicle-retrieval-profile-v2` profile: RRF `k=40`; semantic query-variant
+weight `1`; lexical/entity signal weights `1.25`; recency/chronology signal
+weights `0.25`; and a per-signal candidate limit of `32`. Its diversity policy
 selects at most 16 parents and two parents per turn, includes adjacent
 narration, and uses semantic/kind/entity values `4 / 1 / 0.5`.
 
 Against the same corpus, the selected profile produced recall@5/10/20 of
-`0.9705882352941176 / 0.9705882352941176 / 0.9705882352941176`, MRR
-`0.9411764705882353`, NDCG `0.9772439525156154`, duplicate rate `0`, and
-`0.11377245508982035` relevant memories per prompt token. Leakage remained
-`0 / 0 / 0`; p50/p95 evaluator latency was `12 ms / 15 ms`, below the
-`44 ms` legacy-derived gate; embedding requests/cost were `3 / 0`; and
-semantic-only hits and promotions/demotions were `3` and `0 / 0`.
+`0.8235294117647058 / 0.8235294117647058 / 1`, MRR `0.7757352941176471`,
+NDCG `0.8667030368443928`, duplicate rate `0`, and `0.007233273056057866`
+relevant memories per prompt token. Leakage remained `0 / 0 / 0`, and
+p50/p95 evaluator latency stayed below the legacy-derived gate.
+
+Selection is reproducible from the corpus alone. Wall-clock latency and
+embedding request counts are recorded as diagnostics but are excluded from the
+selection keys: p95 is measurement noise and the request count depends on how
+warm the query cache happened to be when a candidate ran, so including either
+made calibration choose a different profile on every run. Latency remains a
+pass/fail gate. Because those diagnostics are not reproducible, the staleness
+check in `pnpm evaluate:chronicle -- --implementation chunked_hybrid` compares
+only the deterministic metrics and fails when retrieval changes land after
+calibration without the profile being regenerated.
 
 Generation uses this profile only when a campaign is explicitly configured
 for `chunked_hybrid`. Calibration does not update campaign configuration, so
 existing and newly defaulted campaigns remain on `legacy_hybrid` until an
 operator or future explicit product action opts them in.
+
+## Long-campaign behaviour
+
+A scaling review of 100-plus-turn campaigns measured retrieval against a real
+database and found the retrieval path healthy but the indexing path unable to
+keep up. Chunked previews cost roughly 115 ms at 100 turns (303 chunks) and
+253 ms at 200 turns (603 chunks), which is immaterial next to story
+generation, and chunked selection stayed at exactly 16 parents at every
+campaign length. Growth itself is bounded by design: the living campaign
+summary and open-thread records are singletons updated in place, because
+`chronicle_memories` is unique on `(campaign_id, turn_id, memory_kind)` with
+`NULLS NOT DISTINCT`, so a campaign accumulates roughly one derived parent per
+accepted turn.
+
+Five changes came out of that review.
+
+1. **Incremental parent selection.** `loadForClaim` previously returned every
+   parent in scope and the worker re-embedded all of them, while the job's work
+   signature changes on every accepted turn. A single turn therefore triggered a
+   complete re-embed of the campaign, making per-turn indexing cost grow with
+   campaign length and total cost grow quadratically. Parents that already hold
+   terminal chunks at their current content hash and protocol version are now
+   filtered out in SQL, so a turn costs work proportional to what actually
+   changed. `totalParents` still counts every parent in scope so the worker's
+   mid-run parent-total invariant is unaffected. Because skipped parents mean the
+   committed parent is no longer the cursor's immediate successor,
+   `commitParentBatch` now fences on the parent's own identity while still
+   requiring it to be strictly ahead of the durable cursor.
+2. **Resumable progress across appended parents.** Any signature change used to
+   clear the durable cursor, so a turn accepted during a long initial backfill
+   restarted it from zero and the readiness gate could never be reached on an
+   actively played campaign. `chronicle_chunk_jobs.processed_signature`
+   (migration `0077`) records the signature of the parents at or before the
+   cursor. When it still matches, the cursor is preserved and the job resumes;
+   when an already-processed parent changed, the cursor is cleared and the job
+   restarts, so a stale prefix can never be skipped.
+3. **Batched embedding by default.** Unknown provider batch capacity resolved to
+   one document per request, making a reindex cost one HTTP round trip per chunk
+   and dominating indexing time. The unknown default is now 16, still lowered by
+   the campaign batch size and still overridable with `embeddingMaxBatchItems`.
+   Safety is unchanged: `assertCompleteEmbeddingBatch` rejects any response that
+   does not return one vector per requested document.
+4. **Vectors loaded once per preview.** The authorized-chunk projection rendered
+   `embedding::text` for every candidate, and a chunked preview issues up to 17
+   rank queries, so the campaign's vectors were serialised once per signal per
+   variant. Vectors are needed only for the maximal-marginal-relevance penalty,
+   so they are now fetched in a single query for the fused candidate set.
+5. **Bounded legacy chronological coverage.** Legacy retrieval added every turn
+   memory for chronological coverage and relied on the token budget to trim,
+   so a 100-turn campaign put 100 Chronicle entries into the prompt and crowded
+   out relevance-selected entries. Coverage is retained as a deterministic
+   evenly-spaced sample of at most 32 entries, so early, middle, and late
+   history all survive within a bounded size.
+
+Together these keep per-turn indexing proportional to changed content rather
+than campaign length, which is what allows the readiness gate to be reached and
+held on a campaign that is being actively played.
+
+## Future enhancements
+
+Future work may expose bounded provider capability controls and versioned chunk
+policy presets, but must not present one unrestricted embedding-context value.
+Provider limits and chunk granularity are different concerns: changing provider
+limits affects request validation and batching, while changing chunk target or
+overlap changes derived content identity and requires a complete compatible
+rebuild plus retrieval recalibration.
+
+Chronicle retrieval should also gain a typed, privacy-safe per-turn audit that
+separately records the configured and effective retrieval implementations,
+semantic versus lexical use, dedicated-embedding versus text-role-provider
+resolution, provider call versus query-cache use, and any sanitized fallback
+reason. Operational shadow telemetry remains best-effort and retention-bound;
+the accepted-turn audit must be written atomically with the turn and must not
+rewrite existing accepted turns.
+
+The source investigation, proposed contract, implementation sequence, test
+matrix, privacy boundary, and effort assessment are recorded in
+[Chronicle retrieval audit and embedding controls future enhancement](../review/chronicle-retrieval-audit-future-enhancement.md).

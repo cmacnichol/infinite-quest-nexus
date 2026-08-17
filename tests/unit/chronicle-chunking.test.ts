@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   CHRONICLE_CHUNK_PROTOCOL_VERSION,
+  CHRONICLE_CHUNK_SKIP_REASONS,
   DEFAULT_CHRONICLE_CHUNKING_POLICY,
   chunkChronicleMemory,
+  sanitizeChronicleChunkSkipReason,
   type ChronicleMemoryParent
 } from "../../packages/domain/src/chronicle-chunking.js";
 import { resolveEmbeddingCapability, splitChunkForCapability } from "../../packages/domain/src/chronicle-embedding-capabilities.js";
@@ -133,5 +135,32 @@ describe("Chronicle chunking", () => {
       chunk.estimatedTokens + capability.documentPrefixTokens + capability.safetyMarginTokens
         <= capability.maxInputTokens
     )).toBe(true);
+  });
+
+  it("preserves declared skip reasons and collapses anything else into the generic bucket", () => {
+    for (const reason of CHRONICLE_CHUNK_SKIP_REASONS) {
+      expect(sanitizeChronicleChunkSkipReason(reason)).toBe(reason);
+    }
+    expect(sanitizeChronicleChunkSkipReason(null)).toBeNull();
+    expect(sanitizeChronicleChunkSkipReason("")).toBeNull();
+    expect(sanitizeChronicleChunkSkipReason(undefined)).toBeNull();
+  });
+
+  it("never returns provider text, endpoints, or credentials as a skip reason", () => {
+    for (const unsafe of [
+      "https://provider.invalid?token=must-not-persist",
+      "Bearer sk-live-abcdef",
+      "connect ECONNREFUSED 10.0.0.5:11434",
+      "SEMANTIC_RETRIEVAL_DISABLED"
+    ]) {
+      expect(sanitizeChronicleChunkSkipReason(unsafe)).toBe("chunk_embedding_skipped");
+    }
+  });
+
+  it("declares every skip reason as a safe lowercase retrieval code", () => {
+    for (const reason of CHRONICLE_CHUNK_SKIP_REASONS) {
+      expect(reason).toMatch(/^[a-z0-9][a-z0-9_.:-]*$/u);
+    }
+    expect(new Set(CHRONICLE_CHUNK_SKIP_REASONS).size).toBe(CHRONICLE_CHUNK_SKIP_REASONS.length);
   });
 });

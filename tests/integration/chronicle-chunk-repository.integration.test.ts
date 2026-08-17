@@ -374,6 +374,16 @@ integration("PostgreSQL Chronicle chunk repository", () => {
       "SELECT embedding_skip_reason FROM chronicle_memory_chunks WHERE parent_memory_id=$1", [parent.id]
     )).toMatchObject({ rows: [{ embedding_skip_reason: "chunk_embedding_skipped" }] });
 
+    await expect(pool.query(
+      "UPDATE chronicle_memory_chunks SET embedding_skip_reason='chunk_exceeds_provider_capacity' WHERE parent_memory_id=$1",
+      [parent.id]
+    )).resolves.toMatchObject({ rowCount: 1 });
+
+    await expect(pool.query(
+      "UPDATE chronicle_memory_chunks SET embedding_skip_reason='provider said no' WHERE parent_memory_id=$1",
+      [parent.id]
+    )).rejects.toMatchObject({ constraint: "chronicle_memory_chunks_embedding_skip_reason_check" });
+
     await pool.query("DELETE FROM campaigns WHERE id=$1 AND owner_user_id=$2", [value.campaignId, value.ownerUserId]);
     expect(await pool.query<{ count: string }>(
       "SELECT count(*)::text AS count FROM chronicle_chunk_jobs WHERE campaign_id=$1", [value.campaignId]
@@ -459,5 +469,91 @@ integration("PostgreSQL Chronicle chunk repository", () => {
       "SELECT content,embedding_status,embedding::text FROM chronicle_memory_chunks WHERE campaign_id=$1",
       [value.campaignId]
     )).toMatchObject({ rows: [{ content: "First safe parent.", embedding_status: "pending", embedding: null }] });
+  });
+
+  it("returns only parents whose current content is not already terminally chunked", async () => {
+    const value = await fixture("incremental");
+    await enqueuePostgresChronicleChunkIndex(pool, value);
+    const state = createPostgresChronicleChunkJobStatePort(pool);
+    const parents = createPostgresChronicleChunkParentPort(pool);
+    const claim = await state.claimNext({ workerId: "incremental-worker", leaseSeconds: 30 });
+    if (!claim) throw new Error("chunk job was not claimed");
+
+    const initial = await parents.loadForClaim(claim, { batchLimit: 10, cursor: null });
+    expect(initial.parents.map((parent) => parent.id).sort())
+      .toEqual(value.parents.map((parent) => parent.id).sort());
+    expect(initial.totalParents).toBe(2);
+
+    // The first parent becomes terminally chunked at its current content hash.
+    await pool.query(
+      `INSERT INTO chronicle_memory_chunks
+         (owner_user_id,campaign_id,world_version_id,parent_memory_id,parent_content_hash,
+          chunking_protocol_version,chunk_ordinal,chunk_kind,content,token_estimate,
+          embedding_status,embedding_skip_reason)
+       VALUES ($1,$2,$3,$4,$5,'chronicle-chunk-v1',0,'campaign_summary','First safe parent.',4,
+               'skipped','semantic_retrieval_disabled')`,
+      [value.ownerUserId, value.campaignId, value.worldVersionId,
+        value.parents[0]!.id, value.parents[0]!.content_hash]
+    );
+
+    const afterIndexing = await parents.loadForClaim(claim, { batchLimit: 10, cursor: null });
+    expect(afterIndexing.parents.map((parent) => parent.id)).toEqual([value.parents[1]!.id]);
+    // Scope total stays stable so the worker's mid-run parent-total invariant still holds.
+    expect(afterIndexing.totalParents).toBe(2);
+
+    // Editing that parent's content makes its chunks stale, so it needs work again.
+    await pool.query(
+      "UPDATE chronicle_memories SET content='First safe parent, corrected.' WHERE id=$1",
+      [value.parents[0]!.id]
+    );
+    const afterEdit = await parents.loadForClaim(claim, { batchLimit: 10, cursor: null });
+    expect(afterEdit.parents.map((parent) => parent.id).sort())
+      .toEqual(value.parents.map((parent) => parent.id).sort());
+  });
+
+  it("resumes a durable cursor across an appended parent and restarts when the processed prefix changes", async () => {
+    const value = await fixture("resume-prefix");
+    const jobId = await enqueuePostgresChronicleChunkIndex(pool, value);
+    const cursor = `1:${value.parents[0]!.id}`;
+    const processedSignature = (await pool.query<{ signature: string }>(
+      `SELECT encode(digest(COALESCE(string_agg(
+                m.ordinal::text || ':' || m.id::text || ':' || m.content_hash, E'\\x1e'
+                ORDER BY m.ordinal,m.id), ''),'sha256'),'hex') AS signature
+         FROM chronicle_memories m
+        WHERE m.owner_user_id=$1 AND m.campaign_id=$2 AND m.world_version_id=$3 AND m.ordinal<=1`,
+      [value.ownerUserId, value.campaignId, value.worldVersionId]
+    )).rows[0]!.signature;
+    await pool.query(
+      "UPDATE chronicle_chunk_jobs SET progress=$2::jsonb, processed_signature=$3 WHERE id=$1",
+      [jobId, JSON.stringify({
+        parentCursor: cursor, processedParents: 1, embeddedChunks: 1,
+        skippedChunks: 0, totalParents: 2, capabilityFingerprint: "fingerprint-a"
+      }), processedSignature]
+    );
+
+    // A newly accepted turn appends a parent after the cursor. The processed prefix is
+    // untouched, so a long backfill must resume rather than restart from zero.
+    await pool.query(
+      `INSERT INTO chronicle_memories
+         (owner_user_id,campaign_id,world_version_id,memory_kind,ordinal,content,token_estimate)
+       VALUES ($1,$2,$3,'turn_fiction',3,'A newly accepted turn.',5)`,
+      [value.ownerUserId, value.campaignId, value.worldVersionId]
+    );
+    await enqueuePostgresChronicleChunkIndex(pool, value);
+    expect(await pool.query<{ progress: Record<string, unknown>; work_version: string }>(
+      "SELECT progress,work_version::text FROM chronicle_chunk_jobs WHERE id=$1", [jobId]
+    )).toMatchObject({
+      rows: [{ work_version: "2", progress: expect.objectContaining({ parentCursor: cursor }) }]
+    });
+
+    // Editing an already-processed parent invalidates the prefix, so the cursor is cleared.
+    await pool.query(
+      "UPDATE chronicle_memories SET content='First safe parent, rewritten.' WHERE id=$1",
+      [value.parents[0]!.id]
+    );
+    await enqueuePostgresChronicleChunkIndex(pool, value);
+    expect(await pool.query<{ progress: Record<string, unknown>; processed_signature: string | null }>(
+      "SELECT progress,processed_signature FROM chronicle_chunk_jobs WHERE id=$1", [jobId]
+    )).toMatchObject({ rows: [{ progress: {}, processed_signature: null }] });
   });
 });

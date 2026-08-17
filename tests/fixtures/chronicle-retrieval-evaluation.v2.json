@@ -1,5 +1,5 @@
 {
-  "version": "v1",
+  "version": "v2",
   "cases": [
     {
       "id": "exact-reference",
@@ -8,7 +8,7 @@
         "campaignId": "campaign-fixture",
         "worldVersionId": "world-fixture",
         "request": {
-          "budgetTokens": 256,
+          "budgetTokens": 4096,
           "compression": "auto",
           "query": "exact reference",
           "recentTurns": 4
@@ -21,7 +21,8 @@
       "labelByMemoryId": {
         "m-exact-reference-a": "exact-reference-a",
         "m-exact-reference-b": "exact-reference-b"
-      }
+      },
+      "distractorCount": 24
     },
     {
       "id": "paraphrase",
@@ -30,7 +31,7 @@
         "campaignId": "campaign-fixture",
         "worldVersionId": "world-fixture",
         "request": {
-          "budgetTokens": 256,
+          "budgetTokens": 4096,
           "compression": "auto",
           "query": "amber agreement",
           "recentTurns": 32
@@ -43,9 +44,14 @@
         "m-paraphrase-a": "paraphrase-a"
       },
       "excludedLabels": {
-        "semantic": ["paraphrase-semantic-scope-decoy"],
-        "entity": ["paraphrase-entity-scope-decoy"]
-      }
+        "semantic": [
+          "paraphrase-semantic-scope-decoy"
+        ],
+        "entity": [
+          "paraphrase-entity-scope-decoy"
+        ]
+      },
+      "distractorCount": 24
     },
     {
       "id": "character-alias",
@@ -54,7 +60,7 @@
         "campaignId": "campaign-fixture",
         "worldVersionId": "world-fixture",
         "request": {
-          "budgetTokens": 256,
+          "budgetTokens": 4096,
           "compression": "auto",
           "query": "amber agreement",
           "recentTurns": 32
@@ -67,9 +73,14 @@
         "m-character-alias-a": "character-alias-a"
       },
       "excludedLabels": {
-        "semantic": ["character-alias-semantic-scope-decoy"],
-        "entity": ["character-alias-entity-scope-decoy"]
-      }
+        "semantic": [
+          "character-alias-semantic-scope-decoy"
+        ],
+        "entity": [
+          "character-alias-entity-scope-decoy"
+        ]
+      },
+      "distractorCount": 24
     },
     {
       "id": "location-alias",
@@ -78,7 +89,7 @@
         "campaignId": "campaign-fixture",
         "worldVersionId": "world-fixture",
         "request": {
-          "budgetTokens": 256,
+          "budgetTokens": 4096,
           "compression": "auto",
           "query": "amber agreement",
           "recentTurns": 32
@@ -91,9 +102,14 @@
         "m-location-alias-a": "location-alias-a"
       },
       "excludedLabels": {
-        "semantic": ["location-alias-semantic-scope-decoy"],
-        "entity": ["location-alias-entity-scope-decoy"]
-      }
+        "semantic": [
+          "location-alias-semantic-scope-decoy"
+        ],
+        "entity": [
+          "location-alias-entity-scope-decoy"
+        ]
+      },
+      "distractorCount": 24
     },
     {
       "id": "long-callback",
@@ -102,7 +118,7 @@
         "campaignId": "campaign-fixture",
         "worldVersionId": "world-fixture",
         "request": {
-          "budgetTokens": 256,
+          "budgetTokens": 4096,
           "compression": "auto",
           "query": "long callback",
           "recentTurns": 4
@@ -115,7 +131,8 @@
       "labelByMemoryId": {
         "m-long-callback-a": "long-callback-a",
         "m-long-callback-b": "long-callback-b"
-      }
+      },
+      "distractorCount": 24
     },
     {
       "id": "open-thread",
@@ -124,7 +141,7 @@
         "campaignId": "campaign-fixture",
         "worldVersionId": "world-fixture",
         "request": {
-          "budgetTokens": 256,
+          "budgetTokens": 4096,
           "compression": "auto",
           "query": "open thread",
           "recentTurns": 4
@@ -135,7 +152,8 @@
       ],
       "labelByMemoryId": {
         "m-open-thread-a": "open-thread-a"
-      }
+      },
+      "distractorCount": 24
     },
     {
       "id": "active-fact",
@@ -144,7 +162,7 @@
         "campaignId": "campaign-fixture",
         "worldVersionId": "world-fixture",
         "request": {
-          "budgetTokens": 256,
+          "budgetTokens": 4096,
           "compression": "auto",
           "query": "active fact",
           "recentTurns": 4
@@ -157,7 +175,8 @@
       "labelByMemoryId": {
         "m-active-fact-a": "active-fact-a",
         "m-active-fact-b": "active-fact-b"
-      }
+      },
+      "distractorCount": 24
     },
     {
       "id": "superseded-fact",
@@ -166,7 +185,7 @@
         "campaignId": "campaign-fixture",
         "worldVersionId": "world-fixture",
         "request": {
-          "budgetTokens": 256,
+          "budgetTokens": 4096,
           "compression": "auto",
           "query": "superseded fact",
           "recentTurns": 4,
@@ -186,7 +205,8 @@
         "supersededFact": [
           "superseded-fact-old"
         ]
-      }
+      },
+      "distractorCount": 0
     },
     {
       "id": "narration-correction",
@@ -195,7 +215,7 @@
         "campaignId": "campaign-fixture",
         "worldVersionId": "world-fixture",
         "request": {
-          "budgetTokens": 256,
+          "budgetTokens": 4096,
           "compression": "auto",
           "query": "narration correction",
           "recentTurns": 4
@@ -206,7 +226,8 @@
       ],
       "labelByMemoryId": {
         "m-narration-correction-a": "narration-correction-a"
-      }
+      },
+      "distractorCount": 24
     },
     {
       "id": "state-correction",
@@ -215,7 +236,7 @@
         "campaignId": "campaign-fixture",
         "worldVersionId": "world-fixture",
         "request": {
-          "budgetTokens": 256,
+          "budgetTokens": 4096,
           "compression": "auto",
           "query": "state correction",
           "recentTurns": 4
@@ -226,7 +247,8 @@
       ],
       "labelByMemoryId": {
         "m-state-correction-a": "state-correction-a"
-      }
+      },
+      "distractorCount": 24
     },
     {
       "id": "historical-cutoff",
@@ -235,7 +257,7 @@
         "campaignId": "campaign-fixture",
         "worldVersionId": "world-fixture",
         "request": {
-          "budgetTokens": 256,
+          "budgetTokens": 4096,
           "compression": "auto",
           "query": "historical cutoff",
           "recentTurns": 4,
@@ -253,7 +275,8 @@
         "futureTurn": [
           "historical-cutoff-future"
         ]
-      }
+      },
+      "distractorCount": 0
     },
     {
       "id": "branch-isolation",
@@ -262,7 +285,7 @@
         "campaignId": "campaign-fixture",
         "worldVersionId": "world-fixture",
         "request": {
-          "budgetTokens": 256,
+          "budgetTokens": 4096,
           "compression": "auto",
           "query": "branch isolation",
           "recentTurns": 4
@@ -273,7 +296,8 @@
       ],
       "labelByMemoryId": {
         "m-branch-isolation-a": "branch-isolation-a"
-      }
+      },
+      "distractorCount": 24
     },
     {
       "id": "replacement",
@@ -282,7 +306,7 @@
         "campaignId": "campaign-fixture",
         "worldVersionId": "world-fixture",
         "request": {
-          "budgetTokens": 256,
+          "budgetTokens": 4096,
           "compression": "auto",
           "query": "replacement",
           "recentTurns": 4
@@ -293,7 +317,8 @@
       ],
       "labelByMemoryId": {
         "m-replacement-a": "replacement-a"
-      }
+      },
+      "distractorCount": 24
     },
     {
       "id": "rewind",
@@ -302,7 +327,7 @@
         "campaignId": "campaign-fixture",
         "worldVersionId": "world-fixture",
         "request": {
-          "budgetTokens": 256,
+          "budgetTokens": 4096,
           "compression": "auto",
           "query": "rewind",
           "recentTurns": 4
@@ -313,7 +338,8 @@
       ],
       "labelByMemoryId": {
         "m-rewind-a": "rewind-a"
-      }
+      },
+      "distractorCount": 24
     },
     {
       "id": "cross-campaign-decoy",
@@ -322,7 +348,7 @@
         "campaignId": "campaign-fixture",
         "worldVersionId": "world-fixture",
         "request": {
-          "budgetTokens": 256,
+          "budgetTokens": 4096,
           "compression": "auto",
           "query": "campaign isolation",
           "recentTurns": 4
@@ -341,10 +367,17 @@
         ]
       },
       "excludedLabels": {
-        "owner": ["cross-campaign-foreign"],
-        "campaign": ["cross-campaign-same-owner-decoy"],
-        "worldVersion": ["cross-campaign-world-version-decoy"]
-      }
+        "owner": [
+          "cross-campaign-foreign"
+        ],
+        "campaign": [
+          "cross-campaign-same-owner-decoy"
+        ],
+        "worldVersion": [
+          "cross-campaign-world-version-decoy"
+        ]
+      },
+      "distractorCount": 24
     },
     {
       "id": "future-turn-decoy",
@@ -353,7 +386,7 @@
         "campaignId": "campaign-fixture",
         "worldVersionId": "world-fixture",
         "request": {
-          "budgetTokens": 256,
+          "budgetTokens": 4096,
           "compression": "auto",
           "query": "future isolation",
           "recentTurns": 4,
@@ -371,7 +404,8 @@
         "futureTurn": [
           "future-turn-decoy"
         ]
-      }
+      },
+      "distractorCount": 0
     },
     {
       "id": "no-memory",
@@ -380,14 +414,15 @@
         "campaignId": "campaign-fixture",
         "worldVersionId": "world-fixture",
         "request": {
-          "budgetTokens": 256,
+          "budgetTokens": 4096,
           "compression": "auto",
           "query": "no memory",
           "recentTurns": 4
         }
       },
       "expectedLabels": [],
-      "labelByMemoryId": {}
+      "labelByMemoryId": {},
+      "distractorCount": 0
     }
   ]
 }

@@ -599,8 +599,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       },
       scopes: { currentScene: { memoryId: "legacy-memory" } }
     });
-    const readiness = queries.find(({ sql }) => sql.includes("AS chunk_index_ready"));
-    expect(readiness?.values).toEqual([scope.ownerUserId, scope.campaignId, scope.worldVersionId]);
+    expect(queries.some(({ sql }) => sql.includes("AS chunk_index_ready"))).toBe(false);
     expect(queries.some(({ sql }) => sql.includes("chronicle_rank:"))).toBe(false);
   });
 
@@ -645,8 +644,8 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       if (sql.includes("FROM campaign_canonical_facts")) return { rows: [] };
       if (sql.includes("FROM campaign_memory_configs")) {
         return { rows: [{
-          embedding_enabled: false,
-          embedding_provider_profile_id: null,
+          embedding_enabled: true,
+          embedding_provider_profile_id: "embedding-profile",
           embedding_model: "embed-v1",
           embedding_batch_size: 8,
           embedding_document_prefix: null,
@@ -655,10 +654,30 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
           retrieval_shadow_enabled: false
         }] };
       }
+      if (sql.includes("FROM chronicle_query_embedding_cache")) return { rows: [] };
       if (sql.includes("AS chunk_index_ready")) return { rows: [{ chunk_index_ready: true }] };
+      // Fused candidate vectors are loaded once per preview instead of being rendered
+      // inside every rank query.
+      if (sql.includes("embedding::text AS embedding")) return { rows: [] };
       if (sql.includes("chronicle_rank:")) {
         rankQueries.push(sql);
-        return { rows: [] };
+        return { rows: [{
+          candidate_id: "authorized-chunk",
+          parent_memory_id: "authorized-memory",
+          parent_turn_id: "turn-3",
+          parent_memory_kind: "turn_fiction",
+          parent_ordinal: 3,
+          parent_content: "Turn 3\nNarration: The Moon Warden waits at the gate.",
+          parent_token_estimate: 14,
+          parent_importance: 0.8,
+          parent_entities: ["Moon Warden"],
+          parent_entity_ids: ["world:moon-warden"],
+          parent_metadata: {},
+          chunk_ordinal: 0,
+          chunk_kind: "turn_narration",
+          chunk_content: "The Moon Warden waits at the gate.",
+          active_fact: true
+        }] };
       }
       if (sql.includes("estimated_tokens") && sql.includes("memory_count")) {
         return { rows: [{
@@ -668,7 +687,27 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       }
       throw new Error(`Unexpected SQL: ${sql}`);
     });
-    const transaction = createPostgresChronicleGenerationTransactionPort({ embeddings: embeddingPort() });
+    const transaction = createPostgresChronicleGenerationTransactionPort({
+      embeddings: embeddingPort({
+        resolve: async () => "embedding-profile",
+        load: async () => ({
+          id: "embedding-profile",
+          model: "embed-v1",
+          providerType: "openai_compatible",
+          configuration: { embeddingDimensions: 2 },
+          embed: async () => ({ embeddings: [], responseId: "unused", usage: {}, reportedCost: null })
+        }),
+        embed: async (_provider, documents) => ({
+          embeddings: documents.map(() => [1, 0]),
+          responseId: "query-batch",
+          usage: {},
+          reportedCost: null
+        }),
+        fingerprint: async () => "fingerprint",
+        recordCost: async () => null,
+        recordHealth: async () => undefined
+      })
+    });
 
     const preview = await transaction.buildContextPreview(client, {
       ...scope,
@@ -749,6 +788,9 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
         }] };
       }
       if (sql.includes("AS chunk_index_ready")) return { rows: [{ chunk_index_ready: true }] };
+      // Fused candidate vectors are loaded once per preview instead of being rendered
+      // inside every rank query.
+      if (sql.includes("embedding::text AS embedding")) return { rows: [] };
       if (sql.includes("chronicle_rank:")) {
         rankQueries.push({ sql, values });
         return { rows: [] };
@@ -929,6 +971,9 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
         }] };
       }
       if (sql.includes("AS chunk_index_ready")) return { rows: [{ chunk_index_ready: true }] };
+      // Fused candidate vectors are loaded once per preview instead of being rendered
+      // inside every rank query.
+      if (sql.includes("embedding::text AS embedding")) return { rows: [] };
       if (sql.includes("chronicle_rank:semantic")) {
         return { rows: [candidate("semantic-parent", "turn_fiction", "A semantically related memory.")] };
       }
@@ -982,6 +1027,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
 
   it("discards all semantic rank inputs when one query variant fails", async () => {
     let semanticQueries = 0;
+    let nonsemanticRankQueries = 0;
     const client = databaseClient((sql) => {
       if (sql.includes("FROM campaigns c") && sql.includes("campaign_state")) {
         return { rows: [{
@@ -1026,6 +1072,9 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
         }] };
       }
       if (sql.includes("AS chunk_index_ready")) return { rows: [{ chunk_index_ready: true }] };
+      // Fused candidate vectors are loaded once per preview instead of being rendered
+      // inside every rank query.
+      if (sql.includes("embedding::text AS embedding")) return { rows: [] };
       if (sql.includes("chronicle_rank:semantic")) {
         semanticQueries += 1;
         if (semanticQueries === 2) throw new Error("second semantic rank failed");
@@ -1043,7 +1092,13 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
           active_fact: true
         }] };
       }
-      if (sql.includes("chronicle_rank:")) return { rows: [] };
+      // Fused candidate vectors are loaded once per preview instead of being rendered
+      // inside every rank query.
+      if (sql.includes("embedding::text AS embedding")) return { rows: [] };
+      if (sql.includes("chronicle_rank:")) {
+        nonsemanticRankQueries += 1;
+        return { rows: [] };
+      }
       if (sql.includes("estimated_tokens") && sql.includes("memory_count")) {
         return { rows: [{
           turns: "2", characters: "80", estimated_tokens: "20", memory_count: "1", memory_tokens: "12",
@@ -1082,10 +1137,10 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     expect(preview).toMatchObject({
       retrieval: {
         semanticAvailable: false,
-        fallbackReason: "semantic_retrieval_unavailable",
-        rankedCandidates: 0
+        fallbackReason: "semantic_retrieval_unavailable"
       }
     });
+    expect(nonsemanticRankQueries).toBe(0);
     expect(JSON.stringify(preview.scopes)).not.toContain("Partial semantic content must not survive");
   });
 });

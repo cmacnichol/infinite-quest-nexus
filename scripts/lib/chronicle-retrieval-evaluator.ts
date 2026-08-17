@@ -25,6 +25,12 @@ export type ChronicleRetrievalCase = Readonly<{
     supersededFact?: readonly string[];
   }>;
   excludedLabels?: Readonly<Record<string, readonly string[]>>;
+  /**
+   * In-scope, authorized, but irrelevant memories that compete for the same prompt slots.
+   * Without enough of them every grid candidate scores a perfect recall and the profile
+   * choice collapses onto tie-breakers instead of retrieval quality.
+   */
+  distractorCount?: number;
 }>;
 
 export type ChronicleRetrievalCorpus = Readonly<{
@@ -223,15 +229,23 @@ export function chronicleProfilePassesGates(
     && candidate.latencyMs.p95 <= maximumP95;
 }
 
+/**
+ * Selection keys must be reproducible from the corpus alone. Wall-clock latency and
+ * embedding request counts are deliberately excluded: p95 is measurement noise and the
+ * request count depends on how warm the query cache happened to be when a candidate ran,
+ * so including either made calibration pick a different profile on every run. Both remain
+ * recorded as diagnostics, and p95 is still enforced as a gate by chronicleProfilePassesGates.
+ */
 function compareCalibrationCandidates(
   left: ChronicleCalibrationCandidate,
   right: ChronicleCalibrationCandidate,
 ): number {
   return right.metrics.recallAt10 - left.metrics.recallAt10
     || right.metrics.ndcg - left.metrics.ndcg
+    || right.metrics.mrr - left.metrics.mrr
+    || right.metrics.recallAt5 - left.metrics.recallAt5
+    || right.metrics.recallAt20 - left.metrics.recallAt20
     || right.metrics.relevantMemoriesPerPromptToken - left.metrics.relevantMemoriesPerPromptToken
-    || left.metrics.embedding.requests - right.metrics.embedding.requests
-    || left.metrics.latencyMs.p95 - right.metrics.latencyMs.p95
     || left.metrics.duplicateRate - right.metrics.duplicateRate
     || compareText(serializedProfile(left.profile), serializedProfile(right.profile));
 }

@@ -9,6 +9,10 @@ import type {
   MemoryTransactionContext
 } from "../../application/src/memory/index.js";
 import type { ChronicleTransactionEmbeddingPort } from "./chronicle-repository.js";
+import {
+  CHRONICLE_CHUNK_PROTOCOL_VERSION,
+  sanitizeChronicleChunkSkipReason
+} from "../../domain/src/chronicle-chunking.js";
 import { toSafeProviderConfiguration } from "../../application/src/providers/index.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
@@ -175,6 +179,30 @@ export async function enqueuePostgresChronicleChunkIndex(
           AND m.world_version_id=c.world_version_id
         WHERE c.id=$2 AND c.owner_user_id=$1 AND c.world_version_id=$3
         GROUP BY c.world_version_id
+     ), resumable AS (
+       /* The signature of the parents at or before each job's durable cursor. When it still
+          matches the signature recorded when that cursor was written, every already-processed
+          parent is unchanged and the cursor remains valid, so an unrelated tail change must not
+          restart a long backfill from zero. */
+       SELECT j.id,
+              encode(digest(
+                COALESCE(string_agg(
+                  m.ordinal::text || ':' || m.id::text || ':' || m.content_hash,
+                  E'\\x1e' ORDER BY m.ordinal,m.id
+                ), ''),
+                'sha256'
+              ), 'hex') AS processed_signature
+         FROM chronicle_chunk_jobs j
+         LEFT JOIN chronicle_memories m
+           ON m.campaign_id=j.campaign_id AND m.owner_user_id=j.owner_user_id
+          AND m.world_version_id=$3
+          AND (m.ordinal < split_part(j.progress->>'parentCursor',':',1)::integer
+               OR (m.ordinal = split_part(j.progress->>'parentCursor',':',1)::integer
+                   AND m.id <= split_part(j.progress->>'parentCursor',':',2)::uuid))
+        WHERE j.campaign_id=$2 AND j.owner_user_id=$1
+          AND j.status IN ('queued','running')
+          AND j.progress->>'parentCursor' IS NOT NULL
+        GROUP BY j.id
      ), upserted AS (
        INSERT INTO chronicle_chunk_jobs
          (owner_user_id,campaign_id,job_type,status,progress,work_signature)
@@ -183,7 +211,25 @@ export async function enqueuePostgresChronicleChunkIndex(
        ON CONFLICT (campaign_id) WHERE status IN ('queued','running')
        DO UPDATE SET work_version=chronicle_chunk_jobs.work_version+1,
                      work_signature=EXCLUDED.work_signature,
-                     progress='{}'::jsonb,error_message=NULL,completed_at=NULL,
+                     progress=CASE
+                       WHEN NOT $4::boolean
+                        AND chronicle_chunk_jobs.processed_signature IS NOT NULL
+                        AND chronicle_chunk_jobs.processed_signature
+                            = (SELECT r.processed_signature FROM resumable r
+                                WHERE r.id=chronicle_chunk_jobs.id)
+                       THEN chronicle_chunk_jobs.progress
+                       ELSE '{}'::jsonb
+                     END,
+                     processed_signature=CASE
+                       WHEN NOT $4::boolean
+                        AND chronicle_chunk_jobs.processed_signature IS NOT NULL
+                        AND chronicle_chunk_jobs.processed_signature
+                            = (SELECT r.processed_signature FROM resumable r
+                                WHERE r.id=chronicle_chunk_jobs.id)
+                       THEN chronicle_chunk_jobs.processed_signature
+                       ELSE NULL
+                     END,
+                     error_message=NULL,completed_at=NULL,
                      updated_at=clock_timestamp()
        WHERE $4::boolean
           OR chronicle_chunk_jobs.work_signature IS DISTINCT FROM EXCLUDED.work_signature
@@ -314,15 +360,29 @@ export function createPostgresChronicleChunkParentPort(pool: DatabasePool): Chro
         throw invalid("Chronicle chunk job lease is unavailable.");
       }
       const cursor = parseCursor(request.cursor);
+      // Only parents whose current content is not already terminally chunked are returned.
+      // Re-embedding every parent on every job made per-turn indexing cost grow with campaign
+      // length, so a long campaign could never finish indexing between accepted turns.
       const result = await pool.query<ChunkParentRow>(
         `SELECT id,ordinal,memory_kind,content,content_hash,entities,entity_ids,metadata
-           FROM chronicle_memories
+           FROM chronicle_memories parent
           WHERE owner_user_id=$1 AND campaign_id=$2 AND world_version_id=$3
             AND ($4::integer IS NULL OR ordinal>$4 OR (ordinal=$4 AND id>$5::uuid))
+            AND NOT EXISTS (
+              SELECT 1 FROM chronicle_memory_chunks chunk
+               WHERE chunk.parent_memory_id=parent.id
+                 AND chunk.owner_user_id=parent.owner_user_id
+                 AND chunk.campaign_id=parent.campaign_id
+                 AND chunk.world_version_id=parent.world_version_id
+                 AND chunk.parent_content_hash=parent.content_hash
+                 AND chunk.chunking_protocol_version=$7
+                 AND (chunk.embedding_status='embedded' OR chunk.embedding_status='skipped')
+            )
           ORDER BY ordinal,id
           LIMIT $6`,
         [scope.ownerUserId, scope.campaignId, scope.worldVersionId,
-          cursor?.ordinal ?? null, cursor?.id ?? null, request.batchLimit + 1]
+          cursor?.ordinal ?? null, cursor?.id ?? null, request.batchLimit + 1,
+          CHRONICLE_CHUNK_PROTOCOL_VERSION]
       );
       const rows = result.rows.slice(0, request.batchLimit);
       const tail = rows.at(-1);
@@ -520,15 +580,18 @@ export function createPostgresChronicleChunkBatchPort(
         );
 
         const cursor = parseCursor(input.previousParentCursor);
+        // Incremental indexing skips parents that are already terminally chunked, so the committed
+        // parent is not necessarily the immediate successor of the cursor. Fence on the parent's
+        // own identity instead, still requiring it to be strictly ahead of the durable cursor so
+        // progress stays monotonic and a stale claimant cannot rewind it.
         const currentParent = await client.query<ChunkParentRow>(
           `SELECT id,ordinal,memory_kind,content,content_hash,entities,entity_ids,metadata
              FROM chronicle_memories
-            WHERE owner_user_id=$1 AND campaign_id=$2 AND world_version_id=$3
+            WHERE owner_user_id=$1 AND campaign_id=$2 AND world_version_id=$3 AND id=$6::uuid
               AND ($4::integer IS NULL OR ordinal>$4 OR (ordinal=$4 AND id>$5::uuid))
-            ORDER BY ordinal,id LIMIT 1
             FOR UPDATE`,
           [scope.ownerUserId, scope.campaignId, scope.worldVersionId,
-            cursor?.ordinal ?? null, cursor?.id ?? null]
+            cursor?.ordinal ?? null, cursor?.id ?? null, input.parent.id]
         );
         const parent = currentParent.rows[0];
         if (!parent
@@ -568,10 +631,11 @@ export function createPostgresChronicleChunkBatchPort(
         await client.query(
           `DELETE FROM chronicle_memory_chunks
             WHERE parent_memory_id=$1 AND owner_user_id=$2 AND campaign_id=$3 AND world_version_id=$4
-              AND (parent_content_hash<>$5 OR chunking_protocol_version<>'chronicle-chunk-v1'
+              AND (parent_content_hash<>$5 OR chunking_protocol_version<>$7
                    OR NOT (chunk_ordinal=ANY($6::integer[])))`,
           [parent.id, scope.ownerUserId, scope.campaignId, scope.worldVersionId,
-            parent.content_hash, input.chunks.map((chunk) => chunk.chunkIndex)]
+            parent.content_hash, input.chunks.map((chunk) => chunk.chunkIndex),
+            CHRONICLE_CHUNK_PROTOCOL_VERSION]
         );
         for (const chunk of input.chunks) {
           if (chunk.parentMemoryId !== parent.id || chunk.protocolVersion !== "chronicle-chunk-v1") {
@@ -579,7 +643,7 @@ export function createPostgresChronicleChunkBatchPort(
           }
           const embedding = chunk.embedding ? vectorLiteral(chunk.embedding) : null;
           const dimensions = chunk.embedding?.length ?? null;
-          const skipReason = chunk.skipReason ? "chunk_embedding_skipped" : null;
+          const skipReason = sanitizeChronicleChunkSkipReason(chunk.skipReason);
           await client.query(
             `INSERT INTO chronicle_memory_chunks (
                owner_user_id,campaign_id,world_version_id,parent_memory_id,parent_content_hash,
@@ -628,6 +692,21 @@ export function createPostgresChronicleChunkBatchPort(
         const updated = await client.query(
           `UPDATE chronicle_chunk_jobs
               SET progress=$6::jsonb,
+                  /* Recorded with the cursor it describes so a later enqueue can prove the
+                     already-processed prefix is unchanged and resume instead of restarting. */
+                  processed_signature=(
+                    SELECT encode(digest(
+                             COALESCE(string_agg(
+                               m.ordinal::text || ':' || m.id::text || ':' || m.content_hash,
+                               E'\x1e' ORDER BY m.ordinal,m.id
+                             ), ''),
+                             'sha256'
+                           ), 'hex')
+                      FROM chronicle_memories m
+                     WHERE m.owner_user_id=$2 AND m.campaign_id=$3 AND m.world_version_id=$8
+                       AND (m.ordinal < $10::integer
+                            OR (m.ordinal = $10::integer AND m.id <= $11::uuid))
+                  ),
                   lease_expires_at=clock_timestamp()+($7::text || ' seconds')::interval,
                   updated_at=clock_timestamp()
             WHERE id=$1 AND owner_user_id=$2 AND campaign_id=$3 AND lease_owner=$4
@@ -636,7 +715,8 @@ export function createPostgresChronicleChunkBatchPort(
               AND EXISTS (SELECT 1 FROM campaigns c
                            WHERE c.id=$3 AND c.owner_user_id=$2 AND c.world_version_id=$8)`,
           [scope.jobId, scope.ownerUserId, scope.campaignId, scope.workerId, scope.workVersion,
-            JSON.stringify(input.progress), scope.leaseSeconds, scope.worldVersionId, scope.leaseToken]
+            JSON.stringify(input.progress), scope.leaseSeconds, scope.worldVersionId, scope.leaseToken,
+            parent.ordinal, parent.id]
         );
         if (updated.rowCount !== 1) throw new Error("Chronicle chunk lease was lost before batch commit.");
         return true;

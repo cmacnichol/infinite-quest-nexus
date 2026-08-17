@@ -22,8 +22,10 @@ import {
 import { persistOriginalImage } from "../legacy-api/src/asset-service.js";
 import { captureCampaignArchiveSnapshot, cleanupExpiredArchivePreviews, exportCampaign, previewCampaignArchive } from "../legacy-api/src/campaign-archive-service.js";
 import { importCampaignArchive } from "../legacy-api/src/import-service.js";
+import { campaignArchivePayloads } from "../../services/runtime/src/campaign-archive-export-composition.js";
+import { loadCampaignArchiveExportSnapshot } from "../../packages/database/src/campaign-archive-export-repository.js";
 import { buildServer } from "../../services/api/src/server.js";
-import { inertStorageServerOptions, serverOptions } from "../helpers/build-server-options.js";
+import { inertStorageServerOptions, legacyStoryImportServerOptions, serverOptions } from "../helpers/build-server-options.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 
 const archiveCleanupTestState = vi.hoisted(() => ({
@@ -390,6 +392,110 @@ integration("campaign archive export", () => {
     expect(snapshot.memories[0]).not.toHaveProperty("embedding");
   });
 
+  it("omits every derived Chronicle projection from the exported portable payload bytes", async () => {
+    const ownerUserId = await initialOwnerId(pool);
+    const chunkContent = "Derived chunk text that must never leave the installation.";
+    const chunkContentHash = createHash("sha256").update(chunkContent, "utf8").digest("hex");
+    const parentHash = createHash("sha256").update("Chronicle marker", "utf8").digest("hex");
+    const memory = (await pool.query<{ id: string }>(
+      "SELECT id FROM chronicle_memories WHERE campaign_id=$1 AND owner_user_id=$2 ORDER BY ordinal LIMIT 1",
+      [campaignId, ownerUserId]
+    )).rows[0]!;
+    const provider = (await pool.query<{ id: string }>(
+      `INSERT INTO provider_profiles
+         (owner_user_id, name, provider_type, provider_role, base_url, default_model)
+       VALUES ($1,$2,'openai_compatible','embedding','http://archive-provider.invalid/v1','embed-v1') RETURNING id`,
+      [ownerUserId, `Archive embedding provider ${randomUUID()}`]
+    )).rows[0]!;
+    try {
+      await pool.query(
+        `INSERT INTO chronicle_memory_chunks
+           (owner_user_id,campaign_id,world_version_id,parent_memory_id,parent_content_hash,
+            chunking_protocol_version,chunk_ordinal,chunk_kind,content,source_start_offset,source_end_offset,
+            token_estimate,entities,entity_ids,embedding,embedding_status,embedding_provider_profile_id,
+            embedding_model,embedding_dimensions,embedding_protocol_version,embedding_provider_fingerprint,
+            embedding_content_hash,embedding_updated_at)
+         VALUES ($1,$2,$3,$4,$5,'chronicle-chunk-v1',0,'legacy_summary',$6,0,length($6),
+                 4,ARRAY[]::text[],ARRAY[]::text[],'[0.125,0.875]'::vector,'embedded',$7,
+                 'chunk-embed-v1',2,'chronicle-embedding-v1','archive-chunk-fingerprint',$8,now())`,
+        [ownerUserId, campaignId, sourceWorldVersionId, memory.id, parentHash, chunkContent, provider.id, chunkContentHash]
+      );
+      await pool.query(
+        `INSERT INTO chronicle_chunk_jobs (owner_user_id,campaign_id,status,completed_at)
+         VALUES ($1,$2,'completed',now())`,
+        [ownerUserId, campaignId]
+      );
+      const run = (await pool.query<{ id: string }>(
+        `INSERT INTO chronicle_retrieval_runs
+           (owner_user_id,campaign_id,world_version_id,query_hash,production_implementation,shadow_enabled,
+            retrieval_version,embedding_protocol_version,chunk_protocol_version,query_token_estimate)
+         VALUES ($1,$2,$3,$4,'legacy_hybrid',false,'chronicle-retrieval-v1','chronicle-embedding-v1',
+                 'chronicle-chunk-v1',12) RETURNING id`,
+        [ownerUserId, campaignId, sourceWorldVersionId, "c".repeat(64)]
+      )).rows[0]!;
+      await pool.query(
+        `INSERT INTO chronicle_retrieval_candidates
+           (run_id,owner_user_id,campaign_id,world_version_id,implementation,candidate_id,parent_memory_id,
+            rank,reason,token_estimate,selected,production_selection)
+         VALUES ($1,$2,$3,$4,'legacy_hybrid','archive-candidate',$5,1,'lexical_match',4,true,true)`,
+        [run.id, ownerUserId, campaignId, sourceWorldVersionId, memory.id]
+      );
+      await pool.query(
+        `INSERT INTO chronicle_query_embedding_cache
+           (owner_user_id,campaign_id,normalized_query_hash,provider_profile_id,embedding_model_hash,
+            provider_fingerprint_hash,query_prefix_hash,embedding_protocol_version,embedding,embedding_dimensions)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'chronicle-embedding-v1','[0.5,0.25]'::vector,2)`,
+        [ownerUserId, campaignId, "d".repeat(64), provider.id, "e".repeat(64), "f".repeat(64), "0".repeat(64)]
+      );
+
+      const snapshot = await loadCampaignArchiveExportSnapshot(pool, ownerUserId, campaignId);
+      const projected = campaignArchivePayloads(snapshot);
+      const emitted = {
+        "campaign.json": canonicalArchiveJson(projected.campaign),
+        "world.json": canonicalArchiveJson(projected.world),
+        "chronicle.json": canonicalArchiveJson(projected.chronicle)
+      };
+
+      for (const [entry, bytes] of Object.entries(emitted)) {
+        for (const forbidden of [
+          chunkContent,
+          chunkContentHash,
+          "0.125",
+          "0.875",
+          "archive-chunk-fingerprint",
+          "chronicle-chunk-v1",
+          "index_memory_chunks_v2",
+          "archive-candidate",
+          "chronicle_memory_chunks",
+          "chronicle_chunk_jobs",
+          "chronicle_retrieval_runs",
+          "chronicle_retrieval_candidates",
+          "chronicle_query_embedding_cache",
+          run.id,
+          provider.id
+        ]) {
+          expect(bytes, `${entry} must not carry ${forbidden}`).not.toContain(forbidden);
+        }
+      }
+      expect(JSON.parse(emitted["chronicle.json"]).memories).toEqual([
+        expect.objectContaining({ memory_kind: "legacy_summary", content: "Chronicle marker" })
+      ]);
+      for (const memoryEntry of JSON.parse(emitted["chronicle.json"]).memories) {
+        expect(memoryEntry).not.toHaveProperty("embedding");
+        expect(memoryEntry).not.toHaveProperty("content_hash");
+      }
+      expect(Object.keys(JSON.parse(emitted["campaign.json"]).archiveRecords)).toEqual(
+        expect.not.arrayContaining(["chunks", "chunkJobs", "retrievalTelemetry", "queryEmbeddingCache"])
+      );
+    } finally {
+      await pool.query("DELETE FROM chronicle_query_embedding_cache WHERE campaign_id=$1", [campaignId]);
+      await pool.query("DELETE FROM chronicle_retrieval_runs WHERE campaign_id=$1", [campaignId]);
+      await pool.query("DELETE FROM chronicle_chunk_jobs WHERE campaign_id=$1", [campaignId]);
+      await pool.query("DELETE FROM chronicle_memory_chunks WHERE campaign_id=$1", [campaignId]);
+      await pool.query("DELETE FROM provider_profiles WHERE id=$1", [provider.id]);
+    }
+  });
+
   secureGeneratedStagingIt("[secure generated staging] exports only the selected campaign and pinned world version as a deterministic manifest archive", async () => {
     const artifact = await exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root, limits });
     const repeated = await exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root, limits });
@@ -631,7 +737,22 @@ integration("campaign archive export", () => {
     )).rejects.toMatchObject({ code: "archive-asset-invalid", details: { payload: "assets" } });
   });
 
-  secureGeneratedStagingIt("[secure generated staging] keeps legacy JSON imports and manifest-less ZIP previews available", async () => {
+  it("keeps the legacy JSON import route available on every platform", async () => {
+    const app = await buildServer(legacyStoryImportServerOptions({ config: serverConfig(), pool }));
+    try {
+      const legacyJson = await app.inject({
+        method: "POST",
+        url: "/api/v1/imports/legacy-story",
+        headers: { "content-type": "application/json" },
+        payload: { sourceName: `legacy-json-${randomUUID()}.story`, story: { world: { title: "Legacy JSON route" }, turns: [] } }
+      });
+      expect([200, 201]).toContain(legacyJson.statusCode);
+    } finally {
+      await app.close();
+    }
+  });
+
+  secureGeneratedStagingIt("[secure generated staging] keeps manifest-less ZIP previews available", async () => {
     const app = await buildServer(serverOptions({ config: serverConfig(), pool }));
     const legacyZipPath = join(root, `legacy-route-${randomUUID()}.zip`);
     const output = createWriteStream(legacyZipPath, { flags: "wx" });
@@ -647,14 +768,6 @@ integration("campaign archive export", () => {
     ]);
     await unlink(legacyZipPath);
     try {
-      const legacyJson = await app.inject({
-        method: "POST",
-        url: "/api/v1/imports/legacy-story",
-        headers: { "content-type": "application/json" },
-        payload: { sourceName: `legacy-json-${randomUUID()}.story`, story: { world: { title: "Legacy JSON route" }, turns: [] } }
-      });
-      expect([200, 201]).toContain(legacyJson.statusCode);
-
       const legacyZip = await app.inject({
         method: "POST",
         url: "/api/v1/imports/campaign-archive/preview",

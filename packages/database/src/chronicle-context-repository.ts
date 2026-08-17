@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { MemoryGenerationTransactionPort } from "../../application/src/memory/index.js";
 import { requireCampaignWorldVersionScope } from "../../application/src/memory/helpers.js";
+import { toSafeProviderConfiguration } from "../../application/src/providers/index.js";
 import {
   CHRONICLE_RETRIEVAL_VERSION,
   type ChronicleRetrievalCandidate,
@@ -29,6 +30,7 @@ import {
 } from "../../domain/src/entity-references.js";
 import {
   CHRONICLE_CHUNK_PROTOCOL_VERSION,
+  CHRONICLE_CHUNK_SKIP_REASONS,
   type ChronicleChunkKind
 } from "../../domain/src/chronicle-chunking.js";
 import {
@@ -46,8 +48,15 @@ import { CHRONICLE_RETRIEVAL_PROFILE_V2 } from "../../domain/src/generated/chron
 import { estimateTokens, stableStringify, truncateAtBoundary } from "../../domain/src/text.js";
 import { characterNarrativeContext } from "../../domain/src/world-characters.js";
 import { compressTurnMemory } from "../../story-engine/src/chronicle.js";
-import type { ChronicleGenerationTransactionDependencies } from "./chronicle-repository.js";
-import { CHRONICLE_RANK_COMPATIBLE_EMBEDDING_SQL } from "./chronicle-embedding-compatibility.js";
+import type {
+  ChronicleGenerationTransactionDependencies,
+  ChronicleTransactionEmbeddingExecution
+} from "./chronicle-repository.js";
+import {
+  CHRONICLE_RANK_COMPATIBLE_EMBEDDING_SQL,
+  CHRONICLE_READINESS_COMPATIBLE_EMBEDDING_SQL,
+  CHRONICLE_READINESS_EMBEDDING_IDENTITY_SQL
+} from "./chronicle-embedding-compatibility.js";
 import {
   createPostgresChronicleQueryCacheRepository,
   type ChronicleQueryEmbeddingCacheKey
@@ -119,7 +128,6 @@ type ChunkCandidateRow = Readonly<{
   chunk_ordinal: number;
   chunk_kind: ChronicleChunkKind;
   chunk_content: string;
-  chunk_embedding: unknown;
   active_fact: boolean;
 }>;
 
@@ -129,6 +137,16 @@ type ChunkedRankFusionResult = Readonly<{
   providerFingerprint: string | null;
   costIds: readonly string[];
   telemetryCandidates: readonly ChronicleRetrievalCandidate[];
+  legacyFallbackReason?: string;
+}>;
+
+type ChunkEmbeddingIdentity = Readonly<{
+  providerProfileId: string;
+  model: string;
+  fingerprint: string;
+  dimensions: number | null;
+  provider: ChronicleTransactionEmbeddingExecution;
+  prefixes: ReturnType<typeof modelAwareEmbeddingPrefixes>;
 }>;
 
 type LegacyRetrievalResult = Readonly<{
@@ -696,9 +714,79 @@ async function applyContextSemanticRelevance(
   }
 }
 
+/**
+ * Renders a compile-time Chronicle protocol constant as a SQL literal. Values are
+ * whitelisted rather than interpolated blindly so no unchecked text can reach a query.
+ */
+/**
+ * Legacy retrieval used to add every turn memory for chronological coverage, so a 100-turn
+ * campaign put 100 Chronicle entries in the prompt and only the token budget trimmed them.
+ * That crowds out the relevance-selected entries and makes the prompt grow with campaign
+ * length. Coverage is kept, but as a deterministic evenly-spaced sample anchored on the most
+ * recent turns, so early, middle, and late history all survive within a bounded size.
+ */
+const LEGACY_CHRONOLOGICAL_COVERAGE_LIMIT = 32;
+
+function chronologicalCoverage<T>(turnMemories: readonly T[]): readonly T[] {
+  if (turnMemories.length <= LEGACY_CHRONOLOGICAL_COVERAGE_LIMIT) return turnMemories;
+  const selectedIndexes = new Set<number>();
+  const last = turnMemories.length - 1;
+  for (let step = 0; step < LEGACY_CHRONOLOGICAL_COVERAGE_LIMIT; step += 1) {
+    selectedIndexes.add(Math.round(step * last / (LEGACY_CHRONOLOGICAL_COVERAGE_LIMIT - 1)));
+  }
+  return turnMemories.filter((_, index) => selectedIndexes.has(index));
+}
+
+function protocolLiteral(value: string): string {
+  if (!/^[a-z0-9][a-z0-9_.:-]*$/u.test(value)) {
+    throw new Error("Chronicle protocol constants must be safe lowercase identifiers.");
+  }
+  return `'${value}'`;
+}
+
+const CHUNK_PROTOCOL_LITERAL = protocolLiteral(CHRONICLE_CHUNK_PROTOCOL_VERSION);
+
+const SANITIZED_SKIPPED_CHUNK_PREDICATE = `(chunk.embedding_status='skipped'
+                   AND chunk.embedding_skip_reason IN (${
+  CHRONICLE_CHUNK_SKIP_REASONS.map(protocolLiteral).join(",")
+}))`;
+
+/** A chunk is terminal when it carries a vector or any sanitized skip reason from the closed set. */
+const TERMINAL_CHUNK_PREDICATE = `(chunk.embedding_status='embedded'
+               OR ${SANITIZED_SKIPPED_CHUNK_PREDICATE})`;
+
+async function resolveChunkEmbeddingIdentity(
+  client: DatabaseClient,
+  scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
+  config: EmbeddingConfigRow | undefined,
+  dependencies: ChronicleGenerationTransactionDependencies,
+): Promise<ChunkEmbeddingIdentity | null> {
+  if (!config?.embedding_enabled || !config.embedding_provider_profile_id || !config.embedding_model) return null;
+  const providerProfileId = await dependencies.embeddings.resolve(client, {
+    ownerUserId: scope.ownerUserId,
+    campaignId: scope.campaignId,
+    selectedProviderProfileId: config.embedding_provider_profile_id
+  });
+  if (!providerProfileId) return null;
+  const provider = await dependencies.embeddings.load(client, {
+    ownerUserId: scope.ownerUserId,
+    providerProfileId,
+    model: config.embedding_model
+  });
+  const prefixes = modelAwareEmbeddingPrefixes(
+    config.embedding_model,
+    config.embedding_document_prefix,
+    config.embedding_query_prefix
+  );
+  const fingerprint = await dependencies.embeddings.fingerprint(provider, prefixes);
+  const dimensions = toSafeProviderConfiguration(provider.configuration).embeddingDimensions ?? null;
+  return { providerProfileId, model: config.embedding_model, fingerprint, dimensions, provider, prefixes };
+}
+
 async function chunkIndexReady(
   client: DatabaseClient,
   scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
+  identity: ChunkEmbeddingIdentity,
 ): Promise<boolean> {
   const result = await client.query<{ chunk_index_ready: boolean }>(
     `WITH current_parents AS MATERIALIZED (
@@ -709,15 +797,29 @@ async function chunkIndexReady(
        SELECT status FROM chronicle_chunk_jobs
         WHERE owner_user_id = $1 AND campaign_id = $2
         ORDER BY updated_at DESC,id DESC LIMIT 1
+     ), compatible_dimension AS (
+       SELECT CASE
+         WHEN $6::integer IS NOT NULL THEN $6::integer
+         WHEN count(DISTINCT chunk.embedding_dimensions) = 1 THEN min(chunk.embedding_dimensions)
+         ELSE NULL
+       END AS expected_dimensions
+         FROM chronicle_memory_chunks chunk
+         JOIN current_parents parent ON parent.id=chunk.parent_memory_id
+          AND parent.content_hash=chunk.parent_content_hash
+        WHERE chunk.owner_user_id = $1 AND chunk.campaign_id = $2 AND chunk.world_version_id = $3
+          AND chunk.chunking_protocol_version=${CHUNK_PROTOCOL_LITERAL}
+          AND ${CHRONICLE_READINESS_EMBEDDING_IDENTITY_SQL}
      )
      SELECT (
+       (SELECT expected_dimensions IS NOT NULL FROM compatible_dimension)
+       AND
        EXISTS (
          SELECT 1 FROM chronicle_memory_chunks chunk
          JOIN current_parents parent ON parent.id=chunk.parent_memory_id
           AND parent.content_hash=chunk.parent_content_hash
         WHERE chunk.owner_user_id = $1 AND chunk.campaign_id = $2 AND chunk.world_version_id = $3
-          AND chunk.chunking_protocol_version='${CHRONICLE_CHUNK_PROTOCOL_VERSION}'
-          AND chunk.embedding_status='embedded'
+          AND chunk.chunking_protocol_version=${CHUNK_PROTOCOL_LITERAL}
+          AND ${CHRONICLE_READINESS_COMPATIBLE_EMBEDDING_SQL}
        )
        AND NOT EXISTS (
          SELECT 1 FROM current_parents parent
@@ -725,10 +827,9 @@ async function chunkIndexReady(
             SELECT 1 FROM chronicle_memory_chunks chunk
              WHERE chunk.parent_memory_id=parent.id AND chunk.parent_content_hash=parent.content_hash
                AND chunk.owner_user_id = $1 AND chunk.campaign_id = $2 AND chunk.world_version_id = $3
-               AND chunk.chunking_protocol_version='${CHRONICLE_CHUNK_PROTOCOL_VERSION}'
-               AND (chunk.embedding_status='embedded'
-                    OR (chunk.embedding_status='skipped'
-                        AND chunk.embedding_skip_reason='chunk_embedding_skipped'))
+               AND chunk.chunking_protocol_version=${CHUNK_PROTOCOL_LITERAL}
+               AND (${CHRONICLE_READINESS_COMPATIBLE_EMBEDDING_SQL}
+                    OR ${SANITIZED_SKIPPED_CHUNK_PREDICATE})
           )
        )
        AND NOT EXISTS (
@@ -736,14 +837,14 @@ async function chunkIndexReady(
          JOIN current_parents parent ON parent.id=chunk.parent_memory_id
           AND parent.content_hash=chunk.parent_content_hash
         WHERE chunk.owner_user_id = $1 AND chunk.campaign_id = $2 AND chunk.world_version_id = $3
-          AND chunk.chunking_protocol_version='${CHRONICLE_CHUNK_PROTOCOL_VERSION}'
-          AND NOT (chunk.embedding_status='embedded'
-                   OR (chunk.embedding_status='skipped'
-                       AND chunk.embedding_skip_reason='chunk_embedding_skipped'))
+          AND chunk.chunking_protocol_version=${CHUNK_PROTOCOL_LITERAL}
+          AND NOT (${CHRONICLE_READINESS_COMPATIBLE_EMBEDDING_SQL}
+                   OR ${SANITIZED_SKIPPED_CHUNK_PREDICATE})
        )
        AND COALESCE((SELECT status='completed' FROM latest_job),true)
      ) AS chunk_index_ready`,
-    [scope.ownerUserId, scope.campaignId, scope.worldVersionId]
+    [scope.ownerUserId, scope.campaignId, scope.worldVersionId, identity.providerProfileId,
+      identity.model, identity.dimensions, identity.fingerprint]
   );
   return result.rows[0]?.chunk_index_ready === true;
 }
@@ -756,7 +857,7 @@ function authorizedChunkCte(): string {
               parent.token_estimate AS parent_token_estimate,parent.importance AS parent_importance,
               parent.entities AS parent_entities,parent.entity_ids AS parent_entity_ids,
               parent.metadata AS parent_metadata,chunk.chunk_ordinal,chunk.chunk_kind,
-              chunk.content AS chunk_content,chunk.embedding::text AS chunk_embedding,
+              chunk.content AS chunk_content,
               chunk.entities,chunk.entity_ids,chunk.search_document,chunk.embedding,
               chunk.embedding_status,chunk.embedding_provider_profile_id,chunk.embedding_model,
               chunk.embedding_dimensions,chunk.embedding_protocol_version,
@@ -768,9 +869,8 @@ function authorizedChunkCte(): string {
           AND parent.owner_user_id = $1 AND parent.campaign_id = $2 AND parent.world_version_id = $3
           AND parent.content_hash=chunk.parent_content_hash
         WHERE chunk.owner_user_id = $1 AND chunk.campaign_id = $2 AND chunk.world_version_id = $3
-          AND chunk.chunking_protocol_version='${CHRONICLE_CHUNK_PROTOCOL_VERSION}'
-          AND (chunk.embedding_status='embedded'
-               OR (chunk.embedding_status='skipped' AND chunk.embedding_skip_reason='chunk_embedding_skipped'))
+          AND chunk.chunking_protocol_version=${CHUNK_PROTOCOL_LITERAL}
+          AND ${TERMINAL_CHUNK_PREDICATE}
           AND ($4::integer IS NULL OR parent.ordinal <= $4::integer)
           AND ($4::integer IS NULL OR parent.memory_kind NOT IN ('legacy_summary','canonical_fact'))
           AND (parent.memory_kind <> 'canonical_fact' OR CASE WHEN jsonb_typeof(parent.metadata->'structuredFactIds')='array'
@@ -868,7 +968,7 @@ async function loadAuthorizedChunkRank(
      )
      SELECT candidate_id,parent_memory_id,parent_turn_id,parent_memory_kind,parent_ordinal,
             parent_content,parent_token_estimate,parent_importance,parent_entities,parent_entity_ids,parent_metadata,
-            chunk_ordinal,chunk_kind,chunk_content,chunk_embedding,active_fact
+            chunk_ordinal,chunk_kind,chunk_content,active_fact
        FROM ranked
       ORDER BY signal_rank,parent_memory_id,candidate_id
       LIMIT $${limitParameter}`,
@@ -967,6 +1067,7 @@ async function applyChunkedRankFusion(
   config: EmbeddingConfigRow,
   dependencies: ChronicleGenerationTransactionDependencies,
   diagnosticMode: RetrievalDiagnosticMode = "production",
+  embeddingIdentity?: ChunkEmbeddingIdentity,
 ): Promise<ChunkedRankFusionResult> {
   const rankFusionProfile = dependencies.rankFusionProfile ?? CHRONICLE_RETRIEVAL_PROFILE_V2;
   const candidateLimit = Math.max(1, Math.floor(rankFusionProfile.candidateLimits.perSignal));
@@ -1002,23 +1103,23 @@ async function applyChunkedRankFusion(
   } else {
     const selectedProviderProfileId = config.embedding_provider_profile_id;
     try {
-      const providerProfileId = await dependencies.embeddings.resolve(client, {
-        ownerUserId: scope.ownerUserId,
-        campaignId: scope.campaignId,
-        selectedProviderProfileId
-      });
+      const providerProfileId = embeddingIdentity?.providerProfileId
+        ?? await dependencies.embeddings.resolve(client, {
+          ownerUserId: scope.ownerUserId,
+          campaignId: scope.campaignId,
+          selectedProviderProfileId
+        });
       if (!providerProfileId) {
         semanticFallbackReason = "provider_unavailable";
       } else {
         const providerScope = { ownerUserId: scope.ownerUserId, providerProfileId, model: config.embedding_model };
-        const provider = await dependencies.embeddings.load(client, providerScope);
-        const prefixes = modelAwareEmbeddingPrefixes(
-          config.embedding_model,
-          config.embedding_document_prefix,
-          config.embedding_query_prefix
+        const provider = embeddingIdentity?.provider ?? await dependencies.embeddings.load(client, providerScope);
+        const prefixes = embeddingIdentity?.prefixes ?? modelAwareEmbeddingPrefixes(
+          config.embedding_model, config.embedding_document_prefix, config.embedding_query_prefix
         );
         effectiveQueryPrefix = prefixes.queryPrefix;
-        const fingerprint = await dependencies.embeddings.fingerprint(provider, prefixes);
+        const fingerprint = embeddingIdentity?.fingerprint
+          ?? await dependencies.embeddings.fingerprint(provider, prefixes);
         providerFingerprint = fingerprint;
         const cache = queryCache(client, scope, dependencies);
         const cacheKeys = variants.map((variant) => queryCacheKey(
@@ -1130,6 +1231,36 @@ async function applyChunkedRankFusion(
     }
   }
 
+  const legacyFallbackReason = diagnosticMode === "production" && [
+    "provider_unavailable",
+    "semantic_retrieval_unavailable",
+    "incompatible_chunk_embeddings"
+  ].includes(semanticFallbackReason ?? "")
+    ? semanticFallbackReason
+    : undefined;
+  if (legacyFallbackReason) {
+    return {
+      retrieval: {
+        implementation: "chunked_hybrid",
+        mode: "lexical_fallback",
+        semanticAvailable: false,
+        fallbackReason: legacyFallbackReason,
+        embeddedCandidates,
+        rankedCandidates: 0,
+        queryExpanded: variants.length > 1,
+        effectiveQueryPrefix,
+        embeddingRequests,
+        queryCacheHits,
+        queryCacheMisses
+      },
+      selectedParentContent: new Map(),
+      providerFingerprint,
+      costIds,
+      telemetryCandidates: [],
+      legacyFallbackReason
+    };
+  }
+
   for (const variant of variants) {
     addRank("full_text", variant, await loadRank({
       signal: "full_text", variant, query: variant.query
@@ -1166,6 +1297,21 @@ async function applyChunkedRankFusion(
   const latestSceneParentMemoryId = memories.filter((memory) => memory.memory_kind === "turn_fiction")
     .sort((left, right) => left.ordinal - right.ordinal || compareDeterministically(left.id, right.id))
     .at(-1)?.id ?? null;
+  // Vectors are only needed for the maximal-marginal-relevance penalty over fused candidates.
+  // Selecting them inside every rank query rendered the whole campaign's vectors as text once
+  // per signal per variant, which is what made retrieval latency grow with campaign length.
+  const fusedCandidateIds = fused.map((candidate) => candidate.candidateId);
+  const embeddingByCandidateId = new Map<string, readonly number[] | null>();
+  if (fusedCandidateIds.length) {
+    const vectors = await client.query<{ id: string; embedding: string | null }>(
+      `SELECT id,embedding::text AS embedding
+         FROM chronicle_memory_chunks
+        WHERE owner_user_id=$1 AND campaign_id=$2 AND world_version_id=$3
+          AND id=ANY($4::uuid[]) AND embedding IS NOT NULL`,
+      [scope.ownerUserId, scope.campaignId, scope.worldVersionId, fusedCandidateIds]
+    );
+    for (const row of vectors.rows) embeddingByCandidateId.set(row.id, parseVector(row.embedding));
+  }
   const rankedChunkParents = fused.flatMap((candidate, index) => {
     const row = candidateRows.get(candidate.candidateId);
     return row ? [{
@@ -1181,7 +1327,7 @@ async function applyChunkedRankFusion(
       chunkOrdinal: row.chunk_ordinal,
       chunkKind: row.chunk_kind,
       chunkContent: row.chunk_content,
-      embedding: parseVector(row.chunk_embedding),
+      embedding: embeddingByCandidateId.get(candidate.candidateId) ?? null,
       fusedRank: fusedRankByCandidateId.get(candidate.candidateId) ?? index + 1
     }] : [];
   });
@@ -1378,58 +1524,132 @@ export async function buildPostgresChronicleContextPreview(
       costIds: result.costIds
     };
   };
+  let chunkEmbeddingIdentity: Promise<ChunkEmbeddingIdentity | null> | undefined;
   let readyForChunked: boolean | undefined;
   const executeChunked = async (
     diagnosticMode: RetrievalDiagnosticMode = "production",
   ): Promise<RetrievalExecution> => {
-    readyForChunked ??= await chunkIndexReady(client, scope);
-    const executionMemories = cloneContextMemories(memories);
     const startedAt = performance.now();
-    if (readyForChunked && config) {
-      const result = await applyChunkedRankFusion(
-        client,
-        campaign,
-        scope,
-        executionMemories,
-        entityCatalog,
-        config,
-        dependencies,
-        diagnosticMode
-      );
+    const executeLegacyFallback = async (
+      fallbackReason: string,
+      executionConfig: EmbeddingConfigRow | undefined,
+      priorCostIds: readonly string[] = [],
+      priorFingerprint: string | null = null,
+    ): Promise<RetrievalExecution> => {
+      const legacy = await executeLegacy("legacy_hybrid", executionConfig, diagnosticMode);
       return {
+        ...legacy,
         implementation: "chunked_hybrid",
-        memories: executionMemories,
-        retrieval: result.retrieval,
-        selectedParentContent: result.selectedParentContent,
+        retrieval: {
+          ...legacy.retrieval,
+          implementation: "chunked_hybrid",
+          ...(["provider_unavailable", "semantic_retrieval_unavailable"].includes(fallbackReason)
+            ? { mode: "lexical_fallback" }
+            : {}),
+          fallbackReason
+        },
         latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
-        providerFingerprint: result.providerFingerprint,
-        costIds: result.costIds,
-        telemetryCandidates: result.telemetryCandidates
+        providerFingerprint: legacy.providerFingerprint ?? priorFingerprint,
+        costIds: [...new Set([...priorCostIds, ...legacy.costIds])]
+      };
+    };
+    if (!config?.embedding_enabled || !config.embedding_provider_profile_id || !config.embedding_model) {
+      return executeLegacyFallback("chunk_index_not_ready", config);
+    }
+    const attemptSavepoint = `chronicle_retrieval_chunk_attempt_${diagnosticMode}`;
+    type ChunkAttempt = Readonly<{
+      kind: "fallback";
+      reason: string;
+      executionConfig: EmbeddingConfigRow | undefined;
+      costIds?: readonly string[];
+      fingerprint?: string | null;
+    }> | Readonly<{
+      kind: "chunked";
+      executionMemories: ContextMemoryRow[];
+      result: ChunkedRankFusionResult;
+    }>;
+    let attempt: ChunkAttempt;
+    await client.query(`SAVEPOINT ${attemptSavepoint}`);
+    try {
+      chunkEmbeddingIdentity ??= resolveChunkEmbeddingIdentity(client, scope, config, dependencies);
+      const identity = await chunkEmbeddingIdentity;
+      if (!identity) {
+        attempt = {
+          kind: "fallback",
+          reason: "provider_unavailable",
+          executionConfig: { ...config, embedding_enabled: false }
+        };
+      } else {
+        readyForChunked ??= await chunkIndexReady(client, scope, identity);
+        if (!readyForChunked) {
+          attempt = { kind: "fallback", reason: "chunk_index_not_ready", executionConfig: config };
+        } else {
+          const executionMemories = cloneContextMemories(memories);
+          const result = await applyChunkedRankFusion(
+            client,
+            campaign,
+            scope,
+            executionMemories,
+            entityCatalog,
+            config,
+            dependencies,
+            diagnosticMode,
+            identity
+          );
+          if (result.legacyFallbackReason) {
+            attempt = {
+              kind: "fallback",
+              reason: result.legacyFallbackReason,
+              executionConfig: result.legacyFallbackReason === "semantic_retrieval_unavailable"
+                ? { ...config, embedding_enabled: false }
+                : config,
+              costIds: result.costIds,
+              fingerprint: result.providerFingerprint
+            };
+          } else {
+            attempt = { kind: "chunked", executionMemories, result };
+          }
+        }
+      }
+      await client.query(`RELEASE SAVEPOINT ${attemptSavepoint}`);
+    } catch {
+      await client.query(`ROLLBACK TO SAVEPOINT ${attemptSavepoint}`);
+      await client.query(`RELEASE SAVEPOINT ${attemptSavepoint}`);
+      try {
+        dependencies.embeddings.logDiagnostic(new Error(
+          diagnosticMode === "shadow" ? "chronicle_retrieval_shadow_failed" : "chronicle_retrieval_failed"
+        ), {
+          campaignId: scope.campaignId,
+          generationJobId: scope.costAttribution?.generationJobId ?? null,
+          memoryOperation: diagnosticMode === "shadow" ? "chronicle_retrieval_shadow" : "chronicle_retrieval",
+          retrievalImplementation: "chunked_hybrid"
+        });
+      } catch {
+        // Diagnostics cannot prevent the complete legacy fallback.
+      }
+      attempt = {
+        kind: "fallback",
+        reason: "semantic_retrieval_unavailable",
+        executionConfig: { ...config, embedding_enabled: false }
       };
     }
-    const fallback = await applyContextSemanticRelevance(
-      client,
-      scope,
-      expandedQuery,
-      executionMemories,
-      queryEntityIds,
-      dependencies,
-      config,
-      diagnosticMode,
-      "chunked_hybrid"
-    );
+    if (attempt.kind === "fallback") {
+      return executeLegacyFallback(
+        attempt.reason,
+        attempt.executionConfig,
+        attempt.costIds,
+        attempt.fingerprint
+      );
+    }
     return {
       implementation: "chunked_hybrid",
-      memories: executionMemories,
-      retrieval: {
-        ...fallback.retrieval,
-        implementation: "chunked_hybrid",
-        fallbackReason: "chunk_index_not_ready"
-      },
-      selectedParentContent: null,
+      memories: attempt.executionMemories,
+      retrieval: attempt.result.retrieval,
+      selectedParentContent: attempt.result.selectedParentContent,
       latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
-      providerFingerprint: fallback.providerFingerprint,
-      costIds: fallback.costIds
+      providerFingerprint: attempt.result.providerFingerprint,
+      costIds: attempt.result.costIds,
+      telemetryCandidates: attempt.result.telemetryCandidates
     };
   };
   const executeShadow = async (
@@ -1663,7 +1883,9 @@ export async function buildPostgresChronicleContextPreview(
     .slice(0, 16)
     .forEach((memory) => addMemory(memory, compressTurnMemory(parentContent(memory), renderLevel), "relevant"));
   if (selectedLevel !== "summary") {
-    turnMemories.forEach((memory) => addMemory(memory, compressTurnMemory(parentContent(memory), renderLevel), "chronological"));
+    for (const memory of chronologicalCoverage(turnMemories)) {
+      addMemory(memory, compressTurnMemory(parentContent(memory), renderLevel), "chronological");
+    }
   }
   const renderChronicle = () => [...selected.values()]
     .sort((left, right) => left.memory.ordinal - right.memory.ordinal

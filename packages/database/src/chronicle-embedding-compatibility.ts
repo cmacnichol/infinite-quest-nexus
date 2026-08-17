@@ -30,6 +30,14 @@ export const CHRONICLE_RANK_COMPATIBLE_EMBEDDING_SQL = compatibleEmbeddingSql(
   "", "$6", "$7", "$8", "$9"
 );
 
+export const CHRONICLE_READINESS_EMBEDDING_IDENTITY_SQL = embeddingIdentitySql(
+  "chunk.", "$4", "$5", "$7"
+);
+
+export const CHRONICLE_READINESS_COMPATIBLE_EMBEDDING_SQL = compatibleEmbeddingSql(
+  "chunk.", "$4", "$5", "(SELECT expected_dimensions FROM compatible_dimension)", "$7"
+);
+
 export const CHRONICLE_HEALTH_EMBEDDING_IDENTITY_SQL = embeddingIdentitySql(
   "chunk.", "$5", "$6", "$8"
 );

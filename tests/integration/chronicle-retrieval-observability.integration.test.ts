@@ -231,7 +231,7 @@ integration("Chronicle retrieval observability", () => {
     )).resolves.toMatchObject({ rows: [{ count: "0" }] });
   });
 
-  it("does not report incompatible chunk vectors healthy and falls open to lexical ranking", async () => {
+  it("does not report incompatible chunk vectors healthy and falls back to legacy ranking", async () => {
     const current = await fixture("vector compatibility health");
     const providerConfiguration = { embeddingDimensions: 2 };
     const provider = await pool.query<{ id: string }>(
@@ -397,10 +397,9 @@ integration("Chronicle retrieval observability", () => {
     if ("failure" in preview) throw new Error("Expected Chronicle preview for the compatibility fixture.");
     expect(preview.retrieval).toMatchObject({
       implementation: "chunked_hybrid",
-      mode: "lexical_fallback",
-      semanticAvailable: false,
-      fallbackReason: "incompatible_chunk_embeddings",
-      embeddedCandidates: 0
+      mode: "hybrid",
+      semanticAvailable: true,
+      fallbackReason: "chunk_index_not_ready"
     });
     const scopes = preview.scopes as { chronicle: readonly unknown[] };
     expect(scopes.chronicle.length).toBeGreaterThan(0);

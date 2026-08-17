@@ -3,6 +3,32 @@ import { estimateTokens } from "./text.js";
 
 export const CHRONICLE_CHUNK_PROTOCOL_VERSION = "chronicle-chunk-v1" as const;
 
+/**
+ * The closed set of sanitized reasons a derived chunk may carry instead of a vector.
+ * `chunk_embedding_skipped` is the generic bucket every unrecognized reason collapses
+ * into, so provider text can never reach the column. Every member is a terminal state
+ * for chunk-index readiness.
+ */
+export const CHRONICLE_CHUNK_SKIP_REASONS = Object.freeze([
+  "semantic_retrieval_disabled",
+  "chunk_exceeds_provider_capacity",
+  "chunk_embedding_skipped"
+] as const);
+
+export type ChronicleChunkSkipReason = (typeof CHRONICLE_CHUNK_SKIP_REASONS)[number];
+
+export const CHRONICLE_GENERIC_CHUNK_SKIP_REASON: ChronicleChunkSkipReason = "chunk_embedding_skipped";
+
+/** Collapses any reason outside the closed set into the generic bucket; never returns provider text. */
+export function sanitizeChronicleChunkSkipReason(
+  reason: string | null | undefined,
+): ChronicleChunkSkipReason | null {
+  if (!reason) return null;
+  return (CHRONICLE_CHUNK_SKIP_REASONS as readonly string[]).includes(reason)
+    ? reason as ChronicleChunkSkipReason
+    : CHRONICLE_GENERIC_CHUNK_SKIP_REASON;
+}
+
 export type ChronicleMemoryKind =
   | "turn_fiction"
   | "canonical_fact"

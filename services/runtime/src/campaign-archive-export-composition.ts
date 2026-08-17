@@ -147,6 +147,15 @@ function legacyPayload(snapshot: CampaignArchiveExportSnapshot, exportedAt: stri
   }) as Record<string, unknown>;
 }
 
+/**
+ * The exact portable JSON payloads written as `campaign.json`, `world.json`, and
+ * `chronicle.json`. Exported so the export allowlist can be proven without secure
+ * archive staging, which is unavailable outside Linux.
+ */
+export function campaignArchivePayloads(snapshot: CampaignArchiveExportSnapshot) {
+  return payloads(snapshot);
+}
+
 function payloads(snapshot: CampaignArchiveExportSnapshot) {
   const legacy = legacyPayload(snapshot, String(iso(snapshot.campaign.updated_at)));
   const content = portableWorldContent(snapshot.campaign.content);

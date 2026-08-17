@@ -5,6 +5,7 @@ import { createPostgresChronicleGenerationTransactionPort } from "../packages/da
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabaseClient } from "../packages/database/src/pool.js";
 import { migrateDatabase } from "../packages/database/src/migrate.js";
 import { CHRONICLE_CHUNK_PROTOCOL_VERSION } from "../packages/domain/src/chronicle-chunking.js";
+import { CHRONICLE_RETRIEVAL_PROFILE_V2 } from "../packages/domain/src/generated/chronicle-retrieval-profile-v2.js";
 import {
   CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
   chronicleContentHash
@@ -32,7 +33,7 @@ function argument(name: string): string | undefined {
 }
 
 async function loadCorpus(): Promise<ChronicleRetrievalCorpus> {
-  return JSON.parse(await readFile(resolve(root, "tests/fixtures/chronicle-retrieval-evaluation.v1.json"), "utf8")) as ChronicleRetrievalCorpus;
+  return JSON.parse(await readFile(resolve(root, "tests/fixtures/chronicle-retrieval-evaluation.v2.json"), "utf8")) as ChronicleRetrievalCorpus;
 }
 
 function retrievalApplication(
@@ -325,6 +326,43 @@ async function seedCorpus(
       const decoy = await createDecoyCampaign(ownerUserId, version.rows[0]!.id);
       await insertDecoy(`memory:excluded-entity:${index}`, label, ownerUserId, decoy.campaignId, decoy.worldVersionId, "entity");
     }
+    // Authorized in-scope competition. These are legitimately retrievable and are neither
+    // leakage nor decoys: they exist so the prompt has more plausible candidates than slots,
+    // which is what makes recall@k and NDCG discriminate between calibration candidates.
+    const distractorTurnBase = semantic ? 3 + (fixture.id === "location-alias" ? 5 : 6) : 3;
+    for (let index = 0; index < (fixture.distractorCount ?? 0); index += 1) {
+      const query = fixture.scope.request.query ?? fixture.id;
+      const content = `${query} peripheral account ${index + 1}`;
+      const turnNumber = distractorTurnBase + index;
+      const turn = await database.query<{ id: string }>(
+        `INSERT INTO turns (owner_user_id, campaign_id, turn_number, action, narration, state_snapshot_private)
+         VALUES ($1,$2,$3,'Sanitized distractor action.','Sanitized distractor narration.','{}'::jsonb) RETURNING id`,
+        [ownerUserId, campaign.rows[0]!.id, turnNumber]
+      );
+      await database.query(
+        `INSERT INTO chronicle_memories
+           (owner_user_id, campaign_id, world_version_id, turn_id, memory_kind, ordinal, content, token_estimate,
+            metadata, embedding, embedding_provider_profile_id, embedding_model, embedding_dimensions,
+            embedding_content_hash, embedding_updated_at, embedding_provider_fingerprint, id)
+         VALUES ($1,$2,$3,$4,'turn_fiction',$5,$6,1,'{}'::jsonb,$7::vector,$8,$9,$10,$11,
+                 CASE WHEN $7::text IS NULL THEN NULL ELSE now() END,$12,$13)`,
+        [
+          ownerUserId,
+          campaign.rows[0]!.id,
+          version.rows[0]!.id,
+          turn.rows[0]!.id,
+          turnNumber,
+          content,
+          semantic ? "[0,1]" : null,
+          semantic ? embeddingProviderId : null,
+          semantic ? "fixture-embedding-v1" : null,
+          semantic ? 2 : null,
+          semantic ? chronicleContentHash(content) : null,
+          semantic ? "fixture-embedding-fingerprint" : null,
+          evaluationUuid(`memory:distractor:${index}`)
+        ]
+      );
+    }
     if (semantic || retrievalImplementation === "chunked_hybrid") {
       await database.query(
         `INSERT INTO campaign_memory_configs
@@ -405,6 +443,39 @@ class EvaluationRollback<T> extends Error {
   }
 }
 
+/**
+ * The checked-in profile records the metrics it was selected on. Retrieval changes that land
+ * after calibration silently invalidate those numbers, so the documented chunked verification
+ * run re-measures them. Only deterministic metrics are compared; latency and request counts
+ * are diagnostics that legitimately vary between runs.
+ */
+function assertProfileMetricsAreCurrent(
+  report: Awaited<ReturnType<typeof evaluateChronicleRetrieval>>,
+): void {
+  if (report.corpusHash !== CHRONICLE_RETRIEVAL_PROFILE_V2.corpusHash) {
+    throw new Error(
+      "Chronicle retrieval profile was calibrated against a different corpus. Regenerate it with --calibrate."
+    );
+  }
+  const recorded = CHRONICLE_RETRIEVAL_PROFILE_V2.metrics;
+  const measured = report.metrics;
+  const drifted = ([
+    ["recallAt5", recorded.recallAt5, measured.recallAt5],
+    ["recallAt10", recorded.recallAt10, measured.recallAt10],
+    ["recallAt20", recorded.recallAt20, measured.recallAt20],
+    ["mrr", recorded.mrr, measured.mrr],
+    ["ndcg", recorded.ndcg, measured.ndcg],
+    ["duplicateRate", recorded.duplicateRate, measured.duplicateRate]
+  ] as const).filter(([, expected, actual]) => Math.abs(expected - actual) > 1e-9);
+  if (drifted.length) {
+    throw new Error(
+      `Chronicle retrieval profile metrics are stale: ${
+        drifted.map(([name, expected, actual]) => `${name} recorded ${expected}, measured ${actual}`).join("; ")
+      }. Regenerate the profile with --calibrate.`
+    );
+  }
+}
+
 function assertCorpusResultInvariants(report: Awaited<ReturnType<typeof evaluateChronicleRetrieval>>): void {
   const supersededFact = report.cases.find((result) => result.id === "superseded-fact");
   const canonicalReplacementLabel = "superseded-fact-canonical-replacement";
@@ -472,6 +543,7 @@ try {
       { implementation, corpusHash }
     );
     assertCorpusResultInvariants(evaluated);
+    if (implementation === "chunked_hybrid") assertProfileMetricsAreCurrent(evaluated);
     throw new EvaluationRollback(evaluated);
   });
   throw new Error("Chronicle evaluation fixtures did not roll back.");
