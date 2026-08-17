@@ -22,6 +22,46 @@ const storyCss = readFileSync("apps/web/public/story.css", "utf8");
 const tokensCss = readFileSync("apps/web/public/tokens.css", "utf8");
 const navigationCss = readFileSync("apps/web/public/navigation.css", "utf8");
 
+async function bootLegacyStory({
+  turns,
+  nextCursor = null,
+  continuousReading = false,
+  fetchTurns = vi.fn()
+}: {
+  turns: Array<Record<string, unknown>>;
+  nextCursor?: string | null;
+  continuousReading?: boolean;
+  fetchTurns?: ReturnType<typeof vi.fn>;
+}) {
+  const { document, window } = parseHTML(storyHtml);
+  Object.defineProperty(window, "location", { value: { pathname: "/story/campaign-1" }, configurable: true });
+  for (const dialog of document.querySelectorAll("dialog")) {
+    (dialog as unknown as { showModal: () => void }).showModal = () => dialog.setAttribute("open", "");
+    (dialog as unknown as { close: () => void }).close = () => dialog.removeAttribute("open");
+  }
+  vi.stubGlobal("window", window);
+  vi.stubGlobal("document", document);
+  vi.stubGlobal("Element", window.Element);
+  vi.stubGlobal("HTMLElement", window.HTMLElement);
+  vi.stubGlobal("localStorage", { getItem: () => null, removeItem: () => undefined, setItem: () => undefined });
+
+  (storyModule.startStoryPlayer as (composition: unknown) => void)({
+    api: {
+      session: { get: async () => ({ user: { settings: { continuousReading, autoSubmitTurnChoices: false, defaultTurnControlStyle: "flexible_auto" } } }) },
+      providers: { list: async () => ({ providers: [{ providerRole: "text" }] }) },
+      generation: { syncStatus: async () => ({ campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 100 }, world: {}, turns: { campaignId: "campaign-1", turns, nextCursor } }) },
+      campaigns: { state: async () => ({ activeTurnNumber: 100 }), turns: fetchTurns },
+      meta: { get: async () => ({}) }
+    },
+    illustrations: { config: async () => ({ enabled: false, sourcePolicy: "off" }), segments: async () => ({ segments: [] }), imageJobs: async () => ({ jobs: [] }) },
+    workflow: { resume: async () => null }
+  });
+  document.dispatchEvent(new window.Event("DOMContentLoaded"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  return { document, window, fetchTurns };
+}
+
 describe("story-player: new Story Player UI contracts & gameplay logic", () => {
   it("uses semantic progress and a served stylesheet for printable story documents", () => {
     expect(storyScript).toContain('<progress class="turn-progress-meter" max="100" value="${percent}"');
@@ -383,25 +423,46 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('el.addEventListener("click", openTurnHistoryModal);');
   });
 
+  it("uses authoritative turn numbers for persistent view and History selection", () => {
+    expect(storyScript).toContain("viewTurnNumber: null");
+    expect(storyScript).toContain("historySelectedTurnNumber: null");
+    expect(storyScript).toContain("function viewedTurnIndex()");
+    expect(storyScript).toContain("turnIndexForNumber(state.turns, state.viewTurnNumber)");
+    expect(storyScript).toContain("function navigateToTurn(turnNumber)");
+    expect(storyScript).toContain("promptBranchOrReset(state.historySelectedTurnNumber)");
+    expect(storyScript).not.toContain("viewIndex:");
+    expect(storyScript).not.toContain("historySelectedIndex:");
+  });
+
+  it("never derives a user-visible turn label from an array index", () => {
+    expect(storyScript).toContain('sceneDiv.id = `scene-${turn.turnNumber}`;');
+    expect(storyScript).toContain("sceneDiv.dataset.turnNumber = turn.turnNumber;");
+    expect(storyScript).toContain('<span class="pill">Turn ${turn.turnNumber}</span>');
+    expect(storyScript).toContain('turnLabel.textContent = `Turn ${turn.turnNumber}`;');
+    expect(storyScript).toContain('<h2>Turn ${turn.turnNumber}${action}</h2>');
+    expect(storyScript).not.toMatch(/Turn \$\{(?:index|turnIndex) \+ 1\}/u);
+    expect(storyScript).not.toMatch(/turn=\$\{turnIndex \+ 1\}/u);
+  });
+
   it("selects accessible history cards and routes footer actions to the selected turn", () => {
     expect(storyHtml).toContain('id="btnTurnHistoryInspect"');
     expect(storyHtml).toContain('id="btnTurnHistoryJump"');
     expect(storyHtml).toContain('id="btnTurnHistoryBranch"');
     expect(storyHtml).toContain('class="row wrap dialog-actions history-dialog-actions"');
-    expect(storyScript).toContain('state.historySelectedIndex = null;');
-    expect(storyScript).toContain('const currentIdx = state.viewIndex === -1 ? state.turns.length - 1 : state.viewIndex;');
-    expect(storyScript).toContain('selectHistoryTurn(currentIdx);');
+    expect(storyScript).toContain('state.historySelectedTurnNumber = null;');
+    expect(storyScript).toContain('const currentTurnNumber = currentViewTurnNumber();');
+    expect(storyScript).toContain('selectHistoryTurn(currentTurnNumber);');
     expect(storyScript).toContain('card.setAttribute("role", "button");');
     expect(storyScript).toContain('card.setAttribute("tabindex", "0");');
     expect(storyScript).toContain('card.setAttribute("aria-pressed", "false");');
     expect(storyScript).toContain('if (event.key === "Enter" || event.key === " ")');
     expect(storyScript).toContain('card.classList.toggle("selected", selected);');
-    expect(storyScript).toContain('const turnNumber = selectedTurnNumber(state.turns, turnIndex);');
+    expect(storyScript).toContain('if (state.historySelectedTurnNumber) inspectTurnState(state.historySelectedTurnNumber);');
     expect(storyScript).toContain('inspectBtn.disabled = !hasSelection;');
     expect(storyScript).toContain('jumpBtn.disabled = !hasSelection;');
-    expect(storyScript).toContain('branchBtn.classList.toggle("hidden", !hasSelection || state.historySelectedIndex >= state.turns.length - 1);');
-    expect(storyScript).toContain('navigateTo(state.historySelectedIndex);');
-    expect(storyScript).toContain('promptBranchOrReset(turnIndex);');
+    expect(storyScript).toContain('branchBtn.classList.toggle("hidden", !hasSelection || state.historySelectedTurnNumber >= state.campaign?.activeTurnNumber);');
+    expect(storyScript).toContain('navigateToTurn(state.historySelectedTurnNumber);');
+    expect(storyScript).toContain('promptBranchOrReset(state.historySelectedTurnNumber);');
     expect(storyCss).toContain('.history-card.selected, .history-card[aria-pressed="true"]');
   });
 
@@ -433,7 +494,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain("function whySegmentImage(segmentId, variantIndex)");
     expect(storyScript).not.toContain("async function removeSegmentImage(segmentId, variantIndex)");
     expect(storyScript).toContain('illustrationApi.regenerateSegmentImage(segmentId');
-    expect(storyScript).toContain("const isCurrentTurn = turnIndex === state.turns.length - 1;");
+    expect(storyScript).toContain("const isCurrentTurn = Number(turn.turnNumber) === Number(state.campaign?.activeTurnNumber);");
     expect(storyHtml).toContain('id="imagePromptDialogTitle"');
     expect(storyScript).toContain('async function pollIllustrationResolution(turnId)');
     expect(storyScript).not.toContain("function installIllustrationSegmentObserver()");
@@ -709,38 +770,12 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
   });
 
   it("opens the real Turn History modal with recorded and Unknown retrieval details that remain keyboard-selectable", async () => {
-    const { document, window } = parseHTML(storyHtml);
-    Object.defineProperty(window, "location", { value: { pathname: "/story/campaign-1" }, configurable: true });
-    for (const dialog of document.querySelectorAll("dialog")) {
-      (dialog as unknown as { showModal: () => void; close: () => void }).showModal = () => dialog.setAttribute("open", "");
-      (dialog as unknown as { showModal: () => void; close: () => void }).close = () => dialog.removeAttribute("open");
-    }
-    vi.stubGlobal("window", window);
-    vi.stubGlobal("document", document);
-    vi.stubGlobal("Element", window.Element);
-    vi.stubGlobal("HTMLElement", window.HTMLElement);
-    vi.stubGlobal("localStorage", { getItem: () => null, removeItem: () => undefined, setItem: () => undefined });
-
     try {
       const turns = [
         { id: "turn-1", turnNumber: 1, action: "Look around", narration: "The harbor waits.", chronicleRetrieval: TEXT_FALLBACK_LEGACY_AUDIT },
         { id: "turn-2", turnNumber: 2, action: "Listen", narration: "A bell rings.", chronicleRetrieval: null }
       ];
-      const start = storyModule.startStoryPlayer as (composition: unknown) => void;
-      start({
-        api: {
-          session: { get: async () => ({ user: { settings: { continuousReading: false, autoSubmitTurnChoices: false, defaultTurnControlStyle: "flexible_auto" } } }) },
-          providers: { list: async () => ({ providers: [{ providerRole: "text" }] }) },
-          generation: { syncStatus: async () => ({ campaign: { title: "Audit campaign", activeTurnNumber: 2 }, world: {}, turns: { turns } }) },
-          campaigns: { state: async () => ({ activeTurnNumber: 2 }), turns: async () => ({ turns }) },
-          meta: { get: async () => ({}) }
-        },
-        illustrations: { config: async () => ({ enabled: false, sourcePolicy: "off" }), segments: async () => ({ segments: [] }), imageJobs: async () => ({ jobs: [] }) },
-        workflow: { resume: async () => null }
-      });
-      document.dispatchEvent(new window.Event("DOMContentLoaded"));
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      const { document, window } = await bootLegacyStory({ turns });
 
       document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
       const dialog = document.getElementById("turnHistoryDialog");
@@ -759,6 +794,26 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       expect(cards[0]?.getAttribute("aria-pressed")).toBe("true");
       expect(cards[1]?.getAttribute("aria-pressed")).toBe("false");
       expect(enter.defaultPrevented).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("renders persisted turn numbers when the loaded window starts at turn 51", async () => {
+    try {
+      const windowTurns = Array.from({ length: 50 }, (_, offset) => ({
+        id: `turn-${offset + 51}`,
+        turnNumber: offset + 51,
+        action: `Action ${offset + 51}`,
+        narration: `Narration ${offset + 51}`
+      }));
+      const { document } = await bootLegacyStory({ turns: windowTurns });
+      const scenes = document.querySelectorAll<HTMLElement>("#storyArea .scene");
+      expect(scenes).toHaveLength(1);
+      expect(scenes[0]?.id).toBe("scene-100");
+      expect(scenes[0]?.dataset.turnNumber).toBe("100");
+      expect(scenes[0]?.textContent).toContain("Turn 100");
+      expect(document.getElementById("viewPill")?.textContent).toMatch(/latest/iu);
     } finally {
       vi.unstubAllGlobals();
     }
