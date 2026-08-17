@@ -262,7 +262,9 @@ integration("Task 14e2c additive adapter contract matrix", () => {
         "0072_chronicle_memory_chunks",
         "0073_chronicle_chunk_job_fencing",
         "0074_chronicle_retrieval_observability",
-        "0075_chronicle_query_embedding_cache"
+        "0075_chronicle_query_embedding_cache",
+        "0076_chronicle_chunk_skip_reasons",
+        "0077_chronicle_chunk_processed_signature"
       ]);
     } finally {
       await pool.end();
