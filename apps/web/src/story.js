@@ -136,6 +136,7 @@ const state = {
 const modalBaselines = new WeakMap();
 let discardModalTarget = null;
 let completeHistoryLoad = null;
+let storyTurnWindowEpoch = 0;
 
 function modalFormSnapshot(dialog) {
   return [...dialog.querySelectorAll("input, select, textarea")].map((control) => {
@@ -203,26 +204,37 @@ function setTurnHistoryLoadStatus(message, kind = "") {
 
 function ensureCompleteTurnHistory() {
   if (!state.historyNextCursor) return Promise.resolve(state.turns);
-  if (completeHistoryLoad?.campaignId === state.campaignId) return completeHistoryLoad.promise;
+  if (completeHistoryLoad?.campaignId === state.campaignId
+    && completeHistoryLoad.epoch === storyTurnWindowEpoch) return completeHistoryLoad.promise;
 
   const campaignId = state.campaignId;
-  const request = { campaignId, promise: null };
+  const epoch = storyTurnWindowEpoch;
+  const request = { campaignId, epoch, promise: null };
   request.promise = loadCompleteStoryHistory({
     campaignId,
     turns: state.turns,
     nextCursor: state.historyNextCursor,
     fetchPage: ({ before, limit }) => apiClient.campaigns.turns(campaignId, { before, limit }),
     onProgress: ({ loadedTurnCount }) => {
-      if (state.campaignId === campaignId) {
+      if (state.campaignId === campaignId
+        && storyTurnWindowEpoch === epoch
+        && completeHistoryLoad === request) {
         setTurnHistoryLoadStatus(`Loading earlier turns… ${loadedTurnCount} loaded`, "loading");
       }
     }
   }).then((result) => {
-    if (state.campaignId !== campaignId) return state.turns;
+    if (state.campaignId !== campaignId
+      || storyTurnWindowEpoch !== epoch
+      || completeHistoryLoad !== request) return state.turns;
     state.turns = result.turns;
     state.historyNextCursor = null;
     setTurnHistoryLoadStatus(`All ${result.turns.length} turns loaded.`);
     return state.turns;
+  }).catch((error) => {
+    if (state.campaignId !== campaignId
+      || storyTurnWindowEpoch !== epoch
+      || completeHistoryLoad !== request) return state.turns;
+    throw error;
   }).finally(() => {
     if (completeHistoryLoad === request) completeHistoryLoad = null;
   });
@@ -331,8 +343,10 @@ async function checkOnboarding() {
 
 // ── Campaign Loading ──────────────────────────────────────────
 async function loadCampaign(campaignId, options = {}) {
+  storyTurnWindowEpoch += 1;
   state.campaignId = campaignId;
-  if (completeHistoryLoad?.campaignId !== campaignId) completeHistoryLoad = null;
+  completeHistoryLoad = null;
+  setTurnHistoryLoadStatus("");
   showBusy("Loading campaign…");
   try {
     const syncData = await apiClient.generation.syncStatus(campaignId);
@@ -2127,6 +2141,7 @@ async function saveUserProfile() {
   const continuousReading = cbContinuous ? cbContinuous.checked : false;
   const defaultTurnControlStyle = defaultTurnStyle ? defaultTurnStyle.value : "flexible_auto";
   const wasContinuousReading = Boolean(state.user?.settings?.continuousReading);
+  let completeHistoryError = null;
 
   if (!displayName) {
     toast("Display name is required.", 2600);
@@ -2157,6 +2172,7 @@ async function saveUserProfile() {
       try {
         await ensureCompleteTurnHistory();
       } catch (error) {
+        completeHistoryError = error;
         toast(`Continuous reading is showing the loaded window: ${error.message}`);
       }
     }
@@ -2164,7 +2180,7 @@ async function saveUserProfile() {
     updateStatusBar();
     const dlg = $("userProfileDialog");
     if (dlg && dlg.close) dlg.close();
-    toast("Profile saved.", 2600);
+    if (!completeHistoryError) toast("Profile saved.", 2600);
   } catch (err) {
     toast("Failed to save profile: " + err.message, 3500);
   }
