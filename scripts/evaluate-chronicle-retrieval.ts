@@ -54,7 +54,22 @@ function retrievalApplication(
     generation: createPostgresChronicleGenerationTransactionPort({
       ...(rankFusionProfile ? { rankFusionProfile } : {}),
       embeddings: {
-        async resolve(_database, scope) { return scope.selectedProviderProfileId ?? null; },
+        async resolve(_database, scope) {
+          return scope.selectedProviderProfileId
+            ? {
+                status: "resolved" as const,
+                resolutionSource: "dedicated_embedding" as const,
+                resolvedRole: "embedding" as const,
+                providerProfileId: scope.selectedProviderProfileId,
+                providerType: provider.providerType,
+                model: provider.model
+              }
+            : {
+                status: "unconfigured" as const,
+                resolutionSource: "none" as const,
+                resolvedRole: null
+              };
+        },
         async load() { return provider; },
         async embed(loadedProvider, documents) { return loadedProvider.embed(documents); },
         async fingerprint() { return "fixture-embedding-fingerprint"; },
