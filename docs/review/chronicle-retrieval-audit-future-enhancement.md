@@ -195,10 +195,12 @@ that chunk ranking SQL is not used after fallback. Verification REDs found and
 the owning repairs fixed five edge cases without changing valid-vector
 selection or token-budget semantics:
 
-- `fb177c1` rejects malformed, all-zero, and wrong-dimension live vectors before
-  caching or success attribution.
-- `616803c` treats stale incompatible cached vectors as misses and replaces them
-  with a valid live vector while retaining truthful counters.
+- `fb177c1` rejects malformed vectors and vectors that contradict an explicitly
+  configured dimension before caching or success attribution.
+- `616803c` infers dimensions from current compatible embeddings when the
+  provider omits them, rejects all-zero or inferred-wrong-dimension vectors,
+  and treats stale incompatible cached vectors as misses that a valid live
+  vector can replace while retaining truthful counters.
 - `43fb6d4` ignores stale chunk embeddings when inferring the current compatible
   dimension.
 - `55fede7` records the campaign's actual configured embedding model and reports
