@@ -113,3 +113,5 @@ ehthumbs.db
 
 # Microsoft Office temporary and lock files
 ~$*
+.claude/CLAUDE.md
+AGENTS.md
