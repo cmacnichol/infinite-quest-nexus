@@ -532,6 +532,34 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
         currentScene: { memoryId: "memory-1" }
       }
     });
+
+    const originalQuery = vi.mocked(client.query).getMockImplementation()!;
+    let failProductionRelease = true;
+    vi.mocked(client.query).mockImplementation((sql, values = []) => {
+      if (failProductionRelease && sql === "RELEASE SAVEPOINT chronicle_retrieval_production_legacy_hybrid") {
+        failProductionRelease = false;
+        throw new Error("late production savepoint failure");
+      }
+      return (originalQuery as unknown as (text: string, parameters: readonly unknown[]) => unknown)(sql, values);
+    });
+    const fallback = await transaction.buildContextPreview(client, {
+      ...scope,
+      request: { budgetTokens: 4_000, compression: "auto", recentTurns: 4, query: "Moon Warden after the storm" },
+      costAttribution: { generationJobId: "generation-1", operation: "retrieval_embedding" }
+    });
+    expect(fallback).toMatchObject({
+      retrieval: { semanticAvailable: false, fallbackReason: "semantic_retrieval_unavailable" },
+      chronicleRetrieval: {
+        effectiveImplementation: "legacy_hybrid",
+        effectiveMode: "lexical_only",
+        fallbackCode: "semantic_retrieval_unavailable",
+        provider: { resolutionSource: "dedicated_embedding", resolvedRole: "embedding" },
+        queryVectorPath: "provider_only",
+        providerCallOutcome: "succeeded",
+        queryEmbeddingRequests: 1,
+        queryCacheMisses: 1
+      }
+    });
     expect(JSON.stringify(preview)).not.toMatch(/diceResult|privateReasoning|credential-secret|embedding\.example/i);
   });
 

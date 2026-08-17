@@ -1815,9 +1815,11 @@ export async function buildPostgresChronicleContextPreview(
   ): Promise<RetrievalExecution> => {
     const startedAt = performance.now();
     const savepoint = `chronicle_retrieval_production_${implementation}`;
+    let completedExecution: RetrievalExecution | undefined;
     await client.query(`SAVEPOINT ${savepoint}`);
     try {
       const execution = await execute();
+      completedExecution = execution;
       await client.query(`RELEASE SAVEPOINT ${savepoint}`);
       return execution;
     } catch {
@@ -1847,7 +1849,7 @@ export async function buildPostgresChronicleContextPreview(
         latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
         providerFingerprint: null,
         costIds: [],
-        auditTrace: emptyChronicleRetrievalAuditTrace()
+        auditTrace: completedExecution?.auditTrace ?? emptyChronicleRetrievalAuditTrace()
       };
     }
   };

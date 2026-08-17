@@ -74,4 +74,11 @@ describe("Chronicle retrieval audit builder", () => {
     );
     expect(trace).toMatchObject({ providerCallOutcome: "mixed", queryEmbeddingRequests: 2, queryCacheMisses: 2 });
   });
+
+  it("rejects a fallback whose resolved provider provenance changes", () => {
+    expect(() => mergeChronicleRetrievalAuditTraces(
+      { provider: dedicated, providerCallOutcome: "failed", queryEmbeddingRequests: 1, queryCacheHits: 0, queryCacheMisses: 1 },
+      { provider: { ...dedicated, resolutionSource: "text_fallback", resolvedRole: "text" }, providerCallOutcome: "succeeded", queryEmbeddingRequests: 1, queryCacheHits: 0, queryCacheMisses: 1 }
+    )).toThrow("provider provenance changed");
+  });
 });

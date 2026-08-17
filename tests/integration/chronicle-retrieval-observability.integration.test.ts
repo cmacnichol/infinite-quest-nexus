@@ -566,6 +566,7 @@ integration("Chronicle retrieval observability", () => {
 
     expect(withShadow.scopes).toEqual(withoutShadow.scopes);
     expect(withShadow.retrieval).toMatchObject({ implementation: "chunked_hybrid" });
+    expect(withShadow.chronicleRetrieval).toEqual(withoutShadow.chronicleRetrieval);
     expect(embeddedQueries).toHaveLength(3);
     expect(diagnostics).toEqual([expect.objectContaining({ message: "chronicle_retrieval_shadow_failed" })]);
     expect(JSON.stringify(diagnostics)).not.toContain(privateShadowFailure);
