@@ -44,6 +44,7 @@ async function bootLegacyStory({
   vi.stubGlobal("Element", window.Element);
   vi.stubGlobal("HTMLElement", window.HTMLElement);
   vi.stubGlobal("localStorage", { getItem: () => null, removeItem: () => undefined, setItem: () => undefined });
+  Object.defineProperty(window.HTMLElement.prototype, "scrollIntoView", { value: () => undefined, configurable: true });
 
   (storyModule.startStoryPlayer as (composition: unknown) => void)({
     api: {
@@ -451,7 +452,8 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyHtml).toContain('class="row wrap dialog-actions history-dialog-actions"');
     expect(storyScript).toContain('state.historySelectedTurnNumber = null;');
     expect(storyScript).toContain('const currentTurnNumber = currentViewTurnNumber();');
-    expect(storyScript).toContain('selectHistoryTurn(currentTurnNumber);');
+    expect(storyScript).toContain('const selectedTurnNumber = Number.isInteger(state.historySelectedTurnNumber)');
+    expect(storyScript).toContain('selectHistoryTurn(selectedTurnNumber);');
     expect(storyScript).toContain('card.setAttribute("role", "button");');
     expect(storyScript).toContain('card.setAttribute("tabindex", "0");');
     expect(storyScript).toContain('card.setAttribute("aria-pressed", "false");');
@@ -817,6 +819,58 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  it("preserves absolute History selection while Previous prepends and views its predecessor", async () => {
+    try {
+      const loadedTurns = Array.from({ length: 50 }, (_, offset) => ({
+        id: `turn-${offset + 51}`,
+        turnNumber: offset + 51,
+        action: `Action ${offset + 51}`,
+        narration: `Narration ${offset + 51}`
+      }));
+      const olderTurns = Array.from({ length: 50 }, (_, offset) => ({
+        id: `turn-${offset + 1}`,
+        turnNumber: offset + 1,
+        action: `Action ${offset + 1}`,
+        narration: `Narration ${offset + 1}`
+      }));
+      const fetchTurns = vi.fn().mockResolvedValue({ turns: olderTurns, nextCursor: null });
+      const { document, window } = await bootLegacyStory({
+        turns: loadedTurns,
+        nextCursor: "before-turn-51",
+        fetchTurns
+      });
+
+      document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      const selectedHistoryCard = document.querySelector<HTMLElement>('[data-turn-number="75"]');
+      selectedHistoryCard?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      expect(selectedHistoryCard?.getAttribute("aria-pressed")).toBe("true");
+
+      const previous = document.getElementById("btnPrev");
+      for (let index = 0; index < 49; index += 1) {
+        previous?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      }
+      expect(document.querySelector<HTMLElement>("#storyArea .scene")?.id).toBe("scene-51");
+
+      previous?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(document.querySelector<HTMLElement>("#storyArea .scene")?.id).toBe("scene-50");
+      document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      expect(document.querySelector<HTMLElement>('[data-turn-number="75"]')?.getAttribute("aria-pressed")).toBe("true");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps older-page loading identity-neutral until Previous chooses the predecessor", () => {
+    const loaderStart = storyScript.indexOf("async function loadOlderTurnPage()");
+    const loaderEnd = storyScript.indexOf("\nasync function goToPrevious()", loaderStart);
+    const loader = storyScript.slice(loaderStart, loaderEnd);
+
+    expect(loader).not.toContain("state.viewTurnNumber =");
   });
 
   it("manages World Setup fields and RPG percentile stats view as static read-only modal", () => {

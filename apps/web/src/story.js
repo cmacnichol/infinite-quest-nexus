@@ -1434,7 +1434,6 @@ async function loadOlderTurnPage() {
     }
     state.turns = [...olderTurns, ...state.turns];
     state.historyNextCursor = page.nextCursor || null;
-    state.viewTurnNumber = olderTurns.at(-1)?.turnNumber || null;
     renderAllScenes();
     updateStatusBar();
     return true;
@@ -1451,7 +1450,10 @@ async function goToPrevious() {
   const curr = viewedTurnIndex();
   if (state.busy || state.turns.length === 0) return;
   if (curr <= 0) {
-    await loadOlderTurnPage();
+    const viewedTurnNumber = currentViewTurnNumber();
+    if (!await loadOlderTurnPage()) return;
+    const viewedIndex = turnIndexForNumber(state.turns, viewedTurnNumber);
+    if (viewedIndex > 0) navigateToTurn(state.turns[viewedIndex - 1]?.turnNumber ?? null);
     return;
   }
   navigateToTurn(state.turns[curr - 1]?.turnNumber ?? null);
@@ -2158,7 +2160,11 @@ function populateHistoryContainer(container) {
     });
     container.appendChild(card);
   });
-  selectHistoryTurn(currentTurnNumber);
+  const selectedTurnNumber = Number.isInteger(state.historySelectedTurnNumber)
+    && turnIndexForNumber(state.turns, state.historySelectedTurnNumber) >= 0
+    ? state.historySelectedTurnNumber
+    : currentTurnNumber;
+  selectHistoryTurn(selectedTurnNumber);
 }
 
 function selectHistoryTurn(turnNumber) {
