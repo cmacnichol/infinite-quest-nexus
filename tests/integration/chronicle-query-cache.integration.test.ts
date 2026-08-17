@@ -302,7 +302,7 @@ integration("PostgreSQL Chronicle query embedding cache", () => {
     let providerRequests = 0;
     const generation = createPostgresChronicleGenerationTransactionPort({
       embeddings: {
-        async resolve() { return providerA; },
+        async resolve() { return { status: "resolved" as const, resolutionSource: "dedicated_embedding" as const, resolvedRole: "embedding" as const, providerProfileId: providerA, providerType: "openai_compatible", model: "embed-v1" }; },
         async load() {
           return {
             id: providerA,
@@ -329,6 +329,8 @@ integration("PostgreSQL Chronicle query embedding cache", () => {
     const secondPreview = await withTransaction(pool, (client) => generation.buildContextPreview(client, previewScope));
     expect(firstPreview.retrieval).toMatchObject({ embeddingRequests: 1, queryCacheHits: 0, queryCacheMisses: 1 });
     expect(secondPreview.retrieval).toMatchObject({ embeddingRequests: 0, queryCacheHits: 1, queryCacheMisses: 0 });
+    expect(firstPreview.chronicleRetrieval).toMatchObject({ queryVectorPath: "provider_only", providerCallOutcome: "succeeded" });
+    expect(secondPreview.chronicleRetrieval).toMatchObject({ queryVectorPath: "cache_only", providerCallOutcome: "not_attempted" });
     expect(secondPreview.scopes).toEqual(firstPreview.scopes);
     expect(providerRequests).toBe(1);
 

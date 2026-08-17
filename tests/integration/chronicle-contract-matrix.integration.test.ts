@@ -941,7 +941,7 @@ integration("PostgreSQL Chronicle contract matrix", () => {
     );
     const transaction = createPostgresChronicleGenerationTransactionPort({
       embeddings: {
-        async resolve() { return providerId; },
+        async resolve() { return { status: "resolved" as const, resolutionSource: "dedicated_embedding" as const, resolvedRole: "embedding" as const, providerProfileId: providerId, providerType: "openai_compatible", model: "contract-model" }; },
         async load() {
           return {
             id: providerId, model: "embed-v1", providerType: "openai_compatible",
@@ -994,7 +994,7 @@ integration("PostgreSQL Chronicle contract matrix", () => {
     await configureEmbedding(fixture.campaignId, providerId, "embed-v1");
     const transaction = createPostgresChronicleGenerationTransactionPort({
       embeddings: {
-        async resolve() { return providerId; },
+        async resolve() { return { status: "resolved" as const, resolutionSource: "dedicated_embedding" as const, resolvedRole: "embedding" as const, providerProfileId: providerId, providerType: "openai_compatible", model: "contract-model" }; },
         async load() {
           return {
             id: providerId, model: "embed-v1", providerType: "openai_compatible",
@@ -1067,7 +1067,7 @@ integration("PostgreSQL Chronicle contract matrix", () => {
     const transaction = createPostgresChronicleGenerationTransactionPort({
       embeddings: {
         async resolve(_database, scope) {
-          return scope.selectedProviderProfileId ?? providerId;
+          return { status: "resolved" as const, resolutionSource: "dedicated_embedding" as const, resolvedRole: "embedding" as const, providerProfileId: scope.selectedProviderProfileId ?? providerId, providerType: "openai_compatible", model: "contract-model" };
         },
         async load() {
           return provider;
@@ -1252,7 +1252,7 @@ integration("PostgreSQL Chronicle contract matrix", () => {
     );
     const transaction = createPostgresChronicleGenerationTransactionPort({
       embeddings: {
-        async resolve() { return null; },
+        async resolve() { return { status: "unconfigured" as const, resolutionSource: "none" as const, resolvedRole: null }; },
         async load() { throw new Error("not used by rebuild"); },
         async embed() { throw new Error("not used by rebuild"); },
         async fingerprint() { throw new Error("not used by rebuild"); },

@@ -120,7 +120,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
             campaignId: scope.campaignId,
             selectedProviderProfileId: null
           });
-          return "embedding-profile";
+          return { status: "resolved", resolutionSource: "dedicated_embedding", resolvedRole: "embedding", providerProfileId: "embedding-profile", providerType: "openrouter", model: "embed-v1" };
         }
       })
     });
@@ -163,7 +163,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
         resolve: async (database, requestedScope) => {
           expect(database).toBe(callerClient);
           expect(requestedScope.selectedProviderProfileId).toBe("embedding-profile");
-          return "embedding-profile";
+          return { status: "resolved", resolutionSource: "dedicated_embedding", resolvedRole: "embedding", providerProfileId: "embedding-profile", providerType: "openrouter", model: "embed-v1" };
         }
       })
     });
@@ -466,7 +466,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       embeddings: embeddingPort({
         resolve: async (database) => {
           expect(database).toBe(callerClient);
-          return "embedding-profile";
+          return { status: "resolved", resolutionSource: "dedicated_embedding", resolvedRole: "embedding", providerProfileId: "embedding-profile", providerType: "openai-compatible", model: "embed-v1" };
         },
         load: async (database) => {
           expect(database).toBe(callerClient);
@@ -518,6 +518,14 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
         embeddingRequests: 1,
         queryCacheHits: 0,
         queryCacheMisses: 1
+      },
+      chronicleRetrieval: {
+        configuredImplementation: "legacy_hybrid",
+        effectiveImplementation: "legacy_hybrid",
+        effectiveMode: "semantic_hybrid",
+        provider: { resolutionSource: "dedicated_embedding", resolvedRole: "embedding", providerType: "openai-compatible", model: "embed-v1" },
+        queryVectorPath: "provider_only",
+        providerCallOutcome: "succeeded"
       },
       scopes: {
         campaignCanon: { continuityScratchpad: "The Moon Warden is alert." },
@@ -595,7 +603,15 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       retrieval: {
         mode: "lexical",
         semanticAvailable: false,
-        fallbackReason: "chunk_index_not_ready"
+        fallbackReason: "semantic_not_configured"
+      },
+      chronicleRetrieval: {
+        configuredImplementation: "chunked_hybrid",
+        effectiveImplementation: "legacy_hybrid",
+        effectiveMode: "lexical_only",
+        fallbackCode: "semantic_not_configured",
+        provider: { resolutionSource: "none" },
+        queryVectorPath: "none"
       },
       scopes: { currentScene: { memoryId: "legacy-memory" } }
     });
@@ -689,7 +705,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     });
     const transaction = createPostgresChronicleGenerationTransactionPort({
       embeddings: embeddingPort({
-        resolve: async () => "embedding-profile",
+        resolve: async () => ({ status: "resolved", resolutionSource: "dedicated_embedding", resolvedRole: "embedding", providerProfileId: "embedding-profile", providerType: "openrouter", model: "embed-v1" }),
         load: async () => ({
           id: "embedding-profile",
           model: "embed-v1",
@@ -879,7 +895,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       });
       const transaction = createPostgresChronicleGenerationTransactionPort({
         embeddings: embeddingPort({
-          resolve: async () => "embedding-profile",
+          resolve: async () => ({ status: "resolved", resolutionSource: "dedicated_embedding", resolvedRole: "embedding", providerProfileId: "embedding-profile", providerType: "openrouter", model: "embed-v1" }),
           load: async () => ({
             id: "embedding-profile",
             model: "embed-v1",
@@ -991,7 +1007,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     });
     const transaction = createPostgresChronicleGenerationTransactionPort({
       embeddings: embeddingPort({
-        resolve: async () => "embedding-profile",
+        resolve: async () => ({ status: "resolved", resolutionSource: "dedicated_embedding", resolvedRole: "embedding", providerProfileId: "embedding-profile", providerType: "openrouter", model: "embed-v1" }),
         load: async () => ({
           id: "embedding-profile",
           model: "embed-v1",
@@ -1109,7 +1125,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     });
     const transaction = createPostgresChronicleGenerationTransactionPort({
       embeddings: embeddingPort({
-        resolve: async () => "embedding-profile",
+        resolve: async () => ({ status: "resolved", resolutionSource: "dedicated_embedding", resolvedRole: "embedding", providerProfileId: "embedding-profile", providerType: "openrouter", model: "embed-v1" }),
         load: async () => ({
           id: "embedding-profile",
           model: "embed-v1",

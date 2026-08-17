@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDatabasePool, initialOwnerId, type DatabasePool, withTransaction } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createPostgresChronicleGenerationTransactionPort } from "../../packages/database/src/chronicle-repository.js";
+import type { ChronicleContextPreview } from "../../packages/application/src/memory/index.js";
 import { chronicleContentHash } from "../../packages/domain/src/chronicle-memory-helpers.js";
 import {
   evaluateChronicleRetrieval,
@@ -190,7 +191,11 @@ integration("Chronicle retrieval evaluation integration seam", () => {
     const application: ChronicleRetrievalApplication = {
       generation: createPostgresChronicleGenerationTransactionPort({
         embeddings: {
-          async resolve(_database, scope) { return scope.selectedProviderProfileId ?? null; },
+          async resolve(_database, scope) {
+            return scope.selectedProviderProfileId
+              ? { status: "resolved" as const, resolutionSource: "dedicated_embedding" as const, resolvedRole: "embedding" as const, providerProfileId: scope.selectedProviderProfileId, providerType: "openai_compatible", model: "fixture-embedding-v1" }
+              : { status: "unconfigured" as const, resolutionSource: "none" as const, resolvedRole: null };
+          },
           async load() { return { id: "fixture-embedding", model: "fixture-embedding-v1", providerType: "openai_compatible", async embed(documents: readonly string[]) { return { embeddings: documents.map(() => [1, 0]), responseId: "fixture", usage: {}, reportedCost: null }; } }; },
           async embed(provider, documents) { return provider.embed(documents); },
           async fingerprint() { return "evaluation-fingerprint"; },
@@ -201,9 +206,9 @@ integration("Chronicle retrieval evaluation integration seam", () => {
       })
     };
     const originalBuildContextPreview = application.generation.buildContextPreview.bind(application.generation);
-    let preview: Record<string, unknown> | undefined;
+    let preview: ChronicleContextPreview | undefined;
     const buildContextPreview = vi.spyOn(application.generation, "buildContextPreview").mockImplementation(async (...args) => {
-      preview = await originalBuildContextPreview(...args) as Record<string, unknown>;
+      preview = await originalBuildContextPreview(...args);
       return preview;
     });
     const generation: ChronicleRetrievalApplication["generation"] = new Proxy({ buildContextPreview }, {

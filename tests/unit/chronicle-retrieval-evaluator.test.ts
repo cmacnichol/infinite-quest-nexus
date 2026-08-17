@@ -25,6 +25,20 @@ const corpus: ChronicleRetrievalCorpus = {
   }]
 };
 
+const lexicalAudit = {
+  auditVersion: "chronicle-retrieval-audit-v1" as const,
+  configuredImplementation: "legacy_hybrid" as const,
+  effectiveImplementation: "legacy_hybrid" as const,
+  effectiveMode: "lexical_only" as const,
+  fallbackCode: "semantic_not_configured" as const,
+  provider: { resolutionSource: "none" as const, resolvedRole: null, providerType: null, model: null },
+  queryVectorPath: "none" as const,
+  providerCallOutcome: "not_attempted" as const,
+  queryEmbeddingRequests: 0,
+  queryCacheHits: 0,
+  queryCacheMisses: 0
+};
+
 describe("Chronicle retrieval evaluator metrics", () => {
   it("calculates rank metrics from hand-labelled results", () => {
     expect(recallAt(["a", "x", "b"], new Set(["a", "b"]), 2)).toBe(0.5);
@@ -91,7 +105,7 @@ describe("Chronicle retrieval evaluator metrics", () => {
     const report = await evaluateChronicleRetrieval({
       generation: {
         async buildContextPreview() {
-          return { retrieval: { semanticAvailable: true }, scopes: { chronicle: [] } };
+          return { retrieval: { semanticAvailable: true }, scopes: { chronicle: [] }, chronicleRetrieval: lexicalAudit };
         }
       }
     }, {}, corpus, { now: vi.fn().mockReturnValue(10) });
@@ -126,7 +140,8 @@ describe("Chronicle retrieval evaluator metrics", () => {
           async buildContextPreview() {
             return {
               retrieval: { semanticAvailable: false },
-              scopes: { chronicle: [{ id: memoryId, estimatedTokens: 2, relevance: 1 }] }
+              scopes: { chronicle: [{ id: memoryId, estimatedTokens: 2, relevance: 1 }] },
+              chronicleRetrieval: lexicalAudit
             };
           }
         }

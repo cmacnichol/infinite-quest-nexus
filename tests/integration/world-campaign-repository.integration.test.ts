@@ -87,7 +87,9 @@ integration("PostgreSQL world campaign repository adapters", () => {
               ORDER BY is_default DESC, name, id LIMIT 1`,
             [scope.ownerUserId]
           );
-          return selected.rows[0]?.id ?? null;
+          return selected.rows[0]?.id
+            ? { status: "resolved" as const, resolutionSource: "dedicated_embedding" as const, resolvedRole: "embedding" as const, providerProfileId: selected.rows[0].id, providerType: "openai_compatible", model: "embed-v1" }
+            : { status: "unconfigured" as const, resolutionSource: "none" as const, resolvedRole: null };
         },
         async load() { throw new Error("provider loading is outside this repository test"); },
         async embed() { throw new Error("provider transport is outside this repository test"); },

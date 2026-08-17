@@ -351,7 +351,7 @@ integration("Chronicle retrieval observability", () => {
 
     const queryRepository = createPostgresChronicleQueryRepository(pool, {
       embeddings: {
-        async resolve() { return providerId; },
+        async resolve() { return { status: "resolved" as const, resolutionSource: "dedicated_embedding" as const, resolvedRole: "embedding" as const, providerProfileId: providerId, providerType: "openai_compatible", model: "compatibility-model" }; },
         async load() {
           return {
             id: providerId,
@@ -400,6 +400,11 @@ integration("Chronicle retrieval observability", () => {
       mode: "hybrid",
       semanticAvailable: true,
       fallbackReason: "chunk_index_not_ready"
+    });
+    expect(preview.chronicleRetrieval).toMatchObject({
+      configuredImplementation: "chunked_hybrid",
+      effectiveImplementation: "legacy_hybrid",
+      fallbackCode: "chunk_index_not_ready"
     });
     const scopes = preview.scopes as { chronicle: readonly unknown[] };
     expect(scopes.chronicle.length).toBeGreaterThan(0);
@@ -462,12 +467,12 @@ integration("Chronicle retrieval observability", () => {
     const generation = createPostgresChronicleGenerationTransactionPort({
       embeddings: {
         async resolve(database, request) {
-          if (request.selectedProviderProfileId !== providerId) return null;
+          if (request.selectedProviderProfileId !== providerId) return { status: "unconfigured" as const, resolutionSource: "none" as const, resolvedRole: null };
           if (remainingSuccessfulResolutions <= 0) {
             await (database as { query(sql: string): Promise<unknown> }).query(`SELECT * FROM ${privateShadowFailure}`);
           }
           remainingSuccessfulResolutions -= 1;
-          return providerId;
+          return { status: "resolved" as const, resolutionSource: "dedicated_embedding" as const, resolvedRole: "embedding" as const, providerProfileId: providerId, providerType: "openai_compatible", model: "shadow-model" };
         },
         async load() {
           return {

@@ -167,7 +167,9 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     return createPostgresChronicleGenerationTransactionPort({
       embeddings: {
         async resolve(_database, requested) {
-          return requested.selectedProviderProfileId === providerId ? providerId : null;
+          return requested.selectedProviderProfileId === providerId
+            ? { status: "resolved" as const, resolutionSource: "dedicated_embedding" as const, resolvedRole: "embedding" as const, providerProfileId: providerId, providerType: "openai_compatible", model: "chunk-embed-v1" }
+            : { status: "unconfigured" as const, resolutionSource: "none" as const, resolvedRole: null };
         },
         async load() {
           return {
@@ -401,6 +403,13 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
           selectedParents: expect.any(Number),
           latestSceneParentsProtected: 1
         }
+      },
+      chronicleRetrieval: {
+        configuredImplementation: "chunked_hybrid",
+        effectiveImplementation: "chunked_hybrid",
+        effectiveMode: "semantic_hybrid",
+        provider: { resolutionSource: "dedicated_embedding", resolvedRole: "embedding" },
+        queryVectorPath: "provider_only"
       }
     });
     const diversity = (preview.retrieval as { diversity: { collapsedChunks: number } }).diversity;
@@ -438,7 +447,15 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
       request: { budgetTokens: 4_096, compression: "auto", query: "iron key opens the gate", recentTurns: 1, throughTurnNumber: 2 }
     });
 
-    expect(fallback).toMatchObject({ retrieval: { fallbackReason: "chunk_index_not_ready" } });
+    expect(fallback).toMatchObject({
+      retrieval: { fallbackReason: "chunk_index_not_ready" },
+      chronicleRetrieval: {
+        configuredImplementation: "chunked_hybrid",
+        effectiveImplementation: "legacy_hybrid",
+        effectiveMode: "semantic_hybrid",
+        fallbackCode: "chunk_index_not_ready"
+      }
+    });
     expect(legacy).toMatchObject({ retrieval: { semanticAvailable: true } });
     expect(JSON.stringify(legacy.scopes)).not.toContain("The iron key opens the gate");
     expect(JSON.stringify(fallback.scopes)).not.toContain("The iron key opens the gate");
@@ -810,7 +827,9 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     const generation = createPostgresChronicleGenerationTransactionPort({
       embeddings: {
         async resolve(_database, requested) {
-          return requested.selectedProviderProfileId === providerId ? providerId : null;
+          return requested.selectedProviderProfileId === providerId
+            ? { status: "resolved" as const, resolutionSource: "dedicated_embedding" as const, resolvedRole: "embedding" as const, providerProfileId: providerId, providerType: "openai_compatible", model: "chunk-embed-v1" }
+            : { status: "unconfigured" as const, resolutionSource: "none" as const, resolvedRole: null };
         },
         async load() {
           return {

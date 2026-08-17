@@ -639,7 +639,7 @@ async function executeLoadedGeneration(
             }
           : {})
       }
-    ))) as GenerationContextPreview;
+    ))) as unknown as GenerationContextPreview;
     const promptContext = context.scopes;
     const inputs = await phase("orchestration_loading", async () => job.orchestration_inputs);
     let orchestration = job.orchestration_private || {};

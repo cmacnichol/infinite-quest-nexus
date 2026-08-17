@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
-import type { MemoryGenerationTransactionPort } from "../../application/src/memory/index.js";
+import type { ChronicleContextPreview, MemoryGenerationTransactionPort } from "../../application/src/memory/index.js";
 import { requireCampaignWorldVersionScope } from "../../application/src/memory/helpers.js";
 import { toSafeProviderConfiguration } from "../../application/src/providers/index.js";
 import {
   CHRONICLE_RETRIEVAL_VERSION,
   type ChronicleRetrievalCandidate,
   type ChronicleRetrievalComparison,
+  type ChronicleRetrievalAudit,
   type CompressionLevel
 } from "../../contracts/src/memory.js";
 type RetrievalDiagnosticMode = "production" | "shadow";
@@ -50,8 +51,16 @@ import { characterNarrativeContext } from "../../domain/src/world-characters.js"
 import { compressTurnMemory } from "../../story-engine/src/chronicle.js";
 import type {
   ChronicleGenerationTransactionDependencies,
-  ChronicleTransactionEmbeddingExecution
+  ChronicleTransactionEmbeddingExecution,
+  ChronicleTransactionEmbeddingResolution
 } from "./chronicle-repository.js";
+import {
+  buildChronicleRetrievalAudit,
+  emptyChronicleRetrievalAuditTrace,
+  mergeChronicleRetrievalAuditTraces,
+  type ChronicleRetrievalAuditProvider,
+  type ChronicleRetrievalAuditTrace
+} from "./chronicle-retrieval-audit.js";
 import {
   CHRONICLE_RANK_COMPATIBLE_EMBEDDING_SQL,
   CHRONICLE_READINESS_COMPATIBLE_EMBEDDING_SQL,
@@ -137,6 +146,7 @@ type ChunkedRankFusionResult = Readonly<{
   providerFingerprint: string | null;
   costIds: readonly string[];
   telemetryCandidates: readonly ChronicleRetrievalCandidate[];
+  auditTrace: ChronicleRetrievalAuditTrace;
   legacyFallbackReason?: string;
 }>;
 
@@ -147,22 +157,26 @@ type ChunkEmbeddingIdentity = Readonly<{
   dimensions: number | null;
   provider: ChronicleTransactionEmbeddingExecution;
   prefixes: ReturnType<typeof modelAwareEmbeddingPrefixes>;
+  auditTrace: ChronicleRetrievalAuditTrace;
 }>;
 
 type LegacyRetrievalResult = Readonly<{
   retrieval: Record<string, unknown>;
   providerFingerprint: string | null;
   costIds: readonly string[];
+  auditTrace: ChronicleRetrievalAuditTrace;
 }>;
 
 type RetrievalExecution = Readonly<{
   implementation: ChronicleRetrievalComparison["implementation"];
+  effectiveImplementation: "legacy_hybrid" | "chunked_hybrid";
   memories: ContextMemoryRow[];
   retrieval: Record<string, unknown>;
   selectedParentContent: ReadonlyMap<string, string> | null;
   latencyMs: number;
   providerFingerprint: string | null;
   costIds: readonly string[];
+  auditTrace: ChronicleRetrievalAuditTrace;
   telemetryCandidates?: readonly ChronicleRetrievalCandidate[];
 }>;
 
@@ -177,6 +191,26 @@ type ContextMetricRow = Readonly<{
   recent_turn_tokens: string;
   summary_tokens: string;
 }>;
+
+function auditProviderFromResolution(
+  resolution: ChronicleTransactionEmbeddingResolution,
+): ChronicleRetrievalAuditProvider {
+  if (resolution.status === "unconfigured") {
+    return { resolutionSource: "none", resolvedRole: null, providerType: null, model: null };
+  }
+  return {
+    resolutionSource: resolution.resolutionSource,
+    resolvedRole: resolution.resolvedRole,
+    providerType: resolution.providerType,
+    model: resolution.model
+  };
+}
+
+function auditTraceFromResolution(
+  resolution: ChronicleTransactionEmbeddingResolution,
+): ChronicleRetrievalAuditTrace {
+  return { ...emptyChronicleRetrievalAuditTrace(), provider: auditProviderFromResolution(resolution) };
+}
 
 export type ContextMetrics = Readonly<{
   turns: number;
@@ -564,28 +598,34 @@ async function applyContextSemanticRelevance(
   if (!query.trim()) return {
     retrieval: { mode: "lexical", semanticAvailable: false, fallbackReason: "empty_query" },
     providerFingerprint: null,
-    costIds: []
+    costIds: [],
+    auditTrace: emptyChronicleRetrievalAuditTrace()
   };
   if (!config?.embedding_enabled || !config.embedding_provider_profile_id || !config.embedding_model) {
     return {
-      retrieval: { mode: "lexical", semanticAvailable: false, fallbackReason: "semantic_not_configured" },
-      providerFingerprint: null,
-      costIds: []
+    retrieval: { mode: "lexical", semanticAvailable: false, fallbackReason: "semantic_not_configured" },
+    providerFingerprint: null,
+    costIds: [],
+    auditTrace: emptyChronicleRetrievalAuditTrace()
     };
   }
   let embeddingRequests = 0;
   let queryCacheHits = 0;
   let queryCacheMisses = 0;
-  const providerProfileId = await dependencies.embeddings.resolve(client, {
+  let auditTrace = emptyChronicleRetrievalAuditTrace();
+  const resolution = await dependencies.embeddings.resolve(client, {
     ownerUserId: scope.ownerUserId,
     campaignId: scope.campaignId,
     selectedProviderProfileId: config.embedding_provider_profile_id
   });
-  if (!providerProfileId) return {
+  auditTrace = auditTraceFromResolution(resolution);
+  if (resolution.status === "unconfigured") return {
     retrieval: { mode: "lexical", semanticAvailable: false, fallbackReason: "provider_unavailable" },
     providerFingerprint: null,
-    costIds: []
+    costIds: [],
+    auditTrace
   };
+  const providerProfileId = resolution.providerProfileId;
   const providerScope = { ownerUserId: scope.ownerUserId, providerProfileId, model: config.embedding_model };
   try {
     const provider = await dependencies.embeddings.load(client, providerScope);
@@ -615,6 +655,7 @@ async function applyContextSemanticRelevance(
       }, result);
       queryVector = result.embeddings[0] ?? null;
       if (!queryVector?.length) throw new Error("Embedding provider returned no query vector.");
+      auditTrace = { ...auditTrace, providerCallOutcome: "succeeded", queryEmbeddingRequests: embeddingRequests };
       await cache.putQueryEmbedding(scope, cacheKey, queryVector);
     }
     const scored = await client.query<ContextMemoryRow>(
@@ -672,7 +713,13 @@ async function applyContextSemanticRelevance(
         queryCacheMisses
       },
       providerFingerprint: fingerprint,
-      costIds: costId ? [costId] : []
+      costIds: costId ? [costId] : [],
+      auditTrace: {
+        ...auditTrace,
+        queryEmbeddingRequests: embeddingRequests,
+        queryCacheHits,
+        queryCacheMisses
+      }
     };
   } catch (error) {
     if (diagnosticMode === "shadow") {
@@ -699,6 +746,9 @@ async function applyContextSemanticRelevance(
       }
       await dependencies.embeddings.recordHealth(client, providerScope, false, "chronicle_retrieval_failed").catch(() => undefined);
     }
+    if (embeddingRequests > 0 && auditTrace.providerCallOutcome !== "succeeded") {
+      auditTrace = { ...auditTrace, providerCallOutcome: "failed" };
+    }
     return {
       retrieval: {
         mode: "lexical_fallback",
@@ -709,7 +759,13 @@ async function applyContextSemanticRelevance(
         queryCacheMisses
       },
       providerFingerprint: null,
-      costIds: []
+      costIds: [],
+      auditTrace: {
+        ...auditTrace,
+        queryEmbeddingRequests: embeddingRequests,
+        queryCacheHits,
+        queryCacheMisses
+      }
     };
   }
 }
@@ -760,14 +816,11 @@ async function resolveChunkEmbeddingIdentity(
   scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
   config: EmbeddingConfigRow | undefined,
   dependencies: ChronicleGenerationTransactionDependencies,
+  resolution: ChronicleTransactionEmbeddingResolution,
 ): Promise<ChunkEmbeddingIdentity | null> {
   if (!config?.embedding_enabled || !config.embedding_provider_profile_id || !config.embedding_model) return null;
-  const providerProfileId = await dependencies.embeddings.resolve(client, {
-    ownerUserId: scope.ownerUserId,
-    campaignId: scope.campaignId,
-    selectedProviderProfileId: config.embedding_provider_profile_id
-  });
-  if (!providerProfileId) return null;
+  if (resolution.status === "unconfigured") return null;
+  const providerProfileId = resolution.providerProfileId;
   const provider = await dependencies.embeddings.load(client, {
     ownerUserId: scope.ownerUserId,
     providerProfileId,
@@ -780,7 +833,15 @@ async function resolveChunkEmbeddingIdentity(
   );
   const fingerprint = await dependencies.embeddings.fingerprint(provider, prefixes);
   const dimensions = toSafeProviderConfiguration(provider.configuration).embeddingDimensions ?? null;
-  return { providerProfileId, model: config.embedding_model, fingerprint, dimensions, provider, prefixes };
+  return {
+    providerProfileId,
+    model: config.embedding_model,
+    fingerprint,
+    dimensions,
+    provider,
+    prefixes,
+    auditTrace: auditTraceFromResolution(resolution)
+  };
 }
 
 async function chunkIndexReady(
@@ -1095,6 +1156,7 @@ async function applyChunkedRankFusion(
   let embeddingRequests = 0;
   let queryCacheHits = 0;
   let queryCacheMisses = 0;
+  let auditTrace = embeddingIdentity?.auditTrace ?? emptyChronicleRetrievalAuditTrace();
   const costIds: string[] = [];
   if (!variants.length) {
     semanticFallbackReason = "empty_query";
@@ -1103,12 +1165,14 @@ async function applyChunkedRankFusion(
   } else {
     const selectedProviderProfileId = config.embedding_provider_profile_id;
     try {
+      const resolution = embeddingIdentity ? null : await dependencies.embeddings.resolve(client, {
+        ownerUserId: scope.ownerUserId,
+        campaignId: scope.campaignId,
+        selectedProviderProfileId
+      });
+      if (resolution) auditTrace = auditTraceFromResolution(resolution);
       const providerProfileId = embeddingIdentity?.providerProfileId
-        ?? await dependencies.embeddings.resolve(client, {
-          ownerUserId: scope.ownerUserId,
-          campaignId: scope.campaignId,
-          selectedProviderProfileId
-        });
+        ?? (resolution?.status === "resolved" ? resolution.providerProfileId : null);
       if (!providerProfileId) {
         semanticFallbackReason = "provider_unavailable";
       } else {
@@ -1166,6 +1230,7 @@ async function applyChunkedRankFusion(
             queryVectors[variantIndex] = vector;
             await cache.putQueryEmbedding(scope, cacheKeys[variantIndex]!, vector);
           }
+          auditTrace = { ...auditTrace, providerCallOutcome: "succeeded", queryEmbeddingRequests: embeddingRequests };
         }
         const semanticRanks: Array<Readonly<{
           variant: ChronicleQueryVariant;
@@ -1200,6 +1265,9 @@ async function applyChunkedRankFusion(
       }
     } catch (error) {
       semanticFallbackReason = "semantic_retrieval_unavailable";
+      if (embeddingRequests > 0 && auditTrace.providerCallOutcome !== "succeeded") {
+        auditTrace = { ...auditTrace, providerCallOutcome: "failed" };
+      }
       if (diagnosticMode === "shadow") {
         try {
           dependencies.embeddings.logDiagnostic(new Error("chronicle_retrieval_shadow_failed"), {
@@ -1256,6 +1324,12 @@ async function applyChunkedRankFusion(
       selectedParentContent: new Map(),
       providerFingerprint,
       costIds,
+      auditTrace: {
+        ...auditTrace,
+        queryEmbeddingRequests: embeddingRequests,
+        queryCacheHits,
+        queryCacheMisses
+      },
       telemetryCandidates: [],
       legacyFallbackReason
     };
@@ -1409,6 +1483,12 @@ async function applyChunkedRankFusion(
     selectedParentContent,
     providerFingerprint,
     costIds,
+    auditTrace: {
+      ...auditTrace,
+      queryEmbeddingRequests: embeddingRequests,
+      queryCacheHits,
+      queryCacheMisses
+    },
     telemetryCandidates: rankedChunkParents.slice(0, CHRONICLE_TELEMETRY_CANDIDATE_LIMIT).map((candidate) => ({
       candidateId: candidate.candidateId,
       parentMemoryId: candidate.parentMemoryId,
@@ -1431,6 +1511,20 @@ function cloneContextMemories(memories: readonly ContextMemoryRow[]): ContextMem
 
 function retrievalFallbackCode(retrieval: Readonly<Record<string, unknown>>): string | null {
   return typeof retrieval.fallbackReason === "string" ? retrieval.fallbackReason : null;
+}
+
+function auditRetrievalFallbackCode(
+  retrieval: Readonly<Record<string, unknown>>,
+): ChronicleRetrievalAudit["fallbackCode"] {
+  const value = retrievalFallbackCode(retrieval);
+  return [
+    "empty_query",
+    "semantic_not_configured",
+    "provider_unavailable",
+    "semantic_retrieval_unavailable",
+    "chunk_index_not_ready",
+    "incompatible_chunk_embeddings"
+  ].includes(value ?? "") ? value as ChronicleRetrievalAudit["fallbackCode"] : null;
 }
 
 function rankedMemoryTelemetryCandidates(
@@ -1457,7 +1551,7 @@ export async function buildPostgresChronicleContextPreview(
   client: DatabaseClient,
   scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
   dependencies: ChronicleGenerationTransactionDependencies,
-): Promise<Record<string, unknown>> {
+): Promise<ChronicleContextPreview> {
   const campaign = await loadContextCampaign(client, scope);
   const completeEntityCatalog = buildChronicleEntityCatalog({
     worldContent: campaign.world_content,
@@ -1516,14 +1610,17 @@ export async function buildPostgresChronicleContextPreview(
     );
     return {
       implementation,
+      effectiveImplementation: "legacy_hybrid",
       memories: executionMemories,
       retrieval: { ...result.retrieval, implementation },
       selectedParentContent: null,
       latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
       providerFingerprint: result.providerFingerprint,
-      costIds: result.costIds
+      costIds: result.costIds,
+      auditTrace: result.auditTrace
     };
   };
+  let chunkEmbeddingResolution: Promise<ChronicleTransactionEmbeddingResolution> | undefined;
   let chunkEmbeddingIdentity: Promise<ChunkEmbeddingIdentity | null> | undefined;
   let readyForChunked: boolean | undefined;
   const executeChunked = async (
@@ -1535,11 +1632,13 @@ export async function buildPostgresChronicleContextPreview(
       executionConfig: EmbeddingConfigRow | undefined,
       priorCostIds: readonly string[] = [],
       priorFingerprint: string | null = null,
+      priorAuditTrace: ChronicleRetrievalAuditTrace = emptyChronicleRetrievalAuditTrace(),
     ): Promise<RetrievalExecution> => {
       const legacy = await executeLegacy("legacy_hybrid", executionConfig, diagnosticMode);
       return {
         ...legacy,
         implementation: "chunked_hybrid",
+        effectiveImplementation: "legacy_hybrid",
         retrieval: {
           ...legacy.retrieval,
           implementation: "chunked_hybrid",
@@ -1550,11 +1649,12 @@ export async function buildPostgresChronicleContextPreview(
         },
         latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
         providerFingerprint: legacy.providerFingerprint ?? priorFingerprint,
-        costIds: [...new Set([...priorCostIds, ...legacy.costIds])]
+        costIds: [...new Set([...priorCostIds, ...legacy.costIds])],
+        auditTrace: mergeChronicleRetrievalAuditTraces(priorAuditTrace, legacy.auditTrace)
       };
     };
     if (!config?.embedding_enabled || !config.embedding_provider_profile_id || !config.embedding_model) {
-      return executeLegacyFallback("chunk_index_not_ready", config);
+      return executeLegacyFallback("semantic_not_configured", config);
     }
     const attemptSavepoint = `chronicle_retrieval_chunk_attempt_${diagnosticMode}`;
     type ChunkAttempt = Readonly<{
@@ -1563,26 +1663,36 @@ export async function buildPostgresChronicleContextPreview(
       executionConfig: EmbeddingConfigRow | undefined;
       costIds?: readonly string[];
       fingerprint?: string | null;
+      auditTrace?: ChronicleRetrievalAuditTrace;
     }> | Readonly<{
       kind: "chunked";
       executionMemories: ContextMemoryRow[];
       result: ChunkedRankFusionResult;
     }>;
     let attempt: ChunkAttempt;
+    let chunkAttemptTrace = emptyChronicleRetrievalAuditTrace();
     await client.query(`SAVEPOINT ${attemptSavepoint}`);
     try {
-      chunkEmbeddingIdentity ??= resolveChunkEmbeddingIdentity(client, scope, config, dependencies);
+      chunkEmbeddingResolution ??= dependencies.embeddings.resolve(client, {
+        ownerUserId: scope.ownerUserId,
+        campaignId: scope.campaignId,
+        selectedProviderProfileId: config.embedding_provider_profile_id
+      });
+      const resolution = await chunkEmbeddingResolution;
+      chunkAttemptTrace = auditTraceFromResolution(resolution);
+      chunkEmbeddingIdentity ??= resolveChunkEmbeddingIdentity(client, scope, config, dependencies, resolution);
       const identity = await chunkEmbeddingIdentity;
       if (!identity) {
         attempt = {
           kind: "fallback",
           reason: "provider_unavailable",
-          executionConfig: { ...config, embedding_enabled: false }
+          executionConfig: { ...config, embedding_enabled: false },
+          auditTrace: chunkAttemptTrace
         };
       } else {
         readyForChunked ??= await chunkIndexReady(client, scope, identity);
         if (!readyForChunked) {
-          attempt = { kind: "fallback", reason: "chunk_index_not_ready", executionConfig: config };
+          attempt = { kind: "fallback", reason: "chunk_index_not_ready", executionConfig: config, auditTrace: identity.auditTrace };
         } else {
           const executionMemories = cloneContextMemories(memories);
           const result = await applyChunkedRankFusion(
@@ -1604,7 +1714,8 @@ export async function buildPostgresChronicleContextPreview(
                 ? { ...config, embedding_enabled: false }
                 : config,
               costIds: result.costIds,
-              fingerprint: result.providerFingerprint
+              fingerprint: result.providerFingerprint,
+              auditTrace: result.auditTrace
             };
           } else {
             attempt = { kind: "chunked", executionMemories, result };
@@ -1630,7 +1741,8 @@ export async function buildPostgresChronicleContextPreview(
       attempt = {
         kind: "fallback",
         reason: "semantic_retrieval_unavailable",
-        executionConfig: { ...config, embedding_enabled: false }
+        executionConfig: { ...config, embedding_enabled: false },
+        auditTrace: chunkAttemptTrace
       };
     }
     if (attempt.kind === "fallback") {
@@ -1638,17 +1750,20 @@ export async function buildPostgresChronicleContextPreview(
         attempt.reason,
         attempt.executionConfig,
         attempt.costIds,
-        attempt.fingerprint
+        attempt.fingerprint,
+        attempt.auditTrace
       );
     }
     return {
       implementation: "chunked_hybrid",
+      effectiveImplementation: "chunked_hybrid",
       memories: attempt.executionMemories,
       retrieval: attempt.result.retrieval,
       selectedParentContent: attempt.result.selectedParentContent,
       latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
       providerFingerprint: attempt.result.providerFingerprint,
       costIds: attempt.result.costIds,
+      auditTrace: attempt.result.auditTrace,
       telemetryCandidates: attempt.result.telemetryCandidates
     };
   };
@@ -1678,6 +1793,7 @@ export async function buildPostgresChronicleContextPreview(
       }
       return {
         implementation,
+        effectiveImplementation: "legacy_hybrid",
         memories: cloneContextMemories(memories),
         retrieval: {
           mode: "shadow_unavailable",
@@ -1688,7 +1804,8 @@ export async function buildPostgresChronicleContextPreview(
         selectedParentContent: null,
         latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
         providerFingerprint: null,
-        costIds: []
+        costIds: [],
+        auditTrace: emptyChronicleRetrievalAuditTrace()
       };
     }
   };
@@ -1718,6 +1835,7 @@ export async function buildPostgresChronicleContextPreview(
       }
       return {
         implementation,
+        effectiveImplementation: "legacy_hybrid",
         memories: cloneContextMemories(memories),
         retrieval: {
           mode: "lexical_fallback",
@@ -1728,7 +1846,8 @@ export async function buildPostgresChronicleContextPreview(
         selectedParentContent: null,
         latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
         providerFingerprint: null,
-        costIds: []
+        costIds: [],
+        auditTrace: emptyChronicleRetrievalAuditTrace()
       };
     }
   };
@@ -1783,6 +1902,13 @@ export async function buildPostgresChronicleContextPreview(
     ...retrievalResult,
     scopeEligibleCandidates
   };
+  const chronicleRetrieval = buildChronicleRetrievalAudit({
+    configuredImplementation: productionImplementation,
+    effectiveImplementation: productionExecution.effectiveImplementation,
+    semanticUsed: retrievalResult.semanticAvailable === true,
+    fallbackCode: auditRetrievalFallbackCode(retrievalResult),
+    trace: productionExecution.auditTrace
+  });
   const metrics = await loadPostgresChronicleContextMetrics(client, scope);
   const sourceWorld = typeof campaign.world_content.world === "object" && campaign.world_content.world !== null
     ? campaign.world_content.world as Record<string, unknown>
@@ -1982,6 +2108,7 @@ export async function buildPostgresChronicleContextPreview(
     },
     metrics,
     retrieval,
+    chronicleRetrieval,
     scopes,
     exclusions: [
       "mechanics and roll records",
