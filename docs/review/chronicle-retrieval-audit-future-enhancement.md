@@ -2,13 +2,13 @@
 
 ## Status
 
-Implementation in progress. The accepted-turn retrieval audit is governed by
+Implemented and verified on 2026-08-17. The accepted-turn retrieval audit is governed by
 [ADR 0029](../architecture/0029-chronicle-turn-retrieval-audit.md) and the
 [implementation plan](../superpowers/plans/2026-08-16-chronicle-turn-retrieval-audit.md).
-Tasks 1 through 6 implement the contract, provider provenance, production-path
-audit, persistence, API projection, lifecycle semantics, portability boundary,
-and operator documentation. Task 7 is the final UI work; Task 8 performs the
-complete verification before this status becomes `Implemented`.
+All eight plan tasks are complete. The delivered work covers the contract,
+provider provenance, production-path audit, persistence, API projection,
+lifecycle semantics, portability boundary, operator documentation, both user
+interfaces, and final regression/privacy verification.
 
 Operational telemetry retention is not turn-history retention. Retrieval runs
 remain optional, expiring diagnostics. An accepted-turn audit is retained only
@@ -120,3 +120,138 @@ The benefit is compatibility and controlled retrieval-quality tuning. The cost
 is a larger support surface, derived reindexing, calibration work, and the risk
 that large chunks reduce precision while small overlapping chunks increase
 storage and request volume.
+
+## Final verification evidence (2026-08-17)
+
+### Repository and database gates
+
+The following final commands exited zero:
+
+```powershell
+pnpm check
+pnpm test:unit
+pnpm build
+node scripts/run-isolated-integration.mjs
+pnpm evaluate:chronicle -- --implementation legacy_hybrid --output tmp/chronicle-evaluation/final-audit-legacy.json
+pnpm evaluate:chronicle -- --implementation chunked_hybrid --output tmp/chronicle-evaluation/final-audit-chunked.json
+git diff --check
+```
+
+- `pnpm check` validated the repository boundary/data checks across 1,187 files
+  and all TypeScript/web checks.
+- The unit suite completed 185 files with 2,072 passed and 44 explicitly skipped
+  tests (2,116 total). The skipped cases were existing platform-capability cases,
+  not Chronicle retrieval/audit cases.
+- Both Legacy and replacement production web bundles built successfully.
+- The isolated integration runner completed all 65 discovered files against
+  real PostgreSQL: 519 passed and 177 explicitly skipped tests (696 total).
+  No Chronicle retrieval or audit test skipped. The skips were limited to
+  unrelated platform/archive/image/secure-filesystem capability cases.
+- Database identity was container `infinitequest-integration-postgres`, database
+  and role `infinitequest_test`, PostgreSQL 18.4 (Debian, x86_64). Credentials
+  are intentionally omitted.
+
+### Evaluator results
+
+Both evaluators used corpus version `v2`, 17 cases, and corpus hash
+`1cd534c1585a81865572beb4fd7748e7ac817d248269a3c0c7ebcb93d415951f`.
+
+| Metric | Legacy hybrid | Chunked hybrid |
+| --- | ---: | ---: |
+| Recall at 5 | 0.7352941176470589 | 0.8235294117647058 |
+| Recall at 10 | 0.7352941176470589 | 0.8235294117647058 |
+| Recall at 20 | 0.7352941176470589 | 1 |
+| MRR | 0.7706558485463151 | 0.7757352941176471 |
+| nDCG | 0.7552612693115515 | 0.8667030368443928 |
+| Duplicate rate | 0 | 0 |
+| Relevant memories per prompt token | 0.0054557124518613605 | 0.007233273056057866 |
+| Cross-campaign/future-turn/superseded-fact leakage | 0 / 0 / 0 | 0 / 0 / 0 |
+| Latency p50 / p95 (ms) | 6 / 22 | 6 / 40 |
+| Embedding requests / cost | 3 / 0 | 3 / 0 |
+| Semantic-only hits | 3 | 3 |
+| Promotions / demotions | 164 / 164 | 138 / 141 |
+
+### Long-campaign and provider-failure proof
+
+The real-PostgreSQL long-campaign fixture contains 120 accepted turns and now
+proves all required audit paths. Compatible ready chunks remain chunked semantic
+and identify dedicated or text-role provider resolution accurately. Query-cache
+reuse is reported as cache-only with no provider call. Timeout, empty/malformed
+vectors, and incompatible dimensions all produce complete effective legacy
+retrieval with a sanitized `semantic_retrieval_unavailable` fallback. When the
+legacy parent vector cannot be used either, lexical/entity/recency/chronology
+retrieval still fills the prompt and reports lexical-only.
+
+The assertions also prove identical selected scopes and token budget across the
+provider-failure cases, preserve campaign/world-version isolation, and prove
+that chunk ranking SQL is not used after fallback. A verification RED exposed
+that a provider vector with the wrong dimensions could be cached before it was
+known to be usable. Commit `fb177c1` (`Reject unusable Chronicle query vectors`)
+adds the minimal owning validation before caching or success attribution. The
+focused PostgreSQL test moved from 10 passed / 1 failed to 11 passed / 0 failed;
+valid-vector selection and budget semantics are unchanged.
+
+### Privacy review
+
+The required staged search covered `baseUrl`, `endpoint`, `credential`,
+`apiKey`, `rawQuery`, `rawAction`, `narration`, `providerProfileId`, and
+`fingerprint` in the contract, audit builder, repository, runtime adapter, and
+both UI renderers. Matches were manually classified as existing provider
+execution/cache configuration, ordinary narration display, or negative
+assertions. None is part of the persisted/public audit object.
+
+The accepted audit remains limited to the versioned closed vocabulary, safe
+provider type/model labels, and bounded counters. It contains no endpoint,
+credential, raw action/query/narration/memory/provider response, profile ID,
+fingerprint, candidate ID, or raw error. `git diff --cached --check` and
+`git diff --check` passed, and unrelated dirty work was preserved unstaged.
+
+### Rendered UI evidence
+
+The real built bundles were served over same-origin HTTP with API fixtures for
+one recorded text-role fallback and one historical `null` audit. The replacement
+history route `/app/campaigns/:campaignId/history` rendered two
+`Chronicle retrieval` definition lists. The Legacy `/story/:campaignId` route
+opened its turn-history dialog from the real `#turnPill` control and rendered
+the same two states. Both surfaces displayed the recorded execution as Legacy
+semantic retrieval, text-role embedding provider, live provider call, and
+chunk-index fallback; both displayed the historical record as Unknown with the
+same explanation. Browser console/error capture was empty for both routes.
+
+This closes the historical Task 7 gap where an API-backed Legacy browser smoke
+was unavailable: Task 7 had DOM/modal and bundle proof, and Task 8 adds live
+same-origin HTTP/browser proof for both surfaces. Root `index.html` remains
+unchanged.
+
+### Delivery commits and deferred cleanup
+
+The implementation range after merge base `7902877` is:
+
+```text
+d4ea52c Define Chronicle turn retrieval audit
+86e6971 Reject endpoint URIs in Chronicle audit
+5e65254 Preserve Chronicle embedding provider provenance
+9cd9886 Harden Chronicle chunk readiness
+656749d Audit effective Chronicle retrieval
+37ede51 Preserve Chronicle fallback audit trace
+483a68e Store Chronicle retrieval audit on turns
+27677a0 Cover Chronicle audit on replacement turns
+133c7b8 Expose Chronicle retrieval audit on turn APIs
+00adb1a Document Chronicle retrieval audit lifecycle
+3df3865 Harden Chronicle audit lifecycle coverage
+f437db3 Show Chronicle retrieval audit on turns
+beb0634 Correct Chronicle retrieval history labels
+c313fea Repair Chronicle audit verification fixtures
+66344de Align Chronicle skip reason fixtures
+a27f4a6 Align Chronicle fallback audit expectation
+9616289 Verify gameplay Chronicle audit projections
+18dc606 Refresh Chronicle migration test contracts
+cbefa9b Repair Chronicle evaluator provider resolution
+fb177c1 Reject unusable Chronicle query vectors
+```
+
+Two Task 5 test-only cleanups remain intentionally deferred and do not weaken
+the verified runtime contract: add an explicit immediate-client null/copy-
+independence assertion, and replace the remaining completed-result fixture type
+assertions with explicit `chronicleRetrieval: null`. They are minor maintainability
+improvements, not implementation or release blockers.
