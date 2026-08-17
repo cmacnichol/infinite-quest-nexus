@@ -9,6 +9,7 @@ import { createPostgresTurnCorrectionRepository } from "../../packages/database/
 import { readTurnPage } from "../../packages/database/src/play-loop-read-repository.js";
 import { readReadableCampaignExport } from "../../packages/database/src/readable-campaign-export-repository.js";
 import type { MemoryGenerationTransactionPort } from "../../packages/application/src/memory/index.js";
+import { DEDICATED_CHUNKED_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -50,9 +51,9 @@ integration("accepted-turn narration corrections", () => {
     );
     campaignId = campaign.rows[0]!.id;
     const turn = await pool.query<{ id: string }>(
-      `INSERT INTO turns (owner_user_id, campaign_id, turn_number, narration, image_url)
-       VALUES ($1,$2,1,'The old moon fades.','/api/assets/existing') RETURNING id`,
-      [ownerUserId, campaignId]
+      `INSERT INTO turns (owner_user_id, campaign_id, turn_number, narration, image_url, model_metadata)
+       VALUES ($1,$2,1,'The old moon fades.','/api/assets/existing', $3::jsonb) RETURNING id`,
+      [ownerUserId, campaignId, JSON.stringify({ chronicleRetrieval: DEDICATED_CHUNKED_AUDIT })]
     );
     turnId = turn.rows[0]!.id;
   });
@@ -99,7 +100,7 @@ integration("accepted-turn narration corrections", () => {
       illustrationsMayBeStale: true
     });
     await expect(readTurnPage(pool, ownerUserId, campaignId, undefined, 10)).resolves.toMatchObject({
-      turns: [{ narration: "The silver moon rises above the lantern-lit harbor." }]
+      turns: [{ narration: "The silver moon rises above the lantern-lit harbor.", chronicleRetrieval: DEDICATED_CHUNKED_AUDIT }]
     });
     await expect(readReadableCampaignExport(pool, ownerUserId, campaignId)).resolves.toMatchObject({
       turns: [{ narration: "The silver moon rises above the lantern-lit harbor." }]

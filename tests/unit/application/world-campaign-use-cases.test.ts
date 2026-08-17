@@ -412,6 +412,7 @@ describe("world and campaign application use cases", () => {
             imagePrompt: "",
             imageUrl: null,
             acceptedAt: repositoryTurnAcceptedAt,
+            chronicleRetrieval: null,
             reportedCost: null
           }],
           nextCursor: "older-page"

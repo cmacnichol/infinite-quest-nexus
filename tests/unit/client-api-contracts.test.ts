@@ -33,6 +33,7 @@ import {
   worldListResponseSchema,
   type GenerationActionResponse
 } from "../../packages/contracts/src/index.js";
+import { DEDICATED_CHUNKED_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
 
 const CAMPAIGN_ID = "11111111-1111-4111-8111-111111111111";
 const WORLD_ID = "22222222-2222-4222-8222-222222222222";
@@ -343,10 +344,14 @@ describe("client API response contracts", () => {
       imagePrompt: "An ancient observatory under emerald stars.",
       imageUrl: null,
       acceptedAt: TIMESTAMP,
+      chronicleRetrieval: null,
       reportedCost: null
     };
     expect(turnListResponseSchema.parse({ campaignId: CAMPAIGN_ID, turns: [turn], nextCursor: null }).turns).toHaveLength(1);
     expect(() => turnListResponseSchema.parse({ campaignId: CAMPAIGN_ID, turns: [turn] })).toThrow();
+    const { chronicleRetrieval: _missingTurnAudit, ...turnWithoutAuditField } = turn;
+    expect(() => turnListResponseSchema.parse({ campaignId: CAMPAIGN_ID, turns: [turnWithoutAuditField], nextCursor: null })).toThrow();
+    expect(turnListResponseSchema.parse({ campaignId: CAMPAIGN_ID, turns: [{ ...turnWithoutAuditField, chronicleRetrieval: null }], nextCursor: null }).turns[0]?.chronicleRetrieval).toBeNull();
 
     const result = generationResultSchema.parse({
       id: JOB_ID,
@@ -364,6 +369,7 @@ describe("client API response contracts", () => {
       choices: turn.choices,
       customActionSuggestion: turn.customActionSuggestion,
       imagePrompt: turn.imagePrompt,
+      chronicleRetrieval: DEDICATED_CHUNKED_AUDIT,
       modelMetadata: {},
       mechanics: {},
       acceptedAt: TIMESTAMP,
@@ -371,6 +377,10 @@ describe("client API response contracts", () => {
       reportedCost: null
     });
     expect(result.resultTurnId).toBe(TURN_ID);
+    expect(result.chronicleRetrieval).toEqual(DEDICATED_CHUNKED_AUDIT);
+    const { chronicleRetrieval: _missingResultAudit, ...resultWithoutAuditField } = result;
+    expect(() => generationResultSchema.parse(resultWithoutAuditField)).toThrow();
+    expect(generationResultSchema.parse({ ...resultWithoutAuditField, chronicleRetrieval: null }).chronicleRetrieval).toBeNull();
     expect(() => generationResultSchema.parse({ ...result, status: "recoverable" })).toThrow();
   });
 

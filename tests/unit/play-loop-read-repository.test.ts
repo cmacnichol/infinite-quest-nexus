@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
 import { readTurnPage } from "../../packages/database/src/play-loop-read-repository.js";
+import { DEDICATED_CHUNKED_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
 
 const OWNER_ID = "00000000-0000-4000-8000-000000000001";
 const CAMPAIGN_ID = "11111111-1111-4111-8111-111111111111";
@@ -67,5 +68,29 @@ describe("play-loop turn pages", () => {
     latestId = REPLACED_LATEST_ID;
     await expect(readTurnPage(pool, OWNER_ID, CAMPAIGN_ID, firstPage.nextCursor || undefined, 1))
       .rejects.toMatchObject({ statusCode: 409 });
+  });
+
+  it("projects only a valid recorded audit and maps historical or malformed values to unknown", async () => {
+    const storedValues: unknown[] = [
+      DEDICATED_CHUNKED_AUDIT,
+      undefined,
+      { auditVersion: "obsolete" }
+    ];
+
+    for (const storedChronicleRetrieval of storedValues) {
+      const query = async (statement: unknown) => {
+        const sql = String(statement);
+        if (sql.includes("historyVersion")) return { rows: [{ historyVersion: `1:1:${FIRST_ID}` }] };
+        return { rows: [{ ...turn(FIRST_ID, 1), storedChronicleRetrieval }] };
+      };
+      const pool = {
+        connect: async () => ({ query, release: () => undefined })
+      } as unknown as DatabasePool;
+
+      const page = await readTurnPage(pool, OWNER_ID, CAMPAIGN_ID, undefined, 10);
+      expect(page.turns[0]?.chronicleRetrieval).toEqual(
+        storedChronicleRetrieval === DEDICATED_CHUNKED_AUDIT ? DEDICATED_CHUNKED_AUDIT : null
+      );
+    }
   });
 });

@@ -290,7 +290,8 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     expect(generationResultSchema.parse(resultResponse.json())).toMatchObject({
       id: job.id,
       campaignId,
-      status: "completed"
+      status: "completed",
+      chronicleRetrieval: null
     });
 
     // 6. Verify that the turn list now contains the generated turn with structured choices and trackers
@@ -304,7 +305,7 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     if (!latestTurn) throw new Error("Expected the completed generation to append a turn.");
     expect(latestTurn.narration).toContain("Ancient Observatory");
     expect(latestTurn.choices).toContain("Examine the telescope.");
-    expect(latestTurn).toMatchObject({ inputMode: "action", inputModeSource: "explicit" });
+    expect(latestTurn).toMatchObject({ inputMode: "action", inputModeSource: "explicit", chronicleRetrieval: null });
 
     const campaignList = await app.inject({ method: "GET", url: "/api/v1/campaigns" });
     expect(campaignList.statusCode).toBe(200);
@@ -339,7 +340,7 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     expect(await runGenerationJob(pool, "worker-generation-route-cutover", 30, credentialSecret)).toBe(true);
     const recovered = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${appendJob.id}/result` });
     expect(recovered.statusCode).toBe(200);
-    expect(generationResultSchema.parse(recovered.json())).toMatchObject({ id: appendJob.id, campaignId, status: "completed" });
+    expect(generationResultSchema.parse(recovered.json())).toMatchObject({ id: appendJob.id, campaignId, status: "completed", chronicleRetrieval: null });
 
     const replacement = await app.inject({
       method: "POST",
