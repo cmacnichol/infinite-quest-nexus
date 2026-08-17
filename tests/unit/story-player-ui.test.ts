@@ -989,6 +989,67 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     }
   });
 
+  it("does not publish History opened during a same-campaign sync over its newer window", async () => {
+    let resolveReload!: (data: Record<string, unknown>) => void;
+    let resolveOldPage!: (page: Record<string, unknown>) => void;
+    let resolveNewPage!: (page: Record<string, unknown>) => void;
+    const syncStatus = vi.fn()
+      .mockResolvedValueOnce({
+        campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 100 },
+        world: {},
+        turns: { campaignId: "campaign-1", turns: makeTurns(51, 100), nextCursor: "before-51" }
+      })
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveReload = resolve; }));
+    const fetchTurns = vi.fn()
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveOldPage = resolve; }))
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveNewPage = resolve; }));
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeTurns(51, 100),
+        nextCursor: "before-51",
+        fetchTurns,
+        syncStatus
+      });
+      vi.stubGlobal("confirm", () => true);
+
+      document.getElementById("btnUndo")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      expect(fetchTurns).toHaveBeenCalledTimes(1);
+
+      resolveReload({
+        campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 101 },
+        world: {},
+        turns: { campaignId: "campaign-1", turns: makeTurns(52, 101), nextCursor: "before-52" }
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(document.querySelector<HTMLElement>("#storyArea .scene")?.id).toBe("scene-101");
+
+      resolveOldPage({ campaignId: "campaign-1", turns: makeTurns(1, 50), nextCursor: null });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const cards = document.querySelectorAll<HTMLElement>("#turnHistoryModalList .history-card");
+      expect(cards).toHaveLength(50);
+      expect(cards[0]?.textContent).toContain("Turn 52");
+      expect(cards[49]?.textContent).toContain("Turn 101");
+      expect(document.getElementById("turnHistoryLoadStatus")?.classList.contains("hidden")).toBe(true);
+      expect(document.getElementById("turnHistoryLoadStatus")?.textContent).toBe("");
+      expect(document.getElementById("toast")?.textContent).not.toContain("Could not load complete history");
+
+      document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      expect(fetchTurns).toHaveBeenCalledTimes(2);
+      expect(fetchTurns).toHaveBeenLastCalledWith("campaign-1", { before: "before-52", limit: 200 });
+      resolveNewPage({ campaignId: "campaign-1", turns: makeTurns(1, 51), nextCursor: null });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(document.querySelectorAll("#turnHistoryModalList .history-card")).toHaveLength(101);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("retries complete History after a failed page walk", async () => {
     const fetchTurns = vi.fn()
       .mockRejectedValueOnce(new Error("first page failed"))
@@ -1125,6 +1186,51 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       expect(printWindow.print).not.toHaveBeenCalled();
       expect(writes.join("\n")).not.toContain("Turn 51");
       expect(document.getElementById("toast")?.textContent).toContain("print history failed");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("closes Print without partial markup or failure noise when history is superseded by a reload", async () => {
+    let resolvePage!: (page: Record<string, unknown>) => void;
+    const fetchTurns = vi.fn(() => new Promise((resolve) => { resolvePage = resolve; }));
+    const syncStatus = vi.fn()
+      .mockResolvedValueOnce({
+        campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 100 },
+        world: {},
+        turns: { campaignId: "campaign-1", turns: makeTurns(51, 100), nextCursor: "before-51" }
+      })
+      .mockResolvedValueOnce({
+        campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 101 },
+        world: {},
+        turns: { campaignId: "campaign-1", turns: makeTurns(52, 101), nextCursor: "before-52" }
+      });
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeTurns(51, 100),
+        nextCursor: "before-51",
+        fetchTurns,
+        syncStatus
+      });
+      const { printWindow, writes } = controlledPrintWindow();
+      Object.defineProperty(window, "open", { value: vi.fn(() => printWindow), configurable: true });
+      vi.stubGlobal("confirm", () => true);
+
+      document.getElementById("btnExportPdf")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      expect(printWindow.print).not.toHaveBeenCalled();
+      document.getElementById("btnUndo")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      resolvePage({ campaignId: "campaign-1", turns: makeTurns(1, 50), nextCursor: null });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(printWindow.close).toHaveBeenCalledTimes(1);
+      expect(printWindow.print).not.toHaveBeenCalled();
+      expect(writes.join("\n")).not.toContain("Turn 52");
+      expect(document.getElementById("toast")?.textContent).not.toContain("Export failed");
+      expect(document.getElementById("toast")?.textContent).not.toContain("superseded");
     } finally {
       vi.unstubAllGlobals();
     }

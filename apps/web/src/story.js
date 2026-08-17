@@ -137,6 +137,17 @@ const modalBaselines = new WeakMap();
 let discardModalTarget = null;
 let completeHistoryLoad = null;
 let storyTurnWindowEpoch = 0;
+const COMPLETE_HISTORY_SUPERSEDED = "complete_history_superseded";
+
+function completeHistorySupersededError() {
+  const error = new Error("Story history load was superseded.");
+  error.code = COMPLETE_HISTORY_SUPERSEDED;
+  return error;
+}
+
+function isCompleteHistorySuperseded(error) {
+  return error?.code === COMPLETE_HISTORY_SUPERSEDED;
+}
 
 function modalFormSnapshot(dialog) {
   return [...dialog.querySelectorAll("input, select, textarea")].map((control) => {
@@ -210,32 +221,32 @@ function ensureCompleteTurnHistory() {
   const campaignId = state.campaignId;
   const epoch = storyTurnWindowEpoch;
   const request = { campaignId, epoch, promise: null };
+  const requestIsCurrent = () => state.campaignId === campaignId
+    && storyTurnWindowEpoch === epoch
+    && completeHistoryLoad === request;
   request.promise = loadCompleteStoryHistory({
     campaignId,
     turns: state.turns,
     nextCursor: state.historyNextCursor,
     fetchPage: ({ before, limit }) => apiClient.campaigns.turns(campaignId, { before, limit }),
     onProgress: ({ loadedTurnCount }) => {
-      if (state.campaignId === campaignId
-        && storyTurnWindowEpoch === epoch
-        && completeHistoryLoad === request) {
+      if (requestIsCurrent()) {
         setTurnHistoryLoadStatus(`Loading earlier turns… ${loadedTurnCount} loaded`, "loading");
       }
     }
-  }).then((result) => {
-    if (state.campaignId !== campaignId
-      || storyTurnWindowEpoch !== epoch
-      || completeHistoryLoad !== request) return state.turns;
-    state.turns = result.turns;
-    state.historyNextCursor = null;
-    setTurnHistoryLoadStatus(`All ${result.turns.length} turns loaded.`);
-    return state.turns;
-  }).catch((error) => {
-    if (state.campaignId !== campaignId
-      || storyTurnWindowEpoch !== epoch
-      || completeHistoryLoad !== request) return state.turns;
-    throw error;
-  }).finally(() => {
+  }).then(
+    (result) => {
+      if (!requestIsCurrent()) throw completeHistorySupersededError();
+      state.turns = result.turns;
+      state.historyNextCursor = null;
+      setTurnHistoryLoadStatus(`All ${result.turns.length} turns loaded.`);
+      return state.turns;
+    },
+    (error) => {
+      if (!requestIsCurrent()) throw completeHistorySupersededError();
+      throw error;
+    }
+  ).finally(() => {
     if (completeHistoryLoad === request) completeHistoryLoad = null;
   });
   completeHistoryLoad = request;
@@ -343,20 +354,25 @@ async function checkOnboarding() {
 
 // ── Campaign Loading ──────────────────────────────────────────
 async function loadCampaign(campaignId, options = {}) {
-  storyTurnWindowEpoch += 1;
+  const loadEpoch = ++storyTurnWindowEpoch;
   state.campaignId = campaignId;
   completeHistoryLoad = null;
   setTurnHistoryLoadStatus("");
   showBusy("Loading campaign…");
   try {
     const syncData = await apiClient.generation.syncStatus(campaignId);
+    const turnData = syncData.turns || await apiClient.campaigns.turns(campaignId);
+    if (state.campaignId !== campaignId || storyTurnWindowEpoch !== loadEpoch) return;
+
+    storyTurnWindowEpoch += 1;
+    completeHistoryLoad = null;
+    setTurnHistoryLoadStatus("");
     state.campaign = syncData.campaign || syncData;
     state.world = syncData.world || state.campaign.world || null;
     state.playerConfig = syncData.playerConfig || state.campaign.playerConfig || null;
     state.pendingGeneration = syncData.pendingGeneration || null;
     syncTurnInputModeFromCampaign();
 
-    const turnData = syncData.turns || await apiClient.campaigns.turns(campaignId);
     state.turns = turnData.turns || [];
     state.historyNextCursor = turnData.nextCursor || null;
     state.runtimeState = await apiClient.campaigns.state(campaignId);
@@ -380,7 +396,9 @@ async function loadCampaign(campaignId, options = {}) {
       try {
         await ensureCompleteTurnHistory();
       } catch (error) {
-        toast(`Continuous reading is showing the loaded window: ${error.message}`);
+        if (!isCompleteHistorySuperseded(error)) {
+          toast(`Continuous reading is showing the loaded window: ${error.message}`);
+        }
       }
     }
     renderAllScenes({ autoScroll: options.autoScroll });
@@ -2172,8 +2190,10 @@ async function saveUserProfile() {
       try {
         await ensureCompleteTurnHistory();
       } catch (error) {
-        completeHistoryError = error;
-        toast(`Continuous reading is showing the loaded window: ${error.message}`);
+        if (!isCompleteHistorySuperseded(error)) {
+          completeHistoryError = error;
+          toast(`Continuous reading is showing the loaded window: ${error.message}`);
+        }
       }
     }
     renderAllScenes();
@@ -2199,6 +2219,10 @@ async function openTurnHistoryModal() {
     await ensureCompleteTurnHistory();
     populateHistoryContainer($("turnHistoryModalList"));
   } catch (error) {
+    if (isCompleteHistorySuperseded(error)) {
+      populateHistoryContainer($("turnHistoryModalList"));
+      return;
+    }
     setTurnHistoryLoadStatus(`Could not load complete history: ${error.message}`, "error");
     toast(`Could not load complete history: ${error.message}`);
   }
@@ -2464,7 +2488,7 @@ async function printStory() {
     toast("Print dialog opened. Choose Save as PDF.");
   } catch (err) {
     printWindow.close();
-    toast(`Export failed: ${err.message}`);
+    if (!isCompleteHistorySuperseded(err)) toast(`Export failed: ${err.message}`);
   }
 }
 
