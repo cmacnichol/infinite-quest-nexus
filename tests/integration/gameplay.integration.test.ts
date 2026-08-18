@@ -7,7 +7,10 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { readTurnPage } from "../../packages/database/src/play-loop-read-repository.js";
 import { buildServer } from "../../services/api/src/server.js";
 import { createApiWorldCampaignApplication } from "../helpers/runtime-application-fixtures.js";
-import { legacyStoryImportServerOptions as serverOptions } from "../helpers/build-server-options.js";
+import {
+  legacyStoryImportServerOptions,
+  serverOptions as productionServerOptions,
+} from "../helpers/build-server-options.js";
 import { createProvider } from "../helpers/provider-application-fixtures.js";
 import { runGenerationJob } from "../helpers/generation-worker-harness.js";
 import { runImageJob } from "../../services/runtime/src/illustration-image-job-adapter.js";
@@ -29,6 +32,9 @@ import { worldListResponseSchema } from "../../packages/contracts/src/world-libr
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
 const secureGeneratedStagingIt = supportsSecureGeneratedArchiveStaging() ? it : it.skip;
+const gameplayServerOptions = supportsSecureGeneratedArchiveStaging()
+  ? productionServerOptions
+  : legacyStoryImportServerOptions;
 const credentialSecret = "integration-test-credential-secret";
 const lexicalTextFallbackAudit = {
   auditVersion: "chronicle-retrieval-audit-v1",
@@ -156,7 +162,7 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     await migrateDatabase(pool, resolve("database/migrations"));
     providerTransport = installIntegrationProviderTransport();
     const config = makeConfig(databaseUrl!);
-    app = await buildServer(serverOptions({
+    app = await buildServer(gameplayServerOptions({
       config,
       pool,
       worldCampaign: createApiWorldCampaignApplication(pool, {
