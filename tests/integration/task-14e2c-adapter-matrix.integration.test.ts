@@ -7,6 +7,7 @@ import JSZip from "jszip";
 import { runner } from "node-pg-migrate";
 import sharp from "sharp";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { MemoryGenerationTransactionPort } from "../../packages/application/src/memory/index.js";
 import { toAssetMutationIdempotencyKey } from "../../packages/application/src/assets/index.js";
 import {
   toPortableImportedRecordId,
@@ -42,10 +43,10 @@ import {
 import { createTask14e2cAdapters } from "../helpers/task-14e2c-adapters.js";
 import {
   importInfiniteWorldsWithClient,
-  importLegacyStoryWithClient,
   portableWorldApplicationForTest,
   transactionBoundPortableWorldApplicationForTest
 } from "../helpers/memory-aware-services.js";
+import { importLegacyStoryWithClient } from "../legacy-api/src/import-service.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -64,6 +65,29 @@ const tinyPng = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64",
 );
+
+// This matrix intentionally runs on the pre-0061 schema. Imported fiction
+// memories are written directly by the legacy importer, while derived indexing
+// belongs to the later Chronicle schema and is covered by focused suites.
+const preChunkChronicleMemory: MemoryGenerationTransactionPort = {
+  async autoEnableCampaignEmbedding() {
+    return { enabled: false };
+  },
+  async buildContextPreview() {
+    throw new Error("Task 14e2c does not build Chronicle context previews.");
+  },
+  async enqueueEmbeddingReindex() {
+    return null;
+  },
+  async enqueueChunkIndex() {
+    return null;
+  },
+  async rebuildCampaignMemories() {
+    return 0;
+  },
+  async storeDerivedTurnMemories() {},
+  async writeAcceptedTurnFiction() {},
+};
 
 function deterministicInfiniteWorldsProviders(): InfiniteWorldsApiProviders {
   const snapshot = Object.fromEntries(Object.entries(PROMPT_TEMPLATE_CATALOG).map(([key, definition]) => [
@@ -817,7 +841,7 @@ The durable record is verified.`;
         const parsedPreview = await previewLegacyStoryImport(pool, request);
         expect(parsedPreview).toMatchObject({ valid: true, counts: { turns: 2 } });
         completion = async (client) => {
-          const imported = await importLegacyStoryWithClient(pool, client, request);
+          const imported = await importLegacyStoryWithClient(client, request, preChunkChronicleMemory);
           const destinationTurns = await client.query<{ id: string; source_turn_id: string }>(
             `SELECT id,source_turn_id FROM turns
               WHERE owner_user_id=$1 AND campaign_id=$2 AND source_turn_id IS NOT NULL`,
@@ -872,7 +896,7 @@ The durable record is verified.`;
           });
           projection = await previewLegacyStoryImport(pool, request);
           completion = async (client) => {
-            const imported = await importLegacyStoryWithClient(pool, client, request);
+            const imported = await importLegacyStoryWithClient(client, request, preChunkChronicleMemory);
             return {
               importId: imported.importId,
               importedRecordId: toPortableImportedRecordId(imported.importId),
@@ -1038,7 +1062,7 @@ The durable record is verified.`;
     };
 
     await expect(adapters.archive.commit(commitCommand, async (client) => {
-      const imported = await importLegacyStoryWithClient(pool, client, request);
+      const imported = await importLegacyStoryWithClient(client, request, preChunkChronicleMemory);
       expect((await client.query(
         "SELECT 1 FROM imports WHERE owner_user_id=$1 AND id=$2",
         [ownerUserId, imported.importId]
@@ -1060,7 +1084,7 @@ The durable record is verified.`;
     )).rows[0]).toEqual({ status: "previewed" });
 
     const committed = await adapters.archive.commit(commitCommand, async (client) => {
-      const imported = await importLegacyStoryWithClient(pool, client, request);
+      const imported = await importLegacyStoryWithClient(client, request, preChunkChronicleMemory);
       return {
         importId: imported.importId,
         importedRecordId: toPortableImportedRecordId(imported.importId),
