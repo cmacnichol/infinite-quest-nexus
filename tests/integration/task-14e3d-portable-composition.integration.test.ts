@@ -73,6 +73,22 @@ integration("Task 14e3d durable portable composition authority", () => {
     await pool.end();
   });
 
+  async function waitForConcurrentOperationWaiter(): Promise<void> {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const waiting = await pool.query<{ count: number }>(
+        `SELECT count(*)::int AS count
+           FROM pg_stat_activity
+          WHERE datname=current_database() AND wait_event_type='Lock'
+            AND wait_event='transactionid'
+            AND query ILIKE '%FROM portable_import_operations%'
+            AND query ILIKE '%FOR UPDATE%'`,
+      );
+      if ((waiting.rows[0]?.count ?? 0) >= 1) return;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    }
+    throw new Error("task_14e3d_concurrent_operation_wait_timeout");
+  }
+
   async function stage() {
     const portable = createPostgresImportRepository(pool);
     const operationScopeId = `portable-14e3d-${crypto.randomUUID()}`;
@@ -1618,7 +1634,7 @@ integration("Task 14e3d durable portable composition authority", () => {
       }
       let loserSettled = false;
       loser = secondComposition.commit(command).finally(() => { loserSettled = true; });
-      await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+      await waitForConcurrentOperationWaiter();
       expect(loserSettled).toBe(false);
       await gate.query("SELECT pg_advisory_unlock(hashtextextended($1,0))", [gateName]);
       gateHeld = false;
