@@ -18,6 +18,8 @@ import type {
   ApiPortableImportExportComposition,
   ApiPortableImportExportCompositionOptions,
 } from "../../services/runtime/src/api-portable-import-export-composition.js";
+import { createApiPortableImportExportComposition } from "../../services/runtime/src/api-portable-import-export-composition.js";
+import { supportsSecureGeneratedArchiveStaging } from "../../services/api/src/archive-io.js";
 import {
   toPortableImportedRecordId,
   toPortableImportResultRetrieval,
@@ -155,6 +157,19 @@ async function createLegacyStoryTestApiPortable(
     reap: unexpectedPortableCall,
     close: async () => undefined,
   } as unknown as PortableImportExportComposition;
+  if (supportsSecureGeneratedArchiveStaging()) {
+    const production = await createApiPortableImportExportComposition(options);
+    return {
+      portable: {
+        ...production.portable,
+        stageInput: portable.stageInput,
+        previewLegacyStory: portable.previewLegacyStory,
+        commit: portable.commit,
+      } as PortableImportExportComposition,
+      progress: production.progress,
+      close: production.close,
+    };
+  }
   return {
     portable,
     progress: {

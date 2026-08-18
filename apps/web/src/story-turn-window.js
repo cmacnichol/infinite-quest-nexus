@@ -22,3 +22,8 @@ export function latestTurnNumber(turns) {
 export function selectedTurnNumber(turns, index) {
   return Number.isInteger(index) ? positiveInteger(turns[index]?.turnNumber) : null;
 }
+
+export function turnIndexForNumber(turns, turnNumber) {
+  const target = positiveInteger(turnNumber);
+  return target ? turns.findIndex((turn) => positiveInteger(turn?.turnNumber) === target) : -1;
+}

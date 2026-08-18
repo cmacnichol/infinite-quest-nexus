@@ -5,9 +5,13 @@ import { branchCampaignFromTurn } from "./story-routing.js";
 import {
   appendExpectedTurnNumber,
   latestTurnNumber,
-  selectedTurnNumber,
+  turnIndexForNumber,
   undoTargetTurnNumber
 } from "./story-turn-window.js";
+import {
+  loadCompleteStoryHistory,
+  mergeStoryTurnPages
+} from "./story-history-loader.js";
 import {
   cancelGeneration,
   reconcileRemoteGenerationCancellation,
@@ -96,7 +100,7 @@ const state = {
   editStateSession: null,
   turns: [],
   historyNextCursor: null,
-  viewIndex: -1,
+  viewTurnNumber: null,
   busy: false,
   providers: [],
   abortController: null,
@@ -123,7 +127,7 @@ const state = {
   choiceDraftOwnerKey: null,
   choiceDraftSelection: createChoiceDraftSelection(),
   pendingIntentDecision: null,
-  historySelectedIndex: null,
+  historySelectedTurnNumber: null,
   historyInspectionRequestId: 0,
   user: {
     id: null,
@@ -139,6 +143,35 @@ const state = {
 
 const modalBaselines = new WeakMap();
 let discardModalTarget = null;
+let completeHistoryLoad = null;
+let storyTurnWindowEpoch = 0;
+const COMPLETE_HISTORY_SUPERSEDED = "complete_history_superseded";
+
+function completeHistorySupersededError() {
+  const error = new Error("Story history load was superseded.");
+  error.code = COMPLETE_HISTORY_SUPERSEDED;
+  return error;
+}
+
+function isCompleteHistorySuperseded(error) {
+  return error?.code === COMPLETE_HISTORY_SUPERSEDED;
+}
+
+function publishStoryTurnWindow(turns, nextCursor, options = {}) {
+  state.turns = turns;
+  state.historyNextCursor = nextCursor || null;
+  storyTurnWindowEpoch += 1;
+  if (completeHistoryLoad !== options.completeHistoryRequest) {
+    completeHistoryLoad = null;
+    setTurnHistoryLoadStatus("");
+  }
+}
+
+function storyTurnWindowIsCurrent(campaignId, epoch, cursor) {
+  return state.campaignId === campaignId
+    && storyTurnWindowEpoch === epoch
+    && state.historyNextCursor === cursor;
+}
 
 function modalFormSnapshot(dialog) {
   return [...dialog.querySelectorAll("input, select, textarea")].map((control) => {
@@ -195,6 +228,55 @@ function toast(msg, duration) {
   state.toastTimer = setTimeout(() => el.classList.remove("show"), duration || TOAST_DURATION);
 }
 
+function setTurnHistoryLoadStatus(message, kind = "") {
+  const status = $("turnHistoryLoadStatus");
+  if (!status) return;
+  status.textContent = message;
+  status.classList.toggle("hidden", !message);
+  status.classList.toggle("loading", kind === "loading");
+  status.classList.toggle("error", kind === "error");
+}
+
+function ensureCompleteTurnHistory() {
+  if (!state.historyNextCursor) return Promise.resolve(state.turns);
+  if (completeHistoryLoad?.campaignId === state.campaignId
+    && completeHistoryLoad.epoch === storyTurnWindowEpoch) return completeHistoryLoad.promise;
+
+  const campaignId = state.campaignId;
+  const epoch = storyTurnWindowEpoch;
+  const request = { campaignId, epoch, promise: null };
+  const requestIsCurrent = () => state.campaignId === campaignId
+    && storyTurnWindowEpoch === epoch
+    && completeHistoryLoad === request;
+  request.promise = loadCompleteStoryHistory({
+    campaignId,
+    turns: state.turns,
+    nextCursor: state.historyNextCursor,
+    fetchPage: ({ before, limit }) => apiClient.campaigns.turns(campaignId, { before, limit }),
+    onProgress: ({ loadedTurnCount }) => {
+      if (requestIsCurrent()) {
+        setTurnHistoryLoadStatus(`Loading earlier turns… ${loadedTurnCount} loaded`, "loading");
+      }
+    }
+  }).then(
+    (result) => {
+      if (!requestIsCurrent()) throw completeHistorySupersededError();
+      publishStoryTurnWindow(result.turns, null, { completeHistoryRequest: request });
+      setTurnHistoryLoadStatus(`All ${result.turns.length} turns loaded.`);
+      if (state.user?.settings?.continuousReading) renderAllScenes({ autoScroll: false });
+      return state.turns;
+    },
+    (error) => {
+      if (!requestIsCurrent()) throw completeHistorySupersededError();
+      throw error;
+    }
+  ).finally(() => {
+    if (completeHistoryLoad === request) completeHistoryLoad = null;
+  });
+  completeHistoryLoad = request;
+  return request.promise;
+}
+
 function showBusy(msg) {
   state.busy = true;
   const el = $("llmWaitIndicator");
@@ -220,8 +302,8 @@ function syncInputState() {
   const freeAction = $("freeAction");
   const generationLocked = state.busy || Boolean(state.pendingGeneration);
   const turnCount = state.turns ? state.turns.length : 0;
-  const curr = state.viewIndex === -1 ? turnCount - 1 : state.viewIndex;
-  const isLatest = state.viewIndex === -1 || state.viewIndex >= turnCount - 1;
+  const curr = viewedTurnIndex();
+  const isLatest = isViewingLatestTurn();
   const storyInputLocked = generationLocked || !isLatest;
   if (btnAction) btnAction.disabled = storyInputLocked;
   if (freeAction) freeAction.disabled = storyInputLocked;
@@ -297,18 +379,24 @@ async function checkOnboarding() {
 
 // ── Campaign Loading ──────────────────────────────────────────
 async function loadCampaign(campaignId, options = {}) {
+  const loadEpoch = ++storyTurnWindowEpoch;
+  state.campaignId = campaignId;
+  completeHistoryLoad = null;
+  setTurnHistoryLoadStatus("");
   showBusy("Loading campaign…");
   try {
     const syncData = await apiClient.generation.syncStatus(campaignId);
+    const turnData = syncData.turns || await apiClient.campaigns.turns(campaignId);
+    if (state.campaignId !== campaignId || storyTurnWindowEpoch !== loadEpoch) return;
+
+    setTurnHistoryLoadStatus("");
     state.campaign = syncData.campaign || syncData;
     state.world = syncData.world || state.campaign.world || null;
     state.playerConfig = syncData.playerConfig || state.campaign.playerConfig || null;
     state.pendingGeneration = syncData.pendingGeneration || null;
     syncTurnInputModeFromCampaign();
 
-    const turnData = syncData.turns || await apiClient.campaigns.turns(campaignId);
-    state.turns = turnData.turns || [];
-    state.historyNextCursor = turnData.nextCursor || null;
+    publishStoryTurnWindow(turnData.turns || [], turnData.nextCursor || null);
     state.runtimeState = await apiClient.campaigns.state(campaignId);
     try {
       state.illustrationConfig = await illustrationApi.config(campaignId);
@@ -325,7 +413,16 @@ async function loadCampaign(campaignId, options = {}) {
     if (titleEl) titleEl.textContent = name;
     document.title = `${name} — Infinite Quest`;
 
-    state.viewIndex = -1;
+    state.viewTurnNumber = null;
+    if (state.user?.settings?.continuousReading && state.historyNextCursor) {
+      try {
+        await ensureCompleteTurnHistory();
+      } catch (error) {
+        if (!isCompleteHistorySuperseded(error)) {
+          toast(`Continuous reading is showing the loaded window: ${error.message}`);
+        }
+      }
+    }
     renderAllScenes({ autoScroll: options.autoScroll });
     updateStatusBar();
 
@@ -411,8 +508,8 @@ function reportedCostTooltip(cost) {
 function renderScene(turn, index) {
   const sceneDiv = document.createElement("div");
   sceneDiv.className = "scene";
-  sceneDiv.id = `scene-${index}`;
-  sceneDiv.dataset.turnNumber = index + 1;
+  sceneDiv.id = `scene-${turn.turnNumber}`;
+  sceneDiv.dataset.turnNumber = turn.turnNumber;
 
   // Narration column
   let narrationHtml = "";
@@ -435,7 +532,7 @@ function renderScene(turn, index) {
 
     narrationHtml += `<div class="turn-meta">
       <div class="action-tag">➜ ${escapeHtml(turn.action)}</div>
-      <span class="pill">Turn ${index + 1}</span>
+      <span class="pill">Turn ${turn.turnNumber}</span>
       ${reportedCostHtml}
     </div>`;
   }
@@ -478,7 +575,7 @@ function renderScene(turn, index) {
               <div class="segment-illustration-sticky">
                 <div class="story-illustration-heading">
                   <span>Illustration</span>
-                  <span class="pill">Turn ${index + 1}</span>
+                  <span class="pill">Turn ${turn.turnNumber}</span>
                 </div>
                 <div class="segment-illustration-content" data-segment-id="${escapeHtml(segment.id)}">
                   ${segmentIllustrationMarkup(turn, index, segment, segments.length)}
@@ -500,8 +597,17 @@ function renderScene(turn, index) {
   return sceneDiv;
 }
 
+function currentViewTurnNumber() {
+  return state.viewTurnNumber || latestTurnNumber(state.turns);
+}
+
 function viewedTurnIndex() {
-  return state.viewIndex === -1 ? state.turns.length - 1 : state.viewIndex;
+  if (state.viewTurnNumber) return turnIndexForNumber(state.turns, state.viewTurnNumber);
+  return turnIndexForNumber(state.turns, currentViewTurnNumber());
+}
+
+function isViewingLatestTurn() {
+  return currentViewTurnNumber() === latestTurnNumber(state.turns);
 }
 
 function illustrationsEnabled() {
@@ -538,11 +644,11 @@ function segmentIllustrationMarkup(turn, turnIndex, segment, segmentCount) {
   const selected = variants[selectedIndex];
   const selectedVariantIndex = selected?.variantIndex ?? selectedIndex;
   const status = segmentStatusLabel(segment);
-  const isCurrentTurn = turnIndex === state.turns.length - 1;
+  const isCurrentTurn = Number(turn.turnNumber) === Number(state.campaign?.activeTurnNumber);
   return `<div class="segment-illustration-card">
     <div class="image-wrap${selected ? "" : " image-job-placeholder"}">
     ${selected
-      ? `<img src="${escapeHtml(selected.url)}" alt="Illustration ${selectedIndex + 1} for turn ${turnIndex + 1}, segment ${segment.ordinal + 1}" loading="lazy" />`
+      ? `<img src="${escapeHtml(selected.url)}" alt="Illustration ${selectedIndex + 1} for turn ${turn.turnNumber}, segment ${segment.ordinal + 1}" loading="lazy" />`
       : `<div class="image-placeholder">${escapeHtml(status || "No illustration is available for this segment yet.")}</div>`}
     ${variants.length > 1 ? `<div class="illustration-carousel" aria-label="Illustration variants">
       <button class="small ghost" type="button" data-action="previous-segment-image" data-segment-id="${escapeHtml(segment.id)}" aria-label="Previous illustration">←</button>
@@ -612,7 +718,7 @@ function renderStoryIllustration() {
     return;
   }
 
-  if (turnLabel) turnLabel.textContent = `Turn ${turnIndex + 1}`;
+  if (turnLabel) turnLabel.textContent = `Turn ${turn.turnNumber}`;
   const turnId = turn.id || turn.turnId || "";
   content.innerHTML = `<div class="image-wrap image-job-placeholder">
     <div class="image-placeholder">This accepted turn has no illustration segments yet.</div>
@@ -655,7 +761,7 @@ function renderAllScenes(options = {}) {
       container.appendChild(renderScene(state.turns[i], i));
     }
   } else {
-    const targetIndex = state.viewIndex === -1 ? state.turns.length - 1 : state.viewIndex;
+    const targetIndex = viewedTurnIndex();
     if (state.turns[targetIndex]) {
       container.appendChild(renderScene(state.turns[targetIndex], targetIndex));
     }
@@ -668,13 +774,18 @@ function renderAllScenes(options = {}) {
 function scrollToView() {
   const container = $("storyArea");
   if (!container) return;
-  const isLatest = state.viewIndex === -1;
+  const isLatest = isViewingLatestTurn();
   const isContinuous = Boolean(state.user?.settings?.continuousReading);
+  if (isContinuous) {
+    const target = $(`scene-${currentViewTurnNumber()}`);
+    if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
   if (isLatest) {
     const last = container.lastElementChild;
     if (last) last.scrollIntoView({ behavior: "smooth", block: "start" });
   } else {
-    const target = $(`scene-${state.viewIndex}`);
+    const target = $(`scene-${currentViewTurnNumber()}`);
     if (target) {
       target.scrollIntoView({ behavior: "smooth", block: "start" });
     } else if (!isContinuous) {
@@ -851,7 +962,7 @@ function renderChoices(choices, customSuggestion, ownerKey) {
 function renderTurnInput() {
   const inputPanel = document.querySelector(".input-action");
   if (!inputPanel) return;
-  const isLatest = state.viewIndex === -1 || state.viewIndex >= state.turns.length - 1;
+  const isLatest = isViewingLatestTurn();
   const shouldShowInput = !state.generationDisplayActive && isLatest;
   inputPanel.classList.toggle("hidden", !shouldShowInput);
   if (!shouldShowInput) {
@@ -1278,20 +1389,21 @@ function replaceStreamingPreviewWithAcceptedTurn(result, preserveViewport) {
   if (!preview || !result.resultTurnId) return false;
 
   const completedTurn = { ...result, id: result.resultTurnId };
-  state.turns = state.turns
+  const acceptedTurns = state.turns
     .filter((turn) => turn.id !== result.resultTurnId && Number(turn.turnNumber) !== Number(result.turnNumber))
     .concat(completedTurn)
     .sort((left, right) => Number(left.turnNumber) - Number(right.turnNumber));
+  publishStoryTurnWindow(acceptedTurns, state.historyNextCursor);
   const completedTurnIndex = state.turns.findIndex((turn) => turn.id === result.resultTurnId);
   if (completedTurnIndex < 0) return false;
 
-  state.viewIndex = -1;
+  state.viewTurnNumber = null;
   preview.replaceWith(renderScene(completedTurn, completedTurnIndex));
   state.streamingAutoFollow = true;
   state.streamingExpectedScrollY = null;
   renderStoryIllustration();
   renderTurnInput();
-  if (!preserveViewport) $("scene-" + completedTurnIndex)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  if (!preserveViewport) $("scene-" + completedTurn.turnNumber)?.scrollIntoView({ behavior: "smooth", block: "start" });
   return true;
 }
 
@@ -1440,22 +1552,21 @@ function updateStatusBar() {
   const turnPill = $("turnPill");
   const viewPill = $("viewPill");
   if (turnPill) turnPill.textContent = `Turn ${state.campaign?.activeTurnNumber || 0}`;
-  const isLatest = state.viewIndex === -1 || state.viewIndex >= state.turns.length - 1;
+  const isLatest = isViewingLatestTurn();
   if (viewPill) {
     viewPill.textContent = isLatest
-      ? "Viewing latest"
-      : `Viewing turn ${state.viewIndex + 1}`;
+      ? "Viewing Latest Turn"
+      : `Viewing turn ${currentViewTurnNumber()}`;
   }
   syncInputState();
 }
 
 // ── History Navigation ────────────────────────────────────────
-function navigateTo(index) {
-  if (index < 0 || index >= state.turns.length) {
-    state.viewIndex = -1;
-  } else {
-    state.viewIndex = index;
-  }
+function navigateToTurn(turnNumber) {
+  const latest = latestTurnNumber(state.turns);
+  const target = turnNumber === null ? latest : Number(turnNumber);
+  if (!target || turnIndexForNumber(state.turns, target) < 0) return;
+  state.viewTurnNumber = target === latest ? null : target;
   const isContinuous = Boolean(state.user?.settings?.continuousReading);
   if (!isContinuous) {
     renderAllScenes();
@@ -1468,22 +1579,25 @@ function navigateTo(index) {
 
 async function loadOlderTurnPage() {
   if (!state.historyNextCursor || state.busy) return false;
+  const campaignId = state.campaignId;
+  const epoch = storyTurnWindowEpoch;
+  const requestedCursor = state.historyNextCursor;
+  const turns = state.turns;
   showBusy("Loading older turns…");
   try {
-    const page = await apiClient.campaigns.turns(state.campaignId, { before: state.historyNextCursor });
-    const knownIds = new Set(state.turns.map((turn) => turn.id));
-    const olderTurns = (page.turns || []).filter((turn) => !knownIds.has(turn.id));
-    if (!olderTurns.length) {
-      state.historyNextCursor = null;
-      return false;
+    const page = await apiClient.campaigns.turns(campaignId, { before: requestedCursor });
+    if (!storyTurnWindowIsCurrent(campaignId, epoch, requestedCursor)) return false;
+    if (page.campaignId !== campaignId) {
+      throw new Error(`Story history page belongs to ${page.campaignId}.`);
     }
-    state.turns = [...olderTurns, ...state.turns];
-    state.historyNextCursor = page.nextCursor || null;
-    state.viewIndex = olderTurns.length - 1;
+    const mergedTurns = mergeStoryTurnPages(turns, page.turns || []);
+    publishStoryTurnWindow(mergedTurns, page.nextCursor || null);
+    if (mergedTurns.length === turns.length) return false;
     renderAllScenes();
     updateStatusBar();
     return true;
   } catch (error) {
+    if (!storyTurnWindowIsCurrent(campaignId, epoch, requestedCursor)) return false;
     toast(`Unable to load older turns: ${error.message}`);
     recordActivity("error", "Older turn page failed", error.message);
     return false;
@@ -1493,25 +1607,27 @@ async function loadOlderTurnPage() {
 }
 
 async function goToPrevious() {
-  const curr = state.viewIndex === -1 ? state.turns.length - 1 : state.viewIndex;
+  const curr = viewedTurnIndex();
   if (state.busy || state.turns.length === 0) return;
   if (curr <= 0) {
-    await loadOlderTurnPage();
+    if (!await loadOlderTurnPage()) return;
+    const viewedIndex = viewedTurnIndex();
+    if (viewedIndex > 0) navigateToTurn(state.turns[viewedIndex - 1]?.turnNumber ?? null);
     return;
   }
-  navigateTo(curr - 1);
+  navigateToTurn(state.turns[curr - 1]?.turnNumber ?? null);
 }
 
 function goToNext() {
-  const curr = state.viewIndex === -1 ? state.turns.length - 1 : state.viewIndex;
-  const isLatest = state.viewIndex === -1 || state.viewIndex >= state.turns.length - 1;
+  const curr = viewedTurnIndex();
+  const isLatest = isViewingLatestTurn();
   if (state.busy || state.turns.length === 0 || isLatest) return;
-  if (curr < state.turns.length - 1) navigateTo(curr + 1);
-  else navigateTo(-1);
+  if (curr < state.turns.length - 1) navigateToTurn(state.turns[curr + 1]?.turnNumber ?? null);
+  else navigateToTurn(null);
 }
 
 async function undoLatest() {
-  const isLatest = state.viewIndex === -1 || state.viewIndex >= state.turns.length - 1;
+  const isLatest = isViewingLatestTurn();
   if (state.busy || state.turns.length === 0 || !isLatest) return;
   if (!confirm("Undo the last turn? This rewinds the campaign and cannot be reversed.")) return;
   showBusy("Rewinding…");
@@ -1530,7 +1646,7 @@ async function undoLatest() {
 }
 
 async function retryLatest() {
-  const isLatest = state.viewIndex === -1 || state.viewIndex >= state.turns.length - 1;
+  const isLatest = isViewingLatestTurn();
   const lastTurnHasAction = state.turns.length > 0 && Boolean(state.turns[state.turns.length - 1] && state.turns[state.turns.length - 1].action);
   if (state.busy || state.turns.length === 0 || !isLatest || !lastTurnHasAction) return;
   const lastAction = state.turns[state.turns.length - 1].action;
@@ -1559,7 +1675,7 @@ function closeRetryPromptDialog() {
 }
 
 async function executeRetryWithPrompt(submittedPromptText) {
-  const isLatest = state.viewIndex === -1 || state.viewIndex >= state.turns.length - 1;
+  const isLatest = isViewingLatestTurn();
   if (state.busy || state.turns.length === 0 || !isLatest) return;
   const action = String(submittedPromptText || "").trim();
   if (!action) {
@@ -1583,11 +1699,11 @@ async function executeRetryWithPrompt(submittedPromptText) {
   });
 }
 
-function promptBranchOrReset(turnIndex) {
+function promptBranchOrReset(turnNumber) {
   const dlg = $("branchStoryDialog");
   if (!dlg) return;
-  const targetTurnNumber = selectedTurnNumber(state.turns, turnIndex);
-  if (!targetTurnNumber) return;
+  const targetTurnNumber = Number(turnNumber);
+  if (!targetTurnNumber || turnIndexForNumber(state.turns, targetTurnNumber) < 0) return;
   const msg = $("branchStoryMessage");
   if (msg) msg.textContent = `You selected Turn ${targetTurnNumber} (of ${state.campaign?.activeTurnNumber || 0}). Choose what should happen to later turns before continuing.`;
   dlg._targetTurnNumber = targetTurnNumber;
@@ -1640,7 +1756,10 @@ function recordIllustrationSegmentActivity(segment, options = {}) {
   state.illustrationSegmentActivity.set(segment.id, signature);
   if (options.suppress) return;
   const turnIndex = state.turns.findIndex((turn) => (turn.id || turn.turnId) === segment.turnId);
-  const detail = `turn=${turnIndex + 1} · segment=${segment.ordinal + 1} · prompt=${segment.promptSource || "direct"} · status=${segment.status}`;
+  const turn = state.turns[turnIndex];
+  const detail = turn
+    ? `turn=${turn.turnNumber} · segment=${segment.ordinal + 1} · prompt=${segment.promptSource || "direct"} · status=${segment.status}`
+    : `turnId=${segment.turnId || "unknown"} · segment=${segment.ordinal + 1} · prompt=${segment.promptSource || "direct"} · status=${segment.status}`;
   if (segment.promptJobStatus === "refining") {
     recordActivity("image", "Refining segment illustration prompt", detail);
   } else if (segment.promptSource === "ai_fallback") {
@@ -1669,7 +1788,8 @@ function recordImageJobActivity(job, options = {}) {
   if (options.suppress) return;
 
   const turnIndex = state.turns.findIndex((turn) => (turn.id || turn.turnId) === job.turnId);
-  const turnDetail = turnIndex >= 0 ? `turn=${turnIndex + 1}` : `turnId=${job.turnId || "unknown"}`;
+  const turn = state.turns[turnIndex];
+  const turnDetail = turn ? `turn=${turn.turnNumber}` : `turnId=${job.turnId || "unknown"}`;
   const detail = [
     turnDetail,
     `jobId=${job.id}`,
@@ -1714,6 +1834,7 @@ function renderSceneImageJob(job) {
     return;
   }
   const turnIdx = job.turnId ? state.turns.findIndex((turn) => (turn.id || turn.turnId) === job.turnId) : -1;
+  const turn = state.turns[turnIdx];
   
   let segmentContent = null;
   if (isStreaming) {
@@ -1763,7 +1884,7 @@ function renderSceneImageJob(job) {
     progress.max = 100;
     const value = Number(job.providerProgress);
     if (Number.isFinite(value)) progress.value = Math.max(0, Math.min(100, value));
-    progress.setAttribute("aria-label", `Illustration generation progress for turn ${turnIdx + 1}`);
+    progress.setAttribute("aria-label", `Illustration generation progress for turn ${turn?.turnNumber ?? "unknown"}`);
     status.append(progress);
   } else if (terminalFailure) {
     const retry = document.createElement("button");
@@ -2114,6 +2235,8 @@ async function saveUserProfile() {
   const autoSubmitTurnChoices = cbSubmit ? cbSubmit.checked : true;
   const continuousReading = cbContinuous ? cbContinuous.checked : false;
   const defaultTurnControlStyle = defaultTurnStyle ? defaultTurnStyle.value : "flexible_auto";
+  const wasContinuousReading = Boolean(state.user?.settings?.continuousReading);
+  let completeHistoryError = null;
 
   if (!displayName) {
     toast("Display name is required.", 2600);
@@ -2140,27 +2263,53 @@ async function saveUserProfile() {
         state.user.settings.defaultTurnControlStyle = defaultTurnControlStyle;
       }
     }
+    if (!wasContinuousReading && continuousReading && state.historyNextCursor) {
+      try {
+        await ensureCompleteTurnHistory();
+      } catch (error) {
+        if (!isCompleteHistorySuperseded(error)) {
+          completeHistoryError = error;
+          toast(`Continuous reading is showing the loaded window: ${error.message}`);
+        }
+      }
+    }
     renderAllScenes();
     updateStatusBar();
     const dlg = $("userProfileDialog");
     if (dlg && dlg.close) dlg.close();
-    toast("Profile saved.", 2600);
+    if (!completeHistoryError) toast("Profile saved.", 2600);
   } catch (err) {
     toast("Failed to save profile: " + err.message, 3500);
   }
 }
 
 async function openTurnHistoryModal() {
-  const dlg = $("turnHistoryDialog");
-  openManagedModal(dlg);
+  const dialog = $("turnHistoryDialog");
+  openManagedModal(dialog);
   populateHistoryContainer($("turnHistoryModalList"));
+  if (!state.historyNextCursor) {
+    setTurnHistoryLoadStatus(`All ${state.turns.length} turns loaded.`);
+    return;
+  }
+  setTurnHistoryLoadStatus(`Loading earlier turns… ${state.turns.length} loaded`, "loading");
+  try {
+    await ensureCompleteTurnHistory();
+    populateHistoryContainer($("turnHistoryModalList"));
+  } catch (error) {
+    if (isCompleteHistorySuperseded(error)) {
+      populateHistoryContainer($("turnHistoryModalList"));
+      return;
+    }
+    setTurnHistoryLoadStatus(`Could not load complete history: ${error.message}`, "error");
+    toast(`Could not load complete history: ${error.message}`);
+  }
 }
 
 function populateHistoryContainer(container) {
   if (!container) return;
   container.innerHTML = "";
   if (state.turns.length === 0) {
-    state.historySelectedIndex = null;
+    state.historySelectedTurnNumber = null;
     container.innerHTML = `<p class="dim mini">No turns recorded yet.</p>`;
     const panel = $("turnHistoryStatePanel");
     if (panel) {
@@ -2170,11 +2319,11 @@ function populateHistoryContainer(container) {
     updateHistorySelectionActions();
     return;
   }
-  const currentIdx = state.viewIndex === -1 ? state.turns.length - 1 : state.viewIndex;
-  state.turns.forEach((t, i) => {
+  const currentTurnNumber = currentViewTurnNumber();
+  state.turns.forEach((t) => {
     const card = document.createElement("div");
     card.className = "history-card";
-    card.dataset.turnIndex = String(i);
+    card.dataset.turnNumber = String(t.turnNumber);
     card.setAttribute("role", "button");
     card.setAttribute("tabindex", "0");
     card.setAttribute("aria-pressed", "false");
@@ -2183,41 +2332,43 @@ function populateHistoryContainer(container) {
     const inputModeLabel = inputMode === "scene" ? "Scene direction" : "Action";
     card.innerHTML = `
       <div class="history-card-heading">
-        <h4>${i === currentIdx ? "◆ " : ""}Turn ${t.turnNumber}${t.action ? `: ${escapeHtml(t.action.slice(0, 60))}` : (t.turnNumber === 1 ? ": Adventure Begin" : "")}</h4>
+        <h4>${t.turnNumber === currentTurnNumber ? "◆ " : ""}Turn ${t.turnNumber}${t.action ? `: ${escapeHtml(t.action.slice(0, 60))}` : (t.turnNumber === 1 ? ": Adventure Begin" : "")}</h4>
         <span class="turn-input-mode-pill ${inputMode}" title="Story Engine interpreted this prompt as ${inputModeLabel}" aria-label="Prompt interpretation: ${inputModeLabel}">${inputModeLabel}</span>
       </div>
       <p>${escapeHtml(preview)}</p>
       ${chronicleRetrievalHistoryMarkup(t.chronicleRetrieval)}
     `;
-    card.addEventListener("click", () => selectHistoryTurn(i));
+    card.addEventListener("click", () => selectHistoryTurn(t.turnNumber));
     card.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
-        selectHistoryTurn(i);
+        selectHistoryTurn(t.turnNumber);
       }
     });
     container.appendChild(card);
   });
-  selectHistoryTurn(currentIdx);
+  const selectedTurnNumber = Number.isInteger(state.historySelectedTurnNumber)
+    && turnIndexForNumber(state.turns, state.historySelectedTurnNumber) >= 0
+    ? state.historySelectedTurnNumber
+    : currentTurnNumber;
+  selectHistoryTurn(selectedTurnNumber);
 }
 
-function selectHistoryTurn(turnIndex) {
-  if (!Number.isInteger(turnIndex) || turnIndex < 0 || turnIndex >= state.turns.length) return;
-  state.historySelectedIndex = turnIndex;
+function selectHistoryTurn(turnNumber) {
+  if (!Number.isInteger(turnNumber) || turnIndexForNumber(state.turns, turnNumber) < 0) return;
+  state.historySelectedTurnNumber = turnNumber;
   document.querySelectorAll("#turnHistoryModalList .history-card").forEach(card => {
-    const selected = Number(card.dataset.turnIndex) === turnIndex;
+    const selected = Number(card.dataset.turnNumber) === turnNumber;
     card.classList.toggle("selected", selected);
     card.setAttribute("aria-pressed", String(selected));
   });
   updateHistorySelectionActions();
-  const turnNumber = selectedTurnNumber(state.turns, turnIndex);
-  if (turnNumber) inspectTurnState(turnNumber);
+  if (state.historySelectedTurnNumber) inspectTurnState(state.historySelectedTurnNumber);
 }
 
 function updateHistorySelectionActions() {
-  const hasSelection = Number.isInteger(state.historySelectedIndex)
-    && state.historySelectedIndex >= 0
-    && state.historySelectedIndex < state.turns.length;
+  const hasSelection = Number.isInteger(state.historySelectedTurnNumber)
+    && turnIndexForNumber(state.turns, state.historySelectedTurnNumber) >= 0;
   const inspectBtn = $("btnTurnHistoryInspect");
   const jumpBtn = $("btnTurnHistoryJump");
   const branchBtn = $("btnTurnHistoryBranch");
@@ -2225,7 +2376,7 @@ function updateHistorySelectionActions() {
   if (jumpBtn) jumpBtn.disabled = !hasSelection;
   if (branchBtn) {
     branchBtn.disabled = !hasSelection;
-    branchBtn.classList.toggle("hidden", !hasSelection || state.historySelectedIndex >= state.turns.length - 1);
+    branchBtn.classList.toggle("hidden", !hasSelection || state.historySelectedTurnNumber >= state.campaign?.activeTurnNumber);
   }
 }
 
@@ -2364,35 +2515,36 @@ async function exportStandaloneHtml() {
   }
 }
 
-async function exportPdfWithImages() {
+async function printStory() {
   if (!state.campaignId) return;
-  const printWindow = window.open("", "_blank", "width=1000,height=800");
+  const printWindow = window.open("", "_blank");
   if (!printWindow) {
-    toast("Allow pop-ups to export the story as PDF.");
+    toast("Allow pop-ups to print this story.");
     return;
   }
   printWindow.opener = null;
   printWindow.document.write("<!doctype html><title>Preparing story…</title><p>Preparing your story for PDF export…</p>");
 
   try {
+    await ensureCompleteTurnHistory();
     const titleText = state.campaign?.title || "Infinite Quest Story";
     const title = escapeHtml(titleText);
-    const turns = state.turns.map((turn, index) => {
+    const turns = state.turns.map((turn) => {
       const action = turn.action ? `: ${escapeHtml(turn.action)}` : "";
-      const turnId = turn.id || turn.turnId || state.turns[index]?.id || "";
+      const turnId = turn.id || turn.turnId || "";
       const segments = illustrationSegmentsForTurn(turnId);
       const content = segments.length
         ? segments.map((segment) => {
             const narration = sanitizeNarration(segment.text);
             const imageUrl = String(segment.variants?.[0]?.url || "").trim();
             return `${narration}${imageUrl
-              ? `<figure><img src="${escapeHtml(imageUrl)}" alt="Illustration for turn ${index + 1}, segment ${segment.ordinal + 1}"><figcaption>Turn ${index + 1} · Segment ${segment.ordinal + 1}</figcaption></figure>`
+              ? `<figure><img src="${escapeHtml(imageUrl)}" alt="Illustration for turn ${turn.turnNumber}, segment ${segment.ordinal + 1}"><figcaption>Turn ${turn.turnNumber} · Segment ${segment.ordinal + 1}</figcaption></figure>`
               : ""}`;
           }).join("")
         : `${sanitizeNarration(turn.narration || "")}${turn.imageAssetUrl || turn.imageUrl
-          ? `<figure><img src="${escapeHtml(turn.imageAssetUrl || turn.imageUrl)}" alt="Illustration for turn ${index + 1}"><figcaption>Turn ${index + 1} illustration</figcaption></figure>`
+          ? `<figure><img src="${escapeHtml(turn.imageAssetUrl || turn.imageUrl)}" alt="Illustration for turn ${turn.turnNumber}"><figcaption>Turn ${turn.turnNumber} illustration</figcaption></figure>`
           : ""}`;
-      return `<section class="turn"><h2>Turn ${index + 1}${action}</h2>${content}</section>`;
+      return `<section class="turn"><h2>Turn ${turn.turnNumber}${action}</h2>${content}</section>`;
     }).join("");
     const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><link rel="stylesheet" href="/nexus/story-print.css"></head><body><h1>${title}</h1>${turns || "<p>No accepted story turns are available yet.</p>"}</body></html>`;
 
@@ -2413,7 +2565,7 @@ async function exportPdfWithImages() {
     toast("Print dialog opened. Choose Save as PDF.");
   } catch (err) {
     printWindow.close();
-    toast(`Export failed: ${err.message}`);
+    if (!isCompleteHistorySuperseded(err)) toast(`Export failed: ${err.message}`);
   }
 }
 
@@ -2579,7 +2731,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const btnExportHtml = $("btnExportHtml");
   if (btnExportHtml) btnExportHtml.addEventListener("click", () => { closeNavigationMenus(); exportStandaloneHtml(); });
   const btnExportPdf = $("btnExportPdf");
-  if (btnExportPdf) btnExportPdf.addEventListener("click", () => { closeNavigationMenus(); exportPdfWithImages(); });
+  if (btnExportPdf) btnExportPdf.addEventListener("click", () => { closeNavigationMenus(); printStory(); });
   const btnOpenEditState = $("btnOpenEditState");
   if (btnOpenEditState) btnOpenEditState.addEventListener("click", () => { closeNavigationMenus(); openEditState(); });
   const btnOpenActivityLog = $("btnOpenActivityLog");
@@ -2648,27 +2800,25 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnTurnHistoryDone) btnTurnHistoryDone.addEventListener("click", () => { const d = $("turnHistoryDialog"); if (d && d.close) d.close(); });
   const btnTurnHistoryInspect = $("btnTurnHistoryInspect");
   if (btnTurnHistoryInspect) btnTurnHistoryInspect.addEventListener("click", () => {
-    const turnNumber = selectedTurnNumber(state.turns, state.historySelectedIndex);
-    if (turnNumber) inspectTurnState(turnNumber);
+    if (state.historySelectedTurnNumber) inspectTurnState(state.historySelectedTurnNumber);
   });
   const btnTurnHistoryJump = $("btnTurnHistoryJump");
   if (btnTurnHistoryJump) btnTurnHistoryJump.addEventListener("click", () => {
-    if (!Number.isInteger(state.historySelectedIndex)) return;
-    navigateTo(state.historySelectedIndex);
+    if (!Number.isInteger(state.historySelectedTurnNumber)) return;
+    navigateToTurn(state.historySelectedTurnNumber);
     const d = $("turnHistoryDialog");
     if (d && d.close) d.close();
   });
   const btnTurnHistoryBranch = $("btnTurnHistoryBranch");
   if (btnTurnHistoryBranch) btnTurnHistoryBranch.addEventListener("click", () => {
-    if (!Number.isInteger(state.historySelectedIndex) || state.historySelectedIndex >= state.turns.length - 1) return;
-    const turnIndex = state.historySelectedIndex;
+    if (!Number.isInteger(state.historySelectedTurnNumber) || state.historySelectedTurnNumber >= state.campaign?.activeTurnNumber) return;
     const d = $("turnHistoryDialog");
     if (d && d.close) d.close();
-    promptBranchOrReset(turnIndex);
+    promptBranchOrReset(state.historySelectedTurnNumber);
   });
   const btnTurnHistoryJumpLatest = $("btnTurnHistoryJumpLatest");
   if (btnTurnHistoryJumpLatest) btnTurnHistoryJumpLatest.addEventListener("click", () => {
-    navigateTo(-1);
+    navigateToTurn(null);
     const d = $("turnHistoryDialog");
     if (d && d.close) d.close();
   });
@@ -2699,7 +2849,7 @@ document.addEventListener("DOMContentLoaded", () => {
       try {
         await apiClient.campaigns.rewind(state.campaignId, { targetTurnNumber: branchDlg._targetTurnNumber });
         await loadCampaign(state.campaignId);
-        navigateTo(-1);
+        navigateToTurn(null);
         toast("Campaign rewound.");
       } catch (err) {
         toast(`Rewind failed: ${err.message}`);
@@ -2822,7 +2972,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const dlg = $("editResponseDialog");
     const editor = $("responseEditor");
     if (!dlg || !editor) return;
-    const turnIdx = state.viewIndex === -1 ? state.turns.length - 1 : state.viewIndex;
+    const turnIdx = viewedTurnIndex();
     if (turnIdx < 0) return;
     const turn = state.turns[turnIdx];
     try {
@@ -2833,15 +2983,17 @@ document.addEventListener("DOMContentLoaded", () => {
       toast(`Response could not be loaded: ${error.message}`);
       return;
     }
-    dlg._turnIndex = turnIdx;
+    dlg._turnNumber = turn.turnNumber;
     openManagedModal(dlg);
   });
   const btnEditResponseSave = $("btnEditResponseSave");
   if (btnEditResponseSave) btnEditResponseSave.addEventListener("click", async () => {
     const dlg = $("editResponseDialog");
     const editor = $("responseEditor");
-    if (!dlg || !editor || dlg._turnIndex === undefined) return;
-    const turn = state.turns[dlg._turnIndex];
+    if (!dlg || !editor || dlg._turnNumber === undefined) return;
+    const turnIndex = turnIndexForNumber(state.turns, dlg._turnNumber);
+    const turn = state.turns[turnIndex];
+    if (!turn) return;
     try {
       showBusy("Saving corrected narration…");
       const correction = await apiClient.campaigns.correctTurnNarration(state.campaignId, turn.id, {

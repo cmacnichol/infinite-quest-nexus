@@ -261,6 +261,9 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 button.history-card, .history-card[role="button"] { text-align: left; width: 100%; cursor: pointer; transition: border-color 0.18s ease, background 0.18s ease; font-family: inherit; }
 button.history-card:hover, button.history-card:focus-visible, .history-card[role="button"]:hover, .history-card[role="button"]:focus-visible { border-color: var(--gold); background: rgba(255,255,255,.085); outline: none; }
 .history-card.selected, .history-card[aria-pressed="true"] { border-color: var(--gold); background: rgba(241,194,50,.1); box-shadow: 0 0 0 1px rgba(241,194,50,.18); }
+.turn-history-load-status { margin: 0 0 10px; color: var(--dim); }
+.turn-history-load-status.loading { color: var(--gold2); }
+.turn-history-load-status.error { color: var(--danger); }
 .track-card h4, .history-card h4 { margin: 0; font-size: .95rem; color: #fff; }
 .track-card p, .history-card p { margin: 0; color: var(--dim); font-size: .86rem; line-height: 1.45; }
 .history-card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }

@@ -68,7 +68,7 @@
     <p id="storyNexusVersion" class="story-product-version hidden"></p>
 
     <main class="layout" id="appLayout">
-      <section class="panel story-shell">
+      <section id="storyContainer" class="panel story-shell">
         <div class="story-top">
           <h2 id="storyTitle">No adventure yet</h2>
           <div class="statusbar">
@@ -367,6 +367,7 @@
         <button id="btnCloseTurnHistory" class="small ghost" type="button" aria-label="Close turn history">✕</button>
       </div>
       <div class="dialog-scroll">
+        <p id="turnHistoryLoadStatus" class="turn-history-load-status mini hidden" role="status" aria-live="polite"></p>
         <div id="turnHistoryModalList" class="stack"></div>
         <div id="turnHistoryStatePanel" class="track-card turn-history-state-panel hidden"></div>
       </div>
