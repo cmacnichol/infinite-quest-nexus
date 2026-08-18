@@ -117,7 +117,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('async function submitAction(actionText, options = {})');
     expect(storyScript).toContain('if (state.busy) return;');
     expect(storyScript).toContain('if (!action) { toast("Enter an action first."); return; }');
-    expect(storyScript).toContain('function renderChoices(choices, customSuggestion)');
+    expect(storyScript).toContain('function renderChoices(choices, customSuggestion, ownerKey)');
     expect(storyScript).toContain('submitAction(text)');
     expect(storyScript).toContain('freeAction.addEventListener("keydown", (e) => {');
     expect(storyScript).toContain('if (e.key === "Enter" && !e.shiftKey)');
@@ -134,9 +134,155 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('state.campaign?.turnControlStyle || "flexible_auto"');
     expect(storyScript).toContain('campaignTurnControlStyle() === "action_only"');
     expect(storyScript).toContain('function setTurnInputMode(mode, options = {})');
-    expect(storyScript).toContain('setTurnInputMode("action", { refreshPlaceholder: true });');
     expect(storyScript).toContain('state.nextTurnInputModeSource = "generated_choice"');
     expect(storyScript).toContain('inputModeSource: "opening_action"');
+  });
+
+  it("uses the campaign preference and preserves the draft while toggling multiple generated choices", async () => {
+    const { document, window } = parseHTML(storyHtml);
+    Object.defineProperty(window, "location", { value: { pathname: "/story/campaign-1" }, configurable: true });
+    for (const dialog of document.querySelectorAll("dialog")) {
+      (dialog as unknown as { showModal: () => void; close: () => void }).showModal = () => dialog.setAttribute("open", "");
+      (dialog as unknown as { showModal: () => void; close: () => void }).close = () => dialog.removeAttribute("open");
+    }
+    vi.stubGlobal("window", window);
+    vi.stubGlobal("document", document);
+    vi.stubGlobal("Element", window.Element);
+    vi.stubGlobal("HTMLElement", window.HTMLElement);
+    vi.stubGlobal("localStorage", { getItem: () => null, removeItem: () => undefined, setItem: () => undefined });
+    (window.HTMLElement.prototype as unknown as { scrollIntoView: () => void }).scrollIntoView = () => undefined;
+
+    try {
+      const turns = [{
+        id: "turn-1",
+        turnNumber: 1,
+        action: "Wait",
+        narration: "The gate remains closed.",
+        choices: ["Open the gate.", "Call for the keeper."]
+      }];
+      const start = storyModule.startStoryPlayer as (composition: unknown) => void;
+      start({
+        api: {
+          session: { get: async () => ({ user: { settings: { continuousReading: false, autoSubmitTurnChoices: false, defaultTurnControlStyle: "flexible_action" } } }) },
+          providers: { list: async () => ({ providers: [{ providerRole: "text" }] }) },
+          generation: { syncStatus: async () => ({ campaign: { title: "Choice campaign", activeTurnNumber: 1, turnControlStyle: "flexible_scene" }, world: {}, turns: { turns } }) },
+          campaigns: { state: async () => ({ activeTurnNumber: 1 }), turns: async () => ({ turns }) },
+          meta: { get: async () => ({}) }
+        },
+        illustrations: { config: async () => ({ enabled: false, sourcePolicy: "off" }), segments: async () => ({ segments: [] }), imageJobs: async () => ({ jobs: [] }) },
+        workflow: { resume: async () => null }
+      });
+      document.dispatchEvent(new window.Event("DOMContentLoaded"));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      for (let attempt = 0; attempt < 8 && !document.querySelector("#choiceArea .choice"); attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      const input = document.getElementById("freeAction") as HTMLTextAreaElement;
+      const choices = document.querySelectorAll<HTMLButtonElement>("#choiceArea .choice");
+      input.value = "Keep watch.";
+      input.dispatchEvent(new window.Event("input", { bubbles: true }));
+      expect(choices).toHaveLength(2);
+      expect(choices[0]?.hasAttribute("disabled")).toBe(false);
+      choices[0]?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      choices[1]?.dispatchEvent(new window.Event("click", { bubbles: true }));
+
+      expect(document.getElementById("turnInputModeScene")?.getAttribute("aria-checked")).toBe("true");
+      expect(input.value).toBe("Keep watch.\nOpen the gate.\nCall for the keeper.");
+      expect(choices[0]?.getAttribute("aria-pressed")).toBe("true");
+      expect(choices[1]?.getAttribute("aria-pressed")).toBe("true");
+
+      choices[0]?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      expect(input.value).toBe("Keep watch.\nCall for the keeper.");
+      expect(choices[0]?.getAttribute("aria-pressed")).toBe("false");
+
+      input.value = "A custom combined direction.";
+      input.dispatchEvent(new window.Event("input", { bubbles: true }));
+      expect(input.value).toBe("A custom combined direction.");
+      expect(choices[1]?.getAttribute("aria-pressed")).toBe("false");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("auto-submits a generated choice through Auto classification without treating it as a stale draft", async () => {
+    const { document, window } = parseHTML(storyHtml);
+    Object.defineProperty(window, "location", { value: { pathname: "/story/campaign-auto" }, configurable: true });
+    for (const dialog of document.querySelectorAll("dialog")) {
+      (dialog as unknown as { showModal: () => void; close: () => void }).showModal = () => dialog.setAttribute("open", "");
+      (dialog as unknown as { showModal: () => void; close: () => void }).close = () => dialog.removeAttribute("open");
+    }
+    vi.stubGlobal("window", window);
+    vi.stubGlobal("document", document);
+    vi.stubGlobal("Element", window.Element);
+    vi.stubGlobal("HTMLElement", window.HTMLElement);
+    vi.stubGlobal("localStorage", { getItem: () => null, removeItem: () => undefined, setItem: () => undefined });
+    (window.HTMLElement.prototype as unknown as { scrollIntoView: () => void }).scrollIntoView = () => undefined;
+
+    try {
+      const turns = [{
+        id: "turn-auto",
+        turnNumber: 1,
+        action: "Wait",
+        narration: "The gate remains closed.",
+        choices: ["Open the gate."]
+      }];
+      const classified: string[] = [];
+      const submissions: unknown[] = [];
+      const start = storyModule.startStoryPlayer as (composition: unknown) => void;
+      start({
+        api: {
+          session: { get: async () => ({ user: { settings: { continuousReading: false, autoSubmitTurnChoices: true, defaultTurnControlStyle: "flexible_scene" } } }) },
+          providers: { list: async () => ({ providers: [{ providerRole: "text" }] }) },
+          generation: { syncStatus: async () => ({ campaign: { title: "Auto campaign", activeTurnNumber: 1, turnControlStyle: "flexible_auto" }, world: {}, turns: { turns } }) },
+          campaigns: {
+            state: async () => ({ activeTurnNumber: 1 }),
+            turns: async () => ({ turns }),
+            classifyTurnInput: async (_campaignId: string, request: { text: string }) => {
+              classified.push(request.text);
+              return { classificationId: "classification-1", classification: "action", confidenceBand: "certain", resolvedMode: "action" };
+            }
+          },
+          meta: { get: async () => ({}) }
+        },
+        illustrations: { config: async () => ({ enabled: false, sourcePolicy: "off" }), segments: async () => ({ segments: [] }), imageJobs: async () => ({ jobs: [] }) },
+        workflow: {
+          resume: async () => null,
+          submit: async (_campaignId: string, submission: unknown) => {
+            submissions.push(submission);
+            return { jobId: "job-1", watch: async function* () {} };
+          }
+        },
+        pendingSubmissions: { clear: () => undefined },
+        idFactory: { create: () => "idempotency-1" },
+        clock: { now: () => 1_000 }
+      });
+      document.dispatchEvent(new window.Event("DOMContentLoaded"));
+      for (let attempt = 0; attempt < 10 && !document.querySelector("#choiceArea .choice"); attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+
+      document.querySelector<HTMLButtonElement>("#choiceArea .choice")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      for (let attempt = 0; attempt < 10 && submissions.length === 0; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+
+      expect(document.getElementById("turnInputModeAuto")?.getAttribute("aria-checked")).toBe("true");
+      expect(classified).toEqual(["Open the gate."]);
+      expect(submissions).toHaveLength(1);
+      expect(submissions[0]).toMatchObject({
+        request: {
+          action: "Open the gate.",
+          requestedInputMode: "auto",
+          resolvedInputMode: "action",
+          classificationId: "classification-1"
+        }
+      });
+      expect((document.getElementById("freeAction") as HTMLTextAreaElement).value).toBe("");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("classifies Auto immediately before submission and confirms ambiguous intent inline", () => {

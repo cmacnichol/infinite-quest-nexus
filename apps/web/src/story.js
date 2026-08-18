@@ -28,6 +28,12 @@ import {
   resumeActiveGenerationConflict
 } from "./story-generation-monitor.js";
 import { handleStoryEscape } from "./story-keyboard.js";
+import {
+  createChoiceDraftSelection,
+  resetChoiceDraftSelection,
+  turnInputModeForControlStyle,
+  toggleChoiceDraftSelection
+} from "./story-choice-selection.js";
 import { formatChronicleRetrievalAudit } from "@infinite-quest/client-core";
 
 "use strict";
@@ -114,6 +120,8 @@ const state = {
   streamingExpectedScrollY: null,
   turnInputMode: "auto",
   nextTurnInputModeSource: null,
+  choiceDraftOwnerKey: null,
+  choiceDraftSelection: createChoiceDraftSelection(),
   pendingIntentDecision: null,
   historySelectedIndex: null,
   historyInspectionRequestId: 0,
@@ -681,10 +689,7 @@ function campaignTurnControlStyle() {
 }
 
 function defaultTurnInputMode() {
-  const turnControlStyle = campaignTurnControlStyle();
-  if (turnControlStyle === "flexible_auto") return "auto";
-  if (turnControlStyle === "flexible_scene") return "scene";
-  return "action";
+  return turnInputModeForControlStyle(campaignTurnControlStyle());
 }
 
 function preferredAutoFallback() {
@@ -757,37 +762,79 @@ function syncTurnInputModeFromCampaign() {
   updateTurnInputCharacterCount();
 }
 
-function renderChoices(choices, customSuggestion) {
+function syncChoiceSelectionButtons(container) {
+  const selectedIndexes = new Set(state.choiceDraftSelection.selectedIndexes);
+  container.querySelectorAll(".choice").forEach((button) => {
+    button.setAttribute("aria-pressed", String(selectedIndexes.has(Number(button.dataset.choiceIndex))));
+  });
+}
+
+function resetChoiceSelectionFromDraft(text = "") {
+  state.choiceDraftSelection = resetChoiceDraftSelection(text);
+  state.nextTurnInputModeSource = null;
+  const container = $("choiceArea");
+  if (container) syncChoiceSelectionButtons(container);
+}
+
+function renderChoices(choices, customSuggestion, ownerKey) {
   const container = $("choiceArea");
   if (!container) return;
+  const freeAction = $("freeAction");
+  if (state.choiceDraftOwnerKey !== ownerKey) {
+    state.choiceDraftOwnerKey = ownerKey;
+    resetChoiceSelectionFromDraft(freeAction?.value || "");
+  }
   container.innerHTML = "";
   if (choices && choices.length) {
-    choices.forEach(text => {
+    choices.forEach((text, choiceIndex) => {
       const btn = document.createElement("button");
       btn.className = "choice";
       btn.type = "button";
       btn.textContent = text;
+      btn.dataset.choiceIndex = String(choiceIndex);
+      btn.setAttribute("aria-pressed", "false");
       btn.addEventListener("click", () => {
         const autoSubmit = state.user?.settings?.autoSubmitTurnChoices !== false;
+        setTurnInputMode(defaultTurnInputMode(), { refreshPlaceholder: true });
         if (autoSubmit) {
-          setTurnInputMode("action", { refreshPlaceholder: true });
+          if (freeAction) {
+            const maxLength = freeAction.maxLength > 0 ? freeAction.maxLength : 12_000;
+            if (text.length > maxLength) {
+              toast("This generated choice exceeds the 12,000 character limit.", 3200);
+              return;
+            }
+            resetChoiceSelectionFromDraft(text);
+            freeAction.value = text;
+            updateTurnInputCharacterCount();
+          }
           state.nextTurnInputModeSource = "generated_choice";
           submitAction(text);
         } else {
-          const freeAction = $("freeAction");
           if (freeAction) {
-            setTurnInputMode("action", { refreshPlaceholder: true });
-            freeAction.value = text;
+            const result = toggleChoiceDraftSelection(
+              state.choiceDraftSelection,
+              choices,
+              choiceIndex,
+              freeAction.value,
+              freeAction.maxLength > 0 ? freeAction.maxLength : 12_000
+            );
+            if (result.overLimit) {
+              toast("Selected choices would exceed the 12,000 character limit.", 3200);
+              return;
+            }
+            state.choiceDraftSelection = result.selection;
+            state.nextTurnInputModeSource = result.selection.selectedIndexes.length ? "generated_choice" : null;
+            freeAction.value = result.text;
             freeAction.focus();
             updateTurnInputCharacterCount();
+            syncChoiceSelectionButtons(container);
           }
-          toast("Loaded choice into action box for editing.", 2400);
         }
       });
       container.appendChild(btn);
     });
   }
-  const freeAction = $("freeAction");
+  syncChoiceSelectionButtons(container);
   if (freeAction && customSuggestion) {
     freeAction.placeholder = state.turnInputMode === "action" ? customSuggestion : turnInputCopy(state.turnInputMode).placeholder;
   }
@@ -805,9 +852,11 @@ function renderTurnInput() {
   }
   const latestTurn = state.turns[state.turns.length - 1];
   if (latestTurn) {
-    renderChoices(latestTurn.choices || [], latestTurn.customActionSuggestion || "");
+    const choices = latestTurn.choices || [];
+    renderChoices(choices, latestTurn.customActionSuggestion || "", `${state.campaignId}:${latestTurn.id || latestTurn.turnNumber}:${JSON.stringify(choices)}`);
   } else {
-    renderChoices([firstActionForNewAdventure()], firstActionForNewAdventure());
+    const openingAction = firstActionForNewAdventure();
+    renderChoices([openingAction], openingAction, `${state.campaignId}:opening:${openingAction}`);
   }
 }
 
@@ -839,6 +888,7 @@ async function classifyTurnInput(action) {
 async function submitResolvedTurn(action, details) {
   const freeAction = $("freeAction");
   if (freeAction) freeAction.value = "";
+  resetChoiceSelectionFromDraft("");
   updateTurnInputCharacterCount();
   clearTurnIntentDecision();
   await runGeneration(action, details);
@@ -2446,6 +2496,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const freeAction = $("freeAction");
   if (freeAction) {
     freeAction.addEventListener("input", () => {
+      resetChoiceSelectionFromDraft(freeAction.value);
       updateTurnInputCharacterCount();
       clearTurnIntentDecision();
     });
