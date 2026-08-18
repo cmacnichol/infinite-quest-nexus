@@ -229,6 +229,7 @@ function syncInputState() {
     button.disabled = storyInputLocked || campaignTurnControlStyle() === "action_only";
   });
   document.querySelectorAll("#choiceArea .choice").forEach(b => { b.disabled = storyInputLocked; });
+  syncClearTurnInputButton();
 
   const btnPrev = $("btnPrev");
   const btnNext = $("btnNext");
@@ -725,6 +726,13 @@ function updateTurnInputCharacterCount() {
   const freeAction = $("freeAction");
   const counter = $("turnInputCount");
   if (freeAction && counter) counter.textContent = `${freeAction.value.length.toLocaleString()} / 12,000`;
+  syncClearTurnInputButton();
+}
+
+function syncClearTurnInputButton() {
+  const button = $("btnClearTurnInput");
+  const freeAction = $("freeAction");
+  if (button) button.disabled = !freeAction || freeAction.disabled || !freeAction.value;
 }
 
 function clearTurnIntentDecision() {
@@ -2504,6 +2512,15 @@ document.addEventListener("DOMContentLoaded", () => {
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitAction(freeAction.value); }
     });
   }
+  const btnClearTurnInput = $("btnClearTurnInput");
+  if (btnClearTurnInput) btnClearTurnInput.addEventListener("click", () => {
+    if (!freeAction || freeAction.disabled) return;
+    freeAction.value = "";
+    resetChoiceSelectionFromDraft("");
+    updateTurnInputCharacterCount();
+    clearTurnIntentDecision();
+    freeAction.focus();
+  });
   document.querySelectorAll("[data-turn-input-mode]").forEach((button) => {
     button.addEventListener("click", () => setTurnInputMode(button.dataset.turnInputMode, { refreshPlaceholder: true }));
   });

@@ -99,9 +99,11 @@
             </div>
             <span id="turnInputModeLock" class="turn-input-mode-lock hidden">Action only for this campaign</span>
           </fieldset>
-          <label><span id="turnInputLabel">Describe what you want to do or what happens next</span>
+          <label for="freeAction"><span id="turnInputLabel">Describe what you want to do or what happens next</span></label>
+          <div class="turn-input-editor">
             <textarea id="freeAction" maxlength="12000" aria-describedby="turnInputHelp turnInputCount" placeholder="Describe an action, dialogue, or the scene events and details that should happen..."></textarea>
-          </label>
+            <button id="btnClearTurnInput" class="clear-turn-input" type="button" aria-label="Clear turn text" title="Clear turn text" disabled><span aria-hidden="true">×</span></button>
+          </div>
           <div class="turn-input-guidance">
             <span id="turnInputHelp">Auto decides whether your prompt is an attempted action or scene direction immediately before submission.</span>
             <span id="turnInputCount">0 / 12,000</span>

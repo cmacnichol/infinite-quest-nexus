@@ -230,6 +230,11 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .choice[aria-pressed="true"]::before { content: "✓"; }
 
 .input-action { display: grid; gap: 10px; border-top: 1px solid var(--border); padding: 17px 20px 20px; background: rgba(0,0,0,.12); }
+.turn-input-editor { position: relative; }
+.turn-input-editor textarea { padding-right: 46px; }
+.clear-turn-input { position: absolute; top: 8px; right: 8px; width: 28px; min-height: 28px; padding: 0; border-color: transparent; border-radius: 999px; color: var(--dim); background: rgba(9,8,14,.58); font-size: 1.1rem; line-height: 1; opacity: .58; }
+.clear-turn-input:hover, .clear-turn-input:focus-visible { border-color: rgba(201,156,255,.42); color: var(--text); opacity: 1; }
+.clear-turn-input:disabled { opacity: .16; cursor: default; }
 .turn-input-mode-field { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0; padding: 0; border: 0; }
 .turn-input-mode-field legend { width: 100%; margin-bottom: 2px; color: var(--dim); font-size: .82rem; font-weight: 700; }
 .turn-input-mode-selector { display: inline-flex; flex-wrap: wrap; gap: 4px; padding: 4px; border: 1px solid rgba(255,255,255,.14); border-radius: 14px; background: rgba(0,0,0,.18); }

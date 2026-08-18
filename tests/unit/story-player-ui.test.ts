@@ -201,6 +201,20 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       input.dispatchEvent(new window.Event("input", { bubbles: true }));
       expect(input.value).toBe("A custom combined direction.");
       expect(choices[1]?.getAttribute("aria-pressed")).toBe("false");
+
+      choices[0]?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      const clearButton = document.querySelector<HTMLButtonElement>("#btnClearTurnInput");
+      if (!clearButton) throw new Error("Clear turn text button is required.");
+      expect(clearButton.disabled).toBe(false);
+      let focusedAfterClear = false;
+      input.focus = () => { focusedAfterClear = true; };
+      clearButton.dispatchEvent(new window.Event("click", { bubbles: true }));
+
+      expect(input.value).toBe("");
+      expect(document.getElementById("turnInputCount")?.textContent).toBe("0 / 12,000");
+      expect(choices[0]?.getAttribute("aria-pressed")).toBe("false");
+      expect(clearButton.disabled).toBe(true);
+      expect(focusedAfterClear).toBe(true);
     } finally {
       vi.unstubAllGlobals();
     }
