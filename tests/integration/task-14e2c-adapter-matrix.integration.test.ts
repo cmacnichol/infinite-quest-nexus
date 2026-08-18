@@ -35,18 +35,20 @@ import {
   restoreAssetBindings,
   type ArchiveIdMap
 } from "../legacy-api/src/asset-archive-service.js";
-import { previewLegacyStoryImport } from "../legacy-api/src/import-service.js";
 import {
+  importLegacyStoryWithClient,
+  previewLegacyStoryImport
+} from "../legacy-api/src/import-service.js";
+import {
+  importInfiniteWorldsWithClient,
   previewInfiniteWorldsImport,
   type InfiniteWorldsApiProviders
 } from "../legacy-api/src/infinite-worlds-import-service.js";
 import { createTask14e2cAdapters } from "../helpers/task-14e2c-adapters.js";
 import {
-  importInfiniteWorldsWithClient,
   portableWorldApplicationForTest,
   transactionBoundPortableWorldApplicationForTest
 } from "../helpers/memory-aware-services.js";
-import { importLegacyStoryWithClient } from "../legacy-api/src/import-service.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -924,10 +926,10 @@ The durable record is verified.`;
               "task-14e2c-credential-secret",
             );
             const imported = await importInfiniteWorldsWithClient(
-              pool,
               client,
               request,
               providers,
+              preChunkChronicleMemory,
               transactionBoundPortableWorld,
             );
             return {
