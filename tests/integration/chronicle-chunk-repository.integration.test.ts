@@ -349,6 +349,48 @@ integration("PostgreSQL Chronicle chunk repository", () => {
       "SELECT progress FROM chronicle_chunk_jobs WHERE id=$1", [claim.jobId]
     )).toMatchObject({ rows: [{ progress: { parentCursor: null, processedParents: 0 } }] });
 
+    const costFailure = createPostgresChronicleChunkBatchPort(pool, {
+      recordCost: async () => {
+        throw new Error("private provider cost failure");
+      }
+    });
+    await expect(costFailure.commitParentBatch(claim, {
+      parent,
+      previousParentCursor: null,
+      provider: { id: value.providerId, model: "embed-v1", providerType: "openai_compatible" },
+      providerFingerprint: "provider-b",
+      capabilityFingerprint: "capability-b",
+      embeddingProtocolVersion: "chronicle-embedding-v1",
+      chunks: [{
+        protocolVersion: "chronicle-chunk-v1", parentMemoryId: parent.id, kind: "campaign_summary",
+        chunkIndex: 0, content: "First safe parent.", contentHash: parent.contentHash,
+        estimatedTokens: 4, sourceStartOffset: 0, sourceEndOffset: 18,
+        embedding: [0.1, 0.2], skipReason: null
+      }],
+      results: [{
+        embeddings: [[0.1, 0.2]], responseId: "cost-failure", usage: {},
+        reportedCost: { amount: "1.2e-7", currency: "USD" }
+      }],
+      progress: {
+        parentCursor: `1:${parent.id}`, processedParents: 1, embeddedChunks: 1,
+        skippedChunks: 0, totalParents: 2, capabilityFingerprint: "capability-b"
+      }
+    })).rejects.toMatchObject({
+      providerExecutionContext: {
+        commitStage: "cost_recording",
+        reportedCostPresent: true,
+        reportedCostCount: 1,
+        reportedCostNotation: "scientific",
+        reportedCostCurrencyValid: true
+      }
+    });
+    expect(await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM chronicle_memory_chunks WHERE parent_memory_id=$1", [parent.id]
+    )).toMatchObject({ rows: [{ count: "0" }] });
+    expect(await pool.query<{ progress: Record<string, unknown> }>(
+      "SELECT progress FROM chronicle_chunk_jobs WHERE id=$1", [claim.jobId]
+    )).toMatchObject({ rows: [{ progress: { parentCursor: null, processedParents: 0 } }] });
+
     await expect(batches.commitParentBatch(claim, {
       parent,
       previousParentCursor: null,

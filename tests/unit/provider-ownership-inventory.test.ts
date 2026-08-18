@@ -112,4 +112,15 @@ describe("Task 14d provider/prompt/intent/cost ownership inventory", () => {
     expect(publicAdapterContract).not.toMatch(/\bloadProvider\b/);
     expect(publicAdapterContract).not.toMatch(/\btransport\b/);
   });
+
+  it("routes Chronicle worker failures through correlated provider execution diagnostics", () => {
+    const source = readFileSync(
+      join(repositoryRoot, "services/runtime/src/memory-composition.ts"),
+      "utf8",
+    );
+
+    expect(source).toContain("import { logProviderExecutionError }");
+    expect(source).toContain("logProviderTransportError: logProviderExecutionError");
+    expect(source).not.toContain("import { logProviderTransportError }");
+  });
 });

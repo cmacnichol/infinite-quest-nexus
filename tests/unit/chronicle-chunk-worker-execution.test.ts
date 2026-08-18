@@ -163,6 +163,65 @@ describe("Chronicle chunk worker execution", () => {
     expect(values.batches.commitParentBatch).not.toHaveBeenCalled();
   });
 
+  it.each([
+    {
+      name: "provider loading",
+      configure: (values: ReturnType<typeof dependencies>) => {
+        values.embeddings.load.mockRejectedValue(new Error("private provider-load failure"));
+      },
+      expectedStage: "provider_load"
+    },
+    {
+      name: "embedding",
+      configure: (values: ReturnType<typeof dependencies>) => {
+        values.provider.embed.mockRejectedValue(new Error("private embedding failure"));
+      },
+      expectedStage: "embedding_batch"
+    },
+    {
+      name: "parent commit",
+      configure: (values: ReturnType<typeof dependencies>) => {
+        values.batches.commitParentBatch.mockRejectedValue(Object.assign(new Error("private commit failure"), {
+          providerExecutionContext: {
+            commitStage: "cost_recording",
+            reportedCostPresent: true,
+            reportedCostCount: 1,
+            reportedCostNotation: "scientific",
+            reportedCostCurrencyValid: true
+          }
+        }));
+      },
+      expectedStage: "parent_commit"
+    }
+  ])("annotates $name failures before the lane owner logs them", async ({ configure, expectedStage }) => {
+    const values = dependencies();
+    configure(values);
+    const execution = createChronicleChunkWorkerExecution(values);
+    let thrown: unknown;
+
+    try {
+      await execution.execute({
+        ...claim,
+        progress: { ...claim.progress, parentCursor: null, processedParents: 0 }
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(Error);
+    expect(thrown).toHaveProperty("providerExecutionContext.executionStage", expectedStage);
+    expect(thrown).toHaveProperty("providerExecutionContext.processedParents", 0);
+    if (expectedStage === "embedding_batch") {
+      expect(thrown).toHaveProperty("providerExecutionContext.attemptedBatchSize", expect.any(Number));
+    }
+    if (expectedStage === "parent_commit") {
+      expect(thrown).toHaveProperty("providerExecutionContext.parentOrdinal", 7);
+      expect(thrown).toHaveProperty("providerExecutionContext.chunkCount", expect.any(Number));
+      expect(thrown).toHaveProperty("providerExecutionContext.commitStage", "cost_recording");
+      expect(thrown).toHaveProperty("providerExecutionContext.reportedCostNotation", "scientific");
+    }
+  });
+
   it("rejects an incomplete provider response before any durable write", async () => {
     const values = dependencies();
     values.provider.embed.mockResolvedValue({

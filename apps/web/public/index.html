@@ -294,7 +294,7 @@
               <h3 id="campaignContextTitle">Memory and context</h3>
               <p>Control optional Semantic Retrieval and preview the campaign context sent to story generation.</p>
             </div>
-            <button id="reindexMemory" class="button secondary" type="button" disabled>Rebuild memory</button>
+            <button id="reindexMemory" class="button secondary" type="button" title="Reconstruct derived Chronicle memories from accepted turns and campaign state, then queue semantic indexing. Use only when memory is stale or inconsistent." disabled>Rebuild memory</button>
           </div>
 
         <div id="memoryMetrics" class="metrics" aria-live="polite"></div>
@@ -332,8 +332,8 @@
           <label title="Optional query-task prefix. Leave blank to use the model-aware default, including search_query for Nomic retrieval models.">Query prefix<input id="embeddingQueryPrefix" maxlength="200" placeholder="Automatic for selected model"></label>
           <label>Batch size<input id="embeddingBatchSize" type="number" min="1" max="128"></label>
           <div class="chronicle-index-actions">
-            <button id="reindexEmbeddings" class="button secondary" type="button" disabled>Reindex Semantic Retrieval</button>
-            <button id="saveEmbeddingConfig" class="button primary" type="submit" disabled>Save &amp; index</button>
+            <button id="reindexEmbeddings" class="button secondary" type="button" title="Re-run the legacy memory-vector embedding job using the saved provider and model. This does not save form changes or rebuild chunked vectors." disabled>Reindex Semantic Retrieval</button>
+            <button id="saveEmbeddingConfig" class="button primary" type="submit" title="Save these Semantic Retrieval settings and queue the chunked vector index. Use this after changing the provider, model, prefixes, or retrieval implementation." disabled>Save &amp; index</button>
           </div>
         </form>
         <div id="embeddingProgress" class="embedding-progress hidden" aria-live="polite">

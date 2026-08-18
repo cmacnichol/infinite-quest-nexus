@@ -3,7 +3,7 @@ import {
   type ProviderCostRecordCommand
 } from "../../../packages/application/src/providers/index.js";
 import type { DatabaseClient } from "../../../packages/database/src/pool.js";
-import { logProviderTransportError } from "../../../packages/story-engine/src/index.js";
+import { logProviderExecutionError } from "../../../packages/story-engine/src/index.js";
 import {
   createChronicleEmbeddingProviderPort,
   type ChronicleEmbeddingProviderPort
@@ -84,7 +84,7 @@ export function createChroniclePlatformBindings(
             : {},
           reportedCost: result.reportedCost,
         }),
-      logProviderTransportError,
+      logProviderTransportError: logProviderExecutionError,
     }),
   };
 }

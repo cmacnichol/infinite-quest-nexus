@@ -110,13 +110,14 @@ integration("PostgreSQL Chronicle contract matrix", () => {
     model: string,
     documentPrefix: string | null = null,
     queryPrefix: string | null = null,
+    batchSize = 16,
   ) {
     await pool.query(
       `INSERT INTO campaign_memory_configs
          (campaign_id, owner_user_id, embedding_enabled, embedding_provider_profile_id,
-          embedding_model, embedding_document_prefix, embedding_query_prefix)
-       VALUES ($1,$2,true,$3,$4,$5,$6)`,
-      [campaignId, ownerUserId, providerId, model, documentPrefix, queryPrefix]
+          embedding_model, embedding_document_prefix, embedding_query_prefix, embedding_batch_size)
+       VALUES ($1,$2,true,$3,$4,$5,$6,$7)`,
+      [campaignId, ownerUserId, providerId, model, documentPrefix, queryPrefix, batchSize]
     );
   }
 
@@ -349,6 +350,62 @@ integration("PostgreSQL Chronicle contract matrix", () => {
     await expect(retrieval.loadForClaim(claim, { batchLimit: 129 })).rejects.toMatchObject({ statusCode: 400 });
     await expect(retrieval.loadForClaim(claim, { batchLimit: 1, cursor: "1:not-a-uuid" }))
       .rejects.toMatchObject({ statusCode: 400 });
+    await expect(state.completeClaim(claim, { progress: {} })).resolves.toBe(true);
+  });
+
+  it("caps worker retrieval pages at the configured embedding batch size", async () => {
+    const fixture = await campaignFixture("configured retrieval batch");
+    const providerId = await providerFixture("configured retrieval batch");
+    await configureEmbedding(
+      fixture.campaignId,
+      providerId,
+      "configured-retrieval-model",
+      null,
+      null,
+      2
+    );
+    const jobId = await jobFixture(fixture.campaignId, "embed_campaign", "2000-06-10T00:00:00Z");
+    await pool.query(
+      `INSERT INTO chronicle_memories
+         (owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content, token_estimate)
+       VALUES ($1,$2,$3,'campaign_summary',1,'configured batch one',3),
+              ($1,$2,$3,'open_thread',2,'configured batch two',3),
+              ($1,$2,$3,'canonical_fact',3,'configured batch three',3),
+              ($1,$2,$3,'legacy_summary',4,'configured batch four',3),
+              ($1,$2,$3,'turn_fiction',5,'configured batch five',3)`,
+      [ownerUserId, fixture.campaignId, fixture.worldVersionId]
+    );
+    const { state, retrieval } = createPostgresChronicleWorkerAdapters(pool);
+    const claim = await state.claimNext({ workerId: "configured-batch-worker", leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(jobId);
+    if (!claim) throw new Error("configured batch fixture job was not claimed");
+
+    const first = await retrieval.loadForClaim(claim, { batchLimit: 100 });
+    expect(first.batchLimit).toBe(2);
+    expect(first.memories.map((memory) => memory.content)).toEqual([
+      "configured batch one",
+      "configured batch two"
+    ]);
+    expect(first.nextCursor).toEqual(expect.any(String));
+
+    const second = await retrieval.loadForClaim(claim, {
+      batchLimit: first.batchLimit,
+      cursor: first.nextCursor
+    });
+    expect(second.batchLimit).toBe(2);
+    expect(second.memories.map((memory) => memory.content)).toEqual([
+      "configured batch three",
+      "configured batch four"
+    ]);
+    expect(second.nextCursor).toEqual(expect.any(String));
+
+    const third = await retrieval.loadForClaim(claim, {
+      batchLimit: second.batchLimit,
+      cursor: second.nextCursor
+    });
+    expect(third.batchLimit).toBe(2);
+    expect(third.memories.map((memory) => memory.content)).toEqual(["configured batch five"]);
+    expect(third.nextCursor).toBeNull();
     await expect(state.completeClaim(claim, { progress: {} })).resolves.toBe(true);
   });
 

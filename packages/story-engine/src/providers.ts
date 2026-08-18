@@ -311,7 +311,8 @@ function transportFailure(
 }
 
 export function providerTransportErrorDetails(error: unknown): ProviderTransportDetails | null {
-  return error instanceof ProviderTransportError ? error.transport : null;
+  const transportError = errorChain(error).find((item) => item instanceof ProviderTransportError);
+  return transportError instanceof ProviderTransportError ? transportError.transport : null;
 }
 
 export function logProviderTransportError(error: unknown, context: Record<string, unknown>): void {
@@ -321,6 +322,328 @@ export function logProviderTransportError(error: unknown, context: Record<string
     event: "provider_transport_error_correlated",
     ...context,
     ...safeTransportDiagnostic(transport)
+  });
+}
+
+function safeProviderStatusCode(error: unknown): number | null {
+  for (const item of errorChain(error)) {
+    const statusCode = Number(item.statusCode);
+    if (Number.isSafeInteger(statusCode) && statusCode >= 100 && statusCode <= 599) {
+      return statusCode;
+    }
+  }
+  return null;
+}
+
+type ProviderExecutionDiagnostic = Readonly<{
+  diagnosticCode:
+    | "provider_http_error"
+    | "provider_response_invalid"
+    | "provider_response_too_large"
+    | "provider_destination_not_allowed"
+    | "provider_execution_failed";
+  failureReason: string;
+}>;
+
+const PROVIDER_RESPONSE_FAILURE_REASONS: readonly Readonly<{
+  pattern: RegExp;
+  failureReason: string;
+}>[] = [
+  { pattern: /^Embedding provider returned \d+ vectors for \d+ inputs\.$/, failureReason: "embedding_vector_count_mismatch" },
+  { pattern: /^Embedding result \d+ did not contain a vector\.$/, failureReason: "embedding_vector_missing" },
+  { pattern: /^Embedding result \d+ contained a non-finite value\.$/, failureReason: "embedding_vector_non_finite" },
+  { pattern: /^Embedding result \d+ exceeded the supported dimensionality\.$/, failureReason: "embedding_vector_too_large" },
+  { pattern: /^Embedding provider returned vectors with inconsistent dimensions\.$/, failureReason: "embedding_vector_dimensions_inconsistent" },
+  { pattern: /^Embedding response did not include every requested document\.$/, failureReason: "embedding_batch_incomplete" },
+  { pattern: /^Embedding provider returned an incomplete Chronicle batch\.$/, failureReason: "embedding_chronicle_batch_incomplete" },
+  { pattern: /^Embedding response dimensions are inconsistent\.$/, failureReason: "embedding_batch_dimensions_inconsistent" },
+  { pattern: /^Embedding response dimensions do not match the configured capability\.$/, failureReason: "embedding_capability_dimension_mismatch" }
+];
+
+const CHRONICLE_EXECUTION_FAILURE_REASONS = new Map<string, string>([
+  ["Embedding provider context window cannot provide a positive input capacity.", "embedding_input_capacity_invalid"],
+  ["Chronicle chunk parent total changed during resumed work.", "chunk_parent_total_changed_on_resume"],
+  ["Chronicle chunk indexing is no longer enabled for this campaign.", "chunk_indexing_disabled"],
+  ["Chronicle chunk embedding provider capability is unavailable.", "embedding_capability_unavailable"],
+  ["Chronicle chunk work version changed before execution.", "chunk_work_version_changed"],
+  ["Chronicle chunk job lease was lost during parent commit.", "chunk_parent_commit_lease_lost"],
+  ["Chronicle chunk parent total changed during work.", "chunk_parent_total_changed"],
+  ["Chronicle chunk job lease was lost before completion could be recorded.", "chunk_job_completion_lease_lost"],
+  ["Chronicle chunk lease was lost before batch commit.", "chunk_batch_commit_lease_lost"],
+  ["Chronicle job lease heartbeat was lost.", "chronicle_heartbeat_lease_lost"],
+  ["Chronicle job lease was lost before completion could be recorded.", "chronicle_job_completion_lease_lost"],
+  ["Chronicle claim execution ended without progress.", "chronicle_execution_no_progress"],
+  ["Chronicle retrieval returned an invalid embedding row.", "chronicle_embedding_row_invalid"],
+  ["Chronicle job lease was lost during embedding batch commit.", "chronicle_embedding_commit_lease_lost"],
+  ["Chronicle retrieval total regressed during a claim.", "chronicle_retrieval_total_regressed"],
+  ["Chronicle embedding lease was lost before the batch could be committed.", "chronicle_embedding_batch_commit_lease_lost"],
+  ["Accepted turn fiction memory was unexpectedly excluded.", "accepted_turn_memory_excluded"]
+]);
+
+const SAFE_PROVIDER_ERROR_TYPES = new Set([
+  "Error",
+  "TypeError",
+  "RangeError",
+  "ReferenceError",
+  "SyntaxError",
+  "URIError",
+  "AggregateError",
+  "ProviderResponseTooLargeError",
+  "ProviderDestinationNotAllowedError",
+  "ProviderTimeoutError",
+  "ProviderTransportError",
+  "error"
+]);
+
+function safeProviderErrorType(error: unknown): string {
+  const name = error instanceof Error ? error.name : "NonError";
+  return SAFE_PROVIDER_ERROR_TYPES.has(name) ? name : error instanceof Error ? "Error" : "NonError";
+}
+
+function safeProviderErrorCode(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  return /^(?:[0-9A-Z]{5}|E[A-Z0-9_]{1,47}|UND_ERR_[A-Z0-9_]{1,47}|provider_[a-z0-9_]{1,47}|PROVIDER_[A-Z0-9_]{1,47})$/.test(value)
+    ? value
+    : null;
+}
+
+function safeDatabaseIdentifier(value: unknown): string | null {
+  return typeof value === "string" && /^[A-Za-z_][A-Za-z0-9_.-]{0,126}$/.test(value)
+    ? value
+    : null;
+}
+
+function firstBoolean(chain: readonly Record<string, unknown>[], key: string): boolean | null {
+  const value = chain.find((item) => typeof item[key] === "boolean")?.[key];
+  return typeof value === "boolean" ? value : null;
+}
+
+function vectorDimensionDiagnostic(chain: readonly Record<string, unknown>[]) {
+  for (const item of chain) {
+    const message = typeof item.message === "string" ? item.message : "";
+    const match = /^expected (\d{1,6}) dimensions, not (\d{1,6})(?:[.;]|$)/i.exec(message)
+      ?? /^different vector dimensions (\d{1,6}) and (\d{1,6})(?:[.;]|$)/i.exec(message);
+    if (!match) continue;
+    const expectedEmbeddingDimensions = Number(match[1]);
+    const actualEmbeddingDimensions = Number(match[2]);
+    if (expectedEmbeddingDimensions > 0 && actualEmbeddingDimensions > 0) {
+      return { expectedEmbeddingDimensions, actualEmbeddingDimensions };
+    }
+  }
+  return null;
+}
+
+const SAFE_PROVIDER_EXECUTION_STAGES = new Set([
+  "parent_load",
+  "provider_capability",
+  "provider_load",
+  "provider_fingerprint",
+  "claim_prepare",
+  "chunk_prepare",
+  "embedding_batch",
+  "parent_commit",
+  "next_parent_load",
+  "provider_health_record"
+]);
+
+const SAFE_CHRONICLE_COMMIT_STAGES = new Set([
+  "input_validation",
+  "transaction_lock",
+  "progress_validation",
+  "dimension_validation",
+  "stale_chunk_cleanup",
+  "chunk_upsert",
+  "cost_recording",
+  "progress_update",
+  "transaction_finalize"
+]);
+
+const SAFE_REPORTED_COST_NOTATIONS = new Set(["decimal", "scientific", "invalid"]);
+
+const CHRONICLE_COMMIT_FAILURE_REASONS = new Map<string, string>([
+  ["input_validation", "chunk_commit_input_invalid"],
+  ["transaction_lock", "chunk_commit_lock_failed"],
+  ["progress_validation", "chunk_commit_progress_invalid"],
+  ["dimension_validation", "chunk_commit_dimension_validation_failed"],
+  ["stale_chunk_cleanup", "chunk_commit_cleanup_failed"],
+  ["chunk_upsert", "chunk_commit_upsert_failed"],
+  ["cost_recording", "chunk_cost_recording_failed"],
+  ["progress_update", "chunk_commit_progress_update_failed"],
+  ["transaction_finalize", "chunk_commit_transaction_failed"]
+]);
+
+function safeExecutionCount(value: unknown): number | null {
+  return Number.isSafeInteger(value) && Number(value) >= 0 && Number(value) <= 1_000_000
+    ? Number(value)
+    : null;
+}
+
+function safeExecutionUuid(value: unknown): string | null {
+  return typeof value === "string"
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+    ? value
+    : null;
+}
+
+function providerExecutionStageMetadata(chain: readonly Record<string, unknown>[]) {
+  const context = chain
+    .map((item) => item.providerExecutionContext)
+    .find((value): value is Record<string, unknown> => typeof value === "object" && value !== null);
+  if (!context || typeof context.executionStage !== "string"
+    || !SAFE_PROVIDER_EXECUTION_STAGES.has(context.executionStage)) return {};
+  const parentMemoryId = safeExecutionUuid(context.parentMemoryId);
+  const commitStage = typeof context.commitStage === "string" && SAFE_CHRONICLE_COMMIT_STAGES.has(context.commitStage)
+    ? context.commitStage
+    : null;
+  const reportedCostNotation = typeof context.reportedCostNotation === "string"
+    && SAFE_REPORTED_COST_NOTATIONS.has(context.reportedCostNotation)
+    ? context.reportedCostNotation
+    : null;
+  return {
+    executionStage: context.executionStage,
+    ...(parentMemoryId === null ? {} : { parentMemoryId }),
+    ...(commitStage === null ? {} : { commitStage }),
+    ...(reportedCostNotation === null ? {} : { reportedCostNotation }),
+    ...(typeof context.reportedCostPresent === "boolean"
+      ? { reportedCostPresent: context.reportedCostPresent }
+      : {}),
+    ...(typeof context.reportedCostCurrencyValid === "boolean"
+      ? { reportedCostCurrencyValid: context.reportedCostCurrencyValid }
+      : {}),
+    ...Object.fromEntries([
+      "parentOrdinal",
+      "attemptedBatchSize",
+      "chunkCount",
+      "embeddedChunkCount",
+      "processedParents",
+      "reportedCostCount"
+    ].flatMap((key) => {
+      const value = safeExecutionCount(context[key]);
+      return value === null ? [] : [[key, value]];
+    }))
+  };
+}
+
+function providerExecutionMetadata(error: unknown): Readonly<Record<string, unknown>> {
+  const chain = errorChain(error);
+  const errorCodes = [...new Set(chain
+    .map((item) => safeProviderErrorCode(item.code))
+    .filter((code): code is string => code !== null))];
+  const databaseError = chain.find((item) => /^[0-9A-Z]{5}$/.test(safeProviderErrorCode(item.code) ?? ""));
+  const responseTooLarge = chain.find((item) => item instanceof ProviderResponseTooLargeError);
+  const destinationRejected = chain.find((item) => item instanceof ProviderDestinationNotAllowedError);
+  const retryable = firstBoolean(chain, "retryable");
+  const permanent = firstBoolean(chain, "permanent");
+  return {
+    errorType: safeProviderErrorType(error),
+    errorCauseDepth: chain.length,
+    errorCauseTypes: chain.map((item) => safeProviderErrorType(item)),
+    ...(errorCodes.length ? { errorCodes } : {}),
+    ...(retryable === null ? {} : { retryable }),
+    ...(permanent === null ? {} : { permanent }),
+    ...(responseTooLarge instanceof ProviderResponseTooLargeError
+      ? { providerResponseLimitBytes: responseTooLarge.limitBytes }
+      : {}),
+    ...(destinationRejected instanceof ProviderDestinationNotAllowedError
+      ? { providerDestinationStage: destinationRejected.stage }
+      : {}),
+    ...(databaseError ? {
+      databaseErrorCode: safeProviderErrorCode(databaseError.code),
+      ...(safeDatabaseIdentifier(databaseError.schema) ? { databaseSchema: databaseError.schema } : {}),
+      ...(safeDatabaseIdentifier(databaseError.table) ? { databaseTable: databaseError.table } : {}),
+      ...(safeDatabaseIdentifier(databaseError.column) ? { databaseColumn: databaseError.column } : {}),
+      ...(safeDatabaseIdentifier(databaseError.constraint) ? { databaseConstraint: databaseError.constraint } : {}),
+      ...(safeDatabaseIdentifier(databaseError.routine) ? { databaseRoutine: databaseError.routine } : {})
+    } : {}),
+    ...(vectorDimensionDiagnostic(chain) ?? {}),
+    ...providerExecutionStageMetadata(chain)
+  };
+}
+
+function providerHttpFailureReason(statusCode: number): string {
+  if (statusCode === 401) return "provider_authentication_failed";
+  if (statusCode === 403) return "provider_authorization_failed";
+  if (statusCode === 404) return "provider_endpoint_or_model_not_found";
+  if (statusCode === 408) return "provider_request_timeout";
+  if (statusCode === 413) return "provider_request_too_large";
+  if (statusCode === 429) return "provider_rate_limited";
+  if (statusCode >= 500) return "provider_upstream_error";
+  if (statusCode >= 400) return "provider_request_rejected";
+  return "provider_http_error";
+}
+
+function providerExecutionDiagnostic(
+  error: unknown,
+  providerStatusCode: number | null,
+): ProviderExecutionDiagnostic {
+  const chain = errorChain(error);
+  if (chain.some((item) => item instanceof ProviderResponseTooLargeError)) {
+    return {
+      diagnosticCode: "provider_response_too_large",
+      failureReason: "provider_response_size_limit_exceeded"
+    };
+  }
+  if (chain.some((item) => item instanceof ProviderDestinationNotAllowedError)) {
+    return {
+      diagnosticCode: "provider_destination_not_allowed",
+      failureReason: "provider_network_policy_rejected"
+    };
+  }
+  if (providerStatusCode !== null) {
+    return {
+      diagnosticCode: "provider_http_error",
+      failureReason: providerHttpFailureReason(providerStatusCode)
+    };
+  }
+  const messages = chain.map((item) => typeof item.message === "string" ? item.message : "");
+  const responseFailure = PROVIDER_RESPONSE_FAILURE_REASONS.find(({ pattern }) =>
+    messages.some((message) => pattern.test(message))
+  );
+  if (responseFailure) {
+    return {
+      diagnosticCode: "provider_response_invalid",
+      failureReason: responseFailure.failureReason
+    };
+  }
+  if (vectorDimensionDiagnostic(chain)) {
+    return {
+      diagnosticCode: "provider_execution_failed",
+      failureReason: "embedding_vector_dimension_mismatch_on_persist"
+    };
+  }
+  const chronicleFailureReason = messages
+    .map((message) => CHRONICLE_EXECUTION_FAILURE_REASONS.get(message))
+    .find((failureReason) => failureReason !== undefined);
+  const commitFailureReason = chain
+    .map((item) => item.providerExecutionContext)
+    .filter((context): context is Record<string, unknown> => typeof context === "object" && context !== null)
+    .map((context) => typeof context.commitStage === "string"
+      ? CHRONICLE_COMMIT_FAILURE_REASONS.get(context.commitStage)
+      : undefined)
+    .find((failureReason) => failureReason !== undefined);
+  return {
+    diagnosticCode: "provider_execution_failed",
+    failureReason: chronicleFailureReason ?? commitFailureReason ?? (errorChain(error).some((item) =>
+      /^[0-9A-Z]{5}$/.test(safeProviderErrorCode(item.code) ?? "")
+    ) ? "database_error" : "unclassified")
+  };
+}
+
+/** Logs correlated provider failures without serializing the error or upstream response body. */
+export function logProviderExecutionError(error: unknown, context: Record<string, unknown>): void {
+  const transport = providerTransportErrorDetails(error);
+  if (transport) {
+    logProviderTransportError(error, context);
+    return;
+  }
+  const providerStatusCode = safeProviderStatusCode(error);
+  const diagnostic = providerExecutionDiagnostic(error, providerStatusCode);
+  logger.error({
+    event: "provider_execution_error_correlated",
+    ...context,
+    ...diagnostic,
+    ...providerExecutionMetadata(error),
+    ...(providerStatusCode === null ? {} : { providerStatusCode })
   });
 }
 
@@ -407,15 +730,38 @@ function limitReason(values: unknown[]): boolean {
   return values.some((value) => /(?:length|max(?:imum)?[_ -]?(?:output[_ -]?)?tokens?|token[_ -]?limit|context[_ -]?(?:length|limit)|incomplete|truncated)/i.test(String(value ?? "")));
 }
 
+function providerCostAmount(rawCost: number | string): string | null {
+  const source = String(rawCost).trim().toLowerCase().replace(/^\+/, "");
+  if (!/^(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/.test(source)) return null;
+  const numericCost = Number(source);
+  if (!Number.isFinite(numericCost) || numericCost < 0) return null;
+
+  const [coefficient, exponentSource] = source.split("e");
+  const exponent = exponentSource === undefined ? 0 : Number(exponentSource);
+  const decimalOffset = coefficient!.indexOf(".");
+  const digits = coefficient!.replace(".", "");
+  const decimalIndex = (decimalOffset === -1 ? digits.length : decimalOffset) + exponent;
+  const expanded = decimalIndex <= 0
+    ? `0.${"0".repeat(-decimalIndex)}${digits}`
+    : decimalIndex >= digits.length
+      ? `${digits}${"0".repeat(decimalIndex - digits.length)}`
+      : `${digits.slice(0, decimalIndex)}.${digits.slice(decimalIndex)}`;
+  const [integerPart, fractionalPart] = expanded.split(".");
+  const normalizedInteger = integerPart!.replace(/^0+(?=\d)/, "") || "0";
+  return fractionalPart === undefined || fractionalPart === ""
+    ? normalizedInteger
+    : `${normalizedInteger}.${fractionalPart}`;
+}
+
 export function reportedProviderCost(usage: unknown): ReportedProviderCost | null {
   if (!usage || typeof usage !== "object" || !("cost" in usage)) return null;
   const rawCost = (usage as { cost?: unknown }).cost;
   if ((typeof rawCost !== "number" && typeof rawCost !== "string") || String(rawCost).trim() === "") return null;
-  const numericCost = Number(rawCost);
-  if (!Number.isFinite(numericCost) || numericCost < 0) return null;
+  const amount = providerCostAmount(rawCost);
+  if (amount === null) return null;
   const currency = String((usage as { currency?: unknown }).currency || "USD").trim().toUpperCase();
   if (!/^[A-Z]{3}$/.test(currency)) return null;
-  return { amount: String(rawCost).trim(), currency };
+  return { amount, currency };
 }
 
 export async function ensureLmStudioModelLoaded(

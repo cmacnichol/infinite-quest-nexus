@@ -235,6 +235,9 @@ describe("web-next campaign parity inventory", () => {
     expect(html).toContain("Shadow comparison · On");
     expect(html).toContain("Chronicle local memory remains available when semantic retrieval is off.");
     expect(html).toContain('data-action="reindex-embeddings"');
+    expect(html).toContain('data-action="rebuild-memory" title="Reconstruct derived Chronicle memories');
+    expect(html).toContain('data-action="reindex-embeddings" title="Re-run the legacy memory-vector embedding job');
+    expect(html).toContain('type="submit" title="Save these Semantic Retrieval settings');
 
     const expectedLabels = {
       chronicle_available: "Chronicle available",

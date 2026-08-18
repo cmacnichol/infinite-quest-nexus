@@ -2,6 +2,7 @@ import type { Dispatcher } from "undici";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { providerProfileInputSchema } from "../../packages/contracts/src/generation.js";
 import { ProviderDestinationNotAllowedError } from "../../packages/security/src/provider-network-policy.js";
+import { ProviderResponseTooLargeError } from "../../packages/story-engine/src/provider-response.js";
 import {
   MAX_IMAGE_PROVIDER_RESPONSE_BYTES,
   MAX_PROVIDER_JSON_RESPONSE_BYTES,
@@ -17,6 +18,7 @@ import {
   discoverEmbeddingModels,
   discoverImageModels,
   discoverModels,
+  logProviderExecutionError,
   logProviderTransportError,
   pollImageProvider,
   providerTransportErrorDetails,
@@ -134,6 +136,224 @@ describe("text provider adapters", () => {
     loggerError.mockRestore();
   });
 
+  it("logs correlated provider HTTP failures without provider response content", () => {
+    const loggerError = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+    const failure = Object.assign(
+      new Error("Provider request failed (429): private upstream response"),
+      {
+        statusCode: 429,
+        providerMessage: "private upstream response"
+      }
+    );
+
+    logProviderExecutionError(failure, {
+      chronicleJobId: "chronicle-job-correlation-id",
+      campaignId: "campaign-correlation-id"
+    });
+
+    expect(loggerError).toHaveBeenCalledWith({
+      event: "provider_execution_error_correlated",
+      chronicleJobId: "chronicle-job-correlation-id",
+      campaignId: "campaign-correlation-id",
+      diagnosticCode: "provider_http_error",
+      errorType: "Error",
+      errorCauseDepth: 1,
+      errorCauseTypes: ["Error"],
+      failureReason: "provider_rate_limited",
+      providerStatusCode: 429
+    });
+    const logged = JSON.stringify(loggerError.mock.calls);
+    expect(logged).not.toContain("private upstream response");
+    expect(logged).not.toContain("providerMessage");
+  });
+
+  it("classifies invalid embedding responses without logging the error message", () => {
+    const loggerError = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+    const failure = new Error("Embedding provider returned 1 vectors for 2 inputs.");
+
+    logProviderExecutionError(failure, {
+      chronicleJobId: "chronicle-job-correlation-id",
+      campaignId: "campaign-correlation-id"
+    });
+
+    expect(loggerError).toHaveBeenCalledWith({
+      event: "provider_execution_error_correlated",
+      chronicleJobId: "chronicle-job-correlation-id",
+      campaignId: "campaign-correlation-id",
+      diagnosticCode: "provider_response_invalid",
+      errorType: "Error",
+      errorCauseDepth: 1,
+      errorCauseTypes: ["Error"],
+      failureReason: "embedding_vector_count_mismatch"
+    });
+    expect(JSON.stringify(loggerError.mock.calls)).not.toContain(failure.message);
+  });
+
+  it.each([
+    [
+      "Chronicle chunk embedding provider capability is unavailable.",
+      "embedding_capability_unavailable"
+    ],
+    [
+      "Chronicle job lease heartbeat was lost.",
+      "chronicle_heartbeat_lease_lost"
+    ]
+  ])("logs a safe reason for known Chronicle execution failure: %s", (message, failureReason) => {
+    const loggerError = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+
+    logProviderExecutionError(
+      new Error(message),
+      { chronicleJobId: "chronicle-job-correlation-id" },
+    );
+
+    expect(loggerError).toHaveBeenCalledWith({
+      event: "provider_execution_error_correlated",
+      chronicleJobId: "chronicle-job-correlation-id",
+      diagnosticCode: "provider_execution_failed",
+      errorType: "Error",
+      errorCauseDepth: 1,
+      errorCauseTypes: ["Error"],
+      failureReason
+    });
+  });
+
+  it("does not expose arbitrary error details when the execution failure is unclassified", () => {
+    const loggerError = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+    const failure = new TypeError("private provider detail synthetic-secret-token");
+
+    logProviderExecutionError(failure, { chronicleJobId: "chronicle-job-correlation-id" });
+
+    expect(loggerError).toHaveBeenCalledWith({
+      event: "provider_execution_error_correlated",
+      chronicleJobId: "chronicle-job-correlation-id",
+      diagnosticCode: "provider_execution_failed",
+      errorType: "TypeError",
+      errorCauseDepth: 1,
+      errorCauseTypes: ["TypeError"],
+      failureReason: "unclassified"
+    });
+    expect(JSON.stringify(loggerError.mock.calls)).not.toContain("synthetic-secret-token");
+  });
+
+  it("logs bounded response-size and nested cause details without response content", () => {
+    const loggerError = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+    const failure = new Error("private wrapper", {
+      cause: new ProviderResponseTooLargeError(4 * 1024 * 1024)
+    });
+
+    logProviderExecutionError(failure, { chronicleJobId: "chronicle-job-correlation-id" });
+
+    expect(loggerError).toHaveBeenCalledWith({
+      event: "provider_execution_error_correlated",
+      chronicleJobId: "chronicle-job-correlation-id",
+      diagnosticCode: "provider_response_too_large",
+      errorType: "Error",
+      errorCauseDepth: 2,
+      errorCauseTypes: ["Error", "ProviderResponseTooLargeError"],
+      errorCodes: ["provider_response_too_large"],
+      failureReason: "provider_response_size_limit_exceeded",
+      permanent: true,
+      providerResponseLimitBytes: 4 * 1024 * 1024,
+      providerStatusCode: 502,
+      retryable: false
+    });
+    expect(JSON.stringify(loggerError.mock.calls)).not.toContain("private wrapper");
+  });
+
+  it("logs the controlled provider network-policy stage", () => {
+    const loggerError = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+
+    logProviderExecutionError(
+      new ProviderDestinationNotAllowedError("redirect"),
+      { chronicleJobId: "chronicle-job-correlation-id" },
+    );
+
+    expect(loggerError).toHaveBeenCalledWith(expect.objectContaining({
+      diagnosticCode: "provider_destination_not_allowed",
+      errorCodes: ["PROVIDER_DESTINATION_NOT_ALLOWED"],
+      failureReason: "provider_network_policy_rejected",
+      providerDestinationStage: "redirect",
+      providerStatusCode: 422
+    }));
+  });
+
+  it("logs safe PostgreSQL and vector-dimension details without arbitrary database text", () => {
+    const loggerError = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+    const failure = Object.assign(
+      new Error("expected 4096 dimensions, not 3584; token=synthetic-secret-token"),
+      {
+        name: "error",
+        code: "22000",
+        schema: "public",
+        table: "chronicle_memory_chunks",
+        constraint: "chronicle_memory_chunks_embedding_check",
+        routine: "CheckExpectedDim",
+        detail: "synthetic-secret-token"
+      },
+    );
+
+    logProviderExecutionError(failure, { chronicleJobId: "chronicle-job-correlation-id" });
+
+    expect(loggerError).toHaveBeenCalledWith(expect.objectContaining({
+      diagnosticCode: "provider_execution_failed",
+      failureReason: "embedding_vector_dimension_mismatch_on_persist",
+      errorType: "error",
+      errorCodes: ["22000"],
+      databaseErrorCode: "22000",
+      databaseSchema: "public",
+      databaseTable: "chronicle_memory_chunks",
+      databaseConstraint: "chronicle_memory_chunks_embedding_check",
+      databaseRoutine: "CheckExpectedDim",
+      expectedEmbeddingDimensions: 4096,
+      actualEmbeddingDimensions: 3584
+    }));
+    const logged = JSON.stringify(loggerError.mock.calls);
+    expect(logged).not.toContain("synthetic-secret-token");
+    expect(logged).not.toContain("detail");
+  });
+
+  it("logs only controlled Chronicle chunk execution-stage context", () => {
+    const loggerError = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+    const failure = Object.assign(new Error("private commit failure synthetic-secret-token"), {
+      providerExecutionContext: {
+        executionStage: "parent_commit",
+        parentOrdinal: 7,
+        parentMemoryId: "66666666-6666-4666-8666-666666666666",
+        attemptedBatchSize: 2,
+        chunkCount: 3,
+        embeddedChunkCount: 2,
+        processedParents: 1,
+        commitStage: "cost_recording",
+        reportedCostPresent: true,
+        reportedCostCount: 1,
+        reportedCostNotation: "scientific",
+        reportedCostCurrencyValid: true,
+        privateDetail: "synthetic-secret-token"
+      }
+    });
+
+    logProviderExecutionError(failure, { chronicleJobId: "chronicle-job-correlation-id" });
+
+    expect(loggerError).toHaveBeenCalledWith(expect.objectContaining({
+      failureReason: "chunk_cost_recording_failed",
+      executionStage: "parent_commit",
+      parentOrdinal: 7,
+      parentMemoryId: "66666666-6666-4666-8666-666666666666",
+      attemptedBatchSize: 2,
+      chunkCount: 3,
+      embeddedChunkCount: 2,
+      processedParents: 1,
+      commitStage: "cost_recording",
+      reportedCostPresent: true,
+      reportedCostCount: 1,
+      reportedCostNotation: "scientific",
+      reportedCostCurrencyValid: true
+    }));
+    const logged = JSON.stringify(loggerError.mock.calls);
+    expect(logged).not.toContain("privateDetail");
+    expect(logged).not.toContain("synthetic-secret-token");
+  });
+
   it("keeps arbitrary transport causes out of provider logs and error surfaces", async () => {
     const privateMarker = "SECRET_AT_START_OF_TRANSPORT_CAUSE";
     const loggerError = vi.spyOn(logger, "error").mockImplementation(() => undefined);
@@ -189,6 +409,8 @@ describe("text provider adapters", () => {
 
   it("normalizes only explicit valid provider-reported costs", () => {
     expect(reportedProviderCost({ cost: 0.00001234 })).toEqual({ amount: "0.00001234", currency: "USD" });
+    expect(reportedProviderCost({ cost: 1.2e-7, currency: "USD" })).toEqual({ amount: "0.00000012", currency: "USD" });
+    expect(reportedProviderCost({ cost: "1.2e-7", currency: "usd" })).toEqual({ amount: "0.00000012", currency: "USD" });
     expect(reportedProviderCost({ cost: 0, currency: "usd" })).toEqual({ amount: "0", currency: "USD" });
     expect(reportedProviderCost({ prompt_tokens: 10 })).toBeNull();
     expect(reportedProviderCost({ cost: -1 })).toBeNull();

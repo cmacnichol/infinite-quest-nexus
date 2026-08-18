@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { ProviderResponseTooLargeError } from "../../packages/story-engine/src/provider-response.js";
+import { ProviderTransportError } from "../../packages/story-engine/src/providers.js";
 import { createChronicleClaimExecution } from "../../services/runtime/src/chronicle-worker-execution.js";
 
 const claim = {
@@ -43,6 +45,7 @@ function dependencies(overrides: Readonly<Record<string, unknown>> = {}) {
       rebuildCampaignMemories: vi.fn(),
       enqueueEmbeddingReindex: vi.fn()
     },
+    logger: { error: vi.fn() },
     credentialSecret: "secret",
     ...overrides
   } as never;
@@ -113,6 +116,93 @@ describe("createChronicleClaimExecution", () => {
       "chronicle_embedding_failed"
     );
     expect(JSON.stringify(recordHealth.mock.calls)).not.toContain("private.example");
+  });
+
+  it("logs a controlled diagnostic when an embedding response exceeds the safe limit", async () => {
+    const logger = { error: vi.fn() };
+    const execution = createChronicleClaimExecution({} as never, dependencies({
+      logger,
+      embeddings: {
+        load: vi.fn().mockResolvedValue(provider),
+        fingerprint: vi.fn().mockResolvedValue("fingerprint"),
+        embed: vi.fn().mockRejectedValue(new ProviderResponseTooLargeError(4 * 1024 * 1024)),
+        recordHealth: vi.fn().mockResolvedValue(undefined)
+      }
+    }));
+
+    await expect(execution.execute(claim, firstPage())).rejects.toBeInstanceOf(ProviderResponseTooLargeError);
+
+    expect(logger.error).toHaveBeenCalledWith({
+      event: "chronicle_embedding_batch_failed",
+      diagnosticCode: "provider_response_too_large",
+      chronicleJobId: "job-1",
+      campaignId: "campaign-1",
+      providerProfileId: "provider-1",
+      configuredBatchSize: 1,
+      effectiveBatchLimit: 1,
+      attemptedBatchSize: 1
+    });
+  });
+
+  it.each([
+    {
+      name: "provider transport failures",
+      error: new ProviderTransportError("secret transport failure", {
+        providerType: "openrouter",
+        operation: "embedding",
+        endpoint: "https://private.example/token=secret",
+        model: "secret-model",
+        timeoutMs: 1_000,
+        durationMs: 10,
+        timedOut: false,
+        transportCode: "ECONNRESET",
+        causeCategory: "network",
+        causeMessage: "secret cause"
+      }),
+      expected: { diagnosticCode: "provider_transport_error" }
+    },
+    {
+      name: "provider HTTP failures",
+      error: Object.assign(new Error("secret provider response"), { statusCode: 503, providerMessage: "secret body" }),
+      expected: { diagnosticCode: "provider_http_error", providerStatusCode: 503 }
+    },
+    {
+      name: "invalid embedding responses",
+      error: new Error("Embedding provider returned vectors with inconsistent dimensions."),
+      expected: { diagnosticCode: "provider_response_invalid" }
+    },
+    {
+      name: "unrecognized failures",
+      error: new Error("https://private.example/token=secret"),
+      expected: { diagnosticCode: "embedding_failed" }
+    }
+  ])("logs a redacted controlled cause for $name", async ({ error, expected }) => {
+    const logger = { error: vi.fn() };
+    const execution = createChronicleClaimExecution({} as never, dependencies({
+      logger,
+      embeddings: {
+        load: vi.fn().mockResolvedValue(provider),
+        fingerprint: vi.fn().mockResolvedValue("fingerprint"),
+        embed: vi.fn().mockRejectedValue(error),
+        recordHealth: vi.fn().mockResolvedValue(undefined)
+      }
+    }));
+
+    await expect(execution.execute(claim, firstPage())).rejects.toBe(error);
+
+    expect(logger.error).toHaveBeenCalledWith({
+      event: "chronicle_embedding_batch_failed",
+      ...expected,
+      chronicleJobId: "job-1",
+      campaignId: "campaign-1",
+      providerProfileId: "provider-1",
+      configuredBatchSize: 1,
+      effectiveBatchLimit: 1,
+      attemptedBatchSize: 1
+    });
+    const logged = JSON.stringify(logger.error.mock.calls);
+    expect(logged).not.toContain("private.example");
+    expect(logged).not.toContain("secret");
   });
 
   it("rebuilds and enqueues embedding work on the same caller-owned transaction", async () => {

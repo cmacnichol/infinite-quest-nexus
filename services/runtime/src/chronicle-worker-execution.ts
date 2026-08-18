@@ -16,6 +16,9 @@ import type {
 } from "../../../packages/database/src/chronicle-repository.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { withTransaction } from "../../../packages/database/src/pool.js";
+import { logger as applicationLogger } from "../../../packages/logger/src/index.js";
+import { ProviderResponseTooLargeError } from "../../../packages/story-engine/src/provider-response.js";
+import { providerTransportErrorDetails } from "../../../packages/story-engine/src/providers.js";
 import type { ChronicleEmbeddingProviderPort } from "./chronicle-platform-adapter.js";
 
 export type ChronicleWorkerExecutionDependencies = Readonly<{
@@ -23,7 +26,53 @@ export type ChronicleWorkerExecutionDependencies = Readonly<{
   embeddings: ChronicleEmbeddingProviderPort;
   batches: ChronicleEmbeddingBatchPort;
   generation: MemoryGenerationTransactionPort;
+  logger?: Pick<typeof applicationLogger, "error">;
 }>;
+
+type EmbeddingFailureDiagnostic = Readonly<{
+  diagnosticCode:
+    | "provider_response_too_large"
+    | "provider_transport_error"
+    | "provider_http_error"
+    | "provider_response_invalid"
+    | "embedding_failed";
+  providerStatusCode?: number;
+}>;
+
+function providerStatusCode(error: unknown): number | null {
+  if (typeof error !== "object" || error === null) return null;
+  const statusCode = Number((error as { statusCode?: unknown }).statusCode);
+  return Number.isInteger(statusCode) && statusCode >= 400 && statusCode <= 599
+    ? statusCode
+    : null;
+}
+
+function isInvalidEmbeddingResponse(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.message === "Embedding provider returned an incomplete Chronicle batch."
+    || /^Embedding provider returned \d+ vectors for \d+ inputs\.$/.test(error.message)
+    || /^Embedding result \d+ did not contain a vector\.$/.test(error.message)
+    || /^Embedding result \d+ contained a non-finite value\.$/.test(error.message)
+    || /^Embedding result \d+ exceeded the supported dimensionality\.$/.test(error.message)
+    || error.message === "Embedding provider returned vectors with inconsistent dimensions.";
+}
+
+function embeddingFailureDiagnostic(error: unknown): EmbeddingFailureDiagnostic {
+  if (error instanceof ProviderResponseTooLargeError) {
+    return { diagnosticCode: "provider_response_too_large" };
+  }
+  if (providerTransportErrorDetails(error)) {
+    return { diagnosticCode: "provider_transport_error" };
+  }
+  const statusCode = providerStatusCode(error);
+  if (statusCode !== null) {
+    return { diagnosticCode: "provider_http_error", providerStatusCode: statusCode };
+  }
+  if (isInvalidEmbeddingResponse(error)) {
+    return { diagnosticCode: "provider_response_invalid" };
+  }
+  return { diagnosticCode: "embedding_failed" };
+}
 
 function batchMemories(retrieval: ChronicleWorkerRetrieval) {
   return retrieval.memories.map((memory) => {
@@ -89,6 +138,16 @@ async function executeChronicleClaim(
         result = await dependencies.embeddings.embed(provider, memories.map((memory) => `${prefixes.documentPrefix}${memory.content}`));
         if (result.embeddings.length !== memories.length) throw new Error("Embedding provider returned an incomplete Chronicle batch.");
       } catch (error) {
+        (dependencies.logger ?? applicationLogger).error({
+          event: "chronicle_embedding_batch_failed",
+          ...embeddingFailureDiagnostic(error),
+          chronicleJobId: claim.jobId,
+          campaignId: claim.campaignId,
+          providerProfileId: config.providerProfileId,
+          configuredBatchSize: config.batchSize,
+          effectiveBatchLimit: retrieval.batchLimit,
+          attemptedBatchSize: memories.length
+        });
         await dependencies.embeddings.recordHealth(
           pool,
           providerScope,

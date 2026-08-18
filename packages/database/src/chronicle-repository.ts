@@ -1827,6 +1827,8 @@ export function createPostgresChronicleWorkerRetrievalPort(pool: DatabasePool): 
       const active = await createPostgresChronicleWorkerStatePort(pool).loadClaimedJob(scope);
       if (!active) throw notFound("Chronicle job lease");
       const cursor = parseCursor(request.cursor);
+      const config = await loadConfig(pool, scope);
+      const effectiveBatchLimit = Math.min(request.batchLimit, config.batchSize ?? request.batchLimit);
       const result = await pool.query<ChronicleMemoryRow>(
         `SELECT id, ordinal, content, token_estimate, memory_kind
            FROM chronicle_memories
@@ -1834,9 +1836,9 @@ export function createPostgresChronicleWorkerRetrievalPort(pool: DatabasePool): 
             AND ($4::integer IS NULL OR ordinal > $4 OR (ordinal = $4 AND id > $5::uuid))
           ORDER BY ordinal, id
           LIMIT $6`,
-        [scope.ownerUserId, scope.campaignId, scope.worldVersionId, cursor?.ordinal ?? null, cursor?.id ?? null, request.batchLimit + 1]
+        [scope.ownerUserId, scope.campaignId, scope.worldVersionId, cursor?.ordinal ?? null, cursor?.id ?? null, effectiveBatchLimit + 1]
       );
-      const rows = result.rows.slice(0, request.batchLimit);
+      const rows = result.rows.slice(0, effectiveBatchLimit);
       const tail = rows.at(-1);
       const total = await pool.query<{ total: string }>(
         `SELECT count(*)::text AS total
@@ -1845,13 +1847,13 @@ export function createPostgresChronicleWorkerRetrievalPort(pool: DatabasePool): 
         [scope.ownerUserId, scope.campaignId, scope.worldVersionId]
       );
       return {
-        config: await loadConfig(pool, scope),
+        config,
         memories: rows.map((row) => ({
           id: row.id, ordinal: row.ordinal, content: row.content, tokenEstimate: row.token_estimate, kind: row.memory_kind
         })),
         totalMemories: Number(total.rows[0]?.total ?? 0),
-        batchLimit: request.batchLimit,
-        nextCursor: tail && result.rows.length > request.batchLimit ? `${tail.ordinal}:${tail.id}` : null
+        batchLimit: effectiveBatchLimit,
+        nextCursor: tail && result.rows.length > effectiveBatchLimit ? `${tail.ordinal}:${tail.id}` : null
       };
     }
   };

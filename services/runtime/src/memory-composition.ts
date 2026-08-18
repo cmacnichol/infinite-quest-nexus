@@ -17,7 +17,7 @@ import {
   createPostgresChronicleChunkParentPort
 } from "../../../packages/database/src/chronicle-chunk-repository.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
-import { logProviderTransportError } from "../../../packages/story-engine/src/providers.js";
+import { logProviderExecutionError } from "../../../packages/story-engine/src/providers.js";
 import { createChronicleWorkerExecutor } from "./chronicle-platform-adapter.js";
 import { createChroniclePlatformBindings } from "./chronicle-platform-bindings.js";
 import { createChronicleClaimExecution } from "./chronicle-worker-execution.js";
@@ -79,7 +79,7 @@ export function createWorkerMemoryApplication(
         }
       })
     },
-    logProviderTransportError
+    logProviderTransportError: logProviderExecutionError
   });
   return createMemoryWorkerApplication({ ...adapters, executor });
 }

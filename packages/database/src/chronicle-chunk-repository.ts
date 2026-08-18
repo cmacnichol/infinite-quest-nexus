@@ -58,6 +58,77 @@ export type ChronicleChunkBatchDependencies = Readonly<{
   recordCost: ChronicleTransactionEmbeddingPort["recordCost"];
 }>;
 
+type ChronicleChunkCommitStage =
+  | "input_validation"
+  | "transaction_lock"
+  | "progress_validation"
+  | "dimension_validation"
+  | "stale_chunk_cleanup"
+  | "chunk_upsert"
+  | "cost_recording"
+  | "progress_update"
+  | "transaction_finalize";
+
+type ChronicleChunkCommitContext = Readonly<{
+  commitStage: ChronicleChunkCommitStage;
+  reportedCostPresent?: boolean;
+  reportedCostCount?: number;
+  reportedCostNotation?: "decimal" | "scientific" | "invalid";
+  reportedCostCurrencyValid?: boolean;
+}>;
+
+function annotateChunkCommitError(error: unknown, context: ChronicleChunkCommitContext): Error {
+  const target = error instanceof Error
+    ? error
+    : new Error("Chronicle chunk commit failed with a non-Error value.", { cause: error });
+  const inherited = (target as Error & { providerExecutionContext?: unknown }).providerExecutionContext;
+  const inheritedContext = typeof inherited === "object" && inherited !== null ? inherited : {};
+  const merged = Object.freeze({ ...context, ...inheritedContext });
+  try {
+    Object.defineProperty(target, "providerExecutionContext", {
+      value: merged,
+      configurable: true
+    });
+    return target;
+  } catch {
+    const wrapper = new Error("Chronicle chunk commit failed.", { cause: target });
+    Object.defineProperty(wrapper, "providerExecutionContext", {
+      value: merged,
+      configurable: true
+    });
+    return wrapper;
+  }
+}
+
+async function atChunkCommitStage<T>(
+  context: ChronicleChunkCommitContext,
+  operation: () => T | Promise<T>,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    throw annotateChunkCommitError(error, context);
+  }
+}
+
+function reportedCostContext(
+  results: readonly Readonly<{ reportedCost: Readonly<{ amount: string; currency: string }> | null }>[],
+): Omit<ChronicleChunkCommitContext, "commitStage"> {
+  const costs = results.flatMap((result) => result.reportedCost ? [result.reportedCost] : []);
+  if (!costs.length) return { reportedCostPresent: false, reportedCostCount: 0 };
+  const notation = costs.some((cost) => !/^\d+(?:\.\d+)?$/.test(cost.amount))
+    ? costs.every((cost) => /^\d+(?:\.\d+)?[eE][+-]?\d+$/.test(cost.amount))
+      ? "scientific" as const
+      : "invalid" as const
+    : "decimal" as const;
+  return {
+    reportedCostPresent: true,
+    reportedCostCount: costs.length,
+    reportedCostNotation: notation,
+    reportedCostCurrencyValid: costs.every((cost) => /^[A-Z]{3}$/.test(cost.currency))
+  };
+}
+
 function invalid(message: string): Error & { statusCode: number } {
   return Object.assign(new Error(message), { statusCode: 400 });
 }
@@ -522,36 +593,39 @@ export function createPostgresChronicleChunkBatchPort(
       });
     },
     async commitParentBatch(scope, input) {
-      if (!input.capabilityFingerprint.trim()
-        || input.progress.capabilityFingerprint !== input.capabilityFingerprint
-        || input.parent.id === ""
-        || input.chunks.some((chunk, index) => chunk.chunkIndex !== index)) {
-        throw invalid("Chronicle chunk batch is invalid.");
-      }
-      const embedded = input.chunks.filter((chunk) => chunk.embedding !== null);
-      const skipped = input.chunks.filter((chunk) => chunk.skipReason !== null);
-      if (embedded.length + skipped.length !== input.chunks.length
-        || input.chunks.some((chunk) => (chunk.embedding === null) === (chunk.skipReason === null))) {
-        throw invalid("Chronicle chunk terminal state is invalid.");
-      }
-      const resultEmbeddings = input.results.flatMap((result) => result.embeddings);
-      if (resultEmbeddings.length !== embedded.length) {
-        throw invalid("Chronicle chunk embedding response is incomplete.");
-      }
-      const batchDimensions = new Set(embedded.map((chunk) => chunk.embedding!.length));
-      if (batchDimensions.size > 1) {
-        throw invalid("Chronicle chunk embedding dimensions are inconsistent.");
-      }
-      for (const [index, chunk] of embedded.entries()) {
-        const vector = chunk.embedding!;
-        const returned = resultEmbeddings[index]!;
-        if (vector.length !== returned.length || vector.some((value, coordinate) => value !== returned[coordinate])) {
-          throw invalid("Chronicle chunk embedding response does not match the committed vectors.");
+      const { embedded, skipped } = await atChunkCommitStage({ commitStage: "input_validation" }, () => {
+        if (!input.capabilityFingerprint.trim()
+          || input.progress.capabilityFingerprint !== input.capabilityFingerprint
+          || input.parent.id === ""
+          || input.chunks.some((chunk, index) => chunk.chunkIndex !== index)) {
+          throw invalid("Chronicle chunk batch is invalid.");
         }
-      }
+        const validEmbedded = input.chunks.filter((chunk) => chunk.embedding !== null);
+        const validSkipped = input.chunks.filter((chunk) => chunk.skipReason !== null);
+        if (validEmbedded.length + validSkipped.length !== input.chunks.length
+          || input.chunks.some((chunk) => (chunk.embedding === null) === (chunk.skipReason === null))) {
+          throw invalid("Chronicle chunk terminal state is invalid.");
+        }
+        const resultEmbeddings = input.results.flatMap((result) => result.embeddings);
+        if (resultEmbeddings.length !== validEmbedded.length) {
+          throw invalid("Chronicle chunk embedding response is incomplete.");
+        }
+        const batchDimensions = new Set(validEmbedded.map((chunk) => chunk.embedding!.length));
+        if (batchDimensions.size > 1) {
+          throw invalid("Chronicle chunk embedding dimensions are inconsistent.");
+        }
+        for (const [index, chunk] of validEmbedded.entries()) {
+          const vector = chunk.embedding!;
+          const returned = resultEmbeddings[index]!;
+          if (vector.length !== returned.length || vector.some((value, coordinate) => value !== returned[coordinate])) {
+            throw invalid("Chronicle chunk embedding response does not match the committed vectors.");
+          }
+        }
+        return { embedded: validEmbedded, skipped: validSkipped };
+      });
 
-      return withTransaction(pool, async (client) => {
-        const active = await client.query<Pick<ChunkJobRow, "progress">>(
+      return atChunkCommitStage({ commitStage: "transaction_finalize" }, () => withTransaction(pool, async (client) => {
+        const active = await atChunkCommitStage({ commitStage: "transaction_lock" }, () => client.query<Pick<ChunkJobRow, "progress">>(
           `SELECT j.progress
              FROM chronicle_chunk_jobs j
              JOIN campaigns c ON c.id=j.campaign_id AND c.owner_user_id=j.owner_user_id
@@ -562,29 +636,32 @@ export function createPostgresChronicleChunkBatchPort(
             FOR UPDATE OF j,c`,
           [scope.jobId, scope.ownerUserId, scope.campaignId, scope.workerId, scope.workVersion,
             scope.worldVersionId, scope.leaseToken]
-        );
+        ));
         const job = active.rows[0];
         if (!job) return false;
-        const previous = durableProgress(job.progress);
-        if (previous.parentCursor !== input.previousParentCursor
-          || previous.capabilityFingerprint !== input.capabilityFingerprint) {
-          throw invalid("Chronicle chunk batch progress is stale.");
-        }
-        validateProgress(
-          previous,
-          input.progress,
-          input.parent,
-          input.capabilityFingerprint,
-          embedded.length,
-          skipped.length
-        );
+        await atChunkCommitStage({ commitStage: "progress_validation" }, () => {
+          const durable = durableProgress(job.progress);
+          if (durable.parentCursor !== input.previousParentCursor
+            || durable.capabilityFingerprint !== input.capabilityFingerprint) {
+            throw invalid("Chronicle chunk batch progress is stale.");
+          }
+          validateProgress(
+            durable,
+            input.progress,
+            input.parent,
+            input.capabilityFingerprint,
+            embedded.length,
+            skipped.length
+          );
+          return durable;
+        });
 
         const cursor = parseCursor(input.previousParentCursor);
         // Incremental indexing skips parents that are already terminally chunked, so the committed
         // parent is not necessarily the immediate successor of the cursor. Fence on the parent's
         // own identity instead, still requiring it to be strictly ahead of the durable cursor so
         // progress stays monotonic and a stale claimant cannot rewind it.
-        const currentParent = await client.query<ChunkParentRow>(
+        const currentParent = await atChunkCommitStage({ commitStage: "progress_validation" }, () => client.query<ChunkParentRow>(
           `SELECT id,ordinal,memory_kind,content,content_hash,entities,entity_ids,metadata
              FROM chronicle_memories
             WHERE owner_user_id=$1 AND campaign_id=$2 AND world_version_id=$3 AND id=$6::uuid
@@ -592,43 +669,48 @@ export function createPostgresChronicleChunkBatchPort(
             FOR UPDATE`,
           [scope.ownerUserId, scope.campaignId, scope.worldVersionId,
             cursor?.ordinal ?? null, cursor?.id ?? null, input.parent.id]
-        );
-        const parent = currentParent.rows[0];
-        if (!parent
-          || parent.id !== input.parent.id
-          || parent.content !== input.parent.content
-          || parent.content_hash !== input.parent.contentHash) {
-          throw invalid("Chronicle chunk parent content changed before batch commit.");
-        }
-        const config = await loadConfig(client, scope);
-        if (!config) throw invalid("Chronicle chunk configuration is unavailable.");
-        if (input.provider) {
-          if (!config.embedding_enabled
-            || config.embedding_provider_profile_id !== input.provider.id
-            || config.embedding_model !== input.provider.model
-            || !input.providerFingerprint?.trim()) {
-            throw invalid("Chronicle chunk provider configuration changed during the claimed job.");
+        ));
+        const parent = await atChunkCommitStage({ commitStage: "progress_validation" }, async () => {
+          const current = currentParent.rows[0];
+          if (!current
+            || current.id !== input.parent.id
+            || current.content !== input.parent.content
+            || current.content_hash !== input.parent.contentHash) {
+            throw invalid("Chronicle chunk parent content changed before batch commit.");
           }
-        } else if (config.embedding_enabled || !config.retrieval_shadow_enabled) {
-          throw invalid("Chronicle chunk provider is required for this campaign.");
-        }
+          const activeConfig = await loadConfig(client, scope);
+          if (!activeConfig) throw invalid("Chronicle chunk configuration is unavailable.");
+          if (input.provider) {
+            if (!activeConfig.embedding_enabled
+              || activeConfig.embedding_provider_profile_id !== input.provider.id
+              || activeConfig.embedding_model !== input.provider.model
+              || !input.providerFingerprint?.trim()) {
+              throw invalid("Chronicle chunk provider configuration changed during the claimed job.");
+            }
+          } else if (activeConfig.embedding_enabled || !activeConfig.retrieval_shadow_enabled) {
+            throw invalid("Chronicle chunk provider is required for this campaign.");
+          }
+          return current;
+        });
         if (embedded.length) {
-          const existingDimensions = await client.query<{ embedding_dimensions: number }>(
+          await atChunkCommitStage({ commitStage: "dimension_validation" }, async () => {
+            const existingDimensions = await client.query<{ embedding_dimensions: number }>(
             `SELECT DISTINCT embedding_dimensions
                FROM chronicle_memory_chunks
               WHERE owner_user_id=$1 AND campaign_id=$2 AND world_version_id=$3
                 AND embedding_status='embedded'
               LIMIT 2`,
             [scope.ownerUserId, scope.campaignId, scope.worldVersionId]
-          );
-          if (existingDimensions.rows.length > 1
-            || (existingDimensions.rows[0]
-              && existingDimensions.rows[0].embedding_dimensions !== embedded[0]!.embedding!.length)) {
-            throw invalid("Chronicle chunk embedding dimensions changed during indexing.");
-          }
+            );
+            if (existingDimensions.rows.length > 1
+              || (existingDimensions.rows[0]
+                && existingDimensions.rows[0].embedding_dimensions !== embedded[0]!.embedding!.length)) {
+              throw invalid("Chronicle chunk embedding dimensions changed during indexing.");
+            }
+          });
         }
 
-        await client.query(
+        await atChunkCommitStage({ commitStage: "stale_chunk_cleanup" }, () => client.query(
           `DELETE FROM chronicle_memory_chunks
             WHERE parent_memory_id=$1 AND owner_user_id=$2 AND campaign_id=$3 AND world_version_id=$4
               AND (parent_content_hash<>$5 OR chunking_protocol_version<>$7
@@ -636,15 +718,16 @@ export function createPostgresChronicleChunkBatchPort(
           [parent.id, scope.ownerUserId, scope.campaignId, scope.worldVersionId,
             parent.content_hash, input.chunks.map((chunk) => chunk.chunkIndex),
             CHRONICLE_CHUNK_PROTOCOL_VERSION]
-        );
+        ));
         for (const chunk of input.chunks) {
-          if (chunk.parentMemoryId !== parent.id || chunk.protocolVersion !== "chronicle-chunk-v1") {
-            throw invalid("Chronicle chunk parent scope is invalid.");
-          }
-          const embedding = chunk.embedding ? vectorLiteral(chunk.embedding) : null;
-          const dimensions = chunk.embedding?.length ?? null;
-          const skipReason = sanitizeChronicleChunkSkipReason(chunk.skipReason);
-          await client.query(
+          await atChunkCommitStage({ commitStage: "chunk_upsert" }, async () => {
+            if (chunk.parentMemoryId !== parent.id || chunk.protocolVersion !== "chronicle-chunk-v1") {
+              throw invalid("Chronicle chunk parent scope is invalid.");
+            }
+            const embedding = chunk.embedding ? vectorLiteral(chunk.embedding) : null;
+            const dimensions = chunk.embedding?.length ?? null;
+            const skipReason = sanitizeChronicleChunkSkipReason(chunk.skipReason);
+            await client.query(
             `INSERT INTO chronicle_memory_chunks (
                owner_user_id,campaign_id,world_version_id,parent_memory_id,parent_content_hash,
                chunking_protocol_version,chunk_ordinal,chunk_kind,content,source_start_offset,
@@ -678,18 +761,22 @@ export function createPostgresChronicleChunkBatchPort(
               dimensions, chunk.embedding ? input.embeddingProtocolVersion : null,
               chunk.embedding ? input.providerFingerprint : null,
               chunk.embedding ? chunk.contentHash : null]
-          );
+            );
+          });
         }
         if (input.provider) {
-          for (const result of input.results) {
-            await dependencies.recordCost(client, input.provider, {
-              ownerUserId: scope.ownerUserId,
-              campaignId: scope.campaignId,
-              operation: "memory_embedding"
-            }, result);
-          }
+          await atChunkCommitStage({ commitStage: "cost_recording", ...reportedCostContext(input.results) }, async () => {
+            for (const result of input.results) {
+              await dependencies.recordCost(client, input.provider!, {
+                ownerUserId: scope.ownerUserId,
+                campaignId: scope.campaignId,
+                operation: "memory_embedding"
+              }, result);
+            }
+          });
         }
-        const updated = await client.query(
+        await atChunkCommitStage({ commitStage: "progress_update" }, async () => {
+          const updated = await client.query(
           `UPDATE chronicle_chunk_jobs
               SET progress=$6::jsonb,
                   /* Recorded with the cursor it describes so a later enqueue can prove the
@@ -717,10 +804,11 @@ export function createPostgresChronicleChunkBatchPort(
           [scope.jobId, scope.ownerUserId, scope.campaignId, scope.workerId, scope.workVersion,
             JSON.stringify(input.progress), scope.leaseSeconds, scope.worldVersionId, scope.leaseToken,
             parent.ordinal, parent.id]
-        );
-        if (updated.rowCount !== 1) throw new Error("Chronicle chunk lease was lost before batch commit.");
+          );
+          if (updated.rowCount !== 1) throw new Error("Chronicle chunk lease was lost before batch commit.");
+        });
         return true;
-      });
+      }));
     }
   };
 }

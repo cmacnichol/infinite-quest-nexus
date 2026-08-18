@@ -489,7 +489,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('id="embeddingProgress" class="embedding-progress hidden"');
     expect(managementHtml).toContain('id="embeddingProgressBar"');
     expect(managementHtml).toContain('id="budgetTokensSource"');
-    expect(managementScript).toContain("async function monitorEmbeddingJob(jobId, campaignId, sequence)");
+    expect(managementScript).toContain("async function monitorEmbeddingJob(jobId, campaignId, monitorState)");
     expect(managementScript).toContain("renderEmbeddingJobProgress(job)");
     expect(managementScript).toContain("await refreshCampaignMemoryMetrics()");
     expect(managementScript).toContain("function applyStoryProviderContextBudget()");
@@ -497,6 +497,15 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("text provider's available input space");
     expect(managementScript).not.toContain("applyEmbeddingModelContextBudget");
     expect(managementScript).not.toContain("modelContextTokens - 512");
+  });
+
+  it("keeps semantic indexing monitors campaign-scoped across campaign switches", () => {
+    expect(managementScript).toContain("const embeddingJobMonitors = new Map();");
+    expect(managementScript).toContain("if (embeddingJobMonitors.get(campaignId) !== monitorState) return null;");
+    expect(managementScript).toContain("if (selectedCampaign?.id === campaignId) renderEmbeddingJobProgress(job);");
+    expect(managementScript).toContain("if (selectedCampaign?.id === campaignId && existing.latestJob) renderEmbeddingJobProgress(existing.latestJob);");
+    expect(managementScript).toContain("if (selectedCampaign?.id !== campaignId) return job;");
+    expect(managementScript).not.toContain("sequence !== embeddingJobPollSequence || selectedCampaign?.id !== campaignId");
   });
 
   it("exposes the shared Semantic Retrieval contract and safe health projection", () => {
@@ -507,6 +516,9 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('id="embeddingRetrievalShadowEnabled"');
     expect(managementHtml).toContain("Chronicle local memory remains available when semantic retrieval is off.");
     expect(managementHtml).toContain('id="reindexEmbeddings"');
+    expect(managementHtml).toContain('id="reindexMemory" class="button secondary" type="button" title="Reconstruct derived Chronicle memories');
+    expect(managementHtml).toContain('id="reindexEmbeddings" class="button secondary" type="button" title="Re-run the legacy memory-vector embedding job');
+    expect(managementHtml).toContain('id="saveEmbeddingConfig" class="button primary" type="submit" title="Save these Semantic Retrieval settings');
     expect(managementScript).toContain('/memory/embeddings/reindex`');
     expect(managementScript).toContain('/memory/context-preview?${parameters}`');
     expect(managementScript).toContain('/memory/reindex`');

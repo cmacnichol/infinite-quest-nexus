@@ -51,7 +51,7 @@ let editingProviderId = "";
 let discoveredProfileModels = [];
 let discoveredEmbeddingModels = [];
 let providerModelPickerTarget = "provider";
-let embeddingJobPollSequence = 0;
+const embeddingJobMonitors = new Map();
 let worldCoverJobPollSequence = 0;
 let illustrationRefinementPromptValue = "";
 let defaultIllustrationRefinementPrompt = "";
@@ -2359,7 +2359,6 @@ async function loadCampaigns(preselectId = "") {
 }
 
 async function selectCampaign(campaign) {
-  embeddingJobPollSequence += 1;
   elements.embeddingProgress.classList.add("hidden");
   selectedCampaign = campaign;
   updateStoryViewLink();
@@ -3838,17 +3837,21 @@ function embeddingPollDelay(milliseconds) {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
-async function monitorEmbeddingJob(jobId, campaignId, sequence) {
+async function monitorEmbeddingJob(jobId, campaignId, monitorState) {
   for (let poll = 0; poll < 1200; poll += 1) {
-    if (sequence !== embeddingJobPollSequence || selectedCampaign?.id !== campaignId) return null;
+    if (embeddingJobMonitors.get(campaignId) !== monitorState) return null;
     const job = await api(`/api/v1/jobs/${jobId}`);
-    renderEmbeddingJobProgress(job);
+    monitorState.latestJob = job;
+    if (selectedCampaign?.id === campaignId) renderEmbeddingJobProgress(job);
     if (["completed", "failed"].includes(job.status)) {
-      await refreshCampaignMemoryMetrics();
-      elements.embeddingStatus.className = `status ${job.status === "completed" ? "success" : "error"}`;
-      elements.embeddingStatus.textContent = job.status === "completed"
-        ? "Semantic Retrieval indexing completed. Current compatible vector coverage is shown above."
-        : `${job.errorMessage || "Semantic Retrieval indexing failed."} Chronicle local memory remains available when semantic retrieval is off or unavailable.`;
+      if (selectedCampaign?.id === campaignId) {
+        await refreshCampaignMemoryMetrics();
+        if (selectedCampaign?.id !== campaignId) return job;
+        elements.embeddingStatus.className = `status ${job.status === "completed" ? "success" : "error"}`;
+        elements.embeddingStatus.textContent = job.status === "completed"
+          ? "Semantic Retrieval indexing completed. Current compatible vector coverage is shown above."
+          : `${job.errorMessage || "Semantic Retrieval indexing failed."} Chronicle local memory remains available when semantic retrieval is off or unavailable.`;
+      }
       return job;
     }
     await embeddingPollDelay(1000);
@@ -3856,20 +3859,35 @@ async function monitorEmbeddingJob(jobId, campaignId, sequence) {
   throw new Error("Semantic indexing is still running, but live progress monitoring timed out. Refresh the campaign to resume monitoring.");
 }
 
+function ensureEmbeddingJobProgress(jobId, campaignId) {
+  const existing = embeddingJobMonitors.get(campaignId);
+  if (existing?.jobId === jobId) {
+    if (selectedCampaign?.id === campaignId && existing.latestJob) renderEmbeddingJobProgress(existing.latestJob);
+    return existing.promise;
+  }
+  const monitorState = { jobId, latestJob: null, promise: null };
+  monitorState.promise = Promise.resolve()
+    .then(() => monitorEmbeddingJob(jobId, campaignId, monitorState))
+    .finally(() => {
+      if (embeddingJobMonitors.get(campaignId) === monitorState) embeddingJobMonitors.delete(campaignId);
+    });
+  embeddingJobMonitors.set(campaignId, monitorState);
+  return monitorState.promise;
+}
+
 async function resumeEmbeddingJobProgress(jobId, campaignId) {
-  const sequence = ++embeddingJobPollSequence;
   elements.saveEmbeddingConfig.disabled = true;
   elements.reindexEmbeddings.disabled = true;
   elements.saveEmbeddingConfig.classList.add("busy");
   try {
-    await monitorEmbeddingJob(jobId, campaignId, sequence);
+    await ensureEmbeddingJobProgress(jobId, campaignId);
   } catch (error) {
-    if (sequence === embeddingJobPollSequence && selectedCampaign?.id === campaignId) {
+    if (selectedCampaign?.id === campaignId) {
       elements.embeddingStatus.className = "status error";
       elements.embeddingStatus.textContent = error.message || String(error);
     }
   } finally {
-    if (sequence === embeddingJobPollSequence && selectedCampaign?.id === campaignId) {
+    if (selectedCampaign?.id === campaignId) {
       elements.saveEmbeddingConfig.disabled = false;
       elements.reindexEmbeddings.disabled = !embeddingConfig?.enabled;
       elements.saveEmbeddingConfig.classList.remove("busy");
@@ -3882,7 +3900,6 @@ async function saveEmbeddingConfig(event) {
   event.preventDefault();
   if (!selectedCampaign) return;
   const campaignId = selectedCampaign.id;
-  const sequence = ++embeddingJobPollSequence;
   elements.saveEmbeddingConfig.disabled = true;
   elements.saveEmbeddingConfig.classList.add("busy");
   elements.saveEmbeddingConfig.textContent = "Saving…";
@@ -3912,7 +3929,7 @@ async function saveEmbeddingConfig(event) {
     if (saved.enabled && !saved.jobId) throw new Error("Semantic Retrieval was enabled, but the indexing job was not created.");
     if (saved.enabled && saved.jobId) {
       elements.embeddingStatus.textContent = `Semantic Retrieval indexing queued as durable job ${saved.jobId}. Live progress will remain here until it completes or fails.`;
-      await monitorEmbeddingJob(saved.jobId, campaignId, sequence);
+      await ensureEmbeddingJobProgress(saved.jobId, campaignId);
     } else {
       elements.embeddingProgress.classList.add("hidden");
       await refreshCampaignMemoryMetrics();
@@ -3920,10 +3937,12 @@ async function saveEmbeddingConfig(event) {
       elements.embeddingStatus.textContent = "Semantic Retrieval disabled. Chronicle local lexical retrieval remains available; retained legacy embeddings remain available for rollback.";
     }
   } catch (error) {
-    elements.embeddingStatus.className = "status error";
-    elements.embeddingStatus.textContent = error.message || String(error);
+    if (selectedCampaign?.id === campaignId) {
+      elements.embeddingStatus.className = "status error";
+      elements.embeddingStatus.textContent = error.message || String(error);
+    }
   } finally {
-    if (sequence === embeddingJobPollSequence && selectedCampaign?.id === campaignId) {
+    if (selectedCampaign?.id === campaignId) {
       elements.saveEmbeddingConfig.disabled = false;
       elements.saveEmbeddingConfig.classList.remove("busy");
       elements.saveEmbeddingConfig.textContent = "Save & index";
@@ -3935,7 +3954,6 @@ async function saveEmbeddingConfig(event) {
 async function reindexSemanticRetrieval() {
   if (!selectedCampaign || !embeddingConfig?.enabled) return;
   const campaignId = selectedCampaign.id;
-  const sequence = ++embeddingJobPollSequence;
   elements.reindexEmbeddings.disabled = true;
   elements.saveEmbeddingConfig.disabled = true;
   elements.embeddingStatus.className = "status";
@@ -3947,14 +3965,14 @@ async function reindexSemanticRetrieval() {
     });
     if (!queued.jobId) throw new Error("The Semantic Retrieval reindex did not return a job identifier.");
     elements.embeddingStatus.textContent = `Semantic Retrieval reindex job ${queued.jobId} queued.`;
-    await monitorEmbeddingJob(queued.jobId, campaignId, sequence);
+    await ensureEmbeddingJobProgress(queued.jobId, campaignId);
   } catch (error) {
-    if (sequence === embeddingJobPollSequence && selectedCampaign?.id === campaignId) {
+    if (selectedCampaign?.id === campaignId) {
       elements.embeddingStatus.className = "status error";
       elements.embeddingStatus.textContent = error.message || String(error);
     }
   } finally {
-    if (sequence === embeddingJobPollSequence && selectedCampaign?.id === campaignId) {
+    if (selectedCampaign?.id === campaignId) {
       elements.reindexEmbeddings.disabled = !embeddingConfig?.enabled;
       elements.saveEmbeddingConfig.disabled = false;
     }

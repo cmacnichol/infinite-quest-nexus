@@ -65,6 +65,72 @@ export type ChronicleChunkWorkerExecution = Readonly<{
   ): Promise<ChronicleChunkJobProgress>;
 }>;
 
+type ChronicleChunkExecutionStage =
+  | "parent_load"
+  | "provider_capability"
+  | "provider_load"
+  | "provider_fingerprint"
+  | "claim_prepare"
+  | "chunk_prepare"
+  | "embedding_batch"
+  | "parent_commit"
+  | "next_parent_load"
+  | "provider_health_record";
+
+type ChronicleChunkExecutionContext = Readonly<{
+  executionStage: ChronicleChunkExecutionStage;
+  parentMemoryId?: string;
+  parentOrdinal?: number;
+  attemptedBatchSize?: number;
+  chunkCount?: number;
+  embeddedChunkCount?: number;
+  processedParents: number;
+}>;
+
+function annotateChunkExecutionError(
+  error: unknown,
+  context: ChronicleChunkExecutionContext,
+): Error {
+  const target = error instanceof Error
+    ? error
+    : new Error("Chronicle chunk execution failed with a non-Error value.", { cause: error });
+  const inherited = (target as Error & { providerExecutionContext?: unknown }).providerExecutionContext;
+  const inheritedContext = typeof inherited === "object" && inherited !== null ? inherited : {};
+  const merged = Object.freeze({ ...inheritedContext, ...context });
+  try {
+    Object.defineProperty(target, "providerExecutionContext", {
+      value: merged,
+      configurable: true
+    });
+    return target;
+  } catch {
+    const wrapper = new Error("Chronicle chunk execution failed.", { cause: target });
+    Object.defineProperty(wrapper, "providerExecutionContext", {
+      value: merged,
+      configurable: true
+    });
+    return wrapper;
+  }
+}
+
+async function atChunkExecutionStage<T>(
+  context: ChronicleChunkExecutionContext,
+  operation: () => T | Promise<T>,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    throw annotateChunkExecutionError(error, context);
+  }
+}
+
+function chunkExecutionError(
+  message: string,
+  context: ChronicleChunkExecutionContext,
+): Error {
+  return annotateChunkExecutionError(new Error(message), context);
+}
+
 function throwIfLeaseLost(lifecycle?: ChronicleClaimExecutionLifecycle): void {
   lifecycle?.throwIfLeaseLost();
 }
@@ -205,19 +271,28 @@ export function createChronicleChunkWorkerExecution(
   return {
     async execute(claim, lifecycle) {
       throwIfLeaseLost(lifecycle);
-      let page = await dependencies.parents.loadForClaim(claim, {
-        batchLimit: 1,
-        cursor: claim.progress.parentCursor
-      });
+      let page = await atChunkExecutionStage({
+        executionStage: "parent_load",
+        processedParents: claim.progress.processedParents
+      }, () => dependencies.parents.loadForClaim(claim, {
+          batchLimit: 1,
+          cursor: claim.progress.parentCursor
+        }));
       if (claim.progress.totalParents && claim.progress.totalParents !== page.totalParents) {
-        throw new Error("Chronicle chunk parent total changed during resumed work.");
+        throw chunkExecutionError("Chronicle chunk parent total changed during resumed work.", {
+          executionStage: "parent_load",
+          processedParents: claim.progress.processedParents
+        });
       }
 
       const semanticEnabled = Boolean(page.config.enabled
         && page.config.providerProfileId
         && page.config.model);
       if (!semanticEnabled && !page.config.retrievalShadowEnabled) {
-        throw new Error("Chronicle chunk indexing is no longer enabled for this campaign.");
+        throw chunkExecutionError("Chronicle chunk indexing is no longer enabled for this campaign.", {
+          executionStage: "provider_capability",
+          processedParents: claim.progress.processedParents
+        });
       }
 
       let provider: ChronicleTransactionEmbeddingExecution | null = null;
@@ -225,60 +300,94 @@ export function createChronicleChunkWorkerExecution(
       let providerFingerprint: string | null = null;
       if (semanticEnabled) {
         if (!page.providerCapability) {
-          throw new Error("Chronicle chunk embedding provider capability is unavailable.");
+          throw chunkExecutionError("Chronicle chunk embedding provider capability is unavailable.", {
+            executionStage: "provider_capability",
+            processedParents: claim.progress.processedParents
+          });
         }
-        provider = await dependencies.embeddings.load({
-          ownerUserId: claim.ownerUserId,
-          providerProfileId: page.config.providerProfileId!,
-          model: page.config.model!
-        });
-        capability = withCampaignPrefixes(
-          resolveEmbeddingCapability({
-            model: page.providerCapability.model,
-            contextWindowTokens: page.providerCapability.contextWindowTokens,
-            requestTimeoutMs: page.providerCapability.requestTimeoutMs,
-            configuration: page.providerCapability.configuration
-          }),
-          provider.model,
-          page.config.documentPrefix,
-          page.config.queryPrefix,
-          page.config.batchSize
-        );
-        providerFingerprint = await dependencies.embeddings.fingerprint(provider, {
-          documentPrefix: capability.documentPrefix,
-          queryPrefix: capability.queryPrefix,
-          automatic: page.config.documentPrefix == null && page.config.queryPrefix == null
-        });
+        provider = await atChunkExecutionStage({
+          executionStage: "provider_load",
+          processedParents: claim.progress.processedParents
+        }, () => dependencies.embeddings.load({
+            ownerUserId: claim.ownerUserId,
+            providerProfileId: page.config.providerProfileId!,
+            model: page.config.model!
+          }));
+        capability = await atChunkExecutionStage({
+          executionStage: "provider_capability",
+          processedParents: claim.progress.processedParents
+        }, () => withCampaignPrefixes(
+            resolveEmbeddingCapability({
+              model: page.providerCapability!.model,
+              contextWindowTokens: page.providerCapability!.contextWindowTokens,
+              requestTimeoutMs: page.providerCapability!.requestTimeoutMs,
+              configuration: page.providerCapability!.configuration
+            }),
+            provider!.model,
+            page.config.documentPrefix,
+            page.config.queryPrefix,
+            page.config.batchSize
+          ));
+        providerFingerprint = await atChunkExecutionStage({
+          executionStage: "provider_fingerprint",
+          processedParents: claim.progress.processedParents
+        }, () => dependencies.embeddings.fingerprint(provider!, {
+            documentPrefix: capability!.documentPrefix,
+            queryPrefix: capability!.queryPrefix,
+            automatic: page.config.documentPrefix == null && page.config.queryPrefix == null
+          }));
       }
       throwIfLeaseLost(lifecycle);
       const fingerprint = capabilityFingerprint(providerFingerprint, capability);
-      const preparation = await dependencies.batches.prepareClaim(claim, {
-        capabilityFingerprint: fingerprint
-      });
+      const preparation = await atChunkExecutionStage({
+        executionStage: "claim_prepare",
+        processedParents: claim.progress.processedParents
+      }, () => dependencies.batches.prepareClaim(claim, {
+          capabilityFingerprint: fingerprint
+        }));
       if (preparation === "requeued") {
-        throw new Error("Chronicle chunk work version changed before execution.");
+        throw chunkExecutionError("Chronicle chunk work version changed before execution.", {
+          executionStage: "claim_prepare",
+          processedParents: claim.progress.processedParents
+        });
       }
 
       let progress = baseProgress(claim, page.totalParents, fingerprint);
       while (page.parents.length) {
         throwIfLeaseLost(lifecycle);
         const parent = page.parents[0]!;
-        const drafts = finalChunks(parent, capability ?? undefined);
-        const partition = capability
-          ? partitionEmbeddableChunks(drafts, capability)
-          : { embeddable: [] as readonly ChronicleChunkDraft[], oversizedIndexes: new Set<number>() };
-        const results = [];
+        const { drafts, partition } = await atChunkExecutionStage({
+          executionStage: "chunk_prepare",
+          parentMemoryId: parent.id,
+          parentOrdinal: parent.ordinal,
+          processedParents: progress.processedParents
+        }, () => {
+          const preparedDrafts = finalChunks(parent, capability ?? undefined);
+          return {
+            drafts: preparedDrafts,
+            partition: capability
+              ? partitionEmbeddableChunks(preparedDrafts, capability)
+              : { embeddable: [] as readonly ChronicleChunkDraft[], oversizedIndexes: new Set<number>() }
+          };
+        });
+        const results: ChronicleTransactionEmbeddingResult[] = [];
         const vectors: (readonly number[])[] = [];
         if (provider && capability) {
           for (const batch of boundedBatches(partition.embeddable, capability)) {
             throwIfLeaseLost(lifecycle);
             try {
-              const result = await embedWithRetry(
-                dependencies,
-                provider,
-                batch.map((chunk) => `${capability!.documentPrefix}${chunk.content}`),
-                capability
-              );
+              const result = await atChunkExecutionStage({
+                executionStage: "embedding_batch",
+                parentMemoryId: parent.id,
+                parentOrdinal: parent.ordinal,
+                attemptedBatchSize: batch.length,
+                processedParents: progress.processedParents
+              }, () => embedWithRetry(
+                  dependencies,
+                  provider!,
+                  batch.map((chunk) => `${capability!.documentPrefix}${chunk.content}`),
+                  capability!
+                ));
               results.push(result);
               vectors.push(...result.embeddings);
             } catch (error) {
@@ -314,34 +423,60 @@ export function createChronicleChunkWorkerExecution(
           capabilityFingerprint: fingerprint
         };
         throwIfLeaseLost(lifecycle);
-        const committed = await dependencies.batches.commitParentBatch(claim, {
-          parent,
-          previousParentCursor: progress.parentCursor,
-          provider,
-          providerFingerprint,
-          capabilityFingerprint: fingerprint,
-          embeddingProtocolVersion: CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
-          chunks,
-          results,
-          progress: nextProgress
-        });
-        if (!committed) throw new Error("Chronicle chunk job lease was lost during parent commit.");
+        const committed = await atChunkExecutionStage({
+          executionStage: "parent_commit",
+          parentMemoryId: parent.id,
+          parentOrdinal: parent.ordinal,
+          chunkCount: chunks.length,
+          embeddedChunkCount: embeddedCount,
+          processedParents: progress.processedParents
+        }, () => dependencies.batches.commitParentBatch(claim, {
+            parent,
+            previousParentCursor: progress.parentCursor,
+            provider,
+            providerFingerprint,
+            capabilityFingerprint: fingerprint,
+            embeddingProtocolVersion: CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
+            chunks,
+            results,
+            progress: nextProgress
+          }));
+        if (!committed) throw chunkExecutionError(
+          "Chronicle chunk job lease was lost during parent commit.",
+          {
+            executionStage: "parent_commit",
+            parentMemoryId: parent.id,
+            parentOrdinal: parent.ordinal,
+            chunkCount: chunks.length,
+            embeddedChunkCount: embeddedCount,
+            processedParents: progress.processedParents
+          }
+        );
         progress = nextProgress;
         if (!page.nextCursor) break;
-        page = await dependencies.parents.loadForClaim(claim, {
-          batchLimit: 1,
-          cursor: progress.parentCursor
-        });
+        page = await atChunkExecutionStage({
+          executionStage: "next_parent_load",
+          processedParents: progress.processedParents
+        }, () => dependencies.parents.loadForClaim(claim, {
+            batchLimit: 1,
+            cursor: progress.parentCursor
+          }));
         if (page.totalParents !== progress.totalParents) {
-          throw new Error("Chronicle chunk parent total changed during work.");
+          throw chunkExecutionError("Chronicle chunk parent total changed during work.", {
+            executionStage: "next_parent_load",
+            processedParents: progress.processedParents
+          });
         }
       }
       if (provider) {
-        await dependencies.embeddings.recordHealth({
-          ownerUserId: claim.ownerUserId,
-          providerProfileId: provider.id,
-          model: provider.model
-        }, true);
+        await atChunkExecutionStage({
+          executionStage: "provider_health_record",
+          processedParents: progress.processedParents
+        }, () => dependencies.embeddings.recordHealth({
+            ownerUserId: claim.ownerUserId,
+            providerProfileId: provider!.id,
+            model: provider!.model
+          }, true));
       }
       throwIfLeaseLost(lifecycle);
       return progress;

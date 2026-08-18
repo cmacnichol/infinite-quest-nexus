@@ -12,6 +12,7 @@ import {
 import { createPromptRepository } from "../../packages/database/src/prompt-repository.js";
 import { encryptCredential } from "../../packages/story-engine/src/credentials.js";
 import { buildRpgAssessmentPrompt } from "../../packages/story-engine/src/mechanics.js";
+import { reportedProviderCost } from "../../packages/story-engine/src/providers.js";
 import { createRuntimeProviderAdapter } from "../../services/runtime/src/provider-credential-transport-adapter.js";
 
 describe("provider PostgreSQL adapter boundaries", () => {
@@ -64,6 +65,33 @@ describe("provider PostgreSQL adapter boundaries", () => {
 
     expect(writer.query).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(writer.query.mock.calls)).not.toContain("must-never");
+  });
+
+  test("records tiny provider costs in the database decimal contract", async () => {
+    const writer = { query: vi.fn().mockResolvedValue({ rows: [{ id: "cost-id" }] }) };
+    const repository = createProviderCostRepository({ query: vi.fn() } as never);
+    const reportedCost = reportedProviderCost({ cost: 1.2e-7, currency: "USD" });
+    expect(reportedCost).toEqual({ amount: "0.00000012", currency: "USD" });
+    if (!reportedCost) throw new Error("Expected a normalized provider cost.");
+
+    await expect(repository.recordCost(
+      createProviderCostTransactionContext(writer as never),
+      {
+        ownerUserId: "00000000-0000-4000-8000-000000000001",
+        campaignId: "00000000-0000-4000-8000-000000000002",
+        providerProfileId: "00000000-0000-4000-8000-000000000003",
+        providerType: "openrouter",
+        requestedModel: "qwen/qwen3-embedding-8b",
+        category: "memory",
+        operation: "memory_embedding",
+        usage: { inputTokens: 10, totalTokens: 10 },
+        reportedCost,
+        localCallId: "00000000-0000-4000-8000-000000000004"
+      }
+    )).resolves.toBe("cost-id");
+
+    expect(writer.query.mock.calls[0]?.[1]).toContain("0.00000012");
+    expect(JSON.stringify(writer.query.mock.calls)).not.toContain("1.2e-7");
   });
 
   test("keeps credentials runtime-private while reusing the injected pinned transport", async () => {
