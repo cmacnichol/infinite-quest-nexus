@@ -3870,6 +3870,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
     expect(inlineWorld.rows[0]?.cover_asset_id).toMatch(UUID_PATTERN_FOR_TEST);
 
     const ambiguousTarget = await createWorldScope(`14e3e4 ambiguous-cover target ${crypto.randomUUID()}`);
+    const ambiguousComposition = await composePortable(ambiguousTarget, "14e3e4-ambiguous-cover");
     const ambiguousA = await sharp({
       create: { width: 2, height: 3, channels: 3, background: { r: 1, g: 2, b: 3 } }
     }).png().toBuffer();
@@ -3881,7 +3882,7 @@ integration("Task 14e3e4 portable normalized publication", () => {
       world: { title: "Ambiguous cover", coverImageUrl: "cover.png" },
       turns: [{ id: crypto.randomUUID(), narration: "No unambiguous cover", imageUrl: "" }]
     }));
-    const ambiguousStaged = await stagedInput(composition, ambiguousBytes, "14e3e4-ambiguous-cover");
+    const ambiguousStaged = await stagedInput(ambiguousComposition, ambiguousBytes, "14e3e4-ambiguous-cover");
     const ambiguousDestination = {
       kind: "existing_world_version" as const,
       worldId: ambiguousTarget.worldId,
@@ -3909,13 +3910,13 @@ integration("Task 14e3e4 portable normalized publication", () => {
         }
       ]
     };
-    const ambiguousPreview = await composition.previewLegacyStory({
+    const ambiguousPreview = await ambiguousComposition.previewLegacyStory({
       ownerUserId,
       stagedInput: ambiguousStaged,
       kind: "legacy_story",
       destination: ambiguousDestination
     }, ambiguousAssets);
-    await expect(composition.commit({
+    await expect(ambiguousComposition.commit({
       ownerUserId,
       kind: "legacy_story",
       destination: ambiguousDestination,

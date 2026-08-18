@@ -762,12 +762,17 @@ export function createPostgresPortableNormalizedAssetPublicationRepository(
       validateScope(scope);
       const requests = validateRequests(scope, intents);
       if (requests.length === 0) return;
+      // Keep the portable prewrite durable before generic reservation. Each
+      // generic reservation takes a content lock, while a concurrent importer
+      // can hold the physical form of that lock while waiting for the operation
+      // row. It must therefore wait without holding that row itself.
+      await withTransaction(pool, async (database) => {
+        await lockOperation(database, scope, "previewed");
+        await recordReservationIntentsWithDatabase(database, scope, requests);
+      });
+      await withTransaction(pool, (database) => reserve(database, requests));
       return withTransaction(pool, async (database) => {
         await lockOperation(database, scope, "previewed");
-        // Prewrite, generic request reservation, and exact request binding are
-        // one DB transaction. Physical e2 work starts only after this commits.
-        await recordReservationIntentsWithDatabase(database, scope, requests);
-        await reserve(database, requests);
         await bindReservedRequestsWithDatabase(database, scope, requests);
       });
     },
