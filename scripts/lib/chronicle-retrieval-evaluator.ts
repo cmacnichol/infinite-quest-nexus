@@ -93,7 +93,9 @@ export type ChronicleRetrievalEvaluationOptions = Readonly<{
 
 export type ChronicleRetrievalProfileParameters = Readonly<{
   rrfK: number;
-  semanticVariantWeight: number;
+  entityExpandedVariantWeight: number;
+  sceneVariantWeight: number;
+  openThreadVariantWeight: number;
   lexicalEntityWeight: number;
   recencyChronologyWeight: number;
   candidateLimit: number;
@@ -112,17 +114,27 @@ export type ChronicleRetrievalProfileV2 = ChronicleProductionRankFusionProfile &
 }>;
 
 const RRF_K_GRID = [20, 40, 60] as const;
-const SEMANTIC_VARIANT_WEIGHT_GRID = [0.5, 0.75, 1] as const;
+const QUERY_VARIANT_WEIGHT_GRID = Object.freeze([
+  Object.freeze({ entityExpanded: 1, scene: 1, openThread: 1 }),
+  Object.freeze({ entityExpanded: 0.5, scene: 1, openThread: 1 }),
+  Object.freeze({ entityExpanded: 0.75, scene: 1, openThread: 1 }),
+  Object.freeze({ entityExpanded: 1, scene: 0.5, openThread: 1 }),
+  Object.freeze({ entityExpanded: 1, scene: 0.75, openThread: 1 }),
+  Object.freeze({ entityExpanded: 1, scene: 1, openThread: 0.5 }),
+  Object.freeze({ entityExpanded: 1, scene: 1, openThread: 0.75 })
+]);
 const LEXICAL_ENTITY_WEIGHT_GRID = [0.75, 1, 1.25] as const;
 const RECENCY_CHRONOLOGY_WEIGHT_GRID = [0.25, 0.5, 0.75] as const;
-const CANDIDATE_LIMIT_GRID = [32, 64, 96] as const;
+const CANDIDATE_LIMIT_GRID = [16, 32, 64] as const;
 
 export const CHRONICLE_RETRIEVAL_CALIBRATION_GRID: readonly ChronicleRetrievalProfileParameters[] = Object.freeze(
-  RRF_K_GRID.flatMap((rrfK) => SEMANTIC_VARIANT_WEIGHT_GRID.flatMap((semanticVariantWeight) => (
+  RRF_K_GRID.flatMap((rrfK) => QUERY_VARIANT_WEIGHT_GRID.flatMap((variantWeights) => (
     LEXICAL_ENTITY_WEIGHT_GRID.flatMap((lexicalEntityWeight) => RECENCY_CHRONOLOGY_WEIGHT_GRID.flatMap(
       (recencyChronologyWeight) => CANDIDATE_LIMIT_GRID.map((candidateLimit) => Object.freeze({
         rrfK,
-        semanticVariantWeight,
+        entityExpandedVariantWeight: variantWeights.entityExpanded,
+        sceneVariantWeight: variantWeights.scene,
+        openThreadVariantWeight: variantWeights.openThread,
         lexicalEntityWeight,
         recencyChronologyWeight,
         candidateLimit
@@ -201,9 +213,9 @@ export function chronicleProductionRankFusionProfile(
       }),
       variants: Object.freeze({
         action: 1,
-        entity_expanded: parameters.semanticVariantWeight,
-        scene: parameters.semanticVariantWeight,
-        open_thread: parameters.semanticVariantWeight
+        entity_expanded: parameters.entityExpandedVariantWeight,
+        scene: parameters.sceneVariantWeight,
+        open_thread: parameters.openThreadVariantWeight
       })
     }),
     candidateLimits: Object.freeze({ perSignal: parameters.candidateLimit }),

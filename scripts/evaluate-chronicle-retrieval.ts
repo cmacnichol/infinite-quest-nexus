@@ -29,7 +29,7 @@ import {
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const defaultOutput = "tmp/chronicle-evaluation/legacy-baseline.json";
-const productionCorpusRelativePath = "tests/fixtures/chronicle-retrieval-evaluation.v2.json";
+const productionCorpusRelativePath = "tests/fixtures/chronicle-retrieval-evaluation.v3.json";
 
 function argument(name: string): string | undefined {
   const index = process.argv.indexOf(name);

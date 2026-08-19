@@ -152,45 +152,51 @@ UPDATE campaign_memory_configs
 
 ## Legacy baseline
 
-The deterministic `chronicle-retrieval-evaluation.v2` corpus (SHA-256
-`1cd534c1585a81865572beb4fd7748e7ac817d248269a3c0c7ebcb93d415951f`)
+The deterministic `chronicle-retrieval-evaluation.v3` corpus (SHA-256
+`4ce28d185827a5f932ab6b8cb4c8be97dfe0de483aed86e574c64522e85074f4`)
 establishes the following label-only baseline for `legacy_hybrid` (generated
 locally at `tmp/chronicle-evaluation/legacy-baseline.json`, which is not
 committed):
 
-- recall@5/10/20: 0.7352941176470589 / 0.7352941176470589 /
-  0.7352941176470589; MRR: 0.7706558485463151;
-  NDCG: 0.7552612693115515.
-- duplicate rate: 0; relevant memories per prompt token: 0.0054557124518613605.
+- recall@5/10/20: 0.675 / 0.675 / 0.675; MRR: 0.6670574712643678;
+  NDCG: 0.6613147192765458.
+- duplicate rate: 0; relevant memories per prompt token: 0.003399534800500984.
 - cross-campaign, future-turn, and superseded-fact leakage: 0 / 0 / 0.
-- p50/p95 evaluator latency: 6 ms / 20 ms; embedding requests/cost: 3 / 0;
-  semantic-only hits: 3; promotions/demotions: 164 / 164. A promotion or
+- p50/p95 evaluator latency: 6 ms / 17 ms; embedding requests/cost: 6 / 0;
+  semantic-only hits: 3; promotions/demotions: 180 / 180. A promotion or
   demotion is an entry whose selected rank improves or worsens, respectively,
   against the deterministic lexical-only ordering for that same preview.
 
-Each ranking case declares `distractorCount` in-scope authorized memories that
-compete for the same prompt slots, and requests a 4,096-token budget so more
-candidates are eligible than the diversity policy can select. Without both, every
-grid candidate scored a perfect recall, the quality keys tied, and profile
-selection collapsed onto tie-breakers instead of retrieval quality.
+Each ordinary ranking case declares `distractorCount` in-scope authorized
+memories that compete for the same prompt slots and requests a 4,096-token
+budget so more candidates are eligible than the diversity policy can select.
+The three long-parent cases retain their exact 1,024, 2,048, and 4,096-token
+budgets, each with 24 distractors, so tight-budget selection is measured without
+changing its production ranking labels. Without this discrimination, every grid
+candidate scored a perfect recall, the quality keys tied, and profile selection
+collapsed onto tie-breakers instead of retrieval quality.
 
 The report contains fixture labels, hashes, ranks, and aggregates only; it
 does not persist prompt or Chronicle content.
 
 ## Calibrated production profile
 
-The exhaustive 243-profile grid selected the checked-in
-`chronicle-retrieval-profile-v2` profile: RRF `k=40`; semantic query-variant
-weight `1`; lexical/entity signal weights `1.25`; recency/chronology signal
-weights `0.25`; and a per-signal candidate limit of `32`. Its diversity policy
-selects at most 16 parents and two parents per turn, includes adjacent
-narration, and uses semantic/kind/entity values `4 / 1 / 0.5`.
+The evaluator selected the checked-in `chronicle-retrieval-profile-v2` profile
+from the exhaustive 567-profile bounded-coordinate grid: RRF `k=20`; query
+variant weights entity-expanded/scene/open-thread `1 / 0.75 / 1`; lexical/entity
+signal weights `0.75`; recency/chronology signal weights `0.75`; and a
+per-signal candidate limit of `16`. Its diversity policy selects at most 16
+parents and two parents per turn, includes adjacent narration, and uses
+semantic/kind/entity values `4 / 1 / 0.5`.
 
 Against the same corpus, the selected profile produced recall@5/10/20 of
-`0.8235294117647058 / 0.8235294117647058 / 1`, MRR `0.7757352941176471`,
-NDCG `0.8667030368443928`, duplicate rate `0`, and `0.007233273056057866`
-relevant memories per prompt token. Leakage remained `0 / 0 / 0`, and
-p50/p95 evaluator latency stayed below the legacy-derived gate.
+`0.75 / 0.75 / 1`, MRR `0.6833333333333333`, NDCG `0.7874420161450112`,
+duplicate rate `0`, and `0.0053068758652515` relevant memories per prompt
+token. Calibration recorded p50/p95 evaluator latency of `7 / 29 ms`, zero
+embedding requests/cost from a warm cache, and leakage `0 / 0 / 0`. A separate
+selected-profile evaluator pass recorded `7 / 40 ms` and six requests/cost `0`;
+both latency readings satisfy the v3 legacy-derived p95 gate. The profile values
+are evaluator-generated rather than hand-selected.
 
 Selection is reproducible from the corpus alone. Wall-clock latency and
 embedding request counts are recorded as diagnostics but are excluded from the

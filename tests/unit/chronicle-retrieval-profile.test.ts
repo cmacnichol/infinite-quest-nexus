@@ -14,7 +14,7 @@ import {
   type ChronicleRetrievalProfileParameters
 } from "../../scripts/lib/chronicle-retrieval-evaluator.js";
 
-const CORPUS_HASH = "1cd534c1585a81865572beb4fd7748e7ac817d248269a3c0c7ebcb93d415951f";
+const CORPUS_HASH = "4ce28d185827a5f932ab6b8cb4c8be97dfe0de483aed86e574c64522e85074f4";
 const GENERATED_AT = "2026-08-16T12:00:00.000Z";
 
 function metrics(overrides: Partial<ChronicleEvaluationMetrics> = {}): ChronicleEvaluationMetrics {
@@ -44,18 +44,50 @@ function candidate(
 }
 
 describe("Chronicle retrieval profile calibration", () => {
-  it("enumerates the exact deterministic 243-profile search grid", () => {
-    expect(CHRONICLE_RETRIEVAL_CALIBRATION_GRID).toHaveLength(243);
-    expect(new Set(CHRONICLE_RETRIEVAL_CALIBRATION_GRID.map((value) => JSON.stringify(value)))).toHaveLength(243);
+  it("enumerates the exact deterministic 567-profile coordinate search grid", () => {
+    expect(CHRONICLE_RETRIEVAL_CALIBRATION_GRID).toHaveLength(567);
+    expect(new Set(CHRONICLE_RETRIEVAL_CALIBRATION_GRID.map((value) => JSON.stringify(value)))).toHaveLength(567);
     expect([...new Set(CHRONICLE_RETRIEVAL_CALIBRATION_GRID.map((value) => value.rrfK))]).toEqual([20, 40, 60]);
-    expect([...new Set(CHRONICLE_RETRIEVAL_CALIBRATION_GRID.map((value) => value.semanticVariantWeight))])
-      .toEqual([0.5, 0.75, 1]);
+    expect([...new Set(CHRONICLE_RETRIEVAL_CALIBRATION_GRID.map((value) => value.entityExpandedVariantWeight))])
+      .toEqual([1, 0.5, 0.75]);
+    expect([...new Set(CHRONICLE_RETRIEVAL_CALIBRATION_GRID.map((value) => value.sceneVariantWeight))])
+      .toEqual([1, 0.5, 0.75]);
+    expect([...new Set(CHRONICLE_RETRIEVAL_CALIBRATION_GRID.map((value) => value.openThreadVariantWeight))])
+      .toEqual([1, 0.5, 0.75]);
     expect([...new Set(CHRONICLE_RETRIEVAL_CALIBRATION_GRID.map((value) => value.lexicalEntityWeight))])
       .toEqual([0.75, 1, 1.25]);
     expect([...new Set(CHRONICLE_RETRIEVAL_CALIBRATION_GRID.map((value) => value.recencyChronologyWeight))])
       .toEqual([0.25, 0.5, 0.75]);
     expect([...new Set(CHRONICLE_RETRIEVAL_CALIBRATION_GRID.map((value) => value.candidateLimit))])
-      .toEqual([32, 64, 96]);
+      .toEqual([16, 32, 64]);
+
+    expect(CHRONICLE_RETRIEVAL_CALIBRATION_GRID).toContainEqual({
+      rrfK: 20,
+      entityExpandedVariantWeight: 0.5,
+      sceneVariantWeight: 1,
+      openThreadVariantWeight: 1,
+      lexicalEntityWeight: 0.75,
+      recencyChronologyWeight: 0.25,
+      candidateLimit: 16
+    });
+    expect(CHRONICLE_RETRIEVAL_CALIBRATION_GRID).toContainEqual({
+      rrfK: 20,
+      entityExpandedVariantWeight: 1,
+      sceneVariantWeight: 0.5,
+      openThreadVariantWeight: 1,
+      lexicalEntityWeight: 0.75,
+      recencyChronologyWeight: 0.25,
+      candidateLimit: 16
+    });
+    expect(CHRONICLE_RETRIEVAL_CALIBRATION_GRID).toContainEqual({
+      rrfK: 20,
+      entityExpandedVariantWeight: 1,
+      sceneVariantWeight: 1,
+      openThreadVariantWeight: 0.5,
+      lexicalEntityWeight: 0.75,
+      recencyChronologyWeight: 0.25,
+      candidateLimit: 16
+    });
   });
 
   it("rejects every quality, leakage, duplication, and latency gate independently", () => {
@@ -147,8 +179,9 @@ describe("Chronicle retrieval profile calibration", () => {
       generatedAt: GENERATED_AT
     }));
 
-    for (const selection of selections) {
-      expect(JSON.stringify(selection)).toBe(JSON.stringify(selections[0]));
+    const selectedProfiles = selections.map(({ metrics: _metrics, ...profile }) => JSON.stringify(profile));
+    for (const selection of selectedProfiles) {
+      expect(selection).toBe(selectedProfiles[0]);
     }
   });
 
@@ -165,18 +198,22 @@ describe("Chronicle retrieval profile calibration", () => {
 
   it("keeps the corpus discriminating rather than saturated at a perfect score", () => {
     const fixture = JSON.parse(readFileSync(
-      "tests/fixtures/chronicle-retrieval-evaluation.v2.json",
+      "tests/fixtures/chronicle-retrieval-evaluation.v3.json",
       "utf8"
     )) as ChronicleRetrievalCorpus;
-    const ranking = fixture.cases.filter((value) => (value.distractorCount ?? 0) > 0);
+    const longParentCases = fixture.cases.filter((value) => value.longParent);
+    const ordinaryRankingCases = fixture.cases.filter((value) => !value.longParent && (value.distractorCount ?? 0) > 0);
 
     // A corpus every candidate aces cannot order candidates, so calibration collapses onto
     // tie-breakers. Each ranking case must offer more plausible memories than prompt slots.
-    expect(ranking.length).toBeGreaterThanOrEqual(10);
-    for (const value of ranking) {
+    expect(ordinaryRankingCases.length).toBeGreaterThanOrEqual(10);
+    for (const value of ordinaryRankingCases) {
       expect(value.distractorCount ?? 0).toBeGreaterThanOrEqual(16);
       expect(value.scope.request.budgetTokens ?? 0).toBeGreaterThanOrEqual(4_096);
     }
+    expect(longParentCases).toHaveLength(3);
+    expect(longParentCases.map((value) => value.scope.request.budgetTokens)).toEqual([1_024, 2_048, 4_096]);
+    for (const value of longParentCases) expect(value.distractorCount ?? 0).toBeGreaterThanOrEqual(16);
     // Headroom on the primary selection key, so a better profile can still be measured.
     expect(CHRONICLE_RETRIEVAL_PROFILE_V2.metrics.recallAt10).toBeLessThan(1);
     expect(CHRONICLE_RETRIEVAL_PROFILE_V2.metrics.ndcg).toBeLessThan(1);
@@ -187,7 +224,7 @@ describe("Chronicle retrieval profile calibration", () => {
 
   it("renders a deterministic safe module and checks in a gated corpus-matched profile", () => {
     const fixture = JSON.parse(readFileSync(
-      "tests/fixtures/chronicle-retrieval-evaluation.v2.json",
+      "tests/fixtures/chronicle-retrieval-evaluation.v3.json",
       "utf8"
     )) as ChronicleRetrievalCorpus;
     expect(chronicleRetrievalCorpusHash(fixture)).toBe(CORPUS_HASH);
