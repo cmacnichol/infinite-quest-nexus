@@ -109,12 +109,21 @@ function viewingLabel(turnNumber: number | null, activeTurnNumber: number): stri
   return turnNumber === activeTurnNumber ? "Viewing latest turn" : `Viewing turn ${turnNumber} of ${activeTurnNumber}`;
 }
 
+function resolvedRenderedTurn(state: StoryPlayerViewState): CampaignProjection["turns"][number] | null {
+  const campaign = state.projection.campaign;
+  if (campaign === null) return null;
+  const requestedTurnNumber = state.ui.viewTurnNumber ?? campaign.activeTurnNumber;
+  return state.projection.turns.find((turn) => turn.turnNumber === requestedTurnNumber)
+    ?? state.projection.turns[state.projection.turns.length - 1]
+    ?? null;
+}
+
 export function renderStoryCommandRow(document: Document, state: StoryPlayerViewState): HTMLElement {
   const row = element(document, "div", "story-command-content");
   const campaign = state.projection.campaign;
   const world = state.projection.world;
   if (campaign && world) {
-    const viewed = state.ui.viewTurnNumber ?? campaign.activeTurnNumber;
+    const viewed = resolvedRenderedTurn(state)?.turnNumber ?? null;
     row.append(
       element(document, "p", "story-command-campaign", campaign.title),
       element(document, "p", "story-command-world", `${world.title} · Version ${world.versionNumber}`),
@@ -210,10 +219,7 @@ function campaignReader(document: Document, state: StoryPlayerViewState): HTMLEl
     return reader;
   }
 
-  const requestedTurnNumber = state.ui.viewTurnNumber ?? campaign.activeTurnNumber;
-  const selectedTurn = projection.turns.find((turn) => turn.turnNumber === requestedTurnNumber)
-    ?? projection.turns[projection.turns.length - 1]
-    ?? null;
+  const selectedTurn = resolvedRenderedTurn(state);
   if (selectedTurn) {
     reader.append(renderStoryTurn(document, selectedTurn, projection.turns, projection.generation !== null));
   } else {

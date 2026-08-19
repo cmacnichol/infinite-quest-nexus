@@ -301,6 +301,43 @@ describe("Story Player page shell", () => {
     mounted.dispose();
   });
 
+  it("reports the resolved rendered turn when a deep-linked persisted turn is outside the loaded window", async () => {
+    const page = fixture();
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 9 },
+      activeTurnNumber: 9,
+      turns: {
+        campaignId,
+        nextCursor: "older-turns-available",
+        turns: [{
+          id: "88888888-8888-4888-8888-888888888888",
+          turnNumber: 9,
+          action: "Resume the latest scene.",
+          inputMode: "action",
+          inputModeSource: "explicit",
+          narration: "The loaded latest turn remains readable.",
+          choices: [],
+          customActionSuggestion: "",
+          imagePrompt: "",
+          imageUrl: null,
+          acceptedAt: "2026-08-18T00:00:00.000Z",
+          chronicleRetrieval: null,
+          reportedCost: null
+        }]
+      }
+    });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 2 }, composition({
+      list: vi.fn().mockResolvedValue({ campaigns: [campaignSummary({ activeTurnNumber: 9 })] }),
+      syncStatus: vi.fn().mockResolvedValue(loaded)
+    }));
+    await settle();
+
+    expect(page.document.querySelector("[data-story-leaf] h1")?.textContent).toBe("Turn 9");
+    expect(page.document.querySelector(".story-command-row")?.textContent).toContain("Viewing latest turn");
+    expect(page.document.querySelector(".story-command-row")?.textContent).not.toContain("Viewing turn 2 of 9");
+    mounted.dispose();
+  });
+
   it("renders labelled local width controls and persisted-number reader navigation", async () => {
     const page = fixture();
     const loaded = sync({
