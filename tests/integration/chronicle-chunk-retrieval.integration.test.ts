@@ -78,7 +78,7 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     ordinal: number,
     action: string,
     narration: string
-  ): Promise<void> {
+  ): Promise<string> {
     const result = await pool.query<{ id: string }>(
       `INSERT INTO turns (owner_user_id,campaign_id,turn_number,action,narration,state_snapshot_private)
        VALUES ($1,$2,$3,$4,$5,'{}'::jsonb) RETURNING id`,
@@ -127,7 +127,7 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
       entities?: readonly string[];
       entityIds?: readonly string[];
     }>
-  ): Promise<string> {
+  ): Promise<void> {
     const id = value.id ?? crypto.randomUUID();
     await pool.query(
       `INSERT INTO chronicle_memory_chunks
@@ -527,12 +527,14 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     const rankedRows = (
       family: keyof typeof batchRequests,
       requestOrdinal: number,
+      signal: string,
+      variant: string,
       candidates: ReadonlyArray<readonly [candidateId: string, parentMemoryId: string]>
     ) => candidates.map(([candidateId, parentMemoryId], index) => ({
       family,
       requestOrdinal,
-      signal: batchRequests[family][requestOrdinal]!.signal,
-      variant: batchRequests[family][requestOrdinal]!.variant,
+      signal,
+      variant,
       candidateId,
       parentMemoryId,
       signalRank: index + 1
@@ -542,20 +544,20 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     const currentNarration = ["20000000-0000-4000-8000-000000000003", current.id] as const;
     const openThreadChunk = ["20000000-0000-4000-8000-000000000004", openThread.id] as const;
     expect(batchRows).toEqual([
-      ...rankedRows("semantic", 0, [targetAction, targetNarration, openThreadChunk, currentNarration]),
-      ...rankedRows("semantic", 1, [targetAction, targetNarration, openThreadChunk, currentNarration]),
-      ...rankedRows("semantic", 2, [targetAction, targetNarration, openThreadChunk, currentNarration]),
-      ...rankedRows("semantic", 3, [targetAction, targetNarration, openThreadChunk, currentNarration]),
-      ...rankedRows("full_text", 0, [targetAction, targetNarration, currentNarration, openThreadChunk]),
-      ...rankedRows("full_text", 1, [targetNarration, openThreadChunk, currentNarration]),
-      ...rankedRows("full_text", 2, [currentNarration]),
-      ...rankedRows("full_text", 3, [openThreadChunk]),
-      ...rankedRows("entity", 0, [targetAction, targetNarration, currentNarration, openThreadChunk]),
-      ...rankedRows("static", 0, [currentNarration, openThreadChunk, targetAction, targetNarration]),
-      ...rankedRows("static", 1, [targetAction, targetNarration, currentNarration, openThreadChunk]),
-      ...rankedRows("static", 2, [currentNarration, openThreadChunk, targetAction, targetNarration]),
-      ...rankedRows("static", 3, [openThreadChunk, currentNarration, targetAction, targetNarration]),
-      ...rankedRows("static", 4, [currentNarration, openThreadChunk, targetAction, targetNarration])
+      ...rankedRows("semantic", 0, "semantic", "action", [targetAction, targetNarration, openThreadChunk, currentNarration]),
+      ...rankedRows("semantic", 1, "semantic", "entity_expanded", [targetAction, targetNarration, openThreadChunk, currentNarration]),
+      ...rankedRows("semantic", 2, "semantic", "scene", [targetAction, targetNarration, openThreadChunk, currentNarration]),
+      ...rankedRows("semantic", 3, "semantic", "open_thread", [targetAction, targetNarration, openThreadChunk, currentNarration]),
+      ...rankedRows("full_text", 0, "full_text", "action", [targetAction, targetNarration, currentNarration, openThreadChunk]),
+      ...rankedRows("full_text", 1, "full_text", "entity_expanded", [targetNarration, openThreadChunk, currentNarration]),
+      ...rankedRows("full_text", 2, "full_text", "scene", [currentNarration]),
+      ...rankedRows("full_text", 3, "full_text", "open_thread", [openThreadChunk]),
+      ...rankedRows("entity", 0, "entity", "entity_expanded", [targetAction, targetNarration, currentNarration, openThreadChunk]),
+      ...rankedRows("static", 0, "recency", "action", [currentNarration, openThreadChunk, targetAction, targetNarration]),
+      ...rankedRows("static", 1, "chronology", "action", [targetAction, targetNarration, currentNarration, openThreadChunk]),
+      ...rankedRows("static", 2, "importance", "action", [currentNarration, openThreadChunk, targetAction, targetNarration]),
+      ...rankedRows("static", 3, "kind", "action", [openThreadChunk, currentNarration, targetAction, targetNarration]),
+      ...rankedRows("static", 4, "temporal", "action", [currentNarration, openThreadChunk, targetAction, targetNarration])
     ]);
     expect(targetParents).toHaveLength(1);
     expect(targetParents[0]?.content).toMatch(/Player action:[\s\S]+Narration:/);
