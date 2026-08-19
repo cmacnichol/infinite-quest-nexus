@@ -351,7 +351,8 @@ describe("Story Player page shell", () => {
     mounted.dispose();
   });
 
-  it("does not react to viewport scroll after disposal", async () => {
+  it("pauses following when a manual scroll arrives while auto-follow is armed", async () => {
+    vi.useFakeTimers();
     const page = fixture();
     const loaded = sync({
       campaign: { ...sync().campaign, activeTurnNumber: 1 }, activeTurnNumber: 1,
@@ -362,12 +363,72 @@ describe("Story Player page shell", () => {
       },
       turns: turnWindow([1])
     });
+    const originalScrollIntoView = page.window.HTMLElement.prototype.scrollIntoView;
+    const originalScrollY = Object.getOwnPropertyDescriptor(page.window, "scrollY");
+    const autoFollow = vi.fn();
+    Object.defineProperty(page.window, "scrollY", { configurable: true, value: 0 });
+    Object.defineProperty(page.window.HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: autoFollow
+    });
+
+    let mounted: ReturnType<typeof mountStoryPlayerPage> | null = null;
+    try {
+      mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({ syncStatus: vi.fn().mockResolvedValue(loaded) }));
+      await settle();
+      expect(autoFollow).toHaveBeenCalled();
+
+      Object.defineProperty(page.window, "scrollY", { configurable: true, value: 240 });
+      page.window.dispatchEvent(new page.window.Event("scroll"));
+      await settle();
+
+      expect(page.document.querySelector<HTMLButtonElement>("[data-action='resume-generation-following']")).toBeTruthy();
+    } finally {
+      mounted?.dispose();
+      Object.defineProperty(page.window.HTMLElement.prototype, "scrollIntoView", { configurable: true, value: originalScrollIntoView });
+      if (originalScrollY) Object.defineProperty(page.window, "scrollY", originalScrollY);
+      else delete (page.window as { scrollY?: number }).scrollY;
+      vi.useRealTimers();
+    }
+  });
+
+  it("removes the viewport scroll listener on disposal", async () => {
+    const page = fixture();
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 1 }, activeTurnNumber: 1,
+      pendingGeneration: {
+        id: "55555555-5555-4555-8555-555555555555", status: "generating", action: "Continue",
+        expectedTurnNumber: 2, createdAt: "2026-08-18T00:00:00.000Z", updatedAt: "2026-08-18T00:00:00.000Z",
+        operationKind: "append", replacementTurnId: null
+      },
+      turns: turnWindow([1])
+    });
+    const storyWindow = page.root.ownerDocument.defaultView;
+    if (!storyWindow) throw new Error("Story fixture window is missing.");
+    const activeScrollListeners = new Set<EventListenerOrEventListenerObject>();
+    const originalAdd = storyWindow.addEventListener.bind(storyWindow);
+    const originalRemove = storyWindow.removeEventListener.bind(storyWindow);
+    Object.defineProperty(storyWindow, "addEventListener", {
+      configurable: true,
+      value: (type: string, listener: EventListenerOrEventListenerObject | null, options?: boolean | AddEventListenerOptions) => {
+        if (type === "scroll" && listener) activeScrollListeners.add(listener);
+        return originalAdd(type, listener, options);
+      }
+    });
+    Object.defineProperty(storyWindow, "removeEventListener", {
+      configurable: true,
+      value: (type: string, listener: EventListenerOrEventListenerObject | null, options?: boolean | EventListenerOptions) => {
+        if (type === "scroll" && listener) activeScrollListeners.delete(listener);
+        return originalRemove(type, listener, options);
+      }
+    });
     const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({ syncStatus: vi.fn().mockResolvedValue(loaded) }));
     await settle();
     mounted.dispose();
     page.window.dispatchEvent(new page.window.Event("scroll"));
     await settle();
 
+    expect(activeScrollListeners).toEqual(new Set());
     expect(page.document.querySelector("[data-action='resume-generation-following']")).toBeNull();
   });
 

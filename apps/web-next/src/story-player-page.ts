@@ -48,6 +48,21 @@ function errorMessage(error: unknown): string {
   return error instanceof Error && error.message ? error.message : "The Story Player could not load this campaign.";
 }
 
+type ViewportPosition = Readonly<{ x: number; y: number }>;
+
+function viewportPosition(scrollWindow: Window | null): ViewportPosition {
+  const x = scrollWindow?.scrollX ?? scrollWindow?.pageXOffset ?? 0;
+  const y = scrollWindow?.scrollY ?? scrollWindow?.pageYOffset ?? 0;
+  return {
+    x: Number.isFinite(x) ? x : 0,
+    y: Number.isFinite(y) ? y : 0
+  };
+}
+
+function isViewportPosition(expected: ViewportPosition, actual: ViewportPosition): boolean {
+  return expected.x === actual.x && expected.y === actual.y;
+}
+
 export interface PreparedStoryTurnSubmission {
   readonly action: string;
   readonly requestedInputMode: StoryTurnInputMode;
@@ -125,7 +140,7 @@ export function mountStoryPlayerPage(
   let inspectionRequestToken = 0;
   let autoSubmitTurnChoices = false;
   let submittedDraft: string | null = null;
-  let followingProgrammatically = false;
+  let programmaticFollowTarget: ViewportPosition | null = null;
   let programmaticFollowResetTimer: ReturnType<typeof setTimeout> | null = null;
   const refreshCompletionResources = (campaignId: string, turnNumber: number) => {
     void composition.api.campaigns.state(campaignId, turnNumber).then((runtime) => {
@@ -153,13 +168,16 @@ export function mountStoryPlayerPage(
   });
   const scrollWindow = root.ownerDocument.defaultView;
   const onDocumentScroll = () => {
-    if (followingProgrammatically) {
-      followingProgrammatically = false;
+    if (programmaticFollowTarget !== null && isViewportPosition(programmaticFollowTarget, viewportPosition(scrollWindow))) {
+      programmaticFollowTarget = null;
       if (programmaticFollowResetTimer !== null) globalThis.clearTimeout(programmaticFollowResetTimer);
       programmaticFollowResetTimer = null;
       return;
     }
-    if (!followingProgrammatically && projection.generation !== null && ui.get().generationFollowing) {
+    programmaticFollowTarget = null;
+    if (programmaticFollowResetTimer !== null) globalThis.clearTimeout(programmaticFollowResetTimer);
+    programmaticFollowResetTimer = null;
+    if (projection.generation !== null && ui.get().generationFollowing) {
       ui.setGenerationFollowing(false);
     }
   };
@@ -501,11 +519,11 @@ export function mountStoryPlayerPage(
     if (projection.generation !== null && ui.get().generationFollowing) {
       const preview = root.querySelector<HTMLElement>("[data-story-generation-preview]");
       if (preview && typeof preview.scrollIntoView === "function") {
-        followingProgrammatically = true;
         preview.scrollIntoView({ block: "end" });
+        programmaticFollowTarget = viewportPosition(scrollWindow);
         if (programmaticFollowResetTimer !== null) globalThis.clearTimeout(programmaticFollowResetTimer);
         programmaticFollowResetTimer = globalThis.setTimeout(() => {
-          followingProgrammatically = false;
+          programmaticFollowTarget = null;
           programmaticFollowResetTimer = null;
         }, 0);
       }
