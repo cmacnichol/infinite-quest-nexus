@@ -6,6 +6,12 @@ export type ChronicleRetrievalApplication = Readonly<{
   generation: Pick<MemoryGenerationTransactionPort, "buildContextPreview">;
 }>;
 
+export type ChronicleLongParentFixture = Readonly<{
+  paragraphCount: number;
+  relevantParagraphIndex: number;
+  relevantParagraph: string;
+}>;
+
 type ChroniclePreviewEntry = Readonly<{
   id: string;
   estimatedTokens?: number;
@@ -19,6 +25,7 @@ export type ChronicleRetrievalCase = Readonly<{
   scope: MemoryGenerationContextPreviewScope;
   expectedLabels: readonly string[];
   labelByMemoryId: Readonly<Record<string, string>>;
+  longParent?: ChronicleLongParentFixture;
   forbiddenLabels?: Readonly<{
     crossCampaign?: readonly string[];
     futureTurn?: readonly string[];
@@ -141,6 +148,17 @@ export function deterministicChronicleEvaluationUuid(
 ): string {
   const digest = hash({ corpusVersion, caseId, role });
   return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-5${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+}
+
+function validateLongParentFixture(fixture: ChronicleLongParentFixture): void {
+  if (!Number.isSafeInteger(fixture.paragraphCount) || fixture.paragraphCount < 2) {
+    throw new Error("Chronicle evaluation long parent requires at least two paragraphs.");
+  }
+  if (!Number.isSafeInteger(fixture.relevantParagraphIndex)
+    || fixture.relevantParagraphIndex < 0
+    || fixture.relevantParagraphIndex >= fixture.paragraphCount) {
+    throw new Error("Chronicle evaluation relevant paragraph index is out of range.");
+  }
 }
 
 function average(values: readonly number[]): number {
@@ -403,6 +421,7 @@ export async function evaluateChronicleRetrieval(
   const now = options.now ?? Date.now;
   const cases: ChronicleEvaluationCaseResult[] = [];
   for (const fixture of corpus.cases) {
+    if (fixture.longParent) validateLongParentFixture(fixture.longParent);
     const startedAt = now();
     const preview = await application.generation.buildContextPreview(database as never, fixture.scope);
     const latencyMs = Math.max(0, now() - startedAt);

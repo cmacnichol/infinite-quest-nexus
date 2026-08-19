@@ -101,6 +101,82 @@ describe("Chronicle retrieval evaluator metrics", () => {
     })]);
   });
 
+  it("evaluates every long-parent budget through the context-preview seam", async () => {
+    const longParentCorpus: ChronicleRetrievalCorpus = {
+      version: "v3",
+      cases: [1_024, 2_048, 4_096].map((budgetTokens) => ({
+        id: `long-parent-budget-${budgetTokens}`,
+        scope: {
+          ownerUserId: "owner-a",
+          campaignId: "campaign-a",
+          worldVersionId: "world-version-a",
+          request: { budgetTokens, compression: "auto", query: "moon sigil western gate", recentTurns: 0 }
+        },
+        expectedLabels: [`long-parent-budget-${budgetTokens}-a`],
+        labelByMemoryId: { [`memory-${budgetTokens}`]: `long-parent-budget-${budgetTokens}-a` },
+        longParent: {
+          paragraphCount: 48,
+          relevantParagraphIndex: 24,
+          relevantParagraph: "The moon sigil opens the western gate at midnight."
+        },
+        distractorCount: 24
+      }))
+    };
+    const buildContextPreview = vi.fn(async (_database, scope) => ({
+      retrieval: { semanticAvailable: false },
+      scopes: { chronicle: [{ id: `memory-${scope.request.budgetTokens}`, estimatedTokens: 1, relevance: 1 }] },
+      chronicleRetrieval: lexicalAudit
+    }));
+
+    await evaluateChronicleRetrieval({ generation: { buildContextPreview } }, {}, longParentCorpus);
+
+    expect(buildContextPreview.mock.calls.map(([, scope]) => scope.request.budgetTokens)).toEqual([1_024, 2_048, 4_096]);
+  });
+
+  it("rejects invalid long-parent metadata before invoking the retrieval seam", async () => {
+    const invalidLongParentCorpus: ChronicleRetrievalCorpus = {
+      version: "v3",
+      cases: [{
+        ...corpus.cases[0]!,
+        longParent: {
+          paragraphCount: 1,
+          relevantParagraphIndex: 1,
+          relevantParagraph: "The moon sigil opens the western gate at midnight."
+        }
+      }]
+    };
+    const buildContextPreview = vi.fn();
+
+    await expect(evaluateChronicleRetrieval(
+      { generation: { buildContextPreview } },
+      {},
+      invalidLongParentCorpus
+    )).rejects.toThrow("Chronicle evaluation long parent requires at least two paragraphs.");
+    expect(buildContextPreview).not.toHaveBeenCalled();
+  });
+
+  it("rejects an out-of-range long-parent paragraph before invoking the retrieval seam", async () => {
+    const invalidLongParentCorpus: ChronicleRetrievalCorpus = {
+      version: "v3",
+      cases: [{
+        ...corpus.cases[0]!,
+        longParent: {
+          paragraphCount: 48,
+          relevantParagraphIndex: 48,
+          relevantParagraph: "The moon sigil opens the western gate at midnight."
+        }
+      }]
+    };
+    const buildContextPreview = vi.fn();
+
+    await expect(evaluateChronicleRetrieval(
+      { generation: { buildContextPreview } },
+      {},
+      invalidLongParentCorpus
+    )).rejects.toThrow("Chronicle evaluation relevant paragraph index is out of range.");
+    expect(buildContextPreview).not.toHaveBeenCalled();
+  });
+
   it("preserves the legacy semantic request estimate when a preview omits the explicit counter", async () => {
     const report = await evaluateChronicleRetrieval({
       generation: {

@@ -6,6 +6,7 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createPostgresChronicleGenerationTransactionPort } from "../../packages/database/src/chronicle-repository.js";
 import type { ChronicleContextPreview } from "../../packages/application/src/memory/index.js";
 import { chronicleContentHash } from "../../packages/domain/src/chronicle-memory-helpers.js";
+import { CHRONICLE_CHUNK_PROTOCOL_VERSION, chunkChronicleMemory } from "../../packages/domain/src/chronicle-chunking.js";
 import {
   evaluateChronicleRetrieval,
   type ChronicleRetrievalApplication,
@@ -27,6 +28,28 @@ integration("Chronicle retrieval evaluation integration seam", () => {
 
   afterAll(async () => {
     await pool?.end();
+  });
+
+  it("creates multiple production-protocol chunks for a long evaluator parent", () => {
+    const content = Array.from({ length: 48 }, (_, index) => (
+      index === 24
+        ? "The moon sigil opens the western gate at midnight."
+        : `Sanitized continuity filler paragraph ${index + 1} describing quiet roads and empty courtyards.`
+    )).join("\n\n");
+
+    const chunks = chunkChronicleMemory({
+      id: "6cf39a7b-6251-4e63-8d8a-80758b525a3a",
+      memoryKind: "campaign_summary",
+      content
+    });
+
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.map((chunk) => chunk.chunkIndex)).toEqual(chunks.map((_, index) => index));
+    expect(chunks.every((chunk) => (
+      chunk.protocolVersion === CHRONICLE_CHUNK_PROTOCOL_VERSION
+      && chunk.contentHash === chronicleContentHash(chunk.content)
+      && chunk.sourceEndOffset > chunk.sourceStartOffset
+    ))).toBe(true);
   });
 
   it("reaches the production generation retrieval interface without a bypass", async () => {
