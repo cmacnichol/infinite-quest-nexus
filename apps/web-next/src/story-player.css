@@ -1,0 +1,63 @@
+main[data-page="story-player"] {
+  display: grid;
+  gap: 1rem;
+}
+
+.story-command-row,
+.story-foldout,
+.story-reader,
+.story-campaign-spine,
+.story-illustration-wing,
+.story-state,
+.story-recovery {
+  border: 1px solid var(--line, currentColor);
+  background: var(--panel, transparent);
+}
+
+.story-command-row,
+.story-reader,
+.story-campaign-spine,
+.story-illustration-wing,
+.story-state,
+.story-recovery {
+  padding: 1rem;
+}
+
+.story-foldout {
+  display: grid;
+  gap: 1rem;
+  grid-template-areas:
+    "reader"
+    "spine"
+    "illustration";
+}
+
+.story-reader { grid-area: reader; }
+.story-campaign-spine { grid-area: spine; }
+.story-illustration-wing { grid-area: illustration; }
+
+.story-reading-width,
+.story-choices,
+.story-campaign-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem;
+}
+
+.story-choices,
+.story-campaign-list {
+  flex-direction: column;
+}
+
+.story-status,
+.story-state-error,
+.story-recovery {
+  margin: 0;
+}
+
+@media (min-width: 900px) {
+  .story-foldout {
+    grid-template-columns: minmax(0, 1fr) minmax(12rem, .3fr) minmax(12rem, .3fr);
+    grid-template-areas: "reader spine illustration";
+  }
+}
