@@ -141,7 +141,6 @@ export function mountStoryPlayerPage(
   let autoSubmitTurnChoices = false;
   let submittedDraft: string | null = null;
   let programmaticFollowTarget: ViewportPosition | null = null;
-  let programmaticFollowResetTimer: ReturnType<typeof setTimeout> | null = null;
   const refreshCompletionResources = (campaignId: string, turnNumber: number) => {
     void composition.api.campaigns.state(campaignId, turnNumber).then((runtime) => {
       if (!disposed && projection.campaign?.id === campaignId && runtime.campaignId === campaignId) {
@@ -170,13 +169,9 @@ export function mountStoryPlayerPage(
   const onDocumentScroll = () => {
     if (programmaticFollowTarget !== null && isViewportPosition(programmaticFollowTarget, viewportPosition(scrollWindow))) {
       programmaticFollowTarget = null;
-      if (programmaticFollowResetTimer !== null) globalThis.clearTimeout(programmaticFollowResetTimer);
-      programmaticFollowResetTimer = null;
       return;
     }
     programmaticFollowTarget = null;
-    if (programmaticFollowResetTimer !== null) globalThis.clearTimeout(programmaticFollowResetTimer);
-    programmaticFollowResetTimer = null;
     if (projection.generation !== null && ui.get().generationFollowing) {
       ui.setGenerationFollowing(false);
     }
@@ -521,11 +516,6 @@ export function mountStoryPlayerPage(
       if (preview && typeof preview.scrollIntoView === "function") {
         preview.scrollIntoView({ block: "end" });
         programmaticFollowTarget = viewportPosition(scrollWindow);
-        if (programmaticFollowResetTimer !== null) globalThis.clearTimeout(programmaticFollowResetTimer);
-        programmaticFollowResetTimer = globalThis.setTimeout(() => {
-          programmaticFollowTarget = null;
-          programmaticFollowResetTimer = null;
-        }, 0);
       }
     }
   }
@@ -616,7 +606,7 @@ export function mountStoryPlayerPage(
       controller?.abort();
       generation.dispose();
       scrollWindow?.removeEventListener("scroll", onDocumentScroll);
-      if (programmaticFollowResetTimer !== null) globalThis.clearTimeout(programmaticFollowResetTimer);
+      programmaticFollowTarget = null;
       root.removeEventListener("click", onClick);
       retryControl?.removeEventListener("click", onRetry);
       unsubscribeStore();
