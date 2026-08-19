@@ -37,8 +37,18 @@ const DEFAULT_LIMITS: ChronicleQueryLimits = Object.freeze({
   open_thread: 1_400
 });
 
+const QUERY_CONNECTIVES = new Set([
+  "and", "again", "about", "from", "into", "that", "the", "their", "this", "with"
+]);
+
 function normalized(value: string): string {
   return value.normalize("NFKC").toLowerCase().replace(/\s+/gu, " ").trim();
+}
+
+function substantiveTerms(value: string): ReadonlySet<string> {
+  return new Set(value.normalize("NFKC").toLocaleLowerCase("en-US")
+    .match(/[\p{L}\p{N}]+/gu)
+    ?.filter((term) => term.length >= 3 && !QUERY_CONNECTIVES.has(term)) ?? []);
 }
 
 function compareDeterministically(left: string, right: string): number {
@@ -135,11 +145,15 @@ export function planChronicleQueries(input: ChronicleQueryPlanInput): readonly C
       entityIds: []
     }] : [])
   ];
-  const seenQueries = new Set<string>();
-  return Object.freeze(planned.flatMap((variant) => {
-    const key = normalized(variant.query);
-    if (!key || seenQueries.has(key)) return [];
-    seenQueries.add(key);
+  const coveredTerms = new Set<string>();
+  const coveredEntityIds = new Set<string>();
+  return Object.freeze(planned.flatMap((variant, index) => {
+    const terms = substantiveTerms(variant.query);
+    const addsTerms = [...terms].some((term) => !coveredTerms.has(term));
+    const addsEntityIds = variant.entityIds.some((entityId) => !coveredEntityIds.has(entityId));
+    if (index > 0 && !addsTerms && !addsEntityIds) return [];
+    for (const term of terms) coveredTerms.add(term);
+    for (const entityId of variant.entityIds) coveredEntityIds.add(entityId);
     return [Object.freeze({ ...variant, entityIds: Object.freeze([...variant.entityIds]) })];
   }));
 }

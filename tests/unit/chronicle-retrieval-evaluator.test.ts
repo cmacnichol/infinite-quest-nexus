@@ -216,6 +216,31 @@ describe("Chronicle retrieval evaluator metrics", () => {
     expect(report.cases[0]?.embeddingRequests).toBe(1);
   });
 
+  it("reports safe query variant counts from retrieval cache metadata", async () => {
+    const previews = [
+      {
+        retrieval: { semanticAvailable: false, queryCacheHits: 2, queryCacheMisses: 1 },
+        scopes: { chronicle: [] },
+        chronicleRetrieval: lexicalAudit
+      },
+      {
+        retrieval: { semanticAvailable: false, queryCacheHits: "two", queryCacheMisses: -1 },
+        scopes: { chronicle: [] },
+        chronicleRetrieval: lexicalAudit
+      },
+      { retrieval: { semanticAvailable: false }, scopes: { chronicle: [] } }
+    ];
+    const buildContextPreview = vi.fn(async () => previews.shift());
+
+    const report = await evaluateChronicleRetrieval(
+      { generation: { buildContextPreview } },
+      {},
+      { ...corpus, cases: [corpus.cases[0]!, corpus.cases[0]!, corpus.cases[0]!] }
+    );
+
+    expect(report.cases.map((result) => result.queryVariants)).toEqual([3, 0, 0]);
+  });
+
   it("keeps independently constructed evaluation identities, case hashes, and metrics repeatable", async () => {
     const memoryId = deterministicChronicleEvaluationUuid("v1", "repeatable", "memory:expected:0");
     expect(memoryId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-a[0-9a-f]{3}-[0-9a-f]{12}$/u);

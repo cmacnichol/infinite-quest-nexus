@@ -124,7 +124,8 @@ export async function seedCorpus(
     const evaluationUuid = (role: string): string => (
       deterministicChronicleEvaluationUuid(corpus.version, fixture.id, role)
     );
-    const semantic = fixture.id === "paraphrase" || fixture.id === "character-alias" || fixture.id === "location-alias" || Boolean(fixture.longParent);
+    const semantic = fixture.id === "paraphrase" || fixture.id === "character-alias" || fixture.id === "location-alias"
+      || fixture.id === "repeated-hint" || Boolean(fixture.longParent);
     const fixtureTitle = fixture.id === "superseded-fact" ? "E" : `Chronicle evaluator ${fixture.id}`;
     const world = await database.query<{ id: string }>(
       "INSERT INTO worlds (owner_user_id, title) VALUES ($1,$2) RETURNING id",
@@ -268,6 +269,20 @@ export async function seedCorpus(
           ]
         );
       labelByMemoryId[memory.rows[0]!.id] = label;
+    }
+    if (fixture.id === "repeated-hint") {
+      await database.query(
+        `INSERT INTO chronicle_memories
+           (id, owner_user_id, campaign_id, world_version_id, turn_id, memory_kind, ordinal, content, token_estimate)
+         VALUES ($1,$2,$3,$4,$5,'turn_fiction',2,'azure beacon confirmation again',1)`,
+        [evaluationUuid("memory:repeated-scene"), ownerUserId, campaign.rows[0]!.id, version.rows[0]!.id, secondTurn.rows[0]!.id]
+      );
+      await database.query(
+        `INSERT INTO chronicle_memories
+           (id, owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content, token_estimate)
+         VALUES ($1,$2,$3,$4,'open_thread',2,'about azure beacon confirmation',1)`,
+        [evaluationUuid("memory:repeated-open-thread"), ownerUserId, campaign.rows[0]!.id, version.rows[0]!.id]
+      );
     }
     for (const [index, label] of (fixture.forbiddenLabels?.futureTurn ?? []).entries()) {
       const memory = await database.query<{ id: string }>(

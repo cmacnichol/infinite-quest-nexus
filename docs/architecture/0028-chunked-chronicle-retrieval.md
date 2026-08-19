@@ -153,17 +153,17 @@ UPDATE campaign_memory_configs
 ## Legacy baseline
 
 The deterministic `chronicle-retrieval-evaluation.v3` corpus (SHA-256
-`4ce28d185827a5f932ab6b8cb4c8be97dfe0de483aed86e574c64522e85074f4`)
+`5f9d9a27ab5b8b532e8a051928f051b89b910b836a068ca0bc47d93581af32a1`)
 establishes the following label-only baseline for `legacy_hybrid` (generated
 locally at `tmp/chronicle-evaluation/legacy-baseline.json`, which is not
 committed):
 
-- recall@5/10/20: 0.675 / 0.675 / 0.675; MRR: 0.6670574712643678;
-  NDCG: 0.6613147192765458.
-- duplicate rate: 0; relevant memories per prompt token: 0.003399534800500984.
+- recall@5/10/20: 0.6428571428571429 / 0.6428571428571429 / 0.6428571428571429;
+  MRR: 0.6368289280858802; NDCG: 0.6298235421681389.
+- duplicate rate: 0; relevant memories per prompt token: 0.0033738191632928477.
 - cross-campaign, future-turn, and superseded-fact leakage: 0 / 0 / 0.
-- p50/p95 evaluator latency: 6 ms / 17 ms; embedding requests/cost: 6 / 0;
-  semantic-only hits: 3; promotions/demotions: 180 / 180. A promotion or
+- p50/p95 evaluator latency: 7 ms / 17 ms; embedding requests/cost: 7 / 0;
+  semantic-only hits: 8; promotions/demotions: 196 / 194. A promotion or
   demotion is an entry whose selected rank improves or worsens, respectively,
   against the deterministic lexical-only ordering for that same preview.
 
@@ -190,13 +190,22 @@ parents and two parents per turn, includes adjacent narration, and uses
 semantic/kind/entity values `4 / 1 / 0.5`.
 
 Against the same corpus, the selected profile produced recall@5/10/20 of
-`0.75 / 0.75 / 1`, MRR `0.6833333333333333`, NDCG `0.7874420161450112`,
-duplicate rate `0`, and `0.0053068758652515` relevant memories per prompt
-token. Calibration recorded p50/p95 evaluator latency of `7 / 29 ms`, zero
-embedding requests/cost from a warm cache, and leakage `0 / 0 / 0`. A separate
-selected-profile evaluator pass recorded `7 / 40 ms` and six requests/cost `0`;
-both latency readings satisfy the v3 legacy-derived p95 gate. The profile values
-are evaluator-generated rather than hand-selected.
+`0.7142857142857143 / 0.7142857142857143 / 1`, MRR
+`0.6537698412698413`, NDCG `0.7615948030961166`, duplicate rate `0`, and
+`0.005273566249176005` relevant memories per prompt token. Calibration recorded
+p50/p95 evaluator latency of `6 / 28 ms`, zero embedding requests/cost from a
+warm cache, and leakage `0 / 0 / 0`. A separate selected-profile evaluator pass
+recorded `6 / 42 ms` and seven requests/cost `0`; both latency readings satisfy
+the v3 legacy-derived p95 gate. The profile values are evaluator-generated rather
+than hand-selected.
+
+Query planning keeps the deterministic action, entity-expanded, scene, and
+open-thread order and all existing per-variant limits. The action is always
+retained. Later variants are omitted only when NFKC-normalized substantive terms
+and entity IDs are both already covered; the fixed connective set prevents
+formatting words from manufacturing novelty. The v3 `repeated-hint` case records
+safe cache-derived `queryVariants` metadata and reduced cold-cache variants from
+three to two without a ranking, leakage, or tight-budget regression.
 
 Selection is reproducible from the corpus alone. Wall-clock latency and
 embedding request counts are recorded as diagnostics but are excluded from the

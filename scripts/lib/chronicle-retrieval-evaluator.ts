@@ -55,6 +55,7 @@ export type ChronicleEvaluationCaseResult = Readonly<{
   latencyMs: number;
   embeddingRequests: number;
   embeddingCost: number;
+  queryVariants: number;
   semanticOnlyHits: number;
   promotions: number;
   demotions: number;
@@ -344,16 +345,27 @@ function safePreviewMetadata(preview: unknown): Readonly<{
   semanticAvailable: boolean;
   embeddingCost: number;
   embeddingRequests: number;
+  queryVariants: number;
 }> {
   if (!preview || typeof preview !== "object") {
-    return { semanticAvailable: false, embeddingCost: 0, embeddingRequests: 0 };
+    return { semanticAvailable: false, embeddingCost: 0, embeddingRequests: 0, queryVariants: 0 };
   }
   const retrieval = (preview as { retrieval?: unknown }).retrieval;
   if (!retrieval || typeof retrieval !== "object") {
-    return { semanticAvailable: false, embeddingCost: 0, embeddingRequests: 0 };
+    return { semanticAvailable: false, embeddingCost: 0, embeddingRequests: 0, queryVariants: 0 };
   }
-  const value = retrieval as { semanticAvailable?: unknown; embeddingCost?: unknown; embeddingRequests?: unknown };
+  const value = retrieval as {
+    semanticAvailable?: unknown;
+    embeddingCost?: unknown;
+    embeddingRequests?: unknown;
+    queryCacheHits?: unknown;
+    queryCacheMisses?: unknown;
+  };
   const semanticAvailable = value.semanticAvailable === true;
+  const queryCacheHits = typeof value.queryCacheHits === "number"
+    && Number.isInteger(value.queryCacheHits) && value.queryCacheHits >= 0 ? value.queryCacheHits : 0;
+  const queryCacheMisses = typeof value.queryCacheMisses === "number"
+    && Number.isInteger(value.queryCacheMisses) && value.queryCacheMisses >= 0 ? value.queryCacheMisses : 0;
   return {
     semanticAvailable,
     embeddingCost: typeof value.embeddingCost === "number" && Number.isFinite(value.embeddingCost) ? value.embeddingCost : 0,
@@ -361,7 +373,8 @@ function safePreviewMetadata(preview: unknown): Readonly<{
       && Number.isInteger(value.embeddingRequests)
       && value.embeddingRequests >= 0
       ? value.embeddingRequests
-      : semanticAvailable ? 1 : 0
+      : semanticAvailable ? 1 : 0,
+    queryVariants: queryCacheHits + queryCacheMisses
   };
 }
 
@@ -465,6 +478,7 @@ export async function evaluateChronicleRetrieval(
       latencyMs,
       embeddingRequests: metadata.embeddingRequests,
       embeddingCost: metadata.embeddingCost,
+      queryVariants: metadata.queryVariants,
       semanticOnlyHits,
       promotions: movements.promotions,
       demotions: movements.demotions,
