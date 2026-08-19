@@ -228,9 +228,13 @@ describe("Chronicle retrieval evaluator metrics", () => {
         scopes: { chronicle: [] },
         chronicleRetrieval: lexicalAudit
       },
-      { retrieval: { semanticAvailable: false }, scopes: { chronicle: [] } }
+      {
+        retrieval: { semanticAvailable: false },
+        scopes: { chronicle: [] },
+        chronicleRetrieval: lexicalAudit
+      }
     ];
-    const buildContextPreview = vi.fn(async () => previews.shift());
+    const buildContextPreview = vi.fn(async () => previews.shift()!);
 
     const report = await evaluateChronicleRetrieval(
       { generation: { buildContextPreview } },

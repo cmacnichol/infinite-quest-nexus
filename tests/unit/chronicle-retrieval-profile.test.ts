@@ -68,6 +68,7 @@ function invariantCase(
     ranks: Object.fromEntries(expectedLabels.map((label) => [label, 1])),
     promptTokens,
     latencyMs: 0,
+    queryVariants: 0,
     embeddingRequests: 0,
     embeddingCost: 0,
     semanticOnlyHits: 0,
