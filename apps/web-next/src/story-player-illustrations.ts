@@ -63,7 +63,7 @@ const INITIAL_STATE: StoryIllustrationState = {
 };
 
 function terminal(status: string | null): boolean {
-  return status === null || ["completed", "failed", "cancelled", "canceled", "skipped"].includes(status.toLowerCase());
+  return status === null || ["completed", "failed", "cancelled", "canceled", "skipped", "expired"].includes(status.toLowerCase());
 }
 
 function workIsActive(segments: readonly IllustrationSegment[]): boolean {

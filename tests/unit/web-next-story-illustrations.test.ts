@@ -282,6 +282,40 @@ describe("StoryIllustrationController", () => {
     expect(delay.wait).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["failed", "expired"] as const)("does not poll a terminal %s image job", async (imageJobStatus) => {
+    const wait = deferred<void>();
+    const delay = { wait: vi.fn().mockReturnValue(wait.promise) };
+    const api = illustrationApi({
+      segments: vi.fn().mockResolvedValue(segments(turnId, { imageJobStatus, status: "completed" }))
+    });
+    const subject = createStoryIllustrationController({ illustrations: api, idFactory: { create: () => "99999999-9999-4999-8999-999999999999" }, clock: { now: () => 0 }, delay });
+
+    await subject.load(campaignId, turnId);
+
+    expect(subject.get().status).toBe("ready");
+    expect(api.segments).toHaveBeenCalledTimes(1);
+    expect(delay.wait).not.toHaveBeenCalled();
+  });
+
+  it("polls a recoverable image job until it becomes terminal", async () => {
+    const wait = deferred<void>();
+    const delay = { wait: vi.fn().mockReturnValue(wait.promise) };
+    const api = illustrationApi({
+      segments: vi.fn()
+        .mockResolvedValueOnce(segments(turnId, { imageJobStatus: "recoverable", status: "completed" }))
+        .mockResolvedValueOnce(segments(turnId, { imageJobStatus: "failed", status: "completed" }))
+    });
+    const subject = createStoryIllustrationController({ illustrations: api, idFactory: { create: () => "99999999-9999-4999-8999-999999999999" }, clock: { now: () => 0 }, delay });
+
+    await subject.load(campaignId, turnId);
+    expect(delay.wait).toHaveBeenCalledTimes(1);
+    wait.resolve();
+    await settle();
+
+    expect(api.segments).toHaveBeenCalledTimes(2);
+    expect(delay.wait).toHaveBeenCalledTimes(1);
+  });
+
   it("aborts in-flight polling on disposal without issuing another image request", async () => {
     const wait = deferred<void>();
     let pollingSignal: AbortSignal | undefined;
