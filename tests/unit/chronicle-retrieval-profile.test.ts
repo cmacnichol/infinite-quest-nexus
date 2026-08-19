@@ -1,7 +1,10 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { CHRONICLE_RETRIEVAL_PROFILE_V2 } from "../../packages/domain/src/generated/chronicle-retrieval-profile-v2.js";
-import { assertCorpusResultInvariants } from "../../scripts/evaluate-chronicle-retrieval.js";
+import {
+  assertCorpusResultInvariants,
+  calibrationMetricsIfCorpusInvariantsHold
+} from "../../scripts/evaluate-chronicle-retrieval.js";
 import {
   CHRONICLE_RETRIEVAL_CALIBRATION_GRID,
   calibrateChronicleRetrievalProfile,
@@ -261,6 +264,43 @@ describe("Chronicle retrieval profile calibration", () => {
       }
     });
 
+    expect(selected.rrfK).toBe(accepted.rrfK);
+    expect(selected.candidateLimits.perSignal).toBe(accepted.candidateLimit);
+  });
+
+  it("continues calibration after the production callback excludes a long-parent violation", async () => {
+    const corpus = JSON.parse(readFileSync(
+      "tests/fixtures/chronicle-retrieval-evaluation.v3.json",
+      "utf8"
+    )) as ChronicleRetrievalCorpus;
+    const compliantReport = reportSatisfyingLongParentInvariants(corpus);
+    const missingLabel = "long-parent-budget-1024-a";
+    const invalidReport: ChronicleEvaluationReport = {
+      ...compliantReport,
+      cases: compliantReport.cases.map((value) => value.id === "long-parent-budget-1024" ? {
+        ...value,
+        retrievedLabels: [],
+        ranks: { ...value.ranks, [missingLabel]: null }
+      } : value)
+    };
+    const accepted = CHRONICLE_RETRIEVAL_CALIBRATION_GRID[0];
+    if (!accepted) throw new Error("Expected a calibration profile.");
+    let evaluations = 0;
+
+    const selected = await calibrateChronicleRetrievalProfile({
+      corpusHash: CORPUS_HASH,
+      baselineMetrics: metrics(),
+      generatedAt: GENERATED_AT,
+      async evaluate(profile) {
+        evaluations += 1;
+        return calibrationMetricsIfCorpusInvariantsHold(
+          profile === accepted ? compliantReport : invalidReport,
+          corpus
+        );
+      }
+    });
+
+    expect(evaluations).toBe(CHRONICLE_RETRIEVAL_CALIBRATION_GRID.length);
     expect(selected.rrfK).toBe(accepted.rrfK);
     expect(selected.candidateLimits.perSignal).toBe(accepted.candidateLimit);
   });

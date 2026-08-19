@@ -591,6 +591,19 @@ export function assertCorpusResultInvariants(
   }
 }
 
+export function calibrationMetricsIfCorpusInvariantsHold(
+  report: Awaited<ReturnType<typeof evaluateChronicleRetrieval>>,
+  corpus: ChronicleRetrievalCorpus,
+): Awaited<ReturnType<typeof evaluateChronicleRetrieval>>["metrics"] | null {
+  try {
+    assertCorpusResultInvariants(report, corpus);
+  } catch (error) {
+    if (error instanceof ChronicleEvaluationInvariantError) return null;
+    throw error;
+  }
+  return report.metrics;
+}
+
 export async function main(): Promise<void> {
 const corpusArgument = argument("--corpus");
 const productionCorpusPath = resolveRepositoryCorpusPath(undefined);
@@ -640,13 +653,7 @@ try {
             seededCorpus,
             { implementation: "chunked_hybrid", corpusHash }
           );
-          try {
-            assertCorpusResultInvariants(evaluated, corpus);
-          } catch (error) {
-            if (error instanceof ChronicleEvaluationInvariantError) return null;
-            throw error;
-          }
-          return evaluated.metrics;
+          return calibrationMetricsIfCorpusInvariantsHold(evaluated, corpus);
         }
       });
       throw new EvaluationRollback(profile);
