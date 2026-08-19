@@ -48,7 +48,6 @@ docker-compose.override.yml
 
 # Local-only project notes
 docs/*.local.md
-task-9-report.md
 
 # Repository-local development tools and worktrees
 /.kangentic/

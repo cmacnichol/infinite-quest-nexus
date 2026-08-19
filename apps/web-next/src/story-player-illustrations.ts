@@ -184,13 +184,31 @@ export function createStoryIllustrationController(options: StoryIllustrationCont
     publish({ ...next, ...selected(next) });
   };
 
-  const afterAction = async (action: () => Promise<unknown>, refresh = true) => {
-    if (disposed || state.campaignId === null || state.turnId === null || !currentSignal() || currentSignal()!.aborted) return;
+  const actionScope = () => {
+    const signal = currentSignal();
+    if (
+      disposed
+      || state.campaignId === null
+      || state.turnId === null
+      || signal === undefined
+      || signal.aborted
+      || state.config === null
+      || !state.config.enabled
+      || state.config.sourcePolicy === "off"
+    ) return null;
+    return { campaignId: state.campaignId, turnId: state.turnId, epoch, signal };
+  };
+  const afterAction = async (action: (scope: NonNullable<ReturnType<typeof actionScope>>) => Promise<unknown>, refresh = true) => {
+    const scope = actionScope();
+    if (scope === null) return;
     try {
-      await action();
-      if (refresh && !disposed && state.campaignId !== null && state.turnId !== null) await load(state.campaignId, state.turnId);
+      await action(scope);
+      if (!isCurrent(scope.epoch, scope.campaignId, scope.turnId)) return;
+      if (refresh) await load(scope.campaignId, scope.turnId);
     } catch {
-      if (!disposed) publish({ ...state, ...unavailable("The requested image operation could not be completed.") });
+      if (isCurrent(scope.epoch, scope.campaignId, scope.turnId)) {
+        publish({ ...state, ...unavailable("The requested image operation could not be completed.") });
+      }
     }
   };
 
@@ -209,30 +227,28 @@ export function createStoryIllustrationController(options: StoryIllustrationCont
       const next = { ...state, prompt };
       publish(next);
     },
-    regenerate: async () => afterAction(async () => {
-      if (!state.selectedSegment || !currentSignal()) return;
-      await options.illustrations.regenerateSegmentImage(state.selectedSegment.id, { prompt: state.prompt, variantIndex: state.selectedVariant?.variantIndex ?? 0 }, currentSignal());
+    regenerate: async () => afterAction(async (scope) => {
+      const segment = state.selectedSegment;
+      if (!segment) return;
+      await options.illustrations.regenerateSegmentImage(segment.id, { prompt: state.prompt, variantIndex: state.selectedVariant?.variantIndex ?? 0 }, scope.signal);
     }),
-    retryJob: async () => afterAction(async () => {
-      if (!state.selectedSegment?.imageJobId || !currentSignal()) return;
-      await options.illustrations.retryImageJob(state.selectedSegment.imageJobId, currentSignal());
+    retryJob: async () => afterAction(async (scope) => {
+      const jobId = state.selectedSegment?.imageJobId;
+      if (!jobId) return;
+      await options.illustrations.retryImageJob(jobId, scope.signal);
     }),
-    generateMissing: async () => afterAction(async () => {
-      if (!state.turnId || !currentSignal()) return;
-      await options.illustrations.generateTurnSegments(state.turnId, { mode: "missing", idempotencyKey: options.idFactory.create() }, currentSignal());
+    generateMissing: async () => afterAction(async (scope) => {
+      await options.illustrations.generateTurnSegments(scope.turnId, { mode: "missing", idempotencyKey: options.idFactory.create() }, scope.signal);
     }),
-    rebuild: async () => afterAction(async () => {
-      if (!state.turnId || !currentSignal()) return;
-      await options.illustrations.generateTurnSegments(state.turnId, { mode: "rebuild", idempotencyKey: options.idFactory.create() }, currentSignal());
+    rebuild: async () => afterAction(async (scope) => {
+      await options.illustrations.generateTurnSegments(scope.turnId, { mode: "rebuild", idempotencyKey: options.idFactory.create() }, scope.signal);
     }),
-    loadProvenance: async () => afterAction(async () => {
-      if (!state.turnId || !currentSignal()) return;
-      const provenance = await options.illustrations.resolution(state.turnId, currentSignal());
-      if (!disposed) publish({ ...state, provenance });
+    loadProvenance: async () => afterAction(async (scope) => {
+      const provenance = await options.illustrations.resolution(scope.turnId, scope.signal);
+      if (isCurrent(scope.epoch, scope.campaignId, scope.turnId)) publish({ ...state, provenance });
     }, false),
-    rematch: async () => afterAction(async () => {
-      if (!state.turnId || !currentSignal()) return;
-      await options.illustrations.rematch(state.turnId, currentSignal());
+    rematch: async () => afterAction(async (scope) => {
+      await options.illustrations.rematch(scope.turnId, scope.signal);
     }),
     dispose() {
       if (disposed) return;

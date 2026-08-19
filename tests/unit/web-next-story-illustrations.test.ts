@@ -36,7 +36,7 @@ function config(overrides: Partial<IllustrationConfigResponse> = {}): Illustrati
   };
 }
 
-function segments(turn = turnId): IllustrationSegmentsResponse {
+function segments(turn = turnId, overrides: Record<string, unknown> = {}): IllustrationSegmentsResponse {
   return {
     segments: [{
       setId: "66666666-6666-4666-8666-666666666666",
@@ -89,9 +89,22 @@ function segments(turn = turnId): IllustrationSegmentsResponse {
       providerStatus: "completed",
       providerProgress: 100,
       errorMessage: null,
-      promptJobStatus: null
+      promptJobStatus: null,
+      ...overrides
     }]
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => { resolve = nextResolve; reject = nextReject; });
+  return { promise, resolve, reject };
+}
+
+async function settle(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
 }
 
 function illustrationApi(overrides: Partial<IllustrationApi> = {}): IllustrationApi {
@@ -127,6 +140,56 @@ describe("StoryIllustrationController", () => {
     expect(api.segments).not.toHaveBeenCalled();
     expect(subject.get().status).toBe("disabled");
     expect(subject.get().segments).toEqual([]);
+  });
+
+  it.each([
+    ["disabled", config({ enabled: false })],
+    ["source policy off", config({ sourcePolicy: "off" })]
+  ] as const)("does not call illustration endpoints when %s", async (_, configuration) => {
+    const api = illustrationApi({ config: vi.fn().mockResolvedValue(configuration) });
+    const subject = controller(api);
+
+    await subject.load(campaignId, turnId);
+    subject.selectNext();
+    await subject.editPrompt("Do not send this prompt.");
+    await subject.regenerate();
+    await subject.retryJob();
+    await subject.generateMissing();
+    await subject.rebuild();
+    await subject.loadProvenance();
+    await subject.rematch();
+
+    expect(api.segments).not.toHaveBeenCalled();
+    expect(api.regenerateSegmentImage).not.toHaveBeenCalled();
+    expect(api.retryImageJob).not.toHaveBeenCalled();
+    expect(api.generateTurnSegments).not.toHaveBeenCalled();
+    expect(api.resolution).not.toHaveBeenCalled();
+    expect(api.rematch).not.toHaveBeenCalled();
+  });
+
+  it("keeps controller-level endpoint failures local and renders an empty ready turn", async () => {
+    const unavailable = controller(illustrationApi({ config: vi.fn().mockRejectedValue(new Error("offline")) }));
+    await unavailable.load(campaignId, turnId);
+    expect(unavailable.get().status).toBe("unavailable");
+
+    const empty = controller(illustrationApi({ segments: vi.fn().mockResolvedValue({ segments: [] }) }));
+    await empty.load(campaignId, turnId);
+    empty.selectPrevious();
+    empty.selectNext();
+    expect(empty.get().status).toBe("ready");
+    expect(empty.get().selectedVariant).toBeNull();
+  });
+
+  it("keeps one available variant selected when image navigation wraps", async () => {
+    const response = segments();
+    response.segments[0]!.variants = response.segments[0]!.variants.slice(0, 1);
+    const subject = controller(illustrationApi({ segments: vi.fn().mockResolvedValue(response) }));
+
+    await subject.load(campaignId, turnId);
+    subject.selectNext();
+    subject.selectPrevious();
+
+    expect(subject.get().selectedVariant?.url).toBe("/assets/one.png");
   });
 
   it("keeps image navigation and image actions scoped to the selected accepted turn", async () => {
@@ -173,5 +236,87 @@ describe("StoryIllustrationController", () => {
     subject.dispose();
     await subject.load(campaignId, turnId);
     expect(subject.get().turnId).toBe(anotherTurnId);
+  });
+
+  it("ignores abort-ignoring provenance and action completions after a campaign and turn switch", async () => {
+    const pendingProvenance = deferred<unknown>();
+    const pendingRegeneration = deferred<unknown>();
+    const otherCampaignId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const api = illustrationApi({
+      segments: vi.fn().mockResolvedValueOnce(segments(turnId)).mockResolvedValueOnce(segments(anotherTurnId)),
+      resolution: vi.fn().mockReturnValue(pendingProvenance.promise),
+      regenerateSegmentImage: vi.fn().mockReturnValue(pendingRegeneration.promise)
+    });
+    const subject = controller(api);
+
+    await subject.load(campaignId, turnId);
+    const provenance = subject.loadProvenance();
+    const regeneration = subject.regenerate();
+    await subject.load(otherCampaignId, anotherTurnId);
+    pendingProvenance.resolve({ id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", status: "stale" });
+    pendingRegeneration.reject(new Error("late failure"));
+    await Promise.all([provenance, regeneration]);
+
+    expect(subject.get().campaignId).toBe(otherCampaignId);
+    expect(subject.get().turnId).toBe(anotherTurnId);
+    expect(subject.get().provenance).toBeNull();
+    expect(subject.get().status).toBe("ready");
+  });
+
+  it("runs one poller for active work and stops it once the visible job is terminal", async () => {
+    const wait = deferred<void>();
+    const delay = { wait: vi.fn().mockReturnValue(wait.promise) };
+    const api = illustrationApi({
+      segments: vi.fn()
+        .mockResolvedValueOnce(segments(turnId, { imageJobStatus: "processing", status: "processing" }))
+        .mockResolvedValueOnce(segments(turnId))
+    });
+    const subject = createStoryIllustrationController({ illustrations: api, idFactory: { create: () => "99999999-9999-4999-8999-999999999999" }, clock: { now: () => 0 }, delay });
+
+    await subject.load(campaignId, turnId);
+    expect(delay.wait).toHaveBeenCalledTimes(1);
+    wait.resolve();
+    await settle();
+
+    expect(api.segments).toHaveBeenCalledTimes(2);
+    expect(delay.wait).toHaveBeenCalledTimes(1);
+  });
+
+  it("aborts in-flight polling on disposal without issuing another image request", async () => {
+    const wait = deferred<void>();
+    let pollingSignal: AbortSignal | undefined;
+    const delay = { wait: vi.fn((_: number, signal: AbortSignal) => { pollingSignal = signal; return wait.promise; }) };
+    const api = illustrationApi({ segments: vi.fn().mockResolvedValue(segments(turnId, { imageJobStatus: "processing", status: "processing" })) });
+    const subject = createStoryIllustrationController({ illustrations: api, idFactory: { create: () => "99999999-9999-4999-8999-999999999999" }, clock: { now: () => 0 }, delay });
+
+    await subject.load(campaignId, turnId);
+    subject.dispose();
+    wait.resolve();
+    await settle();
+
+    expect(pollingSignal?.aborted).toBe(true);
+    expect(api.segments).toHaveBeenCalledTimes(1);
+  });
+
+  it("aborts stale polling before a campaign switch can overwrite the new turn", async () => {
+    const wait = deferred<void>();
+    let pollingSignal: AbortSignal | undefined;
+    const delay = { wait: vi.fn((_: number, signal: AbortSignal) => { pollingSignal = signal; return wait.promise; }) };
+    const api = illustrationApi({
+      segments: vi.fn()
+        .mockResolvedValueOnce(segments(turnId, { imageJobStatus: "processing", status: "processing" }))
+        .mockResolvedValueOnce(segments(anotherTurnId))
+    });
+    const subject = createStoryIllustrationController({ illustrations: api, idFactory: { create: () => "99999999-9999-4999-8999-999999999999" }, clock: { now: () => 0 }, delay });
+
+    await subject.load(campaignId, turnId);
+    await subject.load("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", anotherTurnId);
+    wait.resolve();
+    await settle();
+
+    expect(pollingSignal?.aborted).toBe(true);
+    expect(subject.get().turnId).toBe(anotherTurnId);
+    expect(subject.get().segments[0]?.turnId).toBe(anotherTurnId);
+    expect(api.segments).toHaveBeenCalledTimes(2);
   });
 });
