@@ -52,6 +52,8 @@ export function mountStoryPlayerPage(
   let controller: AbortController | null = null;
   let projection: Readonly<CampaignProjection> = composition.campaignStore.store.get();
   let retryControl: HTMLButtonElement | null = null;
+  let historyDialogOpener: HTMLElement | null = null;
+  let focusHistoryDialog = false;
   const history = createStoryHistoryController({
     campaigns: composition.api.campaigns,
     campaignStore: composition.campaignStore,
@@ -59,6 +61,52 @@ export function mountStoryPlayerPage(
   });
 
   const onRetry = () => { void load(); };
+  const restoreHistoryFocus = () => {
+    const opener = historyDialogOpener;
+    historyDialogOpener = null;
+    opener?.focus();
+  };
+  const closeHistoryDialog = () => {
+    const dialog = root.querySelector<HTMLDialogElement>("[data-story-history]");
+    if (dialog && (dialog.hasAttribute("open") || dialog.open) && typeof dialog.close === "function") dialog.close();
+    if (ui.get().activeDialog === "history") ui.setActiveDialog(null);
+    restoreHistoryFocus();
+  };
+  const bindHistoryDialog = () => {
+    const dialog = root.querySelector<HTMLDialogElement>("[data-story-history]");
+    if (!dialog) return;
+    if (!dialog.hasAttribute("open")) {
+      if (typeof dialog.showModal === "function") dialog.showModal();
+      else dialog.setAttribute("open", "");
+    }
+    dialog.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      closeHistoryDialog();
+    });
+    dialog.addEventListener("close", () => {
+      if (ui.get().activeDialog === "history") ui.setActiveDialog(null);
+      restoreHistoryFocus();
+    });
+    dialog.addEventListener("keydown", (event) => {
+      if (event.key !== "Tab") return;
+      const controls = [...dialog.querySelectorAll<HTMLElement>("button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled])")];
+      if (!controls.length) return;
+      const active = dialog.ownerDocument.activeElement as HTMLElement;
+      const index = controls.indexOf(active);
+      const focusedIndex = index >= 0 ? index : controls.indexOf(event.target as HTMLElement);
+      if (event.shiftKey && focusedIndex <= 0) {
+        event.preventDefault();
+        controls.at(-1)?.focus();
+      } else if (!event.shiftKey && focusedIndex === controls.length - 1) {
+        event.preventDefault();
+        controls[0]?.focus();
+      }
+    });
+    if (focusHistoryDialog) {
+      focusHistoryDialog = false;
+      dialog.querySelector<HTMLElement>("[data-story-history-focus]")?.focus();
+    }
+  };
   function render(): void {
     retryControl?.removeEventListener("click", onRetry);
     renderStoryPlayerView(root, { route, ui: ui.get(), campaigns, selectedCampaign, projection });
@@ -80,6 +128,8 @@ export function mountStoryPlayerPage(
     for (const control of root.querySelectorAll<HTMLElement>("[data-action='open-complete-history']")) {
       control.addEventListener("click", (event) => {
         event.stopPropagation();
+        historyDialogOpener = control;
+        focusHistoryDialog = true;
         ui.setActiveDialog("history");
         void history.openCompleteHistory().catch(() => undefined);
       });
@@ -88,8 +138,19 @@ export function mountStoryPlayerPage(
       control.addEventListener("click", (event) => { event.stopPropagation(); void history.retryCompleteHistory().catch(() => undefined); });
     }
     for (const control of root.querySelectorAll<HTMLElement>("[data-action='close-history']")) {
-      control.addEventListener("click", (event) => { event.stopPropagation(); ui.setActiveDialog(null); });
+      control.addEventListener("click", (event) => { event.stopPropagation(); closeHistoryDialog(); });
     }
+    for (const control of root.querySelectorAll<HTMLElement>("[data-action='jump-to-scene']")) {
+      control.addEventListener("click", (event) => { event.stopPropagation(); closeHistoryDialog(); });
+    }
+    for (const control of root.querySelectorAll<HTMLElement>("[data-action='inspect-state']")) {
+      control.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const turnNumber = ui.get().viewTurnNumber;
+        if (turnNumber !== null) void history.inspect(turnNumber).then(() => undefined);
+      });
+    }
+    bindHistoryDialog();
   }
   const unsubscribeStore = composition.campaignStore.store.subscribe((next) => {
     projection = next;

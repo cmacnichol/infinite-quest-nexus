@@ -301,9 +301,11 @@ function completeHistoryDialog(document: Document, state: StoryPlayerViewState):
   if (state.ui.activeDialog !== "history") return null;
   const dialog = element(document, "dialog", "story-history-dialog") as HTMLDialogElement;
   dialog.dataset.storyHistory = "";
-  dialog.setAttribute("open", "");
   dialog.setAttribute("aria-label", "Complete story history");
-  dialog.append(element(document, "h2", undefined, "Turn History"));
+  const title = element(document, "h2", undefined, "Turn History");
+  title.dataset.storyHistoryFocus = "";
+  title.tabIndex = -1;
+  dialog.append(title);
   if (state.ui.history === "loading") dialog.append(element(document, "p", undefined, "Loading complete history…"));
   if (state.ui.history === "error") {
     dialog.append(element(document, "p", "story-history-error", state.ui.message ?? "History unavailable."));
@@ -323,13 +325,14 @@ function completeHistoryDialog(document: Document, state: StoryPlayerViewState):
   dialog.append(list);
   for (const [action, label] of [
     ["inspect-state", "Inspect State"],
-    ["restart-from-turn", "Restart / Branch from Here"],
+    ["jump-to-scene", "Jump to Scene"],
     ["jump-to-latest", "Jump to Latest"],
     ["close-history", "Done"]
   ] as const) {
     const button = element(document, "button", undefined, label);
     button.type = "button";
     button.dataset.action = action;
+    if (action === "jump-to-scene" && state.ui.viewTurnNumber !== null) button.dataset.turnNumber = String(state.ui.viewTurnNumber);
     if (action === "jump-to-latest" && state.projection.campaign) button.dataset.turnNumber = String(state.projection.campaign.activeTurnNumber);
     dialog.append(button);
   }

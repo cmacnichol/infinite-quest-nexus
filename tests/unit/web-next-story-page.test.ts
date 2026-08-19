@@ -109,6 +109,7 @@ function composition(options: {
   readonly list?: ReturnType<typeof vi.fn>;
   readonly syncStatus?: ReturnType<typeof vi.fn>;
   readonly turns?: ReturnType<typeof vi.fn>;
+  readonly state?: ReturnType<typeof vi.fn>;
   readonly session?: ReturnType<typeof vi.fn>;
   readonly campaignStore?: CampaignStoreController;
 } = {}): StoryPlayerComposition {
@@ -117,7 +118,8 @@ function composition(options: {
     api: {
       campaigns: {
         list: options.list ?? vi.fn().mockResolvedValue({ campaigns: [campaignSummary()] }),
-        turns: options.turns ?? vi.fn()
+        turns: options.turns ?? vi.fn(),
+        state: options.state ?? vi.fn()
       },
       generation: { syncStatus: options.syncStatus ?? vi.fn().mockResolvedValue(sync()) }
       ,session: { get: options.session }
@@ -504,6 +506,54 @@ describe("Story Player page shell", () => {
     expect(dialog?.textContent).toContain("History unavailable");
     expect(page.document.querySelector("[data-story-leaf] h1")?.textContent).toBe("Turn 7");
     expect(page.document.querySelector<HTMLButtonElement>("[data-action='retry-complete-history']")).toBeTruthy();
+    mounted.dispose();
+  });
+
+  it("runs the selected History actions through a native dialog close path with focus restoration", async () => {
+    const page = fixture();
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 7 }, activeTurnNumber: 7,
+      turns: { campaignId, nextCursor: null, turns: [6, 7].map((turnNumber) => ({
+        id: `00000000-0000-4000-8000-${String(turnNumber).padStart(12, "0")}`,
+        turnNumber, action: `Action ${turnNumber}`, inputMode: "action" as const, inputModeSource: "explicit" as const,
+        narration: `Narration ${turnNumber}.`, choices: [], customActionSuggestion: "", imagePrompt: "", imageUrl: null,
+        acceptedAt: "2026-08-18T00:00:00.000Z", chronicleRetrieval: null, reportedCost: null
+      })) }
+    });
+    const state = vi.fn().mockResolvedValue({ campaignId, turnNumber: 6 });
+    const focus = vi.spyOn(page.window.HTMLElement.prototype, "focus");
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 7 }, composition({
+      list: vi.fn().mockResolvedValue({ campaigns: [campaignSummary({ activeTurnNumber: 7 })] }), syncStatus: vi.fn().mockResolvedValue(loaded), state
+    }));
+    await settle();
+    const opener = page.document.querySelector<HTMLButtonElement>("[data-action='open-complete-history']");
+    opener?.click();
+    await settle();
+
+    const dialog = page.document.querySelector<HTMLDialogElement>("[data-story-history]");
+    expect(dialog?.querySelector("[data-action='jump-to-scene']")?.textContent).toContain("Jump to Scene");
+    expect(dialog?.querySelector("[data-action='restart-from-turn']")).toBeNull();
+    dialog?.querySelector<HTMLButtonElement>("[data-turn-number='6']")?.click();
+    dialog?.querySelector<HTMLButtonElement>("[data-action='inspect-state']")?.click();
+    await settle();
+    expect(state).toHaveBeenCalledWith(campaignId, 6, undefined);
+    expect(focus).toHaveBeenCalled();
+
+    const controls = [...dialog?.querySelectorAll<HTMLButtonElement>("button") ?? []];
+    const firstControl = controls[0];
+    const lastControl = controls.at(-1);
+    const firstFocus = firstControl && vi.spyOn(firstControl, "focus");
+    lastControl?.focus();
+    firstFocus?.mockClear();
+    const tab = new page.window.Event("keydown", { bubbles: true, cancelable: true });
+    Object.defineProperty(tab, "key", { value: "Tab" });
+    Object.defineProperty(tab, "shiftKey", { value: false });
+    lastControl?.dispatchEvent(tab);
+    expect(firstFocus).toHaveBeenCalled();
+
+    dialog?.dispatchEvent(new page.window.Event("cancel", { cancelable: true }));
+    expect(page.document.querySelector("[data-story-history]")).toBeNull();
+    expect(focus.mock.instances).toContain(opener);
     mounted.dispose();
   });
 

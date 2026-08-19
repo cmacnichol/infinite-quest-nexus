@@ -165,6 +165,63 @@ describe("Story History controller", () => {
     await expect(inspection).resolves.toBeNull();
   });
 
+  it("does not publish a pending cursor page after the window cursor changes", async () => {
+    const { campaignStore, controller, turns, ui } = setup([turn(6), turn(7)], "before-6");
+    ui.setViewTurnNumber(6);
+    const delayed = deferred<TurnListResponse>();
+    turns.mockReturnValue(delayed.promise);
+    const previous = controller.previous();
+
+    campaignStore.prependOlderTurns({ campaignId, turns: [turn(4), turn(5)], nextCursor: "before-4" });
+    controller.sync(campaignStore.store.get());
+    delayed.resolve({ campaignId, turns: [turn(2), turn(3)], nextCursor: null });
+    await previous;
+
+    expect(campaignStore.store.get().turns.map((item) => item.turnNumber)).toEqual([4, 5, 6, 7]);
+    expect(ui.get().viewTurnNumber).toBe(6);
+  });
+
+  it("keeps a newer shared complete walk owned after an obsolete walk finishes", async () => {
+    const { campaignStore, controller, turns, ui } = setup([turn(6), turn(7)], "before-6");
+    const firstPage = deferred<TurnListResponse>();
+    const secondPage = deferred<TurnListResponse>();
+    turns.mockReturnValueOnce(firstPage.promise).mockReturnValue(secondPage.promise);
+    const first = controller.openCompleteHistory();
+
+    campaignStore.load(sync([turn(8), turn(9)], "before-8", "sync-2"));
+    controller.sync(campaignStore.store.get());
+    const second = controller.openCompleteHistory();
+    firstPage.resolve({ campaignId, turns: [turn(1)], nextCursor: null });
+    await first;
+
+    const duplicate = controller.openCompleteHistory();
+    expect(duplicate).toBe(second);
+    expect(ui.get().history).toBe("loading");
+    secondPage.resolve({ campaignId, turns: [turn(1), turn(2)], nextCursor: null });
+    await Promise.all([second, duplicate]);
+    expect(ui.get().history).toBe("idle");
+    expect(campaignStore.store.get().turns.map((item) => item.turnNumber)).toEqual([1, 2, 8, 9]);
+  });
+
+  it("allows inspect and Previous to complete without superseding a shared complete walk", async () => {
+    const { campaignStore, controller, state, turns, ui } = setup([turn(6), turn(7)], "before-6");
+    const completePage = deferred<TurnListResponse>();
+    const previousPage = deferred<TurnListResponse>();
+    turns.mockReturnValueOnce(completePage.promise).mockReturnValueOnce(previousPage.promise);
+    state.mockResolvedValue({ campaignId, turnNumber: 6 });
+    const complete = controller.openCompleteHistory();
+    const inspection = controller.inspect(6);
+    const previous = controller.previous();
+
+    await expect(inspection).resolves.toEqual({ campaignId, turnNumber: 6 });
+    completePage.resolve({ campaignId, turns: [turn(4), turn(5)], nextCursor: null });
+    previousPage.resolve({ campaignId, turns: [turn(4), turn(5)], nextCursor: null });
+    await Promise.all([complete, previous]);
+
+    expect(ui.get().history).toBe("idle");
+    expect(campaignStore.store.get().turns.map((item) => item.turnNumber)).toEqual([4, 5, 6, 7]);
+  });
+
   it("latest-aligns the compact spine safely when test DOMs do not implement scrollTo", () => {
     const scrollTo = vi.fn();
     alignLatestSpine({ scrollWidth: 420, scrollTo } as unknown as HTMLElement, (callback) => callback());

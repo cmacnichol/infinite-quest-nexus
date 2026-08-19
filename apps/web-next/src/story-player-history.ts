@@ -29,10 +29,11 @@ export interface StoryHistoryControllerOptions {
 }
 
 type RequestGuard = Readonly<{
+  id: number;
   campaignId: string;
   epoch: number;
   cursor: string | null;
-  request: number;
+  authority: HistoryEpoch;
 }>;
 
 type HistoryEpoch = Readonly<{
@@ -40,6 +41,8 @@ type HistoryEpoch = Readonly<{
   syncToken: string | null;
   activeTurnNumber: number;
   latestTurnId: string | null;
+  oldestTurnId: string | null;
+  nextTurnsCursor: string | null;
 }>;
 
 function positiveTurnNumber(value: unknown): number | null {
@@ -61,7 +64,9 @@ function currentEpoch(projection: Readonly<CampaignProjection>): HistoryEpoch {
     campaignId: projection.campaign?.id ?? null,
     syncToken: projection.syncToken,
     activeTurnNumber: projection.campaign?.activeTurnNumber ?? 0,
-    latestTurnId: turns.at(-1)?.id ?? null
+    latestTurnId: turns.at(-1)?.id ?? null,
+    oldestTurnId: turns[0]?.id ?? null,
+    nextTurnsCursor: projection.nextTurnsCursor
   };
 }
 
@@ -69,7 +74,9 @@ function sameEpoch(left: HistoryEpoch, right: HistoryEpoch): boolean {
   return left.campaignId === right.campaignId
     && left.syncToken === right.syncToken
     && left.activeTurnNumber === right.activeTurnNumber
-    && left.latestTurnId === right.latestTurnId;
+    && left.latestTurnId === right.latestTurnId
+    && left.oldestTurnId === right.oldestTurnId
+    && left.nextTurnsCursor === right.nextTurnsCursor;
 }
 
 function mergeTurns<T extends { id: string; turnNumber: number }>(existing: readonly T[], incoming: readonly T[]): readonly T[] {
@@ -110,21 +117,22 @@ export function createStoryHistoryController(options: StoryHistoryControllerOpti
   let projection = options.campaignStore.store.get();
   let epochState = currentEpoch(projection);
   let epoch = 0;
-  let request = 0;
-  let completeHistory: Promise<StoryHistoryResult> | null = null;
+  let operationId = 0;
+  let completeHistory: Readonly<{ guard: RequestGuard; promise: Promise<StoryHistoryResult> }> | null = null;
   let disposed = false;
 
   const startRequest = (cursor: string | null): RequestGuard | null => {
-    const campaignId = projection.campaign?.id;
+    const current = options.campaignStore.store.get();
+    const campaignId = current.campaign?.id;
     if (disposed || campaignId === undefined) return null;
-    request += 1;
-    return { campaignId, epoch, cursor, request };
+    const authority = currentEpoch(current);
+    return { id: ++operationId, campaignId, epoch, cursor, authority };
   };
 
   const isCurrent = (guard: RequestGuard): boolean => {
-    if (disposed || guard.epoch !== epoch || guard.request !== request) return false;
+    if (disposed || guard.epoch !== epoch) return false;
     const current = options.campaignStore.store.get();
-    return current.campaign?.id === guard.campaignId && currentEpoch(current).campaignId === guard.campaignId;
+    return current.campaign?.id === guard.campaignId && sameEpoch(currentEpoch(current), guard.authority);
   };
 
   const olderPage = async (guard: RequestGuard): Promise<TurnListResponse | null> => {
@@ -142,14 +150,14 @@ export function createStoryHistoryController(options: StoryHistoryControllerOpti
   };
 
   const complete = (): Promise<StoryHistoryResult> => {
-    if (completeHistory !== null) return completeHistory;
+    if (completeHistory !== null && isCurrent(completeHistory.guard)) return completeHistory.promise;
     const initial = options.campaignStore.store.get();
     projection = initial;
     const guard = startRequest(initial.nextTurnsCursor);
     if (guard === null) return Promise.resolve({ campaignId: "", turns: [], nextCursor: null });
     options.model.setMessage(null);
     options.model.setHistory("loading");
-    completeHistory = (async () => {
+    const promise = (async () => {
       let cursor = guard.cursor;
       let turns = sortedTurns(initial.turns);
       const pages: TurnListResponse[] = [];
@@ -167,9 +175,13 @@ export function createStoryHistoryController(options: StoryHistoryControllerOpti
         cursor = page.nextCursor;
       }
       if (!isCurrent(guard)) return { campaignId: guard.campaignId, turns: sortedTurns(options.campaignStore.store.get().turns), nextCursor: options.campaignStore.store.get().nextTurnsCursor };
-      for (const page of pages) {
-        if (!isCurrent(guard)) return { campaignId: guard.campaignId, turns: sortedTurns(options.campaignStore.store.get().turns), nextCursor: options.campaignStore.store.get().nextTurnsCursor };
-        options.campaignStore.prependOlderTurns(page);
+      if (pages.length > 0) {
+        const mergedPage: TurnListResponse = {
+          campaignId: guard.campaignId,
+          turns: pages.flatMap((page) => page.turns),
+          nextCursor: null
+        };
+        options.campaignStore.prependOlderTurns(mergedPage);
       }
       options.model.setHistory("idle");
       return { campaignId: guard.campaignId, turns, nextCursor: null };
@@ -179,8 +191,11 @@ export function createStoryHistoryController(options: StoryHistoryControllerOpti
         options.model.setMessage("History unavailable. Retry complete history.");
       }
       throw error;
-    }).finally(() => { completeHistory = null; });
-    return completeHistory;
+    }).finally(() => {
+      if (completeHistory?.guard === guard) completeHistory = null;
+    });
+    completeHistory = { guard, promise };
+    return promise;
   };
 
   return {
@@ -190,8 +205,8 @@ export function createStoryHistoryController(options: StoryHistoryControllerOpti
       if (!sameEpoch(epochState, nextEpoch)) {
         epochState = nextEpoch;
         epoch += 1;
-        request += 1;
         completeHistory = null;
+        if (options.model.get().history === "loading") options.model.setHistory("idle");
       }
     },
     async previous() {
@@ -240,7 +255,6 @@ export function createStoryHistoryController(options: StoryHistoryControllerOpti
     },
     dispose() {
       disposed = true;
-      request += 1;
       completeHistory = null;
     }
   };
