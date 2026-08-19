@@ -1,11 +1,22 @@
 import { describe, expect, it } from "vitest";
 import {
+  activeTurnNumber,
   appendExpectedTurnNumber,
   latestTurnNumber,
+  recentTurnSpine,
   selectedTurnNumber,
   turnIndexForNumber,
   undoTargetTurnNumber
 } from "../../apps/web/src/story-turn-window.js";
+import {
+  activeTurnNumber as activeSharedTurnNumber,
+  appendExpectedTurnNumber as appendExpectedSharedTurnNumber,
+  latestTurnNumber as latestSharedTurnNumber,
+  recentTurnSpine as recentSharedTurnSpine,
+  selectedTurnNumber as selectedSharedTurnNumber,
+  turnIndexForNumber as turnIndexForSharedNumber,
+  undoTargetTurnNumber as undoTargetSharedTurnNumber
+} from "../../packages/client-core/src/index.js";
 
 const windowTurns = Array.from({ length: 50 }, (_, offset) => ({
   id: `turn-${offset + 51}`,
@@ -13,6 +24,16 @@ const windowTurns = Array.from({ length: 50 }, (_, offset) => ({
 }));
 
 describe("Story Player bounded turn window commands", () => {
+  it("re-exports the shared persisted-turn policy", () => {
+    expect(activeTurnNumber).toBe(activeSharedTurnNumber);
+    expect(appendExpectedTurnNumber).toBe(appendExpectedSharedTurnNumber);
+    expect(undoTargetTurnNumber).toBe(undoTargetSharedTurnNumber);
+    expect(latestTurnNumber).toBe(latestSharedTurnNumber);
+    expect(selectedTurnNumber).toBe(selectedSharedTurnNumber);
+    expect(turnIndexForNumber).toBe(turnIndexForSharedNumber);
+    expect(recentTurnSpine).toBe(recentSharedTurnSpine);
+  });
+
   it("keeps append, undo, retry, inspection, and branch targets in absolute campaign turn numbers", () => {
     expect(appendExpectedTurnNumber({ activeTurnNumber: 100 })).toBe(101);
     expect(undoTargetTurnNumber({ activeTurnNumber: 100 })).toBe(99);

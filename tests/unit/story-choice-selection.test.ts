@@ -6,8 +6,21 @@ import {
   toggleChoiceDraftSelection
 // @ts-expect-error Browser JavaScript modules intentionally do not publish TypeScript declarations.
 } from "../../apps/web/src/story-choice-selection.js";
+import {
+  createChoiceDraftSelection as createSharedChoiceDraftSelection,
+  resetChoiceDraftSelection as resetSharedChoiceDraftSelection,
+  turnInputModeForControlStyle as turnInputModeForSharedControlStyle,
+  toggleChoiceDraftSelection as toggleSharedChoiceDraftSelection
+} from "../../packages/client-core/src/index.js";
 
 describe("legacy Story Player generated choice selection", () => {
+  it("re-exports the shared Story input policy", () => {
+    expect(turnInputModeForControlStyle).toBe(turnInputModeForSharedControlStyle);
+    expect(createChoiceDraftSelection).toBe(createSharedChoiceDraftSelection);
+    expect(resetChoiceDraftSelection).toBe(resetSharedChoiceDraftSelection);
+    expect(toggleChoiceDraftSelection).toBe(toggleSharedChoiceDraftSelection);
+  });
+
   it("maps every campaign turn-control preference to its generated-choice input mode", () => {
     expect(turnInputModeForControlStyle("flexible_auto")).toBe("auto");
     expect(turnInputModeForControlStyle("flexible_action")).toBe("action");
