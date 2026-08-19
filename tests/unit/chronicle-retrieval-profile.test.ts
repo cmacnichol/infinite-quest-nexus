@@ -20,7 +20,7 @@ import {
   type ChronicleRetrievalProfileParameters
 } from "../../scripts/lib/chronicle-retrieval-evaluator.js";
 
-const CORPUS_HASH = "4ce28d185827a5f932ab6b8cb4c8be97dfe0de483aed86e574c64522e85074f4";
+const CORPUS_HASH = "5f9d9a27ab5b8b532e8a051928f051b89b910b836a068ca0bc47d93581af32a1";
 const GENERATED_AT = "2026-08-16T12:00:00.000Z";
 const V3_LEGACY_BASELINE_GATE_METRICS = Object.freeze({
   recallAt10: 0.675,
