@@ -19,6 +19,7 @@ export interface StoryToolTurn {
 export interface StoryToolScope {
   readonly campaignId: string;
   readonly campaignTitle?: string;
+  readonly syncToken: string | null;
   readonly activeTurnNumber: number;
   readonly generationActive: boolean;
   readonly viewTurnNumber: number | null;
@@ -64,6 +65,12 @@ export interface StoryActivityRecord {
   readonly detail: string;
 }
 
+export type StoryActivityOperation =
+  | "generation_queued"
+  | "markdown_export_downloaded"
+  | "html_export_downloaded"
+  | "story_print_prepared";
+
 export interface StoryToolsController {
   openWorldSetup(): void;
   openCurrentState(): Promise<CampaignRuntimeStateResponse | null>;
@@ -77,7 +84,7 @@ export interface StoryToolsController {
   exportMarkdown(): Promise<boolean>;
   exportStandaloneHtml(): Promise<boolean>;
   printStory(): Promise<boolean>;
-  recordActivity(category: string, title: string, detail?: Readonly<Record<string, unknown>>): Readonly<StoryActivityRecord>;
+  recordActivity(operation: StoryActivityOperation, detail?: Readonly<Record<string, unknown>>): Readonly<StoryActivityRecord> | null;
   activity(): readonly Readonly<StoryActivityRecord>[];
   copyActivityDiagnostics(): Promise<boolean>;
   clearActivity(): void;
@@ -179,7 +186,10 @@ function canMutate(scope: StoryToolScope): boolean {
 }
 
 function sameExportScope(left: StoryToolScope, right: StoryToolScope | null): boolean {
-  if (right === null || left.campaignId !== right.campaignId || left.activeTurnNumber !== right.activeTurnNumber) return false;
+  if (right === null
+    || left.campaignId !== right.campaignId
+    || left.syncToken !== right.syncToken
+    || left.activeTurnNumber !== right.activeTurnNumber) return false;
   return latestTurn(left)?.id === latestTurn(right)?.id;
 }
 
@@ -210,7 +220,15 @@ function downloadReadableExport(browser: StoryToolBrowser, body: string, filenam
 
 const SAFE_ACTIVITY_DETAIL_FIELDS = ["campaignId", "turnNumber", "jobId", "status", "operationKind", "retryCount", "correlationId"] as const;
 
-function safeActivityText(value: string): string {
+const ACTIVITY_OPERATIONS: Readonly<Record<StoryActivityOperation, Readonly<Pick<StoryActivityRecord, "category" | "title">>>> = {
+  generation_queued: { category: "generation", title: "Generation queued" },
+  markdown_export_downloaded: { category: "export", title: "Markdown export downloaded" },
+  html_export_downloaded: { category: "export", title: "HTML export downloaded" },
+  story_print_prepared: { category: "print", title: "Story print prepared" }
+};
+
+function safeActivityText(value: unknown): string {
+  if (typeof value !== "string") return "";
   return value.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 160);
 }
 
@@ -431,11 +449,13 @@ export function createStoryToolsController(options: StoryToolsControllerOptions)
         return false;
       }
     },
-    recordActivity(category, title, detail) {
+    recordActivity(operation, detail) {
+      const activity = ACTIVITY_OPERATIONS[operation];
+      if (!activity) return null;
       const record: StoryActivityRecord = {
         timestamp: new Date().toISOString(),
-        category: safeActivityText(category) || "system",
-        title: safeActivityText(title),
+        category: activity.category,
+        title: activity.title,
         detail: safeActivityDetail(detail)
       };
       if (disposed) return record;

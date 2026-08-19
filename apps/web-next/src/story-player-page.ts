@@ -247,6 +247,7 @@ export function mountStoryPlayerPage(
       return {
         campaignId: campaign.id,
         campaignTitle: campaign.title,
+        syncToken: projection.syncToken,
         activeTurnNumber: campaign.activeTurnNumber,
         generationActive: projection.generation !== null,
         viewTurnNumber: ui.get().viewTurnNumber,
@@ -935,7 +936,7 @@ export function mountStoryPlayerPage(
     if (action === "export-markdown") {
       void tools.exportMarkdown().then((downloaded) => {
         if (!downloaded || disposed) return;
-        tools.recordActivity("export", "Markdown export downloaded", { campaignId: projection.campaign?.id, operationKind: "markdown" });
+        tools.recordActivity("markdown_export_downloaded", { campaignId: projection.campaign?.id, operationKind: "markdown" });
         ui.setMessage("Markdown export downloaded.");
       });
       return;
@@ -943,7 +944,7 @@ export function mountStoryPlayerPage(
     if (action === "export-html") {
       void tools.exportStandaloneHtml().then((downloaded) => {
         if (!downloaded || disposed) return;
-        tools.recordActivity("export", "HTML export downloaded", { campaignId: projection.campaign?.id, operationKind: "html" });
+        tools.recordActivity("html_export_downloaded", { campaignId: projection.campaign?.id, operationKind: "html" });
         ui.setMessage("Standalone HTML export downloaded.");
       });
       return;
@@ -951,7 +952,7 @@ export function mountStoryPlayerPage(
     if (action === "export-pdf") {
       void tools.printStory().then((printed) => {
         if (!printed || disposed) return;
-        tools.recordActivity("print", "Story print prepared", { campaignId: projection.campaign?.id, operationKind: "pdf_images" });
+        tools.recordActivity("story_print_prepared", { campaignId: projection.campaign?.id, operationKind: "pdf_images" });
         ui.setMessage("Print dialog opened.");
       });
     }

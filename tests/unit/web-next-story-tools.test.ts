@@ -47,6 +47,7 @@ function controller(overrides: Record<string, unknown> = {}) {
     confirm,
     current: () => ({
       campaignId,
+      syncToken: "story-tools",
       activeTurnNumber: 7,
       generationActive: false,
       viewTurnNumber: 7,
@@ -63,7 +64,7 @@ type StoryExportTools = {
 };
 
 type StoryActivityTools = {
-  recordActivity(category: string, title: string, detail?: Record<string, unknown>): Readonly<{ detail: string }>;
+  recordActivity(operation: string, detail?: Record<string, unknown>): Readonly<{ category: string; title: string; detail: string }> | null;
   copyActivityDiagnostics(): Promise<boolean>;
   activity(): readonly Readonly<{ title: string; detail: string }>[];
   clearActivity(): void;
@@ -251,6 +252,7 @@ describe("Story campaign tools", () => {
   it("does not mutate current state while an older turn is selected or generation is active", async () => {
     const current = {
       campaignId,
+      syncToken: "story-tools",
       activeTurnNumber: 7,
       generationActive: false,
       viewTurnNumber: 6,
@@ -281,6 +283,7 @@ describe("Story campaign tools", () => {
   it("refuses a Retry Latest submission when the pinned persisted turn is no longer latest", async () => {
     let current = {
       campaignId,
+      syncToken: "story-tools",
       activeTurnNumber: 7,
       generationActive: false,
       viewTurnNumber: 7,
@@ -328,6 +331,7 @@ describe("Story campaign tools", () => {
       current: () => ({
         campaignId,
         campaignTitle: "The Astral Expedition",
+        syncToken: "story-tools",
         activeTurnNumber: 7,
         generationActive: false,
         viewTurnNumber: 7,
@@ -347,12 +351,12 @@ describe("Story campaign tools", () => {
     expect((append.mock.calls[0]?.[0] as HTMLAnchorElement).download).toBe("the-astral-expedition.md");
   });
 
-  it("records and copies only operational activity diagnostics", async () => {
+  it("records and copies only closed operational activity diagnostics", async () => {
     const copyText = vi.fn().mockResolvedValue(undefined);
     const { tools } = controller({ copyText });
     const activity = tools as unknown as StoryActivityTools;
 
-    const record = activity.recordActivity("generation", "Generation queued", {
+    const record = activity.recordActivity("generation_queued", {
       campaignId,
       turnNumber: 7,
       jobId: "job-7",
@@ -361,13 +365,24 @@ describe("Story campaign tools", () => {
       providerResponse: "Or raw provider output."
     });
 
-    expect(record.detail).toBe(`campaignId=${campaignId} turnNumber=7 jobId=job-7`);
+    expect(record).toEqual(expect.objectContaining({ category: "generation", title: "Generation queued", detail: `campaignId=${campaignId} turnNumber=7 jobId=job-7` }));
     await expect(activity.copyActivityDiagnostics()).resolves.toBe(true);
     expect(copyText).toHaveBeenCalledWith(expect.stringContaining("campaignId="));
     expect(copyText).not.toHaveBeenCalledWith(expect.stringContaining("accepted narration"));
     expect(activity.activity()).toHaveLength(1);
     activity.clearActivity();
     expect(activity.activity()).toEqual([]);
+  });
+
+  it("rejects caller-controlled narration and prompt text from activity diagnostics", async () => {
+    const copyText = vi.fn().mockResolvedValue(undefined);
+    const { tools } = controller({ copyText });
+    const activity = tools as unknown as StoryActivityTools;
+
+    expect(activity.recordActivity("The private narration must not be copied.", { prompt: "The secret prompt must not be copied." })).toBeNull();
+    await expect(activity.copyActivityDiagnostics()).resolves.toBe(true);
+
+    expect(copyText).toHaveBeenCalledWith("");
   });
 
   it("downloads the backend standalone HTML export with a safely derived filename", async () => {
@@ -378,7 +393,7 @@ describe("Story campaign tools", () => {
     const { document } = parseHTML("<body></body>").window;
     const append = vi.spyOn(document.body, "append");
     const { tools } = controller({
-      current: () => ({ campaignId, campaignTitle: "The Astral Expedition", activeTurnNumber: 7, generationActive: false, viewTurnNumber: 7, turns: [olderTurn, latestTurn] }),
+      current: () => ({ campaignId, campaignTitle: "The Astral Expedition", syncToken: "story-tools", activeTurnNumber: 7, generationActive: false, viewTurnNumber: 7, turns: [olderTurn, latestTurn] }),
       completeHistory: history,
       readableExport,
       browser: { document, createObjectUrl, revokeObjectUrl }
@@ -413,6 +428,7 @@ describe("Story campaign tools", () => {
     let current = {
       campaignId,
       campaignTitle: "The Astral Expedition",
+      syncToken: "story-tools",
       activeTurnNumber: 7,
       generationActive: false,
       viewTurnNumber: 7,
@@ -431,6 +447,36 @@ describe("Story campaign tools", () => {
     await expect((tools as unknown as StoryExportTools).exportMarkdown()).resolves.toBe(true);
 
     expect(readableExport).toHaveBeenCalledWith(campaignId, "markdown");
+  });
+
+  it("does not download a readable export after a same-campaign sync-token refresh", async () => {
+    let current = {
+      campaignId,
+      campaignTitle: "The Astral Expedition",
+      syncToken: "before-refresh",
+      activeTurnNumber: 7,
+      generationActive: false,
+      viewTurnNumber: 7,
+      turns: [olderTurn, latestTurn]
+    };
+    const readable = deferred<{ body: string }>();
+    const readableExport = vi.fn().mockReturnValue(readable.promise);
+    const createObjectUrl = vi.fn();
+    const { document } = parseHTML("<body></body>").window;
+    const { tools } = controller({
+      current: () => current,
+      completeHistory: vi.fn().mockResolvedValue(undefined),
+      readableExport,
+      browser: { document, createObjectUrl, revokeObjectUrl: vi.fn() }
+    });
+
+    const exporting = (tools as unknown as StoryExportTools).exportMarkdown();
+    await settle();
+    current = { ...current, syncToken: "after-correction" };
+    readable.resolve({ body: "# stale export" });
+
+    await expect(exporting).resolves.toBe(false);
+    expect(createObjectUrl).not.toHaveBeenCalled();
   });
 
   it("opens a print window synchronously and writes only complete, sanitized story content", async () => {
@@ -469,6 +515,84 @@ describe("Story campaign tools", () => {
     expect(document.write).toHaveBeenCalledWith(expect.stringContaining("/assets/accepted.png"));
     expect(document.write).not.toHaveBeenCalledWith(expect.stringContaining("external.example.test"));
     expect(printWindow.print).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes a print window without writing or printing after a same-campaign sync-token refresh", async () => {
+    let current = {
+      campaignId,
+      campaignTitle: "The Astral Expedition",
+      syncToken: "before-refresh",
+      activeTurnNumber: 7,
+      generationActive: false,
+      viewTurnNumber: 7,
+      turns: [olderTurn, latestTurn]
+    };
+    const snapshot = deferred<{ title: string; turns: [] }>();
+    const document = { open: vi.fn(), write: vi.fn(), close: vi.fn(), images: [] };
+    const printWindow = { document, close: vi.fn(), print: vi.fn(), opener: {} };
+    const { tools } = controller({
+      current: () => current,
+      completeHistory: vi.fn().mockResolvedValue(undefined),
+      printSnapshot: vi.fn().mockReturnValue(snapshot.promise),
+      browser: {
+        document: parseHTML("<body></body>").window.document,
+        createObjectUrl: vi.fn(),
+        revokeObjectUrl: vi.fn(),
+        openPrintWindow: vi.fn().mockReturnValue(printWindow),
+        printOrigin: "https://story.example.test"
+      }
+    });
+
+    const printing = (tools as unknown as StoryPrintTools).printStory();
+    await settle();
+    current = { ...current, syncToken: "after-correction" };
+    snapshot.resolve({ title: "The Astral Expedition", turns: [] });
+
+    await expect(printing).resolves.toBe(false);
+    expect(document.write).not.toHaveBeenCalled();
+    expect(printWindow.print).not.toHaveBeenCalled();
+    expect(printWindow.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes a print window without printing when the sync token changes during image settlement", async () => {
+    let current = {
+      campaignId,
+      campaignTitle: "The Astral Expedition",
+      syncToken: "before-images",
+      activeTurnNumber: 7,
+      generationActive: false,
+      viewTurnNumber: 7,
+      turns: [olderTurn, latestTurn]
+    };
+    const listeners = new Map<string, () => void>();
+    const image = {
+      complete: false,
+      addEventListener: vi.fn((event: string, listener: () => void) => listeners.set(event, listener))
+    };
+    const document = { open: vi.fn(), write: vi.fn(), close: vi.fn(), images: [image] };
+    const printWindow = { document, close: vi.fn(), print: vi.fn(), opener: {} };
+    const { tools } = controller({
+      current: () => current,
+      completeHistory: vi.fn().mockResolvedValue(undefined),
+      printSnapshot: vi.fn().mockResolvedValue({ title: "The Astral Expedition", turns: [] }),
+      browser: {
+        document: parseHTML("<body></body>").window.document,
+        createObjectUrl: vi.fn(),
+        revokeObjectUrl: vi.fn(),
+        openPrintWindow: vi.fn().mockReturnValue(printWindow),
+        printOrigin: "https://story.example.test"
+      }
+    });
+
+    const printing = (tools as unknown as StoryPrintTools).printStory();
+    await settle();
+    current = { ...current, syncToken: "after-correction" };
+    listeners.get("load")?.();
+
+    await expect(printing).resolves.toBe(false);
+    expect(document.write).toHaveBeenCalledTimes(1);
+    expect(printWindow.print).not.toHaveBeenCalled();
+    expect(printWindow.close).toHaveBeenCalledTimes(1);
   });
 
   it("loads About through the shared meta API", async () => {
