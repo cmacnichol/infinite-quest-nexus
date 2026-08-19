@@ -6,7 +6,7 @@
 4. Choose the **Embedding provider** and **Embedding model**.
 5. Under **Advanced retrieval**, optionally set **Document prefix** and **Query prefix**.
 6. Under **Advanced retrieval**, set a bounded **Batch size**.
-7. Under **Advanced retrieval**, keep **Production retrieval** on **Legacy hybrid** while preparing and shadowing the chunk index.
+7. Under **Advanced retrieval**, keep **Production implementation** on **Legacy hybrid** while preparing and shadowing the chunk index.
 8. Select **Save & index**. This enqueues the durable `index_memory_chunks_v2` job without changing production retrieval.
 9. Under **Advanced retrieval**, after the campaign is fully ready and shadow diagnostics are acceptable, explicitly select **Chunked hybrid**. There is no automatic campaign conversion.
 

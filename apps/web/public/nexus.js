@@ -116,12 +116,19 @@ function setCampaignSettingsAvailability(available) {
   if (!available) setCampaignSettingsPanel("overview");
 }
 
-function clearCampaignEditorSelection() {
+function syncCampaignSettingsRailOrientation(mediaQuery) {
+  elements.campaignSettingsRail.setAttribute("aria-orientation", mediaQuery.matches ? "horizontal" : "vertical");
+}
+
+function clearCampaignEditorSelection({ focus = false } = {}) {
   setCampaignSettingsAvailability(false);
   elements.memoryTitle.textContent = "Select a campaign";
   elements.campaignEditorSummary.textContent = "";
+  elements.campaignStatusMessage.textContent = "";
+  elements.campaignStatusMessage.className = "status hidden";
   [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignTurnControlStyle, elements.campaignStoryLengthProfile, elements.saveCampaign, elements.migrateCampaign, elements.transferCampaign, elements.editCampaignCharacter, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationSourcePolicy, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts, elements.illustrationMatchingScope, elements.illustrationConfidenceProfile, elements.illustrationRepetitionWindow, elements.illustrationSegmentWordCount, elements.illustrationImagesPerSegment, elements.illustrationSegmentPromptMode, elements.openIllustrationPromptEditor, elements.previewIllustrationBackfill, elements.previewIllustrationRebuild, elements.saveIllustrationConfig, elements.discoverIllustrationModels, elements.reindexMemory, elements.previewContext, elements.saveEmbeddingConfig, elements.reindexEmbeddings, elements.embeddingEnabled, elements.embeddingRetrievalImplementation, elements.embeddingRetrievalShadowEnabled, elements.embeddingProvider, elements.discoverEmbeddingModels, elements.embeddingModel, elements.embeddingDocumentPrefix, elements.embeddingQueryPrefix, elements.embeddingBatchSize, elements.budgetTokens, elements.compression, elements.memoryQuery].forEach((element) => { element.disabled = true; });
   elements.campaignCostSection.classList.add("hidden");
+  if (focus) elements.refreshCampaigns.focus();
 }
 
 const MIN_MEMORY_CONTEXT_BUDGET_TOKENS = 512;
@@ -2381,7 +2388,7 @@ async function createCampaignFromWorld() {
   }
 }
 
-async function loadCampaigns(preselectId = "") {
+async function loadCampaigns(preselectId = "", { focusNoSelection = false } = {}) {
   ({ campaigns } = await api("/api/v1/campaigns"));
   renderDashboardCampaigns();
   void loadDashboardStats();
@@ -2390,7 +2397,7 @@ async function loadCampaigns(preselectId = "") {
     elements.campaignList.innerHTML = '<p class="muted">No database-backed campaigns yet.</p>';
     selectedCampaign = null;
     updateStoryViewLink();
-    clearCampaignEditorSelection();
+    clearCampaignEditorSelection({ focus: focusNoSelection });
     elements.illustrationSourcePolicy.value = "off";
     renderIllustrationSettingsVisibility();
     elements.campaignCostSection.classList.add("hidden");
@@ -2414,7 +2421,7 @@ async function loadCampaigns(preselectId = "") {
   else {
     selectedCampaign = null;
     updateStoryViewLink();
-    clearCampaignEditorSelection();
+    clearCampaignEditorSelection({ focus: focusNoSelection });
   }
 }
 
@@ -2682,7 +2689,7 @@ async function deleteSelectedCampaign() {
     });
     selectedCampaign = null;
     updateStoryViewLink();
-    await loadCampaigns();
+    await loadCampaigns("", { focusNoSelection: true });
     await loadWorlds(selectedWorld?.id || "");
     campaignMessage(`Campaign “${expectedTitle}” was permanently deleted.`, "success");
   } catch (error) {
@@ -5180,8 +5187,11 @@ elements.revokeWorldShare.addEventListener("click", revokeSelectedWorldShare);
 elements.deleteWorldVersion.addEventListener("click", deleteSelectedWorldVersion);
 elements.archiveWorld.addEventListener("click", toggleWorldArchive);
 elements.deleteWorld.addEventListener("click", deleteSelectedWorld);
-elements.refreshCampaigns.addEventListener("click", () => loadCampaigns().catch((error) => setStatus(error.message, "error")));
+elements.refreshCampaigns.addEventListener("click", () => loadCampaigns("", { focusNoSelection: true }).catch((error) => setStatus(error.message, "error")));
 elements.campaignForm.addEventListener("submit", saveSelectedCampaign);
+const campaignSettingsRailMediaQuery = window.matchMedia("(max-width: 820px)");
+syncCampaignSettingsRailOrientation(campaignSettingsRailMediaQuery);
+campaignSettingsRailMediaQuery.addEventListener("change", syncCampaignSettingsRailOrientation);
 elements.campaignSettingsRail.addEventListener("click", (event) => {
   const tab = event.target.closest("[data-campaign-settings-panel]");
   if (tab && !tab.disabled) setCampaignSettingsPanel(tab.dataset.campaignSettingsPanel);
