@@ -3,6 +3,7 @@ import type { CampaignRuntimeStateResponse, CampaignSummary } from "@infinite-qu
 import { storyPlayerPath, type StoryRoute } from "./story-route";
 import type { ReadingWidth, StoryUiState } from "./story-player-model";
 import { alignLatestSpine, latestCampaignSpine } from "./story-player-history";
+import type { StoryIllustrationState } from "./story-player-illustrations";
 
 export interface StoryPlayerViewState {
   readonly route: StoryRoute;
@@ -11,6 +12,7 @@ export interface StoryPlayerViewState {
   readonly selectedCampaign: CampaignSummary | null;
   readonly projection: Readonly<CampaignProjection>;
   readonly inspectedState: CampaignRuntimeStateResponse | null;
+  readonly illustrations: Readonly<StoryIllustrationState>;
 }
 
 type ReaderTurn = Readonly<{
@@ -283,6 +285,25 @@ function narrationParagraphs(document: Document, narration: string): readonly HT
     });
 }
 
+function illustrationAlt(segmentText: string): string {
+  const concise = segmentText.trim().replace(/\s+/g, " ");
+  return concise ? `Illustration of ${concise}` : "Campaign illustration";
+}
+
+function compactIllustrationPreview(document: Document, illustration: Readonly<StoryIllustrationState>): HTMLElement | null {
+  const variant = illustration.selectedVariant;
+  if (!variant) return null;
+  const preview = element(document, "figure", "story-compact-illustration-preview");
+  preview.dataset.storyCompactIllustrationPreview = "";
+  const image = element(document, "img") as HTMLImageElement;
+  image.src = variant.url;
+  image.alt = "";
+  image.setAttribute("aria-hidden", "true");
+  const caption = element(document, "figcaption", undefined, illustration.selectedSegment?.text || "Current illustration");
+  preview.append(image, caption);
+  return preview;
+}
+
 function formatReportedCost(turn: ReaderTurn): string | null {
   return turn.reportedCost === null ? null : `${turn.reportedCost.amount} ${turn.reportedCost.currency}`;
 }
@@ -360,6 +381,8 @@ function campaignReader(document: Document, state: StoryPlayerViewState): HTMLEl
 
   const selectedTurn = resolvedRenderedTurn(state);
   if (selectedTurn) {
+    const preview = compactIllustrationPreview(document, state.illustrations);
+    if (preview) reader.append(preview);
     if (state.ui.continuousReading) {
       for (const turn of projection.turns) {
         reader.append(renderStoryTurn(
@@ -416,6 +439,77 @@ function campaignReader(document: Document, state: StoryPlayerViewState): HTMLEl
   const recoveryView = recovery(document, projection);
   if (recoveryView) reader.append(recoveryView);
   return reader;
+}
+
+function illustrationWing(document: Document, illustration: Readonly<StoryIllustrationState>): HTMLElement {
+  const wing = element(document, "section", "story-illustration-content");
+  const statusMessage = illustration.status === "disabled"
+    ? "Illustrations are disabled for this campaign."
+    : illustration.status === "unavailable"
+      ? illustration.message ?? "Illustrations are unavailable."
+      : illustration.status === "loading"
+        ? "Loading illustrations…"
+        : illustration.segments.length
+          ? `${illustration.segments.length} illustration segment${illustration.segments.length === 1 ? "" : "s"}.`
+          : "No illustrations are available for this accepted turn.";
+  const statusLine = element(document, "p", "story-illustration-status", statusMessage);
+  statusLine.dataset.storyIllustrationStatus = "";
+  statusLine.setAttribute("role", "status");
+  statusLine.setAttribute("aria-live", "polite");
+  wing.append(statusLine);
+  const segment = illustration.selectedSegment;
+  const variant = illustration.selectedVariant;
+  if (!segment || !variant) {
+    if (illustration.status === "ready") {
+      for (const [action, label] of [["generate-missing-images", "Generate missing images"], ["rebuild-images", "Rebuild images"]] as const) {
+        const button = element(document, "button", undefined, label);
+        button.type = "button";
+        button.dataset.action = action;
+        wing.append(button);
+      }
+    }
+    return wing;
+  }
+  const figure = element(document, "figure", "story-illustration-figure");
+  const image = element(document, "img") as HTMLImageElement;
+  image.src = variant.url;
+  image.alt = illustrationAlt(segment.text);
+  const caption = element(document, "figcaption", "story-illustration-caption", segment.text || "Current illustration");
+  figure.append(image, caption);
+  wing.append(figure);
+  const navigation = element(document, "div", "story-illustration-navigation");
+  for (const [action, label] of [["previous-image", "Previous image"], ["next-image", "Next image"]] as const) {
+    const button = element(document, "button", undefined, label);
+    button.type = "button";
+    button.dataset.action = action;
+    navigation.append(button);
+  }
+  wing.append(navigation);
+  const label = element(document, "label", "story-illustration-prompt-label", "Image prompt");
+  label.htmlFor = "story-illustration-prompt";
+  const prompt = element(document, "textarea", "story-illustration-prompt") as HTMLTextAreaElement;
+  prompt.id = label.htmlFor;
+  prompt.dataset.storyIllustrationPrompt = "";
+  prompt.value = illustration.prompt;
+  wing.append(label, prompt);
+  for (const [action, labelText] of [
+    ["regenerate-image", "Regenerate"],
+    ["retry-image-job", "Retry"],
+    ["load-image-provenance", "Why this image?"],
+    ["rematch-image", "Find library match"],
+    ["generate-missing-images", "Generate missing images"],
+    ["rebuild-images", "Rebuild images"]
+  ] as const) {
+    const button = element(document, "button", undefined, labelText);
+    button.type = "button";
+    button.dataset.action = action;
+    if (action === "retry-image-job") button.disabled = segment.imageJobId === null;
+    wing.append(button);
+  }
+  if (illustration.provenance) {
+    wing.append(element(document, "p", "story-illustration-provenance", `Image match status: ${illustration.provenance.status}.`));
+  }
+  return wing;
 }
 
 function turnModeLabel(mode: CampaignProjection["turns"][number]["inputMode"]): string {
@@ -536,7 +630,7 @@ export function renderStoryPlayerView(root: HTMLElement, state: StoryPlayerViewS
   applyReadingWidth(foldout, state.ui.readingWidth);
   commandRow.replaceChildren(renderStoryCommandRow(document, state));
   spine.replaceChildren();
-  illustration.replaceChildren(element(document, "p", "story-illustration-status", "Illustrations remain optional to story progress."));
+  illustration.replaceChildren(illustrationWing(document, state.illustrations));
 
   if (state.ui.phase === "loading") {
     reader.replaceChildren(status(document, "Loading Story…"));

@@ -496,12 +496,37 @@ describe("Story Player page shell", () => {
           async *retryGeneration() {}, cancelGeneration: vi.fn(), discardGeneration: vi.fn(), fetchResult: vi.fn()
         }))
       },
-      illustrations: { ...base.illustrations, segments }
+      illustrations: {
+        ...base.illustrations,
+        config: vi.fn().mockResolvedValue({ enabled: true, sourcePolicy: "library_then_generate" }),
+        segments
+      }
     } as StoryPlayerComposition;
     const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, prepared);
 
     await vi.waitFor(() => expect(runtime).toHaveBeenCalledWith(campaignId, 2));
-    await vi.waitFor(() => expect(segments).toHaveBeenCalledWith(campaignId));
+    await vi.waitFor(() => expect(segments).toHaveBeenCalledWith(campaignId, expect.any(AbortSignal)));
+    mounted.dispose();
+  });
+
+  it("keeps accepted narration and Continue Story available when illustration loading fails", async () => {
+    const page = fixture();
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 1 }, activeTurnNumber: 1, turns: turnWindow([1])
+    });
+    const base = composition({ syncStatus: vi.fn().mockResolvedValue(loaded) });
+    const config = vi.fn().mockRejectedValue(new Error("illustration endpoint unavailable"));
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, {
+      ...base,
+      illustrations: { ...base.illustrations, config, segments: vi.fn() }
+    } as StoryPlayerComposition);
+
+    await settle();
+
+    expect(config).toHaveBeenCalledWith(campaignId, expect.any(AbortSignal));
+    expect(page.document.querySelector("[data-story-illustration-status]")?.textContent).toContain("unavailable");
+    expect(page.document.querySelector("[data-story-reader]")?.textContent).toContain("Narration 1.");
+    expect(page.document.querySelector<HTMLButtonElement>("[data-action='continue-story']")).toBeTruthy();
     mounted.dispose();
   });
 

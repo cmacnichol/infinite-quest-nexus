@@ -32,7 +32,7 @@ export interface StoryUiState {
   readonly continuousReading: boolean;
   readonly generationFollowing: boolean;
   readonly history: "idle" | "loading" | "error";
-  readonly illustration: "idle" | "loading" | "unavailable";
+  readonly illustration: "idle" | "loading" | "disabled" | "ready" | "unavailable";
   readonly activity: "idle" | "generating" | "recoverable";
   readonly message: string | null;
 }
@@ -121,7 +121,8 @@ function localInitialState(
     generationFollowing: value.generationFollowing !== false,
     history: value.history === "idle" || value.history === "loading" || value.history === "error"
       ? value.history : DEFAULT_STATE.history,
-    illustration: value.illustration === "idle" || value.illustration === "loading" || value.illustration === "unavailable"
+    illustration: value.illustration === "idle" || value.illustration === "loading" || value.illustration === "disabled"
+      || value.illustration === "ready" || value.illustration === "unavailable"
       ? value.illustration : DEFAULT_STATE.illustration,
     activity: value.activity === "idle" || value.activity === "generating" || value.activity === "recoverable"
       ? value.activity : DEFAULT_STATE.activity,

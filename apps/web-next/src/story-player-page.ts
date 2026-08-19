@@ -15,6 +15,7 @@ import { createStoryGenerationController } from "./story-player-generation";
 import { createStoryUiModel, type StoryUiPhase } from "./story-player-model";
 import { createStoryHistoryController } from "./story-player-history";
 import { renderStoryPlayerView } from "./story-player-view";
+import { createStoryIllustrationController } from "./story-player-illustrations";
 import type { StoryRoute } from "./story-route";
 import type { MountedPage } from "./world-library-page";
 import "./story-player.css";
@@ -141,6 +142,13 @@ export function mountStoryPlayerPage(
   let autoSubmitTurnChoices = false;
   let submittedDraft: string | null = null;
   let programmaticFollowTarget: ViewportPosition | null = null;
+  let illustrationRequestKey: string | null = null;
+  const illustrations = createStoryIllustrationController({
+    illustrations: composition.illustrations,
+    idFactory: composition.idFactory,
+    clock: composition.clock,
+    delay: composition.delay
+  });
   const refreshCompletionResources = (campaignId: string, turnNumber: number) => {
     void composition.api.campaigns.state(campaignId, turnNumber).then((runtime) => {
       if (!disposed && projection.campaign?.id === campaignId && runtime.campaignId === campaignId) {
@@ -148,7 +156,7 @@ export function mountStoryPlayerPage(
       }
     }).catch(() => undefined);
     // Illustration refresh is deliberately independent: failures never alter accepted narration.
-    void composition.illustrations.segments(campaignId).catch(() => undefined);
+    illustrationRequestKey = null;
   };
   const generation = createStoryGenerationController({
     workflow: composition.workflow,
@@ -182,6 +190,7 @@ export function mountStoryPlayerPage(
     campaignStore: composition.campaignStore,
     model: ui
   });
+  const unsubscribeIllustrations = illustrations.subscribe(() => render());
 
   const onRetry = () => { void load(); };
   const restoreHistoryFocus = () => {
@@ -318,7 +327,16 @@ export function mountStoryPlayerPage(
   };
   function render(): void {
     retryControl?.removeEventListener("click", onRetry);
-    renderStoryPlayerView(root, { route, ui: ui.get(), campaigns, selectedCampaign, projection, inspectedState });
+    renderStoryPlayerView(root, { route, ui: ui.get(), campaigns, selectedCampaign, projection, inspectedState, illustrations: illustrations.get() });
+    const selectedTurnNumber = ui.get().viewTurnNumber ?? projection.campaign?.activeTurnNumber ?? null;
+    const selectedTurn = selectedTurnNumber === null ? null : projection.turns.find((turn) => turn.turnNumber === selectedTurnNumber) ?? null;
+    if (typeof composition.illustrations.config === "function" && projection.campaign && selectedTurn) {
+      const requestKey = `${projection.campaign.id}:${selectedTurn.id}`;
+      if (requestKey !== illustrationRequestKey) {
+        illustrationRequestKey = requestKey;
+        void illustrations.load(projection.campaign.id, selectedTurn.id);
+      }
+    }
     retryControl = root.querySelector<HTMLButtonElement>('[data-action="retry-story"]');
     retryControl?.addEventListener("click", onRetry);
     for (const control of root.querySelectorAll<HTMLElement>("[data-turn-number]:not([data-action])")) {
@@ -510,6 +528,27 @@ export function mountStoryPlayerPage(
         focusDraft();
       });
     }
+    for (const textarea of root.querySelectorAll<HTMLTextAreaElement>("[data-story-illustration-prompt]")) {
+      textarea.addEventListener("input", () => { void illustrations.editPrompt(textarea.value); });
+    }
+    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='previous-image']")) {
+      control.addEventListener("click", () => illustrations.selectPrevious());
+    }
+    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='next-image']")) {
+      control.addEventListener("click", () => illustrations.selectNext());
+    }
+    for (const [action, operation] of [
+      ["regenerate-image", () => illustrations.regenerate()],
+      ["retry-image-job", () => illustrations.retryJob()],
+      ["generate-missing-images", () => illustrations.generateMissing()],
+      ["rebuild-images", () => illustrations.rebuild()],
+      ["load-image-provenance", () => illustrations.loadProvenance()],
+      ["rematch-image", () => illustrations.rematch()]
+    ] as const) {
+      for (const control of root.querySelectorAll<HTMLButtonElement>(`[data-action='${action}']`)) {
+        control.addEventListener("click", () => { void operation(); });
+      }
+    }
     bindHistoryDialog();
     if (projection.generation !== null && ui.get().generationFollowing) {
       const preview = root.querySelector<HTMLElement>("[data-story-generation-preview]");
@@ -612,6 +651,8 @@ export function mountStoryPlayerPage(
       unsubscribeStore();
       unsubscribeUi();
       history.dispose();
+      unsubscribeIllustrations();
+      illustrations.dispose();
       ui.dispose();
       theme.dispose();
     }
