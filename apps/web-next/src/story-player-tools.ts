@@ -1,9 +1,10 @@
-import type { CampaignApi } from "@infinite-quest/client-web";
+import type { CampaignApi, ShellApi } from "@infinite-quest/client-web";
 import type {
   AcceptedTurnCorrectionRequest,
   AcceptedTurnCorrectionView,
   CampaignRuntimeStateResponse,
-  CampaignRuntimeStateUpdate
+  CampaignRuntimeStateUpdate,
+  MetaResponse
 } from "@infinite-quest/contracts";
 import type { StoryGenerationController, StoryGenerationSubmission } from "./story-player-generation";
 
@@ -17,10 +18,50 @@ export interface StoryToolTurn {
 
 export interface StoryToolScope {
   readonly campaignId: string;
+  readonly campaignTitle?: string;
   readonly activeTurnNumber: number;
   readonly generationActive: boolean;
   readonly viewTurnNumber: number | null;
   readonly turns: readonly StoryToolTurn[];
+}
+
+export type StoryReadableExportFormat = "markdown" | "html";
+
+export interface StoryReadableExport {
+  readonly body: string;
+}
+
+export interface StoryToolBrowser {
+  readonly document: Document;
+  readonly createObjectUrl: (blob: Blob) => string;
+  readonly revokeObjectUrl: (url: string) => void;
+  readonly openPrintWindow?: (url?: string, target?: string) => StoryPrintWindow | null;
+  readonly printOrigin?: string;
+  readonly printStyles?: string;
+}
+
+export interface StoryPrintWindow {
+  opener: unknown;
+  readonly document: Pick<Document, "open" | "write" | "close" | "images">;
+  print(): void;
+  close(): void;
+}
+
+export interface StoryPrintSnapshot {
+  readonly title: string;
+  readonly turns: readonly {
+    readonly turnNumber: number;
+    readonly action: string;
+    readonly narration: string;
+    readonly imageUrls: readonly string[];
+  }[];
+}
+
+export interface StoryActivityRecord {
+  readonly timestamp: string;
+  readonly category: string;
+  readonly title: string;
+  readonly detail: string;
 }
 
 export interface StoryToolsController {
@@ -32,7 +73,14 @@ export interface StoryToolsController {
   saveNarrationCorrection(turnId: string, request: Omit<AcceptedTurnCorrectionRequest, "turnId">): Promise<AcceptedTurnCorrectionView | null>;
   openHistory(): void;
   openActivity(): void;
-  openAbout(): void;
+  openAbout(): Promise<MetaResponse | null>;
+  exportMarkdown(): Promise<boolean>;
+  exportStandaloneHtml(): Promise<boolean>;
+  printStory(): Promise<boolean>;
+  recordActivity(category: string, title: string, detail?: Readonly<Record<string, unknown>>): Readonly<StoryActivityRecord>;
+  activity(): readonly Readonly<StoryActivityRecord>[];
+  copyActivityDiagnostics(): Promise<boolean>;
+  clearActivity(): void;
   undoLatest(): Promise<boolean>;
   retryLatest(replacementTurnId: string, submission: StoryGenerationSubmission): Promise<boolean>;
   restartFromTurn(turnNumber: number, operation: "branch" | "rewind"): Promise<boolean>;
@@ -47,6 +95,13 @@ export interface StoryToolsControllerOptions {
   readonly reload: () => Promise<void>;
   readonly navigate: (campaignId: string) => void;
   readonly confirm: (kind: StoryToolConfirmation, target: Readonly<Record<string, string | number>>) => boolean | Promise<boolean>;
+  readonly completeHistory?: () => Promise<void>;
+  readonly readableExport?: (campaignId: string, format: StoryReadableExportFormat) => Promise<StoryReadableExport>;
+  readonly printSnapshot?: () => Promise<StoryPrintSnapshot>;
+  readonly meta?: Pick<ShellApi, "get">;
+  readonly browser?: StoryToolBrowser;
+  readonly copyText?: (text: string) => Promise<void>;
+  readonly onActivity?: () => void;
   readonly onDialog?: (dialog: "world" | "current-state" | "correction" | "history" | "activity" | "about" | null) => void;
   readonly onError?: (error: unknown) => void;
 }
@@ -62,11 +117,11 @@ export function storyCampaignToolsMarkup(): string {
       <button type="button" data-tool-action="open-world-setup">Current World Setup</button>
       <button type="button" data-tool-action="edit-campaign-state">Edit Campaign State</button>
       <button type="button" data-tool-action="open-campaign-history">Turn History &amp; State</button>
-      <button type="button" data-tool-action="open-activity" disabled>Activity Log</button>
-      <button type="button" data-tool-action="open-about" disabled>About</button>
-      <button type="button" data-tool-action="export-markdown" disabled>Markdown</button>
-      <button type="button" data-tool-action="export-html" disabled>HTML</button>
-      <button type="button" data-tool-action="export-pdf" disabled>PDF + images</button>
+      <button type="button" data-tool-action="open-activity">Activity Log</button>
+      <button type="button" data-tool-action="open-about">About</button>
+      <button type="button" data-tool-action="export-markdown">Markdown</button>
+      <button type="button" data-tool-action="export-html">HTML</button>
+      <button type="button" data-tool-action="export-pdf">PDF + images</button>
     </div>
   </details>`;
 }
@@ -123,6 +178,90 @@ function canMutate(scope: StoryToolScope): boolean {
   return !scope.generationActive && scope.viewTurnNumber === scope.activeTurnNumber && isPositiveInteger(scope.activeTurnNumber);
 }
 
+function sameExportScope(left: StoryToolScope, right: StoryToolScope | null): boolean {
+  if (right === null || left.campaignId !== right.campaignId || left.activeTurnNumber !== right.activeTurnNumber) return false;
+  return latestTurn(left)?.id === latestTurn(right)?.id;
+}
+
+function safeExportFilename(title: string | undefined, extension: "md" | "html"): string {
+  const slug = (title ?? "infinite-quest-story")
+    .normalize("NFKD")
+    .replace(/[^a-zA-Z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase()
+    .slice(0, 80);
+  return `${slug || "infinite-quest-story"}.${extension}`;
+}
+
+function downloadReadableExport(browser: StoryToolBrowser, body: string, filename: string, type: string): void {
+  const url = browser.createObjectUrl(new Blob([body], { type }));
+  const anchor = browser.document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.hidden = true;
+  try {
+    browser.document.body.append(anchor);
+    anchor.click();
+  } finally {
+    anchor.remove();
+    browser.revokeObjectUrl(url);
+  }
+}
+
+const SAFE_ACTIVITY_DETAIL_FIELDS = ["campaignId", "turnNumber", "jobId", "status", "operationKind", "retryCount", "correlationId"] as const;
+
+function safeActivityText(value: string): string {
+  return value.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 160);
+}
+
+function safeActivityDetail(detail: Readonly<Record<string, unknown>> | undefined): string {
+  if (!detail) return "";
+  const fields: string[] = [];
+  for (const key of SAFE_ACTIVITY_DETAIL_FIELDS) {
+    const value = detail[key];
+    if (typeof value === "string" && safeActivityText(value)) fields.push(`${key}=${safeActivityText(value)}`);
+    if (typeof value === "number" && Number.isFinite(value)) fields.push(`${key}=${value}`);
+  }
+  return fields.join(" ");
+}
+
+function escapePrintText(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function sameOriginAssetUrl(value: string, origin: string | undefined): string | null {
+  if (!origin) return null;
+  try {
+    const url = new URL(value, origin);
+    return url.origin === origin && (url.protocol === "http:" || url.protocol === "https:") ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+function printMarkup(snapshot: StoryPrintSnapshot, origin: string | undefined, styles: string | undefined): string {
+  const title = escapePrintText(snapshot.title || "Infinite Quest Story");
+  const turns = snapshot.turns.map((turn) => {
+    const paragraphs = escapePrintText(turn.narration).split(/\r?\n+/).filter(Boolean).map((paragraph) => `<p>${paragraph}</p>`).join("") || "<p></p>";
+    const images = turn.imageUrls.map((value) => sameOriginAssetUrl(value, origin)).filter((value): value is string => value !== null)
+      .map((url) => `<figure><img src="${escapePrintText(url)}" alt="Illustration for turn ${turn.turnNumber}"></figure>`).join("");
+    return `<section class="turn"><h2>Turn ${turn.turnNumber}: ${escapePrintText(turn.action)}</h2>${paragraphs}${images}</section>`;
+  }).join("") || "<p>No accepted story turns are available yet.</p>";
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${title}</title><style>${styles ?? ""}</style></head><body><h1>${title}</h1>${turns}</body></html>`;
+}
+
+async function waitForPrintImages(document: Pick<Document, "images">): Promise<void> {
+  const images = [...document.images];
+  if (!images.length) return;
+  await Promise.race([
+    Promise.all(images.map((image) => image.complete ? Promise.resolve() : new Promise<void>((resolve) => {
+      image.addEventListener("load", () => resolve(), { once: true });
+      image.addEventListener("error", () => resolve(), { once: true });
+    }))),
+    new Promise<void>((resolve) => globalThis.setTimeout(resolve, 3_000))
+  ]);
+}
+
 /**
  * Owns only Story-tool intent and persisted-target guards. The page keeps UI
  * drafts locally, so rejected mutations never need to clear them here.
@@ -130,6 +269,7 @@ function canMutate(scope: StoryToolScope): boolean {
 export function createStoryToolsController(options: StoryToolsControllerOptions): StoryToolsController {
   let disposed = false;
   let mutationPending = false;
+  let activityRecords: readonly StoryActivityRecord[] = [];
 
   const scope = (): StoryToolScope | null => disposed ? null : options.current();
   const show = (dialog: Parameters<NonNullable<StoryToolsControllerOptions["onDialog"]>>[0]) => {
@@ -144,6 +284,27 @@ export function createStoryToolsController(options: StoryToolsControllerOptions)
     if (disposed || mutationPending) return false;
     mutationPending = true;
     return true;
+  };
+  const exportReadable = async (format: StoryReadableExportFormat): Promise<boolean> => {
+    const current = scope();
+    if (current === null || !options.completeHistory || !options.readableExport || !options.browser) return false;
+    try {
+      await options.completeHistory();
+      if (disposed || !sameExportScope(current, scope())) return false;
+      const exported = await options.readableExport(current.campaignId, format);
+      if (disposed || !sameExportScope(current, scope())) return false;
+      const isMarkdown = format === "markdown";
+      downloadReadableExport(
+        options.browser,
+        exported.body,
+        safeExportFilename(current.campaignTitle, isMarkdown ? "md" : "html"),
+        isMarkdown ? "text/markdown;charset=utf-8" : "text/html;charset=utf-8"
+      );
+      return true;
+    } catch (error) {
+      options.onError?.(error);
+      return false;
+    }
   };
 
   return {
@@ -220,8 +381,86 @@ export function createStoryToolsController(options: StoryToolsControllerOptions)
     openActivity() {
       show("activity");
     },
-    openAbout() {
+    async openAbout() {
       show("about");
+      if (!options.meta) return null;
+      try {
+        const result = await options.meta.get(undefined);
+        return disposed ? null : result;
+      } catch (error) {
+        return fail(error);
+      }
+    },
+    async exportMarkdown() {
+      return exportReadable("markdown");
+    },
+    async exportStandaloneHtml() {
+      return exportReadable("html");
+    },
+    async printStory() {
+      const current = scope();
+      const openPrintWindow = options.browser?.openPrintWindow;
+      if (current === null || !options.completeHistory || !options.printSnapshot || !openPrintWindow) return false;
+      const printWindow = openPrintWindow("", "_blank");
+      if (printWindow === null) return false;
+      printWindow.opener = null;
+      try {
+        await options.completeHistory();
+        if (disposed || !sameExportScope(current, scope())) {
+          printWindow.close();
+          return false;
+        }
+        const snapshot = await options.printSnapshot();
+        if (disposed || !sameExportScope(current, scope())) {
+          printWindow.close();
+          return false;
+        }
+        printWindow.document.open();
+        printWindow.document.write(printMarkup(snapshot, options.browser?.printOrigin, options.browser?.printStyles));
+        printWindow.document.close();
+        await waitForPrintImages(printWindow.document);
+        if (disposed || !sameExportScope(current, scope())) {
+          printWindow.close();
+          return false;
+        }
+        printWindow.print();
+        return true;
+      } catch (error) {
+        printWindow.close();
+        options.onError?.(error);
+        return false;
+      }
+    },
+    recordActivity(category, title, detail) {
+      const record: StoryActivityRecord = {
+        timestamp: new Date().toISOString(),
+        category: safeActivityText(category) || "system",
+        title: safeActivityText(title),
+        detail: safeActivityDetail(detail)
+      };
+      if (disposed) return record;
+      activityRecords = [...activityRecords, record];
+      options.onActivity?.();
+      return record;
+    },
+    activity() {
+      return activityRecords.map((record) => ({ ...record }));
+    },
+    async copyActivityDiagnostics() {
+      if (disposed || !options.copyText) return false;
+      const text = activityRecords.map((record) => `[${record.timestamp}] [${record.category}] ${record.title}${record.detail ? `\n${record.detail}` : ""}`).join("\n\n");
+      try {
+        await options.copyText(text);
+        return true;
+      } catch (error) {
+        options.onError?.(error);
+        return false;
+      }
+    },
+    clearActivity() {
+      if (disposed || activityRecords.length === 0) return;
+      activityRecords = [];
+      options.onActivity?.();
     },
     async undoLatest() {
       const current = scope();

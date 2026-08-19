@@ -163,6 +163,7 @@ function composition(options: {
   readonly state?: ReturnType<typeof vi.fn>;
   readonly inspectState?: ReturnType<typeof vi.fn>;
   readonly session?: ReturnType<typeof vi.fn>;
+  readonly meta?: ReturnType<typeof vi.fn>;
   readonly campaignStore?: CampaignStoreController;
 } = {}): StoryPlayerComposition {
   const campaignStore = options.campaignStore ?? createCampaignStore();
@@ -174,7 +175,8 @@ function composition(options: {
         state: options.state ?? vi.fn(),
         inspectState: options.inspectState ?? options.state ?? vi.fn()
       },
-      generation: { syncStatus: options.syncStatus ?? vi.fn().mockResolvedValue(sync()) }
+      generation: { syncStatus: options.syncStatus ?? vi.fn().mockResolvedValue(sync()) },
+      meta: { get: options.meta ?? vi.fn().mockResolvedValue({ application: "Infinite Quest Nexus", version: "development" }) }
       ,session: { get: options.session }
     },
     campaignStore,
@@ -186,9 +188,48 @@ function composition(options: {
   } as unknown as StoryPlayerComposition;
 }
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 describe("Story Player page shell", () => {
+  it("enables Campaign Tools About and renders only shared meta data", async () => {
+    const page = fixture();
+    const meta = vi.fn().mockResolvedValue({ application: { name: "Infinite Quest Nexus", version: "2026.08", commit: null, builtAt: null } });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: null }, composition({ meta }));
+    await settle();
+
+    const about = page.document.querySelector<HTMLButtonElement>("[data-tool-action='open-about']");
+    expect(about?.disabled).toBe(false);
+    about?.click();
+    await settle();
+
+    expect(meta).toHaveBeenCalledWith(undefined);
+    expect(page.document.querySelector("[data-story-tool-dialog]")?.textContent).toContain("Infinite Quest Nexus");
+    expect(page.document.querySelector("[data-story-tool-dialog]")?.textContent).toContain("2026.08");
+    mounted.dispose();
+  });
+
+  it("requests the backend readable export only after complete Story history is available", async () => {
+    const page = fixture();
+    const fetch = vi.fn().mockResolvedValue({ ok: true, text: vi.fn().mockResolvedValue("# Accepted story") });
+    vi.stubGlobal("fetch", fetch);
+    const createObjectUrl = vi.fn().mockReturnValue("blob:story-export");
+    const revokeObjectUrl = vi.fn();
+    vi.stubGlobal("URL", { createObjectURL: createObjectUrl, revokeObjectURL: revokeObjectUrl });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: null }, composition());
+    await settle();
+
+    page.document.querySelector<HTMLButtonElement>("[data-tool-action='export-markdown']")?.click();
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledWith(
+      `/api/v1/campaigns/${campaignId}/readable-export?format=markdown`
+    ));
+    expect(createObjectUrl).toHaveBeenCalledTimes(1);
+    expect(revokeObjectUrl).toHaveBeenCalledWith("blob:story-export");
+    mounted.dispose();
+  });
+
   it("loads the chooser through the campaign API and keeps reader-first source order", async () => {
     const page = fixture();
     const list = vi.fn().mockResolvedValue({ campaigns: [campaignSummary()] });

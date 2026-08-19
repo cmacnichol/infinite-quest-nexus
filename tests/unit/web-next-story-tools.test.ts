@@ -57,6 +57,26 @@ function controller(overrides: Record<string, unknown> = {}) {
   return { tools, campaigns, generation, reload, navigate, confirm };
 }
 
+type StoryExportTools = {
+  exportMarkdown(): Promise<boolean>;
+  exportStandaloneHtml(): Promise<boolean>;
+};
+
+type StoryActivityTools = {
+  recordActivity(category: string, title: string, detail?: Record<string, unknown>): Readonly<{ detail: string }>;
+  copyActivityDiagnostics(): Promise<boolean>;
+  activity(): readonly Readonly<{ title: string; detail: string }>[];
+  clearActivity(): void;
+};
+
+type StoryPrintTools = {
+  printStory(): Promise<boolean>;
+};
+
+type StoryAboutTools = {
+  openAbout(): Promise<unknown>;
+};
+
 function storyComposition() {
   return {
     api: {
@@ -295,5 +315,169 @@ describe("Story campaign tools", () => {
     expect(campaigns.rewind).not.toHaveBeenCalled();
     expect(navigate).toHaveBeenCalledWith("44444444-4444-4444-8444-444444444444");
     expect(reload).not.toHaveBeenCalled();
+  });
+
+  it("downloads the backend Markdown export only after complete history and revokes its object URL", async () => {
+    const history = vi.fn().mockResolvedValue(undefined);
+    const readableExport = vi.fn().mockResolvedValue({ body: "# Accepted story" });
+    const createObjectUrl = vi.fn().mockReturnValue("blob:story-export");
+    const revokeObjectUrl = vi.fn();
+    const { document } = parseHTML("<body></body>").window;
+    const append = vi.spyOn(document.body, "append");
+    const { tools } = controller({
+      current: () => ({
+        campaignId,
+        campaignTitle: "The Astral Expedition",
+        activeTurnNumber: 7,
+        generationActive: false,
+        viewTurnNumber: 7,
+        turns: [olderTurn, latestTurn]
+      }),
+      completeHistory: history,
+      readableExport,
+      browser: { document, createObjectUrl, revokeObjectUrl }
+    });
+
+    await expect((tools as unknown as StoryExportTools).exportMarkdown()).resolves.toBe(true);
+
+    expect(history).toHaveBeenCalledTimes(1);
+    expect(readableExport).toHaveBeenCalledWith(campaignId, "markdown");
+    expect(createObjectUrl).toHaveBeenCalledTimes(1);
+    expect(revokeObjectUrl).toHaveBeenCalledWith("blob:story-export");
+    expect((append.mock.calls[0]?.[0] as HTMLAnchorElement).download).toBe("the-astral-expedition.md");
+  });
+
+  it("records and copies only operational activity diagnostics", async () => {
+    const copyText = vi.fn().mockResolvedValue(undefined);
+    const { tools } = controller({ copyText });
+    const activity = tools as unknown as StoryActivityTools;
+
+    const record = activity.recordActivity("generation", "Generation queued", {
+      campaignId,
+      turnNumber: 7,
+      jobId: "job-7",
+      narration: "This accepted narration must never enter diagnostics.",
+      prompt: "Nor can this prompt.",
+      providerResponse: "Or raw provider output."
+    });
+
+    expect(record.detail).toBe(`campaignId=${campaignId} turnNumber=7 jobId=job-7`);
+    await expect(activity.copyActivityDiagnostics()).resolves.toBe(true);
+    expect(copyText).toHaveBeenCalledWith(expect.stringContaining("campaignId="));
+    expect(copyText).not.toHaveBeenCalledWith(expect.stringContaining("accepted narration"));
+    expect(activity.activity()).toHaveLength(1);
+    activity.clearActivity();
+    expect(activity.activity()).toEqual([]);
+  });
+
+  it("downloads the backend standalone HTML export with a safely derived filename", async () => {
+    const history = vi.fn().mockResolvedValue(undefined);
+    const readableExport = vi.fn().mockResolvedValue({ body: "<!doctype html><title>Accepted story</title>" });
+    const createObjectUrl = vi.fn().mockReturnValue("blob:story-export-html");
+    const revokeObjectUrl = vi.fn();
+    const { document } = parseHTML("<body></body>").window;
+    const append = vi.spyOn(document.body, "append");
+    const { tools } = controller({
+      current: () => ({ campaignId, campaignTitle: "The Astral Expedition", activeTurnNumber: 7, generationActive: false, viewTurnNumber: 7, turns: [olderTurn, latestTurn] }),
+      completeHistory: history,
+      readableExport,
+      browser: { document, createObjectUrl, revokeObjectUrl }
+    });
+
+    await expect((tools as unknown as StoryExportTools).exportStandaloneHtml()).resolves.toBe(true);
+
+    expect(readableExport).toHaveBeenCalledWith(campaignId, "html");
+    expect(createObjectUrl).toHaveBeenCalledTimes(1);
+    expect(revokeObjectUrl).toHaveBeenCalledWith("blob:story-export-html");
+    expect((append.mock.calls[0]?.[0] as HTMLAnchorElement).download).toBe("the-astral-expedition.html");
+  });
+
+  it("writes no export when complete history fails or is superseded", async () => {
+    const history = vi.fn().mockRejectedValue(new Error("history unavailable"));
+    const readableExport = vi.fn();
+    const createObjectUrl = vi.fn();
+    const { document } = parseHTML("<body></body>").window;
+    const { tools } = controller({
+      completeHistory: history,
+      readableExport,
+      browser: { document, createObjectUrl, revokeObjectUrl: vi.fn() }
+    });
+
+    await expect((tools as unknown as StoryExportTools).exportMarkdown()).resolves.toBe(false);
+
+    expect(readableExport).not.toHaveBeenCalled();
+    expect(createObjectUrl).not.toHaveBeenCalled();
+  });
+
+  it("allows complete history to prepend older turns without treating it as export supersession", async () => {
+    let current = {
+      campaignId,
+      campaignTitle: "The Astral Expedition",
+      activeTurnNumber: 7,
+      generationActive: false,
+      viewTurnNumber: 7,
+      turns: [latestTurn]
+    };
+    const readableExport = vi.fn().mockResolvedValue({ body: "# Accepted story" });
+    const createObjectUrl = vi.fn().mockReturnValue("blob:full-history-export");
+    const { document } = parseHTML("<body></body>").window;
+    const { tools } = controller({
+      current: () => current,
+      completeHistory: async () => { current = { ...current, turns: [olderTurn, latestTurn] }; },
+      readableExport,
+      browser: { document, createObjectUrl, revokeObjectUrl: vi.fn() }
+    });
+
+    await expect((tools as unknown as StoryExportTools).exportMarkdown()).resolves.toBe(true);
+
+    expect(readableExport).toHaveBeenCalledWith(campaignId, "markdown");
+  });
+
+  it("opens a print window synchronously and writes only complete, sanitized story content", async () => {
+    const history = deferred<void>();
+    const document = {
+      open: vi.fn(),
+      write: vi.fn(),
+      close: vi.fn(),
+      images: []
+    };
+    const printWindow = { document, close: vi.fn(), print: vi.fn(), opener: {} };
+    const openPrintWindow = vi.fn().mockReturnValue(printWindow);
+    const printSnapshot = vi.fn().mockResolvedValue({
+      title: "The <Astral> Expedition",
+      turns: [{
+        turnNumber: 7,
+        action: "Open <the> observatory.",
+        narration: "The <script> stars answer.",
+        imageUrls: ["https://story.example.test/assets/accepted.png", "https://external.example.test/not-allowed.png"]
+      }]
+    });
+    const { tools } = controller({
+      completeHistory: () => history.promise,
+      printSnapshot,
+      browser: { document: parseHTML("<body></body>").window.document, createObjectUrl: vi.fn(), revokeObjectUrl: vi.fn(), openPrintWindow, printOrigin: "https://story.example.test", printStyles: "@page { margin: 18mm; }" }
+    });
+
+    const printing = (tools as unknown as StoryPrintTools).printStory();
+
+    expect(openPrintWindow).toHaveBeenCalledWith("", "_blank");
+    expect(document.write).not.toHaveBeenCalled();
+    history.resolve();
+    await expect(printing).resolves.toBe(true);
+    expect(document.write).toHaveBeenCalledWith(expect.stringContaining("The &lt;Astral&gt; Expedition"));
+    expect(document.write).toHaveBeenCalledWith(expect.stringContaining("@page { margin: 18mm; }"));
+    expect(document.write).toHaveBeenCalledWith(expect.stringContaining("/assets/accepted.png"));
+    expect(document.write).not.toHaveBeenCalledWith(expect.stringContaining("external.example.test"));
+    expect(printWindow.print).toHaveBeenCalledTimes(1);
+  });
+
+  it("loads About through the shared meta API", async () => {
+    const expected = { application: { name: "Infinite Quest Nexus", version: "2026.08", commit: null, builtAt: null } };
+    const meta = { get: vi.fn().mockResolvedValue(expected) };
+    const { tools } = controller({ meta });
+
+    await expect((tools as unknown as StoryAboutTools).openAbout()).resolves.toEqual(expected);
+
+    expect(meta.get).toHaveBeenCalledWith(undefined);
   });
 });

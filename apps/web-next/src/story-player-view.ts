@@ -1,9 +1,10 @@
 import type { CampaignProjection } from "@infinite-quest/client-core";
-import type { AcceptedTurnCorrectionView, CampaignRuntimeStateResponse, CampaignSummary } from "@infinite-quest/contracts";
+import type { AcceptedTurnCorrectionView, CampaignRuntimeStateResponse, CampaignSummary, MetaResponse } from "@infinite-quest/contracts";
 import { storyPlayerPath, type StoryRoute } from "./story-route";
 import type { ReadingWidth, StoryUiState } from "./story-player-model";
 import { alignLatestSpine, latestCampaignSpine } from "./story-player-history";
 import type { StoryIllustrationState } from "./story-player-illustrations";
+import type { StoryActivityRecord } from "./story-player-tools";
 
 export interface StoryPlayerViewState {
   readonly route: StoryRoute;
@@ -14,6 +15,8 @@ export interface StoryPlayerViewState {
   readonly inspectedState: CampaignRuntimeStateResponse | null;
   readonly currentState: CampaignRuntimeStateResponse | null;
   readonly correction: AcceptedTurnCorrectionView | null;
+  readonly about: MetaResponse | null;
+  readonly activityRecords: readonly StoryActivityRecord[];
   readonly illustrations: Readonly<StoryIllustrationState>;
 }
 
@@ -644,16 +647,45 @@ function editorField(document: Document, labelText: string, action: string, valu
 
 function toolDialog(document: Document, state: StoryPlayerViewState): HTMLDialogElement | null {
   const active = state.ui.activeDialog;
-  if (active !== "world" && active !== "current-state" && active !== "correction" && !active?.startsWith("restart:")) return null;
+  if (active !== "world" && active !== "current-state" && active !== "correction" && active !== "activity" && active !== "about" && !active?.startsWith("restart:")) return null;
   const dialog = element(document, "dialog", "story-tool-dialog") as HTMLDialogElement;
   dialog.dataset.storyToolDialog = "";
   const title = element(document, "h2", undefined, active === "world" ? "Current World Setup"
     : active === "current-state" ? "Edit Campaign State"
       : active === "correction" ? "Edit Response" : "Restart from this turn");
+  title.textContent = active === "activity" ? "Activity Log" : active === "about" ? "About Infinite Quest Nexus" : title.textContent;
   title.id = "story-tool-dialog-title";
   dialog.setAttribute("aria-labelledby", title.id);
   dialog.append(title);
-  if (active === "world") {
+  if (active === "activity") {
+    if (!state.activityRecords.length) dialog.append(element(document, "p", undefined, "No activity recorded this session."));
+    else {
+      const list = element(document, "ol", "story-activity-log");
+      for (const record of state.activityRecords) {
+        const entry = element(document, "li");
+        entry.append(element(document, "strong", undefined, record.title), element(document, "p", undefined, record.detail || `${record.category} · ${record.timestamp}`));
+        list.append(entry);
+      }
+      dialog.append(list);
+    }
+    for (const [action, label, disabled] of [["copy-activity-diagnostics", "Copy diagnostics", !state.activityRecords.length], ["clear-activity", "Clear log", !state.activityRecords.length]] as const) {
+      const button = element(document, "button", undefined, label);
+      button.type = "button";
+      button.dataset.action = action;
+      button.disabled = disabled;
+      dialog.append(button);
+    }
+  } else if (active === "about") {
+    const application = state.about?.application;
+    if (application) {
+      dialog.append(
+        element(document, "p", undefined, application.name),
+        element(document, "p", undefined, `Version ${application.version}`),
+        element(document, "p", undefined, application.commit ? `Commit ${application.commit}` : "Commit unavailable."),
+        element(document, "p", undefined, application.builtAt ? `Built ${application.builtAt}` : "Build time unavailable.")
+      );
+    } else dialog.append(element(document, "p", undefined, "Loading application information…"));
+  } else if (active === "world") {
     const world = state.projection.world;
     if (world) {
       dialog.append(

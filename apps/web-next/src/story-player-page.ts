@@ -8,6 +8,7 @@ import type {
   CampaignRuntimeStateResponse,
   CampaignRuntimeStateUpdate,
   CampaignSummary,
+  MetaResponse,
   TurnInputClassificationResponse,
   TurnInputModeSource
 } from "@infinite-quest/contracts";
@@ -22,6 +23,7 @@ import { createStoryToolsController, installStoryToolsDisclosure, storyCampaignT
 import type { StoryRoute } from "./story-route";
 import type { MountedPage } from "./world-library-page";
 import "./story-player.css";
+import storyPrintCss from "./story-print.css?inline";
 
 const storyPlayerMarkup = `
   <main id="main-content" data-page="story-player" aria-busy="true">
@@ -143,6 +145,7 @@ export function mountStoryPlayerPage(
   let inspectedState: CampaignRuntimeStateResponse | null = null;
   let currentState: CampaignRuntimeStateResponse | null = null;
   let correction: AcceptedTurnCorrectionView | null = null;
+  let about: MetaResponse | null = null;
   let replacementTurnId: string | null = null;
   let inspectionRequestToken = 0;
   let autoSubmitTurnChoices = false;
@@ -184,11 +187,66 @@ export function mountStoryPlayerPage(
   const tools = createStoryToolsController({
     campaigns: composition.api.campaigns,
     generation,
+    meta: composition.api.meta,
+    completeHistory: async () => {
+      const campaign = projection.campaign;
+      const authority = campaign === null ? null : { campaignId: campaign.id, activeTurnNumber: campaign.activeTurnNumber, syncToken: projection.syncToken };
+      if (authority === null) throw new Error("Story campaign is unavailable.");
+      const result = await history.openCompleteHistory();
+      const current = projection.campaign;
+      if (
+        disposed
+        || current === null
+        || current.id !== authority.campaignId
+        || current.activeTurnNumber !== authority.activeTurnNumber
+        || projection.syncToken !== authority.syncToken
+        || result.campaignId !== authority.campaignId
+        || result.nextCursor !== null
+      ) throw new Error("Story history changed before the operation completed.");
+    },
+    readableExport: async (campaignId, format) => {
+      const view = root.ownerDocument.defaultView;
+      const response = typeof view?.fetch === "function"
+        ? await view.fetch(`/api/v1/campaigns/${encodeURIComponent(campaignId)}/readable-export?format=${format}`)
+        : await globalThis.fetch(`/api/v1/campaigns/${encodeURIComponent(campaignId)}/readable-export?format=${format}`);
+      if (!response.ok) throw new Error(`Story export failed with HTTP ${response.status}.`);
+      return { body: await response.text() };
+    },
+    printSnapshot: async () => {
+      const campaign = projection.campaign;
+      if (campaign === null) throw new Error("Story campaign is unavailable.");
+      return {
+        title: campaign.title,
+        turns: projection.turns.map((turn) => ({
+          turnNumber: turn.turnNumber,
+          action: turn.action,
+          narration: turn.narration,
+          imageUrls: turn.imageUrl ? [turn.imageUrl] : []
+        }))
+      };
+    },
+    browser: {
+      document: root.ownerDocument,
+      createObjectUrl: (blob) => URL.createObjectURL(blob),
+      revokeObjectUrl: (url) => URL.revokeObjectURL(url),
+      openPrintWindow: (url, target) => root.ownerDocument.defaultView?.open(url, target) as never,
+      printOrigin: root.ownerDocument.defaultView?.location?.origin,
+      printStyles: storyPrintCss
+    },
+    copyText: async (text) => {
+      const clipboard = root.ownerDocument.defaultView?.navigator?.clipboard;
+      if (!clipboard) throw new Error("Clipboard access is unavailable.");
+      await clipboard.writeText(text);
+    },
+    onActivity: () => {
+      if (!disposed && ui.get().activeDialog === "activity") render();
+    },
     current: () => {
       const campaign = projection.campaign;
       if (campaign === null) return null;
       return {
         campaignId: campaign.id,
+        campaignTitle: campaign.title,
         activeTurnNumber: campaign.activeTurnNumber,
         generationActive: projection.generation !== null,
         viewTurnNumber: ui.get().viewTurnNumber,
@@ -304,6 +362,19 @@ export function mountStoryPlayerPage(
       tools.closeActiveDialog();
       toolsDisclosure?.querySelector<HTMLElement>("summary")?.focus();
     });
+    for (const control of dialog.querySelectorAll<HTMLButtonElement>("[data-action='copy-activity-diagnostics']")) {
+      control.addEventListener("click", () => {
+        void tools.copyActivityDiagnostics().then((copied) => {
+          if (copied && !disposed) ui.setMessage("Activity diagnostics copied.");
+        });
+      });
+    }
+    for (const control of dialog.querySelectorAll<HTMLButtonElement>("[data-action='clear-activity']")) {
+      control.addEventListener("click", () => {
+        tools.clearActivity();
+        if (!disposed) ui.setMessage("Activity log cleared.");
+      });
+    }
     dialog.querySelector<HTMLElement>("textarea, button:not([disabled])")?.focus();
   };
   const focusDraft = () => root.querySelector<HTMLTextAreaElement>("[data-story-draft]")?.focus();
@@ -398,6 +469,8 @@ export function mountStoryPlayerPage(
       inspectedState,
       currentState,
       correction,
+      about,
+      activityRecords: tools.activity(),
       illustrations: illustrations.get()
     });
     const activeCampaign = projection.campaign;
@@ -843,6 +916,44 @@ export function mountStoryPlayerPage(
       focusHistoryDialog = true;
       ui.setActiveDialog("history");
       void history.openCompleteHistory().catch(() => undefined);
+      return;
+    }
+    if (action === "open-activity") {
+      tools.openActivity();
+      return;
+    }
+    if (action === "open-about") {
+      about = null;
+      void tools.openAbout().then((result) => {
+        if (!disposed && result !== null) {
+          about = result;
+          render();
+        }
+      }).catch(() => undefined);
+      return;
+    }
+    if (action === "export-markdown") {
+      void tools.exportMarkdown().then((downloaded) => {
+        if (!downloaded || disposed) return;
+        tools.recordActivity("export", "Markdown export downloaded", { campaignId: projection.campaign?.id, operationKind: "markdown" });
+        ui.setMessage("Markdown export downloaded.");
+      });
+      return;
+    }
+    if (action === "export-html") {
+      void tools.exportStandaloneHtml().then((downloaded) => {
+        if (!downloaded || disposed) return;
+        tools.recordActivity("export", "HTML export downloaded", { campaignId: projection.campaign?.id, operationKind: "html" });
+        ui.setMessage("Standalone HTML export downloaded.");
+      });
+      return;
+    }
+    if (action === "export-pdf") {
+      void tools.printStory().then((printed) => {
+        if (!printed || disposed) return;
+        tools.recordActivity("print", "Story print prepared", { campaignId: projection.campaign?.id, operationKind: "pdf_images" });
+        ui.setMessage("Print dialog opened.");
+      });
     }
   };
   root.addEventListener("click", onClick);

@@ -1,0 +1,37 @@
+@page {
+  margin: 18mm;
+}
+
+html {
+  color: #111;
+  background: #fff;
+  font-family: Georgia, serif;
+}
+
+body {
+  max-width: 180mm;
+  margin: 0 auto;
+  line-height: 1.5;
+}
+
+.turn {
+  break-inside: avoid;
+  margin: 0 0 1.5rem;
+}
+
+h1,
+h2 {
+  break-after: avoid;
+}
+
+figure {
+  break-inside: avoid;
+  margin: 1rem 0;
+}
+
+img {
+  display: block;
+  max-width: 100%;
+  max-height: 220mm;
+  margin: 0 auto;
+}
