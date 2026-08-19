@@ -174,6 +174,11 @@ describe("Chronicle chunk worker execution", () => {
       cursor: null
     });
     expect(values.embeddings.embed).toHaveBeenCalledOnce();
+    expect(values.embeddings.embed).toHaveBeenCalledWith(values.provider, [
+      "First parent.",
+      "Second parent.",
+      "Third parent."
+    ]);
     expect(values.batches.commitParentBatch).toHaveBeenCalledTimes(3);
     const commits = values.batches.commitParentBatch.mock.calls.map(([, input]) => input as unknown as {
       parent: { id: string };
@@ -193,6 +198,76 @@ describe("Chronicle chunk worker execution", () => {
       [[0.5, 0.6]]
     ]);
     expect(commits.map((input) => input.costResults.length)).toEqual([1, 0, 0]);
+  });
+
+  it("stops at a later failed parent commit while retaining the preceding durable cursor", async () => {
+    const values = dependencies();
+    const parents = [
+      { id: "parent-1", ordinal: 1, content: "First parent." },
+      { id: "parent-2", ordinal: 2, content: "Second parent." },
+      { id: "parent-3", ordinal: 3, content: "Third parent." }
+    ].map((parent, index) => ({
+      ...parent,
+      memoryKind: "canonical_fact" as const,
+      contentHash: String(index + 1).repeat(64),
+      entities: [],
+      entityIds: [],
+      metadata: {}
+    }));
+    values.parents.loadForClaim = vi.fn().mockResolvedValue({
+      ...parentPage(),
+      config: { ...parentPage().config, batchSize: 8 },
+      providerCapability: {
+        ...parentPage().providerCapability,
+        configuration: {
+          embeddingMaxInputTokens: 128,
+          embeddingMaxBatchItems: 8,
+          embeddingMaxBatchTokens: 512,
+          embeddingDimensions: 2,
+          embeddingMaxRetries: 2
+        }
+      },
+      parents,
+      totalParents: 3,
+      batchLimit: 8,
+      nextCursor: null
+    });
+    values.provider.embed.mockResolvedValue({
+      embeddings: [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]],
+      responseId: "page-response",
+      usage: { inputTokens: 12 },
+      reportedCost: { amount: "0.01", currency: "USD" }
+    });
+    values.batches.commitParentBatch
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+    const pageClaim = {
+      ...claim,
+      progress: {
+        ...claim.progress,
+        parentCursor: null,
+        processedParents: 0,
+        embeddedChunks: 0,
+        totalParents: 3
+      }
+    };
+    const execution = createChronicleChunkWorkerExecution(values);
+
+    await expect(execution.execute(pageClaim))
+      .rejects.toThrow("Chronicle chunk job lease was lost during parent commit.");
+
+    expect(values.batches.commitParentBatch).toHaveBeenCalledTimes(2);
+    const commits = values.batches.commitParentBatch.mock.calls.map(([, input]) => input as unknown as {
+      parent: { id: string };
+      previousParentCursor: string | null;
+      costResults: readonly unknown[];
+      progress: { parentCursor: string | null };
+    });
+    expect(commits.map((input) => input.parent.id)).toEqual(["parent-1", "parent-2"]);
+    expect(commits.map((input) => input.previousParentCursor)).toEqual([null, "1:parent-1"]);
+    expect(commits.map((input) => input.progress.parentCursor)).toEqual(["1:parent-1", "2:parent-2"]);
+    expect(commits.map((input) => input.costResults.length)).toEqual([1, 0]);
+    expect(commits.some((input) => input.parent.id === "parent-3")).toBe(false);
   });
 
   it("resumes at the durable parent cursor and commits capability-bounded batches", async () => {
