@@ -123,7 +123,7 @@ export function mountStoryPlayerPage(
     renderStoryPlayerView(root, { route, ui: ui.get(), campaigns, selectedCampaign, projection, inspectedState });
     retryControl = root.querySelector<HTMLButtonElement>('[data-action="retry-story"]');
     retryControl?.addEventListener("click", onRetry);
-    for (const control of root.querySelectorAll<HTMLElement>("[data-turn-number]")) {
+    for (const control of root.querySelectorAll<HTMLElement>("[data-turn-number]:not([data-action])")) {
       const turnNumber = Number(control.dataset.turnNumber);
       control.addEventListener("click", (event) => {
         event.stopPropagation();

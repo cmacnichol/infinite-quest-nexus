@@ -105,6 +105,28 @@ function historicalState(turnNumber: number, continuitySummary: string): Campaig
   };
 }
 
+function turnWindow(turnNumbers: readonly number[]) {
+  return {
+    campaignId,
+    nextCursor: null,
+    turns: turnNumbers.map((turnNumber) => ({
+      id: `00000000-0000-4000-8000-${String(turnNumber).padStart(12, "0")}`,
+      turnNumber,
+      action: `Action ${turnNumber}`,
+      inputMode: "action" as const,
+      inputModeSource: "explicit" as const,
+      narration: `Narration ${turnNumber}.`,
+      choices: [],
+      customActionSuggestion: "",
+      imagePrompt: "",
+      imageUrl: null,
+      acceptedAt: "2026-08-18T00:00:00.000Z",
+      chronicleRetrieval: null,
+      reportedCost: null
+    }))
+  };
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
@@ -500,6 +522,46 @@ describe("Story Player page shell", () => {
 
     expect(turns).toHaveBeenCalledWith(campaignId, { before: "before-6", limit: 200 }, undefined);
     expect(page.document.querySelector("[data-story-leaf] h1")?.textContent).toBe("Turn 5");
+    mounted.dispose();
+  });
+
+  it("moves reader Previous exactly one loaded persisted turn", async () => {
+    const page = fixture();
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 8 },
+      activeTurnNumber: 8,
+      turns: turnWindow([6, 7, 8])
+    });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 8 }, composition({
+      list: vi.fn().mockResolvedValue({ campaigns: [campaignSummary({ activeTurnNumber: 8 })] }),
+      syncStatus: vi.fn().mockResolvedValue(loaded)
+    }));
+    await settle();
+
+    page.document.querySelector<HTMLButtonElement>("[data-story-reader] [data-action='previous-turn']")?.click();
+    await settle();
+
+    expect(page.document.querySelector("[data-story-leaf] h1")?.textContent).toBe("Turn 7");
+    mounted.dispose();
+  });
+
+  it("moves reader Next exactly one loaded persisted turn", async () => {
+    const page = fixture();
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 8 },
+      activeTurnNumber: 8,
+      turns: turnWindow([6, 7, 8])
+    });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 6 }, composition({
+      list: vi.fn().mockResolvedValue({ campaigns: [campaignSummary({ activeTurnNumber: 8 })] }),
+      syncStatus: vi.fn().mockResolvedValue(loaded)
+    }));
+    await settle();
+
+    page.document.querySelector<HTMLButtonElement>("[data-story-reader] [data-action='next-turn']")?.click();
+    await settle();
+
+    expect(page.document.querySelector("[data-story-leaf] h1")?.textContent).toBe("Turn 7");
     mounted.dispose();
   });
 
