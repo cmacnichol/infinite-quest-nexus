@@ -93,6 +93,10 @@ function setCampaignSettingsPanel(panelId, { focus = false } = {}) {
   document.querySelectorAll("[data-campaign-settings-content]").forEach((panel) => {
     panel.hidden = panel.dataset.campaignSettingsContent !== panelId;
   });
+  if (window.matchMedia("(max-width: 820px)").matches) {
+    const activeTab = elements.campaignSettingsRail.querySelector('[aria-selected="true"]');
+    activeTab?.scrollIntoView({ block: "nearest", inline: "center" });
+  }
 }
 
 function handleCampaignSettingsRailKeydown(event) {

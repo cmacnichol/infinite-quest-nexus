@@ -58,6 +58,18 @@ describe("Nexus management UI contracts", () => {
     }
   });
 
+  it("adapts the legacy campaign list and settings rail before either can overflow", () => {
+    expect(managementHtml).toContain('class="workspace anchor-section world-management campaign-management-workspace"');
+    expect(managementCss).toContain("@media (max-width: 1180px)");
+    expect(managementCss).toContain(".campaign-management-workspace { grid-template-columns: 1fr; }");
+    expect(managementCss).toContain(".campaign-management-workspace .campaign-list {");
+    expect(managementCss).toContain("@media (max-width: 820px)");
+    expect(managementCss).toContain(".campaign-settings-shell { grid-template-columns: 1fr; }");
+    expect(managementCss).toContain('.campaign-settings-rail [role="tab"] { min-width: 150px; }');
+    expect(managementCss).toContain("@media (max-width: 520px)");
+    expect(managementCss).toContain(".campaign-panel-fields { grid-template-columns: 1fr; }");
+  });
+
   it("groups every illustration control by source, segmentation, matching, provider, and history", () => {
     const panel = managementDocument.querySelector("#campaignPanelIllustrations")!;
     const markup = panel.innerHTML;
@@ -177,6 +189,7 @@ describe("Nexus management UI contracts", () => {
     ], {
       elements,
       document,
+      window: { matchMedia: () => ({ matches: false }) },
       CAMPAIGN_SETTINGS_PANEL_IDS: ["overview", "story", "illustrations", "chronicle", "usage"]
     });
     const staleControlIds = [
