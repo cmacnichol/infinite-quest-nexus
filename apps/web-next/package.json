@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@infinite-quest/client-core": "workspace:*"
+    "@infinite-quest/client-core": "workspace:*",
+    "@infinite-quest/client-web": "workspace:*"
   },
   "devDependencies": {
     "vite": "^7.3.6"

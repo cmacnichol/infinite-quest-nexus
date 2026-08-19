@@ -20,10 +20,10 @@ export function renderAppShell(root: HTMLElement, pageMarkup: string, currentNav
         <nav class="site-nav" aria-label="Primary navigation">
           <a href="/app/"${currentAttribute(currentNavigation, "world-library")}>World Library</a>
           <a href="/app/campaigns"${currentAttribute(currentNavigation, "campaigns")}>Campaigns</a>
-          <a href="/story"${currentAttribute(currentNavigation, "story")}>Story</a>
+          <a href="/app/story"${currentAttribute(currentNavigation, "story")}>Story</a>
           <a href="/nexus/#providers"${currentAttribute(currentNavigation, "setup")}>Setup</a>
         </nav>
-        <a class="story-link" href="/story">
+        <a class="story-link" href="/app/story">
           Enter story
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9" /></svg>
         </a>
