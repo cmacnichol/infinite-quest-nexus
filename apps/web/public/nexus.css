@@ -215,8 +215,13 @@ textarea { resize: vertical; }
 .illustration-toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .illustration-controls .toggle-field { display: flex; align-items: center; gap: 9px; color: var(--text); font-size: .9rem; }
 .illustration-controls .toggle-field input { width: auto; }
-.illustration-settings { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; align-items: end; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
-.illustration-settings-group { display: contents; }
+.illustration-panel-stack { display: grid; gap: 16px; }
+.illustration-settings { display: grid; gap: 16px; }
+.illustration-settings-group { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; border-top: 1px solid var(--line); padding-top: 16px; }
+.illustration-group-heading { grid-column: 1 / -1; }
+.illustration-group-heading h3 { margin: 0; font-size: .92rem; }
+.illustration-group-heading p { max-width: 68ch; margin: 4px 0 0; color: var(--muted); font-size: .74rem; line-height: 1.45; }
+.illustration-history-group { display: grid; gap: 10px; border-top: 1px solid var(--line); padding-top: 16px; }
 .illustration-settings .field-note { grid-column: 1 / -1; margin: 0; }
 .illustration-history-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0 10px; }
 .context-controls .query-field { grid-column: 1 / -1; }

@@ -58,6 +58,42 @@ describe("Nexus management UI contracts", () => {
     }
   });
 
+  it("groups every illustration control by source, segmentation, matching, provider, and history", () => {
+    const panel = managementDocument.querySelector("#campaignPanelIllustrations")!;
+    const markup = panel.innerHTML;
+    const groups = [
+      "illustrationSourceGroup",
+      "illustrationSegmentSettings",
+      "illustrationMatchingSettings",
+      "illustrationProviderSettings",
+      "illustrationHistoryGroup"
+    ];
+    for (const id of groups) expect(panel.querySelector("#" + id)).not.toBeNull();
+    expect(groups.map((id) => markup.indexOf('id="' + id + '"'))).toEqual([...groups.map((id) => markup.indexOf('id="' + id + '"'))].sort((a, b) => a - b));
+
+    for (const id of [
+      "illustrationSourcePolicy",
+      "illustrationSegmentWordCount",
+      "illustrationImagesPerSegment",
+      "illustrationSegmentPromptMode",
+      "illustrationMatchingScope",
+      "illustrationConfidenceProfile",
+      "illustrationRepetitionWindow",
+      "campaignImageProvider",
+      "illustrationModel",
+      "illustrationSize",
+      "illustrationAspectRatio",
+      "illustrationQuality",
+      "illustrationOutputFormat",
+      "illustrationMaxAttempts",
+      "previewIllustrationBackfill",
+      "previewIllustrationRebuild",
+      "saveIllustrationConfig"
+    ]) {
+      expect(panel.querySelector("#" + id), id + " should stay in the Illustration panel").not.toBeNull();
+    }
+  });
+
   it("keeps campaign persistence separate from migration and panel navigation", () => {
     for (const id of [
       "campaignTitle",

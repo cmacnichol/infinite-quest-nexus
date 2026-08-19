@@ -254,8 +254,12 @@
               <p>Configure independent image jobs that run only after a story turn is accepted.</p>
             </div>
           </div>
-          <form id="illustrationForm" class="illustration-controls">
-            <div class="illustration-toggle-row">
+          <form id="illustrationForm" class="illustration-controls illustration-panel-stack">
+            <div id="illustrationSourceGroup" class="illustration-settings-group illustration-source-group">
+              <div class="illustration-group-heading">
+                <h3>Illustration source</h3>
+                <p>Choose whether accepted story segments use the library, image generation, or both.</p>
+              </div>
               <label>Automatic illustration source
                 <select id="illustrationSourcePolicy" disabled>
                   <option value="off">No automatic illustrations</option>
@@ -267,7 +271,11 @@
               <button id="saveIllustrationConfig" class="button primary" type="submit" disabled>Save illustration settings</button>
             </div>
             <div id="illustrationSettings" class="illustration-settings hidden" aria-hidden="true">
-              <div id="illustrationSegmentSettings" class="illustration-settings-group">
+              <div id="illustrationSegmentSettings" class="illustration-settings-group illustration-segment-group">
+                <div class="illustration-group-heading">
+                  <h3>Segmentation</h3>
+                  <p>Control how accepted narration is divided into illustration-ready segments.</p>
+                </div>
                 <label>Words per illustration segment<input id="illustrationSegmentWordCount" type="number" min="100" max="5000" value="500"></label>
                 <label>Images per segment<select id="illustrationImagesPerSegment"><option value="1">1 image</option><option value="2">2 images</option></select></label>
                 <label>Segment prompt mode<select id="illustrationSegmentPromptMode"><option value="direct">Use accepted segment text</option><option value="ai_refined">AI-refined visual prompt</option></select></label>
@@ -276,12 +284,20 @@
                 <div><strong>AI prompt editor</strong><span id="illustrationRefinementPromptSummary" class="field-note">Using the default refinement prompt.</span></div>
                 <button id="openIllustrationPromptEditor" class="button secondary" type="button">Read or edit prompt…</button>
               </div>
-              <div id="illustrationMatchingSettings" class="illustration-settings-group hidden">
+              <div id="illustrationMatchingSettings" class="illustration-settings-group illustration-matching-group hidden">
+                <div class="illustration-group-heading">
+                  <h3>Library matching</h3>
+                  <p>Set how existing images are matched before a new illustration is generated.</p>
+                </div>
                 <label>Matching scope<select id="illustrationMatchingScope"><option value="campaign">Current campaign</option><option value="world">Current world</option><option value="owner_library">Entire personal library</option></select></label>
                 <label>Confidence<select id="illustrationConfidenceProfile"><option value="strict">Strict</option><option value="balanced">Balanced</option><option value="broad">Broad</option></select></label>
                 <label>Recent-turn repetition window<input id="illustrationRepetitionWindow" type="number" min="0" max="100" value="5"></label>
               </div>
-              <div id="illustrationProviderSettings" class="illustration-settings-group hidden">
+              <div id="illustrationProviderSettings" class="illustration-settings-group illustration-provider-group hidden">
+                <div class="illustration-group-heading">
+                  <h3>Image provider</h3>
+                  <p>Configure the independent image endpoint used only when generation is selected.</p>
+                </div>
                 <label>Image provider profile<select id="campaignImageProvider" disabled><option value="">Use default image provider</option></select></label>
                 <p id="campaignImageProviderSummary" class="field-note">Image generation uses the campaign image profile, or the default image profile when left empty.</p>
                 <label>Image model<input id="illustrationModel" maxlength="500" list="illustrationModels" placeholder="Select an image-capable model" disabled><datalist id="illustrationModels"></datalist></label>
@@ -294,9 +310,15 @@
               </div>
             </div>
           </form>
-          <div class="illustration-history-actions">
+          <div id="illustrationHistoryGroup" class="illustration-history-group">
+            <div class="illustration-group-heading">
+              <h3>Historical illustrations</h3>
+              <p>Preview the work before generating missing illustrations or rebuilding existing segments.</p>
+            </div>
+            <div class="illustration-history-actions">
             <button id="previewIllustrationBackfill" class="button secondary" type="button" disabled>Generate missing historical illustrations…</button>
             <button id="previewIllustrationRebuild" class="button secondary" type="button" disabled>Rebuild historical illustration segments…</button>
+            </div>
           </div>
           <div id="illustrationStatus" class="status">Illustrations are optional child jobs. Image failures never roll back or rerun an accepted story turn.</div>
         </section>
