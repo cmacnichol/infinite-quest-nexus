@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { parseHTML } from "linkedom";
 import { createCampaignStore, type CampaignStoreController } from "../../packages/client-core/src/index.js";
-import type { CampaignSyncStatus } from "../../packages/contracts/src/index.js";
+import type { CampaignRuntimeStateResponse, CampaignSyncStatus } from "../../packages/contracts/src/index.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { StoryPlayerComposition } from "../../apps/web-next/src/story-player-composition.js";
 import { mountStoryPlayerPage } from "../../apps/web-next/src/story-player-page.js";
@@ -86,6 +86,25 @@ function sync(overrides: Record<string, unknown> = {}): CampaignSyncStatus {
   } as CampaignSyncStatus;
 }
 
+function historicalState(turnNumber: number, continuitySummary: string): CampaignRuntimeStateResponse {
+  return {
+    campaignId,
+    activeTurnNumber: 7,
+    viewedTurnNumber: turnNumber,
+    isCurrent: turnNumber === 7,
+    revision: 4,
+    updatedAt: "2026-08-18T00:00:00.000Z",
+    continuitySummary,
+    openThreads: ["Find the observatory."],
+    canonicalFacts: [],
+    scratchpad: "Private campaign scratchpad.",
+    trackers: [],
+    rpgStats: [{ id: "courage", name: "Courage", value: 8, note: "Inspector-only mechanics." }],
+    eventTriggers: [],
+    pendingEventTriggers: []
+  };
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
@@ -158,6 +177,8 @@ describe("Story Player page shell", () => {
     expect(main?.querySelector("aside.story-illustration-wing")?.getAttribute("aria-label")).toBe("Current turn illustration");
     const styles = readFileSync(new URL("../../apps/web-next/src/story-player.css", import.meta.url), "utf8");
     expect(styles).toMatch(/@media \(min-width: 900px\) \{[\s\S]*grid-template-areas: "spine reader illustration";/u);
+    expect(styles).toMatch(/:focus-visible/u);
+    expect(styles).toMatch(/var\(--focus-ring/u);
     mounted.dispose();
   });
 
@@ -520,22 +541,7 @@ describe("Story Player page shell", () => {
         acceptedAt: "2026-08-18T00:00:00.000Z", chronicleRetrieval: null, reportedCost: null
       })) }
     });
-    const inspectedState = {
-      campaignId,
-      activeTurnNumber: 7,
-      viewedTurnNumber: 6,
-      isCurrent: false,
-      revision: 4,
-      updatedAt: "2026-08-18T00:00:00.000Z",
-      continuitySummary: "Archived continuity for turn six.",
-      openThreads: ["Find the observatory."],
-      canonicalFacts: [],
-      scratchpad: "Private campaign scratchpad.",
-      trackers: [],
-      rpgStats: [{ id: "courage", name: "Courage", value: 8, note: "Inspector-only mechanics." }],
-      eventTriggers: [],
-      pendingEventTriggers: []
-    };
+    const inspectedState = historicalState(6, "Archived continuity for turn six.");
     const state = vi.fn().mockResolvedValue(inspectedState);
     const confirm = vi.fn().mockReturnValue(false);
     Object.defineProperty(page.window, "confirm", { configurable: true, value: confirm });
@@ -564,6 +570,10 @@ describe("Story Player page shell", () => {
     liveOpener?.click();
     await settle();
     dialog = page.document.querySelector<HTMLDialogElement>("[data-story-history]");
+    const historyTitle = dialog?.querySelector<HTMLHeadingElement>("h2");
+    expect(historyTitle?.id).toBeTruthy();
+    expect(dialog?.getAttribute("aria-labelledby")).toBe(historyTitle?.id);
+    expect(focus.mock.instances).toContain(dialog?.querySelector("button"));
     dialog?.querySelector<HTMLButtonElement>("[data-action='inspect-state']")?.click();
     await settle();
     expect(state).toHaveBeenCalledWith(campaignId, 6, undefined);
@@ -590,6 +600,74 @@ describe("Story Player page shell", () => {
     dialog?.dispatchEvent(new page.window.Event("cancel", { cancelable: true }));
     expect(page.document.querySelector("[data-story-history]")).toBeNull();
     expect(focus.mock.instances).toContain(page.document.querySelector("[data-action='open-complete-history']"));
+    mounted.dispose();
+  });
+
+  it("opens the isolated History inspector from the normal reader without leaking mechanics into the leaf", async () => {
+    const page = fixture();
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 7 }, activeTurnNumber: 7,
+      turns: { campaignId, nextCursor: null, turns: [6, 7].map((turnNumber) => ({
+        id: `00000000-0000-4000-8000-${String(turnNumber).padStart(12, "0")}`,
+        turnNumber, action: `Action ${turnNumber}`, inputMode: "action" as const, inputModeSource: "explicit" as const,
+        narration: `Narration ${turnNumber}.`, choices: [], customActionSuggestion: "", imagePrompt: "", imageUrl: null,
+        acceptedAt: "2026-08-18T00:00:00.000Z", chronicleRetrieval: null, reportedCost: null
+      })) }
+    });
+    const state = vi.fn().mockResolvedValue(historicalState(6, "Reader inspection is dialog-only."));
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 6 }, composition({
+      list: vi.fn().mockResolvedValue({ campaigns: [campaignSummary({ activeTurnNumber: 7 })] }), syncStatus: vi.fn().mockResolvedValue(loaded), state
+    }));
+    await settle();
+
+    page.document.querySelector<HTMLButtonElement>("[data-story-reader] [data-action='inspect-state']")?.click();
+    await settle();
+
+    expect(state).toHaveBeenCalledWith(campaignId, 6, undefined);
+    expect(page.document.querySelector("[data-story-history]")).toBeTruthy();
+    expect(page.document.querySelector("[data-story-state-inspector]")?.textContent).toContain("Reader inspection is dialog-only.");
+    expect(page.document.querySelector("[data-story-reader]")?.textContent).not.toContain("Reader inspection is dialog-only.");
+    expect(page.document.querySelector("[data-story-reader]")?.textContent).not.toContain("Inspector-only mechanics.");
+    expect(page.document.querySelector(".story-campaign-spine")?.textContent).not.toContain("Inspector-only mechanics.");
+    mounted.dispose();
+  });
+
+  it("keeps the newest selected inspection when an older response arrives last", async () => {
+    const page = fixture();
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 7 }, activeTurnNumber: 7,
+      turns: { campaignId, nextCursor: null, turns: [6, 7].map((turnNumber) => ({
+        id: `00000000-0000-4000-8000-${String(turnNumber).padStart(12, "0")}`,
+        turnNumber, action: `Action ${turnNumber}`, inputMode: "action" as const, inputModeSource: "explicit" as const,
+        narration: `Narration ${turnNumber}.`, choices: [], customActionSuggestion: "", imagePrompt: "", imageUrl: null,
+        acceptedAt: "2026-08-18T00:00:00.000Z", chronicleRetrieval: null, reportedCost: null
+      })) }
+    });
+    const older = deferred<CampaignRuntimeStateResponse | null>();
+    const newer = deferred<CampaignRuntimeStateResponse | null>();
+    const state = vi.fn().mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise);
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 6 }, composition({
+      list: vi.fn().mockResolvedValue({ campaigns: [campaignSummary({ activeTurnNumber: 7 })] }), syncStatus: vi.fn().mockResolvedValue(loaded), state
+    }));
+    await settle();
+
+    page.document.querySelector<HTMLButtonElement>("[data-action='open-complete-history']")?.click();
+    await settle();
+    page.document.querySelector<HTMLButtonElement>("[data-story-history] [data-action='inspect-state']")?.click();
+    await settle();
+    page.document.querySelector<HTMLButtonElement>("[data-story-history] [data-turn-number='7']")?.click();
+    await settle();
+    page.document.querySelector<HTMLButtonElement>("[data-story-history] [data-action='inspect-state']")?.click();
+    await settle();
+
+    newer.resolve(historicalState(7, "Newer inspection wins."));
+    await settle();
+    expect(page.document.querySelector("[data-story-state-inspector]")?.textContent).toContain("Newer inspection wins.");
+
+    older.resolve(historicalState(6, "Older inspection must not overwrite."));
+    await settle();
+    expect(page.document.querySelector("[data-story-state-inspector]")?.textContent).toContain("Newer inspection wins.");
+    expect(page.document.querySelector("[data-story-state-inspector]")?.textContent).not.toContain("Older inspection must not overwrite.");
     mounted.dispose();
   });
 

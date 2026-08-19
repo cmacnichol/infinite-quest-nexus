@@ -52,9 +52,10 @@ export function mountStoryPlayerPage(
   let controller: AbortController | null = null;
   let projection: Readonly<CampaignProjection> = composition.campaignStore.store.get();
   let retryControl: HTMLButtonElement | null = null;
-  let historyDialogOpener = false;
+  let historyDialogOpener: "history" | "inspect" | null = null;
   let focusHistoryDialog = false;
   let inspectedState: CampaignRuntimeStateResponse | null = null;
+  let inspectionRequestToken = 0;
   const history = createStoryHistoryController({
     campaigns: composition.api.campaigns,
     campaignStore: composition.campaignStore,
@@ -63,11 +64,20 @@ export function mountStoryPlayerPage(
 
   const onRetry = () => { void load(); };
   const restoreHistoryFocus = () => {
-    if (!historyDialogOpener) return;
-    historyDialogOpener = false;
-    root.querySelector<HTMLButtonElement>("[data-action='open-complete-history']")?.focus();
+    const opener = historyDialogOpener;
+    if (opener === null) return;
+    historyDialogOpener = null;
+    const selector = opener === "history"
+      ? "[data-action='open-complete-history']"
+      : "[data-story-reader] [data-action='inspect-state']";
+    root.querySelector<HTMLButtonElement>(selector)?.focus();
+  };
+  const invalidateInspection = () => {
+    inspectionRequestToken += 1;
+    inspectedState = null;
   };
   const closeHistoryDialog = () => {
+    invalidateInspection();
     const dialog = root.querySelector<HTMLDialogElement>("[data-story-history]");
     if (dialog && (dialog.hasAttribute("open") || dialog.open) && typeof dialog.close === "function") dialog.close();
     if (ui.get().activeDialog === "history") ui.setActiveDialog(null);
@@ -103,9 +113,9 @@ export function mountStoryPlayerPage(
         controls[0]?.focus();
       }
     });
-    if (focusHistoryDialog) {
+    if (focusHistoryDialog || !dialog.contains(dialog.ownerDocument.activeElement)) {
       focusHistoryDialog = false;
-      dialog.querySelector<HTMLElement>("[data-story-history-focus]")?.focus();
+      dialog.querySelector<HTMLElement>("button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled])")?.focus();
     }
   };
   function render(): void {
@@ -117,20 +127,21 @@ export function mountStoryPlayerPage(
       const turnNumber = Number(control.dataset.turnNumber);
       control.addEventListener("click", (event) => {
         event.stopPropagation();
-        inspectedState = null;
+        invalidateInspection();
         history.jump(turnNumber);
       });
     }
     for (const control of root.querySelectorAll<HTMLElement>("[data-action='previous-turn']")) {
-      control.addEventListener("click", (event) => { event.stopPropagation(); void history.previous(); });
+      control.addEventListener("click", (event) => { event.stopPropagation(); invalidateInspection(); void history.previous(); });
     }
     for (const control of root.querySelectorAll<HTMLElement>("[data-action='next-turn']")) {
-      control.addEventListener("click", (event) => { event.stopPropagation(); void history.next(); });
+      control.addEventListener("click", (event) => { event.stopPropagation(); invalidateInspection(); void history.next(); });
     }
     for (const control of root.querySelectorAll<HTMLElement>("[data-action='open-complete-history']")) {
       control.addEventListener("click", (event) => {
         event.stopPropagation();
-        historyDialogOpener = true;
+        invalidateInspection();
+        historyDialogOpener = "history";
         focusHistoryDialog = true;
         ui.setActiveDialog("history");
         void history.openCompleteHistory().catch(() => undefined);
@@ -147,10 +158,20 @@ export function mountStoryPlayerPage(
         event.stopPropagation();
         const turnNumber = Number(control.dataset.turnNumber);
         if (Number.isSafeInteger(turnNumber) && turnNumber > 0) {
-          inspectedState = null;
+          invalidateInspection();
           history.jump(turnNumber);
         }
         closeHistoryDialog();
+      });
+    }
+    for (const control of root.querySelectorAll<HTMLElement>("[data-action='jump-to-latest']")) {
+      control.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const turnNumber = Number(control.dataset.turnNumber);
+        if (Number.isSafeInteger(turnNumber) && turnNumber > 0) {
+          invalidateInspection();
+          history.jump(turnNumber);
+        }
       });
     }
     for (const control of root.querySelectorAll<HTMLElement>("[data-action='inspect-state']")) {
@@ -158,8 +179,24 @@ export function mountStoryPlayerPage(
         event.stopPropagation();
         const turnNumber = ui.get().viewTurnNumber;
         if (turnNumber !== null) {
+          const requestedCampaignId = projection.campaign?.id;
+          const requestToken = ++inspectionRequestToken;
+          if (control.closest("[data-story-reader]")) {
+            historyDialogOpener = "inspect";
+            focusHistoryDialog = true;
+            ui.setActiveDialog("history");
+          }
           void history.inspect(turnNumber).then((result) => {
-            if (disposed || result === null) return;
+            if (
+              disposed
+              || result === null
+              || requestToken !== inspectionRequestToken
+              || requestedCampaignId === undefined
+              || projection.campaign?.id !== requestedCampaignId
+              || ui.get().viewTurnNumber !== turnNumber
+              || result.campaignId !== requestedCampaignId
+              || result.viewedTurnNumber !== turnNumber
+            ) return;
             inspectedState = result;
             render();
           });
@@ -180,6 +217,7 @@ export function mountStoryPlayerPage(
   }
   const unsubscribeStore = composition.campaignStore.store.subscribe((next) => {
     projection = next;
+    inspectionRequestToken += 1;
     history.sync(next);
     render();
   });

@@ -302,10 +302,9 @@ function completeHistoryDialog(document: Document, state: StoryPlayerViewState):
   if (state.ui.activeDialog !== "history") return null;
   const dialog = element(document, "dialog", "story-history-dialog") as HTMLDialogElement;
   dialog.dataset.storyHistory = "";
-  dialog.setAttribute("aria-label", "Complete story history");
   const title = element(document, "h2", undefined, "Turn History");
-  title.dataset.storyHistoryFocus = "";
-  title.tabIndex = -1;
+  title.id = "story-history-title";
+  dialog.setAttribute("aria-labelledby", title.id);
   dialog.append(title);
   if (state.ui.history === "loading") dialog.append(element(document, "p", undefined, "Loading complete history…"));
   if (state.ui.history === "error") {
