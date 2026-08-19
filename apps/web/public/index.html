@@ -329,96 +329,126 @@
         <section id="campaignContextSection" class="campaign-settings-section chronicle-settings-section" aria-labelledby="campaignContextTitle">
           <div class="campaign-settings-heading">
             <div>
-              <p class="eyebrow">Chronicle</p>
-              <h3 id="campaignContextTitle">Memory and context</h3>
-              <p>Control optional Semantic Retrieval and preview the campaign context sent to story generation.</p>
+              <h3 id="campaignContextTitle">Chronicle</h3>
+              <p>Monitor local memory health, preview story context, and manage optional Semantic Retrieval.</p>
             </div>
-            <button id="reindexMemory" class="button secondary" type="button" title="Reconstruct derived Chronicle memories from accepted turns and campaign state, then queue semantic indexing. Use only when memory is stale or inconsistent." disabled>Rebuild memory</button>
           </div>
 
-        <div id="memoryMetrics" class="metrics" aria-live="polite"></div>
+        <section id="chronicleHealthRegion" class="chronicle-health-region" aria-label="Chronicle health">
+          <div id="memoryMetrics" class="metrics" aria-live="polite"></div>
 
-        <div id="semanticMemoryHealth" class="semantic-memory-health" role="status" aria-live="polite" aria-atomic="true">
-          <span id="semanticMemoryHealthBadge" class="health-badge">Chronicle available</span>
-          <div>
-            <strong id="semanticMemoryHealthTitle">Chronicle local memory is available</strong>
-            <p id="semanticMemoryHealthMessage">Semantic Retrieval status will appear after a campaign is selected.</p>
+          <div id="semanticMemoryHealth" class="semantic-memory-health" role="status" aria-live="polite" aria-atomic="true">
+            <span id="semanticMemoryHealthBadge" class="health-badge">Chronicle available</span>
+            <div>
+              <strong id="semanticMemoryHealthTitle">Chronicle local memory is available</strong>
+              <p id="semanticMemoryHealthMessage">Semantic Retrieval status will appear after a campaign is selected.</p>
+            </div>
+            <dl id="semanticMemoryHealthDetails" class="chronicle-health-details"></dl>
+            <p class="chronicle-availability-note">Chronicle local memory remains available when semantic retrieval is off.</p>
           </div>
-          <dl id="semanticMemoryHealthDetails" class="chronicle-health-details"></dl>
-          <p class="chronicle-availability-note">Chronicle local memory remains available when semantic retrieval is off.</p>
-        </div>
+        </section>
 
-        <form id="embeddingForm" class="embedding-controls">
-          <fieldset class="semantic-retrieval-controls">
-            <legend>Semantic Retrieval</legend>
+        <section class="chronicle-context-workbench" aria-labelledby="chronicleContextWorkbenchTitle">
+          <header class="chronicle-subheading">
+            <div>
+              <h3 id="chronicleContextWorkbenchTitle">Context preview</h3>
+              <p>Preview only — does not change campaign settings. It does not submit a story turn.</p>
+            </div>
+          </header>
+          <div class="chronicle-context-grid">
+            <div class="chronicle-context-controls">
+              <form id="contextForm" class="context-controls">
+                <label>
+                  Context budget
+                  <input id="budgetTokens" type="number" min="512" max="1000000" step="1024" value="32000" aria-describedby="budgetTokensSource">
+                  <span id="budgetTokensSource" class="field-note">The selected text provider supplies the available input limit.</span>
+                </label>
+                <label>
+                  Compression
+                  <select id="compression" title="Choose how Chronicle fits story history into the context budget.">
+                    <option value="auto" title="Selects the richest level that fits the current context budget.">Automatic</option>
+                    <option value="full" title="Includes complete accepted narration and actions until the budget is exhausted.">Full history</option>
+                    <option value="balanced" title="Keeps important scene detail while shortening older accepted turns.">Balanced</option>
+                    <option value="compact" title="Uses concise per-turn memory so more chronology fits in the same budget.">Compact</option>
+                    <option value="summary" title="Uses campaign summaries plus the most recent verbatim turns.">Summary + recent</option>
+                  </select>
+                </label>
+                <label class="query-field">
+                  Preview retrieval query
+                  <input id="memoryQuery" type="text" maxlength="4000" placeholder="Optional: name, location, event, or intended action">
+                </label>
+                <button class="button primary" type="submit" disabled id="previewContext">Build context preview</button>
+              </form>
+              <details class="field-help">
+                <summary>What do the compression options include?</summary>
+                <dl>
+                  <dt>Automatic</dt><dd>Selects the richest representation that fits.</dd>
+                  <dt>Full history</dt><dd>Prefers complete accepted narration and actions.</dd>
+                  <dt>Balanced</dt><dd>Shortens older turns while preserving important scene detail.</dd>
+                  <dt>Compact</dt><dd>Uses concise per-turn memory to retain more chronology.</dd>
+                  <dt>Summary + recent</dt><dd>Uses campaign summaries with recent verbatim turns.</dd>
+                </dl>
+              </details>
+            </div>
+            <div class="chronicle-context-preview-pane">
+              <div id="contextSummary" class="status hidden" role="status" aria-live="polite"></div>
+              <details class="context-preview-details">
+                <summary>View context preview</summary>
+                <pre id="contextPreview" class="context-preview" tabindex="0">The preview deliberately excludes rolls, mechanics records, private scratchpad content, rejected output, and credentials.</pre>
+              </details>
+            </div>
+          </div>
+        </section>
+
+        <section class="chronicle-retrieval-config" aria-labelledby="semanticRetrievalTitle">
+          <header class="chronicle-subheading">
+            <div>
+              <h3 id="semanticRetrievalTitle">Semantic Retrieval index</h3>
+              <p>Optional vector search layered over Chronicle local retrieval.</p>
+            </div>
+          </header>
+          <form id="embeddingForm" class="embedding-controls">
             <label class="toggle-field"><input id="embeddingEnabled" type="checkbox"> Enable Semantic Retrieval for this campaign</label>
-            <label>Production implementation
-              <select id="embeddingRetrievalImplementation" required>
-                <option value="" disabled selected>Configuration unavailable</option>
-                <option value="legacy_hybrid">Legacy hybrid</option>
-                <option value="chunked_hybrid">Chunked hybrid</option>
-              </select>
-            </label>
-            <label class="toggle-field"><input id="embeddingRetrievalShadowEnabled" type="checkbox"> Compare retrieval implementations in shadow</label>
-            <p class="field-note">Shadow comparison records safe diagnostics only. It never changes production selection.</p>
-          </fieldset>
-          <label title="Selects the endpoint used to create Chronicle vectors. If no embedding profile is enabled, this automatically uses the campaign's effective text provider.">Embedding provider<select id="embeddingProvider"><option value="">Uses the campaign text provider when no embedding provider is enabled</option></select></label>
-          <label class="model-discovery-field" title="Names the embedding model sent to the selected endpoint. Refresh to load the selected provider's model inventory.">
-            <span class="field-label-row"><span>Embedding model</span><button id="discoverEmbeddingModels" class="mini-icon-button" type="button" aria-label="Refresh embedding models from endpoint" title="Refresh active and inactive models from the selected embedding endpoint">↻</button></span>
-            <input id="embeddingModel" maxlength="500" readonly role="button" aria-haspopup="dialog" aria-controls="providerModelDialog" placeholder="Click to choose an embedding model">
-          </label>
-          <label title="Optional document-task prefix. Leave blank to use the model-aware default, including search_document for Nomic retrieval models.">Document prefix<input id="embeddingDocumentPrefix" maxlength="200" placeholder="Automatic for selected model"></label>
-          <label title="Optional query-task prefix. Leave blank to use the model-aware default, including search_query for Nomic retrieval models.">Query prefix<input id="embeddingQueryPrefix" maxlength="200" placeholder="Automatic for selected model"></label>
-          <label>Batch size<input id="embeddingBatchSize" type="number" min="1" max="128"></label>
-          <div class="chronicle-index-actions">
-            <button id="reindexEmbeddings" class="button secondary" type="button" title="Re-run the legacy memory-vector embedding job using the saved provider and model. This does not save form changes or rebuild chunked vectors." disabled>Reindex Semantic Retrieval</button>
+            <label title="Selects the endpoint used to create Chronicle vectors. If no embedding profile is enabled, this automatically uses the campaign's effective text provider.">Embedding provider<select id="embeddingProvider"><option value="">Choose an eligible embedding provider</option></select></label>
+            <label class="model-discovery-field" title="Names the embedding model sent to the selected endpoint. Refresh to load the selected provider's model inventory."><span class="field-label-row"><span>Embedding model</span><button id="discoverEmbeddingModels" class="mini-icon-button" type="button" aria-label="Refresh embedding models from endpoint" title="Refresh active and inactive models from the selected embedding endpoint">↻</button></span><input id="embeddingModel" maxlength="500" readonly role="button" aria-haspopup="dialog" aria-controls="providerModelDialog" placeholder="Click to choose an embedding model"></label>
+            <details id="advancedRetrievalSettings" class="field-help">
+              <summary>Advanced retrieval</summary>
+              <div class="advanced-retrieval-fields">
+                <label>Production implementation<select id="embeddingRetrievalImplementation" required><option value="legacy_hybrid">Legacy hybrid</option><option value="chunked_hybrid">Chunked hybrid</option></select></label>
+                <label class="toggle-field"><input id="embeddingRetrievalShadowEnabled" type="checkbox"> Compare retrieval implementations in shadow</label>
+                <label title="Optional document-task prefix. Leave blank to use the model-aware default, including search_document for Nomic retrieval models.">Document prefix<input id="embeddingDocumentPrefix" maxlength="200" placeholder="Automatic for selected model"></label>
+                <label title="Optional query-task prefix. Leave blank to use the model-aware default, including search_query for Nomic retrieval models.">Query prefix<input id="embeddingQueryPrefix" maxlength="200" placeholder="Automatic for selected model"></label>
+                <label>Batch size<input id="embeddingBatchSize" type="number" min="1" max="128"></label>
+                <p class="field-note">Shadow comparison records safe diagnostics only. It never changes production selection.</p>
+              </div>
+            </details>
             <button id="saveEmbeddingConfig" class="button primary" type="submit" title="Save these Semantic Retrieval settings and queue the chunked vector index. Use this after changing the provider, model, prefixes, or retrieval implementation." disabled>Save &amp; index</button>
-          </div>
-        </form>
+          </form>
+        </section>
         <div id="embeddingProgress" class="embedding-progress hidden" aria-live="polite">
           <progress id="embeddingProgressBar" max="100" value="0"></progress>
           <span id="embeddingProgressLabel">Waiting to index Semantic Retrieval…</span>
         </div>
         <div id="embeddingStatus" class="status" role="status" aria-live="polite">Semantic Retrieval is optional. Without it, Chronicle local memory uses full-text, entity, chronology, and recency retrieval.</div>
 
-        <form id="contextForm" class="context-controls">
-          <label>
-            Context budget
-            <input id="budgetTokens" type="number" min="512" max="1000000" step="1024" value="32000" aria-describedby="budgetTokensSource">
-            <span id="budgetTokensSource" class="field-note">The selected text provider supplies the available input limit.</span>
-          </label>
-          <label>
-            Compression
-            <select id="compression" title="Choose how Chronicle fits story history into the context budget.">
-              <option value="auto" title="Selects the richest level that fits the current context budget.">Automatic</option>
-              <option value="full" title="Includes complete accepted narration and actions until the budget is exhausted.">Full history</option>
-              <option value="balanced" title="Keeps important scene detail while shortening older accepted turns.">Balanced</option>
-              <option value="compact" title="Uses concise per-turn memory so more chronology fits in the same budget.">Compact</option>
-              <option value="summary" title="Uses campaign summaries plus the most recent verbatim turns.">Summary + recent</option>
-            </select>
-          </label>
-          <label class="query-field">
-            Current action or retrieval query
-            <input id="memoryQuery" type="text" maxlength="4000" placeholder="Optional: name, location, event, or intended action">
-          </label>
-          <button class="button primary" type="submit" disabled id="previewContext">Build context preview</button>
-        </form>
-        <details class="field-help">
-          <summary>What do the compression options include?</summary>
-          <dl>
-            <dt>Automatic</dt><dd>Selects the richest representation that fits.</dd>
-            <dt>Full history</dt><dd>Prefers complete accepted narration and actions.</dd>
-            <dt>Balanced</dt><dd>Shortens older turns while preserving important scene detail.</dd>
-            <dt>Compact</dt><dd>Uses concise per-turn memory to retain more chronology.</dd>
-            <dt>Summary + recent</dt><dd>Uses campaign summaries with recent verbatim turns.</dd>
-          </dl>
-        </details>
-
-        <div id="contextSummary" class="status hidden" role="status" aria-live="polite"></div>
-        <details class="context-preview-details">
-          <summary>View context preview</summary>
-          <pre id="contextPreview" class="context-preview" tabindex="0">The preview deliberately excludes rolls, mechanics records, private scratchpad content, rejected output, and credentials.</pre>
-        </details>
+        <section id="chronicleMaintenanceRegion" class="chronicle-maintenance-region" aria-labelledby="chronicleMaintenanceTitle">
+          <header class="chronicle-subheading">
+            <div>
+              <h3 id="chronicleMaintenanceTitle">Chronicle maintenance</h3>
+              <p>Use these repair actions only when indexing or derived memory needs recovery.</p>
+            </div>
+          </header>
+          <div class="chronicle-maintenance-actions">
+            <div class="chronicle-maintenance-action">
+              <button id="reindexEmbeddings" class="button secondary" type="button" title="Re-run the legacy memory-vector embedding job using the saved provider and model. This does not save form changes or rebuild chunked vectors." disabled>Reindex Semantic Retrieval</button>
+              <p>Re-runs the saved legacy vector job without saving form changes or rebuilding chunked vectors.</p>
+            </div>
+            <div class="chronicle-maintenance-action">
+              <button id="reindexMemory" class="button secondary" type="button" title="Reconstruct derived Chronicle memories from accepted turns and campaign state, then queue semantic indexing. Use only when memory is stale or inconsistent." disabled>Rebuild memory</button>
+              <p>Reconstructs derived Chronicle memories from accepted turns and campaign state, then queues semantic indexing.</p>
+            </div>
+          </div>
+        </section>
         </section>
             </section>
 

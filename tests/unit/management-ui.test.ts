@@ -94,6 +94,40 @@ describe("Nexus management UI contracts", () => {
     }
   });
 
+  it("orders Chronicle health, preview, retrieval configuration, and maintenance by user task", () => {
+    const panel = managementDocument.querySelector("#campaignPanelChronicle")!;
+    const markup = panel.innerHTML;
+    const orderedIds = [
+      "chronicleHealthRegion",
+      "contextForm",
+      "embeddingForm",
+      "embeddingProgress",
+      "embeddingStatus",
+      "chronicleMaintenanceRegion"
+    ];
+    const positions = orderedIds.map((id) => markup.indexOf('id="' + id + '"'));
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+
+    expect(panel.textContent).toContain("Preview only — does not change campaign settings.");
+    expect(panel.querySelector("#advancedRetrievalSettings #embeddingRetrievalImplementation")).not.toBeNull();
+    expect(panel.querySelector("#advancedRetrievalSettings #embeddingRetrievalShadowEnabled")).not.toBeNull();
+    expect(panel.querySelector("#advancedRetrievalSettings #embeddingDocumentPrefix")).not.toBeNull();
+    expect(panel.querySelector("#advancedRetrievalSettings #embeddingQueryPrefix")).not.toBeNull();
+    expect(panel.querySelector("#advancedRetrievalSettings #embeddingBatchSize")).not.toBeNull();
+    expect(panel.querySelector("#chronicleMaintenanceRegion #reindexEmbeddings")).not.toBeNull();
+    expect(panel.querySelector("#chronicleMaintenanceRegion #reindexMemory")).not.toBeNull();
+  });
+
+  it("keeps context preview inputs separate from saved Semantic Retrieval settings", () => {
+    expect(managementDocument.querySelector("#memoryQuery")?.closest("form")?.id).toBe("contextForm");
+    expect(managementDocument.querySelector("#budgetTokens")?.closest("form")?.id).toBe("contextForm");
+    expect(managementDocument.querySelector("#compression")?.closest("form")?.id).toBe("contextForm");
+    expect(managementDocument.querySelector("#embeddingProvider")?.closest("form")?.id).toBe("embeddingForm");
+    expect(managementDocument.querySelector("#saveEmbeddingConfig")?.closest("form")?.id).toBe("embeddingForm");
+    expect(managementDocument.querySelector("#memoryQuery")?.parentElement?.textContent).toContain("Preview retrieval query");
+  });
+
   it("keeps campaign persistence separate from migration and panel navigation", () => {
     for (const id of [
       "campaignTitle",
