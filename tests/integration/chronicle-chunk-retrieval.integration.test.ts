@@ -412,30 +412,22 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
 
     embeddingQueries.length = 0;
     const statements: string[] = [];
-    const batchRequests = {
-      semantic: [
-        { signal: "semantic", variant: "action" },
-        { signal: "semantic", variant: "entity_expanded" },
-        { signal: "semantic", variant: "scene" },
-        { signal: "semantic", variant: "open_thread" }
-      ],
-      full_text: [
-        { signal: "full_text", variant: "action" },
-        { signal: "full_text", variant: "entity_expanded" },
-        { signal: "full_text", variant: "scene" },
-        { signal: "full_text", variant: "open_thread" }
-      ],
-      entity: [{ signal: "entity", variant: "entity_expanded" }],
-      static: [
+    const staticBatchRequests = [
         { signal: "recency", variant: "action" },
         { signal: "chronology", variant: "action" },
         { signal: "importance", variant: "action" },
         { signal: "kind", variant: "action" },
         { signal: "temporal", variant: "action" }
-      ]
-    } as const;
+    ] as const;
+    type DynamicBatchFamily = "semantic" | "full_text" | "entity";
+    type BatchFamily = DynamicBatchFamily | "static";
+    const boundVariantKinds: Record<DynamicBatchFamily, string[]> = {
+      semantic: [],
+      full_text: [],
+      entity: []
+    };
     const batchRows: Array<Readonly<{
-      family: keyof typeof batchRequests;
+      family: BatchFamily;
       requestOrdinal: number;
       signal: string;
       variant: string;
@@ -450,20 +442,26 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
             return async (statement: unknown, values?: readonly unknown[]) => {
               if (typeof statement === "string") statements.push(statement);
               const result = await target.query(statement as never, values as never);
-              const family = typeof statement === "string"
-                ? statement.match(/chronicle_rank_batch:(semantic|full_text|entity|static)/)?.[1]
+              const sql = typeof statement === "string" ? statement : undefined;
+              const family = sql
+                ? sql.match(/chronicle_rank_batch:(semantic|full_text|entity|static)/)?.[1] as BatchFamily | undefined
                 : undefined;
               if (family) {
-                const typedFamily = family as keyof typeof batchRequests;
+                const dynamicFamily = family === "static" ? undefined : family as DynamicBatchFamily;
+                if (dynamicFamily) {
+                  const variantParameters = [...sql!.matchAll(
+                    /\(\d+::integer,\$(\d+)::text,\$\d+::(?:vector|text|text\[\])\)/g
+                  )].map((match) => Number(match[1]));
+                  boundVariantKinds[dynamicFamily] = variantParameters.map((parameter) => String(values?.[parameter - 1]));
+                }
                 for (const row of result.rows as unknown as Array<Record<string, unknown>>) {
                   const requestOrdinal = Number(row.request_ordinal);
-                  const request = batchRequests[typedFamily][requestOrdinal];
-                  if (!request) continue;
+                  const staticRequest = family === "static" ? staticBatchRequests[requestOrdinal] : undefined;
                   batchRows.push({
-                    family: typedFamily,
+                    family,
                     requestOrdinal,
-                    signal: request.signal,
-                    variant: request.variant,
+                    signal: staticRequest?.signal ?? family,
+                    variant: staticRequest?.variant ?? boundVariantKinds[dynamicFamily!][requestOrdinal] ?? "missing_bound_variant_kind",
                     candidateId: String(row.candidate_id),
                     parentMemoryId: String(row.parent_memory_id),
                     signalRank: Number(row.signal_rank)
@@ -524,8 +522,13 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     )))).toEqual(new Set(["semantic", "full_text", "entity", "static"]));
     expect(statements.filter((sql) => /chronicle_rank_batch:(semantic|full_text|entity)/.test(sql))
       .every((sql) => sql.includes("request_variants(request_ordinal,variant_kind,"))).toBe(true);
+    expect(boundVariantKinds).toEqual({
+      semantic: ["action", "entity_expanded", "scene", "open_thread"],
+      full_text: ["action", "entity_expanded", "scene", "open_thread"],
+      entity: ["entity_expanded"]
+    });
     const rankedRows = (
-      family: keyof typeof batchRequests,
+      family: BatchFamily,
       requestOrdinal: number,
       signal: string,
       variant: string,
