@@ -101,7 +101,17 @@ function historicalState(turnNumber: number, continuitySummary: string): Campaig
     trackers: [],
     rpgStats: [{ id: "courage", name: "Courage", value: 8, note: "Inspector-only mechanics." }],
     eventTriggers: [],
-    pendingEventTriggers: []
+    pendingEventTriggers: [],
+    recordedResolution: {
+      statName: "Courage",
+      base: 8,
+      modifier: 4,
+      target: 12,
+      roll: 9,
+      success: true,
+      margin: 3,
+      difficultyLabel: "easy"
+    }
   };
 }
 
@@ -321,6 +331,26 @@ describe("Story Player page shell", () => {
     page.document.querySelector<HTMLButtonElement>("[data-action='resume-generation-following']")?.click();
     await settle();
     expect(page.document.querySelector("[data-action='resume-generation-following']")).toBeNull();
+    mounted.dispose();
+  });
+
+  it("disables history restart and branch controls while generation is active", async () => {
+    const page = fixture();
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 1 }, activeTurnNumber: 1,
+      pendingGeneration: {
+        id: "55555555-5555-4555-8555-555555555555", status: "generating", action: "Continue",
+        expectedTurnNumber: 2, createdAt: "2026-08-18T00:00:00.000Z", updatedAt: "2026-08-18T00:00:00.000Z",
+        operationKind: "append", replacementTurnId: null
+      },
+      turns: turnWindow([1])
+    });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({ syncStatus: vi.fn().mockResolvedValue(loaded) }));
+    await settle();
+
+    page.document.querySelector<HTMLButtonElement>("[data-action='open-complete-history']")?.click();
+    await settle();
+    expect(page.document.querySelector<HTMLButtonElement>("[data-action='restart-from-turn']")?.disabled).toBe(true);
     mounted.dispose();
   });
 
@@ -917,8 +947,12 @@ describe("Story Player page shell", () => {
     expect(state).toHaveBeenCalledWith(campaignId, 6, undefined);
     expect(page.document.querySelector("[data-story-history]")).toBeTruthy();
     expect(page.document.querySelector("[data-story-state-inspector]")?.textContent).toContain("Reader inspection is dialog-only.");
+    expect(page.document.querySelector("[data-story-state-inspector]")?.textContent).toContain("Resolve Check");
+    expect(page.document.querySelector("[data-story-state-inspector]")?.textContent).toContain("Courage: 9 / 12 (success)");
     expect(page.document.querySelector("[data-story-reader]")?.textContent).not.toContain("Reader inspection is dialog-only.");
     expect(page.document.querySelector("[data-story-reader]")?.textContent).not.toContain("Inspector-only mechanics.");
+    expect(page.document.querySelector("[data-story-reader]")?.textContent).not.toContain("Resolve Check");
+    expect(page.document.querySelector(".story-campaign-spine")?.textContent).not.toContain("Resolve Check");
     expect(page.document.querySelector(".story-campaign-spine")?.textContent).not.toContain("Inspector-only mechanics.");
     mounted.dispose();
   });

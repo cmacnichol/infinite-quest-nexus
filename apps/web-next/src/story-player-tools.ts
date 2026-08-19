@@ -34,7 +34,7 @@ export interface StoryToolsController {
   openActivity(): void;
   openAbout(): void;
   undoLatest(): Promise<boolean>;
-  retryLatest(submission: StoryGenerationSubmission): Promise<boolean>;
+  retryLatest(replacementTurnId: string, submission: StoryGenerationSubmission): Promise<boolean>;
   restartFromTurn(turnNumber: number, operation: "branch" | "rewind"): Promise<boolean>;
   closeActiveDialog(): void;
   dispose(): void;
@@ -129,6 +129,7 @@ function canMutate(scope: StoryToolScope): boolean {
  */
 export function createStoryToolsController(options: StoryToolsControllerOptions): StoryToolsController {
   let disposed = false;
+  let mutationPending = false;
 
   const scope = (): StoryToolScope | null => disposed ? null : options.current();
   const show = (dialog: Parameters<NonNullable<StoryToolsControllerOptions["onDialog"]>>[0]) => {
@@ -138,6 +139,11 @@ export function createStoryToolsController(options: StoryToolsControllerOptions)
   const fail = (error: unknown): never => {
     options.onError?.(error);
     throw error;
+  };
+  const beginMutation = (): boolean => {
+    if (disposed || mutationPending) return false;
+    mutationPending = true;
+    return true;
   };
 
   return {
@@ -166,7 +172,7 @@ export function createStoryToolsController(options: StoryToolsControllerOptions)
     },
     async saveCurrentState(request) {
       const current = scope();
-      if (!current || !canMutate(current)) return null;
+      if (!current || !canMutate(current) || !beginMutation()) return null;
       try {
         const result = await options.campaigns.updateState(current.campaignId, request, undefined);
         if (disposed || scope()?.campaignId !== current.campaignId) return null;
@@ -174,6 +180,8 @@ export function createStoryToolsController(options: StoryToolsControllerOptions)
         return result;
       } catch (error) {
         return fail(error);
+      } finally {
+        mutationPending = false;
       }
     },
     async openNarrationCorrection(turnId) {
@@ -190,18 +198,20 @@ export function createStoryToolsController(options: StoryToolsControllerOptions)
     async saveNarrationCorrection(turnId, request) {
       const current = scope();
       const turn = current === null ? null : turnById(current, turnId);
-      if (!current || !turn || !canMutate(current) || turn.turnNumber !== current.activeTurnNumber) return null;
-      if (!await confirm("correct-narration", { turnId: turn.id, turnNumber: turn.turnNumber })) return null;
-      const beforeWrite = scope();
-      if (!beforeWrite || beforeWrite.campaignId !== current.campaignId || !canMutate(beforeWrite)
-        || latestTurn(beforeWrite)?.id !== turn.id) return null;
+      if (!current || !turn || !canMutate(current) || turn.turnNumber !== current.activeTurnNumber || !beginMutation()) return null;
       try {
+        if (!await confirm("correct-narration", { turnId: turn.id, turnNumber: turn.turnNumber })) return null;
+        const beforeWrite = scope();
+        if (!beforeWrite || beforeWrite.campaignId !== current.campaignId || !canMutate(beforeWrite)
+          || latestTurn(beforeWrite)?.id !== turn.id) return null;
         const result = await options.campaigns.correctTurnNarration(current.campaignId, turn.id, request, undefined);
         if (disposed || scope()?.campaignId !== current.campaignId) return null;
         await options.reload();
         return result;
       } catch (error) {
         return fail(error);
+      } finally {
+        mutationPending = false;
       }
     },
     openHistory() {
@@ -216,12 +226,12 @@ export function createStoryToolsController(options: StoryToolsControllerOptions)
     async undoLatest() {
       const current = scope();
       const turn = current === null ? null : latestTurn(current);
-      if (!current || !turn || !canMutate(current)) return false;
-      if (!await confirm("undo-latest", { activeTurnNumber: current.activeTurnNumber })) return false;
-      const beforeWrite = scope();
-      if (!beforeWrite || beforeWrite.campaignId !== current.campaignId || !canMutate(beforeWrite)
-        || latestTurn(beforeWrite)?.id !== turn.id) return false;
+      if (!current || !turn || !canMutate(current) || !beginMutation()) return false;
       try {
+        if (!await confirm("undo-latest", { activeTurnNumber: current.activeTurnNumber })) return false;
+        const beforeWrite = scope();
+        if (!beforeWrite || beforeWrite.campaignId !== current.campaignId || !canMutate(beforeWrite)
+          || latestTurn(beforeWrite)?.id !== turn.id) return false;
         await options.campaigns.rewind(current.campaignId, {
           targetTurnNumber: current.activeTurnNumber - 1,
           expectedCurrentTurnNumber: current.activeTurnNumber
@@ -232,32 +242,36 @@ export function createStoryToolsController(options: StoryToolsControllerOptions)
       } catch (error) {
         fail(error);
         return false;
+      } finally {
+        mutationPending = false;
       }
     },
-    async retryLatest(submission) {
+    async retryLatest(replacementTurnId, submission) {
       const current = scope();
-      const turn = current === null ? null : latestTurn(current);
-      if (!current || !turn || !canMutate(current)) return false;
-      if (!await confirm("retry-latest", { turnId: turn.id, turnNumber: turn.turnNumber })) return false;
-      const beforeWrite = scope();
-      if (!beforeWrite || beforeWrite.campaignId !== current.campaignId || !canMutate(beforeWrite)
-        || latestTurn(beforeWrite)?.id !== turn.id) return false;
+      const turn = current === null ? null : turnById(current, replacementTurnId);
+      if (!current || !turn || !canMutate(current) || turn.turnNumber !== current.activeTurnNumber || !beginMutation()) return false;
       try {
-        return await options.generation.submitReplacement(turn.id, submission);
+        if (!await confirm("retry-latest", { turnId: turn.id, turnNumber: turn.turnNumber })) return false;
+        const beforeWrite = scope();
+        if (!beforeWrite || beforeWrite.campaignId !== current.campaignId || !canMutate(beforeWrite)
+          || latestTurn(beforeWrite)?.id !== replacementTurnId) return false;
+        return await options.generation.submitReplacement(replacementTurnId, submission);
       } catch (error) {
         fail(error);
         return false;
+      } finally {
+        mutationPending = false;
       }
     },
     async restartFromTurn(turnNumber, operation) {
       const current = scope();
       const turn = current === null ? null : current.turns.find((candidate) => candidate.turnNumber === turnNumber) ?? null;
-      if (!current || !turn || current.generationActive) return false;
-      if (!await confirm(operation, { turnId: turn.id, turnNumber: turn.turnNumber, activeTurnNumber: current.activeTurnNumber })) return false;
-      const beforeWrite = scope();
-      if (!beforeWrite || beforeWrite.campaignId !== current.campaignId || beforeWrite.generationActive
-        || !beforeWrite.turns.some((candidate) => candidate.id === turn.id && candidate.turnNumber === turn.turnNumber)) return false;
+      if (!current || !turn || current.generationActive || !beginMutation()) return false;
       try {
+        if (!await confirm(operation, { turnId: turn.id, turnNumber: turn.turnNumber, activeTurnNumber: current.activeTurnNumber })) return false;
+        const beforeWrite = scope();
+        if (!beforeWrite || beforeWrite.campaignId !== current.campaignId || beforeWrite.generationActive
+          || !beforeWrite.turns.some((candidate) => candidate.id === turn.id && candidate.turnNumber === turn.turnNumber)) return false;
         if (operation === "branch") {
           const branch = await options.campaigns.branch(current.campaignId, {
             targetTurnNumber: turn.turnNumber,
@@ -276,6 +290,8 @@ export function createStoryToolsController(options: StoryToolsControllerOptions)
       } catch (error) {
         fail(error);
         return false;
+      } finally {
+        mutationPending = false;
       }
     },
     closeActiveDialog() {

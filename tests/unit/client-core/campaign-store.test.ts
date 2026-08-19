@@ -120,7 +120,8 @@ function runtime(id = campaignId): CampaignRuntimeStateResponse {
     trackers: [{ id: "tracker", name: "Tracker", value: "1", rules: "" }],
     rpgStats: [],
     eventTriggers: [],
-    pendingEventTriggers: []
+    pendingEventTriggers: [],
+    recordedResolution: null
   };
 }
 

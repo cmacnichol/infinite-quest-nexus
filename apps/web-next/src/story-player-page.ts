@@ -312,14 +312,15 @@ export function mountStoryPlayerPage(
   const campaignFallback = () => composerCampaign()?.turnControlStyle === "flexible_scene" ? "scene" as const : "action" as const;
   const submitPreparedTurn = async (submission: PreparedStoryTurnSubmission) => {
     submittedDraft = submission.action;
-    const accepted = replacementTurnId === null
+    const pinnedReplacementTurnId = replacementTurnId;
+    replacementTurnId = null;
+    const accepted = pinnedReplacementTurnId === null
       ? await generation.submitAppend(submission)
-      : await tools.retryLatest(submission);
+      : await tools.retryLatest(pinnedReplacementTurnId, submission);
     if (!accepted) {
       if (!disposed) ui.setMessage("Story generation could not be started. Your accepted turns are unchanged.");
       return;
     }
-    replacementTurnId = null;
     ui.setGenerationFollowing(true);
     await options.onSubmit?.(submission);
   };
@@ -499,6 +500,7 @@ export function mountStoryPlayerPage(
     for (const control of root.querySelectorAll<HTMLElement>("[data-action='restart-from-turn']")) {
       control.addEventListener("click", (event) => {
         event.stopPropagation();
+        if (control.matches(":disabled")) return;
         const turnNumber = Number(control.dataset.turnNumber);
         const confirm = root.ownerDocument.defaultView?.confirm;
         if (Number.isSafeInteger(turnNumber) && turnNumber > 0 && typeof confirm === "function"
@@ -524,6 +526,7 @@ export function mountStoryPlayerPage(
     }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='retry-latest-generation']")) {
       control.addEventListener("click", () => {
+        if (projection.generation !== null) return;
         const campaign = projection.campaign;
         const latest = campaign === null ? null : projection.turns.find((turn) => turn.turnNumber === campaign.activeTurnNumber) ?? null;
         if (!latest) return;
@@ -537,6 +540,7 @@ export function mountStoryPlayerPage(
     }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='save-current-state']")) {
       control.addEventListener("click", () => {
+        if (control.disabled) return;
         const base = currentState;
         if (base === null) return;
         try {
@@ -555,12 +559,15 @@ export function mountStoryPlayerPage(
             expectedRevision: base.revision,
             effectiveTurnNumber: base.viewedTurnNumber
           };
+          control.disabled = true;
           void tools.saveCurrentState(request).then((result) => {
             if (result !== null && !disposed) {
               currentState = result;
               ui.setActiveDialog(null);
             }
-          }).catch(() => undefined);
+          }).catch(() => undefined).finally(() => {
+            if (!disposed && control.isConnected) control.disabled = false;
+          });
         } catch {
           const message = root.querySelector<HTMLElement>("[data-story-tool-dialog] [data-story-status]");
           if (message) message.textContent = "State fields containing lists must be valid JSON. Your edits are preserved.";
@@ -569,9 +576,11 @@ export function mountStoryPlayerPage(
     }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='save-narration-correction']")) {
       control.addEventListener("click", () => {
+        if (control.disabled) return;
         const value = root.querySelector<HTMLTextAreaElement>("[data-correction-narration]")?.value ?? "";
         const currentCorrection = correction;
         if (currentCorrection === null || !value.trim()) return;
+        control.disabled = true;
         void tools.saveNarrationCorrection(currentCorrection.turnId, {
           narration: value,
           expectedCorrectionRevision: currentCorrection.correctionRevision,
@@ -582,11 +591,14 @@ export function mountStoryPlayerPage(
             correction = result;
             ui.setActiveDialog(null);
           }
-        }).catch(() => undefined);
+        }).catch(() => undefined).finally(() => {
+          if (!disposed && control.isConnected) control.disabled = false;
+        });
       });
     }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='branch-from-turn'], [data-action='rewind-from-turn']")) {
       control.addEventListener("click", () => {
+        if (control.disabled) return;
         const turnNumber = Number(control.dataset.turnNumber);
         const operation = control.dataset.action === "branch-from-turn" ? "branch" : "rewind";
         if (Number.isSafeInteger(turnNumber) && turnNumber > 0) void tools.restartFromTurn(turnNumber, operation).catch(() => undefined);

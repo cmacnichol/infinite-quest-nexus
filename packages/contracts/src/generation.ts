@@ -342,13 +342,29 @@ export const campaignRuntimeStateUpdateSchema = campaignRuntimeStateContentSchem
   effectiveTurnNumber: z.coerce.number().int().min(0).optional()
 });
 
+/**
+ * The deliberately narrow, player-readable portion of a persisted private
+ * resolution. Rationale and model-selected outcomes remain private mechanics.
+ */
+export const recordedResolutionSchema = z.object({
+  statName: z.string().trim().min(1).max(200),
+  base: z.coerce.number().int().min(1).max(99),
+  modifier: z.coerce.number().int().min(-50).max(40),
+  target: z.coerce.number().int().min(1).max(99),
+  roll: z.coerce.number().int().min(1).max(100),
+  success: z.boolean(),
+  margin: z.coerce.number().int().min(0).max(100),
+  difficultyLabel: z.string().trim().min(1).max(100)
+});
+
 export const campaignRuntimeStateSchema = campaignRuntimeStateContentSchema.extend({
   campaignId: z.uuid(),
   activeTurnNumber: z.coerce.number().int().min(0),
   viewedTurnNumber: z.coerce.number().int().min(0),
   isCurrent: z.boolean(),
   revision: z.coerce.number().int().min(0),
-  updatedAt: z.union([z.string(), z.date()])
+  updatedAt: z.union([z.string(), z.date()]),
+  recordedResolution: recordedResolutionSchema.nullable().default(null)
 });
 
 export const rpgAssessmentOutputSchema = z.object({

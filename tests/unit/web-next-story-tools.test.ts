@@ -17,6 +17,14 @@ const olderTurn = {
   action: "Cross the moor."
 };
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve };
+}
+
 function controller(overrides: Record<string, unknown> = {}) {
   const campaigns = {
     state: vi.fn().mockResolvedValue({ campaignId, viewedTurnNumber: 7, rpgStats: [{ name: "Courage", value: 8 }] }),
@@ -109,6 +117,25 @@ describe("Story campaign tools", () => {
     dispose();
   });
 
+  it("closes the native Campaign Tools disclosure when focus leaves or a pointer lands outside", async () => {
+    const { document, Event } = parseHTML(`<body>${storyCampaignToolsMarkup()}<button id=outside>Outside</button></body>`).window;
+    const tools = document.querySelector<HTMLDetailsElement>("[data-campaign-tools]");
+    const outside = document.querySelector<HTMLElement>("#outside");
+    if (!tools || !outside) throw new Error("Campaign tools fixture is missing.");
+    const dispose = installStoryToolsDisclosure(tools);
+
+    tools.open = true;
+    document.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    expect(tools.open).toBe(false);
+
+    tools.open = true;
+    Object.defineProperty(document, "activeElement", { configurable: true, value: outside });
+    tools.dispatchEvent(new Event("focusout", { bubbles: true }));
+    await settle();
+    expect(tools.open).toBe(false);
+    dispose();
+  });
+
   it("mounts every approved Campaign Tools command in the Story header only", async () => {
     const { document } = parseHTML("<body><div id=app></div></body>").window;
     const root = document.querySelector<HTMLElement>("#app");
@@ -146,6 +173,20 @@ describe("Story campaign tools", () => {
     expect(reload).not.toHaveBeenCalled();
   });
 
+  it("single-flights duplicate current-state saves", async () => {
+    const first = deferred<{ campaignId: string; viewedTurnNumber: number }>();
+    const { tools, campaigns } = controller();
+    campaigns.updateState.mockReturnValueOnce(first.promise);
+    const request = { continuitySummary: "Keep this draft." } as never;
+
+    const saving = tools.saveCurrentState(request);
+    expect(await tools.saveCurrentState(request)).toBeNull();
+    expect(campaigns.updateState).toHaveBeenCalledTimes(1);
+
+    first.resolve({ campaignId, viewedTurnNumber: 7 });
+    await expect(saving).resolves.toEqual({ campaignId, viewedTurnNumber: 7 });
+  });
+
   it("uses the persisted latest turn ID for append-only narration correction", async () => {
     const { tools, campaigns, reload, confirm } = controller();
 
@@ -154,6 +195,21 @@ describe("Story campaign tools", () => {
     expect(confirm).toHaveBeenCalledWith("correct-narration", expect.objectContaining({ turnId: latestTurn.id, turnNumber: 7 }));
     expect(campaigns.correctTurnNarration).toHaveBeenCalledWith(campaignId, latestTurn.id, { narration: "A corrected sentence." }, undefined);
     expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("single-flights duplicate narration corrections", async () => {
+    const first = deferred<{ turnId: string; narration: string }>();
+    const { tools, campaigns } = controller();
+    campaigns.correctTurnNarration.mockReturnValueOnce(first.promise);
+    const request = { narration: "A corrected sentence." } as never;
+
+    const saving = tools.saveNarrationCorrection(latestTurn.id, request);
+    await settle();
+    expect(await tools.saveNarrationCorrection(latestTurn.id, request)).toBeNull();
+    expect(campaigns.correctTurnNarration).toHaveBeenCalledTimes(1);
+
+    first.resolve({ turnId: latestTurn.id, narration: "A corrected sentence." });
+    await expect(saving).resolves.toEqual({ turnId: latestTurn.id, narration: "A corrected sentence." });
   });
 
   it("rewinds only the confirmed current persisted turn", async () => {
@@ -193,10 +249,35 @@ describe("Story campaign tools", () => {
       inputModeSource: "explicit" as const
     };
 
-    await tools.retryLatest(submission);
+    await tools.retryLatest(latestTurn.id, submission);
 
     expect(confirm).toHaveBeenCalledWith("retry-latest", expect.objectContaining({ turnId: latestTurn.id, turnNumber: 7 }));
     expect(generation.submitReplacement).toHaveBeenCalledWith(latestTurn.id, submission);
+  });
+
+  it("refuses a Retry Latest submission when the pinned persisted turn is no longer latest", async () => {
+    let current = {
+      campaignId,
+      activeTurnNumber: 7,
+      generationActive: false,
+      viewTurnNumber: 7,
+      turns: [olderTurn, latestTurn]
+    };
+    const { tools, generation } = controller({ current: () => current });
+    current = {
+      ...current,
+      activeTurnNumber: 8,
+      viewTurnNumber: 8,
+      turns: [...current.turns, { id: "55555555-5555-4555-8555-555555555555", turnNumber: 8, action: "A newer prompt." }]
+    };
+
+    expect(await tools.retryLatest(latestTurn.id, {
+      action: latestTurn.action,
+      requestedInputMode: "action",
+      resolvedInputMode: "action",
+      inputModeSource: "explicit"
+    })).toBe(false);
+    expect(generation.submitReplacement).not.toHaveBeenCalled();
   });
 
   it("keeps branch navigation separate from authoritative rewind", async () => {

@@ -604,6 +604,14 @@ function completeHistoryDialog(document: Document, state: StoryPlayerViewState):
       for (const stat of state.inspectedState.rpgStats) mechanics.append(element(document, "li", undefined, `${stat.name}: ${stat.value}`));
       inspector.append(element(document, "h4", undefined, "Recorded Mechanics"), mechanics);
     }
+    if (state.inspectedState.recordedResolution !== null) {
+      const resolution = state.inspectedState.recordedResolution;
+      inspector.append(
+        element(document, "h4", undefined, "Resolve Check"),
+        element(document, "p", undefined, `${resolution.statName}: ${resolution.roll} / ${resolution.target} (${resolution.success ? "success" : "failure"})`),
+        element(document, "p", undefined, `Base ${resolution.base}; modifier ${resolution.modifier >= 0 ? "+" : ""}${resolution.modifier}; ${resolution.difficultyLabel}.`)
+      );
+    }
     dialog.append(inspector);
   }
   for (const [action, label] of [
@@ -619,6 +627,7 @@ function completeHistoryDialog(document: Document, state: StoryPlayerViewState):
     if (action === "jump-to-scene" && state.ui.viewTurnNumber !== null) button.dataset.turnNumber = String(state.ui.viewTurnNumber);
     if (action === "jump-to-latest" && state.projection.campaign) button.dataset.turnNumber = String(state.projection.campaign.activeTurnNumber);
     if (action === "restart-from-turn" && state.ui.viewTurnNumber !== null) button.dataset.turnNumber = String(state.ui.viewTurnNumber);
+    if (action === "restart-from-turn") button.disabled = state.projection.generation !== null;
     dialog.append(button);
   }
   return dialog;
@@ -697,6 +706,7 @@ function toolDialog(document: Document, state: StoryPlayerViewState): HTMLDialog
       button.type = "button";
       button.dataset.action = action;
       button.dataset.turnNumber = String(turnNumber);
+      button.disabled = state.projection.generation !== null;
       dialog.append(button);
     }
   }
