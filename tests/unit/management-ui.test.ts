@@ -17,6 +17,17 @@ function managementFunction<T extends (...args: never[]) => unknown>(name: strin
   return Function(`${managementScript.slice(start, end)}; return ${name};`)() as T;
 }
 
+function managementFunctions<T extends Record<string, (...args: never[]) => unknown>>(names: string[], bindings: Record<string, unknown>): T {
+  const sources = names.map((name) => {
+    const start = managementScript.indexOf(`function ${name}(`);
+    const end = managementScript.indexOf("\nfunction ", start + 1);
+    if (start < 0 || end < 0) throw new Error(`Unable to locate management function ${name}.`);
+    return managementScript.slice(start, end);
+  });
+  const bindingNames = Object.keys(bindings);
+  return Function(...bindingNames, `${sources.join("\n")}; return { ${names.join(", ")} };`)(...Object.values(bindings)) as T;
+}
+
 describe("Nexus management UI contracts", () => {
   it("organizes the selected legacy campaign into five accessible settings panels", () => {
     const rail = managementDocument.querySelector("#campaignSettingsRail");
@@ -80,6 +91,45 @@ describe("Nexus management UI contracts", () => {
     expect(nextIndex("Home", 3, 5)).toBe(0);
     expect(nextIndex("End", 1, 5)).toBe(4);
     expect(nextIndex("Enter", 2, 5)).toBe(2);
+  });
+
+  it("clears campaign controls when a refresh leaves other campaigns but no selection", () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    const functions = managementFunctions<{
+      setCampaignSettingsPanel: (panelId: string) => void;
+      setCampaignSettingsAvailability: (available: boolean) => void;
+      clearCampaignEditorSelection: () => void;
+    }>([
+      "setCampaignSettingsPanel",
+      "setCampaignSettingsAvailability",
+      "clearCampaignEditorSelection"
+    ], {
+      elements,
+      document,
+      CAMPAIGN_SETTINGS_PANEL_IDS: ["overview", "story", "illustrations", "chronicle", "usage"]
+    });
+    const staleControlIds = [
+      "campaignTitle", "campaignStatus", "campaignWorldVersion", "campaignTextProvider", "campaignTurnControlStyle", "campaignStoryLengthProfile",
+      "saveCampaign", "migrateCampaign", "transferCampaign", "editCampaignCharacter", "loadCampaign", "exportCampaign", "deleteCampaign",
+      "reindexMemory", "previewContext", "saveEmbeddingConfig", "reindexEmbeddings", "embeddingEnabled", "embeddingProvider", "embeddingModel",
+      "embeddingDocumentPrefix", "embeddingQueryPrefix", "embeddingBatchSize", "discoverEmbeddingModels", "budgetTokens", "compression", "memoryQuery"
+    ];
+    for (const id of staleControlIds) elements[id].disabled = false;
+    elements.memoryTitle.textContent = "Deleted campaign";
+    elements.campaignEditorSummary.textContent = "active · Stale World v4 · Mira";
+    functions.setCampaignSettingsPanel("chronicle");
+
+    functions.clearCampaignEditorSelection();
+
+    expect([...elements.campaignSettingsRail.querySelectorAll("[role=tab]")].every((tab) => tab.disabled)).toBe(true);
+    expect(staleControlIds.every((id) => elements[id].disabled)).toBe(true);
+    expect(elements.memoryTitle.textContent).toBe("Select a campaign");
+    expect(elements.campaignEditorSummary.textContent).toBe("");
+    expect(elements.campaignCostSection.classList.contains("hidden")).toBe(true);
+    expect(elements.campaignTabOverview.getAttribute("aria-selected")).toBe("true");
+    expect(elements.campaignPanelOverview.hidden).toBe(false);
+    expect(elements.campaignPanelChronicle.hidden).toBe(true);
   });
 
   it("navigates to provider management with an anchor", () => {
