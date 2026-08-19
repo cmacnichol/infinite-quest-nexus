@@ -24,6 +24,7 @@ describe("Story Player local UI model", () => {
       "activeDialog",
       "activity",
       "choiceSelection",
+      "continuousReading",
       "draft",
       "history",
       "illustration",
@@ -62,6 +63,12 @@ describe("Story Player local UI model", () => {
     expect(model.get().readingWidth).toBe("narrow");
     expect(model.get().draft).toBe("Wait at the bridge.");
     expect(externalCampaignId).toBe("campaign-authority-remains-outside-the-model");
+  });
+
+  it("holds continuous-reading presentation locally without accepting campaign authority", () => {
+    const model = createStoryUiModel({ continuousReading: true } as never, memoryStorage());
+
+    expect(model.get().continuousReading).toBe(true);
   });
 
   it("discards unknown runtime initial fields instead of retaining campaign authority", () => {

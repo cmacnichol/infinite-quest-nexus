@@ -2,6 +2,7 @@ import type { CampaignProjection } from "@infinite-quest/client-core";
 import type { CampaignSummary } from "@infinite-quest/contracts";
 import { storyPlayerPath, type StoryRoute } from "./story-route";
 import type { ReadingWidth, StoryUiState } from "./story-player-model";
+import { alignLatestSpine, latestCampaignSpine } from "./story-player-history";
 
 export interface StoryPlayerViewState {
   readonly route: StoryRoute;
@@ -164,7 +165,8 @@ export function renderReaderToolbar(
   document: Document,
   turns: readonly ReaderTurn[],
   selectedTurnNumber: number,
-  generationActive: boolean
+  generationActive: boolean,
+  canLoadPrevious = false
 ): HTMLElement {
   const toolbar = element(document, "nav", "story-reader-toolbar");
   toolbar.setAttribute("aria-label", "Turn navigation");
@@ -179,7 +181,7 @@ export function renderReaderToolbar(
     button.type = "button";
     button.dataset.action = action;
     if (target) button.dataset.turnNumber = String(target.turnNumber);
-    button.disabled = generationActive || target === null;
+    button.disabled = generationActive || (target === null && !(action === "previous-turn" && canLoadPrevious));
     toolbar.append(button);
   }
   return toolbar;
@@ -189,12 +191,14 @@ export function renderStoryTurn(
   document: Document,
   turn: ReaderTurn,
   turns: readonly ReaderTurn[],
-  generationActive: boolean
+  generationActive: boolean,
+  canLoadPrevious = false,
+  contextual = true
 ): HTMLElement {
   const leaf = element(document, "article", "story-leaf");
   leaf.dataset.storyLeaf = "";
+  if (contextual) leaf.append(renderReaderToolbar(document, turns, turn.turnNumber, generationActive, canLoadPrevious));
   leaf.append(
-    renderReaderToolbar(document, turns, turn.turnNumber, generationActive),
     element(document, "p", "story-turn-coordinate", `Turn ${turn.turnNumber}`),
     element(document, "h1", "story-title", `Turn ${turn.turnNumber}`),
     element(document, "p", "story-action", turn.action)
@@ -202,9 +206,11 @@ export function renderStoryTurn(
   const cost = formatReportedCost(turn);
   if (cost !== null) leaf.append(element(document, "p", "story-reported-cost", cost));
   leaf.append(...narrationParagraphs(document, turn.narration));
-  const actions = element(document, "div", "story-turn-record-actions");
-  actions.append(recordAction(document, "edit-response", "Edit Response"), recordAction(document, "inspect-state", "Inspect State"));
-  leaf.append(actions);
+  if (contextual) {
+    const actions = element(document, "div", "story-turn-record-actions");
+    actions.append(recordAction(document, "edit-response", "Edit Response"), recordAction(document, "inspect-state", "Inspect State"));
+    leaf.append(actions);
+  }
   return leaf;
 }
 
@@ -221,7 +227,20 @@ function campaignReader(document: Document, state: StoryPlayerViewState): HTMLEl
 
   const selectedTurn = resolvedRenderedTurn(state);
   if (selectedTurn) {
-    reader.append(renderStoryTurn(document, selectedTurn, projection.turns, projection.generation !== null));
+    if (state.ui.continuousReading) {
+      for (const turn of projection.turns) {
+        reader.append(renderStoryTurn(
+          document,
+          turn,
+          projection.turns,
+          projection.generation !== null,
+          projection.nextTurnsCursor !== null,
+          turn.turnNumber === selectedTurn.turnNumber
+        ));
+      }
+    } else {
+      reader.append(renderStoryTurn(document, selectedTurn, projection.turns, projection.generation !== null, projection.nextTurnsCursor !== null));
+    }
   } else {
     const background = element(document, "p", "story-background", world.backgroundStory);
     background.dataset.storyBackground = "";
@@ -245,6 +264,78 @@ function campaignReader(document: Document, state: StoryPlayerViewState): HTMLEl
   return reader;
 }
 
+function turnModeLabel(mode: CampaignProjection["turns"][number]["inputMode"]): string {
+  return mode === "scene" ? "Scene Direction" : "Action";
+}
+
+function firstNarrationSentence(narration: string): string {
+  const sentence = narration.trim().split(/(?<=[.!?])\s|\r?\n/u, 1)[0] ?? "";
+  return sentence || "Accepted story turn";
+}
+
+function campaignSpine(document: Document, state: StoryPlayerViewState): HTMLElement {
+  const spine = element(document, "div", "story-campaign-spine-content");
+  const latest = latestCampaignSpine(state.projection.turns);
+  if (!latest.length) {
+    spine.append(element(document, "p", "story-spine-empty", "Accepted turns will appear here."));
+    return spine;
+  }
+  const selected = state.ui.viewTurnNumber;
+  for (const turn of latest) {
+    const button = element(document, "button", "story-spine-turn");
+    button.type = "button";
+    button.dataset.turnNumber = String(turn.turnNumber);
+    if (selected === turn.turnNumber) button.setAttribute("aria-current", "step");
+    button.append(
+      element(document, "span", "story-spine-number", String(turn.turnNumber)),
+      element(document, "strong", "story-spine-title", `Turn ${turn.turnNumber}`),
+      element(document, "small", "story-spine-meta", `${firstNarrationSentence(turn.narration)} · ${turnModeLabel(turn.inputMode)}`),
+      element(document, "small", "story-spine-chronicle", turn.chronicleRetrieval === null ? "No Chronicle recall" : "Chronicle recall available")
+    );
+    spine.append(button);
+  }
+  return spine;
+}
+
+function completeHistoryDialog(document: Document, state: StoryPlayerViewState): HTMLDialogElement | null {
+  if (state.ui.activeDialog !== "history") return null;
+  const dialog = element(document, "dialog", "story-history-dialog") as HTMLDialogElement;
+  dialog.dataset.storyHistory = "";
+  dialog.setAttribute("open", "");
+  dialog.setAttribute("aria-label", "Complete story history");
+  dialog.append(element(document, "h2", undefined, "Turn History"));
+  if (state.ui.history === "loading") dialog.append(element(document, "p", undefined, "Loading complete history…"));
+  if (state.ui.history === "error") {
+    dialog.append(element(document, "p", "story-history-error", state.ui.message ?? "History unavailable."));
+    const retry = element(document, "button", undefined, "Retry complete history");
+    retry.type = "button";
+    retry.dataset.action = "retry-complete-history";
+    dialog.append(retry);
+  }
+  const list = element(document, "div", "story-history-list");
+  for (const turn of [...state.projection.turns].sort((left, right) => left.turnNumber - right.turnNumber)) {
+    const entry = element(document, "button", "story-history-turn", `Turn ${turn.turnNumber}: ${firstNarrationSentence(turn.narration)}`);
+    entry.type = "button";
+    entry.dataset.turnNumber = String(turn.turnNumber);
+    entry.setAttribute("aria-pressed", String(state.ui.viewTurnNumber === turn.turnNumber));
+    list.append(entry);
+  }
+  dialog.append(list);
+  for (const [action, label] of [
+    ["inspect-state", "Inspect State"],
+    ["restart-from-turn", "Restart / Branch from Here"],
+    ["jump-to-latest", "Jump to Latest"],
+    ["close-history", "Done"]
+  ] as const) {
+    const button = element(document, "button", undefined, label);
+    button.type = "button";
+    button.dataset.action = action;
+    if (action === "jump-to-latest" && state.projection.campaign) button.dataset.turnNumber = String(state.projection.campaign.activeTurnNumber);
+    dialog.append(button);
+  }
+  return dialog;
+}
+
 export function applyReadingWidth(foldout: HTMLElement, width: ReadingWidth): void {
   foldout.dataset.readingWidth = width;
 }
@@ -262,6 +353,7 @@ export function renderStoryPlayerView(root: HTMLElement, state: StoryPlayerViewS
   }
 
   main.setAttribute("aria-busy", String(state.ui.phase === "loading"));
+  main.querySelector("[data-story-history]")?.remove();
   applyReadingWidth(foldout, state.ui.readingWidth);
   commandRow.replaceChildren(renderStoryCommandRow(document, state));
   spine.replaceChildren();
@@ -282,6 +374,12 @@ export function renderStoryPlayerView(root: HTMLElement, state: StoryPlayerViewS
 
   reader.replaceChildren(campaignReader(document, state));
   if (state.projection.campaign) {
-    spine.append(element(document, "p", "story-campaign-name", state.projection.campaign.title));
+    const openHistory = element(document, "button", "story-open-history", "Turn History");
+    openHistory.type = "button";
+    openHistory.dataset.action = "open-complete-history";
+    spine.append(element(document, "p", "story-campaign-name", state.projection.campaign.title), openHistory, campaignSpine(document, state));
+    alignLatestSpine(spine);
   }
+  const dialog = completeHistoryDialog(document, state);
+  if (dialog) main.append(dialog);
 }

@@ -3,6 +3,7 @@ import type { CampaignSummary } from "@infinite-quest/contracts";
 import { initializeAppTheme, renderAppShell } from "./app-shell";
 import { createStoryPlayerComposition, type StoryPlayerComposition } from "./story-player-composition";
 import { createStoryUiModel, type StoryUiPhase } from "./story-player-model";
+import { createStoryHistoryController } from "./story-player-history";
 import { renderStoryPlayerView } from "./story-player-view";
 import type { StoryRoute } from "./story-route";
 import type { MountedPage } from "./world-library-page";
@@ -51,6 +52,11 @@ export function mountStoryPlayerPage(
   let controller: AbortController | null = null;
   let projection: Readonly<CampaignProjection> = composition.campaignStore.store.get();
   let retryControl: HTMLButtonElement | null = null;
+  const history = createStoryHistoryController({
+    campaigns: composition.api.campaigns,
+    campaignStore: composition.campaignStore,
+    model: ui
+  });
 
   const onRetry = () => { void load(); };
   function render(): void {
@@ -58,9 +64,36 @@ export function mountStoryPlayerPage(
     renderStoryPlayerView(root, { route, ui: ui.get(), campaigns, selectedCampaign, projection });
     retryControl = root.querySelector<HTMLButtonElement>('[data-action="retry-story"]');
     retryControl?.addEventListener("click", onRetry);
+    for (const control of root.querySelectorAll<HTMLElement>("[data-turn-number]")) {
+      const turnNumber = Number(control.dataset.turnNumber);
+      control.addEventListener("click", (event) => {
+        event.stopPropagation();
+        history.jump(turnNumber);
+      });
+    }
+    for (const control of root.querySelectorAll<HTMLElement>("[data-action='previous-turn']")) {
+      control.addEventListener("click", (event) => { event.stopPropagation(); void history.previous(); });
+    }
+    for (const control of root.querySelectorAll<HTMLElement>("[data-action='next-turn']")) {
+      control.addEventListener("click", (event) => { event.stopPropagation(); void history.next(); });
+    }
+    for (const control of root.querySelectorAll<HTMLElement>("[data-action='open-complete-history']")) {
+      control.addEventListener("click", (event) => {
+        event.stopPropagation();
+        ui.setActiveDialog("history");
+        void history.openCompleteHistory().catch(() => undefined);
+      });
+    }
+    for (const control of root.querySelectorAll<HTMLElement>("[data-action='retry-complete-history']")) {
+      control.addEventListener("click", (event) => { event.stopPropagation(); void history.retryCompleteHistory().catch(() => undefined); });
+    }
+    for (const control of root.querySelectorAll<HTMLElement>("[data-action='close-history']")) {
+      control.addEventListener("click", (event) => { event.stopPropagation(); ui.setActiveDialog(null); });
+    }
   }
   const unsubscribeStore = composition.campaignStore.store.subscribe((next) => {
     projection = next;
+    history.sync(next);
     render();
   });
   const unsubscribeUi = ui.subscribe(() => render());
@@ -80,15 +113,23 @@ export function mountStoryPlayerPage(
         ui.setPhase("chooser");
         return;
       }
-      const [listed, sync] = await Promise.all([
+      const sessionRequest = composition.api.session?.get?.(nextController.signal) ?? Promise.resolve(null);
+      const [listed, sync, session] = await Promise.all([
         listedRequest,
-        composition.api.generation.syncStatus(route.campaignId, nextController.signal)
+        composition.api.generation.syncStatus(route.campaignId, nextController.signal),
+        sessionRequest
       ]);
       if (disposed || nextController.signal.aborted) return;
       campaigns = listed.campaigns;
       selectedCampaign = campaigns.find((campaign) => campaign.id === route.campaignId) ?? null;
       composition.campaignStore.load(sync);
       ui.setViewTurnNumber(route.turnNumber ?? sync.campaign.activeTurnNumber);
+      const continuousReading = session?.user?.settings?.continuousReading === true;
+      ui.setContinuousReading(continuousReading);
+      if (continuousReading && sync.turnWindowMode === "replace" && sync.turns.nextCursor !== null) {
+        await history.openCompleteHistory().catch(() => undefined);
+        if (disposed || nextController.signal.aborted) return;
+      }
       ui.setPhase("loaded");
     } catch (error) {
       if (disposed || nextController.signal.aborted) return;
@@ -109,6 +150,17 @@ export function mountStoryPlayerPage(
       activated?.focus();
       return;
     }
+    const action = actionTarget.closest<HTMLElement>("[data-action]")?.dataset.action;
+    if (action === "previous-turn") {
+      void history.previous();
+      return;
+    }
+    if (action === "next-turn") {
+      void history.next();
+      return;
+    }
+    const turnNumber = Number(actionTarget.closest<HTMLElement>("[data-turn-number]")?.dataset.turnNumber);
+    if (Number.isSafeInteger(turnNumber) && turnNumber > 0) history.jump(turnNumber);
   };
   root.addEventListener("click", onClick);
   const pollTimer = globalThis.setInterval(() => { void load(); }, 30_000);
@@ -125,6 +177,7 @@ export function mountStoryPlayerPage(
       retryControl?.removeEventListener("click", onRetry);
       unsubscribeStore();
       unsubscribeUi();
+      history.dispose();
       ui.dispose();
       theme.dispose();
     }

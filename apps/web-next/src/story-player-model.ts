@@ -11,6 +11,7 @@ export interface StoryUiState {
   readonly draft: string;
   readonly choiceSelection: readonly string[];
   readonly activeDialog: string | null;
+  readonly continuousReading: boolean;
   readonly history: "idle" | "loading" | "error";
   readonly illustration: "idle" | "loading" | "unavailable";
   readonly activity: "idle" | "generating" | "recoverable";
@@ -22,6 +23,9 @@ export interface StoryUiModel {
   subscribe(listener: (state: Readonly<StoryUiState>) => void): () => void;
   setReadingWidth(width: ReadingWidth): void;
   setViewTurnNumber(turnNumber: number | null): void;
+  setHistory(status: StoryUiState["history"]): void;
+  setActiveDialog(dialog: string | null): void;
+  setContinuousReading(enabled: boolean): void;
   setDraft(draft: string): void;
   setPhase(phase: StoryUiPhase): void;
   setMessage(message: string | null): void;
@@ -35,6 +39,7 @@ const DEFAULT_STATE: StoryUiState = {
   draft: "",
   choiceSelection: [],
   activeDialog: null,
+  continuousReading: false,
   history: "idle",
   illustration: "idle",
   activity: "idle",
@@ -71,6 +76,7 @@ function localInitialState(
       : DEFAULT_STATE.choiceSelection,
     activeDialog: typeof value.activeDialog === "string" || value.activeDialog === null
       ? value.activeDialog : DEFAULT_STATE.activeDialog,
+    continuousReading: value.continuousReading === true,
     history: value.history === "idle" || value.history === "loading" || value.history === "error"
       ? value.history : DEFAULT_STATE.history,
     illustration: value.illustration === "idle" || value.illustration === "loading" || value.illustration === "unavailable"
@@ -117,6 +123,17 @@ export function createStoryUiModel(
     },
     setViewTurnNumber(viewTurnNumber) {
       if (state.viewTurnNumber !== viewTurnNumber) publish({ ...state, viewTurnNumber });
+    },
+    setHistory(history) {
+      if (state.history !== history) publish({ ...state, history });
+    },
+    setActiveDialog(activeDialog) {
+      if (state.activeDialog !== activeDialog) publish({ ...state, activeDialog });
+    },
+    setContinuousReading(continuousReading) {
+      if (typeof continuousReading === "boolean" && state.continuousReading !== continuousReading) {
+        publish({ ...state, continuousReading });
+      }
     },
     setDraft(draft) {
       if (state.draft !== draft) publish({ ...state, draft });

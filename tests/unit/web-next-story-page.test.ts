@@ -108,13 +108,19 @@ function fixture() {
 function composition(options: {
   readonly list?: ReturnType<typeof vi.fn>;
   readonly syncStatus?: ReturnType<typeof vi.fn>;
+  readonly turns?: ReturnType<typeof vi.fn>;
+  readonly session?: ReturnType<typeof vi.fn>;
   readonly campaignStore?: CampaignStoreController;
 } = {}): StoryPlayerComposition {
   const campaignStore = options.campaignStore ?? createCampaignStore();
   return {
     api: {
-      campaigns: { list: options.list ?? vi.fn().mockResolvedValue({ campaigns: [campaignSummary()] }) },
+      campaigns: {
+        list: options.list ?? vi.fn().mockResolvedValue({ campaigns: [campaignSummary()] }),
+        turns: options.turns ?? vi.fn()
+      },
       generation: { syncStatus: options.syncStatus ?? vi.fn().mockResolvedValue(sync()) }
+      ,session: { get: options.session }
     },
     campaignStore,
     workflow: {},
@@ -400,6 +406,137 @@ describe("Story Player page shell", () => {
     expect(page.document.querySelector<HTMLButtonElement>('[data-reading-width="wide"]')?.getAttribute("aria-pressed")).toBe("true");
     expect(page.document.querySelector("[data-reading-width-status]")?.textContent).toBe("Reading width set to Wide.");
     expect(focus).toHaveBeenCalledTimes(1);
+    mounted.dispose();
+  });
+
+  it("renders the latest five persisted spine turns without falsely marking an older view current", async () => {
+    const page = fixture();
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 9 },
+      activeTurnNumber: 9,
+      turns: {
+        campaignId,
+        nextCursor: null,
+        turns: Array.from({ length: 9 }, (_, index) => ({
+          id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+          turnNumber: index + 1,
+          action: `Action ${index + 1}`,
+          inputMode: "action" as const,
+          inputModeSource: "explicit" as const,
+          narration: `Narration ${index + 1}.`,
+          choices: [], customActionSuggestion: "", imagePrompt: "", imageUrl: null,
+          acceptedAt: "2026-08-18T00:00:00.000Z", chronicleRetrieval: null, reportedCost: null
+        }))
+      }
+    });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 2 }, composition({
+      list: vi.fn().mockResolvedValue({ campaigns: [campaignSummary({ activeTurnNumber: 9 })] }),
+      syncStatus: vi.fn().mockResolvedValue(loaded)
+    }));
+    await settle();
+
+    const spine = page.document.querySelector(".story-campaign-spine");
+    expect([...spine?.querySelectorAll<HTMLButtonElement>("[data-turn-number]") ?? []].map((button) => button.dataset.turnNumber))
+      .toEqual(["5", "6", "7", "8", "9"]);
+    expect(spine?.querySelector("[aria-current='step']")).toBeNull();
+    page.document.querySelector<HTMLButtonElement>("[data-turn-number='5']")?.click();
+    expect(page.document.querySelector("[data-story-leaf] h1")?.textContent).toBe("Turn 5");
+    expect(spine?.querySelector("[aria-current='step']")?.getAttribute("data-turn-number")).toBe("5");
+    mounted.dispose();
+  });
+
+  it("loads a cursor page before reader Previous crosses the bounded window", async () => {
+    const page = fixture();
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 7 }, activeTurnNumber: 7,
+      turns: {
+        campaignId, nextCursor: "before-6",
+        turns: [6, 7].map((turnNumber) => ({
+          id: `00000000-0000-4000-8000-${String(turnNumber).padStart(12, "0")}`,
+          turnNumber, action: `Action ${turnNumber}`, inputMode: "action" as const, inputModeSource: "explicit" as const,
+          narration: `Narration ${turnNumber}.`, choices: [], customActionSuggestion: "", imagePrompt: "", imageUrl: null,
+          acceptedAt: "2026-08-18T00:00:00.000Z", chronicleRetrieval: null, reportedCost: null
+        }))
+      }
+    });
+    const turns = vi.fn().mockResolvedValue({
+      campaignId, nextCursor: null,
+      turns: [4, 5].map((turnNumber) => ({
+        id: `00000000-0000-4000-8000-${String(turnNumber).padStart(12, "0")}`,
+        turnNumber, action: `Action ${turnNumber}`, inputMode: "action" as const, inputModeSource: "explicit" as const,
+        narration: `Narration ${turnNumber}.`, choices: [], customActionSuggestion: "", imagePrompt: "", imageUrl: null,
+        acceptedAt: "2026-08-18T00:00:00.000Z", chronicleRetrieval: null, reportedCost: null
+      }))
+    });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 6 }, composition({
+      list: vi.fn().mockResolvedValue({ campaigns: [campaignSummary({ activeTurnNumber: 7 })] }), syncStatus: vi.fn().mockResolvedValue(loaded), turns
+    }));
+    await settle();
+    page.document.querySelector<HTMLButtonElement>("[data-action='previous-turn']")?.click();
+    await settle();
+
+    expect(turns).toHaveBeenCalledWith(campaignId, { before: "before-6", limit: 200 }, undefined);
+    expect(page.document.querySelector("[data-story-leaf] h1")?.textContent).toBe("Turn 5");
+    mounted.dispose();
+  });
+
+  it("opens complete history as a retryable dialog without discarding the bounded reader on failure", async () => {
+    const page = fixture();
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 7 }, activeTurnNumber: 7,
+      turns: { campaignId, nextCursor: "before-6", turns: [6, 7].map((turnNumber) => ({
+        id: `00000000-0000-4000-8000-${String(turnNumber).padStart(12, "0")}`,
+        turnNumber, action: `Action ${turnNumber}`, inputMode: "action" as const, inputModeSource: "explicit" as const,
+        narration: `Narration ${turnNumber}.`, choices: [], customActionSuggestion: "", imagePrompt: "", imageUrl: null,
+        acceptedAt: "2026-08-18T00:00:00.000Z", chronicleRetrieval: null, reportedCost: null
+      })) }
+    });
+    const turns = vi.fn().mockRejectedValue(new Error("history unavailable"));
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 7 }, composition({
+      list: vi.fn().mockResolvedValue({ campaigns: [campaignSummary({ activeTurnNumber: 7 })] }), syncStatus: vi.fn().mockResolvedValue(loaded), turns
+    }));
+    await settle();
+    page.document.querySelector<HTMLButtonElement>("[data-action='open-complete-history']")?.click();
+    await settle();
+
+    const dialog = page.document.querySelector<HTMLElement>("[data-story-history]");
+    expect(dialog?.hasAttribute("open")).toBe(true);
+    expect(dialog?.textContent).toContain("History unavailable");
+    expect(page.document.querySelector("[data-story-leaf] h1")?.textContent).toBe("Turn 7");
+    expect(page.document.querySelector<HTMLButtonElement>("[data-action='retry-complete-history']")).toBeTruthy();
+    mounted.dispose();
+  });
+
+  it("waits for complete history before continuous reading renders every accepted turn", async () => {
+    const page = fixture();
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 7 }, activeTurnNumber: 7,
+      turns: { campaignId, nextCursor: "before-6", turns: [6, 7].map((turnNumber) => ({
+        id: `00000000-0000-4000-8000-${String(turnNumber).padStart(12, "0")}`,
+        turnNumber, action: `Action ${turnNumber}`, inputMode: "action" as const, inputModeSource: "explicit" as const,
+        narration: `Narration ${turnNumber}.`, choices: [], customActionSuggestion: "", imagePrompt: "", imageUrl: null,
+        acceptedAt: "2026-08-18T00:00:00.000Z", chronicleRetrieval: null, reportedCost: null
+      })) }
+    });
+    const turns = vi.fn().mockResolvedValue({
+      campaignId, nextCursor: null, turns: [4, 5].map((turnNumber) => ({
+        id: `00000000-0000-4000-8000-${String(turnNumber).padStart(12, "0")}`,
+        turnNumber, action: `Action ${turnNumber}`, inputMode: "action" as const, inputModeSource: "explicit" as const,
+        narration: `Narration ${turnNumber}.`, choices: [], customActionSuggestion: "", imagePrompt: "", imageUrl: null,
+        acceptedAt: "2026-08-18T00:00:00.000Z", chronicleRetrieval: null, reportedCost: null
+      }))
+    });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 7 }, composition({
+      list: vi.fn().mockResolvedValue({ campaigns: [campaignSummary({ activeTurnNumber: 7 })] }), syncStatus: vi.fn().mockResolvedValue(loaded), turns,
+      session: vi.fn().mockResolvedValue({ user: { settings: { continuousReading: true } } })
+    }));
+    await settle();
+    await settle();
+    await settle();
+
+    expect(turns).toHaveBeenCalledWith(campaignId, { before: "before-6", limit: 200 }, undefined);
+    await vi.waitFor(() => expect(page.document.querySelectorAll("[data-story-leaf]")).toHaveLength(4));
+    expect(page.document.querySelectorAll("[data-story-leaf] [data-action='inspect-state']")).toHaveLength(1);
     mounted.dispose();
   });
 

@@ -52,7 +52,8 @@ main[data-page="story-player"] {
 .story-choices,
 .story-campaign-list,
 .story-reader-toolbar,
-.story-turn-record-actions {
+.story-turn-record-actions,
+.story-campaign-spine-content {
   display: flex;
   flex-wrap: wrap;
   gap: .5rem;
@@ -61,6 +62,22 @@ main[data-page="story-player"] {
 .story-choices,
 .story-campaign-list {
   flex-direction: column;
+}
+
+.story-campaign-spine-content {
+  flex-direction: column;
+}
+
+.story-spine-turn {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: .25rem .5rem;
+  text-align: left;
+}
+
+.story-spine-meta,
+.story-spine-chronicle {
+  grid-column: 2;
 }
 
 .story-status,
