@@ -106,21 +106,18 @@ describe("Chronicle query planning", () => {
     expect(plan.map((variant) => variant.kind)).toEqual(["action", "scene"]);
   });
 
-  it("retains entity expansion when it carries a newly scoped entity id despite overlapping visible terms", () => {
+  it("retains entity expansion solely for a fresh entity id when normalized visible terms add nothing", () => {
     const plan = planChronicleQueries({
       action: "Find Mara",
-      entityHints: [
-        { ordinal: 2, entityId: "world:moon-gate", terms: ["Moon Gate"] },
-        { ordinal: 2, entityId: "world:mara", terms: ["Mara"] }
-      ]
+      entityHints: [{ ordinal: 2, entityId: "world:mara", terms: ["Mara!"] }]
     });
 
     expect(plan).toEqual([
       { kind: "action", query: "Find Mara", entityIds: [] },
       {
         kind: "entity_expanded",
-        query: "Find Mara Moon Gate",
-        entityIds: ["world:mara", "world:moon-gate"]
+        query: "Find Mara Mara!",
+        entityIds: ["world:mara"]
       }
     ]);
   });
