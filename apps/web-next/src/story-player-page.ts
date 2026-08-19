@@ -936,7 +936,7 @@ export function mountStoryPlayerPage(
     if (action === "export-markdown") {
       void tools.exportMarkdown().then((downloaded) => {
         if (!downloaded || disposed) return;
-        tools.recordActivity("markdown_export_downloaded", { campaignId: projection.campaign?.id, operationKind: "markdown" });
+        tools.recordActivity("markdown_export_downloaded", { campaignId: projection.campaign?.id });
         ui.setMessage("Markdown export downloaded.");
       });
       return;
@@ -944,7 +944,7 @@ export function mountStoryPlayerPage(
     if (action === "export-html") {
       void tools.exportStandaloneHtml().then((downloaded) => {
         if (!downloaded || disposed) return;
-        tools.recordActivity("html_export_downloaded", { campaignId: projection.campaign?.id, operationKind: "html" });
+        tools.recordActivity("html_export_downloaded", { campaignId: projection.campaign?.id });
         ui.setMessage("Standalone HTML export downloaded.");
       });
       return;
@@ -952,7 +952,7 @@ export function mountStoryPlayerPage(
     if (action === "export-pdf") {
       void tools.printStory().then((printed) => {
         if (!printed || disposed) return;
-        tools.recordActivity("story_print_prepared", { campaignId: projection.campaign?.id, operationKind: "pdf_images" });
+        tools.recordActivity("story_print_prepared", { campaignId: projection.campaign?.id });
         ui.setMessage("Print dialog opened.");
       });
     }

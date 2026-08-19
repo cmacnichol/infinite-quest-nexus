@@ -218,7 +218,16 @@ function downloadReadableExport(browser: StoryToolBrowser, body: string, filenam
   }
 }
 
-const SAFE_ACTIVITY_DETAIL_FIELDS = ["campaignId", "turnNumber", "jobId", "status", "operationKind", "retryCount", "correlationId"] as const;
+const ACTIVITY_DETAIL_FIELDS = {
+  generation_queued: ["campaignId", "turnNumber", "jobId", "status", "retryCount", "correlationId"],
+  markdown_export_downloaded: ["campaignId"],
+  html_export_downloaded: ["campaignId"],
+  story_print_prepared: ["campaignId"]
+} as const;
+
+const SAFE_ACTIVITY_STATUSES = new Set([
+  "queued", "assessing", "generating", "validating", "indexing", "committed", "recoverable", "failed"
+]);
 
 const ACTIVITY_OPERATIONS: Readonly<Record<StoryActivityOperation, Readonly<Pick<StoryActivityRecord, "category" | "title">>>> = {
   generation_queued: { category: "generation", title: "Generation queued" },
@@ -232,13 +241,30 @@ function safeActivityText(value: unknown): string {
   return value.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 160);
 }
 
-function safeActivityDetail(detail: Readonly<Record<string, unknown>> | undefined): string {
+function safeActivityUuid(value: unknown): string | null {
+  const text = safeActivityText(value);
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(text) ? text : null;
+}
+
+function safeActivityDetail(operation: StoryActivityOperation, detail: Readonly<Record<string, unknown>> | undefined): string {
   if (!detail) return "";
   const fields: string[] = [];
-  for (const key of SAFE_ACTIVITY_DETAIL_FIELDS) {
+  for (const key of ACTIVITY_DETAIL_FIELDS[operation]) {
     const value = detail[key];
-    if (typeof value === "string" && safeActivityText(value)) fields.push(`${key}=${safeActivityText(value)}`);
-    if (typeof value === "number" && Number.isFinite(value)) fields.push(`${key}=${value}`);
+    if (key === "campaignId" || key === "jobId" || key === "correlationId") {
+      const identifier = safeActivityUuid(value);
+      if (identifier) fields.push(`${key}=${identifier}`);
+      continue;
+    }
+    if (key === "turnNumber" && typeof value === "number" && Number.isSafeInteger(value) && value > 0) {
+      fields.push(`${key}=${value}`);
+      continue;
+    }
+    if (key === "retryCount" && typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= 100) {
+      fields.push(`${key}=${value}`);
+      continue;
+    }
+    if (key === "status" && typeof value === "string" && SAFE_ACTIVITY_STATUSES.has(value)) fields.push(`${key}=${value}`);
   }
   return fields.join(" ");
 }
@@ -456,7 +482,7 @@ export function createStoryToolsController(options: StoryToolsControllerOptions)
         timestamp: new Date().toISOString(),
         category: activity.category,
         title: activity.title,
-        detail: safeActivityDetail(detail)
+        detail: safeActivityDetail(operation, detail)
       };
       if (disposed) return record;
       activityRecords = [...activityRecords, record];

@@ -359,13 +359,13 @@ describe("Story campaign tools", () => {
     const record = activity.recordActivity("generation_queued", {
       campaignId,
       turnNumber: 7,
-      jobId: "job-7",
+      jobId: "44444444-4444-4444-8444-444444444444",
       narration: "This accepted narration must never enter diagnostics.",
       prompt: "Nor can this prompt.",
       providerResponse: "Or raw provider output."
     });
 
-    expect(record).toEqual(expect.objectContaining({ category: "generation", title: "Generation queued", detail: `campaignId=${campaignId} turnNumber=7 jobId=job-7` }));
+    expect(record).toEqual(expect.objectContaining({ category: "generation", title: "Generation queued", detail: `campaignId=${campaignId} turnNumber=7 jobId=44444444-4444-4444-8444-444444444444` }));
     await expect(activity.copyActivityDiagnostics()).resolves.toBe(true);
     expect(copyText).toHaveBeenCalledWith(expect.stringContaining("campaignId="));
     expect(copyText).not.toHaveBeenCalledWith(expect.stringContaining("accepted narration"));
@@ -383,6 +383,27 @@ describe("Story campaign tools", () => {
     await expect(activity.copyActivityDiagnostics()).resolves.toBe(true);
 
     expect(copyText).toHaveBeenCalledWith("");
+  });
+
+  it("does not copy private values passed under allowlisted activity detail keys", async () => {
+    const copyText = vi.fn().mockResolvedValue(undefined);
+    const { tools } = controller({ copyText });
+    const activity = tools as unknown as StoryActivityTools;
+    const privateNarration = "The hidden narration must not enter copied diagnostics.";
+    const privatePrompt = "The private prompt must not enter copied diagnostics.";
+
+    const record = activity.recordActivity("generation_queued", {
+      campaignId,
+      turnNumber: 7,
+      jobId: "44444444-4444-4444-8444-444444444444",
+      status: privateNarration,
+      correlationId: privatePrompt
+    });
+    await expect(activity.copyActivityDiagnostics()).resolves.toBe(true);
+
+    expect(record?.detail).toBe(`campaignId=${campaignId} turnNumber=7 jobId=44444444-4444-4444-8444-444444444444`);
+    expect(copyText).not.toHaveBeenCalledWith(expect.stringContaining(privateNarration));
+    expect(copyText).not.toHaveBeenCalledWith(expect.stringContaining(privatePrompt));
   });
 
   it("downloads the backend standalone HTML export with a safely derived filename", async () => {
