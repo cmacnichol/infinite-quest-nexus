@@ -125,6 +125,16 @@ export function mountStoryPlayerPage(
   let inspectionRequestToken = 0;
   let autoSubmitTurnChoices = false;
   let submittedDraft: string | null = null;
+  let followingProgrammatically = false;
+  const refreshCompletionResources = (campaignId: string, turnNumber: number) => {
+    void composition.api.campaigns.state(campaignId, turnNumber).then((runtime) => {
+      if (!disposed && projection.campaign?.id === campaignId && runtime.campaignId === campaignId) {
+        composition.campaignStore.loadRuntimeState(runtime);
+      }
+    }).catch(() => undefined);
+    // Illustration refresh is deliberately independent: failures never alter accepted narration.
+    void composition.illustrations.segments(campaignId).catch(() => undefined);
+  };
   const generation = createStoryGenerationController({
     workflow: composition.workflow,
     campaignStore: composition.campaignStore,
@@ -134,6 +144,7 @@ export function mountStoryPlayerPage(
       ui.setViewTurnNumber(result.turnNumber);
       if (submittedDraft !== null) ui.clearSubmittedComposerDraft(submittedDraft);
       submittedDraft = null;
+      refreshCompletionResources(result.campaignId, result.turnNumber);
     },
     onError() {
       if (!disposed) ui.setMessage("Story generation could not be completed. Your accepted turns are unchanged.");
@@ -206,13 +217,14 @@ export function mountStoryPlayerPage(
     ? selectedCampaign : null;
   const campaignFallback = () => composerCampaign()?.turnControlStyle === "flexible_scene" ? "scene" as const : "action" as const;
   const submitPreparedTurn = async (submission: PreparedStoryTurnSubmission) => {
-    if (options.onSubmit) {
-      await options.onSubmit(submission);
-      return;
-    }
     submittedDraft = submission.action;
     const accepted = await generation.submitAppend(submission);
-    if (!accepted && !disposed) ui.setMessage("Story generation could not be started. Your accepted turns are unchanged.");
+    if (!accepted) {
+      if (!disposed) ui.setMessage("Story generation could not be started. Your accepted turns are unchanged.");
+      return;
+    }
+    ui.setGenerationFollowing(true);
+    await options.onSubmit?.(submission);
   };
   const submitComposer = async (): Promise<void> => {
     const campaign = projection.campaign;
@@ -438,7 +450,7 @@ export function mountStoryPlayerPage(
           requestedInputMode: "action",
           resolvedInputMode: "action",
           inputModeSource: "opening_action"
-        });
+        }).then((accepted) => { if (accepted) ui.setGenerationFollowing(true); });
       });
     }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='cancel-generation']")) {
@@ -449,6 +461,9 @@ export function mountStoryPlayerPage(
         const campaignId = projection.campaign?.id;
         if (campaignId) void generation.resume(campaignId);
       });
+    }
+    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='resume-generation-following']")) {
+      control.addEventListener("click", () => { ui.setGenerationFollowing(true); });
     }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='retry-generation']")) {
       control.addEventListener("click", () => { void generation.retry(); });
@@ -469,6 +484,20 @@ export function mountStoryPlayerPage(
       });
     }
     bindHistoryDialog();
+    const reader = root.querySelector<HTMLElement>("[data-story-reader]");
+    reader?.addEventListener("scroll", () => {
+      if (!followingProgrammatically && projection.generation !== null && ui.get().generationFollowing) {
+        ui.setGenerationFollowing(false);
+      }
+    });
+    if (projection.generation !== null && ui.get().generationFollowing) {
+      const preview = root.querySelector<HTMLElement>("[data-story-generation-preview]");
+      if (preview && typeof preview.scrollIntoView === "function") {
+        followingProgrammatically = true;
+        preview.scrollIntoView({ block: "end" });
+        queueMicrotask(() => { followingProgrammatically = false; });
+      }
+    }
   }
   const unsubscribeStore = composition.campaignStore.store.subscribe((next) => {
     projection = next;

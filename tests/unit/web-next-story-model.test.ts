@@ -29,6 +29,7 @@ describe("Story Player local UI model", () => {
       "draft",
       "draftOwnerKey",
       "draftOwnerTurnNumber",
+      "generationFollowing",
       "history",
       "illustration",
       "intentConfirmation",
@@ -98,6 +99,16 @@ describe("Story Player local UI model", () => {
     const model = createStoryUiModel({ continuousReading: true } as never, memoryStorage());
 
     expect(model.get().continuousReading).toBe(true);
+  });
+
+  it("holds generation preview following as local presentation state", () => {
+    const model = createStoryUiModel({}, memoryStorage());
+
+    expect(model.get().generationFollowing).toBe(true);
+    model.setGenerationFollowing(false);
+    expect(model.get().generationFollowing).toBe(false);
+    model.setGenerationFollowing(true);
+    expect(model.get().generationFollowing).toBe(true);
   });
 
   it("discards unknown runtime initial fields instead of retaining campaign authority", () => {

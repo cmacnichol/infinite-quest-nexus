@@ -299,6 +299,66 @@ describe("Story Player page shell", () => {
     mounted.dispose();
   });
 
+  it("pauses streamed-preview following after manual scroll and resumes it explicitly", async () => {
+    const page = fixture();
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 1 },
+      activeTurnNumber: 1,
+      pendingGeneration: {
+        id: "55555555-5555-4555-8555-555555555555", status: "generating", action: "Continue",
+        expectedTurnNumber: 2, createdAt: "2026-08-18T00:00:00.000Z", updatedAt: "2026-08-18T00:00:00.000Z",
+        operationKind: "append", replacementTurnId: null
+      },
+      turns: turnWindow([1])
+    });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({ syncStatus: vi.fn().mockResolvedValue(loaded) }));
+    await settle();
+
+    page.document.querySelector<HTMLElement>("[data-story-reader]")?.dispatchEvent(new page.window.Event("scroll", { bubbles: true }));
+    await settle();
+    expect(page.document.querySelector<HTMLButtonElement>("[data-action='resume-generation-following']")).toBeTruthy();
+
+    page.document.querySelector<HTMLButtonElement>("[data-action='resume-generation-following']")?.click();
+    await settle();
+    expect(page.document.querySelector("[data-action='resume-generation-following']")).toBeNull();
+    mounted.dispose();
+  });
+
+  it("refreshes runtime state and illustration data independently after durable completion", async () => {
+    const page = fixture();
+    const completed = {
+      id: "55555555-5555-4555-8555-555555555555", campaignId, expectedTurnNumber: 2, turnNumber: 2,
+      resultTurnId: "66666666-6666-4666-8666-666666666666", action: "Continue.", inputMode: "action", inputModeSource: "explicit",
+      narration: "The observatory opens.", choices: [], customActionSuggestion: "", imagePrompt: "", acceptedAt: "2026-08-18T00:01:00.000Z",
+      stateSnapshot: {}, chronicleRetrieval: null, reportedCost: null
+    };
+    const runtime = vi.fn().mockResolvedValue(historicalState(2, "The observatory is open."));
+    const segments = vi.fn().mockResolvedValue({ campaignId, segments: [] });
+    const base = composition({
+      syncStatus: vi.fn().mockResolvedValue(sync({
+        campaign: { ...sync().campaign, activeTurnNumber: 1 }, activeTurnNumber: 1, turns: turnWindow([1])
+      }))
+    });
+    const prepared = {
+      ...base,
+      api: { ...base.api, campaigns: { ...base.api.campaigns, state: runtime } },
+      workflow: {
+        submit: vi.fn(),
+        resume: vi.fn(async () => ({
+          campaignId, jobId: completed.id, operationKind: "append", replacementTurnId: null,
+          async *watch() { yield { type: "settled" as const, outcome: "completed" as const, result: completed }; },
+          async *retryGeneration() {}, cancelGeneration: vi.fn(), discardGeneration: vi.fn(), fetchResult: vi.fn()
+        }))
+      },
+      illustrations: { ...base.illustrations, segments }
+    } as StoryPlayerComposition;
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, prepared);
+
+    await vi.waitFor(() => expect(runtime).toHaveBeenCalledWith(campaignId, 2));
+    await vi.waitFor(() => expect(segments).toHaveBeenCalledWith(campaignId));
+    mounted.dispose();
+  });
+
   it("renders a text-safe foldout reader from the campaign projection without normal-leaf mechanics", async () => {
     const page = fixture();
     const loaded = sync({

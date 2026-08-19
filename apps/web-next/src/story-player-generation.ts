@@ -62,6 +62,7 @@ export function createStoryGenerationController(
   let disposed = false;
   let epoch = 0;
   let active: AttachedRun | null = null;
+  let submitting = false;
 
   const isCurrent = (entry: AttachedRun) => !disposed
     && active === entry
@@ -74,6 +75,23 @@ export function createStoryGenerationController(
     epoch += 1;
   };
 
+  const finalizeCompleted = async (entry: AttachedRun, result: GenerationResult): Promise<boolean> => {
+    if (!isCurrent(entry)) return false;
+    await dependencies.onCompleted?.(result);
+    if (!isCurrent(entry)) return false;
+    active = null;
+    epoch += 1;
+    return true;
+  };
+
+  const finalizeTerminal = (entry: AttachedRun): boolean => {
+    if (!isCurrent(entry)) return false;
+    entry.abort.abort();
+    active = null;
+    epoch += 1;
+    return true;
+  };
+
   const monitor = (entry: AttachedRun, retryFirst = false) => {
     void (async () => {
       try {
@@ -82,14 +100,9 @@ export function createStoryGenerationController(
           if (!isCurrent(entry)) return;
           entry.session.apply(event);
           if (event.type === "settled" && event.outcome === "completed" && isCurrent(entry)) {
-            await dependencies.onCompleted?.(event.result);
-            if (isCurrent(entry)) {
-              active = null;
-              epoch += 1;
-            }
+            await finalizeCompleted(entry, event.result);
           } else if (event.type === "settled" && (event.outcome === "cancelled" || event.outcome === "discarded") && isCurrent(entry)) {
-            active = null;
-            epoch += 1;
+            finalizeTerminal(entry);
           }
         }
       } catch (error) {
@@ -125,7 +138,7 @@ export function createStoryGenerationController(
 
   return {
     async resume(campaignId) {
-      if (disposed || dependencies.currentCampaign()?.id !== campaignId) return false;
+      if (disposed || active !== null || submitting || dependencies.currentCampaign()?.id !== campaignId) return false;
       try {
         const run = await dependencies.workflow.resume(campaignId);
         return run !== null && attach(run);
@@ -136,7 +149,8 @@ export function createStoryGenerationController(
     },
     async submitAppend(submission) {
       const campaign = dependencies.currentCampaign();
-      if (disposed || campaign === null || active !== null) return false;
+      if (disposed || campaign === null || active !== null || submitting) return false;
+      submitting = true;
       try {
         const run = await dependencies.workflow.submit(campaign.id, {
           operationKind: "append",
@@ -147,11 +161,14 @@ export function createStoryGenerationController(
       } catch (error) {
         dependencies.onError?.(error);
         return false;
+      } finally {
+        submitting = false;
       }
     },
     async submitReplacement(replacementTurnId, submission) {
       const campaign = dependencies.currentCampaign();
-      if (disposed || campaign === null || active !== null || !replacementTurnId || campaign.activeTurnNumber < 1) return false;
+      if (disposed || campaign === null || active !== null || submitting || !replacementTurnId || campaign.activeTurnNumber < 1) return false;
+      submitting = true;
       try {
         const run = await dependencies.workflow.submit(campaign.id, {
           operationKind: "replace_latest",
@@ -165,6 +182,8 @@ export function createStoryGenerationController(
       } catch (error) {
         dependencies.onError?.(error);
         return false;
+      } finally {
+        submitting = false;
       }
     },
     async cancel() {
@@ -184,8 +203,12 @@ export function createStoryGenerationController(
       try {
         const generation = dependencies.campaignStore.store.get().generation;
         if (generation?.result.state === "unavailable") {
-          await entry.session.retryResult();
-          return true;
+          const event = await entry.run.fetchResult();
+          if (!isCurrent(entry)) return false;
+          entry.session.apply(event);
+          return event.type === "settled" && event.outcome === "completed"
+            ? finalizeCompleted(entry, event.result)
+            : true;
         }
         return attach(entry.run, true);
       } catch (error) {
@@ -198,7 +221,9 @@ export function createStoryGenerationController(
       if (!entry || !isCurrent(entry)) return false;
       try {
         await entry.run.discardGeneration();
-        return true;
+        if (!isCurrent(entry)) return false;
+        entry.session.apply({ type: "settled", outcome: "discarded", error: new Error("Generation discarded.") });
+        return finalizeTerminal(entry);
       } catch (error) {
         if (isCurrent(entry)) dependencies.onError?.(error);
         return false;

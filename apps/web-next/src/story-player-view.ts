@@ -377,10 +377,17 @@ function campaignReader(document: Document, state: StoryPlayerViewState): HTMLEl
     if (projection.generation !== null) {
       const preview = element(document, "article", "story-leaf story-generation-preview");
       preview.dataset.storyGenerationPreview = "";
+      preview.dataset.generationFollowing = String(state.ui.generationFollowing);
       preview.append(element(document, "p", "story-generation-status", generationLabel(projection)));
       if (projection.generation.narration) preview.append(...narrationParagraphs(document, projection.generation.narration));
       if (projection.generation.transport.state === "degraded") {
         preview.append(element(document, "p", "story-generation-degraded", "Connection is degraded; recovery monitoring remains active."));
+      }
+      if (!state.ui.generationFollowing) {
+        const resumeFollowing = element(document, "button", undefined, "Resume following");
+        resumeFollowing.type = "button";
+        resumeFollowing.dataset.action = "resume-generation-following";
+        preview.append(resumeFollowing);
       }
       reader.append(preview);
     }

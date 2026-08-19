@@ -30,6 +30,7 @@ export interface StoryUiState {
   readonly intentConfirmation: StoryIntentConfirmation | null;
   readonly activeDialog: string | null;
   readonly continuousReading: boolean;
+  readonly generationFollowing: boolean;
   readonly history: "idle" | "loading" | "error";
   readonly illustration: "idle" | "loading" | "unavailable";
   readonly activity: "idle" | "generating" | "recoverable";
@@ -44,6 +45,7 @@ export interface StoryUiModel {
   setHistory(status: StoryUiState["history"]): void;
   setActiveDialog(dialog: string | null): void;
   setContinuousReading(enabled: boolean): void;
+  setGenerationFollowing(enabled: boolean): void;
   setDraft(draft: string): void;
   syncComposer(campaignId: string, acceptedTurnNumber: number, turnControlStyle: unknown): void;
   setComposerDraft(draft: string): void;
@@ -70,6 +72,7 @@ const DEFAULT_STATE: StoryUiState = {
   intentConfirmation: null,
   activeDialog: null,
   continuousReading: false,
+  generationFollowing: true,
   history: "idle",
   illustration: "idle",
   activity: "idle",
@@ -115,6 +118,7 @@ function localInitialState(
     activeDialog: typeof value.activeDialog === "string" || value.activeDialog === null
       ? value.activeDialog : DEFAULT_STATE.activeDialog,
     continuousReading: value.continuousReading === true,
+    generationFollowing: value.generationFollowing !== false,
     history: value.history === "idle" || value.history === "loading" || value.history === "error"
       ? value.history : DEFAULT_STATE.history,
     illustration: value.illustration === "idle" || value.illustration === "loading" || value.illustration === "unavailable"
@@ -178,6 +182,11 @@ export function createStoryUiModel(
     setContinuousReading(continuousReading) {
       if (typeof continuousReading === "boolean" && state.continuousReading !== continuousReading) {
         publish({ ...state, continuousReading });
+      }
+    },
+    setGenerationFollowing(generationFollowing) {
+      if (typeof generationFollowing === "boolean" && state.generationFollowing !== generationFollowing) {
+        publish({ ...state, generationFollowing });
       }
     },
     setDraft(draft) {

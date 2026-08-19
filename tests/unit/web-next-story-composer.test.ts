@@ -112,7 +112,20 @@ function composition(options: {
       generation: { syncStatus: vi.fn().mockResolvedValue(sync()) },
       session: { get: vi.fn().mockResolvedValue({ user: { settings: { autoSubmitTurnChoices: options.autoSubmitTurnChoices === true } } }) }
     },
-    campaignStore: createCampaignStore(), workflow: {}, illustrations: {}, idFactory: {}, clock: {}, delay: {}
+    campaignStore: createCampaignStore(),
+    workflow: {
+      submit: vi.fn(async () => ({
+        campaignId,
+        jobId: "55555555-5555-4555-8555-555555555555",
+        operationKind: "append" as const,
+        replacementTurnId: null,
+        async *watch() { yield { type: "settled" as const, outcome: "discarded" as const, error: new Error("test discard") }; },
+        async *retryGeneration() {},
+        cancelGeneration: vi.fn(), discardGeneration: vi.fn(), fetchResult: vi.fn()
+      })),
+      resume: vi.fn(async () => null)
+    },
+    illustrations: {}, idFactory: { create: () => "composer-idempotency-key" }, clock: {}, delay: {}
   } as unknown as StoryPlayerComposition;
 }
 
@@ -145,6 +158,12 @@ type SubmissionPreparer = (
 
 function submissionPreparer(): SubmissionPreparer | undefined {
   return (storyPlayerPage as unknown as { prepareTurnSubmission?: SubmissionPreparer }).prepareTurnSubmission;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((nextResolve) => { resolve = nextResolve; });
+  return { promise, resolve };
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -279,6 +298,37 @@ describe("Story continuation composer", () => {
     mounted.dispose();
   });
 
+  it("treats onSubmit as a post-attachment observer, never as a durable-generation bypass", async () => {
+    const page = fixture();
+    const observer = vi.fn();
+    const durableRun = deferred<unknown>();
+    const base = composition();
+    const prepared = {
+      ...base,
+      workflow: { submit: vi.fn(() => durableRun.promise), resume: vi.fn(async () => null) },
+      idFactory: { create: () => "observer-idempotency-key" }
+    } as StoryPlayerComposition;
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, prepared, { onSubmit: observer });
+    await settle();
+
+    enter(page, "Open the observatory.");
+    page.document.querySelector<HTMLButtonElement>("[data-action='continue-story']")?.click();
+    await settle();
+    expect(observer).not.toHaveBeenCalled();
+
+    durableRun.resolve({
+      campaignId,
+      jobId: "55555555-5555-4555-8555-555555555555",
+      operationKind: "append",
+      replacementTurnId: null,
+      async *watch() {}, async *retryGeneration() {},
+      cancelGeneration: vi.fn(), discardGeneration: vi.fn(), fetchResult: vi.fn()
+    });
+    await settle();
+    expect(observer).toHaveBeenCalledWith(expect.objectContaining({ action: "Open the observatory." }));
+    mounted.dispose();
+  });
+
   it("auto-submits a generated choice only when the user profile enables it", async () => {
     const disabledPage = fixture();
     const disabledSubmit = vi.fn();
@@ -313,12 +363,14 @@ describe("Story continuation composer", () => {
     page.document.querySelector<HTMLButtonElement>("[data-action='continue-story']")?.click();
     await settle();
     expect(submit).toHaveBeenLastCalledWith(expect.objectContaining({ action: "Open the observatory.", requestedInputMode: "auto", resolvedInputMode: "action", classificationId: "77777777-7777-4777-8777-777777777777" }));
+    await vi.waitFor(() => expect(page.document.querySelector("[data-story-draft]")).toBeTruthy());
 
     enter(page, "  Perhaps describe what changes.  ");
     page.document.querySelector<HTMLButtonElement>("[data-action='continue-story']")?.click();
     await settle();
     expect(page.document.querySelector("[data-story-intent-confirmation]")?.textContent).toContain("  Perhaps describe what changes.  ");
     page.document.querySelector<HTMLButtonElement>("[data-action='confirm-intent-scene']")?.click();
+    await settle();
     expect(submit).toHaveBeenLastCalledWith(expect.objectContaining({ action: "  Perhaps describe what changes.  ", requestedInputMode: "auto", resolvedInputMode: "scene", classificationId: "88888888-8888-4888-8888-888888888888" }));
     expect(classifyTurnInput).toHaveBeenCalledTimes(2);
     mounted.dispose();
