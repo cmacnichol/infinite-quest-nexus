@@ -421,10 +421,10 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     ] as const;
     type DynamicBatchFamily = "semantic" | "full_text" | "entity";
     type BatchFamily = DynamicBatchFamily | "static";
-    const boundVariantKinds: Record<DynamicBatchFamily, string[]> = {
-      semantic: [],
-      full_text: [],
-      entity: []
+    const boundVariantKinds: Record<DynamicBatchFamily, ReadonlyMap<number, string>> = {
+      semantic: new Map(),
+      full_text: new Map(),
+      entity: new Map()
     };
     const batchRows: Array<Readonly<{
       family: BatchFamily;
@@ -449,10 +449,13 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
               if (family) {
                 const dynamicFamily = family === "static" ? undefined : family as DynamicBatchFamily;
                 if (dynamicFamily) {
-                  const variantParameters = [...sql!.matchAll(
-                    /\(\d+::integer,\$(\d+)::text,\$\d+::(?:vector|text|text\[\])\)/g
-                  )].map((match) => Number(match[1]));
-                  boundVariantKinds[dynamicFamily] = variantParameters.map((parameter) => String(values?.[parameter - 1]));
+                  const variantBindings = [...sql!.matchAll(
+                    /\((\d+)::integer,\$(\d+)::text,\$\d+::(?:vector|text|text\[\])\)/g
+                  )];
+                  boundVariantKinds[dynamicFamily] = new Map(variantBindings.map((match) => [
+                    Number(match[1]),
+                    String(values?.[Number(match[2]) - 1])
+                  ]));
                 }
                 for (const row of result.rows as unknown as Array<Record<string, unknown>>) {
                   const requestOrdinal = Number(row.request_ordinal);
@@ -461,7 +464,7 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
                     family,
                     requestOrdinal,
                     signal: staticRequest?.signal ?? family,
-                    variant: staticRequest?.variant ?? boundVariantKinds[dynamicFamily!][requestOrdinal] ?? "missing_bound_variant_kind",
+                    variant: staticRequest?.variant ?? boundVariantKinds[dynamicFamily!].get(requestOrdinal) ?? "missing_bound_variant_kind",
                     candidateId: String(row.candidate_id),
                     parentMemoryId: String(row.parent_memory_id),
                     signalRank: Number(row.signal_rank)
@@ -523,9 +526,9 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     expect(statements.filter((sql) => /chronicle_rank_batch:(semantic|full_text|entity)/.test(sql))
       .every((sql) => sql.includes("request_variants(request_ordinal,variant_kind,"))).toBe(true);
     expect(boundVariantKinds).toEqual({
-      semantic: ["action", "entity_expanded", "scene", "open_thread"],
-      full_text: ["action", "entity_expanded", "scene", "open_thread"],
-      entity: ["entity_expanded"]
+      semantic: new Map([[0, "action"], [1, "entity_expanded"], [2, "scene"], [3, "open_thread"]]),
+      full_text: new Map([[0, "action"], [1, "entity_expanded"], [2, "scene"], [3, "open_thread"]]),
+      entity: new Map([[0, "entity_expanded"]])
     });
     const rankedRows = (
       family: BatchFamily,
