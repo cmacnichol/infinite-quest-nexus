@@ -251,10 +251,32 @@ describe("Story Player page shell", () => {
     expect(main?.querySelector("aside.story-campaign-spine")?.getAttribute("aria-label")).toBe("Campaign spine");
     expect(main?.querySelector("aside.story-illustration-wing")?.getAttribute("aria-label")).toBe("Current turn illustration");
     const styles = readFileSync(new URL("../../apps/web-next/src/story-player.css", import.meta.url), "utf8");
-    expect(styles).toMatch(/@media \(min-width: 900px\) \{[\s\S]*grid-template-areas: "spine reader illustration";/u);
+    expect(styles).toMatch(/\.story-foldout\s*\{[\s\S]*grid-template-areas: "spine reader illustration";/u);
     expect(styles).toMatch(/:focus-visible/u);
-    expect(styles).toMatch(/var\(--focus-ring/u);
+    expect(styles).toMatch(/var\(--accent\)/u);
     mounted.dispose();
+  });
+
+  it("enforces the Fold-out responsive design contract without horizontal overflow", () => {
+    const styles = readFileSync(new URL("../../apps/web-next/src/story-player.css", import.meta.url), "utf8");
+
+    expect(styles).toMatch(/grid-template-areas:\s*"spine reader illustration";/u);
+    expect(styles).toMatch(/grid-template-columns:\s*clamp\(172px, 13vw, 220px\) minmax\(0, 1fr\) clamp\(196px, 15\.5vw, 280px\);/u);
+    expect(styles).toMatch(/\.story-reader-column,?\s*\.story-reader\s*\{[\s\S]*?grid-area:\s*reader;[\s\S]*?min-width:\s*0;/u);
+    expect(styles).toMatch(/\.story-campaign-spine\s*\{[\s\S]*?grid-area:\s*spine;[\s\S]*?position:\s*sticky;/u);
+    expect(styles).toMatch(/\.story-illustration-wing\s*\{[\s\S]*?grid-area:\s*illustration;[\s\S]*?position:\s*sticky;/u);
+    expect(styles).toMatch(/\[data-reading-width="narrow"\]\s*\{\s*--story-reader-max:\s*680px;/u);
+    expect(styles).toMatch(/\[data-reading-width="standard"\]\s*\{\s*--story-reader-max:\s*1120px;/u);
+    expect(styles).toMatch(/\[data-reading-width="wide"\]\s*\{\s*--story-reader-max:\s*none;/u);
+    expect(styles).toMatch(/--story-reader-gutter:\s*32px;/u);
+    expect(styles).toMatch(/@media \(max-width: 1180px\)[\s\S]*?--story-reader-gutter:\s*24px;/u);
+    expect(styles).toMatch(/@media \(max-width: 1040px\)[\s\S]*?grid-template-areas:\s*"reader"\s*"spine"\s*"illustration";/u);
+    expect(styles).toMatch(/@media \(max-width: 820px\)[\s\S]*?--story-reader-gutter:\s*18px;/u);
+    expect(styles).toMatch(/@media \(max-width: 540px\)[\s\S]*?\.story-continue\s*\{\s*width:\s*100%;/u);
+    expect(styles).toMatch(/@media \(min-width: 320px\)/u);
+    expect(styles).toMatch(/@media \(prefers-reduced-motion:\s*reduce\)/u);
+    expect(styles).toMatch(/overflow-x:\s*clip;/u);
+    expect(styles).not.toMatch(/border-radius\s*:\s*(?!0(?:px)?\s*;)/u);
   });
 
   it("announces loading and offers Retry for unavailable or missing campaigns", async () => {
