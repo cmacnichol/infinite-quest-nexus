@@ -41,7 +41,7 @@ export interface StoryToolsController {
 }
 
 export interface StoryToolsControllerOptions {
-  readonly campaigns: Pick<CampaignApi, "state" | "updateState" | "getTurnCorrection" | "correctTurnNarration" | "rewind" | "branch">;
+  readonly campaigns: Pick<CampaignApi, "state" | "inspectState" | "updateState" | "getTurnCorrection" | "correctTurnNarration" | "rewind" | "branch">;
   readonly generation: Pick<StoryGenerationController, "submitReplacement">;
   readonly current: () => StoryToolScope | null;
   readonly reload: () => Promise<void>;
@@ -164,7 +164,7 @@ export function createStoryToolsController(options: StoryToolsControllerOptions)
       const current = scope();
       if (!current || !isPositiveInteger(turnNumber) || !current.turns.some((turn) => turn.turnNumber === turnNumber)) return null;
       try {
-        const result = await options.campaigns.state(current.campaignId, turnNumber, undefined);
+        const result = await options.campaigns.inspectState(current.campaignId, turnNumber, undefined);
         return disposed || scope()?.campaignId !== current.campaignId ? null : result;
       } catch (error) {
         return fail(error);

@@ -769,6 +769,51 @@ describe("client API route contracts without PostgreSQL", () => {
     }
   });
 
+  it("keeps recorded resolution off generic state paths and fetches it only through explicit inspection", async () => {
+    const genericState = {
+      campaignId: CAMPAIGN_ID,
+      activeTurnNumber: 2,
+      viewedTurnNumber: 2,
+      isCurrent: true,
+      revision: 1,
+      updatedAt: NOW.toISOString(),
+      ...RUNTIME_STATE,
+      recordedResolution: null
+    };
+    const inspectedState = {
+      ...genericState,
+      recordedResolution: {
+        statName: "Resolve", base: 61, modifier: 0, target: 61, roll: 37,
+        success: true, margin: 24, difficultyLabel: "standard"
+      }
+    };
+    const getCampaignRuntimeState = vi.fn(async (_scope, _turnNumber, includeRecordedResolution = false) => (
+      includeRecordedResolution ? inspectedState : genericState
+    ));
+    const app = await buildServer(serverOptions({
+      config: config(storageRoot),
+      pool: mockPool(),
+      worldCampaign: testWorldCampaignApplication({ getCampaignRuntimeState })
+    }));
+    try {
+      const generic = await app.inject({ method: "GET", url: `/api/v1/campaigns/${CAMPAIGN_ID}/state?turnNumber=2` });
+      expect(generic.statusCode).toBe(200);
+      expect(campaignRuntimeStateResponseSchema.parse(generic.json()).recordedResolution).toBeNull();
+
+      const inspection = await app.inject({ method: "GET", url: `/api/v1/campaigns/${CAMPAIGN_ID}/state/inspection?turnNumber=2` });
+      expect(inspection.statusCode).toBe(200);
+      expect(campaignRuntimeStateResponseSchema.parse(inspection.json()).recordedResolution).toEqual({
+        statName: "Resolve", base: 61, modifier: 0, target: 61, roll: 37,
+        success: true, margin: 24, difficultyLabel: "standard"
+      });
+      expect(inspection.body).not.toContain("Private referee reasoning.");
+      expect(getCampaignRuntimeState).toHaveBeenNthCalledWith(1, expect.objectContaining({ campaignId: CAMPAIGN_ID }), 2);
+      expect(getCampaignRuntimeState).toHaveBeenNthCalledWith(2, expect.objectContaining({ campaignId: CAMPAIGN_ID }), 2, true);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("serializes every remaining adopted success route through its shared response schema", async () => {
     const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool(), memory: inertRouteMemory }));
     const runtimeStateUpdate = {

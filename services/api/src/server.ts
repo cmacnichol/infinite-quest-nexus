@@ -1073,6 +1073,17 @@ export async function buildServer({
     ))
   ));
 
+  app.get<{ Params: { campaignId: string }; Querystring: { turnNumber: string } }>("/api/v1/campaigns/:campaignId/state/inspection", async (request) => (
+    worldCampaignAdapter.run(async () => parseResponseProjection(
+      campaignRuntimeStateResponseSchema,
+      await worldCampaignAdapter.application.getCampaignRuntimeState(
+        await resolveCampaignScope(uuidSchema.parse(request.params.campaignId)),
+        z.coerce.number().int().positive().parse(request.query.turnNumber),
+        true
+      )
+    ))
+  ));
+
   app.patch<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/state", async (request) => (
     worldCampaignAdapter.run(async () => parseResponseProjection(
       campaignRuntimeStateResponseSchema,

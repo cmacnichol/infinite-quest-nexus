@@ -81,7 +81,7 @@ describe("createNexusApiClient", () => {
     expect(Object.keys(client).sort()).toEqual(["campaigns", "generation", "illustrations", "meta", "providers", "session", "worlds"]);
     expect(Object.keys(client.worlds).sort()).toEqual(["create", "list", "playableCharacters"]);
     expect(Object.keys(client.campaigns).sort()).toEqual([
-      "branch", "classifyTurnInput", "correctTurnNarration", "create", "getTurnCorrection", "list", "rewind", "state", "turns", "updateState"
+      "branch", "classifyTurnInput", "correctTurnNarration", "create", "getTurnCorrection", "inspectState", "list", "rewind", "state", "turns", "updateState"
     ]);
     expect(Object.keys(client.generation).sort()).toEqual([
       "cancel",
@@ -106,6 +106,7 @@ describe("createNexusApiClient", () => {
     const shell = client as unknown as Record<string, unknown>;
 
     expect(typeof campaigns.state).toBe("function");
+    expect(typeof campaigns.inspectState).toBe("function");
     expect(typeof campaigns.updateState).toBe("function");
     expect(typeof campaigns.getTurnCorrection).toBe("function");
     expect(typeof campaigns.correctTurnNarration).toBe("function");
@@ -137,6 +138,7 @@ describe("createNexusApiClient", () => {
       () => client.campaigns.turns("campaign / id", { before: "older-page", limit: 3 }, signal),
       () => client.campaigns.state("campaign / id", undefined, signal),
       () => client.campaigns.state("campaign / id", 3, signal),
+      () => client.campaigns.inspectState("campaign / id", 3, signal),
       () => client.campaigns.updateState(campaignId, {
         expectedTurnNumber: 3,
         expectedRevision: 2,
@@ -194,6 +196,7 @@ describe("createNexusApiClient", () => {
       "/api/v1/campaigns/campaign%20%2F%20id/turns?before=older-page&limit=3",
       "/api/v1/campaigns/campaign%20%2F%20id/state",
       "/api/v1/campaigns/campaign%20%2F%20id/state?turnNumber=3",
+      "/api/v1/campaigns/campaign%20%2F%20id/state/inspection?turnNumber=3",
       `/api/v1/campaigns/${campaignId}/state`,
       `/api/v1/campaigns/${campaignId}/turns/${worldVersionId}/correction`,
       `/api/v1/campaigns/${campaignId}/turns/${worldVersionId}/correction`,
@@ -223,15 +226,15 @@ describe("createNexusApiClient", () => {
       "/api/v1/turns/turn%20%2F%20id/illustration-match"
     ]);
     expect(queue.options.map((option) => option.method)).toEqual([
-      "GET", "POST", "GET", "GET", "POST", "GET", "GET", "GET", "GET", "PATCH", "GET", "PATCH", "POST", "POST", "POST",
+      "GET", "POST", "GET", "GET", "POST", "GET", "GET", "GET", "GET", "GET", "PATCH", "GET", "PATCH", "POST", "POST", "POST",
       "GET", "GET", "POST", "POST", "GET", "GET", "POST", "POST", "POST", "GET", "GET", "PATCH", "GET",
       "GET", "GET", "GET", "POST", "POST", "POST", "GET", "POST"
     ]);
-    expect(queue.options[17]?.body).toBe(JSON.stringify(generationRequest));
-    expect(queue.options[18]?.body).toBe(JSON.stringify(replacementRequest));
-    expect(queue.options.slice(21, 24).map((option) => option.body)).toEqual([undefined, undefined, undefined]);
-    expect(queue.options[32]?.body).toBe(JSON.stringify({ prompt: "A quiet road", variantIndex: 0 }));
-    expect(queue.options[33]?.body).toBe(JSON.stringify({ mode: "missing", idempotencyKey: jobId }));
+    expect(queue.options[18]?.body).toBe(JSON.stringify(generationRequest));
+    expect(queue.options[19]?.body).toBe(JSON.stringify(replacementRequest));
+    expect(queue.options.slice(22, 25).map((option) => option.body)).toEqual([undefined, undefined, undefined]);
+    expect(queue.options[33]?.body).toBe(JSON.stringify({ prompt: "A quiet road", variantIndex: 0 }));
+    expect(queue.options[34]?.body).toBe(JSON.stringify({ mode: "missing", idempotencyKey: jobId }));
     expect(queue.options.every((option) => option.signal === signal)).toBe(true);
   });
 

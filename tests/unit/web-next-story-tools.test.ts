@@ -28,6 +28,7 @@ function deferred<T>() {
 function controller(overrides: Record<string, unknown> = {}) {
   const campaigns = {
     state: vi.fn().mockResolvedValue({ campaignId, viewedTurnNumber: 7, rpgStats: [{ name: "Courage", value: 8 }] }),
+    inspectState: vi.fn().mockResolvedValue({ campaignId, viewedTurnNumber: 7, rpgStats: [{ name: "Courage", value: 8 }], recordedResolution: { statName: "Courage", base: 8, modifier: 0, target: 8, roll: 4, success: true, margin: 4, difficultyLabel: "standard" } }),
     updateState: vi.fn().mockResolvedValue({ campaignId, viewedTurnNumber: 7 }),
     getTurnCorrection: vi.fn().mockResolvedValue({ turnId: latestTurn.id, narration: "Corrected narration." }),
     correctTurnNarration: vi.fn().mockResolvedValue({ turnId: latestTurn.id, narration: "Corrected narration." }),
@@ -61,7 +62,7 @@ function storyComposition() {
     api: {
       campaigns: {
         list: vi.fn().mockResolvedValue({ campaigns: [{ id: campaignId, title: "Campaign", activeTurnNumber: 0, turnControlStyle: "action_only", textProviderProfileId: null }] }),
-        state: vi.fn(), updateState: vi.fn(), getTurnCorrection: vi.fn(), correctTurnNarration: vi.fn(), rewind: vi.fn(), branch: vi.fn()
+        state: vi.fn(), inspectState: vi.fn(), updateState: vi.fn(), getTurnCorrection: vi.fn(), correctTurnNarration: vi.fn(), rewind: vi.fn(), branch: vi.fn()
       },
       generation: {
         syncStatus: vi.fn().mockResolvedValue({
@@ -153,13 +154,15 @@ describe("Story campaign tools", () => {
     mounted.dispose();
   });
 
-  it("fetches mechanics only after explicit persisted-turn inspection", async () => {
+  it("keeps generic state reads separate from the explicit persisted-turn inspection path", async () => {
     const { tools, campaigns } = controller();
 
+    await tools.openCurrentState();
     const state = await tools.openTurnState(olderTurn.turnNumber);
 
-    expect(campaigns.state).toHaveBeenCalledWith(campaignId, olderTurn.turnNumber, undefined);
-    expect(state).toEqual(expect.objectContaining({ viewedTurnNumber: 7 }));
+    expect(campaigns.state).toHaveBeenCalledWith(campaignId, undefined, undefined);
+    expect(campaigns.inspectState).toHaveBeenCalledWith(campaignId, olderTurn.turnNumber, undefined);
+    expect(state).toEqual(expect.objectContaining({ recordedResolution: expect.any(Object) }));
   });
 
   it("writes only current campaign state and keeps the caller draft when the save fails", async () => {

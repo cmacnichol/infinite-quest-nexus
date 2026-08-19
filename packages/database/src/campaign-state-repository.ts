@@ -330,8 +330,12 @@ async function loadRuntimeState(
     });
   }
   const historical = viewedTurnNumber > 0
-    ? await client.query<{ stateSnapshotPrivate: Record<string, unknown>; mechanicsPrivate: unknown; acceptedAt: Date | string }>(
-      `SELECT state_snapshot_private AS "stateSnapshotPrivate", mechanics_private AS "mechanicsPrivate", accepted_at AS "acceptedAt"
+    ? await client.query<{ stateSnapshotPrivate: Record<string, unknown>; mechanicsPrivate?: unknown; acceptedAt: Date | string }>(
+      includeRecordedResolution
+        ? `SELECT state_snapshot_private AS "stateSnapshotPrivate", mechanics_private AS "mechanicsPrivate", accepted_at AS "acceptedAt"
+         FROM turns
+        WHERE owner_user_id = $1 AND campaign_id = $2 AND turn_number = $3`
+        : `SELECT state_snapshot_private AS "stateSnapshotPrivate", accepted_at AS "acceptedAt"
          FROM turns
         WHERE owner_user_id = $1 AND campaign_id = $2 AND turn_number = $3`,
       [scope.ownerUserId, scope.campaignId, viewedTurnNumber]
@@ -407,8 +411,8 @@ function createPostgresCampaignStateRepository(
       };
     },
 
-    async getCampaignRuntimeState(transaction, scope, requestedTurnNumber) {
-      return loadRuntimeState(worldCampaignDatabaseClient(transaction), scope, requestedTurnNumber, requestedTurnNumber !== undefined);
+    async getCampaignRuntimeState(transaction, scope, requestedTurnNumber, includeRecordedResolution = false) {
+      return loadRuntimeState(worldCampaignDatabaseClient(transaction), scope, requestedTurnNumber, includeRecordedResolution);
     },
 
     async updateCampaignRuntimeState(transaction, scope, request) {

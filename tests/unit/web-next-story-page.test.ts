@@ -161,6 +161,7 @@ function composition(options: {
   readonly syncStatus?: ReturnType<typeof vi.fn>;
   readonly turns?: ReturnType<typeof vi.fn>;
   readonly state?: ReturnType<typeof vi.fn>;
+  readonly inspectState?: ReturnType<typeof vi.fn>;
   readonly session?: ReturnType<typeof vi.fn>;
   readonly campaignStore?: CampaignStoreController;
 } = {}): StoryPlayerComposition {
@@ -170,7 +171,8 @@ function composition(options: {
       campaigns: {
         list: options.list ?? vi.fn().mockResolvedValue({ campaigns: [campaignSummary()] }),
         turns: options.turns ?? vi.fn(),
-        state: options.state ?? vi.fn()
+        state: options.state ?? vi.fn(),
+        inspectState: options.inspectState ?? options.state ?? vi.fn()
       },
       generation: { syncStatus: options.syncStatus ?? vi.fn().mockResolvedValue(sync()) }
       ,session: { get: options.session }
@@ -354,6 +356,37 @@ describe("Story Player page shell", () => {
     mounted.dispose();
   });
 
+  it("disables Branch and Rewind if generation starts while their dialog is open", async () => {
+    const page = fixture();
+    const campaignStore = createCampaignStore();
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 1 }, activeTurnNumber: 1, turns: turnWindow([1])
+    });
+    Object.defineProperty(page.window, "confirm", { configurable: true, value: vi.fn(() => true) });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({
+      campaignStore, syncStatus: vi.fn().mockResolvedValue(loaded)
+    }));
+    await settle();
+
+    page.document.querySelector<HTMLButtonElement>("[data-action='open-complete-history']")?.click();
+    await settle();
+    page.document.querySelector<HTMLButtonElement>("[data-action='restart-from-turn']")?.click();
+    await settle();
+    campaignStore.load(sync({
+      ...loaded,
+      pendingGeneration: {
+        id: "55555555-5555-4555-8555-555555555555", status: "generating", action: "Continue",
+        expectedTurnNumber: 2, createdAt: "2026-08-18T00:00:00.000Z", updatedAt: "2026-08-18T00:00:00.000Z",
+        operationKind: "append", replacementTurnId: null
+      }
+    }));
+    await settle();
+
+    expect(page.document.querySelector<HTMLButtonElement>("[data-action='branch-from-turn']")?.disabled).toBe(true);
+    expect(page.document.querySelector<HTMLButtonElement>("[data-action='rewind-from-turn']")?.disabled).toBe(true);
+    mounted.dispose();
+  });
+
   it("keeps following when an auto-scroll delivers its viewport scroll after microtasks", async () => {
     const page = fixture();
     const loaded = sync({
@@ -508,9 +541,13 @@ describe("Story Player page shell", () => {
       narration: "The observatory opens.", choices: [], customActionSuggestion: "", imagePrompt: "", acceptedAt: "2026-08-18T00:01:00.000Z",
       stateSnapshot: {}, chronicleRetrieval: null, reportedCost: null
     };
-    const runtime = vi.fn().mockResolvedValue(historicalState(2, "The observatory is open."));
+    const genericRuntime = { ...historicalState(2, "The observatory is open."), recordedResolution: null };
+    const runtime = vi.fn().mockResolvedValue(genericRuntime);
     const segments = vi.fn().mockResolvedValue({ campaignId, segments: [] });
+    const campaignStore = createCampaignStore();
+    const loadRuntimeState = vi.spyOn(campaignStore, "loadRuntimeState");
     const base = composition({
+      campaignStore,
       syncStatus: vi.fn().mockResolvedValue(sync({
         campaign: { ...sync().campaign, activeTurnNumber: 1 }, activeTurnNumber: 1, turns: turnWindow([1])
       }))
@@ -535,7 +572,46 @@ describe("Story Player page shell", () => {
     const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, prepared);
 
     await vi.waitFor(() => expect(runtime).toHaveBeenCalledWith(campaignId, 2));
+    await vi.waitFor(() => expect(loadRuntimeState).toHaveBeenCalledWith(genericRuntime));
     await vi.waitFor(() => expect(segments).toHaveBeenCalledWith(campaignId, expect.any(AbortSignal)));
+    mounted.dispose();
+  });
+
+  it("returns focus to Campaign Tools after cancel and Close dismiss a tool dialog", async () => {
+    const page = fixture();
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 1 }, activeTurnNumber: 1, turns: turnWindow([1])
+    });
+    const base = composition({ syncStatus: vi.fn().mockResolvedValue(loaded) });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, {
+      ...base,
+      api: {
+        ...base.api,
+        campaigns: {
+          ...base.api.campaigns,
+          getTurnCorrection: vi.fn().mockResolvedValue({
+            ownerUserId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", campaignId,
+            turnId: "00000000-0000-4000-8000-000000000001", turnNumber: 1,
+            correctionRevision: 0, originalNarration: "Narration 1.", effectiveNarration: "Narration 1.",
+            correctedAt: null, illustrationsMayBeStale: false
+          })
+        }
+      }
+    } as StoryPlayerComposition);
+    await settle();
+
+    const summary = page.document.querySelector<HTMLElement>("[data-campaign-tools] summary");
+    if (!summary) throw new Error("Campaign Tools summary is missing.");
+    const focus = vi.spyOn(summary, "focus");
+    page.document.querySelector<HTMLButtonElement>("[data-action='edit-response']")?.click();
+    await vi.waitFor(() => expect(page.document.querySelector("[data-story-tool-dialog]")).toBeTruthy());
+    page.document.querySelector<HTMLDialogElement>("[data-story-tool-dialog]")?.dispatchEvent(new page.window.Event("cancel", { cancelable: true }));
+    expect(focus).toHaveBeenCalledTimes(1);
+
+    page.document.querySelector<HTMLButtonElement>("[data-action='edit-response']")?.click();
+    await vi.waitFor(() => expect(page.document.querySelector("[data-story-tool-dialog]")).toBeTruthy());
+    page.document.querySelector<HTMLButtonElement>("[data-action='close-story-tool-dialog']")?.click();
+    expect(focus).toHaveBeenCalledTimes(2);
     mounted.dispose();
   });
 

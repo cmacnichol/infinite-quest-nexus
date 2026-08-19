@@ -84,6 +84,7 @@ export interface CampaignApi {
   list(signal?: AbortSignal): Promise<CampaignListResponse>;
   turns(campaignId: string, options?: TurnPageRequest | AbortSignal, signal?: AbortSignal): Promise<TurnListResponse>;
   state(campaignId: string, turnNumber?: number, signal?: AbortSignal): Promise<CampaignRuntimeStateResponse>;
+  inspectState(campaignId: string, turnNumber: number, signal?: AbortSignal): Promise<CampaignRuntimeStateResponse>;
   updateState(campaignId: string, request: CampaignRuntimeStateUpdate, signal?: AbortSignal): Promise<CampaignRuntimeStateResponse>;
   getTurnCorrection(campaignId: string, turnId: string, signal?: AbortSignal): Promise<AcceptedTurnCorrectionView>;
   correctTurnNarration(campaignId: string, turnId: string, request: Omit<AcceptedTurnCorrectionRequest, "turnId">, signal?: AbortSignal): Promise<AcceptedTurnCorrectionView>;
@@ -196,6 +197,11 @@ export function createNexusApiClient(options: NexusHttpClientOptions): NexusApiC
     state: (campaignId, turnNumber, signal) => http.request(withSignal({
       method: "GET",
       path: `/campaigns/${encodedPathSegment(campaignId)}/state${turnNumber === undefined ? "" : `?turnNumber=${encodeURIComponent(String(turnNumber))}`}`,
+      responseSchema: campaignRuntimeStateResponseSchema
+    }, signal)),
+    inspectState: (campaignId, turnNumber, signal) => http.request(withSignal({
+      method: "GET",
+      path: `/campaigns/${encodedPathSegment(campaignId)}/state/inspection?turnNumber=${encodeURIComponent(String(turnNumber))}`,
       responseSchema: campaignRuntimeStateResponseSchema
     }, signal)),
     async updateState(campaignId, request, signal) {
