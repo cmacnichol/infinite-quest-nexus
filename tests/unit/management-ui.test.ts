@@ -69,7 +69,11 @@ describe("Nexus management UI contracts", () => {
     expect(managementCss).toContain("@media (max-width: 520px)");
     expect(managementCss).toContain(".campaign-panel-fields { grid-template-columns: 1fr; }");
     const mobileCss = managementCss.slice(managementCss.indexOf("@media (max-width: 520px)"));
-    const actionColumns = [...mobileCss.matchAll(/\.campaign-editor-actions\s*\{[^}]*grid-template-columns:\s*([^;]+);/g)].map((match) => match[1].trim());
+    const actionColumns = [...mobileCss.matchAll(/\.campaign-editor-actions\s*\{[^}]*grid-template-columns:\s*([^;]+);/g)].map((match) => {
+      const columns = match[1];
+      if (!columns) throw new Error("Campaign editor action columns were not captured.");
+      return columns.trim();
+    });
     expect(actionColumns.at(-1)).toBe("1fr");
   });
 
@@ -201,21 +205,34 @@ describe("Nexus management UI contracts", () => {
       "reindexMemory", "previewContext", "saveEmbeddingConfig", "reindexEmbeddings", "embeddingEnabled", "embeddingProvider", "embeddingModel",
       "embeddingDocumentPrefix", "embeddingQueryPrefix", "embeddingBatchSize", "discoverEmbeddingModels", "budgetTokens", "compression", "memoryQuery"
     ];
-    for (const id of staleControlIds) elements[id].disabled = false;
-    elements.memoryTitle.textContent = "Deleted campaign";
-    elements.campaignEditorSummary.textContent = "active · Stale World v4 · Mira";
+    const requiredElement = <T extends HTMLElement>(id: string): T => {
+      const element = elements[id];
+      if (!element) throw new Error(`Expected #${id} in the management fixture.`);
+      return element as T;
+    };
+    const staleControls = staleControlIds.map((id) => requiredElement<HTMLButtonElement | HTMLInputElement | HTMLSelectElement>(id));
+    for (const control of staleControls) control.disabled = false;
+    const memoryTitle = requiredElement<HTMLElement>("memoryTitle");
+    const campaignEditorSummary = requiredElement<HTMLElement>("campaignEditorSummary");
+    const campaignSettingsRail = requiredElement<HTMLElement>("campaignSettingsRail");
+    const campaignCostSection = requiredElement<HTMLElement>("campaignCostSection");
+    const campaignTabOverview = requiredElement<HTMLButtonElement>("campaignTabOverview");
+    const campaignPanelOverview = requiredElement<HTMLElement>("campaignPanelOverview");
+    const campaignPanelChronicle = requiredElement<HTMLElement>("campaignPanelChronicle");
+    memoryTitle.textContent = "Deleted campaign";
+    campaignEditorSummary.textContent = "active · Stale World v4 · Mira";
     functions.setCampaignSettingsPanel("chronicle");
 
     functions.clearCampaignEditorSelection();
 
-    expect([...elements.campaignSettingsRail.querySelectorAll("[role=tab]")].every((tab) => tab.disabled)).toBe(true);
-    expect(staleControlIds.every((id) => elements[id].disabled)).toBe(true);
-    expect(elements.memoryTitle.textContent).toBe("Select a campaign");
-    expect(elements.campaignEditorSummary.textContent).toBe("");
-    expect(elements.campaignCostSection.classList.contains("hidden")).toBe(true);
-    expect(elements.campaignTabOverview.getAttribute("aria-selected")).toBe("true");
-    expect(elements.campaignPanelOverview.hidden).toBe(false);
-    expect(elements.campaignPanelChronicle.hidden).toBe(true);
+    expect([...campaignSettingsRail.querySelectorAll<HTMLButtonElement>("[role=tab]")].every((tab) => tab.disabled)).toBe(true);
+    expect(staleControls.every((control) => control.disabled)).toBe(true);
+    expect(memoryTitle.textContent).toBe("Select a campaign");
+    expect(campaignEditorSummary.textContent).toBe("");
+    expect(campaignCostSection.classList.contains("hidden")).toBe(true);
+    expect(campaignTabOverview.getAttribute("aria-selected")).toBe("true");
+    expect(campaignPanelOverview.hidden).toBe(false);
+    expect(campaignPanelChronicle.hidden).toBe(true);
   });
 
   it("navigates to provider management with an anchor", () => {
