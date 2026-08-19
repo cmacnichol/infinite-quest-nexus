@@ -13,8 +13,8 @@ const storyPlayerMarkup = `
     <section class="story-command-row" aria-label="Story controls"></section>
     <section class="story-foldout">
       <section class="story-reader"></section>
-      <aside class="story-campaign-spine"></aside>
-      <aside class="story-illustration-wing"></aside>
+      <aside class="story-campaign-spine" aria-label="Campaign spine"></aside>
+      <aside class="story-illustration-wing" aria-label="Current turn illustration"></aside>
     </section>
   </main>
 `;

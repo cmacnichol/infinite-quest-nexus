@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { parseHTML } from "linkedom";
 import { createCampaignStore, type CampaignStoreController } from "../../packages/client-core/src/index.js";
 import type { CampaignSyncStatus } from "../../packages/contracts/src/index.js";
@@ -145,6 +146,10 @@ describe("Story Player page shell", () => {
       "story-campaign-spine",
       "story-illustration-wing"
     ]);
+    expect(main?.querySelector("aside.story-campaign-spine")?.getAttribute("aria-label")).toBe("Campaign spine");
+    expect(main?.querySelector("aside.story-illustration-wing")?.getAttribute("aria-label")).toBe("Current turn illustration");
+    const styles = readFileSync(new URL("../../apps/web-next/src/story-player.css", import.meta.url), "utf8");
+    expect(styles).toMatch(/@media \(min-width: 900px\) \{[\s\S]*grid-template-areas: "spine reader illustration";/u);
     mounted.dispose();
   });
 

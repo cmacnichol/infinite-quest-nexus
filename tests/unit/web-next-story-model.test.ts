@@ -63,4 +63,37 @@ describe("Story Player local UI model", () => {
     expect(model.get().draft).toBe("Wait at the bridge.");
     expect(externalCampaignId).toBe("campaign-authority-remains-outside-the-model");
   });
+
+  it("discards unknown runtime initial fields instead of retaining campaign authority", () => {
+    const model = createStoryUiModel({
+      draft: "A local draft.",
+      campaign: { id: "must-not-enter-local-ui-state" },
+      generation: { id: "must-not-enter-local-ui-state" }
+    } as never, memoryStorage());
+
+    expect(model.get()).toEqual(expect.objectContaining({ draft: "A local draft." }));
+    expect(model.get()).not.toHaveProperty("campaign");
+    expect(model.get()).not.toHaveProperty("generation");
+  });
+
+  it("returns snapshots that callers cannot use to mutate backing UI state", () => {
+    const model = createStoryUiModel({}, memoryStorage());
+    const exposed = model.get() as { draft: string; choiceSelection: string[] };
+
+    exposed.draft = "Externally changed.";
+    exposed.choiceSelection.push("Externally selected.");
+
+    expect(model.get().draft).toBe("");
+    expect(model.get().choiceSelection).toEqual([]);
+  });
+
+  it("ignores an invalid runtime reading width without adopting or persisting it", () => {
+    const values: Record<string, string> = {};
+    const model = createStoryUiModel({}, memoryStorage(values));
+
+    model.setReadingWidth("unbounded" as never);
+
+    expect(model.get().readingWidth).toBe("standard");
+    expect(values[STORY_READING_WIDTH_STORAGE_KEY]).toBeUndefined();
+  });
 });

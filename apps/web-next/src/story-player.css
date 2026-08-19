@@ -57,7 +57,7 @@ main[data-page="story-player"] {
 
 @media (min-width: 900px) {
   .story-foldout {
-    grid-template-columns: minmax(0, 1fr) minmax(12rem, .3fr) minmax(12rem, .3fr);
-    grid-template-areas: "reader spine illustration";
+    grid-template-columns: minmax(12rem, .3fr) minmax(0, 1fr) minmax(12rem, .3fr);
+    grid-template-areas: "spine reader illustration";
   }
 }

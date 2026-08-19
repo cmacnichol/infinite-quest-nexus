@@ -44,10 +44,45 @@ const DEFAULT_STATE: StoryUiState = {
 function readingWidthFromStorage(storage: Pick<Storage, "getItem"> | null | undefined): ReadingWidth {
   try {
     const stored = storage?.getItem(STORY_READING_WIDTH_STORAGE_KEY);
-    return stored === "narrow" || stored === "wide" || stored === "standard" ? stored : "standard";
+    return isReadingWidth(stored) ? stored : "standard";
   } catch {
     return "standard";
   }
+}
+
+function isReadingWidth(value: unknown): value is ReadingWidth {
+  return value === "narrow" || value === "wide" || value === "standard";
+}
+
+function localInitialState(
+  initial: Partial<StoryUiState>,
+  storage: Pick<Storage, "getItem"> | null
+): StoryUiState {
+  const value = initial !== null && typeof initial === "object" && !Array.isArray(initial) ? initial : {};
+  return {
+    phase: value.phase === "chooser" || value.phase === "loading" || value.phase === "loaded"
+      || value.phase === "error" || value.phase === "not_found" ? value.phase : DEFAULT_STATE.phase,
+    viewTurnNumber: typeof value.viewTurnNumber === "number" && Number.isSafeInteger(value.viewTurnNumber)
+      ? value.viewTurnNumber : value.viewTurnNumber === null ? null : DEFAULT_STATE.viewTurnNumber,
+    readingWidth: isReadingWidth(value.readingWidth) ? value.readingWidth : readingWidthFromStorage(storage),
+    draft: typeof value.draft === "string" ? value.draft : DEFAULT_STATE.draft,
+    choiceSelection: Array.isArray(value.choiceSelection)
+      ? value.choiceSelection.filter((choice): choice is string => typeof choice === "string")
+      : DEFAULT_STATE.choiceSelection,
+    activeDialog: typeof value.activeDialog === "string" || value.activeDialog === null
+      ? value.activeDialog : DEFAULT_STATE.activeDialog,
+    history: value.history === "idle" || value.history === "loading" || value.history === "error"
+      ? value.history : DEFAULT_STATE.history,
+    illustration: value.illustration === "idle" || value.illustration === "loading" || value.illustration === "unavailable"
+      ? value.illustration : DEFAULT_STATE.illustration,
+    activity: value.activity === "idle" || value.activity === "generating" || value.activity === "recoverable"
+      ? value.activity : DEFAULT_STATE.activity,
+    message: typeof value.message === "string" || value.message === null ? value.message : DEFAULT_STATE.message
+  };
+}
+
+function snapshot(state: StoryUiState): StoryUiState {
+  return { ...state, choiceSelection: [...state.choiceSelection] };
 }
 
 export function createStoryUiModel(
@@ -55,28 +90,24 @@ export function createStoryUiModel(
   storage: Pick<Storage, "getItem" | "setItem"> | null = null
 ): StoryUiModel {
   const listeners = new Set<(state: Readonly<StoryUiState>) => void>();
-  let state: StoryUiState = {
-    ...DEFAULT_STATE,
-    ...initial,
-    readingWidth: initial.readingWidth ?? readingWidthFromStorage(storage)
-  };
+  let state = localInitialState(initial, storage);
   let disposed = false;
 
   const publish = (next: StoryUiState) => {
     if (disposed || Object.is(state, next)) return;
     state = next;
-    for (const listener of [...listeners]) listener(state);
+    for (const listener of [...listeners]) listener(snapshot(state));
   };
 
   return {
-    get: () => state,
+    get: () => snapshot(state),
     subscribe(listener) {
       if (disposed) return () => undefined;
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
     setReadingWidth(readingWidth) {
-      if (disposed || state.readingWidth === readingWidth) return;
+      if (disposed || !isReadingWidth(readingWidth) || state.readingWidth === readingWidth) return;
       try {
         storage?.setItem(STORY_READING_WIDTH_STORAGE_KEY, readingWidth);
       } catch {
