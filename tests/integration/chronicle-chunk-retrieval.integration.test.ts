@@ -78,7 +78,7 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     ordinal: number,
     action: string,
     narration: string
-  ): Promise<string> {
+  ): Promise<void> {
     const result = await pool.query<{ id: string }>(
       `INSERT INTO turns (owner_user_id,campaign_id,turn_number,action,narration,state_snapshot_private)
        VALUES ($1,$2,$3,$4,$5,'{}'::jsonb) RETURNING id`,
@@ -90,6 +90,7 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
   async function parent(
     fixture: CampaignFixture,
     input: Readonly<{
+      id?: string;
       turnId: string | null;
       kind: "turn_fiction" | "open_thread" | "campaign_summary" | "legacy_summary" | "canonical_fact";
       ordinal: number;
@@ -101,12 +102,12 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
   ): Promise<Readonly<{ id: string; contentHash: string }>> {
     const result = await pool.query<{ id: string; content_hash: string }>(
       `INSERT INTO chronicle_memories
-         (owner_user_id,campaign_id,world_version_id,turn_id,memory_kind,ordinal,content,
+         (id,owner_user_id,campaign_id,world_version_id,turn_id,memory_kind,ordinal,content,
           token_estimate,importance,entities,entity_ids,metadata)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,CEIL(length($7::text)/4.0),0.8,$8::text[],$9::text[],$10::jsonb)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,CEIL(length($8::text)/4.0),0.8,$9::text[],$10::text[],$11::jsonb)
        RETURNING id,content_hash`,
-      [fixture.ownerUserId, fixture.campaignId, fixture.worldVersionId, input.turnId, input.kind,
-        input.ordinal, input.content, [...(input.entities ?? [])], [...(input.entityIds ?? [])],
+      [input.id ?? crypto.randomUUID(), fixture.ownerUserId, fixture.campaignId, fixture.worldVersionId,
+        input.turnId, input.kind, input.ordinal, input.content, [...(input.entities ?? [])], [...(input.entityIds ?? [])],
         JSON.stringify(input.metadata ?? {})]
     );
     return { id: result.rows[0]!.id, contentHash: result.rows[0]!.content_hash };
@@ -116,6 +117,7 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     fixture: CampaignFixture,
     providerId: string,
     value: Readonly<{
+      id?: string;
       parentId: string;
       parentContentHash: string;
       chunkOrdinal?: number;
@@ -125,18 +127,19 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
       entities?: readonly string[];
       entityIds?: readonly string[];
     }>
-  ): Promise<void> {
+  ): Promise<string> {
+    const id = value.id ?? crypto.randomUUID();
     await pool.query(
       `INSERT INTO chronicle_memory_chunks
-         (owner_user_id,campaign_id,world_version_id,parent_memory_id,parent_content_hash,
+         (id,owner_user_id,campaign_id,world_version_id,parent_memory_id,parent_content_hash,
           chunking_protocol_version,chunk_ordinal,chunk_kind,content,source_start_offset,source_end_offset,
           token_estimate,entities,entity_ids,embedding,embedding_status,embedding_provider_profile_id,
           embedding_model,embedding_dimensions,embedding_protocol_version,embedding_provider_fingerprint,
           embedding_content_hash,embedding_updated_at)
-       VALUES ($1,$2,$3,$4,$5,'chronicle-chunk-v1',$6,$7,$8,0,length($8),
-               CEIL(length($8::text)/4.0),$9::text[],$10::text[],$11::vector,'embedded',$12,
-               'chunk-embed-v1',2,'chronicle-embedding-v1','chunk-fingerprint',$13,now())`,
-      [fixture.ownerUserId, fixture.campaignId, fixture.worldVersionId, value.parentId,
+       VALUES ($1,$2,$3,$4,$5,$6,'chronicle-chunk-v1',$7,$8,$9,0,length($9),
+               CEIL(length($9::text)/4.0),$10::text[],$11::text[],$12::vector,'embedded',$13,
+               'chunk-embed-v1',2,'chronicle-embedding-v1','chunk-fingerprint',$14,now())`,
+      [id, fixture.ownerUserId, fixture.campaignId, fixture.worldVersionId, value.parentId,
         value.parentContentHash, value.chunkOrdinal ?? 0, value.kind, value.content, [...(value.entities ?? [])],
         [...(value.entityIds ?? [])], `[${value.vector.join(",")}]`, providerId,
         chronicleContentHash(value.content)]
@@ -212,6 +215,7 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     const secondTurn = await turn(fixture, 2, "Wait beneath the arch.", "Rain darkens the empty stones.");
     const futureTurn = await turn(fixture, 5, "Open the sealed vault.", "The future vault answer is obsidian.");
     const target = await parent(fixture, {
+      id: "10000000-0000-4000-8000-000000000001",
       turnId: firstTurn,
       kind: "turn_fiction",
       ordinal: 1,
@@ -220,12 +224,14 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
       entityIds: ["world:moon-warden"]
     });
     const current = await parent(fixture, {
+      id: "10000000-0000-4000-8000-000000000002",
       turnId: secondTurn,
       kind: "turn_fiction",
       ordinal: 2,
       content: "Turn 2\nPlayer action: Wait beneath the arch.\nNarration: Rain darkens the empty stones."
     });
     const future = await parent(fixture, {
+      id: "10000000-0000-4000-8000-000000000005",
       turnId: futureTurn,
       kind: "turn_fiction",
       ordinal: 5,
@@ -234,6 +240,7 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
       entityIds: ["world:future-oracle"]
     });
     const openThread = await parent(fixture, {
+      id: "10000000-0000-4000-8000-000000000003",
       turnId: null,
       kind: "open_thread",
       ordinal: 2,
@@ -242,31 +249,35 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
       entityIds: ["world:moon-warden"]
     });
     const staleLegacySummary = await parent(fixture, {
+      id: "10000000-0000-4000-8000-000000000004",
       turnId: null,
       kind: "legacy_summary",
       ordinal: 0,
       content: "Full history: a later turn reveals the obsidian vault answer."
     });
     await embeddedChunk(fixture, providerId, {
+      id: "20000000-0000-4000-8000-000000000001",
       parentId: target.id,
       parentContentHash: target.contentHash,
       kind: "turn_action",
-      content: "Enter the moon court.",
+      content: "Shade seeks the key.",
       vector: [1, 0],
       entities: ["Moon Warden"],
       entityIds: ["world:moon-warden"]
     });
     await embeddedChunk(fixture, providerId, {
+      id: "20000000-0000-4000-8000-000000000002",
       parentId: target.id,
       parentContentHash: target.contentHash,
       chunkOrdinal: 1,
       kind: "turn_narration",
-      content: "The Moon Warden carries the silver key.",
+      content: "Shade seeks the key beside the Moon Warden.",
       vector: [1, 0],
       entities: ["Moon Warden"],
       entityIds: ["world:moon-warden"]
     });
     await embeddedChunk(fixture, providerId, {
+      id: "20000000-0000-4000-8000-000000000006",
       parentId: staleLegacySummary.id,
       parentContentHash: staleLegacySummary.contentHash,
       kind: "campaign_summary",
@@ -274,13 +285,17 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
       vector: [1, 0]
     });
     await embeddedChunk(fixture, providerId, {
+      id: "20000000-0000-4000-8000-000000000003",
       parentId: current.id,
       parentContentHash: current.contentHash,
       kind: "turn_narration",
-      content: "Rain darkens the empty stones.",
-      vector: [0, 1]
+      content: "Shade seeks the key. Turn 2 Player action Wait beneath the arch. Narration Rain darkens the empty stones. Turn 1 Player action Enter the moon court. Narration The Moon Warden carries the silver key.",
+      vector: [0, 1],
+      entities: ["Moon Warden"],
+      entityIds: ["world:moon-warden"]
     });
     await embeddedChunk(fixture, providerId, {
+      id: "20000000-0000-4000-8000-000000000007",
       parentId: future.id,
       parentContentHash: future.contentHash,
       kind: "turn_narration",
@@ -290,10 +305,11 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
       entityIds: ["world:future-oracle"]
     });
     await embeddedChunk(fixture, providerId, {
+      id: "20000000-0000-4000-8000-000000000004",
       parentId: openThread.id,
       parentContentHash: openThread.contentHash,
       kind: "open_thread",
-      content: "Discover why the Moon Warden carries the silver key.",
+      content: "Shade seeks the key. Discover why the Moon Warden carries the silver key.",
       vector: [1, 0],
       entities: ["Moon Warden"],
       entityIds: ["world:moon-warden"]
@@ -310,6 +326,7 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
       [replacedId, ownerUserId, fixture.campaignId, fixture.worldVersionId, firstTurn, replacementId, secondTurn]
     );
     const supersededFactParent = await parent(fixture, {
+      id: "10000000-0000-4000-8000-000000000006",
       turnId: firstTurn,
       kind: "canonical_fact",
       ordinal: 1,
@@ -317,6 +334,7 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
       metadata: { structuredFactIds: [replacedId] }
     });
     const activeFactParent = await parent(fixture, {
+      id: "10000000-0000-4000-8000-000000000007",
       turnId: secondTurn,
       kind: "canonical_fact",
       ordinal: 2,
@@ -324,6 +342,7 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
       metadata: { structuredFactIds: [replacementId] }
     });
     await embeddedChunk(fixture, providerId, {
+      id: "20000000-0000-4000-8000-000000000008",
       parentId: supersededFactParent.id,
       parentContentHash: supersededFactParent.contentHash,
       kind: "canonical_fact",
@@ -331,6 +350,7 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
       vector: [1, 0]
     });
     await embeddedChunk(fixture, providerId, {
+      id: "20000000-0000-4000-8000-000000000009",
       parentId: activeFactParent.id,
       parentContentHash: activeFactParent.contentHash,
       kind: "canonical_fact",
@@ -504,25 +524,39 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     )))).toEqual(new Set(["semantic", "full_text", "entity", "static"]));
     expect(statements.filter((sql) => /chronicle_rank_batch:(semantic|full_text|entity)/.test(sql))
       .every((sql) => sql.includes("request_variants(request_ordinal,variant_kind,"))).toBe(true);
-    // No chunk satisfies the fixture's multi-term websearch queries. Keeping this empty is
-    // part of the pre-batch rank semantics, while the other families return ranked rows.
-    expect(batchRows.some((row) => row.family === "full_text")).toBe(false);
-    expect(new Set(batchRows.map((row) => `${row.signal}:${row.variant}`))).toEqual(new Set([
-      "semantic:action", "semantic:entity_expanded", "semantic:scene", "semantic:open_thread",
-      "entity:entity_expanded", "recency:action", "chronology:action", "importance:action",
-      "kind:action", "temporal:action"
-    ]));
-    for (const request of new Set(batchRows.map((row) => `${row.family}:${row.requestOrdinal}`))) {
-      const rows = batchRows.filter((row) => `${row.family}:${row.requestOrdinal}` === request);
-      expect(rows.map((row) => row.signalRank), request).toEqual(
-        Array.from({ length: rows.length }, (_unused, index) => index + 1)
-      );
-      expect(rows, request).toEqual([...rows].sort((left, right) => (
-        left.signalRank - right.signalRank
-        || left.parentMemoryId.localeCompare(right.parentMemoryId)
-        || left.candidateId.localeCompare(right.candidateId)
-      )));
-    }
+    const rankedRows = (
+      family: keyof typeof batchRequests,
+      requestOrdinal: number,
+      candidates: ReadonlyArray<readonly [candidateId: string, parentMemoryId: string]>
+    ) => candidates.map(([candidateId, parentMemoryId], index) => ({
+      family,
+      requestOrdinal,
+      signal: batchRequests[family][requestOrdinal]!.signal,
+      variant: batchRequests[family][requestOrdinal]!.variant,
+      candidateId,
+      parentMemoryId,
+      signalRank: index + 1
+    }));
+    const targetAction = ["20000000-0000-4000-8000-000000000001", target.id] as const;
+    const targetNarration = ["20000000-0000-4000-8000-000000000002", target.id] as const;
+    const currentNarration = ["20000000-0000-4000-8000-000000000003", current.id] as const;
+    const openThreadChunk = ["20000000-0000-4000-8000-000000000004", openThread.id] as const;
+    expect(batchRows).toEqual([
+      ...rankedRows("semantic", 0, [targetAction, targetNarration, openThreadChunk, currentNarration]),
+      ...rankedRows("semantic", 1, [targetAction, targetNarration, openThreadChunk, currentNarration]),
+      ...rankedRows("semantic", 2, [targetAction, targetNarration, openThreadChunk, currentNarration]),
+      ...rankedRows("semantic", 3, [targetAction, targetNarration, openThreadChunk, currentNarration]),
+      ...rankedRows("full_text", 0, [targetAction, targetNarration, currentNarration, openThreadChunk]),
+      ...rankedRows("full_text", 1, [targetNarration, openThreadChunk, currentNarration]),
+      ...rankedRows("full_text", 2, [currentNarration]),
+      ...rankedRows("full_text", 3, [openThreadChunk]),
+      ...rankedRows("entity", 0, [targetAction, targetNarration, currentNarration, openThreadChunk]),
+      ...rankedRows("static", 0, [currentNarration, openThreadChunk, targetAction, targetNarration]),
+      ...rankedRows("static", 1, [targetAction, targetNarration, currentNarration, openThreadChunk]),
+      ...rankedRows("static", 2, [currentNarration, openThreadChunk, targetAction, targetNarration]),
+      ...rankedRows("static", 3, [openThreadChunk, currentNarration, targetAction, targetNarration]),
+      ...rankedRows("static", 4, [currentNarration, openThreadChunk, targetAction, targetNarration])
+    ]);
     expect(targetParents).toHaveLength(1);
     expect(targetParents[0]?.content).toMatch(/Player action:[\s\S]+Narration:/);
     expect(targetParents[0]?.content).not.toBe("The Moon Warden carries the silver key.");
