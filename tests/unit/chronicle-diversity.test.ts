@@ -25,27 +25,106 @@ function candidate(overrides: Partial<ChronicleParentCandidate> = {}): Chronicle
 }
 
 describe("Chronicle parent diversity", () => {
-  it("collapses a parent's chunks to its strongest fused candidate and returns coherent parent text", () => {
+  it.each([
+    {
+      chunkKind: "turn_action" as const,
+      memoryKind: "turn_fiction" as const,
+      parentContent: "Turn 4\nPlayer action: Open the western gate.\nNarration: Moonlight fills the court.",
+      chunkContent: "Open the western gate.",
+      siblings: [candidate({
+        candidateId: "chunk-narration",
+        chunkOrdinal: 1,
+        chunkKind: "turn_narration",
+        chunkContent: "Moonlight fills the court.",
+        fusedRank: 8
+      })],
+      expected: "Player action: Open the western gate.\nNarration: Moonlight fills the court."
+    },
+    {
+      chunkKind: "turn_narration" as const,
+      memoryKind: "turn_fiction" as const,
+      parentContent: "Turn 4\nPlayer action: Open the western gate.\nNarration: Moonlight fills the court.",
+      chunkContent: "Moonlight fills the court.",
+      siblings: [candidate({
+        candidateId: "chunk-action",
+        chunkOrdinal: 0,
+        chunkKind: "turn_action",
+        chunkContent: "Open the western gate.",
+        fusedRank: 8
+      })],
+      expected: "Player action: Open the western gate.\nNarration: Moonlight fills the court."
+    },
+    {
+      chunkKind: "campaign_summary" as const,
+      memoryKind: "campaign_summary" as const,
+      parentContent: "The full campaign summary contains unrelated history.",
+      chunkContent: "The moon sigil opens the western gate at midnight.",
+      siblings: [],
+      expected: "The moon sigil opens the western gate at midnight."
+    },
+    {
+      chunkKind: "legacy_summary" as const,
+      memoryKind: "legacy_summary" as const,
+      parentContent: "The full legacy summary contains unrelated history.",
+      chunkContent: "The moon sigil opens the western gate at midnight.",
+      siblings: [],
+      expected: "The moon sigil opens the western gate at midnight."
+    },
+    {
+      chunkKind: "canonical_fact" as const,
+      memoryKind: "canonical_fact" as const,
+      parentContent: "The complete canonical fact remains atomic.",
+      chunkContent: "A clipped canonical fact would be wrong.",
+      siblings: [],
+      expected: "The complete canonical fact remains atomic."
+    },
+    {
+      chunkKind: "open_thread" as const,
+      memoryKind: "open_thread" as const,
+      parentContent: "The complete open thread remains atomic.",
+      chunkContent: "A clipped open thread would be wrong.",
+      siblings: [],
+      expected: "The complete open thread remains atomic."
+    }
+  ])("renders the matched $chunkKind chunk without changing parent selection", ({
+    chunkKind,
+    memoryKind,
+    parentContent,
+    chunkContent,
+    siblings,
+    expected
+  }) => {
     const selection = selectDiverseChronicleParents([
-      candidate({ candidateId: "chunk-weaker", chunkOrdinal: 1, chunkKind: "turn_narration", fusedRank: 8 }),
-      candidate({ candidateId: "chunk-strongest", fusedRank: 1 })
-    ], { maximumParents: 8 });
+      candidate({ chunkKind, memoryKind, parentContent, chunkContent, fusedRank: 1 }),
+      ...siblings
+    ], { maximumParents: 8, includeAdjacentNarration: true });
 
-    expect(selection.parents).toEqual([{
-      parentMemoryId: "parent-a",
-      parentTurnId: "turn-a",
-      ordinal: 4,
-      memoryKind: "turn_fiction",
-      content: "Turn 4\nPlayer action: Open the western gate.\nNarration: Moonlight fills the court.",
-      entities: ["Western Gate"],
-      entityIds: ["world:western-gate"]
-    }]);
+    expect(selection.parents[0]?.content).toBe(expected);
     expect(selection.diagnostics).toMatchObject({
-      candidateChunks: 2,
+      candidateChunks: siblings.length + 1,
       candidateParents: 1,
-      collapsedChunks: 1,
+      collapsedChunks: siblings.length,
       selectedParents: 1
     });
+  });
+
+  it.each([
+    {
+      chunkKind: "turn_narration" as const,
+      chunkContent: "Moonlight fills the court.",
+      expected: "Narration: Moonlight fills the court."
+    },
+    {
+      chunkKind: "turn_action" as const,
+      chunkContent: "Open the western gate.",
+      expected: "Player action: Open the western gate."
+    }
+  ])("renders a $chunkKind chunk without its missing sibling", ({ chunkKind, chunkContent, expected }) => {
+    const selection = selectDiverseChronicleParents([
+      candidate({ chunkKind, chunkContent, fusedRank: 1 })
+    ], { maximumParents: 8, includeAdjacentNarration: true });
+
+    expect(selection.parents[0]?.content).toBe(expected);
   });
 
   it("can render a strongest action chunk with its adjacent narration as a coherent excerpt", () => {
