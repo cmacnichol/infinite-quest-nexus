@@ -370,13 +370,19 @@ main[data-page="story-player"] :is(button, a, input, select, textarea, summary):
 @media (max-width: 1080px) {
   .app-shell:has(main[data-page="story-player"]) .site-header {
     grid-template-columns: minmax(0, 1fr) auto 48px 48px;
+    grid-template-rows: minmax(64px, auto) 44px;
     grid-template-areas:
       "brand tools theme profile"
       "nav nav nav nav";
   }
 
   .app-shell:has(main[data-page="story-player"]) .brand { grid-area: brand; }
-  .app-shell:has(main[data-page="story-player"]) .site-nav { grid-area: nav; overflow-x: auto; }
+  .app-shell:has(main[data-page="story-player"]) .site-nav {
+    grid-area: nav;
+    display: flex;
+    min-width: 0;
+    overflow-x: auto;
+  }
   .app-shell:has(main[data-page="story-player"]) .story-link { display: none; }
   .app-shell:has(main[data-page="story-player"]) .story-campaign-tools { grid-area: tools; }
   .app-shell:has(main[data-page="story-player"]) .theme-toggle { grid-area: theme; }
@@ -441,6 +447,16 @@ main[data-page="story-player"] :is(button, a, input, select, textarea, summary):
 @media (max-width: 540px) {
   .story-campaign-tools-desktop { display: none; }
   .story-campaign-tools-mobile { display: inline; }
+  .app-shell:has(main[data-page="story-player"]) .story-campaign-tools-menu {
+    position: fixed;
+    top: calc(108px + 8px);
+    right: auto;
+    inset-inline: var(--edge);
+    width: auto;
+    max-width: none;
+    max-height: calc(100dvh - 124px);
+    overflow-y: auto;
+  }
   .story-command-row,
   .story-campaign-spine,
   .story-illustration-wing { padding: 18px; }

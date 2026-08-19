@@ -279,6 +279,13 @@ describe("Story Player page shell", () => {
     expect(styles).not.toMatch(/border-radius\s*:\s*(?!0(?:px)?\s*;)/u);
   });
 
+  it("restores Story navigation and keeps the compact Campaign Tools disclosure viewport-safe", () => {
+    const styles = readFileSync(new URL("../../apps/web-next/src/story-player.css", import.meta.url), "utf8");
+
+    expect(styles).toMatch(/@media \(max-width: 1080px\)[\s\S]*?\.site-nav\s*\{\s*grid-area:\s*nav;\s*display:\s*flex;\s*min-width:\s*0;\s*overflow-x:\s*auto;/u);
+    expect(styles).toMatch(/@media \(max-width: 540px\)[\s\S]*?\.story-campaign-tools-menu\s*\{\s*position:\s*fixed;[\s\S]*?inset-inline:\s*var\(--edge\);[\s\S]*?width:\s*auto;/u);
+  });
+
   it("announces loading and offers Retry for unavailable or missing campaigns", async () => {
     const page = fixture();
     const pending = deferred<CampaignSyncStatus>();
