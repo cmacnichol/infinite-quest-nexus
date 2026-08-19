@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDatabasePool, initialOwnerId, type DatabasePool, withTransaction } from "../../packages/database/src/pool.js";
@@ -6,12 +7,12 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createPostgresChronicleGenerationTransactionPort } from "../../packages/database/src/chronicle-repository.js";
 import type { ChronicleContextPreview } from "../../packages/application/src/memory/index.js";
 import { chronicleContentHash } from "../../packages/domain/src/chronicle-memory-helpers.js";
-import { CHRONICLE_CHUNK_PROTOCOL_VERSION, chunkChronicleMemory } from "../../packages/domain/src/chronicle-chunking.js";
 import {
   evaluateChronicleRetrieval,
   type ChronicleRetrievalApplication,
   type ChronicleRetrievalCorpus
 } from "../../scripts/lib/chronicle-retrieval-evaluator.js";
+import { retrievalApplication, seedCorpus } from "../../scripts/evaluate-chronicle-retrieval.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe.sequential : describe.skip;
@@ -30,26 +31,87 @@ integration("Chronicle retrieval evaluation integration seam", () => {
     await pool?.end();
   });
 
-  it("creates multiple production-protocol chunks for a long evaluator parent", () => {
-    const content = Array.from({ length: 48 }, (_, index) => (
-      index === 24
-        ? "The moon sigil opens the western gate at midnight."
-        : `Sanitized continuity filler paragraph ${index + 1} describing quiet roads and empty courtyards.`
-    )).join("\n\n");
+  it("seeds and retrieves v3 long-parent chunks through the PostgreSQL seam", async () => {
+    const fixtureCorpus = JSON.parse(await readFile(
+      resolve("tests/fixtures/chronicle-retrieval-evaluation.v3.json"),
+      "utf8"
+    )) as ChronicleRetrievalCorpus;
+    const fixture = fixtureCorpus.cases.find((candidate) => candidate.id === "long-parent-budget-1024");
+    expect(fixture).toBeDefined();
+    const longParentFixture: ChronicleRetrievalCorpus = {
+      version: fixtureCorpus.version,
+      cases: [{
+        ...fixture!,
+        scope: {
+          ...fixture!.scope,
+          request: { ...fixture!.scope.request, throughTurnNumber: 2 }
+        },
+        forbiddenLabels: { futureTurn: ["long-parent-future-decoy"] },
+        excludedLabels: {
+          owner: ["long-parent-owner-decoy"],
+          campaign: ["long-parent-campaign-decoy"],
+          worldVersion: ["long-parent-world-version-decoy"]
+        }
+      }]
+    };
+    const rollback = new Error("Rollback long-parent evaluator fixture.");
 
-    const chunks = chunkChronicleMemory({
-      id: "6cf39a7b-6251-4e63-8d8a-80758b525a3a",
-      memoryKind: "campaign_summary",
-      content
-    });
+    await expect(withTransaction(pool, async (database) => {
+      const seededCorpus = await seedCorpus(
+        database,
+        ownerUserId,
+        longParentFixture,
+        "chunked_hybrid"
+      );
+      const scope = seededCorpus.cases[0]!.scope;
+      const parentMemoryId = Object.entries(seededCorpus.cases[0]!.labelByMemoryId).find(([, label]) => (
+        label === "long-parent-budget-1024-a"
+      ))?.[0];
+      expect(parentMemoryId).toBeDefined();
+      const chunks = await database.query<Readonly<{
+        chunk_ordinal: number;
+        chunk_kind: string;
+        content: string;
+        source_start_offset: number;
+        source_end_offset: number;
+        token_estimate: number;
+        content_hash: string;
+        embedding: string;
+      }>>(
+        `SELECT chunk_ordinal,chunk_kind,content,source_start_offset,source_end_offset,token_estimate,
+                embedding_content_hash AS content_hash,embedding::text
+           FROM chronicle_memory_chunks
+          WHERE owner_user_id=$1 AND campaign_id=$2 AND world_version_id=$3
+            AND parent_memory_id=$4
+          ORDER BY chunk_ordinal`,
+        [scope.ownerUserId, scope.campaignId, scope.worldVersionId, parentMemoryId]
+      );
+      const relevantChunks = chunks.rows.filter((chunk) => chunk.content.includes("The moon sigil opens the western gate at midnight."));
 
-    expect(chunks.length).toBeGreaterThan(1);
-    expect(chunks.map((chunk) => chunk.chunkIndex)).toEqual(chunks.map((_, index) => index));
-    expect(chunks.every((chunk) => (
-      chunk.protocolVersion === CHRONICLE_CHUNK_PROTOCOL_VERSION
-      && chunk.contentHash === chronicleContentHash(chunk.content)
-      && chunk.sourceEndOffset > chunk.sourceStartOffset
-    ))).toBe(true);
+      expect(chunks.rows.length).toBeGreaterThan(1);
+      expect(chunks.rows.map((chunk) => chunk.chunk_ordinal)).toEqual(chunks.rows.map((_, index) => index));
+      expect(chunks.rows.every((chunk) => (
+        chunk.chunk_kind === "campaign_summary"
+        && chunk.source_end_offset > chunk.source_start_offset
+        && chunk.token_estimate > 0
+        && chunk.content_hash === chronicleContentHash(chunk.content)
+      ))).toBe(true);
+      expect(relevantChunks).toHaveLength(1);
+      expect(relevantChunks[0]!.embedding).toBe("[1,0]");
+      expect(chunks.rows.filter((chunk) => !relevantChunks.includes(chunk)).every((chunk) => chunk.embedding === "[0,1]")).toBe(true);
+
+      const report = await evaluateChronicleRetrieval(retrievalApplication(), database, seededCorpus, {
+        implementation: "chunked_hybrid"
+      });
+      expect(report.cases[0]).toMatchObject({
+        leakage: { crossCampaign: 0, futureTurn: 0, supersededFact: 0 }
+      });
+      expect(report.cases[0]!.retrievedLabels).not.toContain("long-parent-future-decoy");
+      expect(report.cases[0]!.retrievedLabels).not.toContain("long-parent-owner-decoy");
+      expect(report.cases[0]!.retrievedLabels).not.toContain("long-parent-campaign-decoy");
+      expect(report.cases[0]!.retrievedLabels).not.toContain("long-parent-world-version-decoy");
+      throw rollback;
+    })).rejects.toBe(rollback);
   });
 
   it("reaches the production generation retrieval interface without a bypass", async () => {

@@ -2,10 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import {
   deterministicChronicleEvaluationUuid,
   evaluateChronicleRetrieval,
+  isDiagnosticChronicleCorpus,
   leakageCounts,
   percentile,
   recallAt,
   reciprocalRank,
+  validateChronicleRetrievalCorpus,
   type ChronicleRetrievalApplication,
   type ChronicleRetrievalCorpus
 } from "../../scripts/lib/chronicle-retrieval-evaluator.js";
@@ -175,6 +177,30 @@ describe("Chronicle retrieval evaluator metrics", () => {
       invalidLongParentCorpus
     )).rejects.toThrow("Chronicle evaluation relevant paragraph index is out of range.");
     expect(buildContextPreview).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed long-parent metadata during corpus validation", () => {
+    expect(() => validateChronicleRetrievalCorpus({
+      version: "v3",
+      cases: [{
+        ...corpus.cases[0]!,
+        longParent: {
+          paragraphCount: 48,
+          relevantParagraphIndex: -1,
+          relevantParagraph: "The moon sigil opens the western gate at midnight."
+        }
+      }]
+    })).toThrow("Chronicle evaluation relevant paragraph index is out of range.");
+  });
+
+  it("keeps profile enforcement for default and explicit production corpus paths", () => {
+    const productionCorpusPath = "C:/repo/tests/fixtures/chronicle-retrieval-evaluation.v2.json";
+
+    expect(isDiagnosticChronicleCorpus(productionCorpusPath, productionCorpusPath)).toBe(false);
+    expect(isDiagnosticChronicleCorpus(
+      "C:/repo/tests/fixtures/chronicle-retrieval-evaluation.v3.json",
+      productionCorpusPath
+    )).toBe(true);
   });
 
   it("preserves the legacy semantic request estimate when a preview omits the explicit counter", async () => {

@@ -161,6 +161,16 @@ function validateLongParentFixture(fixture: ChronicleLongParentFixture): void {
   }
 }
 
+export function validateChronicleRetrievalCorpus(corpus: ChronicleRetrievalCorpus): void {
+  for (const fixture of corpus.cases) {
+    if (fixture.longParent) validateLongParentFixture(fixture.longParent);
+  }
+}
+
+export function isDiagnosticChronicleCorpus(corpusPath: string, productionCorpusPath: string): boolean {
+  return corpusPath !== productionCorpusPath;
+}
+
 function average(values: readonly number[]): number {
   return values.length === 0 ? 0 : values.reduce((sum, value) => sum + value, 0) / values.length;
 }
@@ -418,10 +428,10 @@ export async function evaluateChronicleRetrieval(
   corpus: ChronicleRetrievalCorpus,
   options: ChronicleRetrievalEvaluationOptions = {},
 ): Promise<ChronicleEvaluationReport> {
+  validateChronicleRetrievalCorpus(corpus);
   const now = options.now ?? Date.now;
   const cases: ChronicleEvaluationCaseResult[] = [];
   for (const fixture of corpus.cases) {
-    if (fixture.longParent) validateLongParentFixture(fixture.longParent);
     const startedAt = now();
     const preview = await application.generation.buildContextPreview(database as never, fixture.scope);
     const latencyMs = Math.max(0, now() - startedAt);

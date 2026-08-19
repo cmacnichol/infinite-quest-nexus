@@ -17,7 +17,9 @@ import {
   chronicleRetrievalCorpusHash,
   deterministicChronicleEvaluationUuid,
   evaluateChronicleRetrieval,
+  isDiagnosticChronicleCorpus,
   renderChronicleRetrievalProfileModule,
+  validateChronicleRetrievalCorpus,
   type ChronicleEvaluationReport,
   type ChronicleRetrievalApplication,
   type ChronicleRetrievalCorpus,
@@ -27,6 +29,7 @@ import {
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const defaultOutput = "tmp/chronicle-evaluation/legacy-baseline.json";
+const productionCorpusRelativePath = "tests/fixtures/chronicle-retrieval-evaluation.v2.json";
 
 function argument(name: string): string | undefined {
   const index = process.argv.indexOf(name);
@@ -34,7 +37,7 @@ function argument(name: string): string | undefined {
 }
 
 function resolveRepositoryCorpusPath(corpusArgument: string | undefined): string {
-  const corpusPath = resolve(root, corpusArgument ?? "tests/fixtures/chronicle-retrieval-evaluation.v2.json");
+  const corpusPath = resolve(root, corpusArgument ?? productionCorpusRelativePath);
   const pathFromRoot = relative(root, corpusPath);
   if (pathFromRoot === ".." || pathFromRoot.startsWith(`..${sep}`) || isAbsolute(pathFromRoot)) {
     throw new Error("Chronicle evaluation corpus must be contained within the repository root.");
@@ -62,18 +65,21 @@ function longParentContent(fixture: ChronicleLongParentFixture): string {
   )).join("\n\n");
 }
 
-function retrievalApplication(
+function fixtureVectorFor(text: string): readonly [number, number] {
+  return text.includes("amber agreement") || (text.includes("moon sigil") && text.includes("western gate"))
+    ? [1, 0]
+    : [0, 1];
+}
+
+export function retrievalApplication(
   rankFusionProfile?: Parameters<typeof createPostgresChronicleGenerationTransactionPort>[0]["rankFusionProfile"],
 ): ChronicleRetrievalApplication {
-  const vectorFor = (text: string): readonly number[] => (
-    text.includes("amber agreement") || text.includes("moon sigil western gate") ? [1, 0] : [0, 1]
-  );
   const provider = {
     id: "fixture-embedding-provider",
     model: "fixture-embedding-v1",
     providerType: "openai_compatible",
     async embed(documents: readonly string[]) {
-      return { embeddings: documents.map(vectorFor), responseId: "fixture-embedding", usage: {}, reportedCost: null };
+      return { embeddings: documents.map(fixtureVectorFor), responseId: "fixture-embedding", usage: {}, reportedCost: null };
     }
   };
   return {
@@ -107,7 +113,7 @@ function retrievalApplication(
   };
 }
 
-async function seedCorpus(
+export async function seedCorpus(
   database: DatabaseClient,
   ownerUserId: string,
   corpus: ChronicleRetrievalCorpus,
@@ -450,6 +456,7 @@ async function seedCorpus(
           content: parent.content
         })) {
           const embedded = parent.embedding !== null;
+          const chunkVector = embedded ? `[${fixtureVectorFor(chunk.content).join(",")}]` : null;
           await database.query(
             `INSERT INTO chronicle_memory_chunks
                (id,owner_user_id,campaign_id,world_version_id,parent_memory_id,parent_content_hash,
@@ -477,7 +484,7 @@ async function seedCorpus(
               [...parent.entities],
               [...parent.entity_ids],
               JSON.stringify(parent.metadata),
-              parent.embedding,
+              chunkVector,
               embedded ? "embedded" : "skipped",
               embedded ? null : "chunk_embedding_skipped",
               embedded ? parent.embedding_provider_profile_id : null,
@@ -555,9 +562,13 @@ function assertCorpusResultInvariants(report: Awaited<ReturnType<typeof evaluate
   }
 }
 
+export async function main(): Promise<void> {
 const corpusArgument = argument("--corpus");
-const corpus = await loadCorpus(resolveRepositoryCorpusPath(corpusArgument));
-const explicitDiagnosticCorpus = corpusArgument !== undefined;
+const productionCorpusPath = resolveRepositoryCorpusPath(undefined);
+const corpusPath = resolveRepositoryCorpusPath(corpusArgument);
+const corpus = await loadCorpus(corpusPath);
+validateChronicleRetrievalCorpus(corpus);
+const explicitDiagnosticCorpus = isDiagnosticChronicleCorpus(corpusPath, productionCorpusPath);
 const corpusHash = chronicleRetrievalCorpusHash(corpus);
 const calibrate = process.argv.includes("--calibrate");
 const baselineArgument = argument("--baseline");
@@ -632,4 +643,9 @@ if (calibrate) {
   await mkdir(dirname(output), { recursive: true });
   await writeFile(output, `${JSON.stringify(result, null, 2)}\n`, "utf8");
   process.stdout.write(`${output}\n`);
+}
+}
+
+if (resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
+  await main();
 }
