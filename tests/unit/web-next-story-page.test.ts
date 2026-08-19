@@ -440,10 +440,8 @@ describe("Story Player page shell", () => {
 
     const previous = page.document.querySelector<HTMLButtonElement>('[data-action="previous-turn"]');
     const next = page.document.querySelector<HTMLButtonElement>('[data-action="next-turn"]');
-    expect(previous?.dataset.turnNumber).toBe("2");
-    expect(next?.dataset.turnNumber).toBe("9");
-    expect(previous?.disabled).toBe(true);
-    expect(next?.disabled).toBe(true);
+    expect(previous).toBeNull();
+    expect(next).toBeNull();
 
     const focus = vi.spyOn(page.window.HTMLElement.prototype, "focus");
     page.document.querySelector<HTMLButtonElement>('[data-reading-width="wide"]')?.click();
@@ -766,7 +764,7 @@ describe("Story Player page shell", () => {
     mounted.dispose();
   });
 
-  it("aborts work, unsubscribes, removes listeners, and clears polling on disposal", async () => {
+  it("aborts work, unsubscribes, and removes listeners on disposal without page polling", async () => {
     const page = fixture();
     const baseStore = createCampaignStore();
     const unsubscribe = vi.fn();
@@ -790,6 +788,6 @@ describe("Story Player page shell", () => {
 
     expect(syncStatus.mock.calls[0]?.[1]?.aborted).toBe(true);
     expect(unsubscribe).toHaveBeenCalledTimes(1);
-    expect(clearInterval).toHaveBeenCalled();
+    expect(clearInterval).not.toHaveBeenCalled();
   });
 });

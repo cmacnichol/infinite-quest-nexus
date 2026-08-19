@@ -51,6 +51,7 @@ export interface StoryUiModel {
   setRequestedInputMode(mode: StoryTurnInputMode): void;
   setIntentConfirmation(intent: StoryIntentConfirmation | null): void;
   clearComposerDraft(): void;
+  clearSubmittedComposerDraft(submittedDraft: string): void;
   setPhase(phase: StoryUiPhase): void;
   setMessage(message: string | null): void;
   dispose(): void;
@@ -221,6 +222,11 @@ export function createStoryUiModel(
     clearComposerDraft() {
       const selection = createChoiceDraftSelection();
       if (!state.draft && !state.choiceSelection.length && state.intentConfirmation === null) return;
+      publish({ ...state, draft: "", choiceSelection: selection.selectedIndexes, choiceBaseText: selection.baseText, intentConfirmation: null, message: null });
+    },
+    clearSubmittedComposerDraft(submittedDraft) {
+      if (state.draft !== submittedDraft) return;
+      const selection = createChoiceDraftSelection();
       publish({ ...state, draft: "", choiceSelection: selection.selectedIndexes, choiceBaseText: selection.baseText, intentConfirmation: null, message: null });
     },
     setPhase(phase) {

@@ -11,6 +11,7 @@ import type {
 } from "@infinite-quest/contracts";
 import { initializeAppTheme, renderAppShell } from "./app-shell";
 import { createStoryPlayerComposition, type StoryPlayerComposition } from "./story-player-composition";
+import { createStoryGenerationController } from "./story-player-generation";
 import { createStoryUiModel, type StoryUiPhase } from "./story-player-model";
 import { createStoryHistoryController } from "./story-player-history";
 import { renderStoryPlayerView } from "./story-player-view";
@@ -56,7 +57,7 @@ export interface PreparedStoryTurnSubmission {
 }
 
 export interface StoryPlayerPageOptions {
-  /** Task 7 test seam only. Durable generation belongs to Task 8. */
+  /** Test observer; production submission always uses the durable controller. */
   readonly onSubmit?: (submission: PreparedStoryTurnSubmission) => void | Promise<void>;
 }
 
@@ -123,6 +124,21 @@ export function mountStoryPlayerPage(
   let inspectedState: CampaignRuntimeStateResponse | null = null;
   let inspectionRequestToken = 0;
   let autoSubmitTurnChoices = false;
+  let submittedDraft: string | null = null;
+  const generation = createStoryGenerationController({
+    workflow: composition.workflow,
+    campaignStore: composition.campaignStore,
+    idFactory: composition.idFactory,
+    currentCampaign: () => projection.campaign,
+    onCompleted(result) {
+      ui.setViewTurnNumber(result.turnNumber);
+      if (submittedDraft !== null) ui.clearSubmittedComposerDraft(submittedDraft);
+      submittedDraft = null;
+    },
+    onError() {
+      if (!disposed) ui.setMessage("Story generation could not be completed. Your accepted turns are unchanged.");
+    }
+  });
   const history = createStoryHistoryController({
     campaigns: composition.api.campaigns,
     campaignStore: composition.campaignStore,
@@ -189,8 +205,14 @@ export function mountStoryPlayerPage(
   const composerCampaign = () => projection.campaign !== null && selectedCampaign?.id === projection.campaign.id
     ? selectedCampaign : null;
   const campaignFallback = () => composerCampaign()?.turnControlStyle === "flexible_scene" ? "scene" as const : "action" as const;
-  const invokeTestSubmission = async (submission: PreparedStoryTurnSubmission) => {
-    await options.onSubmit?.(submission);
+  const submitPreparedTurn = async (submission: PreparedStoryTurnSubmission) => {
+    if (options.onSubmit) {
+      await options.onSubmit(submission);
+      return;
+    }
+    submittedDraft = submission.action;
+    const accepted = await generation.submitAppend(submission);
+    if (!accepted && !disposed) ui.setMessage("Story generation could not be started. Your accepted turns are unchanged.");
   };
   const submitComposer = async (): Promise<void> => {
     const campaign = projection.campaign;
@@ -220,7 +242,7 @@ export function mountStoryPlayerPage(
         root.querySelector<HTMLButtonElement>("[data-action='confirm-intent-action']")?.focus();
         return;
       }
-      await invokeTestSubmission(preparation.submission);
+      await submitPreparedTurn(preparation.submission);
     } catch {
       if (!disposed) ui.setMessage("Prompt interpretation could not be completed. Choose Action or Scene Direction.");
     }
@@ -229,7 +251,7 @@ export function mountStoryPlayerPage(
     const intent = ui.get().intentConfirmation;
     if (intent === null) return;
     ui.setIntentConfirmation(null);
-    await invokeTestSubmission({
+    await submitPreparedTurn({
       action: intent.action,
       requestedInputMode: "auto",
       resolvedInputMode,
@@ -406,6 +428,34 @@ export function mountStoryPlayerPage(
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='continue-story']")) {
       control.addEventListener("click", () => { void submitComposer(); });
     }
+    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='begin-story']")) {
+      control.addEventListener("click", () => {
+        const world = projection.world;
+        if (!world) return;
+        submittedDraft = null;
+        void generation.submitAppend({
+          action: world.firstAction,
+          requestedInputMode: "action",
+          resolvedInputMode: "action",
+          inputModeSource: "opening_action"
+        });
+      });
+    }
+    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='cancel-generation']")) {
+      control.addEventListener("click", () => { void generation.cancel(); });
+    }
+    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='resume-generation']")) {
+      control.addEventListener("click", () => {
+        const campaignId = projection.campaign?.id;
+        if (campaignId) void generation.resume(campaignId);
+      });
+    }
+    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='retry-generation']")) {
+      control.addEventListener("click", () => { void generation.retry(); });
+    }
+    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='discard-generation']")) {
+      control.addEventListener("click", () => { void generation.discard(); });
+    }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='confirm-intent-action']")) {
       control.addEventListener("click", () => { void confirmComposerIntent("action"); });
     }
@@ -459,6 +509,7 @@ export function mountStoryPlayerPage(
       const continuousReading = session?.user?.settings?.continuousReading === true;
       autoSubmitTurnChoices = session?.user?.settings?.autoSubmitTurnChoices === true;
       ui.setContinuousReading(continuousReading);
+      if (typeof composition.workflow.resume === "function") await generation.resume(route.campaignId);
       if (continuousReading && sync.turnWindowMode === "replace" && sync.turns.nextCursor !== null) {
         await history.openCompleteHistory().catch(() => undefined);
         if (disposed || nextController.signal.aborted) return;
@@ -496,7 +547,6 @@ export function mountStoryPlayerPage(
     if (Number.isSafeInteger(turnNumber) && turnNumber > 0) history.jump(turnNumber);
   };
   root.addEventListener("click", onClick);
-  const pollTimer = globalThis.setInterval(() => { void load(); }, 30_000);
   render();
   void load();
 
@@ -505,7 +555,7 @@ export function mountStoryPlayerPage(
       if (disposed) return;
       disposed = true;
       controller?.abort();
-      globalThis.clearInterval(pollTimer);
+      generation.dispose();
       root.removeEventListener("click", onClick);
       retryControl?.removeEventListener("click", onRetry);
       unsubscribeStore();

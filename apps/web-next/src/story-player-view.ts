@@ -92,13 +92,39 @@ function chooser(document: Document, campaigns: readonly CampaignSummary[]): HTM
 }
 
 function recovery(document: Document, projection: Readonly<CampaignProjection>): HTMLElement | null {
-  if (projection.generation?.origin !== "hydrated_recovery") return null;
+  const generation = projection.generation;
+  if (generation === null) return null;
   const section = element(document, "section", "story-recovery");
   section.dataset.storyRecovery = "";
-  section.append(
-    element(document, "h2", undefined, "Story generation needs attention"),
-    element(document, "p", undefined, "Try again when the text provider is ready.")
-  );
+  const failed = generation.result.state === "failed" || generation.origin === "hydrated_recovery";
+  section.append(element(document, "h2", undefined, failed ? "Story generation needs attention" : "Story generation in progress"));
+  section.append(element(document, "p", undefined, failed ? "Try again when the text provider is ready." : "The accepted story remains unchanged until completion."));
+  const actions = element(document, "div", "story-generation-actions");
+  if (generation.monitoring === "detached") {
+    const resume = element(document, "button", undefined, "Resume monitoring");
+    resume.type = "button";
+    resume.dataset.action = "resume-generation";
+    actions.append(resume);
+  }
+  if (generation.result.state === "unavailable" || failed) {
+    const retry = element(document, "button", undefined, generation.result.state === "unavailable" ? "Load accepted result" : "Retry generation");
+    retry.type = "button";
+    retry.dataset.action = "retry-generation";
+    actions.append(retry);
+  }
+  if (generation.result.state === "pending") {
+    const cancel = element(document, "button", undefined, "Cancel generation");
+    cancel.type = "button";
+    cancel.dataset.action = "cancel-generation";
+    actions.append(cancel);
+  }
+  if (failed) {
+    const discard = element(document, "button", undefined, "Discard generation job");
+    discard.type = "button";
+    discard.dataset.action = "discard-generation";
+    actions.append(discard);
+  }
+  if (actions.childElementCount) section.append(actions);
   return section;
 }
 
@@ -304,7 +330,7 @@ export function renderStoryTurn(
 ): HTMLElement {
   const leaf = element(document, "article", "story-leaf");
   leaf.dataset.storyLeaf = "";
-  if (contextual) leaf.append(renderReaderToolbar(document, turns, turn.turnNumber, generationActive, canLoadPrevious));
+  if (contextual && !generationActive) leaf.append(renderReaderToolbar(document, turns, turn.turnNumber, generationActive, canLoadPrevious));
   leaf.append(
     element(document, "p", "story-turn-coordinate", `Turn ${turn.turnNumber}`),
     element(document, "h1", "story-title", `Turn ${turn.turnNumber}`),
@@ -347,6 +373,16 @@ function campaignReader(document: Document, state: StoryPlayerViewState): HTMLEl
       }
     } else {
       reader.append(renderStoryTurn(document, selectedTurn, projection.turns, projection.generation !== null, projection.nextTurnsCursor !== null));
+    }
+    if (projection.generation !== null) {
+      const preview = element(document, "article", "story-leaf story-generation-preview");
+      preview.dataset.storyGenerationPreview = "";
+      preview.append(element(document, "p", "story-generation-status", generationLabel(projection)));
+      if (projection.generation.narration) preview.append(...narrationParagraphs(document, projection.generation.narration));
+      if (projection.generation.transport.state === "degraded") {
+        preview.append(element(document, "p", "story-generation-degraded", "Connection is degraded; recovery monitoring remains active."));
+      }
+      reader.append(preview);
     }
     const isViewingLatest = selectedTurn.turnNumber === campaign.activeTurnNumber;
     if (isViewingLatest && projection.generation === null) {

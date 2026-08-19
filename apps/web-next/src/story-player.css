@@ -52,6 +52,7 @@ main[data-page="story-player"] {
 .story-choices,
 .story-input-mode-bar,
 .story-composer-secondary-actions,
+.story-generation-actions,
 .story-campaign-list,
 .story-reader-toolbar,
 .story-turn-record-actions,
@@ -142,6 +143,15 @@ main[data-page="story-player"] {
 }
 
 .story-intent-confirmation > p { width: 100%; margin: 0; }
+
+.story-generation-preview {
+  border-inline: 3px solid var(--accent, currentColor);
+}
+
+.story-generation-status,
+.story-generation-degraded { margin: 0; }
+
+.story-generation-degraded { font-size: .875rem; }
 
 .story-campaign-spine-content {
   flex-direction: column;
