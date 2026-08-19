@@ -309,11 +309,12 @@ export async function calibrateChronicleRetrievalProfile(input: Readonly<{
   corpusHash: string;
   baselineMetrics: ChronicleEvaluationMetrics;
   generatedAt?: string;
-  evaluate(profile: ChronicleRetrievalProfileParameters): Promise<ChronicleEvaluationMetrics>;
+  evaluate(profile: ChronicleRetrievalProfileParameters): Promise<ChronicleEvaluationMetrics | null>;
 }>): Promise<ChronicleRetrievalProfileV2> {
   const candidates: ChronicleCalibrationCandidate[] = [];
   for (const profile of CHRONICLE_RETRIEVAL_CALIBRATION_GRID) {
-    candidates.push({ profile, metrics: await input.evaluate(profile) });
+    const metrics = await input.evaluate(profile);
+    if (metrics) candidates.push({ profile, metrics });
   }
   return selectChronicleRetrievalProfile({
     corpusHash: input.corpusHash,

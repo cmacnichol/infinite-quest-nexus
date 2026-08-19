@@ -46,7 +46,7 @@ export const CHRONICLE_RETRIEVAL_PROFILE_V2 = Object.freeze({
       "supersededFact": 0
     },
     "latencyMs": {
-      "p50": 7,
+      "p50": 6,
       "p95": 29
     },
     "embedding": {
@@ -57,5 +57,5 @@ export const CHRONICLE_RETRIEVAL_PROFILE_V2 = Object.freeze({
     "promotions": 151,
     "demotions": 154
   },
-  "generatedAt": "2026-08-19T03:50:44.180Z"
+  "generatedAt": "2026-08-19T04:07:16.773Z"
 } as const);

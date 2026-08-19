@@ -551,14 +551,43 @@ function assertProfileMetricsAreCurrent(
   }
 }
 
-function assertCorpusResultInvariants(report: Awaited<ReturnType<typeof evaluateChronicleRetrieval>>): void {
+class ChronicleEvaluationInvariantError extends Error {}
+
+function assertCanonicalResultInvariants(
+  report: Awaited<ReturnType<typeof evaluateChronicleRetrieval>>,
+): void {
   const supersededFact = report.cases.find((result) => result.id === "superseded-fact");
   const canonicalReplacementLabel = "superseded-fact-canonical-replacement";
   if (!supersededFact || supersededFact.ranks[canonicalReplacementLabel] === null) {
-    throw new Error("Chronicle evaluation did not retrieve the canonical replacement fact.");
+    throw new ChronicleEvaluationInvariantError("Chronicle evaluation did not retrieve the canonical replacement fact.");
   }
   if (supersededFact.retrievedLabels.filter((label) => label === canonicalReplacementLabel).length !== 1) {
-    throw new Error("Chronicle evaluation retrieved an ambiguous canonical replacement label.");
+    throw new ChronicleEvaluationInvariantError("Chronicle evaluation retrieved an ambiguous canonical replacement label.");
+  }
+}
+
+export function assertCorpusResultInvariants(
+  report: Awaited<ReturnType<typeof evaluateChronicleRetrieval>>,
+  corpus: ChronicleRetrievalCorpus,
+): void {
+  assertCanonicalResultInvariants(report);
+  for (const fixture of corpus.cases.filter((value) => value.longParent)) {
+    const result = report.cases.find((value) => value.id === fixture.id);
+    if (!result) throw new ChronicleEvaluationInvariantError(`Chronicle evaluation did not produce ${fixture.id}.`);
+    for (const label of fixture.expectedLabels) {
+      if (result.ranks[label] === null || result.ranks[label] === undefined) {
+        throw new ChronicleEvaluationInvariantError(`Chronicle evaluation did not retrieve ${label} for ${fixture.id}.`);
+      }
+    }
+    if (result.leakage.crossCampaign !== 0
+      || result.leakage.futureTurn !== 0
+      || result.leakage.supersededFact !== 0) {
+      throw new ChronicleEvaluationInvariantError(`Chronicle evaluation detected leakage for ${fixture.id}.`);
+    }
+    const budgetTokens = fixture.scope.request.budgetTokens;
+    if (budgetTokens === undefined || result.promptTokens > budgetTokens) {
+      throw new ChronicleEvaluationInvariantError(`Chronicle evaluation exceeded the token budget for ${fixture.id}.`);
+    }
   }
 }
 
@@ -611,7 +640,12 @@ try {
             seededCorpus,
             { implementation: "chunked_hybrid", corpusHash }
           );
-          assertCorpusResultInvariants(evaluated);
+          try {
+            assertCorpusResultInvariants(evaluated, corpus);
+          } catch (error) {
+            if (error instanceof ChronicleEvaluationInvariantError) return null;
+            throw error;
+          }
           return evaluated.metrics;
         }
       });
@@ -623,7 +657,8 @@ try {
       seededCorpus,
       { implementation, corpusHash }
     );
-    assertCorpusResultInvariants(evaluated);
+    if (implementation === "chunked_hybrid") assertCorpusResultInvariants(evaluated, corpus);
+    else assertCanonicalResultInvariants(evaluated);
     if (implementation === "chunked_hybrid" && !explicitDiagnosticCorpus) assertProfileMetricsAreCurrent(evaluated);
     throw new EvaluationRollback(evaluated);
   });
