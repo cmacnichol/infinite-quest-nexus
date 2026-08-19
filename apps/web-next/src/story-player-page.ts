@@ -150,6 +150,13 @@ export function mountStoryPlayerPage(
       if (!disposed) ui.setMessage("Story generation could not be completed. Your accepted turns are unchanged.");
     }
   });
+  const scrollWindow = root.ownerDocument.defaultView;
+  const onDocumentScroll = () => {
+    if (!followingProgrammatically && projection.generation !== null && ui.get().generationFollowing) {
+      ui.setGenerationFollowing(false);
+    }
+  };
+  scrollWindow?.addEventListener("scroll", onDocumentScroll, { passive: true });
   const history = createStoryHistoryController({
     campaigns: composition.api.campaigns,
     campaignStore: composition.campaignStore,
@@ -484,12 +491,6 @@ export function mountStoryPlayerPage(
       });
     }
     bindHistoryDialog();
-    const reader = root.querySelector<HTMLElement>("[data-story-reader]");
-    reader?.addEventListener("scroll", () => {
-      if (!followingProgrammatically && projection.generation !== null && ui.get().generationFollowing) {
-        ui.setGenerationFollowing(false);
-      }
-    });
     if (projection.generation !== null && ui.get().generationFollowing) {
       const preview = root.querySelector<HTMLElement>("[data-story-generation-preview]");
       if (preview && typeof preview.scrollIntoView === "function") {
@@ -585,6 +586,7 @@ export function mountStoryPlayerPage(
       disposed = true;
       controller?.abort();
       generation.dispose();
+      scrollWindow?.removeEventListener("scroll", onDocumentScroll);
       root.removeEventListener("click", onClick);
       retryControl?.removeEventListener("click", onRetry);
       unsubscribeStore();

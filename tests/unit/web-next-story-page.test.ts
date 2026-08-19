@@ -314,7 +314,7 @@ describe("Story Player page shell", () => {
     const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({ syncStatus: vi.fn().mockResolvedValue(loaded) }));
     await settle();
 
-    page.document.querySelector<HTMLElement>("[data-story-reader]")?.dispatchEvent(new page.window.Event("scroll", { bubbles: true }));
+    page.window.dispatchEvent(new page.window.Event("scroll"));
     await settle();
     expect(page.document.querySelector<HTMLButtonElement>("[data-action='resume-generation-following']")).toBeTruthy();
 
