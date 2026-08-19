@@ -68,6 +68,9 @@ describe("Nexus management UI contracts", () => {
     expect(managementCss).toContain('.campaign-settings-rail [role="tab"] { min-width: 150px; }');
     expect(managementCss).toContain("@media (max-width: 520px)");
     expect(managementCss).toContain(".campaign-panel-fields { grid-template-columns: 1fr; }");
+    const mobileCss = managementCss.slice(managementCss.indexOf("@media (max-width: 520px)"));
+    const actionColumns = [...mobileCss.matchAll(/\.campaign-editor-actions\s*\{[^}]*grid-template-columns:\s*([^;]+);/g)].map((match) => match[1].trim());
+    expect(actionColumns.at(-1)).toBe("1fr");
   });
 
   it("groups every illustration control by source, segmentation, matching, provider, and history", () => {

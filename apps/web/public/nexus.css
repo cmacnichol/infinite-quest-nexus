@@ -539,7 +539,7 @@ legend { padding: 0 8px; color: var(--purple); font-size: .8rem; font-weight: 80
   .advanced-retrieval-fields, .chronicle-maintenance-actions { grid-template-columns: 1fr; }
   .campaign-editor-header, .campaign-editor-actions, .chronicle-subheading, .chronicle-maintenance-actions { align-items: stretch; grid-template-columns: 1fr; }
   .campaign-editor-header { flex-direction: column; }
-  .campaign-editor-actions { display: grid; grid-template-columns: 1fr 1fr; }
+  .campaign-editor-actions { display: grid; grid-template-columns: 1fr; }
   .campaign-panel-fields { grid-template-columns: 1fr; }
   .illustration-settings-group { grid-template-columns: 1fr; }
   .campaign-management-workspace .campaign-list { grid-auto-columns: 86%; }
