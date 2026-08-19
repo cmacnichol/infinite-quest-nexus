@@ -34,6 +34,16 @@ describe("Story Player bounded turn window commands", () => {
     expect(recentTurnSpine).toBe(recentSharedTurnSpine);
   });
 
+  it("declares the generic latest-five facade for typed legacy callers", () => {
+    const spine = recentTurnSpine([
+      { id: "turn-28", turnNumber: 28 },
+      { id: "turn-24", turnNumber: 24 }
+    ]);
+    const firstId: string = spine[0]!.id;
+
+    expect(firstId).toBe("turn-24");
+  });
+
   it("keeps append, undo, retry, inspection, and branch targets in absolute campaign turn numbers", () => {
     expect(appendExpectedTurnNumber({ activeTurnNumber: 100 })).toBe(101);
     expect(undoTargetTurnNumber({ activeTurnNumber: 100 })).toBe(99);
