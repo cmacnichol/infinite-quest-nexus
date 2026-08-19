@@ -1,7 +1,7 @@
 import type { CampaignProjection } from "@infinite-quest/client-core";
 import type { CampaignSummary } from "@infinite-quest/contracts";
 import { storyPlayerPath, type StoryRoute } from "./story-route";
-import type { StoryUiState } from "./story-player-model";
+import type { ReadingWidth, StoryUiState } from "./story-player-model";
 
 export interface StoryPlayerViewState {
   readonly route: StoryRoute;
@@ -10,6 +10,13 @@ export interface StoryPlayerViewState {
   readonly selectedCampaign: CampaignSummary | null;
   readonly projection: Readonly<CampaignProjection>;
 }
+
+type ReaderTurn = Readonly<{
+  turnNumber: number;
+  action: string;
+  narration: string;
+  reportedCost: Readonly<{ amount: string; currency: string }> | null;
+}>;
 
 function element<K extends keyof HTMLElementTagNameMap>(
   document: Document,
@@ -31,8 +38,9 @@ function status(document: Document, message: string): HTMLElement {
   return next;
 }
 
-function widthControl(document: Document, current: StoryUiState["readingWidth"]): HTMLElement {
+function widthControl(document: Document, current: ReadingWidth): HTMLElement {
   const control = element(document, "div", "story-reading-width");
+  control.setAttribute("role", "group");
   control.setAttribute("aria-label", "Reading width");
   for (const width of ["narrow", "standard", "wide"] as const) {
     const button = element(document, "button", undefined, width[0].toUpperCase() + width.slice(1));
@@ -92,6 +100,105 @@ function recovery(document: Document, projection: Readonly<CampaignProjection>):
   return section;
 }
 
+function generationLabel(projection: Readonly<CampaignProjection>): string {
+  return projection.generation === null ? "Story Engine ready" : "Story Engine generating";
+}
+
+function viewingLabel(turnNumber: number | null, activeTurnNumber: number): string {
+  if (turnNumber === null) return "No accepted turns yet";
+  return turnNumber === activeTurnNumber ? "Viewing latest turn" : `Viewing turn ${turnNumber} of ${activeTurnNumber}`;
+}
+
+export function renderStoryCommandRow(document: Document, state: StoryPlayerViewState): HTMLElement {
+  const row = element(document, "div", "story-command-content");
+  const campaign = state.projection.campaign;
+  const world = state.projection.world;
+  if (campaign && world) {
+    const viewed = state.ui.viewTurnNumber ?? campaign.activeTurnNumber;
+    row.append(
+      element(document, "p", "story-command-campaign", campaign.title),
+      element(document, "p", "story-command-world", `${world.title} · Version ${world.versionNumber}`),
+      element(document, "p", "story-command-active", `Active turn ${campaign.activeTurnNumber}`),
+      element(document, "p", "story-command-view", viewingLabel(viewed, campaign.activeTurnNumber)),
+      element(document, "p", "story-command-engine", generationLabel(state.projection))
+    );
+  }
+  const widthStatus = element(document, "p", "story-reading-width-status");
+  widthStatus.dataset.readingWidthStatus = "";
+  widthStatus.setAttribute("role", "status");
+  widthStatus.setAttribute("aria-live", "polite");
+  row.append(widthControl(document, state.ui.readingWidth), widthStatus);
+  return row;
+}
+
+function narrationParagraphs(document: Document, narration: string): readonly HTMLElement[] {
+  return narration.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+    .map((line) => {
+      const paragraph = element(document, "p", "story-narration", line);
+      paragraph.dataset.effectiveNarration = "";
+      return paragraph;
+    });
+}
+
+function formatReportedCost(turn: ReaderTurn): string | null {
+  return turn.reportedCost === null ? null : `${turn.reportedCost.amount} ${turn.reportedCost.currency}`;
+}
+
+function recordAction(document: Document, action: "edit-response" | "inspect-state", label: string): HTMLButtonElement {
+  const button = element(document, "button", undefined, label);
+  button.type = "button";
+  button.dataset.action = action;
+  return button;
+}
+
+export function renderReaderToolbar(
+  document: Document,
+  turns: readonly ReaderTurn[],
+  selectedTurnNumber: number,
+  generationActive: boolean
+): HTMLElement {
+  const toolbar = element(document, "nav", "story-reader-toolbar");
+  toolbar.setAttribute("aria-label", "Turn navigation");
+  const index = turns.findIndex((turn) => turn.turnNumber === selectedTurnNumber);
+  const previousTurn = index > 0 ? turns[index - 1] : null;
+  const nextTurn = index >= 0 && index < turns.length - 1 ? turns[index + 1] : null;
+  for (const [action, label, target] of [
+    ["previous-turn", "Previous", previousTurn],
+    ["next-turn", "Next", nextTurn]
+  ] as const) {
+    const button = element(document, "button", undefined, label);
+    button.type = "button";
+    button.dataset.action = action;
+    if (target) button.dataset.turnNumber = String(target.turnNumber);
+    button.disabled = generationActive || target === null;
+    toolbar.append(button);
+  }
+  return toolbar;
+}
+
+export function renderStoryTurn(
+  document: Document,
+  turn: ReaderTurn,
+  turns: readonly ReaderTurn[],
+  generationActive: boolean
+): HTMLElement {
+  const leaf = element(document, "article", "story-leaf");
+  leaf.dataset.storyLeaf = "";
+  leaf.append(
+    renderReaderToolbar(document, turns, turn.turnNumber, generationActive),
+    element(document, "p", "story-turn-coordinate", `Turn ${turn.turnNumber}`),
+    element(document, "h1", "story-title", `Turn ${turn.turnNumber}`),
+    element(document, "p", "story-action", turn.action)
+  );
+  const cost = formatReportedCost(turn);
+  if (cost !== null) leaf.append(element(document, "p", "story-reported-cost", cost));
+  leaf.append(...narrationParagraphs(document, turn.narration));
+  const actions = element(document, "div", "story-turn-record-actions");
+  actions.append(recordAction(document, "edit-response", "Edit Response"), recordAction(document, "inspect-state", "Inspect State"));
+  leaf.append(actions);
+  return leaf;
+}
+
 function campaignReader(document: Document, state: StoryPlayerViewState): HTMLElement {
   const projection = state.projection;
   const campaign = projection.campaign;
@@ -103,18 +210,12 @@ function campaignReader(document: Document, state: StoryPlayerViewState): HTMLEl
     return reader;
   }
 
-  const selectedTurnNumber = state.ui.viewTurnNumber ?? campaign.activeTurnNumber;
-  const selectedTurn = projection.turns.find((turn) => turn.turnNumber === selectedTurnNumber)
+  const requestedTurnNumber = state.ui.viewTurnNumber ?? campaign.activeTurnNumber;
+  const selectedTurn = projection.turns.find((turn) => turn.turnNumber === requestedTurnNumber)
     ?? projection.turns[projection.turns.length - 1]
     ?? null;
-  reader.append(element(document, "h1", "story-title", campaign.title));
   if (selectedTurn) {
-    reader.append(element(document, "p", "story-narration", selectedTurn.narration));
-    if (selectedTurn.choices.length) {
-      const choices = element(document, "ul", "story-choices");
-      for (const choice of selectedTurn.choices) choices.append(element(document, "li", undefined, choice));
-      reader.append(choices);
-    }
+    reader.append(renderStoryTurn(document, selectedTurn, projection.turns, projection.generation !== null));
   } else {
     const background = element(document, "p", "story-background", world.backgroundStory);
     background.dataset.storyBackground = "";
@@ -138,6 +239,10 @@ function campaignReader(document: Document, state: StoryPlayerViewState): HTMLEl
   return reader;
 }
 
+export function applyReadingWidth(foldout: HTMLElement, width: ReadingWidth): void {
+  foldout.dataset.readingWidth = width;
+}
+
 export function renderStoryPlayerView(root: HTMLElement, state: StoryPlayerViewState): void {
   const document = root.ownerDocument;
   const main = root.querySelector<HTMLElement>('main[data-page="story-player"]');
@@ -151,8 +256,8 @@ export function renderStoryPlayerView(root: HTMLElement, state: StoryPlayerViewS
   }
 
   main.setAttribute("aria-busy", String(state.ui.phase === "loading"));
-  foldout.dataset.readingWidth = state.ui.readingWidth;
-  commandRow.replaceChildren(widthControl(document, state.ui.readingWidth));
+  applyReadingWidth(foldout, state.ui.readingWidth);
+  commandRow.replaceChildren(renderStoryCommandRow(document, state));
   spine.replaceChildren();
   illustration.replaceChildren(element(document, "p", "story-illustration-status", "Illustrations remain optional to story progress."));
 

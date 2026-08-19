@@ -104,6 +104,9 @@ export function mountStoryPlayerPage(
     const width = actionTarget.closest<HTMLButtonElement>("[data-reading-width]")?.dataset.readingWidth;
     if (width === "narrow" || width === "standard" || width === "wide") {
       ui.setReadingWidth(width);
+      const activated = root.querySelector<HTMLButtonElement>(`[data-reading-width="${width}"]`);
+      root.querySelector<HTMLElement>("[data-reading-width-status]")!.textContent = `Reading width set to ${width[0].toUpperCase() + width.slice(1)}.`;
+      activated?.focus();
       return;
     }
   };

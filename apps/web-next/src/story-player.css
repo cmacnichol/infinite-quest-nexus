@@ -24,6 +24,8 @@ main[data-page="story-player"] {
 }
 
 .story-foldout {
+  --story-reader-gutter: 32px;
+  --story-reader-max: 1120px;
   display: grid;
   gap: 1rem;
   grid-template-areas:
@@ -32,13 +34,25 @@ main[data-page="story-player"] {
     "illustration";
 }
 
+.story-foldout[data-reading-width="narrow"] { --story-reader-max: 680px; }
+.story-foldout[data-reading-width="standard"] { --story-reader-max: 1120px; }
+.story-foldout[data-reading-width="wide"] { --story-reader-max: none; }
+
 .story-reader { grid-area: reader; }
 .story-campaign-spine { grid-area: spine; }
 .story-illustration-wing { grid-area: illustration; }
 
+.story-leaf {
+  width: calc(100% - 2 * var(--story-reader-gutter));
+  max-width: var(--story-reader-max);
+  margin-inline: auto;
+}
+
 .story-reading-width,
 .story-choices,
-.story-campaign-list {
+.story-campaign-list,
+.story-reader-toolbar,
+.story-turn-record-actions {
   display: flex;
   flex-wrap: wrap;
   gap: .5rem;

@@ -248,6 +248,124 @@ describe("Story Player page shell", () => {
     mounted.dispose();
   });
 
+  it("renders a text-safe foldout reader from the campaign projection without normal-leaf mechanics", async () => {
+    const page = fixture();
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 5 },
+      activeTurnNumber: 5,
+      turns: {
+        campaignId,
+        nextCursor: null,
+        turns: [{
+          id: "66666666-6666-4666-8666-666666666666",
+          turnNumber: 5,
+          action: "Cross the flooded bridge.",
+          inputMode: "action",
+          inputModeSource: "explicit",
+          narration: "<script>window.alert('unsafe')</script>\n\nThe corrected current narration remains fiction.",
+          choices: [],
+          customActionSuggestion: "",
+          imagePrompt: "",
+          imageUrl: null,
+          acceptedAt: "2026-08-18T00:00:00.000Z",
+          chronicleRetrieval: null,
+          reportedCost: { amount: "0.0123", currency: "USD", byCategory: { story: "0.0123", image: "0", memory: "0" } }
+        }]
+      }
+    });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 5 }, composition({
+      list: vi.fn().mockResolvedValue({ campaigns: [campaignSummary({ activeTurnNumber: 5 })] }),
+      syncStatus: vi.fn().mockResolvedValue(loaded)
+    }));
+    await settle();
+
+    const commandRow = page.document.querySelector(".story-command-row");
+    expect(commandRow?.textContent).toContain("Campaign under test");
+    expect(commandRow?.textContent).toContain("World under test · Version 1");
+    expect(commandRow?.textContent).toContain("Active turn 5");
+    expect(commandRow?.textContent).toContain("Viewing latest turn");
+    expect(commandRow?.textContent).toContain("Story Engine ready");
+
+    const leaf = page.document.querySelector("[data-story-leaf]");
+    expect(leaf?.querySelector("h1")?.textContent).toBe("Turn 5");
+    expect(leaf?.textContent).toContain("Cross the flooded bridge.");
+    expect(leaf?.textContent).toContain("0.0123 USD");
+    expect([...leaf?.querySelectorAll(".story-narration") ?? []].map((paragraph) => paragraph.textContent)).toEqual([
+      "<script>window.alert('unsafe')</script>",
+      "The corrected current narration remains fiction."
+    ]);
+    expect(leaf?.querySelector("script")).toBeNull();
+    expect(leaf?.textContent).toContain("Edit Response");
+    expect(leaf?.textContent).toContain("Inspect State");
+    expect(leaf?.textContent).not.toMatch(/Resolve Check|mechanics|difficulty/i);
+    mounted.dispose();
+  });
+
+  it("renders labelled local width controls and persisted-number reader navigation", async () => {
+    const page = fixture();
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 9 },
+      activeTurnNumber: 9,
+      pendingGeneration: {
+        id: "55555555-5555-4555-8555-555555555555",
+        status: "generating",
+        action: "Continue",
+        expectedTurnNumber: 10,
+        createdAt: "2026-08-18T00:00:00.000Z",
+        updatedAt: "2026-08-18T00:00:00.000Z",
+        operationKind: "append",
+        replacementTurnId: null
+      },
+      turns: {
+        campaignId,
+        nextCursor: null,
+        turns: [2, 4, 9].map((turnNumber) => ({
+          id: turnNumber === 2
+            ? "66666666-6666-4666-8666-666666666666"
+            : turnNumber === 4 ? "77777777-7777-4777-8777-777777777777" : "88888888-8888-4888-8888-888888888888",
+          turnNumber,
+          action: `Action ${turnNumber}`,
+          inputMode: "action" as const,
+          inputModeSource: "explicit" as const,
+          narration: `Narration ${turnNumber}.`,
+          choices: [],
+          customActionSuggestion: "",
+          imagePrompt: "",
+          imageUrl: null,
+          acceptedAt: "2026-08-18T00:00:00.000Z",
+          chronicleRetrieval: null,
+          reportedCost: null
+        }))
+      }
+    });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 4 }, composition({
+      list: vi.fn().mockResolvedValue({ campaigns: [campaignSummary({ activeTurnNumber: 9 })] }),
+      syncStatus: vi.fn().mockResolvedValue(loaded)
+    }));
+    await settle();
+
+    const controls = page.document.querySelector("[aria-label=\"Reading width\"]");
+    expect(controls?.getAttribute("role")).toBe("group");
+    expect([...controls?.querySelectorAll<HTMLButtonElement>("button") ?? []].map((button) => [button.textContent, button.getAttribute("aria-pressed")]))
+      .toEqual([["Narrow", "false"], ["Standard", "true"], ["Wide", "false"]]);
+    expect(page.document.querySelector<HTMLElement>(".story-foldout")?.dataset.readingWidth).toBe("standard");
+
+    const previous = page.document.querySelector<HTMLButtonElement>('[data-action="previous-turn"]');
+    const next = page.document.querySelector<HTMLButtonElement>('[data-action="next-turn"]');
+    expect(previous?.dataset.turnNumber).toBe("2");
+    expect(next?.dataset.turnNumber).toBe("9");
+    expect(previous?.disabled).toBe(true);
+    expect(next?.disabled).toBe(true);
+
+    const focus = vi.spyOn(page.window.HTMLElement.prototype, "focus");
+    page.document.querySelector<HTMLButtonElement>('[data-reading-width="wide"]')?.click();
+    expect(page.document.querySelector<HTMLElement>(".story-foldout")?.dataset.readingWidth).toBe("wide");
+    expect(page.document.querySelector<HTMLButtonElement>('[data-reading-width="wide"]')?.getAttribute("aria-pressed")).toBe("true");
+    expect(page.document.querySelector("[data-reading-width-status]")?.textContent).toBe("Reading width set to Wide.");
+    expect(focus).toHaveBeenCalledTimes(1);
+    mounted.dispose();
+  });
+
   it("aborts work, unsubscribes, removes listeners, and clears polling on disposal", async () => {
     const page = fixture();
     const baseStore = createCampaignStore();
