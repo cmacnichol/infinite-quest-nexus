@@ -606,8 +606,7 @@ export function createPostgresChronicleChunkBatchPort(
           || input.chunks.some((chunk) => (chunk.embedding === null) === (chunk.skipReason === null))) {
           throw invalid("Chronicle chunk terminal state is invalid.");
         }
-        const resultEmbeddings = input.results.flatMap((result) => result.embeddings);
-        if (resultEmbeddings.length !== validEmbedded.length) {
+        if (input.embeddingEvidence.length !== validEmbedded.length) {
           throw invalid("Chronicle chunk embedding response is incomplete.");
         }
         const batchDimensions = new Set(validEmbedded.map((chunk) => chunk.embedding!.length));
@@ -616,7 +615,7 @@ export function createPostgresChronicleChunkBatchPort(
         }
         for (const [index, chunk] of validEmbedded.entries()) {
           const vector = chunk.embedding!;
-          const returned = resultEmbeddings[index]!;
+          const returned = input.embeddingEvidence[index]!;
           if (vector.length !== returned.length || vector.some((value, coordinate) => value !== returned[coordinate])) {
             throw invalid("Chronicle chunk embedding response does not match the committed vectors.");
           }
@@ -765,8 +764,11 @@ export function createPostgresChronicleChunkBatchPort(
           });
         }
         if (input.provider) {
-          await atChunkCommitStage({ commitStage: "cost_recording", ...reportedCostContext(input.results) }, async () => {
-            for (const result of input.results) {
+          await atChunkCommitStage({
+            commitStage: "cost_recording",
+            ...reportedCostContext(input.costResults)
+          }, async () => {
+            for (const result of input.costResults) {
               await dependencies.recordCost(client, input.provider!, {
                 ownerUserId: scope.ownerUserId,
                 campaignId: scope.campaignId,

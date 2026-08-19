@@ -65,6 +65,20 @@ export type ChronicleChunkWorkerExecution = Readonly<{
   ): Promise<ChronicleChunkJobProgress>;
 }>;
 
+const CHRONICLE_CHUNK_PARENT_PAGE_SIZE = 8;
+
+type PreparedParent = Readonly<{
+  parent: ChronicleChunkParent;
+  drafts: readonly ChronicleChunkDraft[];
+  oversizedIndexes: ReadonlySet<number>;
+}>;
+
+type PendingEmbedding = Readonly<{
+  parentIndex: number;
+  draftIndex: number;
+  chunk: ChronicleChunkDraft;
+}>;
+
 type ChronicleChunkExecutionStage =
   | "parent_load"
   | "provider_capability"
@@ -199,21 +213,21 @@ export function partitionEmbeddableChunks(
 }
 
 function boundedBatches(
-  chunks: readonly ChronicleChunkDraft[],
+  pendingEmbeddings: readonly PendingEmbedding[],
   capability: EmbeddingCapability,
-): readonly (readonly ChronicleChunkDraft[])[] {
-  const batches: ChronicleChunkDraft[][] = [];
-  let current: ChronicleChunkDraft[] = [];
+): readonly (readonly PendingEmbedding[])[] {
+  const batches: PendingEmbedding[][] = [];
+  let current: PendingEmbedding[] = [];
   let tokens = 0;
-  for (const chunk of chunks) {
-    const itemTokens = chunk.estimatedTokens + capability.documentPrefixTokens;
+  for (const pending of pendingEmbeddings) {
+    const itemTokens = pending.chunk.estimatedTokens + capability.documentPrefixTokens;
     if (current.length && (current.length >= capability.maxBatchItems
       || tokens + itemTokens > capability.maxBatchTokens)) {
       batches.push(current);
       current = [];
       tokens = 0;
     }
-    current.push(chunk);
+    current.push(pending);
     tokens += itemTokens;
   }
   if (current.length) batches.push(current);
@@ -225,12 +239,14 @@ async function embedWithRetry(
   provider: ChronicleTransactionEmbeddingExecution,
   documents: readonly string[],
   capability: EmbeddingCapability,
+  lifecycle?: ChronicleClaimExecutionLifecycle,
 ) {
   const sleep = dependencies.sleep ?? ((milliseconds: number) => new Promise<void>((resolve) => {
     const timer = setTimeout(resolve, milliseconds);
     timer.unref();
   }));
   for (let attempt = 0; ; attempt += 1) {
+    throwIfLeaseLost(lifecycle);
     try {
       const result = await dependencies.embeddings.embed(provider, documents);
       assertCompleteEmbeddingBatch(result.embeddings, documents.length, capability);
@@ -275,7 +291,7 @@ export function createChronicleChunkWorkerExecution(
         executionStage: "parent_load",
         processedParents: claim.progress.processedParents
       }, () => dependencies.parents.loadForClaim(claim, {
-          batchLimit: 1,
+          batchLimit: CHRONICLE_CHUNK_PARENT_PAGE_SIZE,
           cursor: claim.progress.parentCursor
         }));
       if (claim.progress.totalParents && claim.progress.totalParents !== page.totalParents) {
@@ -355,42 +371,57 @@ export function createChronicleChunkWorkerExecution(
       let progress = baseProgress(claim, page.totalParents, fingerprint);
       while (page.parents.length) {
         throwIfLeaseLost(lifecycle);
-        const parent = page.parents[0]!;
-        const { drafts, partition } = await atChunkExecutionStage({
-          executionStage: "chunk_prepare",
-          parentMemoryId: parent.id,
-          parentOrdinal: parent.ordinal,
-          processedParents: progress.processedParents
-        }, () => {
-          const preparedDrafts = finalChunks(parent, capability ?? undefined);
-          return {
-            drafts: preparedDrafts,
-            partition: capability
-              ? partitionEmbeddableChunks(preparedDrafts, capability)
-              : { embeddable: [] as readonly ChronicleChunkDraft[], oversizedIndexes: new Set<number>() }
-          };
-        });
-        const results: ChronicleTransactionEmbeddingResult[] = [];
-        const vectors: (readonly number[])[] = [];
+        const preparedParents: PreparedParent[] = [];
+        for (const parent of page.parents) {
+          preparedParents.push(await atChunkExecutionStage({
+            executionStage: "chunk_prepare",
+            parentMemoryId: parent.id,
+            parentOrdinal: parent.ordinal,
+            processedParents: progress.processedParents
+          }, () => {
+            const drafts = finalChunks(parent, capability ?? undefined);
+            const oversizedIndexes = capability
+              ? partitionEmbeddableChunks(drafts, capability).oversizedIndexes
+              : new Set<number>();
+            return { parent, drafts, oversizedIndexes };
+          }));
+        }
+        const pendingEmbeddings: readonly PendingEmbedding[] = capability
+          ? preparedParents.flatMap((prepared, parentIndex) => prepared.drafts.flatMap(
+            (chunk, draftIndex) => prepared.oversizedIndexes.has(draftIndex)
+              ? []
+              : [{ parentIndex, draftIndex, chunk }]
+          ))
+          : [];
+        const pageCostResults: ChronicleTransactionEmbeddingResult[] = [];
+        const vectorsByParent: ((readonly number[] | undefined)[])[] = preparedParents.map(
+          (prepared) => Array.from({ length: prepared.drafts.length })
+        );
         if (provider && capability) {
-          for (const batch of boundedBatches(partition.embeddable, capability)) {
-            throwIfLeaseLost(lifecycle);
+          for (const batch of boundedBatches(pendingEmbeddings, capability)) {
+            const firstPending = batch[0]!;
+            const batchParent = preparedParents[firstPending.parentIndex]!.parent;
             try {
               const result = await atChunkExecutionStage({
                 executionStage: "embedding_batch",
-                parentMemoryId: parent.id,
-                parentOrdinal: parent.ordinal,
+                parentMemoryId: batchParent.id,
+                parentOrdinal: batchParent.ordinal,
                 attemptedBatchSize: batch.length,
                 processedParents: progress.processedParents
               }, () => embedWithRetry(
                   dependencies,
                   provider!,
-                  batch.map((chunk) => `${capability!.documentPrefix}${chunk.content}`),
-                  capability!
+                  batch.map((pending) => `${capability!.documentPrefix}${pending.chunk.content}`),
+                  capability!,
+                  lifecycle
                 ));
-              results.push(result);
-              vectors.push(...result.embeddings);
+              pageCostResults.push(result);
+              for (const [resultIndex, vector] of result.embeddings.entries()) {
+                const pending = batch[resultIndex]!;
+                vectorsByParent[pending.parentIndex]![pending.draftIndex] = vector;
+              }
             } catch (error) {
+              throwIfLeaseLost(lifecycle);
               await dependencies.embeddings.recordHealth({
                 ownerUserId: claim.ownerUserId,
                 providerProfileId: provider.id,
@@ -400,65 +431,69 @@ export function createChronicleChunkWorkerExecution(
             }
           }
         }
-        let vectorIndex = 0;
-        const chunks = drafts.map((chunk, index) => {
-          const skipReason: ChronicleChunkSkipReason | null = !provider
-            ? "semantic_retrieval_disabled"
-            : partition.oversizedIndexes.has(index)
-              ? "chunk_exceeds_provider_capacity"
-              : null;
-          return {
-            ...chunk,
-            embedding: skipReason === null ? vectors[vectorIndex++]! : null,
-            skipReason
+        for (const [parentIndex, prepared] of preparedParents.entries()) {
+          const { parent, drafts, oversizedIndexes } = prepared;
+          const chunks = drafts.map((chunk, draftIndex) => {
+            const skipReason: ChronicleChunkSkipReason | null = !provider
+              ? "semantic_retrieval_disabled"
+              : oversizedIndexes.has(draftIndex)
+                ? "chunk_exceeds_provider_capacity"
+                : null;
+            return {
+              ...chunk,
+              embedding: skipReason === null ? vectorsByParent[parentIndex]![draftIndex]! : null,
+              skipReason
+            };
+          });
+          const embeddingEvidence = chunks.flatMap((chunk) => chunk.embedding ? [chunk.embedding] : []);
+          const embeddedCount = embeddingEvidence.length;
+          const nextProgress: ChronicleChunkJobProgress = {
+            parentCursor: `${parent.ordinal}:${parent.id}`,
+            processedParents: progress.processedParents + 1,
+            embeddedChunks: progress.embeddedChunks + embeddedCount,
+            skippedChunks: progress.skippedChunks + (chunks.length - embeddedCount),
+            totalParents: progress.totalParents,
+            capabilityFingerprint: fingerprint
           };
-        });
-        const embeddedCount = chunks.filter((chunk) => chunk.skipReason === null).length;
-        const nextProgress: ChronicleChunkJobProgress = {
-          parentCursor: `${parent.ordinal}:${parent.id}`,
-          processedParents: progress.processedParents + 1,
-          embeddedChunks: progress.embeddedChunks + embeddedCount,
-          skippedChunks: progress.skippedChunks + (chunks.length - embeddedCount),
-          totalParents: progress.totalParents,
-          capabilityFingerprint: fingerprint
-        };
-        throwIfLeaseLost(lifecycle);
-        const committed = await atChunkExecutionStage({
-          executionStage: "parent_commit",
-          parentMemoryId: parent.id,
-          parentOrdinal: parent.ordinal,
-          chunkCount: chunks.length,
-          embeddedChunkCount: embeddedCount,
-          processedParents: progress.processedParents
-        }, () => dependencies.batches.commitParentBatch(claim, {
-            parent,
-            previousParentCursor: progress.parentCursor,
-            provider,
-            providerFingerprint,
-            capabilityFingerprint: fingerprint,
-            embeddingProtocolVersion: CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
-            chunks,
-            results,
-            progress: nextProgress
-          }));
-        if (!committed) throw chunkExecutionError(
-          "Chronicle chunk job lease was lost during parent commit.",
-          {
+          throwIfLeaseLost(lifecycle);
+          const committed = await atChunkExecutionStage({
             executionStage: "parent_commit",
             parentMemoryId: parent.id,
             parentOrdinal: parent.ordinal,
             chunkCount: chunks.length,
             embeddedChunkCount: embeddedCount,
             processedParents: progress.processedParents
-          }
-        );
-        progress = nextProgress;
+          }, () => dependencies.batches.commitParentBatch(claim, {
+              parent,
+              previousParentCursor: progress.parentCursor,
+              provider,
+              providerFingerprint,
+              capabilityFingerprint: fingerprint,
+              embeddingProtocolVersion: CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
+              chunks,
+              embeddingEvidence,
+              costResults: parentIndex === 0 ? pageCostResults : [],
+              progress: nextProgress
+            }));
+          if (!committed) throw chunkExecutionError(
+            "Chronicle chunk job lease was lost during parent commit.",
+            {
+              executionStage: "parent_commit",
+              parentMemoryId: parent.id,
+              parentOrdinal: parent.ordinal,
+              chunkCount: chunks.length,
+              embeddedChunkCount: embeddedCount,
+              processedParents: progress.processedParents
+            }
+          );
+          progress = nextProgress;
+        }
         if (!page.nextCursor) break;
         page = await atChunkExecutionStage({
           executionStage: "next_parent_load",
           processedParents: progress.processedParents
         }, () => dependencies.parents.loadForClaim(claim, {
-            batchLimit: 1,
+            batchLimit: CHRONICLE_CHUNK_PARENT_PAGE_SIZE,
             cursor: progress.parentCursor
           }));
         if (page.totalParents !== progress.totalParents) {

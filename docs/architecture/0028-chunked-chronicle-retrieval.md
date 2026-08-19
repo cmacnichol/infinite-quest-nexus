@@ -300,6 +300,29 @@ Five changes came out of that review.
    rather than interpreted as a universal latency guarantee: the acceptance
    gate is unchanged retrieval accuracy and fewer rank statements, not a fixed
    wall-clock threshold.
+7. **Page-wide parent embedding batches.** The chunk worker prepares up to eight
+   parents, flattens their embeddable chunks in stable parent/chunk order, and
+   applies the existing provider item and token limits across that page. Vector
+   evidence remains parent-specific for each sequential fenced commit, while
+   every provider result used for cost recording is attached only to the first
+   parent transaction in the page. A later failed commit therefore leaves the
+   earlier cursor and its provider costs durable without duplicating those costs
+   on the uncommitted suffix.
+
+   A controlled in-memory worker comparison on the same Windows machine and
+   Node/Vitest runtime used one-chunk parents, provider capacity eight, the same
+   deterministic provider fixture with a requested 5 ms delay, five warmups,
+   and 20 measured samples. The before shape returned one parent per load to
+   reproduce the former paging behavior; the after shape returned all eight.
+
+   | Shape | Parent loads | Provider calls | Embedded chunks | Committed parents | Median elapsed |
+   | --- | ---: | ---: | ---: | ---: | ---: |
+   | Before | 8 | 8 | 8 | 8 | 125.646 ms |
+   | After | 1 | 1 | 8 | 8 | 15.386 ms |
+
+   The provider-call acceptance gate is the deterministic reduction from eight
+   to one. The elapsed values describe only this fixture and machine; they are
+   recorded as diagnostic evidence, not as a production latency guarantee.
 
 Together these keep per-turn indexing proportional to changed content rather
 than campaign length, which is what allows the readiness gate to be reached and
