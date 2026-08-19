@@ -274,6 +274,32 @@ Five changes came out of that review.
    out relevance-selected entries. Coverage is retained as a deterministic
    evenly-spaced sample of at most 32 entries, so early, middle, and late
    history all survive within a bounded size.
+6. **Authorized rank batching by signal family.** Chunk retrieval now executes
+   semantic, full-text, entity, and static ranking as at most four sequential
+   statements on the preview transaction. Each statement materializes the
+   owner/campaign/world-version/cutoff authorization CTE before its parameterized
+   request rows. Request ordinals and per-request `signal_rank` preserve the
+   exact ordered rows supplied to rank fusion; the five protocol-owned static
+   signals share one fixed `UNION ALL` statement. User query text, entity IDs,
+   vectors, scope IDs, and temporal anchors remain query parameters.
+
+   A same-container Docker PostgreSQL comparison used identical deterministic
+   100-turn and 200-turn fixtures, five warmups, 30 measured warm-cache previews,
+   and the selected v3 profile. The pre-batch code was loaded from commit
+   `5e1ff83` while the Task 5 implementation used the working tree, both against
+   the same PostgreSQL instance. The pruned query plan produced ten individual
+   rank statements before and four family statements after:
+
+   | Turns | Before p50 / p95 | After p50 / p95 | Rank statements before / after |
+   | ---: | ---: | ---: | ---: |
+   | 100 | 44.610 / 49.687 ms | 46.968 / 53.988 ms | 10 / 4 |
+   | 200 | 74.145 / 79.337 ms | 76.183 / 85.372 ms | 10 / 4 |
+
+   The measured wall-clock samples increased 5.3%/8.7% at 100 turns and
+   2.7%/7.6% at 200 turns for p50/p95 respectively. This result is recorded
+   rather than interpreted as a universal latency guarantee: the acceptance
+   gate is unchanged retrieval accuracy and fewer rank statements, not a fixed
+   wall-clock threshold.
 
 Together these keep per-turn indexing proportional to changed content rather
 than campaign length, which is what allows the readiness gate to be reached and

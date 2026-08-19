@@ -647,7 +647,8 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       scopes: { currentScene: { memoryId: "legacy-memory" } }
     });
     expect(queries.some(({ sql }) => sql.includes("AS chunk_index_ready"))).toBe(false);
-    expect(queries.some(({ sql }) => sql.includes("chronicle_rank:"))).toBe(false);
+    expect(queries.some(({ sql }) => sql.includes("chronicle_rank:") || sql.includes("chronicle_rank_batch:")))
+      .toBe(false);
   });
 
   it("creates every chunk rank input only after owner, campaign, version, and cutoff authorization", async () => {
@@ -706,9 +707,11 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       // Fused candidate vectors are loaded once per preview instead of being rendered
       // inside every rank query.
       if (sql.includes("embedding::text AS embedding")) return { rows: [] };
-      if (sql.includes("chronicle_rank:")) {
+      if (sql.includes("chronicle_rank_batch:")) {
         rankQueries.push(sql);
         return { rows: [{
+          request_ordinal: 0,
+          signal_rank: 1,
           candidate_id: "authorized-chunk",
           parent_memory_id: "authorized-memory",
           parent_turn_id: "turn-3",
@@ -773,10 +776,10 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       "CASE WHEN jsonb_typeof(metadata->'structuredFactIds')='array'"
     ))).toBe(true);
     expect(rankQueries.length).toBeGreaterThan(0);
-    expect(rankQueries.filter((sql) => sql.includes("chronicle_rank:entity"))).toHaveLength(1);
+    expect(rankQueries.filter((sql) => sql.includes("chronicle_rank_batch:entity"))).toHaveLength(1);
     for (const sql of rankQueries) {
       const authorization = sql.indexOf("authorized AS MATERIALIZED");
-      const ranking = sql.indexOf("ranked AS");
+      const ranking = Math.max(sql.indexOf("request_variants"), sql.indexOf("ranked AS"));
       expect(authorization).toBeGreaterThanOrEqual(0);
       expect(ranking).toBeGreaterThan(authorization);
       expect(sql.slice(authorization, ranking)).toMatch(
@@ -838,7 +841,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       // Fused candidate vectors are loaded once per preview instead of being rendered
       // inside every rank query.
       if (sql.includes("embedding::text AS embedding")) return { rows: [] };
-      if (sql.includes("chronicle_rank:")) {
+      if (sql.includes("chronicle_rank_batch:")) {
         rankQueries.push({ sql, values });
         return { rows: [] };
       }
@@ -863,7 +866,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       }
     });
 
-    expect(rankQueries.filter(({ sql }) => sql.includes("chronicle_rank:entity"))).toHaveLength(0);
+    expect(rankQueries.filter(({ sql }) => sql.includes("chronicle_rank_batch:entity"))).toHaveLength(0);
     expect(rankQueries.flatMap(({ values }) => values).join("\n")).not.toContain("Moon Warden");
   });
 
@@ -1021,12 +1024,22 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       // Fused candidate vectors are loaded once per preview instead of being rendered
       // inside every rank query.
       if (sql.includes("embedding::text AS embedding")) return { rows: [] };
-      if (sql.includes("chronicle_rank:semantic")) {
-        return { rows: [candidate("semantic-parent", "turn_fiction", "A semantically related memory.")] };
+      if (sql.includes("chronicle_rank_batch:semantic")) {
+        return { rows: [{
+          ...candidate("semantic-parent", "turn_fiction", "A semantically related memory."),
+          request_ordinal: 0,
+          signal_rank: 1
+        }] };
       }
-      if (sql.includes("chronicle_rank:full_text") || sql.includes("chronicle_rank:entity")) return { rows: [] };
-      if (sql.includes("chronicle_rank:")) {
-        return { rows: [candidate("skipped-parent", "open_thread", "A nonsemantic open thread.")] };
+      if (sql.includes("chronicle_rank_batch:full_text") || sql.includes("chronicle_rank_batch:entity")) {
+        return { rows: [] };
+      }
+      if (sql.includes("chronicle_rank_batch:static")) {
+        return { rows: [{
+          ...candidate("skipped-parent", "open_thread", "A nonsemantic open thread."),
+          request_ordinal: 0,
+          signal_rank: 1
+        }] };
       }
       if (sql.includes("estimated_tokens") && sql.includes("memory_count")) {
         return { rows: [{
@@ -1072,7 +1085,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     expect(nonsemantic).toMatchObject({ semanticRelevance: 0, lexicalRelevance: 0 });
   });
 
-  it("discards all semantic rank inputs when one query variant fails", async () => {
+  it("discards all semantic rank inputs when the semantic family query fails", async () => {
     let semanticQueries = 0;
     let nonsemanticRankQueries = 0;
     const client = databaseClient((sql) => {
@@ -1122,27 +1135,14 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       // Fused candidate vectors are loaded once per preview instead of being rendered
       // inside every rank query.
       if (sql.includes("embedding::text AS embedding")) return { rows: [] };
-      if (sql.includes("chronicle_rank:semantic")) {
+      if (sql.includes("chronicle_rank_batch:semantic")) {
         semanticQueries += 1;
-        if (semanticQueries === 2) throw new Error("second semantic rank failed");
-        return { rows: [{
-          candidate_id: "partial-semantic-chunk",
-          parent_memory_id: "partial-semantic-parent",
-          parent_turn_id: "turn-1",
-          parent_memory_kind: "turn_fiction",
-          parent_ordinal: 1,
-          parent_content: "Turn 1\nNarration: Partial semantic content must not survive.",
-          parent_token_estimate: 12,
-          parent_importance: 0.8,
-          parent_entities: [],
-          parent_entity_ids: [],
-          active_fact: true
-        }] };
+        throw new Error("semantic rank family failed");
       }
       // Fused candidate vectors are loaded once per preview instead of being rendered
       // inside every rank query.
       if (sql.includes("embedding::text AS embedding")) return { rows: [] };
-      if (sql.includes("chronicle_rank:")) {
+      if (sql.includes("chronicle_rank_batch:")) {
         nonsemanticRankQueries += 1;
         return { rows: [] };
       }
@@ -1180,7 +1180,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       request: { budgetTokens: 4_000, compression: "auto", recentTurns: 1, query: "quiet scene" }
     });
 
-    expect(semanticQueries).toBe(2);
+    expect(semanticQueries).toBe(1);
     expect(preview).toMatchObject({
       retrieval: {
         semanticAvailable: false,

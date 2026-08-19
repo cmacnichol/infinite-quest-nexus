@@ -2,7 +2,13 @@ import { resolve } from "node:path";
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { createDatabasePool, initialOwnerId, type DatabasePool, withTransaction } from "../../packages/database/src/pool.js";
+import {
+  createDatabasePool,
+  initialOwnerId,
+  type DatabaseClient,
+  type DatabasePool,
+  withTransaction
+} from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createPostgresChronicleGenerationTransactionPort } from "../../packages/database/src/chronicle-repository.js";
 import type { ChronicleContextPreview } from "../../packages/application/src/memory/index.js";
@@ -100,9 +106,27 @@ integration("Chronicle retrieval evaluation integration seam", () => {
       expect(relevantChunks[0]!.embedding).toBe("[1,0]");
       expect(chunks.rows.filter((chunk) => !relevantChunks.includes(chunk)).every((chunk) => chunk.embedding === "[0,1]")).toBe(true);
 
-      const report = await evaluateChronicleRetrieval(retrievalApplication(), database, seededCorpus, {
+      const rankStatements: string[] = [];
+      const intercepted = new Proxy(database, {
+        get(target, property) {
+          if (property === "query") {
+            return (statement: unknown, values?: readonly unknown[]) => {
+              if (typeof statement === "string" && statement.includes("/* chronicle_rank")) {
+                rankStatements.push(statement);
+              }
+              return target.query(statement as never, values as never);
+            };
+          }
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+      }) as DatabaseClient;
+      const report = await evaluateChronicleRetrieval(retrievalApplication(), intercepted, seededCorpus, {
         implementation: "chunked_hybrid"
       });
+      expect(rankStatements).not.toHaveLength(0);
+      expect(rankStatements.length).toBeLessThanOrEqual(4);
+      expect(rankStatements.every((statement) => statement.includes("chronicle_rank_batch:"))).toBe(true);
       expect(report.cases[0]).toMatchObject({
         leakage: { crossCampaign: 0, futureTurn: 0, supersededFact: 0 }
       });

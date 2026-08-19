@@ -391,15 +391,82 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     expect.soft(JSON.stringify(historicalSummary.scopes)).not.toContain("later turn reveals the obsidian vault answer");
 
     embeddingQueries.length = 0;
-    const preview = await generation.buildContextPreview(pool, {
-      ...fixture,
-      request: {
-        budgetTokens: 4_096,
-        compression: "auto",
-        query: "Shade seeks the key [[roll d20 target 18]].",
-        recentTurns: 1,
-        throughTurnNumber: 2
-      }
+    const statements: string[] = [];
+    const batchRequests = {
+      semantic: [
+        { signal: "semantic", variant: "action" },
+        { signal: "semantic", variant: "entity_expanded" },
+        { signal: "semantic", variant: "scene" },
+        { signal: "semantic", variant: "open_thread" }
+      ],
+      full_text: [
+        { signal: "full_text", variant: "action" },
+        { signal: "full_text", variant: "entity_expanded" },
+        { signal: "full_text", variant: "scene" },
+        { signal: "full_text", variant: "open_thread" }
+      ],
+      entity: [{ signal: "entity", variant: "entity_expanded" }],
+      static: [
+        { signal: "recency", variant: "action" },
+        { signal: "chronology", variant: "action" },
+        { signal: "importance", variant: "action" },
+        { signal: "kind", variant: "action" },
+        { signal: "temporal", variant: "action" }
+      ]
+    } as const;
+    const batchRows: Array<Readonly<{
+      family: keyof typeof batchRequests;
+      requestOrdinal: number;
+      signal: string;
+      variant: string;
+      candidateId: string;
+      parentMemoryId: string;
+      signalRank: number;
+    }>> = [];
+    const preview = await withTransaction(pool, async (database) => {
+      const intercepted = new Proxy(database, {
+        get(target, property) {
+          if (property === "query") {
+            return async (statement: unknown, values?: readonly unknown[]) => {
+              if (typeof statement === "string") statements.push(statement);
+              const result = await target.query(statement as never, values as never);
+              const family = typeof statement === "string"
+                ? statement.match(/chronicle_rank_batch:(semantic|full_text|entity|static)/)?.[1]
+                : undefined;
+              if (family) {
+                const typedFamily = family as keyof typeof batchRequests;
+                for (const row of result.rows as unknown as Array<Record<string, unknown>>) {
+                  const requestOrdinal = Number(row.request_ordinal);
+                  const request = batchRequests[typedFamily][requestOrdinal];
+                  if (!request) continue;
+                  batchRows.push({
+                    family: typedFamily,
+                    requestOrdinal,
+                    signal: request.signal,
+                    variant: request.variant,
+                    candidateId: String(row.candidate_id),
+                    parentMemoryId: String(row.parent_memory_id),
+                    signalRank: Number(row.signal_rank)
+                  });
+                }
+              }
+              return result;
+            };
+          }
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+      }) as DatabaseClient;
+      return generation.buildContextPreview(intercepted, {
+        ...fixture,
+        request: {
+          budgetTokens: 4_096,
+          compression: "auto",
+          query: "Shade seeks the key [[roll d20 target 18]].",
+          recentTurns: 1,
+          throughTurnNumber: 2
+        }
+      });
     });
     const serialized = JSON.stringify(preview.scopes);
 
@@ -428,6 +495,34 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     expect(diversity.collapsedChunks).toBeGreaterThan(0);
     const targetParents = (preview.scopes as { chronicle: Array<{ id: string; content: string }> }).chronicle
       .filter((memory) => memory.id === target.id);
+    expect((preview.scopes as { chronicle: Array<{ id: string }> }).chronicle.map((entry) => entry.id))
+      .toEqual([target.id, ...[openThread.id, replacementId].sort()]);
+    expect(statements.filter((sql) => sql.includes("chronicle_rank_batch:"))).toHaveLength(4);
+    expect(statements.some((sql) => sql.includes("chronicle_rank:"))).toBe(false);
+    expect(new Set(statements.flatMap((sql) => (
+      sql.match(/chronicle_rank_batch:(semantic|full_text|entity|static)/)?.[1] ?? []
+    )))).toEqual(new Set(["semantic", "full_text", "entity", "static"]));
+    expect(statements.filter((sql) => /chronicle_rank_batch:(semantic|full_text|entity)/.test(sql))
+      .every((sql) => sql.includes("request_variants(request_ordinal,variant_kind,"))).toBe(true);
+    // No chunk satisfies the fixture's multi-term websearch queries. Keeping this empty is
+    // part of the pre-batch rank semantics, while the other families return ranked rows.
+    expect(batchRows.some((row) => row.family === "full_text")).toBe(false);
+    expect(new Set(batchRows.map((row) => `${row.signal}:${row.variant}`))).toEqual(new Set([
+      "semantic:action", "semantic:entity_expanded", "semantic:scene", "semantic:open_thread",
+      "entity:entity_expanded", "recency:action", "chronology:action", "importance:action",
+      "kind:action", "temporal:action"
+    ]));
+    for (const request of new Set(batchRows.map((row) => `${row.family}:${row.requestOrdinal}`))) {
+      const rows = batchRows.filter((row) => `${row.family}:${row.requestOrdinal}` === request);
+      expect(rows.map((row) => row.signalRank), request).toEqual(
+        Array.from({ length: rows.length }, (_unused, index) => index + 1)
+      );
+      expect(rows, request).toEqual([...rows].sort((left, right) => (
+        left.signalRank - right.signalRank
+        || left.parentMemoryId.localeCompare(right.parentMemoryId)
+        || left.candidateId.localeCompare(right.candidateId)
+      )));
+    }
     expect(targetParents).toHaveLength(1);
     expect(targetParents[0]?.content).toMatch(/Player action:[\s\S]+Narration:/);
     expect(targetParents[0]?.content).not.toBe("The Moon Warden carries the silver key.");
@@ -501,8 +596,9 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
         get(target, property) {
           if (property === "query") {
             return (statement: unknown, values?: readonly unknown[]) => {
-              if (typeof statement === "string" && statement.includes("/* chronicle_rank:")) {
-                rankLimits.push(Number(values?.at(-1)));
+              if (typeof statement === "string" && statement.includes("/* chronicle_rank_batch:")) {
+                const parameter = Number(statement.match(/LIMIT \$(\d+)/)?.[1]);
+                rankLimits.push(Number(values?.[parameter - 1]));
               }
               return target.query(statement as never, values as never);
             };
@@ -690,7 +786,7 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
         get(target, property) {
           if (property === "query") {
             return (statement: unknown, values?: readonly unknown[]) => {
-              if (typeof statement === "string" && statement.includes("/* chronicle_rank:")) {
+              if (typeof statement === "string" && statement.includes("/* chronicle_rank_batch:")) {
                 chunkRankStatements.push(statement);
               }
               return target.query(statement as never, values as never);
@@ -797,7 +893,7 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
           if (property === "query") {
             return (statement: unknown, values?: readonly unknown[]) => {
               if (typeof statement === "string") {
-                if (statement.includes("/* chronicle_rank:")) rankStatements.push(statement);
+                if (statement.includes("/* chronicle_rank_batch:")) rankStatements.push(statement);
                 if (statement.includes("embedding::text AS embedding")) vectorLoads.push(statement);
               }
               return target.query(statement as never, values as never);
@@ -910,7 +1006,7 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
         get(target, property) {
           if (property === "query") {
             return (statement: unknown, values?: readonly unknown[]) => {
-              if (typeof statement === "string" && statement.includes("/* chronicle_rank:")) {
+              if (typeof statement === "string" && statement.includes("/* chronicle_rank_batch:")) {
                 chunkRankStatements.push(statement);
               }
               return target.query(statement as never, values as never);
@@ -1043,7 +1139,7 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
         get(target, property) {
           if (property === "query") {
             return async (statement: unknown, values?: readonly unknown[]) => {
-              if (typeof statement === "string" && statement.includes("/* chronicle_rank:")) {
+              if (typeof statement === "string" && statement.includes("/* chronicle_rank_batch:")) {
                 chunkRankStatements.push(statement);
               }
               const result = await target.query(statement as never, values as never);
@@ -1317,7 +1413,7 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
           get(target, property) {
             if (property === "query") {
               return (statement: unknown, values?: readonly unknown[]) => {
-                if (typeof statement === "string" && statement.includes("/* chronicle_rank:")) {
+                if (typeof statement === "string" && statement.includes("/* chronicle_rank_batch:")) {
                   chunkRankStatements.push(statement);
                 }
                 return target.query(statement as never, values as never);
