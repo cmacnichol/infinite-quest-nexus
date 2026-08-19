@@ -1,4 +1,4 @@
-import type { CampaignStoreController, CampaignProjection } from "@infinite-quest/client-core";
+import { recentTurnSpine, type CampaignStoreController, type CampaignProjection } from "@infinite-quest/client-core";
 import type { CampaignApi } from "@infinite-quest/client-web";
 import type { CampaignRuntimeStateResponse, TurnListResponse } from "@infinite-quest/contracts";
 import type { StoryUiModel } from "./story-player-model";
@@ -10,6 +10,7 @@ export interface StoryHistoryController {
   previous(): Promise<void>;
   next(): Promise<void>;
   jump(turnNumber: number): void;
+  loadTurn(turnNumber: number): Promise<boolean>;
   openCompleteHistory(): Promise<StoryHistoryResult>;
   retryCompleteHistory(): Promise<StoryHistoryResult>;
   inspect(turnNumber: number): Promise<CampaignRuntimeStateResponse | null>;
@@ -53,10 +54,7 @@ function sortedTurns<T extends { turnNumber: number }>(turns: readonly T[]): rea
   return [...turns].sort((left, right) => left.turnNumber - right.turnNumber);
 }
 
-export function latestCampaignSpine<T extends { turnNumber: number }>(turns: readonly T[]): readonly T[] {
-  const ordered = [...turns].sort((left, right) => left.turnNumber - right.turnNumber);
-  return ordered.slice(-5);
-}
+export const latestCampaignSpine = recentTurnSpine;
 
 function currentEpoch(projection: Readonly<CampaignProjection>): HistoryEpoch {
   const turns = sortedTurns(projection.turns);
@@ -149,6 +147,41 @@ export function createStoryHistoryController(options: StoryHistoryControllerOpti
     if (index > 0) options.model.setViewTurnNumber(turns[index - 1]!.turnNumber);
   };
 
+  const loadTurn = async (turnNumber: number): Promise<boolean> => {
+    const target = positiveTurnNumber(turnNumber);
+    const initial = options.campaignStore.store.get();
+    const latest = initial.campaign?.activeTurnNumber ?? 0;
+    if (target === null || target > latest) return false;
+    if (initial.turns.some((turn) => turn.turnNumber === target)) {
+      options.model.setViewTurnNumber(target);
+      return true;
+    }
+    const guard = startRequest(initial.nextTurnsCursor);
+    if (guard === null) return false;
+    let cursor = guard.cursor;
+    const pages: TurnListResponse[] = [];
+    const seen = new Set<string>();
+    let found = false;
+    while (cursor !== null && !found) {
+      if (seen.has(cursor)) throw new Error(`Story history cursor did not advance: ${cursor}`);
+      seen.add(cursor);
+      const page = await olderPage({ ...guard, cursor });
+      if (page === null) return false;
+      pages.push(page);
+      found = page.turns.some((turn) => turn.turnNumber === target);
+      cursor = page.nextCursor;
+    }
+    if (!found || !isCurrent(guard)) return false;
+    options.campaignStore.prependOlderTurns({
+      campaignId: guard.campaignId,
+      turns: pages.flatMap((page) => page.turns),
+      nextCursor: cursor
+    });
+    projection = options.campaignStore.store.get();
+    options.model.setViewTurnNumber(target);
+    return true;
+  };
+
   const complete = (): Promise<StoryHistoryResult> => {
     if (completeHistory !== null && isCurrent(completeHistory.guard)) return completeHistory.promise;
     const initial = options.campaignStore.store.get();
@@ -233,6 +266,7 @@ export function createStoryHistoryController(options: StoryHistoryControllerOpti
       const next = turns.find((turn) => turn.turnNumber > selected && turn.turnNumber <= latest);
       if (next) options.model.setViewTurnNumber(next.turnNumber);
     },
+    loadTurn,
     jump(turnNumber) {
       const target = positiveTurnNumber(turnNumber);
       const latest = projection.campaign?.activeTurnNumber ?? 0;

@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   illustrationConfigResponseSchema,
+  illustrationResolutionResponseSchema,
   illustrationSegmentsResponseSchema,
-  imageJobsResponseSchema
+  imageJobsResponseSchema,
+  segmentImageResponseSchema
 } from "../../packages/contracts/src/index.js";
 
 const CAMPAIGN_ID = "11111111-1111-4111-8111-111111111111";
@@ -122,5 +124,54 @@ describe("illustration client contracts", () => {
     expect(imageJobsResponseSchema.safeParse({ jobs: [{ ...imageJob, id: "not-a-uuid" }] }).success).toBe(false);
     expect(imageJobsResponseSchema.safeParse({ jobs: [{ ...imageJob, createdAt: "not-a-timestamp" }] }).success).toBe(false);
     expect(imageJobsResponseSchema.safeParse({ jobs: [{ ...imageJob, providerProgress: "not-a-number" }] }).success).toBe(false);
+  });
+
+  it("normalizes unknown internal lifecycle values to a safe terminal state", () => {
+    const segment = illustrationSegmentsResponseSchema.parse({
+      segments: [{
+        ...persistedSegment,
+        setStatus: "future_set_state",
+        status: "future_segment_state",
+        imageJobStatus: "future_image_state",
+        promptJobStatus: "future_prompt_state"
+      }]
+    }).segments[0]!;
+    const job = imageJobsResponseSchema.parse({ jobs: [{ ...imageJob, status: "future_image_state" }] }).jobs[0]!;
+    const queuedImage = segmentImageResponseSchema.parse({
+      id: JOB_ID,
+      duplicate: false,
+      segmentId: SEGMENT_ID,
+      variantIndex: 0,
+      status: "future_enqueue_state"
+    });
+    const resolution = illustrationResolutionResponseSchema.parse({
+      id: JOB_ID,
+      campaignId: CAMPAIGN_ID,
+      turnId: TURN_ID,
+      sourcePolicy: "future_policy",
+      matchingScope: "campaign",
+      confidenceProfile: "balanced",
+      status: "future_resolution_state",
+      selectedAssetId: null,
+      selectedScore: null,
+      resolvedThreshold: null,
+      algorithmVersion: "v1",
+      imageJobId: null,
+      reasonCode: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+      completedAt: null,
+      candidates: []
+    });
+
+    expect(segment).toMatchObject({
+      setStatus: "unknown",
+      status: "unknown",
+      imageJobStatus: "unknown",
+      promptJobStatus: "unknown"
+    });
+    expect(job.status).toBe("unknown");
+    expect(queuedImage.status).toBe("unknown");
+    expect(resolution).toMatchObject({ sourcePolicy: "unknown", status: "unknown" });
   });
 });

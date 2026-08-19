@@ -96,12 +96,18 @@ function historicalState(turnNumber: number, continuitySummary: string): Campaig
     updatedAt: "2026-08-18T00:00:00.000Z",
     continuitySummary,
     openThreads: ["Find the observatory."],
-    canonicalFacts: [],
+    canonicalFacts: [{ id: null, content: "The observatory lens is cracked." }],
     scratchpad: "Private campaign scratchpad.",
-    trackers: [],
+    trackers: [{ id: "moon", name: "Moon phase", value: "Waxing", rules: "Advance after rest." }],
     rpgStats: [{ id: "courage", name: "Courage", value: 8, note: "Inspector-only mechanics." }],
-    eventTriggers: [],
-    pendingEventTriggers: [],
+    eventTriggers: [{
+      id: "bell", label: "Midnight bell", timing: "after", condition: "After midnight", effect: "The bell rings.",
+      addTextAfter: false, triggeredCount: 1, lastTriggeredTurn: 5, lastTriggeredAt: "2026-08-18T00:00:00.000Z"
+    }],
+    pendingEventTriggers: [{
+      id: "echo", sourceTriggerId: "bell", name: "Bell echo", timing: "after", condition: "", effect: "",
+      instructions: "Echo the bell once.", reason: "Queued by the bell.", sourceTurn: 5
+    }],
     recordedResolution: {
       statName: "Courage",
       base: 8,
@@ -160,6 +166,7 @@ function composition(options: {
   readonly list?: ReturnType<typeof vi.fn>;
   readonly syncStatus?: ReturnType<typeof vi.fn>;
   readonly turns?: ReturnType<typeof vi.fn>;
+  readonly readableExport?: ReturnType<typeof vi.fn>;
   readonly state?: ReturnType<typeof vi.fn>;
   readonly inspectState?: ReturnType<typeof vi.fn>;
   readonly session?: ReturnType<typeof vi.fn>;
@@ -171,6 +178,7 @@ function composition(options: {
     api: {
       campaigns: {
         list: options.list ?? vi.fn().mockResolvedValue({ campaigns: [campaignSummary()] }),
+        readableExport: options.readableExport ?? vi.fn().mockResolvedValue(new Blob(["# Accepted story"])),
         turns: options.turns ?? vi.fn(),
         state: options.state ?? vi.fn(),
         inspectState: options.inspectState ?? options.state ?? vi.fn()
@@ -213,20 +221,95 @@ describe("Story Player page shell", () => {
 
   it("requests the backend readable export only after complete Story history is available", async () => {
     const page = fixture();
-    const fetch = vi.fn().mockResolvedValue({ ok: true, text: vi.fn().mockResolvedValue("# Accepted story") });
-    vi.stubGlobal("fetch", fetch);
+    const readableExport = vi.fn().mockResolvedValue(new Blob(["# Accepted story"]));
     const createObjectUrl = vi.fn().mockReturnValue("blob:story-export");
     const revokeObjectUrl = vi.fn();
     vi.stubGlobal("URL", { createObjectURL: createObjectUrl, revokeObjectURL: revokeObjectUrl });
-    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: null }, composition());
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: null }, composition({ readableExport }));
     await settle();
 
     page.document.querySelector<HTMLButtonElement>("[data-tool-action='export-markdown']")?.click();
-    await vi.waitFor(() => expect(fetch).toHaveBeenCalledWith(
-      `/api/v1/campaigns/${campaignId}/readable-export?format=markdown`
-    ));
+    await vi.waitFor(() => expect(readableExport).toHaveBeenCalledWith(campaignId, "markdown"));
     expect(createObjectUrl).toHaveBeenCalledTimes(1);
     expect(revokeObjectUrl).toHaveBeenCalledWith("blob:story-export");
+    mounted.dispose();
+  });
+
+  it("restores Campaign Tools focus immediately for every export action", async () => {
+    const page = fixture();
+    Object.defineProperty(page.window, "location", { configurable: true, value: { origin: "https://story.example.test" } });
+    const printDocument = { open: vi.fn(), write: vi.fn(), close: vi.fn(), images: [] };
+    Object.defineProperty(page.window, "open", {
+      configurable: true,
+      value: vi.fn().mockReturnValue({ document: printDocument, close: vi.fn(), print: vi.fn(), opener: {} })
+    });
+    vi.stubGlobal("URL", { createObjectURL: vi.fn().mockReturnValue("blob:story-export"), revokeObjectURL: vi.fn() });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: null }, composition());
+    await settle();
+    const summary = page.document.querySelector<HTMLElement>("[data-campaign-tools] summary");
+    if (!summary) throw new Error("Campaign Tools summary is missing.");
+    const focus = vi.spyOn(summary, "focus");
+
+    for (const action of ["export-markdown", "export-html", "export-pdf"] as const) {
+      const button = page.document.querySelector<HTMLButtonElement>(`[data-tool-action='${action}']`);
+      if (!button) throw new Error(`Missing ${action} control.`);
+      button.focus();
+      button.click();
+      expect(focus).toHaveBeenCalledTimes(action === "export-markdown" ? 1 : action === "export-html" ? 2 : 3);
+      await settle();
+    }
+    mounted.dispose();
+  });
+
+  it("prints the first stored variant from every illustration segment in complete accepted history", async () => {
+    const page = fixture();
+    Object.defineProperty(page.window, "location", { configurable: true, value: { origin: "https://story.example.test" } });
+    const printDocument = { open: vi.fn(), write: vi.fn(), close: vi.fn(), images: [] };
+    const printWindow = { document: printDocument, close: vi.fn(), print: vi.fn(), opener: {} };
+    Object.defineProperty(page.window, "open", { configurable: true, value: vi.fn().mockReturnValue(printWindow) });
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 2 }, activeTurnNumber: 2, turns: turnWindow([1, 2])
+    });
+    const segmentResponse = {
+      segments: [
+        {
+          turnId: "00000000-0000-4000-8000-000000000001", id: "segment-one", ordinal: 0, text: "First segment.",
+          variants: [
+            { variantIndex: 1, url: "https://story.example.test/assets/one-second.png" },
+            { variantIndex: 0, url: "https://story.example.test/assets/one-first.png" }
+          ]
+        },
+        {
+          turnId: "00000000-0000-4000-8000-000000000001", id: "segment-two", ordinal: 1, text: "Second segment.",
+          variants: [{ variantIndex: 0, url: "https://story.example.test/assets/two-first.png" }]
+        },
+        {
+          turnId: "00000000-0000-4000-8000-000000000002", id: "segment-three", ordinal: 0, text: "Third segment.",
+          variants: [{ variantIndex: 0, url: "https://story.example.test/assets/three-first.png" }]
+        }
+      ]
+    };
+    const segments = vi.fn().mockResolvedValue(segmentResponse);
+    const base = composition({ syncStatus: vi.fn().mockResolvedValue(loaded) });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 2 }, {
+      ...base,
+      illustrations: {
+        ...base.illustrations,
+        config: vi.fn().mockResolvedValue({ enabled: false, sourcePolicy: "off" }),
+        segments
+      }
+    } as StoryPlayerComposition);
+    await settle();
+
+    page.document.querySelector<HTMLButtonElement>("[data-tool-action='export-pdf']")?.click();
+    await vi.waitFor(() => expect(printWindow.print).toHaveBeenCalledTimes(1));
+
+    expect(segments).toHaveBeenCalledWith(campaignId, expect.any(AbortSignal));
+    const markup = String(printDocument.write.mock.calls[0]?.[0]);
+    expect(markup).toContain("/assets/one-first.png");
+    expect(markup).not.toContain("/assets/one-second.png");
+    expect(markup).toContain("/assets/two-first.png");
+    expect(markup).toContain("/assets/three-first.png");
     mounted.dispose();
   });
 
@@ -276,7 +359,19 @@ describe("Story Player page shell", () => {
     expect(styles).toMatch(/@media \(min-width: 320px\)/u);
     expect(styles).toMatch(/@media \(prefers-reduced-motion:\s*reduce\)/u);
     expect(styles).toMatch(/overflow-x:\s*clip;/u);
-    expect(styles).not.toMatch(/border-radius\s*:\s*(?!0(?:px)?\s*;)/u);
+    expect(styles).not.toMatch(/border-radius\s*:(?!\s*0(?:px)?\s*;)/u);
+    expect(styles).toMatch(/\.story-foldout\s*\{[\s\S]*?column-gap:\s*0;/u);
+    expect(styles).not.toMatch(/\.story-foldout\s*\{[\s\S]*?gap:\s*var\(--story-reader-gutter\);/u);
+    expect(styles).toMatch(/\.story-leaf,[\s\S]*?\.story-composer\s*\{[\s\S]*?calc\(100% - \(2 \* var\(--story-reader-gutter\)\)\)/u);
+  });
+
+  it("scopes square responsive dialogs and 44px targets to the replacement Story page", () => {
+    const styles = readFileSync(new URL("../../apps/web-next/src/story-player.css", import.meta.url), "utf8");
+
+    expect(styles).toMatch(/\.story-history-dialog,\s*\.story-tool-dialog\s*\{[\s\S]*?width:\s*min\(860px, calc\(100vw - 32px\)\);[\s\S]*?max-height:\s*calc\(100dvh - 32px\);[\s\S]*?border-radius:\s*0;/u);
+    expect(styles).toMatch(/\.story-history-dialog::backdrop,\s*\.story-tool-dialog::backdrop\s*\{[\s\S]*?background:\s*var\(--artwork-overlay\);/u);
+    expect(styles).toMatch(/main\[data-page="story-player"\]\s*:is\(button, a, input, select, textarea, summary\)\s*\{[\s\S]*?min-inline-size:\s*44px;[\s\S]*?min-block-size:\s*44px;/u);
+    expect(styles).toMatch(/\.story-clear-draft\s*\{[\s\S]*?width:\s*44px;[\s\S]*?height:\s*44px;/u);
   });
 
   it("restores Story navigation and keeps the compact Campaign Tools disclosure viewport-safe", () => {
@@ -685,6 +780,26 @@ describe("Story Player page shell", () => {
     mounted.dispose();
   });
 
+  it("restores the visible accepted action before Retry Latest focuses the composer", async () => {
+    const page = fixture();
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 1 }, activeTurnNumber: 1, turns: turnWindow([1])
+    });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({
+      syncStatus: vi.fn().mockResolvedValue(loaded)
+    }));
+    await settle();
+    const textarea = page.document.querySelector<HTMLTextAreaElement>("[data-story-draft]");
+    if (!textarea) throw new Error("Story composer is missing.");
+    textarea.value = "Unsaved stale text.";
+    textarea.dispatchEvent(new page.window.Event("input", { bubbles: true }));
+
+    page.document.querySelector<HTMLButtonElement>("[data-action='retry-latest-generation']")?.click();
+
+    expect(page.document.querySelector<HTMLTextAreaElement>("[data-story-draft]")?.value).toBe("Action 1");
+    mounted.dispose();
+  });
+
   it("keeps accepted narration and Continue Story available when illustration loading fails", async () => {
     const page = fixture();
     const loaded = sync({
@@ -759,7 +874,7 @@ describe("Story Player page shell", () => {
     mounted.dispose();
   });
 
-  it("reports the resolved rendered turn when a deep-linked persisted turn is outside the loaded window", async () => {
+  it("pages the bounded persisted history before rendering an older deep-linked turn", async () => {
     const page = fixture();
     const loaded = sync({
       campaign: { ...sync().campaign, activeTurnNumber: 9 },
@@ -784,15 +899,34 @@ describe("Story Player page shell", () => {
         }]
       }
     });
+    const turns = vi.fn().mockResolvedValue({ campaignId, turns: turnWindow([1, 2]).turns, nextCursor: null });
     const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 2 }, composition({
       list: vi.fn().mockResolvedValue({ campaigns: [campaignSummary({ activeTurnNumber: 9 })] }),
-      syncStatus: vi.fn().mockResolvedValue(loaded)
+      syncStatus: vi.fn().mockResolvedValue(loaded),
+      turns
     }));
-    await settle();
+    await vi.waitFor(() => expect(page.document.querySelector("[data-story-leaf] h1")?.textContent).toBe("Turn 2"));
 
-    expect(page.document.querySelector("[data-story-leaf] h1")?.textContent).toBe("Turn 9");
-    expect(page.document.querySelector(".story-command-row")?.textContent).toContain("Viewing latest turn");
-    expect(page.document.querySelector(".story-command-row")?.textContent).not.toContain("Viewing turn 2 of 9");
+    expect(turns).toHaveBeenCalledWith(campaignId, { before: "older-turns-available", limit: 200 }, undefined);
+    expect(page.document.querySelector(".story-command-row")?.textContent).toContain("Viewing turn 2 of 9");
+    mounted.dispose();
+  });
+
+  it("renders a not-found state instead of falling back to latest for an absent deep-linked turn", async () => {
+    const page = fixture();
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 9 },
+      activeTurnNumber: 9,
+      turns: { ...turnWindow([9]), nextCursor: "older-turns-available" }
+    });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 2 }, composition({
+      list: vi.fn().mockResolvedValue({ campaigns: [campaignSummary({ activeTurnNumber: 9 })] }),
+      syncStatus: vi.fn().mockResolvedValue(loaded),
+      turns: vi.fn().mockResolvedValue({ campaignId, turns: turnWindow([4, 5]).turns, nextCursor: null })
+    }));
+
+    await vi.waitFor(() => expect(page.document.querySelector("[data-story-error]")?.textContent).toContain("not found"));
+    expect(page.document.querySelector("[data-story-leaf]")).toBeNull();
     mounted.dispose();
   });
 
@@ -892,6 +1026,24 @@ describe("Story Player page shell", () => {
     page.document.querySelector<HTMLButtonElement>("[data-turn-number='5']")?.click();
     expect(page.document.querySelector("[data-story-leaf] h1")?.textContent).toBe("Turn 5");
     expect(spine?.querySelector("[aria-current='step']")?.getAttribute("data-turn-number")).toBe("5");
+    mounted.dispose();
+  });
+
+  it("aligns the compact Campaign Spine by scrolling its actual overflow rail", async () => {
+    const page = fixture();
+    const scrollTo = vi.fn();
+    page.window.HTMLElement.prototype.scrollTo = scrollTo;
+    Object.defineProperty(page.window.HTMLElement.prototype, "scrollWidth", { configurable: true, get: () => 420 });
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 5 }, activeTurnNumber: 5, turns: turnWindow([1, 2, 3, 4, 5])
+    });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 5 }, composition({
+      syncStatus: vi.fn().mockResolvedValue(loaded)
+    }));
+    await settle();
+
+    expect(scrollTo).toHaveBeenCalledWith({ left: expect.any(Number) });
+    expect((scrollTo.mock.instances[0] as HTMLElement).classList.contains("story-campaign-spine-content")).toBe(true);
     mounted.dispose();
   });
 
@@ -1045,6 +1197,11 @@ describe("Story Player page shell", () => {
     await settle();
     expect(state).toHaveBeenCalledWith(campaignId, 6, undefined);
     expect(page.document.querySelector("[data-story-state-inspector]")?.textContent).toContain("Archived continuity for turn six.");
+    expect(page.document.querySelector("[data-story-state-inspector]")?.textContent).toContain("The observatory lens is cracked.");
+    expect(page.document.querySelector("[data-story-state-inspector]")?.textContent).toContain("Private campaign scratchpad.");
+    expect(page.document.querySelector("[data-story-state-inspector]")?.textContent).toContain("Moon phase");
+    expect(page.document.querySelector("[data-story-state-inspector]")?.textContent).toContain("Midnight bell");
+    expect(page.document.querySelector("[data-story-state-inspector]")?.textContent).toContain("Bell echo");
     expect(page.document.querySelector("[data-story-reader]")?.textContent).not.toContain("Archived continuity for turn six.");
     expect(page.document.querySelector(".story-campaign-spine")?.textContent).not.toContain("Archived continuity for turn six.");
 

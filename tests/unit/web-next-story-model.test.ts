@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   STORY_READING_WIDTH_STORAGE_KEY,
   createStoryUiModel
@@ -93,6 +93,17 @@ describe("Story Player local UI model", () => {
     expect(model.get()).toEqual(expect.objectContaining({
       draft: "", choiceSelection: [], choiceBaseText: "", intentConfirmation: null
     }));
+  });
+
+  it("publishes a restored Retry Latest draft before focus can return to the composer", () => {
+    const model = createStoryUiModel({ draft: "Stale visible draft." }, memoryStorage());
+    const listener = vi.fn();
+    model.subscribe(listener);
+
+    model.restoreComposerDraft("Restored accepted action.");
+
+    expect(listener).toHaveBeenCalledWith(expect.objectContaining({ draft: "Restored accepted action." }));
+    expect(model.get().draft).toBe("Restored accepted action.");
   });
 
   it("holds continuous-reading presentation locally without accepting campaign authority", () => {

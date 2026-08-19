@@ -49,6 +49,7 @@ export interface StoryUiModel {
   setDraft(draft: string): void;
   syncComposer(campaignId: string, acceptedTurnNumber: number, turnControlStyle: unknown): void;
   setComposerDraft(draft: string): void;
+  restoreComposerDraft(draft: string): void;
   setChoiceDraft(selection: ChoiceDraftSelection, draft: string): void;
   setRequestedInputMode(mode: StoryTurnInputMode): void;
   setIntentConfirmation(intent: StoryIntentConfirmation | null): void;
@@ -214,6 +215,11 @@ export function createStoryUiModel(
       const selection = createChoiceDraftSelection(draft);
       if (state.draft === draft && !state.choiceSelection.length && state.choiceBaseText === selection.baseText && state.intentConfirmation === null) return;
       state = { ...state, draft, choiceSelection: selection.selectedIndexes, choiceBaseText: selection.baseText, intentConfirmation: null };
+    },
+    restoreComposerDraft(draft) {
+      const selection = createChoiceDraftSelection(draft);
+      if (state.draft === draft && !state.choiceSelection.length && state.choiceBaseText === selection.baseText && state.intentConfirmation === null) return;
+      publish({ ...state, draft, choiceSelection: selection.selectedIndexes, choiceBaseText: selection.baseText, intentConfirmation: null });
     },
     setChoiceDraft(selection, draft) {
       const selectedIndexes = selection.selectedIndexes.filter((index) => Number.isSafeInteger(index) && index >= 0);

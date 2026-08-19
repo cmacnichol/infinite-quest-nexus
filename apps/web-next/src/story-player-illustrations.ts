@@ -7,6 +7,7 @@ import type {
 import type { Clock, DelayScheduler, IdFactory } from "@infinite-quest/client-core";
 
 export type StoryIllustrationStatus = "idle" | "loading" | "disabled" | "ready" | "unavailable";
+export type StoryIllustrationAction = "regenerate" | "retry" | "generate_missing" | "rebuild" | "provenance" | "rematch";
 type IllustrationVariant = IllustrationSegment["variants"][number];
 
 export interface StoryIllustrationState {
@@ -21,6 +22,7 @@ export interface StoryIllustrationState {
   readonly selectedVariant: IllustrationVariant | null;
   readonly prompt: string;
   readonly provenance: IllustrationResolutionResponse | null;
+  readonly pendingAction: StoryIllustrationAction | null;
   readonly message: string | null;
 }
 
@@ -59,11 +61,14 @@ const INITIAL_STATE: StoryIllustrationState = {
   selectedVariant: null,
   prompt: "",
   provenance: null,
+  pendingAction: null,
   message: null
 };
 
 function terminal(status: string | null): boolean {
-  return status === null || ["completed", "failed", "cancelled", "canceled", "skipped", "expired"].includes(status.toLowerCase());
+  return status === null || !new Set([
+    "queued", "refining", "generating", "provider_pending", "downloading", "recoverable", "matching", "generation_queued"
+  ]).has(status.toLowerCase());
 }
 
 function workIsActive(segments: readonly IllustrationSegment[]): boolean {
@@ -82,6 +87,33 @@ function snapshot(state: StoryIllustrationState): StoryIllustrationState {
 
 function unavailable(message: string): Pick<StoryIllustrationState, "status" | "message"> {
   return { status: "unavailable", message: `Illustrations are unavailable. ${message}` };
+}
+
+function sourceSupportsGeneration(config: IllustrationConfigResponse | null): boolean {
+  return config?.sourcePolicy === "library_then_generate" || config?.sourcePolicy === "generate_only";
+}
+
+function sourceSupportsMatching(config: IllustrationConfigResponse | null): boolean {
+  return config?.sourcePolicy === "library_only" || config?.sourcePolicy === "library_then_generate";
+}
+
+function retryableImageJob(segment: IllustrationSegment | null): boolean {
+  return segment?.imageJobId !== null
+    && segment?.imageJobId !== undefined
+    && ["recoverable", "failed", "cancelled", "expired"].includes(segment.imageJobStatus ?? "");
+}
+
+export function storyIllustrationCapabilities(state: Readonly<StoryIllustrationState>) {
+  const canGenerate = state.status === "ready" && sourceSupportsGeneration(state.config);
+  const canMatch = state.status === "ready" && sourceSupportsMatching(state.config);
+  return {
+    busy: state.pendingAction !== null,
+    canGenerate,
+    canMatch,
+    canRegenerate: canGenerate && state.selectedSegment !== null,
+    canRetry: canGenerate && retryableImageJob(state.selectedSegment),
+    canInspectProvenance: canMatch && state.selectedSegment !== null
+  } as const;
 }
 
 /**
@@ -184,7 +216,7 @@ export function createStoryIllustrationController(options: StoryIllustrationCont
     publish({ ...next, ...selected(next) });
   };
 
-  const actionScope = () => {
+  const actionScope = (supported: (config: IllustrationConfigResponse | null) => boolean) => {
     const signal = currentSignal();
     if (
       disposed
@@ -195,19 +227,28 @@ export function createStoryIllustrationController(options: StoryIllustrationCont
       || state.config === null
       || !state.config.enabled
       || state.config.sourcePolicy === "off"
+      || state.pendingAction !== null
+      || !supported(state.config)
     ) return null;
     return { campaignId: state.campaignId, turnId: state.turnId, epoch, signal };
   };
-  const afterAction = async (action: (scope: NonNullable<ReturnType<typeof actionScope>>) => Promise<unknown>, refresh = true) => {
-    const scope = actionScope();
+  const afterAction = async (
+    pendingAction: StoryIllustrationAction,
+    supported: (config: IllustrationConfigResponse | null) => boolean,
+    action: (scope: NonNullable<ReturnType<typeof actionScope>>) => Promise<unknown>,
+    refresh = true
+  ) => {
+    const scope = actionScope(supported);
     if (scope === null) return;
+    publish({ ...state, pendingAction, message: null });
     try {
       await action(scope);
       if (!isCurrent(scope.epoch, scope.campaignId, scope.turnId)) return;
       if (refresh) await load(scope.campaignId, scope.turnId);
+      else publish({ ...state, pendingAction: null });
     } catch {
       if (isCurrent(scope.epoch, scope.campaignId, scope.turnId)) {
-        publish({ ...state, ...unavailable("The requested image operation could not be completed.") });
+        publish({ ...state, pendingAction: null, ...unavailable("The requested image operation could not be completed.") });
       }
     }
   };
@@ -227,27 +268,31 @@ export function createStoryIllustrationController(options: StoryIllustrationCont
       const next = { ...state, prompt };
       publish(next);
     },
-    regenerate: async () => afterAction(async (scope) => {
+    regenerate: async () => {
       const segment = state.selectedSegment;
       if (!segment) return;
-      await options.illustrations.regenerateSegmentImage(segment.id, { prompt: state.prompt, variantIndex: state.selectedVariant?.variantIndex ?? 0 }, scope.signal);
-    }),
-    retryJob: async () => afterAction(async (scope) => {
+      return afterAction("regenerate", sourceSupportsGeneration, async (scope) => {
+        await options.illustrations.regenerateSegmentImage(segment.id, { prompt: state.prompt, variantIndex: state.selectedVariant?.variantIndex ?? 0 }, scope.signal);
+      });
+    },
+    retryJob: async () => {
       const jobId = state.selectedSegment?.imageJobId;
-      if (!jobId) return;
-      await options.illustrations.retryImageJob(jobId, scope.signal);
-    }),
-    generateMissing: async () => afterAction(async (scope) => {
+      if (!jobId || !retryableImageJob(state.selectedSegment)) return;
+      return afterAction("retry", sourceSupportsGeneration, async (scope) => {
+        await options.illustrations.retryImageJob(jobId, scope.signal);
+      });
+    },
+    generateMissing: async () => afterAction("generate_missing", sourceSupportsGeneration, async (scope) => {
       await options.illustrations.generateTurnSegments(scope.turnId, { mode: "missing", idempotencyKey: options.idFactory.create() }, scope.signal);
     }),
-    rebuild: async () => afterAction(async (scope) => {
+    rebuild: async () => afterAction("rebuild", sourceSupportsGeneration, async (scope) => {
       await options.illustrations.generateTurnSegments(scope.turnId, { mode: "rebuild", idempotencyKey: options.idFactory.create() }, scope.signal);
     }),
-    loadProvenance: async () => afterAction(async (scope) => {
+    loadProvenance: async () => afterAction("provenance", sourceSupportsMatching, async (scope) => {
       const provenance = await options.illustrations.resolution(scope.turnId, scope.signal);
       if (isCurrent(scope.epoch, scope.campaignId, scope.turnId)) publish({ ...state, provenance });
     }, false),
-    rematch: async () => afterAction(async (scope) => {
+    rematch: async () => afterAction("rematch", sourceSupportsMatching, async (scope) => {
       await options.illustrations.rematch(scope.turnId, scope.signal);
     }),
     dispose() {

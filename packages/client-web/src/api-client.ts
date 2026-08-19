@@ -82,6 +82,7 @@ export interface WorldApi {
 
 export interface CampaignApi {
   list(signal?: AbortSignal): Promise<CampaignListResponse>;
+  readableExport(campaignId: string, format: "markdown" | "html", signal?: AbortSignal): Promise<Blob>;
   turns(campaignId: string, options?: TurnPageRequest | AbortSignal, signal?: AbortSignal): Promise<TurnListResponse>;
   state(campaignId: string, turnNumber?: number, signal?: AbortSignal): Promise<CampaignRuntimeStateResponse>;
   inspectState(campaignId: string, turnNumber: number, signal?: AbortSignal): Promise<CampaignRuntimeStateResponse>;
@@ -182,6 +183,13 @@ export function createNexusApiClient(options: NexusHttpClientOptions): NexusApiC
   };
   const campaigns: CampaignApi = {
     list: (signal) => http.request(withSignal({ method: "GET", path: "/campaigns", responseSchema: campaignListResponseSchema }, signal)),
+    readableExport: (campaignId, format, signal) => http.request({
+      method: "GET",
+      path: `/campaigns/${encodedPathSegment(campaignId)}/readable-export?format=${format}`,
+      accept: format === "markdown" ? "text/markdown" : "text/html",
+      responseKind: "blob",
+      ...(signal ? { signal } : {})
+    }),
     turns: (campaignId, options, signal) => {
       const [page, resolvedSignal] = splitOptions<TurnPageRequest>(options, signal);
       const request = validatedRequest(turnPageRequestSchema, page || {}, "GET", `/campaigns/${encodedPathSegment(campaignId)}/turns`);

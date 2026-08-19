@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createCampaignStore } from "../../packages/client-core/src/index.js";
+import { createCampaignStore, recentTurnSpine } from "../../packages/client-core/src/index.js";
 import type { CampaignSyncStatus, TurnListResponse, TurnSummary } from "../../packages/contracts/src/index.js";
 import { createStoryUiModel } from "../../apps/web-next/src/story-player-model.js";
 import {
@@ -76,6 +76,31 @@ describe("Story History controller", () => {
     controller.jump(2);
     expect(ui.get().viewTurnNumber).toBe(2);
     expect(latestCampaignSpine(turns).map((item) => item.turnNumber)).toEqual([5, 6, 7, 8, 9]);
+    expect(latestCampaignSpine).toBe(recentTurnSpine);
+  });
+
+  it("loads only as many bounded older pages as needed to resolve a deep-linked turn", async () => {
+    const { campaignStore, controller, turns, ui } = setup([turn(9), turn(10)], "before-9");
+    turns
+      .mockResolvedValueOnce({ campaignId, turns: [turn(5), turn(6), turn(7), turn(8)], nextCursor: "before-5" })
+      .mockResolvedValueOnce({ campaignId, turns: [turn(1), turn(2), turn(3), turn(4)], nextCursor: null });
+
+    await expect(controller.loadTurn(2)).resolves.toBe(true);
+
+    expect(turns).toHaveBeenCalledTimes(2);
+    expect(turns).toHaveBeenNthCalledWith(1, campaignId, { before: "before-9", limit: 200 }, undefined);
+    expect(turns).toHaveBeenNthCalledWith(2, campaignId, { before: "before-5", limit: 200 }, undefined);
+    expect(campaignStore.store.get().turns.map((item) => item.turnNumber)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(ui.get().viewTurnNumber).toBe(2);
+  });
+
+  it("rejects an absent deep-linked turn instead of selecting the latest loaded turn", async () => {
+    const { controller, turns, ui } = setup([turn(9)], "before-9");
+    turns.mockResolvedValue({ campaignId, turns: [turn(4), turn(5)], nextCursor: null });
+
+    await expect(controller.loadTurn(2)).resolves.toBe(false);
+
+    expect(ui.get().viewTurnNumber).toBe(9);
   });
 
   it("loads an older cursor page before selecting Previous across the window boundary", async () => {

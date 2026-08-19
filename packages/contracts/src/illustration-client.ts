@@ -5,6 +5,32 @@ import { apiTimestampSchema } from "./http.js";
 const nullableTimestampSchema = apiTimestampSchema.nullable();
 const nullableUuidSchema = z.uuid().nullable();
 
+function normalizedLifecycleSchema<const TValues extends readonly [string, ...string[]]>(values: TValues) {
+  const known = new Set<string>(values);
+  return z.string().trim().min(1).transform((value): TValues[number] | "unknown" => (
+    known.has(value) ? value as TValues[number] : "unknown"
+  ));
+}
+
+const illustrationSetStatusSchema = normalizedLifecycleSchema([
+  "provisional", "queued", "refining", "generating", "completed", "partial", "failed", "superseded", "orphaned"
+] as const);
+const illustrationSegmentStatusSchema = normalizedLifecycleSchema([
+  "queued", "refining", "generating", "completed", "recoverable", "failed"
+] as const);
+const imageJobStatusSchema = normalizedLifecycleSchema([
+  "queued", "generating", "provider_pending", "downloading", "completed", "recoverable", "failed", "cancelled", "expired"
+] as const);
+const promptJobStatusSchema = normalizedLifecycleSchema([
+  "queued", "refining", "completed", "fallback", "recoverable", "failed"
+] as const);
+const illustrationResolutionSourcePolicySchema = normalizedLifecycleSchema([
+  "library_only", "library_then_generate"
+] as const);
+const illustrationResolutionStatusSchema = normalizedLifecycleSchema([
+  "queued", "matching", "matched", "no_match", "generation_queued", "completed", "recoverable", "failed", "cancelled"
+] as const);
+
 export const illustrationConfigResponseSchema = z.object({
   enabled: z.boolean(),
   sourcePolicy: z.enum(["off", "library_only", "library_then_generate", "generate_only"]),
@@ -43,7 +69,7 @@ export const illustrationVariantSchema = z.object({
 export const illustrationSegmentSchema = z.object({
   setId: z.uuid(),
   turnId: z.uuid(),
-  setStatus: z.string().trim().min(1),
+  setStatus: illustrationSetStatusSchema,
   segmentWordCount: z.number().int().positive(),
   imagesPerSegment: z.union([z.literal(1), z.literal(2)]),
   promptMode: z.enum(["direct", "ai_refined"]),
@@ -54,17 +80,17 @@ export const illustrationSegmentSchema = z.object({
   startWord: z.number().int().min(0),
   endWord: z.number().int().min(0),
   text: z.string(),
-  status: z.string().trim().min(1),
+  status: illustrationSegmentStatusSchema,
   promptSource: z.string().nullable(),
   directPrompt: z.string(),
   resolvedPrompt: z.string(),
   variants: z.array(illustrationVariantSchema),
   imageJobId: nullableUuidSchema,
-  imageJobStatus: z.string().nullable(),
+  imageJobStatus: imageJobStatusSchema.nullable(),
   providerStatus: z.string().nullable(),
   providerProgress: z.coerce.number().nullable(),
   errorMessage: z.string().nullable(),
-  promptJobStatus: z.string().nullable()
+  promptJobStatus: promptJobStatusSchema.nullable()
 });
 
 export const illustrationSegmentsResponseSchema = z.object({
@@ -82,7 +108,7 @@ export const imageJobResponseSchema = z.object({
   imageCount: z.number().int().positive(),
   providerProfileId: nullableUuidSchema,
   model: z.string(),
-  status: z.string().trim().min(1),
+  status: imageJobStatusSchema,
   attempts: z.number().int().min(0),
   maxAttempts: z.number().int().positive(),
   size: z.string().trim().min(1),
@@ -116,7 +142,7 @@ export const segmentImageResponseSchema = z.object({
   duplicate: z.boolean(),
   segmentId: z.uuid(),
   variantIndex: z.number().int().min(0),
-  status: z.string().trim().min(1).optional()
+  status: normalizedLifecycleSchema(["queued"] as const).optional()
 });
 
 export const segmentGenerationResponseSchema = z.object({
@@ -137,10 +163,10 @@ export const illustrationResolutionResponseSchema = z.object({
   id: z.uuid(),
   campaignId: z.uuid(),
   turnId: z.uuid(),
-  sourcePolicy: z.string().trim().min(1),
-  matchingScope: z.string().trim().min(1),
-  confidenceProfile: z.string().trim().min(1),
-  status: z.string().trim().min(1),
+  sourcePolicy: illustrationResolutionSourcePolicySchema,
+  matchingScope: illustrationMatchingScopeSchema,
+  confidenceProfile: z.enum(["strict", "balanced", "broad"]),
+  status: illustrationResolutionStatusSchema,
   selectedAssetId: nullableUuidSchema,
   selectedScore: z.number().nullable(),
   resolvedThreshold: z.number().nullable(),

@@ -59,7 +59,8 @@ main[data-page="story-player"] {
   grid-template-areas: "spine reader illustration";
   grid-template-columns: clamp(172px, 13vw, 220px) minmax(0, 1fr) clamp(196px, 15.5vw, 280px);
   align-items: start;
-  gap: var(--story-reader-gutter);
+  column-gap: 0;
+  row-gap: var(--cell);
   min-width: 0;
 }
 
@@ -201,7 +202,7 @@ main[data-page="story-player"] {
 .story-draft {
   min-height: 7rem;
   resize: vertical;
-  padding: 10px 42px 10px 10px;
+  padding: 10px 54px 10px 10px;
 }
 
 .story-draft:focus,
@@ -213,9 +214,9 @@ main[data-page="story-player"] {
 .story-clear-draft {
   position: absolute;
   top: 30px;
-  right: 6px;
-  width: 32px;
-  height: 32px;
+  right: 2px;
+  width: 44px;
+  height: 44px;
   padding: 0;
   color: var(--text-secondary);
   border: 0;
@@ -344,6 +345,36 @@ main[data-page="story-player"] {
 }
 
 .story-compact-illustration-preview { display: none; }
+
+.story-history-dialog,
+.story-tool-dialog {
+  box-sizing: border-box;
+  width: min(860px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  margin: auto;
+  padding: var(--cell);
+  overflow: auto;
+  color: var(--text-primary);
+  border: 1px solid var(--rule-strong);
+  border-radius: 0;
+  background: var(--surface-paper);
+}
+
+.story-history-dialog::backdrop,
+.story-tool-dialog::backdrop {
+  background: var(--artwork-overlay);
+}
+
+main[data-page="story-player"] :is(button, a, input, select, textarea, summary) {
+  box-sizing: border-box;
+  min-inline-size: 44px;
+  min-block-size: 44px;
+}
+
+.app-shell:has(main[data-page="story-player"]) .story-campaign-tools :is(button, summary) {
+  min-inline-size: 44px;
+  min-block-size: 44px;
+}
 
 main[data-page="story-player"] :is(button, a, input, select, textarea, summary):focus-visible {
   outline: 3px solid var(--accent);

@@ -130,9 +130,7 @@ function composition(options: {
 }
 
 async function settle(): Promise<void> {
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 function enter(page: ReturnType<typeof fixture>, text: string): HTMLTextAreaElement {

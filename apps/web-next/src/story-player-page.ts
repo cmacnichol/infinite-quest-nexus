@@ -205,23 +205,42 @@ export function mountStoryPlayerPage(
       ) throw new Error("Story history changed before the operation completed.");
     },
     readableExport: async (campaignId, format) => {
-      const view = root.ownerDocument.defaultView;
-      const response = typeof view?.fetch === "function"
-        ? await view.fetch(`/api/v1/campaigns/${encodeURIComponent(campaignId)}/readable-export?format=${format}`)
-        : await globalThis.fetch(`/api/v1/campaigns/${encodeURIComponent(campaignId)}/readable-export?format=${format}`);
-      if (!response.ok) throw new Error(`Story export failed with HTTP ${response.status}.`);
+      const response = await composition.api.campaigns.readableExport(campaignId, format);
       return { body: await response.text() };
     },
     printSnapshot: async () => {
       const campaign = projection.campaign;
       if (campaign === null) throw new Error("Story campaign is unavailable.");
+      const authority = {
+        campaignId: campaign.id,
+        activeTurnNumber: campaign.activeTurnNumber,
+        syncToken: projection.syncToken
+      };
+      const response = await composition.illustrations.segments(campaign.id, controller?.signal);
+      const current = projection.campaign;
+      if (
+        disposed
+        || current === null
+        || current.id !== authority.campaignId
+        || current.activeTurnNumber !== authority.activeTurnNumber
+        || projection.syncToken !== authority.syncToken
+      ) throw new Error("Story illustrations changed before printing completed.");
       return {
         title: campaign.title,
         turns: projection.turns.map((turn) => ({
           turnNumber: turn.turnNumber,
           action: turn.action,
           narration: turn.narration,
-          imageUrls: turn.imageUrl ? [turn.imageUrl] : []
+          imageUrls: (() => {
+            const segmentUrls = response.segments
+              .filter((segment) => segment.turnId === turn.id)
+              .sort((left, right) => left.ordinal - right.ordinal)
+              .flatMap((segment) => {
+                const first = [...segment.variants].sort((left, right) => left.variantIndex - right.variantIndex)[0];
+                return first ? [first.url] : [];
+              });
+            return segmentUrls.length ? segmentUrls : turn.imageUrl ? [turn.imageUrl] : [];
+          })()
         }))
       };
     },
@@ -605,7 +624,7 @@ export function mountStoryPlayerPage(
         const latest = campaign === null ? null : projection.turns.find((turn) => turn.turnNumber === campaign.activeTurnNumber) ?? null;
         if (!latest) return;
         replacementTurnId = latest.id;
-        ui.setComposerDraft(latest.action);
+        ui.restoreComposerDraft(latest.action);
         focusDraft();
       });
     }
@@ -849,7 +868,13 @@ export function mountStoryPlayerPage(
       selectedCampaign = campaigns.find((campaign) => campaign.id === route.campaignId) ?? null;
       composition.campaignStore.load(sync);
       syncComposer();
-      ui.setViewTurnNumber(route.turnNumber ?? sync.campaign.activeTurnNumber);
+      if (route.turnNumber === null) ui.setViewTurnNumber(sync.campaign.activeTurnNumber);
+      else if (!await history.loadTurn(route.turnNumber)) {
+        if (disposed || nextController.signal.aborted) return;
+        ui.setMessage(`Persisted Turn ${route.turnNumber} was not found in this campaign.`);
+        ui.setPhase("not_found");
+        return;
+      }
       const continuousReading = session?.user?.settings?.continuousReading === true;
       autoSubmitTurnChoices = session?.user?.settings?.autoSubmitTurnChoices === true;
       ui.setContinuousReading(continuousReading);
@@ -896,7 +921,12 @@ export function mountStoryPlayerPage(
     const action = (target as Element).closest<HTMLElement>("[data-tool-action]")?.dataset.toolAction;
     if (!action) return;
     event.preventDefault();
-    if (toolsDisclosure) toolsDisclosure.open = false;
+    if (toolsDisclosure) {
+      toolsDisclosure.open = false;
+      if (action === "export-markdown" || action === "export-html" || action === "export-pdf") {
+        toolsDisclosure.querySelector<HTMLElement>("summary")?.focus();
+      }
+    }
     if (action === "open-world-setup") {
       tools.openWorldSetup();
       return;

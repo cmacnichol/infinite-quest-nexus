@@ -3,7 +3,7 @@ import type { AcceptedTurnCorrectionView, CampaignRuntimeStateResponse, Campaign
 import { storyPlayerPath, type StoryRoute } from "./story-route";
 import type { ReadingWidth, StoryUiState } from "./story-player-model";
 import { alignLatestSpine, latestCampaignSpine } from "./story-player-history";
-import type { StoryIllustrationState } from "./story-player-illustrations";
+import { storyIllustrationCapabilities, type StoryIllustrationState } from "./story-player-illustrations";
 import type { StoryActivityRecord } from "./story-player-tools";
 
 export interface StoryPlayerViewState {
@@ -459,8 +459,9 @@ function campaignReader(document: Document, state: StoryPlayerViewState): HTMLEl
   return reader;
 }
 
-function illustrationWing(document: Document, illustration: Readonly<StoryIllustrationState>): HTMLElement {
+export function renderIllustrationWing(document: Document, illustration: Readonly<StoryIllustrationState>): HTMLElement {
   const wing = element(document, "section", "story-illustration-content");
+  const capabilities = storyIllustrationCapabilities(illustration);
   const statusMessage = illustration.status === "disabled"
     ? "Illustrations are disabled for this campaign."
     : illustration.status === "unavailable"
@@ -479,10 +480,15 @@ function illustrationWing(document: Document, illustration: Readonly<StoryIllust
   const variant = illustration.selectedVariant;
   if (!segment || !variant) {
     if (illustration.status === "ready") {
-      for (const [action, label] of [["generate-missing-images", "Generate missing images"], ["rebuild-images", "Rebuild images"]] as const) {
+      const actions = [
+        ...(capabilities.canGenerate ? [["generate-missing-images", "Generate missing images"], ["rebuild-images", "Rebuild images"]] as const : []),
+        ...(capabilities.canMatch ? [["rematch-image", "Find library match"]] as const : [])
+      ];
+      for (const [action, label] of actions) {
         const button = element(document, "button", undefined, label);
         button.type = "button";
         button.dataset.action = action;
+        button.disabled = capabilities.busy;
         wing.append(button);
       }
     }
@@ -503,25 +509,27 @@ function illustrationWing(document: Document, illustration: Readonly<StoryIllust
     navigation.append(button);
   }
   wing.append(navigation);
-  const label = element(document, "label", "story-illustration-prompt-label", "Image prompt");
-  label.htmlFor = "story-illustration-prompt";
-  const prompt = element(document, "textarea", "story-illustration-prompt") as HTMLTextAreaElement;
-  prompt.id = label.htmlFor;
-  prompt.dataset.storyIllustrationPrompt = "";
-  prompt.value = illustration.prompt;
-  wing.append(label, prompt);
-  for (const [action, labelText] of [
-    ["regenerate-image", "Regenerate"],
-    ["retry-image-job", "Retry"],
-    ["load-image-provenance", "Why this image?"],
-    ["rematch-image", "Find library match"],
-    ["generate-missing-images", "Generate missing images"],
-    ["rebuild-images", "Rebuild images"]
-  ] as const) {
+  if (capabilities.canGenerate) {
+    const label = element(document, "label", "story-illustration-prompt-label", "Image prompt");
+    label.htmlFor = "story-illustration-prompt";
+    const prompt = element(document, "textarea", "story-illustration-prompt") as HTMLTextAreaElement;
+    prompt.id = label.htmlFor;
+    prompt.dataset.storyIllustrationPrompt = "";
+    prompt.value = illustration.prompt;
+    prompt.disabled = capabilities.busy;
+    wing.append(label, prompt);
+  }
+  const actions = [
+    ...(capabilities.canRegenerate ? [["regenerate-image", "Regenerate", true]] as const : []),
+    ...(capabilities.canGenerate ? [["retry-image-job", "Retry", capabilities.canRetry], ["generate-missing-images", "Generate missing images", true], ["rebuild-images", "Rebuild images", true]] as const : []),
+    ...(capabilities.canInspectProvenance ? [["load-image-provenance", "Why this image?", true]] as const : []),
+    ...(capabilities.canMatch ? [["rematch-image", "Find library match", true]] as const : [])
+  ];
+  for (const [action, labelText, valid] of actions) {
     const button = element(document, "button", undefined, labelText);
     button.type = "button";
     button.dataset.action = action;
-    if (action === "retry-image-job") button.disabled = segment.imageJobId === null;
+    button.disabled = capabilities.busy || !valid;
     wing.append(button);
   }
   if (illustration.provenance) {
@@ -597,16 +605,34 @@ function completeHistoryDialog(document: Document, state: StoryPlayerViewState):
       element(document, "h4", undefined, "Continuity"),
       element(document, "p", undefined, state.inspectedState.continuitySummary)
     );
-    if (state.inspectedState.openThreads.length) {
-      const threads = element(document, "ul");
-      for (const thread of state.inspectedState.openThreads) threads.append(element(document, "li", undefined, thread));
-      inspector.append(element(document, "h4", undefined, "Open Threads"), threads);
-    }
-    if (state.inspectedState.rpgStats.length) {
-      const mechanics = element(document, "ul");
-      for (const stat of state.inspectedState.rpgStats) mechanics.append(element(document, "li", undefined, `${stat.name}: ${stat.value}`));
-      inspector.append(element(document, "h4", undefined, "Recorded Mechanics"), mechanics);
-    }
+    const appendList = (heading: string, values: readonly string[]) => {
+      inspector.append(element(document, "h4", undefined, heading));
+      if (!values.length) {
+        inspector.append(element(document, "p", undefined, "None recorded."));
+        return;
+      }
+      const list = element(document, "ul");
+      for (const value of values) list.append(element(document, "li", undefined, value));
+      inspector.append(list);
+    };
+    appendList("Open Threads", state.inspectedState.openThreads);
+    appendList("Canonical Facts", state.inspectedState.canonicalFacts.map((fact) => fact.content));
+    inspector.append(
+      element(document, "h4", undefined, "Scratchpad"),
+      element(document, "p", undefined, state.inspectedState.scratchpad || "No scratchpad entry.")
+    );
+    appendList("Trackers", state.inspectedState.trackers.map((tracker) => (
+      `${tracker.name}: ${tracker.value}${tracker.rules ? ` — ${tracker.rules}` : ""}`
+    )));
+    appendList("RPG Stats", state.inspectedState.rpgStats.map((stat) => (
+      `${stat.name}: ${stat.value}${stat.note ? ` — ${stat.note}` : ""}`
+    )));
+    appendList("Event Triggers", state.inspectedState.eventTriggers.map((trigger) => (
+      `${trigger.label} (${trigger.timing}): ${trigger.condition} — ${trigger.effect}`
+    )));
+    appendList("Pending Triggers", state.inspectedState.pendingEventTriggers.map((trigger) => (
+      `${trigger.name} (${trigger.timing}): ${trigger.instructions}`
+    )));
     if (state.inspectedState.recordedResolution !== null) {
       const resolution = state.inspectedState.recordedResolution;
       inspector.append(
@@ -771,7 +797,7 @@ export function renderStoryPlayerView(root: HTMLElement, state: StoryPlayerViewS
   applyReadingWidth(foldout, state.ui.readingWidth);
   commandRow.replaceChildren(renderStoryCommandRow(document, state));
   spine.replaceChildren();
-  illustration.replaceChildren(illustrationWing(document, state.illustrations));
+  illustration.replaceChildren(renderIllustrationWing(document, state.illustrations));
 
   if (state.ui.phase === "loading") {
     reader.replaceChildren(status(document, "Loading Story…"));
@@ -791,8 +817,9 @@ export function renderStoryPlayerView(root: HTMLElement, state: StoryPlayerViewS
     const openHistory = element(document, "button", "story-open-history", "Turn History");
     openHistory.type = "button";
     openHistory.dataset.action = "open-complete-history";
-    spine.append(element(document, "p", "story-campaign-name", state.projection.campaign.title), openHistory, campaignSpine(document, state));
-    alignLatestSpine(spine);
+    const spineContent = campaignSpine(document, state);
+    spine.append(element(document, "p", "story-campaign-name", state.projection.campaign.title), openHistory, spineContent);
+    alignLatestSpine(spineContent);
   }
   const dialog = completeHistoryDialog(document, state);
   if (dialog) main.append(dialog);

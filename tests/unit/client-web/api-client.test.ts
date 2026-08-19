@@ -1,4 +1,4 @@
-import { describe, expect, expectTypeOf, it } from "vitest";
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
   createNexusApiClient,
   createNoopSessionPort
@@ -81,7 +81,7 @@ describe("createNexusApiClient", () => {
     expect(Object.keys(client).sort()).toEqual(["campaigns", "generation", "illustrations", "meta", "providers", "session", "worlds"]);
     expect(Object.keys(client.worlds).sort()).toEqual(["create", "list", "playableCharacters"]);
     expect(Object.keys(client.campaigns).sort()).toEqual([
-      "branch", "classifyTurnInput", "correctTurnNarration", "create", "getTurnCorrection", "inspectState", "list", "rewind", "state", "turns", "updateState"
+      "branch", "classifyTurnInput", "correctTurnNarration", "create", "getTurnCorrection", "inspectState", "list", "readableExport", "rewind", "state", "turns", "updateState"
     ]);
     expect(Object.keys(client.generation).sort()).toEqual([
       "cancel",
@@ -97,6 +97,37 @@ describe("createNexusApiClient", () => {
     expectTypeOf<NexusApiClient["campaigns"]>().toEqualTypeOf<CampaignApi>();
     expectTypeOf<NexusApiClient["generation"]>().toEqualTypeOf<GenerationApi>();
     expectTypeOf<NexusApiClient["illustrations"]>().toEqualTypeOf<IllustrationApi>();
+  });
+
+  it("downloads readable Story exports through the authenticated Campaign API adapter", async () => {
+    const authorization = vi.fn().mockResolvedValue({ authorization: "Bearer replacement-session" });
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response("# Accepted story", {
+      status: 200,
+      headers: { "content-type": "text/markdown;charset=utf-8" }
+    }));
+    const signal = new AbortController().signal;
+    const client = createNexusApiClient({
+      basePath: "/api/v1",
+      session: { authorization, onUnauthorized: vi.fn().mockResolvedValue(false) },
+      fetchImpl
+    });
+
+    const body = await client.campaigns.readableExport("campaign / id", "markdown", signal);
+
+    expect(await body.text()).toBe("# Accepted story");
+    expect(authorization).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "/api/v1/campaigns/campaign%20%2F%20id/readable-export?format=markdown",
+      expect.objectContaining({
+        method: "GET",
+        cache: "no-store",
+        signal,
+        headers: expect.any(Headers)
+      })
+    );
+    const headers = fetchImpl.mock.calls[0]?.[1]?.headers as Headers;
+    expect(headers.get("authorization")).toBe("Bearer replacement-session");
+    expect(headers.get("accept")).toBe("text/markdown");
   });
 
   it("exposes the typed Story Player projection and action surface instead of a generic request escape hatch", () => {
