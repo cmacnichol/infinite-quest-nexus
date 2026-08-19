@@ -2691,7 +2691,6 @@ async function deleteSelectedCampaign() {
     updateStoryViewLink();
     await loadCampaigns("", { focusNoSelection: true });
     await loadWorlds(selectedWorld?.id || "");
-    campaignMessage(`Campaign “${expectedTitle}” was permanently deleted.`, "success");
   } catch (error) {
     campaignMessage(error.message || String(error), "error");
     elements.deleteCampaign.disabled = !selectedCampaign;

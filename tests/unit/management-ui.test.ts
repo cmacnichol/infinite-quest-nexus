@@ -307,6 +307,61 @@ describe("Nexus management UI contracts", () => {
     expect(focusedControlId).toBe("refreshCampaigns");
   });
 
+  it("keeps the no-selection editor clean after a successful deletion", async () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    const requiredElement = <T extends HTMLElement>(id: string): T => {
+      const element = elements[id];
+      if (!element) throw new Error(`Expected #${id} in the management fixture.`);
+      return element as T;
+    };
+    const campaignStatusMessage = requiredElement<HTMLElement>("campaignStatusMessage");
+    requiredElement<HTMLButtonElement>("refreshCampaigns").focus = () => undefined;
+    const functions = managementFunctions<{
+      setCampaignSettingsPanel: (panelId: string) => void;
+      setCampaignSettingsAvailability: (available: boolean) => void;
+      clearCampaignEditorSelection: (options?: { focus?: boolean }) => void;
+      loadCampaigns: (preselectId?: string, options?: { focusNoSelection?: boolean }) => Promise<void>;
+      campaignMessage: (message: string, type?: string) => void;
+      deleteSelectedCampaign: () => Promise<void>;
+    }>([
+      "setCampaignSettingsPanel",
+      "setCampaignSettingsAvailability",
+      "clearCampaignEditorSelection",
+      "loadCampaigns",
+      "campaignMessage",
+      "deleteSelectedCampaign"
+    ], {
+      elements,
+      document,
+      window: { matchMedia: () => ({ matches: false }) },
+      CAMPAIGN_SETTINGS_PANEL_IDS: ["overview", "story", "illustrations", "chronicle", "usage"],
+      activeCampaignSettingsPanel: "overview",
+      campaigns: [{ id: "deleted-campaign" }],
+      selectedCampaign: { id: "deleted-campaign", title: "Deleted campaign" },
+      selectedWorld: null,
+      requestTypedDelete: async () => true,
+      api: async (path: string, options?: { method?: string }) => {
+        if (options?.method === "DELETE") return {};
+        if (path === "/api/v1/campaigns") return { campaigns: [] };
+        throw new Error(`Unexpected request: ${path}`);
+      },
+      renderDashboardCampaigns: () => undefined,
+      loadDashboardStats: async () => undefined,
+      updateStoryViewLink: () => undefined,
+      renderIllustrationSettingsVisibility: () => undefined,
+      loadWorlds: async () => undefined
+    });
+
+    campaignStatusMessage.textContent = "Stale campaign feedback";
+    campaignStatusMessage.classList.remove("hidden");
+
+    await functions.deleteSelectedCampaign();
+
+    expect(campaignStatusMessage.textContent).toBe("");
+    expect(campaignStatusMessage.classList.contains("hidden")).toBe(true);
+  });
+
   it("navigates to provider management with an anchor", () => {
     expect(storyHtml).toContain('<a id="btnGettingConfigureProviders" class="buttonish accent grow" href="/nexus/#providers">Open Provider Management in Nexus</a>');
   });
