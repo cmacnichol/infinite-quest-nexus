@@ -23,14 +23,19 @@ describe("Story Player local UI model", () => {
     expect(Object.keys(model.get()).sort()).toEqual([
       "activeDialog",
       "activity",
+      "choiceBaseText",
       "choiceSelection",
       "continuousReading",
       "draft",
+      "draftOwnerKey",
+      "draftOwnerTurnNumber",
       "history",
       "illustration",
+      "intentConfirmation",
       "message",
       "phase",
       "readingWidth",
+      "requestedInputMode",
       "viewTurnNumber"
     ]);
   });
@@ -65,6 +70,30 @@ describe("Story Player local UI model", () => {
     expect(externalCampaignId).toBe("campaign-authority-remains-outside-the-model");
   });
 
+  it("tracks composer ownership, input mode, and resettable local draft provenance", () => {
+    const model = createStoryUiModel({}, memoryStorage());
+
+    model.syncComposer("campaign-a", 7, "flexible_scene");
+    model.setComposerDraft("  Keep this exact draft.  ");
+    model.setIntentConfirmation({
+      action: "  Keep this exact draft.  ",
+      classificationId: "classification-a",
+      requestedInputMode: "auto"
+    });
+
+    expect(model.get()).toEqual(expect.objectContaining({
+      draft: "  Keep this exact draft.  ",
+      draftOwnerKey: "campaign-a:7",
+      draftOwnerTurnNumber: 7,
+      requestedInputMode: "scene",
+      intentConfirmation: expect.objectContaining({ action: "  Keep this exact draft.  " })
+    }));
+    model.clearComposerDraft();
+    expect(model.get()).toEqual(expect.objectContaining({
+      draft: "", choiceSelection: [], choiceBaseText: "", intentConfirmation: null
+    }));
+  });
+
   it("holds continuous-reading presentation locally without accepting campaign authority", () => {
     const model = createStoryUiModel({ continuousReading: true } as never, memoryStorage());
 
@@ -85,10 +114,10 @@ describe("Story Player local UI model", () => {
 
   it("returns snapshots that callers cannot use to mutate backing UI state", () => {
     const model = createStoryUiModel({}, memoryStorage());
-    const exposed = model.get() as { draft: string; choiceSelection: string[] };
+    const exposed = model.get() as { draft: string; choiceSelection: number[] };
 
     exposed.draft = "Externally changed.";
-    exposed.choiceSelection.push("Externally selected.");
+    exposed.choiceSelection.push(1);
 
     expect(model.get().draft).toBe("");
     expect(model.get().choiceSelection).toEqual([]);

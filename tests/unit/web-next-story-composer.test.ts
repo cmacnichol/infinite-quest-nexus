@@ -4,6 +4,7 @@ import type { CampaignSyncStatus } from "../../packages/contracts/src/index.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { StoryPlayerComposition } from "../../apps/web-next/src/story-player-composition.js";
 import { mountStoryPlayerPage } from "../../apps/web-next/src/story-player-page.js";
+import * as storyPlayerPage from "../../apps/web-next/src/story-player-page.js";
 
 const campaignId = "11111111-1111-4111-8111-111111111111";
 const worldVersionId = "22222222-2222-4222-8222-222222222222";
@@ -135,6 +136,17 @@ function keydown(page: ReturnType<typeof fixture>, target: HTMLElement, key: str
   target.dispatchEvent(event);
 }
 
+type SubmissionPreparer = (
+  draft: string,
+  requestedInputMode: "auto" | "action" | "scene",
+  campaignFallback: "action" | "scene",
+  classify: (request: { text: string; preferredFallback: "action" | "scene" }) => Promise<unknown>
+) => Promise<unknown>;
+
+function submissionPreparer(): SubmissionPreparer | undefined {
+  return (storyPlayerPage as unknown as { prepareTurnSubmission?: SubmissionPreparer }).prepareTurnSubmission;
+}
+
 afterEach(() => vi.restoreAllMocks());
 
 describe("Story continuation composer", () => {
@@ -230,12 +242,17 @@ describe("Story continuation composer", () => {
   it("clears text, choices, and an intent decision before restoring textarea focus", async () => {
     const page = fixture();
     const focus = vi.spyOn(page.window.HTMLElement.prototype, "focus");
-    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({ turnControlStyle: "flexible_auto" }));
+    const classifyTurnInput = vi.fn().mockResolvedValue({
+      classificationId: "88888888-8888-4888-8888-888888888888", classification: "mixed", resolvedMode: "scene",
+      confidenceBand: "ambiguous", providerSource: "story_text", expiresAt: "2026-08-18T00:01:00.000Z"
+    });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({ turnControlStyle: "flexible_auto", classifyTurnInput }));
     await settle();
     enter(page, "A cautiously ambiguous prompt.");
     page.document.querySelector<HTMLButtonElement>("[data-input-mode='auto']")?.click();
     page.document.querySelector<HTMLButtonElement>("[data-action='continue-story']")?.click();
     await settle();
+    expect(page.document.querySelector("[data-story-intent-confirmation]")).toBeTruthy();
     page.document.querySelector<HTMLButtonElement>("[data-action='clear-story-draft']")?.click();
     expect(page.document.querySelector<HTMLTextAreaElement>("[data-story-draft]")?.value).toBe("");
     expect(page.document.querySelector("[data-story-character-count]")?.textContent).toContain("0 / 12,000");
@@ -293,14 +310,31 @@ describe("Story continuation composer", () => {
     await settle();
     expect(submit).toHaveBeenLastCalledWith(expect.objectContaining({ action: "Open the observatory.", requestedInputMode: "auto", resolvedInputMode: "action", classificationId: "77777777-7777-4777-8777-777777777777" }));
 
-    enter(page, "Perhaps describe what changes.");
+    enter(page, "  Perhaps describe what changes.  ");
     page.document.querySelector<HTMLButtonElement>("[data-action='continue-story']")?.click();
     await settle();
-    expect(page.document.querySelector("[data-story-intent-confirmation]")?.textContent).toContain("Perhaps describe what changes.");
+    expect(page.document.querySelector("[data-story-intent-confirmation]")?.textContent).toContain("  Perhaps describe what changes.  ");
     page.document.querySelector<HTMLButtonElement>("[data-action='confirm-intent-scene']")?.click();
-    expect(submit).toHaveBeenLastCalledWith(expect.objectContaining({ action: "Perhaps describe what changes.", requestedInputMode: "auto", resolvedInputMode: "scene", classificationId: "88888888-8888-4888-8888-888888888888" }));
+    expect(submit).toHaveBeenLastCalledWith(expect.objectContaining({ action: "  Perhaps describe what changes.  ", requestedInputMode: "auto", resolvedInputMode: "scene", classificationId: "88888888-8888-4888-8888-888888888888" }));
     expect(classifyTurnInput).toHaveBeenCalledTimes(2);
     mounted.dispose();
+  });
+
+  it("prepares an ambiguous Auto draft without changing its exact text", async () => {
+    const prepare = submissionPreparer();
+    expect(prepare).toEqual(expect.any(Function));
+    if (!prepare) return;
+    const classify = vi.fn().mockResolvedValue({
+      classificationId: "99999999-9999-4999-8999-999999999999", classification: "mixed", resolvedMode: "scene",
+      confidenceBand: "ambiguous", providerSource: "story_text", expiresAt: "2026-08-18T00:01:00.000Z"
+    });
+
+    await expect(prepare("  Preserve my spacing.  ", "auto", "action", classify)).resolves.toEqual({
+      kind: "confirmation",
+      action: "  Preserve my spacing.  ",
+      classificationId: "99999999-9999-4999-8999-999999999999"
+    });
+    expect(classify).toHaveBeenCalledWith({ text: "  Preserve my spacing.  ", preferredFallback: "action" });
   });
 
   it("moves focus into a labelled inline confirmation region and returns it to the editor", async () => {

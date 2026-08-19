@@ -3,7 +3,12 @@ import {
   type CampaignProjection,
   type StoryTurnInputMode
 } from "@infinite-quest/client-core";
-import type { CampaignRuntimeStateResponse, CampaignSummary, TurnInputModeSource } from "@infinite-quest/contracts";
+import type {
+  CampaignRuntimeStateResponse,
+  CampaignSummary,
+  TurnInputClassificationResponse,
+  TurnInputModeSource
+} from "@infinite-quest/contracts";
 import { initializeAppTheme, renderAppShell } from "./app-shell";
 import { createStoryPlayerComposition, type StoryPlayerComposition } from "./story-player-composition";
 import { createStoryUiModel, type StoryUiPhase } from "./story-player-model";
@@ -53,6 +58,49 @@ export interface PreparedStoryTurnSubmission {
 export interface StoryPlayerPageOptions {
   /** Task 7 test seam only. Durable generation belongs to Task 8. */
   readonly onSubmit?: (submission: PreparedStoryTurnSubmission) => void | Promise<void>;
+}
+
+export type TurnInputClassifier = (request: Readonly<{
+  text: string;
+  preferredFallback: "action" | "scene";
+}>) => Promise<TurnInputClassificationResponse>;
+
+export type TurnSubmissionPreparation = Readonly<
+  | { kind: "ready"; submission: PreparedStoryTurnSubmission }
+  | { kind: "confirmation"; action: string; classificationId: string }
+>;
+
+/**
+ * Resolves a local Story draft immediately before submission. It deliberately
+ * does not enqueue a generation: Task 8 owns durable generation orchestration.
+ */
+export async function prepareTurnSubmission(
+  draft: string,
+  requestedInputMode: StoryTurnInputMode,
+  campaignFallback: "action" | "scene",
+  classifyTurnInput?: TurnInputClassifier
+): Promise<TurnSubmissionPreparation> {
+  if (requestedInputMode === "action" || requestedInputMode === "scene") {
+    return {
+      kind: "ready",
+      submission: { action: draft, requestedInputMode, resolvedInputMode: requestedInputMode, inputModeSource: "explicit" }
+    };
+  }
+  if (!classifyTurnInput) throw new Error("Prompt interpretation is unavailable.");
+  const result = await classifyTurnInput({ text: draft, preferredFallback: campaignFallback });
+  if (result.confidenceBand === "ambiguous") {
+    return { kind: "confirmation", action: draft, classificationId: result.classificationId };
+  }
+  return {
+    kind: "ready",
+    submission: {
+      action: draft,
+      requestedInputMode: "auto",
+      resolvedInputMode: result.resolvedMode,
+      inputModeSource: "auto",
+      classificationId: result.classificationId
+    }
+  };
 }
 
 export function mountStoryPlayerPage(
@@ -147,40 +195,32 @@ export function mountStoryPlayerPage(
   const submitComposer = async (): Promise<void> => {
     const campaign = projection.campaign;
     const current = ui.get();
-    const action = current.draft.trim();
-    if (!campaign || !action) {
+    const draft = current.draft;
+    if (!campaign || !draft.trim()) {
       focusDraft();
       return;
     }
-    if (current.requestedInputMode === "action" || current.requestedInputMode === "scene") {
-      await invokeTestSubmission({
-        action,
-        requestedInputMode: current.requestedInputMode,
-        resolvedInputMode: current.requestedInputMode,
-        inputModeSource: "explicit"
-      });
-      return;
-    }
     const classifyTurnInput = composition.api.campaigns.classifyTurnInput;
-    if (typeof classifyTurnInput !== "function") {
+    if (current.requestedInputMode === "auto" && typeof classifyTurnInput !== "function") {
       ui.setMessage("Prompt interpretation is unavailable. Choose Action or Scene Direction.");
       return;
     }
     try {
-      const result = await classifyTurnInput(campaign.id, { text: action, preferredFallback: campaignFallback() });
-      if (disposed || projection.campaign?.id !== campaign.id || ui.get().draft.trim() !== action) return;
-      if (result.confidenceBand === "ambiguous") {
-        ui.setIntentConfirmation({ action, classificationId: result.classificationId, requestedInputMode: "auto" });
+      const preparation = await prepareTurnSubmission(
+        draft,
+        current.requestedInputMode,
+        campaignFallback(),
+        typeof classifyTurnInput === "function"
+          ? (request) => classifyTurnInput(campaign.id, request)
+          : undefined
+      );
+      if (disposed || projection.campaign?.id !== campaign.id || ui.get().draft !== draft) return;
+      if (preparation.kind === "confirmation") {
+        ui.setIntentConfirmation({ action: preparation.action, classificationId: preparation.classificationId, requestedInputMode: "auto" });
         root.querySelector<HTMLButtonElement>("[data-action='confirm-intent-action']")?.focus();
         return;
       }
-      await invokeTestSubmission({
-        action,
-        requestedInputMode: "auto",
-        resolvedInputMode: result.resolvedMode,
-        inputModeSource: "auto",
-        classificationId: result.classificationId
-      });
+      await invokeTestSubmission(preparation.submission);
     } catch {
       if (!disposed) ui.setMessage("Prompt interpretation could not be completed. Choose Action or Scene Direction.");
     }
