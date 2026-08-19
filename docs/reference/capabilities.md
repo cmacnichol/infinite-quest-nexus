@@ -50,6 +50,13 @@ This page summarizes behavior implemented in the current repository. It is not a
 - Provider-reported campaign cost ledger when a provider supplies cost data
 - Separate text-generation, image-generation, and Chronicle-memory campaign cost categories
 
+## Story interface transition
+
+- The replacement Fold-out Story interface is available at `/app/story` and `/app/story/:campaignId`.
+- The legacy Story Player remains available at `/story` and `/story/:campaignId` during the coexistence period; neither route redirects to the other.
+- Both interfaces use the server-authoritative campaign, accepted-turn, generation, state, and illustration contracts. Replacement presentation policies are shared through `@infinite-quest/client-core` and browser API adapters through `@infinite-quest/client-web`.
+- A future cutover requires recorded disposable-runtime parity evidence from [the Story interface smoke test](../workflows/story-interface-smoke-test.md), including legacy and replacement views of the same campaign. Until then, the legacy route is neither deprecated nor removed.
+
 ## Chronicle
 
 - Accepted-turn ledger as the recovery source of truth

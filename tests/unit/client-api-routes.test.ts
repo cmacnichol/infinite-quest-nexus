@@ -1494,20 +1494,28 @@ describe("client API route contracts without PostgreSQL", () => {
 });
 
 describe("Story route coexistence", () => {
-  it("continues to serve the legacy root while returning the replacement SPA document at /app/story", async () => {
+  it("serves each legacy and replacement Story URL without crossing surfaces", async () => {
     const storyStorageRoot = await mkdtemp(join(tmpdir(), "infinitequest-story-route-"));
     const app = await buildServer(serverOptions({ config: config(storyStorageRoot), pool: mockPool() }));
     try {
-      const [legacy, replacement] = await Promise.all([
+      const [legacyRoot, legacyCampaign, replacementRoot, replacementCampaign] = await Promise.all([
+        app.inject({ method: "GET", url: "/story" }),
         app.inject({ method: "GET", url: "/story/campaign-1" }),
+        app.inject({ method: "GET", url: "/app/story" }),
         app.inject({ method: "GET", url: "/app/story/campaign-1" })
       ]);
 
-      expect(legacy.statusCode).toBe(200);
-      expect(legacy.body).toContain("legacy-client.js");
-      expect(replacement.statusCode).toBe(200);
-      expect(replacement.body).toContain('<div id="app"></div>');
-      expect(replacement.body).not.toContain("legacy-client.js");
+      for (const response of [legacyRoot, legacyCampaign, replacementRoot, replacementCampaign]) {
+        expect(response.statusCode).toBe(200);
+        expect(response.headers.location).toBeUndefined();
+        expect(response.headers["content-type"]).toContain("text/html");
+      }
+      expect(legacyRoot.body).toContain("legacy-client.js");
+      expect(legacyCampaign.body).toContain("legacy-client.js");
+      expect(replacementRoot.body).toContain('<div id="app"></div>');
+      expect(replacementCampaign.body).toContain('<div id="app"></div>');
+      expect(replacementRoot.body).not.toContain("legacy-client.js");
+      expect(replacementCampaign.body).not.toContain("legacy-client.js");
     } finally {
       await app.close();
       await rm(storyStorageRoot, { recursive: true, force: true });
