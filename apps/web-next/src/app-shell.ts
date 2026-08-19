@@ -4,11 +4,23 @@ import { initializeUserProfileMenu } from "./user-profile-menu";
 
 export type AppNavigation = "world-library" | "world-editor" | "campaigns" | "story" | "setup";
 
+/** Static application-owned header content. Page data must never be interpolated here. */
+export interface AppShellOptions {
+  readonly headerToolsMarkup?: string;
+  readonly storyHref?: string;
+}
+
 function currentAttribute(current: AppNavigation, item: AppNavigation): string {
   return current === item ? ' aria-current="page"' : "";
 }
 
-export function renderAppShell(root: HTMLElement, pageMarkup: string, currentNavigation: AppNavigation): void {
+export function renderAppShell(
+  root: HTMLElement,
+  pageMarkup: string,
+  currentNavigation: AppNavigation,
+  options: AppShellOptions = {}
+): void {
+  const storyHref = options.storyHref ?? "/app/story";
   root.innerHTML = `
     <div class="app-shell">
       <header class="site-header">
@@ -20,13 +32,14 @@ export function renderAppShell(root: HTMLElement, pageMarkup: string, currentNav
         <nav class="site-nav" aria-label="Primary navigation">
           <a href="/app/"${currentAttribute(currentNavigation, "world-library")}>World Library</a>
           <a href="/app/campaigns"${currentAttribute(currentNavigation, "campaigns")}>Campaigns</a>
-          <a href="/app/story"${currentAttribute(currentNavigation, "story")}>Story</a>
+          <a href="${storyHref}"${currentAttribute(currentNavigation, "story")}>Story</a>
           <a href="/nexus/#providers"${currentAttribute(currentNavigation, "setup")}>Setup</a>
         </nav>
-        <a class="story-link" href="/app/story">
+        <a class="story-link" href="${storyHref}">
           Enter story
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9" /></svg>
         </a>
+        ${options.headerToolsMarkup ?? ""}
         <button class="theme-toggle" type="button" aria-label="Use dark theme" title="Use dark theme">
           <svg class="theme-icon theme-icon-sun" viewBox="0 0 24 24" aria-hidden="true">
             <circle cx="12" cy="12" r="3.5" />

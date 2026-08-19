@@ -4,7 +4,9 @@ import {
   type StoryTurnInputMode
 } from "@infinite-quest/client-core";
 import type {
+  AcceptedTurnCorrectionView,
   CampaignRuntimeStateResponse,
+  CampaignRuntimeStateUpdate,
   CampaignSummary,
   TurnInputClassificationResponse,
   TurnInputModeSource
@@ -16,6 +18,7 @@ import { createStoryUiModel, type StoryUiPhase } from "./story-player-model";
 import { createStoryHistoryController } from "./story-player-history";
 import { renderStoryPlayerView } from "./story-player-view";
 import { createStoryIllustrationController } from "./story-player-illustrations";
+import { createStoryToolsController, installStoryToolsDisclosure, storyCampaignToolsMarkup } from "./story-player-tools";
 import type { StoryRoute } from "./story-route";
 import type { MountedPage } from "./world-library-page";
 import "./story-player.css";
@@ -126,7 +129,7 @@ export function mountStoryPlayerPage(
   composition: StoryPlayerComposition = createStoryPlayerComposition(),
   options: StoryPlayerPageOptions = {}
 ): MountedPage {
-  renderAppShell(root, storyPlayerMarkup, "story");
+  renderAppShell(root, storyPlayerMarkup, "story", { headerToolsMarkup: storyCampaignToolsMarkup() });
   const theme = initializeAppTheme(root);
   const ui = createStoryUiModel({ viewTurnNumber: route.turnNumber }, browserStorage(root));
   let campaigns: readonly CampaignSummary[] = [];
@@ -138,11 +141,16 @@ export function mountStoryPlayerPage(
   let historyDialogOpener: "history" | "inspect" | null = null;
   let focusHistoryDialog = false;
   let inspectedState: CampaignRuntimeStateResponse | null = null;
+  let currentState: CampaignRuntimeStateResponse | null = null;
+  let correction: AcceptedTurnCorrectionView | null = null;
+  let replacementTurnId: string | null = null;
   let inspectionRequestToken = 0;
   let autoSubmitTurnChoices = false;
   let submittedDraft: string | null = null;
   let programmaticFollowTarget: ViewportPosition | null = null;
   let illustrationRequestKey: string | null = null;
+  const toolsDisclosure = root.querySelector<HTMLDetailsElement>("[data-campaign-tools]");
+  const disposeToolsDisclosure = toolsDisclosure ? installStoryToolsDisclosure(toolsDisclosure) : () => undefined;
   const illustrations = createStoryIllustrationController({
     illustrations: composition.illustrations,
     idFactory: composition.idFactory,
@@ -171,6 +179,42 @@ export function mountStoryPlayerPage(
     },
     onError() {
       if (!disposed) ui.setMessage("Story generation could not be completed. Your accepted turns are unchanged.");
+    }
+  });
+  const tools = createStoryToolsController({
+    campaigns: composition.api.campaigns,
+    generation,
+    current: () => {
+      const campaign = projection.campaign;
+      if (campaign === null) return null;
+      return {
+        campaignId: campaign.id,
+        activeTurnNumber: campaign.activeTurnNumber,
+        generationActive: projection.generation !== null,
+        viewTurnNumber: ui.get().viewTurnNumber,
+        turns: projection.turns.map((turn) => ({ id: turn.id, turnNumber: turn.turnNumber, action: turn.action }))
+      };
+    },
+    reload: async () => load(),
+    navigate: (campaignId) => {
+      const view = root.ownerDocument.defaultView;
+      if (view) view.location.href = `/app/story/${encodeURIComponent(campaignId)}`;
+    },
+    confirm: (kind, target) => {
+      const confirm = root.ownerDocument.defaultView?.confirm;
+      if (typeof confirm !== "function") return false;
+      const message = kind === "undo-latest" ? `Undo persisted Turn ${target.activeTurnNumber}?`
+        : kind === "retry-latest" ? `Retry persisted Turn ${target.turnNumber}?`
+          : kind === "correct-narration" ? `Save the correction for persisted Turn ${target.turnNumber}?`
+            : kind === "branch" ? `Branch from persisted Turn ${target.turnNumber}?`
+              : `Rewind this campaign to persisted Turn ${target.turnNumber}?`;
+      return confirm(message);
+    },
+    onDialog: (dialog) => ui.setActiveDialog(dialog),
+    onError: () => {
+      const message = root.querySelector<HTMLElement>("[data-story-tool-dialog] [data-story-status]");
+      if (message) message.textContent = "Story operation could not be completed. Your current view and draft are unchanged.";
+      else if (!disposed) ui.setMessage("Story operation could not be completed. Your current view and draft are unchanged.");
     }
   });
   const scrollWindow = root.ownerDocument.defaultView;
@@ -248,17 +292,34 @@ export function mountStoryPlayerPage(
       dialog.querySelector<HTMLElement>("button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled])")?.focus();
     }
   };
+  const bindToolDialog = () => {
+    const dialog = root.querySelector<HTMLDialogElement>("[data-story-tool-dialog]");
+    if (!dialog) return;
+    if (!dialog.hasAttribute("open")) {
+      if (typeof dialog.showModal === "function") dialog.showModal();
+      else dialog.setAttribute("open", "");
+    }
+    dialog.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      tools.closeActiveDialog();
+      toolsDisclosure?.querySelector<HTMLElement>("summary")?.focus();
+    });
+    dialog.querySelector<HTMLElement>("textarea, button:not([disabled])")?.focus();
+  };
   const focusDraft = () => root.querySelector<HTMLTextAreaElement>("[data-story-draft]")?.focus();
   const composerCampaign = () => projection.campaign !== null && selectedCampaign?.id === projection.campaign.id
     ? selectedCampaign : null;
   const campaignFallback = () => composerCampaign()?.turnControlStyle === "flexible_scene" ? "scene" as const : "action" as const;
   const submitPreparedTurn = async (submission: PreparedStoryTurnSubmission) => {
     submittedDraft = submission.action;
-    const accepted = await generation.submitAppend(submission);
+    const accepted = replacementTurnId === null
+      ? await generation.submitAppend(submission)
+      : await tools.retryLatest(submission);
     if (!accepted) {
       if (!disposed) ui.setMessage("Story generation could not be started. Your accepted turns are unchanged.");
       return;
     }
+    replacementTurnId = null;
     ui.setGenerationFollowing(true);
     await options.onSubmit?.(submission);
   };
@@ -327,7 +388,23 @@ export function mountStoryPlayerPage(
   };
   function render(): void {
     retryControl?.removeEventListener("click", onRetry);
-    renderStoryPlayerView(root, { route, ui: ui.get(), campaigns, selectedCampaign, projection, inspectedState, illustrations: illustrations.get() });
+    renderStoryPlayerView(root, {
+      route,
+      ui: ui.get(),
+      campaigns,
+      selectedCampaign,
+      projection,
+      inspectedState,
+      currentState,
+      correction,
+      illustrations: illustrations.get()
+    });
+    const activeCampaign = projection.campaign;
+    const canWriteCampaign = activeCampaign !== null
+      && projection.generation === null
+      && ui.get().viewTurnNumber === activeCampaign.activeTurnNumber;
+    const editState = toolsDisclosure?.querySelector<HTMLButtonElement>("[data-tool-action='edit-campaign-state']");
+    if (editState) editState.disabled = !canWriteCampaign;
     const selectedTurnNumber = ui.get().viewTurnNumber ?? projection.campaign?.activeTurnNumber ?? null;
     const selectedTurn = selectedTurnNumber === null ? null : projection.turns.find((turn) => turn.turnNumber === selectedTurnNumber) ?? null;
     if (typeof composition.illustrations.config === "function" && projection.campaign && selectedTurn) {
@@ -402,7 +479,7 @@ export function mountStoryPlayerPage(
             focusHistoryDialog = true;
             ui.setActiveDialog("history");
           }
-          void history.inspect(turnNumber).then((result) => {
+          void tools.openTurnState(turnNumber).then((result) => {
             if (
               disposed
               || result === null
@@ -424,9 +501,101 @@ export function mountStoryPlayerPage(
         event.stopPropagation();
         const turnNumber = Number(control.dataset.turnNumber);
         const confirm = root.ownerDocument.defaultView?.confirm;
-        if (Number.isSafeInteger(turnNumber) && turnNumber > 0 && typeof confirm === "function") {
-          confirm(`Restart or branch from persisted Turn ${turnNumber}?`);
+        if (Number.isSafeInteger(turnNumber) && turnNumber > 0 && typeof confirm === "function"
+          && confirm(`Restart or branch from persisted Turn ${turnNumber}?`)) {
+          ui.setActiveDialog(`restart:${turnNumber}`);
         }
+      });
+    }
+    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='edit-response']")) {
+      control.addEventListener("click", () => {
+        const turnNumber = ui.get().viewTurnNumber;
+        const turn = turnNumber === null ? null : projection.turns.find((candidate) => candidate.turnNumber === turnNumber) ?? null;
+        if (!turn) return;
+        correction = null;
+        ui.setActiveDialog("correction");
+        void tools.openNarrationCorrection(turn.id).then((result) => {
+          if (!disposed && result !== null) {
+            correction = result;
+            render();
+          }
+        }).catch(() => undefined);
+      });
+    }
+    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='retry-latest-generation']")) {
+      control.addEventListener("click", () => {
+        const campaign = projection.campaign;
+        const latest = campaign === null ? null : projection.turns.find((turn) => turn.turnNumber === campaign.activeTurnNumber) ?? null;
+        if (!latest) return;
+        replacementTurnId = latest.id;
+        ui.setComposerDraft(latest.action);
+        focusDraft();
+      });
+    }
+    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='undo-latest']")) {
+      control.addEventListener("click", () => { void tools.undoLatest().catch(() => undefined); });
+    }
+    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='save-current-state']")) {
+      control.addEventListener("click", () => {
+        const base = currentState;
+        if (base === null) return;
+        try {
+          const field = (name: string) => root.querySelector<HTMLTextAreaElement>(`[data-state-field='${name}']`)?.value ?? "";
+          const parsed = (name: string) => JSON.parse(field(name)) as unknown;
+          const request: CampaignRuntimeStateUpdate = {
+            continuitySummary: field("continuitySummary"),
+            openThreads: parsed("openThreads") as CampaignRuntimeStateUpdate["openThreads"],
+            canonicalFacts: parsed("canonicalFacts") as CampaignRuntimeStateUpdate["canonicalFacts"],
+            scratchpad: field("scratchpad"),
+            trackers: parsed("trackers") as CampaignRuntimeStateUpdate["trackers"],
+            rpgStats: parsed("rpgStats") as CampaignRuntimeStateUpdate["rpgStats"],
+            eventTriggers: parsed("eventTriggers") as CampaignRuntimeStateUpdate["eventTriggers"],
+            pendingEventTriggers: parsed("pendingEventTriggers") as CampaignRuntimeStateUpdate["pendingEventTriggers"],
+            expectedTurnNumber: base.activeTurnNumber,
+            expectedRevision: base.revision,
+            effectiveTurnNumber: base.viewedTurnNumber
+          };
+          void tools.saveCurrentState(request).then((result) => {
+            if (result !== null && !disposed) {
+              currentState = result;
+              ui.setActiveDialog(null);
+            }
+          }).catch(() => undefined);
+        } catch {
+          const message = root.querySelector<HTMLElement>("[data-story-tool-dialog] [data-story-status]");
+          if (message) message.textContent = "State fields containing lists must be valid JSON. Your edits are preserved.";
+        }
+      });
+    }
+    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='save-narration-correction']")) {
+      control.addEventListener("click", () => {
+        const value = root.querySelector<HTMLTextAreaElement>("[data-correction-narration]")?.value ?? "";
+        const currentCorrection = correction;
+        if (currentCorrection === null || !value.trim()) return;
+        void tools.saveNarrationCorrection(currentCorrection.turnId, {
+          narration: value,
+          expectedCorrectionRevision: currentCorrection.correctionRevision,
+          expectedActiveTurnNumber: projection.campaign?.activeTurnNumber ?? 0,
+          source: "user_edit"
+        }).then((result) => {
+          if (result !== null && !disposed) {
+            correction = result;
+            ui.setActiveDialog(null);
+          }
+        }).catch(() => undefined);
+      });
+    }
+    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='branch-from-turn'], [data-action='rewind-from-turn']")) {
+      control.addEventListener("click", () => {
+        const turnNumber = Number(control.dataset.turnNumber);
+        const operation = control.dataset.action === "branch-from-turn" ? "branch" : "rewind";
+        if (Number.isSafeInteger(turnNumber) && turnNumber > 0) void tools.restartFromTurn(turnNumber, operation).catch(() => undefined);
+      });
+    }
+    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='close-story-tool-dialog']")) {
+      control.addEventListener("click", () => {
+        tools.closeActiveDialog();
+        toolsDisclosure?.querySelector<HTMLElement>("summary")?.focus();
       });
     }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-input-mode]")) {
@@ -550,6 +719,7 @@ export function mountStoryPlayerPage(
       }
     }
     bindHistoryDialog();
+    bindToolDialog();
     if (projection.generation !== null && ui.get().generationFollowing) {
       const preview = root.querySelector<HTMLElement>("[data-story-generation-preview]");
       if (preview && typeof preview.scrollIntoView === "function") {
@@ -634,7 +804,37 @@ export function mountStoryPlayerPage(
     const turnNumber = Number(actionTarget.closest<HTMLElement>("[data-turn-number]")?.dataset.turnNumber);
     if (Number.isSafeInteger(turnNumber) && turnNumber > 0) history.jump(turnNumber);
   };
+  const onToolsClick = (event: Event) => {
+    const target = event.target;
+    if (!target || typeof (target as Element).closest !== "function") return;
+    const action = (target as Element).closest<HTMLElement>("[data-tool-action]")?.dataset.toolAction;
+    if (!action) return;
+    event.preventDefault();
+    if (toolsDisclosure) toolsDisclosure.open = false;
+    if (action === "open-world-setup") {
+      tools.openWorldSetup();
+      return;
+    }
+    if (action === "edit-campaign-state") {
+      currentState = null;
+      ui.setActiveDialog("current-state");
+      void tools.openCurrentState().then((result) => {
+        if (!disposed && result !== null) {
+          currentState = result;
+          render();
+        }
+      }).catch(() => undefined);
+      return;
+    }
+    if (action === "open-campaign-history") {
+      historyDialogOpener = "history";
+      focusHistoryDialog = true;
+      ui.setActiveDialog("history");
+      void history.openCompleteHistory().catch(() => undefined);
+    }
+  };
   root.addEventListener("click", onClick);
+  toolsDisclosure?.addEventListener("click", onToolsClick);
   render();
   void load();
 
@@ -647,12 +847,15 @@ export function mountStoryPlayerPage(
       scrollWindow?.removeEventListener("scroll", onDocumentScroll);
       programmaticFollowTarget = null;
       root.removeEventListener("click", onClick);
+      toolsDisclosure?.removeEventListener("click", onToolsClick);
       retryControl?.removeEventListener("click", onRetry);
       unsubscribeStore();
       unsubscribeUi();
       history.dispose();
       unsubscribeIllustrations();
       illustrations.dispose();
+      disposeToolsDisclosure();
+      tools.dispose();
       ui.dispose();
       theme.dispose();
     }

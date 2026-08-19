@@ -1,5 +1,5 @@
 import type { CampaignProjection } from "@infinite-quest/client-core";
-import type { CampaignRuntimeStateResponse, CampaignSummary } from "@infinite-quest/contracts";
+import type { AcceptedTurnCorrectionView, CampaignRuntimeStateResponse, CampaignSummary } from "@infinite-quest/contracts";
 import { storyPlayerPath, type StoryRoute } from "./story-route";
 import type { ReadingWidth, StoryUiState } from "./story-player-model";
 import { alignLatestSpine, latestCampaignSpine } from "./story-player-history";
@@ -12,6 +12,8 @@ export interface StoryPlayerViewState {
   readonly selectedCampaign: CampaignSummary | null;
   readonly projection: Readonly<CampaignProjection>;
   readonly inspectedState: CampaignRuntimeStateResponse | null;
+  readonly currentState: CampaignRuntimeStateResponse | null;
+  readonly correction: AcceptedTurnCorrectionView | null;
   readonly illustrations: Readonly<StoryIllustrationState>;
 }
 
@@ -308,7 +310,11 @@ function formatReportedCost(turn: ReaderTurn): string | null {
   return turn.reportedCost === null ? null : `${turn.reportedCost.amount} ${turn.reportedCost.currency}`;
 }
 
-function recordAction(document: Document, action: "edit-response" | "inspect-state", label: string): HTMLButtonElement {
+function recordAction(
+  document: Document,
+  action: "edit-response" | "inspect-state" | "retry-latest-generation" | "undo-latest",
+  label: string
+): HTMLButtonElement {
   const button = element(document, "button", undefined, label);
   button.type = "button";
   button.dataset.action = action;
@@ -362,7 +368,16 @@ export function renderStoryTurn(
   leaf.append(...narrationParagraphs(document, turn.narration));
   if (contextual) {
     const actions = element(document, "div", "story-turn-record-actions");
-    actions.append(recordAction(document, "edit-response", "Edit Response"), recordAction(document, "inspect-state", "Inspect State"));
+    const latest = turns.at(-1);
+    const edit = recordAction(document, "edit-response", "Edit Response");
+    edit.disabled = generationActive || latest?.turnNumber !== turn.turnNumber;
+    actions.append(edit, recordAction(document, "inspect-state", "Inspect State"));
+    if (!generationActive && latest?.turnNumber === turn.turnNumber) {
+      actions.append(
+        recordAction(document, "retry-latest-generation", "Retry Latest Generation"),
+        recordAction(document, "undo-latest", "Undo Latest")
+      );
+    }
     leaf.append(actions);
   }
   return leaf;
@@ -609,6 +624,89 @@ function completeHistoryDialog(document: Document, state: StoryPlayerViewState):
   return dialog;
 }
 
+function editorField(document: Document, labelText: string, action: string, value: string): HTMLElement {
+  const wrapper = element(document, "label", "story-tool-field", labelText);
+  const input = element(document, "textarea") as HTMLTextAreaElement;
+  input.dataset.stateField = action;
+  input.value = value;
+  wrapper.append(input);
+  return wrapper;
+}
+
+function toolDialog(document: Document, state: StoryPlayerViewState): HTMLDialogElement | null {
+  const active = state.ui.activeDialog;
+  if (active !== "world" && active !== "current-state" && active !== "correction" && !active?.startsWith("restart:")) return null;
+  const dialog = element(document, "dialog", "story-tool-dialog") as HTMLDialogElement;
+  dialog.dataset.storyToolDialog = "";
+  const title = element(document, "h2", undefined, active === "world" ? "Current World Setup"
+    : active === "current-state" ? "Edit Campaign State"
+      : active === "correction" ? "Edit Response" : "Restart from this turn");
+  title.id = "story-tool-dialog-title";
+  dialog.setAttribute("aria-labelledby", title.id);
+  dialog.append(title);
+  if (active === "world") {
+    const world = state.projection.world;
+    if (world) {
+      dialog.append(
+        element(document, "p", undefined, world.title),
+        element(document, "p", undefined, `Version ${world.versionNumber}`),
+        element(document, "p", undefined, world.premise),
+        element(document, "p", undefined, world.rules)
+      );
+      if (world.playableCharacters.length) {
+        const characters = element(document, "ul");
+        for (const character of world.playableCharacters) characters.append(element(document, "li", undefined, character.name));
+        dialog.append(element(document, "h3", undefined, "Available characters"), characters);
+      }
+    } else dialog.append(element(document, "p", undefined, "World setup is unavailable."));
+  } else if (active === "current-state") {
+    const runtime = state.currentState;
+    if (runtime === null) dialog.append(element(document, "p", undefined, "Loading campaign state…"));
+    else {
+      dialog.append(
+        editorField(document, "Continuity", "continuitySummary", runtime.continuitySummary),
+        editorField(document, "Open threads", "openThreads", JSON.stringify(runtime.openThreads, null, 2)),
+        editorField(document, "Canonical facts", "canonicalFacts", JSON.stringify(runtime.canonicalFacts, null, 2)),
+        editorField(document, "Scratchpad", "scratchpad", runtime.scratchpad),
+        editorField(document, "Trackers", "trackers", JSON.stringify(runtime.trackers, null, 2)),
+        editorField(document, "RPG stats", "rpgStats", JSON.stringify(runtime.rpgStats, null, 2)),
+        editorField(document, "Event triggers", "eventTriggers", JSON.stringify(runtime.eventTriggers, null, 2)),
+        editorField(document, "Pending triggers", "pendingEventTriggers", JSON.stringify(runtime.pendingEventTriggers, null, 2))
+      );
+      const save = element(document, "button", undefined, "Save Campaign State");
+      save.type = "button";
+      save.dataset.action = "save-current-state";
+      dialog.append(save);
+    }
+  } else if (active === "correction") {
+    const correction = state.correction;
+    if (correction === null) dialog.append(element(document, "p", undefined, "Loading the current response…"));
+    else {
+      const narration = editorField(document, "Effective narration", "correction-narration", correction.effectiveNarration);
+      narration.querySelector<HTMLTextAreaElement>("textarea")!.dataset.correctionNarration = "";
+      const save = element(document, "button", undefined, "Save correction");
+      save.type = "button";
+      save.dataset.action = "save-narration-correction";
+      dialog.append(narration, save);
+    }
+  } else {
+    const turnNumber = Number(active.slice("restart:".length));
+    dialog.append(element(document, "p", undefined, `Choose Branch or authoritative Rewind from persisted Turn ${turnNumber}.`));
+    for (const [action, label] of [["branch-from-turn", "Branch from Here"], ["rewind-from-turn", "Rewind Here"]] as const) {
+      const button = element(document, "button", undefined, label);
+      button.type = "button";
+      button.dataset.action = action;
+      button.dataset.turnNumber = String(turnNumber);
+      dialog.append(button);
+    }
+  }
+  const close = element(document, "button", undefined, "Close");
+  close.type = "button";
+  close.dataset.action = "close-story-tool-dialog";
+  dialog.append(close, status(document, ""));
+  return dialog;
+}
+
 export function applyReadingWidth(foldout: HTMLElement, width: ReadingWidth): void {
   foldout.dataset.readingWidth = width;
 }
@@ -627,6 +725,7 @@ export function renderStoryPlayerView(root: HTMLElement, state: StoryPlayerViewS
 
   main.setAttribute("aria-busy", String(state.ui.phase === "loading"));
   main.querySelector("[data-story-history]")?.remove();
+  main.querySelector("[data-story-tool-dialog]")?.remove();
   applyReadingWidth(foldout, state.ui.readingWidth);
   commandRow.replaceChildren(renderStoryCommandRow(document, state));
   spine.replaceChildren();
@@ -655,4 +754,6 @@ export function renderStoryPlayerView(root: HTMLElement, state: StoryPlayerViewS
   }
   const dialog = completeHistoryDialog(document, state);
   if (dialog) main.append(dialog);
+  const tools = toolDialog(document, state);
+  if (tools) main.append(tools);
 }
