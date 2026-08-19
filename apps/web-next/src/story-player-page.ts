@@ -171,6 +171,7 @@ export function mountStoryPlayerPage(
       if (disposed || projection.campaign?.id !== campaign.id || ui.get().draft.trim() !== action) return;
       if (result.confidenceBand === "ambiguous") {
         ui.setIntentConfirmation({ action, classificationId: result.classificationId, requestedInputMode: "auto" });
+        root.querySelector<HTMLButtonElement>("[data-action='confirm-intent-action']")?.focus();
         return;
       }
       await invokeTestSubmission({
@@ -200,6 +201,19 @@ export function mountStoryPlayerPage(
     const campaign = projection.campaign;
     if (campaign === null) return;
     ui.syncComposer(campaign.id, campaign.activeTurnNumber, composerCampaign()?.turnControlStyle ?? "action_only");
+  };
+  const updateComposerDraftDom = (textarea: HTMLTextAreaElement) => {
+    const composer = textarea.closest<HTMLElement>("[data-story-composer]");
+    if (!composer) return;
+    composer.querySelector<HTMLElement>("[data-story-character-count]")!.textContent = `${textarea.value.length.toLocaleString()} / 12,000`;
+    const clear = composer.querySelector<HTMLButtonElement>("[data-action='clear-story-draft']");
+    if (clear) clear.disabled = !textarea.value;
+    for (const choice of composer.querySelectorAll<HTMLButtonElement>("[data-story-choice]")) choice.setAttribute("aria-pressed", "false");
+    composer.querySelector("[data-story-intent-confirmation]")?.remove();
+  };
+  const selectInputMode = (mode: StoryTurnInputMode) => {
+    ui.setRequestedInputMode(mode);
+    root.querySelector<HTMLButtonElement>(`[data-input-mode="${mode}"]`)?.focus();
   };
   function render(): void {
     retryControl?.removeEventListener("click", onRetry);
@@ -299,11 +313,28 @@ export function mountStoryPlayerPage(
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-input-mode]")) {
       control.addEventListener("click", () => {
         const mode = control.dataset.inputMode;
-        if (mode === "auto" || mode === "action" || mode === "scene") ui.setRequestedInputMode(mode);
+        if (mode === "auto" || mode === "action" || mode === "scene") selectInputMode(mode);
+      });
+      control.addEventListener("keydown", (event) => {
+        const modes = [...root.querySelectorAll<HTMLButtonElement>("[data-input-mode]")];
+        const currentIndex = modes.indexOf(control);
+        if (currentIndex < 0) return;
+        const nextIndex = event.key === "Home" ? 0
+          : event.key === "End" ? modes.length - 1
+            : event.key === "ArrowRight" || event.key === "ArrowDown" ? (currentIndex + 1) % modes.length
+              : event.key === "ArrowLeft" || event.key === "ArrowUp" ? (currentIndex - 1 + modes.length) % modes.length
+                : -1;
+        const mode = modes[nextIndex]?.dataset.inputMode;
+        if (nextIndex < 0 || (mode !== "auto" && mode !== "action" && mode !== "scene")) return;
+        event.preventDefault();
+        selectInputMode(mode);
       });
     }
     for (const textarea of root.querySelectorAll<HTMLTextAreaElement>("[data-story-draft]")) {
-      textarea.addEventListener("input", () => ui.setComposerDraft(textarea.value));
+      textarea.addEventListener("input", () => {
+        ui.setComposerDraft(textarea.value);
+        updateComposerDraftDom(textarea);
+      });
     }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-story-choice]")) {
       control.addEventListener("click", () => {

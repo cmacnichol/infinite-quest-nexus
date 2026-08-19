@@ -202,7 +202,7 @@ export function createStoryUiModel(
     setComposerDraft(draft) {
       const selection = createChoiceDraftSelection(draft);
       if (state.draft === draft && !state.choiceSelection.length && state.choiceBaseText === selection.baseText && state.intentConfirmation === null) return;
-      publish({ ...state, draft, choiceSelection: selection.selectedIndexes, choiceBaseText: selection.baseText, intentConfirmation: null });
+      state = { ...state, draft, choiceSelection: selection.selectedIndexes, choiceBaseText: selection.baseText, intentConfirmation: null };
     },
     setChoiceDraft(selection, draft) {
       const selectedIndexes = selection.selectedIndexes.filter((index) => Number.isSafeInteger(index) && index >= 0);

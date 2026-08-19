@@ -129,6 +129,12 @@ function enter(page: ReturnType<typeof fixture>, text: string): HTMLTextAreaElem
   return textarea;
 }
 
+function keydown(page: ReturnType<typeof fixture>, target: HTMLElement, key: string): void {
+  const event = new page.window.Event("keydown", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "key", { value: key });
+  target.dispatchEvent(event);
+}
+
 afterEach(() => vi.restoreAllMocks());
 
 describe("Story continuation composer", () => {
@@ -163,6 +169,49 @@ describe("Story continuation composer", () => {
     expect([...page.document.querySelectorAll<HTMLButtonElement>("[data-story-choice]")].map((choice) => choice.getAttribute("aria-pressed")))
       .toEqual(["false", "false"]);
     expect(page.document.querySelector<HTMLTextAreaElement>("[data-story-draft]")?.value).toBe("Write something else.");
+    mounted.dispose();
+  });
+
+  it("keeps the textarea mounted for consecutive input and updates the live character count", async () => {
+    const page = fixture();
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition());
+    await settle();
+    const textarea = page.document.querySelector<HTMLTextAreaElement>("[data-story-draft]");
+    if (!textarea) throw new Error("Story composer textarea is missing.");
+
+    textarea.value = "A";
+    textarea.dispatchEvent(new page.window.Event("input", { bubbles: true }));
+    expect(page.document.querySelector("[data-story-draft]")).toBe(textarea);
+    textarea.value = "AB";
+    textarea.dispatchEvent(new page.window.Event("input", { bubbles: true }));
+    expect(page.document.querySelector("[data-story-draft]")).toBe(textarea);
+    const count = page.document.querySelector<HTMLElement>("[data-story-character-count]");
+    expect(count?.textContent).toBe("2 / 12,000");
+    expect(count?.getAttribute("role")).toBe("status");
+    expect(count?.getAttribute("aria-live")).toBe("polite");
+    mounted.dispose();
+  });
+
+  it("moves the compact interpretation radio selection with Arrow, Home, and End keys", async () => {
+    const page = fixture();
+    const focus = vi.spyOn(page.window.HTMLElement.prototype, "focus");
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({ turnControlStyle: "flexible_auto" }));
+    await settle();
+    const auto = page.document.querySelector<HTMLButtonElement>("[data-input-mode='auto']");
+    if (!auto) throw new Error("Auto interpretation control is missing.");
+
+    keydown(page, auto, "ArrowRight");
+    let action = page.document.querySelector<HTMLButtonElement>("[data-input-mode='action']");
+    expect(action?.getAttribute("aria-checked")).toBe("true");
+    expect(focus.mock.instances).toContain(action);
+
+    if (!action) throw new Error("Action interpretation control is missing.");
+    keydown(page, action, "End");
+    const scene = page.document.querySelector<HTMLButtonElement>("[data-input-mode='scene']");
+    expect(scene?.getAttribute("aria-checked")).toBe("true");
+    if (!scene) throw new Error("Scene interpretation control is missing.");
+    keydown(page, scene, "Home");
+    expect(page.document.querySelector<HTMLButtonElement>("[data-input-mode='auto']")?.getAttribute("aria-checked")).toBe("true");
     mounted.dispose();
   });
 
@@ -251,6 +300,31 @@ describe("Story continuation composer", () => {
     page.document.querySelector<HTMLButtonElement>("[data-action='confirm-intent-scene']")?.click();
     expect(submit).toHaveBeenLastCalledWith(expect.objectContaining({ action: "Perhaps describe what changes.", requestedInputMode: "auto", resolvedInputMode: "scene", classificationId: "88888888-8888-4888-8888-888888888888" }));
     expect(classifyTurnInput).toHaveBeenCalledTimes(2);
+    mounted.dispose();
+  });
+
+  it("moves focus into a labelled inline confirmation region and returns it to the editor", async () => {
+    const page = fixture();
+    const focus = vi.spyOn(page.window.HTMLElement.prototype, "focus");
+    const classifyTurnInput = vi.fn().mockResolvedValue({
+      classificationId: "88888888-8888-4888-8888-888888888888", classification: "mixed", resolvedMode: "scene",
+      confidenceBand: "ambiguous", providerSource: "story_text", expiresAt: "2026-08-18T00:01:00.000Z"
+    });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({ turnControlStyle: "flexible_auto", classifyTurnInput }));
+    await settle();
+    enter(page, "Perhaps describe what changes.");
+    page.document.querySelector<HTMLButtonElement>("[data-action='continue-story']")?.click();
+    await settle();
+
+    const confirmation = page.document.querySelector<HTMLElement>("[data-story-intent-confirmation]");
+    const useAction = page.document.querySelector<HTMLButtonElement>("[data-action='confirm-intent-action']");
+    expect(confirmation?.getAttribute("role")).toBe("region");
+    expect(confirmation?.getAttribute("aria-labelledby")).toBeTruthy();
+    expect(confirmation?.getAttribute("role")).not.toBe("alertdialog");
+    expect(focus.mock.instances).toContain(useAction);
+
+    page.document.querySelector<HTMLButtonElement>("[data-action='return-to-story-editor']")?.click();
+    expect(focus.mock.instances).toContain(page.document.querySelector("[data-story-draft]"));
     mounted.dispose();
   });
 });

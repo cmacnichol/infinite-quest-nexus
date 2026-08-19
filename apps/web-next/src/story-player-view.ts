@@ -182,14 +182,18 @@ function storyComposer(
   const count = element(document, "p", "story-draft-count", `${ui.draft.length.toLocaleString()} / 12,000`);
   count.id = "story-draft-count";
   count.dataset.storyCharacterCount = "";
+  count.setAttribute("role", "status");
+  count.setAttribute("aria-live", "polite");
   field.append(label, textarea, clear, help, count);
   composer.append(field);
 
   if (ui.intentConfirmation !== null) {
     const confirmation = element(document, "section", "story-intent-confirmation");
     confirmation.dataset.storyIntentConfirmation = "";
-    confirmation.setAttribute("role", "alertdialog");
-    confirmation.setAttribute("aria-label", "Confirm prompt interpretation");
+    confirmation.setAttribute("role", "region");
+    const title = element(document, "h2", "story-intent-title", "Confirm prompt interpretation");
+    title.id = "story-intent-title";
+    confirmation.setAttribute("aria-labelledby", title.id);
     const useAction = element(document, "button", undefined, "Use as Action");
     useAction.type = "button";
     useAction.dataset.action = "confirm-intent-action";
@@ -199,7 +203,7 @@ function storyComposer(
     const returnToEditor = element(document, "button", undefined, "Return to editor");
     returnToEditor.type = "button";
     returnToEditor.dataset.action = "return-to-story-editor";
-    confirmation.append(element(document, "p", undefined, `Choose how to continue: ${ui.intentConfirmation.action}`), useAction, useScene, returnToEditor);
+    confirmation.append(title, element(document, "p", undefined, `Choose how to continue: ${ui.intentConfirmation.action}`), useAction, useScene, returnToEditor);
     composer.append(confirmation);
   }
 
