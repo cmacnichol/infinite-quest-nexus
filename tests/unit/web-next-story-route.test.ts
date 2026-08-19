@@ -35,4 +35,13 @@ describe("replacement Story routes", () => {
   ])("rejects malformed player route %s%s", (pathname, search) => {
     expect(storyRouteFromLocation(pathname, search)).toBeNull();
   });
+
+  it.each([
+    ["duplicate turn values", "/app/story/campaign-1", "?turn=1&turn=2"],
+    ["extraneous query values", "/app/story/campaign-1", "?turn=1&other=value"],
+    ["a chooser turn query", "/app/story", "?turn=1"],
+    ["an unsafe turn integer", "/app/story/campaign-1", "?turn=9007199254740992"]
+  ])("rejects %s", (_label, pathname, search) => {
+    expect(storyRouteFromLocation(pathname, search)).toBeNull();
+  });
 });
