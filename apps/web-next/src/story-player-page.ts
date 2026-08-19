@@ -126,6 +126,7 @@ export function mountStoryPlayerPage(
   let autoSubmitTurnChoices = false;
   let submittedDraft: string | null = null;
   let followingProgrammatically = false;
+  let programmaticFollowResetTimer: ReturnType<typeof setTimeout> | null = null;
   const refreshCompletionResources = (campaignId: string, turnNumber: number) => {
     void composition.api.campaigns.state(campaignId, turnNumber).then((runtime) => {
       if (!disposed && projection.campaign?.id === campaignId && runtime.campaignId === campaignId) {
@@ -152,6 +153,12 @@ export function mountStoryPlayerPage(
   });
   const scrollWindow = root.ownerDocument.defaultView;
   const onDocumentScroll = () => {
+    if (followingProgrammatically) {
+      followingProgrammatically = false;
+      if (programmaticFollowResetTimer !== null) globalThis.clearTimeout(programmaticFollowResetTimer);
+      programmaticFollowResetTimer = null;
+      return;
+    }
     if (!followingProgrammatically && projection.generation !== null && ui.get().generationFollowing) {
       ui.setGenerationFollowing(false);
     }
@@ -496,7 +503,11 @@ export function mountStoryPlayerPage(
       if (preview && typeof preview.scrollIntoView === "function") {
         followingProgrammatically = true;
         preview.scrollIntoView({ block: "end" });
-        queueMicrotask(() => { followingProgrammatically = false; });
+        if (programmaticFollowResetTimer !== null) globalThis.clearTimeout(programmaticFollowResetTimer);
+        programmaticFollowResetTimer = globalThis.setTimeout(() => {
+          followingProgrammatically = false;
+          programmaticFollowResetTimer = null;
+        }, 0);
       }
     }
   }
@@ -587,6 +598,7 @@ export function mountStoryPlayerPage(
       controller?.abort();
       generation.dispose();
       scrollWindow?.removeEventListener("scroll", onDocumentScroll);
+      if (programmaticFollowResetTimer !== null) globalThis.clearTimeout(programmaticFollowResetTimer);
       root.removeEventListener("click", onClick);
       retryControl?.removeEventListener("click", onRetry);
       unsubscribeStore();

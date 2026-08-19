@@ -324,6 +324,53 @@ describe("Story Player page shell", () => {
     mounted.dispose();
   });
 
+  it("keeps following when an auto-scroll delivers its viewport scroll after microtasks", async () => {
+    const page = fixture();
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 1 }, activeTurnNumber: 1,
+      pendingGeneration: {
+        id: "55555555-5555-4555-8555-555555555555", status: "generating", action: "Continue",
+        expectedTurnNumber: 2, createdAt: "2026-08-18T00:00:00.000Z", updatedAt: "2026-08-18T00:00:00.000Z",
+        operationKind: "append", replacementTurnId: null
+      },
+      turns: turnWindow([1])
+    });
+    const originalScrollIntoView = page.window.HTMLElement.prototype.scrollIntoView;
+    const autoScroll = vi.fn(() => setTimeout(() => page.window.dispatchEvent(new page.window.Event("scroll")), 0));
+    Object.defineProperty(page.window.HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: autoScroll
+    });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({ syncStatus: vi.fn().mockResolvedValue(loaded) }));
+    await vi.waitFor(() => expect(autoScroll).toHaveBeenCalled());
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await settle();
+
+    expect(page.document.querySelector("[data-action='resume-generation-following']")).toBeNull();
+    Object.defineProperty(page.window.HTMLElement.prototype, "scrollIntoView", { configurable: true, value: originalScrollIntoView });
+    mounted.dispose();
+  });
+
+  it("does not react to viewport scroll after disposal", async () => {
+    const page = fixture();
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 1 }, activeTurnNumber: 1,
+      pendingGeneration: {
+        id: "55555555-5555-4555-8555-555555555555", status: "generating", action: "Continue",
+        expectedTurnNumber: 2, createdAt: "2026-08-18T00:00:00.000Z", updatedAt: "2026-08-18T00:00:00.000Z",
+        operationKind: "append", replacementTurnId: null
+      },
+      turns: turnWindow([1])
+    });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({ syncStatus: vi.fn().mockResolvedValue(loaded) }));
+    await settle();
+    mounted.dispose();
+    page.window.dispatchEvent(new page.window.Event("scroll"));
+    await settle();
+
+    expect(page.document.querySelector("[data-action='resume-generation-following']")).toBeNull();
+  });
+
   it("refreshes runtime state and illustration data independently after durable completion", async () => {
     const page = fixture();
     const completed = {
