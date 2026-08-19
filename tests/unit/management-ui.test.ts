@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { parseHTML } from "linkedom";
 import { describe, expect, it } from "vitest";
 
 const storyHtml = readFileSync("apps/web/public/story.html", "utf8");
@@ -6,6 +7,7 @@ const storyScript = readFileSync("apps/web/src/story.js", "utf8");
 const managementHtml = readFileSync("apps/web/public/index.html", "utf8");
 const managementScript = readFileSync("apps/web/public/nexus.js", "utf8");
 const managementCss = readFileSync("apps/web/public/nexus.css", "utf8");
+const { document: managementDocument } = parseHTML(managementHtml);
 const imageLibraryScript = readFileSync("apps/web/public/image-library-browser.js", "utf8");
 
 function managementFunction<T extends (...args: never[]) => unknown>(name: string): T {
@@ -16,6 +18,70 @@ function managementFunction<T extends (...args: never[]) => unknown>(name: strin
 }
 
 describe("Nexus management UI contracts", () => {
+  it("organizes the selected legacy campaign into five accessible settings panels", () => {
+    const rail = managementDocument.querySelector("#campaignSettingsRail");
+    expect(rail?.getAttribute("role")).toBe("tablist");
+    expect(rail?.getAttribute("aria-orientation")).toBe("vertical");
+
+    const expected = [
+      ["campaignTabOverview", "campaignPanelOverview"],
+      ["campaignTabStory", "campaignPanelStory"],
+      ["campaignTabIllustrations", "campaignPanelIllustrations"],
+      ["campaignTabChronicle", "campaignPanelChronicle"],
+      ["campaignTabUsage", "campaignPanelUsage"]
+    ];
+
+    expect([...rail!.querySelectorAll("[role=tab]")].map((tab) => tab.id)).toEqual(expected.map(([tabId]) => tabId));
+    for (const [tabId, panelId] of expected) {
+      const tab = managementDocument.querySelector("#" + tabId);
+      const panel = managementDocument.querySelector("#" + panelId);
+      expect(tab?.getAttribute("aria-controls")).toBe(panelId);
+      expect(panel?.getAttribute("role")).toBe("tabpanel");
+      expect(panel?.getAttribute("aria-labelledby")).toBe(tabId);
+    }
+
+    expect(managementDocument.querySelector("#campaignTabOverview")?.getAttribute("aria-selected")).toBe("true");
+    expect(managementDocument.querySelector("#campaignPanelOverview")?.hasAttribute("hidden")).toBe(false);
+    for (const panelId of expected.slice(1).map(([, panelId]) => panelId)) {
+      expect(managementDocument.querySelector("#" + panelId)?.hasAttribute("hidden")).toBe(true);
+    }
+  });
+
+  it("keeps campaign persistence separate from migration and panel navigation", () => {
+    for (const id of [
+      "campaignTitle",
+      "campaignStatus",
+      "campaignTextProvider",
+      "campaignTurnControlStyle",
+      "campaignStoryLengthProfile",
+      "saveCampaign"
+    ]) {
+      expect(managementDocument.querySelector("#" + id)?.getAttribute("form")).toBe("campaignForm");
+    }
+    expect(managementDocument.querySelector("#campaignWorldVersion")?.getAttribute("form")).toBeNull();
+
+    const saveStart = managementScript.indexOf("async function saveSelectedCampaign");
+    const saveEnd = managementScript.indexOf("\nasync function migrateSelectedCampaign", saveStart);
+    const saveSource = managementScript.slice(saveStart, saveEnd);
+    expect(saveSource).toContain("title: elements.campaignTitle.value");
+    expect(saveSource).toContain("status: elements.campaignStatus.value");
+    expect(saveSource).toContain("textProviderProfileId: elements.campaignTextProvider.value || null");
+    expect(saveSource).toContain("turnControlStyle: elements.campaignTurnControlStyle.value");
+    expect(saveSource).toContain("storyLengthProfile: elements.campaignStoryLengthProfile.value");
+    expect(saveSource).not.toContain("campaignWorldVersion");
+  });
+
+  it("maps standard tab keys with wrapping navigation", () => {
+    const nextIndex = managementFunction<(key: string, currentIndex: number, count: number) => number>("campaignSettingsPanelIndexForKey");
+    expect(nextIndex("ArrowRight", 4, 5)).toBe(0);
+    expect(nextIndex("ArrowDown", 1, 5)).toBe(2);
+    expect(nextIndex("ArrowLeft", 0, 5)).toBe(4);
+    expect(nextIndex("ArrowUp", 3, 5)).toBe(2);
+    expect(nextIndex("Home", 3, 5)).toBe(0);
+    expect(nextIndex("End", 1, 5)).toBe(4);
+    expect(nextIndex("Enter", 2, 5)).toBe(2);
+  });
+
   it("navigates to provider management with an anchor", () => {
     expect(storyHtml).toContain('<a id="btnGettingConfigureProviders" class="buttonish accent grow" href="/nexus/#providers">Open Provider Management in Nexus</a>');
   });

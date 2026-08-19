@@ -330,6 +330,19 @@ code { color: var(--gold); }
 .stat-glyph { color: color-mix(in srgb, var(--stat-glow, var(--purple)) 82%, white); font-size: 1.3rem; }
 .worlds-stat { --stat-glow: #9c70ff; }
 .campaigns-stat { --stat-glow: #55d4e9; }
+.campaign-editor-card { min-width: 0; }
+.campaign-editor-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.campaign-editor-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.campaign-editor-summary { margin: 5px 0 0; color: var(--muted); font-size: .78rem; }
+.campaign-settings-shell { display: grid; grid-template-columns: 220px minmax(0, 1fr); margin-top: 18px; overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: #111622; }
+.campaign-settings-rail { display: flex; min-width: 0; flex-direction: column; border-right: 1px solid var(--line); }
+.campaign-settings-rail nav { display: grid; gap: 3px; padding: 10px; }
+.campaign-settings-rail [role="tab"] { display: grid; gap: 3px; min-height: 58px; border: 0; border-radius: 9px; padding: 10px 12px; background: transparent; color: var(--muted); cursor: pointer; text-align: left; }
+.campaign-settings-rail [role="tab"] span { font-size: .68rem; font-weight: 500; }
+.campaign-settings-rail [role="tab"][aria-selected="true"] { background: #2a2444; color: var(--text); box-shadow: inset 2px 0 var(--purple); }
+.campaign-settings-rail > .button { margin: auto 14px 14px; }
+.campaign-settings-content { min-width: 0; padding: 22px; background: var(--panel); }
+.campaign-settings-content > [role="tabpanel"][hidden] { display: none; }
 .turns-stat { --stat-glow: #f1bd62; }
 .cost-stat { --stat-glow: #6fe0a6; }
 .activity-stat { --stat-glow: #e274a4; }

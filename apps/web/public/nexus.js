@@ -16,6 +16,8 @@ let campaignArchivePreviewSequence = 0;
 let campaignArchivePreviewAbortController = null;
 let campaignImportRefreshSequence = 0;
 let selectedCampaign = null;
+const CAMPAIGN_SETTINGS_PANEL_IDS = Object.freeze(["overview", "story", "illustrations", "chronicle", "usage"]);
+let activeCampaignSettingsPanel = "overview";
 let worlds = [];
 let campaigns = [];
 let selectedWorld = null;
@@ -69,6 +71,47 @@ let promptLibraryActiveScope = "application";
 let promptLibraryActiveCampaignId = "";
 let promptLibraryPreviewTimer = 0;
 let promptLibraryPreviewSequence = 0;
+
+function campaignSettingsPanelIndexForKey(key, currentIndex, count) {
+  if (key === "Home") return 0;
+  if (key === "End") return count - 1;
+  if (key === "ArrowRight" || key === "ArrowDown") return (currentIndex + 1) % count;
+  if (key === "ArrowLeft" || key === "ArrowUp") return (currentIndex - 1 + count) % count;
+  return currentIndex;
+}
+
+function setCampaignSettingsPanel(panelId, { focus = false } = {}) {
+  if (!CAMPAIGN_SETTINGS_PANEL_IDS.includes(panelId)) return;
+  activeCampaignSettingsPanel = panelId;
+  const tabs = [...elements.campaignSettingsRail.querySelectorAll("[role=tab]")];
+  for (const tab of tabs) {
+    const selected = tab.dataset.campaignSettingsPanel === panelId;
+    tab.setAttribute("aria-selected", String(selected));
+    tab.tabIndex = selected ? 0 : -1;
+    if (selected && focus) tab.focus();
+  }
+  document.querySelectorAll("[data-campaign-settings-content]").forEach((panel) => {
+    panel.hidden = panel.dataset.campaignSettingsContent !== panelId;
+  });
+}
+
+function handleCampaignSettingsRailKeydown(event) {
+  const tabs = [...elements.campaignSettingsRail.querySelectorAll("[role=tab]:not(:disabled)")];
+  const currentIndex = tabs.indexOf(event.target);
+  if (currentIndex < 0) return;
+  const nextIndex = campaignSettingsPanelIndexForKey(event.key, currentIndex, tabs.length);
+  if (nextIndex === currentIndex && !["Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  setCampaignSettingsPanel(tabs[nextIndex].dataset.campaignSettingsPanel, { focus: true });
+}
+
+function setCampaignSettingsAvailability(available) {
+  elements.campaignSettingsRail.querySelectorAll("[role=tab]").forEach((tab) => {
+    tab.disabled = !available;
+  });
+  if (!available) setCampaignSettingsPanel("overview");
+}
+
 const MIN_MEMORY_CONTEXT_BUDGET_TOKENS = 512;
 const MAX_MEMORY_CONTEXT_BUDGET_TOKENS = 1_000_000;
 const DEFAULT_MEMORY_CONTEXT_BUDGET_TOKENS = 32_000;
@@ -2335,6 +2378,9 @@ async function loadCampaigns(preselectId = "") {
     elements.campaignList.innerHTML = '<p class="muted">No database-backed campaigns yet.</p>';
     selectedCampaign = null;
     updateStoryViewLink();
+    setCampaignSettingsAvailability(false);
+    elements.memoryTitle.textContent = "Select a campaign";
+    elements.campaignEditorSummary.textContent = "";
     [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignTurnControlStyle, elements.campaignStoryLengthProfile, elements.saveCampaign, elements.migrateCampaign, elements.transferCampaign, elements.editCampaignCharacter, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationSourcePolicy, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts, elements.illustrationMatchingScope, elements.illustrationConfidenceProfile, elements.illustrationRepetitionWindow, elements.illustrationSegmentWordCount, elements.illustrationImagesPerSegment, elements.illustrationSegmentPromptMode, elements.openIllustrationPromptEditor, elements.previewIllustrationBackfill, elements.previewIllustrationRebuild, elements.saveIllustrationConfig, elements.discoverIllustrationModels].forEach((element) => { element.disabled = true; });
     elements.illustrationSourcePolicy.value = "off";
     renderIllustrationSettingsVisibility();
@@ -2364,6 +2410,8 @@ async function selectCampaign(campaign) {
   updateStoryViewLink();
   document.querySelectorAll(".campaign-button").forEach((button) => button.classList.toggle("active", button.dataset.campaignId === campaign.id));
   elements.memoryTitle.textContent = campaign.title;
+  elements.campaignEditorSummary.textContent = `${campaign.status} · ${campaign.worldTitle} v${campaign.worldVersionNumber}${campaign.selectedCharacterName ? ` · ${campaign.selectedCharacterName}` : ""}`;
+  setCampaignSettingsAvailability(true);
   elements.reindexMemory.disabled = false;
   elements.previewContext.disabled = false;
   elements.saveEmbeddingConfig.disabled = false;
@@ -2384,6 +2432,7 @@ async function selectCampaign(campaign) {
     elements.campaignWorldVersion.append(new Option(`Version ${version.versionNumber}`, version.id));
   }
   elements.campaignWorldVersion.value = campaign.worldVersionId;
+  setCampaignSettingsPanel(activeCampaignSettingsPanel);
   elements.migrateCampaign.disabled = !world.versions.some((version) => version.versionNumber > campaign.worldVersionNumber);
   if (campaign.worldUpdateAvailable) campaignMessage(`This campaign is pinned to version ${campaign.worldVersionNumber}; version ${campaign.latestWorldVersionNumber} is available. Migration is explicit and does not rewrite accepted turns.`);
   else elements.campaignStatusMessage.classList.add("hidden");
@@ -5119,6 +5168,11 @@ elements.archiveWorld.addEventListener("click", toggleWorldArchive);
 elements.deleteWorld.addEventListener("click", deleteSelectedWorld);
 elements.refreshCampaigns.addEventListener("click", () => loadCampaigns().catch((error) => setStatus(error.message, "error")));
 elements.campaignForm.addEventListener("submit", saveSelectedCampaign);
+elements.campaignSettingsRail.addEventListener("click", (event) => {
+  const tab = event.target.closest("[data-campaign-settings-panel]");
+  if (tab && !tab.disabled) setCampaignSettingsPanel(tab.dataset.campaignSettingsPanel);
+});
+elements.campaignSettingsRail.addEventListener("keydown", handleCampaignSettingsRailKeydown);
 elements.migrateCampaign.addEventListener("click", migrateSelectedCampaign);
 elements.transferCampaign.addEventListener("click", openCampaignTransfer);
 elements.cancelTransferCampaign.addEventListener("click", () => elements.transferCampaignDialog.close());

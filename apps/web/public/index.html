@@ -168,7 +168,7 @@
       <div id="worldStatus" class="status" role="status" aria-live="polite">World content is stored in PostgreSQL, never embedded in this client.</div>
     </section>
 
-    <section id="campaigns" class="workspace anchor-section world-management">
+    <section id="campaigns" class="workspace anchor-section world-management campaign-management-workspace">
       <aside class="card campaign-list-card">
         <div class="section-heading">
           <div>
@@ -180,57 +180,71 @@
         <div id="campaignList" class="campaign-list"><p class="muted">Loading campaigns…</p></div>
       </aside>
 
-      <section class="card memory-card">
-        <div class="section-heading">
+      <section class="card campaign-editor-card">
+        <div class="section-heading campaign-editor-header">
           <div>
             <p class="eyebrow">Campaign workspace</p>
             <h2 id="memoryTitle">Select a campaign</h2>
+            <p id="campaignEditorSummary" class="campaign-editor-summary"></p>
+          </div>
+          <div class="campaign-editor-actions">
+            <button id="saveCampaign" class="button secondary" type="submit" form="campaignForm" disabled>Save campaign</button>
+            <button id="loadCampaign" class="button primary" type="button" disabled>Load story</button>
           </div>
         </div>
 
-        <form id="campaignForm" class="campaign-controls">
-          <label>Campaign title<input id="campaignTitle" maxlength="200" disabled></label>
-          <label>Status<select id="campaignStatus" disabled><option value="active">Active</option><option value="archived">Archived</option></select></label>
-          <label>World version<select id="campaignWorldVersion" disabled><option value="">Select a campaign</option></select></label>
-          <label>Text provider profile<select id="campaignTextProvider" disabled><option value="">Use default text provider</option></select></label>
-          <label title="Controls whether players enter attempted actions, required scene events, or let Auto classify each freeform prompt.">
-            Turn input style
-            <select id="campaignTurnControlStyle" disabled>
-              <option value="action_only">Player actions only</option>
-              <option value="flexible_auto">Flexible — Auto</option>
-              <option value="flexible_action">Flexible — Action first</option>
-              <option value="flexible_scene">Flexible — Scene direction first</option>
-            </select>
-          </label>
-          <label title="Sets the requested narration size for each new story turn. The provider maximum output remains a separate safety ceiling.">
-            Default story response length
-            <select id="campaignStoryLengthProfile" disabled>
-              <option value="brief">Brief — 250–450 words</option>
-              <option value="standard" selected>Standard — 450–900 words</option>
-              <option value="long">Long — 800–1,200 words</option>
-              <option value="extended">Extended — 1,200–2,000 words</option>
-            </select>
-          </label>
-          <button id="saveCampaign" class="button secondary" type="submit" disabled>Save campaign</button>
-          <button id="migrateCampaign" class="button secondary" type="button" disabled>Migrate version</button>
-          <button id="transferCampaign" class="button secondary" type="button" disabled>Transfer to another world…</button>
-          <button id="editCampaignCharacter" class="button secondary" type="button" disabled>Edit character profile…</button>
-          <button id="loadCampaign" class="button primary" type="button" disabled>Load story</button>
-          <button id="exportCampaign" class="button secondary" type="button" disabled>Export campaign</button>
-          <button id="deleteCampaign" class="button danger" type="button" disabled>Delete campaign</button>
-        </form>
-        <div id="campaignStatusMessage" class="status hidden" role="status" aria-live="polite"></div>
+        <form id="campaignForm" aria-label="Campaign settings"></form>
 
-        <section id="campaignCostSection" class="campaign-settings-section campaign-cost-section hidden" aria-labelledby="campaignCostTitle">
-          <div class="campaign-settings-heading">
-            <div>
-              <p class="eyebrow">Usage</p>
-              <h3 id="campaignCostTitle">Reported provider cost</h3>
-              <p id="campaignCostMessage">No provider-reported cost data is available for this campaign.</p>
-            </div>
-          </div>
-          <div id="campaignCostMetrics" class="cost-metrics" aria-live="polite"></div>
-        </section>
+        <div class="campaign-settings-shell">
+          <aside class="campaign-settings-rail">
+            <nav id="campaignSettingsRail" role="tablist" aria-label="Campaign setting groups" aria-orientation="vertical">
+              <button id="campaignTabOverview" type="button" role="tab" aria-selected="true" aria-controls="campaignPanelOverview" tabindex="0" data-campaign-settings-panel="overview" disabled>Overview<span>Identity, world, and character</span></button>
+              <button id="campaignTabStory" type="button" role="tab" aria-selected="false" aria-controls="campaignPanelStory" tabindex="-1" data-campaign-settings-panel="story" disabled>Story behavior<span>Provider and turn defaults</span></button>
+              <button id="campaignTabIllustrations" type="button" role="tab" aria-selected="false" aria-controls="campaignPanelIllustrations" tabindex="-1" data-campaign-settings-panel="illustrations" disabled>Illustrations<span>Sources and generation</span></button>
+              <button id="campaignTabChronicle" type="button" role="tab" aria-selected="false" aria-controls="campaignPanelChronicle" tabindex="-1" data-campaign-settings-panel="chronicle" disabled>Chronicle<span>Memory and context</span></button>
+              <button id="campaignTabUsage" type="button" role="tab" aria-selected="false" aria-controls="campaignPanelUsage" tabindex="-1" data-campaign-settings-panel="usage" disabled>Usage &amp; more<span>Cost, export, and danger</span></button>
+            </nav>
+            <button id="exportCampaign" class="button secondary" type="button" disabled>Export campaign</button>
+          </aside>
+
+          <div class="campaign-settings-content">
+            <section id="campaignPanelOverview" role="tabpanel" aria-labelledby="campaignTabOverview" data-campaign-settings-content="overview">
+              <div class="campaign-panel-fields campaign-controls">
+                <label>Campaign title<input id="campaignTitle" maxlength="200" form="campaignForm" disabled></label>
+                <label>Status<select id="campaignStatus" form="campaignForm" disabled><option value="active">Active</option><option value="archived">Archived</option></select></label>
+                <label>World version<select id="campaignWorldVersion" disabled><option value="">Select a campaign</option></select></label>
+                <button id="migrateCampaign" class="button secondary" type="button" disabled>Migrate version</button>
+                <button id="transferCampaign" class="button secondary" type="button" disabled>Transfer to another world…</button>
+                <button id="editCampaignCharacter" class="button secondary" type="button" disabled>Edit character profile…</button>
+              </div>
+              <div id="campaignStatusMessage" class="status hidden" role="status" aria-live="polite"></div>
+            </section>
+
+            <section id="campaignPanelStory" role="tabpanel" aria-labelledby="campaignTabStory" data-campaign-settings-content="story" hidden>
+              <div class="campaign-panel-fields campaign-controls">
+                <label>Text provider profile<select id="campaignTextProvider" form="campaignForm" disabled><option value="">Use default text provider</option></select></label>
+                <label title="Controls whether players enter attempted actions, required scene events, or let Auto classify each freeform prompt.">
+                  Turn input style
+                  <select id="campaignTurnControlStyle" form="campaignForm" disabled>
+                    <option value="action_only">Player actions only</option>
+                    <option value="flexible_auto">Flexible — Auto</option>
+                    <option value="flexible_action">Flexible — Action first</option>
+                    <option value="flexible_scene">Flexible — Scene direction first</option>
+                  </select>
+                </label>
+                <label title="Sets the requested narration size for each new story turn. The provider maximum output remains a separate safety ceiling.">
+                  Default story response length
+                  <select id="campaignStoryLengthProfile" form="campaignForm" disabled>
+                    <option value="brief">Brief — 250–450 words</option>
+                    <option value="standard" selected>Standard — 450–900 words</option>
+                    <option value="long">Long — 800–1,200 words</option>
+                    <option value="extended">Extended — 1,200–2,000 words</option>
+                  </select>
+                </label>
+              </div>
+            </section>
+
+            <section id="campaignPanelIllustrations" role="tabpanel" aria-labelledby="campaignTabIllustrations" data-campaign-settings-content="illustrations" hidden>
 
         <section id="campaignIllustrationSection" class="campaign-settings-section illustration-settings-section" aria-labelledby="campaignIllustrationTitle">
           <div class="campaign-settings-heading">
@@ -286,6 +300,9 @@
           </div>
           <div id="illustrationStatus" class="status">Illustrations are optional child jobs. Image failures never roll back or rerun an accepted story turn.</div>
         </section>
+            </section>
+
+            <section id="campaignPanelChronicle" role="tabpanel" aria-labelledby="campaignTabChronicle" data-campaign-settings-content="chronicle" hidden>
 
         <section id="campaignContextSection" class="campaign-settings-section chronicle-settings-section" aria-labelledby="campaignContextTitle">
           <div class="campaign-settings-heading">
@@ -381,6 +398,23 @@
           <pre id="contextPreview" class="context-preview" tabindex="0">The preview deliberately excludes rolls, mechanics records, private scratchpad content, rejected output, and credentials.</pre>
         </details>
         </section>
+            </section>
+
+            <section id="campaignPanelUsage" role="tabpanel" aria-labelledby="campaignTabUsage" data-campaign-settings-content="usage" hidden>
+              <section id="campaignCostSection" class="campaign-settings-section campaign-cost-section hidden" aria-labelledby="campaignCostTitle">
+                <div class="campaign-settings-heading">
+                  <div>
+                    <p class="eyebrow">Usage</p>
+                    <h3 id="campaignCostTitle">Reported provider cost</h3>
+                    <p id="campaignCostMessage">No provider-reported cost data is available for this campaign.</p>
+                  </div>
+                </div>
+                <div id="campaignCostMetrics" class="cost-metrics" aria-live="polite"></div>
+              </section>
+              <button id="deleteCampaign" class="button danger" type="button" disabled>Delete campaign</button>
+            </section>
+          </div>
+        </div>
       </section>
     </section>
 
