@@ -65,14 +65,18 @@ const INITIAL_STATE: StoryIllustrationState = {
   message: null
 };
 
-function terminal(status: string | null): boolean {
-  return status === null || !new Set([
-    "queued", "refining", "generating", "provider_pending", "downloading", "recoverable", "matching", "generation_queued"
-  ]).has(status.toLowerCase());
+const ACTIVE_SEGMENT_STATUSES = new Set(["queued", "refining", "generating"]);
+const ACTIVE_IMAGE_JOB_STATUSES = new Set(["queued", "generating", "provider_pending", "downloading"]);
+const ACTIVE_PROMPT_JOB_STATUSES = new Set(["queued", "refining", "recoverable"]);
+
+function activeStatus(status: string | null, activeStatuses: ReadonlySet<string>): boolean {
+  return status !== null && activeStatuses.has(status.toLowerCase());
 }
 
 function workIsActive(segments: readonly IllustrationSegment[]): boolean {
-  return segments.some((segment) => !terminal(segment.status) || !terminal(segment.imageJobStatus) || !terminal(segment.promptJobStatus));
+  return segments.some((segment) => activeStatus(segment.status, ACTIVE_SEGMENT_STATUSES)
+    || activeStatus(segment.imageJobStatus, ACTIVE_IMAGE_JOB_STATUSES)
+    || activeStatus(segment.promptJobStatus, ACTIVE_PROMPT_JOB_STATUSES));
 }
 
 function selected(state: StoryIllustrationState): Pick<StoryIllustrationState, "selectedSegment" | "selectedVariant" | "prompt"> {

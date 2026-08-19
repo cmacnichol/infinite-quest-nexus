@@ -380,23 +380,37 @@ describe("StoryIllustrationController", () => {
     expect(delay.wait).not.toHaveBeenCalled();
   });
 
-  it("polls a recoverable image job until it becomes terminal", async () => {
-    const wait = deferred<void>();
-    const delay = { wait: vi.fn().mockReturnValue(wait.promise) };
+  it("does not poll a recoverable segment and image job projection", async () => {
+    const delay = { wait: vi.fn().mockReturnValue(new Promise<void>(() => {})) };
     const api = illustrationApi({
-      segments: vi.fn()
-        .mockResolvedValueOnce(segments(turnId, { imageJobStatus: "recoverable", status: "completed" }))
-        .mockResolvedValueOnce(segments(turnId, { imageJobStatus: "failed", status: "completed" }))
+      segments: vi.fn().mockResolvedValue(segments(turnId, { imageJobStatus: "recoverable", status: "recoverable" }))
     });
     const subject = createStoryIllustrationController({ illustrations: api, idFactory: { create: () => "99999999-9999-4999-8999-999999999999" }, clock: { now: () => 0 }, delay });
 
     await subject.load(campaignId, turnId);
-    expect(delay.wait).toHaveBeenCalledTimes(1);
-    wait.resolve();
-    await settle();
 
-    expect(api.segments).toHaveBeenCalledTimes(2);
-    expect(delay.wait).toHaveBeenCalledTimes(1);
+    expect(api.segments).toHaveBeenCalledTimes(1);
+    expect(delay.wait).not.toHaveBeenCalled();
+  });
+
+  it("renders Retry when a recoverable image job has no stored variant", async () => {
+    const api = illustrationApi({
+      segments: vi.fn().mockResolvedValue(segments(turnId, { imageJobStatus: "recoverable", status: "completed", variants: [] }))
+    });
+    const subject = createStoryIllustrationController({
+      illustrations: api,
+      idFactory: { create: () => "99999999-9999-4999-8999-999999999999" },
+      clock: { now: () => 0 },
+      delay: { wait: vi.fn().mockReturnValue(new Promise<void>(() => {})) }
+    });
+    await subject.load(campaignId, turnId);
+
+    const { document } = parseHTML("<body></body>").window;
+    const wing = renderIllustrationWing(document, subject.get());
+    const retry = wing.querySelector<HTMLButtonElement>("[data-action='retry-image-job']");
+
+    expect(retry).not.toBeNull();
+    expect(retry?.disabled).toBe(false);
   });
 
   it("aborts in-flight polling on disposal without issuing another image request", async () => {

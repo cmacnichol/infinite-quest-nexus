@@ -481,14 +481,18 @@ export function renderIllustrationWing(document: Document, illustration: Readonl
   if (!segment || !variant) {
     if (illustration.status === "ready") {
       const actions = [
-        ...(capabilities.canGenerate ? [["generate-missing-images", "Generate missing images"], ["rebuild-images", "Rebuild images"]] as const : []),
-        ...(capabilities.canMatch ? [["rematch-image", "Find library match"]] as const : [])
+        ...(capabilities.canGenerate ? [
+          ["retry-image-job", "Retry", capabilities.canRetry],
+          ["generate-missing-images", "Generate missing images", true],
+          ["rebuild-images", "Rebuild images", true]
+        ] as const : []),
+        ...(capabilities.canMatch ? [["rematch-image", "Find library match", true]] as const : [])
       ];
-      for (const [action, label] of actions) {
+      for (const [action, label, valid] of actions) {
         const button = element(document, "button", undefined, label);
         button.type = "button";
         button.dataset.action = action;
-        button.disabled = capabilities.busy;
+        button.disabled = capabilities.busy || !valid;
         wing.append(button);
       }
     }
