@@ -1,5 +1,5 @@
 import type { CampaignProjection } from "@infinite-quest/client-core";
-import type { CampaignSummary } from "@infinite-quest/contracts";
+import type { CampaignRuntimeStateResponse, CampaignSummary } from "@infinite-quest/contracts";
 import { storyPlayerPath, type StoryRoute } from "./story-route";
 import type { ReadingWidth, StoryUiState } from "./story-player-model";
 import { alignLatestSpine, latestCampaignSpine } from "./story-player-history";
@@ -10,6 +10,7 @@ export interface StoryPlayerViewState {
   readonly campaigns: readonly CampaignSummary[];
   readonly selectedCampaign: CampaignSummary | null;
   readonly projection: Readonly<CampaignProjection>;
+  readonly inspectedState: CampaignRuntimeStateResponse | null;
 }
 
 type ReaderTurn = Readonly<{
@@ -323,10 +324,32 @@ function completeHistoryDialog(document: Document, state: StoryPlayerViewState):
     list.append(entry);
   }
   dialog.append(list);
+  if (state.inspectedState !== null && state.inspectedState.campaignId === state.projection.campaign?.id) {
+    const inspector = element(document, "section", "story-history-state-inspector");
+    inspector.dataset.storyStateInspector = "";
+    inspector.append(
+      element(document, "h3", undefined, `Historical State — Turn ${state.inspectedState.viewedTurnNumber}`),
+      element(document, "p", undefined, "Read-only historical state inspection."),
+      element(document, "h4", undefined, "Continuity"),
+      element(document, "p", undefined, state.inspectedState.continuitySummary)
+    );
+    if (state.inspectedState.openThreads.length) {
+      const threads = element(document, "ul");
+      for (const thread of state.inspectedState.openThreads) threads.append(element(document, "li", undefined, thread));
+      inspector.append(element(document, "h4", undefined, "Open Threads"), threads);
+    }
+    if (state.inspectedState.rpgStats.length) {
+      const mechanics = element(document, "ul");
+      for (const stat of state.inspectedState.rpgStats) mechanics.append(element(document, "li", undefined, `${stat.name}: ${stat.value}`));
+      inspector.append(element(document, "h4", undefined, "Recorded Mechanics"), mechanics);
+    }
+    dialog.append(inspector);
+  }
   for (const [action, label] of [
     ["inspect-state", "Inspect State"],
     ["jump-to-scene", "Jump to Scene"],
     ["jump-to-latest", "Jump to Latest"],
+    ["restart-from-turn", "Restart / Branch from Here"],
     ["close-history", "Done"]
   ] as const) {
     const button = element(document, "button", undefined, label);
@@ -334,6 +357,7 @@ function completeHistoryDialog(document: Document, state: StoryPlayerViewState):
     button.dataset.action = action;
     if (action === "jump-to-scene" && state.ui.viewTurnNumber !== null) button.dataset.turnNumber = String(state.ui.viewTurnNumber);
     if (action === "jump-to-latest" && state.projection.campaign) button.dataset.turnNumber = String(state.projection.campaign.activeTurnNumber);
+    if (action === "restart-from-turn" && state.ui.viewTurnNumber !== null) button.dataset.turnNumber = String(state.ui.viewTurnNumber);
     dialog.append(button);
   }
   return dialog;

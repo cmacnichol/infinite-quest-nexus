@@ -1,5 +1,5 @@
 import type { CampaignProjection } from "@infinite-quest/client-core";
-import type { CampaignSummary } from "@infinite-quest/contracts";
+import type { CampaignRuntimeStateResponse, CampaignSummary } from "@infinite-quest/contracts";
 import { initializeAppTheme, renderAppShell } from "./app-shell";
 import { createStoryPlayerComposition, type StoryPlayerComposition } from "./story-player-composition";
 import { createStoryUiModel, type StoryUiPhase } from "./story-player-model";
@@ -52,8 +52,9 @@ export function mountStoryPlayerPage(
   let controller: AbortController | null = null;
   let projection: Readonly<CampaignProjection> = composition.campaignStore.store.get();
   let retryControl: HTMLButtonElement | null = null;
-  let historyDialogOpener: HTMLElement | null = null;
+  let historyDialogOpener = false;
   let focusHistoryDialog = false;
+  let inspectedState: CampaignRuntimeStateResponse | null = null;
   const history = createStoryHistoryController({
     campaigns: composition.api.campaigns,
     campaignStore: composition.campaignStore,
@@ -62,9 +63,9 @@ export function mountStoryPlayerPage(
 
   const onRetry = () => { void load(); };
   const restoreHistoryFocus = () => {
-    const opener = historyDialogOpener;
-    historyDialogOpener = null;
-    opener?.focus();
+    if (!historyDialogOpener) return;
+    historyDialogOpener = false;
+    root.querySelector<HTMLButtonElement>("[data-action='open-complete-history']")?.focus();
   };
   const closeHistoryDialog = () => {
     const dialog = root.querySelector<HTMLDialogElement>("[data-story-history]");
@@ -109,13 +110,14 @@ export function mountStoryPlayerPage(
   };
   function render(): void {
     retryControl?.removeEventListener("click", onRetry);
-    renderStoryPlayerView(root, { route, ui: ui.get(), campaigns, selectedCampaign, projection });
+    renderStoryPlayerView(root, { route, ui: ui.get(), campaigns, selectedCampaign, projection, inspectedState });
     retryControl = root.querySelector<HTMLButtonElement>('[data-action="retry-story"]');
     retryControl?.addEventListener("click", onRetry);
     for (const control of root.querySelectorAll<HTMLElement>("[data-turn-number]")) {
       const turnNumber = Number(control.dataset.turnNumber);
       control.addEventListener("click", (event) => {
         event.stopPropagation();
+        inspectedState = null;
         history.jump(turnNumber);
       });
     }
@@ -128,7 +130,7 @@ export function mountStoryPlayerPage(
     for (const control of root.querySelectorAll<HTMLElement>("[data-action='open-complete-history']")) {
       control.addEventListener("click", (event) => {
         event.stopPropagation();
-        historyDialogOpener = control;
+        historyDialogOpener = true;
         focusHistoryDialog = true;
         ui.setActiveDialog("history");
         void history.openCompleteHistory().catch(() => undefined);
@@ -141,13 +143,37 @@ export function mountStoryPlayerPage(
       control.addEventListener("click", (event) => { event.stopPropagation(); closeHistoryDialog(); });
     }
     for (const control of root.querySelectorAll<HTMLElement>("[data-action='jump-to-scene']")) {
-      control.addEventListener("click", (event) => { event.stopPropagation(); closeHistoryDialog(); });
+      control.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const turnNumber = Number(control.dataset.turnNumber);
+        if (Number.isSafeInteger(turnNumber) && turnNumber > 0) {
+          inspectedState = null;
+          history.jump(turnNumber);
+        }
+        closeHistoryDialog();
+      });
     }
     for (const control of root.querySelectorAll<HTMLElement>("[data-action='inspect-state']")) {
       control.addEventListener("click", (event) => {
         event.stopPropagation();
         const turnNumber = ui.get().viewTurnNumber;
-        if (turnNumber !== null) void history.inspect(turnNumber).then(() => undefined);
+        if (turnNumber !== null) {
+          void history.inspect(turnNumber).then((result) => {
+            if (disposed || result === null) return;
+            inspectedState = result;
+            render();
+          });
+        }
+      });
+    }
+    for (const control of root.querySelectorAll<HTMLElement>("[data-action='restart-from-turn']")) {
+      control.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const turnNumber = Number(control.dataset.turnNumber);
+        const confirm = root.ownerDocument.defaultView?.confirm;
+        if (Number.isSafeInteger(turnNumber) && turnNumber > 0 && typeof confirm === "function") {
+          confirm(`Restart or branch from persisted Turn ${turnNumber}?`);
+        }
       });
     }
     bindHistoryDialog();

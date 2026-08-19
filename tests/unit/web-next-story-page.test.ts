@@ -509,7 +509,7 @@ describe("Story Player page shell", () => {
     mounted.dispose();
   });
 
-  it("runs the selected History actions through a native dialog close path with focus restoration", async () => {
+  it("runs selected History actions, isolates inspected state, and restores focus to the live opener", async () => {
     const page = fixture();
     const loaded = sync({
       campaign: { ...sync().campaign, activeTurnNumber: 7 }, activeTurnNumber: 7,
@@ -520,7 +520,25 @@ describe("Story Player page shell", () => {
         acceptedAt: "2026-08-18T00:00:00.000Z", chronicleRetrieval: null, reportedCost: null
       })) }
     });
-    const state = vi.fn().mockResolvedValue({ campaignId, turnNumber: 6 });
+    const inspectedState = {
+      campaignId,
+      activeTurnNumber: 7,
+      viewedTurnNumber: 6,
+      isCurrent: false,
+      revision: 4,
+      updatedAt: "2026-08-18T00:00:00.000Z",
+      continuitySummary: "Archived continuity for turn six.",
+      openThreads: ["Find the observatory."],
+      canonicalFacts: [],
+      scratchpad: "Private campaign scratchpad.",
+      trackers: [],
+      rpgStats: [{ id: "courage", name: "Courage", value: 8, note: "Inspector-only mechanics." }],
+      eventTriggers: [],
+      pendingEventTriggers: []
+    };
+    const state = vi.fn().mockResolvedValue(inspectedState);
+    const confirm = vi.fn().mockReturnValue(false);
+    Object.defineProperty(page.window, "confirm", { configurable: true, value: confirm });
     const focus = vi.spyOn(page.window.HTMLElement.prototype, "focus");
     const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 7 }, composition({
       list: vi.fn().mockResolvedValue({ campaigns: [campaignSummary({ activeTurnNumber: 7 })] }), syncStatus: vi.fn().mockResolvedValue(loaded), state
@@ -530,14 +548,32 @@ describe("Story Player page shell", () => {
     opener?.click();
     await settle();
 
-    const dialog = page.document.querySelector<HTMLDialogElement>("[data-story-history]");
+    let dialog = page.document.querySelector<HTMLDialogElement>("[data-story-history]");
     expect(dialog?.querySelector("[data-action='jump-to-scene']")?.textContent).toContain("Jump to Scene");
-    expect(dialog?.querySelector("[data-action='restart-from-turn']")).toBeNull();
-    dialog?.querySelector<HTMLButtonElement>("[data-turn-number='6']")?.click();
+    expect(dialog?.querySelector("[data-action='restart-from-turn']")?.textContent).toContain("Restart / Branch from Here");
+    const jump = dialog?.querySelector<HTMLButtonElement>("[data-action='jump-to-scene']");
+    if (jump) jump.dataset.turnNumber = "6";
+    jump?.click();
+    await settle();
+    expect(page.document.querySelector("[data-story-leaf] h1")?.textContent).toBe("Turn 6");
+    expect(page.document.querySelector("[data-story-history]")).toBeNull();
+    const liveOpener = page.document.querySelector<HTMLButtonElement>("[data-action='open-complete-history']");
+    expect(liveOpener).not.toBe(opener);
+    expect(focus.mock.instances).toContain(liveOpener);
+
+    liveOpener?.click();
+    await settle();
+    dialog = page.document.querySelector<HTMLDialogElement>("[data-story-history]");
     dialog?.querySelector<HTMLButtonElement>("[data-action='inspect-state']")?.click();
     await settle();
     expect(state).toHaveBeenCalledWith(campaignId, 6, undefined);
-    expect(focus).toHaveBeenCalled();
+    expect(page.document.querySelector("[data-story-state-inspector]")?.textContent).toContain("Archived continuity for turn six.");
+    expect(page.document.querySelector("[data-story-reader]")?.textContent).not.toContain("Archived continuity for turn six.");
+    expect(page.document.querySelector(".story-campaign-spine")?.textContent).not.toContain("Archived continuity for turn six.");
+
+    dialog = page.document.querySelector<HTMLDialogElement>("[data-story-history]");
+    dialog?.querySelector<HTMLButtonElement>("[data-action='restart-from-turn']")?.click();
+    expect(confirm).toHaveBeenCalledWith("Restart or branch from persisted Turn 6?");
 
     const controls = [...dialog?.querySelectorAll<HTMLButtonElement>("button") ?? []];
     const firstControl = controls[0];
@@ -553,7 +589,7 @@ describe("Story Player page shell", () => {
 
     dialog?.dispatchEvent(new page.window.Event("cancel", { cancelable: true }));
     expect(page.document.querySelector("[data-story-history]")).toBeNull();
-    expect(focus.mock.instances).toContain(opener);
+    expect(focus.mock.instances).toContain(page.document.querySelector("[data-action='open-complete-history']"));
     mounted.dispose();
   });
 
