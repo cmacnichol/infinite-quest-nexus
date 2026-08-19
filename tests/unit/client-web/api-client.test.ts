@@ -7,6 +7,7 @@ import { validatedRequest } from "../../../packages/client-web/src/api-client.js
 import type {
   CampaignApi,
   GenerationApi,
+  IllustrationApi,
   NexusApiClient,
   WorldApi
 } from "../../../packages/client-web/src/index.js";
@@ -77,7 +78,7 @@ describe("createNexusApiClient", () => {
     const generation: GenerationApiPort = client.generation;
 
     expect(generation).toBe(client.generation);
-    expect(Object.keys(client).sort()).toEqual(["campaigns", "generation", "meta", "providers", "session", "worlds"]);
+    expect(Object.keys(client).sort()).toEqual(["campaigns", "generation", "illustrations", "meta", "providers", "session", "worlds"]);
     expect(Object.keys(client.worlds).sort()).toEqual(["create", "list", "playableCharacters"]);
     expect(Object.keys(client.campaigns).sort()).toEqual([
       "branch", "classifyTurnInput", "correctTurnNarration", "create", "getTurnCorrection", "list", "rewind", "state", "turns", "updateState"
@@ -95,6 +96,7 @@ describe("createNexusApiClient", () => {
     expectTypeOf<NexusApiClient["worlds"]>().toEqualTypeOf<WorldApi>();
     expectTypeOf<NexusApiClient["campaigns"]>().toEqualTypeOf<CampaignApi>();
     expectTypeOf<NexusApiClient["generation"]>().toEqualTypeOf<GenerationApi>();
+    expectTypeOf<NexusApiClient["illustrations"]>().toEqualTypeOf<IllustrationApi>();
   });
 
   it("exposes the typed Story Player projection and action surface instead of a generic request escape hatch", () => {
@@ -169,7 +171,15 @@ describe("createNexusApiClient", () => {
       () => client.meta.get(signal),
       () => client.session.get(signal),
       () => client.session.updateProfile({ displayName: "Initial Owner" }, signal),
-      () => client.providers.list(signal)
+      () => client.providers.list(signal),
+      () => client.illustrations.config("campaign / id", signal),
+      () => client.illustrations.segments("campaign / id", signal),
+      () => client.illustrations.imageJobs("campaign / id", signal),
+      () => client.illustrations.retryImageJob("job / id", signal),
+      () => client.illustrations.regenerateSegmentImage("segment / id", { prompt: "A quiet road", variantIndex: 0 }, signal),
+      () => client.illustrations.generateTurnSegments("turn / id", { mode: "missing", idempotencyKey: jobId }, signal),
+      () => client.illustrations.resolution("turn / id", signal),
+      () => client.illustrations.rematch("turn / id", signal)
     ];
 
     for (const call of calls) expectResponseSchemaError(await call().catch((error: unknown) => error));
@@ -202,15 +212,26 @@ describe("createNexusApiClient", () => {
       "/api/v1/meta",
       "/api/v1/session",
       "/api/v1/users/me/profile",
-      "/api/v1/providers"
+      "/api/v1/providers",
+      "/api/v1/campaigns/campaign%20%2F%20id/illustration-config",
+      "/api/v1/campaigns/campaign%20%2F%20id/illustration-segments",
+      "/api/v1/campaigns/campaign%20%2F%20id/image-jobs",
+      "/api/v1/image-jobs/job%20%2F%20id/retry",
+      "/api/v1/illustration-segments/segment%20%2F%20id/images",
+      "/api/v1/turns/turn%20%2F%20id/illustration-segments",
+      "/api/v1/turns/turn%20%2F%20id/illustration-resolution",
+      "/api/v1/turns/turn%20%2F%20id/illustration-match"
     ]);
     expect(queue.options.map((option) => option.method)).toEqual([
       "GET", "POST", "GET", "GET", "POST", "GET", "GET", "GET", "GET", "PATCH", "GET", "PATCH", "POST", "POST", "POST",
-      "GET", "GET", "POST", "POST", "GET", "GET", "POST", "POST", "POST", "GET", "GET", "PATCH", "GET"
+      "GET", "GET", "POST", "POST", "GET", "GET", "POST", "POST", "POST", "GET", "GET", "PATCH", "GET",
+      "GET", "GET", "GET", "POST", "POST", "POST", "GET", "POST"
     ]);
     expect(queue.options[17]?.body).toBe(JSON.stringify(generationRequest));
     expect(queue.options[18]?.body).toBe(JSON.stringify(replacementRequest));
     expect(queue.options.slice(21, 24).map((option) => option.body)).toEqual([undefined, undefined, undefined]);
+    expect(queue.options[32]?.body).toBe(JSON.stringify({ prompt: "A quiet road", variantIndex: 0 }));
+    expect(queue.options[33]?.body).toBe(JSON.stringify({ mode: "missing", idempotencyKey: jobId }));
     expect(queue.options.every((option) => option.signal === signal)).toBe(true);
   });
 

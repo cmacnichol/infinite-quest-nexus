@@ -71,6 +71,8 @@ import type { AcceptedTurnCorrectionRequest, AcceptedTurnCorrectionView } from "
 import type { z } from "zod";
 import { createNexusHttpClient } from "./http-client.js";
 import type { HttpMethod, JsonRequestSpec, NexusHttpClientOptions } from "./http-client.js";
+import { createIllustrationApi } from "./illustration-api.js";
+import type { IllustrationApi } from "./illustration-api.js";
 
 export interface WorldApi {
   list(signal?: AbortSignal): Promise<WorldListResponse>;
@@ -118,6 +120,7 @@ export interface GenerationApi {
 export interface NexusApiClient {
   campaigns: CampaignApi;
   generation: GenerationApi;
+  illustrations: IllustrationApi;
   worlds: WorldApi;
   meta: ShellApi;
   session: SessionApi;
@@ -160,6 +163,7 @@ function withSignal<T>(
 
 export function createNexusApiClient(options: NexusHttpClientOptions): NexusApiClient {
   const http = createNexusHttpClient(options);
+  const illustrations = createIllustrationApi(http);
 
   const worlds: WorldApi = {
     list: (signal) => http.request(withSignal({ method: "GET", path: "/worlds", responseSchema: worldListResponseSchema }, signal)),
@@ -302,5 +306,5 @@ export function createNexusApiClient(options: NexusHttpClientOptions): NexusApiC
     list: (signal) => http.request(withSignal({ method: "GET", path: "/providers", responseSchema: providerListResponseSchema }, signal))
   };
 
-  return { campaigns, generation, worlds, meta, session, providers };
+  return { campaigns, generation, illustrations, worlds, meta, session, providers };
 }

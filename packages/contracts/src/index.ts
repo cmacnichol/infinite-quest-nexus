@@ -10,3 +10,4 @@ export * from "./campaign-transfer.js";
 export * from "./assets.js";
 export * from "./archives.js";
 export * from "./turn-corrections.js";
+export * from "./illustration-client.js";
