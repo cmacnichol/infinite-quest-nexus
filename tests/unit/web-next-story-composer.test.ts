@@ -249,6 +249,9 @@ describe("Story continuation composer", () => {
     const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({ turnControlStyle: "flexible_auto", classifyTurnInput }));
     await settle();
     enter(page, "A cautiously ambiguous prompt.");
+    page.document.querySelector<HTMLButtonElement>("[data-story-choice]")?.click();
+    expect(page.document.querySelector<HTMLTextAreaElement>("[data-story-draft]")?.value).toBe("A cautiously ambiguous prompt.\nOpen the door");
+    expect(page.document.querySelector<HTMLButtonElement>("[data-story-choice]")?.getAttribute("aria-pressed")).toBe("true");
     page.document.querySelector<HTMLButtonElement>("[data-input-mode='auto']")?.click();
     page.document.querySelector<HTMLButtonElement>("[data-action='continue-story']")?.click();
     await settle();
@@ -257,6 +260,7 @@ describe("Story continuation composer", () => {
     expect(page.document.querySelector<HTMLTextAreaElement>("[data-story-draft]")?.value).toBe("");
     expect(page.document.querySelector("[data-story-character-count]")?.textContent).toContain("0 / 12,000");
     expect(page.document.querySelector("[data-story-intent-confirmation]")).toBeNull();
+    expect([...page.document.querySelectorAll<HTMLButtonElement>("[data-story-choice]")].map((choice) => choice.getAttribute("aria-pressed"))).toEqual(["false", "false"]);
     expect(focus.mock.instances).toContain(page.document.querySelector("[data-story-draft]"));
     mounted.dispose();
   });
