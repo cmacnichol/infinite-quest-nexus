@@ -50,6 +50,8 @@ main[data-page="story-player"] {
 
 .story-reading-width,
 .story-choices,
+.story-input-mode-bar,
+.story-composer-secondary-actions,
 .story-campaign-list,
 .story-reader-toolbar,
 .story-turn-record-actions,
@@ -63,6 +65,83 @@ main[data-page="story-player"] {
 .story-campaign-list {
   flex-direction: column;
 }
+
+.story-composer {
+  width: calc(100% - 2 * var(--story-reader-gutter));
+  max-width: var(--story-reader-max);
+  display: grid;
+  gap: .75rem;
+  margin: 1rem auto 0;
+}
+
+.story-input-mode-bar {
+  display: flex;
+  gap: .25rem;
+}
+
+.story-input-mode {
+  padding: .25rem .5rem;
+  font-size: .875rem;
+}
+
+.story-input-mode[aria-checked="true"] {
+  border-color: var(--focus-ring, currentColor);
+  font-weight: 700;
+}
+
+.story-draft-field {
+  position: relative;
+  display: grid;
+  gap: .375rem;
+}
+
+.story-draft {
+  min-height: 7rem;
+  resize: vertical;
+  padding: .625rem 2.25rem .625rem .625rem;
+}
+
+.story-clear-draft {
+  position: absolute;
+  top: 1.75rem;
+  right: .375rem;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: 1.125rem;
+  line-height: 1;
+  opacity: .7;
+}
+
+.story-clear-draft:hover:not(:disabled) { opacity: 1; }
+.story-draft-help,
+.story-draft-count { margin: 0; font-size: .875rem; }
+
+.story-composer-secondary-actions { display: flex; }
+
+.story-composer-primary-action {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.story-continue {
+  border-color: var(--accent, currentColor);
+  background: var(--accent, currentColor);
+  color: var(--accent-contrast, Canvas);
+  font-weight: 700;
+}
+
+.story-intent-confirmation {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem;
+  padding: .75rem;
+  border: 1px solid var(--line, currentColor);
+}
+
+.story-intent-confirmation > p { width: 100%; margin: 0; }
 
 .story-campaign-spine-content {
   flex-direction: column;
@@ -96,4 +175,12 @@ main[data-page="story-player"] :is(button, a, input, select, textarea):focus-vis
     grid-template-columns: minmax(12rem, .3fr) minmax(0, 1fr) minmax(12rem, .3fr);
     grid-template-areas: "spine reader illustration";
   }
+}
+
+@media (max-width: 540px) {
+  .story-input-mode-bar { justify-content: stretch; }
+  .story-input-mode { flex: 1 1 0; white-space: nowrap; }
+  .story-composer-secondary-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .story-composer-primary-action { display: block; }
+  .story-continue { width: 100%; }
 }

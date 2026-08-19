@@ -1,15 +1,33 @@
+import {
+  createChoiceDraftSelection,
+  turnInputModeForControlStyle,
+  type ChoiceDraftSelection,
+  type StoryTurnInputMode
+} from "@infinite-quest/client-core";
+
 export type ReadingWidth = "narrow" | "standard" | "wide";
 
 export const STORY_READING_WIDTH_STORAGE_KEY = "infinite-quest.story.reading-width";
 
 export type StoryUiPhase = "chooser" | "loading" | "loaded" | "error" | "not_found";
 
+export interface StoryIntentConfirmation {
+  readonly action: string;
+  readonly classificationId: string;
+  readonly requestedInputMode: "auto";
+}
+
 export interface StoryUiState {
   readonly phase: StoryUiPhase;
   readonly viewTurnNumber: number | null;
   readonly readingWidth: ReadingWidth;
   readonly draft: string;
-  readonly choiceSelection: readonly string[];
+  readonly choiceSelection: readonly number[];
+  readonly choiceBaseText: string;
+  readonly draftOwnerKey: string | null;
+  readonly draftOwnerTurnNumber: number | null;
+  readonly requestedInputMode: StoryTurnInputMode;
+  readonly intentConfirmation: StoryIntentConfirmation | null;
   readonly activeDialog: string | null;
   readonly continuousReading: boolean;
   readonly history: "idle" | "loading" | "error";
@@ -27,6 +45,12 @@ export interface StoryUiModel {
   setActiveDialog(dialog: string | null): void;
   setContinuousReading(enabled: boolean): void;
   setDraft(draft: string): void;
+  syncComposer(campaignId: string, acceptedTurnNumber: number, turnControlStyle: unknown): void;
+  setComposerDraft(draft: string): void;
+  setChoiceDraft(selection: ChoiceDraftSelection, draft: string): void;
+  setRequestedInputMode(mode: StoryTurnInputMode): void;
+  setIntentConfirmation(intent: StoryIntentConfirmation | null): void;
+  clearComposerDraft(): void;
   setPhase(phase: StoryUiPhase): void;
   setMessage(message: string | null): void;
   dispose(): void;
@@ -38,6 +62,11 @@ const DEFAULT_STATE: StoryUiState = {
   readingWidth: "standard",
   draft: "",
   choiceSelection: [],
+  choiceBaseText: "",
+  draftOwnerKey: null,
+  draftOwnerTurnNumber: null,
+  requestedInputMode: "action",
+  intentConfirmation: null,
   activeDialog: null,
   continuousReading: false,
   history: "idle",
@@ -72,8 +101,16 @@ function localInitialState(
     readingWidth: isReadingWidth(value.readingWidth) ? value.readingWidth : readingWidthFromStorage(storage),
     draft: typeof value.draft === "string" ? value.draft : DEFAULT_STATE.draft,
     choiceSelection: Array.isArray(value.choiceSelection)
-      ? value.choiceSelection.filter((choice): choice is string => typeof choice === "string")
+      ? value.choiceSelection.filter((choice): choice is number => typeof choice === "number" && Number.isSafeInteger(choice) && choice >= 0)
       : DEFAULT_STATE.choiceSelection,
+    choiceBaseText: typeof value.choiceBaseText === "string" ? value.choiceBaseText : DEFAULT_STATE.choiceBaseText,
+    draftOwnerKey: typeof value.draftOwnerKey === "string" || value.draftOwnerKey === null
+      ? value.draftOwnerKey : DEFAULT_STATE.draftOwnerKey,
+    draftOwnerTurnNumber: typeof value.draftOwnerTurnNumber === "number" && Number.isSafeInteger(value.draftOwnerTurnNumber)
+      ? value.draftOwnerTurnNumber : value.draftOwnerTurnNumber === null ? null : DEFAULT_STATE.draftOwnerTurnNumber,
+    requestedInputMode: value.requestedInputMode === "auto" || value.requestedInputMode === "scene" || value.requestedInputMode === "action"
+      ? value.requestedInputMode : DEFAULT_STATE.requestedInputMode,
+    intentConfirmation: isIntentConfirmation(value.intentConfirmation) ? value.intentConfirmation : DEFAULT_STATE.intentConfirmation,
     activeDialog: typeof value.activeDialog === "string" || value.activeDialog === null
       ? value.activeDialog : DEFAULT_STATE.activeDialog,
     continuousReading: value.continuousReading === true,
@@ -89,6 +126,13 @@ function localInitialState(
 
 function snapshot(state: StoryUiState): StoryUiState {
   return { ...state, choiceSelection: [...state.choiceSelection] };
+}
+
+function isIntentConfirmation(value: unknown): value is StoryIntentConfirmation {
+  return typeof value === "object" && value !== null
+    && typeof (value as { action?: unknown }).action === "string"
+    && typeof (value as { classificationId?: unknown }).classificationId === "string"
+    && (value as { requestedInputMode?: unknown }).requestedInputMode === "auto";
 }
 
 export function createStoryUiModel(
@@ -137,6 +181,47 @@ export function createStoryUiModel(
     },
     setDraft(draft) {
       if (state.draft !== draft) publish({ ...state, draft });
+    },
+    syncComposer(campaignId, acceptedTurnNumber, turnControlStyle) {
+      if (!campaignId || !Number.isSafeInteger(acceptedTurnNumber) || acceptedTurnNumber < 0) return;
+      const ownerKey = `${campaignId}:${acceptedTurnNumber}`;
+      if (state.draftOwnerKey === ownerKey) return;
+      const selection = createChoiceDraftSelection();
+      publish({
+        ...state,
+        draft: "",
+        choiceSelection: selection.selectedIndexes,
+        choiceBaseText: selection.baseText,
+        draftOwnerKey: ownerKey,
+        draftOwnerTurnNumber: acceptedTurnNumber,
+        requestedInputMode: turnInputModeForControlStyle(turnControlStyle),
+        intentConfirmation: null,
+        message: null
+      });
+    },
+    setComposerDraft(draft) {
+      const selection = createChoiceDraftSelection(draft);
+      if (state.draft === draft && !state.choiceSelection.length && state.choiceBaseText === selection.baseText && state.intentConfirmation === null) return;
+      publish({ ...state, draft, choiceSelection: selection.selectedIndexes, choiceBaseText: selection.baseText, intentConfirmation: null });
+    },
+    setChoiceDraft(selection, draft) {
+      const selectedIndexes = selection.selectedIndexes.filter((index) => Number.isSafeInteger(index) && index >= 0);
+      if (state.draft === draft && state.choiceBaseText === selection.baseText && state.choiceSelection.join(",") === selectedIndexes.join(",")) return;
+      publish({ ...state, draft, choiceBaseText: selection.baseText, choiceSelection: selectedIndexes, intentConfirmation: null });
+    },
+    setRequestedInputMode(requestedInputMode) {
+      if (requestedInputMode !== "auto" && requestedInputMode !== "action" && requestedInputMode !== "scene") return;
+      if (state.requestedInputMode !== requestedInputMode || state.intentConfirmation !== null) {
+        publish({ ...state, requestedInputMode, intentConfirmation: null });
+      }
+    },
+    setIntentConfirmation(intentConfirmation) {
+      if (state.intentConfirmation !== intentConfirmation) publish({ ...state, intentConfirmation });
+    },
+    clearComposerDraft() {
+      const selection = createChoiceDraftSelection();
+      if (!state.draft && !state.choiceSelection.length && state.intentConfirmation === null) return;
+      publish({ ...state, draft: "", choiceSelection: selection.selectedIndexes, choiceBaseText: selection.baseText, intentConfirmation: null, message: null });
     },
     setPhase(phase) {
       if (state.phase !== phase) publish({ ...state, phase });

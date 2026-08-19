@@ -120,6 +120,108 @@ function resolvedRenderedTurn(state: StoryPlayerViewState): CampaignProjection["
     ?? null;
 }
 
+function composerModeButtons(document: Document, turnControlStyle: string, current: StoryUiState["requestedInputMode"]): HTMLElement {
+  const group = element(document, "div", "story-input-mode-bar");
+  group.dataset.storyInputModes = "";
+  group.setAttribute("role", "radiogroup");
+  group.setAttribute("aria-label", "Interpret prompt as");
+  const modes = turnControlStyle === "action_only"
+    ? [["action", "Action"]] as const
+    : [["auto", "Auto"], ["action", "Action"], ["scene", "Scene Direction"]] as const;
+  for (const [mode, label] of modes) {
+    const button = element(document, "button", "story-input-mode", label);
+    button.type = "button";
+    button.dataset.inputMode = mode;
+    button.setAttribute("role", "radio");
+    button.setAttribute("aria-checked", String(current === mode));
+    button.tabIndex = current === mode ? 0 : -1;
+    group.append(button);
+  }
+  return group;
+}
+
+function storyComposer(
+  document: Document,
+  state: StoryPlayerViewState,
+  choices: readonly string[],
+  turnControlStyle: string
+): HTMLElement {
+  const composer = element(document, "section", "story-composer");
+  composer.dataset.storyComposer = "";
+  const ui = state.ui;
+  const choiceList = element(document, "div", "story-choices");
+  choiceList.dataset.storyChoices = "";
+  for (const [index, choice] of choices.entries()) {
+    const button = element(document, "button", "story-choice", choice);
+    button.type = "button";
+    button.dataset.storyChoice = "";
+    button.dataset.choiceIndex = String(index);
+    button.setAttribute("aria-pressed", String(ui.choiceSelection.includes(index)));
+    choiceList.append(button);
+  }
+  if (choices.length) composer.append(choiceList);
+  composer.append(composerModeButtons(document, turnControlStyle, ui.requestedInputMode));
+
+  const field = element(document, "div", "story-draft-field");
+  const label = element(document, "label", "story-draft-label", "What happens next?");
+  label.htmlFor = "story-draft";
+  const textarea = element(document, "textarea", "story-draft") as HTMLTextAreaElement;
+  textarea.id = label.htmlFor;
+  textarea.dataset.storyDraft = "";
+  textarea.maxLength = 12_000;
+  textarea.value = ui.draft;
+  textarea.setAttribute("aria-describedby", "story-draft-help story-draft-count");
+  const clear = element(document, "button", "story-clear-draft", "×");
+  clear.type = "button";
+  clear.dataset.action = "clear-story-draft";
+  clear.setAttribute("aria-label", "Clear story prompt");
+  clear.title = "Clear story prompt";
+  clear.disabled = !ui.draft;
+  const help = element(document, "p", "story-draft-help", "Choose a suggestion or describe the next moment. Auto interprets your prompt only when you continue.");
+  help.id = "story-draft-help";
+  const count = element(document, "p", "story-draft-count", `${ui.draft.length.toLocaleString()} / 12,000`);
+  count.id = "story-draft-count";
+  count.dataset.storyCharacterCount = "";
+  field.append(label, textarea, clear, help, count);
+  composer.append(field);
+
+  if (ui.intentConfirmation !== null) {
+    const confirmation = element(document, "section", "story-intent-confirmation");
+    confirmation.dataset.storyIntentConfirmation = "";
+    confirmation.setAttribute("role", "alertdialog");
+    confirmation.setAttribute("aria-label", "Confirm prompt interpretation");
+    const useAction = element(document, "button", undefined, "Use as Action");
+    useAction.type = "button";
+    useAction.dataset.action = "confirm-intent-action";
+    const useScene = element(document, "button", undefined, "Use as Scene Direction");
+    useScene.type = "button";
+    useScene.dataset.action = "confirm-intent-scene";
+    const returnToEditor = element(document, "button", undefined, "Return to editor");
+    returnToEditor.type = "button";
+    returnToEditor.dataset.action = "return-to-story-editor";
+    confirmation.append(element(document, "p", undefined, `Choose how to continue: ${ui.intentConfirmation.action}`), useAction, useScene, returnToEditor);
+    composer.append(confirmation);
+  }
+
+  const secondary = element(document, "div", "story-composer-secondary-actions");
+  const history = element(document, "button", undefined, "Turn History");
+  history.type = "button";
+  history.dataset.action = "open-complete-history";
+  secondary.append(history);
+  const primary = element(document, "div", "story-composer-primary-action");
+  const submit = element(document, "button", "story-continue", "Continue Story");
+  submit.type = "button";
+  submit.dataset.action = "continue-story";
+  primary.append(submit);
+  composer.append(secondary, primary);
+  if (ui.message !== null) {
+    const message = status(document, ui.message);
+    message.dataset.storyComposerStatus = "";
+    composer.append(message);
+  }
+  return composer;
+}
+
 export function renderStoryCommandRow(document: Document, state: StoryPlayerViewState): HTMLElement {
   const row = element(document, "div", "story-command-content");
   const campaign = state.projection.campaign;
@@ -241,6 +343,10 @@ function campaignReader(document: Document, state: StoryPlayerViewState): HTMLEl
       }
     } else {
       reader.append(renderStoryTurn(document, selectedTurn, projection.turns, projection.generation !== null, projection.nextTurnsCursor !== null));
+    }
+    const isViewingLatest = selectedTurn.turnNumber === campaign.activeTurnNumber;
+    if (isViewingLatest && projection.generation === null) {
+      reader.append(storyComposer(document, state, selectedTurn.choices, state.selectedCampaign?.turnControlStyle ?? "action_only"));
     }
   } else {
     const background = element(document, "p", "story-background", world.backgroundStory);

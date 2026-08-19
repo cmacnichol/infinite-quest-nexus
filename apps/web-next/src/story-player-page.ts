@@ -1,5 +1,9 @@
-import type { CampaignProjection } from "@infinite-quest/client-core";
-import type { CampaignRuntimeStateResponse, CampaignSummary } from "@infinite-quest/contracts";
+import {
+  toggleChoiceDraftSelection,
+  type CampaignProjection,
+  type StoryTurnInputMode
+} from "@infinite-quest/client-core";
+import type { CampaignRuntimeStateResponse, CampaignSummary, TurnInputModeSource } from "@infinite-quest/contracts";
 import { initializeAppTheme, renderAppShell } from "./app-shell";
 import { createStoryPlayerComposition, type StoryPlayerComposition } from "./story-player-composition";
 import { createStoryUiModel, type StoryUiPhase } from "./story-player-model";
@@ -38,10 +42,24 @@ function errorMessage(error: unknown): string {
   return error instanceof Error && error.message ? error.message : "The Story Player could not load this campaign.";
 }
 
+export interface PreparedStoryTurnSubmission {
+  readonly action: string;
+  readonly requestedInputMode: StoryTurnInputMode;
+  readonly resolvedInputMode: "action" | "scene";
+  readonly inputModeSource: TurnInputModeSource;
+  readonly classificationId?: string;
+}
+
+export interface StoryPlayerPageOptions {
+  /** Task 7 test seam only. Durable generation belongs to Task 8. */
+  readonly onSubmit?: (submission: PreparedStoryTurnSubmission) => void | Promise<void>;
+}
+
 export function mountStoryPlayerPage(
   root: HTMLElement,
   route: StoryRoute,
-  composition: StoryPlayerComposition = createStoryPlayerComposition()
+  composition: StoryPlayerComposition = createStoryPlayerComposition(),
+  options: StoryPlayerPageOptions = {}
 ): MountedPage {
   renderAppShell(root, storyPlayerMarkup, "story");
   const theme = initializeAppTheme(root);
@@ -56,6 +74,7 @@ export function mountStoryPlayerPage(
   let focusHistoryDialog = false;
   let inspectedState: CampaignRuntimeStateResponse | null = null;
   let inspectionRequestToken = 0;
+  let autoSubmitTurnChoices = false;
   const history = createStoryHistoryController({
     campaigns: composition.api.campaigns,
     campaignStore: composition.campaignStore,
@@ -117,6 +136,70 @@ export function mountStoryPlayerPage(
       focusHistoryDialog = false;
       dialog.querySelector<HTMLElement>("button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled])")?.focus();
     }
+  };
+  const focusDraft = () => root.querySelector<HTMLTextAreaElement>("[data-story-draft]")?.focus();
+  const composerCampaign = () => projection.campaign !== null && selectedCampaign?.id === projection.campaign.id
+    ? selectedCampaign : null;
+  const campaignFallback = () => composerCampaign()?.turnControlStyle === "flexible_scene" ? "scene" as const : "action" as const;
+  const invokeTestSubmission = async (submission: PreparedStoryTurnSubmission) => {
+    await options.onSubmit?.(submission);
+  };
+  const submitComposer = async (): Promise<void> => {
+    const campaign = projection.campaign;
+    const current = ui.get();
+    const action = current.draft.trim();
+    if (!campaign || !action) {
+      focusDraft();
+      return;
+    }
+    if (current.requestedInputMode === "action" || current.requestedInputMode === "scene") {
+      await invokeTestSubmission({
+        action,
+        requestedInputMode: current.requestedInputMode,
+        resolvedInputMode: current.requestedInputMode,
+        inputModeSource: "explicit"
+      });
+      return;
+    }
+    const classifyTurnInput = composition.api.campaigns.classifyTurnInput;
+    if (typeof classifyTurnInput !== "function") {
+      ui.setMessage("Prompt interpretation is unavailable. Choose Action or Scene Direction.");
+      return;
+    }
+    try {
+      const result = await classifyTurnInput(campaign.id, { text: action, preferredFallback: campaignFallback() });
+      if (disposed || projection.campaign?.id !== campaign.id || ui.get().draft.trim() !== action) return;
+      if (result.confidenceBand === "ambiguous") {
+        ui.setIntentConfirmation({ action, classificationId: result.classificationId, requestedInputMode: "auto" });
+        return;
+      }
+      await invokeTestSubmission({
+        action,
+        requestedInputMode: "auto",
+        resolvedInputMode: result.resolvedMode,
+        inputModeSource: "auto",
+        classificationId: result.classificationId
+      });
+    } catch {
+      if (!disposed) ui.setMessage("Prompt interpretation could not be completed. Choose Action or Scene Direction.");
+    }
+  };
+  const confirmComposerIntent = async (resolvedInputMode: "action" | "scene"): Promise<void> => {
+    const intent = ui.get().intentConfirmation;
+    if (intent === null) return;
+    ui.setIntentConfirmation(null);
+    await invokeTestSubmission({
+      action: intent.action,
+      requestedInputMode: "auto",
+      resolvedInputMode,
+      inputModeSource: "auto",
+      classificationId: intent.classificationId
+    });
+  };
+  const syncComposer = () => {
+    const campaign = projection.campaign;
+    if (campaign === null) return;
+    ui.syncComposer(campaign.id, campaign.activeTurnNumber, composerCampaign()?.turnControlStyle ?? "action_only");
   };
   function render(): void {
     retryControl?.removeEventListener("click", onRetry);
@@ -213,12 +296,64 @@ export function mountStoryPlayerPage(
         }
       });
     }
+    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-input-mode]")) {
+      control.addEventListener("click", () => {
+        const mode = control.dataset.inputMode;
+        if (mode === "auto" || mode === "action" || mode === "scene") ui.setRequestedInputMode(mode);
+      });
+    }
+    for (const textarea of root.querySelectorAll<HTMLTextAreaElement>("[data-story-draft]")) {
+      textarea.addEventListener("input", () => ui.setComposerDraft(textarea.value));
+    }
+    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-story-choice]")) {
+      control.addEventListener("click", () => {
+        const index = Number(control.dataset.choiceIndex);
+        const turn = projection.turns.find((candidate) => candidate.turnNumber === projection.campaign?.activeTurnNumber);
+        if (!Number.isSafeInteger(index) || index < 0 || !turn) return;
+        const current = ui.get();
+        const result = toggleChoiceDraftSelection(
+          { baseText: current.choiceBaseText, selectedIndexes: [...current.choiceSelection] },
+          turn.choices,
+          index,
+          current.draft,
+          12_000
+        );
+        if (result.overLimit) {
+          ui.setMessage("That suggestion would exceed the 12,000-character prompt limit.");
+          return;
+        }
+        ui.setChoiceDraft(result.selection, result.text);
+        if (result.selected && autoSubmitTurnChoices) void submitComposer();
+      });
+    }
+    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='clear-story-draft']")) {
+      control.addEventListener("click", () => {
+        ui.clearComposerDraft();
+        focusDraft();
+      });
+    }
+    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='continue-story']")) {
+      control.addEventListener("click", () => { void submitComposer(); });
+    }
+    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='confirm-intent-action']")) {
+      control.addEventListener("click", () => { void confirmComposerIntent("action"); });
+    }
+    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='confirm-intent-scene']")) {
+      control.addEventListener("click", () => { void confirmComposerIntent("scene"); });
+    }
+    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='return-to-story-editor']")) {
+      control.addEventListener("click", () => {
+        ui.setIntentConfirmation(null);
+        focusDraft();
+      });
+    }
     bindHistoryDialog();
   }
   const unsubscribeStore = composition.campaignStore.store.subscribe((next) => {
     projection = next;
     inspectionRequestToken += 1;
     history.sync(next);
+    syncComposer();
     render();
   });
   const unsubscribeUi = ui.subscribe(() => render());
@@ -248,8 +383,10 @@ export function mountStoryPlayerPage(
       campaigns = listed.campaigns;
       selectedCampaign = campaigns.find((campaign) => campaign.id === route.campaignId) ?? null;
       composition.campaignStore.load(sync);
+      syncComposer();
       ui.setViewTurnNumber(route.turnNumber ?? sync.campaign.activeTurnNumber);
       const continuousReading = session?.user?.settings?.continuousReading === true;
+      autoSubmitTurnChoices = session?.user?.settings?.autoSubmitTurnChoices === true;
       ui.setContinuousReading(continuousReading);
       if (continuousReading && sync.turnWindowMode === "replace" && sync.turns.nextCursor !== null) {
         await history.openCompleteHistory().catch(() => undefined);
