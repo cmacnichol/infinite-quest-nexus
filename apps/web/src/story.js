@@ -1370,18 +1370,22 @@ async function finalizeCompletedGeneration(result) {
   if (!replaceStreamingPreviewWithAcceptedTurn(result, preserveViewport)) {
     clearStreamingPreview();
     await loadCampaign(state.campaignId, { autoScroll: !preserveViewport });
+    restoreViewportAfterRender(viewport);
     return;
   }
   void reconcileCompletedGeneration(result);
 
-  if (viewport) {
-    window.requestAnimationFrame(() => {
-      window.scrollTo({ ...viewport, behavior: "auto" });
-    });
-  }
+  restoreViewportAfterRender(viewport);
 
   pollImageJobs();
   if (result.resultTurnId) void pollIllustrationResolution(result.resultTurnId).catch(() => undefined);
+}
+
+function restoreViewportAfterRender(viewport) {
+  if (!viewport) return;
+  window.requestAnimationFrame(() => {
+    window.scrollTo({ ...viewport, behavior: "auto" });
+  });
 }
 
 function replaceStreamingPreviewWithAcceptedTurn(result, preserveViewport) {

@@ -205,3 +205,50 @@ The root client historically supported arbitrary response edits, historical snap
 ## 27. Coverage and Limitations
 
 The legacy feature inventory, API surface, import conversion/commit, generation context, state workflow, recovery, exports, event mechanics, and relevant tests were reviewed in depth or at interface level. Provider transports, asset internals, all migrations, all new-UI pages, CSS/accessibility, and unrelated security/deployment concerns were sampled or excluded. RepoWise was current only for committed `HEAD` and contained stale symbol references to a removed API generation service; live source took precedence. No live provider, PostgreSQL, browser E2E, Compose, Swarm, backup, or rollback operation was executed. Therefore this is a complete capability trace for the identified historical surface, not a claim of exhaustive line-by-line repository verification.
+
+## 28. Dead-Code Reachability Addendum — 2026-08-18
+
+### Review state
+
+- **Observed:** this addendum reviews committed code at `49777f37f620f8030eb0bed2716f24c5fb21523b` on `main`. The only pre-existing working-tree changes were `.claude/CLAUDE.md` and `AGENTS.md`; neither changes application reachability.
+- **Observed:** RepoWise was indexed at `f2f7a1bfd00c`, behind the reviewed revision. Its dead-code graph was therefore used only to generate candidates. Every retained conclusion below was checked against the live tree.
+- **Observed:** the review covered application and test JavaScript/TypeScript, both web clients, services, packages, scripts, public browser assets, package manifests, HTML entry points, Vite entry points, runtime entry points, migrations, CI/build commands, and Docker/Swarm copy and serving rules.
+
+### Executable roots and active surfaces
+
+- **Observed:** server execution starts at `services/runtime/src/main.ts`; schema migration starts at `packages/database/src/migrate-cli.ts` (`package.json`).
+- **Observed:** the active legacy Story Player is bundled from `apps/web/src/legacy-client-entry.ts`, which imports `apps/web/src/story.js`; the legacy Nexus shell loads `apps/web/public/nexus.js` from `apps/web/public/index.html` (`apps/web/vite.config.ts`, `apps/web/public/index.html`).
+- **Observed:** the replacement client starts at `apps/web-next/src/bootstrap.ts` through `apps/web-next/index.html` (`apps/web-next/vite.config.ts`).
+- **Observed:** `apps/web/public/image-library-browser.js`, `docs/.vitepress/config.ts`, and `apps/web-next/public/theme-bootstrap.js` are active despite having no ordinary module importer: they are loaded through an absolute browser import, VitePress configuration discovery, and an HTML script tag respectively.
+- **Observed:** all tracked production JavaScript/TypeScript modules under `apps/`, `services/`, `packages/`, `scripts/`, and `database/migrations/` were reachable after HTML/config/dynamic roots were included. No active whole source file or workspace package was proven unreachable.
+
+### Intentionally non-runtime historical application
+
+- **Documented and observed:** root `index.html` is a 536,930-byte, 10,057-line historical standalone application. `README.md:123`, `AGENTS.md:104`, and `scripts/check-repository-boundaries.mjs:32,115` explicitly state and enforce that it is not loaded or shipped. `services/api/src/server.ts:505-506` redirects `/` and `/index.html` to `/nexus/`; Docker and Compose use only `apps/web/dist` and `apps/web-next/dist`.
+- **Unknown:** the repository currently treats this dead runtime code as a historical artifact. Removing it requires an explicit decision to stop retaining the in-repository reference copy.
+
+### Confirmed declaration-level dead code
+
+- **Observed:** TypeScript with `--noUnusedLocals --noUnusedParameters` reports 30 production declarations, imports, locals, or parameters that are not read. The normal check omits these flags, so `pnpm check` remains green.
+- **Observed:** an independent current-tree export/reference scan found four additional exported declarations with no internal or external references: `canonicalPortableAssetReservationCommand`, `ChronicleEmbeddingProviderScope`, `ChronicleEmbeddingProviderSelectionScope`, and `WorldGenProgress`.
+- **Observed:** the same compiler diagnostic identified 34 unused declarations/imports/locals in test and test-helper code.
+- **Observed:** active legacy browser modules contain no non-exported function or variable whose identifier occurs only at its declaration. Event-bound DOM functions were not mistaken for dead code.
+
+### Dependency and tooling state
+
+- **Observed:** `@playwright/test` is declared in root `devDependencies` (`package.json:55`) but there is no Playwright configuration, test, import, or command in the repository. It is a confirmed unused dependency at this revision.
+- **Observed:** `scripts/provision-windows-dev-tools.ps1` has no caller, package command, CI reference, or current documentation reference. It is executable standalone tooling, so absence of an importer does not prove obsolescence.
+- **Observed:** the tracked `scripts/*.d.mts` files are type declarations for JavaScript runner modules and are consumed through TypeScript module resolution; they are not dead generated artifacts.
+
+### Validation evidence
+
+- **Observed:** `pnpm check` passed all repository, data-safety, package, web, TypeScript, and JavaScript syntax checks.
+- **Observed:** `pnpm test:unit` passed 187 test files and 2,131 tests; 44 tests were skipped by their existing conditions.
+- **Observed:** `pnpm build` built the legacy and replacement clients successfully. Vite emitted existing unresolved-at-build-time font URL notices for four `/app/fonts/...` resources.
+- **Not executed:** integration tests were not run because the documented harness provisions and mutates a PostgreSQL Docker test database, outside this read-only review.
+
+### Coverage limitations
+
+- Static analysis cannot prove that an undocumented external consumer never imports an exported symbol, although all workspace packages are private and repository consumers were exhaustively searched.
+- Standalone operator scripts can be useful without repository references; `scripts/provision-windows-dev-tools.ps1` therefore remains a human-decision item.
+- The RepoWise index was one commit series behind and produced several false positives; live-source evidence superseded it.

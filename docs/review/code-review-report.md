@@ -288,3 +288,221 @@ After approval: map findings to requirements; create small test-first tasks with
 ## 16. Final Recommendation
 
 **Pause and address high-priority findings.** Do not cut over on the current claim of parity. The backend foundation is strong, but REV-001 demonstrably disconnects imported character authority from future generation, and no E2E parity gate would catch it. First: (1) approve the character-mapping and correction semantics, (2) fix and integration-test REV-001 and REV-002, and (3) convert the approved matrix into a cross-UI cutover gate before deciding the remaining Medium/Low equivalence questions.
+
+## 17. Focused Dead-Code Review Addendum — 2026-08-18
+
+### 17.1 Executive result
+
+At revision `49777f37f620f8030eb0bed2716f24c5fb21523b`, no active whole JavaScript/TypeScript source file and no workspace package was proven unreachable. The active legacy and replacement clients are both connected to their build/runtime entry points. The cleanup inventory is:
+
+| Category | Count | Disposition |
+|---|---:|---|
+| Confirmed unused production declarations/imports/locals/parameters | 34 | Deletion-ready in scoped batches, except the provider transport contract parameter should be narrowed deliberately |
+| Confirmed unused test declarations/imports/locals | 34 | Deletion-ready mechanical cleanup |
+| Confirmed unused dependency | 1 (`@playwright/test`) | Remove unless browser tests are being added immediately |
+| Intentionally unreachable historical application | 1 (`index.html`, 10,057 lines) | Human archival decision, then delete and update guard/docs |
+| Orphan standalone tooling | 1 (`scripts/provision-windows-dev-tools.ps1`) | Confirm operational status; document or delete |
+| Proven active false positives from graph analysis | 3 files plus multiple exports/internals | Retain |
+
+The active declaration cleanup is approximately 70–90 lines. Removing the historical root application would reclaim a further 10,057 lines and 536,930 bytes. Final recommendation for this focused scope: **continue normal development while executing a low-risk cleanup series; decide the historical artifact and orphan-script policy separately.**
+
+### 17.2 Repository and analysis state
+
+- Repository: `C:/Git/InfiniteQuest`, branch `main`, revision `49777f37f620f8030eb0bed2716f24c5fb21523b`.
+- Pre-existing working-tree changes: `.claude/CLAUDE.md` and `AGENTS.md`; excluded from code conclusions and left untouched.
+- RepoWise availability: available, indexed at `f2f7a1bfd00c`, behind current `HEAD`.
+- RepoWise dead-code summary: 465 raw candidates (21 high-confidence unused exports, 438 medium-confidence internals, three low-confidence files). The index incorrectly marked live-current symbols such as `createWorldShareLink` and treated internal use as deletion-safe; none was accepted without live verification.
+- Current-tree reachability inventory: 603 source/test JavaScript and TypeScript files, 286 explicit roots, 590 reachable after executable, package, HTML, Vite, test, script, and migration roots were included. The 13 initially unreachable entries were `.d.ts` declarations, client-boundary fixtures, an integration setup file, or HTML/config-loaded files; all were proven active or intentionally fixture-driven.
+
+### 17.3 Findings
+
+#### DEAD-001 — The root historical application is unreachable by design
+
+- **Severity:** Medium (maintainability and repository-data risk), **confidence:** Confirmed.
+- **Category:** Maintainability / human decision required.
+- **Location:** `index.html:1`; controlling evidence in `README.md:123`, `AGENTS.md:104`, `scripts/check-repository-boundaries.mjs:32,115`, and `services/api/src/server.ts:505-506`.
+- **Issue:** the repository retains a 10,057-line standalone application that cannot be loaded or shipped. A repository guard exists specifically to prevent runtime use.
+- **Evidence classification:** Documented and observed.
+- **Impact:** large search/review surface, stale implementation examples, and risk that future work accidentally copies historical logic or embedded data. It has no current runtime blast radius.
+- **Correction:** choose either (a) delete it after preserving any required history in Git, updating README/AGENTS and the historical-client allowlist test, or (b) explicitly retain it as an archive and exclude it from all automated code inventories.
+- **Validation:** `pnpm check`, `pnpm test:unit`, both web builds, and direct proof that `/` and `/index.html` still redirect to `/nexus/`.
+
+#### DEAD-002 — Thirty-four production declarations have no consumer
+
+- **Severity:** Low, **confidence:** Confirmed.
+- **Category:** Maintainability.
+- **Evidence:** 30 TypeScript `TS6133`/`TS6196` diagnostics under `--noUnusedLocals --noUnusedParameters`, plus four current-tree exported declarations with exactly one repository occurrence and no importer.
+- **Failure scenario:** no current functional failure; the remnants increase cognitive load and make security/data-sensitive adapters look more capable than they are.
+- **Blast radius:** concentrated in recently refactored import, filesystem, generation, Chronicle, and illustration adapters. Several files are high-churn/high-centrality, so removals should remain mechanical and split by subsystem.
+
+Compiler-confirmed production inventory:
+
+| File and line | Unused item(s) |
+|---|---|
+| `packages/client-core/src/generation/workflow.ts:8` | `GenerationSubmissionInput` type import |
+| `packages/contracts/src/client-api.ts:3-4,15,22-23` | six imports duplicated by direct re-exports: `campaignBranchSchema`, `campaignRewindSchema`, `turnInputClassificationRequestSchema`, `userProfileUpdateSchema`, `campaignCreateSchema`, `worldCreateSchema` |
+| `packages/contracts/src/client-api.ts:26` | `operationKindSchema` |
+| `packages/database/src/asset-publication-repository.ts:10` | `PrivatePreparedAssetPublication` type import |
+| `packages/database/src/chronicle-chunk-repository.ts:136-140` | `transactionClient` helper |
+| `packages/database/src/chronicle-context-repository.ts:39` | `ChronicleQueryKind` type import |
+| `packages/database/src/durable-filesystem-repository.ts:16` | `DurableFilesystemReserveRequest` type import |
+| `packages/database/src/durable-filesystem-repository.ts:342-347` | `claimClassification` helper |
+| `packages/database/src/generation-execution-repository.ts:509` | `entityMetadata` local |
+| `packages/database/src/generation-repository.ts:4` | `GenerationRetryLatestRequest` type import |
+| `packages/database/src/portable-import-family-repository.ts:902-907` | `portableRecord` helper |
+| `packages/story-engine/src/provider-transport.ts:96` | `profile` implementation parameter; the public transport contract still includes it |
+| `services/api/src/portable-infinite-worlds-import-route.ts:5` | `convertInfiniteWorldsWorld` import |
+| `services/runtime/src/generation-executor-adapter.ts:5,16` | `StreamingIllustrationConfig`, `MemoryContextQuery` type imports |
+| `services/runtime/src/illustration-image-job-adapter.ts:9` | `IllustrationImageProviderPort` type import |
+| `services/runtime/src/illustration-image-job-adapter.ts:873-882` | `withoutTemporaryUrls` helper |
+| `services/runtime/src/illustration-platform-adapter.ts:10` | `IllustrationTransactionContext` type import |
+| `services/runtime/src/illustration-platform-adapter.ts:286-288` | `notFound` helper |
+| `services/runtime/src/illustration-segment-job-adapter.ts:9` | `logger` import |
+| `services/runtime/src/portable-import-export-composition.ts:24,42` | `legacyWorldContent`, `PrivatePortableFamilyMutationPort` imports |
+| `services/runtime/src/portable-import-export-composition.ts:965-972` | `isLegacyExternalImageUrl` helper |
+| `services/runtime/src/provider-world-generation-adapter.ts:872` | unused private `pool` parameter; two call sites still pass it |
+| `services/runtime/src/secure-filesystem-adapter.ts:20` | `ReservedFilesystemOperation` type import |
+
+Additional export/reference-confirmed inventory:
+
+| File and line | Unused exported declaration |
+|---|---|
+| `packages/application/src/imports/private-portable-composition.ts:73-81` | `canonicalPortableAssetReservationCommand` |
+| `services/runtime/src/chronicle-platform-adapter.ts:27-31` | `ChronicleEmbeddingProviderScope` |
+| `services/runtime/src/chronicle-platform-adapter.ts:33-37` | `ChronicleEmbeddingProviderSelectionScope` |
+| `services/runtime/src/provider-world-generation-adapter.ts:189` | `WorldGenProgress` |
+
+- **Correction:** delete imports/types/locals/helpers; remove the private world-generation `pool` parameter and its two arguments; either keep the public provider-transport profile parameter as `_profile` to preserve the contract or deliberately remove it from `ProviderTransport.fetch` and every adapter/test in a separate contract change.
+- **Validation:** enable the strict unused compiler flags for the cleaned programs, run focused unit/integration suites named in the cleanup plan, then the full standard gates.
+
+#### DEAD-003 — Thirty-four test declarations are unused
+
+- **Severity:** Low, **confidence:** Confirmed.
+- **Category:** Testing / maintainability.
+- **Evidence classification:** Observed compiler diagnostics.
+- **Inventory:**
+
+| File | Unused items |
+|---|---|
+| `tests/helpers/private-storage-lifecycle-fake.ts:20-21` | `PortableArchiveExportRetrieval`, `PortableStagedInput` |
+| `tests/helpers/runtime-application-fixtures.ts:44` | `store` |
+| `tests/integration/campaign-transfer-character-repository.integration.test.ts:16` | `worldCreateSchema` |
+| `tests/integration/durable-filesystem-repository.integration.test.ts:7` | `AttachedFilesystemOperation` |
+| `tests/integration/gameplay.integration.test.ts:13,24,131,730` | `runImageJob`, `generationStreamSnapshotSchema`, `imageProviderId`, `worldTitle` |
+| `tests/integration/import-memory.integration.test.ts:4,1040` | `JSZip`, `ownerUserId` |
+| `tests/integration/import-repository.integration.test.ts:22,181` | `DatabaseClient`, `staged` |
+| `tests/integration/task-14e3b4-secure-storage-repository.integration.test.ts:11` | `PrivatePrewriteCleanupPreparation` |
+| `tests/integration/task-14e3b5-storage-composition.integration.test.ts:27-31` | four unused storage/publication types |
+| `tests/integration/task-14e3e1c-normalized-publication-repository.integration.test.ts:282` | `legacyIdentity` |
+| `tests/integration/task-14e3e4-portable-normalized-publication.integration.test.ts:2138` | `row` callback parameter |
+| `tests/integration/world-generation.integration.test.ts:568` | `marker` |
+| `tests/legacy-api/src/campaign-archive-service.ts:860` | `embedded` |
+| `tests/legacy-api/src/infinite-worlds-import-service.ts:388` | `basePrompt` |
+| `tests/unit/application/world-campaign-use-cases.test.ts:242` | `owner` callback parameter |
+| `tests/unit/asset-archive-service.test.ts:51` | `assetE` |
+| `tests/unit/chronicle-runtime-adapter.test.ts:11` | entire unused import declaration |
+| `tests/unit/client-web/api-client.test.ts:20` | `GenerationJobSnapshot` |
+| `tests/unit/client-web/generation-poll-source.test.ts:9` | `Clock` |
+| `tests/unit/runtime-illustration-composition.test.ts:337` | `store` |
+| `tests/unit/task-14e2ar-persisted-filesystem.test.ts:19` | `DurableFilesystemJournalPort` |
+| `tests/unit/task-14e3b1-contracts.test.ts:1,6` | `vi`, `AttachedFilesystemOperation` |
+| `tests/unit/task-14e3b4-secure-filesystem-adapter.test.ts:956` | `closeResolved` |
+| `tests/unit/task-14e3e7-maintenance-scheduler.test.ts:82` | `entered` |
+
+- **Correction:** remove the unused test material in a separate mechanical commit. Do not remove client-boundary fixture declarations merely because normal reachability analysis cannot import them; those files are source text consumed by boundary tests.
+- **Validation:** strict unused compiler run, `pnpm test:unit`, and the affected integration groups with the isolated PostgreSQL harness.
+
+#### DEAD-004 — `@playwright/test` is installed but unused
+
+- **Severity:** Low, **confidence:** Confirmed.
+- **Category:** Dependency maintenance.
+- **Location:** `package.json:55`, corresponding `pnpm-lock.yaml` entries.
+- **Evidence:** no Playwright config, test file, import, or package/CI command exists outside the manifest and lockfile.
+- **Correction:** remove it with the package manager and update the lockfile, unless an immediate approved browser-test task will consume it.
+- **Validation:** frozen-lockfile install in CI, `pnpm check`, `pnpm test:unit`, `pnpm build`.
+
+#### DEAD-005 — Windows provisioning script has no discoverable workflow
+
+- **Severity:** Low, **confidence:** Medium.
+- **Category:** Human decision required / documentation.
+- **Location:** `scripts/provision-windows-dev-tools.ps1:1-155`.
+- **Evidence:** introduced by commit `8e96f0d`; no package command, CI job, test, README entry, or current operations/developer guide references its filename. The script installs machine-wide Node, pnpm, Python, and optional review tools and can alter Docker permissions, so manual execution is a plausible intentional entry point.
+- **Correction:** ask the maintainer whether it remains supported. If yes, document it with prerequisites and ownership; if no, delete it. Do not infer deletion from zero importers.
+- **Validation:** documentation link check if retained; no runtime test required if removed.
+
+### 17.4 Rejected candidates and false positives
+
+| Candidate | Why it is active |
+|---|---|
+| `apps/web/public/image-library-browser.js` | imported by `apps/web/public/nexus.js:1` using `/nexus/...`, covered by UI and server tests |
+| `apps/web-next/public/theme-bootstrap.js` | loaded by `apps/web-next/index.html:8`, covered by theme/build tests |
+| `docs/.vitepress/config.ts` | VitePress configuration-discovery entry point |
+| `createWorldShareLink` | imported and called by `apps/web-next/src/world-editor-page.ts:6,534`; RepoWise missed the post-index connection |
+| `createGenerationExecutionCollaborators` | used locally as a factory binding in its own module (`generation-worker-composition.ts:79`) |
+| `createApiPortableTargetReader` | used locally as a factory binding (`api-portable-import-export-composition.ts:215`) |
+| exported constants such as `GENERIC_FAILURE_MESSAGE` and `CHRONICLE_GENERIC_CHUNK_SKIP_REASON` | read by active functions in their defining files; only their external export is unused |
+| legacy Nexus and Story event handlers | referenced through `addEventListener`/DOM bindings; identifier/call-graph-only scans miss these uses |
+| `scripts/*.d.mts` | TypeScript declarations selected for `.mjs` imports, not unused generated output |
+| `tests/fixtures/client-boundaries/**` | source-text fixtures consumed by repository boundary tests rather than ordinary module imports |
+
+### 17.5 Cleanup plan
+
+#### Phase 1 — Add a reproducible unused-code gate
+
+1. Add a non-emitting production check using `--noUnusedLocals --noUnusedParameters` for root, client-core, client-web, application, and replacement UI programs.
+2. Keep it separate from the existing gate until Phases 2 and 3 are green; then include it in `pnpm check`.
+3. Add a small repository-owned dependency/reference check or adopt an approved maintained tool; ensure HTML/config/dynamic roots are allowlisted explicitly.
+
+Acceptance: the gate reproduces the 30 compiler findings without flagging active HTML/config files or boundary fixtures.
+
+#### Phase 2 — Remove active production remnants by subsystem
+
+Use small commits to limit risk:
+
+1. **Contracts/clients/new UI:** remove unused imports and `operationKindSchema`, `CharacterWorkspaceState` import, and `WorldGenProgress` alias. Run client-core/client-web/new-UI checks and their focused unit tests.
+2. **Chronicle/generation:** remove the unused Chronicle helpers/types, generation local/type imports, and private world-generation `pool` argument. Run Chronicle, generation-executor, and world-generation unit tests plus their focused integration suites.
+3. **Portable import/filesystem:** remove the canonical reservation helper, dead portable helpers/imports, and durable-filesystem helpers/imports. This is the riskiest batch because RepoWise reports 89–99th-percentile churn and broad co-change surfaces. Run portable-composition, durable-filesystem, campaign-transfer, and normalized-publication integration suites against the isolated PostgreSQL database.
+4. **Illustration/provider:** remove dead illustration types/helpers/logger import. Treat `ProviderTransport.fetch(profile, ...)` separately: either preserve the contract with `_profile` or remove the parameter end-to-end with provider security tests.
+
+Acceptance per commit: strict unused check, focused tests, `pnpm check`, `pnpm test:unit`, `pnpm build`, and `git diff --check`.
+
+#### Phase 3 — Remove test debris
+
+Delete the 34 compiler-confirmed unused test declarations in one mechanical commit, preserving fixture-only declarations that encode boundary-test scenarios. Run the strict test-program check, all unit tests, and the affected isolated integration groups.
+
+#### Phase 4 — Remove the unused dependency
+
+Remove `@playwright/test` with pnpm so `package.json` and `pnpm-lock.yaml` stay consistent. If browser automation is imminent, replace this phase with the actual Playwright config/test implementation so the dependency becomes genuinely used.
+
+#### Phase 5 — Decide retained artifacts
+
+1. Decide whether Git history is sufficient archival storage for root `index.html`. If yes, delete it and update README, AGENTS, repository-boundary checks, and any docs that describe it as retained. If no, move it to a clearly non-code archival location only if repository policy permits.
+2. Decide whether `scripts/provision-windows-dev-tools.ps1` is supported. Document and test its entry conditions, or delete it.
+
+#### Phase 6 — Final cross-surface verification
+
+Run:
+
+```text
+pnpm check
+pnpm test:unit
+pnpm test:integration
+pnpm build
+git diff --check
+```
+
+Inspect both Vite manifests and smoke the legacy Nexus, legacy Story Player, and replacement `/app/` UI. Do not call integration validation passed unless the isolated PostgreSQL harness actually completes.
+
+### 17.6 Validation performed for this review
+
+| Command | Result | Interpretation |
+|---|---|---|
+| `pnpm check` | Passed | Existing repository/package/web/type/syntax gates are green |
+| `tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters` | Expected failure: 64 diagnostics | 30 production and 34 test unused-code findings captured above |
+| Current-tree module/entry reachability audit | 603 files, 590 reachable from 286 roots | No active whole production module remained unreachable after dynamic roots were resolved |
+| Current-tree export/reference audit | Four extra dead production exports | Supplemented compiler diagnostics, which do not reject unused exports |
+| Legacy JS declaration/reference audit | No non-exported one-occurrence declaration in active legacy code | DOM-handler false positives excluded |
+| `pnpm test:unit` | 187 files passed; 2,131 tests passed; 44 skipped | Source/unit verification passed; skipped tests are not runtime proof |
+| `pnpm build` | Passed for both web clients | Legacy and replacement build graphs are intact; four existing font URL notices remain |
+
+Integration tests were not run because their harness provisions and mutates a Docker PostgreSQL test database, which was outside this read-only review. No browser smoke test or live provider test was performed.

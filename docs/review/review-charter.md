@@ -87,3 +87,37 @@ Exact UI layout and insecure browser-owned credential behavior are not required 
 ## 10. Approval Gate
 
 After this review, a human must classify each historical difference as intended parity, approved replacement, obsolete behavior, or deferred work. Only then should the target-state specification and implementation plan be created.
+
+## 11. Dead-Code Audit Addendum — 2026-08-18
+
+This focused addendum evaluates whether code is reachable or consumed; it does not reclassify a compatibility path as obsolete merely because the current browser does not call it.
+
+### Evidence required to call code dead
+
+A deletion-ready finding requires all applicable evidence below:
+
+1. No static import, re-export, local reference, HTML/CSS reference, package entry, build entry, package script, CI command, test import, migration loader, or documented runtime loader reaches it.
+2. Dynamic loading conventions have been checked explicitly. Files loaded by HTML, framework configuration discovery, directory enumeration, migration runners, or absolute browser imports are active even when their module in-degree is zero.
+3. Public/API compatibility has been considered. An uncalled HTTP route or exported symbol is not dead solely because a repository UI does not consume it.
+4. Current source confirms the result. Stale graph/index output is a lead, not evidence.
+5. For standalone tooling, a human has confirmed that the operational workflow is obsolete, or the script is explicitly replaced and its documentation updated.
+
+### Finding classes
+
+- **Deletion-ready:** no reference or compatibility role remains; remove in a focused change.
+- **Export-only cleanup:** implementation remains active locally, but its `export` surface is unused. This is API-surface narrowing, not dead implementation.
+- **Historical artifact:** unreachable by design and retained intentionally; remove only after an archival decision.
+- **Orphan tooling:** no repository caller exists, but manual execution may be the intended entry point; human confirmation is required.
+- **False positive:** configuration, HTML, dynamic, test-fixture, declaration, or internal reference proves the candidate active.
+
+### Validation standard for cleanup
+
+- Run `tsc` with `--noUnusedLocals --noUnusedParameters` against production and test programs.
+- Run `pnpm check`, `pnpm test:unit`, `pnpm build`, and `git diff --check` for every cleanup batch.
+- Run focused PostgreSQL integration suites when a removal touches repository, transaction, import, generation, Chronicle, or durable-filesystem files, even if the deleted declaration appears behavior-free.
+- Review built manifests and public output when removing browser files or dependencies.
+- Keep legacy and replacement UI checks separate so one surface cannot mask a regression in the other.
+
+### Scope exclusions
+
+Generated `dist/` output and installed `node_modules/` content are not cleanup targets. Documentation prose, old review records, and migration history are not code and are excluded unless they directly control loading or document a retained compatibility contract.

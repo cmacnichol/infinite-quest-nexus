@@ -614,10 +614,86 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain("async function finalizeCompletedGeneration(result)");
     expect(storyScript).toContain('const preserveViewport = Boolean($("streamingPreviewCard")) && !state.streamingAutoFollow;');
     expect(storyScript).toContain("if (!replaceStreamingPreviewWithAcceptedTurn(result, preserveViewport)) {");
+    expect(storyScript).toContain('await loadCampaign(state.campaignId, { autoScroll: !preserveViewport });\n    restoreViewportAfterRender(viewport);');
+    expect(storyScript).toContain("function restoreViewportAfterRender(viewport)");
     expect(storyScript).toContain("window.requestAnimationFrame(() => {");
     expect(storyScript).toContain('window.scrollTo({ ...viewport, behavior: "auto" });');
     expect(storyScript).toContain('onCompleted: finalizeCompletedGeneration');
     expect(storyScript).toContain('await finalizeCompletedGeneration(result);');
+  });
+
+  it("restores the manually positioned viewport after a completed turn replaces the stream", async () => {
+    let completeGeneration!: () => void;
+    const completion = new Promise<void>((resolve) => { completeGeneration = resolve; });
+    const workflow = {
+      resume: async () => null,
+      submit: vi.fn().mockResolvedValue({
+        jobId: "generation-2",
+        async *watch() {
+          yield { type: "narration", text: "Streaming narration." };
+          await completion;
+          yield {
+            type: "settled",
+            outcome: "completed",
+            result: {
+              resultTurnId: "turn-2",
+              turnNumber: 2,
+              action: "Inspect the ruins",
+              narration: "The ruins answer with a distant bell."
+            }
+          };
+        }
+      })
+    };
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeTurns(1, 1),
+        workflow
+      });
+      let scrollLeft = 24;
+      let scrollTop = 480;
+      const scrollTo = vi.fn(({ left, top }: { left: number; top: number }) => {
+        scrollLeft = left;
+        scrollTop = top;
+      });
+      Object.defineProperties(window, {
+        scrollX: { configurable: true, get: () => scrollLeft },
+        scrollY: { configurable: true, get: () => scrollTop },
+        requestAnimationFrame: { configurable: true, value: (callback: FrameRequestCallback) => {
+          callback(0);
+          return 1;
+        } },
+        scrollTo: { configurable: true, value: scrollTo }
+      });
+
+      document.querySelector<HTMLElement>('[data-turn-input-mode="action"]')
+        ?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      const action = document.getElementById("freeAction") as HTMLTextAreaElement;
+      action.value = "Inspect the ruins";
+      document.getElementById("btnTakeAction")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      for (let attempt = 0; attempt < 8 && !document.getElementById("streamingPreviewCard"); attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+
+      const preview = document.getElementById("streamingPreviewCard") as HTMLElement | null;
+      if (!preview) throw new Error("Streaming preview is required.");
+      const replaceWith = preview.replaceWith.bind(preview);
+      preview.replaceWith = (...nodes: (string | Node)[]) => {
+        scrollTop = 0;
+        replaceWith(...nodes);
+      };
+      window.dispatchEvent(new window.Event("wheel"));
+      completeGeneration();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(document.getElementById("scene-2")).not.toBeNull();
+      expect(scrollTo).toHaveBeenCalledWith({ left: 24, top: 480, behavior: "auto" });
+      expect(scrollLeft).toBe(24);
+      expect(scrollTop).toBe(480);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("provides history navigation with view mode toggling, undo, retry, and branch/reset handling", () => {
