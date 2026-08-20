@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { parseHTML } from "linkedom";
 import { describe, expect, it } from "vitest";
 
 const storyHtml = readFileSync("apps/web/public/story.html", "utf8");
@@ -6,6 +7,7 @@ const storyScript = readFileSync("apps/web/src/story.js", "utf8");
 const managementHtml = readFileSync("apps/web/public/index.html", "utf8");
 const managementScript = readFileSync("apps/web/public/nexus.js", "utf8");
 const managementCss = readFileSync("apps/web/public/nexus.css", "utf8");
+const { document: managementDocument } = parseHTML(managementHtml);
 const imageLibraryScript = readFileSync("apps/web/public/image-library-browser.js", "utf8");
 
 function managementFunction<T extends (...args: never[]) => unknown>(name: string): T {
@@ -15,7 +17,351 @@ function managementFunction<T extends (...args: never[]) => unknown>(name: strin
   return Function(`${managementScript.slice(start, end)}; return ${name};`)() as T;
 }
 
+function managementFunctions<T extends Record<string, (...args: never[]) => unknown>>(names: string[], bindings: Record<string, unknown>): T {
+  const sources = names.map((name) => {
+    const start = managementScript.indexOf(`function ${name}(`);
+    const definitionStart = managementScript.slice(start - 6, start) === "async " ? start - 6 : start;
+    const nextFunction = /\n(?:async )?function /.exec(managementScript.slice(start + 1));
+    const end = nextFunction ? start + 1 + nextFunction.index : -1;
+    if (start < 0 || end < 0) throw new Error(`Unable to locate management function ${name}.`);
+    return managementScript.slice(definitionStart, end);
+  });
+  const bindingNames = Object.keys(bindings);
+  return Function(...bindingNames, `${sources.join("\n")}; return { ${names.join(", ")} };`)(...Object.values(bindings)) as T;
+}
+
 describe("Nexus management UI contracts", () => {
+  it("organizes the selected legacy campaign into five accessible settings panels", () => {
+    const rail = managementDocument.querySelector("#campaignSettingsRail");
+    expect(rail?.getAttribute("role")).toBe("tablist");
+    expect(rail?.getAttribute("aria-orientation")).toBe("vertical");
+
+    const expected = [
+      ["campaignTabOverview", "campaignPanelOverview"],
+      ["campaignTabStory", "campaignPanelStory"],
+      ["campaignTabIllustrations", "campaignPanelIllustrations"],
+      ["campaignTabChronicle", "campaignPanelChronicle"],
+      ["campaignTabUsage", "campaignPanelUsage"]
+    ];
+
+    expect([...rail!.querySelectorAll("[role=tab]")].map((tab) => tab.id)).toEqual(expected.map(([tabId]) => tabId));
+    for (const [tabId, panelId] of expected) {
+      const tab = managementDocument.querySelector("#" + tabId);
+      const panel = managementDocument.querySelector("#" + panelId);
+      expect(tab?.getAttribute("aria-controls")).toBe(panelId);
+      expect(panel?.getAttribute("role")).toBe("tabpanel");
+      expect(panel?.getAttribute("aria-labelledby")).toBe(tabId);
+    }
+
+    expect(managementDocument.querySelector("#campaignTabOverview")?.getAttribute("aria-selected")).toBe("true");
+    expect(managementDocument.querySelector("#campaignPanelOverview")?.hasAttribute("hidden")).toBe(false);
+    for (const panelId of expected.slice(1).map(([, panelId]) => panelId)) {
+      expect(managementDocument.querySelector("#" + panelId)?.hasAttribute("hidden")).toBe(true);
+    }
+  });
+
+  it("keeps campaign feedback visible when a non-Overview panel is active", () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    const functions = managementFunctions<{
+      setCampaignSettingsPanel: (panelId: string) => void;
+      campaignMessage: (message: string, type?: string) => void;
+    }>(["setCampaignSettingsPanel", "campaignMessage"], {
+      elements,
+      document,
+      window: { matchMedia: () => ({ matches: false }) },
+      CAMPAIGN_SETTINGS_PANEL_IDS: ["overview", "story", "illustrations", "chronicle", "usage"]
+    });
+
+    functions.setCampaignSettingsPanel("story");
+    functions.campaignMessage("Campaign settings saved.", "success");
+
+    const status = document.querySelector("#campaignStatusMessage");
+    expect(document.querySelector<HTMLElement>("#campaignPanelOverview")?.hidden).toBe(true);
+    expect(document.querySelector<HTMLElement>("#campaignPanelStory")?.hidden).toBe(false);
+    expect(status?.textContent).toBe("Campaign settings saved.");
+    expect(status?.classList.contains("hidden")).toBe(false);
+    expect(document.querySelector("#campaignPanelOverview #campaignStatusMessage") === null).toBe(true);
+    expect(document.querySelector("#campaignPanelStory #campaignStatusMessage") === null).toBe(true);
+  });
+
+  it("synchronizes settings rail orientation with its responsive layout", () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    const { syncCampaignSettingsRailOrientation } = managementFunctions<{
+      syncCampaignSettingsRailOrientation: (mediaQuery: { matches: boolean }) => void;
+    }>(["syncCampaignSettingsRailOrientation"], { elements });
+    const rail = document.querySelector("#campaignSettingsRail");
+
+    syncCampaignSettingsRailOrientation({ matches: true });
+    expect(rail?.getAttribute("aria-orientation")).toBe("horizontal");
+
+    syncCampaignSettingsRailOrientation({ matches: false });
+    expect(rail?.getAttribute("aria-orientation")).toBe("vertical");
+  });
+
+  it("adapts the legacy campaign list and settings rail before either can overflow", () => {
+    expect(managementHtml).toContain('class="workspace anchor-section world-management campaign-management-workspace"');
+    expect(managementCss).toContain("@media (max-width: 1180px)");
+    expect(managementCss).toContain(".campaign-management-workspace { grid-template-columns: 1fr; }");
+    expect(managementCss).toContain(".campaign-management-workspace .campaign-list {");
+    expect(managementCss).toContain("@media (max-width: 820px)");
+    expect(managementCss).toContain(".campaign-settings-shell { grid-template-columns: 1fr; }");
+    expect(managementCss).toContain('.campaign-settings-rail [role="tab"] { min-width: 150px; }');
+    expect(managementCss).toContain("@media (max-width: 520px)");
+    expect(managementCss).toContain(".campaign-panel-fields { grid-template-columns: 1fr; }");
+    const mobileCss = managementCss.slice(managementCss.indexOf("@media (max-width: 520px)"));
+    const actionColumns = [...mobileCss.matchAll(/\.campaign-editor-actions\s*\{[^}]*grid-template-columns:\s*([^;]+);/g)].map((match) => {
+      const columns = match[1];
+      if (!columns) throw new Error("Campaign editor action columns were not captured.");
+      return columns.trim();
+    });
+    expect(actionColumns.at(-1)).toBe("1fr");
+  });
+
+  it("keeps the single campaign export action reachable at narrow widths", () => {
+    expect(managementDocument.querySelectorAll("#exportCampaign")).toHaveLength(1);
+    expect(managementDocument.querySelector(".campaign-settings-rail > #exportCampaign") !== null).toBe(true);
+
+    const narrowStart = managementCss.indexOf("@media (max-width: 820px)");
+    const narrowEnd = managementCss.indexOf("@media (max-width: 520px)", narrowStart);
+    const narrowCss = managementCss.slice(narrowStart, narrowEnd);
+    const hidesRailButton = /\.campaign-settings-rail\s*>\s*\.button\s*\{[^}]*display:\s*none\s*;/s.test(narrowCss);
+    expect(hidesRailButton).toBe(false);
+  });
+
+  it("groups every illustration control by source, segmentation, matching, provider, and history", () => {
+    const panel = managementDocument.querySelector("#campaignPanelIllustrations")!;
+    const markup = panel.innerHTML;
+    const groups = [
+      "illustrationSourceGroup",
+      "illustrationSegmentSettings",
+      "illustrationMatchingSettings",
+      "illustrationProviderSettings",
+      "illustrationHistoryGroup"
+    ];
+    for (const id of groups) expect(panel.querySelector("#" + id)).not.toBeNull();
+    expect(groups.map((id) => markup.indexOf('id="' + id + '"'))).toEqual([...groups.map((id) => markup.indexOf('id="' + id + '"'))].sort((a, b) => a - b));
+
+    for (const id of [
+      "illustrationSourcePolicy",
+      "illustrationSegmentWordCount",
+      "illustrationImagesPerSegment",
+      "illustrationSegmentPromptMode",
+      "illustrationMatchingScope",
+      "illustrationConfidenceProfile",
+      "illustrationRepetitionWindow",
+      "campaignImageProvider",
+      "illustrationModel",
+      "illustrationSize",
+      "illustrationAspectRatio",
+      "illustrationQuality",
+      "illustrationOutputFormat",
+      "illustrationMaxAttempts",
+      "previewIllustrationBackfill",
+      "previewIllustrationRebuild",
+      "saveIllustrationConfig"
+    ]) {
+      expect(panel.querySelector("#" + id), id + " should stay in the Illustration panel").not.toBeNull();
+    }
+  });
+
+  it("orders Chronicle health, preview, retrieval configuration, and maintenance by user task", () => {
+    const panel = managementDocument.querySelector("#campaignPanelChronicle")!;
+    const markup = panel.innerHTML;
+    const orderedIds = [
+      "chronicleHealthRegion",
+      "contextForm",
+      "embeddingForm",
+      "embeddingProgress",
+      "embeddingStatus",
+      "chronicleMaintenanceRegion"
+    ];
+    const positions = orderedIds.map((id) => markup.indexOf('id="' + id + '"'));
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+
+    expect(panel.textContent).toContain("Preview only — does not change campaign settings.");
+    expect(panel.querySelector("#advancedRetrievalSettings #embeddingRetrievalImplementation")).not.toBeNull();
+    expect(panel.querySelector("#advancedRetrievalSettings #embeddingRetrievalShadowEnabled")).not.toBeNull();
+    expect(panel.querySelector("#advancedRetrievalSettings #embeddingDocumentPrefix")).not.toBeNull();
+    expect(panel.querySelector("#advancedRetrievalSettings #embeddingQueryPrefix")).not.toBeNull();
+    expect(panel.querySelector("#advancedRetrievalSettings #embeddingBatchSize")).not.toBeNull();
+    expect(panel.querySelector("#chronicleMaintenanceRegion #reindexEmbeddings")).not.toBeNull();
+    expect(panel.querySelector("#chronicleMaintenanceRegion #reindexMemory")).not.toBeNull();
+  });
+
+  it("keeps context preview inputs separate from saved Semantic Retrieval settings", () => {
+    expect(managementDocument.querySelector("#memoryQuery")?.closest("form")?.id).toBe("contextForm");
+    expect(managementDocument.querySelector("#budgetTokens")?.closest("form")?.id).toBe("contextForm");
+    expect(managementDocument.querySelector("#compression")?.closest("form")?.id).toBe("contextForm");
+    expect(managementDocument.querySelector("#embeddingProvider")?.closest("form")?.id).toBe("embeddingForm");
+    expect(managementDocument.querySelector("#saveEmbeddingConfig")?.closest("form")?.id).toBe("embeddingForm");
+    expect(managementDocument.querySelector("#memoryQuery")?.parentElement?.textContent).toContain("Preview retrieval query");
+  });
+
+  it("keeps campaign persistence separate from migration and panel navigation", () => {
+    for (const id of [
+      "campaignTitle",
+      "campaignStatus",
+      "campaignTextProvider",
+      "campaignTurnControlStyle",
+      "campaignStoryLengthProfile",
+      "saveCampaign"
+    ]) {
+      expect(managementDocument.querySelector("#" + id)?.getAttribute("form")).toBe("campaignForm");
+    }
+    expect(managementDocument.querySelector("#campaignWorldVersion")?.getAttribute("form")).toBeNull();
+
+    const saveStart = managementScript.indexOf("async function saveSelectedCampaign");
+    const saveEnd = managementScript.indexOf("\nasync function migrateSelectedCampaign", saveStart);
+    const saveSource = managementScript.slice(saveStart, saveEnd);
+    expect(saveSource).toContain("title: elements.campaignTitle.value");
+    expect(saveSource).toContain("status: elements.campaignStatus.value");
+    expect(saveSource).toContain("textProviderProfileId: elements.campaignTextProvider.value || null");
+    expect(saveSource).toContain("turnControlStyle: elements.campaignTurnControlStyle.value");
+    expect(saveSource).toContain("storyLengthProfile: elements.campaignStoryLengthProfile.value");
+    expect(saveSource).not.toContain("campaignWorldVersion");
+  });
+
+  it("maps standard tab keys with wrapping navigation", () => {
+    const nextIndex = managementFunction<(key: string, currentIndex: number, count: number) => number>("campaignSettingsPanelIndexForKey");
+    expect(nextIndex("ArrowRight", 4, 5)).toBe(0);
+    expect(nextIndex("ArrowDown", 1, 5)).toBe(2);
+    expect(nextIndex("ArrowLeft", 0, 5)).toBe(4);
+    expect(nextIndex("ArrowUp", 3, 5)).toBe(2);
+    expect(nextIndex("Home", 3, 5)).toBe(0);
+    expect(nextIndex("End", 1, 5)).toBe(4);
+    expect(nextIndex("Enter", 2, 5)).toBe(2);
+  });
+
+  it("clears campaign controls and restores focus when a refresh leaves no selection", async () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    const functions = managementFunctions<{
+      setCampaignSettingsPanel: (panelId: string) => void;
+      setCampaignSettingsAvailability: (available: boolean) => void;
+      clearCampaignEditorSelection: (options?: { focus?: boolean }) => void;
+      loadCampaigns: (preselectId?: string, options?: { focusNoSelection?: boolean }) => Promise<void>;
+    }>([
+      "setCampaignSettingsPanel",
+      "setCampaignSettingsAvailability",
+      "clearCampaignEditorSelection",
+      "loadCampaigns"
+    ], {
+      elements,
+      document,
+      window: { matchMedia: () => ({ matches: false }) },
+      CAMPAIGN_SETTINGS_PANEL_IDS: ["overview", "story", "illustrations", "chronicle", "usage"],
+      activeCampaignSettingsPanel: "overview",
+      campaigns: [{ id: "deleted-campaign" }],
+      selectedCampaign: { id: "deleted-campaign" },
+      api: async () => ({ campaigns: [] }),
+      renderDashboardCampaigns: () => undefined,
+      loadDashboardStats: async () => undefined,
+      updateStoryViewLink: () => undefined,
+      renderIllustrationSettingsVisibility: () => undefined
+    });
+    const staleControlIds = [
+      "campaignTitle", "campaignStatus", "campaignWorldVersion", "campaignTextProvider", "campaignTurnControlStyle", "campaignStoryLengthProfile",
+      "saveCampaign", "migrateCampaign", "transferCampaign", "editCampaignCharacter", "loadCampaign", "exportCampaign", "deleteCampaign",
+      "reindexMemory", "previewContext", "saveEmbeddingConfig", "reindexEmbeddings", "embeddingEnabled", "embeddingProvider", "embeddingModel",
+      "embeddingDocumentPrefix", "embeddingQueryPrefix", "embeddingBatchSize", "discoverEmbeddingModels", "budgetTokens", "compression", "memoryQuery"
+    ];
+    const requiredElement = <T extends HTMLElement>(id: string): T => {
+      const element = elements[id];
+      if (!element) throw new Error(`Expected #${id} in the management fixture.`);
+      return element as T;
+    };
+    const staleControls = staleControlIds.map((id) => requiredElement<HTMLButtonElement | HTMLInputElement | HTMLSelectElement>(id));
+    for (const control of staleControls) control.disabled = false;
+    const memoryTitle = requiredElement<HTMLElement>("memoryTitle");
+    const campaignEditorSummary = requiredElement<HTMLElement>("campaignEditorSummary");
+    const campaignSettingsRail = requiredElement<HTMLElement>("campaignSettingsRail");
+    const campaignCostSection = requiredElement<HTMLElement>("campaignCostSection");
+    const campaignTabOverview = requiredElement<HTMLButtonElement>("campaignTabOverview");
+    const campaignPanelOverview = requiredElement<HTMLElement>("campaignPanelOverview");
+    const campaignPanelChronicle = requiredElement<HTMLElement>("campaignPanelChronicle");
+    const campaignStatusMessage = requiredElement<HTMLElement>("campaignStatusMessage");
+    const refreshCampaigns = requiredElement<HTMLButtonElement>("refreshCampaigns");
+    let focusedControlId = "";
+    refreshCampaigns.focus = () => { focusedControlId = refreshCampaigns.id; };
+    memoryTitle.textContent = "Deleted campaign";
+    campaignEditorSummary.textContent = "active · Stale World v4 · Mira";
+    campaignStatusMessage.textContent = "Stale campaign feedback";
+    campaignStatusMessage.classList.remove("hidden");
+    functions.setCampaignSettingsPanel("chronicle");
+
+    await functions.loadCampaigns("", { focusNoSelection: true });
+
+    expect([...campaignSettingsRail.querySelectorAll<HTMLButtonElement>("[role=tab]")].every((tab) => tab.disabled)).toBe(true);
+    expect(staleControls.every((control) => control.disabled)).toBe(true);
+    expect(memoryTitle.textContent).toBe("Select a campaign");
+    expect(campaignEditorSummary.textContent).toBe("");
+    expect(campaignCostSection.classList.contains("hidden")).toBe(true);
+    expect(campaignTabOverview.getAttribute("aria-selected")).toBe("true");
+    expect(campaignPanelOverview.hidden).toBe(false);
+    expect(campaignPanelChronicle.hidden).toBe(true);
+    expect(campaignStatusMessage.textContent).toBe("");
+    expect(campaignStatusMessage.classList.contains("hidden")).toBe(true);
+    expect(focusedControlId).toBe("refreshCampaigns");
+  });
+
+  it("keeps the no-selection editor clean after a successful deletion", async () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    const requiredElement = <T extends HTMLElement>(id: string): T => {
+      const element = elements[id];
+      if (!element) throw new Error(`Expected #${id} in the management fixture.`);
+      return element as T;
+    };
+    const campaignStatusMessage = requiredElement<HTMLElement>("campaignStatusMessage");
+    requiredElement<HTMLButtonElement>("refreshCampaigns").focus = () => undefined;
+    const functions = managementFunctions<{
+      setCampaignSettingsPanel: (panelId: string) => void;
+      setCampaignSettingsAvailability: (available: boolean) => void;
+      clearCampaignEditorSelection: (options?: { focus?: boolean }) => void;
+      loadCampaigns: (preselectId?: string, options?: { focusNoSelection?: boolean }) => Promise<void>;
+      campaignMessage: (message: string, type?: string) => void;
+      deleteSelectedCampaign: () => Promise<void>;
+    }>([
+      "setCampaignSettingsPanel",
+      "setCampaignSettingsAvailability",
+      "clearCampaignEditorSelection",
+      "loadCampaigns",
+      "campaignMessage",
+      "deleteSelectedCampaign"
+    ], {
+      elements,
+      document,
+      window: { matchMedia: () => ({ matches: false }) },
+      CAMPAIGN_SETTINGS_PANEL_IDS: ["overview", "story", "illustrations", "chronicle", "usage"],
+      activeCampaignSettingsPanel: "overview",
+      campaigns: [{ id: "deleted-campaign" }],
+      selectedCampaign: { id: "deleted-campaign", title: "Deleted campaign" },
+      selectedWorld: null,
+      requestTypedDelete: async () => true,
+      api: async (path: string, options?: { method?: string }) => {
+        if (options?.method === "DELETE") return {};
+        if (path === "/api/v1/campaigns") return { campaigns: [] };
+        throw new Error(`Unexpected request: ${path}`);
+      },
+      renderDashboardCampaigns: () => undefined,
+      loadDashboardStats: async () => undefined,
+      updateStoryViewLink: () => undefined,
+      renderIllustrationSettingsVisibility: () => undefined,
+      loadWorlds: async () => undefined
+    });
+
+    campaignStatusMessage.textContent = "Stale campaign feedback";
+    campaignStatusMessage.classList.remove("hidden");
+
+    await functions.deleteSelectedCampaign();
+
+    expect(campaignStatusMessage.textContent).toBe("");
+    expect(campaignStatusMessage.classList.contains("hidden")).toBe(true);
+  });
+
   it("navigates to provider management with an anchor", () => {
     expect(storyHtml).toContain('<a id="btnGettingConfigureProviders" class="buttonish accent grow" href="/nexus/#providers">Open Provider Management in Nexus</a>');
   });

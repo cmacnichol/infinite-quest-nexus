@@ -1,13 +1,15 @@
 # Build a context preview
 
-1. Open a campaign's **Memory and context**.
+1. Open a campaign's **Chronicle** settings panel.
 2. Enter a **Context budget**.
 3. Select a **Compression** mode.
-4. Optionally enter **Current action or retrieval query**.
+4. Optionally enter a **Preview retrieval query**.
 5. Select **Build context preview**.
 6. Select **View context preview**.
 
 The preview shows the controlled context selected for story generation. It can include immutable world canon, campaign living canon, selected Chronicle memories, and the current scene.
+
+The budget, compression, and query are preview-only. They do not change the campaign's saved retrieval configuration or story-generation settings.
 
 It excludes rolls, private mechanics records, scratchpads, rejected output, parser diagnostics, credentials, and raw provider responses. Treat the remaining fiction as private campaign content when sharing diagnostics.
 

@@ -1,14 +1,16 @@
 # Configure semantic Chronicle retrieval
 
 1. Create an enabled provider profile with the **Chronicle embeddings** role.
-2. Select the campaign and open **Memory and context**.
-3. Select **Enable hybrid semantic memory for this campaign**.
+2. Select the campaign and open **Chronicle** in the settings rail.
+3. Select **Enable Semantic Retrieval for this campaign**.
 4. Choose the **Embedding provider** and **Embedding model**.
-5. Optionally set **Document prefix** and **Query prefix**.
-6. Set a bounded **Batch size**.
-7. Keep **Production retrieval** on **Legacy hybrid** while preparing and shadowing the chunk index.
+5. Under **Advanced retrieval**, optionally set **Document prefix** and **Query prefix**.
+6. Under **Advanced retrieval**, set a bounded **Batch size**.
+7. Under **Advanced retrieval**, keep **Production implementation** on **Legacy hybrid** while preparing and shadowing the chunk index.
 8. Select **Save & index**. This enqueues the durable `index_memory_chunks_v2` job without changing production retrieval.
-9. After the campaign is fully ready and shadow diagnostics are acceptable, explicitly select **Chunked hybrid**. There is no automatic campaign conversion.
+9. Under **Advanced retrieval**, after the campaign is fully ready and shadow diagnostics are acceptable, explicitly select **Chunked hybrid**. There is no automatic campaign conversion.
+
+Production implementation, shadow comparison, prefixes, and batch size are under **Advanced retrieval**.
 
 Leave prefixes blank to use model-aware defaults when available; override them only when the embedding model documents another instruction format. The text profile may appear as **Text fallback**, but its credentials are not copied into an independent embedding profile.
 
