@@ -277,7 +277,8 @@ export type ChronicleChunkBatchCommit = Readonly<{
   capabilityFingerprint: string;
   embeddingProtocolVersion: string;
   chunks: readonly ChronicleChunkDraftCommit[];
-  results: readonly ChronicleChunkEmbeddingResult[];
+  embeddingEvidence: readonly (readonly number[])[];
+  costResults: readonly ChronicleChunkEmbeddingResult[];
   progress: ChronicleChunkJobProgress;
 }>;
 

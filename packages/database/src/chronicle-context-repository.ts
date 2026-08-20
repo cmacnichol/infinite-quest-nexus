@@ -140,6 +140,11 @@ type ChunkCandidateRow = Readonly<{
   active_fact: boolean;
 }>;
 
+type BatchedChunkCandidateRow = ChunkCandidateRow & Readonly<{
+  request_ordinal: number;
+  signal_rank: number | string;
+}>;
+
 type ChunkedRankFusionResult = Readonly<{
   retrieval: Record<string, unknown>;
   selectedParentContent: ReadonlyMap<string, string>;
@@ -1082,69 +1087,264 @@ type ChunkRankRequest = Readonly<{
   temporalAnchor?: number;
 }>;
 
-async function loadAuthorizedChunkRank(
+type ChunkRankResult = Readonly<{
+  request: ChunkRankRequest;
+  rows: readonly ChunkCandidateRow[];
+}>;
+
+const CHUNK_RANK_RESULT_COLUMNS = `candidate_id,parent_memory_id,parent_turn_id,parent_memory_kind,parent_ordinal,
+            parent_content,parent_token_estimate,parent_importance,parent_entities,parent_entity_ids,parent_metadata,
+            chunk_ordinal,chunk_kind,chunk_content,active_fact`;
+
+function storeChunkRankRows(
+  requests: readonly ChunkRankRequest[],
+  rows: readonly BatchedChunkCandidateRow[],
+  results: Map<ChunkRankRequest, readonly ChunkCandidateRow[]>,
+): void {
+  requests.forEach((request, requestOrdinal) => {
+    const requestRows = rows.filter((row) => Number(row.request_ordinal) === requestOrdinal)
+      .sort((left, right) => Number(left.signal_rank) - Number(right.signal_rank)
+        || compareDeterministically(left.parent_memory_id, right.parent_memory_id)
+        || compareDeterministically(left.candidate_id, right.candidate_id));
+    results.set(request, requestRows);
+  });
+}
+
+function semanticRankCompatibilitySql(
+  providerProfileParameter: number,
+  modelParameter: number,
+  dimensionsParameter: number,
+  fingerprintParameter: number,
+): string {
+  return CHRONICLE_RANK_COMPATIBLE_EMBEDDING_SQL
+    .replaceAll("$9", `$${fingerprintParameter}`)
+    .replaceAll("$8", `$${dimensionsParameter}`)
+    .replaceAll("$7", `$${modelParameter}`)
+    .replaceAll("$6", `$${providerProfileParameter}`);
+}
+
+async function loadSemanticRankFamily(
   client: DatabaseClient,
   scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
-  request: ChunkRankRequest,
+  requests: readonly ChunkRankRequest[],
   candidateLimit: number,
-): Promise<readonly ChunkCandidateRow[]> {
-  const baseValues: unknown[] = [
+  results: Map<ChunkRankRequest, readonly ChunkCandidateRow[]>,
+): Promise<void> {
+  if (!requests.length) return;
+  const requestValuesSql = requests.map((_request, index) => {
+    const variantParameter = 5 + index * 2;
+    return `(${index}::integer,$${variantParameter}::text,$${variantParameter + 1}::vector)`;
+  }).join(",");
+  const providerProfileParameter = 5 + requests.length * 2;
+  const modelParameter = providerProfileParameter + 1;
+  const dimensionsParameter = modelParameter + 1;
+  const fingerprintParameter = dimensionsParameter + 1;
+  const limitParameter = fingerprintParameter + 1;
+  const identity = requests[0]!;
+  const values: unknown[] = [
     scope.ownerUserId,
     scope.campaignId,
     scope.worldVersionId,
-    scope.request.throughTurnNumber ?? null
+    scope.request.throughTurnNumber ?? null,
+    ...requests.flatMap((request) => [request.variant.kind, vectorLiteral(request.vector ?? [])]),
+    identity.providerProfileId,
+    identity.model,
+    identity.vector?.length ?? 0,
+    identity.fingerprint,
+    candidateLimit
   ];
-  let predicate = "true";
-  let order = "parent_memory_id,candidate_id";
-  let limitParameter = 5;
-  if (request.signal === "semantic") {
-    predicate = CHRONICLE_RANK_COMPATIBLE_EMBEDDING_SQL;
-    order = "embedding <=> $5::vector,parent_memory_id,candidate_id";
-    baseValues.push(vectorLiteral(request.vector ?? []), request.providerProfileId, request.model,
-      request.vector?.length ?? 0, request.fingerprint);
-    limitParameter = 10;
-  } else if (request.signal === "full_text") {
-    predicate = "$5::text <> '' AND search_document @@ websearch_to_tsquery('english',$5::text)";
-    order = "ts_rank_cd(search_document,websearch_to_tsquery('english',$5::text)) DESC,parent_memory_id,candidate_id";
-    baseValues.push(request.query?.trim() ?? "");
-    limitParameter = 6;
-  } else if (request.signal === "entity") {
-    predicate = "entity_ids && $5::text[]";
-    order = "cardinality(ARRAY(SELECT unnest(entity_ids) INTERSECT SELECT unnest($5::text[]))) DESC,parent_memory_id,candidate_id";
-    baseValues.push([...(request.entityIds ?? [])]);
-    limitParameter = 6;
-  } else if (request.signal === "recency") {
-    order = "parent_ordinal DESC,parent_memory_id,candidate_id";
-  } else if (request.signal === "chronology") {
-    order = "parent_ordinal ASC,parent_memory_id,candidate_id";
-  } else if (request.signal === "importance") {
-    order = "parent_importance DESC,parent_ordinal DESC,parent_memory_id,candidate_id";
-  } else if (request.signal === "kind") {
-    order = `CASE parent_memory_kind
-      WHEN 'canonical_fact' THEN 0 WHEN 'open_thread' THEN 1 WHEN 'campaign_summary' THEN 2
-      WHEN 'turn_fiction' THEN 3 ELSE 4 END,parent_ordinal DESC,parent_memory_id,candidate_id`;
-  } else {
-    order = "abs(parent_ordinal-$5::integer),parent_ordinal DESC,parent_memory_id,candidate_id";
-    baseValues.push(request.temporalAnchor ?? 0);
-    limitParameter = 6;
-  }
-  baseValues.push(candidateLimit);
-  const result = await client.query<ChunkCandidateRow>(
-    `/* chronicle_rank:${request.signal}:${request.variant.kind} */
-     WITH ${authorizedChunkCte()}, ranked AS (
-       SELECT *,row_number() OVER (ORDER BY ${order}) AS signal_rank
-         FROM authorized
-        WHERE ${predicate}
-     )
-     SELECT candidate_id,parent_memory_id,parent_turn_id,parent_memory_kind,parent_ordinal,
-            parent_content,parent_token_estimate,parent_importance,parent_entities,parent_entity_ids,parent_metadata,
-            chunk_ordinal,chunk_kind,chunk_content,active_fact
-       FROM ranked
-      ORDER BY signal_rank,parent_memory_id,candidate_id
-      LIMIT $${limitParameter}`,
-    baseValues
+  const result = await client.query<BatchedChunkCandidateRow>(
+    `/* chronicle_rank_batch:semantic */
+     WITH ${authorizedChunkCte()},
+     request_variants(request_ordinal,variant_kind,query_vector) AS (VALUES ${requestValuesSql})
+     SELECT request.request_ordinal,candidate.signal_rank,${CHUNK_RANK_RESULT_COLUMNS}
+       FROM request_variants request
+       CROSS JOIN LATERAL (
+         SELECT authorized.*,
+                row_number() OVER (
+                  ORDER BY embedding <=> request.query_vector,parent_memory_id,candidate_id
+                ) AS signal_rank
+           FROM authorized
+          WHERE ${semanticRankCompatibilitySql(
+            providerProfileParameter, modelParameter, dimensionsParameter, fingerprintParameter
+          )}
+          ORDER BY embedding <=> request.query_vector,parent_memory_id,candidate_id
+          LIMIT $${limitParameter}
+       ) candidate
+      ORDER BY request.request_ordinal,candidate.signal_rank,candidate.parent_memory_id,candidate.candidate_id`,
+    values
   );
-  return result.rows;
+  storeChunkRankRows(requests, result.rows, results);
+}
+
+async function loadFullTextRankFamily(
+  client: DatabaseClient,
+  scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
+  requests: readonly ChunkRankRequest[],
+  candidateLimit: number,
+  results: Map<ChunkRankRequest, readonly ChunkCandidateRow[]>,
+): Promise<void> {
+  if (!requests.length) return;
+  const requestValuesSql = requests.map((_request, index) => {
+    const variantParameter = 5 + index * 2;
+    return `(${index}::integer,$${variantParameter}::text,$${variantParameter + 1}::text)`;
+  }).join(",");
+  const limitParameter = 5 + requests.length * 2;
+  const result = await client.query<BatchedChunkCandidateRow>(
+    `/* chronicle_rank_batch:full_text */
+     WITH ${authorizedChunkCte()},
+     request_variants(request_ordinal,variant_kind,query_text) AS (VALUES ${requestValuesSql})
+     SELECT request.request_ordinal,candidate.signal_rank,${CHUNK_RANK_RESULT_COLUMNS}
+       FROM request_variants request
+       CROSS JOIN LATERAL (
+         SELECT authorized.*,
+                row_number() OVER (
+                  ORDER BY ts_rank_cd(search_document,websearch_to_tsquery('english',request.query_text)) DESC,
+                           parent_memory_id,candidate_id
+                ) AS signal_rank
+           FROM authorized
+          WHERE request.query_text <> ''
+            AND search_document @@ websearch_to_tsquery('english',request.query_text)
+          ORDER BY ts_rank_cd(search_document,websearch_to_tsquery('english',request.query_text)) DESC,
+                   parent_memory_id,candidate_id
+          LIMIT $${limitParameter}
+       ) candidate
+      ORDER BY request.request_ordinal,candidate.signal_rank,candidate.parent_memory_id,candidate.candidate_id`,
+    [scope.ownerUserId, scope.campaignId, scope.worldVersionId, scope.request.throughTurnNumber ?? null,
+      ...requests.flatMap((request) => [request.variant.kind, request.query?.trim() ?? ""]), candidateLimit]
+  );
+  storeChunkRankRows(requests, result.rows, results);
+}
+
+async function loadEntityRankFamily(
+  client: DatabaseClient,
+  scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
+  requests: readonly ChunkRankRequest[],
+  candidateLimit: number,
+  results: Map<ChunkRankRequest, readonly ChunkCandidateRow[]>,
+): Promise<void> {
+  if (!requests.length) return;
+  const requestValuesSql = requests.map((_request, index) => {
+    const variantParameter = 5 + index * 2;
+    return `(${index}::integer,$${variantParameter}::text,$${variantParameter + 1}::text[])`;
+  }).join(",");
+  const limitParameter = 5 + requests.length * 2;
+  const result = await client.query<BatchedChunkCandidateRow>(
+    `/* chronicle_rank_batch:entity */
+     WITH ${authorizedChunkCte()},
+     request_variants(request_ordinal,variant_kind,entity_ids) AS (VALUES ${requestValuesSql})
+     SELECT request.request_ordinal,candidate.signal_rank,${CHUNK_RANK_RESULT_COLUMNS}
+       FROM request_variants request
+       CROSS JOIN LATERAL (
+         SELECT authorized.*,
+                row_number() OVER (
+                  ORDER BY cardinality(ARRAY(
+                    SELECT unnest(authorized.entity_ids) INTERSECT SELECT unnest(request.entity_ids)
+                  )) DESC,parent_memory_id,candidate_id
+                ) AS signal_rank
+           FROM authorized
+          WHERE authorized.entity_ids && request.entity_ids
+          ORDER BY cardinality(ARRAY(
+            SELECT unnest(authorized.entity_ids) INTERSECT SELECT unnest(request.entity_ids)
+          )) DESC,parent_memory_id,candidate_id
+          LIMIT $${limitParameter}
+       ) candidate
+      ORDER BY request.request_ordinal,candidate.signal_rank,candidate.parent_memory_id,candidate.candidate_id`,
+    [scope.ownerUserId, scope.campaignId, scope.worldVersionId, scope.request.throughTurnNumber ?? null,
+      ...requests.flatMap((request) => [request.variant.kind, [...(request.entityIds ?? [])]]), candidateLimit]
+  );
+  storeChunkRankRows(requests, result.rows, results);
+}
+
+async function loadStaticRankFamily(
+  client: DatabaseClient,
+  scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
+  requests: readonly ChunkRankRequest[],
+  candidateLimit: number,
+  results: Map<ChunkRankRequest, readonly ChunkCandidateRow[]>,
+): Promise<void> {
+  if (!requests.length) return;
+  const temporalAnchor = requests.find((request) => request.signal === "temporal")?.temporalAnchor ?? 0;
+  const result = await client.query<BatchedChunkCandidateRow>(
+    `/* chronicle_rank_batch:static */
+     WITH ${authorizedChunkCte()}, ranked AS (
+       SELECT 0::integer AS request_ordinal,candidate.* FROM LATERAL (
+         SELECT authorized.*,row_number() OVER (
+                  ORDER BY parent_ordinal DESC,parent_memory_id,candidate_id
+                ) AS signal_rank
+           FROM authorized
+          ORDER BY parent_ordinal DESC,parent_memory_id,candidate_id LIMIT $5
+       ) candidate
+       UNION ALL
+       SELECT 1::integer AS request_ordinal,candidate.* FROM LATERAL (
+         SELECT authorized.*,row_number() OVER (
+                  ORDER BY parent_ordinal ASC,parent_memory_id,candidate_id
+                ) AS signal_rank
+           FROM authorized
+          ORDER BY parent_ordinal ASC,parent_memory_id,candidate_id LIMIT $5
+       ) candidate
+       UNION ALL
+       SELECT 2::integer AS request_ordinal,candidate.* FROM LATERAL (
+         SELECT authorized.*,row_number() OVER (
+                  ORDER BY parent_importance DESC,parent_ordinal DESC,parent_memory_id,candidate_id
+                ) AS signal_rank
+           FROM authorized
+          ORDER BY parent_importance DESC,parent_ordinal DESC,parent_memory_id,candidate_id LIMIT $5
+       ) candidate
+       UNION ALL
+       SELECT 3::integer AS request_ordinal,candidate.* FROM LATERAL (
+         SELECT authorized.*,row_number() OVER (
+                  ORDER BY CASE parent_memory_kind
+                    WHEN 'canonical_fact' THEN 0 WHEN 'open_thread' THEN 1 WHEN 'campaign_summary' THEN 2
+                    WHEN 'turn_fiction' THEN 3 ELSE 4 END,parent_ordinal DESC,parent_memory_id,candidate_id
+                ) AS signal_rank
+           FROM authorized
+          ORDER BY CASE parent_memory_kind
+            WHEN 'canonical_fact' THEN 0 WHEN 'open_thread' THEN 1 WHEN 'campaign_summary' THEN 2
+            WHEN 'turn_fiction' THEN 3 ELSE 4 END,parent_ordinal DESC,parent_memory_id,candidate_id LIMIT $5
+       ) candidate
+       UNION ALL
+       SELECT 4::integer AS request_ordinal,candidate.* FROM LATERAL (
+         SELECT authorized.*,row_number() OVER (
+                  ORDER BY abs(parent_ordinal-$6::integer),parent_ordinal DESC,parent_memory_id,candidate_id
+                ) AS signal_rank
+           FROM authorized
+          ORDER BY abs(parent_ordinal-$6::integer),parent_ordinal DESC,parent_memory_id,candidate_id LIMIT $5
+       ) candidate
+     )
+     SELECT request_ordinal,signal_rank,${CHUNK_RANK_RESULT_COLUMNS}
+       FROM ranked
+      ORDER BY request_ordinal,signal_rank,parent_memory_id,candidate_id`,
+    [scope.ownerUserId, scope.campaignId, scope.worldVersionId, scope.request.throughTurnNumber ?? null,
+      candidateLimit, temporalAnchor]
+  );
+  storeChunkRankRows(requests, result.rows, results);
+}
+
+async function loadAuthorizedChunkRanks(
+  client: DatabaseClient,
+  scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
+  requests: readonly ChunkRankRequest[],
+  candidateLimit: number,
+): Promise<readonly ChunkRankResult[]> {
+  const results = new Map<ChunkRankRequest, readonly ChunkCandidateRow[]>();
+  await loadSemanticRankFamily(
+    client, scope, requests.filter((value) => value.signal === "semantic"), candidateLimit, results
+  );
+  await loadFullTextRankFamily(
+    client, scope, requests.filter((value) => value.signal === "full_text"), candidateLimit, results
+  );
+  await loadEntityRankFamily(
+    client, scope, requests.filter((value) => value.signal === "entity"), candidateLimit, results
+  );
+  await loadStaticRankFamily(
+    client,
+    scope,
+    requests.filter((value) => !["semantic", "full_text", "entity"].includes(value.signal)),
+    candidateLimit,
+    results
+  );
+  return requests.map((request) => ({ request, rows: results.get(request) ?? [] }));
 }
 
 function aliasAttestedByMemories(
@@ -1241,9 +1441,6 @@ async function applyChunkedRankFusion(
 ): Promise<ChunkedRankFusionResult> {
   const rankFusionProfile = dependencies.rankFusionProfile ?? CHRONICLE_RETRIEVAL_PROFILE_V2;
   const candidateLimit = Math.max(1, Math.floor(rankFusionProfile.candidateLimits.perSignal));
-  const loadRank = (request: ChunkRankRequest): Promise<readonly ChunkCandidateRow[]> => (
-    loadAuthorizedChunkRank(client, scope, request, candidateLimit)
-  );
   const variants = plannedChunkQueries(scope, memories, entityCatalog);
   const actionVariant: ChronicleQueryVariant = variants[0] ?? { kind: "action", query: "", entityIds: [] };
   const inputs: ChronicleRankInput[] = [];
@@ -1345,14 +1542,11 @@ async function applyChunkedRankFusion(
           }
           auditTrace = { ...auditTrace, providerCallOutcome: "succeeded", queryEmbeddingRequests: embeddingRequests };
         }
-        const semanticRanks: Array<Readonly<{
-          variant: ChronicleQueryVariant;
-          rows: readonly ChunkCandidateRow[];
-        }>> = [];
+        const semanticRequests: ChunkRankRequest[] = [];
         for (let index = 0; index < variants.length; index += 1) {
           const variant = variants[index]!;
           const vector = requireUsableQueryVector(queryVectors[index], expectedDimensions);
-          const rows = await loadRank({
+          semanticRequests.push({
             signal: "semantic",
             variant,
             vector,
@@ -1360,14 +1554,14 @@ async function applyChunkedRankFusion(
             model: config.embedding_model,
             fingerprint
           });
-          semanticRanks.push({ variant, rows });
         }
+        const semanticRanks = await loadAuthorizedChunkRanks(client, scope, semanticRequests, candidateLimit);
         if (diagnosticMode === "production") {
           await dependencies.embeddings.recordHealth(client, providerScope, true);
         }
-        semanticRanks.forEach(({ variant, rows }) => {
+        semanticRanks.forEach(({ request, rows }) => {
           embeddedCandidates += rows.length;
-          addRank("semantic", variant, rows);
+          addRank(request.signal, request.variant, rows);
         });
         if (embeddedCandidates > 0) {
           semanticAvailable = true;
@@ -1447,24 +1641,22 @@ async function applyChunkedRankFusion(
     };
   }
 
-  for (const variant of variants) {
-    addRank("full_text", variant, await loadRank({
-      signal: "full_text", variant, query: variant.query
-    }));
-    if (variant.entityIds.length) {
-      addRank("entity", variant, await loadRank({
-        signal: "entity", variant, entityIds: variant.entityIds
-      }));
+  const nonsemanticRequests: ChunkRankRequest[] = [
+    ...variants.map((variant) => ({ signal: "full_text" as const, variant, query: variant.query })),
+    ...variants.filter((variant) => variant.entityIds.length > 0)
+      .map((variant) => ({ signal: "entity" as const, variant, entityIds: variant.entityIds })),
+    { signal: "recency", variant: actionVariant },
+    { signal: "chronology", variant: actionVariant },
+    { signal: "importance", variant: actionVariant },
+    { signal: "kind", variant: actionVariant },
+    {
+      signal: "temporal",
+      variant: actionVariant,
+      temporalAnchor: scope.request.throughTurnNumber ?? campaign.active_turn_number
     }
-  }
-  for (const signal of ["recency", "chronology", "importance", "kind"] as const) {
-    addRank(signal, actionVariant, await loadRank({ signal, variant: actionVariant }));
-  }
-  addRank("temporal", actionVariant, await loadRank({
-    signal: "temporal",
-    variant: actionVariant,
-    temporalAnchor: scope.request.throughTurnNumber ?? campaign.active_turn_number
-  }));
+  ];
+  const nonsemanticRanks = await loadAuthorizedChunkRanks(client, scope, nonsemanticRequests, candidateLimit);
+  nonsemanticRanks.forEach(({ request, rows }) => addRank(request.signal, request.variant, rows));
 
   const fused = fuseChronicleRanks(inputs, rankFusionProfile);
   const fusedRankByCandidateId = new Map<string, number>();

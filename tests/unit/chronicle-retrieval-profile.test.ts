@@ -2,6 +2,10 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { CHRONICLE_RETRIEVAL_PROFILE_V2 } from "../../packages/domain/src/generated/chronicle-retrieval-profile-v2.js";
 import {
+  assertCorpusResultInvariants,
+  calibrationMetricsIfCorpusInvariantsHold
+} from "../../scripts/evaluate-chronicle-retrieval.js";
+import {
   CHRONICLE_RETRIEVAL_CALIBRATION_GRID,
   calibrateChronicleRetrievalProfile,
   chronicleProfilePassesGates,
@@ -9,13 +13,21 @@ import {
   renderChronicleRetrievalProfileModule,
   selectChronicleRetrievalProfile,
   type ChronicleCalibrationCandidate,
+  type ChronicleEvaluationCaseResult,
   type ChronicleEvaluationMetrics,
+  type ChronicleEvaluationReport,
   type ChronicleRetrievalCorpus,
   type ChronicleRetrievalProfileParameters
 } from "../../scripts/lib/chronicle-retrieval-evaluator.js";
 
-const CORPUS_HASH = "1cd534c1585a81865572beb4fd7748e7ac817d248269a3c0c7ebcb93d415951f";
+const CORPUS_HASH = "5f9d9a27ab5b8b532e8a051928f051b89b910b836a068ca0bc47d93581af32a1";
 const GENERATED_AT = "2026-08-16T12:00:00.000Z";
+const V3_LEGACY_BASELINE_GATE_METRICS = Object.freeze({
+  recallAt10: 0.675,
+  ndcg: 0.6613147192765458,
+  duplicateRate: 0,
+  latencyMs: { p50: 6, p95: 17 }
+});
 
 function metrics(overrides: Partial<ChronicleEvaluationMetrics> = {}): ChronicleEvaluationMetrics {
   return {
@@ -43,19 +55,95 @@ function candidate(
   return { profile, metrics: metrics(overrides) };
 }
 
+function invariantCase(
+  id: string,
+  expectedLabels: readonly string[],
+  promptTokens: number,
+): ChronicleEvaluationCaseResult {
+  return {
+    id,
+    caseHash: id,
+    expectedLabels,
+    retrievedLabels: expectedLabels,
+    ranks: Object.fromEntries(expectedLabels.map((label) => [label, 1])),
+    promptTokens,
+    latencyMs: 0,
+    queryVariants: 0,
+    embeddingRequests: 0,
+    embeddingCost: 0,
+    semanticOnlyHits: 0,
+    promotions: 0,
+    demotions: 0,
+    leakage: { crossCampaign: 0, futureTurn: 0, supersededFact: 0 }
+  };
+}
+
+function reportSatisfyingLongParentInvariants(corpus: ChronicleRetrievalCorpus): ChronicleEvaluationReport {
+  const longParentCases = corpus.cases.filter((value) => value.longParent);
+  return {
+    corpusVersion: corpus.version,
+    corpusHash: chronicleRetrievalCorpusHash(corpus),
+    implementation: "chunked_hybrid",
+    metrics: metrics(),
+    cases: [
+      ...longParentCases.map((value) => invariantCase(
+        value.id,
+        value.expectedLabels,
+        value.scope.request.budgetTokens ?? 0,
+      )),
+      invariantCase("superseded-fact", [
+        "superseded-fact-memory",
+        "superseded-fact-canonical-replacement"
+      ], 0)
+    ]
+  };
+}
+
 describe("Chronicle retrieval profile calibration", () => {
-  it("enumerates the exact deterministic 243-profile search grid", () => {
-    expect(CHRONICLE_RETRIEVAL_CALIBRATION_GRID).toHaveLength(243);
-    expect(new Set(CHRONICLE_RETRIEVAL_CALIBRATION_GRID.map((value) => JSON.stringify(value)))).toHaveLength(243);
+  it("enumerates the exact deterministic 567-profile coordinate search grid", () => {
+    expect(CHRONICLE_RETRIEVAL_CALIBRATION_GRID).toHaveLength(567);
+    expect(new Set(CHRONICLE_RETRIEVAL_CALIBRATION_GRID.map((value) => JSON.stringify(value)))).toHaveLength(567);
     expect([...new Set(CHRONICLE_RETRIEVAL_CALIBRATION_GRID.map((value) => value.rrfK))]).toEqual([20, 40, 60]);
-    expect([...new Set(CHRONICLE_RETRIEVAL_CALIBRATION_GRID.map((value) => value.semanticVariantWeight))])
-      .toEqual([0.5, 0.75, 1]);
+    expect([...new Set(CHRONICLE_RETRIEVAL_CALIBRATION_GRID.map((value) => value.entityExpandedVariantWeight))])
+      .toEqual([1, 0.5, 0.75]);
+    expect([...new Set(CHRONICLE_RETRIEVAL_CALIBRATION_GRID.map((value) => value.sceneVariantWeight))])
+      .toEqual([1, 0.5, 0.75]);
+    expect([...new Set(CHRONICLE_RETRIEVAL_CALIBRATION_GRID.map((value) => value.openThreadVariantWeight))])
+      .toEqual([1, 0.5, 0.75]);
     expect([...new Set(CHRONICLE_RETRIEVAL_CALIBRATION_GRID.map((value) => value.lexicalEntityWeight))])
       .toEqual([0.75, 1, 1.25]);
     expect([...new Set(CHRONICLE_RETRIEVAL_CALIBRATION_GRID.map((value) => value.recencyChronologyWeight))])
       .toEqual([0.25, 0.5, 0.75]);
     expect([...new Set(CHRONICLE_RETRIEVAL_CALIBRATION_GRID.map((value) => value.candidateLimit))])
-      .toEqual([32, 64, 96]);
+      .toEqual([16, 32, 64]);
+
+    expect(CHRONICLE_RETRIEVAL_CALIBRATION_GRID).toContainEqual({
+      rrfK: 20,
+      entityExpandedVariantWeight: 0.5,
+      sceneVariantWeight: 1,
+      openThreadVariantWeight: 1,
+      lexicalEntityWeight: 0.75,
+      recencyChronologyWeight: 0.25,
+      candidateLimit: 16
+    });
+    expect(CHRONICLE_RETRIEVAL_CALIBRATION_GRID).toContainEqual({
+      rrfK: 20,
+      entityExpandedVariantWeight: 1,
+      sceneVariantWeight: 0.5,
+      openThreadVariantWeight: 1,
+      lexicalEntityWeight: 0.75,
+      recencyChronologyWeight: 0.25,
+      candidateLimit: 16
+    });
+    expect(CHRONICLE_RETRIEVAL_CALIBRATION_GRID).toContainEqual({
+      rrfK: 20,
+      entityExpandedVariantWeight: 1,
+      sceneVariantWeight: 1,
+      openThreadVariantWeight: 0.5,
+      lexicalEntityWeight: 0.75,
+      recencyChronologyWeight: 0.25,
+      candidateLimit: 16
+    });
   });
 
   it("rejects every quality, leakage, duplication, and latency gate independently", () => {
@@ -147,8 +235,9 @@ describe("Chronicle retrieval profile calibration", () => {
       generatedAt: GENERATED_AT
     }));
 
-    for (const selection of selections) {
-      expect(JSON.stringify(selection)).toBe(JSON.stringify(selections[0]));
+    const selectedProfiles = selections.map(({ metrics: _metrics, ...profile }) => JSON.stringify(profile));
+    for (const selection of selectedProfiles) {
+      expect(selection).toBe(selectedProfiles[0]);
     }
   });
 
@@ -163,20 +252,155 @@ describe("Chronicle retrieval profile calibration", () => {
     })).rejects.toThrow("No Chronicle retrieval profile satisfied every calibration gate.");
   });
 
-  it("keeps the corpus discriminating rather than saturated at a perfect score", () => {
-    const fixture = JSON.parse(readFileSync(
-      "tests/fixtures/chronicle-retrieval-evaluation.v2.json",
+  it("does not select candidates excluded by evaluator invariants", async () => {
+    const accepted = CHRONICLE_RETRIEVAL_CALIBRATION_GRID[0];
+    if (!accepted) throw new Error("Expected a calibration profile.");
+
+    const selected = await calibrateChronicleRetrievalProfile({
+      corpusHash: CORPUS_HASH,
+      baselineMetrics: metrics(),
+      generatedAt: GENERATED_AT,
+      async evaluate(profile) {
+        return profile === accepted ? metrics() : null;
+      }
+    });
+
+    expect(selected.rrfK).toBe(accepted.rrfK);
+    expect(selected.candidateLimits.perSignal).toBe(accepted.candidateLimit);
+  });
+
+  it("continues calibration after the production callback excludes a long-parent violation", async () => {
+    const corpus = JSON.parse(readFileSync(
+      "tests/fixtures/chronicle-retrieval-evaluation.v3.json",
       "utf8"
     )) as ChronicleRetrievalCorpus;
-    const ranking = fixture.cases.filter((value) => (value.distractorCount ?? 0) > 0);
+    const compliantReport = reportSatisfyingLongParentInvariants(corpus);
+    const missingLabel = "long-parent-budget-1024-a";
+    const invalidReport: ChronicleEvaluationReport = {
+      ...compliantReport,
+      cases: compliantReport.cases.map((value) => value.id === "long-parent-budget-1024" ? {
+        ...value,
+        retrievedLabels: [],
+        ranks: { ...value.ranks, [missingLabel]: null }
+      } : value)
+    };
+    const accepted = CHRONICLE_RETRIEVAL_CALIBRATION_GRID[0];
+    if (!accepted) throw new Error("Expected a calibration profile.");
+    let evaluations = 0;
+
+    const selected = await calibrateChronicleRetrievalProfile({
+      corpusHash: CORPUS_HASH,
+      baselineMetrics: metrics(),
+      generatedAt: GENERATED_AT,
+      async evaluate(profile) {
+        evaluations += 1;
+        return calibrationMetricsIfCorpusInvariantsHold(
+          profile === accepted ? compliantReport : invalidReport,
+          corpus
+        );
+      }
+    });
+
+    expect(evaluations).toBe(CHRONICLE_RETRIEVAL_CALIBRATION_GRID.length);
+    expect(selected.rrfK).toBe(accepted.rrfK);
+    expect(selected.candidateLimits.perSignal).toBe(accepted.candidateLimit);
+  });
+
+  it("rejects calibration when a long-parent expected label is absent", async () => {
+    const corpus = JSON.parse(readFileSync(
+      "tests/fixtures/chronicle-retrieval-evaluation.v3.json",
+      "utf8"
+    )) as ChronicleRetrievalCorpus;
+    const report = reportSatisfyingLongParentInvariants(corpus);
+    const missingLabel = "long-parent-budget-1024-a";
+    const missingLabelReport: ChronicleEvaluationReport = {
+      ...report,
+      cases: report.cases.map((value) => value.id === "long-parent-budget-1024" ? {
+        ...value,
+        retrievedLabels: [],
+        ranks: { ...value.ranks, [missingLabel]: null }
+      } : value)
+    };
+
+    await expect(calibrateChronicleRetrievalProfile({
+      corpusHash: CORPUS_HASH,
+      baselineMetrics: metrics(),
+      generatedAt: GENERATED_AT,
+      async evaluate() {
+        assertCorpusResultInvariants(missingLabelReport, corpus);
+        return metrics();
+      }
+    })).rejects.toThrow("long-parent-budget-1024");
+  });
+
+  it("rejects calibration when a long-parent result leaks across a protected boundary", async () => {
+    const corpus = JSON.parse(readFileSync(
+      "tests/fixtures/chronicle-retrieval-evaluation.v3.json",
+      "utf8"
+    )) as ChronicleRetrievalCorpus;
+    const report = reportSatisfyingLongParentInvariants(corpus);
+    const leakedReport: ChronicleEvaluationReport = {
+      ...report,
+      cases: report.cases.map((value) => value.id === "long-parent-budget-2048" ? {
+        ...value,
+        leakage: { crossCampaign: 1, futureTurn: 0, supersededFact: 0 }
+      } : value)
+    };
+
+    await expect(calibrateChronicleRetrievalProfile({
+      corpusHash: CORPUS_HASH,
+      baselineMetrics: metrics(),
+      generatedAt: GENERATED_AT,
+      async evaluate() {
+        assertCorpusResultInvariants(leakedReport, corpus);
+        return metrics();
+      }
+    })).rejects.toThrow("long-parent-budget-2048");
+  });
+
+  it("rejects calibration when a long-parent result exceeds its token budget", async () => {
+    const corpus = JSON.parse(readFileSync(
+      "tests/fixtures/chronicle-retrieval-evaluation.v3.json",
+      "utf8"
+    )) as ChronicleRetrievalCorpus;
+    const report = reportSatisfyingLongParentInvariants(corpus);
+    const overBudgetReport: ChronicleEvaluationReport = {
+      ...report,
+      cases: report.cases.map((value) => value.id === "long-parent-budget-4096" ? {
+        ...value,
+        promptTokens: 4_097
+      } : value)
+    };
+
+    await expect(calibrateChronicleRetrievalProfile({
+      corpusHash: CORPUS_HASH,
+      baselineMetrics: metrics(),
+      generatedAt: GENERATED_AT,
+      async evaluate() {
+        assertCorpusResultInvariants(overBudgetReport, corpus);
+        return metrics();
+      }
+    })).rejects.toThrow("long-parent-budget-4096");
+  });
+
+  it("keeps the corpus discriminating rather than saturated at a perfect score", () => {
+    const fixture = JSON.parse(readFileSync(
+      "tests/fixtures/chronicle-retrieval-evaluation.v3.json",
+      "utf8"
+    )) as ChronicleRetrievalCorpus;
+    const longParentCases = fixture.cases.filter((value) => value.longParent);
+    const ordinaryRankingCases = fixture.cases.filter((value) => !value.longParent && (value.distractorCount ?? 0) > 0);
 
     // A corpus every candidate aces cannot order candidates, so calibration collapses onto
     // tie-breakers. Each ranking case must offer more plausible memories than prompt slots.
-    expect(ranking.length).toBeGreaterThanOrEqual(10);
-    for (const value of ranking) {
+    expect(ordinaryRankingCases.length).toBeGreaterThanOrEqual(10);
+    for (const value of ordinaryRankingCases) {
       expect(value.distractorCount ?? 0).toBeGreaterThanOrEqual(16);
       expect(value.scope.request.budgetTokens ?? 0).toBeGreaterThanOrEqual(4_096);
     }
+    expect(longParentCases).toHaveLength(3);
+    expect(longParentCases.map((value) => value.scope.request.budgetTokens)).toEqual([1_024, 2_048, 4_096]);
+    for (const value of longParentCases) expect(value.distractorCount ?? 0).toBeGreaterThanOrEqual(16);
     // Headroom on the primary selection key, so a better profile can still be measured.
     expect(CHRONICLE_RETRIEVAL_PROFILE_V2.metrics.recallAt10).toBeLessThan(1);
     expect(CHRONICLE_RETRIEVAL_PROFILE_V2.metrics.ndcg).toBeLessThan(1);
@@ -187,17 +411,17 @@ describe("Chronicle retrieval profile calibration", () => {
 
   it("renders a deterministic safe module and checks in a gated corpus-matched profile", () => {
     const fixture = JSON.parse(readFileSync(
-      "tests/fixtures/chronicle-retrieval-evaluation.v2.json",
+      "tests/fixtures/chronicle-retrieval-evaluation.v3.json",
       "utf8"
     )) as ChronicleRetrievalCorpus;
     expect(chronicleRetrievalCorpusHash(fixture)).toBe(CORPUS_HASH);
     expect(CHRONICLE_RETRIEVAL_PROFILE_V2.corpusHash).toBe(CORPUS_HASH);
-    expect(chronicleProfilePassesGates(CHRONICLE_RETRIEVAL_PROFILE_V2.metrics, metrics({
-      recallAt10: 0.7352941176470589,
-      ndcg: 0.7552612693115515,
-      duplicateRate: 0,
-      latencyMs: { p50: 6, p95: 20 }
-    }))).toBe(true);
+    const v3LegacyBaseline = metrics(V3_LEGACY_BASELINE_GATE_METRICS);
+    expect(chronicleProfilePassesGates(CHRONICLE_RETRIEVAL_PROFILE_V2.metrics, v3LegacyBaseline)).toBe(true);
+    expect(chronicleProfilePassesGates({
+      ...CHRONICLE_RETRIEVAL_PROFILE_V2.metrics,
+      latencyMs: { p50: 6, p95: 43 }
+    }, v3LegacyBaseline)).toBe(false);
     const source = renderChronicleRetrievalProfileModule({
       ...CHRONICLE_RETRIEVAL_PROFILE_V2,
       generatedAt: GENERATED_AT

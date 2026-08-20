@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   createPostgresChronicleChunkBatchPort,
   createPostgresChronicleChunkJobStatePort,
@@ -168,7 +168,8 @@ integration("PostgreSQL Chronicle chunk repository", () => {
         embedding: null,
         skipReason: "semantic_disabled"
       }],
-      results: [],
+      embeddingEvidence: [],
+      costResults: [],
       progress: {
         parentCursor: `1:${staleParent.id}`,
         processedParents: 1,
@@ -263,7 +264,8 @@ integration("PostgreSQL Chronicle chunk repository", () => {
         embedding: [0.1, 0.2],
         skipReason: null
       }],
-      results: [{ embeddings: [[0.1, 0.2]], responseId: "response-a", usage: {}, reportedCost: null }],
+      embeddingEvidence: [[0.1, 0.2]],
+      costResults: [{ embeddings: [[0.1, 0.2]], responseId: "response-a", usage: {}, reportedCost: null }],
       progress
     };
     await expect(batches.commitParentBatch(claim, input)).resolves.toBe(true);
@@ -313,6 +315,256 @@ integration("PostgreSQL Chronicle chunk repository", () => {
     })).resolves.toBe("requeued");
   });
 
+  it("separates per-parent embedding evidence from page-wide cost results", async () => {
+    const value = await fixture("split evidence cost");
+    await enqueuePostgresChronicleChunkIndex(pool, value);
+    const state = createPostgresChronicleChunkJobStatePort(pool);
+    const claim = await state.claimNext({ workerId: "chunk-split-cost", leaseSeconds: 30 });
+    if (!claim) throw new Error("chunk job was not claimed");
+    const page = await createPostgresChronicleChunkParentPort(pool).loadForClaim(
+      claim,
+      { batchLimit: 2, cursor: null }
+    );
+    const recordCost = vi.fn().mockResolvedValue(null);
+    const batches = createPostgresChronicleChunkBatchPort(pool, { recordCost });
+    await batches.prepareClaim(claim, { capabilityFingerprint: "capability-page" });
+    const provider = { id: value.providerId, model: "embed-v1", providerType: "openai_compatible" };
+    const first = page.parents[0]!;
+    const second = page.parents[1]!;
+    const firstCursor = `1:${first.id}`;
+
+    await expect(batches.commitParentBatch(claim, {
+      parent: first,
+      previousParentCursor: null,
+      provider,
+      providerFingerprint: "provider-page",
+      capabilityFingerprint: "capability-page",
+      embeddingProtocolVersion: "chronicle-embedding-v1",
+      chunks: [{
+        protocolVersion: "chronicle-chunk-v1",
+        parentMemoryId: first.id,
+        kind: "campaign_summary",
+        chunkIndex: 0,
+        content: first.content,
+        contentHash: first.contentHash,
+        estimatedTokens: 4,
+        sourceStartOffset: 0,
+        sourceEndOffset: first.content.length,
+        embedding: [0.1, 0.2],
+        skipReason: null
+      }],
+      embeddingEvidence: [[0.1, 0.2]],
+      costResults: [{
+        embeddings: [[0.1, 0.2], [0.3, 0.4]],
+        responseId: "page-response",
+        usage: { inputTokens: 9 },
+        reportedCost: { amount: "0.01", currency: "USD" }
+      }],
+      progress: {
+        parentCursor: firstCursor,
+        processedParents: 1,
+        embeddedChunks: 1,
+        skippedChunks: 0,
+        totalParents: 2,
+        capabilityFingerprint: "capability-page"
+      }
+    })).resolves.toBe(true);
+
+    await expect(batches.commitParentBatch(claim, {
+      parent: second,
+      previousParentCursor: firstCursor,
+      provider,
+      providerFingerprint: "provider-page",
+      capabilityFingerprint: "capability-page",
+      embeddingProtocolVersion: "chronicle-embedding-v1",
+      chunks: [{
+        protocolVersion: "chronicle-chunk-v1" as const,
+        parentMemoryId: second.id,
+        kind: "open_thread" as const,
+        chunkIndex: 0,
+        content: second.content,
+        contentHash: second.contentHash,
+        estimatedTokens: 5,
+        sourceStartOffset: 0,
+        sourceEndOffset: second.content.length,
+        embedding: [0.3, 0.4],
+        skipReason: null
+      }],
+      embeddingEvidence: [[0.3, 0.4]],
+      costResults: [],
+      progress: {
+        parentCursor: `2:${second.id}`,
+        processedParents: 2,
+        embeddedChunks: 2,
+        skippedChunks: 0,
+        totalParents: 2,
+        capabilityFingerprint: "capability-page"
+      }
+    })).resolves.toBe(true);
+
+    expect(recordCost).toHaveBeenCalledTimes(1);
+    expect(await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM chronicle_memory_chunks WHERE campaign_id=$1",
+      [value.campaignId]
+    )).toMatchObject({ rows: [{ count: "2" }] });
+  });
+
+  it("keeps the first parent cursor and page cost durable when a later parent commit fails", async () => {
+    const value = await fixture("split evidence cost");
+    await enqueuePostgresChronicleChunkIndex(pool, value);
+    const state = createPostgresChronicleChunkJobStatePort(pool);
+    const claim = await state.claimNext({ workerId: "chunk-split-cost", leaseSeconds: 30 });
+    if (!claim) throw new Error("chunk job was not claimed");
+    const page = await createPostgresChronicleChunkParentPort(pool).loadForClaim(
+      claim,
+      { batchLimit: 2, cursor: null }
+    );
+    const recordCost = vi.fn(async (database: object) => {
+      await (database as DatabasePool).query(
+        `INSERT INTO provider_cost_events
+           (owner_user_id,campaign_id,provider_profile_id,provider_type,operation,category,amount,currency)
+         VALUES ($1,$2,$3,'openai_compatible','memory_embedding','memory',0.01,'USD')`,
+        [value.ownerUserId, value.campaignId, value.providerId]
+      );
+      return null;
+    });
+    const batches = createPostgresChronicleChunkBatchPort(pool, { recordCost });
+    await batches.prepareClaim(claim, { capabilityFingerprint: "capability-page" });
+    const provider = { id: value.providerId, model: "embed-v1", providerType: "openai_compatible" };
+    const first = page.parents[0]!;
+    const second = page.parents[1]!;
+    const firstCursor = `1:${first.id}`;
+
+    await expect(batches.commitParentBatch(claim, {
+      parent: first,
+      previousParentCursor: null,
+      provider,
+      providerFingerprint: "provider-page",
+      capabilityFingerprint: "capability-page",
+      embeddingProtocolVersion: "chronicle-embedding-v1",
+      chunks: [{
+        protocolVersion: "chronicle-chunk-v1",
+        parentMemoryId: first.id,
+        kind: "campaign_summary",
+        chunkIndex: 0,
+        content: first.content,
+        contentHash: first.contentHash,
+        estimatedTokens: 4,
+        sourceStartOffset: 0,
+        sourceEndOffset: first.content.length,
+        embedding: [0.1, 0.2],
+        skipReason: null
+      }],
+      embeddingEvidence: [[0.1, 0.2]],
+      costResults: [{
+        embeddings: [[0.1, 0.2], [0.3, 0.4]],
+        responseId: "page-response",
+        usage: { inputTokens: 9 },
+        reportedCost: { amount: "0.01", currency: "USD" }
+      }],
+      progress: {
+        parentCursor: firstCursor,
+        processedParents: 1,
+        embeddedChunks: 1,
+        skippedChunks: 0,
+        totalParents: 2,
+        capabilityFingerprint: "capability-page"
+      }
+    })).resolves.toBe(true);
+
+    const staleSecondInput = {
+      parent: second,
+      previousParentCursor: firstCursor,
+      provider,
+      providerFingerprint: "provider-page",
+      capabilityFingerprint: "capability-page",
+      embeddingProtocolVersion: "chronicle-embedding-v1",
+      chunks: [{
+        protocolVersion: "chronicle-chunk-v1" as const,
+        parentMemoryId: second.id,
+        kind: "open_thread" as const,
+        chunkIndex: 0,
+        content: second.content,
+        contentHash: second.contentHash,
+        estimatedTokens: 5,
+        sourceStartOffset: 0,
+        sourceEndOffset: second.content.length,
+        embedding: [0.3, 0.4],
+        skipReason: null
+      }],
+      embeddingEvidence: [[0.3, 0.4]],
+      costResults: [],
+      progress: {
+        parentCursor: `2:${second.id}`,
+        processedParents: 2,
+        embeddedChunks: 2,
+        skippedChunks: 0,
+        totalParents: 2,
+        capabilityFingerprint: "capability-page"
+      }
+    };
+    await pool.query(
+      "UPDATE chronicle_memories SET content='Who closed the gate?' WHERE id=$1",
+      [second.id]
+    );
+    await expect(batches.commitParentBatch(claim, staleSecondInput))
+      .rejects.toMatchObject({ statusCode: 400 });
+
+    expect(recordCost).toHaveBeenCalledTimes(1);
+    expect(await pool.query<{ progress: Record<string, unknown> }>(
+      "SELECT progress FROM chronicle_chunk_jobs WHERE id=$1",
+      [claim.jobId]
+    )).toMatchObject({
+      rows: [{ progress: expect.objectContaining({ parentCursor: firstCursor, processedParents: 1 }) }]
+    });
+    expect(await pool.query<{ parent_memory_id: string }>(
+      "SELECT parent_memory_id FROM chronicle_memory_chunks WHERE campaign_id=$1 ORDER BY parent_memory_id",
+      [value.campaignId]
+    )).toMatchObject({ rows: [{ parent_memory_id: first.id }] });
+    expect(await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM provider_cost_events WHERE campaign_id=$1 AND operation='memory_embedding'",
+      [value.campaignId]
+    )).toMatchObject({ rows: [{ count: "1" }] });
+
+    const retryPage = await createPostgresChronicleChunkParentPort(pool).loadForClaim(
+      claim,
+      { batchLimit: 2, cursor: firstCursor }
+    );
+    expect(retryPage.parents.map((parent) => ({ id: parent.id, content: parent.content }))).toEqual([{
+      id: second.id,
+      content: "Who closed the gate?"
+    }]);
+    const retrySecond = retryPage.parents[0]!;
+    await expect(batches.commitParentBatch(claim, {
+      ...staleSecondInput,
+      parent: retrySecond,
+      chunks: [{
+        ...staleSecondInput.chunks[0]!,
+        content: retrySecond.content,
+        contentHash: retrySecond.contentHash,
+        sourceEndOffset: retrySecond.content.length,
+        embedding: [0.7, 0.8]
+      }],
+      embeddingEvidence: [[0.7, 0.8]],
+      costResults: [{
+        embeddings: [[0.7, 0.8]],
+        responseId: "retry-response",
+        usage: { inputTokens: 5 },
+        reportedCost: { amount: "0.01", currency: "USD" }
+      }]
+    })).resolves.toBe(true);
+
+    expect(recordCost).toHaveBeenCalledTimes(2);
+    expect(await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM provider_cost_events WHERE campaign_id=$1 AND operation='memory_embedding'",
+      [value.campaignId]
+    )).toMatchObject({ rows: [{ count: "2" }] });
+    expect(await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM chronicle_memory_chunks WHERE campaign_id=$1",
+      [value.campaignId]
+    )).toMatchObject({ rows: [{ count: "2" }] });
+  });
+
   it("rolls back an incomplete batch and cascades chunk work with its campaign", async () => {
     const value = await fixture("rollback cascade");
     await enqueuePostgresChronicleChunkIndex(pool, value);
@@ -336,7 +588,8 @@ integration("PostgreSQL Chronicle chunk repository", () => {
         estimatedTokens: 4, sourceStartOffset: 0, sourceEndOffset: 18,
         embedding: [0.1, 0.2], skipReason: null
       }],
-      results: [{ embeddings: [], responseId: "incomplete", usage: {}, reportedCost: null }],
+      embeddingEvidence: [],
+      costResults: [{ embeddings: [], responseId: "incomplete", usage: {}, reportedCost: null }],
       progress: {
         parentCursor: `1:${parent.id}`, processedParents: 1, embeddedChunks: 1,
         skippedChunks: 0, totalParents: 2, capabilityFingerprint: "capability-b"
@@ -367,7 +620,8 @@ integration("PostgreSQL Chronicle chunk repository", () => {
         estimatedTokens: 4, sourceStartOffset: 0, sourceEndOffset: 18,
         embedding: [0.1, 0.2], skipReason: null
       }],
-      results: [{
+      embeddingEvidence: [[0.1, 0.2]],
+      costResults: [{
         embeddings: [[0.1, 0.2]], responseId: "cost-failure", usage: {},
         reportedCost: { amount: "1.2e-7", currency: "USD" }
       }],
@@ -406,7 +660,8 @@ integration("PostgreSQL Chronicle chunk repository", () => {
         estimatedTokens: 4, sourceStartOffset: 0, sourceEndOffset: 18,
         embedding: null, skipReason: "https://provider.invalid?token=must-not-persist"
       }],
-      results: [],
+      embeddingEvidence: [],
+      costResults: [],
       progress: {
         parentCursor: `1:${parent.id}`, processedParents: 1, embeddedChunks: 0,
         skippedChunks: 1, totalParents: 2, capabilityFingerprint: "capability-b"

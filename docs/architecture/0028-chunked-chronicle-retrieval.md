@@ -139,6 +139,14 @@ UPDATE campaign_memory_configs
  WHERE retrieval_implementation <> 'legacy_hybrid' OR retrieval_shadow_enabled;
 ```
 
+The four tuning changes can also be rolled back independently: restore the
+previous evaluator-generated `chronicle-retrieval-profile-v2` module, restore
+the previous query planner, restore the single-request authorized rank loader,
+or restore the chunk-worker parent page size to one. These are code or derived
+configuration rollbacks. None requires repairing accepted `turns` rows or
+Chronicle parent memories; rebuildable chunks, vectors, caches, and telemetry
+may be discarded and regenerated when compatibility changes.
+
 ## Consequences
 
 - Accepted turns retain their full row identity and physical-row version while
@@ -152,45 +160,69 @@ UPDATE campaign_memory_configs
 
 ## Legacy baseline
 
-The deterministic `chronicle-retrieval-evaluation.v2` corpus (SHA-256
-`1cd534c1585a81865572beb4fd7748e7ac817d248269a3c0c7ebcb93d415951f`)
+The deterministic `chronicle-retrieval-evaluation.v3` corpus (SHA-256
+`5f9d9a27ab5b8b532e8a051928f051b89b910b836a068ca0bc47d93581af32a1`)
 establishes the following label-only baseline for `legacy_hybrid` (generated
-locally at `tmp/chronicle-evaluation/legacy-baseline.json`, which is not
+locally at `tmp/chronicle-evaluation/final/legacy-baseline.json`, which is not
 committed):
 
-- recall@5/10/20: 0.7352941176470589 / 0.7352941176470589 /
-  0.7352941176470589; MRR: 0.7706558485463151;
-  NDCG: 0.7552612693115515.
-- duplicate rate: 0; relevant memories per prompt token: 0.0054557124518613605.
+- recall@5/10/20: 0.6428571428571429 / 0.6428571428571429 / 0.6428571428571429;
+  MRR: 0.6368289280858802; NDCG: 0.6298235421681389.
+- duplicate rate: 0; relevant memories per prompt token: 0.0033738191632928477.
 - cross-campaign, future-turn, and superseded-fact leakage: 0 / 0 / 0.
-- p50/p95 evaluator latency: 6 ms / 20 ms; embedding requests/cost: 3 / 0;
-  semantic-only hits: 3; promotions/demotions: 164 / 164. A promotion or
+- p50/p95 evaluator latency: 6 ms / 16 ms; embedding requests/cost: 7 / 0;
+  semantic-only hits: 8; promotions/demotions: 196 / 194. A promotion or
   demotion is an entry whose selected rank improves or worsens, respectively,
   against the deterministic lexical-only ordering for that same preview.
 
-Each ranking case declares `distractorCount` in-scope authorized memories that
-compete for the same prompt slots, and requests a 4,096-token budget so more
-candidates are eligible than the diversity policy can select. Without both, every
-grid candidate scored a perfect recall, the quality keys tied, and profile
-selection collapsed onto tie-breakers instead of retrieval quality.
+Each ordinary ranking case declares `distractorCount` in-scope authorized
+memories that compete for the same prompt slots and requests a 4,096-token
+budget so more candidates are eligible than the diversity policy can select.
+The three long-parent cases retain their exact 1,024, 2,048, and 4,096-token
+budgets, each with 24 distractors, so tight-budget selection is measured without
+changing its production ranking labels. Without this discrimination, every grid
+candidate scored a perfect recall, the quality keys tied, and profile selection
+collapsed onto tie-breakers instead of retrieval quality.
 
 The report contains fixture labels, hashes, ranks, and aggregates only; it
 does not persist prompt or Chronicle content.
 
 ## Calibrated production profile
 
-The exhaustive 243-profile grid selected the checked-in
-`chronicle-retrieval-profile-v2` profile: RRF `k=40`; semantic query-variant
-weight `1`; lexical/entity signal weights `1.25`; recency/chronology signal
-weights `0.25`; and a per-signal candidate limit of `32`. Its diversity policy
-selects at most 16 parents and two parents per turn, includes adjacent
-narration, and uses semantic/kind/entity values `4 / 1 / 0.5`.
+The evaluator selected the checked-in `chronicle-retrieval-profile-v2` profile
+from the exhaustive 567-profile bounded-coordinate grid: RRF `k=20`; query
+variant weights entity-expanded/scene/open-thread `1 / 0.75 / 1`; lexical/entity
+signal weights `0.75`; recency/chronology signal weights `0.75`; and a
+per-signal candidate limit of `16`. Its diversity policy selects at most 16
+parents and two parents per turn, includes adjacent narration, and uses
+semantic/kind/entity values `4 / 1 / 0.5`.
 
 Against the same corpus, the selected profile produced recall@5/10/20 of
-`0.8235294117647058 / 0.8235294117647058 / 1`, MRR `0.7757352941176471`,
-NDCG `0.8667030368443928`, duplicate rate `0`, and `0.007233273056057866`
-relevant memories per prompt token. Leakage remained `0 / 0 / 0`, and
-p50/p95 evaluator latency stayed below the legacy-derived gate.
+`0.7142857142857143 / 0.7142857142857143 / 1`, MRR
+`0.6537698412698413`, NDCG `0.7615948030961166`, duplicate rate `0`, and
+`0.005273566249176005` relevant memories per prompt token. Calibration recorded
+p50/p95 evaluator latency of `6 / 28 ms`, zero embedding requests/cost from a
+warm cache, and leakage `0 / 0 / 0`. A separate selected-profile evaluator pass
+recorded `6 / 33 ms` and seven requests/cost `0`; both latency readings satisfy
+the v3 legacy-derived p95 gate. The profile values are evaluator-generated rather
+than hand-selected.
+
+The final selected-profile artifact retained every tight-budget label within
+its requested budget:
+
+| Case | Expected-label rank | Prompt tokens / budget | Leakage (cross / future / superseded) |
+| --- | ---: | ---: | ---: |
+| `long-parent-budget-1024` | 3 | 384 / 1,024 | 0 / 0 / 0 |
+| `long-parent-budget-2048` | 12 | 523 / 2,048 | 0 / 0 / 0 |
+| `long-parent-budget-4096` | 16 | 554 / 4,096 | 0 / 0 / 0 |
+
+Query planning keeps the deterministic action, entity-expanded, scene, and
+open-thread order and all existing per-variant limits. The action is always
+retained. Later variants are omitted only when NFKC-normalized substantive terms
+and entity IDs are both already covered; the fixed connective set prevents
+formatting words from manufacturing novelty. The v3 `repeated-hint` case records
+safe cache-derived `queryVariants` metadata and reduced cold-cache variants from
+three to two without a ranking, leakage, or tight-budget regression.
 
 Selection is reproducible from the corpus alone. Wall-clock latency and
 embedding request counts are recorded as diagnostics but are excluded from the
@@ -220,7 +252,7 @@ summary and open-thread records are singletons updated in place, because
 `NULLS NOT DISTINCT`, so a campaign accumulates roughly one derived parent per
 accepted turn.
 
-Five changes came out of that review.
+Seven changes came out of that review.
 
 1. **Incremental parent selection.** `loadForClaim` previously returned every
    parent in scope and the worker re-embedded all of them, while the job's work
@@ -259,10 +291,125 @@ Five changes came out of that review.
    out relevance-selected entries. Coverage is retained as a deterministic
    evenly-spaced sample of at most 32 entries, so early, middle, and late
    history all survive within a bounded size.
+6. **Authorized rank batching by signal family.** Chunk retrieval now executes
+   semantic, full-text, entity, and static ranking as at most four sequential
+   statements on the preview transaction. Each statement materializes the
+   owner/campaign/world-version/cutoff authorization CTE before its parameterized
+   request rows. Request ordinals and per-request `signal_rank` preserve the
+   exact ordered rows supplied to rank fusion; the five protocol-owned static
+   signals share one fixed `UNION ALL` statement. User query text, entity IDs,
+   vectors, scope IDs, and temporal anchors remain query parameters.
+
+   A same-container Docker PostgreSQL comparison used identical deterministic
+   100-turn and 200-turn fixtures, five warmups, 30 measured warm-cache previews,
+   and the selected v3 profile. The pre-batch code was loaded from commit
+   `5e1ff83` while the Task 5 implementation used the working tree, both against
+   the same PostgreSQL instance. The pruned query plan produced ten individual
+   rank statements before and four family statements after:
+
+   | Turns | Before p50 / p95 | After p50 / p95 | Rank statements before / after |
+   | ---: | ---: | ---: | ---: |
+   | 100 | 44.610 / 49.687 ms | 46.968 / 53.988 ms | 10 / 4 |
+   | 200 | 74.145 / 79.337 ms | 76.183 / 85.372 ms | 10 / 4 |
+
+   The measured wall-clock samples increased 5.3%/8.7% at 100 turns and
+   2.7%/7.6% at 200 turns for p50/p95 respectively. This result is recorded
+   rather than interpreted as a universal latency guarantee: the acceptance
+   gate is unchanged retrieval accuracy and fewer rank statements, not a fixed
+   wall-clock threshold.
+7. **Page-wide parent embedding batches.** The chunk worker prepares up to eight
+   parents, flattens their embeddable chunks in stable parent/chunk order, and
+   applies the existing provider item and token limits across that page. Vector
+   evidence remains parent-specific for each sequential fenced commit, while
+   every provider result used for cost recording is attached only to the first
+   parent transaction in the page. A later failed commit therefore leaves the
+   earlier cursor and its provider costs durable without duplicating those costs
+   on the uncommitted suffix.
+
+   A controlled in-memory worker comparison on the same Windows machine and
+   Node/Vitest runtime used one-chunk parents, provider capacity eight, the same
+   deterministic provider fixture with a requested 5 ms delay, five warmups,
+   and 20 measured samples. The before shape returned one parent per load to
+   reproduce the former paging behavior; the after shape returned all eight.
+
+   | Shape | Parent loads | Provider calls | Embedded chunks | Committed parents | Median elapsed |
+   | --- | ---: | ---: | ---: | ---: | ---: |
+   | Before | 8 | 8 | 8 | 8 | 125.646 ms |
+   | After | 1 | 1 | 8 | 8 | 15.386 ms |
+
+   The provider-call acceptance gate is the deterministic reduction from eight
+   to one. The elapsed values describe only this fixture and machine; they are
+   recorded as diagnostic evidence, not as a production latency guarantee.
 
 Together these keep per-turn indexing proportional to changed content rather
 than campaign length, which is what allows the readiness gate to be reached and
 held on a campaign that is being actively played.
+
+## Final verification evidence
+
+The final evidence was generated on 2026-08-19 from the post-Task-6 tree. The
+ignored artifacts are
+`tmp/chronicle-evaluation/final/legacy-baseline.json` (SHA-256
+`4b1bbcbc7e119d2f697dd28698ac4061608c12f538698d62fe5dc4914c006ba3`)
+and `tmp/chronicle-evaluation/final/chunked.json` (SHA-256
+`86331444de202052216deb99de39f09ec3e89b2b2bc969cba5b06f270c74246a`).
+These are the final generated evaluator results, distinct from the earlier
+task-local `v3-before`, calibration, and variant-ablation reports.
+
+The final chunked artifact's corpus hash is
+`5f9d9a27ab5b8b532e8a051928f051b89b910b836a068ca0bc47d93581af32a1`,
+which exactly matches the checked-in generated profile. Its deterministic
+metrics also exactly match the profile: recall@5/10/20
+`0.7142857142857143 / 0.7142857142857143 / 1`, MRR
+`0.6537698412698413`, NDCG `0.7615948030961166`, duplicate rate `0`, relevant
+memories per prompt token `0.005273566249176005`, semantic-only hits `5`,
+promotions/demotions `159 / 160`, and leakage `0 / 0 / 0`. Final-run p50/p95
+was `6 / 33 ms` with seven embedding requests and cost `0`; these diagnostics
+are allowed to differ from the warm-cache profile values as described above.
+
+The repository-local Windows launcher was required because `pnpm exec vitest`
+did not resolve the installed Vitest shim in this linked worktree. The exact
+executed PostgreSQL command was:
+
+```powershell
+.\node_modules\.bin\vitest.CMD run --config vitest.integration.config.ts tests/integration/chronicle-retrieval-evaluation.integration.test.ts tests/integration/chronicle-chunk-retrieval.integration.test.ts tests/integration/chronicle-chunk-repository.integration.test.ts tests/integration/chronicle-contract-matrix.integration.test.ts tests/integration/chronicle-turn-immutability.integration.test.ts
+```
+
+Docker reported `infinitequest-integration-postgres` running, the isolated
+database applied migrations through `0077`, and Vitest reported five files and
+50 tests passed with no skipped tests. The executed cases prove owner,
+campaign, and world-version authorization; `throughTurnNumber` cutoff before
+ranking and expansion; exclusion of cross-campaign, future-turn, and
+superseded-fact rows; exact rank-family ordering; rebuild and chunk-commit
+fencing; and accepted-turn immutability.
+
+An additional dedicated evaluator database retained one sanitized accepted
+turn outside the evaluator's rollback transaction. Before and after the legacy
+and chunked final evaluator commands, this read-only query captured the full
+ordinary row plus PostgreSQL physical-row version:
+
+```sql
+SELECT jsonb_build_object('row', to_jsonb(t), 'xmin', xmin::text)::text
+  FROM turns t
+ ORDER BY owner_user_id, campaign_id, turn_number, id;
+```
+
+The before and after snapshots were byte-for-byte equal: one row, 662 bytes,
+and SHA-256
+`b3ebb664cd0dffc7350e3f68d58e0d26ee41a854b7e9ceda0ddc38e8b0b3ac94`
+on both sides. The integration immutability case separately repeats the same
+row-plus-`xmin` equality checks after rebuild, retrieval, indexing, correction,
+and branching work. No accepted turn or authoritative Chronicle parent repair
+is part of rollout or rollback.
+
+The 100-turn/200-turn timings and eight-parent worker timings in the preceding
+section remain the controlled Task 5 and Task 6 measurements; the final
+evaluator does not remeasure those different fixtures. The final PostgreSQL
+suite re-executed their statement-count, result-order, provider-cost, and fenced
+commit contracts. In particular, the measured rank statement reduction remains
+`10 -> 4` despite the honestly recorded wall-clock increases, and the controlled
+eight-parent provider-call reduction remains `8 -> 1` with median elapsed time
+`125.646 -> 15.386 ms`.
 
 ## Future enhancements
 

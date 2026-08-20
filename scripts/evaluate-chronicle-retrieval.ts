@@ -1,10 +1,10 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createPostgresChronicleGenerationTransactionPort } from "../packages/database/src/chronicle-repository.js";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabaseClient } from "../packages/database/src/pool.js";
 import { migrateDatabase } from "../packages/database/src/migrate.js";
-import { CHRONICLE_CHUNK_PROTOCOL_VERSION } from "../packages/domain/src/chronicle-chunking.js";
+import { CHRONICLE_CHUNK_PROTOCOL_VERSION, chunkChronicleMemory } from "../packages/domain/src/chronicle-chunking.js";
 import { CHRONICLE_RETRIEVAL_PROFILE_V2 } from "../packages/domain/src/generated/chronicle-retrieval-profile-v2.js";
 import {
   CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
@@ -17,37 +17,69 @@ import {
   chronicleRetrievalCorpusHash,
   deterministicChronicleEvaluationUuid,
   evaluateChronicleRetrieval,
+  isDiagnosticChronicleCorpus,
   renderChronicleRetrievalProfileModule,
+  validateChronicleRetrievalCorpus,
   type ChronicleEvaluationReport,
   type ChronicleRetrievalApplication,
   type ChronicleRetrievalCorpus,
+  type ChronicleLongParentFixture,
   type ChronicleRetrievalProfileV2
 } from "./lib/chronicle-retrieval-evaluator.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const defaultOutput = "tmp/chronicle-evaluation/legacy-baseline.json";
+const productionCorpusRelativePath = "tests/fixtures/chronicle-retrieval-evaluation.v3.json";
 
 function argument(name: string): string | undefined {
   const index = process.argv.indexOf(name);
   return index === -1 ? undefined : process.argv[index + 1];
 }
 
-async function loadCorpus(): Promise<ChronicleRetrievalCorpus> {
-  return JSON.parse(await readFile(resolve(root, "tests/fixtures/chronicle-retrieval-evaluation.v2.json"), "utf8")) as ChronicleRetrievalCorpus;
+function resolveRepositoryCorpusPath(corpusArgument: string | undefined): string {
+  const corpusPath = resolve(root, corpusArgument ?? productionCorpusRelativePath);
+  const pathFromRoot = relative(root, corpusPath);
+  if (pathFromRoot === ".." || pathFromRoot.startsWith(`..${sep}`) || isAbsolute(pathFromRoot)) {
+    throw new Error("Chronicle evaluation corpus must be contained within the repository root.");
+  }
+  return corpusPath;
 }
 
-function retrievalApplication(
+async function loadCorpus(corpusPath: string): Promise<ChronicleRetrievalCorpus> {
+  return JSON.parse(await readFile(corpusPath, "utf8")) as ChronicleRetrievalCorpus;
+}
+
+function longParentContent(fixture: ChronicleLongParentFixture): string {
+  if (!Number.isSafeInteger(fixture.paragraphCount) || fixture.paragraphCount < 2) {
+    throw new Error("Chronicle evaluation long parent requires at least two paragraphs.");
+  }
+  if (!Number.isSafeInteger(fixture.relevantParagraphIndex)
+    || fixture.relevantParagraphIndex < 0
+    || fixture.relevantParagraphIndex >= fixture.paragraphCount) {
+    throw new Error("Chronicle evaluation relevant paragraph index is out of range.");
+  }
+  return Array.from({ length: fixture.paragraphCount }, (_, index) => (
+    index === fixture.relevantParagraphIndex
+      ? fixture.relevantParagraph
+      : `Sanitized continuity filler paragraph ${index + 1} describing quiet roads and empty courtyards.`
+  )).join("\n\n");
+}
+
+function fixtureVectorFor(text: string): readonly [number, number] {
+  return text.includes("amber agreement") || (text.includes("moon sigil") && text.includes("western gate"))
+    ? [1, 0]
+    : [0, 1];
+}
+
+export function retrievalApplication(
   rankFusionProfile?: Parameters<typeof createPostgresChronicleGenerationTransactionPort>[0]["rankFusionProfile"],
 ): ChronicleRetrievalApplication {
-  const vectorFor = (text: string): readonly number[] => (
-    text.includes("amber agreement") ? [1, 0] : [0, 1]
-  );
   const provider = {
     id: "fixture-embedding-provider",
     model: "fixture-embedding-v1",
     providerType: "openai_compatible",
     async embed(documents: readonly string[]) {
-      return { embeddings: documents.map(vectorFor), responseId: "fixture-embedding", usage: {}, reportedCost: null };
+      return { embeddings: documents.map(fixtureVectorFor), responseId: "fixture-embedding", usage: {}, reportedCost: null };
     }
   };
   return {
@@ -81,7 +113,7 @@ function retrievalApplication(
   };
 }
 
-async function seedCorpus(
+export async function seedCorpus(
   database: DatabaseClient,
   ownerUserId: string,
   corpus: ChronicleRetrievalCorpus,
@@ -92,7 +124,8 @@ async function seedCorpus(
     const evaluationUuid = (role: string): string => (
       deterministicChronicleEvaluationUuid(corpus.version, fixture.id, role)
     );
-    const semantic = fixture.id === "paraphrase" || fixture.id === "character-alias" || fixture.id === "location-alias";
+    const semantic = fixture.id === "paraphrase" || fixture.id === "character-alias" || fixture.id === "location-alias"
+      || fixture.id === "repeated-hint" || Boolean(fixture.longParent);
     const fixtureTitle = fixture.id === "superseded-fact" ? "E" : `Chronicle evaluator ${fixture.id}`;
     const world = await database.query<{ id: string }>(
       "INSERT INTO worlds (owner_user_id, title) VALUES ($1,$2) RETURNING id",
@@ -197,7 +230,9 @@ async function seedCorpus(
       }
     }
     for (const [index, label] of fixture.expectedLabels.entries()) {
-      const content = semantic ? "azure beacon confirmation" : `sanitized record ${fixture.id} ${index + 1}`;
+      const content = fixture.longParent && index === 0
+        ? longParentContent(fixture.longParent)
+        : semantic ? "azure beacon confirmation" : `sanitized record ${fixture.id} ${index + 1}`;
       const ordinal = semantic ? index + 32 : index + 1;
       const memory = semantic
         ? await database.query<{ id: string }>(
@@ -234,6 +269,20 @@ async function seedCorpus(
           ]
         );
       labelByMemoryId[memory.rows[0]!.id] = label;
+    }
+    if (fixture.id === "repeated-hint") {
+      await database.query(
+        `INSERT INTO chronicle_memories
+           (id, owner_user_id, campaign_id, world_version_id, turn_id, memory_kind, ordinal, content, token_estimate)
+         VALUES ($1,$2,$3,$4,$5,'turn_fiction',2,'azure beacon confirmation again',1)`,
+        [evaluationUuid("memory:repeated-scene"), ownerUserId, campaign.rows[0]!.id, version.rows[0]!.id, secondTurn.rows[0]!.id]
+      );
+      await database.query(
+        `INSERT INTO chronicle_memories
+           (id, owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content, token_estimate)
+         VALUES ($1,$2,$3,$4,'open_thread',2,'about azure beacon confirmation',1)`,
+        [evaluationUuid("memory:repeated-open-thread"), ownerUserId, campaign.rows[0]!.id, version.rows[0]!.id]
+      );
     }
     for (const [index, label] of (fixture.forbiddenLabels?.futureTurn ?? []).entries()) {
       const memory = await database.query<{ id: string }>(
@@ -395,48 +444,74 @@ async function seedCorpus(
       );
     }
     if (retrievalImplementation === "chunked_hybrid") {
-      await database.query(
-        `INSERT INTO chronicle_memory_chunks
-           (id, owner_user_id, campaign_id, world_version_id, parent_memory_id, parent_content_hash,
-            chunking_protocol_version, chunk_ordinal, chunk_kind, content, source_start_offset,
-            source_end_offset, token_estimate, entities, entity_ids, metadata, embedding,
-            embedding_status, embedding_skip_reason, embedding_provider_profile_id, embedding_model,
-            embedding_dimensions, embedding_protocol_version, embedding_provider_fingerprint,
-            embedding_content_hash, embedding_updated_at)
-         SELECT (
-                  substr(md5('chronicle-evaluation-chunk-v1:' || parent.id::text),1,8) || '-' ||
-                  substr(md5('chronicle-evaluation-chunk-v1:' || parent.id::text),9,4) || '-5' ||
-                  substr(md5('chronicle-evaluation-chunk-v1:' || parent.id::text),14,3) || '-a' ||
-                  substr(md5('chronicle-evaluation-chunk-v1:' || parent.id::text),18,3) || '-' ||
-                  substr(md5('chronicle-evaluation-chunk-v1:' || parent.id::text),21,12)
-                )::uuid,
-                parent.owner_user_id,parent.campaign_id,parent.world_version_id,parent.id,parent.content_hash,
-                $4,0,
-                CASE parent.memory_kind
-                  WHEN 'turn_fiction' THEN 'turn_narration'
-                  WHEN 'legacy_summary' THEN 'legacy_summary'
-                  WHEN 'campaign_summary' THEN 'campaign_summary'
-                  WHEN 'canonical_fact' THEN 'canonical_fact'
-                  ELSE 'open_thread'
-                END,
-                parent.content,0,length(parent.content),parent.token_estimate,parent.entities,parent.entity_ids,parent.metadata,
-                parent.embedding,CASE WHEN parent.embedding IS NULL THEN 'skipped' ELSE 'embedded' END,
-                CASE WHEN parent.embedding IS NULL THEN 'chunk_embedding_skipped' ELSE NULL END,
-                parent.embedding_provider_profile_id,parent.embedding_model,parent.embedding_dimensions,
-                CASE WHEN parent.embedding IS NULL THEN NULL ELSE $5 END,
-                parent.embedding_provider_fingerprint,
-                CASE WHEN parent.embedding IS NULL THEN NULL ELSE parent.content_hash END,
-                CASE WHEN parent.embedding IS NULL THEN NULL ELSE now() END
-           FROM chronicle_memories parent
-          WHERE parent.owner_user_id=$1 AND parent.campaign_id=$2 AND parent.world_version_id=$3`,
-        [
-          ownerUserId,
-          campaign.rows[0]!.id,
-          version.rows[0]!.id,
-          CHRONICLE_CHUNK_PROTOCOL_VERSION,
-          CHRONICLE_EMBEDDING_PROTOCOL_VERSION
-        ]
+      const parents = await database.query<Readonly<{
+        id: string;
+        memory_kind: "turn_fiction" | "legacy_summary" | "campaign_summary" | "canonical_fact" | "open_thread";
+        content: string;
+        content_hash: string;
+        entities: readonly string[];
+        entity_ids: readonly string[];
+        metadata: Record<string, unknown>;
+        embedding: string | null;
+        embedding_provider_profile_id: string | null;
+        embedding_model: string | null;
+        embedding_dimensions: number | null;
+        embedding_provider_fingerprint: string | null;
+      }>>(
+        `SELECT id,memory_kind,content,content_hash,entities,entity_ids,metadata,embedding::text,
+                embedding_provider_profile_id,embedding_model,embedding_dimensions,embedding_provider_fingerprint
+           FROM chronicle_memories
+          WHERE owner_user_id=$1 AND campaign_id=$2 AND world_version_id=$3`,
+        [ownerUserId, campaign.rows[0]!.id, version.rows[0]!.id]
       );
+      for (const parent of parents.rows) {
+        for (const chunk of chunkChronicleMemory({
+          id: parent.id,
+          memoryKind: parent.memory_kind,
+          content: parent.content
+        })) {
+          const embedded = parent.embedding !== null;
+          const chunkVector = embedded ? `[${fixtureVectorFor(chunk.content).join(",")}]` : null;
+          await database.query(
+            `INSERT INTO chronicle_memory_chunks
+               (id,owner_user_id,campaign_id,world_version_id,parent_memory_id,parent_content_hash,
+                chunking_protocol_version,chunk_ordinal,chunk_kind,content,source_start_offset,
+                source_end_offset,token_estimate,entities,entity_ids,metadata,embedding,embedding_status,
+                embedding_skip_reason,embedding_provider_profile_id,embedding_model,embedding_dimensions,
+                embedding_protocol_version,embedding_provider_fingerprint,embedding_content_hash,embedding_updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::text[],$15::text[],$16::jsonb,
+                     $17::vector,$18,$19,$20,$21,$22,$23,$24,$25,
+                     CASE WHEN $17::text IS NULL THEN NULL ELSE now() END)`,
+            [
+              deterministicChronicleEvaluationUuid(corpus.version, fixture.id, `chunk:${parent.id}:${chunk.chunkIndex}`),
+              ownerUserId,
+              campaign.rows[0]!.id,
+              version.rows[0]!.id,
+              parent.id,
+              parent.content_hash,
+              CHRONICLE_CHUNK_PROTOCOL_VERSION,
+              chunk.chunkIndex,
+              chunk.kind,
+              chunk.content,
+              chunk.sourceStartOffset,
+              chunk.sourceEndOffset,
+              chunk.estimatedTokens,
+              [...parent.entities],
+              [...parent.entity_ids],
+              JSON.stringify(parent.metadata),
+              chunkVector,
+              embedded ? "embedded" : "skipped",
+              embedded ? null : "chunk_embedding_skipped",
+              embedded ? parent.embedding_provider_profile_id : null,
+              embedded ? parent.embedding_model : null,
+              embedded ? parent.embedding_dimensions : null,
+              embedded ? CHRONICLE_EMBEDDING_PROTOCOL_VERSION : null,
+              embedded ? parent.embedding_provider_fingerprint : null,
+              embedded ? chunk.contentHash : null
+            ]
+          );
+        }
+      }
     }
     cases.push({
       ...fixture,
@@ -491,18 +566,66 @@ function assertProfileMetricsAreCurrent(
   }
 }
 
-function assertCorpusResultInvariants(report: Awaited<ReturnType<typeof evaluateChronicleRetrieval>>): void {
+class ChronicleEvaluationInvariantError extends Error {}
+
+function assertCanonicalResultInvariants(
+  report: Awaited<ReturnType<typeof evaluateChronicleRetrieval>>,
+): void {
   const supersededFact = report.cases.find((result) => result.id === "superseded-fact");
   const canonicalReplacementLabel = "superseded-fact-canonical-replacement";
   if (!supersededFact || supersededFact.ranks[canonicalReplacementLabel] === null) {
-    throw new Error("Chronicle evaluation did not retrieve the canonical replacement fact.");
+    throw new ChronicleEvaluationInvariantError("Chronicle evaluation did not retrieve the canonical replacement fact.");
   }
   if (supersededFact.retrievedLabels.filter((label) => label === canonicalReplacementLabel).length !== 1) {
-    throw new Error("Chronicle evaluation retrieved an ambiguous canonical replacement label.");
+    throw new ChronicleEvaluationInvariantError("Chronicle evaluation retrieved an ambiguous canonical replacement label.");
   }
 }
 
-const corpus = await loadCorpus();
+export function assertCorpusResultInvariants(
+  report: Awaited<ReturnType<typeof evaluateChronicleRetrieval>>,
+  corpus: ChronicleRetrievalCorpus,
+): void {
+  assertCanonicalResultInvariants(report);
+  for (const fixture of corpus.cases.filter((value) => value.longParent)) {
+    const result = report.cases.find((value) => value.id === fixture.id);
+    if (!result) throw new ChronicleEvaluationInvariantError(`Chronicle evaluation did not produce ${fixture.id}.`);
+    for (const label of fixture.expectedLabels) {
+      if (result.ranks[label] === null || result.ranks[label] === undefined) {
+        throw new ChronicleEvaluationInvariantError(`Chronicle evaluation did not retrieve ${label} for ${fixture.id}.`);
+      }
+    }
+    if (result.leakage.crossCampaign !== 0
+      || result.leakage.futureTurn !== 0
+      || result.leakage.supersededFact !== 0) {
+      throw new ChronicleEvaluationInvariantError(`Chronicle evaluation detected leakage for ${fixture.id}.`);
+    }
+    const budgetTokens = fixture.scope.request.budgetTokens;
+    if (budgetTokens === undefined || result.promptTokens > budgetTokens) {
+      throw new ChronicleEvaluationInvariantError(`Chronicle evaluation exceeded the token budget for ${fixture.id}.`);
+    }
+  }
+}
+
+export function calibrationMetricsIfCorpusInvariantsHold(
+  report: Awaited<ReturnType<typeof evaluateChronicleRetrieval>>,
+  corpus: ChronicleRetrievalCorpus,
+): Awaited<ReturnType<typeof evaluateChronicleRetrieval>>["metrics"] | null {
+  try {
+    assertCorpusResultInvariants(report, corpus);
+  } catch (error) {
+    if (error instanceof ChronicleEvaluationInvariantError) return null;
+    throw error;
+  }
+  return report.metrics;
+}
+
+export async function main(): Promise<void> {
+const corpusArgument = argument("--corpus");
+const productionCorpusPath = resolveRepositoryCorpusPath(undefined);
+const corpusPath = resolveRepositoryCorpusPath(corpusArgument);
+const corpus = await loadCorpus(corpusPath);
+validateChronicleRetrievalCorpus(corpus);
+const explicitDiagnosticCorpus = isDiagnosticChronicleCorpus(corpusPath, productionCorpusPath);
 const corpusHash = chronicleRetrievalCorpusHash(corpus);
 const calibrate = process.argv.includes("--calibrate");
 const baselineArgument = argument("--baseline");
@@ -545,8 +668,7 @@ try {
             seededCorpus,
             { implementation: "chunked_hybrid", corpusHash }
           );
-          assertCorpusResultInvariants(evaluated);
-          return evaluated.metrics;
+          return calibrationMetricsIfCorpusInvariantsHold(evaluated, corpus);
         }
       });
       throw new EvaluationRollback(profile);
@@ -557,8 +679,9 @@ try {
       seededCorpus,
       { implementation, corpusHash }
     );
-    assertCorpusResultInvariants(evaluated);
-    if (implementation === "chunked_hybrid") assertProfileMetricsAreCurrent(evaluated);
+    if (implementation === "chunked_hybrid") assertCorpusResultInvariants(evaluated, corpus);
+    else assertCanonicalResultInvariants(evaluated);
+    if (implementation === "chunked_hybrid" && !explicitDiagnosticCorpus) assertProfileMetricsAreCurrent(evaluated);
     throw new EvaluationRollback(evaluated);
   });
   throw new Error("Chronicle evaluation fixtures did not roll back.");
@@ -577,4 +700,9 @@ if (calibrate) {
   await mkdir(dirname(output), { recursive: true });
   await writeFile(output, `${JSON.stringify(result, null, 2)}\n`, "utf8");
   process.stdout.write(`${output}\n`);
+}
+}
+
+if (resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
+  await main();
 }

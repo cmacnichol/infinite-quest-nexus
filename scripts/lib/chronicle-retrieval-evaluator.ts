@@ -6,6 +6,12 @@ export type ChronicleRetrievalApplication = Readonly<{
   generation: Pick<MemoryGenerationTransactionPort, "buildContextPreview">;
 }>;
 
+export type ChronicleLongParentFixture = Readonly<{
+  paragraphCount: number;
+  relevantParagraphIndex: number;
+  relevantParagraph: string;
+}>;
+
 type ChroniclePreviewEntry = Readonly<{
   id: string;
   estimatedTokens?: number;
@@ -19,6 +25,7 @@ export type ChronicleRetrievalCase = Readonly<{
   scope: MemoryGenerationContextPreviewScope;
   expectedLabels: readonly string[];
   labelByMemoryId: Readonly<Record<string, string>>;
+  longParent?: ChronicleLongParentFixture;
   forbiddenLabels?: Readonly<{
     crossCampaign?: readonly string[];
     futureTurn?: readonly string[];
@@ -48,6 +55,7 @@ export type ChronicleEvaluationCaseResult = Readonly<{
   latencyMs: number;
   embeddingRequests: number;
   embeddingCost: number;
+  queryVariants: number;
   semanticOnlyHits: number;
   promotions: number;
   demotions: number;
@@ -86,7 +94,9 @@ export type ChronicleRetrievalEvaluationOptions = Readonly<{
 
 export type ChronicleRetrievalProfileParameters = Readonly<{
   rrfK: number;
-  semanticVariantWeight: number;
+  entityExpandedVariantWeight: number;
+  sceneVariantWeight: number;
+  openThreadVariantWeight: number;
   lexicalEntityWeight: number;
   recencyChronologyWeight: number;
   candidateLimit: number;
@@ -105,17 +115,27 @@ export type ChronicleRetrievalProfileV2 = ChronicleProductionRankFusionProfile &
 }>;
 
 const RRF_K_GRID = [20, 40, 60] as const;
-const SEMANTIC_VARIANT_WEIGHT_GRID = [0.5, 0.75, 1] as const;
+const QUERY_VARIANT_WEIGHT_GRID = Object.freeze([
+  Object.freeze({ entityExpanded: 1, scene: 1, openThread: 1 }),
+  Object.freeze({ entityExpanded: 0.5, scene: 1, openThread: 1 }),
+  Object.freeze({ entityExpanded: 0.75, scene: 1, openThread: 1 }),
+  Object.freeze({ entityExpanded: 1, scene: 0.5, openThread: 1 }),
+  Object.freeze({ entityExpanded: 1, scene: 0.75, openThread: 1 }),
+  Object.freeze({ entityExpanded: 1, scene: 1, openThread: 0.5 }),
+  Object.freeze({ entityExpanded: 1, scene: 1, openThread: 0.75 })
+]);
 const LEXICAL_ENTITY_WEIGHT_GRID = [0.75, 1, 1.25] as const;
 const RECENCY_CHRONOLOGY_WEIGHT_GRID = [0.25, 0.5, 0.75] as const;
-const CANDIDATE_LIMIT_GRID = [32, 64, 96] as const;
+const CANDIDATE_LIMIT_GRID = [16, 32, 64] as const;
 
 export const CHRONICLE_RETRIEVAL_CALIBRATION_GRID: readonly ChronicleRetrievalProfileParameters[] = Object.freeze(
-  RRF_K_GRID.flatMap((rrfK) => SEMANTIC_VARIANT_WEIGHT_GRID.flatMap((semanticVariantWeight) => (
+  RRF_K_GRID.flatMap((rrfK) => QUERY_VARIANT_WEIGHT_GRID.flatMap((variantWeights) => (
     LEXICAL_ENTITY_WEIGHT_GRID.flatMap((lexicalEntityWeight) => RECENCY_CHRONOLOGY_WEIGHT_GRID.flatMap(
       (recencyChronologyWeight) => CANDIDATE_LIMIT_GRID.map((candidateLimit) => Object.freeze({
         rrfK,
-        semanticVariantWeight,
+        entityExpandedVariantWeight: variantWeights.entityExpanded,
+        sceneVariantWeight: variantWeights.scene,
+        openThreadVariantWeight: variantWeights.openThread,
         lexicalEntityWeight,
         recencyChronologyWeight,
         candidateLimit
@@ -141,6 +161,27 @@ export function deterministicChronicleEvaluationUuid(
 ): string {
   const digest = hash({ corpusVersion, caseId, role });
   return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-5${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+}
+
+function validateLongParentFixture(fixture: ChronicleLongParentFixture): void {
+  if (!Number.isSafeInteger(fixture.paragraphCount) || fixture.paragraphCount < 2) {
+    throw new Error("Chronicle evaluation long parent requires at least two paragraphs.");
+  }
+  if (!Number.isSafeInteger(fixture.relevantParagraphIndex)
+    || fixture.relevantParagraphIndex < 0
+    || fixture.relevantParagraphIndex >= fixture.paragraphCount) {
+    throw new Error("Chronicle evaluation relevant paragraph index is out of range.");
+  }
+}
+
+export function validateChronicleRetrievalCorpus(corpus: ChronicleRetrievalCorpus): void {
+  for (const fixture of corpus.cases) {
+    if (fixture.longParent) validateLongParentFixture(fixture.longParent);
+  }
+}
+
+export function isDiagnosticChronicleCorpus(corpusPath: string, productionCorpusPath: string): boolean {
+  return corpusPath !== productionCorpusPath;
 }
 
 function average(values: readonly number[]): number {
@@ -173,9 +214,9 @@ export function chronicleProductionRankFusionProfile(
       }),
       variants: Object.freeze({
         action: 1,
-        entity_expanded: parameters.semanticVariantWeight,
-        scene: parameters.semanticVariantWeight,
-        open_thread: parameters.semanticVariantWeight
+        entity_expanded: parameters.entityExpandedVariantWeight,
+        scene: parameters.sceneVariantWeight,
+        open_thread: parameters.openThreadVariantWeight
       })
     }),
     candidateLimits: Object.freeze({ perSignal: parameters.candidateLimit }),
@@ -269,11 +310,12 @@ export async function calibrateChronicleRetrievalProfile(input: Readonly<{
   corpusHash: string;
   baselineMetrics: ChronicleEvaluationMetrics;
   generatedAt?: string;
-  evaluate(profile: ChronicleRetrievalProfileParameters): Promise<ChronicleEvaluationMetrics>;
+  evaluate(profile: ChronicleRetrievalProfileParameters): Promise<ChronicleEvaluationMetrics | null>;
 }>): Promise<ChronicleRetrievalProfileV2> {
   const candidates: ChronicleCalibrationCandidate[] = [];
   for (const profile of CHRONICLE_RETRIEVAL_CALIBRATION_GRID) {
-    candidates.push({ profile, metrics: await input.evaluate(profile) });
+    const metrics = await input.evaluate(profile);
+    if (metrics) candidates.push({ profile, metrics });
   }
   return selectChronicleRetrievalProfile({
     corpusHash: input.corpusHash,
@@ -303,16 +345,27 @@ function safePreviewMetadata(preview: unknown): Readonly<{
   semanticAvailable: boolean;
   embeddingCost: number;
   embeddingRequests: number;
+  queryVariants: number;
 }> {
   if (!preview || typeof preview !== "object") {
-    return { semanticAvailable: false, embeddingCost: 0, embeddingRequests: 0 };
+    return { semanticAvailable: false, embeddingCost: 0, embeddingRequests: 0, queryVariants: 0 };
   }
   const retrieval = (preview as { retrieval?: unknown }).retrieval;
   if (!retrieval || typeof retrieval !== "object") {
-    return { semanticAvailable: false, embeddingCost: 0, embeddingRequests: 0 };
+    return { semanticAvailable: false, embeddingCost: 0, embeddingRequests: 0, queryVariants: 0 };
   }
-  const value = retrieval as { semanticAvailable?: unknown; embeddingCost?: unknown; embeddingRequests?: unknown };
+  const value = retrieval as {
+    semanticAvailable?: unknown;
+    embeddingCost?: unknown;
+    embeddingRequests?: unknown;
+    queryCacheHits?: unknown;
+    queryCacheMisses?: unknown;
+  };
   const semanticAvailable = value.semanticAvailable === true;
+  const queryCacheHits = typeof value.queryCacheHits === "number"
+    && Number.isInteger(value.queryCacheHits) && value.queryCacheHits >= 0 ? value.queryCacheHits : 0;
+  const queryCacheMisses = typeof value.queryCacheMisses === "number"
+    && Number.isInteger(value.queryCacheMisses) && value.queryCacheMisses >= 0 ? value.queryCacheMisses : 0;
   return {
     semanticAvailable,
     embeddingCost: typeof value.embeddingCost === "number" && Number.isFinite(value.embeddingCost) ? value.embeddingCost : 0,
@@ -320,7 +373,8 @@ function safePreviewMetadata(preview: unknown): Readonly<{
       && Number.isInteger(value.embeddingRequests)
       && value.embeddingRequests >= 0
       ? value.embeddingRequests
-      : semanticAvailable ? 1 : 0
+      : semanticAvailable ? 1 : 0,
+    queryVariants: queryCacheHits + queryCacheMisses
   };
 }
 
@@ -400,6 +454,7 @@ export async function evaluateChronicleRetrieval(
   corpus: ChronicleRetrievalCorpus,
   options: ChronicleRetrievalEvaluationOptions = {},
 ): Promise<ChronicleEvaluationReport> {
+  validateChronicleRetrievalCorpus(corpus);
   const now = options.now ?? Date.now;
   const cases: ChronicleEvaluationCaseResult[] = [];
   for (const fixture of corpus.cases) {
@@ -423,6 +478,7 @@ export async function evaluateChronicleRetrieval(
       latencyMs,
       embeddingRequests: metadata.embeddingRequests,
       embeddingCost: metadata.embeddingCost,
+      queryVariants: metadata.queryVariants,
       semanticOnlyHits,
       promotions: movements.promotions,
       demotions: movements.demotions,

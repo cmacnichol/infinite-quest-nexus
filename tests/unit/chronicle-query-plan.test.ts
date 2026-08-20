@@ -85,4 +85,65 @@ describe("Chronicle query planning", () => {
       entityIds: ["world:zeta", "world:äther"]
     });
   });
+
+  it("omits an open-thread variant when action and scene already cover its substantive terms", () => {
+    const plan = planChronicleQueries({
+      action: "Ask Mara about the moon gate",
+      sceneHints: [{ ordinal: 2, content: "Mara waits beside the moon gate." }],
+      openThreadHints: [{ ordinal: 2, content: "Ask Mara about the moon gate again." }]
+    });
+
+    expect(plan.map((variant) => variant.kind)).toEqual(["action", "scene"]);
+  });
+
+  it("does not treat case, punctuation, Unicode forms, or connective words as novel query information", () => {
+    const plan = planChronicleQueries({
+      action: "Seek the Moon Gate",
+      sceneHints: [{ ordinal: 2, content: "Shade waits beside the gate." }],
+      openThreadHints: [{ ordinal: 2, content: "About THE ＭＯＯＮ-gate; SHADE, again with their." }]
+    });
+
+    expect(plan.map((variant) => variant.kind)).toEqual(["action", "scene"]);
+  });
+
+  it("retains entity expansion solely for a fresh entity id when normalized visible terms add nothing", () => {
+    const plan = planChronicleQueries({
+      action: "Find Mara",
+      entityHints: [{ ordinal: 2, entityId: "world:mara", terms: ["Mara!"] }]
+    });
+
+    expect(plan).toEqual([
+      { kind: "action", query: "Find Mara", entityIds: [] },
+      {
+        kind: "entity_expanded",
+        query: "Find Mara Mara!",
+        entityIds: ["world:mara"]
+      }
+    ]);
+  });
+
+  it("retains scene and open-thread variants when a vague action lacks their substantive names and events", () => {
+    const plan = planChronicleQueries({
+      action: "Ask him about it again",
+      sceneHints: [{ ordinal: 2, content: "Captain Rhea enters the Observatory." }],
+      openThreadHints: [{ ordinal: 2, content: "Recover the Astral Key before dawn." }]
+    });
+
+    expect(plan.map((variant) => variant.kind)).toEqual(["action", "scene", "open_thread"]);
+  });
+
+  it("excludes future-only hints before checking distinct query information", () => {
+    const plan = planChronicleQueries({
+      action: "Seek the moon gate",
+      throughTurnNumber: 2,
+      sceneHints: [
+        { ordinal: 2, content: "The moon gate opens at dusk." },
+        { ordinal: 3, content: "The Future Oracle names the hidden vault." }
+      ],
+      openThreadHints: [{ ordinal: 3, content: "Ask the Future Oracle about the hidden vault." }]
+    });
+
+    expect(plan.map((variant) => variant.kind)).toEqual(["action", "scene"]);
+    expect(plan.map((variant) => variant.query).join("\n")).not.toMatch(/future oracle|hidden vault/i);
+  });
 });

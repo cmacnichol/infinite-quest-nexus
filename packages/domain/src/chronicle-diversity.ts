@@ -110,6 +110,34 @@ function maximumSelectedSimilarity(
   ), 0);
 }
 
+function selectedContent(
+  candidate: ChronicleParentCandidate,
+  siblings: readonly ChronicleParentCandidate[],
+  includeAdjacentNarration: boolean
+): string {
+  if (candidate.chunkKind === "canonical_fact" || candidate.chunkKind === "open_thread") {
+    return candidate.parentContent;
+  }
+  if (candidate.chunkKind === "campaign_summary" || candidate.chunkKind === "legacy_summary") {
+    return candidate.chunkContent;
+  }
+  const action = candidate.chunkKind === "turn_action"
+    ? candidate
+    : siblings.find((chunk) => chunk.chunkKind === "turn_action");
+  const narration = candidate.chunkKind === "turn_narration"
+    ? candidate
+    : includeAdjacentNarration
+      ? siblings.find((chunk) => (
+        chunk.chunkKind === "turn_narration" && chunk.chunkOrdinal === candidate.chunkOrdinal + 1
+      ))
+      : undefined;
+  if (action && narration) {
+    return `Player action: ${action.chunkContent}\nNarration: ${narration.chunkContent}`;
+  }
+  if (candidate.chunkKind === "turn_action") return `Player action: ${candidate.chunkContent}`;
+  return `Narration: ${candidate.chunkContent}`;
+}
+
 export function selectDiverseChronicleParents(
   candidates: readonly ChronicleParentCandidate[],
   policy: ChronicleParentSelectionPolicy
@@ -211,14 +239,11 @@ export function selectDiverseChronicleParents(
     remaining = eligible.filter((value) => value.parentMemoryId !== candidate.parentMemoryId);
   }
   const parents = selectedCandidates.map((candidate) => {
-    const adjacentNarration = policy.includeAdjacentNarration === true && candidate.chunkKind === "turn_action"
-      ? chunksByParent.get(candidate.parentMemoryId)?.find((chunk) => (
-        chunk.chunkKind === "turn_narration" && chunk.chunkOrdinal === candidate.chunkOrdinal + 1
-      ))
-      : undefined;
-    const content = adjacentNarration
-      ? `Player action: ${candidate.chunkContent}\nNarration: ${adjacentNarration.chunkContent}`
-      : candidate.parentContent;
+    const content = selectedContent(
+      candidate,
+      chunksByParent.get(candidate.parentMemoryId) ?? [],
+      policy.includeAdjacentNarration === true
+    );
     return {
       parentMemoryId: candidate.parentMemoryId,
       parentTurnId: candidate.parentTurnId,
