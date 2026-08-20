@@ -119,7 +119,7 @@ export interface CampaignRepositoryPort {
 
 export interface CampaignStateRepositoryPort {
   loadEffectiveCampaignStateEdit(transaction: WorldCampaignReadContext, scope: CampaignScope): Promise<CampaignStateEditSource>;
-  getCampaignRuntimeState(transaction: WorldCampaignReadContext, scope: CampaignScope, requestedTurnNumber?: number): Promise<CampaignStateCorrectionSource>;
+  getCampaignRuntimeState(transaction: WorldCampaignReadContext, scope: CampaignScope, requestedTurnNumber?: number, includeRecordedResolution?: boolean): Promise<CampaignStateCorrectionSource>;
   updateCampaignRuntimeState(transaction: WorldCampaignCommandContext, scope: CampaignScope, request: CampaignRuntimeStateUpdate): Promise<WorldCampaignRepositoryResult<CampaignStateCorrectionSource>>;
 }
 
@@ -244,7 +244,7 @@ export interface WorldCampaignApplication {
   rewindCampaign(scope: CampaignScope, request: CampaignRewindRequest): Promise<CampaignRewindView>;
   branchCampaign(scope: CampaignScope, request: CampaignBranchRequest): Promise<CampaignBranchView>;
   loadEffectiveCampaignStateEdit(scope: CampaignScope): Promise<CampaignStateEditView>;
-  getCampaignRuntimeState(scope: CampaignScope, requestedTurnNumber?: number): Promise<CampaignStateCorrectionView>;
+  getCampaignRuntimeState(scope: CampaignScope, requestedTurnNumber?: number, includeRecordedResolution?: boolean): Promise<CampaignStateCorrectionView>;
   updateCampaignRuntimeState(scope: CampaignScope, request: CampaignRuntimeStateUpdate): Promise<CampaignStateCorrectionView>;
   getCampaignSyncStatus(scope: CampaignScope, request: SyncStatusRequest): Promise<CampaignSyncStatusView>;
   getCampaignCharacterProfile(scope: CampaignScope): Promise<CharacterProfileView>;

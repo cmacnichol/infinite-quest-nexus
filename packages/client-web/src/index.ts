@@ -26,6 +26,12 @@ export type {
   WorldApi
 } from "./api-client.js";
 export {
+  createIllustrationApi
+} from "./illustration-api.js";
+export type {
+  IllustrationApi
+} from "./illustration-api.js";
+export {
   createBrowserGenerationSource
 } from "./generation/fallback-source.js";
 export type {

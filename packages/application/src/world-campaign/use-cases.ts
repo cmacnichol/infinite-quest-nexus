@@ -198,7 +198,7 @@ export function createWorldCampaignApplication(
     rewindCampaign: (scope, request) => transition(scope, (database) => dependencies.campaigns.rewindCampaign(database, scope, request)),
     branchCampaign: (scope, request) => transition(scope, (database) => dependencies.campaigns.branchCampaign(database, scope, request)),
     loadEffectiveCampaignStateEdit: (scope) => read(scope, (database) => dependencies.state.loadEffectiveCampaignStateEdit(database, scope)),
-    getCampaignRuntimeState: (scope, requestedTurnNumber) => read(scope, (database) => dependencies.state.getCampaignRuntimeState(database, scope, requestedTurnNumber)),
+    getCampaignRuntimeState: (scope, requestedTurnNumber, includeRecordedResolution = false) => read(scope, (database) => dependencies.state.getCampaignRuntimeState(database, scope, requestedTurnNumber, includeRecordedResolution)),
     updateCampaignRuntimeState: (scope, request) => transition(scope, (database) => dependencies.state.updateCampaignRuntimeState(database, scope, request)),
     getCampaignSyncStatus: async (scope, request): Promise<CampaignSyncStatusView> => {
       const snapshot = await read(scope, (database) => dependencies.sync.readCampaignSyncSnapshot(database, scope));

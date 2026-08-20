@@ -75,6 +75,19 @@ describe("web build contract", () => {
     expect(emitted).toContain("this turn predates retrieval auditing");
   });
 
+  test("replacement build keeps the Story entry in its hashed SPA asset graph", () => {
+    const distDirectory = path.join(rootDirectory, "apps/web-next/dist");
+    const html = readFileSync(path.join(distDirectory, "index.html"), "utf8");
+    const assetPaths = localAssetPaths(html, "/app/").filter((assetPath) => assetPath.endsWith(".js"));
+    const emitted = assetPaths
+      .map((assetPath) => readFileSync(path.join(distDirectory, assetPath), "utf8"))
+      .join("\n");
+
+    expect(assetPaths).not.toEqual([]);
+    expect(emitted).toContain("/app/story");
+    expect(emitted).toContain("Campaign Tools");
+  });
+
   test("keeps the reference-only root client outside the active UI implementation set", () => {
     expect(activeUiImplementationFiles).not.toContain("index.html");
     expect(activeUiImplementationFiles).toHaveLength(6);

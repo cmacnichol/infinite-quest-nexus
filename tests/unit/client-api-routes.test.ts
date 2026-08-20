@@ -769,6 +769,51 @@ describe("client API route contracts without PostgreSQL", () => {
     }
   });
 
+  it("keeps recorded resolution off generic state paths and fetches it only through explicit inspection", async () => {
+    const genericState = {
+      campaignId: CAMPAIGN_ID,
+      activeTurnNumber: 2,
+      viewedTurnNumber: 2,
+      isCurrent: true,
+      revision: 1,
+      updatedAt: NOW.toISOString(),
+      ...RUNTIME_STATE,
+      recordedResolution: null
+    };
+    const inspectedState = {
+      ...genericState,
+      recordedResolution: {
+        statName: "Resolve", base: 61, modifier: 0, target: 61, roll: 37,
+        success: true, margin: 24, difficultyLabel: "standard"
+      }
+    };
+    const getCampaignRuntimeState = vi.fn(async (_scope, _turnNumber, includeRecordedResolution = false) => (
+      includeRecordedResolution ? inspectedState : genericState
+    ));
+    const app = await buildServer(serverOptions({
+      config: config(storageRoot),
+      pool: mockPool(),
+      worldCampaign: testWorldCampaignApplication({ getCampaignRuntimeState })
+    }));
+    try {
+      const generic = await app.inject({ method: "GET", url: `/api/v1/campaigns/${CAMPAIGN_ID}/state?turnNumber=2` });
+      expect(generic.statusCode).toBe(200);
+      expect(campaignRuntimeStateResponseSchema.parse(generic.json()).recordedResolution).toBeNull();
+
+      const inspection = await app.inject({ method: "GET", url: `/api/v1/campaigns/${CAMPAIGN_ID}/state/inspection?turnNumber=2` });
+      expect(inspection.statusCode).toBe(200);
+      expect(campaignRuntimeStateResponseSchema.parse(inspection.json()).recordedResolution).toEqual({
+        statName: "Resolve", base: 61, modifier: 0, target: 61, roll: 37,
+        success: true, margin: 24, difficultyLabel: "standard"
+      });
+      expect(inspection.body).not.toContain("Private referee reasoning.");
+      expect(getCampaignRuntimeState).toHaveBeenNthCalledWith(1, expect.objectContaining({ campaignId: CAMPAIGN_ID }), 2);
+      expect(getCampaignRuntimeState).toHaveBeenNthCalledWith(2, expect.objectContaining({ campaignId: CAMPAIGN_ID }), 2, true);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("serializes every remaining adopted success route through its shared response schema", async () => {
     const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool(), memory: inertRouteMemory }));
     const runtimeStateUpdate = {
@@ -1444,6 +1489,36 @@ describe("client API route contracts without PostgreSQL", () => {
       expect(apiErrorEnvelopeSchema.parse(malformedResponse.json())).toMatchObject({ error: "Internal server error", details: {} });
     } finally {
       await Promise.all([missingSyncApp.close(), missingJobApp.close(), malformedJobApp.close()]);
+    }
+  });
+});
+
+describe("Story route coexistence", () => {
+  it("serves each legacy and replacement Story URL without crossing surfaces", async () => {
+    const storyStorageRoot = await mkdtemp(join(tmpdir(), "infinitequest-story-route-"));
+    const app = await buildServer(serverOptions({ config: config(storyStorageRoot), pool: mockPool() }));
+    try {
+      const [legacyRoot, legacyCampaign, replacementRoot, replacementCampaign] = await Promise.all([
+        app.inject({ method: "GET", url: "/story" }),
+        app.inject({ method: "GET", url: "/story/campaign-1" }),
+        app.inject({ method: "GET", url: "/app/story" }),
+        app.inject({ method: "GET", url: "/app/story/campaign-1" })
+      ]);
+
+      for (const response of [legacyRoot, legacyCampaign, replacementRoot, replacementCampaign]) {
+        expect(response.statusCode).toBe(200);
+        expect(response.headers.location).toBeUndefined();
+        expect(response.headers["content-type"]).toContain("text/html");
+      }
+      expect(legacyRoot.body).toContain("legacy-client.js");
+      expect(legacyCampaign.body).toContain("legacy-client.js");
+      expect(replacementRoot.body).toContain('<div id="app"></div>');
+      expect(replacementCampaign.body).toContain('<div id="app"></div>');
+      expect(replacementRoot.body).not.toContain("legacy-client.js");
+      expect(replacementCampaign.body).not.toContain("legacy-client.js");
+    } finally {
+      await app.close();
+      await rm(storyStorageRoot, { recursive: true, force: true });
     }
   });
 });

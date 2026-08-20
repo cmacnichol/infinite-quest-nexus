@@ -71,6 +71,8 @@ import type { AcceptedTurnCorrectionRequest, AcceptedTurnCorrectionView } from "
 import type { z } from "zod";
 import { createNexusHttpClient } from "./http-client.js";
 import type { HttpMethod, JsonRequestSpec, NexusHttpClientOptions } from "./http-client.js";
+import { createIllustrationApi } from "./illustration-api.js";
+import type { IllustrationApi } from "./illustration-api.js";
 
 export interface WorldApi {
   list(signal?: AbortSignal): Promise<WorldListResponse>;
@@ -80,8 +82,10 @@ export interface WorldApi {
 
 export interface CampaignApi {
   list(signal?: AbortSignal): Promise<CampaignListResponse>;
+  readableExport(campaignId: string, format: "markdown" | "html", signal?: AbortSignal): Promise<Blob>;
   turns(campaignId: string, options?: TurnPageRequest | AbortSignal, signal?: AbortSignal): Promise<TurnListResponse>;
   state(campaignId: string, turnNumber?: number, signal?: AbortSignal): Promise<CampaignRuntimeStateResponse>;
+  inspectState(campaignId: string, turnNumber: number, signal?: AbortSignal): Promise<CampaignRuntimeStateResponse>;
   updateState(campaignId: string, request: CampaignRuntimeStateUpdate, signal?: AbortSignal): Promise<CampaignRuntimeStateResponse>;
   getTurnCorrection(campaignId: string, turnId: string, signal?: AbortSignal): Promise<AcceptedTurnCorrectionView>;
   correctTurnNarration(campaignId: string, turnId: string, request: Omit<AcceptedTurnCorrectionRequest, "turnId">, signal?: AbortSignal): Promise<AcceptedTurnCorrectionView>;
@@ -118,6 +122,7 @@ export interface GenerationApi {
 export interface NexusApiClient {
   campaigns: CampaignApi;
   generation: GenerationApi;
+  illustrations: IllustrationApi;
   worlds: WorldApi;
   meta: ShellApi;
   session: SessionApi;
@@ -160,6 +165,7 @@ function withSignal<T>(
 
 export function createNexusApiClient(options: NexusHttpClientOptions): NexusApiClient {
   const http = createNexusHttpClient(options);
+  const illustrations = createIllustrationApi(http);
 
   const worlds: WorldApi = {
     list: (signal) => http.request(withSignal({ method: "GET", path: "/worlds", responseSchema: worldListResponseSchema }, signal)),
@@ -177,6 +183,13 @@ export function createNexusApiClient(options: NexusHttpClientOptions): NexusApiC
   };
   const campaigns: CampaignApi = {
     list: (signal) => http.request(withSignal({ method: "GET", path: "/campaigns", responseSchema: campaignListResponseSchema }, signal)),
+    readableExport: (campaignId, format, signal) => http.request({
+      method: "GET",
+      path: `/campaigns/${encodedPathSegment(campaignId)}/readable-export?format=${format}`,
+      accept: format === "markdown" ? "text/markdown" : "text/html",
+      responseKind: "blob",
+      ...(signal ? { signal } : {})
+    }),
     turns: (campaignId, options, signal) => {
       const [page, resolvedSignal] = splitOptions<TurnPageRequest>(options, signal);
       const request = validatedRequest(turnPageRequestSchema, page || {}, "GET", `/campaigns/${encodedPathSegment(campaignId)}/turns`);
@@ -192,6 +205,11 @@ export function createNexusApiClient(options: NexusHttpClientOptions): NexusApiC
     state: (campaignId, turnNumber, signal) => http.request(withSignal({
       method: "GET",
       path: `/campaigns/${encodedPathSegment(campaignId)}/state${turnNumber === undefined ? "" : `?turnNumber=${encodeURIComponent(String(turnNumber))}`}`,
+      responseSchema: campaignRuntimeStateResponseSchema
+    }, signal)),
+    inspectState: (campaignId, turnNumber, signal) => http.request(withSignal({
+      method: "GET",
+      path: `/campaigns/${encodedPathSegment(campaignId)}/state/inspection?turnNumber=${encodeURIComponent(String(turnNumber))}`,
       responseSchema: campaignRuntimeStateResponseSchema
     }, signal)),
     async updateState(campaignId, request, signal) {
@@ -302,5 +320,5 @@ export function createNexusApiClient(options: NexusHttpClientOptions): NexusApiC
     list: (signal) => http.request(withSignal({ method: "GET", path: "/providers", responseSchema: providerListResponseSchema }, signal))
   };
 
-  return { campaigns, generation, worlds, meta, session, providers };
+  return { campaigns, generation, illustrations, worlds, meta, session, providers };
 }

@@ -9,16 +9,21 @@ import { mountWorldCreationPage } from "./world-creation-page";
 import { worldIdFromPath } from "./world-editor-model";
 import { mountWorldEditorPage } from "./world-editor-page";
 import { mountWorldLibraryPage, type MountedPage } from "./world-library-page";
+import { mountStoryPlayerPage } from "./story-player-page";
+import { storyRouteFromLocation } from "./story-route";
 
 const root = document.querySelector<HTMLElement>("#app");
 if (!root) throw new Error("The replacement app root is missing.");
 
 const characterSessionKey = characterSessionKeyFromPath(window.location.pathname);
+const storyRoute = storyRouteFromLocation(window.location.pathname, window.location.search);
 const campaignRoute = campaignRouteFromPath(window.location.pathname);
 const worldId = worldIdFromPath(window.location.pathname);
 const mountedPage: MountedPage = characterSessionKey !== null
   ? mountCharacterWorkspacePage(root, characterSessionKey)
-  : campaignRoute !== null
+  : storyRoute !== null
+    ? mountStoryPlayerPage(root, storyRoute)
+    : campaignRoute !== null
     ? mountCampaignEditorPage(root, campaignRoute)
   : isWorldCreationPath(window.location.pathname)
     ? mountWorldCreationPage(root, { generateWorldPreview })

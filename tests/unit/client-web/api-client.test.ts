@@ -1,4 +1,4 @@
-import { describe, expect, expectTypeOf, it } from "vitest";
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
   createNexusApiClient,
   createNoopSessionPort
@@ -7,6 +7,7 @@ import { validatedRequest } from "../../../packages/client-web/src/api-client.js
 import type {
   CampaignApi,
   GenerationApi,
+  IllustrationApi,
   NexusApiClient,
   WorldApi
 } from "../../../packages/client-web/src/index.js";
@@ -77,10 +78,10 @@ describe("createNexusApiClient", () => {
     const generation: GenerationApiPort = client.generation;
 
     expect(generation).toBe(client.generation);
-    expect(Object.keys(client).sort()).toEqual(["campaigns", "generation", "meta", "providers", "session", "worlds"]);
+    expect(Object.keys(client).sort()).toEqual(["campaigns", "generation", "illustrations", "meta", "providers", "session", "worlds"]);
     expect(Object.keys(client.worlds).sort()).toEqual(["create", "list", "playableCharacters"]);
     expect(Object.keys(client.campaigns).sort()).toEqual([
-      "branch", "classifyTurnInput", "correctTurnNarration", "create", "getTurnCorrection", "list", "rewind", "state", "turns", "updateState"
+      "branch", "classifyTurnInput", "correctTurnNarration", "create", "getTurnCorrection", "inspectState", "list", "readableExport", "rewind", "state", "turns", "updateState"
     ]);
     expect(Object.keys(client.generation).sort()).toEqual([
       "cancel",
@@ -95,6 +96,38 @@ describe("createNexusApiClient", () => {
     expectTypeOf<NexusApiClient["worlds"]>().toEqualTypeOf<WorldApi>();
     expectTypeOf<NexusApiClient["campaigns"]>().toEqualTypeOf<CampaignApi>();
     expectTypeOf<NexusApiClient["generation"]>().toEqualTypeOf<GenerationApi>();
+    expectTypeOf<NexusApiClient["illustrations"]>().toEqualTypeOf<IllustrationApi>();
+  });
+
+  it("downloads readable Story exports through the authenticated Campaign API adapter", async () => {
+    const authorization = vi.fn().mockResolvedValue({ authorization: "Bearer replacement-session" });
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response("# Accepted story", {
+      status: 200,
+      headers: { "content-type": "text/markdown;charset=utf-8" }
+    }));
+    const signal = new AbortController().signal;
+    const client = createNexusApiClient({
+      basePath: "/api/v1",
+      session: { authorization, onUnauthorized: vi.fn().mockResolvedValue(false) },
+      fetchImpl
+    });
+
+    const body = await client.campaigns.readableExport("campaign / id", "markdown", signal);
+
+    expect(await body.text()).toBe("# Accepted story");
+    expect(authorization).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "/api/v1/campaigns/campaign%20%2F%20id/readable-export?format=markdown",
+      expect.objectContaining({
+        method: "GET",
+        cache: "no-store",
+        signal,
+        headers: expect.any(Headers)
+      })
+    );
+    const headers = fetchImpl.mock.calls[0]?.[1]?.headers as Headers;
+    expect(headers.get("authorization")).toBe("Bearer replacement-session");
+    expect(headers.get("accept")).toBe("text/markdown");
   });
 
   it("exposes the typed Story Player projection and action surface instead of a generic request escape hatch", () => {
@@ -104,6 +137,7 @@ describe("createNexusApiClient", () => {
     const shell = client as unknown as Record<string, unknown>;
 
     expect(typeof campaigns.state).toBe("function");
+    expect(typeof campaigns.inspectState).toBe("function");
     expect(typeof campaigns.updateState).toBe("function");
     expect(typeof campaigns.getTurnCorrection).toBe("function");
     expect(typeof campaigns.correctTurnNarration).toBe("function");
@@ -135,6 +169,7 @@ describe("createNexusApiClient", () => {
       () => client.campaigns.turns("campaign / id", { before: "older-page", limit: 3 }, signal),
       () => client.campaigns.state("campaign / id", undefined, signal),
       () => client.campaigns.state("campaign / id", 3, signal),
+      () => client.campaigns.inspectState("campaign / id", 3, signal),
       () => client.campaigns.updateState(campaignId, {
         expectedTurnNumber: 3,
         expectedRevision: 2,
@@ -169,7 +204,15 @@ describe("createNexusApiClient", () => {
       () => client.meta.get(signal),
       () => client.session.get(signal),
       () => client.session.updateProfile({ displayName: "Initial Owner" }, signal),
-      () => client.providers.list(signal)
+      () => client.providers.list(signal),
+      () => client.illustrations.config("campaign / id", signal),
+      () => client.illustrations.segments("campaign / id", signal),
+      () => client.illustrations.imageJobs("campaign / id", signal),
+      () => client.illustrations.retryImageJob("job / id", signal),
+      () => client.illustrations.regenerateSegmentImage("segment / id", { prompt: "A quiet road", variantIndex: 0 }, signal),
+      () => client.illustrations.generateTurnSegments("turn / id", { mode: "missing", idempotencyKey: jobId }, signal),
+      () => client.illustrations.resolution("turn / id", signal),
+      () => client.illustrations.rematch("turn / id", signal)
     ];
 
     for (const call of calls) expectResponseSchemaError(await call().catch((error: unknown) => error));
@@ -184,6 +227,7 @@ describe("createNexusApiClient", () => {
       "/api/v1/campaigns/campaign%20%2F%20id/turns?before=older-page&limit=3",
       "/api/v1/campaigns/campaign%20%2F%20id/state",
       "/api/v1/campaigns/campaign%20%2F%20id/state?turnNumber=3",
+      "/api/v1/campaigns/campaign%20%2F%20id/state/inspection?turnNumber=3",
       `/api/v1/campaigns/${campaignId}/state`,
       `/api/v1/campaigns/${campaignId}/turns/${worldVersionId}/correction`,
       `/api/v1/campaigns/${campaignId}/turns/${worldVersionId}/correction`,
@@ -202,15 +246,26 @@ describe("createNexusApiClient", () => {
       "/api/v1/meta",
       "/api/v1/session",
       "/api/v1/users/me/profile",
-      "/api/v1/providers"
+      "/api/v1/providers",
+      "/api/v1/campaigns/campaign%20%2F%20id/illustration-config",
+      "/api/v1/campaigns/campaign%20%2F%20id/illustration-segments",
+      "/api/v1/campaigns/campaign%20%2F%20id/image-jobs",
+      "/api/v1/image-jobs/job%20%2F%20id/retry",
+      "/api/v1/illustration-segments/segment%20%2F%20id/images",
+      "/api/v1/turns/turn%20%2F%20id/illustration-segments",
+      "/api/v1/turns/turn%20%2F%20id/illustration-resolution",
+      "/api/v1/turns/turn%20%2F%20id/illustration-match"
     ]);
     expect(queue.options.map((option) => option.method)).toEqual([
-      "GET", "POST", "GET", "GET", "POST", "GET", "GET", "GET", "GET", "PATCH", "GET", "PATCH", "POST", "POST", "POST",
-      "GET", "GET", "POST", "POST", "GET", "GET", "POST", "POST", "POST", "GET", "GET", "PATCH", "GET"
+      "GET", "POST", "GET", "GET", "POST", "GET", "GET", "GET", "GET", "GET", "PATCH", "GET", "PATCH", "POST", "POST", "POST",
+      "GET", "GET", "POST", "POST", "GET", "GET", "POST", "POST", "POST", "GET", "GET", "PATCH", "GET",
+      "GET", "GET", "GET", "POST", "POST", "POST", "GET", "POST"
     ]);
-    expect(queue.options[17]?.body).toBe(JSON.stringify(generationRequest));
-    expect(queue.options[18]?.body).toBe(JSON.stringify(replacementRequest));
-    expect(queue.options.slice(21, 24).map((option) => option.body)).toEqual([undefined, undefined, undefined]);
+    expect(queue.options[18]?.body).toBe(JSON.stringify(generationRequest));
+    expect(queue.options[19]?.body).toBe(JSON.stringify(replacementRequest));
+    expect(queue.options.slice(22, 25).map((option) => option.body)).toEqual([undefined, undefined, undefined]);
+    expect(queue.options[33]?.body).toBe(JSON.stringify({ prompt: "A quiet road", variantIndex: 0 }));
+    expect(queue.options[34]?.body).toBe(JSON.stringify({ mode: "missing", idempotencyKey: jobId }));
     expect(queue.options.every((option) => option.signal === signal)).toBe(true);
   });
 

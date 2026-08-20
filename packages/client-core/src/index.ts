@@ -42,6 +42,27 @@ export { createGenerationWorkflow } from "./generation/workflow.js";
 export { GenerationWorkflowProtocolError } from "./generation/types.js";
 export { formatChronicleRetrievalAudit } from "./chronicle-retrieval-audit.js";
 export type { ChronicleRetrievalAuditPresentation } from "./chronicle-retrieval-audit.js";
+export {
+  createChoiceDraftSelection,
+  resetChoiceDraftSelection,
+  toggleChoiceDraftSelection,
+  turnInputModeForControlStyle
+} from "./story-input.js";
+export type {
+  ChoiceDraftSelection,
+  ChoiceDraftSelectionResult,
+  StoryTurnInputMode
+} from "./story-input.js";
+export {
+  activeTurnNumber,
+  appendExpectedTurnNumber,
+  latestTurnNumber,
+  recentTurnSpine,
+  selectedTurnNumber,
+  turnIndexForNumber,
+  undoTargetTurnNumber
+} from "./story-turn-window.js";
+export type { StoryCampaignWindow, StoryTurn } from "./story-turn-window.js";
 export type {
   GenerationEvent,
   GenerationRun,

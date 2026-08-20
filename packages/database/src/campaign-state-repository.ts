@@ -5,6 +5,7 @@ import {
   campaignRuntimeStateSchema,
   campaignRuntimeStateUpdateSchema,
   playerCampaignConfigSchema,
+  recordedResolutionSchema,
   PUBLIC_GENERATION_FAILURE_CODE,
   PUBLIC_GENERATION_FAILURE_MESSAGE,
   type CampaignRuntimeStateContent
@@ -190,6 +191,21 @@ function objectValue(value: unknown): Record<string, unknown> {
     : {};
 }
 
+function publicRecordedResolution(value: unknown) {
+  const roll = objectValue(objectValue(value).roll);
+  const parsed = recordedResolutionSchema.safeParse({
+    statName: roll.statName,
+    base: roll.base,
+    modifier: roll.modifier,
+    target: roll.target,
+    roll: roll.roll,
+    success: roll.success,
+    margin: roll.margin,
+    difficultyLabel: roll.difficultyLabel
+  });
+  return parsed.success ? parsed.data : null;
+}
+
 function persistedTrackers(value: unknown): unknown {
   if (!Array.isArray(value)) return value;
   return value.some((entry) => entry && typeof entry === "object" && "id" in entry)
@@ -297,6 +313,7 @@ async function loadRuntimeState(
   client: DatabaseClient | DatabasePool,
   scope: CampaignScope,
   requestedTurnNumber?: number,
+  includeRecordedResolution = false,
 ) {
   const row = await loadStateRow(client, scope);
   if (!row) {
@@ -313,8 +330,12 @@ async function loadRuntimeState(
     });
   }
   const historical = viewedTurnNumber > 0
-    ? await client.query<{ stateSnapshotPrivate: Record<string, unknown>; acceptedAt: Date | string }>(
-      `SELECT state_snapshot_private AS "stateSnapshotPrivate", accepted_at AS "acceptedAt"
+    ? await client.query<{ stateSnapshotPrivate: Record<string, unknown>; mechanicsPrivate?: unknown; acceptedAt: Date | string }>(
+      includeRecordedResolution
+        ? `SELECT state_snapshot_private AS "stateSnapshotPrivate", mechanics_private AS "mechanicsPrivate", accepted_at AS "acceptedAt"
+         FROM turns
+        WHERE owner_user_id = $1 AND campaign_id = $2 AND turn_number = $3`
+        : `SELECT state_snapshot_private AS "stateSnapshotPrivate", accepted_at AS "acceptedAt"
          FROM turns
         WHERE owner_user_id = $1 AND campaign_id = $2 AND turn_number = $3`,
       [scope.ownerUserId, scope.campaignId, viewedTurnNumber]
@@ -360,6 +381,9 @@ async function loadRuntimeState(
     isCurrent: viewedTurnNumber === row.activeTurnNumber,
     revision: row.revision,
     updatedAt: exactEdit?.createdAt ?? historical?.rows[0]?.acceptedAt ?? row.updatedAt,
+    recordedResolution: includeRecordedResolution && viewedTurnNumber > 0
+      ? publicRecordedResolution(historical?.rows[0]?.mechanicsPrivate)
+      : null,
     ...content
   }, "unavailable", scope);
 }
@@ -387,8 +411,8 @@ function createPostgresCampaignStateRepository(
       };
     },
 
-    async getCampaignRuntimeState(transaction, scope, requestedTurnNumber) {
-      return loadRuntimeState(worldCampaignDatabaseClient(transaction), scope, requestedTurnNumber);
+    async getCampaignRuntimeState(transaction, scope, requestedTurnNumber, includeRecordedResolution = false) {
+      return loadRuntimeState(worldCampaignDatabaseClient(transaction), scope, requestedTurnNumber, includeRecordedResolution);
     },
 
     async updateCampaignRuntimeState(transaction, scope, request) {

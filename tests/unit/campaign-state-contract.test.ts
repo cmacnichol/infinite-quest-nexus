@@ -45,8 +45,46 @@ describe("complete campaign runtime state", () => {
       canonicalFacts: [{
         id: "00000000-0000-4000-8000-000000000002",
         content: "The lens is made of moon glass."
-      }]
+      }],
+      recordedResolution: {
+        statName: "Resolve",
+        base: 61,
+        modifier: -10,
+        target: 51,
+        roll: 37,
+        success: true,
+        margin: 14,
+        difficultyLabel: "hard"
+      }
     }).canonicalFacts[0]?.id).toBe("00000000-0000-4000-8000-000000000002");
+  });
+
+  it("returns only the safe recorded resolution fields for an inspected turn", () => {
+    const state = campaignRuntimeStateSchema.parse({
+      campaignId: "00000000-0000-4000-8000-000000000001",
+      activeTurnNumber: 4,
+      viewedTurnNumber: 3,
+      isCurrent: false,
+      revision: 7,
+      updatedAt: new Date().toISOString(),
+      ...fullState,
+      recordedResolution: {
+        statName: "Resolve",
+        base: 61,
+        modifier: -10,
+        target: 51,
+        roll: 37,
+        success: true,
+        margin: 14,
+        difficultyLabel: "hard",
+        rationale: "Private referee rationale must not cross the boundary."
+      }
+    });
+
+    expect(state.recordedResolution).toEqual({
+      statName: "Resolve", base: 61, modifier: -10, target: 51, roll: 37,
+      success: true, margin: 14, difficultyLabel: "hard"
+    });
   });
 
   it("rejects invalid nested mechanics and empty list entries", () => {

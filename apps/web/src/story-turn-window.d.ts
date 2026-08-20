@@ -12,3 +12,4 @@ export function undoTargetTurnNumber(campaign: Partial<StoryCampaignWindow> | nu
 export function latestTurnNumber(turns: readonly StoryTurn[]): number | null;
 export function selectedTurnNumber(turns: readonly StoryTurn[], index: number | null | undefined): number | null;
 export function turnIndexForNumber(turns: readonly StoryTurn[], turnNumber: number | null): number;
+export function recentTurnSpine<T extends { turnNumber: number }>(turns: readonly T[], count?: number): readonly T[];

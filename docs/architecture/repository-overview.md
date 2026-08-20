@@ -14,6 +14,22 @@ The product domains are:
 
 The legacy `index.html` application no longer needs to be kept in parity with the new application (`apps/web`). It is kept for reference only now.
 
+## Story interface coexistence
+
+The active player transition is additive. The Fastify service continues to
+serve the legacy Story Player at `/story` and `/story/:campaignId`, while the
+replacement Fold-out Story interface is served by the replacement SPA at
+`/app/story` and `/app/story/:campaignId`. These surfaces must remain separate:
+neither route redirects to the other during the transition.
+
+The replacement page owns transient reader, navigation, dialog, and draft
+presentation state. It composes shared turn-input and turn-window policies from
+`@infinite-quest/client-core` with typed browser adapters from
+`@infinite-quest/client-web`; campaigns, accepted turns, state, generation
+jobs, and image jobs remain server-authoritative. Remove or redirect the legacy
+route only after the disposable-runtime coexistence checklist records parity for
+both surfaces against the same campaign.
+
 ## Naming
 
 Use **Infinite Quest Nexus** for the platform and **Infinite Quest** for the player-facing story experience. Use the domain names World Library, Campaigns, Chronicle, and Story Engine in UI and architecture documentation.

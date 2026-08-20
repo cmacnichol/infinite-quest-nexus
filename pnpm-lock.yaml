@@ -109,6 +109,9 @@ importers:
       '@infinite-quest/client-core':
         specifier: workspace:*
         version: link:../../packages/client-core
+      '@infinite-quest/client-web':
+        specifier: workspace:*
+        version: link:../../packages/client-web
     devDependencies:
       vite:
         specifier: ^7.3.6

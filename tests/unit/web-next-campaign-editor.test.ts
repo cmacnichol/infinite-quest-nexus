@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { campaignApi, CampaignEditorApiError, loadCampaign } from "../../apps/web-next/src/campaign-editor-api.js";
 import * as campaignEditorPageModule from "../../apps/web-next/src/campaign-editor-page.js";
 import { CAMPAIGN_SECTIONS, campaignEditorPath, campaignRouteFromPath, campaignStateInspectorMarkup, escapeCampaignText, firstNarrationSentence, narrationCorrectionDialogMarkup, withCampaignActionState } from "../../apps/web-next/src/campaign-editor-model.js";
+import { storyPlayerPath } from "../../apps/web-next/src/story-route.js";
 import { DEDICATED_CHUNKED_AUDIT, TEXT_FALLBACK_LEGACY_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
 
 const campaignEditorPage = campaignEditorPageModule as Record<string, unknown>;
@@ -29,6 +30,21 @@ describe("web-next campaign editor routing", () => {
     expect(firstNarrationSentence("  The gate opens. Beyond it, the road disappears!  ")).toBe("The gate opens.");
     expect(firstNarrationSentence("A single sentence without punctuation")).toBe("A single sentence without punctuation");
     expect(firstNarrationSentence("")).toBe("No narration recorded.");
+  });
+
+  it("builds replacement Story links through the shared encoded route helper", () => {
+    const markup = campaignEditorPage.historyMarkup;
+    expect(typeof markup).toBe("function");
+    if (typeof markup !== "function") return;
+
+    const campaignId = "campaign / one";
+    const route = storyPlayerPath(campaignId, 28);
+    const html = (markup as (value: Record<string, unknown>, campaign: Record<string, unknown>) => string)({
+      campaignId,
+      turns: [{ id: "turn-28", turnNumber: 28, acceptedAt: "2026-08-17T00:00:00.000Z", action: "Look", narration: "The harbor waits." }]
+    }, { activeTurnNumber: 28 });
+
+    expect(html).toContain(`href="${route}"`);
   });
 
   it("renders the same recorded and Unknown Chronicle retrieval details as labelled escaped History metadata", () => {
