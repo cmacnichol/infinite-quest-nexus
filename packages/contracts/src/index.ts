@@ -1,6 +1,7 @@
 export * from "./imports.js";
 export * from "./memory.js";
 export * from "./generation.js";
+export * from "./story-settings.js";
 export * from "./http.js";
 export * from "./client-api.js";
 export * from "./prompt-library.js";
