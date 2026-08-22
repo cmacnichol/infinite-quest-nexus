@@ -307,6 +307,25 @@ describe("generation contracts", () => {
   });
 
   describe("generationRequestSchema", () => {
+    it("accepts only an existing story-length profile as a per-turn override", () => {
+      expect(generationRequestSchema.parse({
+        action: "Cross the observatory.",
+        idempotencyKey: "override-request-1",
+        storyLengthProfileOverride: "long"
+      }).storyLengthProfileOverride).toBe("long");
+
+      expect(generationRequestSchema.parse({
+        action: "Cross the observatory.",
+        idempotencyKey: "override-request-2"
+      }).storyLengthProfileOverride).toBeUndefined();
+
+      expect(generationRequestSchema.safeParse({
+        action: "Cross the observatory.",
+        idempotencyKey: "override-request-3",
+        storyLengthProfileOverride: "marathon"
+      }).success).toBe(false);
+    });
+
     it("applies defaults to context", () => {
       const input = {
         action: "generate_story",
