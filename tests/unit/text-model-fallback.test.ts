@@ -64,9 +64,19 @@ describe("text model fallback", () => {
 
   it.each([
     ["rate_limit", "rate_limit", true],
+    ["provider_overloaded", "provider_unavailable", true],
+    ["provider_unavailable", "provider_unavailable", true],
+    ["service_unavailable", "provider_unavailable", true],
     ["authentication", "authentication", false],
     ["invalid_request", "invalid_request", false],
     ["cancelled", "cancelled", false],
+    ["model_unavailable", "model_unavailable", false],
+    ["context_length_exceeded", "context_length", false],
+    ["request_timeout", "request_timeout", false],
+    ["transport_failure", "transport_failure", false],
+    ["content_policy_violation", "content_policy_violation", false],
+    ["refusal", "refusal", false],
+    ["empty_response", "empty_response", false],
     ["unrecognized_upstream_type", "unknown_failure", false],
     [400, "invalid_request", false],
     [401, "authentication", false]
@@ -74,14 +84,14 @@ describe("text model fallback", () => {
     const failure = normalizeSseFailure(machineType, "2");
     const terminal = new ProviderSseTerminalError(failure);
     expect(normalizeModelFailure(terminal).reason).toBe(expectedReason);
-    expect(shouldAdvanceModel({ reason: failure.reason, emittedOutput: false })).toBe(advance);
+    expect(shouldAdvanceModel({ ...failure, emittedOutput: false })).toBe(advance);
     if (advance) expect(failure.retryAfterMs).toBe(2_000);
   });
 
   it("gives a numeric SSE error code precedence over an eligible metadata type", () => {
     const failure = normalizeSseFailure("rate_limit", "2", { code: 401 });
-    expect(failure).toEqual({ reason: "authentication" });
-    expect(shouldAdvanceModel({ reason: failure.reason, emittedOutput: false })).toBe(false);
+    expect(failure).toMatchObject({ reason: "authentication", advanceEligible: false });
+    expect(shouldAdvanceModel({ ...failure, emittedOutput: false })).toBe(false);
   });
 
   it("sends an ordered OpenRouter models request without model and records the served model", async () => {

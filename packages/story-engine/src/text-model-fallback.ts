@@ -43,6 +43,8 @@ export type ProviderModelPlan = Readonly<{
 export type NormalizedModelFailure = Readonly<{
   reason: ModelFallbackReason;
   retryAfterMs?: number;
+  /** SSE terminal events can forbid an otherwise generally retryable reason from advancing. */
+  advanceEligible?: boolean;
 }>;
 
 const advanceReasons = new Set<ModelFallbackReason>([
@@ -57,8 +59,8 @@ const advanceReasons = new Set<ModelFallbackReason>([
   "empty_response"
 ]);
 
-export function shouldAdvanceModel(input: Readonly<{ reason: ModelFallbackReason; emittedOutput: boolean }>): boolean {
-  return !input.emittedOutput && advanceReasons.has(input.reason);
+export function shouldAdvanceModel(input: Readonly<{ reason: ModelFallbackReason; emittedOutput: boolean; advanceEligible?: boolean }>): boolean {
+  return !input.emittedOutput && input.advanceEligible !== false && advanceReasons.has(input.reason);
 }
 
 export function configuredTextModels(plan: ProviderModelPlan): readonly string[] {
@@ -127,6 +129,11 @@ function withRetryHint(reason: ModelFallbackReason, value: unknown): NormalizedM
   return retryAfter === undefined ? { reason } : { reason, retryAfterMs: retryAfter };
 }
 
+function sseFailure(reason: ModelFallbackReason, retryAfter: unknown, advanceEligible: boolean): NormalizedModelFailure {
+  const normalized = withRetryHint(reason, retryAfter);
+  return { ...normalized, advanceEligible };
+}
+
 function errorChain(error: unknown): Record<string, unknown>[] {
   const chain: Record<string, unknown>[] = [];
   let current = error;
@@ -162,12 +169,12 @@ export function normalizeSseFailure(
   const statusCode = Number(statusValue);
 
   if (["cancelled", "canceled", "aborted", "abort_err", "und_err_aborted"].includes(machineType)
-    || ["cancelled", "canceled", "aborted", "abort_err", "und_err_aborted"].includes(code)) return { reason: "cancelled" };
-  if (statusCode === 401 || statusCode === 403) return { reason: "authentication" };
-  if (statusCode === 408 || statusCode === 504) return withRetryHint("request_timeout", retryAfter);
-  if (statusCode === 429) return withRetryHint("rate_limit", retryAfter);
-  if (Number.isFinite(statusCode) && statusCode >= 400 && statusCode < 500) return { reason: "invalid_request" };
-  if (Number.isFinite(statusCode) && statusCode >= 500) return withRetryHint("provider_unavailable", retryAfter);
+    || ["cancelled", "canceled", "aborted", "abort_err", "und_err_aborted"].includes(code)) return sseFailure("cancelled", retryAfter, false);
+  if (statusCode === 401 || statusCode === 403) return sseFailure("authentication", retryAfter, false);
+  if (statusCode === 408 || statusCode === 504) return sseFailure("request_timeout", retryAfter, false);
+  if (statusCode === 429) return sseFailure("rate_limit", retryAfter, true);
+  if (Number.isFinite(statusCode) && statusCode >= 400 && statusCode < 500) return sseFailure("invalid_request", retryAfter, false);
+  if (Number.isFinite(statusCode) && statusCode >= 500) return sseFailure("provider_unavailable", retryAfter, true);
 
   const terminalReasons: Readonly<Record<string, ModelFallbackReason>> = {
     authentication: "authentication",
@@ -180,15 +187,21 @@ export function normalizeSseFailure(
     cancelled: "cancelled",
     canceled: "cancelled"
   };
-  if (machineType in terminalReasons) return { reason: terminalReasons[machineType]! };
+  if (machineType in terminalReasons) return sseFailure(terminalReasons[machineType]!, retryAfter, false);
 
   const advanceReasonsByMachineType: Readonly<Record<string, ModelFallbackReason>> = {
     rate_limit: "rate_limit",
     rate_limited: "rate_limit",
     rate_limit_exceeded: "rate_limit",
+    provider_overloaded: "provider_unavailable",
     provider_unavailable: "provider_unavailable",
     service_unavailable: "provider_unavailable",
-    overloaded: "provider_unavailable",
+    service_overloaded: "provider_unavailable"
+  };
+  const advanceReason = advanceReasonsByMachineType[machineType];
+  if (advanceReason !== undefined) return sseFailure(advanceReason, retryAfter, true);
+
+  const terminalSseReasons: Readonly<Record<string, ModelFallbackReason>> = {
     model_unavailable: "model_unavailable",
     model_not_found: "model_unavailable",
     context_length: "context_length",
@@ -201,8 +214,10 @@ export function normalizeSseFailure(
     refusal: "refusal",
     empty_response: "empty_response"
   };
-  const reason = advanceReasonsByMachineType[machineType];
-  return reason === undefined ? { reason: "unknown_failure" } : withRetryHint(reason, retryAfter);
+  const terminalReason = terminalSseReasons[machineType];
+  return terminalReason === undefined
+    ? sseFailure("unknown_failure", retryAfter, false)
+    : sseFailure(terminalReason, retryAfter, false);
 }
 
 /** Converts provider failures into durable-safe routing facts without retaining upstream bodies or credentials. */

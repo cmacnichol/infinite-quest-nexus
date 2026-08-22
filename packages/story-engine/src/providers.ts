@@ -1202,7 +1202,10 @@ export async function callTextProvider(
       const attempt = failedAttempt(model, normalized.reason, emittedOutput, normalized.retryAfterMs);
       attempts.push(attempt);
       if (emittedOutput) throw new ProviderStreamInterruptedError(attempts, normalized.retryAfterMs);
-      if (shouldAdvanceModel({ reason: normalized.reason, emittedOutput }) && index < candidates.length - 1) continue;
+      const advanceInput = normalized.advanceEligible === undefined
+        ? { reason: normalized.reason, emittedOutput }
+        : { reason: normalized.reason, emittedOutput, advanceEligible: normalized.advanceEligible };
+      if (shouldAdvanceModel(advanceInput) && index < candidates.length - 1) continue;
       if (error instanceof ProviderDestinationNotAllowedError
         || error instanceof ProviderResponseTooLargeError) throw error;
       if (error instanceof ProviderRequestCancelledError) throw error;
