@@ -431,10 +431,11 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
       await new Promise((resolve) => setTimeout(resolve, 0));
 
-      expect(workflow.submit).toHaveBeenLastCalledWith("campaign-1", expect.objectContaining({
+      expect(workflow.submit).toHaveBeenCalledTimes(2);
+      expect(workflow.submit.mock.calls[1]).toEqual(["campaign-1", expect.objectContaining({
         operationKind: "replace_latest",
         request: expect.objectContaining({ storyLengthProfileOverride: "brief" })
-      }));
+      })]);
       expect(retryDialog.hasAttribute("open")).toBe(false);
       expect(retryLength.value).toBe("");
     } finally {
