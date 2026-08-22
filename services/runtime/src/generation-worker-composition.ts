@@ -58,7 +58,8 @@ export function createGenerationExecutionCollaborators(
         routingSource: routing.routingSource,
         model: routing.requestedModel,
         fallbackModels: routing.configuredModels.slice(1),
-        preset: routing.presetSlug === null || routing.presetVersion === null || routing.presetConfigHash === null
+        preset: routing.presetSlug === null || routing.presetDesignatedVersionId === null
+          || routing.presetVersion === null || routing.presetConfigHash === null
           ? null
           : {
               slug: routing.presetSlug,

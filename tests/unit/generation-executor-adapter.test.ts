@@ -397,10 +397,16 @@ describe("generation executor adapter", () => {
   });
 
   it("records exhausted model plans as a redacted recoverable outcome without accepting state", async () => {
-    const { repository, collaborators, execute } = failureHarness(new ProviderModelFallbackExhaustedError([
+    const failure = new ProviderModelFallbackExhaustedError([
       { model: "primary-model", outcome: "failed", reason: "provider_unavailable", emittedOutput: false },
       { model: "fallback-model", outcome: "refused", reason: "refusal", emittedOutput: false }
-    ]));
+    ]);
+    Object.assign(failure, {
+      prompt: "PROMPT_MARKER_MUST_NOT_PERSIST",
+      credential: "CREDENTIAL_MARKER_MUST_NOT_PERSIST",
+      providerBody: "RAW_PROVIDER_BODY_MARKER_MUST_NOT_PERSIST"
+    });
+    const { repository, collaborators, execute } = failureHarness(failure);
 
     await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
       .execute({ workerId: "worker-a", leaseSeconds: 30, claim })).resolves.toBe(true);
@@ -421,9 +427,23 @@ describe("generation executor adapter", () => {
       }
     }));
     const attempt = (repository.recordAttempt as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(attempt.responseMetadata).toEqual(expect.objectContaining({ modelRouting: expect.any(Object) }));
-    expect(JSON.stringify(attempt.responseMetadata)).not.toContain("credential");
-    expect(JSON.stringify(attempt.responseMetadata)).not.toContain("provider body");
+    expect(attempt.responseMetadata).toEqual({
+      modelRouting: {
+        strategy: "sequential",
+        configuredModels: ["primary-model", "fallback-model"],
+        resolvedModel: null,
+        fallbackUsed: false,
+        emittedOutput: false,
+        attempts: [
+          { model: "primary-model", outcome: "failed", reason: "provider_unavailable", emittedOutput: false },
+          { model: "fallback-model", outcome: "refused", reason: "refusal", emittedOutput: false }
+        ]
+      }
+    });
+    const persisted = JSON.stringify({ attempt: attempt.responseMetadata, recovery: (repository.markRecoverable as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] });
+    expect(persisted).not.toContain("PROMPT_MARKER_MUST_NOT_PERSIST");
+    expect(persisted).not.toContain("CREDENTIAL_MARKER_MUST_NOT_PERSIST");
+    expect(persisted).not.toContain("RAW_PROVIDER_BODY_MARKER_MUST_NOT_PERSIST");
   });
 
   it("preserves partial output and does not re-run another model after a stream interruption", async () => {
@@ -447,6 +467,30 @@ describe("generation executor adapter", () => {
           retryDisposition: "explicit_regeneration"
         })
       }
+    }));
+  });
+
+  it("maps an exhausted auxiliary RPG assessment plan through the same recoverable routing path", async () => {
+    const failure = new ProviderModelFallbackExhaustedError([
+      { model: "primary-model", outcome: "failed", reason: "provider_unavailable", emittedOutput: false },
+      { model: "fallback-model", outcome: "failed", reason: "provider_unavailable", emittedOutput: false }
+    ]);
+    const { job, repository, collaborators, execute } = failureHarness(failure);
+    job.orchestration_inputs = {
+      ...job.orchestration_inputs,
+      useRpgStats: true,
+      rpgStats: [{ id: "courage", name: "Courage", value: 70, note: "fixture" }]
+    };
+
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: "worker-a", leaseSeconds: 30, claim })).resolves.toBe(true);
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
+    expect(repository.markFailed).not.toHaveBeenCalled();
+    expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({
+      errorCode: "model_plan_exhausted",
+      recoveryMetadata: { modelRouting: expect.objectContaining({ attemptedModels: ["primary-model", "fallback-model"] }) }
     }));
   });
 });
