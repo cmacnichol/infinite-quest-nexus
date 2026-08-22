@@ -26,6 +26,7 @@ import {
   type WorldGenerationCostPort,
   type WorldGenerationPromptPort
 } from "../../packages/application/src/providers/index.js";
+import { createProviderApplicationAdapter } from "../../services/api/src/provider-application-adapter.js";
 
 const owner = { ownerUserId: "00000000-0000-4000-8000-000000000001" } as const;
 
@@ -155,6 +156,34 @@ function dependencies(): ProviderApplicationDependencies {
 }
 
 describe("provider application contracts", () => {
+  it("discovers presets only through an OpenRouter text profile owned by the caller", async () => {
+    const runtime = {
+      discoverPresets: vi.fn(async () => ({ presets: [], totalCount: 0 })),
+      discoverCandidatePresetsWithCredential: vi.fn()
+    };
+    const application = {
+      listProfiles: vi.fn(async () => [{ ...textProfile, providerType: "openrouter" as const }])
+    };
+    const adapter = createProviderApplicationAdapter({ application, runtime, transaction: vi.fn() } as never);
+
+    await expect(adapter.presets(owner.ownerUserId, textProfile.id, { offset: 0, limit: 25 })).resolves.toEqual({ presets: [], totalCount: 0 });
+
+    expect(application.listProfiles).toHaveBeenCalledWith(owner);
+    expect(runtime.discoverPresets).toHaveBeenCalledWith(owner, textProfile.id, { offset: 0, limit: 25 });
+  });
+
+  it("rejects non-OpenRouter and non-text preset discovery profiles before calling runtime", async () => {
+    const runtime = { discoverPresets: vi.fn() };
+    const adapter = createProviderApplicationAdapter({
+      application: { listProfiles: vi.fn(async () => [textProfile]) },
+      runtime,
+      transaction: vi.fn()
+    } as never);
+
+    await expect(adapter.presets(owner.ownerUserId, textProfile.id, { offset: 0, limit: 25 }))
+      .rejects.toMatchObject({ statusCode: 400 });
+    expect(runtime.discoverPresets).not.toHaveBeenCalled();
+  });
   it("keeps owner authority explicit while delegating profile operations", async () => {
     const ports = dependencies();
     const application = createProviderApplication(ports);

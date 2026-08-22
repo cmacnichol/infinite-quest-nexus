@@ -2,7 +2,8 @@ import type {
   PromptTemplateKey,
   ProviderProfileInput,
   ProviderProfileUpdate,
-  ProviderTextRequest
+  ProviderTextRequest,
+  OpenRouterPresetSnapshot
 } from "../../../packages/contracts/src/index.js";
 import {
   toSafeProviderConfiguration,
@@ -14,7 +15,11 @@ import {
   type ProviderRole,
   type PromptScope
 } from "../../../packages/application/src/providers/index.js";
-import type { ProviderRequest, ProviderResult } from "../../../packages/story-engine/src/index.js";
+import type {
+  OpenRouterPresetSummary,
+  ProviderRequest,
+  ProviderResult
+} from "../../../packages/story-engine/src/index.js";
 
 type ApiRuntimeProviderAdapter = Readonly<{
   execution: Readonly<{
@@ -36,6 +41,26 @@ type ApiRuntimeProviderAdapter = Readonly<{
     candidate: ProviderCandidate,
     credential: string | null,
   ): Promise<ProviderModelInventory>;
+  discoverPresets(
+    scope: Readonly<{ ownerUserId: string }>,
+    providerProfileId: string,
+    page: Readonly<{ offset: number; limit: number }>,
+  ): Promise<Readonly<{ presets: readonly OpenRouterPresetSummary[]; totalCount: number }>>;
+  getPreset(
+    scope: Readonly<{ ownerUserId: string }>,
+    providerProfileId: string,
+    slug: string,
+  ): Promise<OpenRouterPresetSnapshot>;
+  discoverCandidatePresetsWithCredential(
+    candidate: ProviderCandidate,
+    credential: string | null,
+    page: Readonly<{ offset: number; limit: number }>,
+  ): Promise<Readonly<{ presets: readonly OpenRouterPresetSummary[]; totalCount: number }>>;
+  discoverCandidatePresetWithCredential(
+    candidate: ProviderCandidate,
+    credential: string | null,
+    slug: string,
+  ): Promise<OpenRouterPresetSnapshot>;
 }>;
 
 type ProviderApiComposition = Readonly<{
@@ -75,6 +100,33 @@ function profileResponse(
     hasApiKey: profile.hasCredential,
     createdAt: profile.createdAt,
     updatedAt: profile.updatedAt
+  };
+}
+
+function assertPresetProfile(profile: ProviderProfileView) {
+  if (profile.providerType !== "openrouter" || !["text", "intent"].includes(profile.providerRole)) {
+    throw Object.assign(new Error("OpenRouter preset discovery is available only for text and intent providers."), { statusCode: 400 });
+  }
+}
+
+function candidate(ownerUserId: string, input: ProviderProfileInput): ProviderCandidate {
+  if (input.providerType !== "openrouter" || !["text", "intent"].includes(input.providerRole)) {
+    throw Object.assign(new Error("OpenRouter preset discovery is available only for text and intent providers."), { statusCode: 400 });
+  }
+  return {
+    ownerUserId,
+    name: input.name,
+    providerType: input.providerType,
+    providerRole: input.providerRole,
+    baseUrl: input.baseUrl,
+    defaultModel: input.defaultModel,
+    contextWindowTokens: input.contextWindowTokens,
+    maxOutputTokens: input.maxOutputTokens,
+    temperature: input.temperature,
+    requestTimeoutMs: input.requestTimeoutMs,
+    configuration: toSafeProviderConfiguration(input.configuration),
+    enabled: input.enabled,
+    isDefault: input.isDefault
   };
 }
 
@@ -206,6 +258,30 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
         instanceId: model.id,
         contextLength: model.contextWindowTokens ?? 0
       }));
+    },
+
+    async presets(ownerUserId: string, providerProfileId: string, page: Readonly<{ offset: number; limit: number }>) {
+      const profile = (await composition.application.listProfiles({ ownerUserId }))
+        .find((candidate) => candidate.id === providerProfileId);
+      if (!profile) throw Object.assign(new Error("Provider profile not found."), { statusCode: 404 });
+      assertPresetProfile(profile);
+      return composition.runtime.discoverPresets({ ownerUserId }, providerProfileId, page);
+    },
+
+    async preset(ownerUserId: string, providerProfileId: string, slug: string) {
+      const profile = (await composition.application.listProfiles({ ownerUserId }))
+        .find((candidate) => candidate.id === providerProfileId);
+      if (!profile) throw Object.assign(new Error("Provider profile not found."), { statusCode: 404 });
+      assertPresetProfile(profile);
+      return composition.runtime.getPreset({ ownerUserId }, providerProfileId, slug);
+    },
+
+    discoverPresets(ownerUserId: string, input: ProviderProfileInput, page: Readonly<{ offset: number; limit: number }>) {
+      return composition.runtime.discoverCandidatePresetsWithCredential(candidate(ownerUserId, input), input.apiKey ?? null, page);
+    },
+
+    discoverPreset(ownerUserId: string, input: ProviderProfileInput, slug: string) {
+      return composition.runtime.discoverCandidatePresetWithCredential(candidate(ownerUserId, input), input.apiKey ?? null, slug);
     },
 
     async generateText(ownerUserId: string, request: ProviderTextRequest) {

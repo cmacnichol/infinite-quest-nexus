@@ -178,6 +178,49 @@ describe("API server security and CORS headers", () => {
     await app.close();
   });
 
+  it("uses the server-owned initial user for read-only saved and candidate preset discovery", async () => {
+    const ownerUserId = "11111111-1111-4111-8111-111111111111";
+    const providerProfileId = "66666666-6666-4666-8666-666666666666";
+    const presets = vi.fn().mockResolvedValue({ presets: [], totalCount: 0 });
+    const preset = vi.fn().mockResolvedValue({ slug: "story-router", models: [], providerPolicy: {} });
+    const discoverPresets = vi.fn().mockResolvedValue({ presets: [], totalCount: 0 });
+    const discoverPreset = vi.fn().mockResolvedValue({ slug: "story-router", models: [], providerPolicy: {} });
+    const providers = {
+      presets,
+      preset,
+      discoverPresets,
+      discoverPreset,
+      application: { listProfiles: vi.fn().mockResolvedValue([{ id: providerProfileId, providerType: "openrouter", providerRole: "text" }]) }
+    };
+    const app = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool, providers: providers as never }));
+
+    const saved = await app.inject({ method: "GET", url: `/api/v1/providers/${providerProfileId}/presets?offset=0&limit=10` });
+    const savedDetail = await app.inject({ method: "GET", url: `/api/v1/providers/${providerProfileId}/presets/story-router` });
+    const candidateList = await app.inject({
+      method: "POST",
+      url: "/api/v1/providers/discover-presets?offset=0&limit=10",
+      headers: { "content-type": "application/json" },
+      payload: { name: "OpenRouter", providerType: "openrouter", providerRole: "text", baseUrl: "https://openrouter.ai/api/v1", defaultModel: "", apiKey: "must-not-echo" }
+    });
+    const candidate = await app.inject({
+      method: "POST",
+      url: "/api/v1/providers/discover-presets/story-router",
+      headers: { "content-type": "application/json" },
+      payload: { name: "OpenRouter", providerType: "openrouter", providerRole: "text", baseUrl: "https://openrouter.ai/api/v1", defaultModel: "", apiKey: "must-not-echo" }
+    });
+
+    expect(saved.statusCode).toBe(200);
+    expect(savedDetail.statusCode).toBe(200);
+    expect(candidateList.statusCode).toBe(200);
+    expect(candidate.statusCode).toBe(200);
+    expect(presets).toHaveBeenCalledWith(ownerUserId, providerProfileId, { offset: 0, limit: 10 });
+    expect(preset).toHaveBeenCalledWith(ownerUserId, providerProfileId, "story-router");
+    expect(discoverPresets).toHaveBeenCalledWith(ownerUserId, expect.objectContaining({ providerType: "openrouter", providerRole: "text" }), { offset: 0, limit: 10 });
+    expect(discoverPreset).toHaveBeenCalledWith(ownerUserId, expect.objectContaining({ providerType: "openrouter", providerRole: "text" }), "story-router");
+    expect(candidate.payload).not.toContain("must-not-echo");
+    await app.close();
+  });
+
   it("echoes a correlation ID on adopted API routes", async () => {
     const ownerId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const pool = {

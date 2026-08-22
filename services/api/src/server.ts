@@ -39,6 +39,7 @@ import {
   assetSelectionSchema,
   worldCoverRequestSchema,
   playerCampaignConfigSchema,
+  providerPresetSelectionInputSchema,
   providerProfileInputSchema,
   providerProfileUpdateSchema,
   providerTextRequestSchema,
@@ -163,6 +164,10 @@ export type BuildServerOptions = {
 };
 
 const uuidSchema = z.uuid();
+const presetPageSchema = z.object({
+  offset: z.coerce.number().int().min(0).max(1_000_000).default(0),
+  limit: z.coerce.number().int().min(1).max(100).default(25)
+});
 const worldShareCreateSchema = z.object({
   worldVersionId: z.uuid(),
   expiresInSeconds: z.coerce.number().int().min(300).max(2_592_000).default(604_800)
@@ -661,6 +666,27 @@ export async function buildServer({
     )
   }));
 
+  app.get<{
+    Params: { providerId: string };
+    Querystring: { offset?: string; limit?: string };
+  }>("/api/v1/providers/:providerId/presets", async (request) => (
+    providers.presets(
+      await initialOwnerId(pool),
+      uuidSchema.parse(request.params.providerId),
+      presetPageSchema.parse(request.query)
+    )
+  ));
+
+  app.get<{
+    Params: { providerId: string; presetSlug: string };
+  }>("/api/v1/providers/:providerId/presets/:presetSlug", async (request) => (
+    providers.preset(
+      await initialOwnerId(pool),
+      uuidSchema.parse(request.params.providerId),
+      providerPresetSelectionInputSchema.parse({ presetSlug: request.params.presetSlug }).presetSlug
+    )
+  ));
+
   app.put<{ Params: { providerId: string } }>("/api/v1/providers/:providerId/default", async (request) => (
     providers.setDefault(await initialOwnerId(pool), uuidSchema.parse(request.params.providerId))
   ));
@@ -680,6 +706,22 @@ export async function buildServer({
   app.post("/api/v1/providers/discover-models", async (request) => ({
     models: await providers.discoverModels(await initialOwnerId(pool), providerProfileInputSchema.parse(request.body))
   }));
+
+  app.post<{ Querystring: { offset?: string; limit?: string } }>("/api/v1/providers/discover-presets", async (request) => (
+    providers.discoverPresets(
+      await initialOwnerId(pool),
+      providerProfileInputSchema.parse(request.body),
+      presetPageSchema.parse(request.query)
+    )
+  ));
+
+  app.post<{ Params: { presetSlug: string } }>("/api/v1/providers/discover-presets/:presetSlug", async (request) => (
+    providers.discoverPreset(
+      await initialOwnerId(pool),
+      providerProfileInputSchema.parse(request.body),
+      providerPresetSelectionInputSchema.parse({ presetSlug: request.params.presetSlug }).presetSlug
+    )
+  ));
 
   app.delete<{ Params: { providerId: string } }>("/api/v1/providers/:providerId", async (request) => (
     providers.delete(await initialOwnerId(pool), uuidSchema.parse(request.params.providerId))

@@ -9,6 +9,7 @@ import type {
   ProviderRuntimeLeasePort
 } from "../../../packages/application/src/providers/index.js";
 import type { DatabaseClient } from "../../../packages/database/src/pool.js";
+import type { OpenRouterPresetSnapshot } from "../../../packages/contracts/src/index.js";
 import {
   loadPrivateProviderCredentialRow,
   validateProviderConfiguration,
@@ -22,6 +23,8 @@ import {
   discoverImageModels,
   discoverModels,
   encryptCredential,
+  createOpenRouterPresetDiscovery,
+  type OpenRouterPresetSummary,
   pollImageProvider,
   submitImageProvider,
   type EmbeddingResult,
@@ -92,6 +95,26 @@ export type RuntimeProviderAdapter = Readonly<{
     candidate: ProviderCandidate,
     credential: string | null,
   ): Promise<ProviderModelInventory>;
+  discoverPresets(
+    scope: Readonly<{ ownerUserId: string }>,
+    providerProfileId: string,
+    page: Readonly<{ offset: number; limit: number }>,
+  ): Promise<Readonly<{ presets: readonly OpenRouterPresetSummary[]; totalCount: number }>>;
+  getPreset(
+    scope: Readonly<{ ownerUserId: string }>,
+    providerProfileId: string,
+    slug: string,
+  ): Promise<OpenRouterPresetSnapshot>;
+  discoverCandidatePresetsWithCredential(
+    candidate: ProviderCandidate,
+    credential: string | null,
+    page: Readonly<{ offset: number; limit: number }>,
+  ): Promise<Readonly<{ presets: readonly OpenRouterPresetSummary[]; totalCount: number }>>;
+  discoverCandidatePresetWithCredential(
+    candidate: ProviderCandidate,
+    credential: string | null,
+    slug: string,
+  ): Promise<OpenRouterPresetSnapshot>;
 }>;
 
 function diagnostic(error: unknown): ProviderHealthDiagnosticCode {
@@ -114,6 +137,7 @@ export function createRuntimeProviderAdapter(options: Readonly<{
   leaseDurationMs?: number;
 }>): RuntimeProviderAdapter {
   const leaseDurationMs = options.leaseDurationMs ?? 60_000;
+  const presetDiscovery = createOpenRouterPresetDiscovery(options.transport);
 
   async function load(ownerUserId: string, providerProfileId: string) {
     const row = await loadPrivateProviderCredentialRow(options.database, ownerUserId, providerProfileId);
@@ -269,6 +293,35 @@ export function createRuntimeProviderAdapter(options: Readonly<{
     }
   }
 
+  function assertPresetCandidate(candidate: ProviderCandidate) {
+    if (candidate.providerType !== "openrouter" || !["text", "intent"].includes(candidate.providerRole)) {
+      throw Object.assign(new Error("OpenRouter preset discovery is available only for text and intent providers."), { statusCode: 400 });
+    }
+  }
+
+  function candidateProfile(candidate: ProviderCandidate, credential: string | null): TextProviderProfile {
+    assertPresetCandidate(candidate);
+    return {
+      providerType: candidate.providerType,
+      baseUrl: candidate.baseUrl.replace(/\/+$/, ""),
+      model: candidate.defaultModel,
+      contextWindowTokens: candidate.contextWindowTokens,
+      maxOutputTokens: candidate.maxOutputTokens,
+      temperature: candidate.temperature,
+      requestTimeoutMs: candidate.requestTimeoutMs,
+      configuration: validateProviderConfiguration(candidate.providerType, candidate.configuration),
+      ...(credential?.trim() ? { apiKey: credential.trim() } : {})
+    };
+  }
+
+  async function presetProfile(ownerUserId: string, providerProfileId: string): Promise<TextProviderProfile> {
+    const row = await load(ownerUserId, providerProfileId);
+    if (row.providerType !== "openrouter" || !["text", "intent"].includes(row.providerRole)) {
+      throw Object.assign(new Error("OpenRouter preset discovery is available only for text and intent providers."), { statusCode: 400 });
+    }
+    return transportProfile(row);
+  }
+
   const execution: RuntimeProviderExecutionPort = {
     async text(scope, providerProfileId, providerRole, model) {
       const row = await load(scope.ownerUserId, providerProfileId);
@@ -330,6 +383,18 @@ export function createRuntimeProviderAdapter(options: Readonly<{
     inventory,
     execution,
     discoverCandidateModelsWithCredential: discoverCandidateModels,
+    async discoverPresets(scope, providerProfileId, page) {
+      return presetDiscovery.list(await presetProfile(scope.ownerUserId, providerProfileId), page);
+    },
+    async getPreset(scope, providerProfileId, slug) {
+      return presetDiscovery.get(await presetProfile(scope.ownerUserId, providerProfileId), slug);
+    },
+    async discoverCandidatePresetsWithCredential(candidate, credential, page) {
+      return presetDiscovery.list(candidateProfile(candidate, credential), page);
+    },
+    async discoverCandidatePresetWithCredential(candidate, credential, slug) {
+      return presetDiscovery.get(candidateProfile(candidate, credential), slug);
+    },
     async storeCredential(ownerUserId, providerProfileId, credential) {
       const encrypted = credential?.trim()
         ? encryptCredential(credential.trim(), options.credentialSecret)
