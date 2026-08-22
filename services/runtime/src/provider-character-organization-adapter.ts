@@ -261,7 +261,7 @@ async function organize(
     throw httpError(409, "No enabled text provider is available to organize this profile.", "text_provider_unavailable");
   }
   const provider = await providers.execution.text(
-    { ownerUserId }, resolution.providerProfileId, "text", resolution.model,
+    { ownerUserId }, resolution,
   );
   const promptSnapshot = (await providers.prompts.loadCharacterOrganizationPromptSnapshot({
     ownerUserId,

@@ -3,6 +3,7 @@ import type {
   ProviderHealthDiagnosticCode,
   ProviderHealthPort,
   ProviderCandidate,
+  DirectProviderResolution,
   ProviderModelInventory,
   ProviderModelInventoryPort,
   ProviderRole,
@@ -52,7 +53,17 @@ export type RuntimeProviderDescriptor<R extends ProviderRole = ProviderRole> = R
   configuration: Readonly<Record<string, unknown>>;
 }>;
 
-export type RuntimeTextExecution = RuntimeProviderDescriptor<"text" | "intent"> & Readonly<{
+type ResolvedRuntimeTextProvider = Extract<DirectProviderResolution<"text">, Readonly<{ status: "resolved" }>>
+  | Extract<DirectProviderResolution<"intent">, Readonly<{ status: "resolved" }>>;
+
+export type RuntimeTextProviderDescriptor = RuntimeProviderDescriptor<"text" | "intent"> & Readonly<{
+  routingSource: "models" | "openrouter_preset";
+  fallbackModels: readonly string[];
+  presetProvenance: NonNullable<ResolvedRuntimeTextProvider["preset"]> | null;
+  providerPolicy: ResolvedRuntimeTextProvider["providerPolicy"];
+}>;
+
+export type RuntimeTextExecution = RuntimeTextProviderDescriptor & Readonly<{
   execute(
     request: ProviderRequest,
     policy?: Readonly<{ maxOutputTokens?: number; temperature?: number }>,
@@ -71,9 +82,7 @@ export type RuntimeImageExecution = RuntimeProviderDescriptor<"image"> & Readonl
 export type RuntimeProviderExecutionPort = Readonly<{
   text(
     scope: Readonly<{ ownerUserId: string }>,
-    providerProfileId: string,
-    providerRole: "text" | "intent",
-    model?: string,
+    resolution: ResolvedRuntimeTextProvider,
   ): Promise<RuntimeTextExecution>;
   embedding(
     scope: Readonly<{ ownerUserId: string }>,
@@ -166,7 +175,11 @@ export function createRuntimeProviderAdapter(options: Readonly<{
     }) : null;
   }
 
-  function transportProfile(row: PrivateProviderCredentialRow, model = row.defaultModel): TextProviderProfile {
+  function transportProfile(
+    row: PrivateProviderCredentialRow,
+    model = row.defaultModel,
+    descriptor?: RuntimeTextProviderDescriptor,
+  ): TextProviderProfile {
     const apiKey = row.encryptedCredential
       ? decryptCredential(row.encryptedCredential, options.credentialSecret)
       : undefined;
@@ -179,6 +192,12 @@ export function createRuntimeProviderAdapter(options: Readonly<{
       temperature: row.temperature,
       requestTimeoutMs: row.requestTimeoutMs,
       configuration: row.configuration,
+      ...(descriptor === undefined ? {} : {
+        routingSource: descriptor.routingSource,
+        fallbackModels: descriptor.fallbackModels,
+        presetProvenance: descriptor.presetProvenance,
+        providerPolicy: descriptor.providerPolicy,
+      }),
       ...(apiKey ? { apiKey } : {})
     };
   }
@@ -202,6 +221,19 @@ export function createRuntimeProviderAdapter(options: Readonly<{
     });
   }
 
+  function textDescriptor(
+    row: PrivateProviderCredentialRow,
+    resolution: ResolvedRuntimeTextProvider,
+  ): RuntimeTextProviderDescriptor {
+    return Object.freeze({
+      ...descriptor(row, resolution.resolvedRole, resolution.model),
+      routingSource: resolution.routingSource,
+      fallbackModels: Object.freeze([...resolution.fallbackModels]),
+      presetProvenance: resolution.preset === null ? null : Object.freeze({ ...resolution.preset }),
+      providerPolicy: Object.freeze({ ...resolution.providerPolicy }),
+    });
+  }
+
   const leases: ProviderRuntimeLeasePort = {
     async credentialReference(scope, providerProfileId) {
       const row = await load(scope.ownerUserId, providerProfileId);
@@ -217,7 +249,8 @@ export function createRuntimeProviderAdapter(options: Readonly<{
       if (row.providerRole !== providerRole) {
         throw Object.assign(new Error(`Enabled ${providerRole} provider profile not found.`), { statusCode: 404 });
       }
-      const selectedModel = model.trim() || row.defaultModel.trim();
+      const explicitModel = model.trim();
+      const selectedModel = explicitModel || row.defaultModel.trim();
       if (!selectedModel) throw Object.assign(new Error("Select a model for this provider profile."), { statusCode: 400 });
       return {
         ownerUserId: scope.ownerUserId,
@@ -228,9 +261,15 @@ export function createRuntimeProviderAdapter(options: Readonly<{
         model: selectedModel,
         requestTimeoutMs: row.requestTimeoutMs,
         configuration: row.configuration,
+        ...((providerRole === "text" || providerRole === "intent") ? {
+          routingSource: explicitModel ? "models" as const : row.routingSource,
+          fallbackModels: explicitModel ? Object.freeze([]) : Object.freeze([...row.fallbackModels]),
+          presetProvenance: explicitModel || row.preset === null ? null : Object.freeze({ ...row.preset }),
+          providerPolicy: explicitModel ? Object.freeze({}) : Object.freeze({ ...row.providerPolicy }),
+        } : {}),
         credential: opaqueReference(providerProfileId, Boolean(row.encryptedCredential)),
         expiresAt: new Date(Date.now() + leaseDurationMs).toISOString()
-      };
+      } as never;
     }
   };
 
@@ -353,19 +392,19 @@ export function createRuntimeProviderAdapter(options: Readonly<{
   }
 
   const execution: RuntimeProviderExecutionPort = {
-    async text(scope, providerProfileId, providerRole, model) {
-      const row = await load(scope.ownerUserId, providerProfileId);
-      if (row.providerRole !== providerRole) {
-        throw Object.assign(new Error(`Enabled ${providerRole} provider profile not found.`), { statusCode: 404 });
+    async text(scope, resolution) {
+      const row = await load(scope.ownerUserId, resolution.providerProfileId);
+      if (row.providerRole !== resolution.resolvedRole) {
+        throw Object.assign(new Error(`Enabled ${resolution.resolvedRole} provider profile not found.`), { statusCode: 404 });
       }
-      const selectedModel = model?.trim() || row.defaultModel;
+      const resolvedDescriptor = textDescriptor(row, resolution);
       return Object.freeze({
-        ...descriptor(row, providerRole, selectedModel),
+        ...resolvedDescriptor,
         execute: (
           request: ProviderRequest,
           policy?: Readonly<{ maxOutputTokens?: number; temperature?: number }>,
         ) => callTextProvider(
-          { ...transportProfile(row, selectedModel), ...policy },
+          { ...transportProfile(row, resolvedDescriptor.model, resolvedDescriptor), ...policy },
           request,
           options.transport
         )

@@ -465,8 +465,15 @@ describe("Task 14e3g production binding", () => {
       resolution: {
         resolveDirect: vi.fn(async () => ({
           status: "resolved",
+          requestedRole: "text",
+          resolvedRole: "text",
           providerProfileId: "44444444-4444-4444-8444-444444444444",
+          providerType: "openai_compatible",
+          routingSource: "models",
           model: "text-model",
+          fallbackModels: ["portable-fallback"],
+          preset: null,
+          providerPolicy: {},
         })),
       },
       execution: { text: vi.fn(async () => ({ execute })) },
@@ -523,6 +530,10 @@ describe("Task 14e3g production binding", () => {
       selectedProviderProfileId: "44444444-4444-4444-8444-444444444444",
       model: "text-model",
     }));
+    expect(providers.execution.text).toHaveBeenCalledWith(
+      { ownerUserId: "11111111-1111-4111-8111-111111111111" },
+      expect.objectContaining({ model: "text-model", fallbackModels: ["portable-fallback"] }),
+    );
     expect(execute).toHaveBeenCalledWith(expect.objectContaining({
       systemPrompt: "Generate safe final choices.",
     }));

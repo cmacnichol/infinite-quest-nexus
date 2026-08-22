@@ -159,13 +159,29 @@ describe("provider PostgreSQL adapter boundaries", () => {
     });
     const execution = await adapter.execution.text(
       { ownerUserId: "00000000-0000-4000-8000-000000000012" },
-      row.id,
-      "text",
-      "alternate-model"
+      {
+        status: "resolved",
+        requestedRole: "text",
+        resolvedRole: "text",
+        providerProfileId: row.id,
+        providerType: "openai_compatible",
+        routingSource: "models",
+        model: "alternate-model",
+        fallbackModels: [],
+        preset: null,
+        providerPolicy: {}
+      }
     );
     await adapter.storeCredential("00000000-0000-4000-8000-000000000012", row.id, plaintext);
 
     expect(inventory.models).toEqual([{ id: "story-model", name: "Story Model", contextWindowTokens: 16_384 }]);
+    expect(lease).toMatchObject({
+      model: "story-model",
+      routingSource: "models",
+      fallbackModels: [],
+      presetProvenance: null,
+      providerPolicy: {}
+    });
     expect(execution).toMatchObject({
       id: row.id,
       name: row.name,
@@ -521,6 +537,94 @@ describe("provider PostgreSQL adapter boundaries", () => {
       preset: null,
       providerPolicy: {}
     });
+  });
+
+  test("materializes one resolved text routing snapshot for the shared provider router", async () => {
+    const ownerUserId = "00000000-0000-4000-8000-000000000026";
+    const row = {
+      id: "00000000-0000-4000-8000-000000000027",
+      name: "Preset execution profile",
+      provider_type: "openrouter" as const,
+      provider_role: "text" as const,
+      base_url: "https://openrouter.ai/api/v1",
+      default_model: "primary-model",
+      fallback_models: ["fallback-a", "fallback-b"],
+      routing_source: "openrouter_preset" as const,
+      preset_slug: "story-router",
+      preset_designated_version_id: "version-id",
+      preset_version: 3,
+      preset_config_hash: "d".repeat(64),
+      preset_provider_policy: { allow_fallbacks: true },
+      context_window_tokens: 32_768,
+      max_output_tokens: 4_096,
+      temperature: 0.8,
+      request_timeout_ms: 60_000,
+      configuration: {},
+      encrypted_api_key: null,
+      credential_nonce: null,
+      credential_auth_tag: null,
+      credential_key_version: null,
+      enabled: true,
+      is_default: true,
+      health_status: "unknown" as const,
+      consecutive_failures: 0,
+      last_health_check_at: null,
+      created_at: new Date("2026-08-22T00:00:00Z"),
+      updated_at: new Date("2026-08-22T00:00:00Z")
+    };
+    const fetch = vi.fn(async (profile: Record<string, unknown>) => {
+      expect(profile).toMatchObject({
+        model: "primary-model",
+        fallbackModels: ["fallback-a", "fallback-b"],
+        routingSource: "openrouter_preset",
+        presetProvenance: {
+          slug: "story-router",
+          designatedVersionId: "version-id",
+          version: 3,
+          configHash: "d".repeat(64)
+        },
+        providerPolicy: { allow_fallbacks: true }
+      });
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: "A resolved answer." }, finish_reason: "stop" }],
+        model: "primary-model"
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    const adapter = createRuntimeProviderAdapter({
+      database: { query: vi.fn(async () => ({ rows: [row], rowCount: 1 })) } as never,
+      credentialSecret: "credential-encryption-secret",
+      transport: { fetch, validateSdkEndpoint: vi.fn(), close: vi.fn() },
+      health: { recordHealth: vi.fn() }
+    });
+    const resolution = {
+      status: "resolved" as const,
+      requestedRole: "text" as const,
+      resolvedRole: "text" as const,
+      providerProfileId: row.id,
+      providerType: row.provider_type,
+      routingSource: "openrouter_preset" as const,
+      model: "primary-model",
+      fallbackModels: ["fallback-a", "fallback-b"],
+      preset: {
+        slug: "story-router",
+        designatedVersionId: "version-id",
+        version: 3,
+        configHash: "d".repeat(64)
+      },
+      providerPolicy: { allow_fallbacks: true }
+    };
+
+    const execution = await adapter.execution.text({ ownerUserId }, resolution);
+    await execution.execute({ systemPrompt: "Answer.", input: "Question." });
+
+    expect(execution).toMatchObject({
+      routingSource: "openrouter_preset",
+      model: "primary-model",
+      fallbackModels: ["fallback-a", "fallback-b"],
+      presetProvenance: resolution.preset,
+      providerPolicy: { allow_fallbacks: true }
+    });
+    expect(fetch).toHaveBeenCalledOnce();
   });
 
   test("merges a legacy primary-only PATCH from the row locked at write time", async () => {

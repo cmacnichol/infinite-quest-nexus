@@ -117,6 +117,7 @@ function providerResult(
 
 function generationHarness(outcomes: Array<ProviderResult | Error>) {
   const requests: ProviderRequest[] = [];
+  const textPlans: unknown[] = [];
   const progressUpdates: Array<{ phase: string; percent: number; message: string }> = [];
   const providers = {
     resolution: { resolveDirect: async () => ({
@@ -125,9 +126,14 @@ function generationHarness(outcomes: Array<ProviderResult | Error>) {
       resolvedRole: "text",
       providerProfileId: "provider-id",
       providerType: "lmstudio",
+      routingSource: "models",
       model: "test-model",
+      fallbackModels: ["test-fallback"],
+      preset: null,
+      providerPolicy: {},
     }) },
-    execution: { text: async () => ({ execute: async (request: ProviderRequest) => {
+    execution: { text: async (_scope: unknown, resolution: unknown) => ({ execute: async (request: ProviderRequest) => {
+      textPlans.push(resolution);
       requests.push(request);
       const outcome = outcomes.shift();
       if (!outcome) throw new Error("Unexpected provider call.");
@@ -143,6 +149,7 @@ function generationHarness(outcomes: Array<ProviderResult | Error>) {
 
   return {
     requests,
+    textPlans,
     progressUpdates,
     run: () => generateTemplateWorld(
       {} as never,
@@ -193,6 +200,12 @@ describe("generateTemplateWorld orchestration", () => {
 
     expect(generated.content.playableCharacters).toHaveLength(3);
     expect(harness.requests).toHaveLength(4);
+    expect(harness.textPlans).toHaveLength(4);
+    expect(harness.textPlans).toEqual(Array.from({ length: 4 }, () => expect.objectContaining({
+      model: "test-model",
+      fallbackModels: ["test-fallback"],
+      routingSource: "models"
+    })));
     expect(harness.requests[0]?.systemPrompt).toContain("character_seeds");
     for (const [index, request] of harness.requests.slice(1).entries()) {
       const input = JSON.parse(request.input);

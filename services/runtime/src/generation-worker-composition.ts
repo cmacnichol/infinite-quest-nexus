@@ -45,12 +45,18 @@ export function createGenerationExecutionCollaborators(
   return {
     memory: memory.generation,
     illustration: illustration.generation,
-    loadTextExecution: (ownerUserId, providerProfileId, model) => providers.execution.text(
-      { ownerUserId },
-      providerProfileId,
-      "text",
-      model
-    ),
+    loadTextExecution: async (ownerUserId, providerProfileId, model) => {
+      const resolution = await providers.resolution.resolveDirect({
+        ownerUserId,
+        providerRole: "text",
+        selectedProviderProfileId: providerProfileId,
+        ...(model?.trim() ? { model } : {}),
+      });
+      if (resolution.status !== "resolved") {
+        throw Object.assign(new Error("The selected text provider is unavailable."), { statusCode: 409 });
+      }
+      return providers.execution.text({ ownerUserId }, resolution);
+    },
     promptFromSnapshot: providers.promptTools.content,
     recordProfileCost: (_database, profile, attribution, result) => withTransaction(pool, (client) =>
       providers.costs.recordGenerationCost(providers.costContext(client), {

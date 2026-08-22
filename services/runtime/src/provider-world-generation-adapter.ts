@@ -573,7 +573,7 @@ export async function generateTemplateWorld(
     throw Object.assign(new Error("The selected text provider is unavailable."), { statusCode: 409 });
   }
   const provider = await providers.execution.text(
-    { ownerUserId }, resolution.providerProfileId, "text", resolution.model,
+    { ownerUserId }, resolution,
   );
 
   await onProgress?.("generating_world", 30, "Synthesizing world structure and character seeds via LLM…");
@@ -897,7 +897,7 @@ async function generatePlayableCharacterCandidate(
     );
   }
   const provider = await providers.execution.text(
-    { ownerUserId }, providerResolution.providerProfileId, "text", providerResolution.model,
+    { ownerUserId }, providerResolution,
   );
   await onProgress?.("generating", 35, "Generating character preview.");
   const promptSnapshot = (await providers.prompts.loadWorldGenerationPromptSnapshot({ ownerUserId, worldId })).snapshot;

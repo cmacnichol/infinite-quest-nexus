@@ -9,6 +9,7 @@ import {
   toSafeProviderConfiguration,
   type ProviderApplication,
   type ProviderCandidate,
+  type DirectProviderResolution,
   type ProviderModelInventory,
   type ProviderProfileMutationResult,
   type ProviderProfileView,
@@ -21,13 +22,13 @@ import type {
   ProviderResult
 } from "../../../packages/story-engine/src/index.js";
 
+type ResolvedTextProvider = Extract<DirectProviderResolution<"text">, Readonly<{ status: "resolved" }>>;
+
 type ApiRuntimeProviderAdapter = Readonly<{
   execution: Readonly<{
     text(
       scope: Readonly<{ ownerUserId: string }>,
-      providerProfileId: string,
-      providerRole: "text" | "intent",
-      model?: string,
+      resolution: ResolvedTextProvider,
     ): Promise<Readonly<{
       model: string;
       execute(
@@ -392,9 +393,7 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
       }
       const provider = await composition.runtime.execution.text(
         { ownerUserId },
-        resolution.providerProfileId,
-        "text",
-        resolution.model
+        resolution
       );
       const systemPrompt = request.messages.filter((message) => message.role === "system")
         .map((message) => message.content).join("\n\n") || "Return only the requested result.";

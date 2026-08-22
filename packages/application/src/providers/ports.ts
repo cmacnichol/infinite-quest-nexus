@@ -20,6 +20,8 @@ import type {
   ProviderHealthRecord,
   ProviderModelInventory,
   ProviderModelInventoryRequest,
+  ProviderPolicy,
+  ProviderPresetProvenance,
   ProviderProfileMutationResult,
   ProviderProfileView,
   ProviderResolutionRequest,
@@ -113,7 +115,12 @@ export type ProviderTransportLease<R extends ProviderRole = ProviderRole> = Owne
   configuration: SafeProviderConfiguration;
   credential: OpaqueProviderCredentialReference | null;
   expiresAt: string;
-}>;
+}> & (R extends "text" | "intent" ? Readonly<{
+  routingSource: "models" | "openrouter_preset";
+  fallbackModels: readonly string[];
+  presetProvenance: ProviderPresetProvenance | null;
+  providerPolicy: ProviderPolicy;
+}> : unknown);
 
 /** Distinct runtime boundary; ProviderApplication never accepts or returns a lease. */
 export interface ProviderRuntimeLeasePort {

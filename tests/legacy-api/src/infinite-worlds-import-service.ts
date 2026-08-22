@@ -40,6 +40,7 @@ import type { MemoryGenerationTransactionPort } from "../../../packages/applicat
 import type { PortableWorldApplicationPort } from "../../../packages/application/src/world-campaign/index.js";
 import type {
   InfiniteWorldsPromptPort,
+  DirectProviderResolution,
   ProviderResolutionPort,
   PromptSnapshotVersion
 } from "../../../packages/application/src/providers/index.js";
@@ -53,9 +54,7 @@ export type InfiniteWorldsApiProviders = Readonly<{
   execution: Readonly<{
     text(
       scope: Readonly<{ ownerUserId: string }>,
-      providerProfileId: string,
-      providerRole: "text",
-      model?: string,
+      resolution: Extract<DirectProviderResolution<"text">, Readonly<{ status: "resolved" }>>,
     ): Promise<Readonly<{
       execute(request: ProviderRequest): Promise<ProviderResult>;
     }>>;
@@ -377,7 +376,7 @@ async function convertWorldText(
     throw Object.assign(new Error("The selected text provider is unavailable."), { statusCode: 409 });
   }
   const provider = await providers.execution.text(
-    { ownerUserId }, resolution.providerProfileId, "text", resolution.model,
+    { ownerUserId }, resolution,
   );
   const snapshot = (await providers.prompts.loadInfiniteWorldsPromptSnapshot({ ownerUserId, importId })).snapshot;
   const chunks = sourceChunks(request.sourceText);
@@ -447,7 +446,7 @@ async function enrichFinalTurn(
     throw Object.assign(new Error("The selected text provider is unavailable."), { statusCode: 409 });
   }
   const provider = await providers.execution.text(
-    { ownerUserId }, resolution.providerProfileId, "text", resolution.model,
+    { ownerUserId }, resolution,
   );
   const snapshot = (await providers.prompts.loadInfiniteWorldsPromptSnapshot({ ownerUserId, importId })).snapshot;
   const result = await provider.execute({

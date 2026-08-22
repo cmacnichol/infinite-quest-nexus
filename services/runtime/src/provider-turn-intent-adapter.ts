@@ -113,9 +113,7 @@ export function createTurnIntentClassificationAdapter(options: Readonly<{
         try {
           const provider = await options.runtime.execution.text(
             { ownerUserId: command.ownerUserId },
-            resolution.providerProfileId,
-            "intent",
-            resolution.model
+            resolution
           );
           const prompts = await options.prompts.loadPromptSnapshot({
             ownerUserId: command.ownerUserId,

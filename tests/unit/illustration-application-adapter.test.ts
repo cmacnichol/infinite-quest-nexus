@@ -6,6 +6,7 @@ import {
   createIllustrationImageProviderAdapter,
   createIllustrationPromptRefinementAdapter
 } from "../../services/runtime/src/illustration-platform-adapter.js";
+import { createIllustrationPlatformBindings } from "../../services/runtime/src/illustration-platform-bindings.js";
 import { createIllustrationGenerationTransactionPort } from "../../services/runtime/src/illustration-repository-bindings.js";
 
 const ownerUserId = "11111111-1111-4111-8111-111111111111";
@@ -188,6 +189,44 @@ describe("illustration provider adapters", () => {
     expect(recordProviderHealth).toHaveBeenCalledWith(
       expect.anything(), ownerUserId, providerProfileId, true
     );
+  });
+
+  it("resolves the stored text plan for prompt refinement while preserving the independent image path", async () => {
+    const textPlan = {
+      status: "resolved" as const,
+      requestedRole: "text" as const,
+      resolvedRole: "text" as const,
+      providerProfileId,
+      providerType: "openai_compatible" as const,
+      routingSource: "models" as const,
+      model: "text-primary",
+      fallbackModels: ["text-fallback"],
+      preset: null,
+      providerPolicy: {}
+    };
+    const execution = {
+      text: vi.fn(async () => ({ execute: vi.fn() })),
+      image: vi.fn(async () => ({ submit: vi.fn(), poll: vi.fn() }))
+    };
+    const providers = {
+      resolution: { resolveDirect: vi.fn(async () => textPlan) },
+      execution,
+      health: { recordHealth: vi.fn() },
+      costs: { recordIllustrationCost: vi.fn() },
+      costContext: vi.fn()
+    };
+    const bindings = createIllustrationPlatformBindings({} as DatabasePool, providers as never);
+
+    await bindings.promptRefinement.loadTextExecution(ownerUserId, providerProfileId, "stale-model");
+    await bindings.imageProvider.loadImageExecution(ownerUserId, providerProfileId, "image-model");
+
+    expect(providers.resolution.resolveDirect).toHaveBeenCalledWith({
+      ownerUserId,
+      providerRole: "text",
+      selectedProviderProfileId: providerProfileId
+    });
+    expect(execution.text).toHaveBeenCalledWith({ ownerUserId }, textPlan);
+    expect(execution.image).toHaveBeenCalledWith({ ownerUserId }, providerProfileId, "image-model");
   });
 });
 

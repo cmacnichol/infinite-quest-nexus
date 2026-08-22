@@ -249,6 +249,52 @@ describe("provider application contracts", () => {
     );
   });
 
+  it("reduces a direct HTTP model override to one safe text-routing descriptor", async () => {
+    const resolution = {
+      status: "resolved" as const,
+      requestedRole: "text" as const,
+      resolvedRole: "text" as const,
+      providerProfileId: textProfile.id,
+      providerType: textProfile.providerType,
+      routingSource: "models" as const,
+      model: "http-override-model",
+      fallbackModels: [],
+      preset: null,
+      providerPolicy: {}
+    };
+    const execute = vi.fn(async () => ({
+      content: "A bounded direct response.",
+      finishReason: "stop",
+      modelInstanceId: "http-override-model",
+      usage: {}
+    }));
+    const runtime = {
+      execution: { text: vi.fn(async () => ({ model: "http-override-model", execute })) }
+    };
+    const application = {
+      resolveDirect: vi.fn(async () => resolution)
+    };
+    const adapter = createProviderApplicationAdapter({
+      application,
+      runtime,
+      transaction: vi.fn()
+    } as never);
+
+    await expect(adapter.generateText(owner.ownerUserId, {
+      providerProfileId: textProfile.id,
+      model: "http-override-model",
+      messages: [{ role: "user", content: "Answer directly." }]
+    })).resolves.toMatchObject({ model: "http-override-model" });
+
+    expect(application.resolveDirect).toHaveBeenCalledWith({
+      ownerUserId: owner.ownerUserId,
+      providerRole: "text",
+      selectedProviderProfileId: textProfile.id,
+      model: "http-override-model"
+    });
+    expect(runtime.execution.text).toHaveBeenCalledWith({ ownerUserId: owner.ownerUserId }, resolution);
+  });
+
   it("materializes a server-validated preset snapshot when creating a provider profile", async () => {
     const snapshot = {
       slug: "story-router",

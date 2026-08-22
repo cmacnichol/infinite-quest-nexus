@@ -284,9 +284,7 @@ export async function createApiPortableImportExportComposition(
         }
         const provider = await input.providers.execution.text(
           { ownerUserId: command.ownerUserId },
-          resolution.providerProfileId,
-          "text",
-          resolution.model,
+          resolution,
         );
         const promptOperationId = `portable-story:${createHash("sha256")
           .update(JSON.stringify({ sourceName: command.sourceName, story: command.story }))

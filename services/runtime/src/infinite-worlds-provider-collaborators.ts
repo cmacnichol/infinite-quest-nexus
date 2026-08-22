@@ -3,6 +3,7 @@ import type { WorldContent } from "../../../packages/contracts/src/world-library
 import type { TemplateWorldInput } from "../../../packages/domain/src/world-template.js";
 import type {
   InfiniteWorldsPromptPort,
+  DirectProviderResolution,
   ProviderResolutionPort,
   PromptSnapshotVersion,
 } from "../../../packages/application/src/providers/index.js";
@@ -25,9 +26,7 @@ export type InfiniteWorldsImportProviderCollaborators = Readonly<{
   execution: Readonly<{
     text(
       scope: Readonly<{ ownerUserId: string }>,
-      providerProfileId: string,
-      providerRole: "text",
-      model?: string,
+      resolution: Extract<DirectProviderResolution<"text">, Readonly<{ status: "resolved" }>>,
     ): Promise<Readonly<{
       execute(request: ProviderRequest): Promise<ProviderResult>;
     }>>;
