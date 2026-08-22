@@ -13,9 +13,9 @@ Change the campaign default in the selected campaign's Nexus management panel an
 
 When submitting a turn from either the web-next or legacy **Story** view, the compact **Turn length** control appears beside the turn composer controls. It starts at **Campaign default — <Profile>** and uses the saved campaign preference for that submission. You may instead select **Brief**, **Standard**, **Long**, or **Extended** for just the submitted turn.
 
-- The selected override is captured with the submitted action and applies to that turn only; after the server durably attaches a successful turn, the control resets to the current campaign default.
-- If submission fails, the selected override remains in the composer so you can retry without reselecting it.
-- Editing the latest accepted turn to replace it can choose its own per-turn profile. The retry flow also returns you to the composer, where you may choose a different profile before submitting the replacement.
+- The selected override is captured with the submitted action and applies to that turn only. Once the client workflow accepts the enqueue and attaches the active queued generation, the control resets to the current campaign default; it does not wait for narration to finish or a turn to be accepted.
+- If an enqueue attempt cannot be accepted, the selected override remains in the composer so you can retry without reselecting it. A later generation failure occurs after the one-shot control has reset.
+- Editing the latest accepted turn to replace it can choose its own per-turn profile. In web-next, retry returns to the composer, where you may choose a different profile before submitting the replacement. In legacy Story, retry opens its retry dialog with its own Turn length choice.
 - **Begin Story** remains automatic and uses the campaign default; it does not add a browser-selected override.
 - When Auto mode asks you to confirm an action or generated choice, the chosen Turn length stays with that confirmation. Generated-choice Auto submissions use the currently selected choice.
 
