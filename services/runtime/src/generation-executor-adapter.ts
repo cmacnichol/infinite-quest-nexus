@@ -142,6 +142,8 @@ type StoryCostOperation = "rpg_assessment" | "event_trigger_before" | "story_gen
   | "story_recovery" | "event_trigger_after" | "event_extension"
   | "scene_coverage_validation" | "scene_coverage_rewrite";
 
+const modelRoutingRecoveryOperations = new WeakMap<object, StoryCostOperation>();
+
 type TurnGenerationPhase =
   | "provider_loading"
   | "input_preparation"
@@ -430,6 +432,16 @@ function attemptedModelsFromError(error: ProviderModelFallbackExhaustedError | P
   return error.attempts.map((attempt) => attempt.model).filter(Boolean);
 }
 
+function initialAuditNumber(job: GenerationExecutionPayload): number {
+  // Each worker claim has room for an initial response, a repair response, and
+  // a terminal routing-recovery audit without colliding with a later retry.
+  return job.attempts * 3 - 2;
+}
+
+function routingRecoveryAuditNumber(job: GenerationExecutionPayload): number {
+  return job.attempts * 3;
+}
+
 function isModelRoutingRecovery(error: unknown): error is ProviderModelFallbackExhaustedError | ProviderStreamInterruptedError {
   return error instanceof ProviderModelFallbackExhaustedError || error instanceof ProviderStreamInterruptedError;
 }
@@ -457,7 +469,8 @@ function attemptModelRouting(
       model: attempt.model,
       outcome: attempt.outcome,
       reason: attempt.reason,
-      emittedOutput: attempt.emittedOutput
+      emittedOutput: attempt.emittedOutput,
+      ...(attempt.retryAfterMs === undefined ? {} : { retryAfterMs: attempt.retryAfterMs })
     }))
   };
 }
@@ -479,11 +492,16 @@ async function persistModelRoutingRecovery(
     );
   }
   const attemptedModels = attemptedModelsFromError(error);
+  const storyOperation = modelRoutingRecoveryOperations.get(error) || "story_generation";
   await repository.recordAttempt({
     ...scope,
-    attemptNumber: job.attempts * 2 - 1,
+    attemptNumber: routingRecoveryAuditNumber(job),
     recoveryKind: reason,
-    requestMetadata: {},
+    requestMetadata: {
+      storyOperation,
+      model: job.model_routing.requestedModel,
+      providerType: job.model_routing.providerType
+    },
     responseMetadata: { modelRouting: attemptModelRouting(job, undefined, error) },
     providerResponseId: null,
     finishReason: null,
@@ -575,6 +593,7 @@ async function callCampaignTextProvider(
     });
     return result;
   } catch (error) {
+    if (isModelRoutingRecovery(error)) modelRoutingRecoveryOperations.set(error, operation);
     logProviderTransportError(error, {
       generationJobId: job.id,
       campaignId: job.campaign_id,
@@ -1075,7 +1094,7 @@ async function executeLoadedGeneration(
         ? "output_limit"
         : firstReason;
       const initialValidationErrors = parsed.ok ? [] : parsed.errors;
-      const initialAttemptNumber = job.attempts * 2 - 1;
+      const initialAttemptNumber = initialAuditNumber(job);
       logger.info({
         event: "turn_generation_validation_completed",
         ...generationLogContext(job, workerId),
@@ -1377,6 +1396,7 @@ async function executeLoadedGeneration(
               parsed.story.narration
             );
           } catch (error) {
+            if (isModelRoutingRecovery(error)) throw error;
             triggerError = error instanceof Error ? error.message : String(error);
           }
         }

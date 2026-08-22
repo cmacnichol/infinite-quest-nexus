@@ -140,6 +140,39 @@ function failureHarness(error: Error, configuration: Record<string, unknown> = {
   return { job, repository, collaborators, execute };
 }
 
+function successfulStoryResult(content = JSON.stringify({
+  narration: "The observatory door opens onto moonlight.",
+  choices: ["Enter.", "Wait.", "Listen.", "Leave."],
+  custom_action_suggestion: "Inspect the lock.",
+  scratchpad: "Door open.",
+  tracker_updates: [],
+  image_prompt: "A moonlit observatory door.",
+  continuity_summary: "Door open.",
+  canonical_facts: [],
+  superseded_facts: [],
+  canonical_fact_updates: [],
+  open_threads: []
+})) {
+  return {
+    content,
+    responseId: "test-response",
+    finishReason: "stop",
+    outputLimited: false,
+    modelInstanceId: "primary-model",
+    usage: { inputTokens: 10, outputTokens: 20, totalTokens: 30 },
+    reportedCost: null,
+    rawMetadata: {},
+    modelRouting: {
+      strategy: "sequential" as const,
+      configuredModels: ["primary-model", "fallback-model"],
+      resolvedModel: "primary-model",
+      fallbackUsed: false,
+      emittedOutput: false,
+      attempts: [{ model: "primary-model", outcome: "succeeded" as const, reason: null, emittedOutput: false }]
+    }
+  };
+}
+
 describe("generation executor adapter", () => {
   it("treats a missing guarded payload as cancellation before provider work or mutation", async () => {
     const repository = guardedRepository();
@@ -492,5 +525,70 @@ describe("generation executor adapter", () => {
       errorCode: "model_plan_exhausted",
       recoveryMetadata: { modelRouting: expect.objectContaining({ attemptedModels: ["primary-model", "fallback-model"] }) }
     }));
+  });
+
+  it("does not accept state when an after-event model plan is exhausted", async () => {
+    const routingFailure = new ProviderModelFallbackExhaustedError([
+      { model: "primary-model", outcome: "failed", reason: "provider_unavailable", emittedOutput: false },
+      { model: "fallback-model", outcome: "failed", reason: "provider_unavailable", emittedOutput: false }
+    ]);
+    const { job, repository, collaborators } = failureHarness(routingFailure);
+    job.orchestration_inputs = {
+      ...job.orchestration_inputs,
+      suppressEventTriggers: false,
+      eventTriggers: [{
+        id: "after-marker", label: "After marker", timing: "after",
+        condition: "The door opens.", effect: "The marker glows.", addTextAfter: false,
+        triggeredCount: 0, lastTriggeredTurn: null, lastTriggeredAt: null
+      }]
+    };
+    const providerExecute = vi.fn()
+      .mockResolvedValueOnce(successfulStoryResult())
+      .mockRejectedValueOnce(routingFailure);
+    (collaborators.loadTextExecution as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: claim.providerProfileId, name: "Test provider", providerRole: "text", providerType: "openai_compatible",
+      model: "primary-model", contextWindowTokens: 16_000, maxOutputTokens: 2_000,
+      temperature: 0, requestTimeoutMs: 1_000, configuration: {}, execute: providerExecute
+    });
+
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: "worker-a", leaseSeconds: 30, claim })).resolves.toBe(true);
+
+    expect(providerExecute).toHaveBeenCalledTimes(2);
+    expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
+    expect(repository.markFailed).not.toHaveBeenCalled();
+    expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({ errorCode: "model_plan_exhausted" }));
+  });
+
+  it("keeps the initial safe audit when a schema repair exhausts the model plan", async () => {
+    const routingFailure = new ProviderModelFallbackExhaustedError([
+      { model: "primary-model", outcome: "failed", reason: "provider_unavailable", emittedOutput: false, retryAfterMs: 750 },
+      { model: "fallback-model", outcome: "failed", reason: "provider_unavailable", emittedOutput: false }
+    ]);
+    const { repository, collaborators } = failureHarness(routingFailure);
+    const providerExecute = vi.fn()
+      .mockResolvedValueOnce(successfulStoryResult("{\"narration\":\"invalid repair source\""))
+      .mockRejectedValueOnce(routingFailure);
+    (collaborators.loadTextExecution as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: claim.providerProfileId, name: "Test provider", providerRole: "text", providerType: "openai_compatible",
+      model: "primary-model", contextWindowTokens: 16_000, maxOutputTokens: 2_000,
+      temperature: 0, requestTimeoutMs: 1_000, configuration: {}, execute: providerExecute
+    });
+
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: "worker-a", leaseSeconds: 30, claim })).resolves.toBe(true);
+
+    const audits = (repository.recordAttempt as ReturnType<typeof vi.fn>).mock.calls.map(([input]) => input);
+    expect(audits).toHaveLength(2);
+    expect(audits[0]).toMatchObject({ attemptNumber: 1, recoveryKind: "initial", rawOutput: "{\"narration\":\"invalid repair source\"" });
+    expect(audits[1]).toMatchObject({
+      attemptNumber: 3,
+      recoveryKind: "model_plan_exhausted",
+      requestMetadata: { storyOperation: "story_recovery", model: "primary-model", providerType: "openai_compatible" },
+      responseMetadata: { modelRouting: { attempts: [
+        { model: "primary-model", retryAfterMs: 750 },
+        { model: "fallback-model" }
+      ] } }
+    });
   });
 });

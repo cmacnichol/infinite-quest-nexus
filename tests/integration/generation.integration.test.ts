@@ -47,7 +47,7 @@ const integration = databaseUrl ? describe : describe.skip;
 const credentialSecret = "integration-test-credential-secret";
 
 async function generationAuthoritySnapshot(pool: DatabasePool, campaignId: string) {
-  const [campaign, state, turns, memories, canonicalFacts, checkpoints, acceptedIllustrations] = await Promise.all([
+  const [campaign, state, turns, memories, canonicalFacts, checkpoints, acceptedIllustrations, memoryChunks] = await Promise.all([
     pool.query<{ value: Record<string, unknown> }>(
       "SELECT to_jsonb(campaign_row) AS value FROM campaigns campaign_row WHERE id = $1",
       [campaignId]
@@ -80,6 +80,11 @@ async function generationAuthoritySnapshot(pool: DatabasePool, campaignId: strin
       `SELECT to_jsonb(image_row) AS value FROM image_jobs image_row
         WHERE campaign_id = $1 AND turn_id IS NOT NULL ORDER BY turn_id, id`,
       [campaignId]
+    ),
+    pool.query<{ value: Record<string, unknown> }>(
+      `SELECT to_jsonb(chunk_row) AS value FROM chronicle_memory_chunks chunk_row
+        WHERE campaign_id = $1 ORDER BY parent_memory_id, ordinal, id`,
+      [campaignId]
     )
   ]);
   return {
@@ -89,7 +94,8 @@ async function generationAuthoritySnapshot(pool: DatabasePool, campaignId: strin
     memories: memories.rows.map((row) => row.value),
     canonicalFacts: canonicalFacts.rows.map((row) => row.value),
     checkpoints: checkpoints.rows.map((row) => row.value),
-    acceptedIllustrations: acceptedIllustrations.rows.map((row) => row.value)
+    acceptedIllustrations: acceptedIllustrations.rows.map((row) => row.value),
+    memoryChunks: memoryChunks.rows.map((row) => row.value)
   };
 }
 

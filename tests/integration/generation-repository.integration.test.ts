@@ -882,9 +882,9 @@ integration("PostgreSQL generation command repository", () => {
     await pool.query(
       `UPDATE provider_profiles SET routing_source = 'openrouter_preset', fallback_models = ARRAY['fallback-model'],
          preset_slug = 'story-router', preset_designated_version_id = $2, preset_version = 3,
-         preset_config_hash = 'preset-hash', preset_provider_policy = '{"order":["provider-a"]}'::jsonb
+         preset_config_hash = $3, preset_provider_policy = '{"order":["provider-a"]}'::jsonb
        WHERE id = $1`,
-      [routeProviderId, designatedVersionId]
+      [routeProviderId, designatedVersionId, "a".repeat(64)]
     );
     const imported = await campaign();
     const append = await repository().enqueueAppend(
@@ -904,7 +904,7 @@ integration("PostgreSQL generation command repository", () => {
         presetSlug: "story-router",
         presetDesignatedVersionId: designatedVersionId,
         presetVersion: 3,
-        presetConfigHash: "preset-hash",
+        presetConfigHash: "a".repeat(64),
         providerPolicy: { order: ["provider-a"] }
       }
     });
@@ -922,13 +922,13 @@ integration("PostgreSQL generation command repository", () => {
     )).resolves.toMatchObject({ rows: [{ model_routing: {
       requestedModel: "primary-model", configuredModels: ["primary-model", "fallback-model"],
       routingSource: "openrouter_preset", presetSlug: "story-router", presetDesignatedVersionId: designatedVersionId,
-      presetVersion: 3, presetConfigHash: "preset-hash"
+      presetVersion: 3, presetConfigHash: "a".repeat(64)
     } }] });
     await pool.query(
       `UPDATE provider_profiles SET default_model = 'changed-primary', fallback_models = ARRAY['changed-fallback'],
-         preset_version = 4, preset_config_hash = 'changed-hash', preset_provider_policy = '{"order":["provider-b"]}'::jsonb
+         preset_version = 4, preset_config_hash = $2, preset_provider_policy = '{"order":["provider-b"]}'::jsonb
        WHERE id = $1`,
-      [routeProviderId]
+      [routeProviderId, "b".repeat(64)]
     );
     const durable = await pool.query<{ model_routing: Record<string, unknown> }>(
       "SELECT context_options->'modelRouting' AS model_routing FROM generation_jobs WHERE id = $1",
@@ -936,7 +936,7 @@ integration("PostgreSQL generation command repository", () => {
     );
     expect(durable.rows[0]?.model_routing).toMatchObject({
       configuredModels: ["primary-model", "fallback-model"], presetVersion: 3,
-      presetConfigHash: "preset-hash", providerPolicy: { order: ["provider-a"] }
+      presetConfigHash: "a".repeat(64), providerPolicy: { order: ["provider-a"] }
     });
 
     const overrideCampaign = await campaign();

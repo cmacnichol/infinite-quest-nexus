@@ -10,6 +10,7 @@ import {
   pendingEventTriggerSchema,
   playerEventTriggerSchema,
   playerRpgStatSchema,
+  openRouterPresetSnapshotSchema,
   type CampaignTracker,
   type PlayerEventTrigger,
   type PlayerRpgStat,
@@ -243,7 +244,78 @@ type ExecutionPayloadRow = Omit<GenerationExecutionPayload, "orchestration_input
   character_snapshot: Record<string, unknown> | null;
 };
 
-function modelRoutingSnapshot(row: ExecutionPayloadRow): GenerationModelRoutingSnapshot {
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function unknownRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function supportedTextProviderType(value: unknown): string | null {
+  return value === "lmstudio" || value === "openrouter" || value === "manifest" || value === "openai_compatible"
+    ? value
+    : null;
+}
+
+function legacyContextRoutingSnapshot(row: ExecutionPayloadRow): GenerationModelRoutingSnapshot | null {
+  const context = unknownRecord(row.context_options);
+  const value = unknownRecord(context?.modelRouting);
+  if (!value) return null;
+  const requestedModel = nonEmptyString(value.requestedModel);
+  const providerType = supportedTextProviderType(value.providerType);
+  const routingSource = value.routingSource;
+  const configuredModels = Array.isArray(value.configuredModels)
+    ? value.configuredModels.map(nonEmptyString)
+    : [];
+  if (!requestedModel || !providerType || (routingSource !== "models" && routingSource !== "openrouter_preset")
+      || configuredModels.some((model) => model === null) || configuredModels.length < 1 || configuredModels.length > 5
+      || configuredModels[0] !== requestedModel || new Set(configuredModels).size !== configuredModels.length) {
+    return null;
+  }
+  const models = configuredModels as string[];
+  const providerPolicy = unknownRecord(value.providerPolicy);
+  if (!providerPolicy) return null;
+  const suppliedPolicyHash = typeof value.providerPolicyHash === "string" && /^[a-f0-9]{64}$/.test(value.providerPolicyHash)
+    ? value.providerPolicyHash
+    : sha256(stableStringify(providerPolicy));
+  if (routingSource === "models") {
+    if (Object.keys(providerPolicy).length
+        || value.presetSlug !== null || value.presetDesignatedVersionId !== null
+        || value.presetVersion !== null || value.presetConfigHash !== null) return null;
+    return {
+      requestedModel, configuredModels: models, routingSource, presetSlug: null,
+      presetDesignatedVersionId: null, presetVersion: null, presetConfigHash: null,
+      providerPolicy: {}, providerPolicyHash: suppliedPolicyHash, providerType
+    };
+  }
+  if (providerType !== "openrouter") return null;
+  const parsedPreset = openRouterPresetSnapshotSchema.safeParse({
+    slug: value.presetSlug,
+    designatedVersionId: value.presetDesignatedVersionId,
+    version: value.presetVersion,
+    configHash: value.presetConfigHash,
+    models,
+    providerPolicy
+  });
+  if (!parsedPreset.success) return null;
+  return {
+    requestedModel,
+    configuredModels: parsedPreset.data.models,
+    routingSource,
+    presetSlug: parsedPreset.data.slug,
+    presetDesignatedVersionId: parsedPreset.data.designatedVersionId,
+    presetVersion: parsedPreset.data.version,
+    presetConfigHash: parsedPreset.data.configHash,
+    providerPolicy: parsedPreset.data.providerPolicy,
+    providerPolicyHash: suppliedPolicyHash,
+    providerType
+  };
+}
+
+function columnRoutingSnapshot(row: ExecutionPayloadRow): GenerationModelRoutingSnapshot {
   const providerPolicy = row.requested_provider_policy || {};
   const contextModelRouting = (row.context_options as unknown as {
     modelRouting?: { providerPolicyHash?: unknown };
@@ -262,6 +334,20 @@ function modelRoutingSnapshot(row: ExecutionPayloadRow): GenerationModelRoutingS
         : sha256(stableStringify(providerPolicy)),
     providerType: row.requested_provider_type || "unknown"
   };
+}
+
+function modelRoutingSnapshot(row: ExecutionPayloadRow): GenerationModelRoutingSnapshot {
+  const legacy = legacyContextRoutingSnapshot(row);
+  const columnsOnlyContainDefaults = row.requested_fallback_models.length === 0
+    && row.requested_routing_source === "models"
+    && row.requested_preset_slug === null
+    && row.requested_preset_designated_version_id === null
+    && row.requested_preset_version === null
+    && row.requested_preset_config_hash === null
+    && Object.keys(row.requested_provider_policy || {}).length === 0;
+  return legacy && (columnsOnlyContainDefaults || row.requested_provider_type === null)
+    ? legacy
+    : columnRoutingSnapshot(row);
 }
 
 function claimedGeneration(row: {
