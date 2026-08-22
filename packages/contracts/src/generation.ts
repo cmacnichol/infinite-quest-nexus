@@ -10,7 +10,23 @@ export const providerPresetSelectionInputSchema = z.object({
 
 const providerModelIdSchema = z.string().trim().min(1).max(500);
 const providerFallbackModelsSchema = z.array(providerModelIdSchema).max(4);
-const providerPolicySchema = z.record(z.string(), z.unknown());
+const providerPolicySchema = z.object({
+  order: z.unknown().optional(),
+  only: z.unknown().optional(),
+  ignore: z.unknown().optional(),
+  allow_fallbacks: z.unknown().optional(),
+  require_parameters: z.unknown().optional(),
+  data_collection: z.unknown().optional(),
+  zdr: z.unknown().optional(),
+  quantizations: z.unknown().optional(),
+  sort: z.unknown().optional(),
+  max_price: z.unknown().optional()
+}).strict().superRefine((value, context) => {
+  if (typeof value.sort === "object" && value.sort !== null
+    && "partition" in value.sort && value.sort.partition === "none") {
+    context.addIssue({ code: "custom", path: ["sort", "partition"], message: "Provider sorting must preserve model partitions." });
+  }
+});
 
 export const openRouterPresetSnapshotSchema = z.object({
   slug: providerPresetSelectionInputSchema.shape.presetSlug,

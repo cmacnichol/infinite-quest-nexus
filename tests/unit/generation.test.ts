@@ -169,6 +169,45 @@ describe("generation contracts", () => {
       }).success).toBe(false);
     });
 
+    it("allows only safe OpenRouter provider-policy keys", () => {
+      const resolvedPreset = {
+        ...validOpenRouterTextInput,
+        routingSource: "openrouter_preset",
+        presetSlug: "story-router",
+        fallbackModels: ["google/gemini-2.5-pro"],
+        presetDesignatedVersionId: "version-123",
+        presetVersion: 3,
+        presetConfigHash: "a".repeat(64)
+      };
+      const safePolicy = {
+        order: true,
+        only: true,
+        ignore: true,
+        allow_fallbacks: true,
+        require_parameters: true,
+        data_collection: true,
+        zdr: true,
+        quantizations: true,
+        sort: { partition: "model" },
+        max_price: true
+      };
+
+      expect(providerProfileResolvedWriteSchema.safeParse({
+        ...resolvedPreset,
+        presetProviderPolicy: safePolicy
+      }).success).toBe(true);
+      for (const unsafeKey of ["system", "messages", "tools", "plugins", "api_key", "raw_response"]) {
+        expect(providerProfileResolvedWriteSchema.safeParse({
+          ...resolvedPreset,
+          presetProviderPolicy: { [unsafeKey]: "must-not-persist" }
+        }).success).toBe(false);
+      }
+      expect(providerProfileResolvedWriteSchema.safeParse({
+        ...resolvedPreset,
+        presetProviderPolicy: { sort: { partition: "none" } }
+      }).success).toBe(false);
+    });
+
     it("accepts valid input with minimum required fields and applies defaults", () => {
       const input = {
         name: "My Provider",

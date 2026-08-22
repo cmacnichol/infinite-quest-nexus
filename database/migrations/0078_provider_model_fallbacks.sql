@@ -20,6 +20,24 @@ AS $$
     );
 $$;
 
+CREATE FUNCTION openrouter_provider_policy_is_allowed(provider_policy jsonb)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+STRICT
+AS $$
+  SELECT jsonb_typeof(provider_policy) = 'object'
+    AND NOT EXISTS (
+      SELECT 1
+      FROM jsonb_object_keys(provider_policy) AS policy_key
+      WHERE policy_key NOT IN (
+        'order', 'only', 'ignore', 'allow_fallbacks', 'require_parameters',
+        'data_collection', 'zdr', 'quantizations', 'sort', 'max_price'
+      )
+    )
+    AND provider_policy #>> '{sort,partition}' IS DISTINCT FROM 'none';
+$$;
+
 ALTER TABLE provider_profiles
   ADD COLUMN fallback_models text[] NOT NULL DEFAULT ARRAY[]::text[],
   ADD COLUMN routing_source text NOT NULL DEFAULT 'models',
@@ -53,7 +71,7 @@ ALTER TABLE provider_profiles
       AND length(btrim(preset_designated_version_id)) BETWEEN 1 AND 500
       AND preset_version > 0
       AND preset_config_hash ~ '^[a-f0-9]{64}$'
-      AND jsonb_typeof(preset_provider_policy) = 'object'
+      AND openrouter_provider_policy_is_allowed(preset_provider_policy)
     )
   );
 
@@ -86,7 +104,7 @@ ALTER TABLE generation_jobs
       AND length(btrim(requested_preset_designated_version_id)) BETWEEN 1 AND 500
       AND requested_preset_version > 0
       AND requested_preset_config_hash ~ '^[a-f0-9]{64}$'
-      AND jsonb_typeof(requested_provider_policy) = 'object'
+      AND openrouter_provider_policy_is_allowed(requested_provider_policy)
     )
   );
 

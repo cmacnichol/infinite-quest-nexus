@@ -2347,6 +2347,36 @@ integration("standard database migration runner", () => {
           requested_provider_policy: {}
         }
       ] });
+      const presetProvenance = [
+        "openrouter_preset", "story-router", "version-123", 3, "a".repeat(64), provider.rows[0]!.id
+      ];
+      await isolatedPool.query(
+        `UPDATE provider_profiles
+            SET routing_source=$1,preset_slug=$2,preset_designated_version_id=$3,preset_version=$4,
+                preset_config_hash=$5,preset_provider_policy='{}'::jsonb
+          WHERE id=$6`,
+        presetProvenance
+      );
+      await expect(isolatedPool.query(
+        "UPDATE provider_profiles SET preset_provider_policy = '{\"tools\":[]}'::jsonb WHERE id = $1",
+        [provider.rows[0]!.id]
+      )).rejects.toThrow();
+      await expect(isolatedPool.query(
+        "UPDATE provider_profiles SET preset_provider_policy = '{\"sort\":{\"partition\":\"none\"}}'::jsonb WHERE id = $1",
+        [provider.rows[0]!.id]
+      )).rejects.toThrow();
+      await isolatedPool.query(
+        `UPDATE generation_jobs
+            SET requested_routing_source=$1,requested_preset_slug=$2,requested_preset_designated_version_id=$3,
+                requested_preset_version=$4,requested_preset_config_hash=$5,requested_provider_policy='{}'::jsonb
+          WHERE idempotency_key='routing-active-job'`,
+        presetProvenance.slice(0, 5)
+      );
+      await expect(isolatedPool.query(
+        `UPDATE generation_jobs
+            SET requested_provider_policy = '{"raw_response":{"body":"must-not-persist"}}'::jsonb
+          WHERE idempotency_key='routing-active-job'`
+      )).rejects.toThrow();
     } finally {
       if (isolatedPool) await isolatedPool.end();
       await dropTestDatabaseWhenIdle(pool, databaseName);
