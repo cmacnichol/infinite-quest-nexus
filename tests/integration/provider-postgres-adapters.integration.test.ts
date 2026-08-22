@@ -286,12 +286,23 @@ integration("provider PostgreSQL adapters", () => {
       await expect(repositories.resolution.resolveDirect({
         ownerUserId: first.ownerUserId, providerRole: "text", selectedProviderProfileId: modelsProfile.id
       })).resolves.toMatchObject({ model: "updated-primary", fallbackModels: ["fallback-a", "fallback-b"] });
-      const staleCandidateProfile = (await repositories.profiles.listProfiles({ ownerUserId: first.ownerUserId }))
-        .find((profile) => profile.id === modelsProfile.id)!;
-      await pool.query(
-        "UPDATE provider_profiles SET base_url=$3,updated_at=now() WHERE id=$1 AND owner_user_id=$2",
-        [modelsProfile.id, first.ownerUserId, "https://newer-openrouter.example/v1"]
-      );
+    });
+
+    const staleCandidateProfile = await inTransaction(async (client) => {
+      const profile = (await createPostgresProviderRepositories(client).profiles.listProfiles({
+        ownerUserId: first.ownerUserId
+      })).find((candidate) => candidate.id === modelsProfile.id);
+      if (!profile) {
+        throw new Error("Expected models profile.");
+      }
+      return profile;
+    });
+    await inTransaction((client) => client.query(
+      "UPDATE provider_profiles SET base_url=$3,updated_at=now() WHERE id=$1 AND owner_user_id=$2",
+      [modelsProfile.id, first.ownerUserId, "https://newer-openrouter.example/v1"]
+    ));
+    await inTransaction(async (client) => {
+      const repositories = createPostgresProviderRepositories(client);
       await expect(repositories.profiles.updateProfile({
         ownerUserId: first.ownerUserId,
         providerProfileId: modelsProfile.id,
@@ -316,6 +327,10 @@ integration("provider PostgreSQL adapters", () => {
         defaultModel: "updated-primary",
         fallbackModels: ["fallback-a", "fallback-b"]
       });
+    });
+
+    await inTransaction(async (client) => {
+      const repositories = createPostgresProviderRepositories(client);
       const beforeIncompleteChange = (await repositories.profiles.listProfiles({ ownerUserId: first.ownerUserId }))
         .find((profile) => profile.id === modelsProfile.id);
       await expect(repositories.profiles.updateProfile({
