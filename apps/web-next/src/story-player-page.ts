@@ -414,7 +414,6 @@ export function mountStoryPlayerPage(
   const submitPreparedTurn = async (submission: PreparedStoryTurnSubmission) => {
     submittedDraft = submission.action;
     const pinnedReplacementTurnId = replacementTurnId;
-    replacementTurnId = null;
     const accepted = pinnedReplacementTurnId === null
       ? await generation.submitAppend(submission)
       : await tools.retryLatest(pinnedReplacementTurnId, submission);
@@ -422,6 +421,7 @@ export function mountStoryPlayerPage(
       if (!disposed) ui.setMessage("Story generation could not be started. Your accepted turns are unchanged.");
       return;
     }
+    replacementTurnId = null;
     ui.setStoryLengthProfileOverride(null);
     ui.setGenerationFollowing(true);
     await options.onSubmit?.(submission);

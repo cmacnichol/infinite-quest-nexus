@@ -231,6 +231,50 @@ describe("Story continuation composer", () => {
     expect(rejectedPage.document.querySelector<HTMLSelectElement>("[data-story-length-profile]")?.value).toBe("extended");
     rejectedMounted.dispose();
   });
+
+  it("keeps Retry Latest targeted at replacement after a rejected enqueue", async () => {
+    const page = fixture();
+    const confirm = vi.fn(() => true);
+    Object.defineProperty(page.window, "confirm", { configurable: true, value: confirm });
+    const base = composition();
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, base);
+    await settle();
+
+    const replacementTurnId = "66666666-6666-4666-8666-666666666666";
+    const submit = vi.fn()
+      .mockRejectedValueOnce(new Error("temporary enqueue failure"))
+      .mockResolvedValueOnce({
+        campaignId,
+        jobId: "55555555-5555-4555-8555-555555555555",
+        operationKind: "replace_latest" as const,
+        replacementTurnId,
+        async *watch() {}, async *retryGeneration() {},
+        cancelGeneration: vi.fn(), discardGeneration: vi.fn(), fetchResult: vi.fn()
+      });
+    Object.assign(base.workflow as object, { submit, resume: vi.fn(async () => null) });
+
+    page.document.querySelector<HTMLButtonElement>("[data-action='retry-latest-generation']")?.click();
+    await settle();
+    selectTurnLength(page, "extended");
+    page.document.querySelector<HTMLButtonElement>("[data-action='continue-story']")?.click();
+    await settle();
+
+    expect(submit).toHaveBeenCalledWith(campaignId, expect.objectContaining({
+      operationKind: "replace_latest",
+      request: expect.objectContaining({ storyLengthProfileOverride: "extended", expectedCurrentTurnNumber: 1 })
+    }));
+    expect(page.document.querySelector<HTMLSelectElement>("[data-story-length-profile]")?.value).toBe("extended");
+    page.document.querySelector<HTMLButtonElement>("[data-action='continue-story']")?.click();
+    await settle();
+
+    expect(submit.mock.calls.map(([, request]) => (request as { operationKind: string }).operationKind))
+      .toEqual(["replace_latest", "replace_latest"]);
+    expect(submit.mock.calls[1]?.[1]).toEqual(expect.objectContaining({
+      request: expect.objectContaining({ storyLengthProfileOverride: "extended", expectedCurrentTurnNumber: 1 })
+    }));
+    expect(confirm).toHaveBeenCalledTimes(2);
+    mounted.dispose();
+  });
   it("uses the campaign control style to render an action-only or flexible compact interpretation bar", async () => {
     const actionPage = fixture();
     const actionMounted = mountStoryPlayerPage(actionPage.root, { campaignId, turnNumber: 1 }, composition());
