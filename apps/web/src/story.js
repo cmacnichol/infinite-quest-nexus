@@ -1723,7 +1723,7 @@ function openRetryPromptDialog(originalPrompt) {
 
 function closeRetryPromptDialog() {
   const dialog = $("retryPromptDialog");
-  if (dialog && dialog.open) dialog.close();
+  if (dialog?.hasAttribute("open")) dialog.close();
 }
 
 async function executeRetryWithPrompt(submittedPromptText) {

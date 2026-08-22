@@ -435,6 +435,8 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
         operationKind: "replace_latest",
         request: expect.objectContaining({ storyLengthProfileOverride: "brief" })
       }));
+      expect(retryDialog.hasAttribute("open")).toBe(false);
+      expect(retryLength.value).toBe("");
     } finally {
       vi.unstubAllGlobals();
     }
