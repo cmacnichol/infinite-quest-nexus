@@ -581,6 +581,72 @@ describe("provider PostgreSQL adapter boundaries", () => {
     expect(updates[0]?.[5]).toEqual(["concurrent-fallback"]);
   });
 
+  test("rejects a stale preset candidate revision before writing a locked newer profile", async () => {
+    const row = {
+      id: "00000000-0000-4000-8000-000000000028",
+      name: "Newer saved profile",
+      provider_type: "openrouter" as const,
+      provider_role: "text" as const,
+      base_url: "https://newer-endpoint.example/v1",
+      default_model: "newer-primary",
+      fallback_models: [],
+      routing_source: "models" as const,
+      preset_slug: null,
+      preset_designated_version_id: null,
+      preset_version: null,
+      preset_config_hash: null,
+      preset_provider_policy: {},
+      context_window_tokens: 32_768,
+      max_output_tokens: 4_096,
+      temperature: 0.8,
+      request_timeout_ms: 60_000,
+      configuration: {},
+      encrypted_api_key: null,
+      credential_nonce: null,
+      credential_auth_tag: null,
+      credential_key_version: null,
+      enabled: true,
+      is_default: false,
+      health_status: "unknown" as const,
+      consecutive_failures: 0,
+      last_health_check_at: null,
+      created_at: new Date("2026-08-22T00:00:00Z"),
+      updated_at: new Date("2026-08-22T00:00:00Z"),
+      row_revision: "newer-revision"
+    };
+    const updates: unknown[][] = [];
+    const database = {
+      query: vi.fn(async (statement: string, parameters: unknown[] = []) => {
+        if (statement.includes("FOR UPDATE")) return { rows: [row], rowCount: 1 };
+        if (statement.includes("UPDATE provider_profiles SET name=$3")) {
+          updates.push(parameters);
+          return { rows: [{ ...row, default_model: parameters[4] }], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 1 };
+      })
+    };
+
+    await expect(createPostgresProviderRepositories(database as never).profiles.updateProfile({
+      ownerUserId: "00000000-0000-4000-8000-000000000029",
+      providerProfileId: row.id,
+      changes: {
+        expectedRevision: "revision-before-validation",
+        routingSource: "openrouter_preset",
+        defaultModel: "validated-against-stale-endpoint",
+        fallbackModels: [],
+        preset: {
+          slug: "story-router",
+          designatedVersionId: "version-5",
+          version: 5,
+          configHash: "f".repeat(64)
+        },
+        providerPolicy: { allow_fallbacks: true }
+      } as never
+    })).rejects.toMatchObject({ statusCode: 409 });
+
+    expect(updates).toEqual([]);
+  });
+
   test("acquires the role advisory lock before row locks when an update selects a default", async () => {
     const row = {
       id: "00000000-0000-4000-8000-000000000031",
@@ -611,8 +677,8 @@ describe("provider PostgreSQL adapter boundaries", () => {
       query: vi.fn(async (statement: string) => {
         statements.push(statement.replace(/\s+/g, " ").trim());
         if (/^SELECT provider_role /.test(statements.at(-1)!)) return { rows: [{ provider_role: "text" }] };
-        if (/^SELECT id, name, provider_type/.test(statements.at(-1)!)) return { rows: [row] };
-        if (/RETURNING id, name, provider_type/.test(statements.at(-1)!)) return { rows: [{ ...row, is_default: true }] };
+        if (/^SELECT id, xmin::text AS row_revision, name, provider_type/.test(statements.at(-1)!)) return { rows: [row] };
+        if (/RETURNING id, xmin::text AS row_revision, name, provider_type/.test(statements.at(-1)!)) return { rows: [{ ...row, is_default: true }] };
         return { rows: [] };
       })
     };

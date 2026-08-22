@@ -116,6 +116,8 @@ type ProviderProfileViewBase = Readonly<{
   isDefault: boolean;
   /** Presence only. Credential material and references are runtime-private. */
   hasCredential: boolean;
+  /** Internal optimistic-concurrency token; API projections deliberately omit it. */
+  revision: string;
   health: ProviderHealthView;
   createdAt: string;
   updatedAt: string;
@@ -178,6 +180,8 @@ export type CreateProviderProfileCommand<R extends ProviderRole = ProviderRole> 
   OwnerScope & ProviderProfileWriteFields<R>;
 
 export type ProviderProfileChanges = Readonly<{
+  /** Server-derived optimistic-concurrency token for a validated preset candidate. */
+  expectedRevision?: string;
   name?: string;
   baseUrl?: string;
   defaultModel?: string;

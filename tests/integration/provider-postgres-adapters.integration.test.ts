@@ -286,6 +286,36 @@ integration("provider PostgreSQL adapters", () => {
       await expect(repositories.resolution.resolveDirect({
         ownerUserId: first.ownerUserId, providerRole: "text", selectedProviderProfileId: modelsProfile.id
       })).resolves.toMatchObject({ model: "updated-primary", fallbackModels: ["fallback-a", "fallback-b"] });
+      const staleCandidateProfile = (await repositories.profiles.listProfiles({ ownerUserId: first.ownerUserId }))
+        .find((profile) => profile.id === modelsProfile.id)!;
+      await pool.query(
+        "UPDATE provider_profiles SET base_url=$3,updated_at=now() WHERE id=$1 AND owner_user_id=$2",
+        [modelsProfile.id, first.ownerUserId, "https://newer-openrouter.example/v1"]
+      );
+      await expect(repositories.profiles.updateProfile({
+        ownerUserId: first.ownerUserId,
+        providerProfileId: modelsProfile.id,
+        changes: {
+          expectedRevision: staleCandidateProfile.revision,
+          routingSource: "openrouter_preset",
+          defaultModel: "validated-against-stale-endpoint",
+          fallbackModels: [],
+          preset: {
+            slug: "story-router",
+            designatedVersionId: "version-5",
+            version: 5,
+            configHash: "f".repeat(64)
+          },
+          providerPolicy: { allow_fallbacks: true }
+        }
+      })).rejects.toMatchObject({ statusCode: 409 });
+      expect((await repositories.profiles.listProfiles({ ownerUserId: first.ownerUserId }))
+        .find((profile) => profile.id === modelsProfile.id)).toMatchObject({
+        baseUrl: "https://newer-openrouter.example/v1",
+        routingSource: "models",
+        defaultModel: "updated-primary",
+        fallbackModels: ["fallback-a", "fallback-b"]
+      });
       const beforeIncompleteChange = (await repositories.profiles.listProfiles({ ownerUserId: first.ownerUserId }))
         .find((profile) => profile.id === modelsProfile.id);
       await expect(repositories.profiles.updateProfile({

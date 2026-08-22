@@ -220,11 +220,13 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
 
     async update(ownerUserId: string, providerProfileId: string, input: ProviderProfileUpdate) {
       return composition.transaction(async ({ application, runtime }) => {
+        let expectedRevision: string | undefined;
         const resolvedSelection = input.routingSource === "openrouter_preset"
           ? await (async () => {
               const existing = (await application.listProfiles({ ownerUserId }))
                 .find((profile) => profile.id === providerProfileId);
               if (!existing) throw Object.assign(new Error("Provider profile not found."), { statusCode: 404 });
+              expectedRevision = existing.revision;
               const patchedCandidate: ProviderCandidate = {
                 ownerUserId,
                 name: input.name ?? existing.name,
@@ -260,6 +262,7 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
             ...(input.baseUrl === undefined ? {} : { baseUrl: input.baseUrl }),
             ...(input.defaultModel === undefined ? {} : { defaultModel: input.defaultModel }),
             ...(resolvedSelection === undefined ? {} : {
+              ...(expectedRevision === undefined ? {} : { expectedRevision }),
               defaultModel: resolvedSelection.defaultModel,
               routingSource: resolvedSelection.routingSource,
               fallbackModels: resolvedSelection.fallbackModels,

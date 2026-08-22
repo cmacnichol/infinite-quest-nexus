@@ -50,6 +50,7 @@ const textProfile: ProviderProfileView = {
   enabled: true,
   isDefault: true,
   hasCredential: false,
+  revision: "text-profile-revision",
   health: {
     status: "healthy",
     consecutiveFailures: 0,
@@ -335,7 +336,13 @@ describe("provider application contracts", () => {
       models: ["primary/intent", "fallback/intent"],
       providerPolicy: { allow_fallbacks: true }
     };
-    const existing = { ...textProfile, providerType: "openrouter" as const, providerRole: "intent" as const };
+    const existing: ProviderProfileView = {
+      ...textProfile,
+      providerType: "openrouter" as const,
+      providerRole: "intent" as const,
+      capability: "intent_classification",
+      revision: "revision-before-validation"
+    };
     const profile = {
       ...existing,
       defaultModel: "primary/intent",
@@ -382,6 +389,7 @@ describe("provider application contracts", () => {
       changes: expect.objectContaining({
         defaultModel: "primary/intent",
         routingSource: "openrouter_preset",
+        expectedRevision: "revision-before-validation",
         fallbackModels: ["fallback/intent"],
         preset: {
           slug: snapshot.slug,
@@ -399,6 +407,7 @@ describe("provider application contracts", () => {
       preset: { slug: "intent-router", version: 3, configHash: "b".repeat(64) },
       providerPolicy: { allow_fallbacks: true }
     });
+    expect(response).not.toHaveProperty("revision");
     expect(JSON.stringify(response)).not.toContain("intent-version-3-secret");
   });
 

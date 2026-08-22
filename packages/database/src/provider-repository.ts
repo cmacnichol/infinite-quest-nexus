@@ -23,6 +23,7 @@ import type { DatabaseClient } from "./pool.js";
 
 type ProviderRow = {
   id: string;
+  row_revision: string;
   name: string;
   provider_type: ProviderType;
   provider_role: ProviderRole;
@@ -53,7 +54,7 @@ type ProviderRow = {
   updated_at: Date | string;
 };
 
-const SELECT_COLUMNS = `id, name, provider_type, provider_role, base_url, default_model,
+const SELECT_COLUMNS = `id, xmin::text AS row_revision, name, provider_type, provider_role, base_url, default_model,
   fallback_models, routing_source, preset_slug, preset_designated_version_id, preset_version,
   preset_config_hash, preset_provider_policy,
   context_window_tokens, max_output_tokens, temperature, request_timeout_ms, configuration,
@@ -128,6 +129,7 @@ function profileView(row: ProviderRow): ProviderProfileView {
     enabled: row.enabled,
     isDefault: row.is_default,
     hasCredential: Boolean(row.encrypted_api_key),
+    revision: row.row_revision,
     health: {
       status: row.health_status,
       consecutiveFailures: row.consecutive_failures,
@@ -366,6 +368,9 @@ export function createPostgresProviderRepositories(client: DatabaseClient): Post
       const row = current.rows[0];
       if (!row) throw httpError("Provider profile not found.", 404);
       const changes = command.changes;
+      if (changes.expectedRevision !== undefined && row.row_revision !== changes.expectedRevision) {
+        throw httpError("Provider profile changed while the preset was being validated. Retry the update.", 409);
+      }
       const selection = mergedModelSelection(row, changes);
       const merged = validateCreate({
         ownerUserId: command.ownerUserId,
