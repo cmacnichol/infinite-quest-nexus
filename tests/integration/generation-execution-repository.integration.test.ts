@@ -22,6 +22,7 @@ import { providerPromptProtocolVersion, loadPromptSnapshotForTest } from "../hel
 import { createProvider } from "../helpers/provider-application-fixtures.js";
 import { memoryGeneration } from "../helpers/memory-applications.js";
 import { DEDICATED_CHUNKED_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
+import { sha256, stableStringify } from "../../packages/domain/src/index.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -224,6 +225,7 @@ integration("PostgreSQL generation execution repository", () => {
       providerPolicyHash: "a".repeat(64),
       providerType: "openai_compatible"
     };
+    const emptyPolicyHash = sha256(stableStringify({}));
     await pool.query(
       `UPDATE generation_jobs
           SET requested_fallback_models = ARRAY[]::text[], requested_routing_source = 'models',
@@ -245,7 +247,7 @@ integration("PostgreSQL generation execution repository", () => {
         configuredModels: ["execution-repository-model", "legacy-fallback-model"],
         routingSource: "models",
         providerPolicy: {},
-        providerPolicyHash: "a".repeat(64),
+        providerPolicyHash: emptyPolicyHash,
         providerType: "openai_compatible"
       }
     });
@@ -266,7 +268,44 @@ integration("PostgreSQL generation execution repository", () => {
         configuredModels: ["execution-repository-model"],
         routingSource: "models",
         providerPolicy: {},
+        providerPolicyHash: emptyPolicyHash,
         providerType: "openai_compatible"
+      }
+    });
+
+    const presetPolicy = { order: ["provider-a"] };
+    const presetPolicyHash = sha256(stableStringify(presetPolicy));
+    await pool.query(
+      `UPDATE generation_jobs
+          SET requested_fallback_models = ARRAY[]::text[], requested_routing_source = 'models',
+              requested_preset_slug = NULL, requested_preset_designated_version_id = NULL,
+              requested_preset_version = NULL, requested_preset_config_hash = NULL,
+              requested_provider_policy = '{}'::jsonb, requested_provider_type = NULL,
+              context_options = jsonb_set(context_options, '{modelRouting}', $2::jsonb, true)
+        WHERE id = $1`,
+      [queued.id, JSON.stringify({
+        requestedModel: "execution-repository-model",
+        configuredModels: ["execution-repository-model", "legacy-fallback-model"],
+        routingSource: "openrouter_preset",
+        presetSlug: "legacy-router",
+        presetDesignatedVersionId: "legacy-designated-version",
+        presetVersion: 2,
+        presetConfigHash: "b".repeat(64),
+        providerPolicy: presetPolicy,
+        providerPolicyHash: presetPolicyHash,
+        providerType: "openrouter"
+      })]
+    );
+    await expect(repository.loadExecutionPayload({
+      workerId: "legacy-routing-worker",
+      leaseSeconds: 30,
+      claim: claim!
+    })).resolves.toMatchObject({
+      model_routing: {
+        routingSource: "openrouter_preset",
+        providerPolicy: presetPolicy,
+        providerPolicyHash: presetPolicyHash,
+        providerType: "openrouter"
       }
     });
   });

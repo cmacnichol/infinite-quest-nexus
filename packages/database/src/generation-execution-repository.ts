@@ -278,9 +278,6 @@ function legacyContextRoutingSnapshot(row: ExecutionPayloadRow): GenerationModel
   const models = configuredModels as string[];
   const providerPolicy = unknownRecord(value.providerPolicy);
   if (!providerPolicy) return null;
-  const suppliedPolicyHash = typeof value.providerPolicyHash === "string" && /^[a-f0-9]{64}$/.test(value.providerPolicyHash)
-    ? value.providerPolicyHash
-    : sha256(stableStringify(providerPolicy));
   if (routingSource === "models") {
     if (Object.keys(providerPolicy).length
         || value.presetSlug !== null || value.presetDesignatedVersionId !== null
@@ -288,7 +285,7 @@ function legacyContextRoutingSnapshot(row: ExecutionPayloadRow): GenerationModel
     return {
       requestedModel, configuredModels: models, routingSource, presetSlug: null,
       presetDesignatedVersionId: null, presetVersion: null, presetConfigHash: null,
-      providerPolicy: {}, providerPolicyHash: suppliedPolicyHash, providerType
+      providerPolicy: {}, providerPolicyHash: sha256(stableStringify({})), providerType
     };
   }
   if (providerType !== "openrouter") return null;
@@ -310,16 +307,13 @@ function legacyContextRoutingSnapshot(row: ExecutionPayloadRow): GenerationModel
     presetVersion: parsedPreset.data.version,
     presetConfigHash: parsedPreset.data.configHash,
     providerPolicy: parsedPreset.data.providerPolicy,
-    providerPolicyHash: suppliedPolicyHash,
+    providerPolicyHash: sha256(stableStringify(parsedPreset.data.providerPolicy)),
     providerType
   };
 }
 
 function columnRoutingSnapshot(row: ExecutionPayloadRow): GenerationModelRoutingSnapshot {
   const providerPolicy = row.requested_provider_policy || {};
-  const contextModelRouting = (row.context_options as unknown as {
-    modelRouting?: { providerPolicyHash?: unknown };
-  }).modelRouting;
   return {
     requestedModel: row.requested_model,
     configuredModels: [row.requested_model, ...(row.requested_fallback_models || [])].filter(Boolean),
@@ -329,9 +323,7 @@ function columnRoutingSnapshot(row: ExecutionPayloadRow): GenerationModelRouting
     presetVersion: row.requested_preset_version,
     presetConfigHash: row.requested_preset_config_hash,
     providerPolicy,
-    providerPolicyHash: typeof contextModelRouting?.providerPolicyHash === "string"
-        ? contextModelRouting.providerPolicyHash
-        : sha256(stableStringify(providerPolicy)),
+    providerPolicyHash: sha256(stableStringify(providerPolicy)),
     providerType: row.requested_provider_type || "unknown"
   };
 }

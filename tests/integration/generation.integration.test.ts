@@ -83,7 +83,7 @@ async function generationAuthoritySnapshot(pool: DatabasePool, campaignId: strin
     ),
     pool.query<{ value: Record<string, unknown> }>(
       `SELECT to_jsonb(chunk_row) AS value FROM chronicle_memory_chunks chunk_row
-        WHERE campaign_id = $1 ORDER BY parent_memory_id, ordinal, id`,
+        WHERE campaign_id = $1 ORDER BY parent_memory_id, chunk_ordinal, id`,
       [campaignId]
     )
   ]);
