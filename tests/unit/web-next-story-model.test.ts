@@ -37,6 +37,7 @@ describe("Story Player local UI model", () => {
       "phase",
       "readingWidth",
       "requestedInputMode",
+      "storyLengthProfileOverride",
       "viewTurnNumber"
     ]);
   });
@@ -79,7 +80,8 @@ describe("Story Player local UI model", () => {
     model.setIntentConfirmation({
       action: "  Keep this exact draft.  ",
       classificationId: "classification-a",
-      requestedInputMode: "auto"
+      requestedInputMode: "auto",
+      storyLengthProfileOverride: null
     });
 
     expect(model.get()).toEqual(expect.objectContaining({
@@ -93,6 +95,20 @@ describe("Story Player local UI model", () => {
     expect(model.get()).toEqual(expect.objectContaining({
       draft: "", choiceSelection: [], choiceBaseText: "", intentConfirmation: null
     }));
+  });
+
+  it("keeps a valid turn length override for its composer owner and rejects invalid values", () => {
+    const model = createStoryUiModel({}, memoryStorage());
+
+    model.syncComposer("campaign-a", 7, "flexible_action");
+    model.setStoryLengthProfileOverride("extended");
+    model.syncComposer("campaign-a", 7, "flexible_action");
+
+    expect(model.get().storyLengthProfileOverride).toBe("extended");
+    model.setStoryLengthProfileOverride("unbounded" as never);
+    expect(model.get().storyLengthProfileOverride).toBe("extended");
+    model.syncComposer("campaign-a", 8, "flexible_action");
+    expect(model.get().storyLengthProfileOverride).toBeNull();
   });
 
   it("publishes a restored Retry Latest draft before focus can return to the composer", () => {

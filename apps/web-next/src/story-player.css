@@ -172,6 +172,32 @@ main[data-page="story-player"] {
   font-weight: 700;
 }
 
+.story-length-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(10rem, 16rem);
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-family: "Chakra Petch", sans-serif;
+  font-size: .78rem;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.story-length-control select {
+  min-width: 0;
+  min-height: 44px;
+  padding: 8px 10px;
+  color: var(--text-primary);
+  background: var(--surface-entry);
+  border: 1px solid var(--rule-strong);
+  font: inherit;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
 .story-draft-field {
   position: relative;
   display: grid;
@@ -493,6 +519,8 @@ main[data-page="story-player"] :is(button, a, input, select, textarea, summary):
   .story-illustration-wing { padding: 18px; }
   .story-input-mode-bar { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .story-input-mode { padding-inline: 4px; font-size: .75rem; white-space: nowrap; }
+  .story-length-control { grid-template-columns: minmax(0, 1fr); }
+  .story-length-control select { width: 100%; }
   .story-composer-secondary-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .story-composer-secondary-actions button { min-width: 0; }
   .story-composer-primary-action { display: block; }

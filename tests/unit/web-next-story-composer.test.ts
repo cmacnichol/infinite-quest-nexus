@@ -141,6 +141,14 @@ function enter(page: ReturnType<typeof fixture>, text: string): HTMLTextAreaElem
   return textarea;
 }
 
+function selectTurnLength(page: ReturnType<typeof fixture>, value: string): HTMLSelectElement {
+  const select = page.document.querySelector<HTMLSelectElement>("[data-story-length-profile]");
+  if (!select) throw new Error("Story length profile control is missing.");
+  for (const option of select.querySelectorAll<HTMLOptionElement>("option")) option.selected = option.value === value;
+  select.dispatchEvent(new page.window.Event("change", { bubbles: true }));
+  return select;
+}
+
 function keydown(page: ReturnType<typeof fixture>, target: HTMLElement, key: string): void {
   const event = new page.window.Event("keydown", { bubbles: true, cancelable: true });
   Object.defineProperty(event, "key", { value: key });
@@ -167,6 +175,62 @@ function deferred<T>() {
 afterEach(() => vi.restoreAllMocks());
 
 describe("Story continuation composer", () => {
+  it("renders the compact turn length profile selector and resets it after a durable attachment", async () => {
+    const page = fixture();
+    const observer = vi.fn();
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition(), { onSubmit: observer });
+    await settle();
+
+    const select = page.document.querySelector<HTMLSelectElement>("[data-story-length-profile]");
+    expect([...select?.querySelectorAll("option") ?? []].map((option) => [option.getAttribute("value"), option.textContent]))
+      .toEqual([["", "Campaign default — Standard"], ["brief", "Brief"], ["standard", "Standard"], ["long", "Long"], ["extended", "Extended"]]);
+    selectTurnLength(page, "extended");
+    enter(page, "Open the observatory.");
+    page.document.querySelector<HTMLButtonElement>("[data-action='continue-story']")?.click();
+    await settle();
+
+    expect(observer).toHaveBeenCalledWith(expect.objectContaining({ storyLengthProfileOverride: "extended" }));
+    expect(page.document.querySelector<HTMLSelectElement>("[data-story-length-profile]")?.value).toBe("");
+    mounted.dispose();
+  });
+
+  it("captures the turn length before Auto confirmation and retains it after a rejected submission", async () => {
+    const page = fixture();
+    const classifyTurnInput = vi.fn().mockResolvedValue({
+      classificationId: "11111111-1111-4111-8111-111111111111", classification: "mixed", resolvedMode: "scene",
+      confidenceBand: "ambiguous", providerSource: "story_text", expiresAt: "2026-08-18T00:01:00.000Z"
+    });
+    const observer = vi.fn();
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({ turnControlStyle: "flexible_auto", classifyTurnInput }), { onSubmit: observer });
+    await settle();
+
+    selectTurnLength(page, "extended");
+    enter(page, "Describe the moment.");
+    page.document.querySelector<HTMLButtonElement>("[data-action='continue-story']")?.click();
+    await settle();
+    selectTurnLength(page, "brief");
+    page.document.querySelector<HTMLButtonElement>("[data-action='confirm-intent-scene']")?.click();
+    await settle();
+
+    expect(observer).toHaveBeenCalledWith(expect.objectContaining({ storyLengthProfileOverride: "extended", resolvedInputMode: "scene" }));
+    mounted.dispose();
+
+    const rejectedPage = fixture();
+    const base = composition();
+    const rejected = {
+      ...base,
+      workflow: { submit: vi.fn(async () => { throw new Error("workflow unavailable"); }), resume: vi.fn(async () => null) }
+    } as StoryPlayerComposition;
+    const rejectedMounted = mountStoryPlayerPage(rejectedPage.root, { campaignId, turnNumber: 1 }, rejected);
+    await settle();
+    selectTurnLength(rejectedPage, "extended");
+    enter(rejectedPage, "Try the observatory.");
+    rejectedPage.document.querySelector<HTMLButtonElement>("[data-action='continue-story']")?.click();
+    await settle();
+
+    expect(rejectedPage.document.querySelector<HTMLSelectElement>("[data-story-length-profile]")?.value).toBe("extended");
+    rejectedMounted.dispose();
+  });
   it("uses the campaign control style to render an action-only or flexible compact interpretation bar", async () => {
     const actionPage = fixture();
     const actionMounted = mountStoryPlayerPage(actionPage.root, { campaignId, turnNumber: 1 }, composition());

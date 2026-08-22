@@ -9,6 +9,7 @@ import type {
   CampaignRuntimeStateUpdate,
   CampaignSummary,
   MetaResponse,
+  StoryLengthProfile,
   TurnInputClassificationResponse,
   TurnInputModeSource
 } from "@infinite-quest/contracts";
@@ -75,6 +76,7 @@ export interface PreparedStoryTurnSubmission {
   readonly resolvedInputMode: "action" | "scene";
   readonly inputModeSource: TurnInputModeSource;
   readonly classificationId?: string;
+  readonly storyLengthProfileOverride?: StoryLengthProfile;
 }
 
 export interface StoryPlayerPageOptions {
@@ -89,7 +91,7 @@ export type TurnInputClassifier = (request: Readonly<{
 
 export type TurnSubmissionPreparation = Readonly<
   | { kind: "ready"; submission: PreparedStoryTurnSubmission }
-  | { kind: "confirmation"; action: string; classificationId: string }
+  | { kind: "confirmation"; action: string; classificationId: string; storyLengthProfileOverride?: StoryLengthProfile }
 >;
 
 /**
@@ -100,18 +102,25 @@ export async function prepareTurnSubmission(
   draft: string,
   requestedInputMode: StoryTurnInputMode,
   campaignFallback: "action" | "scene",
-  classifyTurnInput?: TurnInputClassifier
+  classifyTurnInput?: TurnInputClassifier,
+  storyLengthProfileOverride: StoryLengthProfile | null = null
 ): Promise<TurnSubmissionPreparation> {
   if (requestedInputMode === "action" || requestedInputMode === "scene") {
     return {
       kind: "ready",
-      submission: { action: draft, requestedInputMode, resolvedInputMode: requestedInputMode, inputModeSource: "explicit" }
+      submission: {
+        action: draft, requestedInputMode, resolvedInputMode: requestedInputMode, inputModeSource: "explicit",
+        ...(storyLengthProfileOverride ? { storyLengthProfileOverride } : {})
+      }
     };
   }
   if (!classifyTurnInput) throw new Error("Prompt interpretation is unavailable.");
   const result = await classifyTurnInput({ text: draft, preferredFallback: campaignFallback });
   if (result.confidenceBand === "ambiguous") {
-    return { kind: "confirmation", action: draft, classificationId: result.classificationId };
+    return {
+      kind: "confirmation", action: draft, classificationId: result.classificationId,
+      ...(storyLengthProfileOverride ? { storyLengthProfileOverride } : {})
+    };
   }
   return {
     kind: "ready",
@@ -120,7 +129,8 @@ export async function prepareTurnSubmission(
       requestedInputMode: "auto",
       resolvedInputMode: result.resolvedMode,
       inputModeSource: "auto",
-      classificationId: result.classificationId
+      classificationId: result.classificationId,
+      ...(storyLengthProfileOverride ? { storyLengthProfileOverride } : {})
     }
   };
 }
@@ -412,6 +422,7 @@ export function mountStoryPlayerPage(
       if (!disposed) ui.setMessage("Story generation could not be started. Your accepted turns are unchanged.");
       return;
     }
+    ui.setStoryLengthProfileOverride(null);
     ui.setGenerationFollowing(true);
     await options.onSubmit?.(submission);
   };
@@ -419,6 +430,7 @@ export function mountStoryPlayerPage(
     const campaign = projection.campaign;
     const current = ui.get();
     const draft = current.draft;
+    const storyLengthProfileOverride = current.storyLengthProfileOverride;
     if (!campaign || !draft.trim()) {
       focusDraft();
       return;
@@ -435,11 +447,17 @@ export function mountStoryPlayerPage(
         campaignFallback(),
         typeof classifyTurnInput === "function"
           ? (request) => classifyTurnInput(campaign.id, request)
-          : undefined
+          : undefined,
+        storyLengthProfileOverride
       );
       if (disposed || projection.campaign?.id !== campaign.id || ui.get().draft !== draft) return;
       if (preparation.kind === "confirmation") {
-        ui.setIntentConfirmation({ action: preparation.action, classificationId: preparation.classificationId, requestedInputMode: "auto" });
+        ui.setIntentConfirmation({
+          action: preparation.action,
+          classificationId: preparation.classificationId,
+          requestedInputMode: "auto",
+          storyLengthProfileOverride: preparation.storyLengthProfileOverride ?? null
+        });
         root.querySelector<HTMLButtonElement>("[data-action='confirm-intent-action']")?.focus();
         return;
       }
@@ -457,7 +475,8 @@ export function mountStoryPlayerPage(
       requestedInputMode: "auto",
       resolvedInputMode,
       inputModeSource: "auto",
-      classificationId: intent.classificationId
+      classificationId: intent.classificationId,
+      ...(intent.storyLengthProfileOverride ? { storyLengthProfileOverride: intent.storyLengthProfileOverride } : {})
     });
   };
   const syncComposer = () => {
@@ -721,6 +740,14 @@ export function mountStoryPlayerPage(
         if (nextIndex < 0 || (mode !== "auto" && mode !== "action" && mode !== "scene")) return;
         event.preventDefault();
         selectInputMode(mode);
+      });
+    }
+    for (const control of root.querySelectorAll<HTMLSelectElement>("[data-story-length-profile]")) {
+      control.addEventListener("change", () => {
+        const profile = control.value;
+        ui.setStoryLengthProfileOverride(profile === "brief" || profile === "standard" || profile === "long" || profile === "extended"
+          ? profile
+          : null);
       });
     }
     for (const textarea of root.querySelectorAll<HTMLTextAreaElement>("[data-story-draft]")) {
