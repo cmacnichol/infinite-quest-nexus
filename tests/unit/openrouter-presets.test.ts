@@ -28,7 +28,7 @@ function transportReturning(body: unknown, options: Readonly<{ status?: number; 
 }
 
 describe("OpenRouter preset discovery", () => {
-  it("lists paginated active preset metadata through the configured API root with bearer auth and timeout", async () => {
+  it("lists paginated preset metadata through the configured API root with bearer auth and timeout", async () => {
     const transport = transportReturning({
       data: [{
         slug: "story-router",
@@ -56,6 +56,33 @@ describe("OpenRouter preset discovery", () => {
       headers: expect.objectContaining({ authorization: "Bearer preset-discovery-secret" }),
       signal: expect.any(AbortSignal)
     }));
+  });
+
+  it("retains inactive rows and the upstream total count for a paginated management view", async () => {
+    const transport = transportReturning({
+      data: [{
+        slug: "active-router",
+        name: "Active router",
+        status: "active",
+        designated_version_id: "active-version",
+        updated_at: "2026-08-22T12:00:00Z"
+      }, {
+        slug: "inactive-router",
+        name: "Inactive router",
+        status: "inactive",
+        designated_version_id: "inactive-version",
+        updated_at: "2026-08-22T12:01:00Z"
+      }],
+      total_count: 9
+    });
+
+    await expect(createOpenRouterPresetDiscovery(transport).list(profile, { offset: 4, limit: 2 })).resolves.toEqual({
+      presets: expect.arrayContaining([
+        expect.objectContaining({ slug: "active-router", status: "active" }),
+        expect.objectContaining({ slug: "inactive-router", status: "inactive" })
+      ]),
+      totalCount: 9
+    });
   });
 
   it("snapshots only safe active routing configuration in the documented model order", async () => {
@@ -86,6 +113,69 @@ describe("OpenRouter preset discovery", () => {
       providerPolicy: { allow_fallbacks: true }
     });
     expect(transport.fetch).toHaveBeenCalledWith(profile, "OpenRouter preset discovery", "https://openrouter.example/api/v1/presets/story-router", expect.any(Object));
+  });
+
+  it("normalizes models-only configurations and all documented policy fields including slash-qualified endpoints", async () => {
+    const transport = transportReturning({
+      data: {
+        slug: "story-router",
+        status: "active",
+        designated_version_id: "version-id",
+        designated_version: {
+          id: "version-id",
+          version: 3,
+          system_prompt: "",
+          config: {
+            models: ["primary/model", "fallback/model"],
+            provider: {
+              order: ["provider/turbo"],
+              only: ["provider/standard"],
+              ignore: ["provider/legacy"],
+              allow_fallbacks: true,
+              require_parameters: false,
+              data_collection: "deny",
+              zdr: true,
+              quantizations: ["fp16"],
+              sort: { by: "latency", partition: "model" },
+              max_price: { prompt: 0, completion: 1_000_000 }
+            }
+          }
+        }
+      }
+    });
+
+    await expect(createOpenRouterPresetDiscovery(transport).get(profile, "story-router")).resolves.toMatchObject({
+      models: ["primary/model", "fallback/model"],
+      providerPolicy: {
+        order: ["provider/turbo"],
+        only: ["provider/standard"],
+        ignore: ["provider/legacy"],
+        allow_fallbacks: true,
+        require_parameters: false,
+        data_collection: "deny",
+        zdr: true,
+        quantizations: ["fp16"],
+        sort: { by: "latency", partition: "model" },
+        max_price: { completion: 1_000_000, prompt: 0 }
+      }
+    });
+  });
+
+  it("uses the configured request timeout and sanitizes timeout transport details", async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    const transport = {
+      fetch: vi.fn(async () => {
+        throw new Error("timeout with bearer secret");
+      }),
+      validateSdkEndpoint: vi.fn(),
+      close: vi.fn()
+    } satisfies ProviderTransport;
+
+    await expect(createOpenRouterPresetDiscovery(transport).list(
+      { ...profile, requestTimeoutMs: 5_000 },
+      { offset: 0, limit: 10 }
+    )).rejects.not.toThrow("bearer secret");
+    expect(timeoutSpy).toHaveBeenCalledWith(5_000);
   });
 
   it.each([

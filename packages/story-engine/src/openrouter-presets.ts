@@ -12,7 +12,7 @@ const MAX_DISCOVERY_PAGE_LIMIT = 100;
 const MAX_PROVIDER_LIST_ITEMS = 32;
 const MAX_PRESET_CONFIG_BYTES = 64 * 1024;
 const MAX_PRESET_CONFIG_DEPTH = 6;
-const PROVIDER_SLUG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const PROVIDER_ENDPOINT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/;
 const QUANTIZATIONS = new Set(["int4", "int8", "fp4", "mxfp4", "nvfp4", "fp6", "fp8", "mxfp8", "fp16", "bf16", "fp32", "unknown"]);
 
 export type OpenRouterPresetSummary = Readonly<{
@@ -139,7 +139,7 @@ function boundedStringArray(value: unknown, label: string, allowed?: ReadonlySet
     throw new OpenRouterPresetDiscoveryError(`OpenRouter preset ${label} is invalid.`, 422);
   }
   const values = value.map((item) => requiredString(item, label, 160));
-  if (new Set(values).size !== values.length || values.some((item) => (providerSlugs && !PROVIDER_SLUG_PATTERN.test(item)) || (allowed && !allowed.has(item)))) {
+  if (new Set(values).size !== values.length || values.some((item) => (providerSlugs && !PROVIDER_ENDPOINT_PATTERN.test(item)) || (allowed && !allowed.has(item)))) {
     throw new OpenRouterPresetDiscoveryError(`OpenRouter preset ${label} is invalid.`, 422);
   }
   return values;
@@ -258,7 +258,7 @@ function listResult(data: Record<string, unknown>): { presets: readonly OpenRout
       designatedVersionId: requiredString(row.designated_version_id, "designated version ID"),
       updatedAt: requiredString(row.updated_at, "updated time", 100)
     };
-  }).filter((value) => value.status === "active");
+  });
   return { presets, totalCount: Number(totalCount) };
 }
 

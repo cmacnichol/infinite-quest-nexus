@@ -431,17 +431,7 @@ export type PrivateProviderCredentialRow = Readonly<{
   encryptedCredential: EncryptedCredential | null;
 }>;
 
-export async function loadPrivateProviderCredentialRow(
-  database: DatabaseClient,
-  ownerUserId: string,
-  providerProfileId: string,
-): Promise<PrivateProviderCredentialRow | null> {
-  const result = await database.query<ProviderRow>(
-    `SELECT ${SELECT_COLUMNS} FROM provider_profiles WHERE id=$1 AND owner_user_id=$2 AND enabled=true`,
-    [providerProfileId, ownerUserId]
-  );
-  const row = result.rows[0];
-  if (!row) return null;
+function privateProviderCredentialRow(ownerUserId: string, row: ProviderRow): PrivateProviderCredentialRow {
   const complete = row.encrypted_api_key && row.credential_nonce && row.credential_auth_tag && row.credential_key_version;
   return {
     ownerUserId,
@@ -460,6 +450,37 @@ export async function loadPrivateProviderCredentialRow(
       ciphertext: row.encrypted_api_key!, nonce: row.credential_nonce!, authTag: row.credential_auth_tag!, keyVersion: row.credential_key_version!
     } : null
   };
+}
+
+export async function loadPrivateProviderCredentialRow(
+  database: DatabaseClient,
+  ownerUserId: string,
+  providerProfileId: string,
+): Promise<PrivateProviderCredentialRow | null> {
+  const result = await database.query<ProviderRow>(
+    `SELECT ${SELECT_COLUMNS} FROM provider_profiles WHERE id=$1 AND owner_user_id=$2 AND enabled=true`,
+    [providerProfileId, ownerUserId]
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  return privateProviderCredentialRow(ownerUserId, row);
+}
+
+/**
+ * Management-only credential load for read-only discovery. Runtime execution
+ * remains on the enabled-only loader above.
+ */
+export async function loadPrivateProviderManagementCredentialRow(
+  database: DatabaseClient,
+  ownerUserId: string,
+  providerProfileId: string,
+): Promise<PrivateProviderCredentialRow | null> {
+  const result = await database.query<ProviderRow>(
+    `SELECT ${SELECT_COLUMNS} FROM provider_profiles WHERE id=$1 AND owner_user_id=$2`,
+    [providerProfileId, ownerUserId]
+  );
+  const row = result.rows[0];
+  return row ? privateProviderCredentialRow(ownerUserId, row) : null;
 }
 
 export async function writeEncryptedProviderCredential(

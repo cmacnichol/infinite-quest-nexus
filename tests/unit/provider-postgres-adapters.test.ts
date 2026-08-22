@@ -180,6 +180,108 @@ describe("provider PostgreSQL adapter boundaries", () => {
     expect(JSON.stringify(database.query.mock.calls)).not.toContain(plaintext);
   });
 
+  test("uses an owner-scoped management credential load for a disabled saved OpenRouter preset", async () => {
+    const plaintext = "disabled-preset-secret";
+    const encrypted = encryptCredential(plaintext, "credential-encryption-secret");
+    const ownerUserId = "00000000-0000-4000-8000-000000000014";
+    const row = {
+      id: "00000000-0000-4000-8000-000000000015",
+      name: "Disabled OpenRouter",
+      provider_type: "openrouter",
+      provider_role: "intent",
+      base_url: "https://openrouter.ai/api/v1",
+      default_model: "",
+      context_window_tokens: 32_768,
+      max_output_tokens: 4_096,
+      temperature: 0.8,
+      request_timeout_ms: 5_000,
+      configuration: {},
+      encrypted_api_key: encrypted.ciphertext,
+      credential_nonce: encrypted.nonce,
+      credential_auth_tag: encrypted.authTag,
+      credential_key_version: encrypted.keyVersion,
+      enabled: false,
+      is_default: false,
+      health_status: "unknown",
+      consecutive_failures: 0,
+      last_health_check_at: null,
+      created_at: new Date("2026-01-01T00:00:00Z"),
+      updated_at: new Date("2026-01-01T00:00:00Z")
+    };
+    const database = {
+      query: vi.fn(async (statement: string) => statement.includes("AND enabled=true")
+        ? { rows: [], rowCount: 0 }
+        : { rows: [row], rowCount: 1 })
+    };
+    const fetch = vi.fn(async (transportProfile: { apiKey?: string }, operation: string, url: string) => {
+      expect(transportProfile.apiKey).toBe(plaintext);
+      expect(operation).toBe("OpenRouter preset discovery");
+      expect(url).toBe("https://openrouter.ai/api/v1/presets/story-router");
+      return new Response(JSON.stringify({
+        data: {
+          slug: "story-router",
+          status: "active",
+          designated_version_id: "version-id",
+          designated_version: { id: "version-id", version: 1, system_prompt: "", config: { model: "openai/gpt-4o-mini" } }
+        }
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    const adapter = createRuntimeProviderAdapter({
+      database: database as never,
+      credentialSecret: "credential-encryption-secret",
+      transport: { fetch, validateSdkEndpoint: vi.fn(), close: vi.fn() },
+      health: { recordHealth: vi.fn() }
+    });
+
+    await expect(adapter.getPreset({ ownerUserId }, row.id, "story-router")).resolves.toMatchObject({
+      slug: "story-router",
+      models: ["openai/gpt-4o-mini"]
+    });
+    expect(database.query).toHaveBeenCalledWith(expect.not.stringContaining("AND enabled=true"), [row.id, ownerUserId]);
+    expect(JSON.stringify(await adapter.getPreset({ ownerUserId }, row.id, "story-router"))).not.toContain(plaintext);
+  });
+
+  test("forwards a candidate detail credential only to the OpenRouter transport profile", async () => {
+    const credential = "candidate-detail-secret";
+    const fetch = vi.fn(async (transportProfile: { apiKey?: string }, operation: string) => {
+      expect(transportProfile.apiKey).toBe(credential);
+      expect(operation).toBe("OpenRouter preset discovery");
+      return new Response(JSON.stringify({
+        data: {
+          slug: "story-router",
+          status: "active",
+          designated_version_id: "version-id",
+          designated_version: { id: "version-id", version: 1, system_prompt: "", config: { model: "openai/gpt-4o-mini" } }
+        }
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    const adapter = createRuntimeProviderAdapter({
+      database: { query: vi.fn() } as never,
+      credentialSecret: "credential-encryption-secret",
+      transport: { fetch, validateSdkEndpoint: vi.fn(), close: vi.fn() },
+      health: { recordHealth: vi.fn() }
+    });
+    const candidate = {
+      ownerUserId: "00000000-0000-4000-8000-000000000016",
+      name: "Candidate OpenRouter",
+      providerType: "openrouter" as const,
+      providerRole: "text" as const,
+      baseUrl: "https://openrouter.ai/api/v1",
+      defaultModel: "",
+      contextWindowTokens: 32_768,
+      maxOutputTokens: 4_096,
+      temperature: 0.8,
+      requestTimeoutMs: 5_000,
+      configuration: toSafeProviderConfiguration({}),
+      enabled: false,
+      isDefault: false
+    };
+
+    const snapshot = await adapter.discoverCandidatePresetWithCredential(candidate, credential, "story-router");
+    expect(snapshot).toMatchObject({ slug: "story-router", models: ["openai/gpt-4o-mini"] });
+    expect(JSON.stringify(snapshot)).not.toContain(credential);
+  });
+
   test("discovers embedding models through an OpenRouter text fallback profile", async () => {
     const row = {
       id: "00000000-0000-4000-8000-000000000013",

@@ -172,7 +172,7 @@ describe("provider application contracts", () => {
     expect(runtime.discoverPresets).toHaveBeenCalledWith(owner, textProfile.id, { offset: 0, limit: 25 });
   });
 
-  it("rejects non-OpenRouter and non-text preset discovery profiles before calling runtime", async () => {
+  it("rejects non-OpenRouter and non-text or intent preset discovery profiles before calling runtime", async () => {
     const runtime = { discoverPresets: vi.fn() };
     const adapter = createProviderApplicationAdapter({
       application: { listProfiles: vi.fn(async () => [textProfile]) },
@@ -183,6 +183,65 @@ describe("provider application contracts", () => {
     await expect(adapter.presets(owner.ownerUserId, textProfile.id, { offset: 0, limit: 25 }))
       .rejects.toMatchObject({ statusCode: 400 });
     expect(runtime.discoverPresets).not.toHaveBeenCalled();
+  });
+
+  it.each(["image", "embedding"] as const)("rejects %s candidate preset discovery before forwarding credentials", async (providerRole) => {
+    const runtime = { discoverCandidatePresetsWithCredential: vi.fn() };
+    const adapter = createProviderApplicationAdapter({
+      application: { listProfiles: vi.fn() },
+      runtime,
+      transaction: vi.fn()
+    } as never);
+    const input = {
+      name: "Candidate",
+      providerType: "openrouter" as const,
+      providerRole,
+      baseUrl: "https://openrouter.ai/api/v1",
+      defaultModel: "",
+      contextWindowTokens: 32_768,
+      maxOutputTokens: 4_096,
+      temperature: 0.8,
+      requestTimeoutMs: 5_000,
+      configuration: {},
+      enabled: false,
+      isDefault: false,
+      apiKey: "candidate-secret"
+    };
+
+    expect(() => adapter.discoverPresets(owner.ownerUserId, input as never, { offset: 0, limit: 10 }))
+      .toThrow(/OpenRouter preset discovery/i);
+    expect(runtime.discoverCandidatePresetsWithCredential).not.toHaveBeenCalled();
+  });
+
+  it("forwards candidate credentials only to the runtime preset discovery boundary", async () => {
+    const runtime = { discoverCandidatePresetWithCredential: vi.fn(async () => ({ slug: "story-router", models: [], providerPolicy: {} })) };
+    const adapter = createProviderApplicationAdapter({
+      application: { listProfiles: vi.fn() },
+      runtime,
+      transaction: vi.fn()
+    } as never);
+    const input = {
+      name: "Candidate",
+      providerType: "openrouter" as const,
+      providerRole: "intent" as const,
+      baseUrl: "https://openrouter.ai/api/v1",
+      defaultModel: "",
+      contextWindowTokens: 32_768,
+      maxOutputTokens: 4_096,
+      temperature: 0.8,
+      requestTimeoutMs: 5_000,
+      configuration: {},
+      enabled: false,
+      isDefault: false,
+      apiKey: "candidate-secret"
+    };
+
+    await adapter.discoverPreset(owner.ownerUserId, input as never, "story-router");
+    expect(runtime.discoverCandidatePresetWithCredential).toHaveBeenCalledWith(
+      expect.objectContaining({ ownerUserId: owner.ownerUserId, providerType: "openrouter", providerRole: "intent" }),
+      "candidate-secret",
+      "story-router"
+    );
   });
   it("keeps owner authority explicit while delegating profile operations", async () => {
     const ports = dependencies();

@@ -195,7 +195,7 @@ describe("API server security and CORS headers", () => {
     const app = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool, providers: providers as never }));
 
     const saved = await app.inject({ method: "GET", url: `/api/v1/providers/${providerProfileId}/presets?offset=0&limit=10` });
-    const savedDetail = await app.inject({ method: "GET", url: `/api/v1/providers/${providerProfileId}/presets/story-router` });
+    const savedDetail = await app.inject({ method: "GET", url: `/api/v1/providers/${providerProfileId}/presets/%73tory-router` });
     const candidateList = await app.inject({
       method: "POST",
       url: "/api/v1/providers/discover-presets?offset=0&limit=10",

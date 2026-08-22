@@ -11,7 +11,9 @@ import type {
 import type { DatabaseClient } from "../../../packages/database/src/pool.js";
 import type { OpenRouterPresetSnapshot } from "../../../packages/contracts/src/index.js";
 import {
+  loadPrivateProviderManagementCredentialRow,
   loadPrivateProviderCredentialRow,
+  type PrivateProviderCredentialRow,
   validateProviderConfiguration,
   writeEncryptedProviderCredential
 } from "../../../packages/database/src/provider-repository.js";
@@ -145,6 +147,12 @@ export function createRuntimeProviderAdapter(options: Readonly<{
     return row;
   }
 
+  async function loadForManagementDiscovery(ownerUserId: string, providerProfileId: string) {
+    const row = await loadPrivateProviderManagementCredentialRow(options.database, ownerUserId, providerProfileId);
+    if (!row) throw Object.assign(new Error("Provider profile not found."), { statusCode: 404 });
+    return row;
+  }
+
   function opaqueReference(providerProfileId: string, hasCredential: boolean) {
     return hasCredential ? Object.freeze({
       kind: "provider_credential_reference" as const,
@@ -152,7 +160,7 @@ export function createRuntimeProviderAdapter(options: Readonly<{
     }) : null;
   }
 
-  function transportProfile(row: Awaited<ReturnType<typeof load>>, model = row.defaultModel): TextProviderProfile {
+  function transportProfile(row: PrivateProviderCredentialRow, model = row.defaultModel): TextProviderProfile {
     const apiKey = row.encryptedCredential
       ? decryptCredential(row.encryptedCredential, options.credentialSecret)
       : undefined;
@@ -170,7 +178,7 @@ export function createRuntimeProviderAdapter(options: Readonly<{
   }
 
   function descriptor<R extends ProviderRole>(
-    row: Awaited<ReturnType<typeof load>>,
+    row: PrivateProviderCredentialRow,
     providerRole: R,
     model = row.defaultModel,
   ): RuntimeProviderDescriptor<R> {
@@ -315,7 +323,7 @@ export function createRuntimeProviderAdapter(options: Readonly<{
   }
 
   async function presetProfile(ownerUserId: string, providerProfileId: string): Promise<TextProviderProfile> {
-    const row = await load(ownerUserId, providerProfileId);
+    const row = await loadForManagementDiscovery(ownerUserId, providerProfileId);
     if (row.providerType !== "openrouter" || !["text", "intent"].includes(row.providerRole)) {
       throw Object.assign(new Error("OpenRouter preset discovery is available only for text and intent providers."), { statusCode: 400 });
     }
