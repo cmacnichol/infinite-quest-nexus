@@ -114,8 +114,12 @@ export class ProviderStreamInterruptedError extends Error {
 }
 
 function retryAfterMs(value: unknown): number | undefined {
+  if (typeof value === "number") return Number.isFinite(value) && value >= 0 ? Math.round(value) : undefined;
+  if (typeof value !== "string") return undefined;
   const numeric = Number(value);
-  return Number.isFinite(numeric) && numeric >= 0 ? Math.round(numeric) : undefined;
+  if (Number.isFinite(numeric) && numeric >= 0) return Math.round(numeric * 1_000);
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(0, date - Date.now()) : undefined;
 }
 
 function withRetryHint(reason: ModelFallbackReason, value: unknown): NormalizedModelFailure {
@@ -159,11 +163,17 @@ export function normalizeModelFailure(error: unknown): NormalizedModelFailure {
   const retryHint = chain.map((item) => item.retryAfterMs).find((value) => retryAfterMs(value) !== undefined);
   if (values.some((value) => String(value) === "PROVIDER_DESTINATION_NOT_ALLOWED")) return { reason: "network_policy_denied" };
   if (values.some((value) => String(value) === "provider_response_too_large")) return { reason: "response_too_large" };
+  if (values.some((value) => String(value) === "provider_request_cancelled" || String(value) === "ABORT_ERR" || String(value) === "UND_ERR_ABORTED")) return { reason: "cancelled" };
   if (values.some((value) => String(value) === "provider_request_timeout")) return { reason: "request_timeout" };
   if (values.some((value) => String(value) === "provider_transport_error")) return { reason: "transport_failure" };
   if (statusCode === 401 || statusCode === 403) return { reason: "authentication" };
   if (statusCode === 408 || statusCode === 504) return { reason: "request_timeout" };
   if (statusCode === 429) return withRetryHint("rate_limit", retryHint);
+  const typedReason = chain
+    .map((item) => reasonFromText(item.providerErrorType))
+    .find((value): value is ModelFallbackReason => value !== null);
+  if (typedReason) return withRetryHint(typedReason, retryHint);
+  if (statusCode !== undefined && statusCode >= 400 && statusCode < 500) return { reason: "invalid_request" };
   if (statusCode !== undefined && statusCode >= 500) return withRetryHint("provider_unavailable", retryHint);
   const textReason = values.map(reasonFromText).find((value): value is ModelFallbackReason => value !== null);
   if (textReason) return withRetryHint(textReason, retryHint);

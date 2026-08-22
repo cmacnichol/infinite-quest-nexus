@@ -226,6 +226,19 @@ export class ProviderTransportError extends Error {
   }
 }
 
+export class ProviderRequestCancelledError extends Error {
+  readonly code = "provider_request_cancelled";
+  readonly statusCode = 499;
+  readonly expose = true;
+  readonly permanent = true;
+  readonly retryable = false;
+
+  constructor() {
+    super("The provider request was cancelled before a complete response was received.");
+    this.name = "ProviderRequestCancelledError";
+  }
+}
+
 const DEFAULT_REQUEST_TIMEOUT_MS = 300_000;
 const responseStartTimes = new WeakMap<Response, number>();
 
@@ -293,15 +306,20 @@ function transportFailure(
   startedAt: number
 ): Error {
   if (cause instanceof ProviderTransportError
+    || cause instanceof ProviderRequestCancelledError
     || cause instanceof ProviderDestinationNotAllowedError
     || cause instanceof ProviderResponseTooLargeError) return cause;
   const chain = errorChain(cause);
   const messages = chain.map((item) => String(item.message || ""));
   const names = chain.map((item) => String(item.name || ""));
   const codes = chain.map((item) => String(item.code || "")).filter(Boolean);
-  const timedOut = codes.some((code) => /TIMEOUT/i.test(code))
-    || names.some((name) => /^(?:TimeoutError|AbortError)$/i.test(name))
+  const hasExplicitTimeout = codes.some((code) => /TIMEOUT/i.test(code))
+    || names.some((name) => /^TimeoutError$/i.test(name))
     || messages.some((message) => /timed?\s*out|headers timeout|body timeout/i.test(message));
+  const cancelled = !hasExplicitTimeout && (codes.some((code) => /^(?:ABORT_ERR|UND_ERR_ABORTED)$/i.test(code))
+    || names.some((name) => /^AbortError$/i.test(name)));
+  if (cancelled) return new ProviderRequestCancelledError();
+  const timedOut = hasExplicitTimeout;
   const timeoutMs = requestTimeoutMs(profile);
   const providerName = profile.providerType === "lmstudio" ? "LM Studio"
     : profile.providerType === "openrouter" ? "OpenRouter"
@@ -1050,6 +1068,7 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
       throw Object.assign(new Error(`Provider request failed (${response.status}): ${message}`), {
         statusCode: response.status,
         providerMessage: message,
+        providerErrorType: data.error?.metadata?.error_type ?? data.error?.code,
         retryAfterMs: retryAfterMilliseconds(response.headers.get("retry-after"))
       });
     }
@@ -1180,9 +1199,10 @@ export async function callTextProvider(
       attempts.push(attempt);
       if (emittedOutput) throw new ProviderStreamInterruptedError(attempts, normalized.retryAfterMs);
       if (shouldAdvanceModel({ reason: normalized.reason, emittedOutput }) && index < candidates.length - 1) continue;
-      if (error instanceof ProviderTransportError
-        || error instanceof ProviderDestinationNotAllowedError
+      if (error instanceof ProviderDestinationNotAllowedError
         || error instanceof ProviderResponseTooLargeError) throw error;
+      if (error instanceof ProviderRequestCancelledError) throw error;
+      if (error instanceof ProviderTransportError && candidates.length === 1) throw error;
       throw safeExhausted(attempts, normalized.retryAfterMs);
     }
   }

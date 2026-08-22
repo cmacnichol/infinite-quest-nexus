@@ -4,6 +4,7 @@ import {
   createProviderTransport,
   ProviderModelFallbackExhaustedError,
   ProviderStreamInterruptedError,
+  normalizeModelFailure,
   shouldAdvanceModel,
   type ProviderTransport,
   type TextProviderProfile
@@ -49,6 +50,14 @@ describe("text model fallback", () => {
     ["cancelled", false, false], ["rate_limit", true, false]
   ] as const)("classifies %s", (reason, emittedOutput, expected) => {
     expect(shouldAdvanceModel({ reason, emittedOutput })).toBe(expected);
+  });
+
+  it.each([
+    [Object.assign(new Error("private rate-limit wording"), { statusCode: 400 }), "invalid_request"],
+    [Object.assign(new Error("private unavailable wording"), { statusCode: 401 }), "authentication"],
+    [Object.assign(new Error("aborted"), { name: "AbortError", code: "ABORT_ERR" }), "cancelled"]
+  ] as const)("keeps terminal failure classification ahead of provider wording", (error, expected) => {
+    expect(normalizeModelFailure(error).reason).toBe(expected);
   });
 
   it("sends an ordered OpenRouter models request without model and records the served model", async () => {
@@ -140,6 +149,70 @@ describe("text model fallback", () => {
     ]);
   });
 
+  it("preserves an HTTP-date Retry-After hint in milliseconds", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-22T16:00:00.000Z"));
+    const requestedModels: string[] = [];
+    const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      requestedModels.push(JSON.parse(String(init?.body)).model);
+      return requestedModels.length === 1
+        ? new Response(JSON.stringify({ error: { message: "busy" } }), { status: 429, headers: { "retry-after": "Fri, 22 Aug 2026 16:00:11 GMT" } })
+        : completion("fallback");
+    });
+    try {
+      const result = await callTextProvider({ ...profile, fallbackModels: ["fallback"] }, { systemPrompt: "system", input: "input" }, transport(fetcher as typeof fetch));
+      expect(result.modelRouting.attempts[0]).toMatchObject({ reason: "rate_limit", retryAfterMs: 11_000 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps OpenRouter HTTP error metadata when classifying a native model plan", async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({
+      error: { message: "private body", metadata: { error_type: "context_length_exceeded" } }
+    }), { status: 400 }));
+
+    const failure = callTextProvider({
+      ...profile,
+      providerType: "openrouter",
+      baseUrl: "https://openrouter.test/api/v1",
+      fallbackModels: ["fallback"]
+    }, { systemPrompt: "system", input: "input" }, transport(fetcher as typeof fetch));
+
+    await expect(failure).rejects.toMatchObject({
+      code: "provider_model_fallback_exhausted",
+      attempts: [expect.objectContaining({ reason: "context_length" })]
+    });
+    await expect(failure).rejects.not.toThrow("private body");
+  });
+
+  it("exhausts a multi-model transport plan with a safe normalized trace", async () => {
+    const fetcher = vi.fn(async () => {
+      throw Object.assign(new Error("socket reset with private endpoint"), { code: "ECONNRESET" });
+    });
+    const failure = callTextProvider({ ...profile, fallbackModels: ["fallback"] }, { systemPrompt: "system", input: "input" }, transport(fetcher as typeof fetch));
+
+    await expect(failure).rejects.toMatchObject({
+      code: "provider_model_fallback_exhausted",
+      attempts: [
+        expect.objectContaining({ model: "primary", reason: "transport_failure" }),
+        expect.objectContaining({ model: "fallback", reason: "transport_failure" })
+      ]
+    });
+    await expect(failure).rejects.not.toThrow("private endpoint");
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("treats an AbortError cancellation as terminal and does not advance", async () => {
+    const fetcher = vi.fn(async () => {
+      throw Object.assign(new Error("request cancelled"), { name: "AbortError", code: "ABORT_ERR" });
+    });
+    const failure = callTextProvider({ ...profile, fallbackModels: ["fallback"] }, { systemPrompt: "system", input: "input" }, transport(fetcher as typeof fetch));
+
+    await expect(failure).rejects.toMatchObject({ code: "provider_request_cancelled" });
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+
   it("joins multiline SSE data and ignores comments", async () => {
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -175,9 +248,11 @@ describe("text model fallback", () => {
       return completion("fallback");
     });
 
-    await expect(callTextProvider({ ...profile, fallbackModels: ["fallback"] }, {
+    const result = await callTextProvider({ ...profile, fallbackModels: ["fallback"] }, {
       systemPrompt: "system", input: "input", onChunk: vi.fn()
-    }, transport(fetcher as typeof fetch))).resolves.toMatchObject({ modelRouting: { resolvedModel: "fallback" } });
+    }, transport(fetcher as typeof fetch));
+    expect(result.modelRouting).toMatchObject({ resolvedModel: "fallback" });
+    expect(result.modelRouting.attempts[0]).toMatchObject({ reason: "rate_limit", retryAfterMs: 2_000 });
     expect(requestedModels).toEqual(["primary", "fallback"]);
   });
 
