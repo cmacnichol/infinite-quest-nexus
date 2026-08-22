@@ -552,7 +552,7 @@ describe("Nexus management UI contracts", () => {
       applyProviderRoutingContext: () => void;
       providerRoutingMessage: (message: string, type?: string) => void;
     }>([
-      "providerRoutingSupported", "providerRoutingMessage", "providerPresetMessage", "setProviderRoutingSource",
+      "providerRoutingSupported", "providerRoutingMessage", "providerPresetMessage", "invalidateProviderPresetResolution", "setProviderRoutingSource",
       "providerRoutingPayload", "applyProviderRoutingContext", "renderProviderRoutingEditor",
       "renderProviderPresetList", "renderProviderPresetPreview"
     ], {
@@ -628,6 +628,7 @@ describe("Nexus management UI contracts", () => {
       offset: 0,
       totalCount: 0,
       manualContextDraft: "32000",
+      modelsDiscovered: true,
       resolutionSequence: 0,
       resolving: false
     };
@@ -650,6 +651,186 @@ describe("Nexus management UI contracts", () => {
 
     expect((elements.providerRoutingModelList as HTMLElement).textContent).toContain("Unavailable at endpoint");
     expect((elements.providerRoutingModelStatus as HTMLElement).textContent).toContain("Unsaved order differs from saved profile");
+  });
+
+  it("does not call saved models unavailable until routing discovery has completed", () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    const state = {
+      routingSource: "models", models: ["saved-primary"], savedModels: ["saved-primary"], presetSlug: "", snapshot: null, savedSnapshot: null,
+      presets: [], offset: 0, totalCount: 0, manualContextDraft: "32000", modelsDiscovered: false
+    };
+    const functions = managementFunctions<{
+      renderProviderRoutingEditor: () => void;
+      renderProviderPresetList: () => void;
+      renderProviderPresetPreview: () => void;
+      applyProviderRoutingContext: () => void;
+      providerRoutingMessage: (message: string, type?: string) => void;
+    }>([
+      "providerRoutingSupported", "providerRoutingMessage", "providerPresetMessage", "applyProviderRoutingContext",
+      "renderProviderRoutingEditor", "renderProviderPresetList", "renderProviderPresetPreview"
+    ], {
+      elements: { ...elements, providerType: { value: "openrouter" }, providerRole: { value: "text" } }, document, providerRoutingSelection: state, discoveredProfileModels: [],
+      minimumKnownContextWindow, number: (value: number) => String(value), constrainProviderOutputReserve: () => undefined, profileModelValue: (model: { id: string }) => model.id
+    });
+
+    functions.renderProviderRoutingEditor();
+    expect((elements.providerRoutingModelList as HTMLElement).textContent).not.toContain("Unavailable at endpoint");
+    expect((elements.providerRoutingModelStatus as HTMLElement).textContent).not.toContain("unavailable at the endpoint");
+
+    state.modelsDiscovered = true;
+    functions.renderProviderRoutingEditor();
+    expect((elements.providerRoutingModelList as HTMLElement).textContent).toContain("Unavailable at endpoint");
+    expect((elements.providerRoutingModelStatus as HTMLElement).textContent).toContain("unavailable at the endpoint");
+  });
+
+  it("abandons a pending preset resolve when the slug is edited", async () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    (elements.providerPresetSlug as HTMLInputElement).setCustomValidity = () => undefined;
+    const pending: Array<(snapshot: unknown) => void> = [];
+    const state = {
+      routingSource: "openrouter_preset", models: ["manual-primary"], savedModels: ["manual-primary"], presetSlug: "old-router", snapshot: null, savedSnapshot: null,
+      presets: [], offset: 0, totalCount: 0, manualContextDraft: "32000", resolutionSequence: 0, resolving: false
+    };
+    const functions = managementFunctions<{
+      resolveProviderPreset: (slug: string) => Promise<unknown>;
+      setProviderPresetSlug: (slug: string) => void;
+      providerRoutingPayload: () => unknown;
+      renderProviderRoutingEditor: () => void;
+      renderProviderPresetList: () => void;
+      renderProviderPresetPreview: () => void;
+      applyProviderRoutingContext: () => void;
+      providerRoutingMessage: (message: string, type?: string) => void;
+    }>([
+      "providerRoutingSupported", "providerRoutingMessage", "providerPresetMessage", "providerPresetCandidatePayload", "providerRoutingPayload",
+      "applyProviderRoutingContext", "renderProviderRoutingEditor", "renderProviderPresetList", "renderProviderPresetPreview", "invalidateProviderPresetResolution", "setProviderPresetSlug", "resolveProviderPreset"
+    ], {
+      elements: { ...elements, providerType: { value: "openrouter" }, providerRole: { value: "text" } }, document, providerRoutingSelection: state, discoveredProfileModels: [], providers: [], editingProviderId: "",
+      selectPresetSnapshot, comparePresetSnapshots, normalizeRoutingSelection, minimumKnownContextWindow, number: (value: number) => String(value),
+      constrainProviderOutputReserve: () => undefined, profileModelValue: (model: { id: string }) => model.id, providerConfigurationFromForm: () => ({}),
+      api: async () => new Promise((resolve) => pending.push(resolve))
+    });
+
+    functions.renderProviderRoutingEditor();
+    const resolve = functions.resolveProviderPreset("resolving-router");
+    expect((elements.saveProvider as HTMLButtonElement).disabled).toBe(true);
+    functions.setProviderPresetSlug("edited-router");
+    expect(state.resolving).toBe(false);
+    expect(functions.providerRoutingPayload()).toBeNull();
+    pending[0]({ slug: "resolving-router", designatedVersionId: "one", version: 1, configHash: "a".repeat(64), models: ["stale"], providerPolicy: {} });
+    await resolve;
+
+    expect(functions.providerRoutingPayload()).toBeNull();
+    expect((elements.providerPresetSlug as HTMLInputElement).value).toBe("edited-router");
+    expect(state.snapshot).toBeNull();
+  });
+
+  it("abandons a pending preset resolve when switching back to models", async () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    (elements.providerPresetSlug as HTMLInputElement).setCustomValidity = () => undefined;
+    const pending: Array<(snapshot: unknown) => void> = [];
+    const state = {
+      routingSource: "openrouter_preset", models: ["manual-primary"], savedModels: ["manual-primary"], presetSlug: "old-router", snapshot: null, savedSnapshot: null,
+      presets: [], offset: 0, totalCount: 0, manualContextDraft: "32000", resolutionSequence: 0, resolving: false
+    };
+    const functions = managementFunctions<{
+      resolveProviderPreset: (slug: string) => Promise<unknown>;
+      setProviderRoutingSource: (source: string) => void;
+      providerRoutingPayload: () => unknown;
+      renderProviderRoutingEditor: () => void;
+      renderProviderPresetList: () => void;
+      renderProviderPresetPreview: () => void;
+      applyProviderRoutingContext: () => void;
+      providerRoutingMessage: (message: string, type?: string) => void;
+    }>([
+      "providerRoutingSupported", "providerRoutingMessage", "providerPresetMessage", "providerPresetCandidatePayload", "providerRoutingPayload",
+      "applyProviderRoutingContext", "renderProviderRoutingEditor", "renderProviderPresetList", "renderProviderPresetPreview", "invalidateProviderPresetResolution", "setProviderRoutingSource", "resolveProviderPreset"
+    ], {
+      elements: { ...elements, providerType: { value: "openrouter" }, providerRole: { value: "text" } }, document, providerRoutingSelection: state, discoveredProfileModels: [], providers: [], editingProviderId: "",
+      selectPresetSnapshot, comparePresetSnapshots, normalizeRoutingSelection, minimumKnownContextWindow, number: (value: number) => String(value),
+      constrainProviderOutputReserve: () => undefined, profileModelValue: (model: { id: string }) => model.id, providerConfigurationFromForm: () => ({}),
+      api: async () => new Promise((resolve) => pending.push(resolve)), loadProviderPresets: async () => undefined
+    });
+
+    functions.renderProviderRoutingEditor();
+    const resolve = functions.resolveProviderPreset("resolving-router");
+    functions.setProviderRoutingSource("models");
+    expect(state.resolving).toBe(false);
+    expect(functions.providerRoutingPayload()).toEqual({ routingSource: "models", defaultModel: "manual-primary", fallbackModels: [] });
+    pending[0]({ slug: "resolving-router", designatedVersionId: "one", version: 1, configHash: "a".repeat(64), models: ["stale"], providerPolicy: {} });
+    await resolve;
+
+    expect(functions.providerRoutingPayload()).toEqual({ routingSource: "models", defaultModel: "manual-primary", fallbackModels: [] });
+    expect(state.snapshot).toBeNull();
+  });
+
+  it("checks a newly resolved preset against its current draft snapshot", async () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    (elements.providerPresetSlug as HTMLInputElement).setCustomValidity = () => undefined;
+    const currentSnapshot = { slug: "draft-router", version: 2, configHash: "b".repeat(64), models: ["draft-model"], providerPolicy: {} };
+    const state = {
+      routingSource: "openrouter_preset", models: ["manual-primary"], savedModels: ["manual-primary"], presetSlug: "draft-router", snapshot: currentSnapshot, savedSnapshot: null,
+      presets: [], offset: 0, totalCount: 0, manualContextDraft: "32000", resolutionSequence: 0, resolving: false
+    };
+    const functions = managementFunctions<{
+      resolveProviderPreset: (slug: string, options?: { checkOnly?: boolean }) => Promise<unknown>;
+      renderProviderRoutingEditor: () => void;
+      renderProviderPresetList: () => void;
+      renderProviderPresetPreview: () => void;
+      applyProviderRoutingContext: () => void;
+      providerRoutingMessage: (message: string, type?: string) => void;
+    }>([
+      "providerRoutingSupported", "providerRoutingMessage", "providerPresetMessage", "providerPresetCandidatePayload", "applyProviderRoutingContext",
+      "renderProviderRoutingEditor", "renderProviderPresetList", "renderProviderPresetPreview", "resolveProviderPreset"
+    ], {
+      elements: { ...elements, providerType: { value: "openrouter" }, providerRole: { value: "text" } }, document, providerRoutingSelection: state, discoveredProfileModels: [], providers: [], editingProviderId: "",
+      selectPresetSnapshot, comparePresetSnapshots, minimumKnownContextWindow, number: (value: number) => String(value), constrainProviderOutputReserve: () => undefined,
+      profileModelValue: (model: { id: string }) => model.id, providerConfigurationFromForm: () => ({}), api: async () => ({ ...currentSnapshot, designatedVersionId: "two" })
+    });
+
+    functions.renderProviderRoutingEditor();
+    await functions.resolveProviderPreset("draft-router", { checkOnly: true });
+
+    expect((elements.providerPresetStatus as HTMLElement).textContent).toContain("snapshot is current");
+    expect((elements.providerPresetStatus as HTMLElement).textContent).not.toContain("Update available");
+    expect((elements.saveProvider as HTMLButtonElement).disabled).toBe(false);
+    expect((elements.providerPresetPreviewSummary as HTMLElement).textContent).toContain("draft-router v2");
+  });
+
+  it("restores the resolved preset after a recoverable update-check failure", async () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    (elements.providerPresetSlug as HTMLInputElement).setCustomValidity = () => undefined;
+    const currentSnapshot = { slug: "saved-router", version: 1, configHash: "c".repeat(64), models: ["saved-model"], providerPolicy: {} };
+    const state = {
+      routingSource: "openrouter_preset", models: ["manual-primary"], savedModels: ["manual-primary"], presetSlug: "saved-router", snapshot: currentSnapshot, savedSnapshot: currentSnapshot,
+      presets: [], offset: 0, totalCount: 0, manualContextDraft: "32000", resolutionSequence: 0, resolving: false
+    };
+    const functions = managementFunctions<{
+      resolveProviderPreset: (slug: string, options?: { checkOnly?: boolean }) => Promise<unknown>;
+      renderProviderRoutingEditor: () => void;
+      renderProviderPresetList: () => void;
+      renderProviderPresetPreview: () => void;
+      applyProviderRoutingContext: () => void;
+      providerRoutingMessage: (message: string, type?: string) => void;
+    }>([
+      "providerRoutingSupported", "providerRoutingMessage", "providerPresetMessage", "providerPresetCandidatePayload", "applyProviderRoutingContext",
+      "renderProviderRoutingEditor", "renderProviderPresetList", "renderProviderPresetPreview", "resolveProviderPreset"
+    ], {
+      elements: { ...elements, providerType: { value: "openrouter" }, providerRole: { value: "text" } }, document, providerRoutingSelection: state, discoveredProfileModels: [], providers: [], editingProviderId: "",
+      selectPresetSnapshot, comparePresetSnapshots, minimumKnownContextWindow, number: (value: number) => String(value), constrainProviderOutputReserve: () => undefined,
+      profileModelValue: (model: { id: string }) => model.id, providerConfigurationFromForm: () => ({}), api: async () => { throw new Error("temporary OpenRouter outage"); }
+    });
+
+    functions.renderProviderRoutingEditor();
+    await functions.resolveProviderPreset("saved-router", { checkOnly: true });
+
+    expect((elements.providerPresetStatus as HTMLElement).textContent).toContain("temporary OpenRouter outage");
+    expect((elements.saveProvider as HTMLButtonElement).disabled).toBe(false);
+    expect((elements.providerPresetPreviewSummary as HTMLElement).textContent).toContain("saved-router v1");
   });
 
   it("keeps Save disabled while resolving and ignores a stale preset response", async () => {

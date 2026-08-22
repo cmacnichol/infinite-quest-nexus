@@ -64,7 +64,7 @@ let editingProviderId = "";
 let discoveredProfileModels = [];
 let discoveredEmbeddingModels = [];
 let providerModelPickerTarget = "provider";
-let providerRoutingSelection = { routingSource: "models", models: [], savedModels: [], presetSlug: "", snapshot: null, savedSnapshot: null, presets: [], offset: 0, totalCount: 0, manualContextDraft: "", contextIsAuto: false, resolutionSequence: 0, resolving: false };
+let providerRoutingSelection = { routingSource: "models", models: [], savedModels: [], presetSlug: "", snapshot: null, savedSnapshot: null, presets: [], offset: 0, totalCount: 0, manualContextDraft: "", contextIsAuto: false, modelsDiscovered: false, resolutionSequence: 0, resolving: false };
 const embeddingJobMonitors = new Map();
 let worldCoverJobPollSequence = 0;
 let illustrationRefinementPromptValue = "";
@@ -3193,16 +3193,19 @@ function providerRoutingSnapshotFromProfile(provider) {
     totalCount: 0,
     manualContextDraft: elements.providerContextTokens.value,
     contextIsAuto: false,
+    modelsDiscovered: false,
     resolutionSequence: 0,
     resolving: false
   };
 }
 
 function resetProviderRoutingSelection(provider = null) {
+  const resolutionSequence = providerRoutingSelection.resolutionSequence + 1;
   providerRoutingSelection = providerRoutingSnapshotFromProfile(provider || {
     defaultModel: elements.providerDefaultModel.value,
     fallbackModels: []
   });
+  providerRoutingSelection.resolutionSequence = resolutionSequence;
   elements.providerPresetSlug.value = providerRoutingSelection.presetSlug;
   elements.providerPresetSlug.setCustomValidity("");
 }
@@ -3217,8 +3220,18 @@ function providerPresetMessage(message, type = "") {
   elements.providerPresetStatus.className = `status ${type}`.trim();
 }
 
+function invalidateProviderPresetResolution({ clearSnapshot = true } = {}) {
+  providerRoutingSelection = {
+    ...providerRoutingSelection,
+    snapshot: clearSnapshot ? null : providerRoutingSelection.snapshot,
+    resolving: false,
+    resolutionSequence: providerRoutingSelection.resolutionSequence + 1
+  };
+}
+
 function setProviderRoutingSource(routingSource) {
   if (!providerRoutingSupported()) return;
+  if (routingSource !== providerRoutingSelection.routingSource) invalidateProviderPresetResolution();
   const normalized = normalizeRoutingSelection({
     ...providerRoutingSelection,
     routingSource,
@@ -3228,6 +3241,14 @@ function setProviderRoutingSource(routingSource) {
   providerRoutingSelection = { ...providerRoutingSelection, ...normalized };
   renderProviderRoutingEditor();
   if (routingSource === "openrouter_preset" && !providerRoutingSelection.presets.length) void loadProviderPresets();
+}
+
+function setProviderPresetSlug(slug = elements.providerPresetSlug.value) {
+  const normalizedSlug = String(slug || "").trim();
+  elements.providerPresetSlug.setCustomValidity("");
+  if (normalizedSlug !== providerRoutingSelection.presetSlug) invalidateProviderPresetResolution();
+  providerRoutingSelection.presetSlug = normalizedSlug;
+  renderProviderRoutingEditor();
 }
 
 function providerRoutingPayload() {
@@ -3306,7 +3327,7 @@ function renderProviderRoutingEditor() {
     name.textContent = modelId;
     const rank = document.createElement("span");
     const discovered = discoveredProfileModels.find((model) => profileModelValue(model) === modelId || model.id === modelId);
-    rank.textContent = `${index === 0 ? "Primary" : `Fallback ${index}`}${!discovered ? " · Unavailable at endpoint" : discovered.loaded === false ? " · Not active at endpoint" : ""}`;
+    rank.textContent = `${index === 0 ? "Primary" : `Fallback ${index}`}${!discovered && providerRoutingSelection.modelsDiscovered ? " · Unavailable at endpoint" : discovered?.loaded === false ? " · Not active at endpoint" : ""}`;
     details.append(name, rank);
     const actions = document.createElement("div");
     actions.className = "provider-routing-model-actions";
@@ -3341,7 +3362,9 @@ function renderProviderRoutingEditor() {
   }
   const count = providerRoutingSelection.models.length;
   elements.addProviderRoutingModel.disabled = count >= 5;
-  const unavailable = providerRoutingSelection.models.filter((modelId) => !discoveredProfileModels.some((model) => profileModelValue(model) === modelId || model.id === modelId));
+  const unavailable = providerRoutingSelection.modelsDiscovered
+    ? providerRoutingSelection.models.filter((modelId) => !discoveredProfileModels.some((model) => profileModelValue(model) === modelId || model.id === modelId))
+    : [];
   const orderChanged = Array.isArray(providerRoutingSelection.savedModels)
     && providerRoutingSelection.savedModels.join("\u001f") !== providerRoutingSelection.models.join("\u001f");
   const modelStatus = count
@@ -3473,8 +3496,7 @@ async function resolveProviderPreset(slug = elements.providerPresetSlug.value.tr
     const selected = selectPresetSnapshot(snapshot);
     if (resolutionSequence !== providerRoutingSelection.resolutionSequence) return null;
     if (checkOnly) {
-      const saved = providerRoutingSelection.savedSnapshot || providerRoutingSelection.snapshot;
-      const comparison = comparePresetSnapshots(saved, selected.snapshot);
+      const comparison = comparePresetSnapshots(snapshotBeforeResolution || providerRoutingSelection.savedSnapshot, selected.snapshot);
       providerPresetMessage(comparison.changed
         ? `Update available (${comparison.reason}). Review it, then choose Refresh from OpenRouter and save to adopt it.`
         : "This preset snapshot is current. No changes were adopted.", comparison.changed ? "" : "success");
@@ -3497,8 +3519,12 @@ async function resolveProviderPreset(slug = elements.providerPresetSlug.value.tr
   } catch (error) {
     if (resolutionSequence !== providerRoutingSelection.resolutionSequence) return null;
     const message = error.message || String(error);
-    elements.providerPresetSlug.setCustomValidity(message);
-    providerRoutingSelection = { ...providerRoutingSelection, snapshot: null, resolving: false };
+    if (checkOnly) {
+      providerRoutingSelection = { ...providerRoutingSelection, snapshot: snapshotBeforeResolution, resolving: false };
+    } else {
+      elements.providerPresetSlug.setCustomValidity(message);
+      providerRoutingSelection = { ...providerRoutingSelection, snapshot: null, resolving: false };
+    }
     providerPresetMessage(`Preset slug: ${message}`, "error");
     renderProviderRoutingEditor();
     return null;
@@ -3800,6 +3826,7 @@ async function refreshProviderModelsFromForm() {
     discoveredProfileModels = result.models || [];
     const orderedModels = [...discoveredProfileModels].sort((left, right) => Number(right.loaded) - Number(left.loaded) || left.displayName.localeCompare(right.displayName));
     if (providerRoutingSupported()) {
+      providerRoutingSelection.modelsDiscovered = true;
       providerRoutingSelection.models = reconcileModelSelection(providerRoutingSelection.models, discoveredProfileModels);
       applyProviderRoutingContext();
       renderProviderRoutingEditor();
@@ -5644,13 +5671,7 @@ elements.addProviderRoutingModel.addEventListener("click", () => { void openProv
 elements.providerRoutingModels.addEventListener("click", () => setProviderRoutingSource("models"));
 elements.providerRoutingPreset.addEventListener("click", () => setProviderRoutingSource("openrouter_preset"));
 elements.resolveProviderPreset.addEventListener("click", () => { void resolveProviderPreset(); });
-elements.providerPresetSlug.addEventListener("input", () => {
-  const slug = elements.providerPresetSlug.value.trim();
-  elements.providerPresetSlug.setCustomValidity("");
-  if (slug !== providerRoutingSelection.presetSlug) providerRoutingSelection.snapshot = null;
-  providerRoutingSelection.presetSlug = slug;
-  renderProviderRoutingEditor();
-});
+elements.providerPresetSlug.addEventListener("input", () => setProviderPresetSlug());
 elements.previousProviderPresetPage.addEventListener("click", () => { void loadProviderPresets(Math.max(0, providerRoutingSelection.offset - 25)); });
 elements.nextProviderPresetPage.addEventListener("click", () => { void loadProviderPresets(providerRoutingSelection.offset + 25); });
 elements.checkProviderPresetUpdate.addEventListener("click", () => { void resolveProviderPreset(providerRoutingSelection.presetSlug, { checkOnly: true }); });
