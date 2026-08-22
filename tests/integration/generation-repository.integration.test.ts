@@ -268,6 +268,7 @@ integration("PostgreSQL generation command repository", () => {
        ) VALUES ($1,$2,$3,'filesystem',$4,'image/png',1) RETURNING id`,
       [ownerUserId, campaignId, sha256(`provisional-asset-${generationJobId}`), `provisional/${generationJobId}.png`]
     );
+    const designatedVersionId = crypto.randomUUID();
     await pool.query(
       `INSERT INTO turn_illustration_segment_assets (segment_id, owner_user_id, asset_id, image_job_id, variant_index)
        VALUES ($1,$2,$3,$4,0)`,
@@ -865,6 +866,7 @@ integration("PostgreSQL generation command repository", () => {
   });
 
   it("snapshots complete text routing for append, replacement, and explicit model override", async () => {
+    const designatedVersionId = crypto.randomUUID();
     const routeProviderId = (await createProvider(pool, {
       name: `Routing snapshot ${crypto.randomUUID()}`,
       providerType: "openrouter",
@@ -882,7 +884,7 @@ integration("PostgreSQL generation command repository", () => {
          preset_slug = 'story-router', preset_designated_version_id = $2, preset_version = 3,
          preset_config_hash = 'preset-hash', preset_provider_policy = '{"order":["provider-a"]}'::jsonb
        WHERE id = $1`,
-      [routeProviderId, crypto.randomUUID()]
+      [routeProviderId, designatedVersionId]
     );
     const imported = await campaign();
     const append = await repository().enqueueAppend(
@@ -900,6 +902,7 @@ integration("PostgreSQL generation command repository", () => {
         configuredModels: ["primary-model", "fallback-model"],
         routingSource: "openrouter_preset",
         presetSlug: "story-router",
+        presetDesignatedVersionId: designatedVersionId,
         presetVersion: 3,
         presetConfigHash: "preset-hash",
         providerPolicy: { order: ["provider-a"] }
@@ -918,7 +921,8 @@ integration("PostgreSQL generation command repository", () => {
       [replacement.id]
     )).resolves.toMatchObject({ rows: [{ model_routing: {
       requestedModel: "primary-model", configuredModels: ["primary-model", "fallback-model"],
-      routingSource: "openrouter_preset", presetSlug: "story-router", presetVersion: 3, presetConfigHash: "preset-hash"
+      routingSource: "openrouter_preset", presetSlug: "story-router", presetDesignatedVersionId: designatedVersionId,
+      presetVersion: 3, presetConfigHash: "preset-hash"
     } }] });
     await pool.query(
       `UPDATE provider_profiles SET default_model = 'changed-primary', fallback_models = ARRAY['changed-fallback'],
@@ -945,7 +949,7 @@ integration("PostgreSQL generation command repository", () => {
       [override.id]
     )).resolves.toMatchObject({ rows: [{ model_routing: {
       requestedModel: "override-model", configuredModels: ["override-model"], routingSource: "models",
-      presetSlug: null, presetVersion: null, presetConfigHash: null, providerPolicy: {}
+      presetSlug: null, presetDesignatedVersionId: null, presetVersion: null, presetConfigHash: null, providerPolicy: {}
     } }] });
   });
 });

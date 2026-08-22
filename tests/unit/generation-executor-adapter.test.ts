@@ -92,7 +92,7 @@ function modelRoutingJob(): GenerationExecutionPayload {
     input_mode_source: "explicit", requested_model: "primary-model",
     model_routing: {
       requestedModel: "primary-model", configuredModels: ["primary-model", "fallback-model"],
-      routingSource: "models", presetSlug: null, presetVersion: null, presetConfigHash: null,
+      routingSource: "models", presetSlug: null, presetDesignatedVersionId: null, presetVersion: null, presetConfigHash: null,
       providerPolicy: {}, providerPolicyHash: "policy-hash", providerType: "openai_compatible"
     },
     context_options: { budgetTokens: 8_000, compression: "auto", query: "Open the observatory door.", recentTurns: 4 },
@@ -190,6 +190,7 @@ describe("generation executor adapter", () => {
         configuredModels: ["test-model"],
         routingSource: "models",
         presetSlug: null,
+        presetDesignatedVersionId: null,
         presetVersion: null,
         presetConfigHash: null,
         providerPolicy: {},
@@ -311,6 +312,7 @@ describe("generation executor adapter", () => {
       configuredModels: ["primary-model", "fallback-model"],
       routingSource: "openrouter_preset" as const,
       presetSlug: "story-router",
+      presetDesignatedVersionId: "00000000-0000-4000-8000-000000000007",
       presetVersion: 3,
       presetConfigHash: "preset-hash",
       providerPolicy: { order: ["provider-a"] },

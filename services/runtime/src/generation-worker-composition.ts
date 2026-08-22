@@ -62,7 +62,7 @@ export function createGenerationExecutionCollaborators(
           ? null
           : {
               slug: routing.presetSlug,
-              designatedVersionId: "snapshotted",
+              designatedVersionId: routing.presetDesignatedVersionId!,
               version: routing.presetVersion,
               configHash: routing.presetConfigHash
             },

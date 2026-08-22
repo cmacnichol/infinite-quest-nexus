@@ -32,7 +32,9 @@ import {
 import {
   buildScopedEntityCatalog,
   normalizeCampaignTrackers,
-  resolveEntityMetadata
+  resolveEntityMetadata,
+  sha256,
+  stableStringify
 } from "../../domain/src/index.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
@@ -91,6 +93,7 @@ export type GenerationModelRoutingSnapshot = Readonly<{
   configuredModels: readonly string[];
   routingSource: "models" | "openrouter_preset";
   presetSlug: string | null;
+  presetDesignatedVersionId: string | null;
   presetVersion: number | null;
   presetConfigHash: string | null;
   providerPolicy: Record<string, unknown>;
@@ -222,7 +225,15 @@ export type GenerationExecutionRepository = Readonly<{
   markFailed(input: GenerationFailedUpdate): Promise<boolean>;
 }>;
 
-type ExecutionPayloadRow = Omit<GenerationExecutionPayload, "orchestration_inputs"> & {
+type ExecutionPayloadRow = Omit<GenerationExecutionPayload, "orchestration_inputs" | "model_routing"> & {
+  requested_fallback_models: string[];
+  requested_routing_source: "models" | "openrouter_preset";
+  requested_preset_slug: string | null;
+  requested_preset_designated_version_id: string | null;
+  requested_preset_version: number | null;
+  requested_preset_config_hash: string | null;
+  requested_provider_policy: Record<string, unknown>;
+  requested_provider_type: string | null;
   legacy_settings: Record<string, unknown>;
   rpg_stats: unknown;
   event_triggers: unknown;
@@ -231,6 +242,27 @@ type ExecutionPayloadRow = Omit<GenerationExecutionPayload, "orchestration_input
   character_profile: Record<string, unknown> | null;
   character_snapshot: Record<string, unknown> | null;
 };
+
+function modelRoutingSnapshot(row: ExecutionPayloadRow): GenerationModelRoutingSnapshot {
+  const providerPolicy = row.requested_provider_policy || {};
+  const contextModelRouting = (row.context_options as unknown as {
+    modelRouting?: { providerPolicyHash?: unknown };
+  }).modelRouting;
+  return {
+    requestedModel: row.requested_model,
+    configuredModels: [row.requested_model, ...(row.requested_fallback_models || [])].filter(Boolean),
+    routingSource: row.requested_routing_source || "models",
+    presetSlug: row.requested_preset_slug,
+    presetDesignatedVersionId: row.requested_preset_designated_version_id,
+    presetVersion: row.requested_preset_version,
+    presetConfigHash: row.requested_preset_config_hash,
+    providerPolicy,
+    providerPolicyHash: typeof contextModelRouting?.providerPolicyHash === "string"
+        ? contextModelRouting.providerPolicyHash
+        : sha256(stableStringify(providerPolicy)),
+    providerType: row.requested_provider_type || "unknown"
+  };
+}
 
 function claimedGeneration(row: {
   id: string;
@@ -645,18 +677,10 @@ export function createPostgresGenerationExecutionRepository(
                 j.expected_turn_number, j.operation_kind, j.replacement_turn_id,
                 j.base_turn_number, j.base_state_private, j.base_scratchpad_safe_for_prompt,
                 j.action, j.requested_input_mode, j.resolved_input_mode, j.input_mode_source,
-                j.requested_model,
-                COALESCE(j.context_options->'modelRouting', jsonb_build_object(
-                  'requestedModel', j.requested_model,
-                  'configuredModels', jsonb_build_array(j.requested_model),
-                  'routingSource', 'models',
-                  'presetSlug', NULL,
-                  'presetVersion', NULL,
-                  'presetConfigHash', NULL,
-                  'providerPolicy', '{}'::jsonb,
-                  'providerPolicyHash', '',
-                  'providerType', 'unknown'
-                )) AS model_routing,
+                j.requested_model, j.requested_fallback_models, j.requested_routing_source,
+                j.requested_preset_slug, j.requested_preset_designated_version_id,
+                j.requested_preset_version, j.requested_preset_config_hash, j.requested_provider_policy,
+                j.requested_provider_type,
                 j.context_options, j.prompt_protocol_version, j.prompt_snapshot,
                 j.attempts, j.orchestration_private, j.streaming_segments_state,
                 c.world_version_id, c.legacy_settings, c.character_profile, c.character_snapshot,
@@ -686,7 +710,7 @@ export function createPostgresGenerationExecutionRepository(
         character_snapshot: _characterSnapshot,
         ...payload
       } = row;
-      return { ...payload, orchestration_inputs: orchestrationInputs(row) };
+      return { ...payload, model_routing: modelRoutingSnapshot(row), orchestration_inputs: orchestrationInputs(row) };
     },
 
     async renewLease(scope, leaseSeconds) {

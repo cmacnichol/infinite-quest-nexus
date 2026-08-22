@@ -60,6 +60,7 @@ import {
   ProviderModelFallbackExhaustedError,
   ProviderStreamInterruptedError,
   providerTransportErrorDetails,
+  routingStrategy,
   type ActivatedEvent,
   type ProviderRequest,
   type ProviderResult
@@ -429,6 +430,86 @@ function attemptedModelsFromError(error: ProviderModelFallbackExhaustedError | P
   return error.attempts.map((attempt) => attempt.model).filter(Boolean);
 }
 
+function isModelRoutingRecovery(error: unknown): error is ProviderModelFallbackExhaustedError | ProviderStreamInterruptedError {
+  return error instanceof ProviderModelFallbackExhaustedError || error instanceof ProviderStreamInterruptedError;
+}
+
+function attemptModelRouting(
+  job: GenerationExecutionPayload,
+  result?: ProviderResult,
+  failure?: ProviderModelFallbackExhaustedError | ProviderStreamInterruptedError
+) {
+  const attempts = result?.modelRouting?.attempts || failure?.attempts || [];
+  const resolvedModel = result?.modelRouting?.resolvedModel || result?.modelInstanceId || null;
+  return {
+    strategy: result?.modelRouting?.strategy || routingStrategy({
+      providerType: job.model_routing.providerType,
+      model: job.model_routing.requestedModel,
+      fallbackModels: job.model_routing.configuredModels.slice(1),
+      routingSource: job.model_routing.routingSource
+    }),
+    configuredModels: [...job.model_routing.configuredModels],
+    resolvedModel,
+    fallbackUsed: result?.modelRouting?.fallbackUsed ?? Boolean(resolvedModel
+      && resolvedModel !== job.model_routing.requestedModel),
+    emittedOutput: result?.modelRouting?.emittedOutput ?? failure?.emittedOutput ?? false,
+    attempts: attempts.map((attempt) => ({
+      model: attempt.model,
+      outcome: attempt.outcome,
+      reason: attempt.reason,
+      emittedOutput: attempt.emittedOutput
+    }))
+  };
+}
+
+async function persistModelRoutingRecovery(
+  repository: GenerationExecutionRepository,
+  scope: GenerationLeaseScope,
+  job: GenerationExecutionPayload,
+  error: ProviderModelFallbackExhaustedError | ProviderStreamInterruptedError,
+  partialOutput: string
+): Promise<void> {
+  const exhaustion = error instanceof ProviderModelFallbackExhaustedError;
+  const reason = exhaustion ? "model_plan_exhausted" : "provider_stream_interrupted";
+  const partialNarrationAvailable = !exhaustion && Boolean(partialOutput);
+  if (partialNarrationAvailable) {
+    assertActiveGenerationUpdate(
+      await repository.savePartialNarration(scope, partialOutput),
+      "preserving interrupted streamed output"
+    );
+  }
+  const attemptedModels = attemptedModelsFromError(error);
+  await repository.recordAttempt({
+    ...scope,
+    attemptNumber: job.attempts * 2 - 1,
+    recoveryKind: reason,
+    requestMetadata: {},
+    responseMetadata: { modelRouting: attemptModelRouting(job, undefined, error) },
+    providerResponseId: null,
+    finishReason: null,
+    rawOutput: null,
+    validationErrors: [],
+    overwrite: true
+  });
+  assertActiveGenerationUpdate(await repository.markRecoverable({
+    ...scope,
+    providerResponseId: null,
+    providerFinishReason: null,
+    errorCode: reason,
+    errorMessage: exhaustion
+      ? "Every configured text model failed before narration began."
+      : "The text-provider stream was interrupted after narration began.",
+    recoveryMetadata: {
+      modelRouting: safeModelRouting(job, {
+        reason,
+        retryDisposition: "explicit_regeneration",
+        attemptedModels,
+        partialNarrationAvailable
+      })
+    }
+  }), "saving model routing recovery state");
+}
+
 async function persistOrchestration(
   repository: GenerationExecutionRepository,
   scope: GenerationLeaseScope,
@@ -572,6 +653,7 @@ async function executeLoadedGeneration(
 ): Promise<boolean> {
   const { repository, collaborators, pool } = dependencies;
   const scope = { jobId: job.id, ownerUserId: job.owner_user_id, workerId };
+  let streamedPartialOutput = "";
   const generationStartedAt = Date.now();
   const diagnosticContext: TurnGenerationDiagnosticContext = {
     generationJobId: job.id,
@@ -694,6 +776,7 @@ async function executeLoadedGeneration(
             if (response.outputLimited) throw new Error("The private RPG assessment reached its output limit.");
             assessment = parseRpgAssessment(response.content);
           } catch (error) {
+            if (isModelRoutingRecovery(error)) throw error;
             assessmentError = error instanceof Error ? error.message : String(error);
             assessment = localRpgAssessment(job.action, inputs.rpgStats);
           }
@@ -722,6 +805,7 @@ async function executeLoadedGeneration(
               triggers
             );
           } catch (error) {
+            if (isModelRoutingRecovery(error)) throw error;
             triggerError = error instanceof Error ? error.message : String(error);
           }
         }
@@ -834,6 +918,7 @@ async function executeLoadedGeneration(
       const now = Date.now();
       const unchanged = accumulated === lastPartialContent;
       lastPartialContent = accumulated;
+      streamedPartialOutput = accumulated;
       if (now - lastPartialUpdate < 350 || unchanged) return;
       lastPartialUpdate = now;
       lastPartialContent = accumulated;
@@ -980,56 +1065,8 @@ async function executeLoadedGeneration(
     const primaryRequest = supportsStreaming && job.attempts === 1
       ? { ...baseRequest, onChunk }
       : baseRequest;
-    let result: ProviderResult;
-    try {
-      result = await phase("story_generation", () =>
-        callCampaignTextProvider(dependencies, provider, job, "story_generation", primaryRequest));
-    } catch (error) {
-      const exhaustion = error instanceof ProviderModelFallbackExhaustedError;
-      const interruption = error instanceof ProviderStreamInterruptedError;
-      if (!exhaustion && !interruption) throw error;
-      const attemptedModels = attemptedModelsFromError(error);
-      const reason = exhaustion ? "model_plan_exhausted" : "provider_stream_interrupted";
-      const partialNarrationAvailable = interruption && Boolean(lastPartialContent);
-      if (partialNarrationAvailable) {
-        assertActiveGenerationUpdate(
-          await repository.savePartialNarration(scope, lastPartialContent),
-          "preserving interrupted streamed output"
-        );
-      }
-      await repository.recordAttempt({
-        ...scope,
-        attemptNumber: job.attempts * 2 - 1,
-        recoveryKind: reason,
-        requestMetadata: {},
-        responseMetadata: { modelRouting: safeModelRouting(job, { reason, retryDisposition: "explicit_regeneration", attemptedModels, partialNarrationAvailable }) },
-        providerResponseId: null,
-        finishReason: null,
-        rawOutput: null,
-        validationErrors: [],
-        overwrite: true
-      });
-      assertActiveGenerationUpdate(await repository.markRecoverable({
-        ...scope,
-        providerResponseId: null,
-        providerFinishReason: null,
-        errorCode: reason,
-        errorMessage: exhaustion
-          ? "Every configured text model failed before narration began."
-          : "The text-provider stream was interrupted after narration began.",
-        recoveryMetadata: {
-          modelRouting: safeModelRouting(job, { reason, retryDisposition: "explicit_regeneration", attemptedModels, partialNarrationAvailable })
-        }
-      }), "saving model routing recovery state");
-      if (job.streaming_segments_state?.provisionalSetId) {
-        await collaborators.illustration.orphanProvisionalSet(pool, {
-          ownerUserId: job.owner_user_id,
-          campaignId: job.campaign_id,
-          generationJobId: job.id
-        }).catch(() => undefined);
-      }
-      return true;
-    }
+    let result = await phase("story_generation", () =>
+      callCampaignTextProvider(dependencies, provider, job, "story_generation", primaryRequest));
     let validation = await phase("story_validation", async () => {
       const parsed = parseStoryOutput(result.content, storyMemoryDefaults);
       const firstReason: "invalid_json" | "invalid_schema" | "mechanics_leak" | null =
@@ -1063,13 +1100,7 @@ async function executeLoadedGeneration(
           usage: result.usage,
           outputLimited: result.outputLimited,
           modelInstanceId: result.modelInstanceId,
-          modelRouting: safeModelRouting(job, {
-            reason: "completed",
-            retryDisposition: "automatic_retry",
-            attemptedModels: result.modelRouting?.attempts.map((attempt) => attempt.model)
-              || [result.modelRouting?.resolvedModel || provider.model],
-            partialNarrationAvailable: false
-          })
+          modelRouting: attemptModelRouting(job, result)
         },
         providerResponseId: result.responseId || null,
         finishReason: result.finishReason || null,
@@ -1150,13 +1181,7 @@ async function executeLoadedGeneration(
             usage: result.usage,
             outputLimited: result.outputLimited,
             modelInstanceId: result.modelInstanceId,
-            modelRouting: safeModelRouting(job, {
-              reason: "completed",
-              retryDisposition: "automatic_retry",
-              attemptedModels: result.modelRouting?.attempts.map((attempt) => attempt.model)
-                || [result.modelRouting?.resolvedModel || provider.model],
-              partialNarrationAvailable: false
-            })
+            modelRouting: attemptModelRouting(job, result)
           },
           providerResponseId: result.responseId || null,
           finishReason: result.finishReason || null,
@@ -1223,7 +1248,8 @@ async function executeLoadedGeneration(
         coverage = coverageResponse.outputLimited
           ? null
           : parseSceneCoverageOutput(coverageResponse.content);
-      } catch {
+      } catch (error) {
+        if (isModelRoutingRecovery(error)) throw error;
         coverage = null;
       }
       logger.info({
@@ -1287,7 +1313,8 @@ async function executeLoadedGeneration(
             repairedCoverage = coverageResponse.outputLimited
               ? null
               : parseSceneCoverageOutput(coverageResponse.content);
-          } catch {
+          } catch (error) {
+            if (isModelRoutingRecovery(error)) throw error;
             repairedCoverage = null;
           }
         }
@@ -1391,6 +1418,7 @@ async function executeLoadedGeneration(
             }
           });
         } catch (error) {
+          if (isModelRoutingRecovery(error)) throw error;
           orchestration = await persistOrchestration(repository, scope, job, {
             extensionError: (error instanceof Error ? error.message : String(error)).slice(0, 2000)
           });
@@ -1465,25 +1493,32 @@ async function executeLoadedGeneration(
       durationMs: Date.now() - generationStartedAt
     });
   } catch (error) {
-    const transportError = providerTransportErrorDetails(error);
-    const rawCode = transportError
-      ? (transportError.timedOut ? "provider_request_timeout" : "provider_transport_error")
-      : errorCodeFrom(error) || "generation_failed";
-    const code = safeLogErrorCode(rawCode, "generation_failed");
-    const failed = await repository.markFailed({
-      ...scope,
-      errorCode: PUBLIC_GENERATION_FAILURE_CODE,
-      errorMessage: PUBLIC_GENERATION_FAILURE_MESSAGE,
-      recoveryMetadata: {}
-    });
-    if (failed) {
-      logger.error({
-        event: "turn_generation_failed",
-        ...generationLogContext(job, workerId),
-        errorCode: code,
-        durationMs: Date.now() - generationStartedAt,
-        transportTimedOut: Boolean(transportError?.timedOut)
+    if (isModelRoutingRecovery(error)) {
+      await persistModelRoutingRecovery(repository, scope, job, error, streamedPartialOutput);
+    } else {
+      const transportError = providerTransportErrorDetails(error);
+      const rawCode = transportError
+        ? (transportError.timedOut ? "provider_request_timeout" : "provider_transport_error")
+        : errorCodeFrom(error) || "generation_failed";
+      const code = safeLogErrorCode(rawCode, "generation_failed");
+      const failed = await repository.markFailed({
+        ...scope,
+        errorCode: PUBLIC_GENERATION_FAILURE_CODE,
+        errorMessage: PUBLIC_GENERATION_FAILURE_MESSAGE,
+        // ADR0012 transport details are already normalized and deliberately
+        // omit upstream response bodies and credentials.  Keep them for
+        // unrelated legacy/single-model failure diagnosis.
+        recoveryMetadata: transportError ? { transportError } : {}
       });
+      if (failed) {
+        logger.error({
+          event: "turn_generation_failed",
+          ...generationLogContext(job, workerId),
+          errorCode: code,
+          durationMs: Date.now() - generationStartedAt,
+          transportTimedOut: Boolean(transportError?.timedOut)
+        });
+      }
     }
     if (job.streaming_segments_state?.provisionalSetId) {
       try {
