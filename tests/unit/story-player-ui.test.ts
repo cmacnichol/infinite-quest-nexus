@@ -395,6 +395,51 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     }
   });
 
+  it("keeps a rejected retry dialog's length selection for the next replacement attempt", async () => {
+    const workflow = {
+      resume: async () => null,
+      submit: vi.fn()
+        .mockRejectedValueOnce(new Error("queue unavailable"))
+        .mockResolvedValueOnce({ jobId: "retry-after-rejection", watch: async function* () {} })
+    };
+    try {
+      const { document, window } = await bootLegacyStory({ turns: makeTurns(1, 1), workflow });
+      const retryEditor = document.getElementById("retryPromptEditor") as HTMLTextAreaElement;
+      retryEditor.select = () => undefined;
+      document.getElementById("btnRetry")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      const retryDialog = document.getElementById("retryPromptDialog") as HTMLDialogElement;
+      const retryLength = document.getElementById("retryStoryLengthProfileOverride") as HTMLSelectElement;
+      selectOption(retryLength, "brief");
+      document.getElementById("btnRetryPromptSubmit")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      for (let attempt = 0; attempt < 8 && workflow.submit.mock.calls.length === 0; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(retryDialog.hasAttribute("open")).toBe(true);
+      expect(retryLength.value).toBe("brief");
+      expect(workflow.submit.mock.calls[0]).toEqual(["campaign-1", expect.objectContaining({
+        operationKind: "replace_latest",
+        request: expect.objectContaining({ storyLengthProfileOverride: "brief" })
+      })]);
+
+      document.getElementById("btnRetryPromptSubmit")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      for (let attempt = 0; attempt < 8 && workflow.submit.mock.calls.length < 2; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(workflow.submit).toHaveBeenLastCalledWith("campaign-1", expect.objectContaining({
+        operationKind: "replace_latest",
+        request: expect.objectContaining({ storyLengthProfileOverride: "brief" })
+      }));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("uses the campaign preference and preserves the draft while toggling multiple generated choices", async () => {
     const { document, window } = parseHTML(storyHtml);
     Object.defineProperty(window, "location", { value: { pathname: "/story/campaign-1" }, configurable: true });

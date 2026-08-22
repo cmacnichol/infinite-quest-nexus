@@ -1154,6 +1154,7 @@ async function runGeneration(action, options = {}) {
       state.pendingGeneration = conflict.pendingGeneration;
     }
     resetStoryLengthOverrideControls();
+    options.onAttached?.();
     state.generationRun = run;
     state.pendingGeneration = state.pendingGeneration?.id === run.jobId
       ? state.pendingGeneration
@@ -1741,14 +1742,14 @@ async function executeRetryWithPrompt(submittedPromptText) {
   const originalTurn = state.turns.at(-1) || {};
   const resolvedInputMode = originalTurn.resolvedInputMode || originalTurn.inputMode || "action";
   const storyLengthProfileOverride = selectedStoryLengthOverride("retryStoryLengthProfileOverride");
-  closeRetryPromptDialog();
   await runGeneration(action, {
     operationKind: "replace_latest",
     expectedCurrentTurnNumber: currentTurnNumber,
     requestedInputMode: originalTurn.requestedInputMode || resolvedInputMode,
     resolvedInputMode,
     inputModeSource: originalTurn.inputModeSource || "explicit",
-    storyLengthProfileOverride
+    storyLengthProfileOverride,
+    onAttached: closeRetryPromptDialog
   });
 }
 
