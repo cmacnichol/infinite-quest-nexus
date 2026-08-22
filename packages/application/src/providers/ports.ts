@@ -129,7 +129,7 @@ export interface ProviderRuntimeLeasePort {
     scope: OwnerScope,
     providerProfileId: string,
     providerRole: R,
-    model: string,
+    options?: Readonly<{ modelOverride?: string }>,
   ): Promise<ProviderTransportLease<R>>;
 }
 

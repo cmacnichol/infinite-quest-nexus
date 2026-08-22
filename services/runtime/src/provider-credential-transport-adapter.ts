@@ -244,12 +244,12 @@ export function createRuntimeProviderAdapter(options: Readonly<{
         credential: opaqueReference(providerProfileId, Boolean(row.encryptedCredential))
       };
     },
-    async leaseResolved(scope, providerProfileId, providerRole, model) {
+    async leaseResolved(scope, providerProfileId, providerRole, options = {}) {
       const row = await load(scope.ownerUserId, providerProfileId);
       if (row.providerRole !== providerRole) {
         throw Object.assign(new Error(`Enabled ${providerRole} provider profile not found.`), { statusCode: 404 });
       }
-      const explicitModel = model.trim();
+      const explicitModel = options.modelOverride?.trim() ?? "";
       const selectedModel = explicitModel || row.defaultModel.trim();
       if (!selectedModel) throw Object.assign(new Error("Select a model for this provider profile."), { statusCode: 400 });
       return {

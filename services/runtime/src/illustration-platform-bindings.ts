@@ -44,15 +44,7 @@ export function createIllustrationPlatformBindings(
       })
     },
     promptRefinement: {
-      loadTextExecution: async (ownerUserId, providerProfileId, _model) => {
-        const resolution = await providers.resolution.resolveDirect({
-          ownerUserId,
-          providerRole: "text",
-          selectedProviderProfileId: providerProfileId,
-        });
-        if (resolution.status !== "resolved") {
-          throw Object.assign(new Error("The selected text provider is unavailable."), { statusCode: 409 });
-        }
+      loadTextExecution: async (ownerUserId, resolution) => {
         return providers.execution.text({ ownerUserId }, resolution);
       },
       recordProviderHealth: (_pool, ownerUserId, providerProfileId, healthy) => providers.health.recordHealth({

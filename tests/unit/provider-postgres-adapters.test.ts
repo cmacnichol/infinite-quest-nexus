@@ -150,7 +150,7 @@ describe("provider PostgreSQL adapter boundaries", () => {
       { ownerUserId: "00000000-0000-4000-8000-000000000012" },
       row.id,
       "text",
-      "story-model"
+      { modelOverride: "story-model" } as never
     );
     const inventory = await adapter.inventory.listModels({
       ownerUserId: "00000000-0000-4000-8000-000000000012",
@@ -194,6 +194,66 @@ describe("provider PostgreSQL adapter boundaries", () => {
     expect(publicValues).not.toContain(encrypted.ciphertext);
     expect(publicValues).not.toContain("stored-config-secret");
     expect(JSON.stringify(database.query.mock.calls)).not.toContain(plaintext);
+  });
+
+  test("keeps a stored OpenRouter preset chain when no direct model override is leased", async () => {
+    const row = {
+      id: "00000000-0000-4000-8000-000000000016",
+      name: "Preset text provider",
+      provider_type: "openrouter",
+      provider_role: "text",
+      base_url: "https://openrouter.ai/api/v1",
+      default_model: "primary-model",
+      fallback_models: ["fallback-a", "fallback-b"],
+      routing_source: "openrouter_preset",
+      preset_slug: "story-router",
+      preset_designated_version_id: "version-id",
+      preset_version: 3,
+      preset_config_hash: "a".repeat(64),
+      preset_provider_policy: { allow_fallbacks: true },
+      context_window_tokens: 32_768,
+      max_output_tokens: 4_096,
+      temperature: 0.8,
+      request_timeout_ms: 30_000,
+      configuration: {},
+      encrypted_api_key: null,
+      credential_nonce: null,
+      credential_auth_tag: null,
+      credential_key_version: null,
+      enabled: true,
+      is_default: true,
+      health_status: "unknown",
+      consecutive_failures: 0,
+      last_health_check_at: null,
+      created_at: new Date("2026-01-01T00:00:00Z"),
+      updated_at: new Date("2026-01-01T00:00:00Z")
+    };
+    const adapter = createRuntimeProviderAdapter({
+      database: { query: vi.fn(async () => ({ rows: [row], rowCount: 1 })) } as never,
+      credentialSecret: "credential-encryption-secret",
+      transport: { fetch: vi.fn(), validateSdkEndpoint: vi.fn(), close: vi.fn() },
+      health: { recordHealth: vi.fn() }
+    });
+
+    const lease = await adapter.leases.leaseResolved(
+      { ownerUserId: "00000000-0000-4000-8000-000000000017" },
+      row.id,
+      "text",
+      undefined as never,
+    );
+
+    expect(lease).toMatchObject({
+      model: "primary-model",
+      routingSource: "openrouter_preset",
+      fallbackModels: ["fallback-a", "fallback-b"],
+      presetProvenance: {
+        slug: "story-router",
+        designatedVersionId: "version-id",
+        version: 3,
+        configHash: "a".repeat(64)
+      },
+      providerPolicy: { allow_fallbacks: true }
+    });
   });
 
   test("uses an owner-scoped management credential load for a disabled saved OpenRouter preset", async () => {

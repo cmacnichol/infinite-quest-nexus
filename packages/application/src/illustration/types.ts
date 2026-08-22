@@ -7,6 +7,12 @@ import type {
   IllustrationSegmentRequest,
   WorldCoverRequest
 } from "@infinite-quest/contracts";
+import type { DirectProviderResolution } from "../providers/types.js";
+
+type ResolvedIllustrationTextProvider = Extract<
+  DirectProviderResolution<"text">,
+  Readonly<{ status: "resolved" }>
+>;
 
 export type IllustrationOwnerScope = Readonly<{
   ownerUserId: string;
@@ -378,6 +384,11 @@ export type IllustrationImageExecutionResult =
 export type IllustrationPromptRefinementRequest = IllustrationSegmentExecutionScope & Readonly<{
   providerProfileId: string;
   model: string;
+  /**
+   * The in-memory model plan selected for this queued attempt. It keeps
+   * execution and cost attribution on the same primary/fallback chain.
+   */
+  textResolution: ResolvedIllustrationTextProvider;
   systemPrompt: string;
   fictionText: string;
   storyContext: string;

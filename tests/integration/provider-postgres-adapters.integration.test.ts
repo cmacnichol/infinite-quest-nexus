@@ -478,7 +478,7 @@ integration("provider PostgreSQL adapters", () => {
           { ownerUserId: first.ownerUserId },
           profile.id,
           role,
-          expected.selectedModel
+          { modelOverride: expected.selectedModel }
         );
         expect(lease).toMatchObject({
           providerProfileId: profile.id,

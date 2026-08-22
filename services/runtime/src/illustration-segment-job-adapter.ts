@@ -1065,13 +1065,22 @@ export async function runIllustrationPromptJob(
       claimed.turn_id,
       segment.character_visual_reference
     );
+    const textResolution = await providers.resolution.resolveDirect({
+      ownerUserId: claimed.owner_user_id,
+      providerRole: "text",
+      selectedProviderProfileId: claimed.provider_profile_id,
+    });
+    if (textResolution.status !== "resolved") {
+      throw Object.assign(new Error("The selected text provider is unavailable."), { statusCode: 409 });
+    }
     const result = await refinementPort.refinePrompt({
         ownerUserId: claimed.owner_user_id,
         campaignId: claimed.campaign_id,
         turnId: segment.turn_id,
         segmentId: segment.id,
-        providerProfileId: claimed.provider_profile_id,
-        model: claimed.requested_model,
+        providerProfileId: textResolution.providerProfileId,
+        model: textResolution.model,
+        textResolution,
         systemPrompt: promptContent(claimed.prompt_snapshot, "illustration_refinement"),
         fictionText: segment.source_text,
         storyContext
@@ -1105,9 +1114,9 @@ export async function runIllustrationPromptJob(
           campaignId: claimed.campaign_id,
           turnId: claimed.turn_id,
           promptJobId: claimed.id,
-          providerProfileId: claimed.provider_profile_id,
+          providerProfileId: result.providerProfileId,
           providerType: profile.rows[0]?.provider_type || "unknown",
-          requestedModel: claimed.requested_model,
+          requestedModel: result.model,
           operation: "illustration_prompt_refinement",
           usage: portMetadata.usage && typeof portMetadata.usage === "object" ? portMetadata.usage as Record<string, unknown> : {},
           reportedCost: reported && typeof reported === "object"
