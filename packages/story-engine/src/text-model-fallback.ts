@@ -1,0 +1,172 @@
+export type ModelFallbackReason =
+  | "rate_limit"
+  | "provider_unavailable"
+  | "content_policy_violation"
+  | "refusal"
+  | "authentication"
+  | "invalid_request"
+  | "cancelled"
+  | "request_timeout"
+  | "model_unavailable"
+  | "context_length"
+  | "transport_failure"
+  | "empty_response"
+  | "network_policy_denied"
+  | "response_too_large"
+  | "output_limit"
+  | "unknown_failure";
+
+export type ProviderModelAttempt = Readonly<{
+  model: string;
+  outcome: "succeeded" | "failed" | "refused";
+  reason: ModelFallbackReason | null;
+  emittedOutput: boolean;
+  retryAfterMs?: number;
+}>;
+
+export type ProviderModelRouting = Readonly<{
+  strategy: "single" | "openrouter_native" | "openrouter_preset_snapshot" | "sequential";
+  configuredModels: readonly string[];
+  resolvedModel: string;
+  fallbackUsed: boolean;
+  attempts: readonly ProviderModelAttempt[];
+  emittedOutput: boolean;
+}>;
+
+export type ProviderModelPlan = Readonly<{
+  providerType: string;
+  model: string;
+  fallbackModels?: readonly string[];
+  routingSource?: "models" | "openrouter_preset";
+}>;
+
+export type NormalizedModelFailure = Readonly<{
+  reason: ModelFallbackReason;
+  retryAfterMs?: number;
+}>;
+
+const advanceReasons = new Set<ModelFallbackReason>([
+  "rate_limit",
+  "provider_unavailable",
+  "content_policy_violation",
+  "refusal",
+  "request_timeout",
+  "model_unavailable",
+  "context_length",
+  "transport_failure",
+  "empty_response"
+]);
+
+export function shouldAdvanceModel(input: Readonly<{ reason: ModelFallbackReason; emittedOutput: boolean }>): boolean {
+  return !input.emittedOutput && advanceReasons.has(input.reason);
+}
+
+export function configuredTextModels(plan: ProviderModelPlan): readonly string[] {
+  const models = [plan.model, ...(plan.fallbackModels ?? [])]
+    .map((model) => model.trim())
+    .filter(Boolean);
+  return [...new Set(models)];
+}
+
+export function routingStrategy(plan: ProviderModelPlan, configuredModels = configuredTextModels(plan)): ProviderModelRouting["strategy"] {
+  if (plan.providerType === "openrouter" && plan.routingSource === "openrouter_preset") return "openrouter_preset_snapshot";
+  if (plan.providerType === "openrouter" && configuredModels.length > 1) return "openrouter_native";
+  if (configuredModels.length > 1) return "sequential";
+  return "single";
+}
+
+/** An internal parsed terminal SSE event. Its public wrappers contain only the normalized fields below. */
+export class ProviderSseTerminalError extends Error {
+  constructor(readonly failure: NormalizedModelFailure) {
+    super("The provider stream ended with a terminal error.");
+    this.name = "ProviderSseTerminalError";
+  }
+}
+
+export class ProviderModelFallbackExhaustedError extends Error {
+  readonly code = "provider_model_fallback_exhausted";
+  readonly statusCode = 502;
+  readonly expose = true;
+  readonly emittedOutput = false;
+
+  constructor(
+    readonly attempts: readonly ProviderModelAttempt[],
+    readonly retryAfterMs?: number
+  ) {
+    super("The configured provider model plan could not complete.");
+    this.name = "ProviderModelFallbackExhaustedError";
+  }
+}
+
+export class ProviderStreamInterruptedError extends Error {
+  readonly code = "provider_stream_interrupted";
+  readonly statusCode = 502;
+  readonly expose = true;
+  readonly emittedOutput = true;
+
+  constructor(
+    readonly attempts: readonly ProviderModelAttempt[],
+    readonly retryAfterMs?: number
+  ) {
+    super("The provider stream was interrupted after output began.");
+    this.name = "ProviderStreamInterruptedError";
+  }
+}
+
+function retryAfterMs(value: unknown): number | undefined {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= 0 ? Math.round(numeric) : undefined;
+}
+
+function withRetryHint(reason: ModelFallbackReason, value: unknown): NormalizedModelFailure {
+  const retryAfter = retryAfterMs(value);
+  return retryAfter === undefined ? { reason } : { reason, retryAfterMs: retryAfter };
+}
+
+function errorChain(error: unknown): Record<string, unknown>[] {
+  const chain: Record<string, unknown>[] = [];
+  let current = error;
+  for (let index = 0; index < 6 && typeof current === "object" && current !== null; index += 1) {
+    chain.push(current as Record<string, unknown>);
+    current = (current as { cause?: unknown }).cause;
+  }
+  return chain;
+}
+
+function reasonFromText(value: unknown): ModelFallbackReason | null {
+  const text = String(value ?? "").toLowerCase();
+  if (/rate.?limit|too many requests/.test(text)) return "rate_limit";
+  if (/content.?policy|content.?filter/.test(text)) return "content_policy_violation";
+  if (/refusal|refused/.test(text)) return "refusal";
+  if (/context.?length|maximum context|token limit/.test(text)) return "context_length";
+  if (/model.+(?:not found|unavailable)|no such model/.test(text)) return "model_unavailable";
+  if (/timeout|timed out/.test(text)) return "request_timeout";
+  if (/unavailable|overload|capacity/.test(text)) return "provider_unavailable";
+  return null;
+}
+
+export function normalizeSseFailure(errorType: unknown, retryAfter?: unknown): NormalizedModelFailure {
+  const reason = reasonFromText(errorType) ?? "provider_unavailable";
+  return withRetryHint(reason, retryAfter);
+}
+
+/** Converts provider failures into durable-safe routing facts without retaining upstream bodies or credentials. */
+export function normalizeModelFailure(error: unknown): NormalizedModelFailure {
+  if (error instanceof ProviderSseTerminalError) return error.failure;
+  const chain = errorChain(error);
+  const values = chain.flatMap((item) => [item.code, item.statusCode, item.providerErrorType, item.providerMessage, item.message]);
+  const statusCode = chain.map((item) => Number(item.statusCode)).find(Number.isFinite);
+  const retryHint = chain.map((item) => item.retryAfterMs).find((value) => retryAfterMs(value) !== undefined);
+  if (values.some((value) => String(value) === "PROVIDER_DESTINATION_NOT_ALLOWED")) return { reason: "network_policy_denied" };
+  if (values.some((value) => String(value) === "provider_response_too_large")) return { reason: "response_too_large" };
+  if (values.some((value) => String(value) === "provider_request_timeout")) return { reason: "request_timeout" };
+  if (values.some((value) => String(value) === "provider_transport_error")) return { reason: "transport_failure" };
+  if (statusCode === 401 || statusCode === 403) return { reason: "authentication" };
+  if (statusCode === 408 || statusCode === 504) return { reason: "request_timeout" };
+  if (statusCode === 429) return withRetryHint("rate_limit", retryHint);
+  if (statusCode !== undefined && statusCode >= 500) return withRetryHint("provider_unavailable", retryHint);
+  const textReason = values.map(reasonFromText).find((value): value is ModelFallbackReason => value !== null);
+  if (textReason) return withRetryHint(textReason, retryHint);
+  if (statusCode === 400) return { reason: "invalid_request" };
+  return { reason: "unknown_failure" };
+}
