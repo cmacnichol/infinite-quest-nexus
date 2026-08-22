@@ -38,6 +38,10 @@ const textProfile: ProviderProfileView = {
   capability: "text_generation",
   baseUrl: "http://model.internal/v1",
   defaultModel: "story-model",
+  routingSource: "models",
+  fallbackModels: [],
+  preset: null,
+  providerPolicy: {},
   contextWindowTokens: 32_768,
   maxOutputTokens: 4_096,
   temperature: 0.8,
@@ -242,6 +246,150 @@ describe("provider application contracts", () => {
       "candidate-secret",
       "story-router"
     );
+  });
+
+  it("materializes a server-validated preset snapshot when creating a provider profile", async () => {
+    const snapshot = {
+      slug: "story-router",
+      designatedVersionId: "version-3",
+      version: 3,
+      configHash: "a".repeat(64),
+      models: ["primary/model", "fallback/model"],
+      providerPolicy: { allow_fallbacks: true }
+    };
+    const profile = {
+      ...textProfile,
+      providerType: "openrouter" as const,
+      defaultModel: "primary/model",
+      routingSource: "openrouter_preset",
+      fallbackModels: ["fallback/model"],
+      preset: {
+        slug: snapshot.slug,
+        designatedVersionId: snapshot.designatedVersionId,
+        version: snapshot.version,
+        configHash: snapshot.configHash
+      },
+      providerPolicy: snapshot.providerPolicy
+    };
+    const application = {
+      createProfile: vi.fn(async () => ({ profile, configurationProjection: { kind: "sanitized_read" } })),
+      listProfiles: vi.fn()
+    };
+    const runtime = {
+      discoverCandidatePresetWithCredential: vi.fn(async () => snapshot),
+      storeCredential: vi.fn()
+    };
+    const adapter = createProviderApplicationAdapter({
+      application,
+      runtime,
+      transaction: async (work: (binding: { application: typeof application; runtime: typeof runtime }) => unknown) => work({ application, runtime })
+    } as never);
+
+    const response = await adapter.create(owner.ownerUserId, {
+      name: "Preset story router",
+      providerType: "openrouter",
+      providerRole: "text",
+      baseUrl: "https://openrouter.ai/api/v1",
+      defaultModel: "",
+      routingSource: "openrouter_preset",
+      presetSlug: snapshot.slug,
+      contextWindowTokens: 32_768,
+      maxOutputTokens: 4_096,
+      temperature: 0.8,
+      requestTimeoutMs: 60_000,
+      configuration: {},
+      enabled: true,
+      isDefault: false,
+      apiKey: "transient-create-credential"
+    } as never);
+
+    expect(application.createProfile).toHaveBeenCalledWith(expect.objectContaining({
+      ...owner,
+      defaultModel: "primary/model",
+      routingSource: "openrouter_preset",
+      fallbackModels: ["fallback/model"],
+      preset: {
+        slug: snapshot.slug,
+        designatedVersionId: snapshot.designatedVersionId,
+        version: snapshot.version,
+        configHash: snapshot.configHash
+      },
+      providerPolicy: { allow_fallbacks: true }
+    }));
+    expect(response).toMatchObject({
+      routingSource: "openrouter_preset",
+      defaultModel: "primary/model",
+      fallbackModels: ["fallback/model"],
+      preset: { slug: "story-router", version: 3, configHash: "a".repeat(64) },
+      providerPolicy: { allow_fallbacks: true }
+    });
+    expect(JSON.stringify(response)).not.toContain("transient-create-credential");
+  });
+
+  it("uses the saved owner-scoped credential to materialize a preset update", async () => {
+    const snapshot = {
+      slug: "intent-router",
+      designatedVersionId: "intent-version-3",
+      version: 3,
+      configHash: "b".repeat(64),
+      models: ["primary/intent", "fallback/intent"],
+      providerPolicy: { allow_fallbacks: true }
+    };
+    const existing = { ...textProfile, providerType: "openrouter" as const, providerRole: "intent" as const };
+    const profile = {
+      ...existing,
+      defaultModel: "primary/intent",
+      routingSource: "openrouter_preset",
+      fallbackModels: ["fallback/intent"],
+      preset: {
+        slug: snapshot.slug,
+        designatedVersionId: snapshot.designatedVersionId,
+        version: snapshot.version,
+        configHash: snapshot.configHash
+      },
+      providerPolicy: snapshot.providerPolicy
+    };
+    const application = {
+      listProfiles: vi.fn(async () => [existing]),
+      updateProfile: vi.fn(async () => ({ profile, configurationProjection: { kind: "sanitized_read" } }))
+    };
+    const runtime = { getPreset: vi.fn(async () => snapshot), storeCredential: vi.fn() };
+    const adapter = createProviderApplicationAdapter({
+      application,
+      runtime,
+      transaction: async (work: (binding: { application: typeof application; runtime: typeof runtime }) => unknown) => work({ application, runtime })
+    } as never);
+
+    const response = await adapter.update(owner.ownerUserId, existing.id, {
+      routingSource: "openrouter_preset",
+      presetSlug: snapshot.slug
+    } as never);
+
+    expect(runtime.getPreset).toHaveBeenCalledWith(owner, existing.id, snapshot.slug);
+    expect(application.updateProfile).toHaveBeenCalledWith(expect.objectContaining({
+      ...owner,
+      providerProfileId: existing.id,
+      changes: expect.objectContaining({
+        defaultModel: "primary/intent",
+        routingSource: "openrouter_preset",
+        fallbackModels: ["fallback/intent"],
+        preset: {
+          slug: snapshot.slug,
+          designatedVersionId: snapshot.designatedVersionId,
+          version: snapshot.version,
+          configHash: snapshot.configHash
+        },
+        providerPolicy: { allow_fallbacks: true }
+      })
+    }));
+    expect(response).toMatchObject({
+      routingSource: "openrouter_preset",
+      defaultModel: "primary/intent",
+      fallbackModels: ["fallback/intent"],
+      preset: { slug: "intent-router", version: 3, configHash: "b".repeat(64) },
+      providerPolicy: { allow_fallbacks: true }
+    });
+    expect(JSON.stringify(response)).not.toContain("intent-version-3-secret");
   });
   it("keeps owner authority explicit while delegating profile operations", async () => {
     const ports = dependencies();

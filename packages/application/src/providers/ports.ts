@@ -54,6 +54,7 @@ export interface ProviderHealthPort {
 }
 
 export interface ProviderResolutionPort {
+  /** Text and intent resolutions include their complete safe routing plan; image remains single-model. */
   resolveDirect<R extends DirectProviderRole>(
     request: ProviderResolutionRequest<R>,
   ): Promise<DirectProviderResolution<R>>;

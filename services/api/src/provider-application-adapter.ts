@@ -79,7 +79,7 @@ function profileResponse(
   const configuration = mutation?.configurationProjection.kind === "same_request_echo"
     ? mutation.configurationProjection.configuration
     : profile.configuration;
-  return {
+  const response = {
     id: profile.id,
     name: profile.name,
     providerType: profile.providerType,
@@ -100,6 +100,43 @@ function profileResponse(
     hasApiKey: profile.hasCredential,
     createdAt: profile.createdAt,
     updatedAt: profile.updatedAt
+  };
+  if (profile.providerRole === "text" || profile.providerRole === "intent") {
+    return {
+      ...response,
+      routingSource: profile.routingSource,
+      fallbackModels: profile.fallbackModels,
+      preset: profile.preset,
+      providerPolicy: profile.providerPolicy
+    };
+  }
+  return response;
+}
+
+function snapshotSelection(snapshot: OpenRouterPresetSnapshot) {
+  const [model, ...fallbackModels] = snapshot.models;
+  if (!model) throw Object.assign(new Error("OpenRouter preset did not contain a usable model plan."), { statusCode: 400 });
+  return {
+    routingSource: "openrouter_preset" as const,
+    defaultModel: model,
+    fallbackModels,
+    preset: {
+      slug: snapshot.slug,
+      designatedVersionId: snapshot.designatedVersionId,
+      version: snapshot.version,
+      configHash: snapshot.configHash
+    },
+    providerPolicy: snapshot.providerPolicy
+  };
+}
+
+function modelSelection(defaultModel: string, fallbackModels: readonly string[]) {
+  return {
+    routingSource: "models" as const,
+    defaultModel,
+    fallbackModels,
+    preset: null,
+    providerPolicy: {}
   };
 }
 
@@ -141,13 +178,22 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
 
     async create(ownerUserId: string, input: ProviderProfileInput) {
       return composition.transaction(async ({ application, runtime }) => {
+        const selection = input.routingSource === "openrouter_preset"
+          ? snapshotSelection(await runtime.discoverCandidatePresetWithCredential(
+              candidate(ownerUserId, input), input.apiKey ?? null, input.presetSlug!
+            ))
+          : modelSelection(input.defaultModel, input.fallbackModels ?? []);
         const mutation = await application.createProfile({
           ownerUserId,
           name: input.name,
           providerType: input.providerType,
           providerRole: input.providerRole,
           baseUrl: input.baseUrl,
-          defaultModel: input.defaultModel,
+          defaultModel: selection.defaultModel,
+          routingSource: selection.routingSource,
+          fallbackModels: selection.fallbackModels,
+          preset: selection.preset,
+          providerPolicy: selection.providerPolicy,
           contextWindowTokens: input.contextWindowTokens,
           maxOutputTokens: input.maxOutputTokens,
           temperature: input.temperature,
@@ -168,6 +214,35 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
 
     async update(ownerUserId: string, providerProfileId: string, input: ProviderProfileUpdate) {
       return composition.transaction(async ({ application, runtime }) => {
+        const existing = (await application.listProfiles({ ownerUserId }))
+          .find((profile) => profile.id === providerProfileId);
+        if (!existing) throw Object.assign(new Error("Provider profile not found."), { statusCode: 404 });
+        const resolvedSelection = input.routingSource === "openrouter_preset"
+          ? snapshotSelection(input.apiKey === undefined
+            ? await runtime.getPreset({ ownerUserId }, providerProfileId, input.presetSlug!)
+            : await runtime.discoverCandidatePresetWithCredential({
+                ownerUserId,
+                name: input.name ?? existing.name,
+                providerType: existing.providerType,
+                providerRole: existing.providerRole,
+                baseUrl: input.baseUrl ?? existing.baseUrl,
+                defaultModel: "",
+                contextWindowTokens: input.contextWindowTokens ?? existing.contextWindowTokens,
+                maxOutputTokens: input.maxOutputTokens ?? existing.maxOutputTokens,
+                temperature: input.temperature ?? existing.temperature,
+                requestTimeoutMs: input.requestTimeoutMs ?? existing.requestTimeoutMs,
+                configuration: input.configuration === undefined
+                  ? existing.configuration
+                  : toSafeProviderConfiguration(input.configuration),
+                enabled: input.enabled ?? existing.enabled,
+                isDefault: input.isDefault ?? existing.isDefault
+              }, input.apiKey ?? null, input.presetSlug!))
+          : input.routingSource === "models"
+            ? modelSelection(input.defaultModel!, input.fallbackModels!)
+            : input.defaultModel !== undefined && (existing.providerRole === "text" || existing.providerRole === "intent")
+              && existing.routingSource === "models"
+              ? modelSelection(input.defaultModel, existing.fallbackModels)
+              : undefined;
         const mutation = await application.updateProfile({
           ownerUserId,
           providerProfileId,
@@ -175,6 +250,13 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
             ...(input.name === undefined ? {} : { name: input.name }),
             ...(input.baseUrl === undefined ? {} : { baseUrl: input.baseUrl }),
             ...(input.defaultModel === undefined ? {} : { defaultModel: input.defaultModel }),
+            ...(resolvedSelection === undefined ? {} : {
+              defaultModel: resolvedSelection.defaultModel,
+              routingSource: resolvedSelection.routingSource,
+              fallbackModels: resolvedSelection.fallbackModels,
+              preset: resolvedSelection.preset,
+              providerPolicy: resolvedSelection.providerPolicy
+            }),
             ...(input.contextWindowTokens === undefined ? {} : { contextWindowTokens: input.contextWindowTokens }),
             ...(input.maxOutputTokens === undefined ? {} : { maxOutputTokens: input.maxOutputTokens }),
             ...(input.temperature === undefined ? {} : { temperature: input.temperature }),

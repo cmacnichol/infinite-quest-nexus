@@ -206,6 +206,85 @@ integration("provider PostgreSQL adapters", () => {
     });
   });
 
+  it("round-trips owner-scoped model plans and preset snapshots atomically", async () => {
+    const [modelsProfile, presetProfile] = await inTransaction(async (client) => {
+      const profiles = createPostgresProviderRepositories(client).profiles;
+      return Promise.all([
+        profiles.createProfile({
+          ...profileCommand(first.ownerUserId, `Models plan ${crypto.randomUUID()}`),
+          defaultModel: "primary-model",
+          routingSource: "models",
+          fallbackModels: ["fallback-a", "fallback-b"],
+          preset: null,
+          providerPolicy: {}
+        }),
+        profiles.createProfile({
+          ...profileCommand(first.ownerUserId, `Preset plan ${crypto.randomUUID()}`, "intent"),
+          providerType: "openrouter",
+          defaultModel: "primary/intent",
+          routingSource: "openrouter_preset",
+          fallbackModels: ["fallback/intent"],
+          preset: {
+            slug: "story-router",
+            designatedVersionId: "version-3",
+            version: 3,
+            configHash: "d".repeat(64)
+          },
+          providerPolicy: { allow_fallbacks: true }
+        })
+      ]);
+    });
+
+    await inTransaction(async (client) => {
+      const repositories = createPostgresProviderRepositories(client);
+      const visible = await repositories.profiles.listProfiles({ ownerUserId: first.ownerUserId });
+      expect(visible.find((profile) => profile.id === modelsProfile.id)).toMatchObject({
+        routingSource: "models",
+        defaultModel: "primary-model",
+        fallbackModels: ["fallback-a", "fallback-b"],
+        preset: null,
+        providerPolicy: {}
+      });
+      expect(visible.find((profile) => profile.id === presetProfile.id)).toMatchObject({
+        routingSource: "openrouter_preset",
+        defaultModel: "primary/intent",
+        fallbackModels: ["fallback/intent"],
+        preset: { slug: "story-router", version: 3, configHash: "d".repeat(64) },
+        providerPolicy: { allow_fallbacks: true }
+      });
+      await expect(repositories.resolution.resolveDirect({
+        ownerUserId: first.ownerUserId, providerRole: "text", selectedProviderProfileId: modelsProfile.id
+      })).resolves.toMatchObject({
+        routingSource: "models", model: "primary-model", fallbackModels: ["fallback-a", "fallback-b"],
+        preset: null, providerPolicy: {}
+      });
+      await expect(repositories.resolution.resolveDirect({
+        ownerUserId: first.ownerUserId, providerRole: "intent", selectedProviderProfileId: presetProfile.id
+      })).resolves.toMatchObject({
+        routingSource: "openrouter_preset", model: "primary/intent", fallbackModels: ["fallback/intent"],
+        preset: { slug: "story-router", version: 3, configHash: "d".repeat(64) },
+        providerPolicy: { allow_fallbacks: true }
+      });
+      await expect(repositories.resolution.resolveDirect({
+        ownerUserId: first.ownerUserId, providerRole: "intent", selectedProviderProfileId: presetProfile.id,
+        model: "explicit-model"
+      })).resolves.toMatchObject({
+        routingSource: "models", model: "explicit-model", fallbackModels: [], preset: null, providerPolicy: {}
+      });
+      await expect(repositories.resolution.resolveDirect({
+        ownerUserId: second.ownerUserId, providerRole: "text", selectedProviderProfileId: modelsProfile.id
+      })).rejects.toMatchObject({ statusCode: 400 });
+      await repositories.profiles.updateProfile({
+        ownerUserId: first.ownerUserId,
+        providerProfileId: modelsProfile.id,
+        changes: { defaultModel: "updated-primary" }
+      });
+      await expect(repositories.resolution.resolveDirect({
+        ownerUserId: first.ownerUserId, providerRole: "text", selectedProviderProfileId: modelsProfile.id
+      })).resolves.toMatchObject({ model: "updated-primary", fallbackModels: ["fallback-a", "fallback-b"] });
+    });
+  });
+
   it("keeps endpoint, credential, inventory, model, state, health, timeout, and retry policy independent across every role", async () => {
     const roles = ["text", "image", "embedding", "intent"] as const satisfies readonly ProviderRole[];
     const credentialSecret = "provider-role-parity-encryption-secret";

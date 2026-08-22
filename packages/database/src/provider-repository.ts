@@ -1,5 +1,5 @@
 import {
-  providerProfileInputSchema,
+  providerProfileResolvedWriteSchema,
   sogniIllustrationProviderConfigSchema,
   sogniSdkIllustrationProviderConfigSchema,
   type ProviderType
@@ -11,6 +11,7 @@ import {
   type DirectProviderRole,
   type EmbeddingProviderResolution,
   type ProviderHealthPort,
+  type ProviderModelSelection,
   type ProviderProfilePort,
   type ProviderProfileView,
   type ProviderResolutionPort,
@@ -27,6 +28,13 @@ type ProviderRow = {
   provider_role: ProviderRole;
   base_url: string;
   default_model: string;
+  fallback_models?: string[];
+  routing_source?: "models" | "openrouter_preset";
+  preset_slug?: string | null;
+  preset_designated_version_id?: string | null;
+  preset_version?: number | null;
+  preset_config_hash?: string | null;
+  preset_provider_policy?: unknown;
   context_window_tokens: number;
   max_output_tokens: number;
   temperature: number;
@@ -46,6 +54,8 @@ type ProviderRow = {
 };
 
 const SELECT_COLUMNS = `id, name, provider_type, provider_role, base_url, default_model,
+  fallback_models, routing_source, preset_slug, preset_designated_version_id, preset_version,
+  preset_config_hash, preset_provider_policy,
   context_window_tokens, max_output_tokens, temperature, request_timeout_ms, configuration,
   encrypted_api_key, credential_nonce, credential_auth_tag, credential_key_version, enabled,
   is_default, health_status, consecutive_failures, last_health_check_at, created_at, updated_at`;
@@ -65,8 +75,44 @@ function capability(role: ProviderRole): ProviderProfileView["capability"] {
   return "intent_classification";
 }
 
-function profileView(row: ProviderRow): ProviderProfileView {
+function modelSelection(row: ProviderRow): ProviderModelSelection {
+  const parsed = providerProfileResolvedWriteSchema.parse({
+    name: row.name,
+    providerType: row.provider_type,
+    providerRole: row.provider_role,
+    baseUrl: row.base_url,
+    defaultModel: row.default_model,
+    contextWindowTokens: row.context_window_tokens,
+    maxOutputTokens: row.max_output_tokens,
+    temperature: row.temperature,
+    requestTimeoutMs: row.request_timeout_ms,
+    configuration: toSafeProviderConfiguration(row.configuration),
+    enabled: row.enabled,
+    isDefault: row.is_default,
+    routingSource: row.routing_source ?? "models",
+    fallbackModels: row.fallback_models ?? [],
+    presetSlug: row.preset_slug ?? null,
+    presetDesignatedVersionId: row.preset_designated_version_id ?? null,
+    presetVersion: row.preset_version ?? null,
+    presetConfigHash: row.preset_config_hash ?? null,
+    presetProviderPolicy: row.preset_provider_policy ?? {}
+  });
   return {
+    routingSource: parsed.routingSource,
+    model: parsed.defaultModel,
+    fallbackModels: parsed.fallbackModels,
+    preset: parsed.presetSlug === null ? null : {
+      slug: parsed.presetSlug,
+      designatedVersionId: parsed.presetDesignatedVersionId!,
+      version: parsed.presetVersion!,
+      configHash: parsed.presetConfigHash!
+    },
+    providerPolicy: parsed.presetProviderPolicy
+  };
+}
+
+function profileView(row: ProviderRow): ProviderProfileView {
+  const profile = {
     id: row.id,
     name: row.name,
     providerType: row.provider_type,
@@ -89,7 +135,18 @@ function profileView(row: ProviderRow): ProviderProfileView {
     },
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at)
-  } as ProviderProfileView;
+  };
+  if (row.provider_role === "text" || row.provider_role === "intent") {
+    const selection = modelSelection(row);
+    return {
+      ...profile,
+      routingSource: selection.routingSource,
+      fallbackModels: selection.fallbackModels,
+      preset: selection.preset,
+      providerPolicy: selection.providerPolicy
+    } as ProviderProfileView;
+  }
+  return profile as ProviderProfileView;
 }
 
 export function validateProviderConfiguration(
@@ -106,14 +163,81 @@ export function validateProviderConfiguration(
 
 function validateCreate(command: CreateProviderProfileCommand): CreateProviderProfileCommand {
   const configuration = validateProviderConfiguration(command.providerType, command.configuration);
-  const parsed = providerProfileInputSchema.parse({ ...command, configuration });
+  const parsed = providerProfileResolvedWriteSchema.parse({
+    ...command,
+    configuration,
+    routingSource: command.routingSource ?? "models",
+    fallbackModels: command.fallbackModels ?? [],
+    presetSlug: command.preset?.slug ?? null,
+    presetDesignatedVersionId: command.preset?.designatedVersionId ?? null,
+    presetVersion: command.preset?.version ?? null,
+    presetConfigHash: command.preset?.configHash ?? null,
+    presetProviderPolicy: command.providerPolicy ?? {}
+  });
   if (parsed.isDefault && !parsed.enabled) throw httpError("A disabled provider cannot be the default.", 400);
   return {
     ...command,
-    ...parsed,
+    name: parsed.name,
+    providerType: parsed.providerType,
+    providerRole: parsed.providerRole,
     baseUrl: parsed.baseUrl.replace(/\/+$/, ""),
-    configuration
+    defaultModel: parsed.defaultModel,
+    contextWindowTokens: parsed.contextWindowTokens,
+    maxOutputTokens: parsed.maxOutputTokens,
+    temperature: parsed.temperature,
+    requestTimeoutMs: parsed.requestTimeoutMs,
+    configuration,
+    enabled: parsed.enabled,
+    isDefault: parsed.isDefault,
+    routingSource: parsed.routingSource,
+    fallbackModels: parsed.fallbackModels,
+    preset: parsed.presetSlug === null ? null : {
+      slug: parsed.presetSlug,
+      designatedVersionId: parsed.presetDesignatedVersionId!,
+      version: parsed.presetVersion!,
+      configHash: parsed.presetConfigHash!
+    },
+    providerPolicy: parsed.presetProviderPolicy
   } as CreateProviderProfileCommand;
+}
+
+function mergedModelSelection(row: ProviderRow, changes: Parameters<ProviderProfilePort["updateProfile"]>[0]["changes"]): ProviderModelSelection {
+  const stored = modelSelection(row);
+  const hasPartialRoutingFields = changes.fallbackModels !== undefined
+    || changes.preset !== undefined || changes.providerPolicy !== undefined;
+  if (changes.routingSource === undefined) {
+    if (hasPartialRoutingFields) throw httpError("Routing changes must declare their routing source.", 400);
+    if (stored.routingSource === "openrouter_preset" && changes.defaultModel !== undefined) {
+      throw httpError("Preset routing cannot update models without a validated preset selection.", 400);
+    }
+    return {
+      ...stored,
+      model: changes.defaultModel ?? stored.model
+    };
+  }
+  if (changes.routingSource === "models") {
+    if (changes.defaultModel === undefined || changes.fallbackModels === undefined) {
+      throw httpError("Models routing changes require primary and fallback models together.", 400);
+    }
+    return {
+      routingSource: "models",
+      model: changes.defaultModel,
+      fallbackModels: changes.fallbackModels,
+      preset: null,
+      providerPolicy: {}
+    };
+  }
+  if (changes.defaultModel === undefined || changes.fallbackModels === undefined
+    || changes.preset === undefined || changes.preset === null || changes.providerPolicy === undefined) {
+    throw httpError("Preset routing changes require a complete validated preset snapshot.", 400);
+  }
+  return {
+    routingSource: "openrouter_preset",
+    model: changes.defaultModel,
+    fallbackModels: changes.fallbackModels,
+    preset: changes.preset,
+    providerPolicy: changes.providerPolicy
+  };
 }
 
 async function lockRole(client: DatabaseClient, ownerUserId: string, role: ProviderRole): Promise<void> {
@@ -208,14 +332,19 @@ export function createPostgresProviderRepositories(client: DatabaseClient): Post
       const result = await client.query<ProviderRow>(
         `INSERT INTO provider_profiles (
            owner_user_id, name, provider_type, provider_role, base_url, default_model,
+           fallback_models, routing_source, preset_slug, preset_designated_version_id, preset_version,
+           preset_config_hash, preset_provider_policy,
            context_window_tokens, max_output_tokens, temperature, request_timeout_ms,
            configuration, enabled, is_default
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13)
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7::text[],$8,$9,$10,$11,$12,$13::jsonb,$14,$15,$16,$17,$18::jsonb,$19,$20)
          RETURNING ${SELECT_COLUMNS}`,
         [command.ownerUserId, command.name, command.providerType, command.providerRole,
-          command.baseUrl, command.defaultModel.trim(), command.contextWindowTokens,
-          command.maxOutputTokens, command.temperature, command.requestTimeoutMs,
-          JSON.stringify(command.configuration), command.enabled, command.isDefault]
+          command.baseUrl, command.defaultModel.trim(), command.fallbackModels,
+          command.routingSource, command.preset?.slug ?? null,
+          command.preset?.designatedVersionId ?? null, command.preset?.version ?? null,
+          command.preset?.configHash ?? null, JSON.stringify(command.providerPolicy ?? {}),
+          command.contextWindowTokens, command.maxOutputTokens, command.temperature,
+          command.requestTimeoutMs, JSON.stringify(command.configuration), command.enabled, command.isDefault]
       );
       return profileView(result.rows[0]!);
     },
@@ -237,13 +366,18 @@ export function createPostgresProviderRepositories(client: DatabaseClient): Post
       const row = current.rows[0];
       if (!row) throw httpError("Provider profile not found.", 404);
       const changes = command.changes;
+      const selection = mergedModelSelection(row, changes);
       const merged = validateCreate({
         ownerUserId: command.ownerUserId,
         name: changes.name ?? row.name,
         providerType: row.provider_type,
         providerRole: row.provider_role,
         baseUrl: changes.baseUrl ?? row.base_url,
-        defaultModel: changes.defaultModel ?? row.default_model,
+        defaultModel: selection.model,
+        routingSource: selection.routingSource,
+        fallbackModels: selection.fallbackModels,
+        preset: selection.preset,
+        providerPolicy: selection.providerPolicy,
         contextWindowTokens: changes.contextWindowTokens ?? row.context_window_tokens,
         maxOutputTokens: changes.maxOutputTokens ?? row.max_output_tokens,
         temperature: changes.temperature ?? row.temperature,
@@ -262,10 +396,16 @@ export function createPostgresProviderRepositories(client: DatabaseClient): Post
       }
       const result = await client.query<ProviderRow>(
         `UPDATE provider_profiles SET name=$3, base_url=$4, default_model=$5,
-           context_window_tokens=$6, max_output_tokens=$7, temperature=$8, request_timeout_ms=$9,
-           configuration=$10::jsonb, enabled=$11, is_default=$12, updated_at=now()
+           fallback_models=$6::text[], routing_source=$7, preset_slug=$8,
+           preset_designated_version_id=$9, preset_version=$10, preset_config_hash=$11,
+           preset_provider_policy=$12::jsonb, context_window_tokens=$13, max_output_tokens=$14,
+           temperature=$15, request_timeout_ms=$16, configuration=$17::jsonb, enabled=$18,
+           is_default=$19, updated_at=now()
          WHERE id=$1 AND owner_user_id=$2 RETURNING ${SELECT_COLUMNS}`,
         [row.id, command.ownerUserId, merged.name, merged.baseUrl, merged.defaultModel.trim(),
+          merged.fallbackModels, merged.routingSource, merged.preset?.slug ?? null,
+          merged.preset?.designatedVersionId ?? null, merged.preset?.version ?? null,
+          merged.preset?.configHash ?? null, JSON.stringify(merged.providerPolicy ?? {}),
           merged.contextWindowTokens, merged.maxOutputTokens, merged.temperature,
           merged.requestTimeoutMs, JSON.stringify(merged.configuration), merged.enabled, merged.isDefault]
       );
@@ -334,12 +474,13 @@ export function createPostgresProviderRepositories(client: DatabaseClient): Post
     requestedModel: string | undefined,
   ): Promise<DirectProviderResolution<R>> {
     const result = selectedProviderProfileId
-      ? await client.query<Pick<ProviderRow, "id" | "provider_type" | "provider_role" | "default_model" | "is_default">>(
-          "SELECT id,provider_type,provider_role,default_model,is_default FROM provider_profiles WHERE id=$1 AND owner_user_id=$2 AND provider_role=$3 AND enabled=true",
+      ? await client.query<ProviderRow>(
+          `SELECT ${SELECT_COLUMNS} FROM provider_profiles
+            WHERE id=$1 AND owner_user_id=$2 AND provider_role=$3 AND enabled=true`,
           [selectedProviderProfileId, ownerUserId, role]
         )
-      : await client.query<Pick<ProviderRow, "id" | "provider_type" | "provider_role" | "default_model" | "is_default">>(
-          `SELECT id,provider_type,provider_role,default_model,is_default FROM provider_profiles
+      : await client.query<ProviderRow>(
+          `SELECT ${SELECT_COLUMNS} FROM provider_profiles
             WHERE owner_user_id=$1 AND provider_role=$2 AND enabled=true
             ORDER BY is_default DESC,name,id LIMIT 2`,
           [ownerUserId, role]
@@ -353,7 +494,21 @@ export function createPostgresProviderRepositories(client: DatabaseClient): Post
     if (!row) return { status: "unconfigured", requestedRole: role, resolvedRole: null };
     const model = requestedModel?.trim() || row.default_model.trim();
     if (!model) throw httpError(`Select a model for this ${role} provider profile.`, 400);
-    return { status: "resolved", requestedRole: role, resolvedRole: role, providerProfileId: row.id, providerType: row.provider_type, model };
+    if (role === "text" || role === "intent") {
+      if (requestedModel?.trim()) {
+        return {
+          status: "resolved", requestedRole: role, resolvedRole: role, providerProfileId: row.id,
+          providerType: row.provider_type, routingSource: "models", model,
+          fallbackModels: [], preset: null, providerPolicy: {}
+        } as DirectProviderResolution<R>;
+      }
+      const selection = modelSelection(row);
+      return {
+        status: "resolved", requestedRole: role, resolvedRole: role, providerProfileId: row.id,
+        providerType: row.provider_type, ...selection
+      } as DirectProviderResolution<R>;
+    }
+    return { status: "resolved", requestedRole: role, resolvedRole: role, providerProfileId: row.id, providerType: row.provider_type, model } as DirectProviderResolution<R>;
   }
 
   const resolution: ProviderResolutionPort = {
@@ -386,7 +541,17 @@ export function createPostgresProviderRepositories(client: DatabaseClient): Post
           selectedTextFallbackAllowed ? request.selectedProviderProfileId : undefined,
           request.model,
         );
-        if (fallback.status === "resolved") return { ...fallback, requestedRole: "embedding", source: "text_fallback" };
+        if (fallback.status === "resolved") {
+          return {
+            status: "resolved",
+            requestedRole: "embedding",
+            resolvedRole: "text",
+            source: "text_fallback",
+            providerProfileId: fallback.providerProfileId,
+            providerType: fallback.providerType,
+            model: fallback.model
+          };
+        }
       }
       return { status: "unconfigured", requestedRole: "embedding", resolvedRole: null, source: "none" };
     }
@@ -423,6 +588,10 @@ export type PrivateProviderCredentialRow = Readonly<{
   providerType: ProviderType;
   baseUrl: string;
   defaultModel: string;
+  routingSource: "models" | "openrouter_preset";
+  fallbackModels: readonly string[];
+  preset: ProviderModelSelection["preset"];
+  providerPolicy: ProviderModelSelection["providerPolicy"];
   contextWindowTokens: number;
   maxOutputTokens: number;
   temperature: number;
@@ -433,6 +602,9 @@ export type PrivateProviderCredentialRow = Readonly<{
 
 function privateProviderCredentialRow(ownerUserId: string, row: ProviderRow): PrivateProviderCredentialRow {
   const complete = row.encrypted_api_key && row.credential_nonce && row.credential_auth_tag && row.credential_key_version;
+  const selection = row.provider_role === "text" || row.provider_role === "intent"
+    ? modelSelection(row)
+    : { routingSource: "models" as const, model: row.default_model, fallbackModels: [], preset: null, providerPolicy: {} };
   return {
     ownerUserId,
     providerProfileId: row.id,
@@ -441,6 +613,10 @@ function privateProviderCredentialRow(ownerUserId: string, row: ProviderRow): Pr
     providerType: row.provider_type,
     baseUrl: row.base_url,
     defaultModel: row.default_model,
+    routingSource: selection.routingSource,
+    fallbackModels: selection.fallbackModels,
+    preset: selection.preset,
+    providerPolicy: selection.providerPolicy,
     contextWindowTokens: row.context_window_tokens,
     maxOutputTokens: row.max_output_tokens,
     temperature: row.temperature,

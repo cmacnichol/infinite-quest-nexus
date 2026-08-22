@@ -388,6 +388,72 @@ describe("provider PostgreSQL adapter boundaries", () => {
     }
   });
 
+  test("resolves stored text plans and reduces explicit overrides to one model", async () => {
+    const ownerUserId = "00000000-0000-4000-8000-000000000024";
+    const row = {
+      id: "00000000-0000-4000-8000-000000000025",
+      name: "Preset routing profile",
+      provider_type: "openrouter" as const,
+      provider_role: "text" as const,
+      base_url: "https://openrouter.ai/api/v1",
+      default_model: "primary/model",
+      fallback_models: ["fallback/a", "fallback/b"],
+      routing_source: "openrouter_preset" as const,
+      preset_slug: "story-router",
+      preset_designated_version_id: "version-3",
+      preset_version: 3,
+      preset_config_hash: "c".repeat(64),
+      preset_provider_policy: { allow_fallbacks: true },
+      context_window_tokens: 32_768,
+      max_output_tokens: 4_096,
+      temperature: 0.8,
+      request_timeout_ms: 60_000,
+      configuration: {},
+      encrypted_api_key: null,
+      credential_nonce: null,
+      credential_auth_tag: null,
+      credential_key_version: null,
+      enabled: true,
+      is_default: true,
+      health_status: "unknown" as const,
+      consecutive_failures: 0,
+      last_health_check_at: null,
+      created_at: new Date("2026-08-22T00:00:00Z"),
+      updated_at: new Date("2026-08-22T00:00:00Z")
+    };
+    const database = {
+      query: vi.fn(async () => ({ rows: [row], rowCount: 1 }))
+    };
+    const resolution = createPostgresProviderRepositories(database as never).resolution;
+
+    await expect(resolution.resolveDirect({ ownerUserId, providerRole: "text", selectedProviderProfileId: row.id }))
+      .resolves.toMatchObject({
+        status: "resolved",
+        routingSource: "openrouter_preset",
+        model: "primary/model",
+        fallbackModels: ["fallback/a", "fallback/b"],
+        preset: {
+          slug: "story-router",
+          designatedVersionId: "version-3",
+          version: 3,
+          configHash: "c".repeat(64)
+        },
+        providerPolicy: { allow_fallbacks: true }
+      });
+    await expect(resolution.resolveDirect({
+      ownerUserId,
+      providerRole: "text",
+      selectedProviderProfileId: row.id,
+      model: "explicit/model"
+    })).resolves.toMatchObject({
+      routingSource: "models",
+      model: "explicit/model",
+      fallbackModels: [],
+      preset: null,
+      providerPolicy: {}
+    });
+  });
+
   test("acquires the role advisory lock before row locks when an update selects a default", async () => {
     const row = {
       id: "00000000-0000-4000-8000-000000000031",
