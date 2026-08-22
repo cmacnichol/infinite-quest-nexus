@@ -3,8 +3,10 @@ import {
   callTextProvider,
   createProviderTransport,
   ProviderModelFallbackExhaustedError,
+  ProviderSseTerminalError,
   ProviderStreamInterruptedError,
   normalizeModelFailure,
+  normalizeSseFailure,
   shouldAdvanceModel,
   type ProviderTransport,
   type TextProviderProfile
@@ -58,6 +60,28 @@ describe("text model fallback", () => {
     [Object.assign(new Error("aborted"), { name: "AbortError", code: "ABORT_ERR" }), "cancelled"]
   ] as const)("keeps terminal failure classification ahead of provider wording", (error, expected) => {
     expect(normalizeModelFailure(error).reason).toBe(expected);
+  });
+
+  it.each([
+    ["rate_limit", "rate_limit", true],
+    ["authentication", "authentication", false],
+    ["invalid_request", "invalid_request", false],
+    ["cancelled", "cancelled", false],
+    ["unrecognized_upstream_type", "unknown_failure", false],
+    [400, "invalid_request", false],
+    [401, "authentication", false]
+  ] as const)("classifies SSE machine type %s conservatively", (machineType, expectedReason, advance) => {
+    const failure = normalizeSseFailure(machineType, "2");
+    const terminal = new ProviderSseTerminalError(failure);
+    expect(normalizeModelFailure(terminal).reason).toBe(expectedReason);
+    expect(shouldAdvanceModel({ reason: failure.reason, emittedOutput: false })).toBe(advance);
+    if (advance) expect(failure.retryAfterMs).toBe(2_000);
+  });
+
+  it("gives a numeric SSE error code precedence over an eligible metadata type", () => {
+    const failure = normalizeSseFailure("rate_limit", "2", { code: 401 });
+    expect(failure).toEqual({ reason: "authentication" });
+    expect(shouldAdvanceModel({ reason: failure.reason, emittedOutput: false })).toBe(false);
   });
 
   it("sends an ordered OpenRouter models request without model and records the served model", async () => {

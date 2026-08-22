@@ -149,9 +149,60 @@ function reasonFromText(value: unknown): ModelFallbackReason | null {
   return null;
 }
 
-export function normalizeSseFailure(errorType: unknown, retryAfter?: unknown): NormalizedModelFailure {
-  const reason = reasonFromText(errorType) ?? "provider_unavailable";
-  return withRetryHint(reason, retryAfter);
+export function normalizeSseFailure(
+  errorType: unknown,
+  retryAfter?: unknown,
+  context: Readonly<{ statusCode?: unknown; code?: unknown }> = {}
+): NormalizedModelFailure {
+  const machineType = typeof errorType === "string" ? errorType.trim().toLowerCase() : "";
+  const code = typeof context.code === "string" ? context.code.trim().toLowerCase() : "";
+  const statusValue = context.statusCode
+    ?? (typeof context.code === "number" || (typeof context.code === "string" && /^\d+$/.test(context.code)) ? context.code : undefined)
+    ?? (typeof errorType === "number" || /^\d+$/.test(machineType) ? errorType : undefined);
+  const statusCode = Number(statusValue);
+
+  if (["cancelled", "canceled", "aborted", "abort_err", "und_err_aborted"].includes(machineType)
+    || ["cancelled", "canceled", "aborted", "abort_err", "und_err_aborted"].includes(code)) return { reason: "cancelled" };
+  if (statusCode === 401 || statusCode === 403) return { reason: "authentication" };
+  if (statusCode === 408 || statusCode === 504) return withRetryHint("request_timeout", retryAfter);
+  if (statusCode === 429) return withRetryHint("rate_limit", retryAfter);
+  if (Number.isFinite(statusCode) && statusCode >= 400 && statusCode < 500) return { reason: "invalid_request" };
+  if (Number.isFinite(statusCode) && statusCode >= 500) return withRetryHint("provider_unavailable", retryAfter);
+
+  const terminalReasons: Readonly<Record<string, ModelFallbackReason>> = {
+    authentication: "authentication",
+    authentication_error: "authentication",
+    unauthorized: "authentication",
+    forbidden: "authentication",
+    invalid_request: "invalid_request",
+    invalid_request_error: "invalid_request",
+    bad_request: "invalid_request",
+    cancelled: "cancelled",
+    canceled: "cancelled"
+  };
+  if (machineType in terminalReasons) return { reason: terminalReasons[machineType]! };
+
+  const advanceReasonsByMachineType: Readonly<Record<string, ModelFallbackReason>> = {
+    rate_limit: "rate_limit",
+    rate_limited: "rate_limit",
+    rate_limit_exceeded: "rate_limit",
+    provider_unavailable: "provider_unavailable",
+    service_unavailable: "provider_unavailable",
+    overloaded: "provider_unavailable",
+    model_unavailable: "model_unavailable",
+    model_not_found: "model_unavailable",
+    context_length: "context_length",
+    context_length_exceeded: "context_length",
+    request_timeout: "request_timeout",
+    timeout: "request_timeout",
+    transport_failure: "transport_failure",
+    content_policy_violation: "content_policy_violation",
+    content_filter: "content_policy_violation",
+    refusal: "refusal",
+    empty_response: "empty_response"
+  };
+  const reason = advanceReasonsByMachineType[machineType];
+  return reason === undefined ? { reason: "unknown_failure" } : withRetryHint(reason, retryAfter);
 }
 
 /** Converts provider failures into durable-safe routing facts without retaining upstream bodies or credentials. */

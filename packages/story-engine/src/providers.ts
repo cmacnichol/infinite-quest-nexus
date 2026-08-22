@@ -913,7 +913,11 @@ async function readSseStream(
           const error = parsed.error as Record<string, unknown>;
           throw new ProviderSseTerminalError(normalizeSseFailure(
             error.metadata && typeof error.metadata === "object" ? (error.metadata as Record<string, unknown>).error_type : error.code,
-            response.headers.get("retry-after")
+            response.headers.get("retry-after"),
+            {
+              statusCode: error.status_code ?? error.status ?? (typeof error.code === "number" ? error.code : undefined) ?? parsed.status,
+              code: error.code
+            }
           ));
         }
         allData.push(parsed);
