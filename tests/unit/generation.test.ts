@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT,
   providerProfileInputSchema,
+  providerProfileResolvedWriteSchema,
   providerProfileUpdateSchema,
   providerTextRequestSchema,
   generationRequestSchema,
@@ -72,6 +73,102 @@ describe("generation contracts", () => {
   });
 
   describe("providerProfileInputSchema", () => {
+    const validOpenRouterTextInput = {
+      name: "Story router",
+      providerType: "openrouter" as const,
+      providerRole: "text" as const,
+      baseUrl: "https://openrouter.ai/api/v1",
+      defaultModel: "anthropic/claude-sonnet-4",
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 4_096,
+      temperature: 0.8,
+      requestTimeoutMs: 120_000,
+      configuration: {}
+    };
+
+    it("preserves ordered text fallback models", () => {
+      const parsed = providerProfileInputSchema.parse({
+        ...validOpenRouterTextInput,
+        routingSource: "models",
+        fallbackModels: ["google/gemini-2.5-pro", "openai/gpt-4.1"]
+      });
+
+      expect(parsed.fallbackModels).toEqual(["google/gemini-2.5-pro", "openai/gpt-4.1"]);
+    });
+
+    it("keeps omitted routing input compatible with legacy model profiles", () => {
+      const parsed = providerProfileInputSchema.parse(validOpenRouterTextInput);
+
+      expect(parsed).toMatchObject({ routingSource: "models", fallbackModels: [] });
+    });
+
+    it("rejects invalid explicit fallback plans", () => {
+      expect(providerProfileInputSchema.safeParse({
+        ...validOpenRouterTextInput,
+        fallbackModels: ["a", "b", "c", "d", "e"]
+      }).success).toBe(false);
+      expect(providerProfileInputSchema.safeParse({
+        ...validOpenRouterTextInput,
+        fallbackModels: ["openai/gpt-4.1", "openai/gpt-4.1"]
+      }).success).toBe(false);
+      expect(providerProfileInputSchema.safeParse({
+        ...validOpenRouterTextInput,
+        fallbackModels: ["anthropic/claude-sonnet-4"]
+      }).success).toBe(false);
+      expect(providerProfileInputSchema.safeParse({
+        ...validOpenRouterTextInput,
+        providerRole: "image",
+        fallbackModels: ["openai/gpt-image-1"]
+      }).success).toBe(false);
+    });
+
+    it("accepts a browser preset selection without accepting forged provenance", () => {
+      const input = {
+        ...validOpenRouterTextInput,
+        routingSource: "openrouter_preset",
+        presetSlug: "story-router",
+        defaultModel: ""
+      };
+
+      expect(providerProfileInputSchema.safeParse(input).success).toBe(true);
+      expect(providerProfileResolvedWriteSchema.safeParse(input).success).toBe(false);
+    });
+
+    it("rejects routing source combinations outside OpenRouter text and intent", () => {
+      expect(providerProfileInputSchema.safeParse({
+        ...validOpenRouterTextInput,
+        providerType: "openai_compatible",
+        routingSource: "openrouter_preset",
+        presetSlug: "story-router"
+      }).success).toBe(false);
+      expect(providerProfileInputSchema.safeParse({
+        ...validOpenRouterTextInput,
+        providerRole: "embedding",
+        routingSource: "openrouter_preset",
+        presetSlug: "story-router"
+      }).success).toBe(false);
+    });
+
+    it("requires complete server-derived preset provenance for resolved writes", () => {
+      const resolvedPreset = {
+        ...validOpenRouterTextInput,
+        routingSource: "openrouter_preset",
+        presetSlug: "story-router",
+        defaultModel: "anthropic/claude-sonnet-4",
+        fallbackModels: ["google/gemini-2.5-pro"],
+        presetDesignatedVersionId: "version-123",
+        presetVersion: 3,
+        presetConfigHash: "a".repeat(64),
+        presetProviderPolicy: { allow_fallbacks: true }
+      };
+
+      expect(providerProfileResolvedWriteSchema.safeParse(resolvedPreset).success).toBe(true);
+      expect(providerProfileResolvedWriteSchema.safeParse({
+        ...resolvedPreset,
+        presetConfigHash: undefined
+      }).success).toBe(false);
+    });
+
     it("accepts valid input with minimum required fields and applies defaults", () => {
       const input = {
         name: "My Provider",
@@ -164,6 +261,21 @@ describe("generation contracts", () => {
       const result = providerProfileUpdateSchema.safeParse({ configuration: { streaming: true } });
       expect(result.success).toBe(true);
       expect(result.success && result.data.configuration).toEqual({ streaming: true });
+    });
+
+    it("requires atomic routing changes but preserves legacy primary-only patches", () => {
+      expect(providerProfileUpdateSchema.safeParse({ defaultModel: "next-primary" }).success).toBe(true);
+      expect(providerProfileUpdateSchema.safeParse({ routingSource: "models", defaultModel: "next-primary" }).success).toBe(false);
+      expect(providerProfileUpdateSchema.safeParse({
+        routingSource: "models",
+        defaultModel: "next-primary",
+        fallbackModels: ["fallback-model"]
+      }).success).toBe(true);
+      expect(providerProfileUpdateSchema.safeParse({ routingSource: "openrouter_preset" }).success).toBe(false);
+      expect(providerProfileUpdateSchema.safeParse({
+        routingSource: "openrouter_preset",
+        presetSlug: "story-router"
+      }).success).toBe(true);
     });
   });
 
