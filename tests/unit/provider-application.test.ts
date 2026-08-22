@@ -326,7 +326,7 @@ describe("provider application contracts", () => {
     expect(JSON.stringify(response)).not.toContain("transient-create-credential");
   });
 
-  it("uses the saved owner-scoped credential to materialize a preset update", async () => {
+  it("uses the saved owner-scoped credential with patched candidate configuration for a preset update", async () => {
     const snapshot = {
       slug: "intent-router",
       designatedVersionId: "intent-version-3",
@@ -353,7 +353,7 @@ describe("provider application contracts", () => {
       listProfiles: vi.fn(async () => [existing]),
       updateProfile: vi.fn(async () => ({ profile, configurationProjection: { kind: "sanitized_read" } }))
     };
-    const runtime = { getPreset: vi.fn(async () => snapshot), storeCredential: vi.fn() };
+    const runtime = { getPresetForCandidate: vi.fn(async () => snapshot), storeCredential: vi.fn() };
     const adapter = createProviderApplicationAdapter({
       application,
       runtime,
@@ -362,10 +362,20 @@ describe("provider application contracts", () => {
 
     const response = await adapter.update(owner.ownerUserId, existing.id, {
       routingSource: "openrouter_preset",
-      presetSlug: snapshot.slug
+      presetSlug: snapshot.slug,
+      baseUrl: "https://patched-openrouter.example/v1"
     } as never);
 
-    expect(runtime.getPreset).toHaveBeenCalledWith(owner, existing.id, snapshot.slug);
+    expect(runtime.getPresetForCandidate).toHaveBeenCalledWith(
+      owner,
+      existing.id,
+      expect.objectContaining({
+        providerType: "openrouter",
+        providerRole: "intent",
+        baseUrl: "https://patched-openrouter.example/v1"
+      }),
+      snapshot.slug
+    );
     expect(application.updateProfile).toHaveBeenCalledWith(expect.objectContaining({
       ...owner,
       providerProfileId: existing.id,
@@ -390,6 +400,33 @@ describe("provider application contracts", () => {
       providerPolicy: { allow_fallbacks: true }
     });
     expect(JSON.stringify(response)).not.toContain("intent-version-3-secret");
+  });
+
+  it("leaves a legacy primary-only PATCH for the repository's row-locked merge", async () => {
+    const application = {
+      listProfiles: vi.fn(),
+      updateProfile: vi.fn(async () => ({
+        profile: { ...textProfile, defaultModel: "new-primary" },
+        configurationProjection: { kind: "sanitized_read" }
+      }))
+    };
+    const adapter = createProviderApplicationAdapter({
+      application,
+      runtime: { storeCredential: vi.fn() },
+      transaction: async (work: (binding: { application: typeof application; runtime: { storeCredential: ReturnType<typeof vi.fn> } }) => unknown) => work({
+        application,
+        runtime: { storeCredential: vi.fn() }
+      })
+    } as never);
+
+    await adapter.update(owner.ownerUserId, textProfile.id, { defaultModel: "new-primary" });
+
+    expect(application.listProfiles).not.toHaveBeenCalled();
+    expect(application.updateProfile).toHaveBeenCalledWith({
+      ...owner,
+      providerProfileId: textProfile.id,
+      changes: { defaultModel: "new-primary" }
+    });
   });
   it("keeps owner authority explicit while delegating profile operations", async () => {
     const ports = dependencies();

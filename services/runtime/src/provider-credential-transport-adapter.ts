@@ -107,6 +107,12 @@ export type RuntimeProviderAdapter = Readonly<{
     providerProfileId: string,
     slug: string,
   ): Promise<OpenRouterPresetSnapshot>;
+  getPresetForCandidate(
+    scope: Readonly<{ ownerUserId: string }>,
+    providerProfileId: string,
+    candidate: ProviderCandidate,
+    slug: string,
+  ): Promise<OpenRouterPresetSnapshot>;
   discoverCandidatePresetsWithCredential(
     candidate: ProviderCandidate,
     credential: string | null,
@@ -330,6 +336,22 @@ export function createRuntimeProviderAdapter(options: Readonly<{
     return transportProfile(row);
   }
 
+  async function presetCandidateProfile(
+    ownerUserId: string,
+    providerProfileId: string,
+    candidate: ProviderCandidate,
+  ): Promise<TextProviderProfile> {
+    const row = await loadForManagementDiscovery(ownerUserId, providerProfileId);
+    assertPresetCandidate(candidate);
+    if (row.providerType !== candidate.providerType || row.providerRole !== candidate.providerRole) {
+      throw Object.assign(new Error("Provider profile not found."), { statusCode: 404 });
+    }
+    const credential = row.encryptedCredential
+      ? decryptCredential(row.encryptedCredential, options.credentialSecret)
+      : null;
+    return candidateProfile(candidate, credential);
+  }
+
   const execution: RuntimeProviderExecutionPort = {
     async text(scope, providerProfileId, providerRole, model) {
       const row = await load(scope.ownerUserId, providerProfileId);
@@ -396,6 +418,12 @@ export function createRuntimeProviderAdapter(options: Readonly<{
     },
     async getPreset(scope, providerProfileId, slug) {
       return presetDiscovery.get(await presetProfile(scope.ownerUserId, providerProfileId), slug);
+    },
+    async getPresetForCandidate(scope, providerProfileId, candidate, slug) {
+      return presetDiscovery.get(
+        await presetCandidateProfile(scope.ownerUserId, providerProfileId, candidate),
+        slug
+      );
     },
     async discoverCandidatePresetsWithCredential(candidate, credential, page) {
       return presetDiscovery.list(candidateProfile(candidate, credential), page);

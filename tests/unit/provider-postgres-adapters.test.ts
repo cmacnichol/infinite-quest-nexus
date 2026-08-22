@@ -241,6 +241,75 @@ describe("provider PostgreSQL adapter boundaries", () => {
     expect(JSON.stringify(await adapter.getPreset({ ownerUserId }, row.id, "story-router"))).not.toContain(plaintext);
   });
 
+  test("uses the saved owner-scoped credential with a patched candidate profile for preset validation", async () => {
+    const plaintext = "patched-candidate-secret";
+    const encrypted = encryptCredential(plaintext, "credential-encryption-secret");
+    const ownerUserId = "00000000-0000-4000-8000-000000000041";
+    const row = {
+      id: "00000000-0000-4000-8000-000000000042",
+      name: "Saved OpenRouter",
+      provider_type: "openrouter",
+      provider_role: "text",
+      base_url: "https://old-openrouter.example/v1",
+      default_model: "old-model",
+      context_window_tokens: 32_768,
+      max_output_tokens: 4_096,
+      temperature: 0.8,
+      request_timeout_ms: 5_000,
+      configuration: {},
+      encrypted_api_key: encrypted.ciphertext,
+      credential_nonce: encrypted.nonce,
+      credential_auth_tag: encrypted.authTag,
+      credential_key_version: encrypted.keyVersion,
+      enabled: true,
+      is_default: false,
+      health_status: "unknown",
+      consecutive_failures: 0,
+      last_health_check_at: null,
+      created_at: new Date("2026-01-01T00:00:00Z"),
+      updated_at: new Date("2026-01-01T00:00:00Z")
+    };
+    const database = { query: vi.fn(async () => ({ rows: [row], rowCount: 1 })) };
+    const fetch = vi.fn(async (profile: { apiKey?: string }, _operation: string, url: string) => {
+      expect(profile.apiKey).toBe(plaintext);
+      expect(url).toBe("https://patched-openrouter.example/v1/presets/story-router");
+      return new Response(JSON.stringify({
+        data: {
+          slug: "story-router",
+          status: "active",
+          designated_version_id: "version-id",
+          designated_version: { id: "version-id", version: 1, system_prompt: "", config: { model: "openai/gpt-4o-mini" } }
+        }
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    const adapter = createRuntimeProviderAdapter({
+      database: database as never,
+      credentialSecret: "credential-encryption-secret",
+      transport: { fetch, validateSdkEndpoint: vi.fn(), close: vi.fn() },
+      health: { recordHealth: vi.fn() }
+    });
+
+    const snapshot = await adapter.getPresetForCandidate({ ownerUserId }, row.id, {
+      ownerUserId,
+      name: row.name,
+      providerType: "openrouter",
+      providerRole: "text",
+      baseUrl: "https://patched-openrouter.example/v1",
+      defaultModel: "",
+      contextWindowTokens: row.context_window_tokens,
+      maxOutputTokens: row.max_output_tokens,
+      temperature: row.temperature,
+      requestTimeoutMs: row.request_timeout_ms,
+      configuration: toSafeProviderConfiguration({}),
+      enabled: row.enabled,
+      isDefault: row.is_default
+    }, "story-router");
+
+    expect(snapshot).toMatchObject({ slug: "story-router", models: ["openai/gpt-4o-mini"] });
+    expect(JSON.stringify(snapshot)).not.toContain(plaintext);
+    expect(JSON.stringify({ snapshot, calls: database.query.mock.calls })).not.toContain(plaintext);
+  });
+
   test("forwards a candidate detail credential only to the OpenRouter transport profile", async () => {
     const credential = "candidate-detail-secret";
     const fetch = vi.fn(async (transportProfile: { apiKey?: string }, operation: string) => {
@@ -452,6 +521,64 @@ describe("provider PostgreSQL adapter boundaries", () => {
       preset: null,
       providerPolicy: {}
     });
+  });
+
+  test("merges a legacy primary-only PATCH from the row locked at write time", async () => {
+    const row = {
+      id: "00000000-0000-4000-8000-000000000026",
+      name: "Concurrent models plan",
+      provider_type: "openai_compatible" as const,
+      provider_role: "text" as const,
+      base_url: "https://provider.example/v1",
+      default_model: "old-primary",
+      fallback_models: ["concurrent-fallback"],
+      routing_source: "models" as const,
+      preset_slug: null,
+      preset_designated_version_id: null,
+      preset_version: null,
+      preset_config_hash: null,
+      preset_provider_policy: {},
+      context_window_tokens: 32_768,
+      max_output_tokens: 4_096,
+      temperature: 0.8,
+      request_timeout_ms: 60_000,
+      configuration: {},
+      encrypted_api_key: null,
+      credential_nonce: null,
+      credential_auth_tag: null,
+      credential_key_version: null,
+      enabled: true,
+      is_default: false,
+      health_status: "unknown" as const,
+      consecutive_failures: 0,
+      last_health_check_at: null,
+      created_at: new Date("2026-08-22T00:00:00Z"),
+      updated_at: new Date("2026-08-22T00:00:00Z")
+    };
+    const updates: unknown[][] = [];
+    const database = {
+      query: vi.fn(async (statement: string, parameters: unknown[] = []) => {
+        if (statement.includes("FOR UPDATE")) return { rows: [row], rowCount: 1 };
+        if (statement.includes("UPDATE provider_profiles SET name=$3")) {
+          updates.push(parameters);
+          return {
+            rows: [{ ...row, default_model: parameters[4], fallback_models: parameters[5] }],
+            rowCount: 1
+          };
+        }
+        return { rows: [], rowCount: 1 };
+      })
+    };
+
+    await createPostgresProviderRepositories(database as never).profiles.updateProfile({
+      ownerUserId: "00000000-0000-4000-8000-000000000027",
+      providerProfileId: row.id,
+      changes: { defaultModel: "new-primary" }
+    });
+
+    expect(updates).toHaveLength(1);
+    expect(updates[0]?.[4]).toBe("new-primary");
+    expect(updates[0]?.[5]).toEqual(["concurrent-fallback"]);
   });
 
   test("acquires the role advisory lock before row locks when an update selects a default", async () => {

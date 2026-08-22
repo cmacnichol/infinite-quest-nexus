@@ -51,6 +51,12 @@ type ApiRuntimeProviderAdapter = Readonly<{
     providerProfileId: string,
     slug: string,
   ): Promise<OpenRouterPresetSnapshot>;
+  getPresetForCandidate(
+    scope: Readonly<{ ownerUserId: string }>,
+    providerProfileId: string,
+    candidate: ProviderCandidate,
+    slug: string,
+  ): Promise<OpenRouterPresetSnapshot>;
   discoverCandidatePresetsWithCredential(
     candidate: ProviderCandidate,
     credential: string | null,
@@ -214,13 +220,12 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
 
     async update(ownerUserId: string, providerProfileId: string, input: ProviderProfileUpdate) {
       return composition.transaction(async ({ application, runtime }) => {
-        const existing = (await application.listProfiles({ ownerUserId }))
-          .find((profile) => profile.id === providerProfileId);
-        if (!existing) throw Object.assign(new Error("Provider profile not found."), { statusCode: 404 });
         const resolvedSelection = input.routingSource === "openrouter_preset"
-          ? snapshotSelection(input.apiKey === undefined
-            ? await runtime.getPreset({ ownerUserId }, providerProfileId, input.presetSlug!)
-            : await runtime.discoverCandidatePresetWithCredential({
+          ? await (async () => {
+              const existing = (await application.listProfiles({ ownerUserId }))
+                .find((profile) => profile.id === providerProfileId);
+              if (!existing) throw Object.assign(new Error("Provider profile not found."), { statusCode: 404 });
+              const patchedCandidate: ProviderCandidate = {
                 ownerUserId,
                 name: input.name ?? existing.name,
                 providerType: existing.providerType,
@@ -236,13 +241,17 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
                   : toSafeProviderConfiguration(input.configuration),
                 enabled: input.enabled ?? existing.enabled,
                 isDefault: input.isDefault ?? existing.isDefault
-              }, input.apiKey ?? null, input.presetSlug!))
+              };
+              const snapshot = input.apiKey === undefined
+                ? await runtime.getPresetForCandidate({ ownerUserId }, providerProfileId, patchedCandidate, input.presetSlug!)
+                : await runtime.discoverCandidatePresetWithCredential(
+                    patchedCandidate, input.apiKey ?? null, input.presetSlug!
+                  );
+              return snapshotSelection(snapshot);
+            })()
           : input.routingSource === "models"
             ? modelSelection(input.defaultModel!, input.fallbackModels!)
-            : input.defaultModel !== undefined && (existing.providerRole === "text" || existing.providerRole === "intent")
-              && existing.routingSource === "models"
-              ? modelSelection(input.defaultModel, existing.fallbackModels)
-              : undefined;
+            : undefined;
         const mutation = await application.updateProfile({
           ownerUserId,
           providerProfileId,
