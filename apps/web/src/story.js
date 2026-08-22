@@ -307,6 +307,8 @@ function syncInputState() {
   const storyInputLocked = generationLocked || !isLatest;
   if (btnAction) btnAction.disabled = storyInputLocked;
   if (freeAction) freeAction.disabled = storyInputLocked;
+  const storyLengthOverride = $("turnStoryLengthProfileOverride");
+  if (storyLengthOverride) storyLengthOverride.disabled = storyInputLocked;
   document.querySelectorAll("[data-turn-input-mode]").forEach((button) => {
     button.disabled = storyInputLocked || campaignTurnControlStyle() === "action_only";
   });
@@ -800,6 +802,43 @@ function campaignTurnControlStyle() {
   return state.campaign?.turnControlStyle || "flexible_auto";
 }
 
+function campaignStoryLengthProfile() {
+  const profile = state.campaign?.storyLengthProfile;
+  return ["brief", "standard", "long", "extended"].includes(profile) ? profile : "standard";
+}
+
+function storyLengthProfileLabel(profile) {
+  return ({ brief: "Brief", standard: "Standard", long: "Long", extended: "Extended" })[profile] || "Standard";
+}
+
+function selectedStoryLengthOverride(controlId) {
+  const value = String($(controlId)?.value || "");
+  return ["brief", "standard", "long", "extended"].includes(value) ? value : null;
+}
+
+function syncStoryLengthOverrideControls() {
+  const defaultLabel = `Campaign default — ${storyLengthProfileLabel(campaignStoryLengthProfile())}`;
+  ["turnStoryLengthProfileOverride", "retryStoryLengthProfileOverride"].forEach((controlId) => {
+    const control = $(controlId);
+    const defaultOption = control?.querySelector('option[value=""]');
+    if (defaultOption) defaultOption.textContent = defaultLabel;
+  });
+}
+
+function setStoryLengthOverride(controlId, value) {
+  const control = $(controlId);
+  control?.querySelectorAll("option").forEach((option) => { option.selected = false; });
+  const option = control?.querySelector(`option[value="${value}"]`);
+  if (option) option.selected = true;
+}
+
+function resetStoryLengthOverrideControls() {
+  ["turnStoryLengthProfileOverride", "retryStoryLengthProfileOverride"].forEach((controlId) => {
+    setStoryLengthOverride(controlId, "");
+  });
+  syncStoryLengthOverrideControls();
+}
+
 function defaultTurnInputMode() {
   return turnInputModeForControlStyle(campaignTurnControlStyle());
 }
@@ -965,6 +1004,7 @@ function renderTurnInput() {
   const isLatest = isViewingLatestTurn();
   const shouldShowInput = !state.generationDisplayActive && isLatest;
   inputPanel.classList.toggle("hidden", !shouldShowInput);
+  syncStoryLengthOverrideControls();
   if (!shouldShowInput) {
     clearTurnIntentDecision();
     return;
@@ -979,8 +1019,8 @@ function renderTurnInput() {
   }
 }
 
-function showAmbiguousTurnIntent(action, classification) {
-  state.pendingIntentDecision = { action, classification };
+function showAmbiguousTurnIntent(action, classification, storyLengthProfileOverride) {
+  state.pendingIntentDecision = { action, classification, storyLengthProfileOverride };
   const panel = $("turnIntentDecision");
   const message = $("turnIntentDecisionMessage");
   if (message) {
@@ -1020,11 +1060,12 @@ async function submitAction(actionText, options = {}) {
     action = firstActionForNewAdventure();
   }
   if (!action) { toast("Enter an action first."); return; }
+  const storyLengthProfileOverride = selectedStoryLengthOverride("turnStoryLengthProfileOverride");
   const requestedInputMode = options.requestedInputMode || state.turnInputMode;
   const inputModeSource = options.inputModeSource || state.nextTurnInputModeSource || (requestedInputMode === "auto" ? "auto" : "explicit");
   state.nextTurnInputModeSource = null;
   if (requestedInputMode !== "auto") {
-    await submitResolvedTurn(action, { requestedInputMode, resolvedInputMode: requestedInputMode, inputModeSource });
+    await submitResolvedTurn(action, { requestedInputMode, resolvedInputMode: requestedInputMode, inputModeSource, storyLengthProfileOverride });
     return;
   }
   showBusy("Determining how to interpret this turn…");
@@ -1039,14 +1080,15 @@ async function submitAction(actionText, options = {}) {
     return;
   }
   if (classification.confidenceBand === "ambiguous" || classification.classification === "mixed") {
-    showAmbiguousTurnIntent(action, classification);
+    showAmbiguousTurnIntent(action, classification, storyLengthProfileOverride);
     return;
   }
   await submitResolvedTurn(action, {
     requestedInputMode: classification.classificationId ? "auto" : classification.resolvedMode,
     resolvedInputMode: classification.resolvedMode,
     inputModeSource: classification.classificationId ? "auto" : "fallback",
-    classificationId: classification.classificationId
+    classificationId: classification.classificationId,
+    storyLengthProfileOverride
   });
 }
 
@@ -1073,6 +1115,7 @@ async function runGeneration(action, options = {}) {
       resolvedInputMode: options.resolvedInputMode || "action",
       inputModeSource: options.inputModeSource || "explicit",
       ...(options.classificationId ? { classificationId: options.classificationId } : {}),
+      ...(options.storyLengthProfileOverride ? { storyLengthProfileOverride: options.storyLengthProfileOverride } : {}),
       operationKind,
       expectedTurnNumber,
       idempotencyKey: options.idempotencyKey || composition.idFactory.create(),
@@ -1091,6 +1134,7 @@ async function runGeneration(action, options = {}) {
       resolvedInputMode: submission.resolvedInputMode,
       inputModeSource: submission.inputModeSource,
       ...(submission.classificationId ? { classificationId: submission.classificationId } : {}),
+      ...(submission.storyLengthProfileOverride ? { storyLengthProfileOverride: submission.storyLengthProfileOverride } : {}),
       idempotencyKey: submission.idempotencyKey,
       context: submission.context,
       ...(operationKind === "replace_latest" ? { expectedCurrentTurnNumber: expectedTurnNumber } : {})
@@ -1109,6 +1153,7 @@ async function runGeneration(action, options = {}) {
       run = conflict.run;
       state.pendingGeneration = conflict.pendingGeneration;
     }
+    resetStoryLengthOverrideControls();
     state.generationRun = run;
     state.pendingGeneration = state.pendingGeneration?.id === run.jobId
       ? state.pendingGeneration
@@ -1666,6 +1711,8 @@ function openRetryPromptDialog(originalPrompt) {
     return;
   }
   editor.value = originalPrompt || "";
+  syncStoryLengthOverrideControls();
+  setStoryLengthOverride("retryStoryLengthProfileOverride", "");
   openManagedModal(dialog);
   setTimeout(() => {
     editor.focus();
@@ -1693,13 +1740,15 @@ async function executeRetryWithPrompt(submittedPromptText) {
   if (!currentTurnNumber) return;
   const originalTurn = state.turns.at(-1) || {};
   const resolvedInputMode = originalTurn.resolvedInputMode || originalTurn.inputMode || "action";
+  const storyLengthProfileOverride = selectedStoryLengthOverride("retryStoryLengthProfileOverride");
   closeRetryPromptDialog();
   await runGeneration(action, {
     operationKind: "replace_latest",
     expectedCurrentTurnNumber: currentTurnNumber,
     requestedInputMode: originalTurn.requestedInputMode || resolvedInputMode,
     resolvedInputMode,
-    inputModeSource: originalTurn.inputModeSource || "explicit"
+    inputModeSource: originalTurn.inputModeSource || "explicit",
+    storyLengthProfileOverride
   });
 }
 
@@ -2686,7 +2735,8 @@ document.addEventListener("DOMContentLoaded", () => {
     submitResolvedTurn(pending.action, {
       requestedInputMode: resolvedInputMode,
       resolvedInputMode,
-      inputModeSource: "explicit"
+      inputModeSource: "explicit",
+      storyLengthProfileOverride: pending.storyLengthProfileOverride
     });
   };
   const btnSubmitAsAction = $("btnSubmitAsAction");
