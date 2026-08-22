@@ -1,6 +1,14 @@
 import { readFileSync } from "node:fs";
 import { parseHTML } from "linkedom";
 import { describe, expect, it } from "vitest";
+import {
+  appendModel,
+  comparePresetSnapshots,
+  minimumKnownContextWindow,
+  moveModel,
+  normalizeRoutingSelection,
+  selectPresetSnapshot
+} from "../../apps/web/public/provider-model-selection.js";
 
 const storyHtml = readFileSync("apps/web/public/story.html", "utf8");
 const storyScript = readFileSync("apps/web/src/story.js", "utf8");
@@ -518,6 +526,230 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("function resolveProviderPreset(");
     expect(managementScript).toContain("inactive");
     expect(managementCss).toContain(".provider-routing-editor");
+  });
+
+  it("switches an empty OpenRouter profile into its visible preset panel without discarding the explicit draft", () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    const state = {
+      routingSource: "models",
+      models: ["manual-primary"],
+      savedModels: [],
+      presetSlug: "",
+      snapshot: null,
+      savedSnapshot: null,
+      presets: [{ slug: "story-router", status: "active" }],
+      offset: 0,
+      totalCount: 1,
+      manualContextDraft: "32000"
+    };
+    const functions = managementFunctions<{
+      setProviderRoutingSource: (source: string) => void;
+      providerRoutingPayload: () => unknown;
+      renderProviderRoutingEditor: () => void;
+      renderProviderPresetList: () => void;
+      renderProviderPresetPreview: () => void;
+      applyProviderRoutingContext: () => void;
+      providerRoutingMessage: (message: string, type?: string) => void;
+    }>([
+      "providerRoutingSupported", "providerRoutingMessage", "providerPresetMessage", "setProviderRoutingSource",
+      "providerRoutingPayload", "applyProviderRoutingContext", "renderProviderRoutingEditor",
+      "renderProviderPresetList", "renderProviderPresetPreview"
+    ], {
+      elements: { ...elements, providerType: { value: "openrouter" }, providerRole: { value: "text" } }, document, providerRoutingSelection: state, discoveredProfileModels: [],
+      normalizeRoutingSelection, minimumKnownContextWindow, number: (value: number) => String(value),
+      constrainProviderOutputReserve: () => undefined, profileModelValue: (model: { id: string }) => model.id, loadProviderPresets: async () => undefined
+    });
+
+    functions.renderProviderRoutingEditor();
+    functions.setProviderRoutingSource("openrouter_preset");
+
+    expect((elements.providerRoutingPresetPanel as HTMLElement).hidden).toBe(false);
+    expect((elements.providerRoutingModelPanel as HTMLElement).hidden).toBe(true);
+    expect((elements.providerPresetSlug as HTMLInputElement).value).toBe("");
+    expect(functions.providerRoutingPayload()).toBeNull();
+    expect((elements.providerRoutingModelList as HTMLElement).textContent).toContain("manual-primary");
+  });
+
+  it("restores the manual context draft after adding an unknown fallback to a known routed model", () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    (elements.providerModelDialog as HTMLDialogElement).close = () => undefined;
+    (elements.addProviderRoutingModel as HTMLButtonElement).focus = () => undefined;
+    const state = {
+      routingSource: "models",
+      models: ["known"],
+      savedModels: ["known"],
+      presetSlug: "",
+      snapshot: null,
+      savedSnapshot: null,
+      presets: [],
+      offset: 0,
+      totalCount: 0,
+      manualContextDraft: "40000"
+    };
+    (elements.providerContextTokens as HTMLInputElement).value = "40000";
+    const functions = managementFunctions<{
+      renderProviderRoutingEditor: () => void;
+      chooseProviderModel: (value: string) => void;
+      renderProviderPresetList: () => void;
+      renderProviderPresetPreview: () => void;
+      applyProviderRoutingContext: () => void;
+      providerRoutingMessage: (message: string, type?: string) => void;
+    }>([
+      "providerRoutingSupported", "providerRoutingMessage", "providerPresetMessage", "applyProviderRoutingContext",
+      "renderProviderRoutingEditor", "renderProviderPresetList", "renderProviderPresetPreview", "chooseProviderModel"
+    ], {
+      elements: { ...elements, providerType: { value: "openrouter" }, providerRole: { value: "text" } }, document, providerRoutingSelection: state, providerModelPickerTarget: "routing",
+      discoveredProfileModels: [{ id: "known", displayName: "Known", contextLength: 128000 }],
+      appendModel, minimumKnownContextWindow, number: (value: number) => String(value),
+      constrainProviderOutputReserve: () => undefined, profileModelValue: (model: { id: string }) => model.id
+    });
+
+    functions.renderProviderRoutingEditor();
+    expect((elements.providerContextTokens as HTMLInputElement).value).toBe("128000");
+    functions.chooseProviderModel("custom-fallback");
+
+    expect((elements.providerContextTokens as HTMLInputElement).value).toBe("40000");
+    expect((elements.providerContextSource as HTMLElement).textContent).toContain("manual value is retained");
+  });
+
+  it("renders unavailable entries and distinguishes an unsaved routing order", () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    const state = {
+      routingSource: "models",
+      models: ["fallback", "primary"],
+      savedModels: ["primary", "fallback"],
+      presetSlug: "",
+      snapshot: null,
+      savedSnapshot: null,
+      presets: [],
+      offset: 0,
+      totalCount: 0,
+      manualContextDraft: "32000",
+      resolutionSequence: 0,
+      resolving: false
+    };
+    const functions = managementFunctions<{
+      renderProviderRoutingEditor: () => void;
+      renderProviderPresetList: () => void;
+      renderProviderPresetPreview: () => void;
+      applyProviderRoutingContext: () => void;
+      providerRoutingMessage: (message: string, type?: string) => void;
+    }>([
+      "providerRoutingSupported", "providerRoutingMessage", "providerPresetMessage", "applyProviderRoutingContext",
+      "renderProviderRoutingEditor", "renderProviderPresetList", "renderProviderPresetPreview"
+    ], {
+      elements: { ...elements, providerType: { value: "openrouter" }, providerRole: { value: "text" } }, document, providerRoutingSelection: state,
+      discoveredProfileModels: [{ id: "primary", displayName: "Primary", contextLength: 128000 }],
+      minimumKnownContextWindow, number: (value: number) => String(value), constrainProviderOutputReserve: () => undefined, profileModelValue: (model: { id: string }) => model.id
+    });
+
+    functions.renderProviderRoutingEditor();
+
+    expect((elements.providerRoutingModelList as HTMLElement).textContent).toContain("Unavailable at endpoint");
+    expect((elements.providerRoutingModelStatus as HTMLElement).textContent).toContain("Unsaved order differs from saved profile");
+  });
+
+  it("keeps Save disabled while resolving and ignores a stale preset response", async () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    (elements.providerPresetSlug as HTMLInputElement).setCustomValidity = () => undefined;
+    const pending: Array<(snapshot: unknown) => void> = [];
+    const state = {
+      routingSource: "openrouter_preset",
+      models: ["manual-primary"],
+      savedModels: ["manual-primary"],
+      presetSlug: "old-router",
+      snapshot: { slug: "old-router", version: 1, configHash: "a".repeat(64), models: ["old"], providerPolicy: {} },
+      savedSnapshot: null,
+      presets: [],
+      offset: 0,
+      totalCount: 0,
+      manualContextDraft: "32000",
+      resolutionSequence: 0,
+      resolving: false
+    };
+    const functions = managementFunctions<{
+      resolveProviderPreset: (slug: string, options?: { checkOnly?: boolean }) => Promise<unknown>;
+      providerRoutingPayload: () => unknown;
+      renderProviderRoutingEditor: () => void;
+      renderProviderPresetList: () => void;
+      renderProviderPresetPreview: () => void;
+      applyProviderRoutingContext: () => void;
+      providerRoutingMessage: (message: string, type?: string) => void;
+    }>([
+      "providerRoutingSupported", "providerRoutingMessage", "providerPresetMessage", "providerPresetCandidatePayload",
+      "providerRoutingPayload", "applyProviderRoutingContext", "renderProviderRoutingEditor",
+      "renderProviderPresetList", "renderProviderPresetPreview", "resolveProviderPreset"
+    ], {
+      elements: { ...elements, providerType: { value: "openrouter" }, providerRole: { value: "text" } }, document, providerRoutingSelection: state, discoveredProfileModels: [], providers: [], editingProviderId: "",
+      selectPresetSnapshot, comparePresetSnapshots, normalizeRoutingSelection, minimumKnownContextWindow,
+      number: (value: number) => String(value), constrainProviderOutputReserve: () => undefined, profileModelValue: (model: { id: string }) => model.id,
+      providerConfigurationFromForm: () => ({}),
+      api: async () => new Promise((resolve) => pending.push(resolve))
+    });
+
+    functions.renderProviderRoutingEditor();
+    const first = functions.resolveProviderPreset("first-router");
+    expect((elements.saveProvider as HTMLButtonElement).disabled).toBe(true);
+    const second = functions.resolveProviderPreset("second-router");
+    pending[1]({ slug: "second-router", designatedVersionId: "two", version: 2, configHash: "b".repeat(64), models: ["second"], providerPolicy: {} });
+    await second;
+    pending[0]({ slug: "first-router", designatedVersionId: "one", version: 1, configHash: "c".repeat(64), models: ["first"], providerPolicy: {} });
+    await first;
+
+    expect(functions.providerRoutingPayload()).toEqual({ routingSource: "openrouter_preset", presetSlug: "second-router" });
+    expect((elements.providerPresetPreviewSummary as HTMLElement).textContent).toContain("second-router v2");
+
+    const updateCheck = functions.resolveProviderPreset("second-router", { checkOnly: true });
+    pending[2]({ slug: "second-router", designatedVersionId: "three", version: 3, configHash: "d".repeat(64), models: ["second"], providerPolicy: {} });
+    await updateCheck;
+    expect(functions.providerRoutingPayload()).toEqual({ routingSource: "openrouter_preset", presetSlug: "second-router" });
+  });
+
+  it("returns focus to the moved routing item at its target position", () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    const focused: string[] = [];
+    const createElement = document.createElement.bind(document);
+    document.createElement = ((tagName: string) => {
+      const element = createElement(tagName);
+      if (tagName === "li") element.focus = () => { focused.push(element.getAttribute("aria-label") || ""); };
+      return element;
+    }) as typeof document.createElement;
+    const state = {
+      routingSource: "models",
+      models: ["primary", "first", "second"],
+      savedModels: ["primary", "first", "second"],
+      presetSlug: "",
+      snapshot: null,
+      savedSnapshot: null,
+      presets: [],
+      offset: 0,
+      totalCount: 0,
+      manualContextDraft: "32000"
+    };
+    const functions = managementFunctions<{
+      renderProviderRoutingEditor: () => void;
+      renderProviderPresetList: () => void;
+      renderProviderPresetPreview: () => void;
+      applyProviderRoutingContext: () => void;
+      providerRoutingMessage: (message: string, type?: string) => void;
+    }>([
+      "providerRoutingSupported", "providerRoutingMessage", "providerPresetMessage", "applyProviderRoutingContext",
+      "renderProviderRoutingEditor", "renderProviderPresetList", "renderProviderPresetPreview"
+    ], {
+      elements: { ...elements, providerType: { value: "openrouter" }, providerRole: { value: "text" } }, document, providerRoutingSelection: state, discoveredProfileModels: [], moveModel,
+      minimumKnownContextWindow, number: (value: number) => String(value), constrainProviderOutputReserve: () => undefined, profileModelValue: (model: { id: string }) => model.id
+    });
+
+    functions.renderProviderRoutingEditor();
+    [...(elements.providerRoutingModelList as HTMLElement).querySelectorAll("button")]
+      .find((button) => button.getAttribute("aria-label") === "Move up second")?.click();
+
+    expect(focused).toEqual(["Routing model second"]);
   });
 
   it("offers retained images for world covers but not manual story illustration selection", () => {

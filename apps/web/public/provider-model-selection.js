@@ -60,7 +60,7 @@ export function normalizeRoutingSelection(input = {}) {
   const models = normalizeModelSelection(input.models);
   const presetSlug = cleanModelId(input.presetSlug);
   const presetAllowed = input.providerType === "openrouter" && ["text", "intent"].includes(input.providerRole);
-  return presetAllowed && input.routingSource === "openrouter_preset" && presetSlug
+  return presetAllowed && input.routingSource === "openrouter_preset"
     ? { routingSource: "openrouter_preset", models, presetSlug }
     : { routingSource: "models", models, presetSlug: "" };
 }

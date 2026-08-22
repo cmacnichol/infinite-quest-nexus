@@ -47,6 +47,13 @@ describe("provider model selection", () => {
   it("allows presets only for OpenRouter text and intent while retaining the inactive explicit draft", () => {
     expect(normalizeRoutingSelection({
       routingSource: "openrouter_preset",
+      models: ["primary"],
+      presetSlug: "",
+      providerType: "openrouter",
+      providerRole: "intent"
+    })).toEqual({ routingSource: "openrouter_preset", models: ["primary"], presetSlug: "" });
+    expect(normalizeRoutingSelection({
+      routingSource: "openrouter_preset",
       models: ["primary", "fallback"],
       presetSlug: "story-router",
       providerType: "openrouter",
