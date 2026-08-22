@@ -8,7 +8,8 @@ import {
 } from "../../../packages/application/src/index.js";
 import {
   createPostgresGenerationExecutionRepository,
-  type GenerationExecutionRepository
+  type GenerationExecutionRepository,
+  type GenerationModelRoutingSnapshot
 } from "../../../packages/database/src/generation-execution-repository.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { withTransaction } from "../../../packages/database/src/pool.js";
@@ -45,17 +46,28 @@ export function createGenerationExecutionCollaborators(
   return {
     memory: memory.generation,
     illustration: illustration.generation,
-    loadTextExecution: async (ownerUserId, providerProfileId, model) => {
-      const resolution = await providers.resolution.resolveDirect({
-        ownerUserId,
-        providerRole: "text",
-        selectedProviderProfileId: providerProfileId,
-        ...(model?.trim() ? { model } : {}),
+    loadTextExecution: async (ownerUserId, providerProfileId, routing: GenerationModelRoutingSnapshot) => {
+      // Do not re-resolve this job through the current profile or a remote
+      // preset: queued work must execute the plan accepted at enqueue time.
+      return providers.execution.text({ ownerUserId }, {
+        status: "resolved",
+        requestedRole: "text",
+        resolvedRole: "text",
+        providerProfileId,
+        providerType: routing.providerType as never,
+        routingSource: routing.routingSource,
+        model: routing.requestedModel,
+        fallbackModels: routing.configuredModels.slice(1),
+        preset: routing.presetSlug === null || routing.presetVersion === null || routing.presetConfigHash === null
+          ? null
+          : {
+              slug: routing.presetSlug,
+              designatedVersionId: "snapshotted",
+              version: routing.presetVersion,
+              configHash: routing.presetConfigHash
+            },
+        providerPolicy: routing.providerPolicy
       });
-      if (resolution.status !== "resolved") {
-        throw Object.assign(new Error("The selected text provider is unavailable."), { statusCode: 409 });
-      }
-      return providers.execution.text({ ownerUserId }, resolution);
     },
     promptFromSnapshot: providers.promptTools.content,
     recordProfileCost: (_database, profile, attribution, result) => withTransaction(pool, (client) =>
@@ -64,7 +76,7 @@ export function createGenerationExecutionCollaborators(
         providerProfileId: profile.id,
         providerType: profile.providerType,
         requestedModel: profile.model,
-        resolvedModel: result.modelInstanceId || profile.model,
+        resolvedModel: result.modelRouting?.resolvedModel || result.modelInstanceId || profile.model,
         providerResponseId: result.responseId,
         usage: result.usage,
         reportedCost: result.reportedCost

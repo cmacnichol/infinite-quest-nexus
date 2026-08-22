@@ -17,6 +17,18 @@ import { extractPartialNarration, formatNarrationParagraphs, STORY_PROMPT_PROTOC
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
 
+type GenerationModelRoutingSnapshot = Readonly<{
+  requestedModel: string;
+  configuredModels: readonly string[];
+  routingSource: "models" | "openrouter_preset";
+  presetSlug: string | null;
+  presetVersion: number | null;
+  presetConfigHash: string | null;
+  providerPolicy: Record<string, unknown>;
+  providerPolicyHash: string;
+  providerType: string;
+}>;
+
 type OperationKind = "append" | "replace_latest";
 type JobStatus = GenerationJob["status"];
 
@@ -254,6 +266,53 @@ async function resolveTextProviderId(
   return null;
 }
 
+async function snapshotTextModelRouting(
+  client: DatabaseClient,
+  ownerUserId: string,
+  providerProfileId: string,
+  requestedModel: string | undefined
+): Promise<GenerationModelRoutingSnapshot> {
+  const result = await client.query<{
+    provider_type: string;
+    default_model: string;
+    routing_source: "models" | "openrouter_preset" | null;
+    fallback_models: string[] | null;
+    preset_slug: string | null;
+    preset_version: number | null;
+    preset_config_hash: string | null;
+    preset_provider_policy: Record<string, unknown> | null;
+  }>(
+    `SELECT provider_type, default_model, routing_source, fallback_models, preset_slug,
+            preset_version, preset_config_hash, preset_provider_policy
+       FROM provider_profiles
+      WHERE id = $1 AND owner_user_id = $2 AND provider_role = 'text' AND enabled = true
+      FOR SHARE`,
+    [providerProfileId, ownerUserId]
+  );
+  const profile = result.rows[0];
+  if (!profile) throw new GenerationApplicationError("provider_required", { reason: "selected_provider_unavailable", providerProfileId });
+  const explicit = requestedModel?.trim() || "";
+  const primary = explicit || profile.default_model.trim();
+  if (!primary) throw new GenerationApplicationError("provider_required", { reason: "no_text_provider", providerProfileId });
+  const fallbackModels = explicit ? [] : (profile.fallback_models || [])
+    .map((model) => model.trim())
+    .filter((model) => Boolean(model) && model !== primary);
+  const configuredModels = [primary, ...fallbackModels];
+  const routingSource = explicit ? "models" as const : (profile.routing_source || "models");
+  const providerPolicy = explicit || routingSource === "models" ? {} : (profile.preset_provider_policy || {});
+  return {
+    requestedModel: primary,
+    configuredModels,
+    routingSource,
+    presetSlug: routingSource === "openrouter_preset" ? profile.preset_slug : null,
+    presetVersion: routingSource === "openrouter_preset" ? profile.preset_version : null,
+    presetConfigHash: routingSource === "openrouter_preset" ? profile.preset_config_hash : null,
+    providerPolicy,
+    providerPolicyHash: sha256(stableStringify(providerPolicy)),
+    providerType: profile.provider_type
+  };
+}
+
 async function activeGenerationConflict(client: DatabaseClient | DatabasePool, ownerUserId: string, campaignId: string): Promise<never> {
   const active = await client.query<{
     id: string;
@@ -320,11 +379,13 @@ export function createPostgresGenerationCommandRepository(
         const classificationId = await validateTurnInputMode(client, scope.ownerUserId, scope.campaignId, request, campaign.turn_control_style);
         const providerProfileId = await resolveTextProviderId(client, scope.ownerUserId, request.providerProfileId || campaign.text_provider_profile_id);
         if (!providerProfileId) throw new GenerationApplicationError("provider_required", { reason: "no_text_provider" });
+        const modelRouting = await snapshotTextModelRouting(client, scope.ownerUserId, providerProfileId, request.model);
         const storyLengthProfile = storyLengthProfileFromUnknown(campaign.story_length_profile);
         const storyLength = storyLengthWordRange(storyLengthProfile);
         const promptSnapshot = await dependencies.resolvePromptSnapshot(client, scope.ownerUserId, scope.campaignId);
         const contextSnapshot = {
           ...request.context,
+          modelRouting,
           storyLengthProfile,
           narrationMinWords: storyLength.minWords,
           narrationMaxWords: storyLength.maxWords
@@ -341,7 +402,7 @@ export function createPostgresGenerationCommandRepository(
                        expected_turn_number AS "expectedTurnNumber", created_at AS "createdAt"`,
             [scope.ownerUserId, scope.campaignId, providerProfileId, request.idempotencyKey, campaign.active_turn_number + 1,
               request.action, request.requestedInputMode, request.resolvedInputMode, request.inputModeSource, classificationId,
-              request.model || "", json(contextSnapshot), dependencies.promptProtocolVersion(promptSnapshot),
+              modelRouting.requestedModel, json(contextSnapshot), dependencies.promptProtocolVersion(promptSnapshot),
               json({ requestFingerprint }), json(promptSnapshot)]
           );
           return enqueueResult(inserted.rows[0]!, false);
@@ -417,6 +478,7 @@ export function createPostgresGenerationCommandRepository(
         );
         const providerProfileId = await resolveTextProviderId(client, scope.ownerUserId, request.providerProfileId || campaign.text_provider_profile_id);
         if (!providerProfileId) throw new GenerationApplicationError("provider_required", { reason: "no_text_provider" });
+        const modelRouting = await snapshotTextModelRouting(client, scope.ownerUserId, providerProfileId, request.model);
         const baseTurnNumber = campaign.active_turn_number - 1;
         let baseState: Record<string, unknown> = {};
         let baseScratchpadSafeForPrompt = false;
@@ -451,6 +513,7 @@ export function createPostgresGenerationCommandRepository(
         const promptSnapshot = await dependencies.resolvePromptSnapshot(client, scope.ownerUserId, scope.campaignId);
         const contextSnapshot = {
           ...request.context,
+          modelRouting,
           storyLengthProfile: storyLength.profile,
           narrationMinWords: storyLength.minWords,
           narrationMaxWords: storyLength.maxWords
@@ -468,7 +531,7 @@ export function createPostgresGenerationCommandRepository(
                       operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId", created_at AS "createdAt"`,
             [scope.ownerUserId, scope.campaignId, providerProfileId, request.idempotencyKey, campaign.active_turn_number,
               request.action, request.requestedInputMode, request.resolvedInputMode, request.inputModeSource, classificationId,
-              request.model || "", json(contextSnapshot), dependencies.promptProtocolVersion(promptSnapshot),
+              modelRouting.requestedModel, json(contextSnapshot), dependencies.promptProtocolVersion(promptSnapshot),
               json({ requestFingerprint }), json(promptSnapshot), replacementTurnId,
               baseTurnNumber, json(baseState), baseScratchpadSafeForPrompt]
           );

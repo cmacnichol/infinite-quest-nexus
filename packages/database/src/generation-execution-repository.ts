@@ -81,6 +81,23 @@ export type GenerationStreamingState = Record<string, unknown> & {
   provisionalSetId?: string | null;
 };
 
+/**
+ * A safe, immutable copy of the text routing plan selected while a generation
+ * job was enqueued.  It deliberately excludes endpoint, credential, prompt,
+ * and provider-response data.
+ */
+export type GenerationModelRoutingSnapshot = Readonly<{
+  requestedModel: string;
+  configuredModels: readonly string[];
+  routingSource: "models" | "openrouter_preset";
+  presetSlug: string | null;
+  presetVersion: number | null;
+  presetConfigHash: string | null;
+  providerPolicy: Record<string, unknown>;
+  providerPolicyHash: string;
+  providerType: string;
+}>;
+
 export type GenerationOrchestrationInputs = {
   useRpgStats: boolean;
   rpgStats: PlayerRpgStat[];
@@ -114,6 +131,7 @@ export type GenerationExecutionPayload = {
   resolved_input_mode: "action" | "scene";
   input_mode_source: "explicit" | "auto" | "generated_choice" | "opening_action" | "fallback";
   requested_model: string;
+  model_routing: GenerationModelRoutingSnapshot;
   context_options: MemoryContextQuery & {
     modelContextWindowTokens?: number;
     storyLengthProfile?: StoryLengthProfile;
@@ -442,6 +460,15 @@ async function commitAcceptedTurn(
         providerProfileId: provider.id,
         providerType: provider.providerType,
         model: provider.model,
+        requestedModel: job.model_routing.requestedModel,
+        configuredModels: job.model_routing.configuredModels,
+        routingSource: job.model_routing.routingSource,
+        presetSlug: job.model_routing.presetSlug,
+        presetVersion: job.model_routing.presetVersion,
+        presetConfigHash: job.model_routing.presetConfigHash,
+        actualModel: response.modelRouting?.resolvedModel || response.modelInstanceId || provider.model,
+        fallbackUsed: response.modelRouting?.fallbackUsed ?? false,
+        attemptCount: response.modelRouting?.attempts.length || 1,
         modelInstanceId: response.modelInstanceId,
         responseId: response.responseId,
         usage: response.usage,
@@ -618,7 +645,19 @@ export function createPostgresGenerationExecutionRepository(
                 j.expected_turn_number, j.operation_kind, j.replacement_turn_id,
                 j.base_turn_number, j.base_state_private, j.base_scratchpad_safe_for_prompt,
                 j.action, j.requested_input_mode, j.resolved_input_mode, j.input_mode_source,
-                j.requested_model, j.context_options, j.prompt_protocol_version, j.prompt_snapshot,
+                j.requested_model,
+                COALESCE(j.context_options->'modelRouting', jsonb_build_object(
+                  'requestedModel', j.requested_model,
+                  'configuredModels', jsonb_build_array(j.requested_model),
+                  'routingSource', 'models',
+                  'presetSlug', NULL,
+                  'presetVersion', NULL,
+                  'presetConfigHash', NULL,
+                  'providerPolicy', '{}'::jsonb,
+                  'providerPolicyHash', '',
+                  'providerType', 'unknown'
+                )) AS model_routing,
+                j.context_options, j.prompt_protocol_version, j.prompt_snapshot,
                 j.attempts, j.orchestration_private, j.streaming_segments_state,
                 c.world_version_id, c.legacy_settings, c.character_profile, c.character_snapshot,
                 cs.rpg_stats, cs.event_triggers, cs.pending_event_triggers,

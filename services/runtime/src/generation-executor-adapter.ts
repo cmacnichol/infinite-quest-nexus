@@ -57,6 +57,8 @@ import {
   parseSceneCoverageOutput,
   parseStoryOutput,
   performPrivateRoll,
+  ProviderModelFallbackExhaustedError,
+  ProviderStreamInterruptedError,
   providerTransportErrorDetails,
   type ActivatedEvent,
   type ProviderRequest,
@@ -108,7 +110,7 @@ export type GenerationExecutionCollaborators = Readonly<{
   loadTextExecution(
     ownerUserId: string,
     providerProfileId: string,
-    model?: string
+    routing: GenerationExecutionPayload["model_routing"]
   ): Promise<GenerationTextProvider>;
   promptFromSnapshot(
     snapshot: PromptSnapshot | Record<string, unknown> | undefined,
@@ -405,6 +407,28 @@ function snapshottedStoryLength(context: GenerationExecutionPayload["context_opt
   return { profile, minWords, maxWords };
 }
 
+function safeModelRouting(
+  job: GenerationExecutionPayload,
+  input: Readonly<{
+    reason: string;
+    retryDisposition: "automatic_retry" | "explicit_regeneration";
+    attemptedModels: readonly string[];
+    partialNarrationAvailable: boolean;
+  }>
+) {
+  return {
+    reason: input.reason,
+    retryDisposition: input.retryDisposition,
+    configuredModels: [...job.model_routing.configuredModels],
+    attemptedModels: [...input.attemptedModels],
+    partialNarrationAvailable: input.partialNarrationAvailable
+  };
+}
+
+function attemptedModelsFromError(error: ProviderModelFallbackExhaustedError | ProviderStreamInterruptedError): string[] {
+  return error.attempts.map((attempt) => attempt.model).filter(Boolean);
+}
+
 async function persistOrchestration(
   repository: GenerationExecutionRepository,
   scope: GenerationLeaseScope,
@@ -572,7 +596,7 @@ async function executeLoadedGeneration(
     const provider = await phase("provider_loading", () => collaborators.loadTextExecution(
       job.owner_user_id,
       job.provider_profile_id,
-      job.requested_model
+      job.model_routing
     ));
 
     const preparedInput = await phase("input_preparation", async () => {
@@ -750,6 +774,11 @@ async function executeLoadedGeneration(
       const contextFingerprint = sha256(stableStringify({
         provider: provider.id,
         model: provider.model,
+        modelRouting: {
+          configuredModels: job.model_routing.configuredModels,
+          providerPolicyHash: job.model_routing.providerPolicyHash,
+          presetConfigHash: job.model_routing.presetConfigHash
+        },
         protocol: job.prompt_protocol_version,
         expectedTurnNumber: job.expected_turn_number,
         action: safeAction,
@@ -803,7 +832,9 @@ async function executeLoadedGeneration(
     let lastStreamPersistWarningAt = 0;
     const onChunk = async (_delta: string, accumulated: string) => {
       const now = Date.now();
-      if (now - lastPartialUpdate < 350 || accumulated === lastPartialContent) return;
+      const unchanged = accumulated === lastPartialContent;
+      lastPartialContent = accumulated;
+      if (now - lastPartialUpdate < 350 || unchanged) return;
       lastPartialUpdate = now;
       lastPartialContent = accumulated;
       try {
@@ -949,8 +980,56 @@ async function executeLoadedGeneration(
     const primaryRequest = supportsStreaming && job.attempts === 1
       ? { ...baseRequest, onChunk }
       : baseRequest;
-    let result = await phase("story_generation", () =>
-      callCampaignTextProvider(dependencies, provider, job, "story_generation", primaryRequest));
+    let result: ProviderResult;
+    try {
+      result = await phase("story_generation", () =>
+        callCampaignTextProvider(dependencies, provider, job, "story_generation", primaryRequest));
+    } catch (error) {
+      const exhaustion = error instanceof ProviderModelFallbackExhaustedError;
+      const interruption = error instanceof ProviderStreamInterruptedError;
+      if (!exhaustion && !interruption) throw error;
+      const attemptedModels = attemptedModelsFromError(error);
+      const reason = exhaustion ? "model_plan_exhausted" : "provider_stream_interrupted";
+      const partialNarrationAvailable = interruption && Boolean(lastPartialContent);
+      if (partialNarrationAvailable) {
+        assertActiveGenerationUpdate(
+          await repository.savePartialNarration(scope, lastPartialContent),
+          "preserving interrupted streamed output"
+        );
+      }
+      await repository.recordAttempt({
+        ...scope,
+        attemptNumber: job.attempts * 2 - 1,
+        recoveryKind: reason,
+        requestMetadata: {},
+        responseMetadata: { modelRouting: safeModelRouting(job, { reason, retryDisposition: "explicit_regeneration", attemptedModels, partialNarrationAvailable }) },
+        providerResponseId: null,
+        finishReason: null,
+        rawOutput: null,
+        validationErrors: [],
+        overwrite: true
+      });
+      assertActiveGenerationUpdate(await repository.markRecoverable({
+        ...scope,
+        providerResponseId: null,
+        providerFinishReason: null,
+        errorCode: reason,
+        errorMessage: exhaustion
+          ? "Every configured text model failed before narration began."
+          : "The text-provider stream was interrupted after narration began.",
+        recoveryMetadata: {
+          modelRouting: safeModelRouting(job, { reason, retryDisposition: "explicit_regeneration", attemptedModels, partialNarrationAvailable })
+        }
+      }), "saving model routing recovery state");
+      if (job.streaming_segments_state?.provisionalSetId) {
+        await collaborators.illustration.orphanProvisionalSet(pool, {
+          ownerUserId: job.owner_user_id,
+          campaignId: job.campaign_id,
+          generationJobId: job.id
+        }).catch(() => undefined);
+      }
+      return true;
+    }
     let validation = await phase("story_validation", async () => {
       const parsed = parseStoryOutput(result.content, storyMemoryDefaults);
       const firstReason: "invalid_json" | "invalid_schema" | "mechanics_leak" | null =
@@ -983,7 +1062,14 @@ async function executeLoadedGeneration(
         responseMetadata: {
           usage: result.usage,
           outputLimited: result.outputLimited,
-          modelInstanceId: result.modelInstanceId
+          modelInstanceId: result.modelInstanceId,
+          modelRouting: safeModelRouting(job, {
+            reason: "completed",
+            retryDisposition: "automatic_retry",
+            attemptedModels: result.modelRouting?.attempts.map((attempt) => attempt.model)
+              || [result.modelRouting?.resolvedModel || provider.model],
+            partialNarrationAvailable: false
+          })
         },
         providerResponseId: result.responseId || null,
         finishReason: result.finishReason || null,
@@ -1063,7 +1149,14 @@ async function executeLoadedGeneration(
           responseMetadata: {
             usage: result.usage,
             outputLimited: result.outputLimited,
-            modelInstanceId: result.modelInstanceId
+            modelInstanceId: result.modelInstanceId,
+            modelRouting: safeModelRouting(job, {
+              reason: "completed",
+              retryDisposition: "automatic_retry",
+              attemptedModels: result.modelRouting?.attempts.map((attempt) => attempt.model)
+                || [result.modelRouting?.resolvedModel || provider.model],
+              partialNarrationAvailable: false
+            })
           },
           providerResponseId: result.responseId || null,
           finishReason: result.finishReason || null,
@@ -1092,7 +1185,15 @@ async function executeLoadedGeneration(
         providerFinishReason: result.finishReason || null,
         errorCode: code,
         errorMessage: messages.join(" ").slice(0, 4000),
-        recoveryMetadata: { retryable: true, attemptCount: recoveryAttempted ? 2 : 1 }
+        recoveryMetadata: {
+          modelRouting: safeModelRouting(job, {
+            reason: code,
+            retryDisposition: "automatic_retry",
+            attemptedModels: result.modelRouting?.attempts.map((attempt) => attempt.model)
+              || [result.modelRouting?.resolvedModel || provider.model],
+            partialNarrationAvailable: Boolean(lastPartialContent)
+          })
+        }
       }), "saving recovery state");
       logger.warn({
         event: "turn_generation_recoverable",
@@ -1209,7 +1310,15 @@ async function executeLoadedGeneration(
             providerFinishReason: result.finishReason || null,
             errorCode: "scene_coverage",
             errorMessage: details.join(" ").slice(0, 4000),
-            recoveryMetadata: { retryable: true, sceneCoverageRewriteAttempted: true }
+            recoveryMetadata: {
+              modelRouting: safeModelRouting(job, {
+                reason: "scene_coverage",
+                retryDisposition: "automatic_retry",
+                attemptedModels: result.modelRouting?.attempts.map((attempt) => attempt.model)
+                  || [result.modelRouting?.resolvedModel || provider.model],
+                partialNarrationAvailable: Boolean(lastPartialContent)
+              })
+            }
           }), "saving scene recovery state");
           logger.warn({
             event: "turn_generation_recoverable",
@@ -1365,7 +1474,7 @@ async function executeLoadedGeneration(
       ...scope,
       errorCode: PUBLIC_GENERATION_FAILURE_CODE,
       errorMessage: PUBLIC_GENERATION_FAILURE_MESSAGE,
-      recoveryMetadata: transportError ? { transportError } : {}
+      recoveryMetadata: {}
     });
     if (failed) {
       logger.error({
