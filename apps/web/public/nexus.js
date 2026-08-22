@@ -1,4 +1,15 @@
 import { createImageLibraryBrowser } from "/nexus/image-library-browser.js";
+import {
+  appendModel,
+  comparePresetSnapshots,
+  minimumKnownContextWindow,
+  moveModel,
+  normalizeModelSelection,
+  normalizeRoutingSelection,
+  reconcileModelSelection,
+  removeModel,
+  selectPresetSnapshot
+} from "/nexus/provider-model-selection.js";
 
 const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
 const assetLibraryBrowser = createImageLibraryBrowser({
@@ -53,6 +64,7 @@ let editingProviderId = "";
 let discoveredProfileModels = [];
 let discoveredEmbeddingModels = [];
 let providerModelPickerTarget = "provider";
+let providerRoutingSelection = { routingSource: "models", models: [], presetSlug: "", snapshot: null, savedSnapshot: null, presets: [], offset: 0, totalCount: 0 };
 const embeddingJobMonitors = new Map();
 let worldCoverJobPollSequence = 0;
 let illustrationRefinementPromptValue = "";
@@ -3160,6 +3172,299 @@ function renderProviderProfiles() {
   }
 }
 
+function providerRoutingSupported() {
+  return elements.providerType.value === "openrouter" && ["text", "intent"].includes(elements.providerRole.value);
+}
+
+function providerRoutingSnapshotFromProfile(provider) {
+  const models = normalizeModelSelection([provider?.defaultModel, ...(provider?.fallbackModels || [])]);
+  const savedSnapshot = provider?.preset
+    ? selectPresetSnapshot({ ...provider.preset, models, providerPolicy: provider.providerPolicy || {} }).snapshot
+    : null;
+  return {
+    routingSource: provider?.routingSource === "openrouter_preset" ? "openrouter_preset" : "models",
+    models,
+    presetSlug: savedSnapshot?.slug || "",
+    snapshot: savedSnapshot,
+    savedSnapshot,
+    presets: [],
+    offset: 0,
+    totalCount: 0
+  };
+}
+
+function resetProviderRoutingSelection(provider = null) {
+  providerRoutingSelection = providerRoutingSnapshotFromProfile(provider || {
+    defaultModel: elements.providerDefaultModel.value,
+    fallbackModels: []
+  });
+  elements.providerPresetSlug.value = providerRoutingSelection.presetSlug;
+  elements.providerPresetSlug.setCustomValidity("");
+}
+
+function providerRoutingMessage(message, type = "") {
+  elements.providerRoutingModelStatus.textContent = message;
+  elements.providerRoutingModelStatus.className = `status ${type}`.trim();
+}
+
+function providerPresetMessage(message, type = "") {
+  elements.providerPresetStatus.textContent = message;
+  elements.providerPresetStatus.className = `status ${type}`.trim();
+}
+
+function setProviderRoutingSource(routingSource) {
+  if (!providerRoutingSupported()) return;
+  const normalized = normalizeRoutingSelection({
+    ...providerRoutingSelection,
+    routingSource,
+    providerType: elements.providerType.value,
+    providerRole: elements.providerRole.value
+  });
+  providerRoutingSelection = { ...providerRoutingSelection, ...normalized };
+  renderProviderRoutingEditor();
+  if (routingSource === "openrouter_preset" && !providerRoutingSelection.presets.length) void loadProviderPresets();
+}
+
+function providerRoutingPayload() {
+  if (!providerRoutingSupported()) return { defaultModel: elements.providerDefaultModel.value.trim() };
+  const normalized = normalizeRoutingSelection({
+    ...providerRoutingSelection,
+    providerType: elements.providerType.value,
+    providerRole: elements.providerRole.value
+  });
+  providerRoutingSelection = { ...providerRoutingSelection, ...normalized };
+  if (normalized.routingSource === "openrouter_preset") {
+    if (!providerRoutingSelection.snapshot || providerRoutingSelection.snapshot.slug !== normalized.presetSlug) return null;
+    return { routingSource: "openrouter_preset", presetSlug: normalized.presetSlug };
+  }
+  return {
+    routingSource: "models",
+    defaultModel: normalized.models[0] || "",
+    fallbackModels: normalized.models.slice(1)
+  };
+}
+
+function applyProviderRoutingContext() {
+  if (!providerRoutingSupported()) return;
+  const selection = providerRoutingSelection.routingSource === "openrouter_preset" && providerRoutingSelection.snapshot
+    ? providerRoutingSelection.snapshot.models
+    : providerRoutingSelection.models;
+  elements.providerDefaultModel.value = selection[0] || "";
+  const minimum = minimumKnownContextWindow(selection, discoveredProfileModels);
+  if (minimum) {
+    elements.providerContextTokens.value = String(minimum);
+    elements.providerContextTokens.readOnly = true;
+    elements.providerContextSource.textContent = `Locked to the ${number(minimum)}-token minimum advertised by this routing plan.`;
+    elements.providerContextSource.className = "field-note api-supplied";
+    constrainProviderOutputReserve(minimum);
+    return;
+  }
+  elements.providerContextTokens.readOnly = false;
+  elements.providerContextSource.textContent = selection.length
+    ? "One or more selected models have no advertised context length. The manual value is retained and the server remains authoritative."
+    : "Select a primary model before saving this routing plan.";
+  elements.providerContextSource.className = "field-note manual-entry";
+}
+
+function renderProviderRoutingEditor() {
+  const available = providerRoutingSupported();
+  elements.providerRoutingEditor.classList.toggle("hidden", !available);
+  elements.providerRoutingEditor.setAttribute("aria-hidden", String(!available));
+  elements.providerDefaultModelField.classList.toggle("hidden", available);
+  elements.providerDefaultModelField.hidden = available;
+  if (!available) {
+    elements.saveProvider.disabled = false;
+    return;
+  }
+  const presetMode = providerRoutingSelection.routingSource === "openrouter_preset";
+  elements.providerRoutingModels.setAttribute("aria-pressed", String(!presetMode));
+  elements.providerRoutingPreset.setAttribute("aria-pressed", String(presetMode));
+  elements.providerRoutingModelPanel.hidden = presetMode;
+  elements.providerRoutingModelPanel.classList.toggle("hidden", presetMode);
+  elements.providerRoutingPresetPanel.hidden = !presetMode;
+  elements.providerRoutingPresetPanel.classList.toggle("hidden", !presetMode);
+  elements.providerPresetSlug.value = providerRoutingSelection.presetSlug;
+  elements.providerRoutingModelList.replaceChildren();
+  for (const [index, modelId] of providerRoutingSelection.models.entries()) {
+    const row = document.createElement("li");
+    row.className = "provider-routing-model-row";
+    const details = document.createElement("div");
+    const name = document.createElement("strong");
+    name.textContent = modelId;
+    const rank = document.createElement("span");
+    rank.textContent = index === 0 ? "Primary" : `Fallback ${index}`;
+    details.append(name, rank);
+    const actions = document.createElement("div");
+    actions.className = "provider-routing-model-actions";
+    for (const [label, direction, disabled] of [["Move up", -1, index === 0], ["Move down", 1, index === providerRoutingSelection.models.length - 1]]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "button secondary";
+      button.textContent = label;
+      button.disabled = disabled;
+      button.setAttribute("aria-label", `${label} ${modelId}`);
+      button.addEventListener("click", () => {
+        providerRoutingSelection.models = moveModel(providerRoutingSelection.models, index, direction);
+        renderProviderRoutingEditor();
+        elements.providerRoutingModelList.querySelectorAll("button")[index * 3 + (direction < 0 ? 0 : 1)]?.focus();
+      });
+      actions.append(button);
+    }
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "button secondary";
+    remove.textContent = "Remove";
+    remove.setAttribute("aria-label", `Remove ${modelId}`);
+    remove.addEventListener("click", () => {
+      providerRoutingSelection.models = removeModel(providerRoutingSelection.models, index);
+      renderProviderRoutingEditor();
+      elements.addProviderRoutingModel.focus();
+    });
+    actions.append(remove);
+    row.append(details, actions);
+    elements.providerRoutingModelList.append(row);
+  }
+  const count = providerRoutingSelection.models.length;
+  elements.addProviderRoutingModel.disabled = count >= 5;
+  providerRoutingMessage(count
+    ? `${count} of 5 routing positions selected. ${count === 5 ? "Maximum reached." : "Add a fallback or reorder the plan."}`
+    : "Select a primary model to save this routing plan.", count ? "" : "error");
+  renderProviderPresetList();
+  renderProviderPresetPreview();
+  applyProviderRoutingContext();
+  const ready = presetMode
+    ? Boolean(providerRoutingSelection.snapshot && providerRoutingSelection.snapshot.slug === providerRoutingSelection.presetSlug)
+    : Boolean(providerRoutingSelection.models[0]);
+  elements.saveProvider.disabled = !ready;
+}
+
+function renderProviderPresetList() {
+  elements.providerPresetList.replaceChildren();
+  for (const preset of providerRoutingSelection.presets) {
+    const row = document.createElement("div");
+    const inactive = preset.status !== "active";
+    row.className = `provider-preset-row${inactive ? " inactive" : ""}`;
+    const details = document.createElement("div");
+    const name = document.createElement("strong");
+    name.textContent = preset.name || preset.slug;
+    const meta = document.createElement("span");
+    meta.textContent = `${preset.slug} · ${preset.status} · updated ${preset.updatedAt}`;
+    details.append(name, meta);
+    const select = document.createElement("button");
+    select.type = "button";
+    select.className = "button secondary";
+    select.textContent = inactive ? "Unavailable" : "Select";
+    select.disabled = inactive;
+    select.setAttribute("aria-label", inactive ? `${preset.slug} is inactive` : `Select preset ${preset.slug}`);
+    if (!inactive) select.addEventListener("click", () => void resolveProviderPreset(preset.slug));
+    row.append(details, select);
+    elements.providerPresetList.append(row);
+  }
+  if (!providerRoutingSelection.presets.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "No presets loaded yet. Enter a slug or refresh the preset list.";
+    elements.providerPresetList.append(empty);
+  }
+  elements.previousProviderPresetPage.disabled = providerRoutingSelection.offset === 0;
+  elements.nextProviderPresetPage.disabled = providerRoutingSelection.offset + 25 >= providerRoutingSelection.totalCount;
+}
+
+function renderProviderPresetPreview() {
+  const snapshot = providerRoutingSelection.snapshot;
+  elements.providerPresetPreview.classList.toggle("hidden", !snapshot);
+  elements.providerPresetPreview.hidden = !snapshot;
+  if (!snapshot) return;
+  elements.providerPresetPreviewSummary.textContent = `Imported from ${snapshot.slug} v${snapshot.version}. Effective model ranks and policy below are server-derived and read-only.`;
+  elements.providerPresetPreviewModels.replaceChildren(...snapshot.models.map((modelId) => {
+    const item = document.createElement("li");
+    item.textContent = modelId;
+    return item;
+  }));
+  const policyEntries = Object.entries(snapshot.providerPolicy || {});
+  elements.providerPresetPolicySummary.textContent = policyEntries.length
+    ? `Provider policy: ${policyEntries.map(([key, value]) => `${key}: ${typeof value === "object" ? JSON.stringify(value) : String(value)}`).join(" · ")}`
+    : "Provider policy: no additional routing directives.";
+}
+
+function providerPresetCandidatePayload() {
+  const existingConfig = editingProviderId ? (providers.find((item) => item.id === editingProviderId)?.configuration || {}) : {};
+  return {
+    name: elements.providerName.value || "Unsaved provider",
+    providerType: elements.providerType.value,
+    providerRole: elements.providerRole.value,
+    baseUrl: elements.providerBaseUrl.value,
+    apiKey: elements.providerApiKey.value || undefined,
+    defaultModel: providerRoutingSelection.models[0] || "",
+    contextWindowTokens: elements.providerContextTokens.value,
+    maxOutputTokens: elements.providerOutputTokens.value,
+    temperature: elements.providerTemperature.value,
+    requestTimeoutMs: Math.round(Number(elements.providerRequestTimeoutMinutes.value) * 60000),
+    enabled: elements.providerEnabled.checked,
+    isDefault: elements.providerIsDefault.checked,
+    configuration: providerConfigurationFromForm(existingConfig)
+  };
+}
+
+async function loadProviderPresets(offset = providerRoutingSelection.offset) {
+  if (!providerRoutingSupported()) return;
+  providerPresetMessage("Loading OpenRouter presets…");
+  try {
+    const result = editingProviderId && !elements.providerApiKey.value
+      ? await api(`/api/v1/providers/${editingProviderId}/presets?offset=${offset}&limit=25`)
+      : await api(`/api/v1/providers/discover-presets?offset=${offset}&limit=25`, { method: "POST", body: JSON.stringify(providerPresetCandidatePayload()) });
+    providerRoutingSelection.presets = result.presets || [];
+    providerRoutingSelection.offset = offset;
+    providerRoutingSelection.totalCount = Number(result.totalCount || 0);
+    providerPresetMessage(`${providerRoutingSelection.totalCount} preset${providerRoutingSelection.totalCount === 1 ? "" : "s"} available. Select an active preset to resolve it.`, "success");
+    renderProviderRoutingEditor();
+  } catch (error) {
+    providerPresetMessage(`Unable to load presets: ${error.message || String(error)}`, "error");
+  }
+}
+
+async function resolveProviderPreset(slug = elements.providerPresetSlug.value.trim(), { checkOnly = false } = {}) {
+  const normalizedSlug = String(slug || "").trim();
+  if (!normalizedSlug) {
+    elements.providerPresetSlug.setCustomValidity("Enter an OpenRouter preset slug.");
+    providerPresetMessage("Preset slug: enter a slug before resolving it.", "error");
+    return null;
+  }
+  elements.providerPresetSlug.setCustomValidity("");
+  providerPresetMessage(checkOnly ? "Checking OpenRouter for an update…" : "Resolving OpenRouter preset…");
+  try {
+    const snapshot = editingProviderId && !elements.providerApiKey.value
+      ? await api(`/api/v1/providers/${editingProviderId}/presets/${encodeURIComponent(normalizedSlug)}`)
+      : await api(`/api/v1/providers/discover-presets/${encodeURIComponent(normalizedSlug)}`, { method: "POST", body: JSON.stringify(providerPresetCandidatePayload()) });
+    const selected = selectPresetSnapshot(snapshot);
+    if (checkOnly) {
+      const saved = providerRoutingSelection.savedSnapshot || providerRoutingSelection.snapshot;
+      const comparison = comparePresetSnapshots(saved, selected.snapshot);
+      providerPresetMessage(comparison.changed
+        ? `Update available (${comparison.reason}). Review it, then choose Refresh from OpenRouter and save to adopt it.`
+        : "This preset snapshot is current. No changes were adopted.", comparison.changed ? "" : "success");
+      return selected.snapshot;
+    }
+    providerRoutingSelection = {
+      ...providerRoutingSelection,
+      routingSource: selected.routingSource,
+      presetSlug: selected.presetSlug,
+      snapshot: selected.snapshot,
+      savedSnapshot: providerRoutingSelection.savedSnapshot
+    };
+    elements.providerPresetSlug.value = selected.presetSlug;
+    providerPresetMessage(`Resolved ${selected.presetSlug} v${selected.snapshot.version}. Save is now enabled for this preset.`, "success");
+    renderProviderRoutingEditor();
+    return selected.snapshot;
+  } catch (error) {
+    const message = error.message || String(error);
+    elements.providerPresetSlug.setCustomValidity(message);
+    providerPresetMessage(`Preset slug: ${message}`, "error");
+    renderProviderRoutingEditor();
+    return null;
+  }
+}
+
 function resetProviderForm() {
   editingProviderId = "";
   elements.providerForm.reset();
@@ -3180,6 +3485,7 @@ function resetProviderForm() {
   elements.saveProvider.textContent = "Save provider";
   elements.cancelProviderEdit.classList.add("hidden");
   discoveredProfileModels = [];
+  resetProviderRoutingSelection();
   elements.providerModelPickerList.replaceChildren();
   elements.providerContextTokens.readOnly = false;
   elements.providerContextSource.textContent = "Editable until model discovery supplies a context length.";
@@ -3233,6 +3539,7 @@ function syncProviderRoleSettings(options = {}) {
     elements.providerOutputTokens.value = "256";
     elements.providerTemperature.value = "0";
   }
+  renderProviderRoutingEditor();
 }
 
 function isIllustrationProviderForm() {
@@ -3332,6 +3639,7 @@ function beginProviderEdit(provider) {
   elements.saveProvider.textContent = "Save changes";
   elements.cancelProviderEdit.classList.remove("hidden");
   discoveredProfileModels = [];
+  resetProviderRoutingSelection(provider);
   elements.providerModelPickerList.replaceChildren();
   elements.providerName.focus();
   openManagedModal(elements.providerDialog);
@@ -3368,6 +3676,12 @@ async function loadProviders(preselectId = "") {
 
 async function saveProvider(event) {
   event.preventDefault();
+  const routing = providerRoutingPayload();
+  if (!routing) {
+    providerPresetMessage("Preset slug: resolve an active preset before saving.", "error");
+    elements.providerPresetSlug.focus();
+    return;
+  }
   providerMessage("Saving provider profile…");
   try {
     const existingConfig = editingProviderId ? (providers.find((item) => item.id === editingProviderId)?.configuration || {}) : {};
@@ -3379,7 +3693,7 @@ async function saveProvider(event) {
         baseUrl: elements.providerBaseUrl.value,
         apiKey: elements.providerApiKey.value || undefined,
         isDefault: elements.providerIsDefault.checked,
-        defaultModel: elements.providerDefaultModel.value,
+        ...routing,
         ...(!isIllustrationProviderForm() ? {
           contextWindowTokens: elements.providerContextTokens.value,
           maxOutputTokens: elements.providerOutputTokens.value,
@@ -3445,17 +3759,23 @@ async function refreshProviderModelsFromForm() {
     });
     discoveredProfileModels = result.models || [];
     const orderedModels = [...discoveredProfileModels].sort((left, right) => Number(right.loaded) - Number(left.loaded) || left.displayName.localeCompare(right.displayName));
-    const current = elements.providerDefaultModel.value.trim();
-    const selected = orderedModels.find((model) => profileModelValue(model) === current || model.id === current)
-      || orderedModels.find((model) => model.loaded)
-      || orderedModels[0]
-      || null;
-    if (selected) {
-      const value = profileModelValue(selected);
-      elements.providerDefaultModel.value = value;
-      applySogniSdkModelOptions(selected);
+    if (providerRoutingSupported()) {
+      providerRoutingSelection.models = reconcileModelSelection(providerRoutingSelection.models, discoveredProfileModels);
+      applyProviderRoutingContext();
+      renderProviderRoutingEditor();
+    } else {
+      const current = elements.providerDefaultModel.value.trim();
+      const selected = orderedModels.find((model) => profileModelValue(model) === current || model.id === current)
+        || orderedModels.find((model) => model.loaded)
+        || orderedModels[0]
+        || null;
+      if (selected) {
+        const value = profileModelValue(selected);
+        elements.providerDefaultModel.value = value;
+        applySogniSdkModelOptions(selected);
+      }
+      applyProfileModelContext();
     }
-    applyProfileModelContext();
     renderProviderModelPicker();
     elements.providerModelPickerStatus.textContent = `${discoveredProfileModels.length} model entr${discoveredProfileModels.length === 1 ? "y" : "ies"} found. Active models are listed first.`;
     elements.providerModelPickerStatus.className = "status success";
@@ -3481,7 +3801,9 @@ function activeModelPickerModels() {
 function activeModelPickerValue() {
   return providerModelPickerTarget === "embedding"
     ? elements.embeddingModel.value.trim()
-    : elements.providerDefaultModel.value.trim();
+    : providerModelPickerTarget === "routing"
+      ? providerRoutingSelection.models.at(-1) || ""
+      : elements.providerDefaultModel.value.trim();
 }
 
 function chooseProviderModel(value) {
@@ -3491,6 +3813,17 @@ function chooseProviderModel(value) {
     elements.providerModelDialog.close();
     elements.embeddingStatus.className = "status";
     elements.embeddingStatus.textContent = `${value} selected for campaign embeddings. Save & index to apply this change${model?.contextLength ? `; its advertised ${number(model.contextLength)}-token limit applies only to embedding requests` : ""}.`;
+    return;
+  }
+  if (providerModelPickerTarget === "routing") {
+    const before = providerRoutingSelection.models.length;
+    providerRoutingSelection.models = appendModel(providerRoutingSelection.models, value);
+    elements.providerModelDialog.close();
+    renderProviderRoutingEditor();
+    providerRoutingMessage(providerRoutingSelection.models.length === before
+      ? `${value} is already selected or the five-model maximum has been reached.`
+      : `${value} appended as ${providerRoutingSelection.models.length === 1 ? "Primary" : `Fallback ${providerRoutingSelection.models.length - 1}`}. Save the profile to keep this order.`);
+    elements.addProviderRoutingModel.focus();
     return;
   }
   elements.providerDefaultModel.value = value;
@@ -3647,6 +3980,22 @@ async function openProviderModelPicker(forceRefresh = false) {
   elements.providerModelFilter.focus();
 }
 
+async function openProviderRoutingModelPicker(forceRefresh = false) {
+  providerModelPickerTarget = "routing";
+  elements.providerModelDialogTitle.textContent = "Add routing model";
+  elements.providerModelDialogDescription.textContent = "Select a discovered model or enter a custom ID. It appends after the current primary and fallback order.";
+  elements.providerModelFilter.value = "";
+  elements.providerCustomModel.value = "";
+  elements.providerModelPickerStatus.textContent = discoveredProfileModels.length
+    ? `${discoveredProfileModels.length} cached model entries. Active models are listed first.`
+    : "Refresh the endpoint to browse its model inventory.";
+  elements.providerModelPickerStatus.className = "status";
+  openManagedModal(elements.providerModelDialog);
+  renderProviderModelPicker();
+  if (forceRefresh || !discoveredProfileModels.length) await refreshProviderModelsFromForm();
+  elements.providerModelFilter.focus();
+}
+
 async function openEmbeddingModelPicker(forceRefresh = false) {
   const provider = providers.find((item) => item.id === elements.embeddingProvider.value);
   if (!provider) {
@@ -3778,6 +4127,7 @@ elements.providerType.addEventListener("change", () => {
     elements.providerRequestTimeoutMinutes.value = "0.5";
     applySogniConfiguration({}, elements.providerType.value);
   }
+  resetProviderRoutingSelection();
   syncProviderRoleSettings({ applySuggestedDefaults: !editingProviderId });
 });
 
@@ -3794,6 +4144,7 @@ elements.providerSogniNetwork.addEventListener("change", applySogniWorkerAvailab
 
 elements.providerRole.addEventListener("change", () => {
   discoveredProfileModels = [];
+  resetProviderRoutingSelection();
   syncProviderRoleSettings({ applySuggestedDefaults: !editingProviderId });
 });
 
@@ -5247,7 +5598,26 @@ document.querySelectorAll(".tab-button").forEach(button => {
     if (targetPanel) targetPanel.classList.add("active");
   });
 });
-elements.refreshProviderModels.addEventListener("click", async (event) => { event.stopPropagation(); await openProviderModelPicker(true); });
+elements.refreshProviderModels.addEventListener("click", async (event) => { event.stopPropagation(); await (providerRoutingSupported() ? openProviderRoutingModelPicker(true) : openProviderModelPicker(true)); });
+elements.refreshProviderRoutingModels.addEventListener("click", () => { void openProviderRoutingModelPicker(true); });
+elements.addProviderRoutingModel.addEventListener("click", () => { void openProviderRoutingModelPicker(); });
+elements.providerRoutingModels.addEventListener("click", () => setProviderRoutingSource("models"));
+elements.providerRoutingPreset.addEventListener("click", () => setProviderRoutingSource("openrouter_preset"));
+elements.resolveProviderPreset.addEventListener("click", () => { void resolveProviderPreset(); });
+elements.providerPresetSlug.addEventListener("input", () => {
+  const slug = elements.providerPresetSlug.value.trim();
+  elements.providerPresetSlug.setCustomValidity("");
+  if (slug !== providerRoutingSelection.presetSlug) providerRoutingSelection.snapshot = null;
+  providerRoutingSelection.presetSlug = slug;
+  renderProviderRoutingEditor();
+});
+elements.previousProviderPresetPage.addEventListener("click", () => { void loadProviderPresets(Math.max(0, providerRoutingSelection.offset - 25)); });
+elements.nextProviderPresetPage.addEventListener("click", () => { void loadProviderPresets(providerRoutingSelection.offset + 25); });
+elements.checkProviderPresetUpdate.addEventListener("click", () => { void resolveProviderPreset(providerRoutingSelection.presetSlug, { checkOnly: true }); });
+elements.refreshProviderPreset.addEventListener("click", async () => {
+  const snapshot = await resolveProviderPreset(providerRoutingSelection.presetSlug);
+  if (snapshot) elements.providerForm.requestSubmit();
+});
 elements.providerDefaultModel.addEventListener("click", () => { void openProviderModelPicker(); });
 elements.providerDefaultModel.addEventListener("keydown", (event) => {
   if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void openProviderModelPicker(); }

@@ -18,4 +18,13 @@ describe("legacy provider modal defaults", () => {
     expect(nexusSource).toContain("function constrainProviderOutputReserve");
     expect(nexusSource).toContain("contextLength - 513");
   });
+
+  it("submits either explicit model routing or a resolved OpenRouter preset, never both", () => {
+    const saveStart = nexusSource.indexOf("async function saveProvider");
+    const saveEnd = nexusSource.indexOf("\nasync function refreshProviderModelsFromForm", saveStart);
+    const saveSource = nexusSource.slice(saveStart, saveEnd);
+    expect(saveSource).toContain("providerRoutingPayload()");
+    expect(saveSource).toContain("...routing");
+    expect(saveSource).not.toContain("providerPolicy:");
+  });
 });

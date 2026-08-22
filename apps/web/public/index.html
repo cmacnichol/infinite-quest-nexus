@@ -750,10 +750,43 @@
       <fieldset>
         <legend>Model Configuration</legend>
         <div class="fieldset-content provider-model-settings">
-          <label class="model-discovery-field" title="The model Nexus uses when a campaign does not request a model override. Refresh to load the endpoint inventory.">
+          <label id="providerDefaultModelField" class="model-discovery-field" title="The model Nexus uses when a campaign does not request a model override. Refresh to load the endpoint inventory.">
             <span class="field-label-row"><span>Default model</span><button id="refreshProviderModels" class="mini-icon-button" type="button" aria-label="Refresh models from endpoint" title="Refresh active and inactive models from this endpoint">↻</button></span>
             <input id="providerDefaultModel" readonly role="button" aria-haspopup="dialog" aria-controls="providerModelDialog" placeholder="Click to choose a model">
           </label>
+          <section id="providerRoutingEditor" class="provider-routing-editor hidden" aria-labelledby="providerRoutingTitle" aria-hidden="true">
+            <div class="provider-routing-heading">
+              <div><h3 id="providerRoutingTitle">Text routing</h3><p>Choose an ordered model plan or import a validated OpenRouter preset. Only the active source is saved.</p></div>
+              <button id="refreshProviderRoutingModels" class="mini-icon-button" type="button" aria-label="Refresh routing models from endpoint" title="Refresh active and inactive models from this endpoint">↻</button>
+            </div>
+            <div class="provider-routing-sources" role="group" aria-label="Text routing source">
+              <button id="providerRoutingModels" class="button secondary" type="button" aria-pressed="true">Choose models</button>
+              <button id="providerRoutingPreset" class="button secondary" type="button" aria-pressed="false">Import OpenRouter preset</button>
+            </div>
+            <div id="providerRoutingModelPanel" class="provider-routing-panel">
+              <p class="field-note">Primary runs first; up to four fallbacks run in the displayed order. Custom and unavailable IDs remain in this unsaved plan.</p>
+              <ol id="providerRoutingModelList" class="provider-routing-model-list" aria-label="Ordered routing models"></ol>
+              <div class="button-row"><button id="addProviderRoutingModel" class="button secondary" type="button">Add model</button></div>
+              <div id="providerRoutingModelStatus" class="status" role="status" aria-live="polite">Select a primary model to save this routing plan.</div>
+            </div>
+            <div id="providerRoutingPresetPanel" class="provider-routing-panel hidden" hidden>
+              <p class="field-note">Preset model ranks and provider policy are resolved by the server and shown here for review only. Inactive presets cannot be selected.</p>
+              <div class="provider-preset-tools">
+                <label>Preset slug<input id="providerPresetSlug" maxlength="160" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" placeholder="e.g., story-router" autocomplete="off"></label>
+                <button id="resolveProviderPreset" class="button secondary" type="button">Resolve preset</button>
+              </div>
+              <div id="providerPresetStatus" class="status" role="status" aria-live="polite">Choose a preset or enter its slug. Save stays disabled until Nexus resolves it.</div>
+              <div id="providerPresetList" class="provider-preset-list" aria-label="Discovered OpenRouter presets"></div>
+              <div class="button-row provider-preset-pagination"><button id="previousProviderPresetPage" class="button secondary" type="button">Previous</button><button id="nextProviderPresetPage" class="button secondary" type="button">Next</button></div>
+              <section id="providerPresetPreview" class="provider-preset-preview hidden" aria-labelledby="providerPresetPreviewTitle">
+                <h4 id="providerPresetPreviewTitle">Resolved preset</h4>
+                <p id="providerPresetPreviewSummary" class="field-note"></p>
+                <ol id="providerPresetPreviewModels"></ol>
+                <p id="providerPresetPolicySummary" class="field-note"></p>
+                <div class="button-row"><button id="checkProviderPresetUpdate" class="button secondary" type="button">Check for update</button><button id="refreshProviderPreset" class="button primary" type="button">Refresh from OpenRouter and save</button></div>
+              </section>
+            </div>
+          </section>
           <label class="text-model-setting" title="Maximum combined prompt and response capacity. Selecting a discovered model applies the endpoint-advertised value automatically.">Context window
             <input id="providerContextTokens" type="number" min="1024" max="4000000" value="32768" aria-describedby="providerContextSource">
             <span id="providerContextSource" class="field-note">Editable until model discovery supplies a context length.</span>

@@ -502,6 +502,24 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain('...(!isIllustrationProviderForm() ? {');
   });
 
+  it("uses an accessible routing-source editor for OpenRouter text and intent profiles", () => {
+    for (const id of [
+      "providerRoutingModels", "providerRoutingPreset", "providerRoutingEditor", "providerRoutingModelList",
+      "providerPresetList", "providerPresetSlug", "resolveProviderPreset", "providerPresetStatus",
+      "checkProviderPresetUpdate", "refreshProviderPreset"
+    ]) expect(managementHtml).toContain(`id=\"${id}\"`);
+    expect(managementHtml).toContain("Choose models");
+    expect(managementHtml).toContain("Import OpenRouter preset");
+    expect(managementHtml).toContain('role="status" aria-live="polite"');
+    expect(managementScript).toContain("function renderProviderRoutingEditor()");
+    expect(managementScript).toContain("function providerRoutingPayload()");
+    expect(managementScript).toContain("function resetProviderRoutingSelection(");
+    expect(managementScript).toContain("function loadProviderPresets(");
+    expect(managementScript).toContain("function resolveProviderPreset(");
+    expect(managementScript).toContain("inactive");
+    expect(managementCss).toContain(".provider-routing-editor");
+  });
+
   it("offers retained images for world covers but not manual story illustration selection", () => {
     expect(managementHtml).toContain('id="chooseWorldCover"');
     expect(managementHtml).toContain('id="assetLibraryDialog"');
