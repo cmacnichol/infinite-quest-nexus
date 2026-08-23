@@ -1,5 +1,7 @@
 import type {
+  OpenRouterPresetSnapshot,
   PromptTemplateKey,
+  ProviderRoutingSource,
   ProviderType,
   TurnInputMode,
   TurnIntentClassification,
@@ -76,6 +78,29 @@ export type ProviderHealthView = Readonly<{
   lastCheckedAt: string | null;
 }>;
 
+export type ProviderPresetProvenance = Readonly<{
+  slug: string;
+  designatedVersionId: string;
+  version: number;
+  configHash: string;
+}>;
+
+export type ProviderPolicy = OpenRouterPresetSnapshot["providerPolicy"];
+
+/**
+ * The complete, safe model plan persisted for text and intent providers.
+ * A request-level override deliberately projects to a one-model `models` plan.
+ */
+export type ProviderModelSelection = Readonly<{
+  routingSource: ProviderRoutingSource;
+  model: string;
+  fallbackModels: readonly string[];
+  preset: ProviderPresetProvenance | null;
+  providerPolicy: ProviderPolicy;
+}>;
+
+type ProviderProfileRoutingFields = Omit<ProviderModelSelection, "model">;
+
 type ProviderProfileViewBase = Readonly<{
   id: string;
   name: string;
@@ -91,6 +116,8 @@ type ProviderProfileViewBase = Readonly<{
   isDefault: boolean;
   /** Presence only. Credential material and references are runtime-private. */
   hasCredential: boolean;
+  /** Internal optimistic-concurrency token; API projections deliberately omit it. */
+  revision: string;
   health: ProviderHealthView;
   createdAt: string;
   updatedAt: string;
@@ -99,7 +126,7 @@ type ProviderProfileViewBase = Readonly<{
 export type TextProviderProfileView = ProviderProfileViewBase & Readonly<{
   providerRole: "text";
   capability: "text_generation";
-}>;
+}> & ProviderProfileRoutingFields;
 
 export type ImageProviderProfileView = ProviderProfileViewBase & Readonly<{
   providerRole: "image";
@@ -114,7 +141,7 @@ export type EmbeddingProviderProfileView = ProviderProfileViewBase & Readonly<{
 export type IntentProviderProfileView = ProviderProfileViewBase & Readonly<{
   providerRole: "intent";
   capability: "intent_classification";
-}>;
+}> & ProviderProfileRoutingFields;
 
 /** Role is a required discriminator so text/image settings cannot be reused implicitly. */
 export type ProviderProfileView =
@@ -123,7 +150,7 @@ export type ProviderProfileView =
   | EmbeddingProviderProfileView
   | IntentProviderProfileView;
 
-export type ProviderProfileWriteFields<R extends ProviderRole = ProviderRole> = Readonly<{
+type ProviderProfileWriteBase<R extends ProviderRole> = Readonly<{
   name: string;
   providerType: ProviderType;
   providerRole: R;
@@ -138,14 +165,30 @@ export type ProviderProfileWriteFields<R extends ProviderRole = ProviderRole> = 
   isDefault: boolean;
 }>;
 
+type ProviderProfileRoutingWriteFields = Readonly<{
+  routingSource?: ProviderRoutingSource;
+  fallbackModels?: readonly string[];
+  preset?: ProviderPresetProvenance | null;
+  providerPolicy?: ProviderPolicy;
+}>;
+
+export type ProviderProfileWriteFields<R extends ProviderRole = ProviderRole> =
+  ProviderProfileWriteBase<R> & ProviderProfileRoutingWriteFields;
+
 /** Credential input is deliberately absent; runtime credential handling is a separate port. */
 export type CreateProviderProfileCommand<R extends ProviderRole = ProviderRole> =
   OwnerScope & ProviderProfileWriteFields<R>;
 
 export type ProviderProfileChanges = Readonly<{
+  /** Server-derived optimistic-concurrency token for a validated preset candidate. */
+  expectedRevision?: string;
   name?: string;
   baseUrl?: string;
   defaultModel?: string;
+  routingSource?: ProviderRoutingSource;
+  fallbackModels?: readonly string[];
+  preset?: ProviderPresetProvenance | null;
+  providerPolicy?: ProviderPolicy;
   contextWindowTokens?: number;
   maxOutputTokens?: number;
   temperature?: number;
@@ -222,6 +265,10 @@ export type EmbeddingResolutionRequest = OwnerScope & Readonly<{
   allowTextFallback?: boolean;
 }>;
 
+type DirectProviderResolutionFields<R extends DirectProviderRole> = R extends "text" | "intent"
+  ? ProviderModelSelection
+  : Readonly<{ model: string }>;
+
 export type DirectProviderResolution<R extends DirectProviderRole = DirectProviderRole> =
   | Readonly<{
       status: "resolved";
@@ -229,8 +276,7 @@ export type DirectProviderResolution<R extends DirectProviderRole = DirectProvid
       resolvedRole: R;
       providerProfileId: string;
       providerType: ProviderType;
-      model: string;
-    }>
+    }> & DirectProviderResolutionFields<R>
   | Readonly<{
       status: "unconfigured";
       requestedRole: R;

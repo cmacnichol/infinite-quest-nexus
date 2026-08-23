@@ -2,6 +2,7 @@
 // composition layer. Their dependencies are supplied as typed ports so API
 // routes and application use cases remain platform-free.
 import type {
+  DirectProviderResolution,
   IllustrationArtifactDownloadPort,
   IllustrationImageArtifact,
   IllustrationImageExecutionResult,
@@ -36,8 +37,7 @@ export type ImageProviderAdapterDependencies = Readonly<{
 export type PromptRefinementAdapterDependencies = Readonly<{
   loadTextExecution(
     ownerUserId: string,
-    providerProfileId: string,
-    model: string,
+    resolution: Extract<DirectProviderResolution<"text">, Readonly<{ status: "resolved" }>>,
   ): Promise<RuntimeTextExecution>;
   recordProviderHealth: ImageProviderAdapterDependencies["recordProviderHealth"];
   buildRefinementInput(fictionText: string, storyContext: string): string;
@@ -223,8 +223,7 @@ export function createIllustrationPromptRefinementAdapter(
       try {
         const provider = await dependencies.loadTextExecution(
           request.ownerUserId,
-          request.providerProfileId,
-          request.model,
+          request.textResolution,
         );
         const result = await provider.execute({
           systemPrompt: request.systemPrompt,
@@ -233,13 +232,13 @@ export function createIllustrationPromptRefinementAdapter(
         await dependencies.recordProviderHealth(
           pool,
           request.ownerUserId,
-          request.providerProfileId,
+          provider.id,
           true,
         );
         return {
           providerRole: "text",
-          providerProfileId: request.providerProfileId,
-          model: request.model,
+          providerProfileId: provider.id,
+          model: provider.model,
           prompt: dependencies.parseRefinedPrompt(result.content),
           metadata: sanitizedProviderMetadata({
             responseId: result.responseId,
@@ -252,7 +251,7 @@ export function createIllustrationPromptRefinementAdapter(
         await dependencies.recordProviderHealth(
           pool,
           request.ownerUserId,
-          request.providerProfileId,
+          request.textResolution.providerProfileId,
           false,
           error instanceof Error ? error.message : String(error),
         ).catch(() => undefined);

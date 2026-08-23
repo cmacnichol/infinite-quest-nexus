@@ -570,6 +570,18 @@ describe("illustration application use cases", () => {
       segmentId,
       providerProfileId: "99999999-9999-4999-8999-999999999999",
       model: "text-model",
+      textResolution: {
+        status: "resolved",
+        requestedRole: "text",
+        resolvedRole: "text",
+        providerProfileId: "99999999-9999-4999-8999-999999999999",
+        providerType: "openai_compatible",
+        routingSource: "models",
+        model: "text-model",
+        fallbackModels: [],
+        preset: null,
+        providerPolicy: {}
+      },
       systemPrompt: "Return one fiction-only visual prompt.",
       fictionText: "Moonlight fills the observatory.",
       storyContext: "A quiet night."

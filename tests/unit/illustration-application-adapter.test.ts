@@ -6,7 +6,9 @@ import {
   createIllustrationImageProviderAdapter,
   createIllustrationPromptRefinementAdapter
 } from "../../services/runtime/src/illustration-platform-adapter.js";
+import { createIllustrationPlatformBindings } from "../../services/runtime/src/illustration-platform-bindings.js";
 import { createIllustrationGenerationTransactionPort } from "../../services/runtime/src/illustration-repository-bindings.js";
+import { runIllustrationPromptJob } from "../../services/runtime/src/illustration-segment-job-adapter.js";
 
 const ownerUserId = "11111111-1111-4111-8111-111111111111";
 const jobId = "22222222-2222-4222-8222-222222222222";
@@ -130,7 +132,19 @@ describe("illustration provider adapters", () => {
   });
 
   it("keeps fiction refinement on the text-provider path with the configured system prompt", async () => {
-    const provider = { execute: vi.fn() };
+    const textResolution = {
+      status: "resolved" as const,
+      requestedRole: "text" as const,
+      resolvedRole: "text" as const,
+      providerProfileId,
+      providerType: "openai_compatible" as const,
+      routingSource: "models" as const,
+      model: "text-model",
+      fallbackModels: [],
+      preset: null,
+      providerPolicy: {}
+    };
+    const provider = { id: providerProfileId, model: "text-model", execute: vi.fn() };
     const loadTextExecution = vi.fn(async () => provider);
     const callTextProvider = vi.fn(async () => ({
       content: "Moonlit observatory, silver lens, cinematic fantasy illustration",
@@ -162,6 +176,7 @@ describe("illustration provider adapters", () => {
       segmentId,
       providerProfileId,
       model: "text-model",
+      textResolution,
       systemPrompt: "Return only a fiction-only visual prompt.",
       fictionText: "Moonlight fills the observatory.",
       storyContext: "A quiet night beneath a violet sky."
@@ -171,7 +186,7 @@ describe("illustration provider adapters", () => {
       model: "text-model",
       prompt: "Moonlit observatory, silver lens, cinematic fantasy illustration"
     });
-    expect(loadTextExecution).toHaveBeenCalledWith(ownerUserId, providerProfileId, "text-model");
+    expect(loadTextExecution).toHaveBeenCalledWith(ownerUserId, textResolution);
     expect(callTextProvider).toHaveBeenCalledWith({
       systemPrompt: "Return only a fiction-only visual prompt.",
       input: expect.stringContaining("Moonlight fills the observatory.")
@@ -188,6 +203,196 @@ describe("illustration provider adapters", () => {
     expect(recordProviderHealth).toHaveBeenCalledWith(
       expect.anything(), ownerUserId, providerProfileId, true
     );
+  });
+
+  it("forwards the supplied text plan for prompt refinement while preserving the independent image path", async () => {
+    const textPlan = {
+      status: "resolved" as const,
+      requestedRole: "text" as const,
+      resolvedRole: "text" as const,
+      providerProfileId,
+      providerType: "openai_compatible" as const,
+      routingSource: "models" as const,
+      model: "text-primary",
+      fallbackModels: ["text-fallback"],
+      preset: null,
+      providerPolicy: {}
+    };
+    const execution = {
+      text: vi.fn(async () => ({ execute: vi.fn() })),
+      image: vi.fn(async () => ({ submit: vi.fn(), poll: vi.fn() }))
+    };
+    const providers = {
+      resolution: { resolveDirect: vi.fn(async () => textPlan) },
+      execution,
+      health: { recordHealth: vi.fn() },
+      costs: { recordIllustrationCost: vi.fn() },
+      costContext: vi.fn()
+    };
+    const bindings = createIllustrationPlatformBindings({} as DatabasePool, providers as never);
+
+    await bindings.promptRefinement.loadTextExecution(ownerUserId, textPlan);
+    await bindings.imageProvider.loadImageExecution(ownerUserId, providerProfileId, "image-model");
+
+    expect(providers.resolution.resolveDirect).not.toHaveBeenCalled();
+    expect(execution.text).toHaveBeenCalledWith({ ownerUserId }, textPlan);
+    expect(execution.image).toHaveBeenCalledWith({ ownerUserId }, providerProfileId, "image-model");
+  });
+
+  it("uses one current text descriptor for queued refinement execution and attribution after a profile plan changes", async () => {
+    const currentPlan = {
+      status: "resolved" as const,
+      requestedRole: "text" as const,
+      resolvedRole: "text" as const,
+      providerProfileId,
+      providerType: "openai_compatible" as const,
+      routingSource: "models" as const,
+      model: "current-primary",
+      fallbackModels: ["current-fallback"],
+      preset: null,
+      providerPolicy: {}
+    };
+    const execution = {
+      text: vi.fn(async (_scope, resolution) => ({
+        id: resolution.providerProfileId,
+        providerType: resolution.providerType,
+        model: resolution.model,
+        maxOutputTokens: 256,
+        execute: vi.fn(async () => ({
+          content: "Moonlit observatory, silver lens, cinematic fantasy illustration",
+          responseId: "text-response-2",
+          finishReason: "stop",
+          usage: { total_tokens: 42 },
+          reportedCost: null
+        }))
+      }))
+    };
+    const providers = {
+      resolution: { resolveDirect: vi.fn(async () => currentPlan) },
+      execution,
+      health: { recordHealth: vi.fn(async () => undefined) },
+      costs: { recordIllustrationCost: vi.fn() },
+      costContext: vi.fn()
+    };
+    const bindings = createIllustrationPlatformBindings({} as DatabasePool, providers as never);
+    const adapter = createIllustrationPromptRefinementAdapter({} as DatabasePool, bindings.promptRefinement);
+
+    await expect(adapter.refinePrompt({
+      ownerUserId,
+      campaignId,
+      turnId: null,
+      segmentId,
+      providerProfileId,
+      model: "stale-primary",
+      textResolution: currentPlan,
+      systemPrompt: "Return only a fiction-only visual prompt.",
+      fictionText: "Moonlight fills the observatory.",
+      storyContext: "A quiet night beneath a violet sky."
+    } as never)).resolves.toMatchObject({ model: "current-primary" });
+
+    expect(providers.resolution.resolveDirect).not.toHaveBeenCalled();
+    expect(execution.text).toHaveBeenCalledWith({ ownerUserId }, currentPlan);
+  });
+
+  it("uses the resolved queued text plan for prompt-job cost attribution instead of its stale requested model", async () => {
+    const currentPlan = {
+      status: "resolved" as const,
+      requestedRole: "text" as const,
+      resolvedRole: "text" as const,
+      providerProfileId,
+      providerType: "openai_compatible" as const,
+      routingSource: "models" as const,
+      model: "current-primary",
+      fallbackModels: ["current-fallback"],
+      preset: null,
+      providerPolicy: {}
+    };
+    const claimed = {
+      id: jobId,
+      owner_user_id: ownerUserId,
+      campaign_id: campaignId,
+      turn_id: null,
+      segment_id: segmentId,
+      provider_profile_id: providerProfileId,
+      requested_model: "stale-primary",
+      prompt_snapshot: { illustration_refinement: { content: "Return only fiction." }, illustration_character_reference: { content: "" } },
+      attempts: 1,
+      max_attempts: 2
+    };
+    const config = {
+      enabled: true,
+      source_policy: "library_only",
+      matching_scope: "campaign",
+      confidence_profile: "balanced",
+      repetition_window: 3,
+      provider_profile_id: null,
+      model: "image-model",
+      size: "1024x1024",
+      aspect_ratio: "1:1",
+      quality: "standard",
+      output_format: "png",
+      max_attempts: 2,
+      segment_word_count: 500,
+      images_per_segment: 1,
+      segment_prompt_mode: "ai_refined",
+      refinement_prompt: "Return only fiction.",
+      updated_at: new Date("2026-08-22T16:00:00.000Z"),
+      campaign_image_provider_id: null,
+      campaign_text_provider_id: providerProfileId
+    };
+    const segment = {
+      id: segmentId,
+      owner_user_id: ownerUserId,
+      campaign_id: campaignId,
+      turn_id: null,
+      generation_job_id: null,
+      illustration_set_id: "66666666-6666-4666-8666-666666666666",
+      source_text: "Moonlight fills the observatory.",
+      direct_prompt: "Moonlit observatory",
+      resolved_prompt: "",
+      character_visual_reference: ""
+    };
+    const query = vi.fn(async (statement: string) => {
+      if (statement.includes("WITH candidate AS")) return { rows: [claimed], rowCount: 1 };
+      if (statement.includes("FROM turn_illustration_segments segments")) return { rows: [segment], rowCount: 1 };
+      if (statement.includes("SELECT campaigns.title")) return { rows: [], rowCount: 0 };
+      if (statement.startsWith("SELECT id FROM campaigns")) return { rows: [{ id: campaignId }], rowCount: 1 };
+      if (statement.includes("FROM campaign_illustration_configs config")) return { rows: [config], rowCount: 1 };
+      if (statement.includes("SELECT provider_type FROM provider_profiles")) {
+        return { rows: [{ provider_type: "openai_compatible" }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 1 };
+    });
+    const client = { query, release: vi.fn() };
+    const pool = {
+      query,
+      connect: vi.fn(async () => client),
+      totalCount: 1
+    } as never;
+    const refinement = { refinePrompt: vi.fn(async () => ({
+      providerRole: "text" as const,
+      providerProfileId,
+      model: "current-primary",
+      prompt: "Moonlit observatory, silver lens, cinematic fantasy illustration",
+      metadata: { responseId: "text-response-3", usage: { total_tokens: 42 }, reportedCost: null }
+    })) };
+    const costPort = { recordIllustrationCost: vi.fn(async () => null) };
+    const providers = {
+      resolution: { resolveDirect: vi.fn(async () => currentPlan) },
+      prompts: { loadIllustrationPromptSnapshot: vi.fn() },
+      promptTools: { content: vi.fn() }
+    };
+
+    await expect(runIllustrationPromptJob(pool, "worker-1", 30, refinement as never, costPort as never, providers as never))
+      .resolves.toBe(true);
+
+    expect(refinement.refinePrompt).toHaveBeenCalledWith(expect.objectContaining({
+      model: "current-primary",
+      textResolution: currentPlan
+    }));
+    expect(costPort.recordIllustrationCost).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      requestedModel: "current-primary"
+    }));
   });
 });
 

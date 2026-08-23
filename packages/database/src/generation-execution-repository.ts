@@ -10,6 +10,7 @@ import {
   pendingEventTriggerSchema,
   playerEventTriggerSchema,
   playerRpgStatSchema,
+  openRouterPresetSnapshotSchema,
   type CampaignTracker,
   type PlayerEventTrigger,
   type PlayerRpgStat,
@@ -32,7 +33,9 @@ import {
 import {
   buildScopedEntityCatalog,
   normalizeCampaignTrackers,
-  resolveEntityMetadata
+  resolveEntityMetadata,
+  sha256,
+  stableStringify
 } from "../../domain/src/index.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
@@ -81,6 +84,24 @@ export type GenerationStreamingState = Record<string, unknown> & {
   provisionalSetId?: string | null;
 };
 
+/**
+ * A safe, immutable copy of the text routing plan selected while a generation
+ * job was enqueued.  It deliberately excludes endpoint, credential, prompt,
+ * and provider-response data.
+ */
+export type GenerationModelRoutingSnapshot = Readonly<{
+  requestedModel: string;
+  configuredModels: readonly string[];
+  routingSource: "models" | "openrouter_preset";
+  presetSlug: string | null;
+  presetDesignatedVersionId: string | null;
+  presetVersion: number | null;
+  presetConfigHash: string | null;
+  providerPolicy: Record<string, unknown>;
+  providerPolicyHash: string;
+  providerType: string;
+}>;
+
 export type GenerationOrchestrationInputs = {
   useRpgStats: boolean;
   rpgStats: PlayerRpgStat[];
@@ -114,6 +135,7 @@ export type GenerationExecutionPayload = {
   resolved_input_mode: "action" | "scene";
   input_mode_source: "explicit" | "auto" | "generated_choice" | "opening_action" | "fallback";
   requested_model: string;
+  model_routing: GenerationModelRoutingSnapshot;
   context_options: MemoryContextQuery & {
     modelContextWindowTokens?: number;
     storyLengthProfile?: StoryLengthProfile;
@@ -204,7 +226,15 @@ export type GenerationExecutionRepository = Readonly<{
   markFailed(input: GenerationFailedUpdate): Promise<boolean>;
 }>;
 
-type ExecutionPayloadRow = Omit<GenerationExecutionPayload, "orchestration_inputs"> & {
+type ExecutionPayloadRow = Omit<GenerationExecutionPayload, "orchestration_inputs" | "model_routing"> & {
+  requested_fallback_models: string[];
+  requested_routing_source: "models" | "openrouter_preset";
+  requested_preset_slug: string | null;
+  requested_preset_designated_version_id: string | null;
+  requested_preset_version: number | null;
+  requested_preset_config_hash: string | null;
+  requested_provider_policy: Record<string, unknown>;
+  requested_provider_type: string | null;
   legacy_settings: Record<string, unknown>;
   rpg_stats: unknown;
   event_triggers: unknown;
@@ -213,6 +243,104 @@ type ExecutionPayloadRow = Omit<GenerationExecutionPayload, "orchestration_input
   character_profile: Record<string, unknown> | null;
   character_snapshot: Record<string, unknown> | null;
 };
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function unknownRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function supportedTextProviderType(value: unknown): string | null {
+  return value === "lmstudio" || value === "openrouter" || value === "manifest" || value === "openai_compatible"
+    ? value
+    : null;
+}
+
+function legacyContextRoutingSnapshot(row: ExecutionPayloadRow): GenerationModelRoutingSnapshot | null {
+  const context = unknownRecord(row.context_options);
+  const value = unknownRecord(context?.modelRouting);
+  if (!value) return null;
+  const requestedModel = nonEmptyString(value.requestedModel);
+  const providerType = supportedTextProviderType(value.providerType);
+  const routingSource = value.routingSource;
+  const configuredModels = Array.isArray(value.configuredModels)
+    ? value.configuredModels.map(nonEmptyString)
+    : [];
+  if (!requestedModel || !providerType || (routingSource !== "models" && routingSource !== "openrouter_preset")
+      || configuredModels.some((model) => model === null) || configuredModels.length < 1 || configuredModels.length > 5
+      || configuredModels[0] !== requestedModel || new Set(configuredModels).size !== configuredModels.length) {
+    return null;
+  }
+  const models = configuredModels as string[];
+  const providerPolicy = unknownRecord(value.providerPolicy);
+  if (!providerPolicy) return null;
+  if (routingSource === "models") {
+    if (Object.keys(providerPolicy).length
+        || value.presetSlug !== null || value.presetDesignatedVersionId !== null
+        || value.presetVersion !== null || value.presetConfigHash !== null) return null;
+    return {
+      requestedModel, configuredModels: models, routingSource, presetSlug: null,
+      presetDesignatedVersionId: null, presetVersion: null, presetConfigHash: null,
+      providerPolicy: {}, providerPolicyHash: sha256(stableStringify({})), providerType
+    };
+  }
+  if (providerType !== "openrouter") return null;
+  const parsedPreset = openRouterPresetSnapshotSchema.safeParse({
+    slug: value.presetSlug,
+    designatedVersionId: value.presetDesignatedVersionId,
+    version: value.presetVersion,
+    configHash: value.presetConfigHash,
+    models,
+    providerPolicy
+  });
+  if (!parsedPreset.success) return null;
+  return {
+    requestedModel,
+    configuredModels: parsedPreset.data.models,
+    routingSource,
+    presetSlug: parsedPreset.data.slug,
+    presetDesignatedVersionId: parsedPreset.data.designatedVersionId,
+    presetVersion: parsedPreset.data.version,
+    presetConfigHash: parsedPreset.data.configHash,
+    providerPolicy: parsedPreset.data.providerPolicy,
+    providerPolicyHash: sha256(stableStringify(parsedPreset.data.providerPolicy)),
+    providerType
+  };
+}
+
+function columnRoutingSnapshot(row: ExecutionPayloadRow): GenerationModelRoutingSnapshot {
+  const providerPolicy = row.requested_provider_policy || {};
+  return {
+    requestedModel: row.requested_model,
+    configuredModels: [row.requested_model, ...(row.requested_fallback_models || [])].filter(Boolean),
+    routingSource: row.requested_routing_source || "models",
+    presetSlug: row.requested_preset_slug,
+    presetDesignatedVersionId: row.requested_preset_designated_version_id,
+    presetVersion: row.requested_preset_version,
+    presetConfigHash: row.requested_preset_config_hash,
+    providerPolicy,
+    providerPolicyHash: sha256(stableStringify(providerPolicy)),
+    providerType: row.requested_provider_type || "unknown"
+  };
+}
+
+function modelRoutingSnapshot(row: ExecutionPayloadRow): GenerationModelRoutingSnapshot {
+  const legacy = legacyContextRoutingSnapshot(row);
+  const columnsOnlyContainDefaults = row.requested_fallback_models.length === 0
+    && row.requested_routing_source === "models"
+    && row.requested_preset_slug === null
+    && row.requested_preset_designated_version_id === null
+    && row.requested_preset_version === null
+    && row.requested_preset_config_hash === null
+    && Object.keys(row.requested_provider_policy || {}).length === 0;
+  return legacy && (columnsOnlyContainDefaults || row.requested_provider_type === null)
+    ? legacy
+    : columnRoutingSnapshot(row);
+}
 
 function claimedGeneration(row: {
   id: string;
@@ -442,6 +570,15 @@ async function commitAcceptedTurn(
         providerProfileId: provider.id,
         providerType: provider.providerType,
         model: provider.model,
+        requestedModel: job.model_routing.requestedModel,
+        configuredModels: job.model_routing.configuredModels,
+        routingSource: job.model_routing.routingSource,
+        presetSlug: job.model_routing.presetSlug,
+        presetVersion: job.model_routing.presetVersion,
+        presetConfigHash: job.model_routing.presetConfigHash,
+        actualModel: response.modelRouting?.resolvedModel || response.modelInstanceId || provider.model,
+        fallbackUsed: response.modelRouting?.fallbackUsed ?? false,
+        attemptCount: response.modelRouting?.attempts.length || 1,
         modelInstanceId: response.modelInstanceId,
         responseId: response.responseId,
         usage: response.usage,
@@ -618,7 +755,11 @@ export function createPostgresGenerationExecutionRepository(
                 j.expected_turn_number, j.operation_kind, j.replacement_turn_id,
                 j.base_turn_number, j.base_state_private, j.base_scratchpad_safe_for_prompt,
                 j.action, j.requested_input_mode, j.resolved_input_mode, j.input_mode_source,
-                j.requested_model, j.context_options, j.prompt_protocol_version, j.prompt_snapshot,
+                j.requested_model, j.requested_fallback_models, j.requested_routing_source,
+                j.requested_preset_slug, j.requested_preset_designated_version_id,
+                j.requested_preset_version, j.requested_preset_config_hash, j.requested_provider_policy,
+                j.requested_provider_type,
+                j.context_options, j.prompt_protocol_version, j.prompt_snapshot,
                 j.attempts, j.orchestration_private, j.streaming_segments_state,
                 c.world_version_id, c.legacy_settings, c.character_profile, c.character_snapshot,
                 cs.rpg_stats, cs.event_triggers, cs.pending_event_triggers,
@@ -647,7 +788,7 @@ export function createPostgresGenerationExecutionRepository(
         character_snapshot: _characterSnapshot,
         ...payload
       } = row;
-      return { ...payload, orchestration_inputs: orchestrationInputs(row) };
+      return { ...payload, model_routing: modelRoutingSnapshot(row), orchestration_inputs: orchestrationInputs(row) };
     },
 
     async renewLease(scope, leaseSeconds) {

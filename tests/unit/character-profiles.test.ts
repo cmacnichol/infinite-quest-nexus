@@ -19,7 +19,8 @@ import {
   characterProfileOrganizerRepairPrompt,
   characterProfileOrganizerSources,
   validateOrganizerResultWithRepair,
-  validateOrganizerResult
+  validateOrganizerResult,
+  organizeWorldCharacterProfileForOwner
 } from "../../services/runtime/src/provider-character-organization-adapter.js";
 
 const profile = characterProfileSchema.parse({
@@ -147,6 +148,58 @@ describe("strict character profile organizer validation", () => {
     "world.premise": "Roads move after dusk.",
     "world.backgroundStory": ""
   };
+
+  it("passes the resolved text fallback plan to character organization execution", async () => {
+    const resolution = {
+      status: "resolved" as const,
+      requestedRole: "text" as const,
+      resolvedRole: "text" as const,
+      providerProfileId: "text-provider",
+      providerType: "openai_compatible" as const,
+      routingSource: "models" as const,
+      model: "character-primary",
+      fallbackModels: ["character-fallback"],
+      preset: null,
+      providerPolicy: {}
+    };
+    const execution = { text: vi.fn(async () => ({
+      execute: vi.fn(async () => ({
+        content: JSON.stringify({
+          candidate: { appearance: { clothing: "weathered blue cloak" } },
+          evidence: [{ path: "appearance.clothing", source: "legacyGuidance", quote: "weathered blue cloak" }],
+          unassignedText: [], conflicts: [], warnings: []
+        })
+      }))
+    })) };
+    await expect(organizeWorldCharacterProfileForOwner(
+      {
+        query: vi.fn(async () => ({
+          rows: [{
+            status: "draft",
+            revision: 4,
+            content: {
+              world: { title: "The Road", genre: "Fantasy", tone: "Eerie", premise: "Roads move.", backgroundStory: "Old maps lie.", firstAction: "Follow the road.", rules: "Keep faith." },
+              playableCharacters: [{ id: "mira", name: "Mira", characterText: "Mira wears a weathered blue cloak." }]
+            }
+          }], rowCount: 1
+        }))
+      } as never,
+      "owner-1",
+      "world-1",
+      { expectedRevision: 4, character: {
+        id: "mira", name: "Mira", characterText: "Mira wears a weathered blue cloak.",
+        rpgStats: [], defaultTriggers: [], source: {}
+      } },
+      {
+        resolution: { resolveDirect: vi.fn(async () => resolution) },
+        execution,
+        prompts: { loadCharacterOrganizationPromptSnapshot: vi.fn(async () => ({ snapshot: {} })) },
+        promptTools: { content: vi.fn(() => "") }
+      } as never,
+    )).resolves.toMatchObject({ candidate: { appearance: { clothing: "weathered blue cloak" } } });
+
+    expect(execution.text).toHaveBeenCalledWith({ ownerUserId: "owner-1" }, resolution);
+  });
 
   it("uses a complete, exact output contract and dynamically lists allowed evidence sources", () => {
     const prompt = characterProfileOrganizerPrompt();

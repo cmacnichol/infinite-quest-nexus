@@ -206,6 +206,180 @@ integration("provider PostgreSQL adapters", () => {
     });
   });
 
+  it("round-trips owner-scoped model plans and preset snapshots atomically", async () => {
+    const [modelsProfile, presetProfile] = await inTransaction(async (client) => {
+      const profiles = createPostgresProviderRepositories(client).profiles;
+      return Promise.all([
+        profiles.createProfile({
+          ...profileCommand(first.ownerUserId, `Models plan ${crypto.randomUUID()}`),
+          providerType: "openrouter",
+          defaultModel: "primary-model",
+          routingSource: "models",
+          fallbackModels: ["fallback-a", "fallback-b"],
+          preset: null,
+          providerPolicy: {}
+        }),
+        profiles.createProfile({
+          ...profileCommand(first.ownerUserId, `Preset plan ${crypto.randomUUID()}`, "intent"),
+          providerType: "openrouter",
+          defaultModel: "primary/intent",
+          routingSource: "openrouter_preset",
+          fallbackModels: ["fallback/intent"],
+          preset: {
+            slug: "story-router",
+            designatedVersionId: "version-3",
+            version: 3,
+            configHash: "d".repeat(64)
+          },
+          providerPolicy: { allow_fallbacks: true }
+        })
+      ]);
+    });
+
+    await inTransaction(async (client) => {
+      const repositories = createPostgresProviderRepositories(client);
+      const visible = await repositories.profiles.listProfiles({ ownerUserId: first.ownerUserId });
+      expect(visible.find((profile) => profile.id === modelsProfile.id)).toMatchObject({
+        routingSource: "models",
+        defaultModel: "primary-model",
+        fallbackModels: ["fallback-a", "fallback-b"],
+        preset: null,
+        providerPolicy: {}
+      });
+      expect(visible.find((profile) => profile.id === presetProfile.id)).toMatchObject({
+        routingSource: "openrouter_preset",
+        defaultModel: "primary/intent",
+        fallbackModels: ["fallback/intent"],
+        preset: { slug: "story-router", version: 3, configHash: "d".repeat(64) },
+        providerPolicy: { allow_fallbacks: true }
+      });
+      await expect(repositories.resolution.resolveDirect({
+        ownerUserId: first.ownerUserId, providerRole: "text", selectedProviderProfileId: modelsProfile.id
+      })).resolves.toMatchObject({
+        routingSource: "models", model: "primary-model", fallbackModels: ["fallback-a", "fallback-b"],
+        preset: null, providerPolicy: {}
+      });
+      await expect(repositories.resolution.resolveDirect({
+        ownerUserId: first.ownerUserId, providerRole: "intent", selectedProviderProfileId: presetProfile.id
+      })).resolves.toMatchObject({
+        routingSource: "openrouter_preset", model: "primary/intent", fallbackModels: ["fallback/intent"],
+        preset: { slug: "story-router", version: 3, configHash: "d".repeat(64) },
+        providerPolicy: { allow_fallbacks: true }
+      });
+      await expect(repositories.resolution.resolveDirect({
+        ownerUserId: first.ownerUserId, providerRole: "intent", selectedProviderProfileId: presetProfile.id,
+        model: "explicit-model"
+      })).resolves.toMatchObject({
+        routingSource: "models", model: "explicit-model", fallbackModels: [], preset: null, providerPolicy: {}
+      });
+      await expect(repositories.resolution.resolveDirect({
+        ownerUserId: second.ownerUserId, providerRole: "text", selectedProviderProfileId: modelsProfile.id
+      })).rejects.toMatchObject({ statusCode: 400 });
+      await expect(repositories.resolution.resolveDirect({
+        ownerUserId: second.ownerUserId, providerRole: "intent", selectedProviderProfileId: presetProfile.id
+      })).rejects.toMatchObject({ statusCode: 400 });
+      await repositories.profiles.updateProfile({
+        ownerUserId: first.ownerUserId,
+        providerProfileId: modelsProfile.id,
+        changes: { defaultModel: "updated-primary" }
+      });
+      await expect(repositories.resolution.resolveDirect({
+        ownerUserId: first.ownerUserId, providerRole: "text", selectedProviderProfileId: modelsProfile.id
+      })).resolves.toMatchObject({ model: "updated-primary", fallbackModels: ["fallback-a", "fallback-b"] });
+    });
+
+    const staleCandidateProfile = await inTransaction(async (client) => {
+      const profile = (await createPostgresProviderRepositories(client).profiles.listProfiles({
+        ownerUserId: first.ownerUserId
+      })).find((candidate) => candidate.id === modelsProfile.id);
+      if (!profile) {
+        throw new Error("Expected models profile.");
+      }
+      return profile;
+    });
+    await inTransaction((client) => client.query(
+      "UPDATE provider_profiles SET base_url=$3,updated_at=now() WHERE id=$1 AND owner_user_id=$2",
+      [modelsProfile.id, first.ownerUserId, "https://newer-openrouter.example/v1"]
+    ));
+    await inTransaction(async (client) => {
+      const repositories = createPostgresProviderRepositories(client);
+      await expect(repositories.profiles.updateProfile({
+        ownerUserId: first.ownerUserId,
+        providerProfileId: modelsProfile.id,
+        changes: {
+          expectedRevision: staleCandidateProfile.revision,
+          routingSource: "openrouter_preset",
+          defaultModel: "validated-against-stale-endpoint",
+          fallbackModels: [],
+          preset: {
+            slug: "story-router",
+            designatedVersionId: "version-5",
+            version: 5,
+            configHash: "f".repeat(64)
+          },
+          providerPolicy: { allow_fallbacks: true }
+        }
+      })).rejects.toMatchObject({ statusCode: 409 });
+      expect((await repositories.profiles.listProfiles({ ownerUserId: first.ownerUserId }))
+        .find((profile) => profile.id === modelsProfile.id)).toMatchObject({
+        baseUrl: "https://newer-openrouter.example/v1",
+        routingSource: "models",
+        defaultModel: "updated-primary",
+        fallbackModels: ["fallback-a", "fallback-b"]
+      });
+    });
+
+    await inTransaction(async (client) => {
+      const repositories = createPostgresProviderRepositories(client);
+      const beforeIncompleteChange = (await repositories.profiles.listProfiles({ ownerUserId: first.ownerUserId }))
+        .find((profile) => profile.id === modelsProfile.id);
+      await expect(repositories.profiles.updateProfile({
+        ownerUserId: first.ownerUserId,
+        providerProfileId: modelsProfile.id,
+        changes: { routingSource: "models", defaultModel: "should-not-persist" }
+      })).rejects.toMatchObject({ statusCode: 400 });
+      expect((await repositories.profiles.listProfiles({ ownerUserId: first.ownerUserId }))
+        .find((profile) => profile.id === modelsProfile.id)).toEqual(beforeIncompleteChange);
+      await repositories.profiles.updateProfile({
+        ownerUserId: first.ownerUserId,
+        providerProfileId: modelsProfile.id,
+        changes: {
+          routingSource: "openrouter_preset",
+          defaultModel: "preset-primary",
+          fallbackModels: ["preset-fallback"],
+          preset: {
+            slug: "refreshed-router",
+            designatedVersionId: "version-4",
+            version: 4,
+            configHash: "e".repeat(64)
+          },
+          providerPolicy: { allow_fallbacks: true }
+        }
+      });
+      await expect(repositories.resolution.resolveDirect({
+        ownerUserId: first.ownerUserId, providerRole: "text", selectedProviderProfileId: modelsProfile.id
+      })).resolves.toMatchObject({
+        routingSource: "openrouter_preset", model: "preset-primary", fallbackModels: ["preset-fallback"],
+        preset: { slug: "refreshed-router", version: 4, configHash: "e".repeat(64) }
+      });
+      await repositories.profiles.updateProfile({
+        ownerUserId: first.ownerUserId,
+        providerProfileId: modelsProfile.id,
+        changes: {
+          routingSource: "models",
+          defaultModel: "manual-primary",
+          fallbackModels: ["manual-fallback"]
+        }
+      });
+      await expect(repositories.resolution.resolveDirect({
+        ownerUserId: first.ownerUserId, providerRole: "text", selectedProviderProfileId: modelsProfile.id
+      })).resolves.toMatchObject({
+        routingSource: "models", model: "manual-primary", fallbackModels: ["manual-fallback"],
+        preset: null, providerPolicy: {}
+      });
+    });
+  });
+
   it("keeps endpoint, credential, inventory, model, state, health, timeout, and retry policy independent across every role", async () => {
     const roles = ["text", "image", "embedding", "intent"] as const satisfies readonly ProviderRole[];
     const credentialSecret = "provider-role-parity-encryption-secret";
@@ -304,7 +478,7 @@ integration("provider PostgreSQL adapters", () => {
           { ownerUserId: first.ownerUserId },
           profile.id,
           role,
-          expected.selectedModel
+          { modelOverride: expected.selectedModel }
         );
         expect(lease).toMatchObject({
           providerProfileId: profile.id,

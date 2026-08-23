@@ -53,6 +53,30 @@ body:not([data-management-view="dashboard"]) .dashboard-home { display: none; }
 .provider-advanced-fields { display: grid; grid-template-columns: minmax(220px, 1fr) repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
 .provider-form label, .provider-select-row label, .generation-form label { display: grid; gap: 7px; color: var(--muted); font-size: .86rem; font-weight: 700; }
 .provider-form .text-model-setting.hidden { display: none; }
+.provider-routing-editor { grid-column: 1 / -1; display: grid; gap: 13px; min-width: 0; padding: 15px; border: 1px solid var(--purple); border-radius: 12px; background: rgba(142, 98, 238, .07); }
+.provider-routing-editor.hidden { display: none; }
+.provider-routing-heading { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
+.provider-routing-heading h3, .provider-routing-heading p, .provider-preset-preview h4 { margin: 0; }
+.provider-routing-heading h3, .provider-preset-preview h4 { color: var(--gold); font-size: .94rem; }
+.provider-routing-heading p { margin-top: 4px; color: var(--muted); font-size: .8rem; line-height: 1.45; }
+.provider-routing-sources { display: flex; flex-wrap: wrap; gap: 8px; }
+.provider-routing-sources [aria-pressed="true"] { border-color: var(--gold); color: var(--gold); background: #211e12; }
+.provider-routing-panel { display: grid; gap: 10px; min-width: 0; }
+.provider-routing-model-list, .provider-preset-list, .provider-preset-preview ol { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.provider-routing-model-row, .provider-preset-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: #101522; }
+.provider-routing-model-row > div, .provider-preset-row > div { min-width: 0; }
+.provider-routing-model-row strong, .provider-preset-row strong { display: block; overflow-wrap: anywhere; }
+.provider-routing-model-row span, .provider-preset-row span { display: block; margin-top: 3px; color: var(--muted); font-size: .76rem; overflow-wrap: anywhere; }
+.provider-routing-model-actions { display: flex; flex-wrap: wrap; justify-content: end; gap: 6px; }
+.provider-routing-model-actions button { min-width: 0; padding: 6px 8px; font-size: .76rem; }
+.provider-preset-row button { text-align: left; }
+.provider-preset-row.inactive { opacity: .68; }
+.provider-preset-row.inactive button { cursor: not-allowed; }
+.provider-preset-tools { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px; }
+.provider-preset-tools label { display: grid; gap: 7px; min-width: 0; }
+.provider-preset-pagination { justify-content: space-between; }
+.provider-preset-preview { display: grid; gap: 8px; padding-top: 12px; border-top: 1px solid var(--line); }
+.provider-preset-preview ol { padding-left: 22px; list-style: decimal; color: var(--text); }
 .provider-form label[title] { cursor: help; }
 .field-label-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .mini-icon-button { width: 28px; height: 28px; border: 1px solid var(--line); border-radius: 8px; padding: 0; background: var(--panel-2); color: var(--text); cursor: pointer; font-weight: 900; }
@@ -484,6 +508,7 @@ legend { padding: 0 8px; color: var(--purple); font-size: .8rem; font-weight: 80
   .import-card, .import-options { display: grid; grid-template-columns: 1fr; }
   .campaign-archive-preview dl { grid-template-columns: 1fr; }
   .provider-model-settings { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .provider-preset-tools { grid-template-columns: 1fr; }
   .provider-select-row { grid-template-columns: 1fr; }
   .chronicle-context-grid { grid-template-columns: 1fr; }
   .chronicle-context-grid > * + * { border-top: 1px solid var(--line); border-left: 0; }
@@ -554,6 +579,10 @@ legend { padding: 0 8px; color: var(--purple); font-size: .8rem; font-weight: 80
   .field-help dl { grid-template-columns: 1fr; }
   .field-help dd { margin-bottom: 5px; }
   .provider-model-picker-tools, .provider-custom-model-row { grid-template-columns: 1fr; }
+  .provider-routing-heading { align-items: stretch; flex-direction: column; }
+  .provider-routing-heading .mini-icon-button { width: 100%; }
+  .provider-routing-model-row, .provider-preset-row { grid-template-columns: 1fr; }
+  .provider-routing-model-actions { justify-content: start; }
   .character-roster-heading { align-items: stretch; flex-direction: column; }
   .character-generator-fields, .character-edit-row, .character-edit-row.tracker-row { grid-template-columns: 1fr; }
   .character-row-remove { width: 100%; }

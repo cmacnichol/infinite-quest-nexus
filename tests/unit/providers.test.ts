@@ -779,7 +779,7 @@ describe("text provider adapters", () => {
     }]);
   });
 
-  it("handles unparseable JSON in a failed provider response", async () => {
+  it("does not expose unparseable failed provider response bodies", async () => {
     const fetcher = vi.fn(async () => {
       return new Response("Internal Server Error - Invalid JSON [", {
         status: 500,
@@ -794,9 +794,11 @@ describe("text provider adapters", () => {
       thrownError = error;
     }
 
-    expect(thrownError).toBeInstanceOf(Error);
-    expect((thrownError as Error).message).toContain("Internal Server Error - Invalid JSON [");
-    expect((thrownError as any).statusCode).toBe(500);
+    expect(thrownError).toMatchObject({
+      code: "provider_model_fallback_exhausted",
+      statusCode: 502
+    });
+    expect((thrownError as Error).message).not.toContain("Internal Server Error - Invalid JSON [");
   });
 
   it("rejects oversized generic JSON responses with a safe permanent error", async () => {
@@ -906,6 +908,26 @@ describe("text provider adapters", () => {
     }, createTestProviderTransport(fetcher as typeof fetch));
     expect(streamChunks).toEqual(["Hello", "Hello world"]);
     expect(result.content).toBe("Hello world");
+  });
+
+  it("does not treat a malformed terminal SSE event as a completed provider response", async () => {
+    const openAiProfile: TextProviderProfile = {
+      ...profile,
+      providerType: "openai_compatible",
+      baseUrl: "https://api.openai.com/v1"
+    };
+    const fetcher = vi.fn(async () => new Response("data: {not json}\n\n", {
+      status: 200,
+      headers: { "content-type": "text/event-stream" }
+    }));
+
+    await expect(callTextProvider(openAiProfile, {
+      systemPrompt: "system",
+      input: "input",
+      onChunk: vi.fn()
+    }, createTestProviderTransport(fetcher as typeof fetch))).rejects.toMatchObject({
+      code: "provider_model_fallback_exhausted"
+    });
   });
 
   it("cancels oversized SSE responses and returns a safe typed failure", async () => {

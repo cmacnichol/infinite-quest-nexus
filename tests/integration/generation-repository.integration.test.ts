@@ -268,6 +268,7 @@ integration("PostgreSQL generation command repository", () => {
        ) VALUES ($1,$2,$3,'filesystem',$4,'image/png',1) RETURNING id`,
       [ownerUserId, campaignId, sha256(`provisional-asset-${generationJobId}`), `provisional/${generationJobId}.png`]
     );
+    const designatedVersionId = crypto.randomUUID();
     await pool.query(
       `INSERT INTO turn_illustration_segment_assets (segment_id, owner_user_id, asset_id, image_job_id, variant_index)
        VALUES ($1,$2,$3,$4,0)`,
@@ -862,5 +863,93 @@ integration("PostgreSQL generation command repository", () => {
     expect(releaseSavepoint).toBeLessThan(outerRollback);
     expect(outerRollback).toBeLessThan(replayLookup);
     expect(replayLookup).toBeLessThan(activeLookup);
+  });
+
+  it("snapshots complete text routing for append, replacement, and explicit model override", async () => {
+    const designatedVersionId = crypto.randomUUID();
+    const routeProviderId = (await createProvider(pool, {
+      name: `Routing snapshot ${crypto.randomUUID()}`,
+      providerType: "openrouter",
+      providerRole: "text",
+      baseUrl: "http://127.0.0.1:9912",
+      defaultModel: "primary-model",
+      contextWindowTokens: 32768,
+      maxOutputTokens: 4096,
+      temperature: 0,
+      enabled: true,
+      configuration: {}
+    }, credentialSecret)).id;
+    await pool.query(
+      `UPDATE provider_profiles SET routing_source = 'openrouter_preset', fallback_models = ARRAY['fallback-model'],
+         preset_slug = 'story-router', preset_designated_version_id = $2, preset_version = 3,
+         preset_config_hash = $3, preset_provider_policy = '{"order":["provider-a"]}'::jsonb
+       WHERE id = $1`,
+      [routeProviderId, designatedVersionId, "a".repeat(64)]
+    );
+    const imported = await campaign();
+    const append = await repository().enqueueAppend(
+      { ownerUserId, campaignId: imported.campaignId },
+      generationRequestSchema.parse({ ...appendRequest("Snapshot the preset plan."), providerProfileId: routeProviderId })
+    );
+    const routing = await pool.query<{ requested_model: string; model_routing: Record<string, unknown> }>(
+      "SELECT requested_model, context_options->'modelRouting' AS model_routing FROM generation_jobs WHERE id = $1",
+      [append.id]
+    );
+    expect(routing.rows[0]).toMatchObject({
+      requested_model: "primary-model",
+      model_routing: {
+        requestedModel: "primary-model",
+        configuredModels: ["primary-model", "fallback-model"],
+        routingSource: "openrouter_preset",
+        presetSlug: "story-router",
+        presetDesignatedVersionId: designatedVersionId,
+        presetVersion: 3,
+        presetConfigHash: "a".repeat(64),
+        providerPolicy: { order: ["provider-a"] }
+      }
+    });
+    const replacementCampaign = await campaign();
+    const replacement = await repository().enqueueReplacement(
+      { ownerUserId, campaignId: replacementCampaign.campaignId },
+      generationRetryLatestRequestSchema.parse({
+        ...replacementRequest("Snapshot the replacement preset plan."),
+        providerProfileId: routeProviderId
+      })
+    );
+    await expect(pool.query<{ model_routing: Record<string, unknown> }>(
+      "SELECT context_options->'modelRouting' AS model_routing FROM generation_jobs WHERE id = $1",
+      [replacement.id]
+    )).resolves.toMatchObject({ rows: [{ model_routing: {
+      requestedModel: "primary-model", configuredModels: ["primary-model", "fallback-model"],
+      routingSource: "openrouter_preset", presetSlug: "story-router", presetDesignatedVersionId: designatedVersionId,
+      presetVersion: 3, presetConfigHash: "a".repeat(64)
+    } }] });
+    await pool.query(
+      `UPDATE provider_profiles SET default_model = 'changed-primary', fallback_models = ARRAY['changed-fallback'],
+         preset_version = 4, preset_config_hash = $2, preset_provider_policy = '{"order":["provider-b"]}'::jsonb
+       WHERE id = $1`,
+      [routeProviderId, "b".repeat(64)]
+    );
+    const durable = await pool.query<{ model_routing: Record<string, unknown> }>(
+      "SELECT context_options->'modelRouting' AS model_routing FROM generation_jobs WHERE id = $1",
+      [append.id]
+    );
+    expect(durable.rows[0]?.model_routing).toMatchObject({
+      configuredModels: ["primary-model", "fallback-model"], presetVersion: 3,
+      presetConfigHash: "a".repeat(64), providerPolicy: { order: ["provider-a"] }
+    });
+
+    const overrideCampaign = await campaign();
+    const override = await repository().enqueueAppend(
+      { ownerUserId, campaignId: overrideCampaign.campaignId },
+      generationRequestSchema.parse({ ...appendRequest("Use the explicit override."), providerProfileId: routeProviderId, model: "override-model" })
+    );
+    await expect(pool.query<{ model_routing: Record<string, unknown> }>(
+      "SELECT context_options->'modelRouting' AS model_routing FROM generation_jobs WHERE id = $1",
+      [override.id]
+    )).resolves.toMatchObject({ rows: [{ model_routing: {
+      requestedModel: "override-model", configuredModels: ["override-model"], routingSource: "models",
+      presetSlug: null, presetDesignatedVersionId: null, presetVersion: null, presetConfigHash: null, providerPolicy: {}
+    } }] });
   });
 });

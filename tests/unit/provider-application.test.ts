@@ -26,6 +26,7 @@ import {
   type WorldGenerationCostPort,
   type WorldGenerationPromptPort
 } from "../../packages/application/src/providers/index.js";
+import { createProviderApplicationAdapter } from "../../services/api/src/provider-application-adapter.js";
 
 const owner = { ownerUserId: "00000000-0000-4000-8000-000000000001" } as const;
 
@@ -37,6 +38,10 @@ const textProfile: ProviderProfileView = {
   capability: "text_generation",
   baseUrl: "http://model.internal/v1",
   defaultModel: "story-model",
+  routingSource: "models",
+  fallbackModels: [],
+  preset: null,
+  providerPolicy: {},
   contextWindowTokens: 32_768,
   maxOutputTokens: 4_096,
   temperature: 0.8,
@@ -45,6 +50,7 @@ const textProfile: ProviderProfileView = {
   enabled: true,
   isDefault: true,
   hasCredential: false,
+  revision: "text-profile-revision",
   health: {
     status: "healthy",
     consecutiveFailures: 0,
@@ -155,6 +161,328 @@ function dependencies(): ProviderApplicationDependencies {
 }
 
 describe("provider application contracts", () => {
+  it("discovers presets only through an OpenRouter text profile owned by the caller", async () => {
+    const runtime = {
+      discoverPresets: vi.fn(async () => ({ presets: [], totalCount: 0 })),
+      discoverCandidatePresetsWithCredential: vi.fn()
+    };
+    const application = {
+      listProfiles: vi.fn(async () => [{ ...textProfile, providerType: "openrouter" as const }])
+    };
+    const adapter = createProviderApplicationAdapter({ application, runtime, transaction: vi.fn() } as never);
+
+    await expect(adapter.presets(owner.ownerUserId, textProfile.id, { offset: 0, limit: 25 })).resolves.toEqual({ presets: [], totalCount: 0 });
+
+    expect(application.listProfiles).toHaveBeenCalledWith(owner);
+    expect(runtime.discoverPresets).toHaveBeenCalledWith(owner, textProfile.id, { offset: 0, limit: 25 });
+  });
+
+  it("rejects non-OpenRouter and non-text or intent preset discovery profiles before calling runtime", async () => {
+    const runtime = { discoverPresets: vi.fn() };
+    const adapter = createProviderApplicationAdapter({
+      application: { listProfiles: vi.fn(async () => [textProfile]) },
+      runtime,
+      transaction: vi.fn()
+    } as never);
+
+    await expect(adapter.presets(owner.ownerUserId, textProfile.id, { offset: 0, limit: 25 }))
+      .rejects.toMatchObject({ statusCode: 400 });
+    expect(runtime.discoverPresets).not.toHaveBeenCalled();
+  });
+
+  it.each(["image", "embedding"] as const)("rejects %s candidate preset discovery before forwarding credentials", async (providerRole) => {
+    const runtime = { discoverCandidatePresetsWithCredential: vi.fn() };
+    const adapter = createProviderApplicationAdapter({
+      application: { listProfiles: vi.fn() },
+      runtime,
+      transaction: vi.fn()
+    } as never);
+    const input = {
+      name: "Candidate",
+      providerType: "openrouter" as const,
+      providerRole,
+      baseUrl: "https://openrouter.ai/api/v1",
+      defaultModel: "",
+      contextWindowTokens: 32_768,
+      maxOutputTokens: 4_096,
+      temperature: 0.8,
+      requestTimeoutMs: 5_000,
+      configuration: {},
+      enabled: false,
+      isDefault: false,
+      apiKey: "candidate-secret"
+    };
+
+    expect(() => adapter.discoverPresets(owner.ownerUserId, input as never, { offset: 0, limit: 10 }))
+      .toThrow(/OpenRouter preset discovery/i);
+    expect(runtime.discoverCandidatePresetsWithCredential).not.toHaveBeenCalled();
+  });
+
+  it("forwards candidate credentials only to the runtime preset discovery boundary", async () => {
+    const runtime = { discoverCandidatePresetWithCredential: vi.fn(async () => ({ slug: "story-router", models: [], providerPolicy: {} })) };
+    const adapter = createProviderApplicationAdapter({
+      application: { listProfiles: vi.fn() },
+      runtime,
+      transaction: vi.fn()
+    } as never);
+    const input = {
+      name: "Candidate",
+      providerType: "openrouter" as const,
+      providerRole: "intent" as const,
+      baseUrl: "https://openrouter.ai/api/v1",
+      defaultModel: "",
+      contextWindowTokens: 32_768,
+      maxOutputTokens: 4_096,
+      temperature: 0.8,
+      requestTimeoutMs: 5_000,
+      configuration: {},
+      enabled: false,
+      isDefault: false,
+      apiKey: "candidate-secret"
+    };
+
+    await adapter.discoverPreset(owner.ownerUserId, input as never, "story-router");
+    expect(runtime.discoverCandidatePresetWithCredential).toHaveBeenCalledWith(
+      expect.objectContaining({ ownerUserId: owner.ownerUserId, providerType: "openrouter", providerRole: "intent" }),
+      "candidate-secret",
+      "story-router"
+    );
+  });
+
+  it("reduces a direct HTTP model override to one safe text-routing descriptor", async () => {
+    const resolution = {
+      status: "resolved" as const,
+      requestedRole: "text" as const,
+      resolvedRole: "text" as const,
+      providerProfileId: textProfile.id,
+      providerType: textProfile.providerType,
+      routingSource: "models" as const,
+      model: "http-override-model",
+      fallbackModels: [],
+      preset: null,
+      providerPolicy: {}
+    };
+    const execute = vi.fn(async () => ({
+      content: "A bounded direct response.",
+      finishReason: "stop",
+      modelInstanceId: "http-override-model",
+      usage: {}
+    }));
+    const runtime = {
+      execution: { text: vi.fn(async () => ({ model: "http-override-model", execute })) }
+    };
+    const application = {
+      resolveDirect: vi.fn(async () => resolution)
+    };
+    const adapter = createProviderApplicationAdapter({
+      application,
+      runtime,
+      transaction: vi.fn()
+    } as never);
+
+    await expect(adapter.generateText(owner.ownerUserId, {
+      providerProfileId: textProfile.id,
+      model: "http-override-model",
+      messages: [{ role: "user", content: "Answer directly." }]
+    })).resolves.toMatchObject({ model: "http-override-model" });
+
+    expect(application.resolveDirect).toHaveBeenCalledWith({
+      ownerUserId: owner.ownerUserId,
+      providerRole: "text",
+      selectedProviderProfileId: textProfile.id,
+      model: "http-override-model"
+    });
+    expect(runtime.execution.text).toHaveBeenCalledWith({ ownerUserId: owner.ownerUserId }, resolution);
+  });
+
+  it("materializes a server-validated preset snapshot when creating a provider profile", async () => {
+    const snapshot = {
+      slug: "story-router",
+      designatedVersionId: "version-3",
+      version: 3,
+      configHash: "a".repeat(64),
+      models: ["primary/model", "fallback/model"],
+      providerPolicy: { allow_fallbacks: true }
+    };
+    const profile = {
+      ...textProfile,
+      providerType: "openrouter" as const,
+      defaultModel: "primary/model",
+      routingSource: "openrouter_preset",
+      fallbackModels: ["fallback/model"],
+      preset: {
+        slug: snapshot.slug,
+        designatedVersionId: snapshot.designatedVersionId,
+        version: snapshot.version,
+        configHash: snapshot.configHash
+      },
+      providerPolicy: snapshot.providerPolicy
+    };
+    const application = {
+      createProfile: vi.fn(async () => ({ profile, configurationProjection: { kind: "sanitized_read" } })),
+      listProfiles: vi.fn()
+    };
+    const runtime = {
+      discoverCandidatePresetWithCredential: vi.fn(async () => snapshot),
+      storeCredential: vi.fn()
+    };
+    const adapter = createProviderApplicationAdapter({
+      application,
+      runtime,
+      transaction: async (work: (binding: { application: typeof application; runtime: typeof runtime }) => unknown) => work({ application, runtime })
+    } as never);
+
+    const response = await adapter.create(owner.ownerUserId, {
+      name: "Preset story router",
+      providerType: "openrouter",
+      providerRole: "text",
+      baseUrl: "https://openrouter.ai/api/v1",
+      defaultModel: "",
+      routingSource: "openrouter_preset",
+      presetSlug: snapshot.slug,
+      contextWindowTokens: 32_768,
+      maxOutputTokens: 4_096,
+      temperature: 0.8,
+      requestTimeoutMs: 60_000,
+      configuration: {},
+      enabled: true,
+      isDefault: false,
+      apiKey: "transient-create-credential"
+    } as never);
+
+    expect(application.createProfile).toHaveBeenCalledWith(expect.objectContaining({
+      ...owner,
+      defaultModel: "primary/model",
+      routingSource: "openrouter_preset",
+      fallbackModels: ["fallback/model"],
+      preset: {
+        slug: snapshot.slug,
+        designatedVersionId: snapshot.designatedVersionId,
+        version: snapshot.version,
+        configHash: snapshot.configHash
+      },
+      providerPolicy: { allow_fallbacks: true }
+    }));
+    expect(response).toMatchObject({
+      routingSource: "openrouter_preset",
+      defaultModel: "primary/model",
+      fallbackModels: ["fallback/model"],
+      preset: { slug: "story-router", version: 3, configHash: "a".repeat(64) },
+      providerPolicy: { allow_fallbacks: true }
+    });
+    expect(JSON.stringify(response)).not.toContain("transient-create-credential");
+  });
+
+  it("uses the saved owner-scoped credential with patched candidate configuration for a preset update", async () => {
+    const snapshot = {
+      slug: "intent-router",
+      designatedVersionId: "intent-version-3",
+      version: 3,
+      configHash: "b".repeat(64),
+      models: ["primary/intent", "fallback/intent"],
+      providerPolicy: { allow_fallbacks: true }
+    };
+    const existing: ProviderProfileView = {
+      ...textProfile,
+      providerType: "openrouter" as const,
+      providerRole: "intent" as const,
+      capability: "intent_classification",
+      revision: "revision-before-validation"
+    };
+    const profile = {
+      ...existing,
+      defaultModel: "primary/intent",
+      routingSource: "openrouter_preset",
+      fallbackModels: ["fallback/intent"],
+      preset: {
+        slug: snapshot.slug,
+        designatedVersionId: snapshot.designatedVersionId,
+        version: snapshot.version,
+        configHash: snapshot.configHash
+      },
+      providerPolicy: snapshot.providerPolicy
+    };
+    const application = {
+      listProfiles: vi.fn(async () => [existing]),
+      updateProfile: vi.fn(async () => ({ profile, configurationProjection: { kind: "sanitized_read" } }))
+    };
+    const runtime = { getPresetForCandidate: vi.fn(async () => snapshot), storeCredential: vi.fn() };
+    const adapter = createProviderApplicationAdapter({
+      application,
+      runtime,
+      transaction: async (work: (binding: { application: typeof application; runtime: typeof runtime }) => unknown) => work({ application, runtime })
+    } as never);
+
+    const response = await adapter.update(owner.ownerUserId, existing.id, {
+      routingSource: "openrouter_preset",
+      presetSlug: snapshot.slug,
+      baseUrl: "https://patched-openrouter.example/v1"
+    } as never);
+
+    expect(runtime.getPresetForCandidate).toHaveBeenCalledWith(
+      owner,
+      existing.id,
+      expect.objectContaining({
+        providerType: "openrouter",
+        providerRole: "intent",
+        baseUrl: "https://patched-openrouter.example/v1"
+      }),
+      snapshot.slug
+    );
+    expect(application.updateProfile).toHaveBeenCalledWith(expect.objectContaining({
+      ...owner,
+      providerProfileId: existing.id,
+      changes: expect.objectContaining({
+        defaultModel: "primary/intent",
+        routingSource: "openrouter_preset",
+        expectedRevision: "revision-before-validation",
+        fallbackModels: ["fallback/intent"],
+        preset: {
+          slug: snapshot.slug,
+          designatedVersionId: snapshot.designatedVersionId,
+          version: snapshot.version,
+          configHash: snapshot.configHash
+        },
+        providerPolicy: { allow_fallbacks: true }
+      })
+    }));
+    expect(response).toMatchObject({
+      routingSource: "openrouter_preset",
+      defaultModel: "primary/intent",
+      fallbackModels: ["fallback/intent"],
+      preset: { slug: "intent-router", version: 3, configHash: "b".repeat(64) },
+      providerPolicy: { allow_fallbacks: true }
+    });
+    expect(response).not.toHaveProperty("revision");
+    expect(JSON.stringify(response)).not.toContain("intent-version-3-secret");
+  });
+
+  it("leaves a legacy primary-only PATCH for the repository's row-locked merge", async () => {
+    const application = {
+      listProfiles: vi.fn(),
+      updateProfile: vi.fn(async () => ({
+        profile: { ...textProfile, defaultModel: "new-primary" },
+        configurationProjection: { kind: "sanitized_read" }
+      }))
+    };
+    const adapter = createProviderApplicationAdapter({
+      application,
+      runtime: { storeCredential: vi.fn() },
+      transaction: async (work: (binding: { application: typeof application; runtime: { storeCredential: ReturnType<typeof vi.fn> } }) => unknown) => work({
+        application,
+        runtime: { storeCredential: vi.fn() }
+      })
+    } as never);
+
+    await adapter.update(owner.ownerUserId, textProfile.id, { defaultModel: "new-primary" });
+
+    expect(application.listProfiles).not.toHaveBeenCalled();
+    expect(application.updateProfile).toHaveBeenCalledWith({
+      ...owner,
+      providerProfileId: textProfile.id,
+      changes: { defaultModel: "new-primary" }
+    });
+  });
   it("keeps owner authority explicit while delegating profile operations", async () => {
     const ports = dependencies();
     const application = createProviderApplication(ports);

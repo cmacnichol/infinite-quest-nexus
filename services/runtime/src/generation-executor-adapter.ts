@@ -57,7 +57,10 @@ import {
   parseSceneCoverageOutput,
   parseStoryOutput,
   performPrivateRoll,
+  ProviderModelFallbackExhaustedError,
+  ProviderStreamInterruptedError,
   providerTransportErrorDetails,
+  routingStrategy,
   type ActivatedEvent,
   type ProviderRequest,
   type ProviderResult
@@ -108,7 +111,7 @@ export type GenerationExecutionCollaborators = Readonly<{
   loadTextExecution(
     ownerUserId: string,
     providerProfileId: string,
-    model?: string
+    routing: GenerationExecutionPayload["model_routing"]
   ): Promise<GenerationTextProvider>;
   promptFromSnapshot(
     snapshot: PromptSnapshot | Record<string, unknown> | undefined,
@@ -138,6 +141,8 @@ export type GenerationExecutorDependencies = Readonly<{
 type StoryCostOperation = "rpg_assessment" | "event_trigger_before" | "story_generation"
   | "story_recovery" | "event_trigger_after" | "event_extension"
   | "scene_coverage_validation" | "scene_coverage_rewrite";
+
+const modelRoutingRecoveryOperations = new WeakMap<object, StoryCostOperation>();
 
 type TurnGenerationPhase =
   | "provider_loading"
@@ -405,6 +410,124 @@ function snapshottedStoryLength(context: GenerationExecutionPayload["context_opt
   return { profile, minWords, maxWords };
 }
 
+function safeModelRouting(
+  job: GenerationExecutionPayload,
+  input: Readonly<{
+    reason: string;
+    retryDisposition: "automatic_retry" | "explicit_regeneration";
+    attemptedModels: readonly string[];
+    partialNarrationAvailable: boolean;
+  }>
+) {
+  return {
+    reason: input.reason,
+    retryDisposition: input.retryDisposition,
+    configuredModels: [...job.model_routing.configuredModels],
+    attemptedModels: [...input.attemptedModels],
+    partialNarrationAvailable: input.partialNarrationAvailable
+  };
+}
+
+function attemptedModelsFromError(error: ProviderModelFallbackExhaustedError | ProviderStreamInterruptedError): string[] {
+  return error.attempts.map((attempt) => attempt.model).filter(Boolean);
+}
+
+function initialAuditNumber(job: GenerationExecutionPayload): number {
+  // Each worker claim has room for an initial response, a repair response, and
+  // a terminal routing-recovery audit without colliding with a later retry.
+  return job.attempts * 3 - 2;
+}
+
+function routingRecoveryAuditNumber(job: GenerationExecutionPayload): number {
+  return job.attempts * 3;
+}
+
+function isModelRoutingRecovery(error: unknown): error is ProviderModelFallbackExhaustedError | ProviderStreamInterruptedError {
+  return error instanceof ProviderModelFallbackExhaustedError || error instanceof ProviderStreamInterruptedError;
+}
+
+function attemptModelRouting(
+  job: GenerationExecutionPayload,
+  result?: ProviderResult,
+  failure?: ProviderModelFallbackExhaustedError | ProviderStreamInterruptedError
+) {
+  const attempts = result?.modelRouting?.attempts || failure?.attempts || [];
+  const resolvedModel = result?.modelRouting?.resolvedModel || result?.modelInstanceId || null;
+  return {
+    strategy: result?.modelRouting?.strategy || routingStrategy({
+      providerType: job.model_routing.providerType,
+      model: job.model_routing.requestedModel,
+      fallbackModels: job.model_routing.configuredModels.slice(1),
+      routingSource: job.model_routing.routingSource
+    }),
+    configuredModels: [...job.model_routing.configuredModels],
+    resolvedModel,
+    fallbackUsed: result?.modelRouting?.fallbackUsed ?? Boolean(resolvedModel
+      && resolvedModel !== job.model_routing.requestedModel),
+    emittedOutput: result?.modelRouting?.emittedOutput ?? failure?.emittedOutput ?? false,
+    attempts: attempts.map((attempt) => ({
+      model: attempt.model,
+      outcome: attempt.outcome,
+      reason: attempt.reason,
+      emittedOutput: attempt.emittedOutput,
+      ...(attempt.retryAfterMs === undefined ? {} : { retryAfterMs: attempt.retryAfterMs })
+    }))
+  };
+}
+
+async function persistModelRoutingRecovery(
+  repository: GenerationExecutionRepository,
+  scope: GenerationLeaseScope,
+  job: GenerationExecutionPayload,
+  error: ProviderModelFallbackExhaustedError | ProviderStreamInterruptedError,
+  partialOutput: string
+): Promise<void> {
+  const exhaustion = error instanceof ProviderModelFallbackExhaustedError;
+  const reason = exhaustion ? "model_plan_exhausted" : "provider_stream_interrupted";
+  const partialNarrationAvailable = !exhaustion && Boolean(partialOutput);
+  if (partialNarrationAvailable) {
+    assertActiveGenerationUpdate(
+      await repository.savePartialNarration(scope, partialOutput),
+      "preserving interrupted streamed output"
+    );
+  }
+  const attemptedModels = attemptedModelsFromError(error);
+  const storyOperation = modelRoutingRecoveryOperations.get(error) || "story_generation";
+  await repository.recordAttempt({
+    ...scope,
+    attemptNumber: routingRecoveryAuditNumber(job),
+    recoveryKind: reason,
+    requestMetadata: {
+      storyOperation,
+      model: job.model_routing.requestedModel,
+      providerType: job.model_routing.providerType
+    },
+    responseMetadata: { modelRouting: attemptModelRouting(job, undefined, error) },
+    providerResponseId: null,
+    finishReason: null,
+    rawOutput: null,
+    validationErrors: [],
+    overwrite: true
+  });
+  assertActiveGenerationUpdate(await repository.markRecoverable({
+    ...scope,
+    providerResponseId: null,
+    providerFinishReason: null,
+    errorCode: reason,
+    errorMessage: exhaustion
+      ? "Every configured text model failed before narration began."
+      : "The text-provider stream was interrupted after narration began.",
+    recoveryMetadata: {
+      modelRouting: safeModelRouting(job, {
+        reason,
+        retryDisposition: "explicit_regeneration",
+        attemptedModels,
+        partialNarrationAvailable
+      })
+    }
+  }), "saving model routing recovery state");
+}
+
 async function persistOrchestration(
   repository: GenerationExecutionRepository,
   scope: GenerationLeaseScope,
@@ -470,6 +593,7 @@ async function callCampaignTextProvider(
     });
     return result;
   } catch (error) {
+    if (isModelRoutingRecovery(error)) modelRoutingRecoveryOperations.set(error, operation);
     logProviderTransportError(error, {
       generationJobId: job.id,
       campaignId: job.campaign_id,
@@ -548,6 +672,7 @@ async function executeLoadedGeneration(
 ): Promise<boolean> {
   const { repository, collaborators, pool } = dependencies;
   const scope = { jobId: job.id, ownerUserId: job.owner_user_id, workerId };
+  let streamedPartialOutput = "";
   const generationStartedAt = Date.now();
   const diagnosticContext: TurnGenerationDiagnosticContext = {
     generationJobId: job.id,
@@ -572,7 +697,7 @@ async function executeLoadedGeneration(
     const provider = await phase("provider_loading", () => collaborators.loadTextExecution(
       job.owner_user_id,
       job.provider_profile_id,
-      job.requested_model
+      job.model_routing
     ));
 
     const preparedInput = await phase("input_preparation", async () => {
@@ -670,6 +795,7 @@ async function executeLoadedGeneration(
             if (response.outputLimited) throw new Error("The private RPG assessment reached its output limit.");
             assessment = parseRpgAssessment(response.content);
           } catch (error) {
+            if (isModelRoutingRecovery(error)) throw error;
             assessmentError = error instanceof Error ? error.message : String(error);
             assessment = localRpgAssessment(job.action, inputs.rpgStats);
           }
@@ -698,6 +824,7 @@ async function executeLoadedGeneration(
               triggers
             );
           } catch (error) {
+            if (isModelRoutingRecovery(error)) throw error;
             triggerError = error instanceof Error ? error.message : String(error);
           }
         }
@@ -750,6 +877,11 @@ async function executeLoadedGeneration(
       const contextFingerprint = sha256(stableStringify({
         provider: provider.id,
         model: provider.model,
+        modelRouting: {
+          configuredModels: job.model_routing.configuredModels,
+          providerPolicyHash: job.model_routing.providerPolicyHash,
+          presetConfigHash: job.model_routing.presetConfigHash
+        },
         protocol: job.prompt_protocol_version,
         expectedTurnNumber: job.expected_turn_number,
         action: safeAction,
@@ -803,7 +935,10 @@ async function executeLoadedGeneration(
     let lastStreamPersistWarningAt = 0;
     const onChunk = async (_delta: string, accumulated: string) => {
       const now = Date.now();
-      if (now - lastPartialUpdate < 350 || accumulated === lastPartialContent) return;
+      const unchanged = accumulated === lastPartialContent;
+      lastPartialContent = accumulated;
+      streamedPartialOutput = accumulated;
+      if (now - lastPartialUpdate < 350 || unchanged) return;
       lastPartialUpdate = now;
       lastPartialContent = accumulated;
       try {
@@ -959,7 +1094,7 @@ async function executeLoadedGeneration(
         ? "output_limit"
         : firstReason;
       const initialValidationErrors = parsed.ok ? [] : parsed.errors;
-      const initialAttemptNumber = job.attempts * 2 - 1;
+      const initialAttemptNumber = initialAuditNumber(job);
       logger.info({
         event: "turn_generation_validation_completed",
         ...generationLogContext(job, workerId),
@@ -983,7 +1118,8 @@ async function executeLoadedGeneration(
         responseMetadata: {
           usage: result.usage,
           outputLimited: result.outputLimited,
-          modelInstanceId: result.modelInstanceId
+          modelInstanceId: result.modelInstanceId,
+          modelRouting: attemptModelRouting(job, result)
         },
         providerResponseId: result.responseId || null,
         finishReason: result.finishReason || null,
@@ -1063,7 +1199,8 @@ async function executeLoadedGeneration(
           responseMetadata: {
             usage: result.usage,
             outputLimited: result.outputLimited,
-            modelInstanceId: result.modelInstanceId
+            modelInstanceId: result.modelInstanceId,
+            modelRouting: attemptModelRouting(job, result)
           },
           providerResponseId: result.responseId || null,
           finishReason: result.finishReason || null,
@@ -1092,7 +1229,15 @@ async function executeLoadedGeneration(
         providerFinishReason: result.finishReason || null,
         errorCode: code,
         errorMessage: messages.join(" ").slice(0, 4000),
-        recoveryMetadata: { retryable: true, attemptCount: recoveryAttempted ? 2 : 1 }
+        recoveryMetadata: {
+          modelRouting: safeModelRouting(job, {
+            reason: code,
+            retryDisposition: "automatic_retry",
+            attemptedModels: result.modelRouting?.attempts.map((attempt) => attempt.model)
+              || [result.modelRouting?.resolvedModel || provider.model],
+            partialNarrationAvailable: Boolean(lastPartialContent)
+          })
+        }
       }), "saving recovery state");
       logger.warn({
         event: "turn_generation_recoverable",
@@ -1122,7 +1267,8 @@ async function executeLoadedGeneration(
         coverage = coverageResponse.outputLimited
           ? null
           : parseSceneCoverageOutput(coverageResponse.content);
-      } catch {
+      } catch (error) {
+        if (isModelRoutingRecovery(error)) throw error;
         coverage = null;
       }
       logger.info({
@@ -1186,7 +1332,8 @@ async function executeLoadedGeneration(
             repairedCoverage = coverageResponse.outputLimited
               ? null
               : parseSceneCoverageOutput(coverageResponse.content);
-          } catch {
+          } catch (error) {
+            if (isModelRoutingRecovery(error)) throw error;
             repairedCoverage = null;
           }
         }
@@ -1209,7 +1356,15 @@ async function executeLoadedGeneration(
             providerFinishReason: result.finishReason || null,
             errorCode: "scene_coverage",
             errorMessage: details.join(" ").slice(0, 4000),
-            recoveryMetadata: { retryable: true, sceneCoverageRewriteAttempted: true }
+            recoveryMetadata: {
+              modelRouting: safeModelRouting(job, {
+                reason: "scene_coverage",
+                retryDisposition: "automatic_retry",
+                attemptedModels: result.modelRouting?.attempts.map((attempt) => attempt.model)
+                  || [result.modelRouting?.resolvedModel || provider.model],
+                partialNarrationAvailable: Boolean(lastPartialContent)
+              })
+            }
           }), "saving scene recovery state");
           logger.warn({
             event: "turn_generation_recoverable",
@@ -1241,6 +1396,7 @@ async function executeLoadedGeneration(
               parsed.story.narration
             );
           } catch (error) {
+            if (isModelRoutingRecovery(error)) throw error;
             triggerError = error instanceof Error ? error.message : String(error);
           }
         }
@@ -1282,6 +1438,7 @@ async function executeLoadedGeneration(
             }
           });
         } catch (error) {
+          if (isModelRoutingRecovery(error)) throw error;
           orchestration = await persistOrchestration(repository, scope, job, {
             extensionError: (error instanceof Error ? error.message : String(error)).slice(0, 2000)
           });
@@ -1356,25 +1513,32 @@ async function executeLoadedGeneration(
       durationMs: Date.now() - generationStartedAt
     });
   } catch (error) {
-    const transportError = providerTransportErrorDetails(error);
-    const rawCode = transportError
-      ? (transportError.timedOut ? "provider_request_timeout" : "provider_transport_error")
-      : errorCodeFrom(error) || "generation_failed";
-    const code = safeLogErrorCode(rawCode, "generation_failed");
-    const failed = await repository.markFailed({
-      ...scope,
-      errorCode: PUBLIC_GENERATION_FAILURE_CODE,
-      errorMessage: PUBLIC_GENERATION_FAILURE_MESSAGE,
-      recoveryMetadata: transportError ? { transportError } : {}
-    });
-    if (failed) {
-      logger.error({
-        event: "turn_generation_failed",
-        ...generationLogContext(job, workerId),
-        errorCode: code,
-        durationMs: Date.now() - generationStartedAt,
-        transportTimedOut: Boolean(transportError?.timedOut)
+    if (isModelRoutingRecovery(error)) {
+      await persistModelRoutingRecovery(repository, scope, job, error, streamedPartialOutput);
+    } else {
+      const transportError = providerTransportErrorDetails(error);
+      const rawCode = transportError
+        ? (transportError.timedOut ? "provider_request_timeout" : "provider_transport_error")
+        : errorCodeFrom(error) || "generation_failed";
+      const code = safeLogErrorCode(rawCode, "generation_failed");
+      const failed = await repository.markFailed({
+        ...scope,
+        errorCode: PUBLIC_GENERATION_FAILURE_CODE,
+        errorMessage: PUBLIC_GENERATION_FAILURE_MESSAGE,
+        // ADR0012 transport details are already normalized and deliberately
+        // omit upstream response bodies and credentials.  Keep them for
+        // unrelated legacy/single-model failure diagnosis.
+        recoveryMetadata: transportError ? { transportError } : {}
       });
+      if (failed) {
+        logger.error({
+          event: "turn_generation_failed",
+          ...generationLogContext(job, workerId),
+          errorCode: code,
+          durationMs: Date.now() - generationStartedAt,
+          transportTimedOut: Boolean(transportError?.timedOut)
+        });
+      }
     }
     if (job.streaming_segments_state?.provisionalSetId) {
       try {

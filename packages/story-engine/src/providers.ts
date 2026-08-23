@@ -25,6 +25,19 @@ import {
   pollSogniSdkGeneration,
   submitSogniSdkGeneration
 } from "./providers/illustration/sogni-sdk/index.js";
+import {
+  configuredTextModels,
+  normalizeModelFailure,
+  normalizeSseFailure,
+  ProviderModelFallbackExhaustedError,
+  ProviderSseTerminalError,
+  ProviderStreamInterruptedError,
+  routingStrategy,
+  shouldAdvanceModel,
+  type ModelFallbackReason,
+  type ProviderModelAttempt,
+  type ProviderModelRouting
+} from "./text-model-fallback.js";
 
 export {
   configureDefaultProviderTransport,
@@ -43,6 +56,16 @@ export type TextProviderProfile = {
   requestTimeoutMs?: number;
   apiKey?: string;
   configuration?: Record<string, unknown>;
+  /** Task 6 supplies this complete, persisted snapshot for text and intent execution. */
+  routingSource?: "models" | "openrouter_preset";
+  fallbackModels?: readonly string[];
+  presetProvenance?: Readonly<{
+    slug: string;
+    designatedVersionId: string;
+    version: number;
+    configHash: string;
+  }> | null;
+  providerPolicy?: Readonly<Record<string, unknown>>;
 };
 
 export type ProviderRequest = {
@@ -63,7 +86,11 @@ export type ProviderResult = {
   usage: { inputTokens: number; outputTokens: number; totalTokens: number };
   reportedCost: ReportedProviderCost | null;
   rawMetadata: Record<string, unknown>;
+  modelRouting?: ProviderModelRouting;
 };
+
+type ProviderAttemptResult = Omit<ProviderResult, "modelRouting">;
+export type RoutedProviderResult = ProviderResult & Readonly<{ modelRouting: ProviderModelRouting }>;
 
 export type ReportedProviderCost = {
   amount: string;
@@ -199,6 +226,19 @@ export class ProviderTransportError extends Error {
   }
 }
 
+export class ProviderRequestCancelledError extends Error {
+  readonly code = "provider_request_cancelled";
+  readonly statusCode = 499;
+  readonly expose = true;
+  readonly permanent = true;
+  readonly retryable = false;
+
+  constructor() {
+    super("The provider request was cancelled before a complete response was received.");
+    this.name = "ProviderRequestCancelledError";
+  }
+}
+
 const DEFAULT_REQUEST_TIMEOUT_MS = 300_000;
 const responseStartTimes = new WeakMap<Response, number>();
 
@@ -266,15 +306,20 @@ function transportFailure(
   startedAt: number
 ): Error {
   if (cause instanceof ProviderTransportError
+    || cause instanceof ProviderRequestCancelledError
     || cause instanceof ProviderDestinationNotAllowedError
     || cause instanceof ProviderResponseTooLargeError) return cause;
   const chain = errorChain(cause);
   const messages = chain.map((item) => String(item.message || ""));
   const names = chain.map((item) => String(item.name || ""));
   const codes = chain.map((item) => String(item.code || "")).filter(Boolean);
-  const timedOut = codes.some((code) => /TIMEOUT/i.test(code))
-    || names.some((name) => /^(?:TimeoutError|AbortError)$/i.test(name))
+  const hasExplicitTimeout = codes.some((code) => /TIMEOUT/i.test(code))
+    || names.some((name) => /^TimeoutError$/i.test(name))
     || messages.some((message) => /timed?\s*out|headers timeout|body timeout/i.test(message));
+  const cancelled = !hasExplicitTimeout && (codes.some((code) => /^(?:ABORT_ERR|UND_ERR_ABORTED)$/i.test(code))
+    || names.some((name) => /^AbortError$/i.test(name)));
+  if (cancelled) return new ProviderRequestCancelledError();
+  const timedOut = hasExplicitTimeout;
   const timeoutMs = requestTimeoutMs(profile);
   const providerName = profile.providerType === "lmstudio" ? "LM Studio"
     : profile.providerType === "openrouter" ? "OpenRouter"
@@ -701,6 +746,34 @@ function headers(profile: TextProviderProfile, endpoint?: string): Record<string
   };
 }
 
+const openRouterProviderPolicyKeys = new Set([
+  "order", "only", "ignore", "allow_fallbacks", "require_parameters", "data_collection", "zdr", "quantizations", "sort", "max_price"
+]);
+
+function safeOpenRouterProviderPolicy(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const policy: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (!openRouterProviderPolicyKeys.has(key)) continue;
+    if (key === "sort" && entry && typeof entry === "object" && (entry as { partition?: unknown }).partition === "none") continue;
+    try {
+      const cloned = JSON.parse(JSON.stringify(entry)) as unknown;
+      if (cloned !== undefined) policy[key] = cloned;
+    } catch {
+      // The persisted snapshot schema rejects unsafe policy shapes; omit malformed values defensively at execution.
+    }
+  }
+  return policy;
+}
+
+function retryAfterMilliseconds(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1_000);
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(0, date - Date.now()) : undefined;
+}
+
 async function checkedJson(
   response: Response,
   profile?: TextProviderProfile,
@@ -721,7 +794,12 @@ async function checkedJson(
   try { data = text ? JSON.parse(text) as Record<string, any> : {}; } catch { /* response error below includes preview */ }
   if (!response.ok) {
     const message = String(data.error?.message || data.error || text || response.statusText).slice(0, 2000);
-    throw Object.assign(new Error(`Provider request failed (${response.status}): ${message}`), { statusCode: response.status, providerMessage: message });
+    throw Object.assign(new Error(`Provider request failed (${response.status}): ${message}`), {
+      statusCode: response.status,
+      providerMessage: message,
+      providerErrorType: data.error?.metadata?.error_type ?? data.error?.code,
+      retryAfterMs: retryAfterMilliseconds(response.headers.get("retry-after"))
+    });
   }
   return data;
 }
@@ -823,40 +901,52 @@ async function readSseStream(
           .split(/\r?\n/)
           .filter((line) => line.startsWith("data:"))
           .map((line) => line.slice(5).trim());
-        for (const dataStr of dataLines) {
-          if (!dataStr || dataStr === "[DONE]") continue;
-          try {
-            const parsed = JSON.parse(dataStr);
-            allData.push(parsed);
-            finalData = { ...finalData, ...parsed };
-            let delta = "";
-            if (typeof parsed.content === "string" && parsed.type?.includes("delta")) {
-              delta = parsed.content;
-            } else if (parsed.choices?.[0]?.delta?.content !== undefined) {
-              delta = String(parsed.choices[0].delta.content || "");
-            } else if (typeof parsed.choices?.[0]?.text === "string") {
-              delta = parsed.choices[0].text;
-            } else if (Array.isArray(parsed.output)) {
-              const lastMsg = parsed.output.findLast?.((item: any) => item?.type === "message" || item?.type === "message.delta");
-              if (lastMsg?.content && typeof lastMsg.content === "string") {
-                if (lastMsg.content.startsWith(accumulated)) {
-                  delta = lastMsg.content.slice(accumulated.length);
-                } else if (!accumulated.startsWith(lastMsg.content)) {
-                  delta = lastMsg.content;
-                }
-              }
+        const dataStr = dataLines.join("\n");
+        if (!dataStr || dataStr === "[DONE]") continue;
+        let parsed: Record<string, any>;
+        try {
+          parsed = JSON.parse(dataStr) as Record<string, any>;
+        } catch {
+          throw new ProviderSseTerminalError({ reason: "provider_unavailable" });
+        }
+        if (parsed.error && typeof parsed.error === "object") {
+          const error = parsed.error as Record<string, unknown>;
+          throw new ProviderSseTerminalError(normalizeSseFailure(
+            error.metadata && typeof error.metadata === "object" ? (error.metadata as Record<string, unknown>).error_type : error.code,
+            response.headers.get("retry-after"),
+            {
+              statusCode: error.status_code ?? error.status ?? (typeof error.code === "number" ? error.code : undefined) ?? parsed.status,
+              code: error.code
             }
-            if (delta) {
-              accumulated += delta;
-              await onChunk(delta, accumulated);
+          ));
+        }
+        allData.push(parsed);
+        finalData = { ...finalData, ...parsed };
+        let delta = "";
+        if (typeof parsed.content === "string" && parsed.type?.includes("delta")) {
+          delta = parsed.content;
+        } else if (parsed.choices?.[0]?.delta?.content !== undefined) {
+          delta = String(parsed.choices[0].delta.content || "");
+        } else if (typeof parsed.choices?.[0]?.text === "string") {
+          delta = parsed.choices[0].text;
+        } else if (Array.isArray(parsed.output)) {
+          const lastMsg = parsed.output.findLast?.((item: any) => item?.type === "message" || item?.type === "message.delta");
+          if (lastMsg?.content && typeof lastMsg.content === "string") {
+            if (lastMsg.content.startsWith(accumulated)) {
+              delta = lastMsg.content.slice(accumulated.length);
+            } else if (!accumulated.startsWith(lastMsg.content)) {
+              delta = lastMsg.content;
             }
-          } catch {
-            // ignore malformed or non-json SSE event data
           }
+        }
+        if (delta) {
+          accumulated += delta;
+          await onChunk(delta, accumulated);
         }
       }
     }
   } catch (error) {
+    if (error instanceof ProviderSseTerminalError) throw error;
     throw transportFailure(profile, operation, url, error, responseStartTimes.get(response) ?? Date.now());
   } finally {
     reader.releaseLock();
@@ -864,7 +954,7 @@ async function readSseStream(
   return { content: accumulated, finalData, allData };
 }
 
-async function callLmStudio(profile: TextProviderProfile, request: ProviderRequest, transport: ProviderTransport): Promise<ProviderResult> {
+async function callLmStudio(profile: TextProviderProfile, request: ProviderRequest, transport: ProviderTransport): Promise<ProviderAttemptResult> {
   await ensureLmStudioModelLoaded(profile, "story generation model loading", transport);
   const rejectedResponse = String(request.rejectedResponse || "").trim()
     .slice(0, Math.max(4000, Math.min(80_000, profile.maxOutputTokens * 4)));
@@ -925,7 +1015,7 @@ async function callLmStudio(profile: TextProviderProfile, request: ProviderReque
   };
 }
 
-async function callOpenAiCompatible(profile: TextProviderProfile, request: ProviderRequest, transport: ProviderTransport): Promise<ProviderResult> {
+async function callOpenAiCompatible(profile: TextProviderProfile, request: ProviderRequest, transport: ProviderTransport): Promise<ProviderAttemptResult> {
   const rejectedResponse = String(request.rejectedResponse || "").trim()
     .slice(0, Math.max(4000, Math.min(80_000, profile.maxOutputTokens * 4)));
   const messages = [
@@ -943,12 +1033,23 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
     max_tokens: profile.maxOutputTokens,
     response_format: { type: "json_object" }
   };
+  const models = configuredTextModels(profile);
+  if (profile.providerType === "openrouter" && models.length > 1) {
+    delete payload.model;
+    payload.models = models;
+  }
+  if (profile.providerType === "openrouter" && profile.routingSource === "openrouter_preset") {
+    const policy = safeOpenRouterProviderPolicy(profile.providerPolicy);
+    if (Object.keys(policy).length) payload.provider = policy;
+  }
   if (request.onChunk) {
     payload.stream = true;
     payload.stream_options = { include_usage: true };
   }
   const url = `${openAiRoot(profile.baseUrl)}/chat/completions`;
-  const send = () => providerFetch(profile, "story generation", url, { method: "POST", headers: headers(profile, url), body: JSON.stringify(payload) }, transport);
+  const requestHeaders = headers(profile, url);
+  if (profile.providerType === "openrouter") requestHeaders["X-OpenRouter-Metadata"] = "enabled";
+  const send = () => providerFetch(profile, "story generation", url, { method: "POST", headers: requestHeaders, body: JSON.stringify(payload) }, transport);
   let response = await send();
   if (!response.ok) {
     const clone = response.clone();
@@ -970,7 +1071,9 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
       const message = String(data.error?.message || data.error || text || response.statusText).slice(0, 2000);
       throw Object.assign(new Error(`Provider request failed (${response.status}): ${message}`), {
         statusCode: response.status,
-        providerMessage: message
+        providerMessage: message,
+        providerErrorType: data.error?.metadata?.error_type ?? data.error?.code,
+        retryAfterMs: retryAfterMilliseconds(response.headers.get("retry-after"))
       });
     }
   }
@@ -1001,6 +1104,9 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
   const content = typeof contentValue === "string" ? contentValue : Array.isArray(contentValue)
     ? contentValue.map((part: any) => part?.text || "").join("") : "";
   const finishReason = String(choice.finish_reason || "");
+  if (choice.message?.refusal || /^(?:refusal|content_filter)$/i.test(finishReason)) {
+    throw new ProviderSseTerminalError({ reason: /content/i.test(finishReason) ? "content_policy_violation" : "refusal" });
+  }
   return {
     content: content.trim(),
     responseId: String(data.id || ""),
@@ -1017,14 +1123,98 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
   };
 }
 
+function resultFailure(result: ProviderAttemptResult): ModelFallbackReason | null {
+  // Output-limit completion is terminal for routing but remains a normal provider result for the existing validation path.
+  if (result.outputLimited) return null;
+  if (/content.?filter/i.test(result.finishReason)) return "content_policy_violation";
+  if (/refusal/i.test(result.finishReason)) return "refusal";
+  return result.content.trim() ? null : "empty_response";
+}
+
+function failedAttempt(model: string, reason: ModelFallbackReason, emittedOutput: boolean, retryAfterMs?: number): ProviderModelAttempt {
+  return {
+    model,
+    outcome: reason === "refusal" ? "refused" : "failed",
+    reason,
+    emittedOutput,
+    ...(retryAfterMs === undefined ? {} : { retryAfterMs })
+  };
+}
+
+function safeExhausted(attempts: readonly ProviderModelAttempt[], retryAfterMs?: number): ProviderModelFallbackExhaustedError {
+  return new ProviderModelFallbackExhaustedError(attempts, retryAfterMs);
+}
+
+async function callTextProviderAttempt(
+  profile: TextProviderProfile,
+  request: ProviderRequest,
+  transport: ProviderTransport
+): Promise<ProviderAttemptResult> {
+  return profile.providerType === "lmstudio"
+    ? callLmStudio(profile, request, transport)
+    : callOpenAiCompatible(profile, request, transport);
+}
+
 export async function callTextProvider(
   profile: TextProviderProfile,
   request: ProviderRequest,
   transport: ProviderTransport = defaultProviderTransport()
-): Promise<ProviderResult> {
-  return profile.providerType === "lmstudio"
-    ? callLmStudio(profile, request, transport)
-    : callOpenAiCompatible(profile, request, transport);
+): Promise<RoutedProviderResult> {
+  const configuredModels = configuredTextModels(profile);
+  const models = configuredModels.length ? configuredModels : [profile.model];
+  const strategy = routingStrategy(profile, models);
+  const candidates = strategy === "sequential" ? models : [profile.model];
+  const attempts: ProviderModelAttempt[] = [];
+
+  for (const [index, model] of candidates.entries()) {
+    let emittedOutput = false;
+    const candidateProfile: TextProviderProfile = strategy === "sequential"
+      ? { ...profile, model, fallbackModels: [], routingSource: "models", presetProvenance: null, providerPolicy: {} }
+      : profile;
+    const candidateRequest: ProviderRequest = request.onChunk
+      ? {
+          ...request,
+          onChunk: async (delta, accumulated) => {
+            emittedOutput = emittedOutput || Boolean(delta);
+            await request.onChunk?.(delta, accumulated);
+          }
+        }
+      : request;
+    try {
+      const result = await callTextProviderAttempt(candidateProfile, candidateRequest, transport);
+      const failureReason = resultFailure(result);
+      if (failureReason) throw new ProviderSseTerminalError({ reason: failureReason });
+      const resolvedModel = strategy === "sequential" ? model : result.modelInstanceId || model;
+      attempts.push({ model: resolvedModel, outcome: "succeeded", reason: null, emittedOutput });
+      return {
+        ...result,
+        modelRouting: {
+          strategy,
+          configuredModels: models,
+          resolvedModel,
+          fallbackUsed: index > 0 || (strategy !== "sequential" && models.length > 1 && resolvedModel !== models[0]),
+          attempts,
+          emittedOutput
+        }
+      };
+    } catch (error) {
+      const normalized = normalizeModelFailure(error);
+      const attempt = failedAttempt(model, normalized.reason, emittedOutput, normalized.retryAfterMs);
+      attempts.push(attempt);
+      if (emittedOutput) throw new ProviderStreamInterruptedError(attempts, normalized.retryAfterMs);
+      const advanceInput = normalized.advanceEligible === undefined
+        ? { reason: normalized.reason, emittedOutput }
+        : { reason: normalized.reason, emittedOutput, advanceEligible: normalized.advanceEligible };
+      if (shouldAdvanceModel(advanceInput) && index < candidates.length - 1) continue;
+      if (error instanceof ProviderDestinationNotAllowedError
+        || error instanceof ProviderResponseTooLargeError) throw error;
+      if (error instanceof ProviderRequestCancelledError) throw error;
+      if (error instanceof ProviderTransportError && candidates.length === 1) throw error;
+      throw safeExhausted(attempts, normalized.retryAfterMs);
+    }
+  }
+
+  throw safeExhausted(attempts);
 }
 
 export async function callEmbeddingProvider(

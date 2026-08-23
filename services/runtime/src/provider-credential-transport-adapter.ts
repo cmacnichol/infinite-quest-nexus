@@ -3,14 +3,18 @@ import type {
   ProviderHealthDiagnosticCode,
   ProviderHealthPort,
   ProviderCandidate,
+  DirectProviderResolution,
   ProviderModelInventory,
   ProviderModelInventoryPort,
   ProviderRole,
   ProviderRuntimeLeasePort
 } from "../../../packages/application/src/providers/index.js";
 import type { DatabaseClient } from "../../../packages/database/src/pool.js";
+import type { OpenRouterPresetSnapshot } from "../../../packages/contracts/src/index.js";
 import {
+  loadPrivateProviderManagementCredentialRow,
   loadPrivateProviderCredentialRow,
+  type PrivateProviderCredentialRow,
   validateProviderConfiguration,
   writeEncryptedProviderCredential
 } from "../../../packages/database/src/provider-repository.js";
@@ -22,6 +26,8 @@ import {
   discoverImageModels,
   discoverModels,
   encryptCredential,
+  createOpenRouterPresetDiscovery,
+  type OpenRouterPresetSummary,
   pollImageProvider,
   submitImageProvider,
   type EmbeddingResult,
@@ -47,7 +53,17 @@ export type RuntimeProviderDescriptor<R extends ProviderRole = ProviderRole> = R
   configuration: Readonly<Record<string, unknown>>;
 }>;
 
-export type RuntimeTextExecution = RuntimeProviderDescriptor<"text" | "intent"> & Readonly<{
+type ResolvedRuntimeTextProvider = Extract<DirectProviderResolution<"text">, Readonly<{ status: "resolved" }>>
+  | Extract<DirectProviderResolution<"intent">, Readonly<{ status: "resolved" }>>;
+
+export type RuntimeTextProviderDescriptor = RuntimeProviderDescriptor<"text" | "intent"> & Readonly<{
+  routingSource: "models" | "openrouter_preset";
+  fallbackModels: readonly string[];
+  presetProvenance: NonNullable<ResolvedRuntimeTextProvider["preset"]> | null;
+  providerPolicy: ResolvedRuntimeTextProvider["providerPolicy"];
+}>;
+
+export type RuntimeTextExecution = RuntimeTextProviderDescriptor & Readonly<{
   execute(
     request: ProviderRequest,
     policy?: Readonly<{ maxOutputTokens?: number; temperature?: number }>,
@@ -66,9 +82,7 @@ export type RuntimeImageExecution = RuntimeProviderDescriptor<"image"> & Readonl
 export type RuntimeProviderExecutionPort = Readonly<{
   text(
     scope: Readonly<{ ownerUserId: string }>,
-    providerProfileId: string,
-    providerRole: "text" | "intent",
-    model?: string,
+    resolution: ResolvedRuntimeTextProvider,
   ): Promise<RuntimeTextExecution>;
   embedding(
     scope: Readonly<{ ownerUserId: string }>,
@@ -92,6 +106,32 @@ export type RuntimeProviderAdapter = Readonly<{
     candidate: ProviderCandidate,
     credential: string | null,
   ): Promise<ProviderModelInventory>;
+  discoverPresets(
+    scope: Readonly<{ ownerUserId: string }>,
+    providerProfileId: string,
+    page: Readonly<{ offset: number; limit: number }>,
+  ): Promise<Readonly<{ presets: readonly OpenRouterPresetSummary[]; totalCount: number }>>;
+  getPreset(
+    scope: Readonly<{ ownerUserId: string }>,
+    providerProfileId: string,
+    slug: string,
+  ): Promise<OpenRouterPresetSnapshot>;
+  getPresetForCandidate(
+    scope: Readonly<{ ownerUserId: string }>,
+    providerProfileId: string,
+    candidate: ProviderCandidate,
+    slug: string,
+  ): Promise<OpenRouterPresetSnapshot>;
+  discoverCandidatePresetsWithCredential(
+    candidate: ProviderCandidate,
+    credential: string | null,
+    page: Readonly<{ offset: number; limit: number }>,
+  ): Promise<Readonly<{ presets: readonly OpenRouterPresetSummary[]; totalCount: number }>>;
+  discoverCandidatePresetWithCredential(
+    candidate: ProviderCandidate,
+    credential: string | null,
+    slug: string,
+  ): Promise<OpenRouterPresetSnapshot>;
 }>;
 
 function diagnostic(error: unknown): ProviderHealthDiagnosticCode {
@@ -114,10 +154,17 @@ export function createRuntimeProviderAdapter(options: Readonly<{
   leaseDurationMs?: number;
 }>): RuntimeProviderAdapter {
   const leaseDurationMs = options.leaseDurationMs ?? 60_000;
+  const presetDiscovery = createOpenRouterPresetDiscovery(options.transport);
 
   async function load(ownerUserId: string, providerProfileId: string) {
     const row = await loadPrivateProviderCredentialRow(options.database, ownerUserId, providerProfileId);
     if (!row) throw Object.assign(new Error("Enabled provider profile not found."), { statusCode: 404 });
+    return row;
+  }
+
+  async function loadForManagementDiscovery(ownerUserId: string, providerProfileId: string) {
+    const row = await loadPrivateProviderManagementCredentialRow(options.database, ownerUserId, providerProfileId);
+    if (!row) throw Object.assign(new Error("Provider profile not found."), { statusCode: 404 });
     return row;
   }
 
@@ -128,7 +175,11 @@ export function createRuntimeProviderAdapter(options: Readonly<{
     }) : null;
   }
 
-  function transportProfile(row: Awaited<ReturnType<typeof load>>, model = row.defaultModel): TextProviderProfile {
+  function transportProfile(
+    row: PrivateProviderCredentialRow,
+    model = row.defaultModel,
+    descriptor?: RuntimeTextProviderDescriptor,
+  ): TextProviderProfile {
     const apiKey = row.encryptedCredential
       ? decryptCredential(row.encryptedCredential, options.credentialSecret)
       : undefined;
@@ -141,12 +192,18 @@ export function createRuntimeProviderAdapter(options: Readonly<{
       temperature: row.temperature,
       requestTimeoutMs: row.requestTimeoutMs,
       configuration: row.configuration,
+      ...(descriptor === undefined ? {} : {
+        routingSource: descriptor.routingSource,
+        fallbackModels: descriptor.fallbackModels,
+        presetProvenance: descriptor.presetProvenance,
+        providerPolicy: descriptor.providerPolicy,
+      }),
       ...(apiKey ? { apiKey } : {})
     };
   }
 
   function descriptor<R extends ProviderRole>(
-    row: Awaited<ReturnType<typeof load>>,
+    row: PrivateProviderCredentialRow,
     providerRole: R,
     model = row.defaultModel,
   ): RuntimeProviderDescriptor<R> {
@@ -164,6 +221,19 @@ export function createRuntimeProviderAdapter(options: Readonly<{
     });
   }
 
+  function textDescriptor(
+    row: PrivateProviderCredentialRow,
+    resolution: ResolvedRuntimeTextProvider,
+  ): RuntimeTextProviderDescriptor {
+    return Object.freeze({
+      ...descriptor(row, resolution.resolvedRole, resolution.model),
+      routingSource: resolution.routingSource,
+      fallbackModels: Object.freeze([...resolution.fallbackModels]),
+      presetProvenance: resolution.preset === null ? null : Object.freeze({ ...resolution.preset }),
+      providerPolicy: Object.freeze({ ...resolution.providerPolicy }),
+    });
+  }
+
   const leases: ProviderRuntimeLeasePort = {
     async credentialReference(scope, providerProfileId) {
       const row = await load(scope.ownerUserId, providerProfileId);
@@ -174,12 +244,13 @@ export function createRuntimeProviderAdapter(options: Readonly<{
         credential: opaqueReference(providerProfileId, Boolean(row.encryptedCredential))
       };
     },
-    async leaseResolved(scope, providerProfileId, providerRole, model) {
+    async leaseResolved(scope, providerProfileId, providerRole, options = {}) {
       const row = await load(scope.ownerUserId, providerProfileId);
       if (row.providerRole !== providerRole) {
         throw Object.assign(new Error(`Enabled ${providerRole} provider profile not found.`), { statusCode: 404 });
       }
-      const selectedModel = model.trim() || row.defaultModel.trim();
+      const explicitModel = options.modelOverride?.trim() ?? "";
+      const selectedModel = explicitModel || row.defaultModel.trim();
       if (!selectedModel) throw Object.assign(new Error("Select a model for this provider profile."), { statusCode: 400 });
       return {
         ownerUserId: scope.ownerUserId,
@@ -190,9 +261,15 @@ export function createRuntimeProviderAdapter(options: Readonly<{
         model: selectedModel,
         requestTimeoutMs: row.requestTimeoutMs,
         configuration: row.configuration,
+        ...((providerRole === "text" || providerRole === "intent") ? {
+          routingSource: explicitModel ? "models" as const : row.routingSource,
+          fallbackModels: explicitModel ? Object.freeze([]) : Object.freeze([...row.fallbackModels]),
+          presetProvenance: explicitModel || row.preset === null ? null : Object.freeze({ ...row.preset }),
+          providerPolicy: explicitModel ? Object.freeze({}) : Object.freeze({ ...row.providerPolicy }),
+        } : {}),
         credential: opaqueReference(providerProfileId, Boolean(row.encryptedCredential)),
         expiresAt: new Date(Date.now() + leaseDurationMs).toISOString()
-      };
+      } as never;
     }
   };
 
@@ -269,20 +346,65 @@ export function createRuntimeProviderAdapter(options: Readonly<{
     }
   }
 
+  function assertPresetCandidate(candidate: ProviderCandidate) {
+    if (candidate.providerType !== "openrouter" || !["text", "intent"].includes(candidate.providerRole)) {
+      throw Object.assign(new Error("OpenRouter preset discovery is available only for text and intent providers."), { statusCode: 400 });
+    }
+  }
+
+  function candidateProfile(candidate: ProviderCandidate, credential: string | null): TextProviderProfile {
+    assertPresetCandidate(candidate);
+    return {
+      providerType: candidate.providerType,
+      baseUrl: candidate.baseUrl.replace(/\/+$/, ""),
+      model: candidate.defaultModel,
+      contextWindowTokens: candidate.contextWindowTokens,
+      maxOutputTokens: candidate.maxOutputTokens,
+      temperature: candidate.temperature,
+      requestTimeoutMs: candidate.requestTimeoutMs,
+      configuration: validateProviderConfiguration(candidate.providerType, candidate.configuration),
+      ...(credential?.trim() ? { apiKey: credential.trim() } : {})
+    };
+  }
+
+  async function presetProfile(ownerUserId: string, providerProfileId: string): Promise<TextProviderProfile> {
+    const row = await loadForManagementDiscovery(ownerUserId, providerProfileId);
+    if (row.providerType !== "openrouter" || !["text", "intent"].includes(row.providerRole)) {
+      throw Object.assign(new Error("OpenRouter preset discovery is available only for text and intent providers."), { statusCode: 400 });
+    }
+    return transportProfile(row);
+  }
+
+  async function presetCandidateProfile(
+    ownerUserId: string,
+    providerProfileId: string,
+    candidate: ProviderCandidate,
+  ): Promise<TextProviderProfile> {
+    const row = await loadForManagementDiscovery(ownerUserId, providerProfileId);
+    assertPresetCandidate(candidate);
+    if (row.providerType !== candidate.providerType || row.providerRole !== candidate.providerRole) {
+      throw Object.assign(new Error("Provider profile not found."), { statusCode: 404 });
+    }
+    const credential = row.encryptedCredential
+      ? decryptCredential(row.encryptedCredential, options.credentialSecret)
+      : null;
+    return candidateProfile(candidate, credential);
+  }
+
   const execution: RuntimeProviderExecutionPort = {
-    async text(scope, providerProfileId, providerRole, model) {
-      const row = await load(scope.ownerUserId, providerProfileId);
-      if (row.providerRole !== providerRole) {
-        throw Object.assign(new Error(`Enabled ${providerRole} provider profile not found.`), { statusCode: 404 });
+    async text(scope, resolution) {
+      const row = await load(scope.ownerUserId, resolution.providerProfileId);
+      if (row.providerRole !== resolution.resolvedRole) {
+        throw Object.assign(new Error(`Enabled ${resolution.resolvedRole} provider profile not found.`), { statusCode: 404 });
       }
-      const selectedModel = model?.trim() || row.defaultModel;
+      const resolvedDescriptor = textDescriptor(row, resolution);
       return Object.freeze({
-        ...descriptor(row, providerRole, selectedModel),
+        ...resolvedDescriptor,
         execute: (
           request: ProviderRequest,
           policy?: Readonly<{ maxOutputTokens?: number; temperature?: number }>,
         ) => callTextProvider(
-          { ...transportProfile(row, selectedModel), ...policy },
+          { ...transportProfile(row, resolvedDescriptor.model, resolvedDescriptor), ...policy },
           request,
           options.transport
         )
@@ -330,6 +452,24 @@ export function createRuntimeProviderAdapter(options: Readonly<{
     inventory,
     execution,
     discoverCandidateModelsWithCredential: discoverCandidateModels,
+    async discoverPresets(scope, providerProfileId, page) {
+      return presetDiscovery.list(await presetProfile(scope.ownerUserId, providerProfileId), page);
+    },
+    async getPreset(scope, providerProfileId, slug) {
+      return presetDiscovery.get(await presetProfile(scope.ownerUserId, providerProfileId), slug);
+    },
+    async getPresetForCandidate(scope, providerProfileId, candidate, slug) {
+      return presetDiscovery.get(
+        await presetCandidateProfile(scope.ownerUserId, providerProfileId, candidate),
+        slug
+      );
+    },
+    async discoverCandidatePresetsWithCredential(candidate, credential, page) {
+      return presetDiscovery.list(candidateProfile(candidate, credential), page);
+    },
+    async discoverCandidatePresetWithCredential(candidate, credential, slug) {
+      return presetDiscovery.get(candidateProfile(candidate, credential), slug);
+    },
     async storeCredential(ownerUserId, providerProfileId, credential) {
       const encrypted = credential?.trim()
         ? encryptCredential(credential.trim(), options.credentialSecret)

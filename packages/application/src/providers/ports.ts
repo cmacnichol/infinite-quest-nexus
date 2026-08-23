@@ -20,6 +20,8 @@ import type {
   ProviderHealthRecord,
   ProviderModelInventory,
   ProviderModelInventoryRequest,
+  ProviderPolicy,
+  ProviderPresetProvenance,
   ProviderProfileMutationResult,
   ProviderProfileView,
   ProviderResolutionRequest,
@@ -54,6 +56,7 @@ export interface ProviderHealthPort {
 }
 
 export interface ProviderResolutionPort {
+  /** Text and intent resolutions include their complete safe routing plan; image remains single-model. */
   resolveDirect<R extends DirectProviderRole>(
     request: ProviderResolutionRequest<R>,
   ): Promise<DirectProviderResolution<R>>;
@@ -112,7 +115,12 @@ export type ProviderTransportLease<R extends ProviderRole = ProviderRole> = Owne
   configuration: SafeProviderConfiguration;
   credential: OpaqueProviderCredentialReference | null;
   expiresAt: string;
-}>;
+}> & (R extends "text" | "intent" ? Readonly<{
+  routingSource: "models" | "openrouter_preset";
+  fallbackModels: readonly string[];
+  presetProvenance: ProviderPresetProvenance | null;
+  providerPolicy: ProviderPolicy;
+}> : unknown);
 
 /** Distinct runtime boundary; ProviderApplication never accepts or returns a lease. */
 export interface ProviderRuntimeLeasePort {
@@ -121,7 +129,7 @@ export interface ProviderRuntimeLeasePort {
     scope: OwnerScope,
     providerProfileId: string,
     providerRole: R,
-    model: string,
+    options?: Readonly<{ modelOverride?: string }>,
   ): Promise<ProviderTransportLease<R>>;
 }
 

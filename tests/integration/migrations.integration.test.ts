@@ -2261,4 +2261,126 @@ integration("standard database migration runner", () => {
       await rm(beforeDirectory, { recursive: true, force: true });
     }
   });
+
+  it("adds provider routing state without rewriting completed generation history", async () => {
+    const databaseName = `infinitequest_provider_routing_${crypto.randomUUID().replaceAll("-", "")}`;
+    const databaseUrlValue = new URL(databaseUrl!);
+    databaseUrlValue.pathname = `/${databaseName}`;
+    const beforeDirectory = await mkdtemp(join(tmpdir(), "infinitequest-provider-routing-before-"));
+    let isolatedPool: DatabasePool | null = null;
+    try {
+      await pool.query(`CREATE DATABASE ${databaseName}`);
+      for (const file of await readdir(resolve("database/migrations"))) {
+        if (file.endsWith(".sql") && file < "0078_") {
+          await copyFile(join(resolve("database/migrations"), file), join(beforeDirectory, file));
+        }
+      }
+      isolatedPool = createDatabasePool(databaseUrlValue.toString(), 2);
+      await migrateDatabase(isolatedPool, beforeDirectory);
+      const ownerUserId = (await isolatedPool.query<{ id: string }>(
+        "SELECT id FROM users WHERE system_key = 'initial-owner'"
+      )).rows[0]!.id;
+      const provider = await isolatedPool.query<{ id: string }>(
+        `INSERT INTO provider_profiles (owner_user_id,name,provider_type,provider_role,base_url,default_model)
+         VALUES ($1,'Legacy router','openrouter','text','https://openrouter.ai/api/v1','legacy-primary')
+         RETURNING id`, [ownerUserId]
+      );
+      const world = await isolatedPool.query<{ id: string }>(
+        "INSERT INTO worlds (owner_user_id,title) VALUES ($1,'Routing world') RETURNING id", [ownerUserId]
+      );
+      const version = await isolatedPool.query<{ id: string }>(
+        `INSERT INTO world_versions (world_id,owner_user_id,version_number,content)
+         VALUES ($1,$2,1,'{"world":{"title":"Routing world"}}'::jsonb) RETURNING id`,
+        [world.rows[0]!.id, ownerUserId]
+      );
+      const campaign = await isolatedPool.query<{ id: string }>(
+        `INSERT INTO campaigns (owner_user_id,world_version_id,title,active_turn_number)
+         VALUES ($1,$2,'Routing campaign',1) RETURNING id`, [ownerUserId, version.rows[0]!.id]
+      );
+      await isolatedPool.query("INSERT INTO campaign_state (campaign_id,owner_user_id) VALUES ($1,$2)",
+        [campaign.rows[0]!.id, ownerUserId]);
+      await isolatedPool.query(
+        `INSERT INTO generation_jobs
+           (owner_user_id,campaign_id,provider_profile_id,idempotency_key,expected_turn_number,action,status,requested_model)
+         VALUES ($1,$2,$3,'routing-active-job',2,'Continue the story.','queued',''),
+                ($1,$2,$3,'routing-completed-job',3,'Preserve the accepted history.','completed','historical-model')`,
+        [ownerUserId, campaign.rows[0]!.id, provider.rows[0]!.id]
+      );
+
+      await expect(migrateDatabase(isolatedPool, resolve("database/migrations"))).resolves.toEqual([
+        "0078_provider_model_fallbacks"
+      ]);
+
+      expect(await isolatedPool.query(
+        `SELECT default_model,fallback_models,routing_source,preset_slug,preset_designated_version_id,
+                preset_version,preset_config_hash,preset_provider_policy
+           FROM provider_profiles WHERE id=$1`, [provider.rows[0]!.id]
+      )).toMatchObject({ rows: [{
+        default_model: "legacy-primary",
+        fallback_models: [],
+        routing_source: "models",
+        preset_slug: null,
+        preset_designated_version_id: null,
+        preset_version: null,
+        preset_config_hash: null,
+        preset_provider_policy: {}
+      }] });
+      expect(await isolatedPool.query(
+        `SELECT idempotency_key,requested_model,requested_fallback_models,requested_routing_source,
+                requested_preset_slug,requested_provider_policy
+           FROM generation_jobs ORDER BY idempotency_key`
+      )).toMatchObject({ rows: [
+        {
+          idempotency_key: "routing-active-job",
+          requested_model: "legacy-primary",
+          requested_fallback_models: [],
+          requested_routing_source: "models",
+          requested_preset_slug: null,
+          requested_provider_policy: {}
+        },
+        {
+          idempotency_key: "routing-completed-job",
+          requested_model: "historical-model",
+          requested_fallback_models: [],
+          requested_routing_source: "models",
+          requested_preset_slug: null,
+          requested_provider_policy: {}
+        }
+      ] });
+      const presetProvenance = [
+        "openrouter_preset", "story-router", "version-123", 3, "a".repeat(64), provider.rows[0]!.id
+      ];
+      await isolatedPool.query(
+        `UPDATE provider_profiles
+            SET routing_source=$1,preset_slug=$2,preset_designated_version_id=$3,preset_version=$4,
+                preset_config_hash=$5,preset_provider_policy='{}'::jsonb
+          WHERE id=$6`,
+        presetProvenance
+      );
+      await expect(isolatedPool.query(
+        "UPDATE provider_profiles SET preset_provider_policy = '{\"tools\":[]}'::jsonb WHERE id = $1",
+        [provider.rows[0]!.id]
+      )).rejects.toThrow();
+      await expect(isolatedPool.query(
+        "UPDATE provider_profiles SET preset_provider_policy = '{\"sort\":{\"partition\":\"none\"}}'::jsonb WHERE id = $1",
+        [provider.rows[0]!.id]
+      )).rejects.toThrow();
+      await isolatedPool.query(
+        `UPDATE generation_jobs
+            SET requested_routing_source=$1,requested_preset_slug=$2,requested_preset_designated_version_id=$3,
+                requested_preset_version=$4,requested_preset_config_hash=$5,requested_provider_policy='{}'::jsonb
+          WHERE idempotency_key='routing-active-job'`,
+        presetProvenance.slice(0, 5)
+      );
+      await expect(isolatedPool.query(
+        `UPDATE generation_jobs
+            SET requested_provider_policy = '{"raw_response":{"body":"must-not-persist"}}'::jsonb
+          WHERE idempotency_key='routing-active-job'`
+      )).rejects.toThrow();
+    } finally {
+      if (isolatedPool) await isolatedPool.end();
+      await dropTestDatabaseWhenIdle(pool, databaseName);
+      await rm(beforeDirectory, { recursive: true, force: true });
+    }
+  });
 });

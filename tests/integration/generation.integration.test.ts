@@ -47,7 +47,7 @@ const integration = databaseUrl ? describe : describe.skip;
 const credentialSecret = "integration-test-credential-secret";
 
 async function generationAuthoritySnapshot(pool: DatabasePool, campaignId: string) {
-  const [campaign, state, turns, memories, canonicalFacts, checkpoints] = await Promise.all([
+  const [campaign, state, turns, memories, canonicalFacts, checkpoints, acceptedIllustrations, memoryChunks] = await Promise.all([
     pool.query<{ value: Record<string, unknown> }>(
       "SELECT to_jsonb(campaign_row) AS value FROM campaigns campaign_row WHERE id = $1",
       [campaignId]
@@ -75,6 +75,16 @@ async function generationAuthoritySnapshot(pool: DatabasePool, campaignId: strin
       `SELECT to_jsonb(checkpoint_row) AS value FROM summary_checkpoints checkpoint_row
         WHERE campaign_id = $1 ORDER BY through_turn, id`,
       [campaignId]
+    ),
+    pool.query<{ value: Record<string, unknown> }>(
+      `SELECT to_jsonb(image_row) AS value FROM image_jobs image_row
+        WHERE campaign_id = $1 AND turn_id IS NOT NULL ORDER BY turn_id, id`,
+      [campaignId]
+    ),
+    pool.query<{ value: Record<string, unknown> }>(
+      `SELECT to_jsonb(chunk_row) AS value FROM chronicle_memory_chunks chunk_row
+        WHERE campaign_id = $1 ORDER BY parent_memory_id, chunk_ordinal, id`,
+      [campaignId]
     )
   ]);
   return {
@@ -83,7 +93,9 @@ async function generationAuthoritySnapshot(pool: DatabasePool, campaignId: strin
     turns: turns.rows.map((row) => row.value),
     memories: memories.rows.map((row) => row.value),
     canonicalFacts: canonicalFacts.rows.map((row) => row.value),
-    checkpoints: checkpoints.rows.map((row) => row.value)
+    checkpoints: checkpoints.rows.map((row) => row.value),
+    acceptedIllustrations: acceptedIllustrations.rows.map((row) => row.value),
+    memoryChunks: memoryChunks.rows.map((row) => row.value)
   };
 }
 
@@ -128,9 +140,12 @@ async function cancelGeneration(pool: DatabasePool, jobId: string) {
 
 type MockReply = {
   content: string;
+  statusCode?: number;
+  rawBody?: string;
   finishReason?: string;
   streamChunks?: string[];
   streamChunkDelayMs?: number;
+  interruptAfterChunks?: boolean;
   onRequest?: () => void;
   waitFor?: Promise<void>;
 };
@@ -178,6 +193,13 @@ integration("durable Story Engine integration", () => {
         if (isTextGeneration) servedReplies.push(reply);
         reply.onRequest?.();
         await reply.waitFor;
+        if (reply.statusCode && reply.statusCode >= 400) {
+          response.writeHead(reply.statusCode, { "content-type": "application/json" });
+          response.end(reply.rawBody ?? JSON.stringify({
+            error: { message: "Synthetic provider response body.", type: "provider_unavailable" }
+          }));
+          return;
+        }
         if (providerRequest.stream === true && reply.streamChunks) {
           response.writeHead(200, { "content-type": "text/event-stream" });
           for (const [index, chunk] of reply.streamChunks.entries()) {
@@ -189,6 +211,10 @@ integration("durable Story Engine integration", () => {
               model: "deterministic-mock",
               choices: [{ delta: { content: chunk }, finish_reason: null }]
             })}\n\n`);
+          }
+          if (reply.interruptAfterChunks) {
+            response.destroy();
+            return;
           }
           response.write(`data: ${JSON.stringify({
             id: crypto.randomUUID(),
@@ -2221,6 +2247,168 @@ integration("durable Story Engine integration", () => {
     await runGenerationJob(pool, "story-worker-benign-roll", 30, credentialSecret);
     expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
     expect(requests.length - requestCount).toBe(1);
+  });
+
+  it("falls back after primary 503 and refusal while preserving requested and resolved model provenance", async () => {
+    await pool.query(
+      "UPDATE provider_profiles SET default_model = $2, fallback_models = $3::text[], routing_source = 'models' WHERE id = $1",
+      [providerId, "primary-model", ["fallback-model"]]
+    );
+    try {
+      for (const primaryReply of [
+        {
+          content: "",
+          statusCode: 503,
+          rawBody: JSON.stringify({ error: { message: "PROVIDER_BODY_503_MARKER", type: "unavailable" } })
+        },
+        { content: validStory("The primary refusal must fall through to the durable fallback."), finishReason: "refusal" }
+      ] satisfies MockReply[]) {
+        const imported = await campaign();
+        const requestOffset = requests.length;
+        replies.push(primaryReply, { content: validStory("The fallback model accepts this scene.") });
+        const job = await queue(imported.campaignId);
+        await runGenerationJob(pool, `story-worker-fallback-${crypto.randomUUID()}`, 30, credentialSecret);
+
+        expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
+        expect(requests.slice(requestOffset).filter((request) => Array.isArray(request.messages)).map((request) => request.model))
+          .toEqual(["primary-model", "fallback-model"]);
+        const turn = await pool.query<{ model_metadata: Record<string, unknown> }>(
+          "SELECT model_metadata FROM turns WHERE campaign_id = $1 AND turn_number = 3", [imported.campaignId]
+        );
+        expect(turn.rows[0]?.model_metadata).toMatchObject({
+          requestedModel: "primary-model",
+          actualModel: "fallback-model",
+          fallbackUsed: true,
+          attemptCount: 2
+        });
+        const costs = await pool.query<{ requested_model: string; resolved_model: string }>(
+          `SELECT requested_model, resolved_model FROM provider_cost_events
+            WHERE generation_job_id = $1 AND category = 'story' ORDER BY created_at, id`, [job.id]
+        );
+        expect(costs.rows).toEqual([{
+          requested_model: "primary-model",
+          resolved_model: "fallback-model"
+        }]);
+      }
+    } finally {
+      await pool.query(
+        "UPDATE provider_profiles SET default_model = $2, fallback_models = $3::text[], routing_source = 'models' WHERE id = $1",
+        [providerId, "deterministic-mock", []]
+      );
+    }
+  });
+
+  it("keeps accepted authority and illustrations immutable when the snapshotted model plan is exhausted", async () => {
+    const imported = await campaign();
+    const acceptedTurn = await pool.query<{ id: string }>(
+      "SELECT id FROM turns WHERE campaign_id = $1 ORDER BY turn_number DESC LIMIT 1", [imported.campaignId]
+    );
+    await pool.query(
+      `INSERT INTO image_jobs (
+         owner_user_id, campaign_id, turn_id, provider_profile_id, requested_model, prompt, prompt_hash,
+         status, provider_type, target_type
+       ) SELECT owner_user_id, campaign_id, $2, $3, 'accepted-model', 'Accepted illustration',
+                'fallback-accepted-' || id::text, 'completed', 'openai_compatible', 'turn_illustration'
+           FROM campaigns WHERE id = $1`,
+      [imported.campaignId, acceptedTurn.rows[0]!.id, providerId]
+    );
+    const authorityBefore = await generationAuthoritySnapshot(pool, imported.campaignId);
+    await pool.query(
+      "UPDATE provider_profiles SET default_model = $2, fallback_models = $3::text[], routing_source = 'models' WHERE id = $1",
+      [providerId, "primary-model", ["fallback-model"]]
+    );
+    try {
+      replies.push(
+        {
+          content: "",
+          statusCode: 503,
+          rawBody: JSON.stringify({
+            prompt: "PROMPT_MARKER_MUST_NOT_PERSIST",
+            credential: "CREDENTIAL_MARKER_MUST_NOT_PERSIST",
+            providerBody: "RAW_PROVIDER_BODY_MARKER_MUST_NOT_PERSIST"
+          })
+        },
+        {
+          content: "",
+          statusCode: 503,
+          rawBody: JSON.stringify({ error: { message: "RAW_PROVIDER_BODY_MARKER_MUST_NOT_PERSIST", type: "unavailable" } })
+        }
+      );
+      const job = await queue(imported.campaignId);
+      await runGenerationJob(pool, "story-worker-exhausted-plan", 30, credentialSecret);
+
+      expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "recoverable", errorCode: "model_plan_exhausted" });
+      expect(await generationAuthoritySnapshot(pool, imported.campaignId)).toEqual(authorityBefore);
+      const persisted = await pool.query<{ recovery_metadata: unknown; response_metadata: unknown }>(
+        `SELECT jobs.recovery_metadata, attempts.response_metadata
+           FROM generation_jobs jobs
+           JOIN generation_attempts attempts ON attempts.generation_job_id = jobs.id
+          WHERE jobs.id = $1`, [job.id]
+      );
+      const serialized = JSON.stringify(persisted.rows[0]);
+      expect(serialized).not.toContain("PROMPT_MARKER_MUST_NOT_PERSIST");
+      expect(serialized).not.toContain("CREDENTIAL_MARKER_MUST_NOT_PERSIST");
+      expect(serialized).not.toContain("RAW_PROVIDER_BODY_MARKER_MUST_NOT_PERSIST");
+      expect(persisted.rows[0]?.recovery_metadata).toMatchObject({
+        modelRouting: {
+          reason: "model_plan_exhausted",
+          retryDisposition: "explicit_regeneration",
+          configuredModels: ["primary-model", "fallback-model"],
+          attemptedModels: ["primary-model", "fallback-model"],
+          partialNarrationAvailable: false
+        }
+      });
+      expect(persisted.rows[0]?.response_metadata).toMatchObject({
+        modelRouting: {
+          strategy: "sequential",
+          resolvedModel: null,
+          fallbackUsed: false,
+          emittedOutput: false,
+          attempts: [
+            { model: "primary-model", reason: "provider_unavailable", emittedOutput: false },
+            { model: "fallback-model", reason: "provider_unavailable", emittedOutput: false }
+          ]
+        }
+      });
+    } finally {
+      await pool.query(
+        "UPDATE provider_profiles SET default_model = $2, fallback_models = $3::text[], routing_source = 'models' WHERE id = $1",
+        [providerId, "deterministic-mock", []]
+      );
+    }
+  });
+
+  it("persists an interrupted streamed partial without trying a fallback or mutating accepted authority", async () => {
+    const imported = await campaign();
+    const authorityBefore = await generationAuthoritySnapshot(pool, imported.campaignId);
+    const requestOffset = requests.length;
+    await pool.query(
+      "UPDATE provider_profiles SET default_model = $2, fallback_models = $3::text[], routing_source = 'models', configuration = $4::jsonb WHERE id = $1",
+      [providerId, "primary-model", ["fallback-model"], JSON.stringify({ streaming: true })]
+    );
+    try {
+      replies.push({
+        content: "",
+        streamChunks: ["First visible partial stream output."],
+        interruptAfterChunks: true
+      });
+      const job = await queue(imported.campaignId);
+      await runGenerationJob(pool, "story-worker-interrupted-stream", 30, credentialSecret);
+
+      expect(await getGenerationJob(pool, job.id)).toMatchObject({
+        status: "recoverable",
+        errorCode: "provider_stream_interrupted",
+        partialOutput: "First visible partial stream output."
+      });
+      expect(requests.slice(requestOffset).filter((request) => Array.isArray(request.messages)).map((request) => request.model))
+        .toEqual(["primary-model"]);
+      expect(await generationAuthoritySnapshot(pool, imported.campaignId)).toEqual(authorityBefore);
+    } finally {
+      await pool.query(
+        "UPDATE provider_profiles SET default_model = $2, fallback_models = $3::text[], routing_source = 'models', configuration = $4::jsonb WHERE id = $1",
+        [providerId, "deterministic-mock", [], JSON.stringify({})]
+      );
+    }
   });
 
   it("leaves the accepted ledger unchanged when output-limited JSON is truncated", async () => {

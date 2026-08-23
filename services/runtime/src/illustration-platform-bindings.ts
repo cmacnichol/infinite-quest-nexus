@@ -44,12 +44,9 @@ export function createIllustrationPlatformBindings(
       })
     },
     promptRefinement: {
-      loadTextExecution: (ownerUserId, providerProfileId, model) => providers.execution.text(
-        { ownerUserId },
-        providerProfileId,
-        "text",
-        model
-      ),
+      loadTextExecution: async (ownerUserId, resolution) => {
+        return providers.execution.text({ ownerUserId }, resolution);
+      },
       recordProviderHealth: (_pool, ownerUserId, providerProfileId, healthy) => providers.health.recordHealth({
         ownerUserId,
         providerProfileId,

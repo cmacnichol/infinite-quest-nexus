@@ -3,6 +3,43 @@ import { apiTimestampSchema } from "./http.js";
 
 export const providerTypeSchema = z.enum(["lmstudio", "openrouter", "manifest", "openai_compatible", "sogni", "sogni_sdk"]);
 export const providerRoleSchema = z.enum(["text", "image", "embedding", "intent"]);
+export const providerRoutingSourceSchema = z.enum(["models", "openrouter_preset"]);
+export const providerPresetSelectionInputSchema = z.object({
+  presetSlug: z.string().trim().min(1).max(160).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/)
+});
+
+const providerModelIdSchema = z.string().trim().min(1).max(500);
+const providerFallbackModelsSchema = z.array(providerModelIdSchema).max(4);
+const providerPolicySchema = z.object({
+  order: z.unknown().optional(),
+  only: z.unknown().optional(),
+  ignore: z.unknown().optional(),
+  allow_fallbacks: z.unknown().optional(),
+  require_parameters: z.unknown().optional(),
+  data_collection: z.unknown().optional(),
+  zdr: z.unknown().optional(),
+  quantizations: z.unknown().optional(),
+  sort: z.unknown().optional(),
+  max_price: z.unknown().optional()
+}).strict().superRefine((value, context) => {
+  if (typeof value.sort === "object" && value.sort !== null
+    && "partition" in value.sort && value.sort.partition === "none") {
+    context.addIssue({ code: "custom", path: ["sort", "partition"], message: "Provider sorting must preserve model partitions." });
+  }
+});
+
+export const openRouterPresetSnapshotSchema = z.object({
+  slug: providerPresetSelectionInputSchema.shape.presetSlug,
+  designatedVersionId: z.string().trim().min(1).max(500),
+  version: z.coerce.number().int().min(1),
+  configHash: z.string().regex(/^[a-f0-9]{64}$/),
+  models: z.array(providerModelIdSchema).min(1).max(5),
+  providerPolicy: providerPolicySchema.default({})
+}).superRefine((value, context) => {
+  if (new Set(value.models).size !== value.models.length) {
+    context.addIssue({ code: "custom", path: ["models"], message: "Preset models must be unique." });
+  }
+});
 
 export const turnInputModeSchema = z.enum(["action", "scene"]);
 export const turnInputSelectionSchema = z.enum(["auto", "action", "scene"]);
@@ -15,7 +52,7 @@ export const turnInputClassificationRequestSchema = z.object({
   preferredFallback: turnInputModeSchema.optional()
 });
 
-export const providerProfileInputSchema = z.object({
+const providerProfileCoreSchema = z.object({
   name: z.string().trim().min(1).max(120),
   providerType: providerTypeSchema,
   providerRole: providerRoleSchema.default("text"),
@@ -29,7 +66,28 @@ export const providerProfileInputSchema = z.object({
   enabled: z.boolean().default(true),
   isDefault: z.boolean().default(false),
   configuration: z.record(z.string(), z.unknown()).default({})
-}).superRefine((value, context) => {
+});
+
+function validateFallbackModels(
+  value: { defaultModel: string; fallbackModels: string[]; providerRole: z.infer<typeof providerRoleSchema> },
+  context: z.RefinementCtx
+) {
+  if (value.fallbackModels.length === 0) return;
+  if (!["text", "intent"].includes(value.providerRole)) {
+    context.addIssue({ code: "custom", path: ["fallbackModels"], message: "Fallback models are available only for text and intent providers." });
+  }
+  if (!value.defaultModel) {
+    context.addIssue({ code: "custom", path: ["defaultModel"], message: "A fallback plan requires a primary model." });
+  }
+  if (value.fallbackModels.includes(value.defaultModel)) {
+    context.addIssue({ code: "custom", path: ["fallbackModels"], message: "Fallback models cannot repeat the primary model." });
+  }
+  if (new Set(value.fallbackModels).size !== value.fallbackModels.length) {
+    context.addIssue({ code: "custom", path: ["fallbackModels"], message: "Fallback models must be unique." });
+  }
+}
+
+function validateProviderProfileCore(value: z.infer<typeof providerProfileCoreSchema>, context: z.RefinementCtx) {
   if (value.providerRole === "text" && value.maxOutputTokens + 512 >= value.contextWindowTokens) {
     context.addIssue({ code: "custom", path: ["maxOutputTokens"], message: "Text output reserve must leave at least 512 tokens for input context." });
   }
@@ -45,12 +103,83 @@ export const providerProfileInputSchema = z.object({
       for (const issue of result.error.issues) context.addIssue({ ...issue, path: ["configuration", ...issue.path] });
     }
   }
+}
+
+export const providerProfileInputSchema = providerProfileCoreSchema.extend({
+  routingSource: providerRoutingSourceSchema.default("models"),
+  fallbackModels: providerFallbackModelsSchema.default([]),
+  presetSlug: providerPresetSelectionInputSchema.shape.presetSlug.optional()
+}).superRefine((value, context) => {
+  validateProviderProfileCore(value, context);
+  validateFallbackModels(value, context);
+
+  if (value.routingSource === "models") {
+    if (value.presetSlug !== undefined) {
+      context.addIssue({ code: "custom", path: ["presetSlug"], message: "Preset selection is only valid for OpenRouter preset routing." });
+    }
+    return;
+  }
+
+  if (value.providerType !== "openrouter" || !["text", "intent"].includes(value.providerRole)) {
+    context.addIssue({ code: "custom", path: ["routingSource"], message: "OpenRouter preset routing is available only for OpenRouter text and intent providers." });
+  }
+  if (!value.presetSlug) {
+    context.addIssue({ code: "custom", path: ["presetSlug"], message: "Select an OpenRouter preset." });
+  }
+  if (value.defaultModel) {
+    context.addIssue({ code: "custom", path: ["defaultModel"], message: "Preset routing does not accept browser-supplied models." });
+  }
+  if (value.fallbackModels.length > 0) {
+    context.addIssue({ code: "custom", path: ["fallbackModels"], message: "Preset routing does not accept browser-supplied fallback models." });
+  }
+});
+
+export const providerProfileResolvedWriteSchema = providerProfileCoreSchema.extend({
+  routingSource: providerRoutingSourceSchema.default("models"),
+  fallbackModels: providerFallbackModelsSchema.default([]),
+  presetSlug: providerPresetSelectionInputSchema.shape.presetSlug.nullable().default(null),
+  presetDesignatedVersionId: z.string().trim().min(1).max(500).nullable().default(null),
+  presetVersion: z.coerce.number().int().min(1).nullable().default(null),
+  presetConfigHash: z.string().regex(/^[a-f0-9]{64}$/).nullable().default(null),
+  presetProviderPolicy: providerPolicySchema.default({})
+}).superRefine((value, context) => {
+  validateProviderProfileCore(value, context);
+  validateFallbackModels(value, context);
+
+  const hasPresetProvenance = value.presetSlug !== null
+    || value.presetDesignatedVersionId !== null
+    || value.presetVersion !== null
+    || value.presetConfigHash !== null;
+  if (value.routingSource === "models") {
+    if (hasPresetProvenance) {
+      context.addIssue({ code: "custom", path: ["routingSource"], message: "Models routing must not retain preset provenance." });
+    }
+    if (Object.keys(value.presetProviderPolicy).length > 0) {
+      context.addIssue({ code: "custom", path: ["presetProviderPolicy"], message: "Models routing must not retain preset provider policy." });
+    }
+    return;
+  }
+
+  if (value.providerType !== "openrouter" || !["text", "intent"].includes(value.providerRole)) {
+    context.addIssue({ code: "custom", path: ["routingSource"], message: "OpenRouter preset routing is available only for OpenRouter text and intent providers." });
+  }
+  if (!value.defaultModel) {
+    context.addIssue({ code: "custom", path: ["defaultModel"], message: "Preset routing requires a resolved primary model." });
+  }
+  for (const field of ["presetSlug", "presetDesignatedVersionId", "presetVersion", "presetConfigHash"] as const) {
+    if (value[field] === null) {
+      context.addIssue({ code: "custom", path: [field], message: "Preset routing requires complete validated provenance." });
+    }
+  }
 });
 
 export const providerProfileUpdateSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
   baseUrl: z.url().refine((value) => value.startsWith("http://") || value.startsWith("https://"), "Base URL must use HTTP or HTTPS.").optional(),
   defaultModel: z.string().trim().max(500).optional(),
+  routingSource: providerRoutingSourceSchema.optional(),
+  fallbackModels: providerFallbackModelsSchema.optional(),
+  presetSlug: providerPresetSelectionInputSchema.shape.presetSlug.optional(),
   contextWindowTokens: z.coerce.number().int().min(1024).max(4_000_000).optional(),
   maxOutputTokens: z.coerce.number().int().min(128).max(262144).optional(),
   temperature: z.coerce.number().min(0).max(2).optional(),
@@ -59,7 +188,32 @@ export const providerProfileUpdateSchema = z.object({
   enabled: z.boolean().optional(),
   isDefault: z.boolean().optional(),
   configuration: z.record(z.string(), z.unknown()).optional()
-}).refine((value) => Object.values(value).some((item) => item !== undefined), "At least one provider field is required.");
+}).superRefine((value, context) => {
+  if (!Object.values(value).some((item) => item !== undefined)) {
+    context.addIssue({ code: "custom", message: "At least one provider field is required." });
+  }
+  if (value.routingSource === undefined) {
+    if (value.fallbackModels !== undefined || value.presetSlug !== undefined) {
+      context.addIssue({ code: "custom", path: ["routingSource"], message: "Routing changes must declare their routing source." });
+    }
+    return;
+  }
+  if (value.routingSource === "models") {
+    if (value.defaultModel === undefined || value.fallbackModels === undefined) {
+      context.addIssue({ code: "custom", path: ["routingSource"], message: "Models routing changes require primary and fallback models together." });
+    }
+    if (value.presetSlug !== undefined) {
+      context.addIssue({ code: "custom", path: ["presetSlug"], message: "Models routing changes cannot include a preset selection." });
+    }
+    return;
+  }
+  if (value.presetSlug === undefined) {
+    context.addIssue({ code: "custom", path: ["presetSlug"], message: "Preset routing changes require a preset selection." });
+  }
+  if (value.defaultModel !== undefined || value.fallbackModels !== undefined) {
+    context.addIssue({ code: "custom", path: ["routingSource"], message: "Preset routing changes cannot include browser-supplied models." });
+  }
+});
 
 export const providerTextRequestSchema = z.object({
   providerProfileId: z.uuid().optional(),
@@ -483,8 +637,16 @@ export const generationStreamSnapshotSchema = z.discriminatedUnion("operationKin
   })
 ]);
 
-export type ProviderProfileInput = z.infer<typeof providerProfileInputSchema>;
+export type ProviderProfileInput = z.infer<typeof providerProfileCoreSchema> & {
+  routingSource?: ProviderRoutingSource | undefined;
+  fallbackModels?: string[] | undefined;
+  presetSlug?: string | undefined;
+};
+export type ProviderProfileResolvedWrite = z.infer<typeof providerProfileResolvedWriteSchema>;
 export type ProviderProfileUpdate = z.infer<typeof providerProfileUpdateSchema>;
+export type ProviderRoutingSource = z.infer<typeof providerRoutingSourceSchema>;
+export type ProviderPresetSelectionInput = z.infer<typeof providerPresetSelectionInputSchema>;
+export type OpenRouterPresetSnapshot = z.infer<typeof openRouterPresetSnapshotSchema>;
 export type ProviderTextRequest = z.infer<typeof providerTextRequestSchema>;
 export type ProviderType = z.infer<typeof providerTypeSchema>;
 export type TurnInputMode = z.infer<typeof turnInputModeSchema>;
