@@ -48,6 +48,11 @@ export type RuntimeConfig = {
   archiveStorageRoot: string;
   archivePreviewTtlSeconds: number;
   systemArchiveArtifactTtlSeconds: number;
+  systemArchiveEnabled?: boolean;
+  systemArchiveUploadTtlSeconds?: number;
+  systemArchiveChunkBytes?: number;
+  systemArchiveAllowLimitIncrease?: boolean;
+  systemArchiveAllowUnknownFreeSpace?: boolean;
   campaignArchiveLimits: ArchiveLimits;
   systemArchiveLimits: ArchiveLimits;
   credentialEncryptionKey: string;
@@ -90,17 +95,21 @@ function boundedArchiveIntegerSetting(
 
 function archiveLimitsSetting(
   scope: "CAMPAIGN" | "SYSTEM",
-  approved: Pick<ArchiveLimits, "maxCompressedBytes" | "maxUncompressedBytes" | "maxEntries">
+  approved: Pick<ArchiveLimits, "maxCompressedBytes" | "maxUncompressedBytes" | "maxEntries">,
+  allowIncrease = false
 ): ArchiveLimits {
   const prefix = `${scope}_ARCHIVE`;
+  const maximum = (approvedMaximum: number): number => allowIncrease
+    ? Number.MAX_SAFE_INTEGER
+    : approvedMaximum;
   return {
-    maxCompressedBytes: boundedArchiveIntegerSetting(`${prefix}_MAX_COMPRESSED_BYTES`, approved.maxCompressedBytes, 1, approved.maxCompressedBytes),
-    maxUncompressedBytes: boundedArchiveIntegerSetting(`${prefix}_MAX_UNCOMPRESSED_BYTES`, approved.maxUncompressedBytes, 1, approved.maxUncompressedBytes),
-    maxEntries: boundedArchiveIntegerSetting(`${prefix}_MAX_ENTRIES`, approved.maxEntries, 1, approved.maxEntries),
-    maxExpansionRatio: boundedArchiveIntegerSetting(`${prefix}_MAX_EXPANSION_RATIO`, 100, 1, 100),
-    maxManifestBytes: boundedArchiveIntegerSetting(`${prefix}_MAX_MANIFEST_BYTES`, 5_242_880, 1, 5_242_880),
-    maxJsonEntryBytes: boundedArchiveIntegerSetting(`${prefix}_MAX_JSON_ENTRY_BYTES`, 1_073_741_824, 1, 1_073_741_824),
-    maxOriginalImageBytes: boundedArchiveIntegerSetting(`${prefix}_MAX_ORIGINAL_IMAGE_BYTES`, 26_214_400, 1, 26_214_400)
+    maxCompressedBytes: boundedArchiveIntegerSetting(`${prefix}_MAX_COMPRESSED_BYTES`, approved.maxCompressedBytes, 1, maximum(approved.maxCompressedBytes)),
+    maxUncompressedBytes: boundedArchiveIntegerSetting(`${prefix}_MAX_UNCOMPRESSED_BYTES`, approved.maxUncompressedBytes, 1, maximum(approved.maxUncompressedBytes)),
+    maxEntries: boundedArchiveIntegerSetting(`${prefix}_MAX_ENTRIES`, approved.maxEntries, 1, maximum(approved.maxEntries)),
+    maxExpansionRatio: boundedArchiveIntegerSetting(`${prefix}_MAX_EXPANSION_RATIO`, 100, 1, maximum(100)),
+    maxManifestBytes: boundedArchiveIntegerSetting(`${prefix}_MAX_MANIFEST_BYTES`, 5_242_880, 1, maximum(5_242_880)),
+    maxJsonEntryBytes: boundedArchiveIntegerSetting(`${prefix}_MAX_JSON_ENTRY_BYTES`, 1_073_741_824, 1, maximum(1_073_741_824)),
+    maxOriginalImageBytes: boundedArchiveIntegerSetting(`${prefix}_MAX_ORIGINAL_IMAGE_BYTES`, 26_214_400, 1, maximum(26_214_400))
   };
 }
 
@@ -192,6 +201,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
       + `when WORKER_GENERATION_CONCURRENCY=${workerGenerationConcurrency}.`
     );
   }
+  const systemArchiveAllowLimitIncrease = booleanSetting("SYSTEM_ARCHIVE_ALLOW_LIMIT_INCREASE", false);
 
   return {
     role: roleValue as RuntimeConfig["role"],
@@ -212,6 +222,11 @@ export function loadRuntimeConfig(): RuntimeConfig {
     archiveStorageRoot: resolve(process.env.ARCHIVE_STORAGE_ROOT?.trim() || "local-data/archives"),
     archivePreviewTtlSeconds: boundedArchiveIntegerSetting("ARCHIVE_PREVIEW_TTL_SECONDS", 1800, 60, 86400),
     systemArchiveArtifactTtlSeconds: boundedArchiveIntegerSetting("SYSTEM_ARCHIVE_ARTIFACT_TTL_SECONDS", 86400, 300, 604800),
+    systemArchiveEnabled: booleanSetting("SYSTEM_ARCHIVE_ENABLED", false),
+    systemArchiveUploadTtlSeconds: boundedArchiveIntegerSetting("SYSTEM_ARCHIVE_UPLOAD_TTL_SECONDS", 86_400, 300, 604_800),
+    systemArchiveChunkBytes: boundedArchiveIntegerSetting("SYSTEM_ARCHIVE_CHUNK_BYTES", 16_777_216, 1_048_576, 67_108_864),
+    systemArchiveAllowLimitIncrease,
+    systemArchiveAllowUnknownFreeSpace: booleanSetting("SYSTEM_ARCHIVE_ALLOW_UNKNOWN_FREE_SPACE", false),
     campaignArchiveLimits: archiveLimitsSetting("CAMPAIGN", {
       maxCompressedBytes: 2_147_483_648,
       maxUncompressedBytes: 21_474_836_480,
@@ -221,7 +236,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
       maxCompressedBytes: 53_687_091_200,
       maxUncompressedBytes: 214_748_364_800,
       maxEntries: 1_000_000
-    }),
+    }, systemArchiveAllowLimitIncrease),
     credentialEncryptionKey: secretSetting("CREDENTIAL_ENCRYPTION_KEY"),
     worldSharingEnabled: booleanSetting("WORLD_SHARING_ENABLED", false),
     security: {

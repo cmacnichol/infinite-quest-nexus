@@ -237,6 +237,71 @@ integration("standard database migration runner", () => {
     ]);
   });
 
+  it("adds owner-scoped System Archive job and upload persistence with hashed-only handles", async () => {
+    const tableNames = [
+      "system_archive_jobs",
+      "system_archive_upload_chunks",
+      "system_archive_uploads"
+    ];
+    const tables = await pool.query<{ table_name: string }>(
+      `SELECT table_name
+         FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = ANY($1::text[])
+        ORDER BY table_name`,
+      [tableNames]
+    );
+    expect(tables.rows.map((row) => row.table_name)).toEqual([...tableNames].sort());
+
+    const columns = await pool.query<{ table_name: string; column_name: string; is_nullable: string }>(
+      `SELECT table_name,column_name,is_nullable
+         FROM information_schema.columns
+        WHERE table_schema='public' AND table_name=ANY($1::text[])
+        ORDER BY table_name,ordinal_position`,
+      [tableNames]
+    );
+    expect(columns.rows.filter((row) => row.column_name === "owner_user_id"))
+      .toEqual(tableNames.map((tableName) => ({
+        table_name: tableName,
+        column_name: "owner_user_id",
+        is_nullable: "NO"
+      })));
+    expect(columns.rows.filter((row) => row.column_name.includes("token") && !row.column_name.endsWith("_hash")))
+      .toEqual([]);
+
+    const constraints = await pool.query<{ table_name: string; definition: string }>(
+      `SELECT relations.relname AS table_name,pg_get_constraintdef(constraints.oid) AS definition
+         FROM pg_constraint constraints
+         JOIN pg_class relations ON relations.oid=constraints.conrelid
+         JOIN pg_namespace namespaces ON namespaces.oid=relations.relnamespace
+        WHERE namespaces.nspname='public'
+          AND relations.relname=ANY($1::text[])
+        ORDER BY relations.relname,constraints.conname`,
+      [tableNames]
+    );
+    const definitions = constraints.rows.map((row) => `${row.table_name}: ${row.definition}`).join("\n");
+    expect(definitions).toMatch(/system_archive_jobs:.*export.*import/i);
+    expect(definitions).toMatch(/system_archive_jobs:.*queued.*capturing.*authoritative_committed.*expired/i);
+    expect(definitions).toMatch(/system_archive_uploads:.*created.*uploading.*completed.*expired.*failed/i);
+    expect(definitions).toMatch(/system_archive_upload_chunks:.*durable_filesystem_operations/i);
+
+    const indexes = await pool.query<{ indexname: string; indexdef: string }>(
+      `SELECT indexname,indexdef
+         FROM pg_indexes
+        WHERE schemaname='public'
+          AND tablename=ANY($1::text[])
+        ORDER BY indexname`,
+      [tableNames]
+    );
+    expect(indexes.rows.map((row) => row.indexname)).toEqual(expect.arrayContaining([
+      "system_archive_jobs_claim_idx",
+      "system_archive_jobs_one_active_export_per_owner_idx",
+      "system_archive_jobs_one_active_import_idx",
+      "system_archive_upload_chunks_offset_key",
+      "system_archive_uploads_expiry_idx",
+      "system_archive_uploads_handle_token_hash_key"
+    ]));
+  });
+
   it("adds restart-realizable private filesystem authority without classifying legacy asset paths", async () => {
     const authorityTables = [
       "durable_filesystem_candidate_authorities",
@@ -1221,7 +1286,9 @@ integration("standard database migration runner", () => {
         "0074_chronicle_retrieval_observability",
         "0075_chronicle_query_embedding_cache",
         "0076_chronicle_chunk_skip_reasons",
-        "0077_chronicle_chunk_processed_signature"
+        "0077_chronicle_chunk_processed_signature",
+        "0078_system_archive_jobs",
+        "0079_resumable_system_archive_uploads"
       ]);
 
       const scrubbed = await isolatedPool.query<{ technical_metadata: Record<string, unknown> }>(
@@ -2205,7 +2272,9 @@ integration("standard database migration runner", () => {
       const applied = await migrateDatabase(isolatedPool, resolve("database/migrations"));
       expect(applied).toEqual([
         "0076_chronicle_chunk_skip_reasons",
-        "0077_chronicle_chunk_processed_signature"
+        "0077_chronicle_chunk_processed_signature",
+        "0078_system_archive_jobs",
+        "0079_resumable_system_archive_uploads"
       ]);
 
       // Accepted turns and every derived vector survive the upgrade untouched.

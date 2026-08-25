@@ -21,7 +21,13 @@ const securitySettingNames = [
   "NEXT_WEB_ROOT",
   "APP_ROLE",
   "DATABASE_MAX_CONNECTIONS",
-  "WORKER_GENERATION_CONCURRENCY"
+  "WORKER_GENERATION_CONCURRENCY",
+  "SYSTEM_ARCHIVE_ENABLED",
+  "SYSTEM_ARCHIVE_UPLOAD_TTL_SECONDS",
+  "SYSTEM_ARCHIVE_CHUNK_BYTES",
+  "SYSTEM_ARCHIVE_ALLOW_LIMIT_INCREASE",
+  "SYSTEM_ARCHIVE_ALLOW_UNKNOWN_FREE_SPACE",
+  "SYSTEM_ARCHIVE_MAX_COMPRESSED_BYTES"
 ] as const;
 
 afterEach(() => {
@@ -165,4 +171,55 @@ describe("worker concurrency configuration", () => {
       expect(config.databaseMaxConnections).toBe(connections);
     }
   );
+});
+
+describe("System Archive configuration", () => {
+  it("defaults the capability and operator exception gates off with bounded upload settings", () => {
+    minimumEnvironment();
+
+    const config = loadRuntimeConfig();
+
+    expect(config.systemArchiveEnabled).toBe(false);
+    expect(config.systemArchiveUploadTtlSeconds).toBe(86_400);
+    expect(config.systemArchiveChunkBytes).toBe(16_777_216);
+    expect(config.systemArchiveAllowLimitIncrease).toBe(false);
+    expect(config.systemArchiveAllowUnknownFreeSpace).toBe(false);
+  });
+
+  it.each([
+    "SYSTEM_ARCHIVE_ENABLED",
+    "SYSTEM_ARCHIVE_ALLOW_LIMIT_INCREASE",
+    "SYSTEM_ARCHIVE_ALLOW_UNKNOWN_FREE_SPACE"
+  ] as const)("rejects malformed %s instead of weakening startup", (settingName) => {
+    minimumEnvironment();
+    process.env[settingName] = "sometimes";
+
+    expect(() => loadRuntimeConfig()).toThrow(`${settingName} must be true or false.`);
+  });
+
+  it("keeps approved System Archive maxima hard unless the operator explicitly enables increases", () => {
+    minimumEnvironment();
+    process.env.SYSTEM_ARCHIVE_MAX_COMPRESSED_BYTES = "53687091201";
+    expect(loadRuntimeConfig().systemArchiveLimits.maxCompressedBytes).toBe(53_687_091_200);
+
+    process.env.SYSTEM_ARCHIVE_ALLOW_LIMIT_INCREASE = "true";
+    expect(loadRuntimeConfig().systemArchiveLimits.maxCompressedBytes).toBe(53_687_091_201);
+  });
+
+  it.each([
+    ["SYSTEM_ARCHIVE_UPLOAD_TTL_SECONDS", "299"],
+    ["SYSTEM_ARCHIVE_UPLOAD_TTL_SECONDS", "604801"],
+    ["SYSTEM_ARCHIVE_CHUNK_BYTES", "1048575"],
+    ["SYSTEM_ARCHIVE_CHUNK_BYTES", "67108865"]
+  ] as const)("clamps %s to its approved operational range", (settingName, value) => {
+    minimumEnvironment();
+    process.env[settingName] = value;
+
+    const config = loadRuntimeConfig();
+    if (settingName === "SYSTEM_ARCHIVE_UPLOAD_TTL_SECONDS") {
+      expect(config.systemArchiveUploadTtlSeconds).toBe(value === "299" ? 300 : 604_800);
+    } else {
+      expect(config.systemArchiveChunkBytes).toBe(value === "1048575" ? 1_048_576 : 67_108_864);
+    }
+  });
 });

@@ -28,4 +28,12 @@ describe("System Archive portability registry", () => {
     expect(createdTables.filter((table) => !(table in SYSTEM_ARCHIVE_TABLE_CLASSIFICATIONS))).toEqual([]);
     expect(Object.keys(SYSTEM_ARCHIVE_TABLE_CLASSIFICATIONS).sort()).toEqual(createdTables);
   });
+
+  it("classifies durable System Archive transfer state as operational", () => {
+    expect(SYSTEM_ARCHIVE_TABLE_CLASSIFICATIONS).toMatchObject({
+      system_archive_jobs: "operational",
+      system_archive_uploads: "operational",
+      system_archive_upload_chunks: "operational"
+    });
+  });
 });
