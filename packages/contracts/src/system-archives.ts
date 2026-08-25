@@ -596,7 +596,12 @@ export const systemArchiveUploadCreateRequestSchema = z.object({
 
 export const systemArchiveImportCommitRequestSchema = z.object({
   previewHandle: boundedStringSchema(200),
-  idempotencyKey: boundedStringSchema(200)
+  idempotencyKey: boundedStringSchema(200),
+  acknowledgeSensitiveArchive: z.literal(true),
+  acknowledgeEmptyDestination: z.literal(true),
+  acknowledgeInvalidatedAccess: z.literal(true),
+  acknowledgeProviderReentry: z.literal(true),
+  acknowledgeNonCancellableBoundary: z.literal(true)
 }).strict();
 
 export const systemArchiveManifestSchema = archiveManifestSchema.safeExtend({

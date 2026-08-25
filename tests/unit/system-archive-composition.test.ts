@@ -1,6 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { SYSTEM_ARCHIVE_DOMAINS } from "../../packages/contracts/src/system-archives.js";
+import { toPortableArchiveExportRetrieval } from "../../packages/application/src/imports/types.js";
+import { createPostgresImportRepository } from "../../packages/database/src/import-repository.js";
+import { createSystemArchiveAssetStorageComposition } from "../../services/runtime/src/api-asset-composition.js";
 import {
   createFilesystemSystemArchiveWriter,
   createPrivateSystemArchiveStaging,
@@ -56,6 +59,87 @@ function memoryStaging(): SystemArchiveStagingPort & Readonly<{ activeCount(): n
 }
 
 describe("System Archive durable writer composition", () => {
+  it("captures the existing private asset-publication boundary and closes storage once", async () => {
+    const close = vi.fn(async () => undefined);
+    const publication = { identity: "private-test-double" };
+    const createStorage = vi.fn(async (
+      _pool: unknown,
+      _roots: unknown,
+      capture?: (value: unknown) => void,
+    ) => {
+      capture?.(publication);
+      return { close };
+    });
+
+    const composition = await createSystemArchiveAssetStorageComposition(
+      {} as never,
+      { archiveRoot: "archive", assetRoot: "assets" },
+      { createStorage: createStorage as never },
+    );
+
+    expect(composition.assetPublications).toBe(publication);
+    await composition.close();
+    await composition.close();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("closes storage when private asset-publication authority cannot be captured", async () => {
+    const close = vi.fn(async () => undefined);
+
+    await expect(createSystemArchiveAssetStorageComposition(
+      {} as never,
+      { archiveRoot: "archive", assetRoot: "assets" },
+      { createStorage: vi.fn(async () => ({ close })) as never },
+    )).rejects.toThrow("system_archive_asset_publication_unavailable");
+
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("retrieves an owner-wide system artifact with null-safe portable scope matching", async () => {
+    const contentHash = sha256("zip");
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("SELECT artifact.id AS artifact_id")) {
+        const nullSafe = sql.includes("artifact.world_id IS NOT DISTINCT FROM $5::uuid")
+          && sql.includes("artifact.world_version_id IS NOT DISTINCT FROM $6::uuid");
+        return {
+          rowCount: nullSafe ? 1 : 0,
+          rows: nullSafe ? [{
+            artifact_id: "22222222-2222-4222-8222-222222222222",
+            content_type: "application/zip",
+            artifact_content_hash: contentHash,
+            artifact_byte_length: "3",
+            expires_at: new Date("2026-08-26T12:00:00.000Z"),
+            relative_path: "portable/system.zip",
+            device_id: "1",
+            file_id: "2",
+            change_token: "3",
+            content_hash: contentHash,
+            byte_length: "3",
+          }] : [],
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const client = { query, release: vi.fn() };
+    const repository = createPostgresImportRepository({
+      connect: vi.fn(async () => client),
+    } as never);
+
+    const artifact = await repository.retrieveExportArtifact({
+      ownerUserId,
+      exportKind: "system_zip",
+      campaignId: null,
+      worldId: null,
+      worldVersionId: null,
+    }, toPortableArchiveExportRetrieval("opaque-system-retrieval"));
+
+    expect(artifact).toMatchObject({
+      contentType: "application/zip",
+      contentHash,
+      byteLength: 3,
+    });
+  });
+
   it("stages the final ZIP durably until the published artifact is linked", async () => {
     const staging = memoryStaging();
     let publishedZip = Buffer.alloc(0);

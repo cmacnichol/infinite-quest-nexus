@@ -4,6 +4,7 @@ import {
   createSystemArchiveUploadService,
   type SystemArchiveUploadStoragePort,
 } from "../../services/runtime/src/system-archive-composition.js";
+import { createPostgresSystemArchiveUploadRepository } from "../../packages/database/src/system-archive-upload-repository.js";
 import { persistSystemArchiveChunkWithReconciliation } from "../../services/runtime/src/secure-filesystem-adapter.js";
 
 const owner = { ownerUserId: "11111111-1111-4111-8111-111111111111" };
@@ -18,6 +19,34 @@ const completed: SystemArchiveUploadView = {
 };
 
 describe("System Archive ambiguous persistence reconciliation", () => {
+  it("projects an elapsed upload authority as expired for public status", async () => {
+    const expiredRow = {
+      id: uploadId,
+      owner_user_id: owner.ownerUserId,
+      filesystem_operation_id: "44444444-4444-4444-8444-444444444444",
+      status: "expired" as const,
+      byte_length: 4,
+      received_bytes: 2,
+      content_hash: "a".repeat(64),
+      staged_input_id: null,
+      expires_at: new Date("2026-08-25T12:00:00.000Z"),
+    };
+    const query = vi.fn()
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [expiredRow], rowCount: 1 });
+    const uploads = createPostgresSystemArchiveUploadRepository({ query } as never, {
+      uploadTtlSeconds: 300,
+    });
+
+    await expect(uploads.getUpload(owner, uploadId)).resolves.toMatchObject({
+      id: uploadId,
+      status: "expired",
+    });
+
+    expect(query.mock.calls[0]?.[0]).toContain("expires_at<=clock_timestamp()");
+    expect(query.mock.calls.every((call) => call[1][1] === owner.ownerUserId)).toBe(true);
+  });
+
   it("preserves chunk bytes when metadata committed before the caller observed an error", async () => {
     let committed = false;
     const compensate = vi.fn(async () => undefined);

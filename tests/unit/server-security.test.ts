@@ -39,6 +39,8 @@ function makeConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
     archiveStorageRoot: resolve("local-data/archives"),
     archivePreviewTtlSeconds: 1_800,
     systemArchiveArtifactTtlSeconds: 86_400,
+    systemArchiveUploadTtlSeconds: 86_400,
+    systemArchiveChunkBytes: 16_777_216,
     campaignArchiveLimits: {
       maxCompressedBytes: 2_147_483_648,
       maxUncompressedBytes: 21_474_836_480,
@@ -160,6 +162,60 @@ describe("API server security and CORS headers", () => {
     expect(readiness.statusCode).toBe(200);
     expect(readiness.json()).toMatchObject({ status: "ready" });
     await app.close();
+  });
+
+  it("constructs System Archive routes only when the capability is enabled", async () => {
+    const jobId = "22222222-2222-4222-8222-222222222222";
+    const getJob = vi.fn(async () => ({
+      id: jobId,
+      kind: "export" as const,
+      status: "queued" as const,
+      createdAt: "2026-08-25T12:00:00.000Z",
+      updatedAt: "2026-08-25T12:00:00.000Z",
+      report: null,
+    }));
+    const createApiSystemArchive = vi.fn(() => ({
+      application: {
+        enqueueExport: vi.fn(),
+        getJob,
+        cancelJob: vi.fn(),
+        createUpload: vi.fn(),
+        getUpload: vi.fn(),
+        cancelUpload: vi.fn(),
+        putChunk: vi.fn(),
+        completeUpload: vi.fn(),
+        previewImport: vi.fn(),
+        commitImport: vi.fn(),
+      },
+      downloads: { metadata: vi.fn(), open: vi.fn() },
+    } as never));
+
+    const disabled = await buildServer({
+      ...serverOptions({ config: makeConfig({ systemArchiveEnabled: false }), pool: mockPool }),
+      createApiSystemArchive,
+    });
+    expect((await disabled.inject({
+      method: "GET",
+      url: `/api/v1/system-exports/${jobId}`,
+    })).statusCode).toBe(404);
+    expect(createApiSystemArchive).not.toHaveBeenCalled();
+    await disabled.close();
+
+    const enabled = await buildServer({
+      ...serverOptions({ config: makeConfig({ systemArchiveEnabled: true }), pool: mockPool }),
+      createApiSystemArchive,
+    });
+    const response = await enabled.inject({
+      method: "GET",
+      url: `/api/v1/system-exports/${jobId}`,
+    });
+    expect(response.statusCode, response.body).toBe(200);
+    expect(createApiSystemArchive).toHaveBeenCalledOnce();
+    expect(getJob).toHaveBeenCalledWith({
+      ownerUserId: "11111111-1111-4111-8111-111111111111",
+      jobId,
+    });
+    await enabled.close();
   });
 
   it("exposes public application metadata without querying the database", async () => {

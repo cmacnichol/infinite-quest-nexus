@@ -25,6 +25,8 @@ export type PutSystemUploadChunkCommand = OwnerScope & Readonly<{
   sha256: string;
 }>;
 export type CompleteSystemUploadCommand = OwnerScope & Readonly<{ uploadId: SystemArchiveUploadId }>;
+export type GetSystemUploadCommand = OwnerScope & Readonly<{ uploadId: SystemArchiveUploadId }>;
+export type CancelSystemUploadCommand = OwnerScope & Readonly<{ uploadId: SystemArchiveUploadId }>;
 export type PreviewSystemImportCommand = OwnerScope & Readonly<{ uploadId: SystemArchiveUploadId }>;
 export type CommitSystemImportCommand = OwnerScope & Readonly<{
   previewHandle: SystemArchivePreviewHandle;
@@ -36,6 +38,8 @@ export interface SystemArchiveApplication {
   getJob(command: GetSystemArchiveJobCommand): Promise<SystemArchiveJobView>;
   cancelJob(command: CancelSystemArchiveJobCommand): Promise<SystemArchiveJobView>;
   createUpload(command: CreateSystemUploadCommand): Promise<SystemArchiveUploadView>;
+  getUpload(command: GetSystemUploadCommand): Promise<SystemArchiveUploadView>;
+  cancelUpload(command: CancelSystemUploadCommand): Promise<SystemArchiveUploadView>;
   putChunk(command: PutSystemUploadChunkCommand): Promise<SystemArchiveUploadView>;
   completeUpload(command: CompleteSystemUploadCommand): Promise<SystemArchiveUploadView>;
   previewImport(command: PreviewSystemImportCommand): Promise<SystemImportPreviewView>;

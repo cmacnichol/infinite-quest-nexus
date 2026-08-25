@@ -36,7 +36,10 @@ export interface SystemArchiveJobRepository {
   ): Promise<SystemArchiveJobView>;
   claimNext(workerId: string, leaseSeconds: number): Promise<ClaimedSystemArchiveJob | null>;
   heartbeat(jobId: string, workerId: string, leaseSeconds: number): Promise<boolean>;
+  getJob(owner: OwnerScope, jobId: string): Promise<SystemArchiveJobView>;
   requestCancellation(owner: OwnerScope, jobId: string): Promise<SystemArchiveJobView>;
+  markCancelled(jobId: string, workerId: string): Promise<void>;
+  markFailed(jobId: string, workerId: string, errorCode: string): Promise<void>;
 }
 
 const JOB_COLUMNS = `id,owner_user_id,kind,status,idempotency_key_hash,staged_input_id,
@@ -192,6 +195,28 @@ export function createPostgresSystemArchiveJobRepository(pool: DatabasePool): Sy
       return result.rowCount === 1;
     },
 
+    async getJob(owner, jobId) {
+      await pool.query(
+        `UPDATE system_archive_jobs job
+            SET status='expired',updated_at=clock_timestamp()
+           FROM portable_export_artifacts artifact
+          WHERE job.id=$1 AND job.owner_user_id=$2
+            AND job.kind='export' AND job.status='published'
+            AND artifact.id=job.export_artifact_id
+            AND artifact.owner_user_id=job.owner_user_id
+            AND (artifact.status<>'ready' OR artifact.expires_at<=clock_timestamp())`,
+        [jobId, owner.ownerUserId]
+      );
+      const result = await pool.query<SystemArchiveJobRow>(
+        `SELECT ${JOB_COLUMNS} FROM system_archive_jobs
+          WHERE id=$1 AND owner_user_id=$2`,
+        [jobId, owner.ownerUserId]
+      );
+      const row = result.rows[0];
+      if (!row) throw repositoryError("System Archive job was not found.", 404);
+      return toView(row);
+    },
+
     async requestCancellation(owner, jobId) {
       const result = await pool.query<SystemArchiveJobRow>(
         `UPDATE system_archive_jobs
@@ -217,6 +242,47 @@ export function createPostgresSystemArchiveJobRepository(pool: DatabasePool): Sy
       );
       if (!visible.rows[0]) throw repositoryError("System Archive job was not found.", 404);
       throw repositoryError(`System Archive job cannot be cancelled from ${visible.rows[0].status}.`, 409);
+    },
+
+    async markCancelled(jobId, workerId) {
+      const result = await pool.query(
+        `UPDATE system_archive_jobs
+            SET status='cancelled',progress='{}'::jsonb,
+                lease_owner=NULL,lease_expires_at=NULL,updated_at=clock_timestamp()
+          WHERE id=$1 AND lease_owner=$2 AND lease_expires_at>clock_timestamp()
+            AND status='cancelling'`,
+        [jobId, workerId]
+      );
+      if (result.rowCount !== 1) {
+        throw repositoryError("System Archive cancellation authority was lost.", 409);
+      }
+    },
+
+    async markFailed(jobId, workerId, errorCode) {
+      const safeCode = /^[a-z][a-z0-9-]{0,63}$/u.test(errorCode)
+        ? errorCode
+        : "archive-operation-failed";
+      const result = await pool.query(
+        `UPDATE system_archive_jobs
+            SET status='failed',progress=jsonb_build_object('errorCode',$3::text),
+                lease_owner=NULL,lease_expires_at=NULL,updated_at=clock_timestamp()
+          WHERE id=$1 AND lease_owner=$2 AND lease_expires_at>clock_timestamp()
+            AND kind='import'
+            AND status IN (
+              'revalidating','importing'
+            )`,
+        [jobId, workerId, safeCode]
+      );
+      if (result.rowCount !== 1) {
+        const visible = await pool.query<{ status: SystemArchiveJobStatus }>(
+          "SELECT status FROM system_archive_jobs WHERE id=$1",
+          [jobId]
+        );
+        if (!["failed", "authoritative_committed", "rebuilding", "completed"]
+          .includes(visible.rows[0]?.status ?? "")) {
+          throw repositoryError("System Archive failure authority was lost.", 409);
+        }
+      }
     }
   };
 }

@@ -74,6 +74,7 @@ export type CompleteSystemArchiveUploadRequest = Readonly<{
 export interface SystemArchiveUploadRepository {
   createUpload(owner: OwnerScope, request: CreateSystemArchiveUploadRequest): Promise<SystemArchiveUploadView>;
   getUpload(owner: OwnerScope, uploadId: string): Promise<SystemArchiveUploadView>;
+  cancelUpload(owner: OwnerScope, uploadId: string): Promise<SystemArchiveUploadView>;
   getUploadSession(owner: OwnerScope, uploadId: string): Promise<SystemArchiveUploadSession>;
   recordChunk(
     owner: OwnerScope,
@@ -312,12 +313,71 @@ export function createPostgresSystemArchiveUploadRepository(
     },
 
     async getUpload(owner, uploadId) {
+      await pool.query(
+        `UPDATE system_archive_uploads
+            SET status='expired',updated_at=clock_timestamp()
+          WHERE id=$1 AND owner_user_id=$2
+            AND status IN ('created','uploading','completed')
+            AND expires_at<=clock_timestamp()`,
+        [uploadId, owner.ownerUserId]
+      );
       const result = await pool.query<SystemArchiveUploadRow>(
         `SELECT ${UPLOAD_COLUMNS} FROM system_archive_uploads WHERE id=$1 AND owner_user_id=$2`,
         [uploadId, owner.ownerUserId]
       );
       if (!result.rows[0]) throw repositoryError("System Archive upload was not found.", 404);
       return toView(result.rows[0]);
+    },
+
+    async cancelUpload(owner, uploadId) {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const result = await client.query<SystemArchiveUploadRow>(
+          `UPDATE system_archive_uploads upload
+              SET status='expired',expires_at=clock_timestamp(),updated_at=clock_timestamp()
+            WHERE upload.id=$1 AND upload.owner_user_id=$2
+              AND upload.status IN ('created','uploading','completed')
+              AND NOT EXISTS (
+                SELECT 1 FROM system_archive_jobs job
+                 WHERE job.owner_user_id=upload.owner_user_id
+                   AND job.staged_input_id=upload.staged_input_id
+                   AND job.kind='import'
+                   AND job.status IN (
+                     'queued','previewed','revalidating','waiting_for_gate','importing',
+                     'authoritative_committed','rebuilding','cancelling'
+                   )
+              )
+          RETURNING ${UPLOAD_COLUMNS}`,
+          [uploadId, owner.ownerUserId]
+        );
+        const row = result.rows[0];
+        if (!row) {
+          const visible = await client.query<{ status: SystemArchiveUploadView["status"] }>(
+            "SELECT status FROM system_archive_uploads WHERE id=$1 AND owner_user_id=$2",
+            [uploadId, owner.ownerUserId]
+          );
+          if (!visible.rows[0]) throw repositoryError("System Archive upload was not found.", 404);
+          throw repositoryError("System Archive upload can no longer be cancelled.", 409);
+        }
+        await client.query(
+          `UPDATE durable_filesystem_operations operation
+              SET expires_at=clock_timestamp(),updated_at=clock_timestamp()
+             FROM system_archive_uploads upload
+            WHERE upload.id=$1 AND upload.owner_user_id=$2
+              AND operation.id=upload.filesystem_operation_id
+              AND operation.owner_user_id=upload.owner_user_id
+              AND operation.purpose='portable_staging'`,
+          [uploadId, owner.ownerUserId]
+        );
+        await client.query("COMMIT");
+        return toView(row);
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        throw error;
+      } finally {
+        client.release();
+      }
     },
 
     async getUploadSession(owner, uploadId) {

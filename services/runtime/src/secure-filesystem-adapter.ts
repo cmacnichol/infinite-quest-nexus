@@ -140,6 +140,15 @@ export type SecureFilesystemAdapterOptions = Readonly<{
   transactions: SecureFilesystemTransactionRunner;
 }>;
 
+export type SystemArchiveExportStreamSession = Readonly<{
+  contentType: "application/zip";
+  byteLength: number;
+  totalByteLength: number;
+  sha256: string;
+  chunks: AsyncIterable<Uint8Array>;
+  finalize(reason: PrivateStreamTerminalReason): Promise<void>;
+}>;
+
 export type SecureFilesystemAdapter = Readonly<{
   prepareAssetPublication: PrivateAssetPublicationFilesystemPort["prepareAssetPublication"];
   prepareMetadataBackfillThumbnail(
@@ -246,6 +255,14 @@ export type SecureFilesystemAdapter = Readonly<{
     claim: Readonly<{ leaseOwner: string; leaseSeconds: number }>;
     limits: PrivateBoundedStreamLimits;
   }>): Promise<PrivateBoundedStreamSession>;
+  openSystemArchiveExportSession(input: Readonly<{
+    owner: ImportOwnerScope;
+    jobId: string;
+    claim: Readonly<{ leaseOwner: string; leaseSeconds: number }>;
+    range: Readonly<{ start: number; end: number }>;
+    expectedSha256: string;
+    limits: PrivateBoundedStreamLimits;
+  }>): Promise<SystemArchiveExportStreamSession>;
   openAssetSession(input: Readonly<{
     scope: AssetScope;
     request: AssetDeliveryRequest;
@@ -734,6 +751,114 @@ function boundedReadSession(input: Readonly<{
     byteLength: input.descriptor.byteLength,
     chunks,
     finalize
+  });
+}
+
+function boundedRangeReadSession(input: Readonly<{
+  handle: FileHandle;
+  descriptor: PrivateStorageDescriptor;
+  initialStat: BigIntStat;
+  range: Readonly<{ start: number; end: number }>;
+  limits: PrivateBoundedStreamLimits;
+  authorityCurrent(): boolean;
+  onClosed(): void;
+  afterClose(reason: PrivateStreamTerminalReason): Promise<void>;
+}>): SystemArchiveExportStreamSession {
+  requireLimits(input.limits, input.descriptor.byteLength);
+  if (!Number.isSafeInteger(input.range.start)
+    || !Number.isSafeInteger(input.range.end)
+    || input.range.start < 0
+    || input.range.end < input.range.start
+    || input.range.end >= input.descriptor.byteLength) {
+    throw new Error("system_archive_download_range_invalid");
+  }
+  let finalization: Promise<void> | undefined;
+  let terminalReason: PrivateStreamTerminalReason | undefined;
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  const finalize = (reason: PrivateStreamTerminalReason): Promise<void> => {
+    terminalReason ??= reason;
+    if (deadlineTimer) {
+      clearTimeout(deadlineTimer);
+      deadlineTimer = undefined;
+    }
+    finalization ??= (async () => {
+      let closeError: unknown;
+      try {
+        await input.handle.close();
+      } catch (error) {
+        closeError = error;
+      } finally {
+        input.onClosed();
+      }
+      await input.afterClose(terminalReason!);
+      if (closeError) throw closeError;
+    })();
+    return finalization;
+  };
+  const throwIfTerminated = (): void => {
+    if (terminalReason === "timeout") throw new Error("filesystem_stream_timeout");
+    if (terminalReason) throw new Error("filesystem_stream_closed");
+    if (!input.authorityCurrent()) throw new Error("filesystem_stream_lease_lost");
+  };
+  const timeoutMilliseconds = Math.min(
+    2_147_483_647,
+    Math.max(0, Date.parse(input.limits.deadlineAt) - Date.now()),
+  );
+  deadlineTimer = setTimeout(() => {
+    void finalize("timeout").catch(() => undefined);
+  }, timeoutMilliseconds);
+  deadlineTimer.unref?.();
+  const chunks = (async function* (): AsyncGenerator<Uint8Array> {
+    let reason: PrivateStreamTerminalReason = "abort";
+    let position = input.range.start;
+    try {
+      while (position <= input.range.end) {
+        throwIfTerminated();
+        if (Date.now() >= Date.parse(input.limits.deadlineAt)) {
+          reason = "timeout";
+          throw new Error("filesystem_stream_timeout");
+        }
+        const requested = Math.min(
+          input.limits.chunkBytes,
+          input.range.end - position + 1,
+        );
+        const buffer = Buffer.allocUnsafe(requested);
+        const { bytesRead } = await input.handle.read(buffer, 0, requested, position);
+        throwIfTerminated();
+        if (bytesRead !== requested) throw new Error("filesystem_stream_partial");
+        position += bytesRead;
+        yield Uint8Array.from(buffer.subarray(0, bytesRead));
+      }
+      const finalStat = await input.handle.stat({ bigint: true }) as BigIntStat;
+      throwIfTerminated();
+      const initial = statIdentity(input.initialStat);
+      const final = statIdentity(finalStat);
+      if (!finalStat.isFile()
+        || final.deviceId !== initial.deviceId
+        || final.fileId !== initial.fileId
+        || final.changeToken !== initial.changeToken
+        || final.byteLength !== input.descriptor.byteLength) {
+        throw new Error("filesystem_stream_identity_changed");
+      }
+      reason = "eof";
+    } catch (error) {
+      if (terminalReason === "timeout") {
+        reason = "timeout";
+        throw new Error("filesystem_stream_timeout");
+      }
+      if (reason !== "timeout") reason = "read_failure";
+      throw error;
+    } finally {
+      await finalize(reason);
+    }
+  })();
+  return Object.freeze({
+    contentType: "application/zip" as const,
+    byteLength: input.range.end - input.range.start + 1,
+    totalByteLength: input.descriptor.byteLength,
+    sha256: input.descriptor.contentHash,
+    chunks,
+    finalize,
   });
 }
 
@@ -1768,6 +1893,48 @@ export async function createSecureFilesystemAdapter(
     }
   });
 
+  const openSystemArchiveExportSession: SecureFilesystemAdapter["openSystemArchiveExportSession"] = (input) => trackOpen(async () => {
+    const rehydrate = options.portable?.rehydrateSystemArchiveExport;
+    if (!rehydrate) throw new Error("portable_repository_unavailable");
+    const rehydration = await rehydrate(
+      input.owner,
+      input.jobId,
+      input.claim,
+    );
+    if (!rehydration) throw new Error("system_archive_export_unavailable");
+    if (rehydration.descriptor.contentHash !== input.expectedSha256) {
+      throw new Error("system_archive_export_stale");
+    }
+    const readLease = await startPortableReadLease(
+      rehydration.operation.operationId,
+      rehydration.claim,
+      input.claim.leaseSeconds,
+    );
+    let handle: FileHandle | undefined;
+    let unregister: () => void = () => undefined;
+    try {
+      handle = await openAnchored(archiveRoot, rehydration.descriptor.relativePath);
+      const initialStat = await handle.stat({ bigint: true }) as BigIntStat;
+      requireDescriptorIdentity(initialStat, rehydration.descriptor);
+      unregister = registerPortableHandle(rehydration.operation.operationId, handle);
+      return boundedRangeReadSession({
+        handle,
+        descriptor: rehydration.descriptor,
+        initialStat,
+        range: input.range,
+        limits: input.limits,
+        authorityCurrent: readLease.current,
+        onClosed: unregister,
+        afterClose: async () => readLease.stop(),
+      });
+    } catch (error) {
+      unregister();
+      await handle?.close().catch(() => undefined);
+      await readLease.stop();
+      throw error;
+    }
+  });
+
   const openAssetSession: SecureFilesystemAdapter["openAssetSession"] = (input) => trackOpen(async () => {
     if (!options.delivery) throw new Error("asset_delivery_repository_unavailable");
     const resolution = await options.delivery.resolveFinalizedAssetDelivery(input.scope, input.request);
@@ -2048,6 +2215,7 @@ export async function createSecureFilesystemAdapter(
     openStagedInputSession,
     openPreviewInputSession,
     openExportSession,
+    openSystemArchiveExportSession,
     openAssetSession,
     openLegacyPathV1Preview,
     reapExpiredPortable,

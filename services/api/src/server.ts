@@ -129,9 +129,14 @@ import { safeTurnInput } from "./turn-input-safety.js";
 import { applicationMetadata } from "./app-metadata.js";
 import { installRequestSecurity } from "./request-security.js";
 import { registerSystemImportGate } from "./system-import-gate.js";
+import { registerSystemArchiveRoutes } from "./system-archive-routes.js";
 import { registerArchiveRoutes } from "./archive-routes.js";
 import { createApiAssetComposition } from "../../runtime/src/api-asset-composition.js";
 import type { ApiAssetComposition } from "../../runtime/src/api-asset-composition.js";
+import {
+  createApiSystemArchiveComposition,
+  type ApiSystemArchiveComposition,
+} from "../../runtime/src/system-archive-composition.js";
 import {
   createApiCampaignArchiveAssetReader,
   createApiPortableImportExportComposition,
@@ -161,6 +166,11 @@ export type BuildServerOptions = {
   infiniteWorldsProviders: InfiniteWorldsImportProviderCollaborators;
   createApiAssets?: (pool: DatabasePool, roots: Readonly<{ archiveRoot: string; assetRoot: string }>) => Promise<ApiAssetComposition>;
   createApiPortable?: (options: ApiPortableImportExportCompositionOptions) => Promise<ApiPortableImportExportComposition>;
+  createApiSystemArchive?: (options: Readonly<{
+    pool: DatabasePool;
+    config: RuntimeConfig;
+    storage: Pick<ApiAssetComposition, "storage">["storage"];
+  }>) => ApiSystemArchiveComposition;
 };
 
 const uuidSchema = z.uuid();
@@ -361,6 +371,7 @@ export async function buildServer({
   infiniteWorldsProviders,
   createApiAssets = createApiAssetComposition,
   createApiPortable = createApiPortableImportExportComposition,
+  createApiSystemArchive = createApiSystemArchiveComposition,
 }: BuildServerOptions): Promise<FastifyInstance> {
   const illustrationTurnScope = async (turnId: string) => {
     const ownerUserId = await initialOwnerId(pool);
@@ -467,6 +478,9 @@ export async function buildServer({
     archiveRoot: config.archiveStorageRoot,
     assetRoot: config.assetStorageRoot
   });
+  const apiSystemArchive = config.systemArchiveEnabled === true
+    ? createApiSystemArchive({ pool, config, storage: apiAssets.storage })
+    : undefined;
   const apiPortable = await createApiPortable({
     pool,
     config,
@@ -484,6 +498,20 @@ export async function buildServer({
       fieldSize: config.security.apiImportBodyLimitBytes
     }
   });
+  if (apiSystemArchive) {
+    await app.register(registerSystemArchiveRoutes, {
+      enabled: true,
+      application: apiSystemArchive.application,
+      downloads: apiSystemArchive.downloads,
+      resolveOwner: async () => ({ ownerUserId: await initialOwnerId(pool) }),
+      limits: {
+        chunkBytes: config.systemArchiveChunkBytes!,
+        maximumUploadBytes: config.systemArchiveLimits.maxCompressedBytes,
+        maximumDownloadBytes: config.systemArchiveLimits.maxCompressedBytes,
+        downloadDeadlineMs: Math.max(60_000, config.workerLeaseSeconds * 4_000),
+      },
+    });
+  }
   await app.register(registerArchiveRoutes, {
     pool,
     config,

@@ -16,6 +16,10 @@ import {
   type PrivateIllustrationAssetPublicationComposition
 } from "../../runtime/src/illustration-asset-publication-composition.js";
 import { runImageJob } from "../../runtime/src/illustration-image-job-adapter.js";
+import {
+  createProductionSystemArchiveWorkerLane,
+  type ProductionSystemArchiveWorkerLane,
+} from "./system-archive-worker.js";
 
 export type WorkerDependencies = Readonly<{
   generation: GenerationWorkerApplication;
@@ -28,6 +32,7 @@ export type WorkerOptionalLanes = Readonly<{
   illustration(): Promise<boolean>;
   chronicle(): Promise<boolean>;
   asset(): Promise<boolean>;
+  systemArchive?(): Promise<boolean>;
 }>;
 
 export type StartedGeneration = Readonly<{
@@ -90,7 +95,7 @@ function wait(milliseconds: number, signal: AbortSignal): Promise<void> {
 }
 
 type ActiveLane = {
-  name: "illustration" | "chronicle" | "asset";
+  name: "illustration" | "chronicle" | "asset" | "system-archive";
   active: Set<Promise<boolean>>;
   nextEligibleAt: number;
   run(): Promise<boolean>;
@@ -104,6 +109,7 @@ function defaultOptionalLanes(
   memory: MemoryWorkerApplication,
   maintenance: PrivateAssetMaintenanceComposition,
   illustrationPublication: PrivateIllustrationAssetPublicationComposition,
+  systemArchive: ProductionSystemArchiveWorkerLane | undefined,
   signal: AbortSignal,
 ): WorkerOptionalLanes {
   return {
@@ -132,7 +138,8 @@ function defaultOptionalLanes(
         signal
       });
       return result.completed > 0;
-    }
+    },
+    ...(systemArchive === undefined ? {} : { systemArchive: systemArchive.runNext }),
   };
 }
 
@@ -167,19 +174,34 @@ export async function runWorker(
   const workerId = `${hostname()}:${process.pid}:${crypto.randomUUID().slice(0, 8)}`;
   logger.info({ event: "worker_started", workerId });
 
-  const maintenance = injectedOptionalLanes
-    ? undefined
-    : await createPrivateAssetMaintenanceComposition(pool, {
-      archiveRoot: config.archiveStorageRoot,
-      assetRoot: config.assetStorageRoot
-    });
-  const illustrationPublication = injectedOptionalLanes
-    ? undefined
-    : await createPrivateIllustrationAssetPublicationComposition(
-      pool,
-      { archiveRoot: config.archiveStorageRoot, assetRoot: config.assetStorageRoot },
-      { downloadArtifact: (input) => illustration.downloadArtifact(input) }
-    );
+  let maintenance: PrivateAssetMaintenanceComposition | undefined;
+  let illustrationPublication: PrivateIllustrationAssetPublicationComposition | undefined;
+  let systemArchive: ProductionSystemArchiveWorkerLane | undefined;
+  try {
+    maintenance = injectedOptionalLanes
+      ? undefined
+      : await createPrivateAssetMaintenanceComposition(pool, {
+        archiveRoot: config.archiveStorageRoot,
+        assetRoot: config.assetStorageRoot
+      });
+    illustrationPublication = injectedOptionalLanes
+      ? undefined
+      : await createPrivateIllustrationAssetPublicationComposition(
+        pool,
+        { archiveRoot: config.archiveStorageRoot, assetRoot: config.assetStorageRoot },
+        { downloadArtifact: (input) => illustration.downloadArtifact(input) }
+      );
+    systemArchive = injectedOptionalLanes || config.systemArchiveEnabled !== true
+      ? undefined
+      : await createProductionSystemArchiveWorkerLane({ pool, config, workerId });
+  } catch (error) {
+    await Promise.allSettled([
+      systemArchive?.close(),
+      illustrationPublication?.close(),
+      maintenance?.close()
+    ]);
+    throw error;
+  }
   const activeGeneration = new Set<Promise<boolean>>();
   let generationNextEligibleAt = 0;
   const optionalLanes = injectedOptionalLanes ?? defaultOptionalLanes(
@@ -190,12 +212,19 @@ export async function runWorker(
     memory,
     maintenance!,
     illustrationPublication!,
+    systemArchive,
     signal,
   );
   const lanes: ActiveLane[] = [
     { name: "illustration", active: new Set(), nextEligibleAt: 0, run: optionalLanes.illustration },
     { name: "chronicle", active: new Set(), nextEligibleAt: 0, run: optionalLanes.chronicle },
-    { name: "asset", active: new Set(), nextEligibleAt: 0, run: optionalLanes.asset }
+    { name: "asset", active: new Set(), nextEligibleAt: 0, run: optionalLanes.asset },
+    ...(optionalLanes.systemArchive === undefined ? [] : [{
+      name: "system-archive" as const,
+      active: new Set<Promise<boolean>>(),
+      nextEligibleAt: 0,
+      run: optionalLanes.systemArchive,
+    }]),
   ];
 
   try {
@@ -308,13 +337,15 @@ export async function runWorker(
         generationJobs: activeGeneration.size,
         illustrationJobs: lanes[0]!.active.size,
         chronicleJobs: lanes[1]!.active.size,
-        assetJobs: lanes[2]!.active.size
+        assetJobs: lanes[2]!.active.size,
+        systemArchiveJobs: lanes.find((lane) => lane.name === "system-archive")?.active.size ?? 0,
       });
       await Promise.allSettled(draining);
     }
   } finally {
     await illustrationPublication?.close();
     await maintenance?.close();
+    await systemArchive?.close();
     logger.info({ event: "worker_stopped", workerId });
   }
 }

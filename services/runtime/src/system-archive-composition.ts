@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
+import { statfs } from "node:fs/promises";
 import { Readable } from "node:stream";
 import sharp from "sharp";
 import type { Metadata as SharpMetadata } from "sharp";
@@ -32,6 +33,8 @@ import type {
   SystemArchiveWrittenPayload,
 } from "../../../packages/application/src/system-archives/ports.js";
 import { runSystemExport } from "../../../packages/application/src/system-archives/use-cases.js";
+import type { SystemArchiveApplication } from "../../../packages/application/src/system-archives/types.js";
+import type { OwnerScope } from "../../../packages/application/src/generation/types.js";
 import { bindPrivateBoundedStreamLimits } from "../../../packages/application/src/assets/private-secure-storage.js";
 import type {
   PrivateAssetPublicationCommand,
@@ -52,7 +55,11 @@ import {
   createPostgresSystemArchiveImportRepository,
   isSystemArchiveWaitingForGateError,
 } from "../../../packages/database/src/system-archive-import-repository.js";
-import type { ClaimedSystemArchiveJob } from "../../../packages/database/src/system-archive-job-repository.js";
+import {
+  createPostgresSystemArchiveJobRepository,
+  type ClaimedSystemArchiveJob,
+  type SystemArchiveJobRepository,
+} from "../../../packages/database/src/system-archive-job-repository.js";
 import type {
   SystemArchiveUploadAssembly,
   SystemArchiveUploadRepository,
@@ -60,6 +67,7 @@ import type {
 import { createPostgresSystemArchiveUploadRepository } from "../../../packages/database/src/system-archive-upload-repository.js";
 import { createPostgresSystemArchivePrivateStorageRepository } from "../../../packages/database/src/system-archive-private-storage-repository.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
+import type { RuntimeConfig } from "../../../packages/database/src/config.js";
 import { detectImageMimeType } from "../../../packages/domain/src/image-media.js";
 import { sha256 as legacySha256 } from "../../../packages/domain/src/text.js";
 import {
@@ -75,6 +83,8 @@ import {
   type StagedArchive,
 } from "../../api/src/archive-io.js";
 import type { ApiAssetComposition } from "./api-asset-composition.js";
+import type { SystemArchiveDownloadPort } from "../../api/src/system-archive-routes.js";
+import type { AssetImportStorageComposition } from "./asset-import-composition.js";
 import type { SecureFilesystemAdapter } from "./secure-filesystem-adapter.js";
 import { SystemArchivePreviewIndex } from "./system-archive-preview-index.js";
 
@@ -1982,4 +1992,268 @@ export function createSystemArchiveComposition(options: SystemArchiveComposition
       return runSystemExport(job, dependencies);
     },
   });
+}
+
+export function createSystemArchiveApplication(options: Readonly<{
+  jobs: SystemArchiveJobRepository;
+  uploadRepository: SystemArchiveUploadRepository;
+  uploads: ReturnType<typeof createSystemArchiveUploadService>;
+  previews: ReturnType<typeof createSystemArchiveImportPreviewService>;
+  imports: Pick<SystemArchiveImportRepository, "consumePreviewAuthority">;
+}>): SystemArchiveApplication {
+  const owner = (ownerUserId: string) => Object.freeze({ ownerUserId });
+  const application: SystemArchiveApplication = {
+    enqueueExport(command) {
+      const idempotencyKeyHash = createHash("sha256").update(command.idempotencyKey).digest("hex");
+      return options.jobs.enqueueExport(owner(command.ownerUserId), idempotencyKeyHash);
+    },
+    getJob(command) {
+      return options.jobs.getJob(owner(command.ownerUserId), command.jobId);
+    },
+    cancelJob(command) {
+      return options.jobs.requestCancellation(owner(command.ownerUserId), command.jobId);
+    },
+    createUpload(command) {
+      return options.uploads.createUpload(owner(command.ownerUserId), {
+        byteLength: command.byteLength,
+        sha256: command.sha256,
+      });
+    },
+    getUpload(command) {
+      return options.uploadRepository.getUpload(owner(command.ownerUserId), command.uploadId);
+    },
+    cancelUpload(command) {
+      return options.uploadRepository.cancelUpload(owner(command.ownerUserId), command.uploadId);
+    },
+    putChunk(command) {
+      return options.uploads.putChunk(owner(command.ownerUserId), {
+        uploadId: command.uploadId,
+        index: command.index,
+        offset: command.offset,
+        bytes: command.bytes,
+        sha256: command.sha256,
+      });
+    },
+    completeUpload(command) {
+      return options.uploads.completeUpload(owner(command.ownerUserId), command.uploadId);
+    },
+    previewImport(command) {
+      return options.previews.preview(owner(command.ownerUserId), command.uploadId);
+    },
+    async commitImport(command) {
+      const consumed = await options.imports.consumePreviewAuthority(
+        owner(command.ownerUserId),
+        command.previewHandle,
+        command.idempotencyKey,
+      );
+      return options.jobs.getJob(owner(command.ownerUserId), consumed.jobId);
+    },
+  };
+  return Object.freeze(application);
+}
+
+async function availableFilesystemBytes(root: string): Promise<number | null> {
+  try {
+    const value = await statfs(root);
+    const bytes = value.bavail * value.bsize;
+    if (!Number.isFinite(bytes) || bytes < 0) return null;
+    return Math.min(Number.MAX_SAFE_INTEGER, Math.floor(bytes));
+  } catch {
+    return null;
+  }
+}
+
+export function createFilesystemSystemArchiveCapacity(
+  archiveRoot: string,
+  assetRoot: string,
+): SystemArchiveCapacityPort {
+  return Object.freeze({
+    async availableBytes() {
+      const [staging, assetRootBytes] = await Promise.all([
+        availableFilesystemBytes(archiveRoot),
+        availableFilesystemBytes(assetRoot),
+      ]);
+      return { staging, assetRoot: assetRootBytes };
+    },
+  });
+}
+
+export function createSystemArchiveArtifactPublisher(
+  storage: Pick<AssetImportStorageComposition, "adapter" | "portable">,
+  options: Readonly<{
+    leaseOwner: string;
+    artifactTtlSeconds: number;
+    now?: () => Date;
+  }>,
+): SystemArchiveArtifactPublisherPort {
+  if (!options.leaseOwner.trim()
+    || !Number.isSafeInteger(options.artifactTtlSeconds)
+    || options.artifactTtlSeconds < 1) {
+    throw new Error("system_archive_publisher_options_invalid");
+  }
+  const now = options.now ?? (() => new Date());
+  const publisher: SystemArchiveArtifactPublisherPort = {
+    async publishSystemArchive(input) {
+      const scope = Object.freeze({
+        ownerUserId: input.ownerUserId,
+        exportKind: "system_zip" as const,
+        campaignId: null,
+        worldId: null,
+        worldVersionId: null,
+      });
+      const issued = await storage.adapter.publishPortableExport({
+        exportScope: scope,
+        operationScopeId: `system-archive-export:${input.contentFingerprint}:${randomUUID()}`,
+        leaseOwner: options.leaseOwner,
+        expiresAt: new Date(now().getTime() + options.artifactTtlSeconds * 1_000).toISOString(),
+        contentType: "application/zip",
+        byteLength: input.byteLength,
+        source: input.source,
+      });
+      const artifact = await storage.portable.retrieveExportArtifact(scope, issued.retrieval);
+      if (!artifact
+        || artifact.byteLength !== input.byteLength
+        || artifact.contentHash !== input.sha256
+        || artifact.contentType !== "application/zip") {
+        throw new Error("system_archive_publication_reconciliation_failed");
+      }
+      return Object.freeze({
+        artifactId: artifact.artifactId,
+        relativePath: artifact.descriptor.relativePath,
+        byteLength: artifact.byteLength,
+        sha256: artifact.contentHash,
+      });
+    },
+  };
+  return Object.freeze(publisher);
+}
+
+export type ApiSystemArchiveComposition = Readonly<{
+  application: SystemArchiveApplication;
+  downloads: SystemArchiveDownloadPort;
+}>;
+
+export function createApiSystemArchiveComposition(options: Readonly<{
+  pool: DatabasePool;
+  config: RuntimeConfig;
+  storage: Pick<AssetImportStorageComposition, "adapter">;
+}>): ApiSystemArchiveComposition {
+  const uploadTtlSeconds = options.config.systemArchiveUploadTtlSeconds;
+  const chunkBytes = options.config.systemArchiveChunkBytes;
+  if (uploadTtlSeconds === undefined || chunkBytes === undefined) {
+    throw new Error("system_archive_config_incomplete");
+  }
+  const jobs = createPostgresSystemArchiveJobRepository(options.pool);
+  const uploadRepository = createPostgresSystemArchiveUploadRepository(options.pool, { uploadTtlSeconds });
+  const importRepository = createPostgresSystemArchiveImportRepository(options.pool, {
+    previewTtlSeconds: options.config.archivePreviewTtlSeconds,
+  });
+  const privateRepository = createPostgresSystemArchivePrivateStorageRepository(options.pool);
+  const leaseOwner = `api-system-archive-${randomUUID()}`;
+  const leaseSeconds = Math.min(options.config.workerLeaseSeconds, 300);
+  const uploadStorage = createPrivateSystemArchiveUploadStorage(options.storage.adapter, {
+    leaseOwner,
+    leaseSeconds,
+    uploadTtlSeconds,
+  });
+  const uploads = createSystemArchiveUploadService({
+    uploads: uploadRepository,
+    storage: uploadStorage,
+    chunkBytes,
+    maximumBytes: options.config.systemArchiveLimits.maxCompressedBytes,
+  });
+  const previewSource = createPrivateSystemArchivePreviewSource({
+    archiveRoot: options.config.archiveStorageRoot,
+    maximumCompressedBytes: options.config.systemArchiveLimits.maxCompressedBytes,
+    repository: privateRepository,
+    leaseOwner,
+    leaseSeconds,
+    activitySeconds: Math.max(uploadTtlSeconds, options.config.archivePreviewTtlSeconds),
+  });
+  const previews = createSystemArchiveImportPreviewService({
+    imports: importRepository,
+    source: previewSource,
+    capacity: createFilesystemSystemArchiveCapacity(
+      options.config.archiveStorageRoot,
+      options.config.assetStorageRoot,
+    ),
+    limits: options.config.systemArchiveLimits,
+    destinationApplicationVersion: process.env.NEXUS_VERSION?.trim()
+      || process.env.npm_package_version?.trim()
+      || "0.1.0",
+    allowUnknownFreeSpace: options.config.systemArchiveAllowUnknownFreeSpace ?? false,
+  });
+  const application = createSystemArchiveApplication({
+    jobs,
+    uploadRepository,
+    uploads,
+    previews,
+    imports: importRepository,
+  });
+  const downloadImplementation: SystemArchiveDownloadPort = {
+    async metadata(owner: OwnerScope, jobId: string) {
+      const result = await options.pool.query<{ byte_length: string; content_hash: string }>(
+        `SELECT artifact.byte_length::text,artifact.content_hash
+           FROM system_archive_jobs job
+           JOIN portable_export_artifacts artifact
+             ON artifact.id=job.export_artifact_id
+            AND artifact.owner_user_id=job.owner_user_id
+          WHERE job.id=$1 AND job.owner_user_id=$2
+            AND job.kind='export' AND job.status='published'
+            AND artifact.export_kind='system_zip'
+            AND artifact.campaign_id IS NULL
+            AND artifact.world_id IS NULL
+            AND artifact.world_version_id IS NULL
+            AND artifact.content_type='application/zip'
+            AND artifact.status='ready' AND artifact.expires_at>clock_timestamp()`,
+        [jobId, owner.ownerUserId],
+      );
+      const row = result.rows[0];
+      if (!row) {
+        throw Object.assign(new Error("System Archive download was not found."), {
+          statusCode: 404,
+          code: "system-archive-download-unavailable",
+        });
+      }
+      return { byteLength: Number(row.byte_length), sha256: row.content_hash };
+    },
+    async open(input: Parameters<SystemArchiveDownloadPort["open"]>[0]) {
+      try {
+        return await options.storage.adapter.openSystemArchiveExportSession({
+          owner: input.owner,
+          jobId: input.jobId,
+          claim: { leaseOwner: `${leaseOwner}-${randomUUID()}`, leaseSeconds },
+          range: { start: input.start, end: input.end },
+          expectedSha256: input.expectedSha256,
+          limits: bindPrivateBoundedStreamLimits({
+            maximumBytes: input.maximumBytes,
+            deadlineAt: input.deadlineAt,
+          }),
+        });
+      } catch (error) {
+        const code = error instanceof Error ? error.message : "system_archive_export_unavailable";
+        if (code === "system_archive_download_range_invalid") {
+          throw Object.assign(new Error("System Archive byte range is invalid."), {
+            statusCode: 416,
+            code: "system-archive-range-invalid",
+          });
+        }
+        if (code === "system_archive_export_stale") {
+          throw Object.assign(new Error("System Archive download authority changed."), {
+            statusCode: 409,
+            code: "system-archive-download-stale",
+          });
+        }
+        if (code === "system_archive_export_unavailable") {
+          throw Object.assign(new Error("System Archive download was not found."), {
+            statusCode: 404,
+            code: "system-archive-download-unavailable",
+          });
+        }
+        throw error;
+      }
+    },
+  };
+  const downloads = Object.freeze(downloadImplementation);
+  return Object.freeze({ application, downloads });
 }
