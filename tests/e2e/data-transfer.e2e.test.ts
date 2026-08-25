@@ -5,6 +5,8 @@ const OWNER_A = "11111111-1111-4111-8111-111111111111";
 const OWNER_B = "22222222-2222-4222-8222-222222222222";
 const JOB_ID = "33333333-3333-4333-8333-333333333333";
 const UPLOAD_ID = "44444444-4444-4444-8444-444444444444";
+const PRIOR_IMPORT_JOB_ID = "66666666-6666-4666-8666-666666666666";
+const AMBIGUOUS_IMPORT_JOB_ID = "77777777-7777-4777-8777-777777777777";
 const recordsByDomain = {
   providers: 2, prompts: 4, worlds: 1, "world-versions": 1, "world-drafts": 1,
   campaigns: 2, turns: 8, "turn-corrections": 0, "campaign-state": 2,
@@ -83,6 +85,7 @@ async function installDataTransferApi(
   options: Readonly<{
     initialExportStatus?: "queued" | "published";
     disconnectFirstImportCommit?: boolean;
+    acceptedImportJobId?: string;
     holdUploadCreate?: boolean;
     holdFirstUploadChunk?: boolean;
   }> = {}
@@ -90,6 +93,8 @@ async function installDataTransferApi(
   exportPosts: number;
   exportGets: number;
   importCommits: Array<Record<string, unknown>>;
+  cancelledImportJobIds: string[];
+  cancelledUploadIds: string[];
   releaseUploadCreate(): void;
   releaseFirstUploadChunk(): void;
 }> {
@@ -101,12 +106,15 @@ async function installDataTransferApi(
     exportPosts: 0,
     exportGets: 0,
     importCommits: [] as Array<Record<string, unknown>>,
+    cancelledImportJobIds: [] as string[],
+    cancelledUploadIds: [] as string[],
     releaseUploadCreate: () => releaseUploadCreate(),
     releaseFirstUploadChunk: () => releaseFirstUploadChunk()
   };
   let uploadReceived = 0;
   let firstUploadChunk = true;
   let exportStatus: "queued" | "published" | "cancelled" = options.initialExportStatus ?? "queued";
+  const acceptedImportJobId = options.acceptedImportJobId ?? JOB_ID;
   await page.route("**/api/v1/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
@@ -139,6 +147,10 @@ async function installDataTransferApi(
     if (path === `/api/v1/system-imports/uploads/${UPLOAD_ID}/complete`) {
       return json(route, { id: UPLOAD_ID, status: "completed", byteLength: 6, receivedBytes: 6, expiresAt: preview.expiresAt });
     }
+    if (path === `/api/v1/system-imports/uploads/${UPLOAD_ID}` && request.method() === "DELETE") {
+      evidence.cancelledUploadIds.push(UPLOAD_ID);
+      return json(route, { id: UPLOAD_ID, status: "cancelled", byteLength: 6, receivedBytes: 6, expiresAt: preview.expiresAt });
+    }
     if (path === `/api/v1/system-imports/uploads/${UPLOAD_ID}` && request.method() === "GET") {
       return json(route, { id: UPLOAD_ID, status: "uploading", byteLength: 6, receivedBytes: uploadReceived, expiresAt: preview.expiresAt });
     }
@@ -146,10 +158,17 @@ async function installDataTransferApi(
     if (path === "/api/v1/system-imports" && request.method() === "POST") {
       evidence.importCommits.push(request.postDataJSON() as Record<string, unknown>);
       if (options.disconnectFirstImportCommit && evidence.importCommits.length === 1) return route.abort("internetdisconnected");
-      return json(route, { id: JOB_ID, kind: "import", status: "queued", report: null, createdAt: NOW, updatedAt: NOW }, 202);
+      return json(route, { id: acceptedImportJobId, kind: "import", status: "queued", report: null, createdAt: NOW, updatedAt: NOW }, 202);
     }
-    if (path === `/api/v1/system-imports/${JOB_ID}` && request.method() === "GET") {
-      return json(route, { id: JOB_ID, kind: "import", status: "completed", report, createdAt: NOW, updatedAt: NOW });
+    if (path === `/api/v1/system-imports/${acceptedImportJobId}` && request.method() === "GET") {
+      return json(route, { id: acceptedImportJobId, kind: "import", status: "completed", report, createdAt: NOW, updatedAt: NOW });
+    }
+    if (path === `/api/v1/system-imports/${PRIOR_IMPORT_JOB_ID}` && request.method() === "GET") {
+      return json(route, { id: PRIOR_IMPORT_JOB_ID, kind: "import", status: "completed", report, createdAt: NOW, updatedAt: NOW });
+    }
+    if (path === `/api/v1/system-imports/${acceptedImportJobId}` && request.method() === "DELETE") {
+      evidence.cancelledImportJobIds.push(acceptedImportJobId);
+      return json(route, { id: acceptedImportJobId, kind: "import", status: "cancelled", report: null, createdAt: NOW, updatedAt: NOW });
     }
     if (path === "/api/v1/session") return json(route, {
       user: { id: OWNER_B, systemKey: "initial-owner", displayName: "Initial Owner", settings: {} },
@@ -381,6 +400,41 @@ for (const surface of surfaces) {
     await expect(page.locator(surface.report)).toBeVisible();
     expect(evidence.importCommits).toHaveLength(2);
     expect(evidence.importCommits[1]?.idempotencyKey).toBe(evidence.importCommits[0]?.idempotencyKey);
+  });
+
+  test(`${surface.name} cancels a newer ambiguously accepted import after a prior import completed`, async ({ page }) => {
+    const evidence = await installDataTransferApi(page, true, {
+      disconnectFirstImportCommit: true,
+      acceptedImportJobId: AMBIGUOUS_IMPORT_JOB_ID
+    });
+    await page.addInitScript(({ ownerId, priorJobId }) => {
+      sessionStorage.setItem(`infiniteQuest.systemArchiveOperation.v1:${ownerId}:import`, JSON.stringify({
+        kind: "import",
+        idempotencyKey: "prior-completed-import-key",
+        jobId: priorJobId,
+        previewHandle: "prior-preview-authority"
+      }));
+    }, { ownerId: OWNER_B, priorJobId: PRIOR_IMPORT_JOB_ID });
+    await page.goto(surface.url);
+    await expect(page.locator(surface.report)).toBeVisible();
+
+    await page.locator(surface.file).setInputFiles({
+      name: "newer-ambiguous-owner-system.zip",
+      mimeType: "application/zip",
+      buffer: Buffer.from("system")
+    });
+    await expect(page.locator(surface.preview)).toBeVisible();
+    for (const checkbox of await page.locator(surface.acknowledgements).all()) await checkbox.check();
+    await page.locator(surface.commit).click();
+    await expect(page.locator(surface.error)).toBeVisible();
+    await expect(page.locator(surface.preview)).toBeHidden();
+
+    await page.locator(surface.cancel).click();
+    await expect(page.getByText("System Import: cancelled.", { exact: true })).toBeVisible();
+    expect(evidence.importCommits).toHaveLength(2);
+    expect(evidence.importCommits[1]?.idempotencyKey).toBe(evidence.importCommits[0]?.idempotencyKey);
+    expect(evidence.cancelledImportJobIds).toEqual([AMBIGUOUS_IMPORT_JOB_ID]);
+    expect(evidence.cancelledUploadIds).toEqual([]);
   });
 
   test(`${surface.name} exposes mocked upload phases through a labelled progress live region`, async ({ page }) => {

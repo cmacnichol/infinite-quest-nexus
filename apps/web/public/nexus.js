@@ -76,6 +76,7 @@ let systemArchiveSelectedFile = null;
 let systemArchiveUpload = null;
 let systemArchivePreview = null;
 const systemArchiveJobs = { export: null, import: null };
+let systemArchiveImportOperation = null;
 let systemArchiveBusy = false;
 let systemArchiveOperationController = null;
 let systemArchiveOwnerId = null;
@@ -886,13 +887,15 @@ async function resolveStoredSystemImport(stored, signal) {
         }),
         signal
       });
-  writeSystemArchiveOperation({ ...stored, jobId: job.id });
+  systemArchiveImportOperation = { ...stored, jobId: job.id };
+  writeSystemArchiveOperation(systemArchiveImportOperation);
   return job;
 }
 
 async function recoverSystemArchiveImport() {
   const stored = readSystemArchiveOperation("import");
   if (!stored || (!stored.jobId && !stored.previewHandle)) return;
+  systemArchiveImportOperation = stored;
   invalidateSystemImportPreviewAuthority();
   const controller = new AbortController();
   const job = await resolveStoredSystemImport(stored, controller.signal);
@@ -917,9 +920,12 @@ async function cancelSystemArchiveOperation() {
   controller?.abort(new DOMException("Transfer cancelled", "AbortError"));
   try {
     const storedImport = readSystemArchiveOperation("import");
-    if (storedImport && systemArchiveJobs.import === null) {
+    const activeImportOperation = systemArchiveImportOperation || storedImport;
+    const currentJobMatchesActiveImport = activeImportOperation?.jobId !== null
+      && systemArchiveJobs.import?.id === activeImportOperation?.jobId;
+    if (activeImportOperation && !currentJobMatchesActiveImport) {
       invalidateSystemImportPreviewAuthority();
-      const recovered = await resolveStoredSystemImport(storedImport);
+      const recovered = await resolveStoredSystemImport(activeImportOperation);
       systemArchiveUpload = null;
       renderSystemArchiveJob(recovered);
       if (systemArchiveJobCancellable(recovered)) {
@@ -964,7 +970,10 @@ async function commitSystemArchiveImport() {
   }
   const previewHandle = systemArchivePreview.previewHandle;
   const idempotencyKey = systemArchiveIdempotencyKey("legacy-import");
-  writeSystemArchiveOperation({ kind: "import", idempotencyKey, jobId: null, previewHandle });
+  const importOperation = { kind: "import", idempotencyKey, jobId: null, previewHandle };
+  systemArchiveImportOperation = importOperation;
+  systemArchiveJobs.import = null;
+  writeSystemArchiveOperation(importOperation);
   invalidateSystemImportPreviewAuthority();
   await runSystemArchiveAction(async (signal) => {
     const job = await api("/api/v1/system-imports", {
@@ -980,7 +989,8 @@ async function commitSystemArchiveImport() {
       }),
       signal
     });
-    writeSystemArchiveOperation({ kind: "import", idempotencyKey, jobId: job.id, previewHandle });
+    systemArchiveImportOperation = { ...importOperation, jobId: job.id };
+    writeSystemArchiveOperation(systemArchiveImportOperation);
     systemArchiveUpload = null;
     await monitorSystemArchiveJob(job, signal);
   });

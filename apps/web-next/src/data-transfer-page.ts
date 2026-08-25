@@ -308,6 +308,7 @@ export function mountDataTransferPage(
     export: null,
     import: null
   };
+  let currentImportOperation: StoredSystemOperation | null = null;
   let currentPreview: SystemImportPreviewView | null = null;
   let actionBusy = false;
   let operationController: AbortController | null = null;
@@ -544,13 +545,15 @@ export function mountDataTransferPage(
     const job = stored.jobId
       ? await api.getJob("import", stored.jobId, signal)
       : await api.commit(stored.previewHandle!, stored.idempotencyKey, signal);
-    writeStoredOperation(operationStorage ?? null, ownerId, { ...stored, jobId: job.id });
+    currentImportOperation = { ...stored, jobId: job.id };
+    writeStoredOperation(operationStorage ?? null, ownerId, currentImportOperation);
     return job;
   }
 
   async function recoverImport(ownerId: string): Promise<void> {
     const stored = readStoredOperation(operationStorage ?? null, ownerId, "import");
     if (!stored || (!stored.jobId && !stored.previewHandle)) return;
+    currentImportOperation = stored;
     invalidatePreviewAuthority();
     const job = await resolveStoredImport(ownerId, stored, controller.signal);
     currentUpload = null;
@@ -564,9 +567,12 @@ export function mountDataTransferPage(
       const storedImport = sessionOwnerId
         ? readStoredOperation(operationStorage ?? null, sessionOwnerId, "import")
         : null;
-      if (sessionOwnerId && storedImport && currentJobs.import === null) {
+      const activeImportOperation = currentImportOperation ?? storedImport;
+      const currentJobMatchesActiveImport = activeImportOperation?.jobId !== null
+        && currentJobs.import?.id === activeImportOperation?.jobId;
+      if (sessionOwnerId && activeImportOperation && !currentJobMatchesActiveImport) {
         invalidatePreviewAuthority();
-        const recovered = await resolveStoredImport(sessionOwnerId, storedImport, controller.signal);
+        const recovered = await resolveStoredImport(sessionOwnerId, activeImportOperation, controller.signal);
         currentUpload = null;
         renderJob(recovered);
         if (isJobCancellable(recovered)) {
@@ -615,24 +621,23 @@ export function mountDataTransferPage(
     }
     const previewHandle = currentPreview.previewHandle;
     const idempotencyKey = randomIdempotencyKey("browser-import");
+    const importOperation: StoredSystemOperation = {
+      kind: "import",
+      idempotencyKey,
+      jobId: null,
+      previewHandle
+    };
+    currentImportOperation = importOperation;
+    currentJobs.import = null;
     if (sessionOwnerId) {
-      writeStoredOperation(operationStorage ?? null, sessionOwnerId, {
-        kind: "import",
-        idempotencyKey,
-        jobId: null,
-        previewHandle
-      });
+      writeStoredOperation(operationStorage ?? null, sessionOwnerId, importOperation);
     }
     invalidatePreviewAuthority();
     await runAction("import", async (signal) => {
       const job = await api.commit(previewHandle, idempotencyKey, signal);
       if (sessionOwnerId) {
-        writeStoredOperation(operationStorage ?? null, sessionOwnerId, {
-          kind: "import",
-          idempotencyKey,
-          jobId: job.id,
-          previewHandle
-        });
+        currentImportOperation = { ...importOperation, jobId: job.id };
+        writeStoredOperation(operationStorage ?? null, sessionOwnerId, currentImportOperation);
       }
       currentUpload = null;
       await monitorJob(job);
