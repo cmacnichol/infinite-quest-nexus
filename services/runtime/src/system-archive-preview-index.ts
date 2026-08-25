@@ -141,11 +141,13 @@ export class SystemArchivePreviewIndex {
         break;
       case "world-drafts":
         validateWorldContent(envelope.record.content, assetIds);
+        if (envelope.sourceId !== envelope.record.worldId) throw relationshipFailure();
         this.#insertRecord(
           envelope.domain,
           envelope.sourceId,
           envelope.record.worldId,
           envelope.record.basedOnWorldVersionId,
+          envelope.record.worldId,
         );
         this.#require("worlds", envelope.record.worldId);
         if (envelope.record.basedOnWorldVersionId !== null) {

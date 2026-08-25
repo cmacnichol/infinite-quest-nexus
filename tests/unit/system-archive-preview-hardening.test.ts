@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import JSZip from "jszip";
 import { afterEach, describe, expect, it } from "vitest";
+import { systemRecordEnvelopeSchema } from "../../packages/contracts/src/system-archives.js";
 import { stageArchiveUpload } from "../../services/api/src/archive-io.js";
 import { inspectSystemArchiveForPreview } from "../../services/runtime/src/system-archive-composition.js";
 import { SystemArchivePreviewIndex } from "../../services/runtime/src/system-archive-preview-index.js";
@@ -104,6 +105,42 @@ describe("System Archive bounded preview metadata", () => {
 });
 
 describe("System Archive preview restore keys", () => {
+  const worldContent = {
+    schemaVersion: 1,
+    world: {
+      title: "Restore-key world",
+      genre: "",
+      tone: "",
+      premise: "",
+      backgroundStory: "",
+      firstAction: "",
+      rules: "",
+    },
+    entities: [],
+    relationships: [],
+    playableCharacters: [],
+    rpgStats: [],
+    defaultTriggers: [],
+    eventTriggers: [],
+    assets: [],
+    defaults: { selectedCharacterId: null, initialLocation: "" },
+  };
+  const worldDraftEnvelope = (sourceId: string, worldId: string) => systemRecordEnvelopeSchema.parse({
+    domain: "world-drafts",
+    formatVersion: 1,
+    sourceId,
+    record: {
+      sourceId,
+      worldId,
+      basedOnWorldVersionId: null,
+      title: "Restore-key draft",
+      revision: 0,
+      content: worldContent,
+      createdAt: "2026-08-25T12:00:00.000Z",
+      updatedAt: "2026-08-25T12:00:00.000Z",
+    },
+  });
+
   it("rejects duplicate world-version numbers within a world", async () => {
     const index = await SystemArchivePreviewIndex.create();
     try {
@@ -153,6 +190,35 @@ describe("System Archive preview restore keys", () => {
         sourceId: "state-identity",
         record: { campaignId: "campaign-identity" },
       } as never, new Set())).toThrow(expect.objectContaining({ code: "archive-world-mismatch" }));
+    } finally {
+      await index.close();
+    }
+  });
+
+  it("rejects a world draft whose source ID is not its destination world ID", async () => {
+    const index = await SystemArchivePreviewIndex.create();
+    try {
+      const worldId = randomUUID();
+      const sourceId = randomUUID();
+      expect(() => index.add(
+        worldDraftEnvelope(sourceId, worldId),
+        new Set(),
+      )).toThrow(expect.objectContaining({ code: "archive-world-mismatch" }));
+    } finally {
+      await index.close();
+    }
+  });
+
+  it("rejects a second world-draft source ID for the same destination restore key", async () => {
+    const index = await SystemArchivePreviewIndex.create();
+    try {
+      const worldId = randomUUID();
+      index.add(worldDraftEnvelope(worldId, worldId), new Set());
+      const secondSourceId = randomUUID();
+      expect(() => index.add(
+        worldDraftEnvelope(secondSourceId, worldId),
+        new Set(),
+      )).toThrow(expect.objectContaining({ code: "archive-world-mismatch" }));
     } finally {
       await index.close();
     }
