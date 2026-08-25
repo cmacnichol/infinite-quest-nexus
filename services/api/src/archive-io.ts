@@ -1593,7 +1593,8 @@ export async function writeArchiveArtifact(
   archiveRoot: string,
   entries: readonly ArchiveArtifactEntry[],
   buildManifest: (entries: readonly ArchiveEntry[]) => ArchiveManifest,
-  limits?: ArchiveLimits
+  limits?: ArchiveLimits,
+  parseBuiltManifest: (value: unknown) => ArchiveManifest = (value) => archiveManifestSchema.parse(value)
 ): Promise<CompletedArchiveArtifact> {
   assertWriterEntries(entries);
   if (limits && entries.length + 1 > limits.maxEntries) {
@@ -1691,7 +1692,20 @@ export async function writeArchiveArtifact(
       });
     }
 
-    const manifest = archiveManifestSchema.parse(buildManifest(measuredEntries));
+    const manifest = parseBuiltManifest(buildManifest(measuredEntries));
+    archiveManifestSchema.parse({
+      format: manifest.format,
+      formatVersion: manifest.formatVersion,
+      archiveType: manifest.archiveType,
+      createdAt: manifest.createdAt,
+      contentFingerprint: manifest.contentFingerprint,
+      campaignId: manifest.campaignId,
+      worldId: manifest.worldId,
+      worldVersionId: manifest.worldVersionId,
+      entries: manifest.entries,
+      payloads: manifest.payloads,
+      assets: manifest.assets
+    });
     if (canonicalArchiveJson(manifest.entries) !== canonicalArchiveJson(measuredEntries)) {
       throw archiveError("archive-export-inconsistent", "The archive manifest entries do not match the streamed artifact entries.");
     }
