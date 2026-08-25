@@ -82,6 +82,34 @@ const UPDATE_FLAGS = filesystemConstants.O_RDWR | filesystemConstants.O_NOFOLLOW
 // durable authority known locally, so a stalled renewal must fail closed.
 const PORTABLE_READ_LEASE_SAFETY_MARGIN_MILLISECONDS = 50;
 
+/**
+ * Resolves an ambiguous metadata write before any physical compensation. A
+ * reconciliation failure is itself ambiguous and therefore deliberately
+ * preserves bytes; compensation is safe only after an authoritative miss.
+ */
+export async function persistSystemArchiveChunkWithReconciliation<Result>(
+  persist: () => Promise<Result>,
+  reconcile: () => Promise<Result | null>,
+  compensate: () => Promise<void>,
+): Promise<Result> {
+  try {
+    return await persist();
+  } catch (persistenceError) {
+    let durable: Result | null;
+    try {
+      durable = await reconcile();
+    } catch (reconciliationError) {
+      throw Object.assign(new Error("system_archive_chunk_reconciliation_failed"), {
+        cause: reconciliationError,
+        persistenceError,
+      });
+    }
+    if (durable !== null) return durable;
+    await compensate();
+    throw persistenceError;
+  }
+}
+
 export interface SecureFilesystemTransactionRunner {
   run<Result>(
     work: (database: DurableFilesystemTransactionContext) => Promise<Result>,
@@ -161,16 +189,18 @@ export type SecureFilesystemAdapter = Readonly<{
     filesystemOperationId: string;
     leaseOwner: string;
     leaseSeconds: number;
+    activitySeconds: number;
     offset: number;
     bytes: Uint8Array;
     sha256: string;
-  }>, persist: () => Promise<Result>): Promise<Result>;
+  }>, persist: () => Promise<Result>, reconcile: () => Promise<Result | null>): Promise<Result>;
   assembleSystemArchiveUpload(input: Readonly<{
     ownerUserId: string;
     uploadId: string;
     filesystemOperationId: string;
     leaseOwner: string;
     leaseSeconds: number;
+    activitySeconds: number;
     byteLength: number;
     sha256: string;
   }>): Promise<Readonly<{
@@ -1420,11 +1450,14 @@ export async function createSecureFilesystemAdapter(
   const publishSystemArchiveUploadChunk: SecureFilesystemAdapter["publishSystemArchiveUploadChunk"] = async (
     input,
     persist,
+    reconcile,
   ) => {
     requireAdapterOpen();
     if (!options.systemArchiveStorage) throw new Error("system_archive_storage_repository_unavailable");
     if (!Number.isSafeInteger(input.offset) || input.offset < 0
       || input.bytes.byteLength < 1
+      || !Number.isSafeInteger(input.activitySeconds)
+      || input.activitySeconds < input.leaseSeconds
       || createHash("sha256").update(input.bytes).digest("hex") !== input.sha256) {
       throw new Error("system_archive_chunk_invalid");
     }
@@ -1434,8 +1467,10 @@ export async function createSecureFilesystemAdapter(
       filesystemOperationId: input.filesystemOperationId,
       leaseOwner: input.leaseOwner,
       leaseSeconds: input.leaseSeconds,
+      activitySeconds: input.activitySeconds,
     }, async (authority) => {
       if (authority.state !== "assembling") throw new Error("system_archive_upload_already_staged");
+      if (!authority.leaseCurrent()) throw new Error("system_archive_storage_lease_lost");
       const handle = await openAnchored(archiveRoot, authority.relativePath, UPDATE_FLAGS);
       let originalSize = 0;
       let previous = Buffer.alloc(0);
@@ -1470,9 +1505,8 @@ export async function createSecureFilesystemAdapter(
         if (after.deviceId !== authority.identity.deviceId || after.fileId !== authority.identity.fileId) {
           throw new Error("system_archive_upload_identity_mismatch");
         }
-        try {
-          return await persist();
-        } catch (error) {
+        if (!authority.leaseCurrent()) throw new Error("system_archive_storage_lease_lost");
+        return await persistSystemArchiveChunkWithReconciliation(persist, reconcile, async () => {
           let restored = 0;
           while (restored < previous.byteLength) {
             const result = await handle.write(
@@ -1486,8 +1520,7 @@ export async function createSecureFilesystemAdapter(
           }
           await handle.truncate(originalSize);
           await handle.sync();
-          throw error;
-        }
+        });
       } finally {
         await handle.close();
       }
@@ -1505,6 +1538,7 @@ export async function createSecureFilesystemAdapter(
       filesystemOperationId: input.filesystemOperationId,
       leaseOwner: input.leaseOwner,
       leaseSeconds: input.leaseSeconds,
+      activitySeconds: input.activitySeconds,
     }, async (authority) => {
       if (authority.state === "staged") {
         return Object.freeze({
@@ -1551,11 +1585,12 @@ export async function createSecureFilesystemAdapter(
         cleanupDescriptors: [descriptor],
       });
       await options.candidates!.completePublicationCandidate(authority.operation, candidate, descriptor);
+      const settledClaim = await authority.settleLease();
       const attachment = bindPrivateFilesystemCandidateAttachment(
         authority.operation,
         candidate,
         descriptor,
-        authority.claim,
+        settledClaim,
       );
       const issued = await options.transactions.run((database) => options.atomicPortable!.issueStagedInput(
         database,

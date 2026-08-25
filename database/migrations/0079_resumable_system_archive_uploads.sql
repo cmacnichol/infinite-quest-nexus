@@ -36,6 +36,84 @@ CREATE INDEX system_archive_uploads_expiry_idx
   ON system_archive_uploads(status, expires_at, updated_at, id)
   WHERE status IN ('created', 'uploading', 'expired');
 
+-- Portable staged authority is normally write-once. A completed System Archive
+-- upload may extend only its matching staged input's expiry, and never beyond
+-- the upload authority that justifies that extension. This lets a preview keep
+-- its private bytes alive for the entire opaque-handle lifetime without
+-- opening a general-purpose staged-input mutation path.
+CREATE OR REPLACE FUNCTION enforce_portable_staged_input_authority() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'portable staged input authority cannot be deleted'
+      USING ERRCODE = '55000';
+  END IF;
+
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.status <> 'staged' OR NEW.consumed_at IS NOT NULL THEN
+      RAISE EXCEPTION 'portable staged input initial lifecycle is invalid'
+        USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF OLD.id IS DISTINCT FROM NEW.id
+    OR OLD.owner_user_id IS DISTINCT FROM NEW.owner_user_id
+    OR OLD.handle_token_hash IS DISTINCT FROM NEW.handle_token_hash
+    OR OLD.filesystem_operation_id IS DISTINCT FROM NEW.filesystem_operation_id
+    OR OLD.content_hash IS DISTINCT FROM NEW.content_hash
+    OR OLD.byte_length IS DISTINCT FROM NEW.byte_length
+    OR (
+      OLD.expires_at IS DISTINCT FROM NEW.expires_at
+      AND NOT (
+        NEW.expires_at > OLD.expires_at
+        AND EXISTS (
+          SELECT 1
+            FROM system_archive_uploads upload
+           WHERE upload.owner_user_id = NEW.owner_user_id
+             AND upload.filesystem_operation_id = NEW.filesystem_operation_id
+             AND upload.staged_input_id = NEW.id
+             AND upload.status = 'completed'
+             AND upload.expires_at >= NEW.expires_at
+        )
+      )
+    )
+    OR OLD.created_at IS DISTINCT FROM NEW.created_at
+  THEN
+    RAISE EXCEPTION 'portable staged input authority is write-once'
+      USING ERRCODE = '55000';
+  END IF;
+
+  IF OLD.consumed_at IS NOT NULL
+    AND OLD.consumed_at IS DISTINCT FROM NEW.consumed_at
+  THEN
+    RAISE EXCEPTION 'portable staged input consumption evidence is write-once'
+      USING ERRCODE = '55000';
+  END IF;
+
+  IF OLD.status IS DISTINCT FROM NEW.status
+    AND NOT (
+      (OLD.status = 'staged'
+        AND NEW.status IN ('consumed', 'expired', 'failed', 'cleanup_pending'))
+      OR (OLD.status IN ('consumed', 'expired', 'failed')
+        AND NEW.status = 'cleanup_pending')
+      OR (OLD.status = 'cleanup_pending' AND NEW.status = 'cleaned')
+    )
+  THEN
+    RAISE EXCEPTION 'portable staged input lifecycle transition is invalid'
+      USING ERRCODE = '55000';
+  END IF;
+
+  IF OLD.consumed_at IS NULL AND NEW.consumed_at IS NOT NULL
+    AND NOT (OLD.status = 'staged' AND NEW.status = 'consumed')
+  THEN
+    RAISE EXCEPTION 'portable staged input consumption evidence is invalid'
+      USING ERRCODE = '55000';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
 CREATE TABLE system_archive_upload_chunks (
   upload_id uuid NOT NULL,
   owner_user_id uuid NOT NULL REFERENCES users(id),

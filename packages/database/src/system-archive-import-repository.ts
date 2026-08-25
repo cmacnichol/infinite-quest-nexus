@@ -278,6 +278,51 @@ export function createPostgresSystemArchiveImportRepository(
           [options.previewTtlSeconds]
         );
         const expiresAt = expiry.rows[0]!.expires_at.toISOString();
+        const authority = await client.query<{
+          filesystem_operation_id: string;
+          staged_input_id: string;
+        }>(
+          `SELECT upload.filesystem_operation_id,upload.staged_input_id
+             FROM system_archive_uploads upload
+             JOIN portable_staged_inputs staged
+               ON staged.id=upload.staged_input_id
+              AND staged.owner_user_id=upload.owner_user_id
+              AND staged.filesystem_operation_id=upload.filesystem_operation_id
+            WHERE upload.id=$1 AND upload.owner_user_id=$2
+              AND upload.status='completed' AND upload.staged_input_id IS NOT NULL
+              AND upload.expires_at > clock_timestamp()
+              AND staged.status='staged' AND staged.expires_at > clock_timestamp()
+            FOR UPDATE OF upload,staged`,
+          [request.uploadId, owner.ownerUserId]
+        );
+        const privateAuthority = authority.rows[0];
+        if (!privateAuthority) {
+          throw repositoryError("Completed System Archive upload was not found.", 404);
+        }
+        const renewedUpload = await client.query(
+          `UPDATE system_archive_uploads
+              SET expires_at=GREATEST(expires_at,$3),updated_at=clock_timestamp()
+            WHERE id=$1 AND owner_user_id=$2 AND status='completed'`,
+          [request.uploadId, owner.ownerUserId, expiresAt]
+        );
+        const renewedOperation = await client.query(
+          `UPDATE durable_filesystem_operations
+              SET expires_at=GREATEST(expires_at,$3),updated_at=clock_timestamp()
+            WHERE id=$1 AND owner_user_id=$2 AND purpose='portable_staging'
+              AND resource_kind='portable' AND lifecycle <> 'cleaned'`,
+          [privateAuthority.filesystem_operation_id, owner.ownerUserId, expiresAt]
+        );
+        const renewedStaged = await client.query(
+          `UPDATE portable_staged_inputs
+              SET expires_at=GREATEST(expires_at,$3),updated_at=clock_timestamp()
+            WHERE id=$1 AND owner_user_id=$2 AND status='staged'`,
+          [privateAuthority.staged_input_id, owner.ownerUserId, expiresAt]
+        );
+        if (renewedUpload.rowCount !== 1
+          || renewedOperation.rowCount !== 1
+          || renewedStaged.rowCount !== 1) {
+          throw new Error("System Archive preview lost its private staging authority.");
+        }
         const inserted = await client.query<{ id: string }>(
           `INSERT INTO system_archive_jobs (
              owner_user_id,kind,status,idempotency_key_hash,staged_input_id,progress,report

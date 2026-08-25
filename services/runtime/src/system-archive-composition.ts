@@ -332,9 +332,15 @@ export async function inspectSystemArchiveForPreview(
   let assetBytes = 0;
   try {
     for (const entry of manifest.entries) {
+      // system.json is fixed metadata with an empty records array and the
+      // asset inventory duplicates the already-bounded manifest inventory.
+      // Neither requires the generic 1 GiB NDJSON-shard allowance, and both
+      // must be bounded before readVerifiedContainerEntry allocates a buffer.
       const maximumBytes = entry.logicalType === "asset-original"
         ? limits.maxOriginalImageBytes
-        : limits.maxJsonEntryBytes;
+        : entry.path === "system.json" || entry.path === "assets/assets.json"
+          ? Math.min(limits.maxManifestBytes, limits.maxJsonEntryBytes)
+          : limits.maxJsonEntryBytes;
       const containerEntry = container.entries.get(normalizedPath(entry.path));
       if (!containerEntry) throw importFailure("archive-entry-missing", "A declared System Archive entry is missing.");
       if (entry.byteLength > maximumBytes || containerEntry.uncompressedBytes > maximumBytes) {
@@ -501,7 +507,8 @@ export interface SystemArchiveUploadStoragePort {
     offset: number;
     bytes: Uint8Array;
     sha256: string;
-  }>, persist: () => Promise<SystemArchiveUploadView>): Promise<SystemArchiveUploadView>;
+  }>, persist: () => Promise<SystemArchiveUploadView>,
+    reconcile: () => Promise<SystemArchiveUploadView | null>): Promise<SystemArchiveUploadView>;
   assemble(input: Readonly<{
     ownerUserId: string;
     assembly: SystemArchiveUploadAssembly;
@@ -616,25 +623,42 @@ export function createSystemArchiveUploadService(
           bytes: request.bytes.byteLength,
           sha256: request.sha256,
         });
-      });
+      }, () => options.uploads.reconcileChunk(owner, {
+        uploadId: request.uploadId,
+        index: request.index,
+        offset: request.offset,
+        bytes: request.bytes.byteLength,
+        sha256: request.sha256,
+      }));
     },
 
     async completeUpload(owner, uploadId) {
       const assembly = await options.uploads.getAssembly(owner, uploadId);
       const staged = await options.storage.assemble({ ownerUserId: owner.ownerUserId, assembly });
+      if (staged.byteLength !== assembly.byteLength || staged.sha256 !== assembly.sha256) {
+        await staged.rollback().catch(() => undefined);
+        throw Object.assign(new Error("System Archive upload assembly failed its final identity check."), {
+          statusCode: 409,
+        });
+      }
+      const completion = { uploadId, stagedInputId: staged.stagedInputId };
       try {
-        if (staged.byteLength !== assembly.byteLength || staged.sha256 !== assembly.sha256) {
-          throw Object.assign(new Error("System Archive upload assembly failed its final identity check."), {
-            statusCode: 409,
+        return await options.uploads.completeUpload(owner, {
+          ...completion,
+        });
+      } catch (persistenceError) {
+        let durable: SystemArchiveUploadView | null;
+        try {
+          durable = await options.uploads.reconcileCompletion(owner, completion);
+        } catch (reconciliationError) {
+          throw Object.assign(new Error("system_archive_completion_reconciliation_failed"), {
+            cause: reconciliationError,
+            persistenceError,
           });
         }
-        return await options.uploads.completeUpload(owner, {
-          uploadId,
-          stagedInputId: staged.stagedInputId,
-        });
-      } catch (error) {
+        if (durable !== null) return durable;
         await staged.rollback().catch(() => undefined);
-        throw error;
+        throw persistenceError;
       }
     },
   });
@@ -668,17 +692,18 @@ export function createPrivateSystemArchiveUploadStorage(
         expiresAt: new Date(issuedAt.getTime() + options.uploadTtlSeconds * 1_000).toISOString(),
       });
     },
-    publishChunk(input, persist) {
+    publishChunk(input, persist, reconcile) {
       return storage.publishSystemArchiveUploadChunk({
         ownerUserId: input.ownerUserId,
         uploadId: input.uploadId,
         filesystemOperationId: input.assemblyOperationId,
         leaseOwner: options.leaseOwner,
         leaseSeconds: options.leaseSeconds,
+        activitySeconds: options.uploadTtlSeconds,
         offset: input.offset,
         bytes: input.bytes,
         sha256: input.sha256,
-      }, persist);
+      }, persist, reconcile);
     },
     assemble(input) {
       return storage.assembleSystemArchiveUpload({
@@ -687,6 +712,7 @@ export function createPrivateSystemArchiveUploadStorage(
         filesystemOperationId: input.assembly.filesystemOperationId,
         leaseOwner: options.leaseOwner,
         leaseSeconds: options.leaseSeconds,
+        activitySeconds: options.uploadTtlSeconds,
         byteLength: input.assembly.byteLength,
         sha256: input.assembly.sha256,
       });
@@ -875,35 +901,45 @@ export function createPrivateSystemArchivePreviewSource(
     archiveRoot: string;
     maximumCompressedBytes: number;
     repository: ReturnType<typeof createPostgresSystemArchivePrivateStorageRepository>;
+    leaseOwner: string;
+    leaseSeconds: number;
+    activitySeconds: number;
   }>,
 ): SystemArchivePreviewSourcePort {
   const source: SystemArchivePreviewSourcePort = {
     async withCompletedUpload(owner, uploadId, inspect) {
-      const authority = await options.repository.completedUpload(owner.ownerUserId, uploadId);
-      if (!authority) {
-        throw Object.assign(new Error("System Archive completed upload was not found."), { statusCode: 404 });
-      }
-      const change = authority.descriptor.identity.changeToken.split(":");
-      if (change.length !== 2) throw new Error("system_archive_staged_identity_invalid");
-      const staged = await rehydratePersistedAnchoredStagedArchive({
-        archiveRoot: options.archiveRoot,
-        relativePath: authority.descriptor.relativePath,
-        compressedBytes: authority.descriptor.byteLength,
-        maximumCompressedBytes: options.maximumCompressedBytes,
-        sha256: authority.descriptor.contentHash,
-        identity: {
-          device: BigInt(authority.descriptor.identity.deviceId),
-          inode: BigInt(authority.descriptor.identity.fileId),
-          size: BigInt(authority.descriptor.byteLength),
-          modifiedNanoseconds: BigInt(change[0]!),
-          changedNanoseconds: BigInt(change[1]!),
-        },
+      return options.repository.withCompletedUploadLock({
+        ownerUserId: owner.ownerUserId,
+        uploadId,
+        leaseOwner: options.leaseOwner,
+        leaseSeconds: options.leaseSeconds,
+        activitySeconds: options.activitySeconds,
+      }, async (authority) => {
+        if (!authority.leaseCurrent()) throw new Error("system_archive_storage_lease_lost");
+        const change = authority.descriptor.identity.changeToken.split(":");
+        if (change.length !== 2) throw new Error("system_archive_staged_identity_invalid");
+        const staged = await rehydratePersistedAnchoredStagedArchive({
+          archiveRoot: options.archiveRoot,
+          relativePath: authority.descriptor.relativePath,
+          compressedBytes: authority.descriptor.byteLength,
+          maximumCompressedBytes: options.maximumCompressedBytes,
+          sha256: authority.descriptor.contentHash,
+          identity: {
+            device: BigInt(authority.descriptor.identity.deviceId),
+            inode: BigInt(authority.descriptor.identity.fileId),
+            size: BigInt(authority.descriptor.byteLength),
+            modifiedNanoseconds: BigInt(change[0]!),
+            changedNanoseconds: BigInt(change[1]!),
+          },
+        });
+        try {
+          const result = await inspect(staged);
+          if (!authority.leaseCurrent()) throw new Error("system_archive_storage_lease_lost");
+          return result;
+        } finally {
+          await releaseAnchoredStagedArchive(staged);
+        }
       });
-      try {
-        return await inspect(staged);
-      } finally {
-        await releaseAnchoredStagedArchive(staged);
-      }
     },
   };
   return Object.freeze(source);
@@ -962,6 +998,9 @@ export function createSystemArchiveImportComposition(
         archiveRoot: options.archiveRoot,
         maximumCompressedBytes: options.limits.maxCompressedBytes,
         repository: privateRepository,
+        leaseOwner: options.leaseOwner,
+        leaseSeconds: options.leaseSeconds,
+        activitySeconds: Math.max(options.uploadTtlSeconds, options.previewTtlSeconds),
       }),
       capacity: options.capacity,
       limits: options.limits,

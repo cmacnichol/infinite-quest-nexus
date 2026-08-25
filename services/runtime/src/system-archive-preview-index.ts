@@ -67,8 +67,12 @@ export class SystemArchivePreviewIndex {
         source_id TEXT NOT NULL,
         parent_id TEXT,
         secondary_id TEXT,
+        restore_key TEXT,
         PRIMARY KEY (domain,source_id)
       ) WITHOUT ROWID;
+      CREATE UNIQUE INDEX records_restore_key
+        ON records(domain,parent_id,restore_key)
+        WHERE restore_key IS NOT NULL;
       CREATE TABLE required_references (
         target_domain TEXT NOT NULL,
         target_id TEXT NOT NULL,
@@ -98,11 +102,12 @@ export class SystemArchivePreviewIndex {
     sourceId: string,
     parentId: string | null = null,
     secondaryId: string | null = null,
+    restoreKey: string | null = null,
   ): void {
     try {
       this.#database.prepare(
-        "INSERT INTO records (domain,source_id,parent_id,secondary_id) VALUES (?,?,?,?)",
-      ).run(domain, sourceId, parentId, secondaryId);
+        "INSERT INTO records (domain,source_id,parent_id,secondary_id,restore_key) VALUES (?,?,?,?,?)",
+      ).run(domain, sourceId, parentId, secondaryId, restoreKey);
     } catch {
       throw jsonFailure();
     }
@@ -125,7 +130,13 @@ export class SystemArchivePreviewIndex {
         break;
       case "world-versions":
         validateWorldContent(envelope.record.content, assetIds);
-        this.#insertRecord(envelope.domain, envelope.sourceId, envelope.record.worldId);
+        this.#insertRecord(
+          envelope.domain,
+          envelope.sourceId,
+          envelope.record.worldId,
+          null,
+          String(envelope.record.versionNumber),
+        );
         this.#require("worlds", envelope.record.worldId);
         break;
       case "world-drafts":
@@ -146,7 +157,13 @@ export class SystemArchivePreviewIndex {
         this.#require("world-versions", envelope.record.worldVersionId);
         break;
       case "turns":
-        this.#insertRecord(envelope.domain, envelope.sourceId, envelope.record.campaignId);
+        this.#insertRecord(
+          envelope.domain,
+          envelope.sourceId,
+          envelope.record.campaignId,
+          null,
+          String(envelope.record.turnNumber),
+        );
         this.#require("campaigns", envelope.record.campaignId);
         break;
       case "turn-corrections":
@@ -154,6 +171,10 @@ export class SystemArchivePreviewIndex {
         this.#require("turns", envelope.record.turnId);
         break;
       case "campaign-state":
+        if (envelope.sourceId !== envelope.record.campaignId) throw relationshipFailure();
+        this.#insertRecord(envelope.domain, envelope.sourceId, envelope.record.campaignId);
+        this.#require("campaigns", envelope.record.campaignId);
+        break;
       case "campaign-history":
       case "canonical-facts":
       case "chronicle":

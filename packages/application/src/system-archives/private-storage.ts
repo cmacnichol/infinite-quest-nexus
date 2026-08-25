@@ -10,12 +10,16 @@ export type SystemArchiveUploadFileAuthority = Readonly<{
   claim: DurableFilesystemRecoveryClaim;
   relativePath: string;
   identity: Readonly<{ deviceId: string; fileId: string }>;
+  leaseCurrent(): boolean;
+  settleLease(): Promise<DurableFilesystemRecoveryClaim>;
 }>;
 
 export type SystemArchiveStagedFileAuthority = Readonly<{
   state: "staged";
   stagedInputId: string;
   descriptor: PrivateStorageDescriptor;
+  leaseCurrent(): boolean;
+  settleLease(): Promise<DurableFilesystemRecoveryClaim>;
 }>;
 
 export type SystemArchiveUploadStorageAuthority =
@@ -30,18 +34,22 @@ export interface SystemArchivePrivateStorageRepositoryPort {
       filesystemOperationId: string;
       leaseOwner: string;
       leaseSeconds: number;
+      activitySeconds: number;
     }>,
     work: (authority: SystemArchiveUploadStorageAuthority) => Promise<Result>,
+  ): Promise<Result>;
+  withCompletedUploadLock<Result>(
+    input: Readonly<{
+      ownerUserId: string;
+      uploadId: string;
+      leaseOwner: string;
+      leaseSeconds: number;
+      activitySeconds: number;
+    }>,
+    work: (authority: SystemArchiveStagedFileAuthority) => Promise<Result>,
   ): Promise<Result>;
   stagedInputIdForOperation(
     ownerUserId: string,
     filesystemOperationId: string,
   ): Promise<string>;
-  completedUpload(
-    ownerUserId: string,
-    uploadId: string,
-  ): Promise<Readonly<{
-    stagedInputId: string;
-    descriptor: PrivateStorageDescriptor;
-  }> | null>;
 }

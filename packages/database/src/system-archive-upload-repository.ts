@@ -79,11 +79,19 @@ export interface SystemArchiveUploadRepository {
     owner: OwnerScope,
     request: RecordSystemArchiveUploadChunkRequest
   ): Promise<SystemArchiveUploadView>;
+  reconcileChunk(
+    owner: OwnerScope,
+    request: RecordSystemArchiveUploadChunkRequest
+  ): Promise<SystemArchiveUploadView | null>;
   getAssembly(owner: OwnerScope, uploadId: string): Promise<SystemArchiveUploadAssembly>;
   completeUpload(
     owner: OwnerScope,
     request: CompleteSystemArchiveUploadRequest
   ): Promise<SystemArchiveUploadView>;
+  reconcileCompletion(
+    owner: OwnerScope,
+    request: CompleteSystemArchiveUploadRequest
+  ): Promise<SystemArchiveUploadView | null>;
 }
 
 type SystemArchiveUploadRepositoryOptions = Readonly<{
@@ -185,10 +193,41 @@ function assemblyFromRows(
   });
 }
 
+async function renewUploadAuthority(
+  client: DatabaseClient,
+  owner: OwnerScope,
+  uploadId: string,
+  filesystemOperationId: string,
+  uploadTtlSeconds: number
+): Promise<SystemArchiveUploadRow> {
+  const updated = await client.query<SystemArchiveUploadRow>(
+    `UPDATE system_archive_uploads
+        SET expires_at=clock_timestamp()+($4::text || ' seconds')::interval,
+            updated_at=clock_timestamp()
+      WHERE id=$1 AND owner_user_id=$2 AND filesystem_operation_id=$3
+     RETURNING ${UPLOAD_COLUMNS}`,
+    [uploadId, owner.ownerUserId, filesystemOperationId, uploadTtlSeconds]
+  );
+  const row = updated.rows[0];
+  if (!row) throw new Error("System Archive upload authority renewal lost its session.");
+  const operation = await client.query(
+    `UPDATE durable_filesystem_operations
+        SET expires_at=$3,updated_at=clock_timestamp()
+      WHERE id=$1 AND owner_user_id=$2 AND purpose='portable_staging'
+        AND resource_kind='portable' AND lifecycle IN ('reserved','attached','finalized')`,
+    [filesystemOperationId, owner.ownerUserId, row.expires_at]
+  );
+  if (operation.rowCount !== 1) {
+    throw new Error("System Archive upload authority renewal lost its filesystem operation.");
+  }
+  return row;
+}
+
 async function lockedAssembly(
   client: DatabaseClient,
   owner: OwnerScope,
-  uploadId: string
+  uploadId: string,
+  uploadTtlSeconds: number
 ): Promise<Readonly<{
   upload: SystemArchiveUploadRow;
   assembly: SystemArchiveUploadAssembly;
@@ -209,7 +248,18 @@ async function lockedAssembly(
       ORDER BY byte_offset,chunk_index`,
     [uploadId, owner.ownerUserId]
   );
-  return Object.freeze({ upload, assembly: assemblyFromRows(upload, chunks.rows, upload.is_expired) });
+  const assembly = assemblyFromRows(upload, chunks.rows, upload.is_expired);
+  const renewed = await renewUploadAuthority(
+    client,
+    owner,
+    uploadId,
+    upload.filesystem_operation_id,
+    uploadTtlSeconds
+  );
+  return Object.freeze({
+    upload: renewed,
+    assembly: Object.freeze({ ...assembly, expiresAt: renewed.expires_at.toISOString() })
+  });
 }
 
 export function createPostgresSystemArchiveUploadRepository(
@@ -224,17 +274,32 @@ export function createPostgresSystemArchiveUploadRepository(
       requireHash(request.sha256, "System Archive upload content hash");
       requireSafeInteger(request.byteLength, "System Archive upload byte length", 0);
       try {
-        const result = await pool.query<SystemArchiveUploadRow>(
-          `INSERT INTO system_archive_uploads (
-             owner_user_id,handle_token_hash,filesystem_operation_id,byte_length,content_hash,expires_at
-           ) VALUES ($1,$2,$3,$4,$5,clock_timestamp()+($6::text || ' seconds')::interval)
-           RETURNING ${UPLOAD_COLUMNS}`,
-          [owner.ownerUserId, request.handleTokenHash, request.filesystemOperationId,
-            request.byteLength, request.sha256, options.uploadTtlSeconds]
-        );
-        const row = result.rows[0];
-        if (!row) throw new Error("System Archive upload creation did not return a session.");
-        return toView(row);
+        return await withTransaction(pool, async (client) => {
+          const result = await client.query<SystemArchiveUploadRow>(
+            `INSERT INTO system_archive_uploads (
+               owner_user_id,handle_token_hash,filesystem_operation_id,byte_length,content_hash,expires_at
+             ) VALUES ($1,$2,$3,$4,$5,clock_timestamp()+($6::text || ' seconds')::interval)
+             RETURNING ${UPLOAD_COLUMNS}`,
+            [owner.ownerUserId, request.handleTokenHash, request.filesystemOperationId,
+              request.byteLength, request.sha256, options.uploadTtlSeconds]
+          );
+          const row = result.rows[0];
+          if (!row) throw new Error("System Archive upload creation did not return a session.");
+          const operation = await client.query(
+            `UPDATE durable_filesystem_operations
+                SET expires_at=$3,updated_at=clock_timestamp()
+              WHERE id=$1 AND owner_user_id=$2 AND purpose='portable_staging'
+                AND resource_kind='portable' AND lifecycle='reserved'`,
+            [request.filesystemOperationId, owner.ownerUserId, row.expires_at]
+          );
+          if (operation.rowCount !== 1) {
+            throw repositoryError(
+              "System Archive upload filesystem authority was not found for this owner.",
+              404
+            );
+          }
+          return toView(row);
+        });
       } catch (error) {
         if (postgresCode(error) === "23505") {
           throw repositoryError("System Archive upload authority is already in use.", 409);
@@ -310,7 +375,14 @@ export function createPostgresSystemArchiveUploadRepository(
             || chunk.content_hash !== request.sha256) {
             throw repositoryError("System Archive chunk replay conflicts with persisted metadata.", 409);
           }
-          return toView(upload);
+          const renewed = await renewUploadAuthority(
+            client,
+            owner,
+            request.uploadId,
+            upload.filesystem_operation_id,
+            options.uploadTtlSeconds
+          );
+          return toView(renewed);
         }
 
         try {
@@ -339,21 +411,60 @@ export function createPostgresSystemArchiveUploadRepository(
         );
         const row = updated.rows[0];
         if (!row) throw new Error("System Archive chunk persistence lost its upload session.");
+        const operation = await client.query(
+          `UPDATE durable_filesystem_operations
+              SET expires_at=$3,updated_at=clock_timestamp()
+            WHERE id=$1 AND owner_user_id=$2 AND purpose='portable_staging'
+              AND resource_kind='portable' AND lifecycle IN ('reserved','attached','finalized')`,
+          [upload.filesystem_operation_id, owner.ownerUserId, row.expires_at]
+        );
+        if (operation.rowCount !== 1) {
+          throw new Error("System Archive chunk persistence lost its filesystem authority.");
+        }
         return toView(row);
       });
       if (!outcome) throw repositoryError("System Archive upload has expired.", 410);
       return outcome;
     },
 
+    async reconcileChunk(owner, request) {
+      requireChunkIndex(request.index);
+      requireSafeInteger(request.offset, "System Archive chunk offset", 0);
+      requireSafeInteger(request.bytes, "System Archive chunk byte length", 1);
+      requireHash(request.sha256, "System Archive chunk hash");
+      const reconciled = await pool.query<SystemArchiveUploadRow>(
+        `SELECT upload.id,upload.owner_user_id,upload.filesystem_operation_id,upload.status,
+                upload.byte_length,upload.received_bytes,upload.content_hash,
+                upload.staged_input_id,upload.expires_at
+           FROM system_archive_uploads upload
+           JOIN system_archive_upload_chunks chunk
+             ON chunk.upload_id=upload.id
+            AND chunk.owner_user_id=upload.owner_user_id
+            AND chunk.filesystem_operation_id=upload.filesystem_operation_id
+          WHERE upload.id=$1 AND upload.owner_user_id=$2
+            AND chunk.chunk_index=$3 AND chunk.byte_offset=$4
+            AND chunk.byte_length=$5 AND chunk.content_hash=$6`,
+        [request.uploadId, owner.ownerUserId, request.index,
+          request.offset, request.bytes, request.sha256]
+      );
+      const row = reconciled.rows[0];
+      return row ? toView(row) : null;
+    },
+
     async getAssembly(owner, uploadId) {
       return withTransaction(pool, async (client) => (
-        await lockedAssembly(client, owner, uploadId)
+        await lockedAssembly(client, owner, uploadId, options.uploadTtlSeconds)
       ).assembly);
     },
 
     async completeUpload(owner, request) {
       return withTransaction(pool, async (client) => {
-        const { upload, assembly } = await lockedAssembly(client, owner, request.uploadId);
+        const { upload, assembly } = await lockedAssembly(
+          client,
+          owner,
+          request.uploadId,
+          options.uploadTtlSeconds
+        );
         const staged = await client.query<{
           id: string;
           filesystem_operation_id: string;
@@ -391,8 +502,44 @@ export function createPostgresSystemArchiveUploadRepository(
         if (!row || upload.id !== row.id) {
           throw repositoryError("System Archive upload completion conflicted with another request.", 409);
         }
+        const operation = await client.query(
+          `UPDATE durable_filesystem_operations
+              SET expires_at=$3,updated_at=clock_timestamp()
+            WHERE id=$1 AND owner_user_id=$2 AND purpose='portable_staging'
+              AND resource_kind='portable' AND lifecycle IN ('reserved','attached','finalized')`,
+          [assembly.filesystemOperationId, owner.ownerUserId, row.expires_at]
+        );
+        const stagedRenewal = await client.query(
+          `UPDATE portable_staged_inputs
+              SET expires_at=GREATEST(expires_at,$3),updated_at=clock_timestamp()
+            WHERE id=$1 AND owner_user_id=$2 AND status='staged'`,
+          [request.stagedInputId, owner.ownerUserId, row.expires_at]
+        );
+        if (operation.rowCount !== 1 || stagedRenewal.rowCount !== 1) {
+          throw new Error("System Archive upload completion lost its private authority.");
+        }
         return toView(row);
       });
+    },
+
+    async reconcileCompletion(owner, request) {
+      const reconciled = await pool.query<SystemArchiveUploadRow>(
+        `SELECT upload.id,upload.owner_user_id,upload.filesystem_operation_id,upload.status,
+                upload.byte_length,upload.received_bytes,upload.content_hash,
+                upload.staged_input_id,upload.expires_at
+           FROM system_archive_uploads upload
+           JOIN portable_staged_inputs staged
+             ON staged.id=upload.staged_input_id
+            AND staged.owner_user_id=upload.owner_user_id
+            AND staged.filesystem_operation_id=upload.filesystem_operation_id
+            AND staged.content_hash=upload.content_hash
+            AND staged.byte_length=upload.byte_length
+          WHERE upload.id=$1 AND upload.owner_user_id=$2
+            AND upload.status='completed' AND upload.staged_input_id=$3`,
+        [request.uploadId, owner.ownerUserId, request.stagedInputId]
+      );
+      const row = reconciled.rows[0];
+      return row ? toView(row) : null;
     }
   };
 }

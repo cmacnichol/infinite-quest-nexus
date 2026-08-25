@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import JSZip from "jszip";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { SYSTEM_ARCHIVE_DOMAINS, type SystemArchiveDomain } from "@infinite-quest/contracts";
 import type { OwnerScope } from "../../packages/application/src/generation/types.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
@@ -13,11 +13,14 @@ import { createPostgresSystemArchiveExportJobPort } from "../../packages/databas
 import { createPostgresSystemArchiveImportRepository } from "../../packages/database/src/system-archive-import-repository.js";
 import { createPostgresSystemArchivePrivateStorageRepository } from "../../packages/database/src/system-archive-private-storage-repository.js";
 import { createPostgresSystemArchiveUploadRepository } from "../../packages/database/src/system-archive-upload-repository.js";
+import { createPostgresSecureStorageRepository } from "../../packages/database/src/secure-storage-repository.js";
+import { createPostgresDurableFilesystemRepository } from "../../packages/database/src/durable-filesystem-repository.js";
 import {
   createSystemArchiveImportComposition,
   createSystemArchiveUploadService,
   type SystemArchiveUploadStoragePort,
 } from "../../services/runtime/src/system-archive-composition.js";
+import { persistSystemArchiveChunkWithReconciliation } from "../../services/runtime/src/secure-filesystem-adapter.js";
 import { createAssetImportStorageComposition } from "../../services/runtime/src/asset-import-composition.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -259,6 +262,58 @@ integration("durable System Archive jobs and resumable uploads", () => {
     )).resolves.toMatchObject({ rows: [{ status: "expired" }] });
   });
 
+  it("extends every private staging authority through the full preview lifetime", async () => {
+    const uploads = createPostgresSystemArchiveUploadRepository(pool, { uploadTtlSeconds: 300 });
+    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const filesystemOperationId = await reservePortableOperation(owner, "portable_staging");
+    const upload = await uploads.createUpload(owner, {
+      handleTokenHash: hash(`preview-lifetime-${randomUUID()}`),
+      filesystemOperationId,
+      byteLength: 4,
+      sha256: hash("abcd")
+    });
+    await uploads.recordChunk(owner, {
+      uploadId: upload.id,
+      index: 0,
+      offset: 0,
+      bytes: 4,
+      sha256: hash("abcd")
+    });
+    const staged = await pool.query<{ id: string }>(
+      `INSERT INTO portable_staged_inputs (
+         owner_user_id,handle_token_hash,filesystem_operation_id,content_hash,byte_length,expires_at
+       ) VALUES ($1,$2,$3,$4,4,clock_timestamp()+interval '5 minutes') RETURNING id`,
+      [owner.ownerUserId, hash(randomUUID()), filesystemOperationId, hash("abcd")]
+    );
+    await uploads.completeUpload(owner, { uploadId: upload.id, stagedInputId: staged.rows[0]!.id });
+    const destination = await imports.destinationFingerprint(owner, { ignoreUploadId: upload.id });
+    const archiveFingerprint = hash(`preview-lifetime-archive-${randomUUID()}`);
+    const authority = await imports.createPreview(owner, {
+      uploadId: upload.id,
+      archiveFingerprint,
+      destination,
+      projection: safePreviewProjection(owner.ownerUserId, archiveFingerprint)
+    });
+    const persisted = await pool.query<{
+      upload_expires_at: Date;
+      operation_expires_at: Date;
+      staged_expires_at: Date;
+    }>(
+      `SELECT upload.expires_at AS upload_expires_at,
+              operation.expires_at AS operation_expires_at,
+              staged.expires_at AS staged_expires_at
+         FROM system_archive_uploads upload
+         JOIN durable_filesystem_operations operation ON operation.id=upload.filesystem_operation_id
+         JOIN portable_staged_inputs staged ON staged.id=upload.staged_input_id
+        WHERE upload.id=$1`,
+      [upload.id]
+    );
+    const previewExpiry = new Date(authority.expiresAt).getTime();
+    expect(persisted.rows[0]!.upload_expires_at.getTime()).toBeGreaterThanOrEqual(previewExpiry);
+    expect(persisted.rows[0]!.operation_expires_at.getTime()).toBeGreaterThanOrEqual(previewExpiry);
+    expect(persisted.rows[0]!.staged_expires_at.getTime()).toBeGreaterThanOrEqual(previewExpiry);
+  });
+
   it("fingerprints an exactly empty destination and rejects unrelated owner or active-upload state", async () => {
     const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
     const clean = await imports.destinationFingerprint(owner, {});
@@ -373,7 +428,9 @@ integration("durable System Archive jobs and resumable uploads", () => {
     ["staged-input expiry", "staged-expiry"],
     ["staged-input status", "staged-status"],
   ] as const)("refuses preview issuance after %s invalidates completed staging", async (_label, invalidation) => {
-    const uploads = createPostgresSystemArchiveUploadRepository(pool, { uploadTtlSeconds: 86_400 });
+    const uploads = createPostgresSystemArchiveUploadRepository(pool, {
+      uploadTtlSeconds: invalidation === "staged-expiry" ? 1 : 86_400
+    });
     const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
     const filesystemOperationId = await reservePortableOperation(owner, "portable_staging");
     const upload = await uploads.createUpload(owner, {
@@ -409,7 +466,19 @@ integration("durable System Archive jobs and resumable uploads", () => {
         [upload.id]
       );
     } else if (invalidation === "staged-expiry") {
-      await pool.query("SELECT pg_sleep(0.25)");
+      await pool.query(
+        `UPDATE system_archive_uploads
+            SET expires_at=clock_timestamp()+interval '1 day'
+          WHERE id=$1`,
+        [upload.id]
+      );
+      await pool.query(
+        `UPDATE durable_filesystem_operations
+            SET expires_at=clock_timestamp()+interval '1 day'
+          WHERE id=$1`,
+        [filesystemOperationId]
+      );
+      await pool.query("SELECT pg_sleep(1.1)");
     } else {
       await pool.query(
         "UPDATE portable_staged_inputs SET status='expired' WHERE id=$1",
@@ -458,7 +527,8 @@ integration("durable System Archive jobs and resumable uploads", () => {
       uploadId: upload.id,
       filesystemOperationId,
       leaseOwner: "system-archive-test",
-      leaseSeconds: 30
+      leaseSeconds: 30,
+      activitySeconds: 86_400
     }, async (authority) => authority)).resolves.toMatchObject({
       state: "assembling",
       relativePath,
@@ -477,7 +547,8 @@ integration("durable System Archive jobs and resumable uploads", () => {
       uploadId: upload.id,
       filesystemOperationId,
       leaseOwner: "system-archive-test",
-      leaseSeconds: 30
+      leaseSeconds: 30,
+      activitySeconds: 86_400
     }, async (authority) => authority)).rejects.toMatchObject({ statusCode: 409 });
     await expect(pool.query<{ lease_owner: string }>(
       "SELECT lease_owner FROM durable_filesystem_operations WHERE id=$1",
@@ -493,7 +564,8 @@ integration("durable System Archive jobs and resumable uploads", () => {
       uploadId: upload.id,
       filesystemOperationId,
       leaseOwner: "system-archive-test",
-      leaseSeconds: 30
+      leaseSeconds: 30,
+      activitySeconds: 86_400
     }, async (authority) => authority)).resolves.toMatchObject({
       state: "assembling",
       claim: { leaseOwner: "system-archive-test" }
@@ -503,7 +575,8 @@ integration("durable System Archive jobs and resumable uploads", () => {
       uploadId: upload.id,
       filesystemOperationId,
       leaseOwner: "system-archive-test",
-      leaseSeconds: 301
+      leaseSeconds: 301,
+      activitySeconds: 86_400
     }, async (authority) => authority)).rejects.toThrow("system_archive_storage_lease_invalid");
   });
 
@@ -731,6 +804,280 @@ integration("durable System Archive jobs and resumable uploads", () => {
       bytes: 4,
       sha256: hash("efgh")
     })).rejects.toMatchObject({ statusCode: 404 });
+  });
+
+  it("renews upload and filesystem authority together on every chunk replay and assembly activity", async () => {
+    const uploads = createPostgresSystemArchiveUploadRepository(pool, { uploadTtlSeconds: 86_400 });
+    const filesystemOperationId = await reservePortableOperation(owner, "portable_staging");
+    const upload = await uploads.createUpload(owner, {
+      handleTokenHash: hash(`activity-renewal-${randomUUID()}`),
+      filesystemOperationId,
+      byteLength: 4,
+      sha256: hash("abcd")
+    });
+    const chunk = { uploadId: upload.id, index: 0, offset: 0, bytes: 4, sha256: hash("abcd") };
+    await uploads.recordChunk(owner, chunk);
+
+    for (const activity of [
+      () => uploads.recordChunk(owner, chunk),
+      () => uploads.getAssembly(owner, upload.id),
+    ]) {
+      await pool.query(
+        `UPDATE system_archive_uploads SET expires_at=clock_timestamp()+interval '2 seconds' WHERE id=$1`,
+        [upload.id]
+      );
+      await pool.query(
+        `UPDATE durable_filesystem_operations
+            SET expires_at=clock_timestamp()+interval '2 seconds'
+          WHERE id=$1`,
+        [filesystemOperationId]
+      );
+      await activity();
+      const renewed = await pool.query<{
+        upload_remaining: number;
+        operation_remaining: number;
+        expiry_delta: number;
+      }>(
+        `SELECT extract(epoch FROM upload.expires_at-clock_timestamp()) AS upload_remaining,
+                extract(epoch FROM operation.expires_at-clock_timestamp()) AS operation_remaining,
+                abs(extract(epoch FROM upload.expires_at-operation.expires_at)) AS expiry_delta
+           FROM system_archive_uploads upload
+           JOIN durable_filesystem_operations operation ON operation.id=upload.filesystem_operation_id
+          WHERE upload.id=$1`,
+        [upload.id]
+      );
+      expect(Number(renewed.rows[0]!.upload_remaining)).toBeGreaterThan(86_390);
+      expect(Number(renewed.rows[0]!.operation_remaining)).toBeGreaterThan(86_390);
+      expect(Number(renewed.rows[0]!.expiry_delta)).toBeLessThan(0.01);
+    }
+  });
+
+  it("reconciles a committed chunk after a post-COMMIT error without reclaiming bytes", async () => {
+    const uploads = createPostgresSystemArchiveUploadRepository(pool, { uploadTtlSeconds: 86_400 });
+    const filesystemOperationId = await reservePortableOperation(owner, "portable_staging");
+    const upload = await uploads.createUpload(owner, {
+      handleTokenHash: hash(`chunk-commit-error-${randomUUID()}`),
+      filesystemOperationId,
+      byteLength: 4,
+      sha256: hash("abcd")
+    });
+    const request = { uploadId: upload.id, index: 0, offset: 0, bytes: 4, sha256: hash("abcd") };
+    let compensationCount = 0;
+
+    await expect(persistSystemArchiveChunkWithReconciliation(
+      async () => {
+        await uploads.recordChunk(owner, request);
+        throw new Error("connection dropped after COMMIT");
+      },
+      () => uploads.reconcileChunk(owner, request),
+      async () => { compensationCount += 1; },
+    )).resolves.toMatchObject({ id: upload.id, status: "uploading", receivedBytes: 4 });
+    expect(compensationCount).toBe(0);
+    await expect(uploads.getUpload(owner, upload.id)).resolves.toMatchObject({ receivedBytes: 4 });
+  });
+
+  it("keeps an unexpired System upload out of generic recovery and heartbeats long private work", async () => {
+    const uploads = createPostgresSystemArchiveUploadRepository(pool, { uploadTtlSeconds: 86_400 });
+    const privateStorage = createPostgresSystemArchivePrivateStorageRepository(pool);
+    const filesystemOperationId = await reservePortableOperation(owner, "portable_staging");
+    const upload = await uploads.createUpload(owner, {
+      handleTokenHash: hash(`recovery-fence-${randomUUID()}`),
+      filesystemOperationId,
+      byteLength: 4,
+      sha256: hash("abcd")
+    });
+    const relativePath = `staging/${filesystemOperationId}.pending`;
+    await pool.query(
+      `INSERT INTO durable_filesystem_prewrite_nodes (
+         operation_id,owner_user_id,purpose,relative_path,authority_state
+       ) VALUES ($1,$2,'portable_staging',$3,'target_only')`,
+      [filesystemOperationId, owner.ownerUserId, relativePath]
+    );
+    await pool.query(
+      `UPDATE durable_filesystem_prewrite_nodes
+          SET authority_state='identity_bound',device_id='device-heartbeat',file_id='file-heartbeat',
+              identity_bound_at=clock_timestamp()
+        WHERE operation_id=$1`,
+      [filesystemOperationId]
+    );
+    await pool.query(
+      `UPDATE durable_filesystem_operations
+          SET expires_at=clock_timestamp()-interval '1 second',
+              lease_expires_at=clock_timestamp()-interval '1 second'
+        WHERE id=$1`,
+      [filesystemOperationId]
+    );
+
+    const restartedReaper = createPostgresSecureStorageRepository(
+      pool,
+      createPostgresDurableFilesystemRepository(pool)
+    );
+    await expect(restartedReaper.claimExpiredPortableWork({
+      leaseOwner: "generic-reaper-before-heartbeat",
+      leaseSeconds: 30,
+      limit: 10
+    })).resolves.toEqual([]);
+
+    await privateStorage.withUploadLock({
+      ownerUserId: owner.ownerUserId,
+      uploadId: upload.id,
+      filesystemOperationId,
+      leaseOwner: "system-archive-long-work",
+      leaseSeconds: 1,
+      activitySeconds: 86_400
+    }, async (authority) => {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 1_250));
+      expect(authority.leaseCurrent()).toBe(true);
+      await expect(pool.query<{ current: boolean }>(
+        "SELECT lease_expires_at>clock_timestamp() AS current FROM durable_filesystem_operations WHERE id=$1",
+        [filesystemOperationId]
+      )).resolves.toMatchObject({ rows: [{ current: true }] });
+    });
+
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 1_500));
+    await expect(createPostgresSecureStorageRepository(
+      pool,
+      createPostgresDurableFilesystemRepository(pool)
+    ).claimExpiredPortableWork({
+      leaseOwner: "generic-reaper-after-pause",
+      leaseSeconds: 30,
+      limit: 10
+    })).resolves.toEqual([]);
+    await expect(createPostgresSystemArchivePrivateStorageRepository(pool).withUploadLock({
+      ownerUserId: owner.ownerUserId,
+      uploadId: upload.id,
+      filesystemOperationId,
+      leaseOwner: "system-archive-restarted-worker",
+      leaseSeconds: 1,
+      activitySeconds: 86_400
+    }, async (authority) => authority.leaseCurrent())).resolves.toBe(true);
+
+    await pool.query(
+      `UPDATE system_archive_uploads
+          SET status='expired',expires_at=clock_timestamp()-interval '1 second'
+        WHERE id=$1`,
+      [upload.id]
+    );
+    await pool.query(
+      `UPDATE durable_filesystem_operations
+          SET expires_at=clock_timestamp()-interval '1 second',
+              lease_expires_at=clock_timestamp()-interval '1 second'
+        WHERE id=$1`,
+      [filesystemOperationId]
+    );
+    await expect(createPostgresSecureStorageRepository(
+      pool,
+      createPostgresDurableFilesystemRepository(pool)
+    ).claimExpiredPortableWork({
+      leaseOwner: "generic-reaper-after-upload-expiry",
+      leaseSeconds: 30,
+      limit: 10
+    })).resolves.toHaveLength(1);
+  });
+
+  it("heartbeats completed preview staging and keeps every authority live through a long inspection", async () => {
+    const uploads = createPostgresSystemArchiveUploadRepository(pool, { uploadTtlSeconds: 1 });
+    const privateStorage = createPostgresSystemArchivePrivateStorageRepository(pool);
+    const filesystemOperationId = await reservePortableOperation(owner, "portable_staging");
+    const upload = await uploads.createUpload(owner, {
+      handleTokenHash: hash(`completed-preview-heartbeat-${randomUUID()}`),
+      filesystemOperationId,
+      byteLength: 4,
+      sha256: hash("abcd")
+    });
+    await uploads.recordChunk(owner, {
+      uploadId: upload.id,
+      index: 0,
+      offset: 0,
+      bytes: 4,
+      sha256: hash("abcd")
+    });
+    const relativePath = `staging/${filesystemOperationId}.pending`;
+    await pool.query(
+      `INSERT INTO durable_filesystem_prewrite_nodes (
+         operation_id,owner_user_id,purpose,relative_path,authority_state
+       ) VALUES ($1,$2,'portable_staging',$3,'target_only')`,
+      [filesystemOperationId, owner.ownerUserId, relativePath]
+    );
+    await pool.query(
+      `UPDATE durable_filesystem_prewrite_nodes
+          SET authority_state='identity_bound',device_id='preview-device',file_id='preview-file',
+              identity_bound_at=clock_timestamp()
+        WHERE operation_id=$1`,
+      [filesystemOperationId]
+    );
+    await pool.query(
+      `UPDATE durable_filesystem_operations
+          SET lifecycle='attached',candidate_token_hash=$2,locator_token_hash=$3,
+              attached_at=clock_timestamp()
+        WHERE id=$1`,
+      [filesystemOperationId, hash(randomUUID()), hash(randomUUID())]
+    );
+    await pool.query(
+      `INSERT INTO durable_filesystem_descriptors (
+         operation_id,owner_user_id,descriptor_role,ordinal,relative_path,
+         device_id,file_id,change_token,content_hash,byte_length
+       ) VALUES ($1,$2,'delivery',0,$3,'preview-device','preview-file','1:1',$4,4)`,
+      [filesystemOperationId, owner.ownerUserId, relativePath, hash("abcd")]
+    );
+    const staged = await pool.query<{ id: string }>(
+      `INSERT INTO portable_staged_inputs (
+         owner_user_id,handle_token_hash,filesystem_operation_id,content_hash,byte_length,expires_at
+       ) VALUES ($1,$2,$3,$4,4,clock_timestamp()+interval '2 seconds') RETURNING id`,
+      [owner.ownerUserId, hash(randomUUID()), filesystemOperationId, hash("abcd")]
+    );
+    await pool.query(
+      `UPDATE durable_filesystem_operations
+          SET lifecycle='finalized',finalized_at=clock_timestamp()
+        WHERE id=$1`,
+      [filesystemOperationId]
+    );
+    await uploads.completeUpload(owner, { uploadId: upload.id, stagedInputId: staged.rows[0]!.id });
+    await pool.query(
+      `UPDATE durable_filesystem_operations
+          SET lease_expires_at=clock_timestamp()-interval '1 second'
+        WHERE id=$1`,
+      [filesystemOperationId]
+    );
+
+    await expect(privateStorage.withCompletedUploadLock({
+      ownerUserId: owner.ownerUserId,
+      uploadId: upload.id,
+      leaseOwner: "system-archive-preview-heartbeat",
+      leaseSeconds: 1,
+      activitySeconds: 1_800
+    }, async (authority) => {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 1_250));
+      expect(authority.leaseCurrent()).toBe(true);
+      const current = await pool.query<{
+        upload_current: boolean;
+        operation_current: boolean;
+        staged_current: boolean;
+        lease_current: boolean;
+      }>(
+        `SELECT upload.expires_at>clock_timestamp() AS upload_current,
+                operation.expires_at>clock_timestamp() AS operation_current,
+                staged.expires_at>clock_timestamp() AS staged_current,
+                operation.lease_expires_at>clock_timestamp() AS lease_current
+           FROM system_archive_uploads upload
+           JOIN durable_filesystem_operations operation ON operation.id=upload.filesystem_operation_id
+           JOIN portable_staged_inputs staged ON staged.id=upload.staged_input_id
+          WHERE upload.id=$1`,
+        [upload.id]
+      );
+      expect(current.rows[0]).toEqual({
+        upload_current: true,
+        operation_current: true,
+        staged_current: true,
+        lease_current: true
+      });
+      await pool.query(
+        "UPDATE portable_staged_inputs SET status='failed',updated_at=clock_timestamp() WHERE id=$1",
+        [staged.rows[0]!.id]
+      );
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
+      expect(authority.leaseCurrent()).toBe(false);
+    })).rejects.toThrow("system_archive_storage_lease_lost");
   });
 
   it("publishes bounded chunks privately and completes after a process recreation", async () => {
@@ -1021,6 +1368,61 @@ integration("durable System Archive jobs and resumable uploads", () => {
       receivedBytes: 12
     });
     await expect(recreated.getAssembly(owner, upload.id)).rejects.toMatchObject({ statusCode: 409 });
+  });
+
+  it("reconciles completion committed before a caller-visible error without discarding staged authority", async () => {
+    const uploads = createPostgresSystemArchiveUploadRepository(pool, { uploadTtlSeconds: 86_400 });
+    const filesystemOperationId = await reservePortableOperation(owner, "portable_staging");
+    const upload = await uploads.createUpload(owner, {
+      handleTokenHash: hash(`completion-commit-error-${randomUUID()}`),
+      filesystemOperationId,
+      byteLength: 4,
+      sha256: hash("abcd")
+    });
+    await uploads.recordChunk(owner, {
+      uploadId: upload.id,
+      index: 0,
+      offset: 0,
+      bytes: 4,
+      sha256: hash("abcd")
+    });
+    const staged = await pool.query<{ id: string }>(
+      `INSERT INTO portable_staged_inputs (
+         owner_user_id,handle_token_hash,filesystem_operation_id,content_hash,byte_length,expires_at
+       ) VALUES ($1,$2,$3,$4,4,clock_timestamp()+interval '1 day') RETURNING id`,
+      [owner.ownerUserId, hash(randomUUID()), filesystemOperationId, hash("abcd")]
+    );
+    const rollback = vi.fn(async () => undefined);
+    const ambiguousRepository = {
+      ...uploads,
+      async completeUpload(scopedOwner: OwnerScope, request: { uploadId: string; stagedInputId: string }) {
+        await uploads.completeUpload(scopedOwner, request);
+        throw new Error("connection dropped after COMMIT");
+      }
+    };
+    const storage: SystemArchiveUploadStoragePort = {
+      async prepare() { throw new Error("not used"); },
+      async publishChunk() { throw new Error("not used"); },
+      async assemble() {
+        return { stagedInputId: staged.rows[0]!.id, byteLength: 4, sha256: hash("abcd"), rollback };
+      }
+    };
+    const service = createSystemArchiveUploadService({
+      uploads: ambiguousRepository,
+      storage,
+      chunkBytes: 4,
+      maximumBytes: 4
+    });
+
+    await expect(service.completeUpload(owner, upload.id)).resolves.toMatchObject({
+      id: upload.id,
+      status: "completed"
+    });
+    expect(rollback).not.toHaveBeenCalled();
+    await expect(pool.query(
+      "SELECT id FROM portable_staged_inputs WHERE id=$1 AND status='staged'",
+      [staged.rows[0]!.id]
+    )).resolves.toMatchObject({ rowCount: 1 });
   });
 
   it("rejects a truncated or hash-mismatched staged input without completing the upload", async () => {
