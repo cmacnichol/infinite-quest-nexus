@@ -67,6 +67,7 @@ async function oversizedMetadataArchive(path: "system.json" | "assets/assets.jso
     sourceInstallationId: ownerId,
     sourceOwnerCount: 1,
     sourceOwner: { sourceId: ownerId, displayName: "Initial owner" },
+    omittedOperationalRows: 0,
     entries,
     payloads: entries.map((entry) => ({
       kind: entry.logicalType,
@@ -139,6 +140,84 @@ describe("System Archive preview restore keys", () => {
       createdAt: "2026-08-25T12:00:00.000Z",
       updatedAt: "2026-08-25T12:00:00.000Z",
     },
+  });
+
+  it("rejects a campaign-scoped prompt whose campaign is absent from the archive", async () => {
+    const index = await SystemArchivePreviewIndex.create();
+    try {
+      const promptId = randomUUID();
+      index.add(systemRecordEnvelopeSchema.parse({
+        domain: "prompts",
+        formatVersion: 1,
+        sourceId: promptId,
+        record: {
+          sourceId: promptId,
+          campaignId: randomUUID(),
+          templateKey: "story_system",
+          overrideText: "Campaign-specific guidance.",
+          updatedAt: "2026-08-25T12:00:00.000Z",
+        },
+      }), new Set());
+
+      expect(() => index.validate([])).toThrow(expect.objectContaining({
+        code: "archive-world-mismatch",
+      }));
+    } finally {
+      await index.close();
+    }
+  });
+
+  it("rejects Chronicle memory turn authority from another campaign", async () => {
+    const index = await SystemArchivePreviewIndex.create();
+    try {
+      const content = {
+        entities: [], relationships: [], playableCharacters: [], assets: [],
+        defaults: { selectedCharacterId: null },
+      };
+      index.add({ domain: "worlds", sourceId: "world-1", record: {} } as never, new Set());
+      index.add({
+        domain: "world-versions", sourceId: "version-1",
+        record: { worldId: "world-1", versionNumber: 1, content },
+      } as never, new Set());
+      index.add({
+        domain: "campaigns", sourceId: "campaign-1", record: { worldVersionId: "version-1" },
+      } as never, new Set());
+      index.add({
+        domain: "campaigns", sourceId: "campaign-2", record: { worldVersionId: "version-1" },
+      } as never, new Set());
+      index.add({
+        domain: "turns", sourceId: "turn-1", record: { campaignId: "campaign-1", turnNumber: 1 },
+      } as never, new Set());
+      index.add({
+        domain: "chronicle", sourceId: "memory-1",
+        record: { campaignId: "campaign-2", kind: "memory", turnId: "turn-1", memoryKind: "turn_fiction" },
+      } as never, new Set());
+
+      expect(() => index.validate([])).toThrow(expect.objectContaining({
+        code: "archive-world-mismatch",
+      }));
+    } finally {
+      await index.close();
+    }
+  });
+
+  it("rejects duplicate narration-correction revisions for one turn", async () => {
+    const index = await SystemArchivePreviewIndex.create();
+    try {
+      index.add({
+        domain: "turn-corrections", sourceId: "correction-1",
+        record: { turnId: "turn-1", revision: 3 },
+      } as never, new Set());
+
+      expect(() => index.add({
+        domain: "turn-corrections", sourceId: "correction-2",
+        record: { turnId: "turn-1", revision: 3 },
+      } as never, new Set())).toThrow(expect.objectContaining({
+        code: "archive-json-invalid",
+      }));
+    } finally {
+      await index.close();
+    }
   });
 
   it("rejects duplicate world-version numbers within a world", async () => {

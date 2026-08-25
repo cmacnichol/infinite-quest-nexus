@@ -216,11 +216,11 @@ const DOMAIN_SQL = {
       FROM provider_profiles profile
      WHERE profile.owner_user_id=$1`,
   prompts: `
-    SELECT '00:' || prompt.id::text AS sort_key,
+    SELECT '00:' || COALESCE(prompt.campaign_id::text,'') || ':' || prompt.prompt_key || ':' || prompt.id::text AS sort_key,
            jsonb_build_object(
              'domain','prompts','formatVersion',1,'sourceId',prompt.id,
              'record',jsonb_build_object(
-               'sourceId',prompt.id,'templateKey',prompt.prompt_key,
+               'sourceId',prompt.id,'campaignId',prompt.campaign_id,'templateKey',prompt.prompt_key,
                'overrideText',prompt.content,'updatedAt',prompt.updated_at
              )
            ) AS envelope
@@ -302,12 +302,16 @@ const DOMAIN_SQL = {
       FROM turns turn_row
      WHERE turn_row.owner_user_id=$1`,
   "turn-corrections": `
-    SELECT '00:' || correction.id::text AS sort_key,
+    SELECT '00:' || correction.turn_id::text || ':' || lpad(correction.revision::text,10,'0')
+           || ':' || correction.id::text AS sort_key,
            jsonb_build_object(
              'domain','turn-corrections','formatVersion',1,'sourceId',correction.id,
              'record',jsonb_build_object(
                'sourceId',correction.id,'turnId',correction.turn_id,
-               'narration',correction.narration,'correctedAt',correction.created_at
+               'revision',correction.revision,'narration',correction.narration,
+               'previousEffectiveNarrationHash',correction.previous_effective_narration_hash,
+               'reason',correction.reason,'source',correction.source,
+               'correctedAt',correction.created_at
              )
            ) AS envelope
       FROM turn_narration_corrections correction
@@ -512,18 +516,20 @@ const DOMAIN_SQL = {
                'metadata',jsonb_build_object(
                  'entityNames',chronicle.entity_names,'openThreadIds','[]'::jsonb
                )
-             )
+             ) || CASE WHEN chronicle.kind='memory'
+                       THEN jsonb_build_object('turnId',chronicle.turn_id,'memoryKind',chronicle.memory_kind)
+                       ELSE '{}'::jsonb END
            ) AS envelope
       FROM (
         SELECT '01:' || memory.id::text AS sort_key,memory.id AS source_id,memory.campaign_id,
                'memory'::text AS kind,memory.content,memory.created_at AS occurred_at,
-               to_jsonb(memory.entities) AS entity_names
+               to_jsonb(memory.entities) AS entity_names,memory.turn_id,memory.memory_kind
           FROM chronicle_memories memory WHERE memory.owner_user_id=$1
         UNION ALL
         SELECT '02:' || checkpoint.id::text,checkpoint.id,checkpoint.campaign_id,
                'summary-checkpoint',CASE WHEN jsonb_typeof(checkpoint.content)='string'
                                          THEN checkpoint.content#>>'{}' ELSE checkpoint.content::text END,
-               checkpoint.created_at,'[]'::jsonb
+               checkpoint.created_at,'[]'::jsonb,NULL::uuid,NULL::text
           FROM summary_checkpoints checkpoint WHERE checkpoint.owner_user_id=$1
       ) chronicle`,
   illustrations: `

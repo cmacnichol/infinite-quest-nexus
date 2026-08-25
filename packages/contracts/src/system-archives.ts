@@ -39,21 +39,36 @@ export const systemPortableProviderSchema = z.object({
   health: z.literal("unknown")
 }).strict();
 
-/** Chronicle records are logical text/state only; vectors and chunk data are rebuilt locally. */
-export const systemChronicleRecordSchema = z.object({
+const systemChronicleRecordBase = {
   sourceId: z.string().uuid(),
   campaignId: z.string().uuid(),
-  kind: z.enum(["memory", "summary-checkpoint"]),
   content: boundedStringSchema(1_000_000),
   occurredAt: archiveTimestampSchema,
   metadata: z.object({
     entityNames: z.array(identifierSchema).max(1_000),
     openThreadIds: z.array(z.string().uuid()).max(1_000).default([])
   }).strict()
-}).strict();
+};
+
+/** Chronicle records are logical text/state only; vectors and chunk data are rebuilt locally. */
+export const systemChronicleRecordSchema = z.discriminatedUnion("kind", [
+  z.object({
+    ...systemChronicleRecordBase,
+    kind: z.literal("memory"),
+    turnId: z.string().uuid().nullable(),
+    memoryKind: z.enum([
+      "turn_fiction", "legacy_summary", "campaign_summary", "canonical_fact", "open_thread"
+    ])
+  }).strict(),
+  z.object({
+    ...systemChronicleRecordBase,
+    kind: z.literal("summary-checkpoint")
+  }).strict()
+]);
 
 const systemPromptRecordSchema = z.object({
   sourceId: z.string().uuid(),
+  campaignId: z.string().uuid().nullable(),
   templateKey: identifierSchema,
   overrideText: longTextSchema,
   updatedAt: archiveTimestampSchema
@@ -239,7 +254,11 @@ const systemTurnRecordSchema = z.object({
 const systemTurnCorrectionRecordSchema = z.object({
   sourceId: z.string().uuid(),
   turnId: z.string().uuid(),
+  revision: z.number().int().positive(),
   narration: longTextSchema,
+  previousEffectiveNarrationHash: z.string().regex(/^[a-f0-9]{64}$/),
+  reason: boundedStringSchema(2_000).nullable(),
+  source: z.enum(["user_edit", "legacy_import", "administrative"]),
   correctedAt: archiveTimestampSchema
 }).strict();
 
@@ -367,14 +386,54 @@ export const systemArchiveReportSchema = z.object({
   errors: z.array(archiveErrorCodeSchema)
 }).strict();
 
-export const systemArchiveJobViewSchema = z.object({
+export const systemArchiveImportReportSchema = systemArchiveReportSchema.extend({
+  archiveFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  ownerMapping: z.object({
+    sourceOwnerId: z.string().uuid(),
+    destinationOwnerId: z.string().uuid()
+  }).strict(),
+  disabledProviders: nonnegativeSafeIntegerSchema,
+  normalization: z.tuple([
+    z.literal("map-source-owner-to-initial-owner"),
+    z.literal("disable-provider-profiles")
+  ]),
+  invalidatedAccess: z.tuple([
+    z.literal("share-links"),
+    z.literal("sessions"),
+    z.literal("oidc-identities"),
+    z.literal("external-authorizations")
+  ]),
+  integrityReconciliation: z.object({
+    archiveFingerprintVerified: z.literal(true),
+    recordsMatched: z.literal(true),
+    assetsMatched: z.literal(true)
+  }).strict(),
+  rebuildState: z.object({
+    status: z.enum(["pending", "queueing", "queued"]),
+    chronicleCampaigns: nonnegativeSafeIntegerSchema,
+    assets: nonnegativeSafeIntegerSchema
+  }).strict()
+}).strict();
+
+const systemArchiveJobViewBase = {
   id: z.string().uuid(),
-  kind: systemArchiveJobKindSchema,
   status: systemArchiveJobStatusSchema,
   createdAt: z.iso.datetime({ offset: true }),
-  updatedAt: z.iso.datetime({ offset: true }),
-  report: systemArchiveReportSchema.nullable()
-}).strict();
+  updatedAt: z.iso.datetime({ offset: true })
+};
+
+export const systemArchiveJobViewSchema = z.discriminatedUnion("kind", [
+  z.object({
+    ...systemArchiveJobViewBase,
+    kind: z.literal("export"),
+    report: systemArchiveReportSchema.nullable()
+  }).strict(),
+  z.object({
+    ...systemArchiveJobViewBase,
+    kind: z.literal("import"),
+    report: systemArchiveImportReportSchema.nullable()
+  }).strict()
+]);
 
 export const systemUploadViewSchema = z.object({
   id: z.string().uuid(),
@@ -484,7 +543,8 @@ export const systemArchiveManifestSchema = archiveManifestSchema.safeExtend({
   sourceOwner: z.object({
     sourceId: z.string().uuid(),
     displayName: boundedStringSchema(300)
-  }).strict()
+  }).strict(),
+  omittedOperationalRows: nonnegativeSafeIntegerSchema
 }).strict();
 
 export const systemArchiveAssetsPayloadSchema = z.object({
@@ -498,6 +558,7 @@ export type SystemArchiveJobStatus = z.infer<typeof systemArchiveJobStatusSchema
 export type SystemArchiveJobView = z.infer<typeof systemArchiveJobViewSchema>;
 export type SystemArchivePayload = z.infer<typeof systemArchivePayloadSchema>;
 export type SystemArchiveReport = z.infer<typeof systemArchiveReportSchema>;
+export type SystemArchiveImportReport = z.infer<typeof systemArchiveImportReportSchema>;
 export type SystemArchiveUploadView = z.infer<typeof systemUploadViewSchema>;
 export type SystemImportPreviewView = z.infer<typeof systemImportPreviewViewSchema>;
 export type SystemRecordEnvelope = z.infer<typeof systemRecordEnvelopeSchema>;

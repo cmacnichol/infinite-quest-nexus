@@ -7,6 +7,7 @@ import {
   SYSTEM_ARCHIVE_DOMAINS,
   canonicalArchiveJson,
   systemArchiveAssetsPayloadSchema,
+  systemArchiveImportReportSchema,
   systemArchiveManifestSchema,
   systemArchivePayloadSchema,
   systemArchiveReportSchema,
@@ -160,6 +161,7 @@ export type SystemArchiveInspection = Readonly<{
   recordsByDomain: Readonly<Record<SystemArchiveDomain, number>>;
   assetCount: number;
   assetBytes: number;
+  omittedOperationalRows: number;
   disabledProviderCount: number;
   invalidatedAccess: readonly string[];
   normalization: readonly string[];
@@ -550,6 +552,7 @@ export async function inspectSystemArchiveForPreview(
     recordsByDomain,
     assetCount: manifest.assets.length,
     assetBytes,
+    omittedOperationalRows: manifest.omittedOperationalRows,
     disabledProviderCount: recordsByDomain.providers,
     invalidatedAccess: Object.freeze(["share-links", "sessions", "oidc-identities", "external-authorizations"]),
     normalization: Object.freeze(["map-source-owner-to-initial-owner", "disable-provider-profiles"]),
@@ -1279,14 +1282,31 @@ export function createSystemArchiveImportExecutionService(
               attached.push(persisted);
               await transaction.insertAssetBindings(publication.asset);
             }
-            const report = systemArchiveReportSchema.parse({
+            const report = systemArchiveImportReportSchema.parse({
               completedAt: new Date().toISOString(),
               archiveFingerprint: authority.archiveFingerprint,
               recordsByDomain: inspection.recordsByDomain,
               assetCount: manifest.assets.length,
               assetBytes: inspection.assetBytes,
-              omittedOperationalRows: 0,
+              omittedOperationalRows: manifest.omittedOperationalRows,
               errors: [],
+              ownerMapping: {
+                sourceOwnerId: systemPayload.sourceOwner.sourceId,
+                destinationOwnerId: owner.ownerUserId,
+              },
+              disabledProviders: inspection.disabledProviderCount,
+              normalization: ["map-source-owner-to-initial-owner", "disable-provider-profiles"],
+              invalidatedAccess: ["share-links", "sessions", "oidc-identities", "external-authorizations"],
+              integrityReconciliation: {
+                archiveFingerprintVerified: true,
+                recordsMatched: true,
+                assetsMatched: true,
+              },
+              rebuildState: {
+                status: "pending",
+                chronicleCampaigns: inspection.recordsByDomain.campaigns,
+                assets: manifest.assets.length,
+              },
             });
             await transaction.recordImportReport(report);
           });
@@ -1756,6 +1776,8 @@ export async function createFilesystemSystemArchiveWriter(
           sourceId: input.manifest.sourceOwner.sourceId,
           displayName: input.manifest.sourceOwner.displayName,
         },
+        omittedOperationalRows: Object.values(input.manifest.excludedOperationalWork)
+          .reduce((total, count) => total + count, 0),
         entries: [...measuredEntries],
         payloads: ordered
           .filter((entry) => entry.logicalType !== "asset-original")

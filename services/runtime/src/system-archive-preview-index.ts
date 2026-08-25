@@ -123,10 +123,21 @@ export class SystemArchivePreviewIndex {
   add(envelope: SystemRecordEnvelope, assetIds: ReadonlySet<string>): void {
     switch (envelope.domain) {
       case "providers":
-      case "prompts":
       case "worlds":
       case "imports":
         this.#insertRecord(envelope.domain, envelope.sourceId);
+        break;
+      case "prompts":
+        this.#insertRecord(
+          envelope.domain,
+          envelope.sourceId,
+          envelope.record.campaignId ?? "",
+          null,
+          envelope.record.templateKey,
+        );
+        if (envelope.record.campaignId !== null) {
+          this.#require("campaigns", envelope.record.campaignId);
+        }
         break;
       case "world-versions":
         validateWorldContent(envelope.record.content, assetIds);
@@ -169,7 +180,13 @@ export class SystemArchivePreviewIndex {
         this.#require("campaigns", envelope.record.campaignId);
         break;
       case "turn-corrections":
-        this.#insertRecord(envelope.domain, envelope.sourceId, envelope.record.turnId);
+        this.#insertRecord(
+          envelope.domain,
+          envelope.sourceId,
+          envelope.record.turnId,
+          null,
+          String(envelope.record.revision),
+        );
         this.#require("turns", envelope.record.turnId);
         break;
       case "campaign-state":
@@ -179,9 +196,23 @@ export class SystemArchivePreviewIndex {
         break;
       case "campaign-history":
       case "canonical-facts":
-      case "chronicle":
         this.#insertRecord(envelope.domain, envelope.sourceId, envelope.record.campaignId);
         this.#require("campaigns", envelope.record.campaignId);
+        break;
+      case "chronicle":
+        this.#insertRecord(
+          envelope.domain,
+          envelope.sourceId,
+          envelope.record.campaignId,
+          envelope.record.kind === "memory" ? envelope.record.turnId : null,
+          envelope.record.kind === "memory"
+            ? `${envelope.record.turnId ?? ""}:${envelope.record.memoryKind}`
+            : null,
+        );
+        this.#require("campaigns", envelope.record.campaignId);
+        if (envelope.record.kind === "memory" && envelope.record.turnId !== null) {
+          this.#require("turns", envelope.record.turnId, envelope.record.campaignId);
+        }
         break;
       case "illustrations":
         if (!assetIds.has(envelope.record.assetId)) throw relationshipFailure();

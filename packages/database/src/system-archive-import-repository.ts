@@ -2,11 +2,12 @@ import { createHash, randomBytes } from "node:crypto";
 import {
   SYSTEM_ARCHIVE_DOMAINS,
   canonicalArchiveJson,
-  systemArchiveReportSchema,
+  systemArchiveImportReportSchema,
   systemRecordEnvelopeSchema,
   systemImportPreviewViewSchema,
   type ArchiveAssetRecord,
   type SystemArchiveDomain,
+  type SystemArchiveImportReport,
   type SystemImportPreviewView,
   type SystemRecordEnvelope
 } from "@infinite-quest/contracts";
@@ -86,7 +87,7 @@ export interface SystemArchiveAtomicImportTransaction {
     }>
   ): Promise<void>;
   insertAssetBindings(asset: ArchiveAssetRecord): Promise<void>;
-  recordImportReport(report: Readonly<Record<string, unknown>>): Promise<void>;
+  recordImportReport(report: SystemArchiveImportReport): Promise<void>;
 }
 
 export interface SystemArchiveImportRepository {
@@ -100,7 +101,8 @@ export interface SystemArchiveImportRepository {
   ): Promise<SystemArchivePreviewAuthority>;
   consumePreviewAuthority(
     owner: OwnerScope,
-    previewHandle: string
+    previewHandle: string,
+    idempotencyKey: string
   ): Promise<Readonly<{
     jobId: string;
     stagedInputId: string;
@@ -221,6 +223,26 @@ function validatePreviewProjection(
     || projection.versions.destinationMigration !== request.destination.latestMigration) {
     throw repositoryError("System Archive preview projection does not match its authority binding.", 400);
   }
+  return Object.freeze(projection);
+}
+
+function parsePersistedPreviewProjection(value: unknown): SystemImportPreviewProjection {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("System Archive preview projection is malformed.");
+  }
+  const parsed = systemImportPreviewViewSchema.safeParse({
+    ...value,
+    valid: true,
+    previewHandle: "persisted-preview-projection",
+    expiresAt: "2099-01-01T00:00:00.000Z"
+  });
+  if (!parsed.success) throw new Error("System Archive preview projection is malformed.");
+  const {
+    valid: _valid,
+    previewHandle: _previewHandle,
+    expiresAt: _expiresAt,
+    ...projection
+  } = parsed.data;
   return Object.freeze(projection);
 }
 
@@ -409,7 +431,7 @@ function parseImportJobAuthority(row: Readonly<{
     throw new Error("System Archive import authority is malformed.");
   }
   const committed = row.status === "authoritative_committed" || row.status === "rebuilding";
-  const parsedReport = row.report === null ? null : systemArchiveReportSchema.safeParse(row.report);
+  const parsedReport = row.report === null ? null : systemArchiveImportReportSchema.safeParse(row.report);
   if ((parsedReport !== null && !parsedReport.success)
     || (committed && parsedReport === null)
     || (!committed && parsedReport !== null)) {
@@ -580,6 +602,19 @@ async function requireHistoryMutation(
   if (result.rowCount !== 1) invalidHistory(eventType);
 }
 
+async function requireLogicalMutation(
+  operation: Promise<Readonly<{ rowCount: number | null }>>,
+  domain: SystemArchiveDomain
+): Promise<void> {
+  const result = await operation;
+  if (result.rowCount !== 1) {
+    throw repositoryError(`System Archive ${domain} record did not restore exactly once.`, 400);
+  }
+}
+
+type SystemPromptEnvelope = Extract<SystemRecordEnvelope, { domain: "prompts" }>;
+type SystemIllustrationEnvelope = Extract<SystemRecordEnvelope, { domain: "illustrations" }>;
+
 function activityEventIdentity(sourceId: string): number {
   const matched = /^00000000-0000-4000-8000-([0-9a-f]{12})$/iu.exec(sourceId);
   if (!matched) throw repositoryError("System Archive activity identity is invalid.", 400);
@@ -594,15 +629,16 @@ async function insertLogicalRecord(
   database: DatabaseClient,
   ownerUserId: string,
   envelope: SystemRecordEnvelope,
-  pendingIllustrations: SystemRecordEnvelope[]
-): Promise<void> {
+  pendingPrompts: SystemPromptEnvelope[],
+  pendingIllustrations: SystemIllustrationEnvelope[]
+): Promise<boolean> {
   if (envelope.sourceId !== envelope.record.sourceId) {
     throw repositoryError("System Archive record identity is inconsistent.", 400);
   }
   switch (envelope.domain) {
     case "providers": {
       const { record } = envelope;
-      await database.query(
+      await requireLogicalMutation(database.query(
         `INSERT INTO provider_profiles (
            id,owner_user_id,name,provider_type,provider_role,base_url,default_model,
            context_window_tokens,max_output_tokens,temperature,configuration,enabled,
@@ -623,31 +659,35 @@ async function insertLogicalRecord(
           json(record.retryLimit === null ? {} : { retryLimit: record.retryLimit }),
           Math.max(5_000, Math.min(record.timeoutMs ?? 300_000, 3_600_000))
         ]
-      );
-      return;
+      ), envelope.domain);
+      return true;
     }
     case "prompts": {
       const { record } = envelope;
-      await database.query(
+      if (record.campaignId !== null) {
+        pendingPrompts.push(envelope);
+        return false;
+      }
+      await requireLogicalMutation(database.query(
         `INSERT INTO prompt_template_overrides
            (id,owner_user_id,campaign_id,prompt_key,content,created_at,updated_at)
          VALUES ($1,$2,NULL,$3,$4,$5,$5)`,
         [record.sourceId, ownerUserId, record.templateKey, record.overrideText, record.updatedAt]
-      );
-      return;
+      ), envelope.domain);
+      return true;
     }
     case "worlds": {
       const { record } = envelope;
-      await database.query(
+      await requireLogicalMutation(database.query(
         `INSERT INTO worlds (id,owner_user_id,title,status,created_at,updated_at)
          VALUES ($1,$2,$3,$4,$5,$6)`,
         [record.sourceId, ownerUserId, record.title, record.status, record.createdAt, record.updatedAt]
-      );
-      return;
+      ), envelope.domain);
+      return true;
     }
     case "world-versions": {
       const { record } = envelope;
-      await database.query(
+      await requireLogicalMutation(database.query(
         `INSERT INTO world_versions (
            id,world_id,owner_user_id,version_number,content,source_hash,published_at,
            created_at,release_notes,created_from_revision
@@ -663,12 +703,12 @@ async function insertLogicalRecord(
           record.releaseNotes,
           record.createdFromRevision
         ]
-      );
-      return;
+      ), envelope.domain);
+      return true;
     }
     case "world-drafts": {
       const { record } = envelope;
-      await database.query(
+      await requireLogicalMutation(database.query(
         `INSERT INTO world_drafts (
            world_id,owner_user_id,based_on_world_version_id,revision,content,created_at,updated_at
          ) VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7)`,
@@ -681,12 +721,12 @@ async function insertLogicalRecord(
           record.createdAt,
           record.updatedAt
         ]
-      );
-      return;
+      ), envelope.domain);
+      return true;
     }
     case "campaigns": {
       const { record } = envelope;
-      await database.query(
+      await requireLogicalMutation(database.query(
         `INSERT INTO campaigns (
            id,owner_user_id,world_version_id,title,status,active_turn_number,
            legacy_settings,turn_control_style,created_at,updated_at
@@ -703,12 +743,12 @@ async function insertLogicalRecord(
           record.createdAt,
           record.updatedAt
         ]
-      );
-      return;
+      ), envelope.domain);
+      return true;
     }
     case "turns": {
       const { record } = envelope;
-      await database.query(
+      await requireLogicalMutation(database.query(
         `INSERT INTO turns (
            id,owner_user_id,campaign_id,turn_number,action,narration,choices,image_prompt,
            mechanics_private,state_snapshot_private,model_metadata,import_metadata,
@@ -727,32 +767,37 @@ async function insertLogicalRecord(
           json({ source: "system_archive" }),
           record.acceptedAt
         ]
-      );
-      return;
+      ), envelope.domain);
+      return true;
     }
     case "turn-corrections": {
       const { record } = envelope;
-      await database.query(
+      await requireLogicalMutation(database.query(
         `INSERT INTO turn_narration_corrections (
            id,owner_user_id,campaign_id,turn_id,revision,narration,
            previous_effective_narration_hash,reason,source,created_by_user_id,created_at
          )
-         SELECT $1,$2,turn_row.campaign_id,turn_row.id,
-                COALESCE((SELECT max(existing.revision)+1
-                            FROM turn_narration_corrections existing
-                           WHERE existing.turn_id=turn_row.id),1),
-                $3,encode(digest(convert_to(turn_row.narration,'UTF8'),'sha256'),'hex'),
-                NULL,'administrative',$2,$4
+         SELECT $1,$2,turn_row.campaign_id,turn_row.id,$3,$4,$5,$6,$7,$2,$8
            FROM turns turn_row
-          WHERE turn_row.id=$5 AND turn_row.owner_user_id=$2`,
-        [record.sourceId, ownerUserId, record.narration, record.correctedAt, record.turnId]
-      );
-      return;
+          WHERE turn_row.id=$9 AND turn_row.owner_user_id=$2`,
+        [
+          record.sourceId,
+          ownerUserId,
+          record.revision,
+          record.narration,
+          record.previousEffectiveNarrationHash,
+          record.reason,
+          record.source,
+          record.correctedAt,
+          record.turnId
+        ]
+      ), envelope.domain);
+      return true;
     }
     case "campaign-state": {
       const { record } = envelope;
       const state = record.state;
-      await database.query(
+      await requireLogicalMutation(database.query(
         `INSERT INTO campaign_state (
            campaign_id,owner_user_id,scratchpad_private,trackers,default_triggers,
            event_triggers,pending_event_triggers,rpg_stats,import_provenance,
@@ -773,8 +818,8 @@ async function insertLogicalRecord(
           record.revision,
           record.updatedAt
         ]
-      );
-      return;
+      ), envelope.domain);
+      return true;
     }
     case "campaign-history": {
       const { record } = envelope;
@@ -787,7 +832,7 @@ async function insertLogicalRecord(
           const editSource = historyEnum(record.eventType, content, "editSource", [
             "world_version_seed", "manual", "ai_organized", "imported", "branch", "transfer"
           ] as const);
-          await database.query(
+          await requireHistoryMutation(database.query(
             `INSERT INTO campaign_character_profile_edits (
                id,owner_user_id,campaign_id,revision,previous_profile,next_profile,edit_source,created_at
              ) VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8)`,
@@ -801,19 +846,19 @@ async function insertLogicalRecord(
               editSource,
               record.occurredAt
             ]
-          );
+          ), record.eventType);
           await database.query(
             `UPDATE campaigns
                 SET character_profile=$3::jsonb,character_profile_revision=$4
               WHERE id=$1 AND owner_user_id=$2 AND character_profile_revision<$4`,
             [record.campaignId, ownerUserId, json(nextProfile), revision]
           );
-          return;
+          return true;
         }
         case "campaign-state-edit": {
           const stateSnapshot = historyObject(record.eventType, content, "stateSnapshot");
           const changedFields = historyArray(record.eventType, content, "changedFields");
-          await database.query(
+          await requireHistoryMutation(database.query(
             `INSERT INTO campaign_state_edits (
                id,owner_user_id,campaign_id,effective_turn_number,revision,
                state_snapshot_private,changed_fields,created_at
@@ -828,11 +873,11 @@ async function insertLogicalRecord(
               json(changedFields),
               record.occurredAt
             ]
-          );
-          return;
+          ), record.eventType);
+          return true;
         }
         case "world-migration": {
-          await database.query(
+          await requireHistoryMutation(database.query(
             `INSERT INTO campaign_world_migrations (
                id,owner_user_id,campaign_id,from_world_version_id,to_world_version_id,note,created_at
              ) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
@@ -845,13 +890,13 @@ async function insertLogicalRecord(
               historyString(record.eventType, content, "note"),
               record.occurredAt
             ]
-          );
-          return;
+          ), record.eventType);
+          return true;
         }
         case "world-transfer": {
           const sourceFingerprint = historyString(record.eventType, content, "sourceFingerprint");
           requireHash(sourceFingerprint, "System Archive world-transfer source fingerprint");
-          await database.query(
+          await requireHistoryMutation(database.query(
             `INSERT INTO campaign_world_transfers (
                id,owner_user_id,idempotency_key,source_campaign_id,target_campaign_id,
                from_world_version_id,to_world_version_id,character_strategy,state_strategy,
@@ -872,8 +917,8 @@ async function insertLogicalRecord(
               historyString(record.eventType, content, "note"),
               record.occurredAt
             ]
-          );
-          return;
+          ), record.eventType);
+          return true;
         }
         case "memory-config": {
           const embeddingEnabled = historyBoolean(record.eventType, content, "embeddingEnabled");
@@ -886,7 +931,7 @@ async function insertLogicalRecord(
           if (embeddingEnabled && (providerProfileId === null || embeddingModel.length === 0)) {
             invalidHistory(record.eventType);
           }
-          await database.query(
+          await requireHistoryMutation(database.query(
             `INSERT INTO campaign_memory_configs (
                campaign_id,owner_user_id,embedding_enabled,embedding_provider_profile_id,
                embedding_model,embedding_batch_size,created_at,updated_at
@@ -900,8 +945,8 @@ async function insertLogicalRecord(
               historyInteger(record.eventType, content, "embeddingBatchSize", 1, 128),
               record.occurredAt
             ]
-          );
-          return;
+          ), record.eventType);
+          return true;
         }
         case "illustration-config": {
           const enabled = historyBoolean(record.eventType, content, "enabled");
@@ -910,7 +955,7 @@ async function insertLogicalRecord(
           if (enabled && (providerProfileId === null || model.length === 0)) {
             invalidHistory(record.eventType);
           }
-          await database.query(
+          await requireHistoryMutation(database.query(
             `INSERT INTO campaign_illustration_configs (
                campaign_id,owner_user_id,enabled,provider_profile_id,model,size,aspect_ratio,
                quality,output_format,max_attempts,source_policy,segment_word_count,
@@ -934,8 +979,8 @@ async function insertLogicalRecord(
               historyString(record.eventType, content, "refinementPrompt"),
               record.occurredAt
             ]
-          );
-          return;
+          ), record.eventType);
+          return true;
         }
         case "accepted-turn-mode": {
           const turnId = historyUuid(record.eventType, content, "turnId");
@@ -955,7 +1000,7 @@ async function insertLogicalRecord(
               turnNumber
             ]
           ), record.eventType);
-          return;
+          return true;
         }
         case "illustration-set": {
           const turnId = historyUuid(record.eventType, content, "turnId");
@@ -987,7 +1032,7 @@ async function insertLogicalRecord(
               historyOptionalString(record.eventType, content, "completedAt")
             ]
           ), record.eventType);
-          return;
+          return true;
         }
         case "illustration-segment": {
           const turnId = historyUuid(record.eventType, content, "turnId");
@@ -1027,10 +1072,10 @@ async function insertLogicalRecord(
               record.occurredAt
             ]
           ), record.eventType);
-          return;
+          return true;
         }
       }
-      await database.query(
+      await requireLogicalMutation(database.query(
         `INSERT INTO activity_events
            (owner_user_id,campaign_id,event_type,correlation_id,details,created_at)
          VALUES ($1,$2,$3,$4,$5::jsonb,$6)`,
@@ -1042,12 +1087,12 @@ async function insertLogicalRecord(
           json({ sourceId: record.sourceId, content: record.content }),
           record.occurredAt
         ]
-      );
-      return;
+      ), envelope.domain);
+      return true;
     }
     case "canonical-facts": {
       const { record } = envelope;
-      await database.query(
+      await requireLogicalMutation(database.query(
         `INSERT INTO campaign_canonical_facts (
            id,owner_user_id,campaign_id,world_version_id,source_turn_id,source_turn_number,
            source_fact_index,content,normalized_content,entities,valid_from_turn,metadata,
@@ -1075,13 +1120,13 @@ async function insertLogicalRecord(
           record.updatedAt,
           record.campaignId
         ]
-      );
-      return;
+      ), envelope.domain);
+      return true;
     }
     case "chronicle": {
       const { record } = envelope;
       if (record.kind === "summary-checkpoint") {
-        await database.query(
+        await requireLogicalMutation(database.query(
           `INSERT INTO summary_checkpoints (
              id,owner_user_id,campaign_id,through_turn,summary_kind,content,token_estimate,created_at
            ) SELECT $1,$2,campaign.id,campaign.active_turn_number,'system_archive',
@@ -1089,43 +1134,23 @@ async function insertLogicalRecord(
                FROM campaigns campaign
               WHERE campaign.id=$5 AND campaign.owner_user_id=$2`,
           [record.sourceId, ownerUserId, record.content, record.occurredAt, record.campaignId]
-        );
+        ), envelope.domain);
       } else {
-        const inserted = await database.query(
+        await requireLogicalMutation(database.query(
           `INSERT INTO chronicle_memories (
              id,owner_user_id,campaign_id,world_version_id,turn_id,memory_kind,ordinal,
              content,token_estimate,entities,metadata,embedding,created_at,updated_at
-           ) SELECT $1,$2,campaign.id,campaign.world_version_id,slot.turn_id,slot.memory_kind,
+           ) SELECT $1,$2,campaign.id,campaign.world_version_id,$7::uuid,$8,
                     COALESCE((SELECT max(memory.ordinal)+1 FROM chronicle_memories memory
                                WHERE memory.campaign_id=campaign.id),0),
                     $3,0,$4::text[],$5::jsonb,NULL,$6,$6
                FROM campaigns campaign
-               CROSS JOIN LATERAL (
-                 SELECT candidate.turn_id,candidate.memory_kind
-                   FROM (
-                     SELECT NULL::uuid AS turn_id,0 AS turn_number,memory_kind
-                       FROM unnest(ARRAY[
-                         'campaign_summary','canonical_fact','legacy_summary','open_thread','turn_fiction'
-                       ]::text[]) memory_kind
-                     UNION ALL
-                     SELECT turn_row.id,turn_row.turn_number,memory_kind
-                       FROM turns turn_row
-                       CROSS JOIN unnest(ARRAY[
-                         'campaign_summary','canonical_fact','legacy_summary','open_thread','turn_fiction'
-                       ]::text[]) memory_kind
-                      WHERE turn_row.campaign_id=campaign.id AND turn_row.owner_user_id=$2
-                   ) candidate
-                  WHERE NOT EXISTS (
-                    SELECT 1
-                      FROM chronicle_memories existing
-                     WHERE existing.campaign_id=campaign.id
-                       AND existing.turn_id IS NOT DISTINCT FROM candidate.turn_id
-                       AND existing.memory_kind=candidate.memory_kind
-                  )
-                  ORDER BY candidate.turn_number,candidate.memory_kind,candidate.turn_id NULLS FIRST
-                  LIMIT 1
-               ) slot
-              WHERE campaign.id=$7 AND campaign.owner_user_id=$2`,
+              WHERE campaign.id=$9 AND campaign.owner_user_id=$2
+                AND ($7::uuid IS NULL OR EXISTS (
+                  SELECT 1 FROM turns turn_row
+                   WHERE turn_row.id=$7 AND turn_row.owner_user_id=$2
+                     AND turn_row.campaign_id=campaign.id
+                ))`,
           [
             record.sourceId,
             ownerUserId,
@@ -1133,21 +1158,20 @@ async function insertLogicalRecord(
             record.metadata.entityNames,
             json({ openThreadIds: record.metadata.openThreadIds }),
             record.occurredAt,
+            record.turnId,
+            record.memoryKind,
             record.campaignId
           ]
-        );
-        if (inserted.rowCount !== 1) {
-          throw repositoryError("System Archive Chronicle memory has no valid authority slot.", 400);
-        }
+        ), envelope.domain);
       }
-      return;
+      return true;
     }
     case "illustrations":
       pendingIllustrations.push(envelope);
-      return;
+      return false;
     case "imports": {
       const { record } = envelope;
-      await database.query(
+      await requireLogicalMutation(database.query(
         `INSERT INTO imports (
            id,owner_user_id,source_type,source_name,source_hash,status,stats,error_message,
            created_at,completed_at
@@ -1163,21 +1187,21 @@ async function insertLogicalRecord(
           record.completedAt === null ? "Imported historical failure" : null,
           record.completedAt
         ]
-      );
-      return;
+      ), envelope.domain);
+      return true;
     }
     case "cost-events": {
       const { record } = envelope;
       if (record.campaignId === null) {
-        await database.query(
+        await requireLogicalMutation(database.query(
           `INSERT INTO activity_events
              (owner_user_id,campaign_id,event_type,correlation_id,details,created_at)
            VALUES ($1,NULL,'system-archive-cost',$2,$3::jsonb,$4)`,
           [ownerUserId, record.sourceId, json(record), record.occurredAt]
-        );
-        return;
+        ), envelope.domain);
+        return true;
       }
-      await database.query(
+      await requireLogicalMutation(database.query(
         `INSERT INTO provider_cost_events (
            id,owner_user_id,campaign_id,local_call_id,provider_type,category,operation,
            amount,currency,usage_metadata,occurred_at,created_at
@@ -1191,13 +1215,13 @@ async function insertLogicalRecord(
           json({ providerKind: record.providerKind }),
           record.occurredAt
         ]
-      );
-      return;
+      ), envelope.domain);
+      return true;
     }
     case "activity-events": {
       const { record } = envelope;
       const activityId = activityEventIdentity(record.sourceId);
-      await database.query(
+      await requireLogicalMutation(database.query(
         `INSERT INTO activity_events
            (id,owner_user_id,campaign_id,event_type,correlation_id,details,created_at)
          VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)`,
@@ -1210,7 +1234,7 @@ async function insertLogicalRecord(
           json({ summary: record.summary, sourceId: record.sourceId }),
           record.occurredAt
         ]
-      );
+      ), envelope.domain);
       await database.query(
         `SELECT setval(
            pg_get_serial_sequence('activity_events','id'),
@@ -1218,7 +1242,7 @@ async function insertLogicalRecord(
            true
          )`
       );
-      return;
+      return true;
     }
   }
 }
@@ -1232,13 +1256,45 @@ function asyncRecords(
   })();
 }
 
+async function restorePendingPrompts(
+  database: DatabaseClient,
+  ownerUserId: string,
+  pendingPrompts: readonly SystemPromptEnvelope[],
+  restoredIds: Set<string>
+): Promise<number> {
+  let restored = 0;
+  for (const envelope of pendingPrompts) {
+    if (restoredIds.has(envelope.sourceId)) continue;
+    const { record } = envelope;
+    await requireLogicalMutation(database.query(
+      `INSERT INTO prompt_template_overrides
+         (id,owner_user_id,campaign_id,prompt_key,content,created_at,updated_at)
+       SELECT $1,$2,campaign.id,$4,$5,$6,$6
+         FROM campaigns campaign
+        WHERE campaign.id=$3 AND campaign.owner_user_id=$2`,
+      [
+        record.sourceId,
+        ownerUserId,
+        record.campaignId,
+        record.templateKey,
+        record.overrideText,
+        record.updatedAt
+      ]
+    ), envelope.domain);
+    restoredIds.add(envelope.sourceId);
+    restored += 1;
+  }
+  return restored;
+}
+
 async function insertAssetBindings(
   database: DatabaseClient,
   ownerUserId: string,
   asset: ArchiveAssetRecord,
-  pendingIllustrations: readonly SystemRecordEnvelope[]
-): Promise<void> {
-  await database.query(
+  pendingIllustrations: readonly SystemIllustrationEnvelope[],
+  restoredIllustrationIds: Set<string>
+): Promise<number> {
+  const updatedAsset = await database.query(
     `UPDATE assets
         SET pixel_width=$3,pixel_height=$4,technical_metadata=$5::jsonb,created_at=$6
       WHERE id=$1 AND owner_user_id=$2`,
@@ -1251,6 +1307,9 @@ async function insertAssetBindings(
       asset.createdAt
     ]
   );
+  if (updatedAsset.rowCount !== 1) {
+    throw repositoryError("System Archive Original Asset authority was not attached exactly once.", 400);
+  }
   await database.query(
     `INSERT INTO asset_library_entries (asset_id,owner_user_id,created_by_user_id)
      VALUES ($1,$2,$2) ON CONFLICT (asset_id) DO NOTHING`,
@@ -1346,16 +1405,43 @@ async function insertAssetBindings(
         break;
     }
   }
+  let restoredIllustrations = 0;
   for (const illustration of pendingIllustrations) {
-    if (illustration.domain !== "illustrations"
-      || illustration.record.assetId !== asset.sourceAssetId) continue;
+    if (illustration.record.assetId !== asset.sourceAssetId
+      || restoredIllustrationIds.has(illustration.sourceId)) continue;
+    const matched = await database.query<{ count: string }>(
+      `SELECT count(*)::bigint AS count
+         FROM turn_illustration_segment_assets segment_asset
+         JOIN turn_illustration_segments segment
+           ON segment.id=segment_asset.segment_id
+          AND segment.owner_user_id=segment_asset.owner_user_id
+        WHERE segment_asset.owner_user_id=$1 AND segment_asset.asset_id=$2
+          AND segment.campaign_id=$3 AND segment.turn_id IS NOT DISTINCT FROM $4::uuid
+          AND (segment_asset.variant_index=0)=$5
+          AND overlay(overlay(md5('illustration:' || segment.id::text || ':'
+                || segment_asset.variant_index::text) placing '5' from 13) placing '8' from 17)::uuid=$6`,
+      [
+        ownerUserId,
+        asset.sourceAssetId,
+        illustration.record.campaignId,
+        illustration.record.turnId,
+        illustration.record.selected,
+        illustration.sourceId
+      ]
+    );
+    if (Number(matched.rows[0]?.count ?? 0) !== 1) {
+      throw repositoryError("System Archive illustrations record did not restore exactly once.", 400);
+    }
     await database.query(
       `UPDATE asset_generation_contexts
           SET fiction_prompt=$3,target_type='turn_illustration'
         WHERE owner_user_id=$1 AND asset_id=$2`,
       [ownerUserId, asset.sourceAssetId, illustration.record.fictionPrompt]
     );
+    restoredIllustrationIds.add(illustration.sourceId);
+    restoredIllustrations += 1;
   }
+  return restoredIllustrations;
 }
 
 async function normalizeImportedIllustrations(
@@ -1549,49 +1635,99 @@ export function createPostgresSystemArchiveImportRepository(
       }
     },
 
-    async consumePreviewAuthority(owner, previewHandle) {
+    async consumePreviewAuthority(owner, previewHandle, idempotencyKey) {
       if (!/^[A-Za-z0-9_-]{43}$/u.test(previewHandle)) {
         throw repositoryError("System Archive preview authority is invalid.", 400);
       }
-      const selected = await pool.query<{
-        id: string;
-        staged_input_id: string;
-        upload_id: string;
-        progress: unknown;
-      }>(
-        `UPDATE system_archive_jobs job
-            SET status='queued',report=NULL,updated_at=clock_timestamp()
-           FROM system_archive_uploads upload
-          WHERE job.owner_user_id=$1 AND job.kind='import' AND job.status='previewed'
-            AND job.idempotency_key_hash=$2
-            AND job.progress->>'expiresAt' IS NOT NULL
-            AND (job.progress->>'expiresAt')::timestamptz > clock_timestamp()
-            AND upload.owner_user_id=job.owner_user_id
-            AND upload.staged_input_id=job.staged_input_id
-            AND upload.status='completed' AND upload.expires_at > clock_timestamp()
-        RETURNING job.id,job.staged_input_id,upload.id AS upload_id,job.progress`,
-        [owner.ownerUserId, createHash("sha256").update(previewHandle).digest("hex")]
-      );
-      const row = selected.rows[0];
-      if (!row) throw repositoryError("System Archive preview authority is unavailable or expired.", 409);
-      const progress = row.progress as Partial<{
-        archiveFingerprint: unknown;
-        destinationFingerprint: unknown;
-      }>;
-      if (typeof progress?.archiveFingerprint !== "string"
-        || !/^[0-9a-f]{64}$/u.test(progress.archiveFingerprint)
-        || typeof progress.destinationFingerprint !== "object"
-        || progress.destinationFingerprint === null) {
-        throw new Error("System Archive preview authority is malformed.");
+      if (!idempotencyKey.trim() || idempotencyKey.length > 200) {
+        throw repositoryError("System Archive import idempotency key is invalid.", 400);
       }
-      const destination = parsePersistedDestinationFingerprint(progress.destinationFingerprint);
-      return Object.freeze({
-        jobId: row.id,
-        stagedInputId: row.staged_input_id,
-        uploadId: row.upload_id,
-        archiveFingerprint: progress.archiveFingerprint,
-        destination
-      });
+      const previewHash = createHash("sha256").update(previewHandle).digest("hex");
+      const commitKeyHash = createHash("sha256").update(idempotencyKey).digest("hex");
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const selected = await client.query<{
+          id: string;
+          staged_input_id: string;
+          upload_id: string;
+          status: string;
+          upload_status: string;
+          upload_expires_at: Date;
+          progress: unknown;
+          report: unknown;
+        }>(
+          `SELECT job.id,job.staged_input_id,upload.id AS upload_id,job.status,
+                  upload.status AS upload_status,upload.expires_at AS upload_expires_at,
+                  job.progress,job.report
+             FROM system_archive_jobs job
+             JOIN system_archive_uploads upload
+               ON upload.owner_user_id=job.owner_user_id
+              AND upload.staged_input_id=job.staged_input_id
+            WHERE job.owner_user_id=$1 AND job.kind='import' AND job.idempotency_key_hash=$2
+            FOR UPDATE OF job,upload`,
+          [owner.ownerUserId, previewHash]
+        );
+        const row = selected.rows[0];
+        if (!row) throw repositoryError("System Archive preview authority is unavailable or expired.", 409);
+        const progress = row.progress as Partial<{
+          archiveFingerprint: unknown;
+          destinationFingerprint: unknown;
+          expiresAt: unknown;
+          commitIdempotencyKeyHash: unknown;
+        }>;
+        if (typeof progress?.archiveFingerprint !== "string"
+          || !/^[0-9a-f]{64}$/u.test(progress.archiveFingerprint)
+          || typeof progress.destinationFingerprint !== "object"
+          || progress.destinationFingerprint === null) {
+          throw new Error("System Archive preview authority is malformed.");
+        }
+        if (row.status === "previewed") {
+          if (typeof progress.expiresAt !== "string"
+            || Date.parse(progress.expiresAt) <= Date.now()
+            || row.upload_status !== "completed"
+            || row.upload_expires_at.getTime() <= Date.now()) {
+            throw repositoryError("System Archive preview authority is unavailable or expired.", 409);
+          }
+          const queued = await client.query(
+            `UPDATE system_archive_jobs
+                SET status='queued',report=NULL,
+                    progress=progress || $3::jsonb,updated_at=clock_timestamp()
+              WHERE id=$1 AND owner_user_id=$2 AND status='previewed'`,
+            [
+              row.id,
+              owner.ownerUserId,
+              json({
+                commitIdempotencyKeyHash: commitKeyHash,
+                previewProjection: parsePersistedPreviewProjection(row.report)
+              })
+            ]
+          );
+          if (queued.rowCount !== 1) {
+            throw repositoryError("System Archive preview authority changed while it was consumed.", 409);
+          }
+        } else if (progress.commitIdempotencyKeyHash !== commitKeyHash
+          || ![
+            "queued", "revalidating", "waiting_for_gate", "importing",
+            "authoritative_committed", "rebuilding", "completed"
+          ].includes(row.status)) {
+          throw repositoryError("System Archive preview authority was consumed by another request.", 409);
+        }
+        const destination = parsePersistedDestinationFingerprint(progress.destinationFingerprint);
+        await client.query("COMMIT");
+        return Object.freeze({
+          jobId: row.id,
+          stagedInputId: row.staged_input_id,
+          uploadId: row.upload_id,
+          archiveFingerprint: progress.archiveFingerprint,
+          destination
+        });
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        throw error;
+      } finally {
+        client.release();
+      }
     },
 
     async loadImportJobAuthority(owner, jobId, stagedInputId) {
@@ -1628,10 +1764,17 @@ export function createPostgresSystemArchiveImportRepository(
         throw repositoryError("System Archive destination is not empty.", 409);
       }
       const client = await pool.connect();
-      const pendingIllustrations: SystemRecordEnvelope[] = [];
-      const counts = emptyDomainCounts();
+      const pendingPrompts: SystemPromptEnvelope[] = [];
+      const pendingIllustrations: SystemIllustrationEnvelope[] = [];
+      const restoredPromptIds = new Set<string>();
+      const restoredIllustrationIds = new Set<string>();
+      const expectedCounts = emptyDomainCounts();
+      const persistedCounts = emptyDomainCounts();
       const campaignIds = new Set<string>();
       const assetIds = new Set<string>();
+      let persistedAssetBytes = 0;
+      let reportRecorded = false;
+      let previewProjection: SystemImportPreviewProjection | null = null;
       try {
         await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
         await client.query(
@@ -1642,26 +1785,61 @@ export function createPostgresSystemArchiveImportRepository(
           if (!request.leaseOwner?.trim()) {
             throw repositoryError("System Archive import lease is required.", 409);
           }
-          const started = await client.query(
+          const started = await client.query<{ progress: unknown }>(
             `UPDATE system_archive_jobs
                 SET status='importing',updated_at=clock_timestamp()
               WHERE id=$1 AND owner_user_id=$2 AND kind='import'
                 AND status IN ('revalidating','importing')
-                AND lease_owner=$3 AND lease_expires_at>clock_timestamp()`,
+                AND lease_owner=$3 AND lease_expires_at>clock_timestamp()
+            RETURNING progress`,
             [request.jobId, owner.ownerUserId, request.leaseOwner]
           );
           if (started.rowCount !== 1) {
             throw repositoryError("System Archive import lease or state was lost.", 409);
+          }
+          const progress = started.rows[0]?.progress as Partial<{
+            archiveFingerprint: unknown;
+            commitIdempotencyKeyHash: unknown;
+            previewProjection: unknown;
+          }> | undefined;
+          if (progress?.previewProjection !== undefined) {
+            previewProjection = parsePersistedPreviewProjection(progress.previewProjection);
+            if (progress.archiveFingerprint !== previewProjection.archiveFingerprint) {
+              throw repositoryError("System Archive preview fingerprint binding was lost.", 409);
+            }
+          } else if (progress?.commitIdempotencyKeyHash !== undefined) {
+            throw repositoryError("System Archive persisted preview reconciliation was lost.", 409);
           }
         }
         const current = await fingerprint(client, owner, request.ignore);
         if (!current.destinationEmpty || !sameFingerprint(request.destination, current)) {
           throw repositoryError("System Archive destination changed after preview.", 409);
         }
+        const restoreDeferredRecords = async () => {
+          persistedCounts.prompts += await restorePendingPrompts(
+            client,
+            owner.ownerUserId,
+            pendingPrompts,
+            restoredPromptIds
+          );
+        };
+        const reconcileLogicalCounts = () => {
+          for (const domain of SYSTEM_ARCHIVE_DOMAINS) {
+            if (expectedCounts[domain] !== persistedCounts[domain]) {
+              throw repositoryError(
+                `System Archive ${domain} inventory did not match rows actually persisted.`,
+                409
+              );
+            }
+          }
+        };
         let lastDomainIndex = -1;
         const transaction: SystemArchiveAtomicImportTransaction = {
           database: client,
           async insertLogicalDomains(records) {
+            if (reportRecorded) {
+              throw repositoryError("System Archive authority cannot change after its Import Report.", 409);
+            }
             for await (const candidate of asyncRecords(records)) {
               const envelope = systemRecordEnvelopeSchema.parse(candidate);
               const domainIndex = SYSTEM_ARCHIVE_DOMAINS.indexOf(envelope.domain);
@@ -1669,20 +1847,30 @@ export function createPostgresSystemArchiveImportRepository(
                 throw repositoryError("System Archive logical domains are not dependency ordered.", 400);
               }
               lastDomainIndex = domainIndex;
-              await insertLogicalRecord(client, owner.ownerUserId, envelope, pendingIllustrations);
-              counts[envelope.domain] += 1;
+              expectedCounts[envelope.domain] += 1;
+              const persisted = await insertLogicalRecord(
+                client,
+                owner.ownerUserId,
+                envelope,
+                pendingPrompts,
+                pendingIllustrations
+              );
+              if (persisted) persistedCounts[envelope.domain] += 1;
               if ("campaignId" in envelope.record && envelope.record.campaignId) {
                 campaignIds.add(envelope.record.campaignId);
               }
               if (envelope.domain === "campaigns") campaignIds.add(envelope.record.sourceId);
             }
             return Object.freeze({
-              recordsByDomain: Object.freeze({ ...counts }),
+              recordsByDomain: Object.freeze({ ...persistedCounts }),
               campaignIds: Object.freeze([...campaignIds].sort()),
               assetIds: Object.freeze([...assetIds].sort())
             });
           },
           async insertOriginalAsset(asset, persistence) {
+            if (reportRecorded) {
+              throw repositoryError("System Archive authority cannot change after its Import Report.", 409);
+            }
             const inserted = await client.query(
               `INSERT INTO assets (
                  id,owner_user_id,campaign_id,turn_id,content_hash,storage_driver,storage_path,
@@ -1704,34 +1892,103 @@ export function createPostgresSystemArchiveImportRepository(
               ]
             );
             if (inserted.rowCount !== 1) throw new Error("System Archive asset insert failed.");
-            assetIds.add(asset.sourceAssetId);
+            if (!assetIds.has(asset.sourceAssetId)) {
+              assetIds.add(asset.sourceAssetId);
+              persistedAssetBytes += asset.byteLength;
+            }
           },
           async insertAssetBindings(asset) {
-            await insertAssetBindings(
+            if (reportRecorded) {
+              throw repositoryError("System Archive authority cannot change after its Import Report.", 409);
+            }
+            persistedCounts.illustrations += await insertAssetBindings(
               client,
               owner.ownerUserId,
               asset,
-              pendingIllustrations
+              pendingIllustrations,
+              restoredIllustrationIds
             );
-            assetIds.add(asset.sourceAssetId);
+            if (!assetIds.has(asset.sourceAssetId)) {
+              assetIds.add(asset.sourceAssetId);
+              persistedAssetBytes += asset.byteLength;
+            }
           },
           async recordImportReport(report) {
-            const parsedReport = systemArchiveReportSchema.parse(report);
+            if (reportRecorded) {
+              throw repositoryError("System Archive Import Report was already recorded.", 409);
+            }
+            const parsedReport = systemArchiveImportReportSchema.parse(report);
+            await restoreDeferredRecords();
+            reconcileLogicalCounts();
+            for (const domain of SYSTEM_ARCHIVE_DOMAINS) {
+              if (parsedReport.recordsByDomain[domain] !== persistedCounts[domain]) {
+                throw repositoryError(
+                  `System Archive ${domain} report did not match rows actually persisted.`,
+                  409
+                );
+              }
+            }
+            if (parsedReport.assetCount !== assetIds.size
+              || parsedReport.assetBytes !== persistedAssetBytes) {
+              throw repositoryError("System Archive asset report did not match bytes actually persisted.", 409);
+            }
+            if (parsedReport.ownerMapping.destinationOwnerId !== owner.ownerUserId
+              || parsedReport.disabledProviders !== persistedCounts.providers
+              || parsedReport.rebuildState.chronicleCampaigns !== campaignIds.size
+              || parsedReport.rebuildState.assets !== assetIds.size
+              || parsedReport.errors.length !== 0) {
+              throw repositoryError("System Archive Import Report did not match restored authority.", 409);
+            }
+            if (previewProjection !== null) {
+              for (const domain of SYSTEM_ARCHIVE_DOMAINS) {
+                if (previewProjection.recordsByDomain[domain] !== persistedCounts[domain]) {
+                  throw repositoryError(
+                    `System Archive ${domain} preview did not match rows actually persisted.`,
+                    409
+                  );
+                }
+              }
+              if (previewProjection.assets.originalCount !== assetIds.size
+                || previewProjection.assets.totalBytes !== persistedAssetBytes
+                || previewProjection.ownerMapping.sourceOwnerId !== parsedReport.ownerMapping.sourceOwnerId
+                || previewProjection.ownerMapping.destinationOwnerId !== parsedReport.ownerMapping.destinationOwnerId
+                || previewProjection.disabledProviders !== parsedReport.disabledProviders
+                || stableStringify(previewProjection.normalization) !== stableStringify(parsedReport.normalization)
+                || stableStringify(previewProjection.invalidatedAccess) !== stableStringify(parsedReport.invalidatedAccess)
+                || previewProjection.archiveFingerprint !== parsedReport.archiveFingerprint) {
+                throw repositoryError("System Archive preview did not reconcile with imported authority.", 409);
+              }
+            }
             await normalizeImportedIllustrations(client, owner.ownerUserId);
+            const durableReport = systemArchiveImportReportSchema.parse({
+              ...parsedReport,
+              recordsByDomain: { ...persistedCounts },
+              assetCount: assetIds.size,
+              assetBytes: persistedAssetBytes,
+              disabledProviders: persistedCounts.providers,
+              rebuildState: {
+                status: "pending",
+                chronicleCampaigns: campaignIds.size,
+                assets: assetIds.size
+              }
+            });
+            reportRecorded = true;
             if (!request.jobId) return;
             const updated = await client.query(
               `UPDATE system_archive_jobs
                   SET status='authoritative_committed',report=$3::jsonb,
                       progress=progress || $4::jsonb,updated_at=clock_timestamp()
-                WHERE id=$1 AND owner_user_id=$2 AND kind='import' AND status='importing'`,
+                WHERE id=$1 AND owner_user_id=$2 AND kind='import' AND status='importing'
+                  AND lease_owner=$5 AND lease_expires_at>clock_timestamp()`,
               [
                 request.jobId,
                 owner.ownerUserId,
-                json(parsedReport),
+                json(durableReport),
                 json({
                   rebuildCampaignIds: [...campaignIds].sort(),
                   rebuildAssetIds: [...assetIds].sort()
-                })
+                }),
+                request.leaseOwner
               ]
             );
             if (updated.rowCount !== 1) {
@@ -1740,6 +1997,11 @@ export function createPostgresSystemArchiveImportRepository(
           }
         };
         const result = await work(Object.freeze(transaction));
+        await restoreDeferredRecords();
+        reconcileLogicalCounts();
+        if (request.jobId && !reportRecorded) {
+          throw repositoryError("System Archive import completed without a durable Import Report.", 409);
+        }
         await client.query("COMMIT");
         return result;
       } catch (error) {
@@ -1845,7 +2107,9 @@ export function createPostgresSystemArchiveImportRepository(
     async markImportedJobRebuilding(owner, jobId, leaseOwner) {
       const updated = await pool.query(
         `UPDATE system_archive_jobs
-            SET status='rebuilding',updated_at=clock_timestamp()
+            SET status='rebuilding',
+                report=jsonb_set(report,'{rebuildState,status}','"queueing"'::jsonb),
+                updated_at=clock_timestamp()
           WHERE id=$1 AND owner_user_id=$2 AND kind='import'
             AND status IN ('authoritative_committed','rebuilding')
             AND lease_owner=$3 AND lease_expires_at>clock_timestamp()`,
@@ -1859,7 +2123,9 @@ export function createPostgresSystemArchiveImportRepository(
     async completeImportedJob(owner, jobId, leaseOwner) {
       const updated = await pool.query(
         `UPDATE system_archive_jobs
-            SET status='completed',lease_owner=NULL,lease_expires_at=NULL,updated_at=clock_timestamp()
+            SET status='completed',
+                report=jsonb_set(report,'{rebuildState,status}','"queued"'::jsonb),
+                lease_owner=NULL,lease_expires_at=NULL,updated_at=clock_timestamp()
           WHERE id=$1 AND owner_user_id=$2 AND kind='import'
             AND status IN ('authoritative_committed','rebuilding')
             AND lease_owner=$3 AND lease_expires_at>clock_timestamp()`,

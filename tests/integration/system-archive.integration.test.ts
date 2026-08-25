@@ -10,6 +10,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { worldContentSchema } from "../../packages/contracts/src/world-library.js";
 import {
   SYSTEM_ARCHIVE_DOMAINS,
+  systemArchiveImportReportSchema,
   systemArchiveManifestSchema,
   systemArchiveReportSchema,
   systemRecordEnvelopeSchema,
@@ -44,6 +45,10 @@ import {
   stageArchiveUpload,
   supportsSecureGeneratedArchiveStaging,
 } from "../../services/api/src/archive-io.js";
+import {
+  withExclusiveSystemImport,
+  withSystemMutationPermit,
+} from "../../services/api/src/system-import-gate.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -77,6 +82,44 @@ function fakeJobs(): SystemArchiveExportDependencies["jobs"] {
     markCancelled: vi.fn(async () => undefined),
     markFailed: vi.fn(async () => undefined),
   };
+}
+
+function importReport(input: Readonly<{
+  ownerUserId: string;
+  recordsByDomain: Readonly<Record<string, number>>;
+  archiveFingerprint?: string;
+  assetCount?: number;
+  assetBytes?: number;
+  omittedOperationalRows?: number;
+  completedAt?: string;
+}>) {
+  const assetCount = input.assetCount ?? 0;
+  return systemArchiveImportReportSchema.parse({
+    completedAt: input.completedAt ?? "2026-08-25T12:00:03.000Z",
+    archiveFingerprint: input.archiveFingerprint ?? sha256("system-archive-import-report"),
+    recordsByDomain: input.recordsByDomain,
+    assetCount,
+    assetBytes: input.assetBytes ?? 0,
+    omittedOperationalRows: input.omittedOperationalRows ?? 0,
+    errors: [],
+    ownerMapping: {
+      sourceOwnerId: input.ownerUserId,
+      destinationOwnerId: input.ownerUserId,
+    },
+    disabledProviders: input.recordsByDomain.providers ?? 0,
+    normalization: ["map-source-owner-to-initial-owner", "disable-provider-profiles"],
+    invalidatedAccess: ["share-links", "sessions", "oidc-identities", "external-authorizations"],
+    integrityReconciliation: {
+      archiveFingerprintVerified: true,
+      recordsMatched: true,
+      assetsMatched: true,
+    },
+    rebuildState: {
+      status: "pending",
+      chronicleCampaigns: input.recordsByDomain.campaigns ?? 0,
+      assets: assetCount,
+    },
+  });
 }
 
 function memoryStaging(options: Readonly<{
@@ -188,6 +231,8 @@ integration("deterministic owner-wide System Archive export", () => {
   let ownerUserId = "";
   let archiveRoot = "";
   let assetRoot = "";
+  let campaignId = "";
+  let turnId = "";
   let originals: StoredOriginal[] = [];
 
   beforeAll(async () => {
@@ -248,7 +293,12 @@ integration("deterministic owner-wide System Archive export", () => {
        ) VALUES ($1,$2,'System campaign',1,'flexible_scene') RETURNING id`,
       [ownerUserId, worldVersionId],
     );
-    const campaignId = campaign.rows[0]!.id;
+    campaignId = campaign.rows[0]!.id;
+    await pool.query(
+      `INSERT INTO prompt_template_overrides (owner_user_id,campaign_id,prompt_key,content)
+       VALUES ($1,$2,'story_system','Campaign portable prompt')`,
+      [ownerUserId, campaignId],
+    );
     await pool.query(
       `INSERT INTO campaign_state (
          campaign_id,owner_user_id,scratchpad_private,trackers,default_triggers,
@@ -273,12 +323,12 @@ integration("deterministic owner-wide System Archive export", () => {
         pendingEventTriggers: [],
       })],
     );
-    const turnId = turn.rows[0]!.id;
+    turnId = turn.rows[0]!.id;
     await pool.query(
       `INSERT INTO turn_narration_corrections (
          owner_user_id,campaign_id,turn_id,revision,narration,
-         previous_effective_narration_hash,source,created_by_user_id
-       ) VALUES ($1,$2,$3,1,'The gate opens silently.',$4,'user_edit',$1)`,
+         previous_effective_narration_hash,reason,source,created_by_user_id
+       ) VALUES ($1,$2,$3,1,'The gate opens silently.',$4,'Preserve accepted wording.','user_edit',$1)`,
       [ownerUserId, campaignId, turnId, sha256("The gate opens.")],
     );
     await pool.query(
@@ -529,6 +579,9 @@ integration("deterministic owner-wide System Archive export", () => {
         displayName: "Initial Owner",
       },
     });
+    expect(manifest.omittedOperationalRows).toBe(
+      Object.values(first.result.report.excludedOperationalWork).reduce((total, count) => total + count, 0),
+    );
     const providerEntry = Object.values(zip.files)
       .find((entry) => entry.name.startsWith("records/providers/") && !entry.dir);
     const portableProvider = JSON.parse((await providerEntry!.async("string")).trim()) as {
@@ -537,6 +590,36 @@ integration("deterministic owner-wide System Archive export", () => {
     expect(portableProvider.record).toMatchObject({
       baseUrl: "https://portable.invalid/v1",
       timeoutMs: 654321,
+    });
+    const promptRecords = (await Promise.all(Object.values(zip.files)
+      .filter((entry) => entry.name.startsWith("records/prompts/") && !entry.dir)
+      .map((entry) => entry.async("string"))))
+      .flatMap((entry) => entry.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as {
+        record: { campaignId: string | null; templateKey: string; overrideText: string };
+      }));
+    expect(promptRecords.map((entry) => entry.record)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ campaignId: null, templateKey: "story_system", overrideText: "Portable prompt" }),
+      expect.objectContaining({ campaignId, templateKey: "story_system", overrideText: "Campaign portable prompt" }),
+    ]));
+    const correctionRecord = JSON.parse((await Object.values(zip.files)
+      .find((entry) => entry.name.startsWith("records/turn-corrections/") && !entry.dir)!
+      .async("string")).trim()) as { record: Record<string, unknown> };
+    expect(correctionRecord.record).toMatchObject({
+      turnId,
+      revision: 1,
+      previousEffectiveNarrationHash: sha256("The gate opens."),
+      reason: "Preserve accepted wording.",
+      source: "user_edit",
+    });
+    const chronicleRecords = (await Promise.all(Object.values(zip.files)
+      .filter((entry) => entry.name.startsWith("records/chronicle/") && !entry.dir)
+      .map((entry) => entry.async("string"))))
+      .flatMap((entry) => entry.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as {
+        record: Record<string, unknown>;
+      }));
+    expect(chronicleRecords.find((entry) => entry.record.kind === "memory")?.record).toMatchObject({
+      turnId,
+      memoryKind: "turn_fiction",
     });
     expect(serialized).not.toContain("encrypted_api_key");
     expect(serialized).not.toContain("provider-password");
@@ -1423,6 +1506,189 @@ integration("deterministic owner-wide System Archive export", () => {
       .resolves.toMatchObject({ rows: [{ count: "0" }] });
   });
 
+  it("restores global and campaign prompt overrides with the same key without collapsing scope", async () => {
+    await pool.query("TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE");
+    await pool.query("DELETE FROM system_archive_jobs");
+    await pool.query("DELETE FROM system_archive_uploads");
+    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const owner = { ownerUserId };
+    const destination = await imports.destinationFingerprint(owner, {});
+    const globalPromptId = randomUUID();
+    const campaignPromptId = randomUUID();
+    const worldId = randomUUID();
+    const versionId = randomUUID();
+    const campaignId = randomUUID();
+    const timestamp = "2026-08-25T12:00:00.000Z";
+    const records = [
+      systemRecordEnvelopeSchema.parse({
+        domain: "prompts", formatVersion: 1, sourceId: globalPromptId,
+        record: {
+          sourceId: globalPromptId, campaignId: null, templateKey: "story_system",
+          overrideText: "Global story guidance.", updatedAt: timestamp,
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "prompts", formatVersion: 1, sourceId: campaignPromptId,
+        record: {
+          sourceId: campaignPromptId, campaignId, templateKey: "story_system",
+          overrideText: "Campaign story guidance.", updatedAt: timestamp,
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "worlds", formatVersion: 1, sourceId: worldId,
+        record: { sourceId: worldId, title: "Prompt World", status: "active", createdAt: timestamp, updatedAt: timestamp },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "world-versions", formatVersion: 1, sourceId: versionId,
+        record: {
+          sourceId: versionId, worldId, versionNumber: 1, title: "Prompt World",
+          content: worldContentSchema.parse({
+            schemaVersion: 1,
+            world: { title: "Prompt World", genre: "", tone: "", premise: "", backgroundStory: "", firstAction: "", rules: "" },
+            playableCharacters: [], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [],
+            defaults: { selectedCharacterId: null, initialLocation: "" },
+          }),
+          contentFingerprint: null, releaseNotes: "", createdFromRevision: null, publishedAt: timestamp,
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "campaigns", formatVersion: 1, sourceId: campaignId,
+        record: {
+          sourceId: campaignId, worldVersionId: versionId, title: "Prompt Campaign", status: "active", activeTurnNumber: 0,
+          settings: { turnControlStyle: "Auto" }, createdAt: timestamp, updatedAt: timestamp,
+        },
+      }),
+    ];
+
+    await imports.withAtomicImport(owner, { destination, ignore: {} }, async (transaction) => {
+      await transaction.insertLogicalDomains(records);
+    });
+
+    await expect(pool.query<{ id: string; campaign_id: string | null; content: string }>(
+      `SELECT id,campaign_id,content FROM prompt_template_overrides
+        WHERE owner_user_id=$1 AND prompt_key='story_system'
+        ORDER BY campaign_id NULLS FIRST`,
+      [ownerUserId],
+    )).resolves.toMatchObject({ rows: [
+      { id: globalPromptId, campaign_id: null, content: "Global story guidance." },
+      { id: campaignPromptId, campaign_id: campaignId, content: "Campaign story guidance." },
+    ] });
+  });
+
+  it("rolls back when the reported logical inventory does not match rows actually persisted", async () => {
+    await pool.query("TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE");
+    await pool.query("DELETE FROM system_archive_jobs");
+    await pool.query("DELETE FROM system_archive_uploads");
+    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const owner = { ownerUserId };
+    const destination = await imports.destinationFingerprint(owner, {});
+    const worldId = randomUUID();
+    const recordsByDomain = Object.fromEntries(SYSTEM_ARCHIVE_DOMAINS.map((domain) => [domain, 0]));
+
+    await expect(imports.withAtomicImport(owner, { destination, ignore: {} }, async (transaction) => {
+      await transaction.insertLogicalDomains([systemRecordEnvelopeSchema.parse({
+        domain: "worlds", formatVersion: 1, sourceId: worldId,
+        record: {
+          sourceId: worldId, title: "Unreconciled World", status: "active",
+          createdAt: "2026-08-25T12:00:00.000Z", updatedAt: "2026-08-25T12:00:00.000Z",
+        },
+      })]);
+      await transaction.recordImportReport(importReport({
+        ownerUserId,
+        recordsByDomain,
+      }));
+    })).rejects.toMatchObject({ statusCode: 409 });
+
+    await expect(pool.query<{ count: string }>("SELECT count(*)::text AS count FROM worlds"))
+      .resolves.toMatchObject({ rows: [{ count: "0" }] });
+  });
+
+  it("holds the real PostgreSQL exclusive gate against concurrent mutation permits", async () => {
+    const exclusive = await pool.connect();
+    let releaseExclusive!: () => void;
+    let signalEntered!: () => void;
+    const entered = new Promise<void>((resolveEntered) => { signalEntered = resolveEntered; });
+    const release = new Promise<void>((resolveRelease) => { releaseExclusive = resolveRelease; });
+    try {
+      await exclusive.query("BEGIN");
+      const held = withExclusiveSystemImport(exclusive, async () => {
+        signalEntered();
+        await release;
+      });
+      await entered;
+      await expect(withSystemMutationPermit(pool, async () => "mutated"))
+        .rejects.toMatchObject({ statusCode: 503, code: "system-import-in-progress" });
+      releaseExclusive();
+      await held;
+      await exclusive.query("COMMIT");
+    } finally {
+      releaseExclusive?.();
+      await exclusive.query("ROLLBACK").catch(() => undefined);
+      exclusive.release();
+    }
+  });
+
+  it("rolls back when a logical record matches no destination authority row", async () => {
+    await pool.query("TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE");
+    await pool.query("DELETE FROM system_archive_jobs");
+    await pool.query("DELETE FROM system_archive_uploads");
+    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const owner = { ownerUserId };
+    const destination = await imports.destinationFingerprint(owner, {});
+    const worldId = randomUUID();
+    const versionId = randomUUID();
+    const campaignId = randomUUID();
+    const factId = randomUUID();
+    const timestamp = "2026-08-25T12:00:00.000Z";
+    const records = [
+      systemRecordEnvelopeSchema.parse({
+        domain: "worlds", formatVersion: 1, sourceId: worldId,
+        record: { sourceId: worldId, title: "Fact World", status: "active", createdAt: timestamp, updatedAt: timestamp },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "world-versions", formatVersion: 1, sourceId: versionId,
+        record: {
+          sourceId: versionId, worldId, versionNumber: 1, title: "Fact World",
+          content: worldContentSchema.parse({
+            schemaVersion: 1,
+            world: { title: "Fact World", genre: "", tone: "", premise: "", backgroundStory: "", firstAction: "", rules: "" },
+            playableCharacters: [], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [],
+            defaults: { selectedCharacterId: null, initialLocation: "" },
+          }),
+          contentFingerprint: null, releaseNotes: "", createdFromRevision: null, publishedAt: timestamp,
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "campaigns", formatVersion: 1, sourceId: campaignId,
+        record: {
+          sourceId: campaignId, worldVersionId: versionId, title: "Fact Campaign", status: "active", activeTurnNumber: 0,
+          settings: { turnControlStyle: "Auto" }, createdAt: timestamp, updatedAt: timestamp,
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "canonical-facts", formatVersion: 1, sourceId: factId,
+        record: {
+          sourceId: factId, campaignId, subject: "gate", predicate: "is", object: "sealed", updatedAt: timestamp,
+        },
+      }),
+    ];
+    const recordsByDomain = Object.fromEntries(SYSTEM_ARCHIVE_DOMAINS.map((domain) => [
+      domain,
+      records.filter((record) => record.domain === domain).length,
+    ]));
+
+    await expect(imports.withAtomicImport(owner, { destination, ignore: {} }, async (transaction) => {
+      await transaction.insertLogicalDomains(records);
+      await transaction.recordImportReport(importReport({
+        ownerUserId,
+        recordsByDomain,
+      }));
+    })).rejects.toMatchObject({ statusCode: 400 });
+
+    await expect(pool.query<{ count: string }>("SELECT count(*)::text AS count FROM campaigns"))
+      .resolves.toMatchObject({ rows: [{ count: "0" }] });
+  });
+
   it("remaps source ownership, rejects a stale destination, and queues rebuilds idempotently after commit", async () => {
     await pool.query("TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE");
     await pool.query("DELETE FROM system_archive_jobs");
@@ -1445,6 +1711,7 @@ integration("deterministic owner-wide System Archive export", () => {
     const versionId = randomUUID();
     const campaignId = randomUUID();
     const turnId = randomUUID();
+    const correctionIds = [randomUUID(), randomUUID()];
     const turnModeHistoryId = randomUUID();
     const memoryConfigHistoryId = randomUUID();
     const illustrationSetHistoryId = randomUUID();
@@ -1491,6 +1758,21 @@ integration("deterministic owner-wide System Archive export", () => {
           sourceId: turnId, campaignId, turnNumber: 1, action: "Open the gate.", narration: "The gate opens.", choices: [], imagePrompt: "A gate at dawn", acceptedAt: "2026-08-25T12:00:00.000Z",
         },
       }),
+      ...correctionIds.map((correctionId, index) => systemRecordEnvelopeSchema.parse({
+        domain: "turn-corrections", formatVersion: 1, sourceId: correctionId,
+        record: {
+          sourceId: correctionId,
+          turnId,
+          revision: index === 0 ? 2 : 7,
+          narration: index === 0 ? "The gate opens quietly." : "The gate opens beneath a silver dawn.",
+          previousEffectiveNarrationHash: index === 0
+            ? sha256("The gate opens.")
+            : sha256("The gate opens quietly."),
+          reason: index === 0 ? null : "Restore the accepted seventh revision.",
+          source: index === 0 ? "legacy_import" : "user_edit",
+          correctedAt: `2026-08-25T12:00:0${index}.000Z`,
+        },
+      })),
       systemRecordEnvelopeSchema.parse({
         domain: "campaign-history", formatVersion: 1, sourceId: turnModeHistoryId,
         record: {
@@ -1554,6 +1836,8 @@ integration("deterministic owner-wide System Archive export", () => {
           sourceId: memoryId,
           campaignId,
           kind: "memory",
+          turnId: index === 0 ? null : turnId,
+          memoryKind: index === 0 ? "campaign_summary" : "turn_fiction",
           content: `Restored Chronicle memory ${index + 1}`,
           occurredAt: `2026-08-25T12:00:0${index}.000Z`,
           metadata: { entityNames: ["Gate"], openThreadIds: [] },
@@ -1573,14 +1857,12 @@ integration("deterministic owner-wide System Archive export", () => {
 
     await imports.withAtomicImport(owner, { destination, ignore: {} }, async (transaction) => {
       await transaction.insertLogicalDomains(records);
-      await transaction.recordImportReport(systemArchiveReportSchema.parse({
-        completedAt: "2026-08-25T12:00:03.000Z",
-        archiveFingerprint: null,
-        recordsByDomain: Object.fromEntries(SYSTEM_ARCHIVE_DOMAINS.map((domain) => [domain, 0])),
-        assetCount: 0,
-        assetBytes: 0,
-        omittedOperationalRows: 0,
-        errors: [],
+      await transaction.recordImportReport(importReport({
+        ownerUserId,
+        recordsByDomain: Object.fromEntries(SYSTEM_ARCHIVE_DOMAINS.map((domain) => [
+          domain,
+          records.filter((record) => record.domain === domain).length,
+        ])),
       }));
     });
     await imports.enqueueDerivedRebuilds(owner, { campaignIds: [campaignId], assetIds: [] });
@@ -1630,12 +1912,42 @@ integration("deterministic owner-wide System Archive export", () => {
       embedding_model: "restored-model",
       embedding_batch_size: 24,
     }] });
-    await expect(pool.query<{ id: string }>(
-      "SELECT id FROM chronicle_memories WHERE campaign_id=$1 ORDER BY id",
+    await expect(pool.query<{ id: string; turn_id: string | null; memory_kind: string }>(
+      "SELECT id,turn_id,memory_kind FROM chronicle_memories WHERE campaign_id=$1 ORDER BY id",
       [campaignId],
     )).resolves.toMatchObject({
-      rows: [...chronicleMemoryIds].sort().map((id) => ({ id })),
+      rows: chronicleMemoryIds.map((id, index) => ({
+        id,
+        turn_id: index === 0 ? null : turnId,
+        memory_kind: index === 0 ? "campaign_summary" : "turn_fiction",
+      })).sort((left, right) => left.id.localeCompare(right.id)),
     });
+    await expect(pool.query<{
+      id: string;
+      revision: number;
+      previous_effective_narration_hash: string;
+      reason: string | null;
+      source: string;
+    }>(
+      `SELECT id,revision,previous_effective_narration_hash,reason,source
+         FROM turn_narration_corrections WHERE turn_id=$1 ORDER BY revision`,
+      [turnId],
+    )).resolves.toMatchObject({ rows: [
+      {
+        id: correctionIds[0],
+        revision: 2,
+        previous_effective_narration_hash: sha256("The gate opens."),
+        reason: null,
+        source: "legacy_import",
+      },
+      {
+        id: correctionIds[1],
+        revision: 7,
+        previous_effective_narration_hash: sha256("The gate opens quietly."),
+        reason: "Restore the accepted seventh revision.",
+        source: "user_edit",
+      },
+    ] });
     await expect(pool.query<{ id: string }>(
       "SELECT id::text AS id FROM activity_events WHERE campaign_id=$1 AND event_type='campaign-restored'",
       [campaignId],
@@ -1833,6 +2145,210 @@ integration("deterministic owner-wide System Archive export", () => {
     )).resolves.toMatchObject({ rows: [{ status: "importing" }] });
   });
 
+  it("returns the same queued import when preview consumption is retried after response loss", async () => {
+    await pool.query("TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE");
+    await pool.query("DELETE FROM system_archive_jobs");
+    await pool.query("DELETE FROM system_archive_uploads");
+    const operation = await pool.query<{ id: string }>(
+      `INSERT INTO durable_filesystem_operations (
+         owner_user_id,operation_token_hash,purpose,resource_kind,operation_scope_hash,
+         lease_id,lease_owner,lease_expires_at,expires_at
+       ) VALUES ($1,$2,'portable_staging','portable',$3,gen_random_uuid(),$4,
+                 clock_timestamp()+interval '5 minutes',clock_timestamp()+interval '1 day')
+       RETURNING id`,
+      [ownerUserId, sha256(randomUUID()), sha256(randomUUID()), "system-import-idempotency-test"],
+    );
+    const staged = await pool.query<{ id: string }>(
+      `INSERT INTO portable_staged_inputs (
+         owner_user_id,handle_token_hash,filesystem_operation_id,content_hash,byte_length,expires_at
+       ) VALUES ($1,$2,$3,$4,4,clock_timestamp()+interval '1 day') RETURNING id`,
+      [ownerUserId, sha256(randomUUID()), operation.rows[0]!.id, sha256("data")],
+    );
+    const upload = await pool.query<{ id: string }>(
+      `INSERT INTO system_archive_uploads (
+         owner_user_id,handle_token_hash,filesystem_operation_id,status,byte_length,
+         received_bytes,content_hash,staged_input_id,expires_at
+       ) VALUES ($1,$2,$3,'completed',4,4,$4,$5,clock_timestamp()+interval '1 day')
+       RETURNING id`,
+      [ownerUserId, sha256(randomUUID()), operation.rows[0]!.id, sha256("data"), staged.rows[0]!.id],
+    );
+    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const owner = { ownerUserId };
+    const destination = await imports.destinationFingerprint(owner, { ignoreUploadId: upload.rows[0]!.id });
+    const archiveFingerprint = sha256("idempotent-preview");
+    const recordsByDomain = Object.fromEntries(SYSTEM_ARCHIVE_DOMAINS.map((domain) => [domain, 0]));
+    const preview = await imports.createPreview(owner, {
+      uploadId: upload.rows[0]!.id,
+      archiveFingerprint,
+      destination,
+      projection: {
+        versions: {
+          archiveFormat: 1,
+          sourceApplication: "0.1.0",
+          sourceMigration: destination.latestMigration,
+          destinationApplication: "0.1.0",
+          destinationMigration: destination.latestMigration,
+        },
+        sourceOwnerCount: 1,
+        archiveFingerprint,
+        recordsByDomain,
+        assets: { originalCount: 0, totalBytes: 0 },
+        destinationEmpty: true,
+        ownerMapping: { sourceOwnerId: ownerUserId, destinationOwnerId: ownerUserId },
+        disabledProviders: 0,
+        invalidatedAccess: ["share-links", "sessions", "oidc-identities", "external-authorizations"],
+        normalization: ["map-source-owner-to-initial-owner", "disable-provider-profiles"],
+        rebuilds: ["chronicle-index", "asset-thumbnails"],
+        space: {
+          staging: { requiredBytes: 0, availableBytes: 1, verified: true, sufficient: true, overrideUsed: false },
+          assetRoot: { requiredBytes: 0, availableBytes: 1, verified: true, sufficient: true, overrideUsed: false },
+        },
+        warnings: [],
+        errors: [],
+      },
+    });
+    const idempotencyKey = `commit-${randomUUID()}`;
+
+    const first = await imports.consumePreviewAuthority(owner, preview.previewHandle, idempotencyKey);
+    const replay = await imports.consumePreviewAuthority(owner, preview.previewHandle, idempotencyKey);
+
+    expect(replay).toEqual(first);
+    expect(first.jobId).toBe(preview.jobId);
+    await expect(imports.consumePreviewAuthority(owner, preview.previewHandle, `different-${randomUUID()}`))
+      .rejects.toMatchObject({ statusCode: 409 });
+    const persisted = await pool.query<{ status: string; progress_text: string }>(
+      "SELECT status,progress::text AS progress_text FROM system_archive_jobs WHERE id=$1",
+      [preview.jobId],
+    );
+    expect(persisted.rows[0]).toMatchObject({ status: "queued" });
+    expect(persisted.rows[0]!.progress_text).toContain(sha256(idempotencyKey));
+    expect(persisted.rows[0]!.progress_text).not.toContain(idempotencyKey);
+
+    const claimed = await createPostgresSystemArchiveJobRepository(pool).claimNext(
+      "system-import-idempotency-test",
+      300,
+    );
+    expect(claimed).toMatchObject({ id: preview.jobId, status: "revalidating" });
+    const worldId = randomUUID();
+    const actualCounts = Object.fromEntries(SYSTEM_ARCHIVE_DOMAINS.map((domain) => [
+      domain,
+      domain === "worlds" ? 1 : 0,
+    ]));
+    await expect(imports.withAtomicImport(owner, {
+      destination: first.destination,
+      ignore: { ignoreJobId: preview.jobId, ignoreUploadId: upload.rows[0]!.id },
+      jobId: preview.jobId,
+      leaseOwner: claimed!.leaseOwner,
+    }, async (transaction) => {
+      await transaction.insertLogicalDomains([systemRecordEnvelopeSchema.parse({
+        domain: "worlds",
+        formatVersion: 1,
+        sourceId: worldId,
+        record: {
+          sourceId: worldId,
+          title: "Preview mismatch world",
+          status: "active",
+          createdAt: "2026-08-25T12:00:00.000Z",
+          updatedAt: "2026-08-25T12:00:00.000Z",
+        },
+      })]);
+      await transaction.recordImportReport(importReport({
+        ownerUserId,
+        archiveFingerprint,
+        recordsByDomain: actualCounts,
+      }));
+    })).rejects.toMatchObject({ statusCode: 409 });
+    await expect(pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM worlds WHERE id=$1",
+      [worldId],
+    )).resolves.toMatchObject({ rows: [{ count: "0" }] });
+
+    const durableReport = importReport({
+      ownerUserId,
+      archiveFingerprint,
+      recordsByDomain,
+      omittedOperationalRows: 7,
+    });
+    await imports.withAtomicImport(owner, {
+      destination: first.destination,
+      ignore: { ignoreJobId: preview.jobId, ignoreUploadId: upload.rows[0]!.id },
+      jobId: preview.jobId,
+      leaseOwner: claimed!.leaseOwner,
+    }, async (transaction) => {
+      await transaction.recordImportReport(durableReport);
+    });
+    await expect(pool.query<{ status: string; report: unknown }>(
+      "SELECT status,report FROM system_archive_jobs WHERE id=$1",
+      [preview.jobId],
+    )).resolves.toMatchObject({ rows: [{
+      status: "authoritative_committed",
+      report: durableReport,
+    }] });
+  });
+
+  it("rolls back authoritative completion when the worker lease expires during import", async () => {
+    await pool.query("TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE");
+    await pool.query("DELETE FROM system_archive_jobs");
+    await pool.query("DELETE FROM system_archive_uploads");
+    const operation = await pool.query<{ id: string }>(
+      `INSERT INTO durable_filesystem_operations (
+         owner_user_id,operation_token_hash,purpose,resource_kind,operation_scope_hash,
+         lease_id,lease_owner,lease_expires_at,expires_at
+       ) VALUES ($1,$2,'portable_staging','portable',$3,gen_random_uuid(),$4,
+                 clock_timestamp()+interval '5 minutes',clock_timestamp()+interval '1 day')
+       RETURNING id`,
+      [ownerUserId, sha256(randomUUID()), sha256(randomUUID()), "system-import-expiring-lease-test"],
+    );
+    const staged = await pool.query<{ id: string }>(
+      `INSERT INTO portable_staged_inputs (
+         owner_user_id,handle_token_hash,filesystem_operation_id,content_hash,byte_length,expires_at
+       ) VALUES ($1,$2,$3,$4,4,clock_timestamp()+interval '1 day') RETURNING id`,
+      [ownerUserId, sha256(randomUUID()), operation.rows[0]!.id, sha256("data")],
+    );
+    const upload = await pool.query<{ id: string }>(
+      `INSERT INTO system_archive_uploads (
+         owner_user_id,handle_token_hash,filesystem_operation_id,status,byte_length,
+         received_bytes,content_hash,staged_input_id,expires_at
+       ) VALUES ($1,$2,$3,'completed',4,4,$4,$5,clock_timestamp()+interval '1 day')
+       RETURNING id`,
+      [ownerUserId, sha256(randomUUID()), operation.rows[0]!.id, sha256("data"), staged.rows[0]!.id],
+    );
+    const leaseOwner = "system-import-expiring-lease-test";
+    const queued = await pool.query<{ id: string }>(
+      `INSERT INTO system_archive_jobs (
+         owner_user_id,kind,status,idempotency_key_hash,staged_input_id,
+         lease_owner,lease_expires_at
+       ) VALUES ($1,'import','revalidating',$2,$3,$4,
+                 clock_timestamp()+interval '250 milliseconds') RETURNING id`,
+      [ownerUserId, sha256(randomUUID()), staged.rows[0]!.id, leaseOwner],
+    );
+    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const owner = { ownerUserId };
+    const ignore = { ignoreJobId: queued.rows[0]!.id, ignoreUploadId: upload.rows[0]!.id };
+    const destination = await imports.destinationFingerprint(owner, ignore);
+    const recordsByDomain = Object.fromEntries(SYSTEM_ARCHIVE_DOMAINS.map((domain) => [domain, 0]));
+
+    await expect(imports.withAtomicImport(owner, {
+      destination,
+      ignore,
+      jobId: queued.rows[0]!.id,
+      leaseOwner,
+    }, async (transaction) => {
+      await transaction.database.query("SELECT pg_sleep(0.4)");
+      await transaction.recordImportReport(importReport({
+        ownerUserId,
+        completedAt: "2026-08-25T12:00:00.000Z",
+        archiveFingerprint: sha256("lease-expiry-report"),
+        recordsByDomain,
+      }));
+    })).rejects.toMatchObject({ statusCode: 409 });
+
+    await expect(pool.query<{ status: string; report: unknown }>(
+      "SELECT status,report FROM system_archive_jobs WHERE id=$1",
+      [queued.rows[0]!.id],
+    )).resolves.toMatchObject({ rows: [{ status: "revalidating", report: null }] });
+  });
+
   it("rejects an expired opaque preview authority without enqueueing its import", async () => {
     await pool.query("DELETE FROM system_archive_jobs");
     await pool.query("DELETE FROM system_archive_uploads");
@@ -1883,7 +2399,7 @@ integration("deterministic owner-wide System Archive export", () => {
       ],
     );
     const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
-    await expect(imports.consumePreviewAuthority({ ownerUserId }, previewHandle))
+    await expect(imports.consumePreviewAuthority({ ownerUserId }, previewHandle, randomUUID()))
       .rejects.toMatchObject({ statusCode: 409 });
     await expect(pool.query<{ status: string }>(
       "SELECT status FROM system_archive_jobs WHERE id=$1",
@@ -1920,14 +2436,11 @@ integration("deterministic owner-wide System Archive export", () => {
     );
     const jobId = randomUUID();
     const archiveFingerprint = sha256("committed-archive");
-    const report = systemArchiveReportSchema.parse({
+    const report = importReport({
+      ownerUserId,
       completedAt: "2026-08-25T12:00:00.000Z",
       archiveFingerprint,
       recordsByDomain: Object.fromEntries(SYSTEM_ARCHIVE_DOMAINS.map((domain) => [domain, 0])),
-      assetCount: 0,
-      assetBytes: 0,
-      omittedOperationalRows: 0,
-      errors: [],
     });
     const destination = {
       initialOwnerId: ownerUserId,
@@ -2007,7 +2520,10 @@ integration("deterministic owner-wide System Archive export", () => {
     await expect(pool.query<{ status: string; report: unknown }>(
       "SELECT status,report FROM system_archive_jobs WHERE id=$1",
       [jobId],
-    )).resolves.toMatchObject({ rows: [{ status: "rebuilding", report }] });
+    )).resolves.toMatchObject({ rows: [{
+      status: "rebuilding",
+      report: { ...report, rebuildState: { ...report.rebuildState, status: "queueing" } },
+    }] });
 
     await pool.query(
       `UPDATE system_archive_jobs
@@ -2094,7 +2610,7 @@ integration("deterministic owner-wide System Archive export", () => {
         if (!preview.previewHandle) throw new Error("Expected opaque System Import preview authority.");
 
         const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
-        await imports.consumePreviewAuthority({ ownerUserId }, preview.previewHandle);
+        await imports.consumePreviewAuthority({ ownerUserId }, preview.previewHandle, randomUUID());
         const claimed = await createPostgresSystemArchiveJobRepository(pool).claimNext(
           "system-import-production-test",
           300,

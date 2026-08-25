@@ -70,6 +70,7 @@ async function emptySystemArchive(ownerUserId: string): Promise<Buffer> {
     sourceInstallationId: ownerUserId,
     sourceOwnerCount: 1,
     sourceOwner: { sourceId: ownerUserId, displayName: "Initial owner" },
+    omittedOperationalRows: 0,
     entries,
     payloads: [
       { kind: "system", path: "system.json", formatVersion: 1 },

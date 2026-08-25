@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  SYSTEM_ARCHIVE_DOMAINS,
+  systemArchiveImportReportSchema,
   systemArchiveManifestSchema,
   systemArchiveJobViewSchema,
   systemArchivePayloadSchema,
-  systemImportPreviewViewSchema
+  systemImportPreviewViewSchema,
+  systemRecordEnvelopeSchema
 } from "../../packages/contracts/src/system-archives.js";
 
 const sourceOwnerId = "11111111-1111-4111-8111-111111111111";
@@ -31,6 +34,8 @@ const validChronicleRecord = {
   sourceId: chronicleId,
   campaignId,
   kind: "memory",
+  turnId: null,
+  memoryKind: "legacy_summary",
   content: "The party entered the old observatory.",
   occurredAt: "2026-08-25T12:00:00.000Z",
   metadata: { entityNames: ["party", "observatory"] }
@@ -182,6 +187,92 @@ const validPayload = {
 };
 
 describe("System Archive contracts", () => {
+  it("preserves distinct global and campaign-scoped prompt override authority", () => {
+    const globalPromptId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
+    const campaignPromptId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2";
+    const records = [
+      ...validPayload.records,
+      {
+        domain: "prompts",
+        formatVersion: 1,
+        sourceId: globalPromptId,
+        record: {
+          sourceId: globalPromptId,
+          campaignId: null,
+          templateKey: "story_system",
+          overrideText: "Global story guidance.",
+          updatedAt: "2026-08-25T12:00:00.000Z"
+        }
+      },
+      {
+        domain: "prompts",
+        formatVersion: 1,
+        sourceId: campaignPromptId,
+        record: {
+          sourceId: campaignPromptId,
+          campaignId,
+          templateKey: "story_system",
+          overrideText: "Campaign story guidance.",
+          updatedAt: "2026-08-25T12:00:01.000Z"
+        }
+      }
+    ];
+
+    const parsed = systemArchivePayloadSchema.parse({ ...validPayload, records });
+
+    expect(parsed.records.slice(-2).map((entry) => entry.record)).toEqual([
+      expect.objectContaining({ sourceId: globalPromptId, campaignId: null, templateKey: "story_system" }),
+      expect.objectContaining({ sourceId: campaignPromptId, campaignId, templateKey: "story_system" })
+    ]);
+  });
+
+  it("requires exact narration-correction revision authority", () => {
+    const correctionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3";
+    const turnId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa4";
+    const parsed = systemRecordEnvelopeSchema.parse({
+      domain: "turn-corrections",
+      formatVersion: 1,
+      sourceId: correctionId,
+      record: {
+        sourceId: correctionId,
+        turnId,
+        revision: 7,
+        narration: "The seventh accepted correction.",
+        previousEffectiveNarrationHash: "d".repeat(64),
+        reason: "Restore exact accepted history.",
+        source: "user_edit",
+        correctedAt: "2026-08-25T12:00:07.000Z"
+      }
+    });
+
+    expect(parsed.record).toMatchObject({
+      revision: 7,
+      previousEffectiveNarrationHash: "d".repeat(64),
+      reason: "Restore exact accepted history.",
+      source: "user_edit"
+    });
+  });
+
+  it("requires Chronicle memories to carry their authoritative turn and memory kind", () => {
+    const turnId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa5";
+    const parsed = systemRecordEnvelopeSchema.parse({
+      domain: "chronicle",
+      formatVersion: 1,
+      sourceId: chronicleId,
+      record: {
+        ...validChronicleRecord,
+        turnId,
+        memoryKind: "open_thread"
+      }
+    });
+
+    expect(parsed.record).toMatchObject({
+      kind: "memory",
+      turnId,
+      memoryKind: "open_thread"
+    });
+  });
+
   it("requires source-installation and current-owner provenance on the root manifest", () => {
     const manifest = {
       format: "infinite-quest-archive",
@@ -194,6 +285,7 @@ describe("System Archive contracts", () => {
       sourceInstallationId: validPayload.sourceInstallationId,
       sourceOwnerCount: 1,
       sourceOwner: validPayload.sourceOwner,
+      omittedOperationalRows: 7,
       entries: [],
       payloads: [],
       assets: []
@@ -204,7 +296,8 @@ describe("System Archive contracts", () => {
       sourceApplication: "0.1.0",
       sourceMigration: "0079_resumable_system_archive_uploads",
       sourceOwnerCount: 1,
-      sourceOwner: validPayload.sourceOwner
+      sourceOwner: validPayload.sourceOwner,
+      omittedOperationalRows: 7
     });
     expect(systemArchiveManifestSchema.safeParse({
       ...manifest,
@@ -217,6 +310,50 @@ describe("System Archive contracts", () => {
     expect(systemArchiveManifestSchema.safeParse({
       ...manifest,
       sourceOwner: undefined
+    }).success).toBe(false);
+  });
+
+  it("requires the durable Import Report to disclose normalization and reconciliation", () => {
+    const report = {
+      completedAt: "2026-08-25T12:05:00.000Z",
+      archiveFingerprint: "a".repeat(64),
+      recordsByDomain: Object.fromEntries(SYSTEM_ARCHIVE_DOMAINS.map((domain) => [domain, 0])),
+      assetCount: 3,
+      assetBytes: 4_096,
+      omittedOperationalRows: 7,
+      errors: [],
+      ownerMapping: { sourceOwnerId, destinationOwnerId: sourceOwnerId },
+      disabledProviders: 1,
+      normalization: ["map-source-owner-to-initial-owner", "disable-provider-profiles"],
+      invalidatedAccess: ["share-links", "sessions", "oidc-identities", "external-authorizations"],
+      integrityReconciliation: {
+        archiveFingerprintVerified: true,
+        recordsMatched: true,
+        assetsMatched: true
+      },
+      rebuildState: { status: "pending", chronicleCampaigns: 2, assets: 3 }
+    };
+
+    expect(systemArchiveImportReportSchema.parse(report)).toEqual(report);
+    expect(systemArchiveImportReportSchema.safeParse({
+      ...report,
+      integrityReconciliation: { ...report.integrityReconciliation, recordsMatched: false }
+    }).success).toBe(false);
+    expect(systemArchiveJobViewSchema.safeParse({
+      id: "66666666-6666-4666-8666-666666666666",
+      kind: "import",
+      status: "authoritative_committed",
+      createdAt: "2026-08-25T12:00:00.000Z",
+      updatedAt: "2026-08-25T12:05:00.000Z",
+      report: {
+        completedAt: report.completedAt,
+        archiveFingerprint: report.archiveFingerprint,
+        recordsByDomain: report.recordsByDomain,
+        assetCount: report.assetCount,
+        assetBytes: report.assetBytes,
+        omittedOperationalRows: report.omittedOperationalRows,
+        errors: []
+      }
     }).success).toBe(false);
   });
 
