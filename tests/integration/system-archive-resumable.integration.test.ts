@@ -1350,12 +1350,16 @@ integration("durable System Archive jobs and resumable uploads", () => {
       bytes: 4,
       sha256: hash("abcd")
     });
-    await uploads.recordChunk(owner, {
+    await expect(uploads.recordChunk(owner, {
       uploadId: upload.id,
       index: 2,
       offset: 8,
       bytes: 4,
       sha256: hash("ijkl")
+    })).rejects.toMatchObject({
+      statusCode: 409,
+      code: "system-archive-upload-offset-conflict",
+      message: "System Archive chunk does not begin at the durable upload prefix."
     });
 
     await expect(uploads.getAssembly(owner, upload.id)).rejects.toMatchObject({
@@ -1369,6 +1373,13 @@ integration("durable System Archive jobs and resumable uploads", () => {
       offset: 4,
       bytes: 4,
       sha256: hash("efgh")
+    });
+    await uploads.recordChunk(owner, {
+      uploadId: upload.id,
+      index: 2,
+      offset: 8,
+      bytes: 4,
+      sha256: hash("ijkl")
     });
     const assembly = await uploads.getAssembly(owner, upload.id);
     expect(assembly).toMatchObject({
