@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@11.18.0",
+  "packageManager": "pnpm@11.23.0",
   "engines": {
     "node": ">=22.13.0"
   },
@@ -57,7 +57,7 @@
     "@types/pg": "^8.20.3",
     "@types/unzipper": "0.10.11",
     "linkedom": "0.18.13",
-    "tsx": "^4.20.5",
+    "tsx": "^4.23.12",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   }
