@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   SYSTEM_ARCHIVE_DOMAINS,
+  canonicalArchiveJson,
   type ArchiveAssetRecord,
   type SystemArchiveDomain,
   type SystemRecordEnvelope,
@@ -68,6 +69,7 @@ export class SystemArchivePreviewIndex {
         parent_id TEXT,
         secondary_id TEXT,
         restore_key TEXT,
+        numeric_value INTEGER,
         PRIMARY KEY (domain,source_id)
       ) WITHOUT ROWID;
       CREATE UNIQUE INDEX records_restore_key
@@ -80,6 +82,27 @@ export class SystemArchivePreviewIndex {
       );
       CREATE INDEX required_reference_target
         ON required_references(target_domain,target_id);
+      CREATE TABLE actual_world_covers (
+        world_id TEXT PRIMARY KEY,
+        asset_id TEXT NOT NULL
+      ) WITHOUT ROWID;
+      CREATE TABLE actual_asset_bindings (
+        asset_id TEXT NOT NULL,
+        binding_key TEXT NOT NULL,
+        PRIMARY KEY (asset_id,binding_key)
+      ) WITHOUT ROWID;
+      CREATE TABLE expected_world_version_assets (
+        world_id TEXT NOT NULL,
+        world_version_id TEXT NOT NULL,
+        asset_id TEXT NOT NULL,
+        PRIMARY KEY (world_id,world_version_id,asset_id)
+      ) WITHOUT ROWID;
+      CREATE TABLE actual_world_version_assets (
+        world_id TEXT NOT NULL,
+        world_version_id TEXT NOT NULL,
+        asset_id TEXT NOT NULL,
+        PRIMARY KEY (world_id,world_version_id,asset_id)
+      ) WITHOUT ROWID;
     `);
   }
 
@@ -103,11 +126,12 @@ export class SystemArchivePreviewIndex {
     parentId: string | null = null,
     secondaryId: string | null = null,
     restoreKey: string | null = null,
+    numericValue: number | null = null,
   ): void {
     try {
       this.#database.prepare(
-        "INSERT INTO records (domain,source_id,parent_id,secondary_id,restore_key) VALUES (?,?,?,?,?)",
-      ).run(domain, sourceId, parentId, secondaryId, restoreKey);
+        "INSERT INTO records (domain,source_id,parent_id,secondary_id,restore_key,numeric_value) VALUES (?,?,?,?,?,?)",
+      ).run(domain, sourceId, parentId, secondaryId, restoreKey, numericValue);
     } catch {
       throw jsonFailure();
     }
@@ -148,6 +172,16 @@ export class SystemArchivePreviewIndex {
           null,
           String(envelope.record.versionNumber),
         );
+        for (const binding of envelope.record.content.assets) {
+          try {
+            this.#database.prepare(`
+              INSERT INTO expected_world_version_assets
+                (world_id,world_version_id,asset_id) VALUES (?,?,?)
+            `).run(envelope.record.worldId, envelope.sourceId, binding.assetId);
+          } catch {
+            throw relationshipFailure();
+          }
+        }
         this.#require("worlds", envelope.record.worldId);
         break;
       case "world-drafts":
@@ -166,7 +200,14 @@ export class SystemArchivePreviewIndex {
         }
         break;
       case "campaigns":
-        this.#insertRecord(envelope.domain, envelope.sourceId, envelope.record.worldVersionId);
+        this.#insertRecord(
+          envelope.domain,
+          envelope.sourceId,
+          envelope.record.worldVersionId,
+          null,
+          null,
+          envelope.record.activeTurnNumber,
+        );
         this.#require("world-versions", envelope.record.worldVersionId);
         break;
       case "turns":
@@ -208,6 +249,7 @@ export class SystemArchivePreviewIndex {
           envelope.record.kind === "memory"
             ? `${envelope.record.turnId ?? ""}:${envelope.record.memoryKind}`
             : null,
+          envelope.record.kind === "summary-checkpoint" ? envelope.record.throughTurn : null,
         );
         this.#require("campaigns", envelope.record.campaignId);
         if (envelope.record.kind === "memory" && envelope.record.turnId !== null) {
@@ -276,15 +318,50 @@ export class SystemArchivePreviewIndex {
     `).get();
     if (brokenReference !== undefined) throw relationshipFailure();
 
+    const checkpointBeyondCampaign = this.#database.prepare(`
+      SELECT 1 AS broken
+        FROM records checkpoint
+        JOIN records campaign
+          ON campaign.domain='campaigns'
+         AND campaign.source_id=checkpoint.parent_id
+       WHERE checkpoint.domain='chronicle'
+         AND checkpoint.numeric_value IS NOT NULL
+         AND checkpoint.numeric_value>campaign.numeric_value
+       LIMIT 1
+    `).get();
+    if (checkpointBeyondCampaign !== undefined) throw relationshipFailure();
+
     for (const asset of assets) {
       for (const binding of asset.bindings) {
+        try {
+          this.#database.prepare(
+            "INSERT INTO actual_asset_bindings (asset_id,binding_key) VALUES (?,?)",
+          ).run(asset.sourceAssetId, canonicalArchiveJson(binding));
+        } catch {
+          throw relationshipFailure();
+        }
         switch (binding.role) {
           case "world_cover":
             if (!this.#recordExists("worlds", binding.worldId)) throw relationshipFailure();
+            try {
+              this.#database.prepare(
+                "INSERT INTO actual_world_covers (world_id,asset_id) VALUES (?,?)",
+              ).run(binding.worldId, asset.sourceAssetId);
+            } catch {
+              throw relationshipFailure();
+            }
             break;
           case "world_version_asset":
             if (!this.#recordExists("worlds", binding.worldId)
               || !this.#parentMatches("world-versions", binding.worldVersionId, binding.worldId)) {
+              throw relationshipFailure();
+            }
+            try {
+              this.#database.prepare(`
+                INSERT INTO actual_world_version_assets
+                  (world_id,world_version_id,asset_id) VALUES (?,?,?)
+              `).run(binding.worldId, binding.worldVersionId, asset.sourceAssetId);
+            } catch {
               throw relationshipFailure();
             }
             break;
@@ -330,6 +407,21 @@ export class SystemArchivePreviewIndex {
         }
       }
     }
+    const unmatchedVersionAsset = this.#database.prepare(`
+      SELECT 1 AS broken FROM (
+        SELECT world_id,world_version_id,asset_id FROM expected_world_version_assets
+        EXCEPT
+        SELECT world_id,world_version_id,asset_id FROM actual_world_version_assets
+      ) missing
+      UNION ALL
+      SELECT 1 AS broken FROM (
+        SELECT world_id,world_version_id,asset_id FROM actual_world_version_assets
+        EXCEPT
+        SELECT world_id,world_version_id,asset_id FROM expected_world_version_assets
+      ) unexpected
+      LIMIT 1
+    `).get();
+    if (unmatchedVersionAsset !== undefined) throw relationshipFailure();
   }
 
   counts(): Readonly<Record<SystemArchiveDomain, number>> {

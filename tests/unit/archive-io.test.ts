@@ -1236,7 +1236,10 @@ describe("archive artifact writing and cleanup", () => {
           sourceId: "11111111-1111-4111-8111-111111111111",
           displayName: "Archive owner"
         },
-        omittedOperationalRows: 0
+        omittedOperationalRows: 0,
+        operationalOmissions: {
+          generation: 0, illustration: 0, chronicle: 0, imports: 0, "system-archive": 0
+        }
       }),
       DEFAULT_LIMITS,
       (value) => systemArchiveManifestSchema.parse(value)
@@ -1306,7 +1309,10 @@ describe("archive artifact writing and cleanup", () => {
           sourceId: "11111111-1111-4111-8111-111111111111",
           displayName: "Archive owner"
         },
-        omittedOperationalRows: 0
+        omittedOperationalRows: 0,
+        operationalOmissions: {
+          generation: 0, illustration: 0, chronicle: 0, imports: 0, "system-archive": 0
+        }
       }),
       DEFAULT_LIMITS,
       (value) => systemArchiveManifestSchema.parse(value)

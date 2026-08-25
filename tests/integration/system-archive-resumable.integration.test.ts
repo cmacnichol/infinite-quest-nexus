@@ -71,6 +71,9 @@ async function emptySystemArchive(ownerUserId: string): Promise<Buffer> {
     sourceOwnerCount: 1,
     sourceOwner: { sourceId: ownerUserId, displayName: "Initial owner" },
     omittedOperationalRows: 0,
+    operationalOmissions: {
+      generation: 0, illustration: 0, chronicle: 0, imports: 0, "system-archive": 0,
+    },
     entries,
     payloads: [
       { kind: "system", path: "system.json", formatVersion: 1 },
@@ -101,9 +104,16 @@ function safePreviewProjection(ownerUserId: string, archiveFingerprint: string) 
     destinationEmpty: true,
     ownerMapping: { sourceOwnerId: ownerUserId, destinationOwnerId: ownerUserId },
     disabledProviders: 0,
+    omittedOperationalRows: 0,
+    operationalOmissions: {
+      generation: 0, illustration: 0, chronicle: 0, imports: 0, "system-archive": 0,
+    },
     invalidatedAccess: ["share-links", "sessions", "oidc-identities", "external-authorizations"] as const,
     normalization: ["map-source-owner-to-initial-owner", "disable-provider-profiles"],
-    rebuilds: ["chronicle-index", "asset-thumbnails"] as const,
+    rebuilds: {
+      chronicleIndex: { category: "chronicle-index", status: "pending", itemCount: 0 },
+      assetThumbnails: { category: "asset-thumbnails", status: "pending", itemCount: 0 },
+    } as const,
     space: {
       staging: { requiredBytes: 0, availableBytes: 0, verified: true, sufficient: true, overrideUsed: false },
       assetRoot: { requiredBytes: 0, availableBytes: 0, verified: true, sufficient: true, overrideUsed: false }
@@ -744,7 +754,13 @@ integration("durable System Archive jobs and resumable uploads", () => {
       domainCounts,
       originalAssets: 0,
       originalBytes: 0,
-      excludedOperationalWork: {},
+      excludedOperationalWork: {
+        generation: 0,
+        illustration: 0,
+        chronicle: 0,
+        imports: 0,
+        "system-archive": 0,
+      },
     });
 
     await expect(pool.query<{ status: string; export_artifact_id: string }>(

@@ -47,6 +47,12 @@ export type CreateSystemArchivePreviewRequest = Readonly<{
 }>;
 
 export const SYSTEM_IMPORT_LOCK_KEY = "infinitequest:system-import:v1";
+export const SYSTEM_IMPORT_WAITING_FOR_GATE_CODE = "system-import-waiting-for-gate";
+
+export function isSystemArchiveWaitingForGateError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error
+    && (error as { code?: unknown }).code === SYSTEM_IMPORT_WAITING_FOR_GATE_CODE;
+}
 
 export type SystemArchiveAtomicImportRequest = Readonly<{
   destination: SystemImportDestinationFingerprint;
@@ -1129,11 +1135,26 @@ async function insertLogicalRecord(
         await requireLogicalMutation(database.query(
           `INSERT INTO summary_checkpoints (
              id,owner_user_id,campaign_id,through_turn,summary_kind,content,token_estimate,created_at
-           ) SELECT $1,$2,campaign.id,campaign.active_turn_number,'system_archive',
-                    to_jsonb($3::text),0,$4
+            ) SELECT $1,$2,campaign.id,$3,$4,
+                     jsonb_build_object(
+                       'summary',$5::text,
+                       'entityNames',to_jsonb($6::text[]),
+                       'openThreadIds',to_jsonb($7::uuid[])
+                     ),0,$8
                FROM campaigns campaign
-              WHERE campaign.id=$5 AND campaign.owner_user_id=$2`,
-          [record.sourceId, ownerUserId, record.content, record.occurredAt, record.campaignId]
+              WHERE campaign.id=$9 AND campaign.owner_user_id=$2
+                AND $3<=campaign.active_turn_number`,
+          [
+            record.sourceId,
+            ownerUserId,
+            record.throughTurn,
+            record.summaryKind,
+            record.content,
+            record.metadata.entityNames,
+            record.metadata.openThreadIds,
+            record.occurredAt,
+            record.campaignId
+          ]
         ), envelope.domain);
       } else {
         await requireLogicalMutation(database.query(
@@ -1315,7 +1336,7 @@ async function insertAssetBindings(
      VALUES ($1,$2,$2) ON CONFLICT (asset_id) DO NOTHING`,
     [asset.sourceAssetId, ownerUserId]
   );
-  await database.query(
+  const updatedLibrary = await database.query(
     `UPDATE asset_library_entries
         SET created_by_user_id=$2,title=$3,caption=$4,notes=$5,tags=$6::text[],origin=$7,
             reuse_scope=$8,automatic_reuse_enabled=$9,review_status=$10,
@@ -1337,6 +1358,9 @@ async function insertAssetBindings(
       asset.library.archivedAt
     ]
   );
+  if (updatedLibrary.rowCount !== 1) {
+    throw repositoryError("System Archive Original Asset library authority was not attached exactly once.", 400);
+  }
   // The generic publication seam creates conservative defaults. The archive
   // inventory is the complete logical binding authority, so replace them.
   await database.query(
@@ -1347,21 +1371,44 @@ async function insertAssetBindings(
     "DELETE FROM asset_generation_contexts WHERE asset_id=$1 AND owner_user_id=$2",
     [asset.sourceAssetId, ownerUserId]
   );
+  let persistedBindings = 0;
   for (const binding of asset.bindings) {
     switch (binding.role) {
-      case "world_cover":
-        await database.query(
-          "UPDATE worlds SET cover_asset_id=$1 WHERE id=$2 AND owner_user_id=$3",
+      case "world_cover": {
+        const updated = await database.query(
+          `UPDATE worlds SET cover_asset_id=$1
+            WHERE id=$2 AND owner_user_id=$3 AND cover_asset_id IS NULL`,
           [asset.sourceAssetId, binding.worldId, ownerUserId]
         );
+        if (updated.rowCount !== 1) {
+          throw repositoryError("System Archive world-cover binding did not restore exactly once.", 400);
+        }
+        persistedBindings += 1;
         break;
-      case "world_version_asset":
-        // World-version asset identity is already represented in immutable content.assets.
+      }
+      case "world_version_asset": {
+        const matched = await database.query<{ count: string }>(
+          `SELECT count(*)::bigint AS count
+             FROM world_versions version
+             CROSS JOIN LATERAL jsonb_array_elements(
+               CASE WHEN jsonb_typeof(version.content->'assets')='array'
+                    THEN version.content->'assets' ELSE '[]'::jsonb END
+             ) item
+            WHERE version.id=$1 AND version.world_id=$2 AND version.owner_user_id=$3
+              AND item->>'assetId'=$4
+              AND item->>'role' IN ('world_cover','world_version_asset')`,
+          [binding.worldVersionId, binding.worldId, ownerUserId, asset.sourceAssetId]
+        );
+        if (Number(matched.rows[0]?.count ?? 0) !== 1) {
+          throw repositoryError("System Archive world-version asset binding did not restore exactly once.", 400);
+        }
+        persistedBindings += 1;
         break;
+      }
       case "campaign_asset":
       case "turn_illustration":
-      case "imported_attachment":
-        await database.query(
+      case "imported_attachment": {
+        const inserted = await database.query(
           `INSERT INTO asset_references
              (owner_user_id,asset_id,campaign_id,turn_id,asset_role)
            VALUES ($1,$2,$3,$4,$5)
@@ -1376,9 +1423,14 @@ async function insertAssetBindings(
               : binding.role === "campaign_asset" ? "world_asset" : "import_attachment"
           ]
         );
+        if (inserted.rowCount !== 1) {
+          throw repositoryError("System Archive asset reference binding did not restore exactly once.", 400);
+        }
+        persistedBindings += 1;
         break;
-      case "generation_context":
-        await database.query(
+      }
+      case "generation_context": {
+        const inserted = await database.query(
           `INSERT INTO asset_generation_contexts (
              id,owner_user_id,asset_id,created_by_user_id,world_id,world_version_id,
              campaign_id,turn_id,target_type,created_at
@@ -1394,16 +1446,29 @@ async function insertAssetBindings(
             asset.createdAt
           ]
         );
+        if (inserted.rowCount !== 1) {
+          throw repositoryError("System Archive generation-context binding did not restore exactly once.", 400);
+        }
+        persistedBindings += 1;
         break;
-      case "illustration_segment_variant":
-        await database.query(
+      }
+      case "illustration_segment_variant": {
+        const inserted = await database.query(
           `INSERT INTO turn_illustration_segment_assets
              (segment_id,owner_user_id,asset_id,image_job_id,variant_index,created_at)
            VALUES ($1,$2,$3,NULL,$4,$5)`,
           [binding.segmentId, ownerUserId, asset.sourceAssetId, binding.variantIndex, asset.createdAt]
         );
+        if (inserted.rowCount !== 1) {
+          throw repositoryError("System Archive illustration asset binding did not restore exactly once.", 400);
+        }
+        persistedBindings += 1;
         break;
+      }
     }
+  }
+  if (persistedBindings !== asset.bindings.length) {
+    throw repositoryError("System Archive asset binding inventory did not restore exactly.", 400);
   }
   let restoredIllustrations = 0;
   for (const illustration of pendingIllustrations) {
@@ -1774,13 +1839,36 @@ export function createPostgresSystemArchiveImportRepository(
       const assetIds = new Set<string>();
       let persistedAssetBytes = 0;
       let reportRecorded = false;
+      let stagedImportReport: SystemArchiveImportReport | null = null;
       let previewProjection: SystemImportPreviewProjection | null = null;
       try {
         await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
-        await client.query(
-          "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+        const gate = await client.query<{ acquired: boolean }>(
+          "SELECT pg_try_advisory_xact_lock(hashtextextended($1,0)) AS acquired",
           [SYSTEM_IMPORT_LOCK_KEY]
         );
+        if (!gate.rows[0]?.acquired) {
+          await client.query("ROLLBACK");
+          if (!request.jobId || !request.leaseOwner?.trim()) {
+            throw repositoryError("System Archive exclusive import gate is unavailable.", 409);
+          }
+          const waiting = await client.query(
+            `UPDATE system_archive_jobs
+                SET status='waiting_for_gate',lease_owner=NULL,lease_expires_at=NULL,
+                    updated_at=clock_timestamp()
+              WHERE id=$1 AND owner_user_id=$2 AND kind='import'
+                AND status IN ('revalidating','importing')
+                AND lease_owner=$3 AND lease_expires_at>clock_timestamp()`,
+            [request.jobId, owner.ownerUserId, request.leaseOwner]
+          );
+          if (waiting.rowCount !== 1) {
+            throw repositoryError("System Archive import lease or state was lost.", 409);
+          }
+          throw Object.assign(
+            new Error("System Archive import is waiting for the exclusive mutation gate."),
+            { code: SYSTEM_IMPORT_WAITING_FOR_GATE_CODE, statusCode: 409, retryable: true }
+          );
+        }
         if (request.jobId) {
           if (!request.leaseOwner?.trim()) {
             throw repositoryError("System Archive import lease is required.", 409);
@@ -1934,8 +2022,8 @@ export function createPostgresSystemArchiveImportRepository(
             }
             if (parsedReport.ownerMapping.destinationOwnerId !== owner.ownerUserId
               || parsedReport.disabledProviders !== persistedCounts.providers
-              || parsedReport.rebuildState.chronicleCampaigns !== campaignIds.size
-              || parsedReport.rebuildState.assets !== assetIds.size
+              || parsedReport.rebuildState.chronicleIndex.itemCount !== campaignIds.size
+              || parsedReport.rebuildState.assetThumbnails.itemCount !== assetIds.size
               || parsedReport.errors.length !== 0) {
               throw repositoryError("System Archive Import Report did not match restored authority.", 409);
             }
@@ -1953,8 +2041,15 @@ export function createPostgresSystemArchiveImportRepository(
                 || previewProjection.ownerMapping.sourceOwnerId !== parsedReport.ownerMapping.sourceOwnerId
                 || previewProjection.ownerMapping.destinationOwnerId !== parsedReport.ownerMapping.destinationOwnerId
                 || previewProjection.disabledProviders !== parsedReport.disabledProviders
+                || previewProjection.sourceOwnerCount !== parsedReport.sourceOwnerCount
+                || previewProjection.omittedOperationalRows !== parsedReport.omittedOperationalRows
+                || stableStringify(previewProjection.operationalOmissions)
+                  !== stableStringify(parsedReport.operationalOmissions)
+                || stableStringify(previewProjection.versions) !== stableStringify(parsedReport.versions)
+                || stableStringify(previewProjection.warnings) !== stableStringify(parsedReport.warnings)
                 || stableStringify(previewProjection.normalization) !== stableStringify(parsedReport.normalization)
                 || stableStringify(previewProjection.invalidatedAccess) !== stableStringify(parsedReport.invalidatedAccess)
+                || stableStringify(previewProjection.rebuilds) !== stableStringify(parsedReport.rebuildState)
                 || previewProjection.archiveFingerprint !== parsedReport.archiveFingerprint) {
                 throw repositoryError("System Archive preview did not reconcile with imported authority.", 409);
               }
@@ -1967,33 +2062,20 @@ export function createPostgresSystemArchiveImportRepository(
               assetBytes: persistedAssetBytes,
               disabledProviders: persistedCounts.providers,
               rebuildState: {
-                status: "pending",
-                chronicleCampaigns: campaignIds.size,
-                assets: assetIds.size
+                chronicleIndex: {
+                  category: "chronicle-index",
+                  status: "pending",
+                  itemCount: campaignIds.size
+                },
+                assetThumbnails: {
+                  category: "asset-thumbnails",
+                  status: "pending",
+                  itemCount: assetIds.size
+                }
               }
             });
+            stagedImportReport = durableReport;
             reportRecorded = true;
-            if (!request.jobId) return;
-            const updated = await client.query(
-              `UPDATE system_archive_jobs
-                  SET status='authoritative_committed',report=$3::jsonb,
-                      progress=progress || $4::jsonb,updated_at=clock_timestamp()
-                WHERE id=$1 AND owner_user_id=$2 AND kind='import' AND status='importing'
-                  AND lease_owner=$5 AND lease_expires_at>clock_timestamp()`,
-              [
-                request.jobId,
-                owner.ownerUserId,
-                json(durableReport),
-                json({
-                  rebuildCampaignIds: [...campaignIds].sort(),
-                  rebuildAssetIds: [...assetIds].sort()
-                }),
-                request.leaseOwner
-              ]
-            );
-            if (updated.rowCount !== 1) {
-              throw repositoryError("System Archive import lease or state was lost.", 409);
-            }
           }
         };
         const result = await work(Object.freeze(transaction));
@@ -2001,6 +2083,31 @@ export function createPostgresSystemArchiveImportRepository(
         reconcileLogicalCounts();
         if (request.jobId && !reportRecorded) {
           throw repositoryError("System Archive import completed without a durable Import Report.", 409);
+        }
+        if (request.jobId) {
+          if (stagedImportReport === null) {
+            throw repositoryError("System Archive import completed without a durable Import Report.", 409);
+          }
+          const updated = await client.query(
+            `UPDATE system_archive_jobs
+                SET status='authoritative_committed',report=$3::jsonb,
+                    progress=progress || $4::jsonb,updated_at=clock_timestamp()
+              WHERE id=$1 AND owner_user_id=$2 AND kind='import' AND status='importing'
+                AND lease_owner=$5 AND lease_expires_at>clock_timestamp()`,
+            [
+              request.jobId,
+              owner.ownerUserId,
+              json(stagedImportReport),
+              json({
+                rebuildCampaignIds: [...campaignIds].sort(),
+                rebuildAssetIds: [...assetIds].sort()
+              }),
+              request.leaseOwner
+            ]
+          );
+          if (updated.rowCount !== 1) {
+            throw repositoryError("System Archive import lease or state was lost.", 409);
+          }
         }
         await client.query("COMMIT");
         return result;
@@ -2108,7 +2215,10 @@ export function createPostgresSystemArchiveImportRepository(
       const updated = await pool.query(
         `UPDATE system_archive_jobs
             SET status='rebuilding',
-                report=jsonb_set(report,'{rebuildState,status}','"queueing"'::jsonb),
+                report=jsonb_set(
+                  jsonb_set(report,'{rebuildState,chronicleIndex,status}','"queueing"'::jsonb),
+                  '{rebuildState,assetThumbnails,status}','"queueing"'::jsonb
+                ),
                 updated_at=clock_timestamp()
           WHERE id=$1 AND owner_user_id=$2 AND kind='import'
             AND status IN ('authoritative_committed','rebuilding')
@@ -2124,7 +2234,10 @@ export function createPostgresSystemArchiveImportRepository(
       const updated = await pool.query(
         `UPDATE system_archive_jobs
             SET status='completed',
-                report=jsonb_set(report,'{rebuildState,status}','"queued"'::jsonb),
+                report=jsonb_set(
+                  jsonb_set(report,'{rebuildState,chronicleIndex,status}','"queued"'::jsonb),
+                  '{rebuildState,assetThumbnails,status}','"queued"'::jsonb
+                ),
                 lease_owner=NULL,lease_expires_at=NULL,updated_at=clock_timestamp()
           WHERE id=$1 AND owner_user_id=$2 AND kind='import'
             AND status IN ('authoritative_committed','rebuilding')

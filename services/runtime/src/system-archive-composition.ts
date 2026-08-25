@@ -9,6 +9,7 @@ import {
   systemArchiveAssetsPayloadSchema,
   systemArchiveImportReportSchema,
   systemArchiveManifestSchema,
+  systemArchiveOperationalOmissionsSchema,
   systemArchivePayloadSchema,
   systemArchiveReportSchema,
   systemRecordEnvelopeSchema,
@@ -47,7 +48,10 @@ import type {
   SystemArchiveImportJobAuthority,
   SystemArchiveImportRepository,
 } from "../../../packages/database/src/system-archive-import-repository.js";
-import { createPostgresSystemArchiveImportRepository } from "../../../packages/database/src/system-archive-import-repository.js";
+import {
+  createPostgresSystemArchiveImportRepository,
+  isSystemArchiveWaitingForGateError,
+} from "../../../packages/database/src/system-archive-import-repository.js";
 import type { ClaimedSystemArchiveJob } from "../../../packages/database/src/system-archive-job-repository.js";
 import type {
   SystemArchiveUploadAssembly,
@@ -162,10 +166,14 @@ export type SystemArchiveInspection = Readonly<{
   assetCount: number;
   assetBytes: number;
   omittedOperationalRows: number;
+  operationalOmissions: Readonly<Record<string, number>>;
   disabledProviderCount: number;
   invalidatedAccess: readonly string[];
   normalization: readonly string[];
-  rebuilds: readonly string[];
+  rebuilds: Readonly<{
+    chronicleIndex: Readonly<{ category: "chronicle-index"; status: "pending"; itemCount: number }>;
+    assetThumbnails: Readonly<{ category: "asset-thumbnails"; status: "pending"; itemCount: number }>;
+  }>;
 }>;
 
 function importFailure(code: ArchiveErrorCode, message: string): ArchiveError {
@@ -553,10 +561,22 @@ export async function inspectSystemArchiveForPreview(
     assetCount: manifest.assets.length,
     assetBytes,
     omittedOperationalRows: manifest.omittedOperationalRows,
+    operationalOmissions: manifest.operationalOmissions,
     disabledProviderCount: recordsByDomain.providers,
     invalidatedAccess: Object.freeze(["share-links", "sessions", "oidc-identities", "external-authorizations"]),
     normalization: Object.freeze(["map-source-owner-to-initial-owner", "disable-provider-profiles"]),
-    rebuilds: Object.freeze(["chronicle-index", "asset-thumbnails"]),
+    rebuilds: Object.freeze({
+      chronicleIndex: Object.freeze({
+        category: "chronicle-index" as const,
+        status: "pending" as const,
+        itemCount: recordsByDomain.campaigns,
+      }),
+      assetThumbnails: Object.freeze({
+        category: "asset-thumbnails" as const,
+        status: "pending" as const,
+        itemCount: manifest.assets.length,
+      }),
+    }),
   });
 }
 
@@ -923,6 +943,8 @@ export function createSystemArchiveImportPreviewService(
           destinationOwnerId: destination.initialOwnerId,
         },
         disabledProviders: inspected.inspection.disabledProviderCount,
+        omittedOperationalRows: inspected.inspection.omittedOperationalRows,
+        operationalOmissions: inspected.inspection.operationalOmissions,
         invalidatedAccess: inspected.inspection.invalidatedAccess,
         normalization: inspected.inspection.normalization,
         rebuilds: inspected.inspection.rebuilds,
@@ -1028,6 +1050,7 @@ export type SystemArchiveImportExecutionServiceOptions = Readonly<{
   capacity: SystemArchiveCapacityPort;
   limits: ArchiveLimits;
   allowUnknownFreeSpace: boolean;
+  destinationApplicationVersion: string;
   storage: Pick<SecureFilesystemAdapter,
     "prepareAssetPublication" | "discardPreparedAssetPublication" | "finalizeAssetPublication">;
   assetPublications: PrivateAssetPublicationIdentityPort;
@@ -1289,7 +1312,20 @@ export function createSystemArchiveImportExecutionService(
               assetCount: manifest.assets.length,
               assetBytes: inspection.assetBytes,
               omittedOperationalRows: manifest.omittedOperationalRows,
+              operationalOmissions: manifest.operationalOmissions,
+              warnings: [
+                ...unknownCapacityWarning("Staging", stagingCapacity),
+                ...unknownCapacityWarning("Original Asset", assetCapacity),
+              ],
               errors: [],
+              versions: {
+                archiveFormat: inspection.formatVersion,
+                sourceApplication: inspection.sourceApplication,
+                sourceMigration: inspection.sourceMigration,
+                destinationApplication: options.destinationApplicationVersion,
+                destinationMigration: authority.destination.latestMigration,
+              },
+              sourceOwnerCount: inspection.sourceOwnerCount,
               ownerMapping: {
                 sourceOwnerId: systemPayload.sourceOwner.sourceId,
                 destinationOwnerId: owner.ownerUserId,
@@ -1303,15 +1339,28 @@ export function createSystemArchiveImportExecutionService(
                 assetsMatched: true,
               },
               rebuildState: {
-                status: "pending",
-                chronicleCampaigns: inspection.recordsByDomain.campaigns,
-                assets: manifest.assets.length,
+                chronicleIndex: {
+                  category: "chronicle-index",
+                  status: "pending",
+                  itemCount: inspection.recordsByDomain.campaigns,
+                },
+                assetThumbnails: {
+                  category: "asset-thumbnails",
+                  status: "pending",
+                  itemCount: manifest.assets.length,
+                },
               },
             });
             await transaction.recordImportReport(report);
           });
           authorityCommitted = true;
         } catch (error) {
+          if (isSystemArchiveWaitingForGateError(error)) {
+            await Promise.allSettled(prepared.map((entry) => (
+              options.storage.discardPreparedAssetPublication(entry.prepared)
+            )));
+            return;
+          }
           atomicImportFailed = true;
           atomicImportError = error;
         }
@@ -1421,6 +1470,7 @@ export function createSystemArchiveImportComposition(
       capacity: options.capacity,
       limits: options.limits,
       allowUnknownFreeSpace: options.allowUnknownFreeSpace,
+      destinationApplicationVersion: options.destinationApplicationVersion,
       storage: options.storage,
       assetPublications: options.assetPublications,
       publicationLeaseSeconds: Math.min(options.leaseSeconds, 300),
@@ -1776,8 +1826,12 @@ export async function createFilesystemSystemArchiveWriter(
           sourceId: input.manifest.sourceOwner.sourceId,
           displayName: input.manifest.sourceOwner.displayName,
         },
-        omittedOperationalRows: Object.values(input.manifest.excludedOperationalWork)
-          .reduce((total, count) => total + count, 0),
+        omittedOperationalRows: Object.values(systemArchiveOperationalOmissionsSchema.parse(
+          input.manifest.excludedOperationalWork,
+        )).reduce((total, count) => total + count, 0),
+        operationalOmissions: systemArchiveOperationalOmissionsSchema.parse(
+          input.manifest.excludedOperationalWork,
+        ),
         entries: [...measuredEntries],
         payloads: ordered
           .filter((entry) => entry.logicalType !== "asset-original")

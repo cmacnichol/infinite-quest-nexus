@@ -2,6 +2,7 @@ import {
   archiveAssetRecordSchema,
   canonicalArchiveJson,
   sanitizePortableMetadata,
+  systemArchiveOperationalOmissionsSchema,
   systemArchiveReportSchema,
   systemRecordEnvelopeSchema,
   type ArchiveAssetBinding,
@@ -511,25 +512,42 @@ const DOMAIN_SQL = {
              'domain','chronicle','formatVersion',1,'sourceId',chronicle.source_id,
              'record',jsonb_build_object(
                'sourceId',chronicle.source_id,'campaignId',chronicle.campaign_id,
-               'kind',chronicle.kind,'content',chronicle.content,
-               'occurredAt',chronicle.occurred_at,
-               'metadata',jsonb_build_object(
-                 'entityNames',chronicle.entity_names,'openThreadIds','[]'::jsonb
-               )
-             ) || CASE WHEN chronicle.kind='memory'
-                       THEN jsonb_build_object('turnId',chronicle.turn_id,'memoryKind',chronicle.memory_kind)
-                       ELSE '{}'::jsonb END
-           ) AS envelope
+                'kind',chronicle.kind,'content',chronicle.content,
+                'occurredAt',chronicle.occurred_at,
+                'metadata',jsonb_build_object(
+                  'entityNames',chronicle.entity_names,'openThreadIds',chronicle.open_thread_ids
+                )
+              ) || CASE WHEN chronicle.kind='memory'
+                        THEN jsonb_build_object('turnId',chronicle.turn_id,'memoryKind',chronicle.memory_kind)
+                        ELSE jsonb_build_object(
+                          'throughTurn',chronicle.through_turn,
+                          'summaryKind',chronicle.summary_kind
+                        ) END
+            ) AS envelope
       FROM (
         SELECT '01:' || memory.id::text AS sort_key,memory.id AS source_id,memory.campaign_id,
                'memory'::text AS kind,memory.content,memory.created_at AS occurred_at,
-               to_jsonb(memory.entities) AS entity_names,memory.turn_id,memory.memory_kind
+               to_jsonb(memory.entities) AS entity_names,
+               CASE WHEN jsonb_typeof(memory.metadata->'openThreadIds')='array'
+                    THEN memory.metadata->'openThreadIds' ELSE '[]'::jsonb END AS open_thread_ids,
+               memory.turn_id,memory.memory_kind,NULL::integer AS through_turn,
+               NULL::text AS summary_kind
           FROM chronicle_memories memory WHERE memory.owner_user_id=$1
         UNION ALL
         SELECT '02:' || checkpoint.id::text,checkpoint.id,checkpoint.campaign_id,
-               'summary-checkpoint',CASE WHEN jsonb_typeof(checkpoint.content)='string'
-                                         THEN checkpoint.content#>>'{}' ELSE checkpoint.content::text END,
-               checkpoint.created_at,'[]'::jsonb,NULL::uuid,NULL::text
+               'summary-checkpoint',CASE
+                 WHEN jsonb_typeof(checkpoint.content)='string' THEN checkpoint.content#>>'{}'
+                 WHEN jsonb_typeof(checkpoint.content->'summary')='string' THEN checkpoint.content->>'summary'
+                 WHEN jsonb_typeof(checkpoint.content->'history')='string' THEN checkpoint.content->>'history'
+                 WHEN jsonb_typeof(checkpoint.content->'text')='string' THEN checkpoint.content->>'text'
+                 ELSE checkpoint.content::text
+               END,
+               checkpoint.created_at,
+               CASE WHEN jsonb_typeof(checkpoint.content->'entityNames')='array'
+                    THEN checkpoint.content->'entityNames' ELSE '[]'::jsonb END,
+               CASE WHEN jsonb_typeof(checkpoint.content->'openThreadIds')='array'
+                    THEN checkpoint.content->'openThreadIds' ELSE '[]'::jsonb END,
+               NULL::uuid,NULL::text,checkpoint.through_turn,checkpoint.summary_kind
           FROM summary_checkpoints checkpoint WHERE checkpoint.owner_user_id=$1
       ) chronicle`,
   illustrations: `
@@ -685,10 +703,9 @@ async function assetBindings(
     asset_id: string;
     world_id: string;
     world_version_id: string;
-    role: "world_cover" | "world_version_asset";
   }>(
     `SELECT item->>'assetId' AS asset_id,version.world_id,
-            version.id AS world_version_id,item->>'role' AS role
+            version.id AS world_version_id
        FROM world_versions version
        CROSS JOIN LATERAL jsonb_array_elements(
          CASE WHEN jsonb_typeof(version.content->'assets')='array'
@@ -700,9 +717,11 @@ async function assetBindings(
     [ownerUserId, assetIds],
   );
   for (const row of versionAssets.rows) {
-    add(row.asset_id, row.role === "world_cover"
-      ? { role: "world_cover", worldId: row.world_id }
-      : { role: "world_version_asset", worldId: row.world_id, worldVersionId: row.world_version_id });
+    add(row.asset_id, {
+      role: "world_version_asset",
+      worldId: row.world_id,
+      worldVersionId: row.world_version_id,
+    });
   }
 
   const references = await client.query<{
@@ -997,7 +1016,8 @@ export function createPostgresSystemArchiveExportJobPort(pool: DatabasePool): Sy
     async markPublished(job, artifact, report) {
       if (!artifact.artifactId) throw exportError("Published System Archive artifact lacks durable authority.");
       const recordsByDomain = { ...report.domainCounts };
-      const omittedOperationalRows = Object.values(report.excludedOperationalWork)
+      const operationalOmissions = systemArchiveOperationalOmissionsSchema.parse(report.excludedOperationalWork);
+      const omittedOperationalRows = Object.values(operationalOmissions)
         .reduce((total, count) => total + count, 0);
       const durableReport = systemArchiveReportSchema.parse({
         completedAt: report.completedAt,
@@ -1006,6 +1026,8 @@ export function createPostgresSystemArchiveExportJobPort(pool: DatabasePool): Sy
         assetCount: report.originalAssets,
         assetBytes: report.originalBytes,
         omittedOperationalRows,
+        operationalOmissions,
+        warnings: [],
         errors: [],
       });
       const result = await pool.query(

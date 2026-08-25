@@ -101,7 +101,13 @@ describe("System Archive durable writer composition", () => {
         domainCounts: Object.fromEntries(
           SYSTEM_ARCHIVE_DOMAINS.map((domain) => [domain, 0]),
         ) as Record<(typeof SYSTEM_ARCHIVE_DOMAINS)[number], number>,
-        excludedOperationalWork: {},
+        excludedOperationalWork: {
+          generation: 0,
+          illustration: 0,
+          chronicle: 0,
+          imports: 0,
+          "system-archive": 0,
+        },
         assets: [],
       },
       contentFingerprint,
@@ -208,7 +214,13 @@ describe("System Archive durable writer composition", () => {
         domainCounts: Object.fromEntries(
           SYSTEM_ARCHIVE_DOMAINS.map((domain) => [domain, 0]),
         ) as Record<(typeof SYSTEM_ARCHIVE_DOMAINS)[number], number>,
-        excludedOperationalWork: {},
+        excludedOperationalWork: {
+          generation: 0,
+          illustration: 0,
+          chronicle: 0,
+          imports: 0,
+          "system-archive": 0,
+        },
         assets: [],
       },
       contentFingerprint,

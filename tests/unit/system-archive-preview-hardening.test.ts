@@ -68,6 +68,9 @@ async function oversizedMetadataArchive(path: "system.json" | "assets/assets.jso
     sourceOwnerCount: 1,
     sourceOwner: { sourceId: ownerId, displayName: "Initial owner" },
     omittedOperationalRows: 0,
+    operationalOmissions: {
+      generation: 0, illustration: 0, chronicle: 0, imports: 0, "system-archive": 0,
+    },
     entries,
     payloads: entries.map((entry) => ({
       kind: entry.logicalType,
@@ -196,6 +199,147 @@ describe("System Archive preview restore keys", () => {
       expect(() => index.validate([])).toThrow(expect.objectContaining({
         code: "archive-world-mismatch",
       }));
+    } finally {
+      await index.close();
+    }
+  });
+
+  it("rejects a summary checkpoint beyond its campaign authority", async () => {
+    const index = await SystemArchivePreviewIndex.create();
+    try {
+      const content = {
+        entities: [], relationships: [], playableCharacters: [], assets: [],
+        defaults: { selectedCharacterId: null },
+      };
+      index.add({ domain: "worlds", sourceId: "world-1", record: {} } as never, new Set());
+      index.add({
+        domain: "world-versions", sourceId: "version-1",
+        record: { worldId: "world-1", versionNumber: 1, content },
+      } as never, new Set());
+      index.add({
+        domain: "campaigns", sourceId: "campaign-1",
+        record: { worldVersionId: "version-1", activeTurnNumber: 2 },
+      } as never, new Set());
+      index.add({
+        domain: "chronicle", sourceId: "checkpoint-1",
+        record: {
+          campaignId: "campaign-1",
+          kind: "summary-checkpoint",
+          throughTurn: 3,
+          summaryKind: "campaign_continuity",
+        },
+      } as never, new Set());
+
+      expect(() => index.validate([])).toThrow(expect.objectContaining({
+        code: "archive-world-mismatch",
+      }));
+    } finally {
+      await index.close();
+    }
+  });
+
+  it("rejects conflicting Original Assets declared as one world's cover", async () => {
+    const index = await SystemArchivePreviewIndex.create();
+    try {
+      index.add({ domain: "worlds", sourceId: "world-1", record: {} } as never, new Set());
+
+      expect(() => index.validate([
+        { sourceAssetId: "asset-1", bindings: [{ role: "world_cover", worldId: "world-1" }] },
+        { sourceAssetId: "asset-2", bindings: [{ role: "world_cover", worldId: "world-1" }] },
+      ] as never)).toThrow(expect.objectContaining({ code: "archive-world-mismatch" }));
+    } finally {
+      await index.close();
+    }
+  });
+
+  it("rejects a world-version binding absent from immutable version content", async () => {
+    const index = await SystemArchivePreviewIndex.create();
+    try {
+      const assetIds = new Set(["asset-expected", "asset-bound"]);
+      index.add({ domain: "worlds", sourceId: "world-1", record: {} } as never, assetIds);
+      index.add({
+        domain: "world-versions",
+        sourceId: "version-1",
+        record: {
+          worldId: "world-1",
+          versionNumber: 1,
+          content: {
+            entities: [], relationships: [], playableCharacters: [],
+            assets: [{ assetId: "asset-expected", role: "world_version_asset" }],
+            defaults: { selectedCharacterId: null },
+          },
+        },
+      } as never, assetIds);
+
+      expect(() => index.validate([{
+        sourceAssetId: "asset-bound",
+        bindings: [{
+          role: "world_version_asset",
+          worldId: "world-1",
+          worldVersionId: "version-1",
+        }],
+      }] as never)).toThrow(expect.objectContaining({ code: "archive-world-mismatch" }));
+    } finally {
+      await index.close();
+    }
+  });
+
+  it("accepts a version binding for an immutable world-cover content asset", async () => {
+    const index = await SystemArchivePreviewIndex.create();
+    try {
+      const assetIds = new Set(["asset-cover"]);
+      index.add({ domain: "worlds", sourceId: "world-1", record: {} } as never, assetIds);
+      index.add({
+        domain: "world-versions",
+        sourceId: "version-1",
+        record: {
+          worldId: "world-1",
+          versionNumber: 1,
+          content: {
+            entities: [], relationships: [], playableCharacters: [],
+            assets: [{ assetId: "asset-cover", role: "world_cover" }],
+            defaults: { selectedCharacterId: null },
+          },
+        },
+      } as never, assetIds);
+
+      expect(() => index.validate([{
+        sourceAssetId: "asset-cover",
+        bindings: [{
+          role: "world_version_asset",
+          worldId: "world-1",
+          worldVersionId: "version-1",
+        }],
+      }] as never)).not.toThrow();
+    } finally {
+      await index.close();
+    }
+  });
+
+  it("rejects a duplicate binding in one Original Asset inventory", async () => {
+    const index = await SystemArchivePreviewIndex.create();
+    try {
+      const content = {
+        entities: [], relationships: [], playableCharacters: [], assets: [],
+        defaults: { selectedCharacterId: null },
+      };
+      index.add({ domain: "worlds", sourceId: "world-1", record: {} } as never, new Set());
+      index.add({
+        domain: "world-versions", sourceId: "version-1",
+        record: { worldId: "world-1", versionNumber: 1, content },
+      } as never, new Set());
+      index.add({
+        domain: "campaigns", sourceId: "campaign-1",
+        record: { worldVersionId: "version-1", activeTurnNumber: 0 },
+      } as never, new Set());
+
+      expect(() => index.validate([{
+        sourceAssetId: "asset-1",
+        bindings: [
+          { role: "campaign_asset", campaignId: "campaign-1" },
+          { role: "campaign_asset", campaignId: "campaign-1" },
+        ],
+      }] as never)).toThrow(expect.objectContaining({ code: "archive-world-mismatch" }));
     } finally {
       await index.close();
     }

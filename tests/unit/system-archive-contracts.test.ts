@@ -273,6 +273,49 @@ describe("System Archive contracts", () => {
     });
   });
 
+  it("requires Chronicle summary checkpoints to carry exact checkpoint authority", () => {
+    const checkpoint = {
+      domain: "chronicle",
+      formatVersion: 1,
+      sourceId: chronicleId,
+      record: {
+        sourceId: chronicleId,
+        campaignId,
+        kind: "summary-checkpoint",
+        throughTurn: 4,
+        summaryKind: "legacy_full_history",
+        content: "The complete accepted story through turn four.",
+        occurredAt: "2026-08-25T12:00:00.000Z",
+        metadata: {
+          entityNames: ["observatory"],
+          openThreadIds: ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa6"]
+        }
+      }
+    } as const;
+
+    expect(systemRecordEnvelopeSchema.parse(checkpoint).record).toMatchObject({
+      kind: "summary-checkpoint",
+      throughTurn: 4,
+      summaryKind: "legacy_full_history",
+      metadata: { openThreadIds: ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa6"] }
+    });
+    expect(systemRecordEnvelopeSchema.safeParse({
+      ...checkpoint,
+      record: { ...checkpoint.record, throughTurn: undefined }
+    }).success).toBe(false);
+    expect(systemRecordEnvelopeSchema.safeParse({
+      ...checkpoint,
+      record: { ...checkpoint.record, summaryKind: "worker_private_summary" }
+    }).success).toBe(false);
+    expect(systemRecordEnvelopeSchema.safeParse({
+      ...checkpoint,
+      record: {
+        ...checkpoint.record,
+        metadata: { ...checkpoint.record.metadata, openThreadIds: ["not-a-uuid"] }
+      }
+    }).success).toBe(false);
+  });
+
   it("requires source-installation and current-owner provenance on the root manifest", () => {
     const manifest = {
       format: "infinite-quest-archive",
@@ -286,6 +329,13 @@ describe("System Archive contracts", () => {
       sourceOwnerCount: 1,
       sourceOwner: validPayload.sourceOwner,
       omittedOperationalRows: 7,
+      operationalOmissions: {
+        generation: 2,
+        illustration: 1,
+        chronicle: 3,
+        imports: 0,
+        "system-archive": 1
+      },
       entries: [],
       payloads: [],
       assets: []
@@ -297,7 +347,8 @@ describe("System Archive contracts", () => {
       sourceMigration: "0079_resumable_system_archive_uploads",
       sourceOwnerCount: 1,
       sourceOwner: validPayload.sourceOwner,
-      omittedOperationalRows: 7
+      omittedOperationalRows: 7,
+      operationalOmissions: manifest.operationalOmissions
     });
     expect(systemArchiveManifestSchema.safeParse({
       ...manifest,
@@ -311,6 +362,10 @@ describe("System Archive contracts", () => {
       ...manifest,
       sourceOwner: undefined
     }).success).toBe(false);
+    expect(systemArchiveManifestSchema.safeParse({
+      ...manifest,
+      operationalOmissions: { ...manifest.operationalOmissions, generation: 1 }
+    }).success).toBe(false);
   });
 
   it("requires the durable Import Report to disclose normalization and reconciliation", () => {
@@ -321,7 +376,23 @@ describe("System Archive contracts", () => {
       assetCount: 3,
       assetBytes: 4_096,
       omittedOperationalRows: 7,
+      operationalOmissions: {
+        generation: 2,
+        illustration: 1,
+        chronicle: 3,
+        imports: 0,
+        "system-archive": 1
+      },
+      warnings: ["Provider credentials must be re-entered."],
       errors: [],
+      versions: {
+        archiveFormat: 1,
+        sourceApplication: "0.1.0",
+        sourceMigration: "0079_resumable_system_archive_uploads",
+        destinationApplication: "0.1.0",
+        destinationMigration: "0079_resumable_system_archive_uploads"
+      },
+      sourceOwnerCount: 1,
       ownerMapping: { sourceOwnerId, destinationOwnerId: sourceOwnerId },
       disabledProviders: 1,
       normalization: ["map-source-owner-to-initial-owner", "disable-provider-profiles"],
@@ -331,13 +402,24 @@ describe("System Archive contracts", () => {
         recordsMatched: true,
         assetsMatched: true
       },
-      rebuildState: { status: "pending", chronicleCampaigns: 2, assets: 3 }
+      rebuildState: {
+        chronicleIndex: { category: "chronicle-index", status: "pending", itemCount: 2 },
+        assetThumbnails: { category: "asset-thumbnails", status: "pending", itemCount: 3 }
+      }
     };
 
     expect(systemArchiveImportReportSchema.parse(report)).toEqual(report);
     expect(systemArchiveImportReportSchema.safeParse({
       ...report,
       integrityReconciliation: { ...report.integrityReconciliation, recordsMatched: false }
+    }).success).toBe(false);
+    expect(systemArchiveImportReportSchema.safeParse({
+      ...report,
+      operationalOmissions: { ...report.operationalOmissions, chronicle: 2 }
+    }).success).toBe(false);
+    expect(systemArchiveImportReportSchema.safeParse({
+      ...report,
+      versions: undefined
     }).success).toBe(false);
     expect(systemArchiveJobViewSchema.safeParse({
       id: "66666666-6666-4666-8666-666666666666",
@@ -352,6 +434,8 @@ describe("System Archive contracts", () => {
         assetCount: report.assetCount,
         assetBytes: report.assetBytes,
         omittedOperationalRows: report.omittedOperationalRows,
+        operationalOmissions: report.operationalOmissions,
+        warnings: report.warnings,
         errors: []
       }
     }).success).toBe(false);
@@ -455,9 +539,20 @@ describe("System Archive contracts", () => {
       destinationEmpty: true,
       ownerMapping: { sourceOwnerId, destinationOwnerId: sourceOwnerId },
       disabledProviders: 1,
+      omittedOperationalRows: 7,
+      operationalOmissions: {
+        generation: 2,
+        illustration: 1,
+        chronicle: 3,
+        imports: 0,
+        "system-archive": 1
+      },
       invalidatedAccess: ["share-links", "sessions", "oidc-identities", "external-authorizations"],
       normalization: ["map-source-owner-to-initial-owner", "disable-provider-profiles"],
-      rebuilds: ["chronicle-index", "asset-thumbnails"],
+      rebuilds: {
+        chronicleIndex: { category: "chronicle-index", status: "pending", itemCount: 2 },
+        assetThumbnails: { category: "asset-thumbnails", status: "pending", itemCount: 3 }
+      },
       space: {
         staging: { requiredBytes: 8_192, availableBytes: 16_384, verified: true, sufficient: true, overrideUsed: false },
         assetRoot: { requiredBytes: 4_096, availableBytes: 8_192, verified: true, sufficient: true, overrideUsed: false }
@@ -472,6 +567,10 @@ describe("System Archive contracts", () => {
     expect(systemImportPreviewViewSchema.safeParse({
       ...preview,
       versions: { ...preview.versions, sourceMigration: undefined }
+    }).success).toBe(false);
+    expect(systemImportPreviewViewSchema.safeParse({
+      ...preview,
+      omittedOperationalRows: 6
     }).success).toBe(false);
     expect(systemImportPreviewViewSchema.safeParse({
       ...preview,

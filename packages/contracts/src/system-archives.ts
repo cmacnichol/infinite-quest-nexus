@@ -16,6 +16,16 @@ export const SYSTEM_ARCHIVE_DOMAINS = [
 ] as const;
 
 export const systemArchiveDomainSchema = z.enum(SYSTEM_ARCHIVE_DOMAINS);
+export const SYSTEM_ARCHIVE_OPERATIONAL_OMISSION_CATEGORIES = [
+  "generation", "illustration", "chronicle", "imports", "system-archive"
+] as const;
+export const systemArchiveOperationalOmissionsSchema = z.object({
+  generation: nonnegativeSafeIntegerSchema,
+  illustration: nonnegativeSafeIntegerSchema,
+  chronicle: nonnegativeSafeIntegerSchema,
+  imports: nonnegativeSafeIntegerSchema,
+  "system-archive": nonnegativeSafeIntegerSchema
+}).strict();
 export const systemArchiveJobKindSchema = z.enum(["export", "import"]);
 export const systemArchiveJobStatusSchema = z.enum([
   "queued", "capturing", "writing", "verifying", "published",
@@ -50,6 +60,12 @@ const systemChronicleRecordBase = {
   }).strict()
 };
 
+export const systemSummaryCheckpointKindSchema = z.enum([
+  "campaign_continuity",
+  "campaign_summary",
+  "legacy_full_history"
+]);
+
 /** Chronicle records are logical text/state only; vectors and chunk data are rebuilt locally. */
 export const systemChronicleRecordSchema = z.discriminatedUnion("kind", [
   z.object({
@@ -62,7 +78,9 @@ export const systemChronicleRecordSchema = z.discriminatedUnion("kind", [
   }).strict(),
   z.object({
     ...systemChronicleRecordBase,
-    kind: z.literal("summary-checkpoint")
+    kind: z.literal("summary-checkpoint"),
+    throughTurn: nonnegativeSafeIntegerSchema,
+    summaryKind: systemSummaryCheckpointKindSchema
   }).strict()
 ]);
 
@@ -376,6 +394,32 @@ export const systemArchivePayloadSchema = z.object({
   records: z.array(systemRecordEnvelopeSchema)
 }).strict();
 
+export const systemArchiveSafeVersionsSchema = z.object({
+  archiveFormat: z.literal(1),
+  sourceApplication: boundedStringSchema(100),
+  sourceMigration: z.string().regex(/^\d{4}_[a-z0-9_]+$/u).max(200),
+  destinationApplication: boundedStringSchema(100),
+  destinationMigration: boundedStringSchema(200)
+}).strict();
+
+const systemArchiveRebuildStatusSchema = z.enum(["pending", "queueing", "queued"]);
+export const systemArchiveRebuildStateSchema = z.object({
+  chronicleIndex: z.object({
+    category: z.literal("chronicle-index"),
+    status: systemArchiveRebuildStatusSchema,
+    itemCount: nonnegativeSafeIntegerSchema
+  }).strict(),
+  assetThumbnails: z.object({
+    category: z.literal("asset-thumbnails"),
+    status: systemArchiveRebuildStatusSchema,
+    itemCount: nonnegativeSafeIntegerSchema
+  }).strict()
+}).strict();
+
+function operationalOmissionTotal(value: z.infer<typeof systemArchiveOperationalOmissionsSchema>): number {
+  return Object.values(value).reduce((total, count) => total + count, 0);
+}
+
 export const systemArchiveReportSchema = z.object({
   completedAt: z.iso.datetime({ offset: true }),
   archiveFingerprint: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
@@ -383,11 +427,23 @@ export const systemArchiveReportSchema = z.object({
   assetCount: nonnegativeSafeIntegerSchema,
   assetBytes: nonnegativeSafeIntegerSchema,
   omittedOperationalRows: nonnegativeSafeIntegerSchema,
+  operationalOmissions: systemArchiveOperationalOmissionsSchema,
+  warnings: z.array(boundedStringSchema(1_000)),
   errors: z.array(archiveErrorCodeSchema)
-}).strict();
+}).strict().superRefine((report, context) => {
+  if (report.omittedOperationalRows !== operationalOmissionTotal(report.operationalOmissions)) {
+    context.addIssue({
+      code: "custom",
+      path: ["omittedOperationalRows"],
+      message: "Operational omission total must match its categorized inventory."
+    });
+  }
+});
 
-export const systemArchiveImportReportSchema = systemArchiveReportSchema.extend({
+export const systemArchiveImportReportSchema = systemArchiveReportSchema.safeExtend({
   archiveFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  versions: systemArchiveSafeVersionsSchema,
+  sourceOwnerCount: z.literal(1),
   ownerMapping: z.object({
     sourceOwnerId: z.string().uuid(),
     destinationOwnerId: z.string().uuid()
@@ -408,11 +464,7 @@ export const systemArchiveImportReportSchema = systemArchiveReportSchema.extend(
     recordsMatched: z.literal(true),
     assetsMatched: z.literal(true)
   }).strict(),
-  rebuildState: z.object({
-    status: z.enum(["pending", "queueing", "queued"]),
-    chronicleCampaigns: nonnegativeSafeIntegerSchema,
-    assets: nonnegativeSafeIntegerSchema
-  }).strict()
+  rebuildState: systemArchiveRebuildStateSchema
 }).strict();
 
 const systemArchiveJobViewBase = {
@@ -472,13 +524,7 @@ const systemArchiveCapacityCheckSchema = z.object({
 export const systemImportPreviewViewSchema = z.object({
   valid: z.boolean(),
   previewHandle: boundedStringSchema(200).nullable(),
-  versions: z.object({
-    archiveFormat: z.literal(1),
-    sourceApplication: boundedStringSchema(100),
-    sourceMigration: z.string().regex(/^\d{4}_[a-z0-9_]+$/u).max(200),
-    destinationApplication: boundedStringSchema(100),
-    destinationMigration: boundedStringSchema(200)
-  }).strict(),
+  versions: systemArchiveSafeVersionsSchema,
   sourceOwnerCount: z.literal(1),
   archiveFingerprint: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
   recordsByDomain: z.record(systemArchiveDomainSchema, nonnegativeSafeIntegerSchema),
@@ -492,13 +538,15 @@ export const systemImportPreviewViewSchema = z.object({
     destinationOwnerId: z.string().uuid()
   }).strict(),
   disabledProviders: nonnegativeSafeIntegerSchema,
+  omittedOperationalRows: nonnegativeSafeIntegerSchema,
+  operationalOmissions: systemArchiveOperationalOmissionsSchema,
   invalidatedAccess: z.array(z.enum([
     "share-links", "sessions", "oidc-identities", "external-authorizations"
   ])).max(4),
   normalization: z.array(z.enum([
     "map-source-owner-to-initial-owner", "disable-provider-profiles"
   ])).max(2),
-  rebuilds: z.array(z.enum(["chronicle-index", "asset-thumbnails"])).max(2),
+  rebuilds: systemArchiveRebuildStateSchema,
   space: z.object({
     staging: systemArchiveCapacityCheckSchema,
     assetRoot: systemArchiveCapacityCheckSchema
@@ -517,6 +565,23 @@ export const systemImportPreviewViewSchema = z.object({
   }
   if ((preview.previewHandle === null) !== !preview.valid || (preview.expiresAt === null) !== !preview.valid) {
     context.addIssue({ code: "custom", message: "Only a valid preview may carry opaque preview authority." });
+  }
+  if (preview.omittedOperationalRows !== operationalOmissionTotal(preview.operationalOmissions)) {
+    context.addIssue({
+      code: "custom",
+      path: ["omittedOperationalRows"],
+      message: "Operational omission total must match its categorized inventory."
+    });
+  }
+  if (preview.rebuilds.chronicleIndex.status !== "pending"
+    || preview.rebuilds.assetThumbnails.status !== "pending"
+    || preview.rebuilds.chronicleIndex.itemCount !== preview.recordsByDomain.campaigns
+    || preview.rebuilds.assetThumbnails.itemCount !== preview.assets.originalCount) {
+    context.addIssue({
+      code: "custom",
+      path: ["rebuilds"],
+      message: "Import Preview rebuild work must match the portable authority inventory."
+    });
   }
 });
 
@@ -544,8 +609,17 @@ export const systemArchiveManifestSchema = archiveManifestSchema.safeExtend({
     sourceId: z.string().uuid(),
     displayName: boundedStringSchema(300)
   }).strict(),
-  omittedOperationalRows: nonnegativeSafeIntegerSchema
-}).strict();
+  omittedOperationalRows: nonnegativeSafeIntegerSchema,
+  operationalOmissions: systemArchiveOperationalOmissionsSchema
+}).strict().superRefine((manifest, context) => {
+  if (manifest.omittedOperationalRows !== operationalOmissionTotal(manifest.operationalOmissions)) {
+    context.addIssue({
+      code: "custom",
+      path: ["omittedOperationalRows"],
+      message: "Operational omission total must match its categorized inventory."
+    });
+  }
+});
 
 export const systemArchiveAssetsPayloadSchema = z.object({
   formatVersion: z.literal(1),

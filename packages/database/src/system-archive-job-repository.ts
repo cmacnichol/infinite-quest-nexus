@@ -146,8 +146,9 @@ export function createPostgresSystemArchiveJobRepository(pool: DatabasePool): Sy
         `WITH candidate AS (
            SELECT id
              FROM system_archive_jobs
-            WHERE status = 'queued'
-               OR (status = 'cancelling' AND lease_owner IS NULL)
+             WHERE status = 'queued'
+                OR (status = 'waiting_for_gate' AND lease_owner IS NULL)
+                OR (status = 'cancelling' AND lease_owner IS NULL)
                OR (lease_expires_at < clock_timestamp()
                  AND status IN (
                    'capturing','writing','verifying','uploading','validating','revalidating',
@@ -158,7 +159,8 @@ export function createPostgresSystemArchiveJobRepository(pool: DatabasePool): Sy
             LIMIT 1
          )
          UPDATE system_archive_jobs job
-            SET status=CASE
+             SET status=CASE
+                  WHEN job.kind='import' AND job.status IN ('queued','waiting_for_gate') THEN 'revalidating'
                   WHEN job.status <> 'queued' THEN job.status
                   WHEN job.kind = 'export' THEN 'capturing'
                   ELSE 'revalidating'
