@@ -71,6 +71,13 @@ let promptLibraryActiveScope = "application";
 let promptLibraryActiveCampaignId = "";
 let promptLibraryPreviewTimer = 0;
 let promptLibraryPreviewSequence = 0;
+let systemArchiveEnabled = false;
+let systemArchiveSelectedFile = null;
+let systemArchiveUpload = null;
+let systemArchivePreview = null;
+let systemArchiveJob = null;
+let systemArchiveBusy = false;
+let systemArchiveOperationController = null;
 
 function campaignSettingsPanelIndexForKey(key, currentIndex, count) {
   if (key === "Home") return 0;
@@ -250,14 +257,19 @@ installClickAwayModalDismissal();
 async function loadApplicationMetadata() {
   try {
     const response = await fetch("/api/v1/meta");
-    if (!response.ok) return;
+    if (!response.ok) {
+      setSystemArchiveCapability(false, "System Archive availability could not be confirmed. Specialized formats remain available.");
+      return;
+    }
     const metadata = await response.json();
     const version = metadata?.application?.version;
-    if (!version || !elements.nexusVersion) return;
-    elements.nexusVersion.textContent = `v${version}`;
-    elements.nexusVersion.classList.remove("hidden");
+    if (version && elements.nexusVersion) {
+      elements.nexusVersion.textContent = `v${version}`;
+      elements.nexusVersion.classList.remove("hidden");
+    }
+    setSystemArchiveCapability(metadata?.capabilities?.systemArchive === true);
   } catch {
-    // Build metadata is informational and must never block Nexus management.
+    setSystemArchiveCapability(false, "System Archive availability could not be confirmed. Specialized formats remain available.");
   }
 }
 
@@ -303,24 +315,27 @@ function applyManagementView() {
   const dashboardView = hash === "#dashboard";
   const providerView = hash === "#providers";
   const promptLibraryView = hash === "#prompt-library";
-  document.body.dataset.managementView = dashboardView ? "dashboard" : providerView ? "providers" : promptLibraryView ? "prompt-library" : "worlds";
-  elements.managementTitle.textContent = providerView ? "Provider Management" : promptLibraryView ? "Prompt Library" : hash === "#campaigns" ? "Campaign Management" : "World Management";
+  const dataTransferView = hash === "#data-transfer" || hash === "#imports";
+  document.body.dataset.managementView = dashboardView ? "dashboard" : providerView ? "providers" : promptLibraryView ? "prompt-library" : dataTransferView ? "data-transfer" : "worlds";
+  elements.managementTitle.textContent = providerView ? "Provider Management" : promptLibraryView ? "Prompt Library" : dataTransferView ? "Data Transfer" : hash === "#campaigns" ? "Campaign Management" : "World Management";
   elements.managementDescription.textContent = providerView
     ? "Add and manage provider profiles independently for story text, turn intent, image generation, and Chronicle embeddings."
     : promptLibraryView
       ? "Edit the application-owned instructions used for text and image generation. Changes apply to newly queued work."
+      : dataTransferView
+        ? "Move an owner library, world, campaign, external import, or readable story through its supported portable format."
       : hash === "#campaigns"
       ? "Configure campaigns, Chronicle memory, provider selection, illustrations, and world-version migrations."
       : "Author reusable versioned worlds, configure campaigns, and inspect the fiction-only memory selected for generation.";
   document.title = dashboardView ? "Infinite Quest Nexus" : `${elements.managementTitle.textContent} · Infinite Quest Nexus`;
 
-  [elements.navDashboard, elements.navProviders, elements.navPromptLibrary, elements.navWorlds, elements.navCampaigns, elements.navImports].forEach((link) => link?.classList.remove("active"));
+  [elements.navDashboard, elements.navProviders, elements.navPromptLibrary, elements.navWorlds, elements.navCampaigns, elements.navDataTransfer].forEach((link) => link?.classList.remove("active"));
   if (dashboardView) elements.navDashboard?.classList.add("active");
   if (providerView) elements.navProviders?.classList.add("active");
   if (promptLibraryView) { elements.navPromptLibrary?.classList.add("active"); void loadPromptLibrary(); }
   if (hash === "#world-library") elements.navWorlds?.classList.add("active");
   if (hash === "#campaigns") elements.navCampaigns?.classList.add("active");
-  if (hash === "#imports") elements.navImports?.classList.add("active");
+  if (dataTransferView) elements.navDataTransfer?.classList.add("active");
   elements.navSetup?.classList.toggle("active", !dashboardView);
 
   updateStoryViewLink();
@@ -345,6 +360,458 @@ async function api(path, options = {}) {
     throw error;
   }
   return payload;
+}
+
+const SYSTEM_ARCHIVE_CHUNK_BYTES = 4 * 1024 * 1024;
+const SYSTEM_ARCHIVE_TERMINAL_STATUSES = new Set(["published", "completed", "cancelled", "rolled_back", "failed", "expired"]);
+const SYSTEM_ARCHIVE_EXPORT_CANCELLABLE = new Set(["queued", "capturing", "writing", "verifying", "cancelling"]);
+const SYSTEM_ARCHIVE_IMPORT_CANCELLABLE = new Set(["queued", "uploading", "validating", "previewed", "revalidating", "waiting_for_gate", "cancelling"]);
+const SYSTEM_ARCHIVE_ACKNOWLEDGEMENT_IDS = Object.freeze([
+  "acknowledgeSensitiveArchive",
+  "acknowledgeEmptyDestination",
+  "acknowledgeInvalidatedAccess",
+  "acknowledgeProviderReentry",
+  "acknowledgeNonCancellableBoundary"
+]);
+const SYSTEM_SHA256_CONSTANTS = new Uint32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+]);
+
+function rotateSystemArchiveHash(value, amount) {
+  return (value >>> amount) | (value << (32 - amount));
+}
+
+class SystemArchiveSha256 {
+  constructor() {
+    this.state = new Uint32Array([0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]);
+    this.buffer = new Uint8Array(64);
+    this.bufferLength = 0;
+    this.bytesHashed = 0;
+  }
+
+  update(bytes) {
+    this.bytesHashed += bytes.byteLength;
+    let offset = 0;
+    if (this.bufferLength > 0) {
+      const copied = Math.min(64 - this.bufferLength, bytes.byteLength);
+      this.buffer.set(bytes.subarray(0, copied), this.bufferLength);
+      this.bufferLength += copied;
+      offset += copied;
+      if (this.bufferLength === 64) {
+        this.process(this.buffer);
+        this.bufferLength = 0;
+      }
+    }
+    while (offset + 64 <= bytes.byteLength) {
+      this.process(bytes.subarray(offset, offset + 64));
+      offset += 64;
+    }
+    if (offset < bytes.byteLength) {
+      this.buffer.set(bytes.subarray(offset), 0);
+      this.bufferLength = bytes.byteLength - offset;
+    }
+  }
+
+  process(block) {
+    const words = new Uint32Array(64);
+    const view = new DataView(block.buffer, block.byteOffset, block.byteLength);
+    for (let index = 0; index < 16; index += 1) words[index] = view.getUint32(index * 4, false);
+    for (let index = 16; index < 64; index += 1) {
+      const left = words[index - 15];
+      const right = words[index - 2];
+      const sigma0 = rotateSystemArchiveHash(left, 7) ^ rotateSystemArchiveHash(left, 18) ^ (left >>> 3);
+      const sigma1 = rotateSystemArchiveHash(right, 17) ^ rotateSystemArchiveHash(right, 19) ^ (right >>> 10);
+      words[index] = (words[index - 16] + sigma0 + words[index - 7] + sigma1) >>> 0;
+    }
+    let [a, b, c, d, e, f, g, h] = this.state;
+    for (let index = 0; index < 64; index += 1) {
+      const sum1 = rotateSystemArchiveHash(e, 6) ^ rotateSystemArchiveHash(e, 11) ^ rotateSystemArchiveHash(e, 25);
+      const choice = (e & f) ^ (~e & g);
+      const first = (h + sum1 + choice + SYSTEM_SHA256_CONSTANTS[index] + words[index]) >>> 0;
+      const sum0 = rotateSystemArchiveHash(a, 2) ^ rotateSystemArchiveHash(a, 13) ^ rotateSystemArchiveHash(a, 22);
+      const majority = (a & b) ^ (a & c) ^ (b & c);
+      const second = (sum0 + majority) >>> 0;
+      h = g; g = f; f = e; e = (d + first) >>> 0; d = c; c = b; b = a; a = (first + second) >>> 0;
+    }
+    this.state[0] = (this.state[0] + a) >>> 0;
+    this.state[1] = (this.state[1] + b) >>> 0;
+    this.state[2] = (this.state[2] + c) >>> 0;
+    this.state[3] = (this.state[3] + d) >>> 0;
+    this.state[4] = (this.state[4] + e) >>> 0;
+    this.state[5] = (this.state[5] + f) >>> 0;
+    this.state[6] = (this.state[6] + g) >>> 0;
+    this.state[7] = (this.state[7] + h) >>> 0;
+  }
+
+  digestHex() {
+    const final = new Uint8Array(this.bufferLength < 56 ? 64 : 128);
+    final.set(this.buffer.subarray(0, this.bufferLength));
+    final[this.bufferLength] = 0x80;
+    const view = new DataView(final.buffer);
+    const lengthOffset = final.byteLength - 8;
+    view.setUint32(lengthOffset, Math.floor(this.bytesHashed / 0x20000000), false);
+    view.setUint32(lengthOffset + 4, (this.bytesHashed * 8) >>> 0, false);
+    for (let offset = 0; offset < final.byteLength; offset += 64) this.process(final.subarray(offset, offset + 64));
+    return [...this.state].map((value) => value.toString(16).padStart(8, "0")).join("");
+  }
+}
+
+function systemArchiveBytesSha256(bytes) {
+  const hash = new SystemArchiveSha256();
+  hash.update(bytes);
+  return hash.digestHex();
+}
+
+async function systemArchiveFileSha256(file, signal, onProgress) {
+  const hash = new SystemArchiveSha256();
+  for (let offset = 0; offset < file.size; offset += SYSTEM_ARCHIVE_CHUNK_BYTES) {
+    if (signal.aborted) throw signal.reason || new DOMException("Transfer cancelled", "AbortError");
+    const end = Math.min(file.size, offset + SYSTEM_ARCHIVE_CHUNK_BYTES);
+    hash.update(new Uint8Array(await file.slice(offset, end).arrayBuffer()));
+    onProgress(end);
+  }
+  return hash.digestHex();
+}
+
+function systemArchiveFormatBytes(value) {
+  if (value < 1024) return `${value} bytes`;
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  let size = value;
+  let index = -1;
+  do { size /= 1024; index += 1; } while (size >= 1024 && index < units.length - 1);
+  return `${size.toFixed(size >= 10 ? 0 : 1)} ${units[index]}`;
+}
+
+function systemArchiveIdempotencyKey(prefix) {
+  return `${prefix}-${crypto.randomUUID()}`;
+}
+
+function systemArchiveUploadStorageKey(byteLength, sha256) {
+  return `infiniteQuest.systemArchiveUpload.v1:${byteLength}:${sha256}`;
+}
+
+function readSystemArchiveUploadSession(key) {
+  try {
+    const value = JSON.parse(localStorage.getItem(key) || "null");
+    return value && typeof value.id === "string" && value.byteLength >= 0 && typeof value.sha256 === "string" && value.chunkBytes === SYSTEM_ARCHIVE_CHUNK_BYTES
+      ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveSystemArchiveUploadSession(key, upload, sha256) {
+  try {
+    localStorage.setItem(key, JSON.stringify({ id: upload.id, byteLength: upload.byteLength, sha256, chunkBytes: SYSTEM_ARCHIVE_CHUNK_BYTES }));
+  } catch {
+    // Durable server upload remains usable for this page even when browser storage is blocked.
+  }
+}
+
+function setSystemArchiveCapability(enabled, message = "") {
+  systemArchiveEnabled = enabled;
+  if (!elements.systemArchiveTransfer) return;
+  elements.systemArchiveTransfer.dataset.systemArchiveState = enabled ? "available" : "disabled";
+  elements.systemArchiveCapability.textContent = enabled ? "Available" : "Disabled by operator";
+  elements.systemArchiveCapabilityMessage.textContent = message || (enabled
+    ? "System Archive is available. Transfers are durable and can resume after a disconnected browser session."
+    : "System Archive is not enabled on this instance. World, Campaign, legacy, external, and readable formats remain available.");
+  elements.systemArchiveStatus.textContent = enabled ? "Choose an owner-wide export or a System Archive file." : "Specialized Data Transfer tools remain available.";
+  updateSystemArchiveControls();
+}
+
+function systemArchiveJobCancellable(job) {
+  return job?.kind === "export" ? SYSTEM_ARCHIVE_EXPORT_CANCELLABLE.has(job.status) : SYSTEM_ARCHIVE_IMPORT_CANCELLABLE.has(job?.status);
+}
+
+function updateSystemArchiveControls() {
+  if (!elements.systemArchiveTransfer) return;
+  const activeExport = systemArchiveJob?.kind === "export" && !SYSTEM_ARCHIVE_TERMINAL_STATUSES.has(systemArchiveJob.status);
+  elements.createSystemArchive.disabled = !systemArchiveEnabled || systemArchiveBusy || activeExport;
+  elements.systemArchiveFile.disabled = !systemArchiveEnabled || systemArchiveBusy;
+  elements.uploadSystemArchive.disabled = !systemArchiveEnabled || systemArchiveBusy || !systemArchiveSelectedFile;
+  elements.cancelSystemArchive.disabled = !systemArchiveEnabled || (!systemArchiveOperationController && !systemArchiveJobCancellable(systemArchiveJob) && !systemArchiveUpload);
+  elements.commitSystemImport.disabled = !systemArchiveEnabled || systemArchiveBusy || !systemArchivePreview?.valid;
+}
+
+function setSystemArchiveBusy(busy) {
+  systemArchiveBusy = busy;
+  elements.systemArchiveTransfer?.setAttribute("aria-busy", String(busy));
+  updateSystemArchiveControls();
+}
+
+function setSystemArchiveStatus(message, type = "") {
+  elements.systemArchiveStatus.textContent = message;
+  elements.systemArchiveStatus.className = `status ${type}`.trim();
+}
+
+function clearSystemArchiveError() {
+  elements.systemArchiveError.textContent = "";
+  elements.systemArchiveError.classList.add("hidden");
+}
+
+function showSystemArchiveError(error) {
+  elements.systemArchiveError.textContent = error?.message || String(error);
+  elements.systemArchiveError.classList.remove("hidden");
+  setSystemArchiveStatus("Data Transfer needs attention.", "error");
+}
+
+function renderSystemArchiveProgress(phase, receivedBytes, byteLength) {
+  const percent = byteLength > 0 ? Math.min(100, Math.round(receivedBytes / byteLength * 100)) : 0;
+  elements.systemArchiveProgress.classList.remove("hidden");
+  elements.systemArchiveProgressBar.value = percent;
+  elements.systemArchiveProgressPercent.textContent = `${percent}%`;
+  elements.systemArchiveProgressLabel.textContent = phase === "hashing"
+    ? "Checking archive integrity…"
+    : phase === "uploading"
+      ? `Uploading resumable chunks · ${systemArchiveFormatBytes(receivedBytes)} of ${systemArchiveFormatBytes(byteLength)}`
+      : "Verifying the completed server upload…";
+}
+
+function systemArchiveSummaryItem(label, value) {
+  const item = document.createElement("div");
+  const term = document.createElement("span");
+  const detail = document.createElement("strong");
+  term.textContent = label;
+  detail.textContent = value;
+  item.append(term, detail);
+  return item;
+}
+
+function renderSystemImportPreview(preview) {
+  systemArchivePreview = preview;
+  elements.systemImportPreview.classList.remove("hidden");
+  elements.systemImportPreview.dataset.systemPreview = preview.valid ? "ready" : "invalid";
+  const recordCount = Object.values(preview.recordsByDomain || {}).reduce((total, value) => total + Number(value || 0), 0);
+  elements.systemImportPreviewSummary.replaceChildren(
+    systemArchiveSummaryItem("Destination", preview.destinationEmpty ? "Empty and eligible" : "Not empty"),
+    systemArchiveSummaryItem("Portable records", number(recordCount)),
+    systemArchiveSummaryItem("Original images", `${number(preview.assets.originalCount)} · ${systemArchiveFormatBytes(preview.assets.totalBytes)}`),
+    systemArchiveSummaryItem("Source owners", String(preview.sourceOwnerCount))
+  );
+  elements.systemImportPreviewExpiry.textContent = preview.expiresAt ? `Preview expires ${new Date(preview.expiresAt).toLocaleString()}` : "No commit authority issued";
+  elements.systemImportProviderSummary.textContent = `${number(preview.disabledProviders)} disabled providers. Credentials are excluded and must be entered again.`;
+  elements.systemImportAccessSummary.textContent = preview.invalidatedAccess?.length
+    ? `External access will be invalidated: ${preview.invalidatedAccess.join(", ")}.` : "No external access categories were reported.";
+  elements.systemImportRebuildSummary.textContent = `Chronicle index: ${number(preview.rebuilds.chronicleIndex.itemCount)} campaigns. Asset thumbnails: ${number(preview.rebuilds.assetThumbnails.itemCount)} originals.`;
+  elements.systemImportOmissionSummary.textContent = `${number(preview.omittedOperationalRows)} active or rebuildable operational rows are intentionally excluded.`;
+  const diagnostics = [...(preview.warnings || []), ...(preview.errors || [])];
+  elements.systemImportPreviewWarnings.textContent = diagnostics.join(" ");
+  elements.systemImportPreviewWarnings.classList.toggle("hidden", diagnostics.length === 0);
+  elements.systemImportAcknowledgements.disabled = !preview.valid;
+  SYSTEM_ARCHIVE_ACKNOWLEDGEMENT_IDS.forEach((id) => {
+    elements[id].checked = false;
+    elements[id].removeAttribute("aria-invalid");
+  });
+  updateSystemArchiveControls();
+}
+
+function renderSystemImportReport(job) {
+  if (job.kind !== "import" || !job.report) return;
+  const report = job.report;
+  const recordCount = Object.values(report.recordsByDomain || {}).reduce((total, value) => total + Number(value || 0), 0);
+  elements.systemImportReport.classList.remove("hidden");
+  elements.systemImportReport.dataset.systemImportState = job.status;
+  elements.systemImportReportStatus.textContent = job.status === "completed" ? "Integrity verified" : job.status.replaceAll("_", " ");
+  elements.systemImportReportSummary.replaceChildren(
+    systemArchiveSummaryItem("Records restored", number(recordCount)),
+    systemArchiveSummaryItem("Original images", `${number(report.assetCount)} · ${systemArchiveFormatBytes(report.assetBytes)}`),
+    systemArchiveSummaryItem("Providers disabled", number(report.disabledProviders)),
+    systemArchiveSummaryItem("Access categories invalidated", number(report.invalidatedAccess.length))
+  );
+  elements.systemImportReportRebuilds.textContent = `Chronicle index: ${report.rebuildState.chronicleIndex.status} for ${number(report.rebuildState.chronicleIndex.itemCount)} campaigns. Asset thumbnails: ${report.rebuildState.assetThumbnails.status} for ${number(report.rebuildState.assetThumbnails.itemCount)} originals.`;
+}
+
+function renderSystemArchiveJob(job) {
+  systemArchiveJob = job;
+  setSystemArchiveStatus(`${job.kind === "export" ? "System Export" : "System Import"}: ${job.status.replaceAll("_", " ")}.`);
+  if (job.kind === "export" && job.status === "published") {
+    elements.systemArchiveDownload.href = `/api/v1/system-exports/${encodeURIComponent(job.id)}/download`;
+    elements.systemArchiveDownload.classList.remove("hidden");
+  }
+  renderSystemImportReport(job);
+  updateSystemArchiveControls();
+}
+
+async function monitorSystemArchiveJob(job, signal) {
+  let latest = job;
+  renderSystemArchiveJob(latest);
+  while (!SYSTEM_ARCHIVE_TERMINAL_STATUSES.has(latest.status)) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    if (signal.aborted) throw signal.reason || new DOMException("Transfer cancelled", "AbortError");
+    const segment = latest.kind === "export" ? "system-exports" : "system-imports";
+    latest = await api(`/api/v1/${segment}/${encodeURIComponent(latest.id)}`, { signal });
+    renderSystemArchiveJob(latest);
+  }
+  return latest;
+}
+
+async function runSystemArchiveAction(work) {
+  clearSystemArchiveError();
+  const controller = new AbortController();
+  systemArchiveOperationController = controller;
+  setSystemArchiveBusy(true);
+  try {
+    await work(controller.signal);
+  } catch (error) {
+    if (error?.name !== "AbortError") showSystemArchiveError(error);
+  } finally {
+    if (systemArchiveOperationController === controller) systemArchiveOperationController = null;
+    setSystemArchiveBusy(false);
+  }
+}
+
+async function systemArchiveChunkRequest(upload, index, offset, bytes, fileSize, signal) {
+  const response = await fetch(`/api/v1/system-imports/uploads/${encodeURIComponent(upload.id)}/chunks/${index}`, {
+    method: "PUT",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/octet-stream",
+      "Content-Length": String(bytes.byteLength),
+      "Content-Range": `bytes ${offset}-${offset + bytes.byteLength - 1}/${fileSize}`,
+      "X-Chunk-SHA256": systemArchiveBytesSha256(bytes)
+    },
+    body: bytes,
+    signal
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(payload.message || `Request failed with HTTP ${response.status}.`);
+    error.name = payload.error || "ApiError";
+    error.statusCode = response.status;
+    throw error;
+  }
+  return payload;
+}
+
+async function createOrResumeSystemArchiveUpload(file, sha256, signal) {
+  const storageKey = systemArchiveUploadStorageKey(file.size, sha256);
+  const saved = readSystemArchiveUploadSession(storageKey);
+  let upload = null;
+  if (saved?.byteLength === file.size && saved.sha256 === sha256) {
+    try {
+      upload = await api(`/api/v1/system-imports/uploads/${encodeURIComponent(saved.id)}`, { signal });
+      if (!["created", "uploading", "completed"].includes(upload.status) || upload.byteLength !== file.size) upload = null;
+    } catch (error) {
+      if (![404, 410].includes(error?.statusCode)) throw error;
+    }
+  }
+  if (!upload) {
+    upload = await api("/api/v1/system-imports/uploads", {
+      method: "POST",
+      body: JSON.stringify({ byteLength: file.size, sha256 }),
+      signal
+    });
+    saveSystemArchiveUploadSession(storageKey, upload, sha256);
+  }
+  return upload;
+}
+
+async function uploadAndPreviewSystemArchive() {
+  if (!systemArchiveSelectedFile) return;
+  await runSystemArchiveAction(async (signal) => {
+    const file = systemArchiveSelectedFile;
+    if (!file.size) throw new Error("System Archive file must not be empty.");
+    renderSystemArchiveProgress("hashing", 0, file.size);
+    const sha256 = await systemArchiveFileSha256(file, signal, (received) => renderSystemArchiveProgress("hashing", received, file.size));
+    systemArchiveUpload = await createOrResumeSystemArchiveUpload(file, sha256, signal);
+    renderSystemArchiveProgress("uploading", systemArchiveUpload.receivedBytes, file.size);
+    if (systemArchiveUpload.status !== "completed") {
+      let offset = systemArchiveUpload.receivedBytes;
+      if (offset % SYSTEM_ARCHIVE_CHUNK_BYTES !== 0 && offset !== file.size) throw new Error("Durable upload progress does not align with this browser's chunk boundary.");
+      let index = Math.floor(offset / SYSTEM_ARCHIVE_CHUNK_BYTES);
+      while (offset < file.size) {
+        const end = Math.min(file.size, offset + SYSTEM_ARCHIVE_CHUNK_BYTES);
+        const bytes = new Uint8Array(await file.slice(offset, end).arrayBuffer());
+        systemArchiveUpload = await systemArchiveChunkRequest(systemArchiveUpload, index, offset, bytes, file.size, signal);
+        offset = systemArchiveUpload.receivedBytes;
+        index += 1;
+        renderSystemArchiveProgress("uploading", offset, file.size);
+      }
+      renderSystemArchiveProgress("completing", offset, file.size);
+      systemArchiveUpload = await api(`/api/v1/system-imports/uploads/${encodeURIComponent(systemArchiveUpload.id)}/complete`, { method: "POST", signal });
+    }
+    const preview = await api("/api/v1/system-imports/preview", {
+      method: "POST",
+      body: JSON.stringify({ uploadId: systemArchiveUpload.id }),
+      signal
+    });
+    renderSystemImportPreview(preview);
+    setSystemArchiveStatus(preview.valid ? "System Archive preview is ready for review." : "System Archive cannot be imported into this destination.", preview.valid ? "success" : "error");
+  });
+}
+
+async function createSystemArchiveExport() {
+  await runSystemArchiveAction(async (signal) => {
+    elements.systemArchiveDownload.classList.add("hidden");
+    const job = await api("/api/v1/system-exports", {
+      method: "POST",
+      body: JSON.stringify({ idempotencyKey: systemArchiveIdempotencyKey("legacy-export") }),
+      signal
+    });
+    await monitorSystemArchiveJob(job, signal);
+  });
+}
+
+async function cancelSystemArchiveOperation() {
+  const controller = systemArchiveOperationController;
+  controller?.abort(new DOMException("Transfer cancelled", "AbortError"));
+  try {
+    if (systemArchiveJobCancellable(systemArchiveJob)) {
+      const segment = systemArchiveJob.kind === "export" ? "system-exports" : "system-imports";
+      renderSystemArchiveJob(await api(`/api/v1/${segment}/${encodeURIComponent(systemArchiveJob.id)}`, { method: "DELETE" }));
+    } else if (systemArchiveUpload) {
+      systemArchiveUpload = await api(`/api/v1/system-imports/uploads/${encodeURIComponent(systemArchiveUpload.id)}`, { method: "DELETE" });
+      setSystemArchiveStatus("System Archive upload cancelled.");
+    } else {
+      setSystemArchiveStatus("Local System Archive work cancelled.");
+    }
+  } catch (error) {
+    showSystemArchiveError(error);
+  } finally {
+    updateSystemArchiveControls();
+  }
+}
+
+async function commitSystemArchiveImport() {
+  if (!systemArchivePreview?.valid || !systemArchivePreview.previewHandle) return;
+  let firstInvalid = null;
+  SYSTEM_ARCHIVE_ACKNOWLEDGEMENT_IDS.forEach((id) => {
+    elements[id].removeAttribute("aria-invalid");
+    if (!elements[id].checked) {
+      elements[id].setAttribute("aria-invalid", "true");
+      firstInvalid ||= elements[id];
+    }
+  });
+  if (firstInvalid) {
+    showSystemArchiveError(new Error("Review every acknowledgement before importing this System Archive."));
+    firstInvalid.focus();
+    return;
+  }
+  await runSystemArchiveAction(async (signal) => {
+    const job = await api("/api/v1/system-imports", {
+      method: "POST",
+      body: JSON.stringify({
+        previewHandle: systemArchivePreview.previewHandle,
+        idempotencyKey: systemArchiveIdempotencyKey("legacy-import"),
+        acknowledgeSensitiveArchive: true,
+        acknowledgeEmptyDestination: true,
+        acknowledgeInvalidatedAccess: true,
+        acknowledgeProviderReentry: true,
+        acknowledgeNonCancellableBoundary: true
+      }),
+      signal
+    });
+    systemArchiveUpload = null;
+    await monitorSystemArchiveJob(job, signal);
+  });
 }
 
 function worldGenerationFailureMessage(error) {
@@ -4683,16 +5150,8 @@ async function previewImportFile(file) {
       if (!(lowerName.endsWith(".story") && campaignArchiveErrorCode(error) === "archive-format-unrecognized")) throw error;
     }
   }
-  if (lowerName.endsWith('.zip') || lowerName.endsWith('.story')) {
-    try {
-      const zip = await new JSZip().loadAsync(file);
-      const campaignJsonFile = zip.file("campaign.json") || zip.file("infinite-quest-campaign.json");
-      if (campaignJsonFile) {
-        sourceText = await campaignJsonFile.async("string");
-      }
-    } catch {
-      /* Not a zip archive; fall back to plain text */
-    }
+  if (lowerName.endsWith(".zip")) {
+    throw new Error("The server could not recognize this ZIP as a supported Campaign Archive. Browser code does not open archive entries.");
   }
   if (!sourceText) {
     sourceText = await file.text();
@@ -5015,6 +5474,19 @@ elements.deleteDialog.addEventListener("close", () => {
   if (resolve) resolve(confirmed);
 });
 elements.importStory.addEventListener("click", importStory);
+elements.createSystemArchive.addEventListener("click", createSystemArchiveExport);
+elements.uploadSystemArchive.addEventListener("click", uploadAndPreviewSystemArchive);
+elements.cancelSystemArchive.addEventListener("click", cancelSystemArchiveOperation);
+elements.commitSystemImport.addEventListener("click", commitSystemArchiveImport);
+elements.systemArchiveFile.addEventListener("change", () => {
+  systemArchiveSelectedFile = elements.systemArchiveFile.files?.[0] || null;
+  systemArchivePreview = null;
+  elements.systemImportPreview.classList.add("hidden");
+  elements.systemImportReport.classList.add("hidden");
+  elements.systemArchiveProgress.classList.add("hidden");
+  updateSystemArchiveControls();
+  if (systemArchiveSelectedFile) void uploadAndPreviewSystemArchive();
+});
 elements.previewCampaignArchiveAgain.addEventListener("click", () => {
   if (!selectedFile || !campaignArchiveFileSelected()) return;
   const sourceRefreshSequence = beginCampaignImportRefresh();
