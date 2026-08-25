@@ -130,6 +130,38 @@ describe("API server security and CORS headers", () => {
     }),
   } as unknown as DatabasePool;
 
+  it("keeps readiness available while System Import rejects domain mutations", async () => {
+    const gateClient = {
+      query: vi.fn(async (sql: string) => sql.includes("pg_try_advisory_lock_shared")
+        ? { rows: [{ acquired: false }] }
+        : { rows: [] }),
+      release: vi.fn(),
+    };
+    const pool = {
+      connect: vi.fn(async () => gateClient),
+      query: vi.fn(async (sql: string) => sql.includes("current_setting('server_version')")
+        ? { rows: [{ database_version: "17.2", vector_version: "0.8.0" }] }
+        : { rows: [] }),
+    } as unknown as DatabasePool;
+    const app = await buildServer(serverOptions({
+      config: makeConfig({ systemArchiveEnabled: true }),
+      pool,
+    }));
+
+    const mutation = await app.inject({
+      method: "POST",
+      url: "/api/v1/worlds",
+      payload: { title: "Blocked while importing" },
+    });
+    const readiness = await app.inject({ method: "GET", url: "/health/ready" });
+
+    expect(mutation.statusCode).toBe(503);
+    expect(mutation.json()).toMatchObject({ code: "system-import-in-progress" });
+    expect(readiness.statusCode).toBe(200);
+    expect(readiness.json()).toMatchObject({ status: "ready" });
+    await app.close();
+  });
+
   it("exposes public application metadata without querying the database", async () => {
     const config = makeConfig();
     const mockPool = { query: async () => { throw new Error("Metadata must not query the database."); } } as unknown as DatabasePool;

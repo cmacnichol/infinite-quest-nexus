@@ -128,6 +128,7 @@ import { createGenerationRouteLifecycle, type GenerationLifecycleLogContext } fr
 import { safeTurnInput } from "./turn-input-safety.js";
 import { applicationMetadata } from "./app-metadata.js";
 import { installRequestSecurity } from "./request-security.js";
+import { registerSystemImportGate } from "./system-import-gate.js";
 import { registerArchiveRoutes } from "./archive-routes.js";
 import { createApiAssetComposition } from "../../runtime/src/api-asset-composition.js";
 import type { ApiAssetComposition } from "../../runtime/src/api-asset-composition.js";
@@ -450,6 +451,10 @@ export async function buildServer({
   });
 
   installRequestSecurity(app, config);
+  registerSystemImportGate(app, {
+    pool,
+    enabled: config.systemArchiveEnabled ?? false,
+  });
 
   app.options("*", async (_request, reply) => {
     return reply.code(204).send();

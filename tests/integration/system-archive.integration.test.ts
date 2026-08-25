@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { Readable } from "node:stream";
@@ -11,13 +11,19 @@ import { worldContentSchema } from "../../packages/contracts/src/world-library.j
 import {
   SYSTEM_ARCHIVE_DOMAINS,
   systemArchiveManifestSchema,
+  systemArchiveReportSchema,
+  systemRecordEnvelopeSchema,
 } from "../../packages/contracts/src/system-archives.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
+import { createPostgresAssetPublicationRepository } from "../../packages/database/src/asset-publication-repository.js";
+import { createPostgresDurableFilesystemRepository } from "../../packages/database/src/durable-filesystem-repository.js";
 import {
   createPostgresSystemArchiveExportJobPort,
   createPostgresSystemArchiveExportRepository,
 } from "../../packages/database/src/system-archive-export-repository.js";
+import { createPostgresSystemArchiveImportRepository } from "../../packages/database/src/system-archive-import-repository.js";
+import { createPostgresSystemArchiveJobRepository } from "../../packages/database/src/system-archive-job-repository.js";
 import {
   runSystemExport,
   type SystemArchiveExportDependencies,
@@ -26,6 +32,8 @@ import {
 import {
   createPrivateSystemArchiveStaging,
   createFilesystemSystemArchiveWriter,
+  createSystemArchiveImportExecutionService,
+  createSystemArchiveImportComposition,
   createSystemArchiveImportPreviewService,
   inspectSystemArchiveForPreview,
   type SystemArchiveArtifactPublisherPort,
@@ -394,7 +402,7 @@ integration("deterministic owner-wide System Archive export", () => {
       await pool.query(
         `UPDATE asset_library_entries
             SET title=$3,reuse_scope=$4,review_status='eligible',
-                archived_at=CASE WHEN $3='unbound' THEN now() ELSE NULL END
+                archived_at=CASE WHEN $3='unbound' THEN COALESCE(archived_at,created_at) ELSE NULL END
           WHERE owner_user_id=$1 AND asset_id=$2`,
         [ownerUserId, inserted.rows[0]!.id, name, name === "unbound" ? "owner_library" : name === "cover" ? "world" : "campaign"],
       );
@@ -440,7 +448,31 @@ integration("deterministic owner-wide System Archive export", () => {
     };
   }
 
+  async function ensureOriginalAssetFixtures(): Promise<void> {
+    const fixtureNames = ["cover", "selected", "alternate", "unbound"] as const;
+    for (const [index, original] of originals.entries()) {
+      const storagePath = `originals/${original.contentHash}.png`;
+      await pool.query(
+        `INSERT INTO assets (
+           id,owner_user_id,content_hash,storage_driver,storage_path,mime_type,byte_length,
+           pixel_width,pixel_height,technical_metadata
+         ) VALUES ($1,$2,$3,'filesystem',$4,'image/png',$5,2,2,'{}'::jsonb)
+         ON CONFLICT (id) DO NOTHING`,
+        [original.id, ownerUserId, original.contentHash, storagePath, original.bytes.byteLength],
+      );
+      const name = fixtureNames[index]!;
+      await pool.query(
+        `UPDATE asset_library_entries
+            SET title=$3,reuse_scope=$4,review_status='eligible',
+                archived_at=CASE WHEN $3='unbound' THEN COALESCE(archived_at,created_at) ELSE NULL END
+          WHERE owner_user_id=$1 AND asset_id=$2`,
+        [ownerUserId, original.id, name, name === "unbound" ? "owner_library" : name === "cover" ? "world" : "campaign"],
+      );
+    }
+  }
+
   async function exportArchive() {
+    await ensureOriginalAssetFixtures();
     const snapshots = createPostgresSystemArchiveExportRepository(pool, {
       pageSize: 2,
       sourceApplicationVersion: "0.1.0",
@@ -1332,6 +1364,881 @@ integration("deterministic owner-wide System Archive export", () => {
     )).resolves.toMatchObject({ rows: [{ status: "cancelled" }] });
     expect(await writer.unpublishedArtifactCount()).toBe(0);
   });
+
+  it("rolls back every logical domain when an atomic System Import fails mid-graph", async () => {
+    await pool.query("TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE");
+    await pool.query("DELETE FROM system_archive_jobs");
+    await pool.query("DELETE FROM system_archive_uploads");
+    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const owner = { ownerUserId };
+    const destination = await imports.destinationFingerprint(owner, {});
+    expect(destination.destinationEmpty).toBe(true);
+    const worldId = randomUUID();
+    const invalidVersionId = randomUUID();
+    const missingWorldId = randomUUID();
+    const records = [
+      systemRecordEnvelopeSchema.parse({
+        domain: "worlds",
+        formatVersion: 1,
+        sourceId: worldId,
+        record: {
+          sourceId: worldId,
+          title: "Rollback World",
+          status: "active",
+          createdAt: "2026-08-25T12:00:00.000Z",
+          updatedAt: "2026-08-25T12:00:00.000Z",
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "world-versions",
+        formatVersion: 1,
+        sourceId: invalidVersionId,
+        record: {
+          sourceId: invalidVersionId,
+          worldId: missingWorldId,
+          versionNumber: 1,
+          title: "Missing parent",
+          content: worldContentSchema.parse({
+            schemaVersion: 1,
+            world: { title: "Missing parent", genre: "", tone: "", premise: "", backgroundStory: "", firstAction: "", rules: "" },
+            playableCharacters: [], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [],
+            defaults: { selectedCharacterId: null, initialLocation: "" },
+          }),
+          contentFingerprint: null,
+          releaseNotes: "",
+          createdFromRevision: null,
+          publishedAt: "2026-08-25T12:00:00.000Z",
+        },
+      }),
+    ];
+
+    await expect(imports.withAtomicImport(owner, {
+      destination,
+      ignore: {},
+    }, async (transaction) => {
+      await transaction.insertLogicalDomains(records);
+    })).rejects.toMatchObject({ code: "23503" });
+
+    await expect(pool.query<{ count: string }>("SELECT count(*)::text AS count FROM worlds"))
+      .resolves.toMatchObject({ rows: [{ count: "0" }] });
+  });
+
+  it("remaps source ownership, rejects a stale destination, and queues rebuilds idempotently after commit", async () => {
+    await pool.query("TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE");
+    await pool.query("DELETE FROM system_archive_jobs");
+    await pool.query("DELETE FROM system_archive_uploads");
+    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const owner = { ownerUserId };
+    const stale = await imports.destinationFingerprint(owner, {});
+    const competingWorldId = randomUUID();
+    await pool.query(
+      "INSERT INTO worlds (id,owner_user_id,title,status) VALUES ($1,$2,'Competing world','active')",
+      [competingWorldId, ownerUserId],
+    );
+    await expect(imports.withAtomicImport(owner, { destination: stale, ignore: {} }, async () => undefined))
+      .rejects.toMatchObject({ statusCode: 409 });
+    await pool.query("DELETE FROM worlds WHERE id=$1", [competingWorldId]);
+
+    const destination = await imports.destinationFingerprint(owner, {});
+    const providerId = randomUUID();
+    const worldId = randomUUID();
+    const versionId = randomUUID();
+    const campaignId = randomUUID();
+    const turnId = randomUUID();
+    const turnModeHistoryId = randomUUID();
+    const memoryConfigHistoryId = randomUUID();
+    const illustrationSetHistoryId = randomUUID();
+    const illustrationSegmentHistoryId = randomUUID();
+    const chronicleMemoryIds = [randomUUID(), randomUUID()];
+    const activitySourceId = "00000000-0000-4000-8000-00000000002a";
+    const records = [
+      systemRecordEnvelopeSchema.parse({
+        domain: "providers", formatVersion: 1, sourceId: providerId,
+        record: {
+          sourceId: providerId, kind: "text", displayName: "Imported text provider",
+          baseUrl: "https://provider.invalid/v1", selectedModel: "restored-model",
+          contextWindow: 32768, timeoutMs: 300000, retryLimit: 2,
+          enabled: false, health: "unknown",
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "worlds", formatVersion: 1, sourceId: worldId,
+        record: { sourceId: worldId, title: "Restored World", status: "active", createdAt: "2026-08-25T12:00:00.000Z", updatedAt: "2026-08-25T12:00:00.000Z" },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "world-versions", formatVersion: 1, sourceId: versionId,
+        record: {
+          sourceId: versionId, worldId, versionNumber: 1, title: "Restored World",
+          content: worldContentSchema.parse({
+            schemaVersion: 1,
+            world: { title: "Restored World", genre: "Fantasy", tone: "Hopeful", premise: "Return.", backgroundStory: "", firstAction: "Begin.", rules: "" },
+            playableCharacters: [], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [],
+            defaults: { selectedCharacterId: null, initialLocation: "" },
+          }),
+          contentFingerprint: null, releaseNotes: "", createdFromRevision: null, publishedAt: "2026-08-25T12:00:00.000Z",
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "campaigns", formatVersion: 1, sourceId: campaignId,
+        record: {
+          sourceId: campaignId, worldVersionId: versionId, title: "Restored Campaign", status: "active", activeTurnNumber: 1,
+          settings: { turnControlStyle: "Auto" }, createdAt: "2026-08-25T12:00:00.000Z", updatedAt: "2026-08-25T12:00:00.000Z",
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "turns", formatVersion: 1, sourceId: turnId,
+        record: {
+          sourceId: turnId, campaignId, turnNumber: 1, action: "Open the gate.", narration: "The gate opens.", choices: [], imagePrompt: "A gate at dawn", acceptedAt: "2026-08-25T12:00:00.000Z",
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "campaign-history", formatVersion: 1, sourceId: turnModeHistoryId,
+        record: {
+          sourceId: turnModeHistoryId, campaignId, eventType: "accepted-turn-mode",
+          content: JSON.stringify({ turnId, turnNumber: 1, inputMode: "scene", inputModeSource: "explicit" }),
+          occurredAt: "2026-08-25T12:00:00.000Z",
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "campaign-history", formatVersion: 1, sourceId: memoryConfigHistoryId,
+        record: {
+          sourceId: memoryConfigHistoryId, campaignId, eventType: "memory-config",
+          content: JSON.stringify({
+            embeddingEnabled: true,
+            embeddingProviderProfileId: providerId,
+            embeddingModel: "restored-model",
+            embeddingBatchSize: 24,
+          }),
+          occurredAt: "2026-08-25T12:00:00.000Z",
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "campaign-history", formatVersion: 1, sourceId: illustrationSetHistoryId,
+        record: {
+          sourceId: illustrationSetHistoryId, campaignId, eventType: "illustration-set",
+          content: JSON.stringify({
+            turnId,
+            segmentWordCount: 100,
+            imagesPerSegment: 1,
+            promptMode: "direct",
+            status: "generating",
+            isActive: true,
+            characterVisualReference: "",
+          }),
+          occurredAt: "2026-08-25T12:00:00.000Z",
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "campaign-history", formatVersion: 1, sourceId: illustrationSegmentHistoryId,
+        record: {
+          sourceId: illustrationSegmentHistoryId, campaignId, eventType: "illustration-segment",
+          content: JSON.stringify({
+            illustrationSetId: illustrationSetHistoryId,
+            turnId,
+            ordinal: 0,
+            startOffset: 0,
+            endOffset: 15,
+            startWord: 0,
+            endWord: 3,
+            directPrompt: "A gate at dawn",
+            resolvedPrompt: "A gate at dawn",
+            promptSource: "direct",
+            status: "recoverable",
+          }),
+          occurredAt: "2026-08-25T12:00:00.000Z",
+        },
+      }),
+      ...chronicleMemoryIds.map((memoryId, index) => systemRecordEnvelopeSchema.parse({
+        domain: "chronicle", formatVersion: 1, sourceId: memoryId,
+        record: {
+          sourceId: memoryId,
+          campaignId,
+          kind: "memory",
+          content: `Restored Chronicle memory ${index + 1}`,
+          occurredAt: `2026-08-25T12:00:0${index}.000Z`,
+          metadata: { entityNames: ["Gate"], openThreadIds: [] },
+        },
+      })),
+      systemRecordEnvelopeSchema.parse({
+        domain: "activity-events", formatVersion: 1, sourceId: activitySourceId,
+        record: {
+          sourceId: activitySourceId,
+          campaignId,
+          eventType: "campaign-restored",
+          summary: "The campaign crossed instances.",
+          occurredAt: "2026-08-25T12:00:02.000Z",
+        },
+      }),
+    ];
+
+    await imports.withAtomicImport(owner, { destination, ignore: {} }, async (transaction) => {
+      await transaction.insertLogicalDomains(records);
+      await transaction.recordImportReport(systemArchiveReportSchema.parse({
+        completedAt: "2026-08-25T12:00:03.000Z",
+        archiveFingerprint: null,
+        recordsByDomain: Object.fromEntries(SYSTEM_ARCHIVE_DOMAINS.map((domain) => [domain, 0])),
+        assetCount: 0,
+        assetBytes: 0,
+        omittedOperationalRows: 0,
+        errors: [],
+      }));
+    });
+    await imports.enqueueDerivedRebuilds(owner, { campaignIds: [campaignId], assetIds: [] });
+    await imports.enqueueDerivedRebuilds(owner, { campaignIds: [campaignId], assetIds: [] });
+
+    await expect(pool.query<{
+      world_owner: string;
+      provider_owner: string;
+      enabled: boolean;
+      health_status: string;
+      encrypted_api_key: string | null;
+    }>(
+      `SELECT world.owner_user_id AS world_owner,provider.owner_user_id AS provider_owner,
+              provider.enabled,provider.health_status,provider.encrypted_api_key
+         FROM worlds world CROSS JOIN provider_profiles provider
+        WHERE world.id=$1 AND provider.id=$2`,
+      [worldId, providerId],
+    )).resolves.toMatchObject({ rows: [{
+      world_owner: ownerUserId,
+      provider_owner: ownerUserId,
+      enabled: false,
+      health_status: "unknown",
+      encrypted_api_key: null,
+    }] });
+    await expect(pool.query<{
+      input_mode: string;
+      input_mode_source: string;
+      embedding_enabled: boolean;
+      embedding_provider_profile_id: string;
+      embedding_model: string;
+      embedding_batch_size: number;
+    }>(
+      `SELECT turn_row.input_mode,turn_row.input_mode_source,
+              config.embedding_enabled,config.embedding_provider_profile_id,
+              config.embedding_model,config.embedding_batch_size
+         FROM turns turn_row
+         JOIN campaign_memory_configs config
+           ON config.campaign_id=turn_row.campaign_id
+          AND config.owner_user_id=turn_row.owner_user_id
+        WHERE turn_row.id=$1`,
+      [turnId],
+    )).resolves.toMatchObject({ rows: [{
+      input_mode: "scene",
+      input_mode_source: "explicit",
+      embedding_enabled: true,
+      embedding_provider_profile_id: providerId,
+      embedding_model: "restored-model",
+      embedding_batch_size: 24,
+    }] });
+    await expect(pool.query<{ id: string }>(
+      "SELECT id FROM chronicle_memories WHERE campaign_id=$1 ORDER BY id",
+      [campaignId],
+    )).resolves.toMatchObject({
+      rows: [...chronicleMemoryIds].sort().map((id) => ({ id })),
+    });
+    await expect(pool.query<{ id: string }>(
+      "SELECT id::text AS id FROM activity_events WHERE campaign_id=$1 AND event_type='campaign-restored'",
+      [campaignId],
+    )).resolves.toMatchObject({ rows: [{ id: "42" }] });
+    await expect(pool.query<{ set_status: string; segment_status: string }>(
+      `SELECT illustration_set.status AS set_status,segment.status AS segment_status
+         FROM turn_illustration_sets illustration_set
+         JOIN turn_illustration_segments segment ON segment.illustration_set_id=illustration_set.id
+        WHERE illustration_set.id=$1 AND segment.id=$2`,
+      [illustrationSetHistoryId, illustrationSegmentHistoryId],
+    )).resolves.toMatchObject({ rows: [{ set_status: "failed", segment_status: "failed" }] });
+    await expect(pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM chronicle_jobs WHERE campaign_id=$1 AND status IN ('queued','running')",
+      [campaignId],
+    )).resolves.toMatchObject({ rows: [{ count: "1" }] });
+  });
+
+  it("reconciles an ambiguous atomic-import response before compensating prepared assets", async () => {
+    const exported = await exportArchive();
+    await withStagedArchive(exported.bytes, limits, async (staged) => {
+      const jobId = randomUUID();
+      const stagedInputId = randomUUID();
+      const uploadId = randomUUID();
+      const rebuildCampaignId = randomUUID();
+      const discarded = vi.fn(async () => undefined);
+      const finalized = vi.fn(async () => undefined);
+      const completedPublications = vi.fn(async (identity: { assetId: string }) => ({
+        assetId: identity.assetId,
+        mimeType: "image/png" as const,
+        byteLength: 0,
+        contentHash: sha256("published"),
+        derivativeIds: [],
+      }));
+      const reservedAssetIds: string[] = [];
+      let authorityReads = 0;
+      const authority = () => ({
+        jobId,
+        stagedInputId,
+        uploadId,
+        archiveFingerprint: exported.result.artifact.contentFingerprint,
+        destination: {
+          initialOwnerId: ownerUserId,
+          latestMigration: "0079_resumable_system_archive_uploads",
+          authoritativeCountsHash: sha256("empty-authority"),
+          activeJobsHash: sha256("ignored-active-import"),
+          checkedAt: "2026-08-25T12:00:00.000Z",
+          destinationEmpty: true,
+        },
+        status: authorityReads++ === 0 ? "revalidating" as const : "authoritative_committed" as const,
+        report: null,
+        rebuildCampaignIds: [rebuildCampaignId],
+        rebuildAssetIds: [...reservedAssetIds],
+      });
+      const markRebuilding = vi.fn(async () => undefined);
+      const enqueueRebuilds = vi.fn(async () => undefined);
+      const completeImport = vi.fn(async () => undefined);
+      const transaction = {
+        database: {
+          query: vi.fn(async () => ({ rows: [], rowCount: 1 })),
+        },
+        async insertLogicalDomains(records: AsyncIterable<unknown> | Iterable<unknown>) {
+          for await (const _record of records) {
+            // Consume every verified NDJSON record as the production transaction does.
+          }
+          return {
+            recordsByDomain: Object.fromEntries(SYSTEM_ARCHIVE_DOMAINS.map((domain) => [domain, 0])),
+            campaignIds: [],
+            assetIds: [],
+          };
+        },
+        insertOriginalAsset: vi.fn(async () => undefined),
+        insertAssetBindings: vi.fn(async () => undefined),
+        recordImportReport: vi.fn(async () => undefined),
+      };
+      const service = createSystemArchiveImportExecutionService({
+        imports: {
+          loadImportJobAuthority: vi.fn(async () => authority()),
+          reserveOriginalAssetIdentity: vi.fn(async (_owner, assetId) => {
+            reservedAssetIds.push(assetId);
+            return { assetId, ownerUserId, lifecycle: "prepared" };
+          }),
+          withAtomicImport: vi.fn(async (_owner, _request, work) => {
+            await work(transaction as never);
+            throw new Error("connection dropped after COMMIT");
+          }),
+          markImportedJobRebuilding: markRebuilding,
+          enqueueDerivedRebuilds: enqueueRebuilds,
+          completeImportedJob: completeImport,
+        } as never,
+        source: {
+          async withCompletedUpload(_owner, _uploadId, inspect) {
+            return inspect(staged);
+          },
+        },
+        capacity: {
+          availableBytes: vi.fn(async () => ({ staging: 1_000_000_000, assetRoot: 1_000_000_000 })),
+        },
+        limits,
+        allowUnknownFreeSpace: false,
+        storage: {
+          prepareAssetPublication: vi.fn(async () => ({
+            original: {
+              kind: "original" as const,
+              derivativeIndex: null,
+              attachment: {},
+              rollback: vi.fn(async () => undefined),
+            },
+            derivatives: [],
+          })),
+          discardPreparedAssetPublication: discarded,
+          finalizeAssetPublication: finalized,
+        } as never,
+        assetPublications: {
+          attachPublication: vi.fn(async (_database, identity, command) => ({
+            identity: { ...identity, lifecycle: "attached" },
+            result: {
+              assetId: identity.assetId,
+              mimeType: command.original.mimeType,
+              byteLength: command.original.byteLength,
+              contentHash: command.original.contentHash,
+              derivativeIds: [],
+            },
+            finalization: [],
+          })),
+          completePublication: completedPublications,
+        } as never,
+        publicationLeaseSeconds: 300,
+      });
+
+      await expect(service.runSystemImport({
+        id: jobId,
+        kind: "import",
+        status: "revalidating",
+        createdAt: "2026-08-25T12:00:00.000Z",
+        updatedAt: "2026-08-25T12:00:00.000Z",
+        report: null,
+        ownerUserId,
+        stagedInputId,
+        leaseOwner: "ambiguous-commit-test",
+        leaseExpiresAt: "2026-08-25T12:05:00.000Z",
+      })).resolves.toBeUndefined();
+      expect(discarded).not.toHaveBeenCalled();
+      expect(completedPublications).toHaveBeenCalledTimes(4);
+      expect(markRebuilding).toHaveBeenCalledOnce();
+      expect(enqueueRebuilds).toHaveBeenCalledWith(
+        { ownerUserId },
+        { campaignIds: [rebuildCampaignId], assetIds: reservedAssetIds },
+      );
+      expect(completeImport).toHaveBeenCalledOnce();
+    });
+  });
+
+  it("accepts import cancellation before importing and rejects it after the transaction boundary", async () => {
+    await pool.query("DELETE FROM system_archive_jobs");
+    await pool.query("DELETE FROM system_archive_uploads");
+    const operation = await pool.query<{ id: string }>(
+      `INSERT INTO durable_filesystem_operations (
+         owner_user_id,operation_token_hash,purpose,resource_kind,operation_scope_hash,
+         lease_id,lease_owner,lease_expires_at,expires_at
+       ) VALUES ($1,$2,'portable_staging','portable',$3,gen_random_uuid(),$4,
+                 clock_timestamp()+interval '5 minutes',clock_timestamp()+interval '1 day')
+       RETURNING id`,
+      [ownerUserId, sha256(randomUUID()), sha256(randomUUID()), "system-import-cancellation-test"],
+    );
+    const staged = await pool.query<{ id: string }>(
+      `INSERT INTO portable_staged_inputs (
+         owner_user_id,handle_token_hash,filesystem_operation_id,content_hash,byte_length,expires_at
+       ) VALUES ($1,$2,$3,$4,4,clock_timestamp()+interval '1 day') RETURNING id`,
+      [ownerUserId, sha256(randomUUID()), operation.rows[0]!.id, sha256("data")],
+    );
+    const jobs = createPostgresSystemArchiveJobRepository(pool);
+    const cancelable = await jobs.enqueueImport(
+      { ownerUserId },
+      staged.rows[0]!.id,
+      sha256(randomUUID()),
+    );
+    await expect(jobs.requestCancellation({ ownerUserId }, cancelable.id))
+      .resolves.toMatchObject({ status: "cancelling" });
+    await pool.query(
+      "UPDATE system_archive_jobs SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL WHERE id=$1",
+      [cancelable.id],
+    );
+    const importing = await pool.query<{ id: string }>(
+      `INSERT INTO system_archive_jobs (
+         owner_user_id,kind,status,idempotency_key_hash,staged_input_id,lease_owner,lease_expires_at
+       ) VALUES ($1,'import','importing',$2,$3,$4,clock_timestamp()+interval '5 minutes')
+       RETURNING id`,
+      [ownerUserId, sha256(randomUUID()), staged.rows[0]!.id, "system-import-cancellation-test"],
+    );
+    await expect(jobs.requestCancellation({ ownerUserId }, importing.rows[0]!.id))
+      .rejects.toMatchObject({ statusCode: 409 });
+    await expect(pool.query<{ status: string }>(
+      "SELECT status FROM system_archive_jobs WHERE id=$1",
+      [importing.rows[0]!.id],
+    )).resolves.toMatchObject({ rows: [{ status: "importing" }] });
+  });
+
+  it("rejects an expired opaque preview authority without enqueueing its import", async () => {
+    await pool.query("DELETE FROM system_archive_jobs");
+    await pool.query("DELETE FROM system_archive_uploads");
+    const operation = await pool.query<{ id: string }>(
+      `INSERT INTO durable_filesystem_operations (
+         owner_user_id,operation_token_hash,purpose,resource_kind,operation_scope_hash,
+         lease_id,lease_owner,lease_expires_at,expires_at
+       ) VALUES ($1,$2,'portable_staging','portable',$3,gen_random_uuid(),$4,
+                 clock_timestamp()+interval '5 minutes',clock_timestamp()+interval '1 day')
+       RETURNING id`,
+      [ownerUserId, sha256(randomUUID()), sha256(randomUUID()), "expired-system-import-preview-test"],
+    );
+    const staged = await pool.query<{ id: string }>(
+      `INSERT INTO portable_staged_inputs (
+         owner_user_id,handle_token_hash,filesystem_operation_id,content_hash,byte_length,expires_at
+       ) VALUES ($1,$2,$3,$4,4,clock_timestamp()+interval '1 day') RETURNING id`,
+      [ownerUserId, sha256(randomUUID()), operation.rows[0]!.id, sha256("data")],
+    );
+    const upload = await pool.query<{ id: string }>(
+      `INSERT INTO system_archive_uploads (
+         owner_user_id,handle_token_hash,filesystem_operation_id,status,byte_length,
+         received_bytes,content_hash,staged_input_id,expires_at
+       ) VALUES ($1,$2,$3,'completed',4,4,$4,$5,clock_timestamp()+interval '1 day')
+       RETURNING id`,
+      [ownerUserId, sha256(randomUUID()), operation.rows[0]!.id, sha256("data"), staged.rows[0]!.id],
+    );
+    const previewHandle = createHash("sha256").update(randomUUID()).digest("base64url");
+    const preview = await pool.query<{ id: string }>(
+      `INSERT INTO system_archive_jobs (
+         owner_user_id,kind,status,idempotency_key_hash,staged_input_id,progress,report
+       ) VALUES ($1,'import','previewed',$2,$3,$4::jsonb,'{}'::jsonb) RETURNING id`,
+      [
+        ownerUserId,
+        sha256(previewHandle),
+        staged.rows[0]!.id,
+        JSON.stringify({
+          archiveFingerprint: sha256("expired-preview"),
+          destinationFingerprint: {
+            initialOwnerId: ownerUserId,
+            latestMigration: "0079_resumable_system_archive_uploads",
+            authoritativeCountsHash: sha256("authority"),
+            activeJobsHash: sha256("jobs"),
+            checkedAt: "2026-08-25T12:00:00.000Z",
+            destinationEmpty: true,
+          },
+          expiresAt: "2026-08-25T11:59:59.000Z",
+        }),
+      ],
+    );
+    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    await expect(imports.consumePreviewAuthority({ ownerUserId }, previewHandle))
+      .rejects.toMatchObject({ statusCode: 409 });
+    await expect(pool.query<{ status: string }>(
+      "SELECT status FROM system_archive_jobs WHERE id=$1",
+      [preview.rows[0]!.id],
+    )).resolves.toMatchObject({ rows: [{ status: "previewed" }] });
+    expect(upload.rows[0]!.id).toMatch(/^[0-9a-f-]{36}$/u);
+  });
+
+  it("reloads committed import authority after its staging upload expires", async () => {
+    await pool.query("DELETE FROM system_archive_jobs");
+    await pool.query("DELETE FROM system_archive_uploads");
+    const operation = await pool.query<{ id: string }>(
+      `INSERT INTO durable_filesystem_operations (
+         owner_user_id,operation_token_hash,purpose,resource_kind,operation_scope_hash,
+         lease_id,lease_owner,lease_expires_at,expires_at
+       ) VALUES ($1,$2,'portable_staging','portable',$3,gen_random_uuid(),$4,
+                 clock_timestamp()+interval '5 minutes',clock_timestamp()+interval '1 day')
+       RETURNING id`,
+      [ownerUserId, sha256(randomUUID()), sha256(randomUUID()), "expired-staging-rebuild-test"],
+    );
+    const staged = await pool.query<{ id: string }>(
+      `INSERT INTO portable_staged_inputs (
+         owner_user_id,handle_token_hash,filesystem_operation_id,content_hash,byte_length,expires_at
+       ) VALUES ($1,$2,$3,$4,4,clock_timestamp()+interval '1 day') RETURNING id`,
+      [ownerUserId, sha256(randomUUID()), operation.rows[0]!.id, sha256("data")],
+    );
+    const upload = await pool.query<{ id: string }>(
+      `INSERT INTO system_archive_uploads (
+         owner_user_id,handle_token_hash,filesystem_operation_id,status,byte_length,
+         received_bytes,content_hash,staged_input_id,expires_at
+       ) VALUES ($1,$2,$3,'completed',4,4,$4,$5,clock_timestamp()-interval '1 second')
+       RETURNING id`,
+      [ownerUserId, sha256(randomUUID()), operation.rows[0]!.id, sha256("data"), staged.rows[0]!.id],
+    );
+    const jobId = randomUUID();
+    const archiveFingerprint = sha256("committed-archive");
+    const report = systemArchiveReportSchema.parse({
+      completedAt: "2026-08-25T12:00:00.000Z",
+      archiveFingerprint,
+      recordsByDomain: Object.fromEntries(SYSTEM_ARCHIVE_DOMAINS.map((domain) => [domain, 0])),
+      assetCount: 0,
+      assetBytes: 0,
+      omittedOperationalRows: 0,
+      errors: [],
+    });
+    const destination = {
+      initialOwnerId: ownerUserId,
+      latestMigration: "0079_resumable_system_archive_uploads",
+      authoritativeCountsHash: sha256("empty-authority"),
+      activeJobsHash: sha256("ignored-import"),
+      checkedAt: "2026-08-25T12:00:00.000Z",
+      destinationEmpty: true,
+    };
+    await pool.query(
+      `INSERT INTO system_archive_jobs (
+         id,owner_user_id,kind,status,idempotency_key_hash,staged_input_id,progress,report,
+         lease_owner,lease_expires_at
+       ) VALUES ($1,$2,'import','authoritative_committed',$3,$4,$5::jsonb,$6::jsonb,$7,
+                 clock_timestamp()+interval '5 minutes')`,
+      [
+        jobId,
+        ownerUserId,
+        sha256(randomUUID()),
+        staged.rows[0]!.id,
+        JSON.stringify({
+          archiveFingerprint,
+          destinationFingerprint: destination,
+          rebuildCampaignIds: [],
+          rebuildAssetIds: [],
+        }),
+        JSON.stringify(report),
+        "expired-staging-rebuild-test",
+      ],
+    );
+
+    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    await expect(imports.loadImportJobAuthority(
+      { ownerUserId },
+      jobId,
+      staged.rows[0]!.id,
+    )).resolves.toMatchObject({
+      jobId,
+      uploadId: upload.rows[0]!.id,
+      status: "authoritative_committed",
+      archiveFingerprint,
+    });
+
+    const failedRebuild = createSystemArchiveImportExecutionService({
+      imports: {
+        ...imports,
+        enqueueDerivedRebuilds: vi.fn(async () => {
+          throw new Error("forced_system_import_rebuild_failure");
+        }),
+      },
+      source: {
+        withCompletedUpload: vi.fn(async () => {
+          throw new Error("committed import must not reopen expired staging");
+        }),
+      } as never,
+      capacity: {
+        availableBytes: vi.fn(async () => ({ staging: 0, assetRoot: 0 })),
+      },
+      limits,
+      allowUnknownFreeSpace: false,
+      storage: {} as never,
+      assetPublications: {} as never,
+      publicationLeaseSeconds: 300,
+    });
+    await expect(failedRebuild.runSystemImport({
+      id: jobId,
+      kind: "import",
+      status: "authoritative_committed",
+      createdAt: "2026-08-25T12:00:00.000Z",
+      updatedAt: "2026-08-25T12:00:00.000Z",
+      report,
+      ownerUserId,
+      stagedInputId: staged.rows[0]!.id,
+      leaseOwner: "expired-staging-rebuild-test",
+      leaseExpiresAt: "2026-08-25T12:05:00.000Z",
+    })).rejects.toThrow("forced_system_import_rebuild_failure");
+    await expect(pool.query<{ status: string; report: unknown }>(
+      "SELECT status,report FROM system_archive_jobs WHERE id=$1",
+      [jobId],
+    )).resolves.toMatchObject({ rows: [{ status: "rebuilding", report }] });
+
+    await pool.query(
+      `UPDATE system_archive_jobs
+          SET lease_owner='replacement-system-import-worker',
+              lease_expires_at=clock_timestamp()+interval '5 minutes'
+        WHERE id=$1`,
+      [jobId],
+    );
+    await expect(imports.completeImportedJob(
+      { ownerUserId },
+      jobId,
+      "expired-staging-rebuild-test",
+    )).rejects.toMatchObject({ statusCode: 409 });
+    await expect(pool.query<{ status: string; lease_owner: string }>(
+      "SELECT status,lease_owner FROM system_archive_jobs WHERE id=$1",
+      [jobId],
+    )).resolves.toMatchObject({
+      rows: [{ status: "rebuilding", lease_owner: "replacement-system-import-worker" }],
+    });
+
+    await pool.query(
+      `UPDATE system_archive_jobs
+          SET progress=jsonb_set(progress,'{rebuildCampaignIds}','["not-a-uuid"]'::jsonb)
+        WHERE id=$1`,
+      [jobId],
+    );
+    await expect(imports.loadImportJobAuthority(
+      { ownerUserId },
+      jobId,
+      staged.rows[0]!.id,
+    )).rejects.toThrow("malformed");
+  });
+
+  it.skipIf(!supportsSecureGeneratedArchiveStaging())(
+    "consumes opaque preview authority and restores through production staging",
+    async () => {
+      const exported = await exportArchive();
+      await pool.query("TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE");
+      await pool.query("DELETE FROM system_archive_jobs");
+      await pool.query("DELETE FROM system_archive_uploads");
+
+      const privateRoot = await mkdtemp(join(tmpdir(), "infinitequest-system-import-production-"));
+      const privateArchiveRoot = join(privateRoot, "archive");
+      const privateAssetRoot = join(privateRoot, "assets");
+      await mkdir(privateArchiveRoot, { recursive: true });
+      await mkdir(privateAssetRoot, { recursive: true });
+      let assetPublications: Parameters<typeof createSystemArchiveImportComposition>[0]["assetPublications"] | undefined;
+      const storage = await createAssetImportStorageComposition(pool, {
+        archiveRoot: privateArchiveRoot,
+        assetRoot: privateAssetRoot,
+      }, (captured) => { assetPublications = captured; });
+      try {
+        if (!assetPublications) throw new Error("Expected production asset publication authority.");
+        const composition = createSystemArchiveImportComposition({
+          pool,
+          assetPublications,
+          storage: storage.adapter,
+          archiveRoot: privateArchiveRoot,
+          capacity: { availableBytes: async () => ({ staging: 1_000_000_000, assetRoot: 1_000_000_000 }) },
+          limits,
+          destinationApplicationVersion: "0.1.0",
+          uploadTtlSeconds: 3_600,
+          previewTtlSeconds: 1_800,
+          chunkBytes: exported.bytes.byteLength,
+          maximumUploadBytes: limits.maxCompressedBytes,
+          leaseOwner: "system-import-production-test",
+          leaseSeconds: 300,
+          allowUnknownFreeSpace: false,
+        });
+        const upload = await composition.uploads.createUpload({ ownerUserId }, {
+          byteLength: exported.bytes.byteLength,
+          sha256: sha256(exported.bytes),
+        });
+        await composition.uploads.putChunk({ ownerUserId }, {
+          uploadId: upload.id,
+          index: 0,
+          offset: 0,
+          bytes: exported.bytes,
+          sha256: sha256(exported.bytes),
+        });
+        await composition.uploads.completeUpload({ ownerUserId }, upload.id);
+        const preview = await composition.previews.preview({ ownerUserId }, upload.id);
+        expect(preview.valid).toBe(true);
+        if (!preview.previewHandle) throw new Error("Expected opaque System Import preview authority.");
+
+        const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+        await imports.consumePreviewAuthority({ ownerUserId }, preview.previewHandle);
+        const claimed = await createPostgresSystemArchiveJobRepository(pool).claimNext(
+          "system-import-production-test",
+          300,
+        );
+        expect(claimed).toMatchObject({ kind: "import", status: "revalidating" });
+        await composition.imports.runSystemImport(claimed!);
+
+        await expect(pool.query<{ status: string }>(
+          "SELECT status FROM system_archive_jobs WHERE id=$1",
+          [claimed!.id],
+        )).resolves.toMatchObject({ rows: [{ status: "completed" }] });
+        await expect(pool.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM worlds WHERE owner_user_id=$1",
+          [ownerUserId],
+        )).resolves.toMatchObject({ rows: [{ count: "1" }] });
+        await expect(pool.query<{ enabled: boolean; health_status: string; encrypted_api_key: string | null }>(
+          "SELECT enabled,health_status,encrypted_api_key FROM provider_profiles",
+        )).resolves.toMatchObject({ rows: [{
+          enabled: false,
+          health_status: "unknown",
+          encrypted_api_key: null,
+        }] });
+      } finally {
+        await storage.close().catch(() => undefined);
+        await rm(privateRoot, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!supportsSecureGeneratedArchiveStaging())(
+    "rolls back logical authority when production Original Asset attachment fails and preserves shared bytes",
+    async () => {
+      const exported = await exportArchive();
+      expect(exported.result.report.originalAssets).toBeGreaterThan(1);
+      await pool.query("TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE");
+      await pool.query("DELETE FROM system_archive_jobs");
+      await pool.query("DELETE FROM system_archive_uploads");
+
+      const privateRoot = await mkdtemp(join(tmpdir(), "infinitequest-system-import-rollback-"));
+      const privateArchiveRoot = join(privateRoot, "archive");
+      const privateAssetRoot = join(privateRoot, "assets");
+      const contentRoot = join(privateAssetRoot, "assets", "content");
+      await mkdir(privateArchiveRoot, { recursive: true });
+      await mkdir(contentRoot, { recursive: true });
+      const sharedOriginal = originals[0]!;
+      const sharedPath = join(contentRoot, sharedOriginal.contentHash);
+      await writeFile(sharedPath, sharedOriginal.bytes);
+      const storage = await createAssetImportStorageComposition(pool, {
+        archiveRoot: privateArchiveRoot,
+        assetRoot: privateAssetRoot,
+      });
+      try {
+        await withStagedArchive(exported.bytes, limits, async (staged) => {
+          const repository = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+          const destination = await repository.destinationFingerprint({ ownerUserId }, {});
+          expect(destination.destinationEmpty).toBe(true);
+          const jobId = randomUUID();
+          const stagedInputId = randomUUID();
+          const uploadId = randomUUID();
+          const authority = Object.freeze({
+            jobId,
+            stagedInputId,
+            uploadId,
+            archiveFingerprint: exported.result.artifact.contentFingerprint,
+            destination,
+            status: "revalidating" as const,
+            report: null,
+            rebuildCampaignIds: Object.freeze([]),
+            rebuildAssetIds: Object.freeze([]),
+          });
+          const imports: typeof repository = {
+            ...repository,
+            loadImportJobAuthority: vi.fn(async () => authority),
+            async withAtomicImport(owner, request, work) {
+              return repository.withAtomicImport(owner, {
+                destination: request.destination,
+                ignore: request.ignore,
+              }, work);
+            },
+          };
+          const persistedAssetPublications = createPostgresAssetPublicationRepository(
+            pool,
+            createPostgresDurableFilesystemRepository(pool),
+          );
+          let attachedCount = 0;
+          const assetPublications: typeof persistedAssetPublications = {
+            ...persistedAssetPublications,
+            async attachPublication(database, identity, command, prepared) {
+              const attached = await persistedAssetPublications.attachPublication(
+                database,
+                identity,
+                command,
+                prepared,
+              );
+              attachedCount += 1;
+              if (attachedCount === 2) throw new Error("forced_system_import_asset_attachment_failure");
+              return attached;
+            },
+          };
+          const service = createSystemArchiveImportExecutionService({
+            imports,
+            source: {
+              async withCompletedUpload(_owner, _uploadId, inspect) {
+                return inspect(staged);
+              },
+            },
+            capacity: {
+              availableBytes: async () => ({ staging: 1_000_000_000, assetRoot: 1_000_000_000 }),
+            },
+            limits,
+            allowUnknownFreeSpace: false,
+            storage: storage.adapter,
+            assetPublications,
+            publicationLeaseSeconds: 300,
+          });
+
+          await expect(service.runSystemImport({
+            id: jobId,
+            kind: "import",
+            status: "revalidating",
+            createdAt: "2026-08-25T12:00:00.000Z",
+            updatedAt: "2026-08-25T12:00:00.000Z",
+            report: null,
+            ownerUserId,
+            stagedInputId,
+            leaseOwner: "system-import-rollback-test",
+            leaseExpiresAt: "2026-08-25T12:05:00.000Z",
+          })).rejects.toThrow("forced_system_import_asset_attachment_failure");
+          expect(attachedCount).toBe(2);
+          await expect(pool.query<{ worlds: string; providers: string; assets: string }>(
+            `SELECT (SELECT count(*)::text FROM worlds WHERE owner_user_id=$1) AS worlds,
+                    (SELECT count(*)::text FROM provider_profiles WHERE owner_user_id=$1) AS providers,
+                    (SELECT count(*)::text FROM assets WHERE owner_user_id=$1) AS assets`,
+            [ownerUserId],
+          )).resolves.toMatchObject({ rows: [{ worlds: "0", providers: "0", assets: "0" }] });
+          await expect(readFile(sharedPath)).resolves.toEqual(sharedOriginal.bytes);
+          await expect(readdir(contentRoot)).resolves.toEqual([sharedOriginal.contentHash]);
+        });
+      } finally {
+        await storage.close().catch(() => undefined);
+        await rm(privateRoot, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 function ReadableStreamFrom(chunks: readonly Uint8Array[]): AsyncIterable<Uint8Array> {

@@ -1255,11 +1255,19 @@ integration("durable System Archive jobs and resumable uploads", () => {
       } as const;
       let firstStorage: Awaited<ReturnType<typeof createAssetImportStorageComposition>> | undefined;
       let secondStorage: Awaited<ReturnType<typeof createAssetImportStorageComposition>> | undefined;
+      let firstAssetPublications: Parameters<typeof createSystemArchiveImportComposition>[0]["assetPublications"] | undefined;
+      let secondAssetPublications: Parameters<typeof createSystemArchiveImportComposition>[0]["assetPublications"] | undefined;
       try {
-        firstStorage = await createAssetImportStorageComposition(pool, { archiveRoot, assetRoot });
+        firstStorage = await createAssetImportStorageComposition(
+          pool,
+          { archiveRoot, assetRoot },
+          (captured) => { firstAssetPublications = captured; },
+        );
+        if (!firstAssetPublications) throw new Error("Expected production asset publication authority.");
         const first = createSystemArchiveImportComposition({
           ...compositionOptions,
           storage: firstStorage.adapter,
+          assetPublications: firstAssetPublications,
         });
         const upload = await first.uploads.createUpload(owner, {
           byteLength: archive.byteLength,
@@ -1275,10 +1283,16 @@ integration("durable System Archive jobs and resumable uploads", () => {
         await firstStorage.close();
         firstStorage = undefined;
 
-        secondStorage = await createAssetImportStorageComposition(pool, { archiveRoot, assetRoot });
+        secondStorage = await createAssetImportStorageComposition(
+          pool,
+          { archiveRoot, assetRoot },
+          (captured) => { secondAssetPublications = captured; },
+        );
+        if (!secondAssetPublications) throw new Error("Expected production asset publication authority.");
         const second = createSystemArchiveImportComposition({
           ...compositionOptions,
           storage: secondStorage.adapter,
+          assetPublications: secondAssetPublications,
         });
         await expect(second.uploads.completeUpload(owner, upload.id)).resolves.toMatchObject({
           id: upload.id,

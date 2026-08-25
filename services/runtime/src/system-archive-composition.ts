@@ -9,6 +9,7 @@ import {
   systemArchiveAssetsPayloadSchema,
   systemArchiveManifestSchema,
   systemArchivePayloadSchema,
+  systemArchiveReportSchema,
   systemRecordEnvelopeSchema,
   type ArchiveEntry,
   type ArchiveErrorCode,
@@ -30,12 +31,23 @@ import type {
 } from "../../../packages/application/src/system-archives/ports.js";
 import { runSystemExport } from "../../../packages/application/src/system-archives/use-cases.js";
 import { bindPrivateBoundedStreamLimits } from "../../../packages/application/src/assets/private-secure-storage.js";
+import type {
+  PrivateAssetPublicationCommand,
+  PrivateAssetPublicationIdentity,
+  PrivateAssetPublicationIdentityPort,
+  PrivateAttachedAssetPublication,
+  PrivatePreparedAssetPublication,
+} from "../../../packages/application/src/assets/private-asset-publication.js";
 import {
   createPostgresSystemArchiveExportJobPort,
   createPostgresSystemArchiveExportRepository,
 } from "../../../packages/database/src/system-archive-export-repository.js";
-import type { SystemArchiveImportRepository } from "../../../packages/database/src/system-archive-import-repository.js";
+import type {
+  SystemArchiveImportJobAuthority,
+  SystemArchiveImportRepository,
+} from "../../../packages/database/src/system-archive-import-repository.js";
 import { createPostgresSystemArchiveImportRepository } from "../../../packages/database/src/system-archive-import-repository.js";
+import type { ClaimedSystemArchiveJob } from "../../../packages/database/src/system-archive-job-repository.js";
 import type {
   SystemArchiveUploadAssembly,
   SystemArchiveUploadRepository,
@@ -217,6 +229,61 @@ async function consumeSystemRecordShard(
       for (let newline = text.indexOf("\n", start); newline !== -1; newline = text.indexOf("\n", start)) {
         append(text.slice(start, newline));
         acceptLine();
+        start = newline + 1;
+      }
+      append(text.slice(start));
+    }
+    append(decoder.decode());
+  } catch (error) {
+    if (error instanceof ArchiveError) throw error;
+    const failure = importFailure("archive-json-invalid", "System Archive NDJSON is not valid UTF-8.");
+    failure.cause = error;
+    throw failure;
+  }
+  if (pendingBytes !== 0) {
+    throw importFailure("archive-json-invalid", "System Archive NDJSON is truncated.");
+  }
+}
+
+async function* parseSystemRecordShard(
+  source: AsyncIterable<Uint8Array>,
+  domain: SystemArchiveDomain,
+): AsyncGenerator<SystemRecordEnvelope> {
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let pending = "";
+  let pendingBytes = 0;
+  const append = (value: string) => {
+    pendingBytes += Buffer.byteLength(value, "utf8");
+    if (pendingBytes > MAX_SYSTEM_RECORD_BYTES) {
+      throw importFailure("archive-limit-exceeded", "A System Archive logical record exceeds its bounded size.");
+    }
+    pending += value;
+  };
+  const parseLine = (): SystemRecordEnvelope => {
+    if (!pending) throw importFailure("archive-json-invalid", "System Archive NDJSON contains an empty record.");
+    let raw: unknown;
+    try {
+      raw = JSON.parse(pending) as unknown;
+    } catch (error) {
+      const failure = importFailure("archive-json-invalid", "System Archive record is not valid JSON.");
+      failure.cause = error;
+      throw failure;
+    }
+    const parsed = systemRecordEnvelopeSchema.safeParse(raw);
+    if (!parsed.success || parsed.data.domain !== domain || parsed.data.sourceId !== parsed.data.record.sourceId) {
+      throw importFailure("archive-json-invalid", "System Archive record does not match its shard contract.");
+    }
+    pending = "";
+    pendingBytes = 0;
+    return parsed.data;
+  };
+  try {
+    for await (const chunk of source) {
+      const text = decoder.decode(chunk, { stream: true });
+      let start = 0;
+      for (let newline = text.indexOf("\n", start); newline !== -1; newline = text.indexOf("\n", start)) {
+        append(text.slice(start, newline));
+        yield parseLine();
         start = newline + 1;
       }
       append(text.slice(start));
@@ -737,7 +804,7 @@ export interface SystemArchiveCapacityPort {
 }
 
 export type SystemArchiveImportPreviewServiceOptions = Readonly<{
-  imports: SystemArchiveImportRepository;
+  imports: Pick<SystemArchiveImportRepository, "destinationFingerprint" | "createPreview">;
   source: SystemArchivePreviewSourcePort;
   capacity: SystemArchiveCapacityPort;
   limits: ArchiveLimits;
@@ -945,12 +1012,331 @@ export function createPrivateSystemArchivePreviewSource(
   return Object.freeze(source);
 }
 
+type PreparedSystemOriginal = Readonly<{
+  asset: ArchiveAssetRecord;
+  entry: ArchiveEntry;
+  identity: PrivateAssetPublicationIdentity;
+  prepared: PrivatePreparedAssetPublication;
+}>;
+
+export type SystemArchiveImportExecutionServiceOptions = Readonly<{
+  imports: SystemArchiveImportRepository;
+  source: SystemArchivePreviewSourcePort;
+  capacity: SystemArchiveCapacityPort;
+  limits: ArchiveLimits;
+  allowUnknownFreeSpace: boolean;
+  storage: Pick<SecureFilesystemAdapter,
+    "prepareAssetPublication" | "discardPreparedAssetPublication" | "finalizeAssetPublication">;
+  assetPublications: PrivateAssetPublicationIdentityPort;
+  publicationLeaseSeconds: number;
+}>;
+
+function publicationCommand(
+  ownerUserId: string,
+  job: ClaimedSystemArchiveJob,
+  asset: ArchiveAssetRecord,
+  bytes: Buffer,
+): PrivateAssetPublicationCommand {
+  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1_000).toISOString();
+  return Object.freeze({
+    owner: Object.freeze({ ownerUserId }),
+    idempotencyKey: `system-archive:${job.id}:${asset.sourceAssetId}`,
+    leaseOwner: job.leaseOwner,
+    expiresAt,
+    original: Object.freeze({
+      mimeType: asset.mimeType,
+      byteLength: bytes.byteLength,
+      contentHash: createHash("sha256").update(bytes).digest("hex"),
+      bytes: new Uint8Array(bytes),
+    }),
+    derivatives: Object.freeze([]),
+    provenance: Object.freeze({ origin: asset.library.origin }),
+  }) as unknown as PrivateAssetPublicationCommand;
+}
+
+async function readSystemOriginal(
+  container: Awaited<ReturnType<typeof inspectArchiveContainer>>,
+  entry: ArchiveEntry,
+  maximumBytes: number,
+): Promise<Buffer> {
+  const bytes = await readVerifiedContainerEntry(container, entry.path, maximumBytes);
+  const actualHash = createHash("sha256").update(bytes).digest("hex");
+  if (bytes.byteLength !== entry.byteLength || actualHash !== entry.sha256) {
+    throw importFailure("archive-checksum-mismatch", "A System Archive Original Asset changed after preview.");
+  }
+  return bytes;
+}
+
+async function prepareSystemOriginals(
+  options: SystemArchiveImportExecutionServiceOptions,
+  ownerUserId: string,
+  job: ClaimedSystemArchiveJob,
+  container: Awaited<ReturnType<typeof inspectArchiveContainer>>,
+  manifest: ReturnType<typeof systemArchiveManifestSchema.parse>,
+): Promise<readonly PreparedSystemOriginal[]> {
+  const entries = new Map(manifest.entries.map((entry) => [normalizedPath(entry.path), entry] as const));
+  const prepared: PreparedSystemOriginal[] = [];
+  try {
+    for (const asset of manifest.assets) {
+      const entry = entries.get(normalizedPath(asset.archivePath));
+      if (!entry || entry.logicalType !== "asset-original") {
+        throw importFailure("archive-asset-missing", "A System Archive Original Asset is missing.");
+      }
+      const bytes = await readSystemOriginal(container, entry, options.limits.maxOriginalImageBytes);
+      const command = publicationCommand(ownerUserId, job, asset, bytes);
+      const identity = await options.imports.reserveOriginalAssetIdentity(
+        { ownerUserId },
+        asset.sourceAssetId,
+        command,
+      );
+      const candidate = await options.storage.prepareAssetPublication(command, identity);
+      prepared.push(Object.freeze({ asset, entry, identity, prepared: candidate }));
+    }
+    return Object.freeze(prepared);
+  } catch (error) {
+    await Promise.allSettled(prepared.map((entry) => (
+      options.storage.discardPreparedAssetPublication(entry.prepared)
+    )));
+    throw error;
+  }
+}
+
+async function insertLogicalShards(
+  transaction: import("../../../packages/database/src/system-archive-import-repository.js").SystemArchiveAtomicImportTransaction,
+  container: Awaited<ReturnType<typeof inspectArchiveContainer>>,
+  manifest: ReturnType<typeof systemArchiveManifestSchema.parse>,
+  limits: ArchiveLimits,
+): Promise<void> {
+  for (const domain of SYSTEM_ARCHIVE_DOMAINS) {
+    const entries = manifest.entries
+      .filter((entry) => entry.logicalType === "records"
+        && entry.path.startsWith(`records/${domain}/`))
+      .sort((left, right) => left.path.localeCompare(right.path));
+    for (const entry of entries) {
+      const streamed = await consumeVerifiedContainerEntry(
+        container,
+        entry.path,
+        limits.maxJsonEntryBytes,
+        (source) => transaction.insertLogicalDomains(parseSystemRecordShard(source, domain)),
+      );
+      if (streamed.byteLength !== entry.byteLength || streamed.sha256 !== entry.sha256) {
+        throw importFailure("archive-checksum-mismatch", "A System Archive logical shard changed after preview.");
+      }
+    }
+  }
+}
+
+async function finalizeAttachedOriginals(
+  options: SystemArchiveImportExecutionServiceOptions,
+  attached: readonly PrivateAttachedAssetPublication[],
+): Promise<void> {
+  for (const publication of attached) {
+    if (publication.finalization.length > 0) {
+      await options.storage.finalizeAssetPublication(publication.finalization);
+    }
+    await options.assetPublications.completePublication(publication.identity);
+  }
+}
+
+async function reconcileAttachedOriginals(
+  options: SystemArchiveImportExecutionServiceOptions,
+  ownerUserId: string,
+  assetIds: readonly string[],
+  leaseOwner: string,
+): Promise<void> {
+  for (let offset = 0; offset < assetIds.length; offset += 1_000) {
+    const identities = await options.assetPublications.readPublicationIdentities(
+      ownerUserId,
+      assetIds.slice(offset, offset + 1_000),
+    );
+    for (const identity of identities) {
+      if (identity.lifecycle === "published") continue;
+      const reconciled = await options.assetPublications.reconcileAttachedPublication(identity, {
+        leaseOwner,
+        leaseSeconds: options.publicationLeaseSeconds,
+      });
+      if (reconciled.outcome === "published") continue;
+      if (reconciled.outcome !== "ready_to_finalize") {
+        throw new Error("system_archive_asset_publication_recoverable");
+      }
+      if (reconciled.identity.finalization?.length) {
+        await options.storage.finalizeAssetPublication(reconciled.identity.finalization);
+      }
+      await options.assetPublications.completePublication(reconciled.identity);
+    }
+  }
+}
+
+function importReconciliationFailure(persistenceError: unknown, reconciliationError: unknown): Error {
+  const failure = new Error("system_archive_import_reconciliation_failed");
+  failure.cause = reconciliationError;
+  return Object.assign(failure, { persistenceError });
+}
+
+/** Executes only a claimed Task 5 import; Task 6 owns worker scheduling and routes. */
+export function createSystemArchiveImportExecutionService(
+  options: SystemArchiveImportExecutionServiceOptions,
+): Readonly<{ runSystemImport(job: ClaimedSystemArchiveJob): Promise<void> }> {
+  if (!Number.isSafeInteger(options.publicationLeaseSeconds)
+    || options.publicationLeaseSeconds < 1
+    || options.publicationLeaseSeconds > 300) {
+    throw new Error("system_archive_publication_lease_invalid");
+  }
+  return Object.freeze({
+    async runSystemImport(job) {
+      if (job.kind !== "import" || !job.stagedInputId) {
+        throw new Error("system_archive_import_job_invalid");
+      }
+      const stagedInputId = job.stagedInputId;
+      const owner = Object.freeze({ ownerUserId: job.ownerUserId });
+      const authority = await options.imports.loadImportJobAuthority(owner, job.id, stagedInputId);
+      if (authority.status === "authoritative_committed" || authority.status === "rebuilding") {
+        await reconcileAttachedOriginals(
+          options,
+          owner.ownerUserId,
+          authority.rebuildAssetIds,
+          job.leaseOwner,
+        );
+        await options.imports.markImportedJobRebuilding(owner, job.id, job.leaseOwner);
+        await options.imports.enqueueDerivedRebuilds(owner, {
+          campaignIds: authority.rebuildCampaignIds,
+          assetIds: authority.rebuildAssetIds,
+        });
+        await options.imports.completeImportedJob(owner, job.id, job.leaseOwner);
+        return;
+      }
+
+      await options.source.withCompletedUpload(owner, authority.uploadId, async (staged) => {
+        const inspection = await inspectSystemArchiveForPreview(staged, options.limits);
+        if (inspection.archiveFingerprint !== authority.archiveFingerprint) {
+          throw importFailure("archive-checksum-mismatch", "System Archive changed after its preview was authorized.");
+        }
+        const available = await options.capacity.availableBytes();
+        const stagingCapacity = capacityCheck(
+          staged.compressedBytes,
+          available.staging,
+          options.allowUnknownFreeSpace,
+        );
+        const assetCapacity = capacityCheck(
+          inspection.assetBytes,
+          available.assetRoot,
+          options.allowUnknownFreeSpace,
+        );
+        if (!stagingCapacity.sufficient || !assetCapacity.sufficient) {
+          throw importFailure("archive-storage-insufficient", "System Archive capacity changed after preview.");
+        }
+
+        const container = await inspectArchiveContainer(staged, options.limits);
+        const manifestBytes = await readVerifiedContainerEntry(
+          container,
+          "manifest.json",
+          options.limits.maxManifestBytes,
+        );
+        const manifest = systemArchiveManifestSchema.parse(parseJson(manifestBytes, "System Archive manifest"));
+        if (manifest.archiveType !== "system" || manifest.contentFingerprint !== authority.archiveFingerprint) {
+          throw importFailure("archive-world-mismatch", "System Archive manifest no longer matches preview authority.");
+        }
+        const systemEntry = manifest.entries.find((entry) => entry.path === "system.json");
+        if (!systemEntry) throw importFailure("archive-entry-missing", "System Archive owner profile is missing.");
+        const systemBytes = await readVerifiedContainerEntry(
+          container,
+          systemEntry.path,
+          Math.min(options.limits.maxManifestBytes, options.limits.maxJsonEntryBytes),
+        );
+        const systemPayload = systemArchivePayloadSchema.parse(parseJson(systemBytes, "System Archive system payload"));
+        const prepared = await prepareSystemOriginals(options, owner.ownerUserId, job, container, manifest);
+        const attached: PrivateAttachedAssetPublication[] = [];
+        let authorityCommitted = false;
+        let committedAuthority: SystemArchiveImportJobAuthority | null = null;
+        let atomicImportFailed = false;
+        let atomicImportError: unknown;
+        try {
+          await options.imports.withAtomicImport(owner, {
+            destination: authority.destination,
+            ignore: { ignoreJobId: job.id, ignoreUploadId: authority.uploadId },
+            jobId: job.id,
+            leaseOwner: job.leaseOwner,
+          }, async (transaction) => {
+            await transaction.database.query(
+              `UPDATE users SET display_name=$2,updated_at=clock_timestamp()
+                WHERE id=$1 AND system_key='initial-owner'`,
+              [owner.ownerUserId, systemPayload.sourceOwner.displayName],
+            );
+            await insertLogicalShards(transaction, container, manifest, options.limits);
+            for (const publication of prepared) {
+              const bytes = await readSystemOriginal(
+                container,
+                publication.entry,
+                options.limits.maxOriginalImageBytes,
+              );
+              const command = publicationCommand(owner.ownerUserId, job, publication.asset, bytes);
+              const persisted = await options.assetPublications.attachPublication(
+                transaction.database,
+                publication.identity,
+                command,
+                publication.prepared,
+              );
+              attached.push(persisted);
+              await transaction.insertAssetBindings(publication.asset);
+            }
+            const report = systemArchiveReportSchema.parse({
+              completedAt: new Date().toISOString(),
+              archiveFingerprint: authority.archiveFingerprint,
+              recordsByDomain: inspection.recordsByDomain,
+              assetCount: manifest.assets.length,
+              assetBytes: inspection.assetBytes,
+              omittedOperationalRows: 0,
+              errors: [],
+            });
+            await transaction.recordImportReport(report);
+          });
+          authorityCommitted = true;
+        } catch (error) {
+          atomicImportFailed = true;
+          atomicImportError = error;
+        }
+        if (atomicImportFailed) {
+          try {
+            const reconciled = await options.imports.loadImportJobAuthority(owner, job.id, stagedInputId);
+            if (reconciled.status === "authoritative_committed" || reconciled.status === "rebuilding") {
+              authorityCommitted = true;
+              committedAuthority = reconciled;
+            }
+          } catch (reconciliationError) {
+            // A failed status read leaves COMMIT outcome ambiguous. Preserving the
+            // prepared originals is safer than deleting bytes which may be authoritative.
+            throw importReconciliationFailure(atomicImportError, reconciliationError);
+          }
+          if (!authorityCommitted) {
+            await Promise.allSettled(prepared.map((entry) => (
+              options.storage.discardPreparedAssetPublication(entry.prepared)
+            )));
+            throw atomicImportError;
+          }
+        }
+        await finalizeAttachedOriginals(options, attached);
+        committedAuthority ??= await options.imports.loadImportJobAuthority(owner, job.id, stagedInputId);
+        await options.imports.markImportedJobRebuilding(owner, job.id, job.leaseOwner);
+        await options.imports.enqueueDerivedRebuilds(owner, {
+          campaignIds: committedAuthority.rebuildCampaignIds,
+          assetIds: committedAuthority.rebuildAssetIds,
+        });
+        await options.imports.completeImportedJob(owner, job.id, job.leaseOwner);
+      });
+    },
+  });
+}
+
 export type SystemArchiveImportCompositionOptions = Readonly<{
   pool: DatabasePool;
+  assetPublications: PrivateAssetPublicationIdentityPort;
   storage: Pick<SecureFilesystemAdapter,
     "prepareSystemArchiveUpload"
     | "publishSystemArchiveUploadChunk"
-    | "assembleSystemArchiveUpload">;
+    | "assembleSystemArchiveUpload"
+    | "prepareAssetPublication"
+    | "discardPreparedAssetPublication"
+    | "finalizeAssetPublication">;
   archiveRoot: string;
   capacity: SystemArchiveCapacityPort;
   limits: ArchiveLimits;
@@ -971,6 +1357,7 @@ export function createSystemArchiveImportComposition(
 ): Readonly<{
   uploads: ReturnType<typeof createSystemArchiveUploadService>;
   previews: ReturnType<typeof createSystemArchiveImportPreviewService>;
+  imports: ReturnType<typeof createSystemArchiveImportExecutionService>;
 }> {
   const uploadRepository = createPostgresSystemArchiveUploadRepository(options.pool, {
     uploadTtlSeconds: options.uploadTtlSeconds,
@@ -979,6 +1366,14 @@ export function createSystemArchiveImportComposition(
     previewTtlSeconds: options.previewTtlSeconds,
   });
   const privateRepository = createPostgresSystemArchivePrivateStorageRepository(options.pool);
+  const previewSource = createPrivateSystemArchivePreviewSource({
+    archiveRoot: options.archiveRoot,
+    maximumCompressedBytes: options.limits.maxCompressedBytes,
+    repository: privateRepository,
+    leaseOwner: options.leaseOwner,
+    leaseSeconds: options.leaseSeconds,
+    activitySeconds: Math.max(options.uploadTtlSeconds, options.previewTtlSeconds),
+  });
   const storage = createPrivateSystemArchiveUploadStorage(options.storage, {
     leaseOwner: options.leaseOwner,
     leaseSeconds: options.leaseSeconds,
@@ -994,18 +1389,21 @@ export function createSystemArchiveImportComposition(
     }),
     previews: createSystemArchiveImportPreviewService({
       imports: importRepository,
-      source: createPrivateSystemArchivePreviewSource({
-        archiveRoot: options.archiveRoot,
-        maximumCompressedBytes: options.limits.maxCompressedBytes,
-        repository: privateRepository,
-        leaseOwner: options.leaseOwner,
-        leaseSeconds: options.leaseSeconds,
-        activitySeconds: Math.max(options.uploadTtlSeconds, options.previewTtlSeconds),
-      }),
+      source: previewSource,
       capacity: options.capacity,
       limits: options.limits,
       destinationApplicationVersion: options.destinationApplicationVersion,
       allowUnknownFreeSpace: options.allowUnknownFreeSpace,
+    }),
+    imports: createSystemArchiveImportExecutionService({
+      imports: importRepository,
+      source: previewSource,
+      capacity: options.capacity,
+      limits: options.limits,
+      allowUnknownFreeSpace: options.allowUnknownFreeSpace,
+      storage: options.storage,
+      assetPublications: options.assetPublications,
+      publicationLeaseSeconds: Math.min(options.leaseSeconds, 300),
     }),
   });
 }
