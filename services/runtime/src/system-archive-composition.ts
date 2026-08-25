@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
 import { Readable } from "node:stream";
 import sharp from "sharp";
 import {
@@ -32,11 +31,9 @@ import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { detectImageMimeType } from "../../../packages/domain/src/image-media.js";
 import { sha256 as legacySha256 } from "../../../packages/domain/src/text.js";
 import {
-  removeArchivePath,
-  writeArchiveArtifact,
+  createArchiveArtifactSource,
   type ArchiveArtifactEntry,
   type ArchiveLimits,
-  type CompletedArchiveArtifact,
 } from "../../api/src/archive-io.js";
 import type { ApiAssetComposition } from "./api-asset-composition.js";
 import type { SecureFilesystemAdapter } from "./secure-filesystem-adapter.js";
@@ -72,7 +69,7 @@ export interface SystemArchiveArtifactPublisherPort {
     byteLength: number;
     sha256: string;
     source: AsyncIterable<Uint8Array>;
-  }>): Promise<SystemArchivePublishedArtifact>;
+  }>): Promise<Omit<SystemArchivePublishedArtifact, "contentFingerprint">>;
 }
 
 export type FilesystemSystemArchiveWriter = SystemArchiveWriterPort & Readonly<{
@@ -80,11 +77,10 @@ export type FilesystemSystemArchiveWriter = SystemArchiveWriterPort & Readonly<{
 }>;
 
 export type FilesystemSystemArchiveWriterOptions = Readonly<{
-  archiveRoot: string;
   limits: ArchiveLimits;
   staging: SystemArchiveStagingPort;
   now?: () => Date;
-  publisher?: SystemArchiveArtifactPublisherPort;
+  publisher: SystemArchiveArtifactPublisherPort;
 }>;
 
 function archiveFailure(
@@ -96,19 +92,6 @@ function archiveFailure(
 
 function requireHash(value: string, name: string): void {
   if (!/^[a-f0-9]{64}$/u.test(value)) throw archiveFailure("archive-export-inconsistent", `${name} is invalid.`);
-}
-
-async function artifactSource(artifact: CompletedArchiveArtifact): Promise<AsyncIterable<Uint8Array>> {
-  return {
-    async *[Symbol.asyncIterator]() {
-      const source = createReadStream(artifact.absolutePath);
-      try {
-        for await (const chunk of source) yield new Uint8Array(chunk);
-      } finally {
-        if (!source.destroyed) source.destroy();
-      }
-    },
-  };
 }
 
 async function collectStaged(
@@ -136,29 +119,40 @@ export function createPrivateSystemArchiveStaging(
     "stagePortableScratch" | "openStagedInputSession" | "discardPortableStagedInput">,
   options: Readonly<{
     leaseOwner: string;
-    expiresAt?: () => string;
+    artifactTtlSeconds: number;
+    now?: () => Date;
     leaseSeconds?: number;
   }>,
 ): SystemArchiveStagingPort {
   const leaseSeconds = options.leaseSeconds ?? 300;
+  if (!Number.isSafeInteger(options.artifactTtlSeconds) || options.artifactTtlSeconds < leaseSeconds) {
+    throw new Error("system_archive_staging_lifetime_invalid");
+  }
   return Object.freeze({
     async stage(input: Parameters<SystemArchiveStagingPort["stage"]>[0]) {
+      const issuedAt = (options.now ?? (() => new Date()))();
       const issued = await storage.stagePortableScratch({
         owner: { ownerUserId: input.ownerUserId },
         operationScopeId: randomUUID(),
         leaseOwner: options.leaseOwner,
-        expiresAt: (options.expiresAt ?? (() => new Date(Date.now() + 60 * 60 * 1_000).toISOString()))(),
+        // The artifact retention policy is also the minimum active-export
+        // budget. Each durable stage receives the full configured lifetime.
+        expiresAt: new Date(issuedAt.getTime() + options.artifactTtlSeconds * 1_000).toISOString(),
         maximumBytes: input.maximumBytes,
         source: input.source,
       });
       let cleanupPromise: Promise<void> | undefined;
       let cleaned = false;
       const cleanup = (): Promise<void> => {
-        cleanupPromise ??= storage.discardPortableStagedInput({
+        if (cleaned) return Promise.resolve();
+        if (cleanupPromise) return cleanupPromise;
+        cleanupPromise = storage.discardPortableStagedInput({
           owner: { ownerUserId: input.ownerUserId },
           stagedInput: issued.stagedInput,
           claim: { leaseOwner: options.leaseOwner, leaseSeconds },
-        }).then(() => { cleaned = true; });
+        }).then(() => { cleaned = true; }).finally(() => {
+          cleanupPromise = undefined;
+        });
         return cleanupPromise;
       };
       return Object.freeze({
@@ -168,13 +162,17 @@ export function createPrivateSystemArchiveStaging(
           return {
             async *[Symbol.asyncIterator]() {
               if (cleaned || cleanupPromise) throw new Error("system_archive_staging_cleaned");
+              const openedAt = (options.now ?? (() => new Date()))();
               const session = await storage.openStagedInputSession({
                 owner: { ownerUserId: input.ownerUserId },
                 stagedInput: issued.stagedInput,
                 claim: { leaseOwner: options.leaseOwner, leaseSeconds },
                 limits: bindPrivateBoundedStreamLimits({
                   maximumBytes: issued.byteLength,
-                  deadlineAt: new Date(Date.now() + leaseSeconds * 1_000).toISOString(),
+                  chunkBytes: Math.min(64 * 1024, Math.max(1, issued.byteLength)),
+                  deadlineAt: new Date(
+                    openedAt.getTime() + options.artifactTtlSeconds * 1_000,
+                  ).toISOString(),
                 }),
               });
               let reason: "eof" | "abort" | "read_failure" = "abort";
@@ -198,20 +196,28 @@ export function createPrivateSystemArchiveStaging(
 
 /**
  * Runtime-only durable staging and ZIP writer. Application code never receives
- * a path or imports `node:fs`; final ZIP publication delegates to the hardened
- * Campaign Archive writer and may then pass through the durable portable publisher.
+ * a path or imports `node:fs`; both the logical entries and assembled ZIP remain
+ * inside durable private lifecycle authority until publication is recorded.
  */
 export async function createFilesystemSystemArchiveWriter(
   options: FilesystemSystemArchiveWriterOptions,
 ): Promise<FilesystemSystemArchiveWriter> {
-  if (!options.archiveRoot.trim()) throw archiveFailure("archive-export-inconsistent", "System Archive root is required.");
   const entries: SpoolEntry[] = [];
+  const stagedForCleanup = new Set<SystemArchiveStagedContent>();
   const paths = new Set<string>();
   let ownerUserId: string | undefined;
   let state: "open" | "published" | "aborted" = "open";
 
   const requireOpen = () => {
     if (state !== "open") throw archiveFailure("archive-export-inconsistent", "System Archive writer is no longer open.");
+  };
+  const registerStaged = (staged: SystemArchiveStagedContent) => {
+    stagedForCleanup.add(staged);
+    return staged;
+  };
+  const cleanupStaged = async (staged: SystemArchiveStagedContent) => {
+    await staged.cleanup();
+    stagedForCleanup.delete(staged);
   };
   const addEntry = (entry: SpoolEntry): SystemArchiveWrittenPayload => {
     if (paths.has(entry.path) || entry.path === "manifest.json") {
@@ -222,11 +228,11 @@ export async function createFilesystemSystemArchiveWriter(
     return Object.freeze({ path: entry.path, byteLength: entry.byteLength, sha256: entry.sha256 });
   };
   const removeSpool = async () => {
-    const staged = entries.splice(0).map((entry) => entry.staged);
-    paths.clear();
-    const settled = await Promise.allSettled(staged.map((entry) => entry.cleanup()));
+    const staged = [...stagedForCleanup];
+    const settled = await Promise.allSettled(staged.map(cleanupStaged));
     const rejected = settled.find((result): result is PromiseRejectedResult => result.status === "rejected");
     if (rejected) throw rejected.reason;
+    paths.clear();
   };
   const writeBufferEntry = async (
     path: string,
@@ -236,11 +242,11 @@ export async function createFilesystemSystemArchiveWriter(
   ): Promise<SystemArchiveWrittenPayload> => {
     requireOpen();
     if (!ownerUserId) throw archiveFailure("archive-export-inconsistent", "System Archive staging owner is unavailable.");
-    const staged = await options.staging.stage({
+    const staged = registerStaged(await options.staging.stage({
       ownerUserId,
       maximumBytes: bytes.byteLength,
       source: [bytes],
-    });
+    }));
     try {
       if (staged.byteLength !== bytes.byteLength) {
         throw archiveFailure("archive-export-inconsistent", "System Archive staged metadata size changed.");
@@ -254,7 +260,7 @@ export async function createFilesystemSystemArchiveWriter(
         sha256: staged.sha256,
       });
     } catch (error) {
-      await staged.cleanup().catch(() => undefined);
+      await cleanupStaged(staged).catch(() => undefined);
       throw error;
     }
   };
@@ -323,13 +329,13 @@ export async function createFilesystemSystemArchiveWriter(
               }
             },
           };
-          const staged = await options.staging.stage({
+          const staged = registerStaged(await options.staging.stage({
             ownerUserId,
             maximumBytes: shardOptions.targetBytes,
             source,
-          });
+          }));
           if (staged.byteLength === 0) {
-            await staged.cleanup();
+            await cleanupStaged(staged);
             break;
           }
           try {
@@ -342,7 +348,7 @@ export async function createFilesystemSystemArchiveWriter(
               sha256: staged.sha256,
             }));
           } catch (error) {
-            await staged.cleanup().catch(() => undefined);
+            await cleanupStaged(staged).catch(() => undefined);
             throw error;
           }
         }
@@ -374,11 +380,11 @@ export async function createFilesystemSystemArchiveWriter(
       }
       let staged: SystemArchiveStagedContent;
       try {
-        staged = await options.staging.stage({
+        staged = registerStaged(await options.staging.stage({
           ownerUserId,
           maximumBytes: input.expectedBytes,
           source: input.stream,
-        });
+        }));
       } catch (error) {
         if (typeof error === "object" && error !== null && "code" in error) throw error;
         throw archiveFailure("archive-asset-invalid", "System Archive Original Asset could not be read.");
@@ -405,7 +411,7 @@ export async function createFilesystemSystemArchiveWriter(
           sha256: staged.sha256,
         });
       } catch (error) {
-        await staged.cleanup().catch(() => undefined);
+        await cleanupStaged(staged).catch(() => undefined);
         if (typeof error === "object" && error !== null && "code" in error) throw error;
         const failure = archiveFailure("archive-asset-invalid", "System Archive Original Asset failed image decoding.");
         failure.cause = error;
@@ -422,7 +428,9 @@ export async function createFilesystemSystemArchiveWriter(
       requireHash(input.contentFingerprint, "System Archive content fingerprint");
       if (await input.cancellationRequested()) {
         state = "aborted";
-        await removeSpool();
+        // Durable staging retains expiry/reaper cleanup authority. A cleanup
+        // retry cannot revoke an already accepted cancellation.
+        await removeSpool().catch(() => undefined);
         return Object.freeze({ status: "cancelled" as const });
       }
       const ordered = [...entries].sort((left, right) => left.path.localeCompare(right.path));
@@ -469,72 +477,59 @@ export async function createFilesystemSystemArchiveWriter(
         byteLength,
         sha256,
       })));
-      let local: CompletedArchiveArtifact | undefined;
       try {
-        local = await writeArchiveArtifact(
-          options.archiveRoot,
-          archiveEntries,
-          buildManifest,
-          options.limits,
-          (value) => systemArchiveManifestSchema.parse(value),
-        );
-        if (local.contentFingerprint !== input.contentFingerprint) {
-          throw archiveFailure("archive-export-inconsistent", "Published System Archive fingerprint changed.");
-        }
-        if (options.publisher && await input.cancellationRequested()) {
-          await removeArchivePath(options.archiveRoot, local.relativePath);
-          local = undefined;
+        const finalArchive = registerStaged(await options.staging.stage({
+          ownerUserId: input.manifest.sourceOwner.sourceId,
+          maximumBytes: options.limits.maxCompressedBytes,
+          source: createArchiveArtifactSource(
+            archiveEntries,
+            buildManifest,
+            options.limits,
+            (value) => systemArchiveManifestSchema.parse(value),
+          ),
+        }));
+        if (await input.cancellationRequested()) {
           state = "aborted";
-          await removeSpool();
+          await removeSpool().catch(() => undefined);
           return Object.freeze({ status: "cancelled" as const });
         }
-        let published: SystemArchivePublishedArtifact;
-        if (options.publisher) {
-          const source = await artifactSource(local);
-          published = await options.publisher.publishSystemArchive({
-            ownerUserId: input.manifest.sourceOwner.sourceId,
-            contentFingerprint: input.contentFingerprint,
-            byteLength: local.byteLength,
-            sha256: local.sha256,
-            source,
-          });
-          if (published.contentFingerprint !== input.contentFingerprint) {
-            throw archiveFailure("archive-export-inconsistent", "Durable System Archive publication changed its fingerprint.");
-          }
-          await removeArchivePath(options.archiveRoot, local.relativePath);
-        } else {
-          published = Object.freeze({
-            relativePath: local.relativePath,
-            absolutePath: local.absolutePath,
-            byteLength: local.byteLength,
-            sha256: local.sha256,
-            contentFingerprint: local.contentFingerprint,
-          });
-        }
+        const persisted = await options.publisher.publishSystemArchive({
+          ownerUserId: input.manifest.sourceOwner.sourceId,
+          contentFingerprint: input.contentFingerprint,
+          byteLength: finalArchive.byteLength,
+          sha256: finalArchive.sha256,
+          source: finalArchive.open(),
+        });
         state = "published";
-        // Durable portable staging retains cleanup authority for restart
-        // recovery, so a finalized export is never downgraded if immediate
-        // scratch cleanup must be retried by the reaper.
-        await removeSpool().catch(() => undefined);
+        const published: SystemArchivePublishedArtifact = Object.freeze({
+          ...persisted,
+          contentFingerprint: input.contentFingerprint,
+        });
+        // The application links the finalized artifact to the durable job
+        // before asking cleanupPublishedStaging() to release scratch authority.
         return Object.freeze({ status: "published" as const, artifact: published });
       } catch (error) {
-        if (local && options.publisher) {
-          await removeArchivePath(options.archiveRoot, local.relativePath).catch(() => undefined);
+        if (state !== "published") {
+          state = "aborted";
+          await removeSpool().catch(() => undefined);
         }
-        state = "aborted";
-        await removeSpool().catch(() => undefined);
         throw error;
       }
+    },
+
+    async cleanupPublishedStaging() {
+      if (state !== "published") return;
+      await removeSpool();
     },
 
     async abort() {
       if (state !== "open") return;
       state = "aborted";
-      await removeSpool();
+      await removeSpool().catch(() => undefined);
     },
 
     async unpublishedArtifactCount() {
-      return state === "open" ? entries.length : 0;
+      return state === "open" ? stagedForCleanup.size : 0;
     },
   };
   return Object.freeze(writer);
@@ -575,8 +570,8 @@ export function createSystemArchiveOriginalAssetReader(
 
 export type SystemArchiveCompositionOptions = Readonly<{
   pool: DatabasePool;
-  archiveRoot: string;
   limits: ArchiveLimits;
+  artifactTtlSeconds: number;
   originals: SystemArchiveOriginalAssetReaderPort;
   storage: Pick<SecureFilesystemAdapter,
     "stagePortableScratch" | "openStagedInputSession" | "discardPortableStagedInput">;
@@ -593,9 +588,12 @@ export function createSystemArchiveComposition(options: SystemArchiveComposition
   return Object.freeze({
     async runSystemExport(job) {
       const writer = await createFilesystemSystemArchiveWriter({
-        archiveRoot: options.archiveRoot,
         limits: options.limits,
-        staging: createPrivateSystemArchiveStaging(options.storage, { leaseOwner: job.leaseOwner }),
+        staging: createPrivateSystemArchiveStaging(options.storage, {
+          leaseOwner: job.leaseOwner,
+          artifactTtlSeconds: options.artifactTtlSeconds,
+          ...(options.now === undefined ? {} : { now: options.now }),
+        }),
         publisher: options.publisher,
         ...(options.now === undefined ? {} : { now: options.now }),
       });

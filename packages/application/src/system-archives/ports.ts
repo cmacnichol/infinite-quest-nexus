@@ -98,6 +98,8 @@ export interface SystemArchiveWriterPort {
     contentFingerprint: string;
     cancellationRequested(): Promise<boolean>;
   }>): Promise<SystemArchivePublicationResult>;
+  /** Best-effort release after the durable artifact has been linked to its job. */
+  cleanupPublishedStaging(): Promise<void>;
   abort(): Promise<void>;
 }
 

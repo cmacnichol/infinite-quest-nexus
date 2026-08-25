@@ -73,6 +73,8 @@ function payload(path: string, digit: string): SystemArchiveWrittenPayload {
 function dependencies(input: Readonly<{
   cancellationChecks?: readonly boolean[];
   checkCancellationInsidePublish?: boolean;
+  publishedCleanupError?: Error;
+  abortError?: Error;
   originalReader?: SystemArchiveExportDependencies["originals"];
 }> = {}) {
   let snapshotOpen = false;
@@ -145,8 +147,13 @@ function dependencies(input: Readonly<{
         artifact: { ...published, contentFingerprint: inputValue.contentFingerprint },
       };
     },
+    async cleanupPublishedStaging() {
+      events.push("cleanup-published-staging");
+      if (input.publishedCleanupError) throw input.publishedCleanupError;
+    },
     abort: vi.fn(async () => {
       events.push("abort");
+      if (input.abortError) throw input.abortError;
     }),
   };
   const jobs: SystemArchiveExportDependencies["jobs"] = {
@@ -154,7 +161,9 @@ function dependencies(input: Readonly<{
       events.push(`phase:${phase}`);
     }),
     cancellationRequested: vi.fn(async () => cancellationChecks.shift() ?? false),
-    markPublished: vi.fn(async () => undefined),
+    markPublished: vi.fn(async () => {
+      events.push("mark-published");
+    }),
     markCancelled: vi.fn(async () => undefined),
     markFailed: vi.fn(async () => undefined),
   };
@@ -197,7 +206,9 @@ describe("System Archive export use case", () => {
       .toEqual([...SYSTEM_ARCHIVE_DOMAINS]);
     expect(fixture.events.indexOf("write-original:3"))
       .toBeGreaterThan(fixture.events.indexOf("write-domain:activity-events:0"));
-    expect(fixture.events.at(-1)).toBe("publish");
+    expect(fixture.events.slice(-3)).toEqual([
+      "publish", "mark-published", "cleanup-published-staging"
+    ]);
     expect(fixture.jobs.markPublished).toHaveBeenCalledOnce();
     expect(fixture.writer.abort).not.toHaveBeenCalled();
   });
@@ -227,6 +238,35 @@ describe("System Archive export use case", () => {
     expect(fixture.jobs.markCancelled).toHaveBeenCalledWith(job);
     expect(fixture.jobs.markPublished).not.toHaveBeenCalled();
     expect(fixture.jobs.markFailed).not.toHaveBeenCalled();
+  });
+
+  it("keeps accepted cancellation cancelled when durable scratch cleanup must retry", async () => {
+    const fixture = dependencies({
+      cancellationChecks: [true],
+      abortError: new Error("durable cleanup retry pending"),
+    });
+
+    await expect(runSystemExport(job, fixture.value)).resolves.toEqual({ status: "cancelled" });
+
+    expect(fixture.writer.abort).toHaveBeenCalledOnce();
+    expect(fixture.jobs.markCancelled).toHaveBeenCalledOnce();
+    expect(fixture.jobs.markFailed).not.toHaveBeenCalled();
+  });
+
+  it("keeps a finalized publication linked when post-finalization cleanup must retry", async () => {
+    const fixture = dependencies({
+      publishedCleanupError: new Error("durable cleanup retry pending"),
+    });
+
+    const result = await runSystemExport(job, fixture.value);
+
+    expect(result.status).toBe("published");
+    expect(fixture.events.slice(-3)).toEqual([
+      "publish", "mark-published", "cleanup-published-staging"
+    ]);
+    expect(fixture.jobs.markPublished).toHaveBeenCalledOnce();
+    expect(fixture.jobs.markFailed).not.toHaveBeenCalled();
+    expect(fixture.writer.abort).not.toHaveBeenCalled();
   });
 
   it("aborts and marks the durable job failed when an original is missing", async () => {

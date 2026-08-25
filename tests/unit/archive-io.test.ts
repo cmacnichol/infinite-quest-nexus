@@ -22,6 +22,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Open } from "unzipper";
 import {
   ArchiveError,
+  createArchiveArtifactSource,
   createArchiveStagingDirectory,
   inspectArchive,
   readVerifiedEntry,
@@ -1183,6 +1184,34 @@ describe("bounded manifest and entry verification", () => {
 });
 
 describe("archive artifact writing and cleanup", () => {
+  it("streams a validated System ZIP without publishing an unmanaged artifact path", async () => {
+    const data = Buffer.from('{"system":true}', "utf8");
+    const chunks: Buffer[] = [];
+    const source = createArchiveArtifactSource(
+      [{ path: "system.json", logicalType: "system", mediaType: "application/json", source: Readable.from(data) }],
+      (entries) => systemArchiveManifestSchema.parse({
+        ...systemManifest(entries),
+        sourceInstallationId: "55555555-5555-4555-8555-555555555555",
+        sourceOwnerCount: 1,
+        sourceOwner: {
+          sourceId: "11111111-1111-4111-8111-111111111111",
+          displayName: "Archive owner"
+        }
+      }),
+      DEFAULT_LIMITS,
+      (value) => systemArchiveManifestSchema.parse(value)
+    );
+
+    for await (const chunk of source) chunks.push(Buffer.from(chunk));
+    const directory = await Open.buffer(Buffer.concat(chunks));
+
+    expect(directory.files.map((file) => file.path)).toEqual(["system.json", "manifest.json"]);
+    expect(JSON.parse((await directory.files.at(-1)!.buffer()).toString("utf8"))).toMatchObject({
+      archiveType: "system",
+      sourceOwnerCount: 1,
+    });
+  });
+
   it("streams caller-ordered entries, appends manifest last, and atomically publishes the ZIP", async () => {
     const root = await temporaryRoot();
     const first = Buffer.from('{"first":true}');

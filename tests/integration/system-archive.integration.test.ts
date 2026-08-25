@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import JSZip from "jszip";
@@ -25,6 +25,7 @@ import {
 import {
   createPrivateSystemArchiveStaging,
   createFilesystemSystemArchiveWriter,
+  type SystemArchiveArtifactPublisherPort,
   type SystemArchiveStagingPort,
 } from "../../services/runtime/src/system-archive-composition.js";
 import { createAssetImportStorageComposition } from "../../services/runtime/src/asset-import-composition.js";
@@ -64,8 +65,11 @@ function fakeJobs(): SystemArchiveExportDependencies["jobs"] {
   };
 }
 
-function memoryStaging(): SystemArchiveStagingPort & Readonly<{ activeEntryCount(): number }> {
+function memoryStaging(options: Readonly<{
+  cleanupFailures?: number;
+}> = {}): SystemArchiveStagingPort & Readonly<{ activeEntryCount(): number }> {
   const active = new Set<object>();
+  let cleanupFailures = options.cleanupFailures ?? 0;
   return Object.freeze({
     async stage(input: Parameters<SystemArchiveStagingPort["stage"]>[0]) {
       const chunks: Buffer[] = [];
@@ -86,6 +90,10 @@ function memoryStaging(): SystemArchiveStagingPort & Readonly<{ activeEntryCount
           return ReadableStreamFrom([bytes]);
         },
         async cleanup() {
+          if (cleanupFailures > 0) {
+            cleanupFailures -= 1;
+            throw new Error("forced durable scratch cleanup deferral");
+          }
           active.delete(identity);
         },
       });
@@ -96,11 +104,44 @@ function memoryStaging(): SystemArchiveStagingPort & Readonly<{ activeEntryCount
   });
 }
 
-async function archiveText(absolutePath: string): Promise<Readonly<{
+function memoryPublisher(): Readonly<{
+  publisher: SystemArchiveArtifactPublisherPort;
+  read(relativePath: string): Buffer;
+}> {
+  const artifacts = new Map<string, Buffer>();
+  return Object.freeze({
+    publisher: Object.freeze({
+      async publishSystemArchive(input: Parameters<SystemArchiveArtifactPublisherPort["publishSystemArchive"]>[0]) {
+        const chunks: Buffer[] = [];
+        for await (const chunk of input.source) chunks.push(Buffer.from(chunk));
+        const bytes = Buffer.concat(chunks);
+        if (bytes.byteLength !== input.byteLength || sha256(bytes) !== input.sha256) {
+          throw new Error("memory_publication_identity_mismatch");
+        }
+        const artifactId = randomUUID();
+        const relativePath = `memory-system-archives/${artifactId}.zip`;
+        artifacts.set(relativePath, bytes);
+        return Object.freeze({
+          artifactId,
+          relativePath,
+          byteLength: bytes.byteLength,
+          sha256: input.sha256,
+        });
+      },
+    }),
+    read(relativePath: string) {
+      const artifact = artifacts.get(relativePath);
+      if (!artifact) throw new Error("memory_system_archive_missing");
+      return artifact;
+    },
+  });
+}
+
+async function archiveText(bytes: Buffer): Promise<Readonly<{
   zip: JSZip;
   serialized: string;
 }>> {
-  const zip = await JSZip.loadAsync(await readFile(absolutePath));
+  const zip = await JSZip.loadAsync(bytes);
   const portableEntries = Object.values(zip.files)
     .filter((entry) => !entry.dir && (entry.name.endsWith(".json") || entry.name.endsWith(".ndjson")))
     .sort((left, right) => left.name.localeCompare(right.name));
@@ -375,7 +416,12 @@ integration("deterministic owner-wide System Archive export", () => {
 
   async function exportArchive() {
     const snapshots = createPostgresSystemArchiveExportRepository(pool, { pageSize: 2 });
-    const writer = await createFilesystemSystemArchiveWriter({ archiveRoot, limits, staging: memoryStaging() });
+    const publication = memoryPublisher();
+    const writer = await createFilesystemSystemArchiveWriter({
+      limits,
+      staging: memoryStaging(),
+      publisher: publication.publisher,
+    });
     const result = await runSystemExport(job(ownerUserId), {
       snapshots,
       originals: originalsReader(),
@@ -383,7 +429,7 @@ integration("deterministic owner-wide System Archive export", () => {
       jobs: fakeJobs(),
     });
     if (result.status !== "published") throw new Error("Expected a published System Archive fixture.");
-    return { result, writer };
+    return { result, writer, bytes: publication.read(result.artifact.relativePath) };
   }
 
   it("exports exhaustive logical authority, all retained originals, and no excluded state", async () => {
@@ -395,7 +441,7 @@ integration("deterministic owner-wide System Archive export", () => {
     expect(first.result.report.excludedOperationalWork.chronicle).toBeGreaterThan(0);
     expect(first.result.artifact.contentFingerprint).toBe(second.result.artifact.contentFingerprint);
 
-    const { zip, serialized } = await archiveText(first.result.artifact.absolutePath!);
+    const { zip, serialized } = await archiveText(first.bytes);
     const manifest = systemArchiveManifestSchema.parse(
       JSON.parse(await zip.file("manifest.json")!.async("string")),
     );
@@ -529,7 +575,11 @@ integration("deterministic owner-wide System Archive export", () => {
     ["changed", "archive-asset-invalid"],
   ] as const)("prevents publication when an inventoried original is %s", async (failure, code) => {
     const staging = memoryStaging();
-    const writer = await createFilesystemSystemArchiveWriter({ archiveRoot, limits, staging });
+    const writer = await createFilesystemSystemArchiveWriter({
+      limits,
+      staging,
+      publisher: memoryPublisher().publisher,
+    });
     const jobs = fakeJobs();
     const before = await writer.unpublishedArtifactCount();
     const reader: SystemArchiveExportDependencies["originals"] = {
@@ -555,17 +605,22 @@ integration("deterministic owner-wide System Archive export", () => {
   });
 
   it("never removes an atomically published archive when abort is called afterward", async () => {
-    const { result, writer } = await exportArchive();
+    const { result, writer, bytes } = await exportArchive();
 
     await writer.abort();
 
-    await expect(stat(result.artifact.absolutePath!)).resolves.toMatchObject({ isFile: expect.any(Function) });
+    expect(result.status).toBe("published");
+    expect(bytes.subarray(0, 2).toString("ascii")).toBe("PK");
   });
 
   it("never writes System Archive spool data into the operating-system temp directory", async () => {
     const before = new Set((await readdir(tmpdir())).filter((name) => name.startsWith("infinitequest-system-export-")));
     const staging = memoryStaging();
-    const writer = await createFilesystemSystemArchiveWriter({ archiveRoot, limits, staging });
+    const writer = await createFilesystemSystemArchiveWriter({
+      limits,
+      staging,
+      publisher: memoryPublisher().publisher,
+    });
     try {
       await writer.writeSystemMetadata({
         sourceId: ownerUserId,
@@ -587,7 +642,6 @@ integration("deterministic owner-wide System Archive export", () => {
       throw new Error("durable publisher must not be called after cancellation wins");
     });
     const writer = await createFilesystemSystemArchiveWriter({
-      archiveRoot,
       limits,
       staging,
       publisher: { publishSystemArchive },
@@ -601,7 +655,6 @@ integration("deterministic owner-wide System Archive export", () => {
       payloadHashes: [metadata.sha256],
       originalAssetHashes: [],
     });
-    const before = (await readdir(join(archiveRoot, "artifacts"))).sort();
     let checks = 0;
 
     await expect(writer.publish({
@@ -626,7 +679,49 @@ integration("deterministic owner-wide System Archive export", () => {
     expect(checks).toBe(2);
     expect(publishSystemArchive).not.toHaveBeenCalled();
     expect(staging.activeEntryCount()).toBe(0);
-    expect((await readdir(join(archiveRoot, "artifacts"))).sort()).toEqual(before);
+    await expect(stat(join(archiveRoot, "artifacts"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("accepts pre-publication cancellation when durable scratch cleanup must be retried", async () => {
+    const staging = memoryStaging({ cleanupFailures: 1 });
+    const writer = await createFilesystemSystemArchiveWriter({
+      limits,
+      staging,
+      publisher: {
+        async publishSystemArchive() {
+          throw new Error("durable publisher must not run after cancellation");
+        },
+      },
+    });
+    const metadata = await writer.writeSystemMetadata({
+      sourceId: ownerUserId,
+      sourceInstallationId: ownerUserId,
+      displayName: "Initial Owner",
+    });
+    const contentFingerprint = await writer.calculateContentFingerprint({
+      payloadHashes: [metadata.sha256],
+      originalAssetHashes: [],
+    });
+
+    await expect(writer.publish({
+      manifest: {
+        sourceInstallationId: ownerUserId,
+        sourceOwnerCount: 1,
+        sourceOwner: {
+          sourceId: ownerUserId,
+          sourceInstallationId: ownerUserId,
+          displayName: "Initial Owner",
+        },
+        domainCounts: Object.fromEntries(
+          SYSTEM_ARCHIVE_DOMAINS.map((domain) => [domain, 0]),
+        ) as Record<(typeof SYSTEM_ARCHIVE_DOMAINS)[number], number>,
+        excludedOperationalWork: {},
+        assets: [],
+      },
+      contentFingerprint,
+      cancellationRequested: async () => true,
+    })).resolves.toEqual({ status: "cancelled" });
+    expect(staging.activeEntryCount()).toBe(1);
   });
 
   it.runIf(supportsSecureGeneratedArchiveStaging())(
@@ -642,10 +737,9 @@ integration("deterministic owner-wide System Archive export", () => {
       const leaseOwner = `system-archive-spool-${randomUUID()}`;
       const staging = createPrivateSystemArchiveStaging(storage.adapter, {
         leaseOwner,
-        expiresAt: () => new Date(Date.now() + 60_000).toISOString(),
+        artifactTtlSeconds: 86_400,
       });
       const writer = await createFilesystemSystemArchiveWriter({
-        archiveRoot: privateRoot,
         limits,
         staging,
         publisher: {
@@ -692,7 +786,7 @@ integration("deterministic owner-wide System Archive export", () => {
                ON operation.id=staged.filesystem_operation_id
             WHERE staged.owner_user_id=$1 AND operation.lease_owner=$2`,
           [ownerUserId, leaseOwner],
-        )).resolves.toMatchObject({ rows: [{ status: "cleaned" }] });
+        )).resolves.toMatchObject({ rows: [{ status: "cleaned" }, { status: "cleaned" }] });
         expect(await readdir(join(privateRoot, "staging"))).toEqual([]);
         expect(await readdir(join(privateRoot, "artifacts"))).toEqual([]);
       } finally {
@@ -711,7 +805,11 @@ integration("deterministic owner-wide System Archive export", () => {
        RETURNING id`,
       [ownerUserId, sha256("system-archive-cancel-before-phase"), leaseOwner],
     );
-    const writer = await createFilesystemSystemArchiveWriter({ archiveRoot, limits, staging: memoryStaging() });
+    const writer = await createFilesystemSystemArchiveWriter({
+      limits,
+      staging: memoryStaging(),
+      publisher: memoryPublisher().publisher,
+    });
 
     await expect(runSystemExport({
       id: inserted.rows[0]!.id,

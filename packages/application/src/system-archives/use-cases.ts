@@ -97,7 +97,9 @@ async function cancelIfRequested(
   dependencies: SystemArchiveExportDependencies,
 ): Promise<boolean> {
   if (!(await dependencies.jobs.cancellationRequested(job))) return false;
-  await dependencies.writer.abort();
+  // Durable staging owns deferred/restart cleanup. Once cancellation is
+  // accepted, a transient cleanup failure cannot change the job outcome.
+  await dependencies.writer.abort().catch(() => undefined);
   await dependencies.jobs.markCancelled(job);
   return true;
 }
@@ -213,10 +215,13 @@ export async function runSystemExport(
       excludedOperationalWork: Object.freeze({ ...captured.excludedOperationalWork }),
     });
     await dependencies.jobs.markPublished(job, artifact, report);
+    await dependencies.writer.cleanupPublishedStaging().catch(() => undefined);
     return { status: "published", artifact, report };
   } catch (error) {
     await dependencies.writer.abort().catch(() => undefined);
-    await dependencies.jobs.markFailed(job, errorCode(error)).catch(() => undefined);
+    if (!published) {
+      await dependencies.jobs.markFailed(job, errorCode(error)).catch(() => undefined);
+    }
     throw Object.assign(error instanceof Error ? error : new Error("System Archive export failed."), {
       code: errorCode(error),
       published,

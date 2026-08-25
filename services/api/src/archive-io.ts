@@ -16,7 +16,7 @@ import {
   type FileHandle
 } from "node:fs/promises";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
-import { Readable, Transform, Writable, type TransformCallback } from "node:stream";
+import { PassThrough, Readable, Transform, Writable, type TransformCallback } from "node:stream";
 import { finished, pipeline } from "node:stream/promises";
 import unzipper, { type File as ZipFile } from "unzipper";
 import {
@@ -1587,6 +1587,160 @@ async function hashFileHandle(handle: FileHandle, expectedSize: number): Promise
     throw archiveError("archive-export-inconsistent", "The archive artifact grew before publication.");
   }
   return hash.digest("hex");
+}
+
+async function writeArchiveArtifactStream(
+  output: Writable,
+  entries: readonly ArchiveArtifactEntry[],
+  buildManifest: (entries: readonly ArchiveEntry[]) => ArchiveManifest,
+  limits: ArchiveLimits | undefined,
+  parseBuiltManifest: (value: unknown) => ArchiveManifest,
+): Promise<void> {
+  assertWriterEntries(entries);
+  if (limits && entries.length + 1 > limits.maxEntries) {
+    throw archiveError("archive-limit-exceeded", "The archive contains too many entries.");
+  }
+  let archive: Archiver | undefined;
+  let activeSource: Readable | undefined;
+  let activeTransform: Transform | undefined;
+  const outputCompleted = finished(output);
+  const outputFailed = new Promise<never>((_resolve, reject) => {
+    output.once("error", (error) => {
+      activeSource?.destroy(error);
+      activeTransform?.destroy(error);
+      archive?.abort();
+      reject(error);
+    });
+  });
+  void outputFailed.catch(() => undefined);
+  try {
+    archive = new ZipArchive({ forceLocalTime: false, zlib: { level: 9 } });
+    archive.on("warning", (error) => output.destroy(error));
+    archive.on("error", (error) => output.destroy(error));
+    archive.pipe(output);
+
+    const measuredEntries: ArchiveEntry[] = [];
+    let uncompressedBytes = 0;
+    for (const entry of entries) {
+      const normalized = normalizeArchivePath(entry.path);
+      const mediaType = entry.mediaType.toLocaleLowerCase("en-US");
+      const jsonEntry = mediaType === "application/json"
+        || mediaType === "application/x-ndjson"
+        || mediaType.endsWith("+json")
+        || normalized.logicalPath.toLocaleLowerCase("en-US").endsWith(".json")
+        || normalized.logicalPath.toLocaleLowerCase("en-US").endsWith(".ndjson");
+      const entryMaximum = limits
+        ? Math.min(
+          limits.maxUncompressedBytes,
+          ...(jsonEntry ? [limits.maxJsonEntryBytes] : []),
+          ...(mediaType.startsWith("image/") ? [limits.maxOriginalImageBytes] : [])
+        )
+        : Number.MAX_SAFE_INTEGER;
+      const measured = measuringTransform(entryMaximum, (byteLength) => {
+        const nextTotal = uncompressedBytes + byteLength;
+        if (!Number.isSafeInteger(nextTotal)
+          || (limits !== undefined && nextTotal > limits.maxUncompressedBytes)) {
+          throw archiveError("archive-limit-exceeded", "The archive exceeds the configured uncompressed byte limit.");
+        }
+        uncompressedBytes = nextTotal;
+      });
+      archive.append(measured.transform, {
+        name: normalized.logicalPath,
+        date: FIXED_ZIP_DATE,
+        mode: 0o100640,
+      });
+      activeSource = entry.source as Readable;
+      activeTransform = measured.transform;
+      const entryPipeline = pipeline(activeSource, activeTransform);
+      try {
+        await Promise.race([entryPipeline, outputFailed]);
+      } catch (error) {
+        measured.transform.destroy();
+        (entry.source as Readable).destroy?.();
+        await entryPipeline.catch(() => undefined);
+        throw error;
+      }
+      activeSource = undefined;
+      activeTransform = undefined;
+      const measurement = measured.measurement();
+      measuredEntries.push({
+        path: normalized.logicalPath,
+        logicalType: entry.logicalType,
+        mediaType: entry.mediaType,
+        ...measurement,
+      });
+    }
+
+    const manifest = parseBuiltManifest(buildManifest(measuredEntries));
+    archiveManifestSchema.parse({
+      format: manifest.format,
+      formatVersion: manifest.formatVersion,
+      archiveType: manifest.archiveType,
+      createdAt: manifest.createdAt,
+      contentFingerprint: manifest.contentFingerprint,
+      campaignId: manifest.campaignId,
+      worldId: manifest.worldId,
+      worldVersionId: manifest.worldVersionId,
+      entries: manifest.entries,
+      payloads: manifest.payloads,
+      assets: manifest.assets,
+    });
+    if (canonicalArchiveJson(manifest.entries) !== canonicalArchiveJson(measuredEntries)) {
+      throw archiveError("archive-export-inconsistent", "The archive manifest entries do not match the streamed artifact entries.");
+    }
+    const manifestBytes = Buffer.from(canonicalArchiveJson(manifest), "utf8");
+    if (limits && manifestBytes.byteLength > limits.maxManifestBytes) {
+      throw archiveError("archive-limit-exceeded", "manifest.json exceeds the configured byte limit.");
+    }
+    if (limits && (!Number.isSafeInteger(uncompressedBytes + manifestBytes.byteLength)
+      || uncompressedBytes + manifestBytes.byteLength > limits.maxUncompressedBytes)) {
+      throw archiveError("archive-limit-exceeded", "The archive exceeds the configured uncompressed byte limit.");
+    }
+    archive.append(manifestBytes, {
+      name: "manifest.json",
+      date: FIXED_ZIP_DATE,
+      mode: 0o100640,
+      store: true,
+    });
+    await archive.finalize();
+    await outputCompleted;
+  } catch (error) {
+    activeSource?.destroy();
+    activeTransform?.destroy();
+    archive?.unpipe(output);
+    archive?.abort();
+    output.destroy(error instanceof Error ? error : undefined);
+    await outputCompleted.catch(() => undefined);
+    if (error instanceof ArchiveError && error.code === "archive-limit-exceeded") throw error;
+    if (error instanceof ArchiveError) throw error;
+    throw archiveError("archive-export-inconsistent", "The archive artifact could not be completed.");
+  }
+}
+
+/**
+ * Produces a deterministic validated ZIP stream without creating an unmanaged
+ * filesystem artifact. The caller supplies the durable bounded sink.
+ */
+export function createArchiveArtifactSource(
+  entries: readonly ArchiveArtifactEntry[],
+  buildManifest: (entries: readonly ArchiveEntry[]) => ArchiveManifest,
+  limits?: ArchiveLimits,
+  parseBuiltManifest: (value: unknown) => ArchiveManifest = (value) => archiveManifestSchema.parse(value),
+): AsyncIterable<Uint8Array> {
+  return {
+    async *[Symbol.asyncIterator]() {
+      const output = new PassThrough({ highWaterMark: 64 * 1024 });
+      const writing = writeArchiveArtifactStream(output, entries, buildManifest, limits, parseBuiltManifest);
+      void writing.catch(() => undefined);
+      try {
+        for await (const chunk of output) yield new Uint8Array(chunk);
+        await writing;
+      } finally {
+        if (!output.destroyed) output.destroy();
+        await writing.catch(() => undefined);
+      }
+    },
+  };
 }
 
 export async function writeArchiveArtifact(
