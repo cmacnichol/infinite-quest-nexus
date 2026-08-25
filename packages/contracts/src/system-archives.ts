@@ -77,8 +77,45 @@ const systemRpgStatSchema = z.object({
 const systemDefaultTriggerSchema = z.object({
   id: identifierSchema,
   name: identifierSchema,
-  condition: shortTextSchema,
-  effect: shortTextSchema
+  value: z.string().max(10_000),
+  rules: z.string().max(4_000)
+}).strict();
+
+const characterProfileTextSchema = z.string().trim().max(20_000);
+const characterProfileShortTextSchema = z.string().trim().max(2_000);
+
+const systemCharacterProfileSchema = z.object({
+  identity: z.object({
+    aliases: z.array(boundedStringSchema(200)).max(20),
+    pronouns: characterProfileShortTextSchema
+  }).strict(),
+  story: z.object({
+    role: characterProfileTextSchema,
+    background: characterProfileTextSchema,
+    personality: characterProfileTextSchema,
+    motivations: characterProfileTextSchema,
+    goals: characterProfileTextSchema,
+    fearsAndConflicts: characterProfileTextSchema,
+    keyRelationships: characterProfileTextSchema,
+    narrativeHooks: characterProfileTextSchema,
+    voiceAndMannerisms: characterProfileTextSchema,
+    otherGuidance: characterProfileTextSchema
+  }).strict(),
+  appearance: z.object({
+    ancestryOrSpecies: characterProfileShortTextSchema,
+    apparentAge: characterProfileShortTextSchema,
+    genderPresentation: characterProfileShortTextSchema,
+    build: characterProfileShortTextSchema,
+    skinOrComplexion: characterProfileShortTextSchema,
+    face: characterProfileTextSchema,
+    eyes: characterProfileShortTextSchema,
+    hair: characterProfileTextSchema,
+    distinguishingFeatures: z.array(boundedStringSchema(2_000)).max(50),
+    clothing: characterProfileTextSchema,
+    equipmentAndAccessories: characterProfileTextSchema,
+    otherVisualDetails: characterProfileTextSchema
+  }).strict(),
+  unclassifiedNotes: z.string().max(200_000)
 }).strict();
 
 const systemEventTriggerSchema = z.object({
@@ -120,6 +157,7 @@ const systemWorldContentSchema = z.object({
     id: identifierSchema,
     name: identifierSchema,
     characterText: longTextSchema,
+    profile: systemCharacterProfileSchema.optional(),
     rpgStats: z.array(systemRpgStatSchema).max(10_000),
     defaultTriggers: z.array(systemDefaultTriggerSchema).max(10_000)
   }).strict()).max(1_000),

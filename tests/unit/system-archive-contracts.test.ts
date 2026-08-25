@@ -45,6 +45,40 @@ const validCampaignRecord = {
   updatedAt: "2026-08-25T12:00:00.000Z"
 };
 
+const validCharacterProfile = {
+  identity: {
+    aliases: ["The Star Reader"],
+    pronouns: "she/her"
+  },
+  story: {
+    role: "Scholar of impossible skies",
+    background: "Nia learned to read the observatory's forgotten instruments.",
+    personality: "Patient and determined.",
+    motivations: "Restore the observatory's purpose.",
+    goals: "Translate its final star chart.",
+    fearsAndConflicts: "Fears waking what the observatory watches.",
+    keyRelationships: "Trusts the valley archivist.",
+    narrativeHooks: "Carries a lens cut from fallen starlight.",
+    voiceAndMannerisms: "Speaks precisely and sketches while thinking.",
+    otherGuidance: "Protects discoveries from reckless use."
+  },
+  appearance: {
+    ancestryOrSpecies: "Human",
+    apparentAge: "32",
+    genderPresentation: "Woman",
+    build: "Lean",
+    skinOrComplexion: "Warm brown",
+    face: "Angular features",
+    eyes: "Dark amber",
+    hair: "Black curls pinned with brass clips",
+    distinguishingFeatures: ["Star-shaped scar on her left palm"],
+    clothing: "Ink-stained indigo coat",
+    equipmentAndAccessories: "Brass astrolabe and field journal",
+    otherVisualDetails: "Silver dust gathers at her cuffs."
+  },
+  unclassifiedNotes: "Refuses to abandon an unfinished question."
+};
+
 const validWorldContent = {
   schemaVersion: 5,
   world: {
@@ -56,11 +90,18 @@ const validWorldContent = {
     firstAction: "Enter the observatory.",
     rules: "Magic has consequences."
   },
-  playableCharacters: [{ id: "scholar", name: "Nia", characterText: "A determined scholar.", rpgStats: [], defaultTriggers: [] }],
+  playableCharacters: [{
+    id: "scholar",
+    name: "Nia",
+    characterText: "A determined scholar.",
+    profile: validCharacterProfile,
+    rpgStats: [],
+    defaultTriggers: [{ id: "scholar-lens", name: "Star lens", value: "Clouded", rules: "Update when Nia deciphers a star chart." }]
+  }],
   entities: [{ id: "observatory", name: "The Observatory", kind: "location", description: "A moonlit tower.", tags: ["ruin"], facts: [{ key: "door", value: "sealed" }] }],
   relationships: [{ id: "observatory-valley", fromEntityId: "observatory", toEntityId: "valley", kind: "overlooks", description: "The tower overlooks the valley." }],
   rpgStats: [{ id: "resolve", name: "Resolve", value: 4, note: "Stand against fear." }],
-  defaultTriggers: [{ id: "arrival", name: "Arrival", condition: "Enter a location", effect: "Describe the scene." }],
+  defaultTriggers: [{ id: "arrival", name: "Arrival", value: "Awaiting entry", rules: "Update when the party enters a new location." }],
   eventTriggers: [{ id: "bell", label: "Bell toll", timing: "after", condition: "The bell rings", effect: "Advance the mystery.", addTextAfter: false, triggeredCount: 0, lastTriggeredTurn: null, lastTriggeredAt: null }],
   assets: [{ assetId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", role: "world_cover" }],
   defaults: { selectedCharacterId: "scholar", initialLocation: "The Observatory" }
@@ -73,7 +114,7 @@ const validCampaignState = {
   scratchpad: "Watch the bell.",
   trackers: [{ id: "danger", name: "Danger", value: "2", rules: "Increase after loud noise." }],
   rpgStats: [{ id: "resolve", name: "Resolve", value: 4, note: "Stand against fear." }],
-  defaultTriggers: [{ id: "arrival", name: "Arrival", condition: "Enter a location", effect: "Describe the scene." }],
+  defaultTriggers: [{ id: "arrival", name: "Arrival", value: "Entered observatory", rules: "Update when the party enters a new location." }],
   eventTriggers: [{ id: "bell", label: "Bell toll", timing: "after", condition: "The bell rings", effect: "Advance the mystery.", addTextAfter: false, triggeredCount: 0, lastTriggeredTurn: null, lastTriggeredAt: null }],
   pendingEventTriggers: [{ id: "bell-pending", sourceTriggerId: "bell", name: "Bell toll", timing: "after", condition: "", effect: "", instructions: "Advance the mystery.", reason: "Awaiting narration.", sourceTurn: 4 }]
 };
@@ -142,9 +183,25 @@ describe("System Archive contracts", () => {
   it("round-trips complete logical world and campaign-state authority", () => {
     const parsed = systemArchivePayloadSchema.parse(validPayload);
     expect(parsed.sourceOwnerCount).toBe(1);
-    expect(parsed.records[3]).toMatchObject({ record: { content: { world: { title: "The Observatory" }, entities: [{ id: "observatory" }] } } });
-    expect(parsed.records[4]).toMatchObject({ record: { content: { playableCharacters: [{ id: "scholar" }] } } });
-    expect(parsed.records[5]).toMatchObject({ record: { state: { trackers: [{ id: "danger", value: "2" }], canonicalFacts: [{ content: "The observatory door is sealed." }] } } });
+    expect(parsed.records[3]).toMatchObject({ record: { content: {
+      world: { title: "The Observatory" },
+      playableCharacters: [{
+        id: "scholar",
+        profile: {
+          story: { motivations: "Restore the observatory's purpose." },
+          appearance: { distinguishingFeatures: ["Star-shaped scar on her left palm"] }
+        },
+        defaultTriggers: [{ id: "scholar-lens", value: "Clouded", rules: "Update when Nia deciphers a star chart." }]
+      }],
+      entities: [{ id: "observatory" }],
+      defaultTriggers: [{ id: "arrival", value: "Awaiting entry", rules: "Update when the party enters a new location." }]
+    } } });
+    expect(parsed.records[4]).toMatchObject({ record: { content: { playableCharacters: [{ id: "scholar", profile: { identity: { pronouns: "she/her" } } }] } } });
+    expect(parsed.records[5]).toMatchObject({ record: { state: {
+      trackers: [{ id: "danger", value: "2" }],
+      defaultTriggers: [{ id: "arrival", value: "Entered observatory", rules: "Update when the party enters a new location." }],
+      canonicalFacts: [{ content: "The observatory door is sealed." }]
+    } } });
   });
 
   it.each([
@@ -165,10 +222,21 @@ describe("System Archive contracts", () => {
   });
 
   it.each([
-    [3, { ...validPayload.records[3]!.record, content: { ...validWorldContent, assetPath: "C:/private/world.json" } }],
-    [4, { ...validPayload.records[4]!.record, content: { ...validWorldContent, providerToken: "secret" } }],
-    [5, { ...validPayload.records[5]!.record, state: { ...validCampaignState, chronicleChunk: "derived" } }]
-  ])("rejects excluded authority field at record %i", (recordIndex, record) => {
+    ["world asset path", 3, { ...validPayload.records[3]!.record, content: { ...validWorldContent, assetPath: "C:/private/world.json" } }],
+    ["profile provider token", 3, { ...validPayload.records[3]!.record, content: {
+      ...validWorldContent,
+      playableCharacters: [{
+        ...validWorldContent.playableCharacters[0]!,
+        profile: { ...validCharacterProfile, story: { ...validCharacterProfile.story, providerToken: "secret" } }
+      }]
+    } }],
+    ["default-trigger job", 3, { ...validPayload.records[3]!.record, content: {
+      ...validWorldContent,
+      defaultTriggers: [{ ...validWorldContent.defaultTriggers[0]!, generationJob: { status: "queued" } }]
+    } }],
+    ["draft provider token", 4, { ...validPayload.records[4]!.record, content: { ...validWorldContent, providerToken: "secret" } }],
+    ["campaign-state Chronicle chunk", 5, { ...validPayload.records[5]!.record, state: { ...validCampaignState, chronicleChunk: "derived" } }]
+  ])("rejects excluded %s at record %i", (_label, recordIndex, record) => {
     const records = validPayload.records.map((entry, index) => index === recordIndex ? { ...entry, record } : entry);
     expect(systemArchivePayloadSchema.safeParse({ ...validPayload, records }).success).toBe(false);
   });
