@@ -414,7 +414,7 @@ integration("Task 14e3b5 production storage composition (requires Linux descript
     })).resolves.toEqual({ claimed: 1, cleaned: 1, pending: 0 });
   });
 
-  it("fails a stalled staged reader closed after its last durable lease expires and a separate reaper wins", async () => {
+  it("fails a clock-skewed stalled reader closed after its last durable lease expires and a separate reaper wins", async () => {
     const reader = await compose();
     const reaper = await compose();
     const prototypeProbePath = join(archiveRoot, `.b5-read-spy-${crypto.randomUUID()}`);
@@ -477,6 +477,9 @@ integration("Task 14e3b5 production storage composition (requires Linux descript
       limit: 10
     })).resolves.toEqual({ claimed: 1, cleaned: 1, pending: 0 });
 
+    const actualDateNow = Date.now.bind(Date);
+    const laggingNodeClock = vi.spyOn(Date, "now")
+      .mockImplementation(() => actualDateNow() - 60_000);
     const readAfterCleanup = vi.spyOn(fileHandlePrototype, "read");
     const releaseTimer = setTimeout(() => releaseStalledHeartbeat(null), 50);
     try {
@@ -486,6 +489,7 @@ integration("Task 14e3b5 production storage composition (requires Linux descript
       clearTimeout(releaseTimer);
       releaseStalledHeartbeat(null);
       readAfterCleanup.mockRestore();
+      laggingNodeClock.mockRestore();
       await session.finalize("abort").catch(() => undefined);
     }
   });

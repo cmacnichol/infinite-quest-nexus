@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { constants as filesystemConstants } from "node:fs";
 import { lstat, mkdir, open, unlink, type FileHandle } from "node:fs/promises";
 import { isAbsolute } from "node:path";
+import { performance } from "node:perf_hooks";
 import type {
   PrivateBoundedStreamLimits,
   PrivateBoundedStreamSession,
@@ -752,19 +753,28 @@ export async function createSecureFilesystemAdapter(
     let claim = initialClaim;
     let lost = false;
     let stopped = false;
+    let monotonicLeaseDeadlineMilliseconds = Number.NEGATIVE_INFINITY;
     let activeHeartbeat: Promise<void> | undefined;
     let unregister = (): void => undefined;
     const current = (): boolean => !lost
       && !stopped
-      && Date.now() < Date.parse(claim.leaseExpiresAt) - PORTABLE_READ_LEASE_SAFETY_MARGIN_MILLISECONDS;
+      && performance.now() < monotonicLeaseDeadlineMilliseconds;
     const pulse = (): Promise<void> => {
-      activeHeartbeat ??= options.journal!.heartbeatRecoveryClaim(claim, leaseSeconds)
+      if (activeHeartbeat) return activeHeartbeat;
+      // PostgreSQL cannot grant this renewal before the request begins. A
+      // monotonic deadline derived from that lower bound therefore cannot
+      // outlive the database lease even when the host wall clock lags the DB.
+      const requestedAtMilliseconds = performance.now();
+      activeHeartbeat = options.journal!.heartbeatRecoveryClaim(claim, leaseSeconds)
         .then((renewed) => {
           if (!renewed) {
             if (!stopped) lost = true;
             return;
           }
           claim = renewed;
+          monotonicLeaseDeadlineMilliseconds = requestedAtMilliseconds
+            + leaseSeconds * 1_000
+            - PORTABLE_READ_LEASE_SAFETY_MARGIN_MILLISECONDS;
         })
         .catch(() => { if (!stopped) lost = true; })
         .finally(() => { activeHeartbeat = undefined; });
