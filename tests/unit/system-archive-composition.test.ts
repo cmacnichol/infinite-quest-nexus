@@ -114,7 +114,7 @@ describe("System Archive durable writer composition", () => {
     expect(staging.activeCount()).toBe(0);
   });
 
-  it("derives every scratch expiry from the configured System Archive artifact lifetime", async () => {
+  it("derives scratch expiry and a later reopen deadline from the configured artifact lifetime", async () => {
     const stagePortableScratch = vi.fn(async () => ({
       stagedInput: "staged-input" as never,
       operation: {} as never,
@@ -130,6 +130,9 @@ describe("System Archive durable writer composition", () => {
       },
       finalize: vi.fn(async () => undefined),
     }));
+    const now = vi.fn()
+      .mockReturnValueOnce(new Date("2026-08-25T12:00:00.000Z"))
+      .mockReturnValueOnce(new Date("2026-08-25T18:00:00.000Z"));
     const staging = createPrivateSystemArchiveStaging({
       stagePortableScratch,
       openStagedInputSession: openStagedInputSession as never,
@@ -137,7 +140,7 @@ describe("System Archive durable writer composition", () => {
     }, {
       leaseOwner: "system-archive-lifetime-test",
       artifactTtlSeconds: 86_400,
-      now: () => new Date("2026-08-25T12:00:00.000Z"),
+      now,
     });
 
     const staged = await staging.stage({
@@ -154,9 +157,10 @@ describe("System Archive durable writer composition", () => {
     }));
     expect(openStagedInputSession).toHaveBeenCalledWith(expect.objectContaining({
       limits: expect.objectContaining({
-        deadlineAt: "2026-08-26T12:00:00.000Z",
+        deadlineAt: "2026-08-26T18:00:00.000Z",
       }),
     }));
+    expect(now).toHaveBeenCalledTimes(2);
   });
 
   it("cannot reject a finalized artifact because the publisher repeats logical fingerprint metadata", async () => {

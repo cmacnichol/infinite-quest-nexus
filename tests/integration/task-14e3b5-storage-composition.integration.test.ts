@@ -360,6 +360,59 @@ integration("Task 14e3b5 production storage composition (requires Linux descript
       .rejects.toThrow();
   });
 
+  it("holds a durable read lease across initial stage expiry so the reaper cannot close the active stream", async () => {
+    const composition = await compose();
+    const bytes = Buffer.from("active staged system archive bytes");
+    const expiresAt = new Date(Date.now() + 1_500).toISOString();
+    const staged = await composition.adapter.stagePortableScratch({
+      owner: { ownerUserId },
+      operationScopeId: `b5-active-stage:${crypto.randomUUID()}`,
+      leaseOwner: "b5-active-stage-writer",
+      expiresAt,
+      maximumBytes: bytes.byteLength,
+      source: [bytes]
+    });
+    const session = await composition.adapter.openStagedInputSession({
+      owner: { ownerUserId },
+      stagedInput: staged.stagedInput,
+      claim: { leaseOwner: "b5-active-stage-reader", leaseSeconds: 1 },
+      limits: bindPrivateBoundedStreamLimits({
+        maximumBytes: bytes.byteLength,
+        chunkBytes: 1,
+        deadlineAt: new Date(Date.now() + 10_000).toISOString()
+      })
+    });
+    const iterator = session.chunks[Symbol.asyncIterator]();
+    const first = await iterator.next();
+    expect(first).toMatchObject({ done: false });
+
+    await waitForDatabaseExpiry(expiresAt);
+    await expect(composition.adapter.reapExpiredPortable({
+      leaseOwner: "b5-active-stage-reaper",
+      leaseSeconds: 1,
+      limit: 10
+    })).resolves.toEqual({ claimed: 0, cleaned: 0, pending: 0 });
+
+    const read = [Buffer.from(first.value!)];
+    for (;;) {
+      const next = await iterator.next();
+      if (next.done) break;
+      read.push(Buffer.from(next.value));
+    }
+    expect(Buffer.concat(read)).toEqual(bytes);
+
+    const lease = await pool.query<{ lease_expires_at: Date }>(
+      "SELECT lease_expires_at FROM durable_filesystem_operations WHERE id=$1",
+      [staged.operation.operationId],
+    );
+    await waitForDatabaseExpiry(lease.rows[0]!.lease_expires_at.toISOString());
+    await expect(composition.adapter.reapExpiredPortable({
+      leaseOwner: "b5-finished-stage-reaper",
+      leaseSeconds: 1,
+      limit: 10
+    })).resolves.toEqual({ claimed: 1, cleaned: 1, pending: 0 });
+  });
+
   it("persists exact export scope/content type and closes every terminal path with one cleanup", async () => {
     const composition = await compose();
     const terminals = ["eof", "close", "abort"] as const;

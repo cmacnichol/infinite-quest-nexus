@@ -393,6 +393,7 @@ export function createPostgresSecureStorageRepository(
               OR
               (operation.lifecycle IN ('attached','finalized')
                 AND COALESCE(staged.id,artifact.id) IS NOT NULL
+                AND operation.lease_expires_at <= clock_timestamp()
                 AND (operation.expires_at <= clock_timestamp()
                   OR COALESCE(staged.expires_at,artifact.expires_at) <= clock_timestamp()))
               OR
@@ -437,6 +438,7 @@ export function createPostgresSecureStorageRepository(
         const reservedPartial = candidate.lifecycle === "reserved"
           && (candidate.expires_at <= currentTime || candidate.lease_expires_at <= currentTime);
         const pairedExpired = portable !== null
+          && candidate.lease_expires_at <= currentTime
           && (candidate.expires_at <= currentTime || portable.expires_at <= currentTime);
         const pendingExpired = candidate.lifecycle === "cleanup_pending"
           && candidate.lease_expires_at <= currentTime;

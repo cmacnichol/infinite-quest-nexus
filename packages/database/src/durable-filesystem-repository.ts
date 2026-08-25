@@ -812,7 +812,7 @@ export function createPostgresDurableFilesystemRepository(
         WHERE operation.id=$1 AND operation.work_version=$2
           AND operation.lease_id=$3 AND operation.lease_owner=$4
           AND date_trunc('milliseconds',operation.lease_expires_at)=$5::timestamptz
-          AND operation.lifecycle IN ('reserved','attached','cleanup_pending')
+          AND operation.lifecycle IN ('reserved','attached','finalized','cleanup_pending')
           AND operation.lease_expires_at>clock_timestamp()
         RETURNING ${operationColumns("operation")}`,
       [

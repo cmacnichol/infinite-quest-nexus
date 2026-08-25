@@ -14,6 +14,7 @@ import type {
 export { bindLegacyPathV1PreviewDescriptor } from "../../../packages/application/src/assets/private-secure-storage.js";
 import type {
   DurableFilesystemJournalPort,
+  DurableFilesystemRecoveryClaim,
   DurableFilesystemRecoveryRecord,
   DurableFilesystemTransactionContext,
   PrivateStorageDescriptor,
@@ -541,6 +542,7 @@ function boundedReadSession(input: Readonly<{
   initialStat: BigIntStat;
   limits: PrivateBoundedStreamLimits;
   allowLegacyBase64Hash?: boolean;
+  authorityCurrent?: () => boolean;
   onClosed?: () => void;
   afterClose: (reason: PrivateStreamTerminalReason) => Promise<void>;
 }>): PrivateBoundedStreamSession {
@@ -571,6 +573,7 @@ function boundedReadSession(input: Readonly<{
   const throwIfTerminated = (): void => {
     if (terminalReason === "timeout") throw new Error("filesystem_stream_timeout");
     if (terminalReason) throw new Error("filesystem_stream_closed");
+    if (input.authorityCurrent?.() === false) throw new Error("filesystem_stream_lease_lost");
   };
   const timeoutMilliseconds = Math.min(
     2_147_483_647,
@@ -679,6 +682,11 @@ export async function createSecureFilesystemAdapter(
   }
   const activeStreamHandles = new Set<FileHandle>();
   const activePortableHandles = new Map<string, Set<FileHandle>>();
+  type PortableReadLease = Readonly<{
+    current(): boolean;
+    stop(): Promise<void>;
+  }>;
+  const activePortableReadLeases = new Map<string, Set<PortableReadLease>>();
   const inFlightOpens = new Set<Promise<void>>();
   let closing = false;
   const requireAdapterOpen = (): void => {
@@ -716,7 +724,69 @@ export async function createSecureFilesystemAdapter(
       if (handles.size === 0) activePortableHandles.delete(operationId);
     };
   };
+  const registerPortableReadLease = (
+    operationId: string,
+    lease: PortableReadLease,
+  ): (() => void) => {
+    const leases = activePortableReadLeases.get(operationId) ?? new Set<PortableReadLease>();
+    leases.add(lease);
+    activePortableReadLeases.set(operationId, leases);
+    return () => {
+      leases.delete(lease);
+      if (leases.size === 0) activePortableReadLeases.delete(operationId);
+    };
+  };
+  const startPortableReadLease = async (
+    operationId: string,
+    initialClaim: DurableFilesystemRecoveryClaim,
+    leaseSeconds: number,
+  ): Promise<PortableReadLease> => {
+    if (!options.journal) throw new Error("portable_repository_unavailable");
+    // The immutable portable-content expiry remains the cleanup deadline. A
+    // database-backed operation lease is the restart-safe fence that proves a
+    // bounded reader is still active beyond that original deadline.
+    let claim = initialClaim;
+    let lost = false;
+    let stopped = false;
+    let activeHeartbeat: Promise<void> | undefined;
+    let unregister = (): void => undefined;
+    const pulse = (): Promise<void> => {
+      activeHeartbeat ??= options.journal!.heartbeatRecoveryClaim(claim, leaseSeconds)
+        .then((renewed) => {
+          if (!renewed) {
+            if (!stopped) lost = true;
+            return;
+          }
+          claim = renewed;
+        })
+        .catch(() => { if (!stopped) lost = true; })
+        .finally(() => { activeHeartbeat = undefined; });
+      return activeHeartbeat;
+    };
+    await pulse();
+    if (lost) throw new Error("portable_staged_input_lease_lost");
+    const interval = setInterval(() => { void pulse(); }, Math.max(50, Math.floor(leaseSeconds * 333)));
+    interval.unref?.();
+    let stopPromise: Promise<void> | undefined;
+    const lease: PortableReadLease = Object.freeze({
+      current: () => !lost && !stopped,
+      stop() {
+        stopPromise ??= (async () => {
+          stopped = true;
+          clearInterval(interval);
+          await activeHeartbeat;
+          unregister();
+        })();
+        return stopPromise;
+      }
+    });
+    unregister = registerPortableReadLease(operationId, lease);
+    return lease;
+  };
   const closePortableHandles = async (operationId: string): Promise<void> => {
+    const leases = activePortableReadLeases.get(operationId);
+    activePortableReadLeases.delete(operationId);
+    if (leases) await Promise.allSettled([...leases].map((lease) => lease.stop()));
     const handles = activePortableHandles.get(operationId);
     if (!handles) return;
     activePortableHandles.delete(operationId);
@@ -1265,16 +1335,22 @@ export async function createSecureFilesystemAdapter(
   };
 
   const openStagedInputSession: SecureFilesystemAdapter["openStagedInputSession"] = (input) => trackOpen(async () => {
-    if (!options.portable) throw new Error("portable_repository_unavailable");
+    if (!options.portable || !options.journal) throw new Error("portable_repository_unavailable");
     const rehydration = await options.portable.rehydrateStagedInput(
       input.owner,
       input.stagedInput,
       input.claim,
     );
     if (!rehydration) throw new Error("portable_staged_input_unavailable");
-    const handle = await openAnchored(archiveRoot, rehydration.descriptor.relativePath);
+    const readLease = await startPortableReadLease(
+      rehydration.operation.operationId,
+      rehydration.claim,
+      input.claim.leaseSeconds,
+    );
+    let handle: FileHandle | undefined;
     let unregister: () => void = () => undefined;
     try {
+      handle = await openAnchored(archiveRoot, rehydration.descriptor.relativePath);
       const initialStat = await handle.stat({ bigint: true }) as BigIntStat;
       requireDescriptorIdentity(initialStat, rehydration.descriptor);
       unregister = registerPortableHandle(rehydration.operation.operationId, handle);
@@ -1284,14 +1360,16 @@ export async function createSecureFilesystemAdapter(
         descriptor: rehydration.descriptor,
         initialStat,
         limits: input.limits,
+        authorityCurrent: readLease.current,
         onClosed: unregister,
         // Preview reads never consume or delete staging authority. Commit or
         // durable expiry/reaping owns that lifecycle separately.
-        afterClose: async () => undefined
+        afterClose: async () => readLease.stop()
       });
     } catch (error) {
       unregister();
-      await handle.close().catch(() => undefined);
+      await handle?.close().catch(() => undefined);
+      await readLease.stop();
       throw error;
     }
   });
@@ -1661,10 +1739,15 @@ export async function createSecureFilesystemAdapter(
     close() {
       closing = true;
       const streamHandles = [...activeStreamHandles];
+      const portableReadLeases = [...activePortableReadLeases.values()].flatMap((leases) => [...leases]);
       const pendingOpens = [...inFlightOpens];
       activeStreamHandles.clear();
       activePortableHandles.clear();
+      activePortableReadLeases.clear();
       closed ??= (async () => {
+        const leaseResults = await Promise.allSettled(
+          portableReadLeases.map((lease) => lease.stop()),
+        );
         const streamResults = await Promise.allSettled(
           streamHandles.map((handle) => handle.close()),
         );
@@ -1673,7 +1756,7 @@ export async function createSecureFilesystemAdapter(
           archiveRoot.handle.close(),
           assetRoot.handle.close()
         ]);
-        const rejected = [...streamResults, ...rootResults]
+        const rejected = [...leaseResults, ...streamResults, ...rootResults]
           .find((result): result is PromiseRejectedResult => result.status === "rejected");
         if (rejected) throw rejected.reason;
       })();
