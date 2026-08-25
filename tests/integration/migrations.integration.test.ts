@@ -369,20 +369,33 @@ INSERT INTO migration_phase_audit VALUES ('final-swap', txid_current());
       )).resolves.toMatchObject({ rows: [{ count: "1" }] });
       await expect(migrateDatabase(isolatedPool, migrationDirectory)).resolves.toEqual([]);
 
-      await writeFile(
-        join(migrationDirectory, "0079_unregistered_phased.sql"),
-        `CREATE TABLE unregistered_phase_audit (phase text PRIMARY KEY);
-         INSERT INTO unregistered_phase_audit VALUES ('first');
-         COMMIT;
-         BEGIN;
-         INSERT INTO unregistered_phase_audit VALUES ('second');
-        `
-      );
-      await expect(migrateDatabase(isolatedPool, migrationDirectory)).rejects.toThrow(
-        "Migration 0079_unregistered_phased contains transaction control without an approved phased contract."
-      );
-      await expect(isolatedPool.query("SELECT to_regclass('public.unregistered_phase_audit') AS table_name"))
-        .resolves.toMatchObject({ rows: [{ table_name: null }] });
+      const unregisteredCases = [
+        {
+          migrationName: "0079_unregistered_end",
+          tableName: "unregistered_end_audit",
+          sql: "CREATE TABLE unregistered_end_audit (id integer); END;"
+        },
+        {
+          migrationName: "0080_unregistered_commit_chain",
+          tableName: "unregistered_commit_chain_audit",
+          sql: "CREATE TABLE unregistered_commit_chain_audit (id integer); COMMIT AND CHAIN;"
+        },
+        {
+          migrationName: "0081_unregistered_same_line",
+          tableName: "unregistered_same_line_audit",
+          sql: "CREATE TABLE unregistered_same_line_audit (id integer); COMMIT; BEGIN;"
+        }
+      ] as const;
+      for (const unregistered of unregisteredCases) {
+        const migrationPath = join(migrationDirectory, `${unregistered.migrationName}.sql`);
+        await writeFile(migrationPath, unregistered.sql);
+        await expect(migrateDatabase(isolatedPool, migrationDirectory)).rejects.toThrow(
+          `Migration ${unregistered.migrationName} contains transaction control without an approved phased contract.`
+        );
+        await expect(isolatedPool.query(`SELECT to_regclass('public.${unregistered.tableName}') AS table_name`))
+          .resolves.toMatchObject({ rows: [{ table_name: null }] });
+        await rm(migrationPath);
+      }
     } finally {
       if (isolatedPool) await isolatedPool.end();
       await dropTestDatabaseWhenIdle(pool, databaseName);

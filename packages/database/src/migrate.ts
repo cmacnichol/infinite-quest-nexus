@@ -28,6 +28,113 @@ const silentMigrationLogger: NonNullable<RunnerOption["logger"]> = {
   error: () => undefined
 };
 
+function topLevelSqlStatements(source: string): string[] {
+  const statements: string[] = [];
+  let statement = "";
+  let index = 0;
+  const finishStatement = (): void => {
+    const value = statement.trim();
+    if (value) statements.push(value);
+    statement = "";
+  };
+
+  while (index < source.length) {
+    if (source.startsWith("--", index)) {
+      const newline = source.indexOf("\n", index + 2);
+      index = newline < 0 ? source.length : newline + 1;
+      statement += " ";
+      continue;
+    }
+    if (source.startsWith("/*", index)) {
+      let depth = 1;
+      index += 2;
+      while (index < source.length && depth > 0) {
+        if (source.startsWith("/*", index)) {
+          depth += 1;
+          index += 2;
+        } else if (source.startsWith("*/", index)) {
+          depth -= 1;
+          index += 2;
+        } else {
+          index += 1;
+        }
+      }
+      statement += " ";
+      continue;
+    }
+
+    const character = source[index]!;
+    if (character === "'" || character === "\"") {
+      const quote = character;
+      const escapeQuoted = quote === "'"
+        && (/^[eE]$/u.test(source[index - 1] ?? "")
+          || source.slice(Math.max(0, index - 2), index).toUpperCase() === "U&");
+      index += 1;
+      while (index < source.length) {
+        if (escapeQuoted && source[index] === "\\") {
+          index += Math.min(2, source.length - index);
+        } else if (source[index] === quote && source[index + 1] === quote) {
+          index += 2;
+        } else if (source[index] === quote) {
+          index += 1;
+          break;
+        } else {
+          index += 1;
+        }
+      }
+      statement += " ";
+      continue;
+    }
+
+    if (character === "$") {
+      const dollarTag = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/u.exec(source.slice(index))?.[0];
+      if (dollarTag) {
+        const closing = source.indexOf(dollarTag, index + dollarTag.length);
+        index = closing < 0 ? source.length : closing + dollarTag.length;
+        statement += " ";
+        continue;
+      }
+    }
+
+    if (character === ";") {
+      finishStatement();
+      index += 1;
+      continue;
+    }
+    statement += character;
+    index += 1;
+  }
+  finishStatement();
+  return statements;
+}
+
+type TransactionControl = Readonly<{
+  command: string;
+  statement: string;
+}>;
+
+function transactionControl(statement: string): TransactionControl | null {
+  const tokens = statement.match(/[A-Za-z_][A-Za-z0-9_$]*/gu)?.map((token) => token.toUpperCase()) ?? [];
+  const first = tokens[0];
+  if (!first) return null;
+  if (["ABORT", "BEGIN", "COMMIT", "END", "RELEASE", "ROLLBACK", "SAVEPOINT"].includes(first)) {
+    return { command: first, statement };
+  }
+  if (first === "START" && tokens[1] === "TRANSACTION") {
+    return { command: "START TRANSACTION", statement };
+  }
+  if (first === "PREPARE" && tokens[1] === "TRANSACTION") {
+    return { command: "PREPARE TRANSACTION", statement };
+  }
+  if (first === "SET" && (
+    tokens[1] === "TRANSACTION"
+    || tokens.slice(1, 5).join(" ") === "SESSION CHARACTERISTICS AS TRANSACTION"
+  )) {
+    return { command: "SET TRANSACTION", statement };
+  }
+  return null;
+}
+
 async function validateMigrationTransactionContracts(
   migrationDirectory: string,
   migrationNames: readonly string[]
@@ -41,8 +148,9 @@ async function validateMigrationTransactionContracts(
       throw error;
     }
 
-    const controls = [...source.matchAll(/^\s*(BEGIN|COMMIT|ROLLBACK)\s*;/gimu)]
-      .map((match) => match[1]?.toUpperCase());
+    const controls = topLevelSqlStatements(source)
+      .map(transactionControl)
+      .filter((control): control is TransactionControl => control !== null);
     const expectedBoundaries = PHASED_MIGRATION_BOUNDARIES.get(migrationName);
     if (expectedBoundaries === undefined) {
       if (controls.length > 0) {
@@ -67,7 +175,10 @@ async function validateMigrationTransactionContracts(
       () => ["COMMIT", "BEGIN"]
     ).flat();
     if (controls.length !== expectedControls.length
-      || controls.some((control, index) => control !== expectedControls[index])) {
+      || controls.some((control, index) => (
+        control.command !== expectedControls[index]
+        || control.statement.toUpperCase() !== expectedControls[index]
+      ))) {
       throw new Error(`Migration ${migrationName} has invalid phased transaction control.`);
     }
     for (const phase of source.split(PHASE_BOUNDARY).slice(1)) {
