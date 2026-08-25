@@ -71,14 +71,33 @@ type EventSource = Readonly<{
   once(event: string, listener: () => void): unknown;
 }>;
 
+class SystemArchiveRouteError extends Error {
+  readonly expose: boolean;
+
+  constructor(
+    message: string,
+    readonly statusCode: number,
+    readonly code: string,
+  ) {
+    super(message);
+    this.name = "SystemArchiveError";
+    this.expose = statusCode < 500;
+  }
+}
+
+const SANITIZED_SYSTEM_ARCHIVE_SERVER_CODES = new Set([
+  "system-archive-operation-failed",
+  "system-archive-response-invalid",
+]);
+
+export function isSanitizedSystemArchiveServerError(error: unknown): boolean {
+  return error instanceof SystemArchiveRouteError
+    && error.statusCode >= 500
+    && SANITIZED_SYSTEM_ARCHIVE_SERVER_CODES.has(error.code);
+}
+
 function httpError(message: string, statusCode: number, code: string): Error {
-  const error = Object.assign(new Error(message), {
-    statusCode,
-    code,
-    expose: statusCode < 500,
-  });
-  error.name = "SystemArchiveError";
-  return error;
+  return new SystemArchiveRouteError(message, statusCode, code);
 }
 
 type BoundaryOperation =
@@ -265,10 +284,11 @@ function parseResponse<TSchema extends z.ZodType>(
     return schema.parse(value);
   } catch (error) {
     if (error instanceof z.ZodError) {
-      throw Object.assign(new Error("System Archive response failed validation."), {
-        statusCode: 500,
-        code: "system-archive-response-invalid",
-      });
+      throw httpError(
+        "System Archive response failed validation.",
+        500,
+        "system-archive-response-invalid",
+      );
     }
     throw error;
   }

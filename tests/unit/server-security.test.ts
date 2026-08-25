@@ -222,6 +222,81 @@ describe("API server security and CORS headers", () => {
     await enabled.close();
   });
 
+  it("exposes only sanitized System Archive server errors through the production envelope", async () => {
+    const operationJobId = "22222222-2222-4222-8222-222222222222";
+    const projectionJobId = "33333333-3333-4333-8333-333333333333";
+    const marker = "C:\\private\\story-secret-token.txt";
+    const getJob = vi.fn(async ({ jobId }: { jobId: string }) => {
+      if (jobId === operationJobId) {
+        throw Object.assign(new Error(marker), {
+          statusCode: 500,
+          code: "story-secret-token",
+          details: { rawPath: marker },
+        });
+      }
+      return {
+        id: marker,
+        kind: "export" as const,
+        status: "queued" as const,
+        createdAt: "2026-08-25T12:00:00.000Z",
+        updatedAt: "2026-08-25T12:00:00.000Z",
+        report: null,
+      };
+    });
+    const app = await buildServer({
+      ...serverOptions({
+        config: makeConfig({ systemArchiveEnabled: true }),
+        pool: mockPool,
+      }),
+      createApiSystemArchive: () => ({
+        application: {
+          enqueueExport: vi.fn(),
+          getJob,
+          cancelJob: vi.fn(),
+          createUpload: vi.fn(),
+          getUpload: vi.fn(),
+          cancelUpload: vi.fn(),
+          putChunk: vi.fn(),
+          completeUpload: vi.fn(),
+          previewImport: vi.fn(),
+          commitImport: vi.fn(),
+        },
+        downloads: { metadata: vi.fn(), open: vi.fn() },
+      } as never),
+    });
+
+    for (const expected of [
+      {
+        jobId: operationJobId,
+        code: "system-archive-operation-failed",
+        message: "System Archive operation failed.",
+      },
+      {
+        jobId: projectionJobId,
+        code: "system-archive-response-invalid",
+        message: "System Archive response failed validation.",
+      },
+    ]) {
+      const response = await app.inject({
+        method: "GET",
+        url: `/api/v1/system-exports/${expected.jobId}`,
+      });
+      const body = response.json();
+
+      expect(response.statusCode).toBe(500);
+      expect(body).toMatchObject({
+        error: "SystemArchiveError",
+        code: expected.code,
+        details: {},
+      });
+      expect(body.message).toBe(`${expected.message} Correlation ID: ${body.correlationId}.`);
+      expect(JSON.stringify(body)).not.toContain(marker);
+      expect(JSON.stringify(body)).not.toContain("story-secret-token");
+    }
+
+    await app.close();
+  });
+
   it("exposes public application metadata without querying the database", async () => {
     const config = makeConfig();
     const mockPool = { query: async () => { throw new Error("Metadata must not query the database."); } } as unknown as DatabasePool;

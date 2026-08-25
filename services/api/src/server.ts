@@ -129,7 +129,10 @@ import { safeTurnInput } from "./turn-input-safety.js";
 import { applicationMetadata } from "./app-metadata.js";
 import { installRequestSecurity } from "./request-security.js";
 import { registerSystemImportGate } from "./system-import-gate.js";
-import { registerSystemArchiveRoutes } from "./system-archive-routes.js";
+import {
+  isSanitizedSystemArchiveServerError,
+  registerSystemArchiveRoutes,
+} from "./system-archive-routes.js";
 import { registerArchiveRoutes } from "./archive-routes.js";
 import { createApiAssetComposition } from "../../runtime/src/api-asset-composition.js";
 import type { ApiAssetComposition } from "../../runtime/src/api-asset-composition.js";
@@ -282,7 +285,9 @@ function safeErrorDetails(value: unknown): Record<string, unknown> {
 }
 
 function exposeError(error: unknown, code: number): boolean {
-  return code < 500 || (typeof error === "object" && error !== null && "expose" in error && (error as { expose?: unknown }).expose === true);
+  return code < 500
+    || isSanitizedSystemArchiveServerError(error)
+    || (typeof error === "object" && error !== null && "expose" in error && (error as { expose?: unknown }).expose === true);
 }
 
 function safeLogErrorCode(value: unknown, fallback = "unclassified_error"): string {
