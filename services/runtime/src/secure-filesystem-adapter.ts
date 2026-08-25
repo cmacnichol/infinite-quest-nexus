@@ -75,6 +75,9 @@ const CREATE_FLAGS = filesystemConstants.O_WRONLY
   | filesystemConstants.O_CREAT
   | filesystemConstants.O_EXCL
   | filesystemConstants.O_NOFOLLOW;
+// Do not begin a read at the database/reaper boundary. The claim is the last
+// durable authority known locally, so a stalled renewal must fail closed.
+const PORTABLE_READ_LEASE_SAFETY_MARGIN_MILLISECONDS = 50;
 
 export interface SecureFilesystemTransactionRunner {
   run<Result>(
@@ -617,6 +620,7 @@ function boundedReadSession(input: Readonly<{
           legacyRemainder = Buffer.from(pending.subarray(completeLength));
         }
         position += bytesRead;
+        throwIfTerminated();
         yield Uint8Array.from(chunk);
       }
       throwIfTerminated();
@@ -750,6 +754,9 @@ export async function createSecureFilesystemAdapter(
     let stopped = false;
     let activeHeartbeat: Promise<void> | undefined;
     let unregister = (): void => undefined;
+    const current = (): boolean => !lost
+      && !stopped
+      && Date.now() < Date.parse(claim.leaseExpiresAt) - PORTABLE_READ_LEASE_SAFETY_MARGIN_MILLISECONDS;
     const pulse = (): Promise<void> => {
       activeHeartbeat ??= options.journal!.heartbeatRecoveryClaim(claim, leaseSeconds)
         .then((renewed) => {
@@ -764,12 +771,12 @@ export async function createSecureFilesystemAdapter(
       return activeHeartbeat;
     };
     await pulse();
-    if (lost) throw new Error("portable_staged_input_lease_lost");
+    if (!current()) throw new Error("portable_staged_input_lease_lost");
     const interval = setInterval(() => { void pulse(); }, Math.max(50, Math.floor(leaseSeconds * 333)));
     interval.unref?.();
     let stopPromise: Promise<void> | undefined;
     const lease: PortableReadLease = Object.freeze({
-      current: () => !lost && !stopped,
+      current,
       stop() {
         stopPromise ??= (async () => {
           stopped = true;

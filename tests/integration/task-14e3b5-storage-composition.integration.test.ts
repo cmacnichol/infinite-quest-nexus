@@ -3,6 +3,7 @@ import { closeSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
+  open,
   readlink,
   readdir,
   rename,
@@ -15,7 +16,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { bindPrivateFilesystemCandidateAttachment } from "../../packages/application/src/assets/private-filesystem-repository.js";
 import {
   bindLegacyPathV1PreviewDescriptor,
@@ -411,6 +412,82 @@ integration("Task 14e3b5 production storage composition (requires Linux descript
       leaseSeconds: 1,
       limit: 10
     })).resolves.toEqual({ claimed: 1, cleaned: 1, pending: 0 });
+  });
+
+  it("fails a stalled staged reader closed after its last durable lease expires and a separate reaper wins", async () => {
+    const reader = await compose();
+    const reaper = await compose();
+    const prototypeProbePath = join(archiveRoot, `.b5-read-spy-${crypto.randomUUID()}`);
+    await writeFile(prototypeProbePath, "probe");
+    const prototypeProbe = await open(prototypeProbePath);
+    const fileHandlePrototype = Object.getPrototypeOf(prototypeProbe);
+    await prototypeProbe.close();
+    await unlink(prototypeProbePath);
+    const bytes = Buffer.from("stalled staged reader must not outlive durable authority");
+    const expiresAt = new Date(Date.now() + 1_500).toISOString();
+    const staged = await reader.adapter.stagePortableScratch({
+      owner: { ownerUserId },
+      operationScopeId: `b5-stalled-stage:${crypto.randomUUID()}`,
+      leaseOwner: "b5-stalled-stage-writer",
+      expiresAt,
+      maximumBytes: bytes.byteLength,
+      source: [bytes]
+    });
+
+    const originalHeartbeat = reader.journal.heartbeatRecoveryClaim.bind(reader.journal);
+    let heartbeatCalls = 0;
+    let markHeartbeatStalled!: () => void;
+    const heartbeatStalled = new Promise<void>((resolve) => { markHeartbeatStalled = resolve; });
+    let releaseStalledHeartbeat!: (claim: DurableFilesystemRecoveryClaim | null) => void;
+    const stalledHeartbeat = new Promise<DurableFilesystemRecoveryClaim | null>((resolve) => {
+      releaseStalledHeartbeat = resolve;
+    });
+    vi.spyOn(reader.journal, "heartbeatRecoveryClaim").mockImplementation((claim, leaseSeconds) => {
+      heartbeatCalls += 1;
+      if (heartbeatCalls === 1) return originalHeartbeat(claim, leaseSeconds);
+      markHeartbeatStalled();
+      return stalledHeartbeat;
+    });
+
+    const session = await reader.adapter.openStagedInputSession({
+      owner: { ownerUserId },
+      stagedInput: staged.stagedInput,
+      claim: { leaseOwner: "b5-stalled-stage-reader", leaseSeconds: 1 },
+      limits: bindPrivateBoundedStreamLimits({
+        maximumBytes: bytes.byteLength,
+        chunkBytes: 1,
+        deadlineAt: new Date(Date.now() + 10_000).toISOString()
+      })
+    });
+    const iterator = session.chunks[Symbol.asyncIterator]();
+    await expect(iterator.next()).resolves.toMatchObject({ done: false });
+    await heartbeatStalled;
+
+    const durableLease = await pool.query<{ lease_expires_at: Date }>(
+      "SELECT lease_expires_at FROM durable_filesystem_operations WHERE id=$1",
+      [staged.operation.operationId],
+    );
+    await waitForDatabaseExpiry(new Date(Math.max(
+      Date.parse(expiresAt),
+      durableLease.rows[0]!.lease_expires_at.getTime(),
+    )).toISOString());
+    await expect(reaper.adapter.reapExpiredPortable({
+      leaseOwner: "b5-stalled-stage-reaper",
+      leaseSeconds: 1,
+      limit: 10
+    })).resolves.toEqual({ claimed: 1, cleaned: 1, pending: 0 });
+
+    const readAfterCleanup = vi.spyOn(fileHandlePrototype, "read");
+    const releaseTimer = setTimeout(() => releaseStalledHeartbeat(null), 50);
+    try {
+      await expect(iterator.next()).rejects.toThrow("filesystem_stream_lease_lost");
+      expect(readAfterCleanup).not.toHaveBeenCalled();
+    } finally {
+      clearTimeout(releaseTimer);
+      releaseStalledHeartbeat(null);
+      readAfterCleanup.mockRestore();
+      await session.finalize("abort").catch(() => undefined);
+    }
   });
 
   it("persists exact export scope/content type and closes every terminal path with one cleanup", async () => {
