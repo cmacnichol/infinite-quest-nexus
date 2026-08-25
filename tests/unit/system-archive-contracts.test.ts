@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  systemArchiveManifestSchema,
   systemArchiveJobViewSchema,
   systemArchivePayloadSchema
 } from "../../packages/contracts/src/system-archives.js";
@@ -180,6 +181,36 @@ const validPayload = {
 };
 
 describe("System Archive contracts", () => {
+  it("requires source-installation and current-owner provenance on the root manifest", () => {
+    const manifest = {
+      format: "infinite-quest-archive",
+      formatVersion: 1,
+      archiveType: "system",
+      createdAt: "2026-08-25T12:00:00.000Z",
+      contentFingerprint: "a".repeat(64),
+      sourceInstallationId: validPayload.sourceInstallationId,
+      sourceOwnerCount: 1,
+      sourceOwner: validPayload.sourceOwner,
+      entries: [],
+      payloads: [],
+      assets: []
+    };
+
+    expect(systemArchiveManifestSchema.parse(manifest)).toMatchObject({
+      sourceInstallationId: validPayload.sourceInstallationId,
+      sourceOwnerCount: 1,
+      sourceOwner: validPayload.sourceOwner
+    });
+    expect(systemArchiveManifestSchema.safeParse({
+      ...manifest,
+      sourceInstallationId: undefined
+    }).success).toBe(false);
+    expect(systemArchiveManifestSchema.safeParse({
+      ...manifest,
+      sourceOwner: undefined
+    }).success).toBe(false);
+  });
+
   it("round-trips complete logical world and campaign-state authority", () => {
     const parsed = systemArchivePayloadSchema.parse(validPayload);
     expect(parsed.sourceOwnerCount).toBe(1);

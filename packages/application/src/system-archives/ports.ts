@@ -59,6 +59,10 @@ export type SystemArchivePublishedArtifact = Readonly<{
   contentFingerprint: string;
 }>;
 
+export type SystemArchivePublicationResult =
+  | Readonly<{ status: "cancelled" }>
+  | Readonly<{ status: "published"; artifact: SystemArchivePublishedArtifact }>;
+
 export type SystemArchiveManifestDescriptor = Readonly<{
   sourceInstallationId: string;
   sourceOwner: SystemArchiveOwnerRecord;
@@ -92,7 +96,8 @@ export interface SystemArchiveWriterPort {
   publish(input: Readonly<{
     manifest: SystemArchiveManifestDescriptor;
     contentFingerprint: string;
-  }>): Promise<SystemArchivePublishedArtifact>;
+    cancellationRequested(): Promise<boolean>;
+  }>): Promise<SystemArchivePublicationResult>;
   abort(): Promise<void>;
 }
 

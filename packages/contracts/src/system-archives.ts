@@ -414,7 +414,12 @@ export const systemArchiveImportCommitRequestSchema = z.object({
 
 export const systemArchiveManifestSchema = archiveManifestSchema.safeExtend({
   archiveType: z.literal("system"),
-  sourceOwnerCount: z.literal(1)
+  sourceInstallationId: z.string().uuid(),
+  sourceOwnerCount: z.literal(1),
+  sourceOwner: z.object({
+    sourceId: z.string().uuid(),
+    displayName: boundedStringSchema(300)
+  }).strict()
 }).strict();
 
 export const systemArchiveAssetsPayloadSchema = z.object({

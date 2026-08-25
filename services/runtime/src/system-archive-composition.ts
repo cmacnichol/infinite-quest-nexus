@@ -1,8 +1,6 @@
-import { createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, mkdtemp, open, readFile, rm, unlink, type FileHandle } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { Readable } from "node:stream";
 import sharp from "sharp";
 import {
   SYSTEM_ARCHIVE_DOMAINS,
@@ -41,12 +39,28 @@ import {
   type CompletedArchiveArtifact,
 } from "../../api/src/archive-io.js";
 import type { ApiAssetComposition } from "./api-asset-composition.js";
+import type { SecureFilesystemAdapter } from "./secure-filesystem-adapter.js";
+
+export type SystemArchiveStagedContent = Readonly<{
+  byteLength: number;
+  sha256: string;
+  open(): AsyncIterable<Uint8Array>;
+  cleanup(): Promise<void>;
+}>;
+
+export interface SystemArchiveStagingPort {
+  stage(input: Readonly<{
+    ownerUserId: string;
+    maximumBytes: number;
+    source: AsyncIterable<Uint8Array> | Iterable<Uint8Array>;
+  }>): Promise<SystemArchiveStagedContent>;
+}
 
 type SpoolEntry = Readonly<{
   path: string;
   logicalType: "system" | "records" | "assets" | "asset-original";
   mediaType: string;
-  filePath: string;
+  staged: SystemArchiveStagedContent;
   byteLength: number;
   sha256: string;
 }>;
@@ -68,6 +82,7 @@ export type FilesystemSystemArchiveWriter = SystemArchiveWriterPort & Readonly<{
 export type FilesystemSystemArchiveWriterOptions = Readonly<{
   archiveRoot: string;
   limits: ArchiveLimits;
+  staging: SystemArchiveStagingPort;
   now?: () => Date;
   publisher?: SystemArchiveArtifactPublisherPort;
 }>;
@@ -83,19 +98,6 @@ function requireHash(value: string, name: string): void {
   if (!/^[a-f0-9]{64}$/u.test(value)) throw archiveFailure("archive-export-inconsistent", `${name} is invalid.`);
 }
 
-function safeSpoolName(sequence: number): string {
-  return `${String(sequence).padStart(8, "0")}.entry`;
-}
-
-async function writeAll(handle: FileHandle, bytes: Uint8Array): Promise<void> {
-  let offset = 0;
-  while (offset < bytes.byteLength) {
-    const written = await handle.write(bytes, offset, bytes.byteLength - offset);
-    if (written.bytesWritten < 1) throw archiveFailure("archive-export-inconsistent", "System Archive spool write stalled.");
-    offset += written.bytesWritten;
-  }
-}
-
 async function artifactSource(artifact: CompletedArchiveArtifact): Promise<AsyncIterable<Uint8Array>> {
   return {
     async *[Symbol.asyncIterator]() {
@@ -109,20 +111,103 @@ async function artifactSource(artifact: CompletedArchiveArtifact): Promise<Async
   };
 }
 
+async function collectStaged(
+  staged: SystemArchiveStagedContent,
+  maximumBytes: number,
+): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let byteLength = 0;
+  for await (const chunk of staged.open()) {
+    const value = Buffer.from(chunk);
+    byteLength += value.byteLength;
+    if (!Number.isSafeInteger(byteLength) || byteLength > maximumBytes) {
+      throw archiveFailure("archive-asset-invalid", "System Archive staged content exceeded its verified size.");
+    }
+    chunks.push(value);
+  }
+  if (byteLength !== staged.byteLength) {
+    throw archiveFailure("archive-asset-invalid", "System Archive staged content changed while reopening.");
+  }
+  return Buffer.concat(chunks, byteLength);
+}
+
+export function createPrivateSystemArchiveStaging(
+  storage: Pick<SecureFilesystemAdapter,
+    "stagePortableScratch" | "openStagedInputSession" | "discardPortableStagedInput">,
+  options: Readonly<{
+    leaseOwner: string;
+    expiresAt?: () => string;
+    leaseSeconds?: number;
+  }>,
+): SystemArchiveStagingPort {
+  const leaseSeconds = options.leaseSeconds ?? 300;
+  return Object.freeze({
+    async stage(input: Parameters<SystemArchiveStagingPort["stage"]>[0]) {
+      const issued = await storage.stagePortableScratch({
+        owner: { ownerUserId: input.ownerUserId },
+        operationScopeId: randomUUID(),
+        leaseOwner: options.leaseOwner,
+        expiresAt: (options.expiresAt ?? (() => new Date(Date.now() + 60 * 60 * 1_000).toISOString()))(),
+        maximumBytes: input.maximumBytes,
+        source: input.source,
+      });
+      let cleanupPromise: Promise<void> | undefined;
+      let cleaned = false;
+      const cleanup = (): Promise<void> => {
+        cleanupPromise ??= storage.discardPortableStagedInput({
+          owner: { ownerUserId: input.ownerUserId },
+          stagedInput: issued.stagedInput,
+          claim: { leaseOwner: options.leaseOwner, leaseSeconds },
+        }).then(() => { cleaned = true; });
+        return cleanupPromise;
+      };
+      return Object.freeze({
+        byteLength: issued.byteLength,
+        sha256: issued.contentHash,
+        open(): AsyncIterable<Uint8Array> {
+          return {
+            async *[Symbol.asyncIterator]() {
+              if (cleaned || cleanupPromise) throw new Error("system_archive_staging_cleaned");
+              const session = await storage.openStagedInputSession({
+                owner: { ownerUserId: input.ownerUserId },
+                stagedInput: issued.stagedInput,
+                claim: { leaseOwner: options.leaseOwner, leaseSeconds },
+                limits: bindPrivateBoundedStreamLimits({
+                  maximumBytes: issued.byteLength,
+                  deadlineAt: new Date(Date.now() + leaseSeconds * 1_000).toISOString(),
+                }),
+              });
+              let reason: "eof" | "abort" | "read_failure" = "abort";
+              try {
+                for await (const chunk of session.chunks) yield chunk;
+                reason = "eof";
+              } catch (error) {
+                reason = "read_failure";
+                throw error;
+              } finally {
+                await session.finalize(reason);
+              }
+            },
+          };
+        },
+        cleanup,
+      });
+    },
+  });
+}
+
 /**
- * Runtime-only spool and ZIP writer. Application code never receives a path or
- * imports `node:fs`; final ZIP publication delegates to the hardened Campaign
- * Archive writer and may then pass through the durable portable publisher.
+ * Runtime-only durable staging and ZIP writer. Application code never receives
+ * a path or imports `node:fs`; final ZIP publication delegates to the hardened
+ * Campaign Archive writer and may then pass through the durable portable publisher.
  */
 export async function createFilesystemSystemArchiveWriter(
   options: FilesystemSystemArchiveWriterOptions,
 ): Promise<FilesystemSystemArchiveWriter> {
   if (!options.archiveRoot.trim()) throw archiveFailure("archive-export-inconsistent", "System Archive root is required.");
-  const spoolRoot = await mkdtemp(join(tmpdir(), "infinitequest-system-export-"));
-  await mkdir(spoolRoot, { recursive: true });
   const entries: SpoolEntry[] = [];
   const paths = new Set<string>();
-  let sequence = 0;
+  let ownerUserId: string | undefined;
   let state: "open" | "published" | "aborted" = "open";
 
   const requireOpen = () => {
@@ -137,9 +222,11 @@ export async function createFilesystemSystemArchiveWriter(
     return Object.freeze({ path: entry.path, byteLength: entry.byteLength, sha256: entry.sha256 });
   };
   const removeSpool = async () => {
-    await rm(spoolRoot, { recursive: true, force: true });
-    entries.length = 0;
+    const staged = entries.splice(0).map((entry) => entry.staged);
     paths.clear();
+    const settled = await Promise.allSettled(staged.map((entry) => entry.cleanup()));
+    const rejected = settled.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (rejected) throw rejected.reason;
   };
   const writeBufferEntry = async (
     path: string,
@@ -148,26 +235,36 @@ export async function createFilesystemSystemArchiveWriter(
     bytes: Uint8Array,
   ): Promise<SystemArchiveWrittenPayload> => {
     requireOpen();
-    const filePath = join(spoolRoot, safeSpoolName(sequence++));
-    const handle = await open(filePath, "wx", 0o600);
-    try {
-      await writeAll(handle, bytes);
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    return addEntry({
-      path,
-      logicalType,
-      mediaType,
-      filePath,
-      byteLength: bytes.byteLength,
-      sha256: createHash("sha256").update(bytes).digest("hex"),
+    if (!ownerUserId) throw archiveFailure("archive-export-inconsistent", "System Archive staging owner is unavailable.");
+    const staged = await options.staging.stage({
+      ownerUserId,
+      maximumBytes: bytes.byteLength,
+      source: [bytes],
     });
+    try {
+      if (staged.byteLength !== bytes.byteLength) {
+        throw archiveFailure("archive-export-inconsistent", "System Archive staged metadata size changed.");
+      }
+      return addEntry({
+        path,
+        logicalType,
+        mediaType,
+        staged,
+        byteLength: staged.byteLength,
+        sha256: staged.sha256,
+      });
+    } catch (error) {
+      await staged.cleanup().catch(() => undefined);
+      throw error;
+    }
   };
 
   const writer: FilesystemSystemArchiveWriter = {
     async writeSystemMetadata(owner) {
+      if (ownerUserId && ownerUserId !== owner.sourceId) {
+        throw archiveFailure("archive-export-inconsistent", "System Archive staging owner changed.");
+      }
+      ownerUserId = owner.sourceId;
       const value = systemArchivePayloadSchema.parse({
         formatVersion: 1,
         sourceInstallationId: owner.sourceInstallationId,
@@ -191,55 +288,67 @@ export async function createFilesystemSystemArchiveWriter(
         || shardOptions.targetBytes > options.limits.maxJsonEntryBytes) {
         throw archiveFailure("archive-limit-exceeded", "System Archive shard byte limit is invalid.");
       }
+      if (!ownerUserId) throw archiveFailure("archive-export-inconsistent", "System Archive staging owner is unavailable.");
       const written: SystemArchiveWrittenPayload[] = [];
       let shardNumber = 1;
-      let handle: FileHandle | undefined;
-      let filePath = "";
-      let byteLength = 0;
-      let digest = createHash("sha256");
-
-      const start = async () => {
-        filePath = join(spoolRoot, safeSpoolName(sequence++));
-        handle = await open(filePath, "wx", 0o600);
-        byteLength = 0;
-        digest = createHash("sha256");
-      };
-      const finish = async () => {
-        if (!handle || byteLength === 0) return;
-        await handle.sync();
-        await handle.close();
-        handle = undefined;
-        written.push(addEntry({
-          path: `records/${domain}/${String(shardNumber++).padStart(6, "0")}.ndjson`,
-          logicalType: "records",
-          mediaType: "application/x-ndjson",
-          filePath,
-          byteLength,
-          sha256: digest.digest("hex"),
-        }));
-      };
-
+      const iterator = records[Symbol.asyncIterator]();
+      let pending: Buffer | undefined;
+      let exhausted = false;
       try {
-        for await (const candidate of records) {
-          const record = systemRecordEnvelopeSchema.parse(candidate);
-          if (record.domain !== domain) {
-            throw archiveFailure("archive-export-inconsistent", "System Archive shard received the wrong domain.");
+        while (!exhausted || pending) {
+          let emittedBytes = 0;
+          const source: AsyncIterable<Uint8Array> = {
+            async *[Symbol.asyncIterator]() {
+              while (true) {
+                if (!pending && !exhausted) {
+                  const next = await iterator.next();
+                  if (next.done) {
+                    exhausted = true;
+                    break;
+                  }
+                  const record = systemRecordEnvelopeSchema.parse(next.value);
+                  if (record.domain !== domain) {
+                    throw archiveFailure("archive-export-inconsistent", "System Archive shard received the wrong domain.");
+                  }
+                  pending = Buffer.from(`${canonicalArchiveJson(record)}\n`, "utf8");
+                  if (pending.byteLength > shardOptions.targetBytes) {
+                    throw archiveFailure("archive-limit-exceeded", "A System Archive record exceeds the maximum shard size.");
+                  }
+                }
+                if (!pending || (emittedBytes > 0 && emittedBytes + pending.byteLength > shardOptions.targetBytes)) break;
+                const line = pending;
+                pending = undefined;
+                emittedBytes += line.byteLength;
+                yield line;
+              }
+            },
+          };
+          const staged = await options.staging.stage({
+            ownerUserId,
+            maximumBytes: shardOptions.targetBytes,
+            source,
+          });
+          if (staged.byteLength === 0) {
+            await staged.cleanup();
+            break;
           }
-          const line = Buffer.from(`${canonicalArchiveJson(record)}\n`, "utf8");
-          if (line.byteLength > shardOptions.targetBytes) {
-            throw archiveFailure("archive-limit-exceeded", "A System Archive record exceeds the maximum shard size.");
+          try {
+            written.push(addEntry({
+              path: `records/${domain}/${String(shardNumber++).padStart(6, "0")}.ndjson`,
+              logicalType: "records",
+              mediaType: "application/x-ndjson",
+              staged,
+              byteLength: staged.byteLength,
+              sha256: staged.sha256,
+            }));
+          } catch (error) {
+            await staged.cleanup().catch(() => undefined);
+            throw error;
           }
-          if (handle && byteLength + line.byteLength > shardOptions.targetBytes) await finish();
-          if (!handle) await start();
-          await writeAll(handle!, line);
-          byteLength += line.byteLength;
-          digest.update(line);
         }
-        await finish();
         return Object.freeze(written);
       } catch (error) {
-        if (handle) await handle.close().catch(() => undefined);
-        if (filePath) await unlink(filePath).catch(() => undefined);
+        await iterator.return?.().catch(() => undefined);
         throw error;
       }
     },
@@ -256,65 +365,52 @@ export async function createFilesystemSystemArchiveWriter(
 
     async writeOriginal(input) {
       requireOpen();
+      if (!ownerUserId) throw archiveFailure("archive-export-inconsistent", "System Archive staging owner is unavailable.");
       requireHash(input.expectedSha256, "System Archive expected Original Asset hash");
       if (!Number.isSafeInteger(input.expectedBytes)
         || input.expectedBytes < 1
         || input.expectedBytes > options.limits.maxOriginalImageBytes) {
         throw archiveFailure("archive-limit-exceeded", "System Archive Original Asset byte length is invalid.");
       }
-      const filePath = join(spoolRoot, safeSpoolName(sequence++));
-      const handle = await open(filePath, "wx", 0o600);
-      const digest = createHash("sha256");
-      let byteLength = 0;
+      let staged: SystemArchiveStagedContent;
       try {
-        for await (const chunk of input.stream) {
-          const bytes = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
-          const nextLength = byteLength + bytes.byteLength;
-          if (!Number.isSafeInteger(nextLength) || nextLength > input.expectedBytes) {
-            throw archiveFailure("archive-asset-invalid", "System Archive Original Asset grew while it was read.");
-          }
-          await writeAll(handle, bytes);
-          digest.update(bytes);
-          byteLength = nextLength;
-        }
-        await handle.sync();
+        staged = await options.staging.stage({
+          ownerUserId,
+          maximumBytes: input.expectedBytes,
+          source: input.stream,
+        });
       } catch (error) {
-        await handle.close().catch(() => undefined);
-        await unlink(filePath).catch(() => undefined);
         if (typeof error === "object" && error !== null && "code" in error) throw error;
         throw archiveFailure("archive-asset-invalid", "System Archive Original Asset could not be read.");
       }
-      await handle.close();
-      if (byteLength !== input.expectedBytes) {
-        await unlink(filePath).catch(() => undefined);
-        throw archiveFailure("archive-asset-invalid", "System Archive Original Asset was truncated while it was read.");
-      }
-      const rawHash = digest.digest("hex");
-      const bytes = await readFile(filePath);
-      const legacyHash = legacySha256(bytes.toString("base64"));
       try {
+        if (staged.byteLength !== input.expectedBytes) {
+          throw archiveFailure("archive-asset-invalid", "System Archive Original Asset was truncated while it was read.");
+        }
+        const bytes = await collectStaged(staged, input.expectedBytes);
+        const legacyHash = legacySha256(bytes.toString("base64"));
         const metadata = await sharp(bytes, { failOn: "error", limitInputPixels: false }).metadata();
-        if ((rawHash !== input.expectedSha256 && legacyHash !== input.expectedSha256)
+        if ((staged.sha256 !== input.expectedSha256 && legacyHash !== input.expectedSha256)
           || detectImageMimeType(bytes) !== input.expectedMimeType
           || metadata.width !== input.expectedPixelWidth
           || metadata.height !== input.expectedPixelHeight) {
           throw archiveFailure("archive-asset-invalid", "System Archive Original Asset identity verification failed.");
         }
+        return addEntry({
+          path: input.archivePath,
+          logicalType: "asset-original",
+          mediaType: input.expectedMimeType,
+          staged,
+          byteLength: staged.byteLength,
+          sha256: staged.sha256,
+        });
       } catch (error) {
-        await unlink(filePath).catch(() => undefined);
+        await staged.cleanup().catch(() => undefined);
         if (typeof error === "object" && error !== null && "code" in error) throw error;
         const failure = archiveFailure("archive-asset-invalid", "System Archive Original Asset failed image decoding.");
         failure.cause = error;
         throw failure;
       }
-      return addEntry({
-        path: input.archivePath,
-        logicalType: "asset-original",
-        mediaType: input.expectedMimeType,
-        filePath,
-        byteLength,
-        sha256: rawHash,
-      });
     },
 
     async calculateContentFingerprint(input) {
@@ -324,6 +420,11 @@ export async function createFilesystemSystemArchiveWriter(
     async publish(input) {
       requireOpen();
       requireHash(input.contentFingerprint, "System Archive content fingerprint");
+      if (await input.cancellationRequested()) {
+        state = "aborted";
+        await removeSpool();
+        return Object.freeze({ status: "cancelled" as const });
+      }
       const ordered = [...entries].sort((left, right) => left.path.localeCompare(right.path));
       const calculated = calculateContentFingerprint({
         payloadHashes: ordered.filter((entry) => entry.logicalType !== "asset-original").map((entry) => entry.sha256),
@@ -336,7 +437,7 @@ export async function createFilesystemSystemArchiveWriter(
         path: entry.path,
         logicalType: entry.logicalType,
         mediaType: entry.mediaType,
-        source: createReadStream(entry.filePath),
+        source: Readable.from(entry.staged.open()),
       }));
       const createdAt = (options.now ?? (() => new Date()))().toISOString();
       const buildManifest = (measuredEntries: readonly ArchiveEntry[]) => systemArchiveManifestSchema.parse({
@@ -345,7 +446,12 @@ export async function createFilesystemSystemArchiveWriter(
         archiveType: "system",
         createdAt,
         contentFingerprint: input.contentFingerprint,
+        sourceInstallationId: input.manifest.sourceInstallationId,
         sourceOwnerCount: 1,
+        sourceOwner: {
+          sourceId: input.manifest.sourceOwner.sourceId,
+          displayName: input.manifest.sourceOwner.displayName,
+        },
         entries: [...measuredEntries],
         payloads: ordered
           .filter((entry) => entry.logicalType !== "asset-original")
@@ -375,6 +481,13 @@ export async function createFilesystemSystemArchiveWriter(
         if (local.contentFingerprint !== input.contentFingerprint) {
           throw archiveFailure("archive-export-inconsistent", "Published System Archive fingerprint changed.");
         }
+        if (options.publisher && await input.cancellationRequested()) {
+          await removeArchivePath(options.archiveRoot, local.relativePath);
+          local = undefined;
+          state = "aborted";
+          await removeSpool();
+          return Object.freeze({ status: "cancelled" as const });
+        }
         let published: SystemArchivePublishedArtifact;
         if (options.publisher) {
           const source = await artifactSource(local);
@@ -399,8 +512,11 @@ export async function createFilesystemSystemArchiveWriter(
           });
         }
         state = "published";
-        await removeSpool();
-        return published;
+        // Durable portable staging retains cleanup authority for restart
+        // recovery, so a finalized export is never downgraded if immediate
+        // scratch cleanup must be retried by the reaper.
+        await removeSpool().catch(() => undefined);
+        return Object.freeze({ status: "published" as const, artifact: published });
       } catch (error) {
         if (local && options.publisher) {
           await removeArchivePath(options.archiveRoot, local.relativePath).catch(() => undefined);
@@ -462,6 +578,8 @@ export type SystemArchiveCompositionOptions = Readonly<{
   archiveRoot: string;
   limits: ArchiveLimits;
   originals: SystemArchiveOriginalAssetReaderPort;
+  storage: Pick<SecureFilesystemAdapter,
+    "stagePortableScratch" | "openStagedInputSession" | "discardPortableStagedInput">;
   publisher: SystemArchiveArtifactPublisherPort;
   now?: () => Date;
 }>;
@@ -477,6 +595,7 @@ export function createSystemArchiveComposition(options: SystemArchiveComposition
       const writer = await createFilesystemSystemArchiveWriter({
         archiveRoot: options.archiveRoot,
         limits: options.limits,
+        staging: createPrivateSystemArchiveStaging(options.storage, { leaseOwner: job.leaseOwner }),
         publisher: options.publisher,
         ...(options.now === undefined ? {} : { now: options.now }),
       });

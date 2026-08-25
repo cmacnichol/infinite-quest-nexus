@@ -123,6 +123,26 @@ export type SecureFilesystemAdapter = Readonly<{
     operation: import("../../../packages/application/src/assets/private-storage-lifecycle.js").AttachedFilesystemOperation;
     claim: import("../../../packages/application/src/assets/private-storage-lifecycle.js").DurableFilesystemRecoveryClaim;
   }>>;
+  /** Internal bounded staging for generated portable artifacts whose exact size is known only after streaming. */
+  stagePortableScratch(input: Readonly<{
+    owner: ImportOwnerScope;
+    operationScopeId: string;
+    leaseOwner: string;
+    expiresAt: string;
+    maximumBytes: number;
+    source: AsyncIterable<Uint8Array> | Iterable<Uint8Array>;
+  }>): Promise<Readonly<{
+    stagedInput: PortableStagedInput;
+    operation: import("../../../packages/application/src/assets/private-storage-lifecycle.js").AttachedFilesystemOperation;
+    claim: import("../../../packages/application/src/assets/private-storage-lifecycle.js").DurableFilesystemRecoveryClaim;
+    byteLength: number;
+    contentHash: string;
+  }>>;
+  discardPortableStagedInput(input: Readonly<{
+    owner: ImportOwnerScope;
+    stagedInput: PortableStagedInput;
+    claim: Readonly<{ leaseOwner: string; leaseSeconds: number }>;
+  }>): Promise<void>;
   publishPortableExport(input: Readonly<{
     exportScope: PortableExportScope;
     operationScopeId: string;
@@ -368,6 +388,37 @@ async function writeExactContent(
   if (position !== byteLength) throw new Error("filesystem_write_partial");
   await handle.sync();
   return hash.digest("hex");
+}
+
+async function writeBoundedContent(
+  handle: FileHandle,
+  source: AsyncIterable<Uint8Array> | Iterable<Uint8Array>,
+  maximumBytes: number,
+  expiresAt: string,
+): Promise<Readonly<{ contentHash: string; byteLength: number }>> {
+  if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 0) {
+    throw new Error("filesystem_length_invalid");
+  }
+  const hash = createHash("sha256");
+  let position = 0;
+  for await (const value of source) {
+    if (Date.now() >= Date.parse(expiresAt)) throw new Error("filesystem_write_expired");
+    const chunk = Buffer.from(value);
+    if (!Number.isSafeInteger(position + chunk.byteLength)
+      || position + chunk.byteLength > maximumBytes) {
+      throw new Error("filesystem_write_oversized");
+    }
+    let offset = 0;
+    while (offset < chunk.byteLength) {
+      const result = await handle.write(chunk, offset, chunk.byteLength - offset, position + offset);
+      if (result.bytesWritten <= 0) throw new Error("filesystem_write_partial");
+      offset += result.bytesWritten;
+    }
+    hash.update(chunk);
+    position += chunk.byteLength;
+  }
+  await handle.sync();
+  return Object.freeze({ contentHash: hash.digest("hex"), byteLength: position });
 }
 
 async function verifyContentAddressedFile(
@@ -682,12 +733,16 @@ export async function createSecureFilesystemAdapter(
     expiresAt: string;
     purpose: "portable_staging" | "portable_export";
     directory: "staging" | "exports";
-    byteLength: number;
+    byteLength?: number;
+    maximumBytes?: number;
     source: AsyncIterable<Uint8Array> | Iterable<Uint8Array>;
   }>) => {
     requireAdapterOpen();
     if (!options.journal || !options.prewrite || !options.candidates) {
       throw new Error("portable_publication_repository_unavailable");
+    }
+    if ((input.byteLength === undefined) === (input.maximumBytes === undefined)) {
+      throw new Error("filesystem_length_invalid");
     }
     const reserved = await options.journal.reserve(
       {
@@ -742,17 +797,17 @@ export async function createSecureFilesystemAdapter(
         bindPrivatePrewriteNodeAuthority(operation, relativePath, nodeIdentity),
       );
       nodeAuthorityPersisted = true;
-      const contentHash = await writeExactContent(
-        handle,
-        input.source,
-        input.byteLength,
-        input.expiresAt,
-      );
+      const written = input.byteLength === undefined
+        ? await writeBoundedContent(handle, input.source, input.maximumBytes!, input.expiresAt)
+        : Object.freeze({
+          contentHash: await writeExactContent(handle, input.source, input.byteLength, input.expiresAt),
+          byteLength: input.byteLength,
+        });
       const value = descriptorFromStat(
         relativePath,
         await handle.stat({ bigint: true }) as BigIntStat,
-        contentHash,
-        input.byteLength,
+        written.contentHash,
+        written.byteLength,
       );
       await handle.close();
       handle = undefined;
@@ -770,6 +825,8 @@ export async function createSecureFilesystemAdapter(
           value,
           reserved.claim,
         ),
+        byteLength: written.byteLength,
+        contentHash: written.contentHash,
         rollback
       };
     } catch (error) {
@@ -1113,6 +1170,68 @@ export async function createSecureFilesystemAdapter(
     }
     return issued;
   };
+
+  const stagePortableScratch: SecureFilesystemAdapter["stagePortableScratch"] = async (input) => {
+    if (!options.atomicPortable || !options.journal) {
+      throw new Error("portable_publication_repository_unavailable");
+    }
+    const prepared = await preparePortableFile({
+      ownerUserId: input.owner.ownerUserId,
+      operationScopeId: input.operationScopeId,
+      leaseOwner: input.leaseOwner,
+      expiresAt: input.expiresAt,
+      purpose: "portable_staging",
+      directory: "staging",
+      maximumBytes: input.maximumBytes,
+      source: input.source
+    });
+    let issued;
+    try {
+      issued = await options.transactions.run((database) => options.atomicPortable!.issueStagedInput(
+        database,
+        bindPrivateAtomicStagedIssuance(input.owner, prepared.attachment),
+      ));
+    } catch (error) {
+      await prepared.rollback().catch(() => undefined);
+      throw error;
+    }
+    const finalized = await options.journal.finalizeAfterCommit(issued.operation, issued.claim);
+    if (!["finalized", "already_finalized"].includes(finalized.outcome)) {
+      throw new Error(`portable_staging_finalize_${finalized.outcome}`);
+    }
+    return Object.freeze({
+      ...issued,
+      byteLength: prepared.byteLength,
+      contentHash: prepared.contentHash,
+    });
+  };
+
+  const discardPortableStagedInput: SecureFilesystemAdapter["discardPortableStagedInput"] = (input) => trackOpen(async () => {
+    if (!options.portable) throw new Error("portable_repository_unavailable");
+    const rehydration = await options.portable.rehydrateStagedInput(
+      input.owner,
+      input.stagedInput,
+      input.claim,
+    );
+    if (!rehydration) return;
+    await closePortableHandles(rehydration.operation.operationId);
+    const preparation = await options.transactions.run(
+      (database) => options.portable!.prepareStagedCleanup(database, rehydration),
+    );
+    if (preparation.outcome === "already_cleaned") return;
+    if (preparation.outcome !== "cleanup_required") {
+      throw new Error(`portable_staging_${preparation.outcome}`);
+    }
+    for (const descriptor of preparation.descriptors) {
+      await identitySafeDelete(archiveRoot, descriptor);
+    }
+    const result = await options.transactions.run(
+      (database) => options.portable!.acknowledgeStagedCleanup(database, preparation),
+    );
+    if (!["cleaned", "already_cleaned"].includes(result.outcome)) {
+      throw new Error(`portable_staging_cleanup_${result.outcome}`);
+    }
+  });
 
   const publishPortableExport: SecureFilesystemAdapter["publishPortableExport"] = async (input) => {
     if (!options.atomicPortable || !options.journal) {
@@ -1528,6 +1647,8 @@ export async function createSecureFilesystemAdapter(
     discardPreparedAssetPublication,
     finalizeAssetPublication,
     stagePortableInput,
+    stagePortableScratch,
+    discardPortableStagedInput,
     publishPortableExport,
     openStagedInputSession,
     openPreviewInputSession,

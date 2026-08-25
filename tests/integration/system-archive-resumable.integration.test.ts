@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { SYSTEM_ARCHIVE_DOMAINS, type SystemArchiveDomain } from "@infinite-quest/contracts";
 import type { OwnerScope } from "../../packages/application/src/generation/types.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { createPostgresSystemArchiveJobRepository } from "../../packages/database/src/system-archive-job-repository.js";
+import { createPostgresSystemArchiveExportJobPort } from "../../packages/database/src/system-archive-export-repository.js";
 import { createPostgresSystemArchiveUploadRepository } from "../../packages/database/src/system-archive-upload-repository.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -172,6 +174,62 @@ integration("durable System Archive jobs and resumable uploads", () => {
       .rejects.toMatchObject({ statusCode: 404 });
     await expect(repository.requestCancellation(owner, queued.id))
       .resolves.toMatchObject({ id: queued.id, status: "cancelling" });
+  });
+
+  it("lets a finalized durable publication win cancellation requested during publish", async () => {
+    const leaseOwner = "system-archive-publish-race";
+    const operationId = await reservePortableOperation(owner, "portable_export");
+    const artifact = await pool.query<{ id: string }>(
+      `INSERT INTO portable_export_artifacts (
+         owner_user_id,retrieval_token_hash,filesystem_operation_id,export_kind,
+         campaign_id,world_id,world_version_id,content_type,content_hash,byte_length,expires_at
+       ) VALUES ($1,$2,$3,'system_zip',NULL,NULL,NULL,'application/zip',$4,4,now()+interval '1 day')
+       RETURNING id`,
+      [owner.ownerUserId, hash(randomUUID()), operationId, hash("published-system-archive")]
+    );
+    const exportJob = await pool.query<{ id: string }>(
+      `INSERT INTO system_archive_jobs (
+         owner_user_id,kind,status,idempotency_key_hash,lease_owner,lease_expires_at
+       ) VALUES ($1,'export','verifying',$2,$3,now()+interval '1 minute') RETURNING id`,
+      [owner.ownerUserId, hash(randomUUID()), leaseOwner]
+    );
+    await pool.query(
+      "UPDATE system_archive_jobs SET status='cancelling' WHERE id=$1",
+      [exportJob.rows[0]!.id]
+    );
+    const domainCounts = Object.fromEntries(
+      SYSTEM_ARCHIVE_DOMAINS.map((domain) => [domain, 0])
+    ) as Record<SystemArchiveDomain, number>;
+
+    await createPostgresSystemArchiveExportJobPort(pool).markPublished({
+      id: exportJob.rows[0]!.id,
+      ownerUserId: owner.ownerUserId,
+      leaseOwner,
+    }, {
+      artifactId: artifact.rows[0]!.id,
+      relativePath: "exports/finalized.pending",
+      byteLength: 4,
+      sha256: hash("published-system-archive"),
+      contentFingerprint: hash("system-content"),
+    }, {
+      completedAt: new Date().toISOString(),
+      contentFingerprint: hash("system-content"),
+      domainCounts,
+      originalAssets: 0,
+      originalBytes: 0,
+      excludedOperationalWork: {},
+    });
+
+    await expect(pool.query<{ status: string; export_artifact_id: string }>(
+      "SELECT status,export_artifact_id FROM system_archive_jobs WHERE id=$1",
+      [exportJob.rows[0]!.id]
+    )).resolves.toMatchObject({
+      rows: [{ status: "published", export_artifact_id: artifact.rows[0]!.id }]
+    });
+    await expect(pool.query(
+      "SELECT id FROM portable_export_artifacts WHERE id=$1",
+      [artifact.rows[0]!.id]
+    )).resolves.toMatchObject({ rowCount: 1 });
   });
 
   it("records chunks idempotently while rejecting conflicts, overlaps, and foreign owners", async () => {

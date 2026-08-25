@@ -1229,7 +1229,12 @@ describe("archive artifact writing and cleanup", () => {
       [{ path: "system.json", logicalType: "system", mediaType: "application/json", source: Readable.from(data) }],
       (entries) => systemArchiveManifestSchema.parse({
         ...systemManifest(entries),
-        sourceOwnerCount: 1
+        sourceInstallationId: "55555555-5555-4555-8555-555555555555",
+        sourceOwnerCount: 1,
+        sourceOwner: {
+          sourceId: "11111111-1111-4111-8111-111111111111",
+          displayName: "Archive owner"
+        }
       }),
       DEFAULT_LIMITS,
       (value) => systemArchiveManifestSchema.parse(value)
@@ -1237,7 +1242,15 @@ describe("archive artifact writing and cleanup", () => {
 
     const directory = await Open.file(completed.absolutePath);
     const manifest = JSON.parse((await directory.files.at(-1)!.buffer()).toString("utf8")) as Record<string, unknown>;
-    expect(manifest).toMatchObject({ archiveType: "system", sourceOwnerCount: 1 });
+    expect(manifest).toMatchObject({
+      archiveType: "system",
+      sourceInstallationId: "55555555-5555-4555-8555-555555555555",
+      sourceOwnerCount: 1,
+      sourceOwner: {
+        sourceId: "11111111-1111-4111-8111-111111111111",
+        displayName: "Archive owner"
+      }
+    });
   });
 
   it("rejects unknown specialized manifest extensions", async () => {
@@ -1249,7 +1262,12 @@ describe("archive artifact writing and cleanup", () => {
       [{ path: "system.json", logicalType: "system", mediaType: "application/json", source: Readable.from(data) }],
       (entries) => ({
         ...systemManifest(entries),
+        sourceInstallationId: "55555555-5555-4555-8555-555555555555",
         sourceOwnerCount: 1,
+        sourceOwner: {
+          sourceId: "11111111-1111-4111-8111-111111111111",
+          displayName: "Archive owner"
+        },
         unknownExtension: "rejected"
       } as ArchiveManifest),
       DEFAULT_LIMITS,
@@ -1264,7 +1282,15 @@ describe("archive artifact writing and cleanup", () => {
     await expect(writeArchiveArtifact(
       root,
       [{ path: "system.json", logicalType: "system", mediaType: "application/json", source: Readable.from(data) }],
-      (entries) => ({ ...systemManifest(entries), sourceOwnerCount: 2 } as ArchiveManifest),
+      (entries) => ({
+        ...systemManifest(entries),
+        sourceInstallationId: "55555555-5555-4555-8555-555555555555",
+        sourceOwnerCount: 2,
+        sourceOwner: {
+          sourceId: "11111111-1111-4111-8111-111111111111",
+          displayName: "Archive owner"
+        }
+      } as ArchiveManifest),
       DEFAULT_LIMITS,
       (value) => systemArchiveManifestSchema.parse(value)
     )).rejects.toMatchObject({ code: "archive-export-inconsistent" });

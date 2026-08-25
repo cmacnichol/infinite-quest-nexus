@@ -1,13 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import JSZip from "jszip";
 import sharp from "sharp";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { worldContentSchema } from "../../packages/contracts/src/world-library.js";
-import { systemArchiveManifestSchema } from "../../packages/contracts/src/system-archives.js";
+import {
+  SYSTEM_ARCHIVE_DOMAINS,
+  systemArchiveManifestSchema,
+} from "../../packages/contracts/src/system-archives.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import {
@@ -20,8 +23,12 @@ import {
   type SystemArchiveExportJob,
 } from "../../packages/application/src/system-archives/index.js";
 import {
+  createPrivateSystemArchiveStaging,
   createFilesystemSystemArchiveWriter,
+  type SystemArchiveStagingPort,
 } from "../../services/runtime/src/system-archive-composition.js";
+import { createAssetImportStorageComposition } from "../../services/runtime/src/asset-import-composition.js";
+import { supportsSecureGeneratedArchiveStaging } from "../../services/api/src/archive-io.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -55,6 +62,38 @@ function fakeJobs(): SystemArchiveExportDependencies["jobs"] {
     markCancelled: vi.fn(async () => undefined),
     markFailed: vi.fn(async () => undefined),
   };
+}
+
+function memoryStaging(): SystemArchiveStagingPort & Readonly<{ activeEntryCount(): number }> {
+  const active = new Set<object>();
+  return Object.freeze({
+    async stage(input: Parameters<SystemArchiveStagingPort["stage"]>[0]) {
+      const chunks: Buffer[] = [];
+      let byteLength = 0;
+      for await (const chunk of input.source) {
+        const value = Buffer.from(chunk);
+        byteLength += value.byteLength;
+        if (byteLength > input.maximumBytes) throw new Error("memory_staging_limit_exceeded");
+        chunks.push(value);
+      }
+      const bytes = Buffer.concat(chunks, byteLength);
+      const identity = {};
+      active.add(identity);
+      return Object.freeze({
+        byteLength,
+        sha256: sha256(bytes),
+        open() {
+          return ReadableStreamFrom([bytes]);
+        },
+        async cleanup() {
+          active.delete(identity);
+        },
+      });
+    },
+    activeEntryCount() {
+      return active.size;
+    },
+  });
 }
 
 async function archiveText(absolutePath: string): Promise<Readonly<{
@@ -336,7 +375,7 @@ integration("deterministic owner-wide System Archive export", () => {
 
   async function exportArchive() {
     const snapshots = createPostgresSystemArchiveExportRepository(pool, { pageSize: 2 });
-    const writer = await createFilesystemSystemArchiveWriter({ archiveRoot, limits });
+    const writer = await createFilesystemSystemArchiveWriter({ archiveRoot, limits, staging: memoryStaging() });
     const result = await runSystemExport(job(ownerUserId), {
       snapshots,
       originals: originalsReader(),
@@ -360,7 +399,14 @@ integration("deterministic owner-wide System Archive export", () => {
     const manifest = systemArchiveManifestSchema.parse(
       JSON.parse(await zip.file("manifest.json")!.async("string")),
     );
-    expect(manifest.sourceOwnerCount).toBe(1);
+    expect(manifest).toMatchObject({
+      sourceInstallationId: ownerUserId,
+      sourceOwnerCount: 1,
+      sourceOwner: {
+        sourceId: ownerUserId,
+        displayName: "Initial Owner",
+      },
+    });
     const providerEntry = Object.values(zip.files)
       .find((entry) => entry.name.startsWith("records/providers/") && !entry.dir);
     const portableProvider = JSON.parse((await providerEntry!.async("string")).trim()) as {
@@ -407,11 +453,83 @@ integration("deterministic owner-wide System Archive export", () => {
     expect(serialized).toContain("The gate opens silently.");
   });
 
+  it("counts every active or retryable excluded generation and illustration job family", async () => {
+    const snapshots = createPostgresSystemArchiveExportRepository(pool, { pageSize: 2 });
+    const before = await snapshots.withOwnerSnapshot(
+      { ownerUserId },
+      (snapshot) => snapshot.summarizeExcludedOperationalWork(),
+    );
+    const references = await pool.query<{
+      campaign_id: string;
+      turn_id: string;
+      world_version_id: string;
+      provider_profile_id: string;
+      provider_type: string;
+    }>(
+      `SELECT campaigns.id AS campaign_id,turns.id AS turn_id,campaigns.world_version_id,
+              provider_profiles.id AS provider_profile_id,provider_profiles.provider_type
+         FROM campaigns
+         JOIN turns ON turns.campaign_id=campaigns.id AND turns.owner_user_id=campaigns.owner_user_id
+         CROSS JOIN LATERAL (
+           SELECT id,provider_type FROM provider_profiles
+            WHERE owner_user_id=campaigns.owner_user_id ORDER BY id LIMIT 1
+         ) provider_profiles
+        WHERE campaigns.owner_user_id=$1 ORDER BY campaigns.id LIMIT 1`,
+      [ownerUserId],
+    );
+    const reference = references.rows[0]!;
+    const activeCampaigns = await pool.query<{ id: string }>(
+      `INSERT INTO campaigns (owner_user_id,world_version_id,title)
+       SELECT $1,$2,'Excluded work ' || value::text
+         FROM generate_series(1,3) value RETURNING id`,
+      [ownerUserId, reference.world_version_id],
+    );
+    for (const [index, status] of ["replacement_queued", "assessing", "recoverable"].entries()) {
+      await pool.query(
+        `INSERT INTO generation_jobs (
+           owner_user_id,campaign_id,provider_profile_id,idempotency_key,
+           expected_turn_number,action,status
+         ) VALUES ($1,$2,$3,$4,1,'Excluded active work',$5)`,
+        [ownerUserId, activeCampaigns.rows[index]!.id, reference.provider_profile_id, randomUUID(), status],
+      );
+    }
+    await pool.query(
+      `INSERT INTO image_jobs (
+         owner_user_id,campaign_id,turn_id,provider_profile_id,requested_model,prompt,
+         prompt_hash,status,provider_type,target_type
+       ) VALUES ($1,$2,$3,$4,'excluded-model','Excluded retryable image','excluded-image',
+                 'recoverable',$5,'turn_illustration')`,
+      [ownerUserId, reference.campaign_id, reference.turn_id,
+        reference.provider_profile_id, reference.provider_type],
+    );
+    for (const status of ["queued", "matching", "recoverable", "generation_queued"]) {
+      await pool.query(
+        `INSERT INTO illustration_resolution_jobs (
+           owner_user_id,campaign_id,turn_id,source_policy,matching_scope,
+           confidence_profile,status
+         ) VALUES ($1,$2,NULL,'library_then_generate','owner_library','balanced',$3)`,
+        [ownerUserId, reference.campaign_id, status],
+      );
+    }
+
+    const after = await snapshots.withOwnerSnapshot(
+      { ownerUserId },
+      (snapshot) => snapshot.summarizeExcludedOperationalWork(),
+    );
+
+    expect((after.generation ?? 0) - (before.generation ?? 0)).toBe(3);
+    expect((after.illustration ?? 0) - (before.illustration ?? 0)).toBe(5);
+    expect(Object.keys(after).sort()).toEqual([
+      "chronicle", "generation", "illustration", "imports", "system-archive"
+    ]);
+  });
+
   it.each([
     ["missing", "archive-asset-missing"],
     ["changed", "archive-asset-invalid"],
   ] as const)("prevents publication when an inventoried original is %s", async (failure, code) => {
-    const writer = await createFilesystemSystemArchiveWriter({ archiveRoot, limits });
+    const staging = memoryStaging();
+    const writer = await createFilesystemSystemArchiveWriter({ archiveRoot, limits, staging });
     const jobs = fakeJobs();
     const before = await writer.unpublishedArtifactCount();
     const reader: SystemArchiveExportDependencies["originals"] = {
@@ -433,6 +551,7 @@ integration("deterministic owner-wide System Archive export", () => {
 
     expect(jobs.markFailed).toHaveBeenCalledWith(expect.anything(), code);
     expect(await writer.unpublishedArtifactCount()).toBe(before);
+    expect(staging.activeEntryCount()).toBe(0);
   });
 
   it("never removes an atomically published archive when abort is called afterward", async () => {
@@ -443,6 +562,146 @@ integration("deterministic owner-wide System Archive export", () => {
     await expect(stat(result.artifact.absolutePath!)).resolves.toMatchObject({ isFile: expect.any(Function) });
   });
 
+  it("never writes System Archive spool data into the operating-system temp directory", async () => {
+    const before = new Set((await readdir(tmpdir())).filter((name) => name.startsWith("infinitequest-system-export-")));
+    const staging = memoryStaging();
+    const writer = await createFilesystemSystemArchiveWriter({ archiveRoot, limits, staging });
+    try {
+      await writer.writeSystemMetadata({
+        sourceId: ownerUserId,
+        sourceInstallationId: ownerUserId,
+        displayName: "Initial Owner",
+      });
+      const created = (await readdir(tmpdir()))
+        .filter((name) => name.startsWith("infinitequest-system-export-") && !before.has(name));
+      expect(created).toEqual([]);
+    } finally {
+      await writer.abort();
+    }
+    expect(staging.activeEntryCount()).toBe(0);
+  });
+
+  it("removes only unpublished local and staged artifacts when cancellation wins during publish", async () => {
+    const staging = memoryStaging();
+    const publishSystemArchive = vi.fn(async () => {
+      throw new Error("durable publisher must not be called after cancellation wins");
+    });
+    const writer = await createFilesystemSystemArchiveWriter({
+      archiveRoot,
+      limits,
+      staging,
+      publisher: { publishSystemArchive },
+    });
+    const metadata = await writer.writeSystemMetadata({
+      sourceId: ownerUserId,
+      sourceInstallationId: ownerUserId,
+      displayName: "Initial Owner",
+    });
+    const contentFingerprint = await writer.calculateContentFingerprint({
+      payloadHashes: [metadata.sha256],
+      originalAssetHashes: [],
+    });
+    const before = (await readdir(join(archiveRoot, "artifacts"))).sort();
+    let checks = 0;
+
+    await expect(writer.publish({
+      manifest: {
+        sourceInstallationId: ownerUserId,
+        sourceOwnerCount: 1,
+        sourceOwner: {
+          sourceId: ownerUserId,
+          sourceInstallationId: ownerUserId,
+          displayName: "Initial Owner",
+        },
+        domainCounts: Object.fromEntries(
+          SYSTEM_ARCHIVE_DOMAINS.map((domain) => [domain, 0]),
+        ) as Record<(typeof SYSTEM_ARCHIVE_DOMAINS)[number], number>,
+        excludedOperationalWork: {},
+        assets: [],
+      },
+      contentFingerprint,
+      cancellationRequested: async () => ++checks === 2,
+    })).resolves.toEqual({ status: "cancelled" });
+
+    expect(checks).toBe(2);
+    expect(publishSystemArchive).not.toHaveBeenCalled();
+    expect(staging.activeEntryCount()).toBe(0);
+    expect((await readdir(join(archiveRoot, "artifacts"))).sort()).toEqual(before);
+  });
+
+  it.runIf(supportsSecureGeneratedArchiveStaging())(
+    "cleans durable private spool authority when publication fails",
+    async () => {
+      const privateRoot = await mkdtemp(join(tmpdir(), "infinitequest-system-private-spool-"));
+      const privateAssetRoot = join(privateRoot, "assets-root");
+      await mkdir(privateAssetRoot, { recursive: true });
+      const storage = await createAssetImportStorageComposition(pool, {
+        archiveRoot: privateRoot,
+        assetRoot: privateAssetRoot,
+      });
+      const leaseOwner = `system-archive-spool-${randomUUID()}`;
+      const staging = createPrivateSystemArchiveStaging(storage.adapter, {
+        leaseOwner,
+        expiresAt: () => new Date(Date.now() + 60_000).toISOString(),
+      });
+      const writer = await createFilesystemSystemArchiveWriter({
+        archiveRoot: privateRoot,
+        limits,
+        staging,
+        publisher: {
+          async publishSystemArchive() {
+            throw new Error("forced durable publication failure");
+          },
+        },
+      });
+      try {
+        const metadata = await writer.writeSystemMetadata({
+          sourceId: ownerUserId,
+          sourceInstallationId: ownerUserId,
+          displayName: "Initial Owner",
+        });
+        const contentFingerprint = await writer.calculateContentFingerprint({
+          payloadHashes: [metadata.sha256],
+          originalAssetHashes: [],
+        });
+        const domainCounts = Object.fromEntries(
+          SYSTEM_ARCHIVE_DOMAINS.map((domain) => [domain, 0]),
+        ) as Record<(typeof SYSTEM_ARCHIVE_DOMAINS)[number], number>;
+
+        await expect(writer.publish({
+          manifest: {
+            sourceInstallationId: ownerUserId,
+            sourceOwnerCount: 1,
+            sourceOwner: {
+              sourceId: ownerUserId,
+              sourceInstallationId: ownerUserId,
+              displayName: "Initial Owner",
+            },
+            domainCounts,
+            excludedOperationalWork: {},
+            assets: [],
+          },
+          contentFingerprint,
+          cancellationRequested: async () => false,
+        })).rejects.toThrow("forced durable publication failure");
+
+        await expect(pool.query<{ status: string }>(
+          `SELECT staged.status
+             FROM portable_staged_inputs staged
+             JOIN durable_filesystem_operations operation
+               ON operation.id=staged.filesystem_operation_id
+            WHERE staged.owner_user_id=$1 AND operation.lease_owner=$2`,
+          [ownerUserId, leaseOwner],
+        )).resolves.toMatchObject({ rows: [{ status: "cleaned" }] });
+        expect(await readdir(join(privateRoot, "staging"))).toEqual([]);
+        expect(await readdir(join(privateRoot, "artifacts"))).toEqual([]);
+      } finally {
+        await storage.close();
+        await rm(privateRoot, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("honors durable cancellation that wins before the next phase update", async () => {
     const leaseOwner = "system-archive-cancelled-worker";
     const inserted = await pool.query<{ id: string }>(
@@ -452,7 +711,7 @@ integration("deterministic owner-wide System Archive export", () => {
        RETURNING id`,
       [ownerUserId, sha256("system-archive-cancel-before-phase"), leaseOwner],
     );
-    const writer = await createFilesystemSystemArchiveWriter({ archiveRoot, limits });
+    const writer = await createFilesystemSystemArchiveWriter({ archiveRoot, limits, staging: memoryStaging() });
 
     await expect(runSystemExport({
       id: inserted.rows[0]!.id,

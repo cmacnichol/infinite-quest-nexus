@@ -186,7 +186,7 @@ export async function runSystemExport(
     });
     if (await cancelIfRequested(job, dependencies)) return { status: "cancelled" };
 
-    const artifact = await dependencies.writer.publish({
+    const publication = await dependencies.writer.publish({
       manifest: {
         sourceInstallationId: captured.owner.sourceInstallationId,
         sourceOwner: captured.owner,
@@ -196,7 +196,13 @@ export async function runSystemExport(
         assets: assetRecords,
       },
       contentFingerprint,
+      cancellationRequested: () => dependencies.jobs.cancellationRequested(job),
     });
+    if (publication.status === "cancelled") {
+      await dependencies.jobs.markCancelled(job);
+      return { status: "cancelled" };
+    }
+    const artifact = publication.artifact;
     published = true;
     const report: SystemArchiveExportReport = Object.freeze({
       completedAt: now().toISOString(),

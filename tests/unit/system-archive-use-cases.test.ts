@@ -72,6 +72,7 @@ function payload(path: string, digit: string): SystemArchiveWrittenPayload {
 
 function dependencies(input: Readonly<{
   cancellationChecks?: readonly boolean[];
+  checkCancellationInsidePublish?: boolean;
   originalReader?: SystemArchiveExportDependencies["originals"];
 }> = {}) {
   let snapshotOpen = false;
@@ -135,7 +136,14 @@ function dependencies(input: Readonly<{
     async publish(inputValue) {
       expect(inputValue.contentFingerprint).toMatch(/^[a-f0-9]{64}$/u);
       events.push("publish");
-      return { ...published, contentFingerprint: inputValue.contentFingerprint };
+      if (input.checkCancellationInsidePublish && await inputValue.cancellationRequested()) {
+        events.push("publish-cancelled-before-finalization");
+        return { status: "cancelled" as const };
+      }
+      return {
+        status: "published" as const,
+        artifact: { ...published, contentFingerprint: inputValue.contentFingerprint },
+      };
     },
     abort: vi.fn(async () => {
       events.push("abort");
@@ -204,6 +212,21 @@ describe("System Archive export use case", () => {
     expect(fixture.jobs.markCancelled).toHaveBeenCalledWith(job);
     expect(fixture.jobs.markPublished).not.toHaveBeenCalled();
     expect(fixture.events).not.toContain("publish");
+  });
+
+  it("lets cancellation win at the writer's pre-publication commit boundary", async () => {
+    const fixture = dependencies({
+      cancellationChecks: [false, false, false, false, true],
+      checkCancellationInsidePublish: true,
+    });
+
+    const result = await runSystemExport(job, fixture.value);
+
+    expect(result).toEqual({ status: "cancelled" });
+    expect(fixture.events).toContain("publish-cancelled-before-finalization");
+    expect(fixture.jobs.markCancelled).toHaveBeenCalledWith(job);
+    expect(fixture.jobs.markPublished).not.toHaveBeenCalled();
+    expect(fixture.jobs.markFailed).not.toHaveBeenCalled();
   });
 
   it("aborts and marks the durable job failed when an original is missing", async () => {

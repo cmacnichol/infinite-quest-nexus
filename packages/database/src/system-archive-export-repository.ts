@@ -853,11 +853,15 @@ async function excludedOperationalWork(
   const result = await client.query<Readonly<Record<string, number | string>>>(
     `SELECT
        (SELECT count(*)::int FROM generation_jobs
-         WHERE owner_user_id=$1 AND status IN ('queued','generating','validating','committing','indexing')) AS generation,
+         WHERE owner_user_id=$1 AND status IN (
+           'queued','replacement_queued','assessing','generating','validating','committing','recoverable'
+         )) AS generation,
        ((SELECT count(*) FROM image_jobs
-          WHERE owner_user_id=$1 AND status IN ('queued','generating','provider_pending','downloading'))
+          WHERE owner_user_id=$1 AND status IN ('queued','generating','provider_pending','downloading','recoverable'))
         +(SELECT count(*) FROM illustration_prompt_jobs
           WHERE owner_user_id=$1 AND status IN ('queued','refining','recoverable'))
+        +(SELECT count(*) FROM illustration_resolution_jobs
+          WHERE owner_user_id=$1 AND status IN ('queued','matching','generation_queued','recoverable'))
         +(SELECT count(*) FROM illustration_backfill_jobs
           WHERE owner_user_id=$1 AND status IN ('queued','running')))::int AS illustration,
        ((SELECT count(*) FROM chronicle_jobs
@@ -987,7 +991,7 @@ export function createPostgresSystemArchiveExportJobPort(pool: DatabasePool): Sy
                 progress='{}'::jsonb,lease_owner=NULL,lease_expires_at=NULL,
                 updated_at=clock_timestamp()
           WHERE id=$1 AND owner_user_id=$2 AND kind='export' AND lease_owner=$3
-            AND status='verifying'`,
+            AND status IN ('verifying','cancelling')`,
         [job.id, job.ownerUserId, job.leaseOwner, artifact.artifactId, canonicalArchiveJson(durableReport)],
       );
       if (result.rowCount !== 1) throw jobUpdateError("System Archive export could not publish its durable job.", 409);
