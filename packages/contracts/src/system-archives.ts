@@ -67,20 +67,110 @@ const systemWorldRecordSchema = z.object({
   updatedAt: archiveTimestampSchema
 }).strict();
 
+const systemRpgStatSchema = z.object({
+  id: identifierSchema,
+  name: identifierSchema,
+  value: z.number().int().min(1).max(99),
+  note: shortTextSchema
+}).strict();
+
+const systemDefaultTriggerSchema = z.object({
+  id: identifierSchema,
+  name: identifierSchema,
+  condition: shortTextSchema,
+  effect: shortTextSchema
+}).strict();
+
+const systemEventTriggerSchema = z.object({
+  id: identifierSchema,
+  label: identifierSchema,
+  timing: z.enum(["before", "after"]),
+  condition: shortTextSchema,
+  effect: shortTextSchema,
+  addTextAfter: z.boolean(),
+  triggeredCount: nonnegativeSafeIntegerSchema,
+  lastTriggeredTurn: z.number().int().positive().nullable(),
+  lastTriggeredAt: archiveTimestampSchema.nullable()
+}).strict();
+
+const systemPendingEventTriggerSchema = z.object({
+  id: identifierSchema,
+  sourceTriggerId: identifierSchema,
+  name: identifierSchema,
+  timing: z.enum(["before", "after"]),
+  condition: shortTextSchema,
+  effect: shortTextSchema,
+  instructions: shortTextSchema,
+  reason: shortTextSchema,
+  sourceTurn: z.number().int().positive().nullable()
+}).strict();
+
+const systemWorldContentSchema = z.object({
+  schemaVersion: z.number().int().positive(),
+  world: z.object({
+    title: identifierSchema,
+    genre: shortTextSchema,
+    tone: shortTextSchema,
+    premise: longTextSchema,
+    backgroundStory: longTextSchema,
+    firstAction: longTextSchema,
+    rules: longTextSchema
+  }).strict(),
+  playableCharacters: z.array(z.object({
+    id: identifierSchema,
+    name: identifierSchema,
+    characterText: longTextSchema,
+    rpgStats: z.array(systemRpgStatSchema).max(10_000),
+    defaultTriggers: z.array(systemDefaultTriggerSchema).max(10_000)
+  }).strict()).max(1_000),
+  entities: z.array(z.object({
+    id: identifierSchema,
+    name: identifierSchema,
+    kind: identifierSchema,
+    description: longTextSchema,
+    tags: z.array(identifierSchema).max(1_000),
+    facts: z.array(z.object({ key: identifierSchema, value: longTextSchema }).strict()).max(10_000)
+  }).strict()).max(20_000),
+  relationships: z.array(z.object({
+    id: identifierSchema,
+    fromEntityId: identifierSchema,
+    toEntityId: identifierSchema,
+    kind: identifierSchema,
+    description: longTextSchema
+  }).strict()).max(50_000),
+  rpgStats: z.array(systemRpgStatSchema).max(10_000),
+  defaultTriggers: z.array(systemDefaultTriggerSchema).max(10_000),
+  eventTriggers: z.array(systemEventTriggerSchema).max(10_000),
+  assets: z.array(z.object({
+    assetId: z.string().uuid(),
+    role: z.enum(["world_cover", "world_version_asset"])
+  }).strict()).max(10_000),
+  defaults: z.object({
+    selectedCharacterId: identifierSchema.nullable(),
+    initialLocation: shortTextSchema
+  }).strict()
+}).strict();
+
 const systemWorldVersionRecordSchema = z.object({
   sourceId: z.string().uuid(),
   worldId: z.string().uuid(),
   versionNumber: z.number().int().positive(),
   title: identifierSchema,
+  content: systemWorldContentSchema,
   contentFingerprint: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
+  releaseNotes: longTextSchema,
+  createdFromRevision: nonnegativeSafeIntegerSchema.nullable(),
   publishedAt: archiveTimestampSchema
 }).strict();
 
 const systemWorldDraftRecordSchema = z.object({
   sourceId: z.string().uuid(),
   worldId: z.string().uuid(),
+  basedOnWorldVersionId: z.string().uuid().nullable(),
   title: identifierSchema,
   revision: nonnegativeSafeIntegerSchema,
+  content: systemWorldContentSchema,
+  createdAt: archiveTimestampSchema,
   updatedAt: archiveTimestampSchema
 }).strict();
 
@@ -118,7 +208,23 @@ const systemTurnCorrectionRecordSchema = z.object({
 const systemCampaignStateRecordSchema = z.object({
   sourceId: z.string().uuid(),
   campaignId: z.string().uuid(),
-  trackerLabels: z.array(identifierSchema).max(10_000),
+  revision: nonnegativeSafeIntegerSchema,
+  state: z.object({
+    continuitySummary: longTextSchema,
+    openThreads: z.array(shortTextSchema).max(500),
+    canonicalFacts: z.array(z.object({ id: z.string().uuid().nullable(), content: longTextSchema }).strict()).max(2_000),
+    scratchpad: longTextSchema,
+    trackers: z.array(z.object({
+      id: identifierSchema,
+      name: identifierSchema,
+      value: shortTextSchema,
+      rules: shortTextSchema
+    }).strict()).max(200),
+    rpgStats: z.array(systemRpgStatSchema).max(100),
+    defaultTriggers: z.array(systemDefaultTriggerSchema).max(200),
+    eventTriggers: z.array(systemEventTriggerSchema).max(200),
+    pendingEventTriggers: z.array(systemPendingEventTriggerSchema).max(200)
+  }).strict(),
   updatedAt: archiveTimestampSchema
 }).strict();
 
