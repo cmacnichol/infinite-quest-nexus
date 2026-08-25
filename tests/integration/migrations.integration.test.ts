@@ -304,6 +304,8 @@ integration("standard database migration runner", () => {
 
   it("validates expanded portable artifact constraints before the short final swap", async () => {
     const migration = await readFile(resolve("database/migrations/0078_system_archive_jobs.sql"), "utf8");
+    expect(migration.startsWith("-- infinitequest:migration-mode=phased-transactions-v1\n")).toBe(true);
+    expect(migration.match(/^-- infinitequest:transaction-boundary$/gmu)).toHaveLength(2);
     const addKind = migration.indexOf("portable_export_artifacts_export_kind_check_system_archive");
     const addScope = migration.indexOf("portable_export_scope_check_system_archive");
     const validateKind = migration.indexOf(
@@ -322,6 +324,70 @@ integration("standard database migration runner", () => {
     expect(validateScope).toBeGreaterThan(addScope);
     expect(dropOriginal).toBeGreaterThan(validateKind);
     expect(dropOriginal).toBeGreaterThan(validateScope);
+  });
+
+  it("runs only the registered online migration phases in separate transactions", async () => {
+    const databaseName = `infinitequest_phased_migration_${crypto.randomUUID().replaceAll("-", "")}`;
+    const databaseUrlValue = new URL(databaseUrl!);
+    databaseUrlValue.pathname = `/${databaseName}`;
+    const migrationDirectory = await mkdtemp(join(tmpdir(), "infinitequest-phased-migration-"));
+    const migrationName = "0078_system_archive_jobs";
+    const phasedSql = `-- infinitequest:migration-mode=phased-transactions-v1
+CREATE TABLE migration_phase_audit (
+  phase text PRIMARY KEY,
+  transaction_id bigint NOT NULL
+);
+INSERT INTO migration_phase_audit VALUES ('add-not-valid', txid_current());
+-- infinitequest:transaction-boundary
+COMMIT;
+BEGIN;
+INSERT INTO migration_phase_audit VALUES ('validate', txid_current());
+-- infinitequest:transaction-boundary
+COMMIT;
+BEGIN;
+INSERT INTO migration_phase_audit VALUES ('final-swap', txid_current());
+`;
+    let isolatedPool: DatabasePool | null = null;
+    try {
+      await pool.query(`CREATE DATABASE ${databaseName}`);
+      isolatedPool = createDatabasePool(databaseUrlValue.toString(), 2);
+      await writeFile(join(migrationDirectory, `${migrationName}.sql`), phasedSql);
+
+      await expect(migrateDatabase(isolatedPool, migrationDirectory)).resolves.toEqual([migrationName]);
+      const phases = await isolatedPool.query<{ phase: string; transaction_id: string }>(
+        "SELECT phase,transaction_id::text FROM migration_phase_audit ORDER BY transaction_id"
+      );
+      expect(phases.rows.map((row) => row.phase)).toEqual([
+        "add-not-valid",
+        "validate",
+        "final-swap"
+      ]);
+      expect(new Set(phases.rows.map((row) => row.transaction_id)).size).toBe(3);
+      await expect(isolatedPool.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM schema_migrations WHERE name=$1",
+        [migrationName]
+      )).resolves.toMatchObject({ rows: [{ count: "1" }] });
+      await expect(migrateDatabase(isolatedPool, migrationDirectory)).resolves.toEqual([]);
+
+      await writeFile(
+        join(migrationDirectory, "0079_unregistered_phased.sql"),
+        `CREATE TABLE unregistered_phase_audit (phase text PRIMARY KEY);
+         INSERT INTO unregistered_phase_audit VALUES ('first');
+         COMMIT;
+         BEGIN;
+         INSERT INTO unregistered_phase_audit VALUES ('second');
+        `
+      );
+      await expect(migrateDatabase(isolatedPool, migrationDirectory)).rejects.toThrow(
+        "Migration 0079_unregistered_phased contains transaction control without an approved phased contract."
+      );
+      await expect(isolatedPool.query("SELECT to_regclass('public.unregistered_phase_audit') AS table_name"))
+        .resolves.toMatchObject({ rows: [{ table_name: null }] });
+    } finally {
+      if (isolatedPool) await isolatedPool.end();
+      await dropTestDatabaseWhenIdle(pool, databaseName);
+      await rm(migrationDirectory, { recursive: true, force: true });
+    }
   });
 
   it("adds restart-realizable private filesystem authority without classifying legacy asset paths", async () => {

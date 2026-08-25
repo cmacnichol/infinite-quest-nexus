@@ -1,9 +1,16 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { runner, type RunnerOption } from "node-pg-migrate";
 import type { DatabasePool } from "./pool.js";
 import { logger } from "../../logger/src/index.js";
 
 const MIGRATIONS_TABLE = "schema_migrations";
 const MAINTENANCE_SUFFIX = ".maintenance";
+const PHASED_MIGRATION_DIRECTIVE = "-- infinitequest:migration-mode=phased-transactions-v1";
+const PHASE_BOUNDARY = "-- infinitequest:transaction-boundary";
+const PHASED_MIGRATION_BOUNDARIES = new Map<string, number>([
+  ["0078_system_archive_jobs", 2]
+]);
 
 type MigrationRunOptions = {
   allowMaintenanceMigrations?: boolean;
@@ -21,11 +28,65 @@ const silentMigrationLogger: NonNullable<RunnerOption["logger"]> = {
   error: () => undefined
 };
 
+async function validateMigrationTransactionContracts(
+  migrationDirectory: string,
+  migrationNames: readonly string[]
+): Promise<void> {
+  for (const migrationName of migrationNames) {
+    let source: string;
+    try {
+      source = await readFile(join(migrationDirectory, `${migrationName}.sql`), "utf8");
+    } catch (error: any) {
+      if (error?.code === "ENOENT") continue;
+      throw error;
+    }
+
+    const controls = [...source.matchAll(/^\s*(BEGIN|COMMIT|ROLLBACK)\s*;/gimu)]
+      .map((match) => match[1]?.toUpperCase());
+    const expectedBoundaries = PHASED_MIGRATION_BOUNDARIES.get(migrationName);
+    if (expectedBoundaries === undefined) {
+      if (controls.length > 0) {
+        throw new Error(
+          `Migration ${migrationName} contains transaction control without an approved phased contract.`
+        );
+      }
+      continue;
+    }
+
+    if (!source.startsWith(`${PHASED_MIGRATION_DIRECTIVE}\n`)) {
+      throw new Error(`Migration ${migrationName} is missing its approved phased transaction directive.`);
+    }
+    const boundaryCount = source.match(/^-- infinitequest:transaction-boundary$/gmu)?.length ?? 0;
+    if (boundaryCount !== expectedBoundaries) {
+      throw new Error(
+        `Migration ${migrationName} must contain exactly ${expectedBoundaries} approved transaction boundaries.`
+      );
+    }
+    const expectedControls = Array.from(
+      { length: expectedBoundaries },
+      () => ["COMMIT", "BEGIN"]
+    ).flat();
+    if (controls.length !== expectedControls.length
+      || controls.some((control, index) => control !== expectedControls[index])) {
+      throw new Error(`Migration ${migrationName} has invalid phased transaction control.`);
+    }
+    for (const phase of source.split(PHASE_BOUNDARY).slice(1)) {
+      if (!/^\r?\nCOMMIT;\r?\nBEGIN;/u.test(phase)) {
+        throw new Error(`Migration ${migrationName} has an invalid transaction boundary marker.`);
+      }
+    }
+  }
+}
+
 async function runMigrations(
   pool: DatabasePool,
   migrationDirectory: string,
-  dryRun: boolean
+  dryRun: boolean,
+  expectedMigrations?: readonly string[]
 ): Promise<string[]> {
+  if (!dryRun && expectedMigrations) {
+    await validateMigrationTransactionContracts(migrationDirectory, expectedMigrations);
+  }
   const client = await pool.connect();
   try {
     const migrations = await runner({
@@ -40,7 +101,9 @@ async function runMigrations(
       verbose: false,
       logger: dryRun ? silentMigrationLogger : migrationLogger
     });
-    return migrations.map((migration) => migration.name);
+    const names = migrations.map((migration) => migration.name);
+    if (dryRun) await validateMigrationTransactionContracts(migrationDirectory, names);
+    return names;
   } finally {
     client.release();
   }
@@ -95,7 +158,7 @@ export async function migrateDatabase(
         "Back up the database and run the migrate role or set ALLOW_MAINTENANCE_MIGRATIONS=true."
       );
     }
-    return runMigrations(pool, migrationDirectory, false);
+    return runMigrations(pool, migrationDirectory, false, pending);
   });
 }
 

@@ -1,35 +1,62 @@
+-- infinitequest:migration-mode=phased-transactions-v1
 -- System Archive work is operational and never portable. Jobs retain only hashed
 -- idempotency authority plus owner-scoped links to existing portable staging and
 -- artifact records.
 
-ALTER TABLE portable_export_artifacts
-  ADD CONSTRAINT portable_export_artifacts_export_kind_check_system_archive
-    CHECK (export_kind IN ('campaign_zip', 'world_json', 'system_zip')) NOT VALID,
-  ADD CONSTRAINT portable_export_scope_check_system_archive CHECK (
-    (export_kind = 'campaign_zip'
-      AND campaign_id IS NOT NULL
-      AND world_id IS NOT NULL
-      AND world_version_id IS NOT NULL
-      AND content_type = 'application/zip')
-    OR
-    (export_kind = 'world_json'
-      AND campaign_id IS NULL
-      AND world_id IS NOT NULL
-      AND world_version_id IS NOT NULL
-      AND content_type = 'application/json')
-    OR
-    (export_kind = 'system_zip'
-      AND campaign_id IS NULL
-      AND world_id IS NULL
-      AND world_version_id IS NULL
-      AND content_type = 'application/zip')
-  ) NOT VALID;
+DO $system_archive_add_constraints$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conrelid = 'portable_export_artifacts'::regclass
+       AND conname = 'portable_export_artifacts_export_kind_check_system_archive'
+  ) THEN
+    ALTER TABLE portable_export_artifacts
+      ADD CONSTRAINT portable_export_artifacts_export_kind_check_system_archive
+        CHECK (export_kind IN ('campaign_zip', 'world_json', 'system_zip')) NOT VALID;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conrelid = 'portable_export_artifacts'::regclass
+       AND conname = 'portable_export_scope_check_system_archive'
+  ) THEN
+    ALTER TABLE portable_export_artifacts
+      ADD CONSTRAINT portable_export_scope_check_system_archive CHECK (
+        (export_kind = 'campaign_zip'
+          AND campaign_id IS NOT NULL
+          AND world_id IS NOT NULL
+          AND world_version_id IS NOT NULL
+          AND content_type = 'application/zip')
+        OR
+        (export_kind = 'world_json'
+          AND campaign_id IS NULL
+          AND world_id IS NOT NULL
+          AND world_version_id IS NOT NULL
+          AND content_type = 'application/json')
+        OR
+        (export_kind = 'system_zip'
+          AND campaign_id IS NULL
+          AND world_id IS NULL
+          AND world_version_id IS NULL
+          AND content_type = 'application/zip')
+      ) NOT VALID;
+  END IF;
+END
+$system_archive_add_constraints$;
+
+-- infinitequest:transaction-boundary
+COMMIT;
+BEGIN;
 
 ALTER TABLE portable_export_artifacts
   VALIDATE CONSTRAINT portable_export_artifacts_export_kind_check_system_archive;
 
 ALTER TABLE portable_export_artifacts
   VALIDATE CONSTRAINT portable_export_scope_check_system_archive;
+
+-- infinitequest:transaction-boundary
+COMMIT;
+BEGIN;
 
 -- The expanded constraints are already valid and enforce concurrent writes.
 -- This transaction-visible metadata swap is the only short exclusive-lock phase.
