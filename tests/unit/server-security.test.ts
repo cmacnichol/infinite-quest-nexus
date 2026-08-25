@@ -198,6 +198,8 @@ describe("API server security and CORS headers", () => {
       method: "GET",
       url: `/api/v1/system-exports/${jobId}`,
     })).statusCode).toBe(404);
+    expect((await disabled.inject({ method: "GET", url: "/api/v1/meta" })).json())
+      .toMatchObject({ capabilities: { systemArchive: false } });
     expect(createApiSystemArchive).not.toHaveBeenCalled();
     await disabled.close();
 
@@ -210,6 +212,8 @@ describe("API server security and CORS headers", () => {
       url: `/api/v1/system-exports/${jobId}`,
     });
     expect(response.statusCode, response.body).toBe(200);
+    expect((await enabled.inject({ method: "GET", url: "/api/v1/meta" })).json())
+      .toMatchObject({ capabilities: { systemArchive: true } });
     expect(createApiSystemArchive).toHaveBeenCalledOnce();
     expect(getJob).toHaveBeenCalledWith({
       ownerUserId: "11111111-1111-4111-8111-111111111111",

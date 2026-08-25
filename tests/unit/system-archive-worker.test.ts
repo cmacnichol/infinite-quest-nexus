@@ -118,8 +118,15 @@ describe("System Archive worker lane", () => {
       const running = lane.runNext();
       await vi.advanceTimersByTimeAsync(1_100);
       expect(jobs.heartbeat).toHaveBeenCalled();
-      rejectImport(Object.assign(new Error("C:\\private\\story.txt"), { code: "archive-checksum-mismatch" }));
-      await expect(running).rejects.toThrow("C:\\private\\story.txt");
+      const marker = "C:\\private\\story-secret-token.txt";
+      rejectImport(Object.assign(new Error(marker), { code: "archive-checksum-mismatch" }));
+      const failure = await running.catch((error: unknown) => error);
+      expect(failure).toMatchObject({
+        name: "SystemArchiveWorkerError",
+        message: "System Archive worker operation failed.",
+        code: "archive-checksum-mismatch",
+      });
+      expect(JSON.stringify(failure)).not.toContain(marker);
       expect(jobs.markFailed).toHaveBeenCalledWith(
         job.id,
         "worker",
@@ -128,6 +135,47 @@ describe("System Archive worker lane", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("replaces untrusted story-like failure codes before persistence or propagation", async () => {
+    const importing = {
+      ...job,
+      kind: "import" as const,
+      stagedInputId: "staged",
+      status: "revalidating" as const,
+    };
+    const marker = "story-secret-token";
+    const jobs = {
+      claimNext: vi.fn(async () => importing),
+      heartbeat: vi.fn(async () => true),
+      markCancelled: vi.fn(async () => { throw new Error("not cancelling"); }),
+      markFailed: vi.fn(async () => undefined),
+    };
+    const lane = createSystemArchiveWorkerLane({
+      workerId: "worker",
+      leaseSeconds: 60,
+      jobs: jobs as never,
+      exports: { runSystemExport: vi.fn() } as never,
+      imports: {
+        runSystemImport: vi.fn(async () => {
+          throw Object.assign(new Error(`C:\\private\\${marker}.txt`), { code: marker });
+        }),
+      } as never,
+    });
+
+    const failure = await lane.runNext().catch((error: unknown) => error);
+
+    expect(failure).toMatchObject({
+      name: "SystemArchiveWorkerError",
+      message: "System Archive worker operation failed.",
+      code: "archive-operation-failed",
+    });
+    expect(JSON.stringify(failure)).not.toContain(marker);
+    expect(jobs.markFailed).toHaveBeenCalledWith(
+      importing.id,
+      "worker",
+      "archive-operation-failed",
+    );
   });
 
   it("honors a cancellation requested while a pre-boundary import is running", async () => {

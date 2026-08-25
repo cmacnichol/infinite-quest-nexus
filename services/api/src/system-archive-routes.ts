@@ -72,7 +72,105 @@ type EventSource = Readonly<{
 }>;
 
 function httpError(message: string, statusCode: number, code: string): Error {
-  return Object.assign(new Error(message), { statusCode, code, expose: true });
+  const error = Object.assign(new Error(message), {
+    statusCode,
+    code,
+    expose: statusCode < 500,
+  });
+  error.name = "SystemArchiveError";
+  return error;
+}
+
+type BoundaryOperation =
+  | "enqueue-export"
+  | "get-job"
+  | "cancel-job"
+  | "download"
+  | "create-upload"
+  | "get-upload"
+  | "cancel-upload"
+  | "put-chunk"
+  | "complete-upload"
+  | "preview-import"
+  | "commit-import";
+
+const SAFE_BOUNDARY_ERRORS: Readonly<Record<string, Readonly<{
+  statusCode: number;
+  message: string;
+}>>> = Object.freeze({
+  "system-archive-job-not-found": { statusCode: 404, message: "System Archive job was not found." },
+  "system-archive-cancellation-boundary": { statusCode: 409, message: "System Archive can no longer be cancelled." },
+  "system-archive-download-unavailable": { statusCode: 404, message: "System Archive download is unavailable." },
+  "system-archive-download-stale": { statusCode: 409, message: "System Archive download authority changed." },
+  "system-archive-range-invalid": { statusCode: 416, message: "System Archive byte range is invalid." },
+  "system-archive-upload-not-found": { statusCode: 404, message: "System Archive upload was not found." },
+  "system-archive-upload-expired": { statusCode: 410, message: "System Archive upload has expired." },
+  "system-archive-upload-conflict": { statusCode: 409, message: "System Archive upload conflicts with durable state." },
+  "system-archive-upload-offset-conflict": { statusCode: 409, message: "System Archive chunk does not begin at the durable upload prefix." },
+  "system-archive-preview-not-found": { statusCode: 404, message: "System Archive preview was not found." },
+  "system-archive-preview-expired": { statusCode: 410, message: "System Archive preview has expired." },
+  "system-archive-preview-stale": { statusCode: 409, message: "System Archive preview authority is stale." },
+  "system-archive-export-conflict": { statusCode: 409, message: "A conflicting System Archive export is active." },
+});
+
+function boundaryStatus(error: unknown): number {
+  if (typeof error === "object" && error !== null && "statusCode" in error) {
+    const value = Number((error as { statusCode?: unknown }).statusCode);
+    if (Number.isInteger(value) && value >= 400 && value <= 599) return value;
+  }
+  return 500;
+}
+
+function fallbackBoundaryCode(operation: BoundaryOperation, statusCode: number): string {
+  if (statusCode >= 500) return "system-archive-operation-failed";
+  if (operation === "get-job" && statusCode === 404) return "system-archive-job-not-found";
+  if (operation === "cancel-job") {
+    return statusCode === 404 ? "system-archive-job-not-found" : "system-archive-cancellation-boundary";
+  }
+  if (operation === "download") {
+    if (statusCode === 416) return "system-archive-range-invalid";
+    return statusCode === 409 ? "system-archive-download-stale" : "system-archive-download-unavailable";
+  }
+  if (operation === "enqueue-export" && statusCode === 409) return "system-archive-export-conflict";
+  if (["create-upload", "get-upload", "cancel-upload", "put-chunk", "complete-upload", "preview-import"]
+    .includes(operation)) {
+    if (statusCode === 404) return "system-archive-upload-not-found";
+    if (statusCode === 410) return "system-archive-upload-expired";
+    if (statusCode === 409) return "system-archive-upload-conflict";
+  }
+  if (operation === "commit-import") {
+    if (statusCode === 404) return "system-archive-preview-not-found";
+    if (statusCode === 410) return "system-archive-preview-expired";
+    if (statusCode === 409) return "system-archive-preview-stale";
+  }
+  return statusCode === 400
+    ? "system-archive-request-invalid"
+    : "system-archive-operation-failed";
+}
+
+function safeBoundaryError(operation: BoundaryOperation, error: unknown): Error {
+  const statusCode = boundaryStatus(error);
+  const rawCode = typeof error === "object" && error !== null && "code" in error
+    && typeof (error as { code?: unknown }).code === "string"
+    ? (error as { code: string }).code
+    : "";
+  const retained = SAFE_BOUNDARY_ERRORS[rawCode];
+  const code = retained?.statusCode === statusCode
+    ? rawCode
+    : fallbackBoundaryCode(operation, statusCode);
+  const known = SAFE_BOUNDARY_ERRORS[code];
+  const message = known?.message ?? (statusCode >= 500
+    ? "System Archive operation failed."
+    : "System Archive request could not be completed.");
+  return httpError(message, statusCode >= 500 ? 500 : statusCode, code);
+}
+
+async function atBoundary<T>(operation: BoundaryOperation, work: () => Promise<T>): Promise<T> {
+  try {
+    return await work();
+  } catch (error) {
+    throw safeBoundaryError(operation, error);
+  }
 }
 
 function requireHeader(value: string | string[] | undefined, name: string): string {
@@ -203,18 +301,24 @@ export async function registerSystemArchiveRoutes(
 
   app.post("/api/v1/system-exports", async (request, reply) => {
     const body = systemArchiveExportRequestSchema.parse(request.body);
-    const owner = await options.resolveOwner();
-    const job = checkedJob(await options.application.enqueueExport({ ...owner, ...body }), "export");
+    const value = await atBoundary("enqueue-export", async () => {
+      const owner = await options.resolveOwner();
+      return options.application.enqueueExport({ ...owner, ...body });
+    });
+    const job = checkedJob(value, "export");
     return reply.code(202).send(job);
   });
 
   const getJob = async (kind: "export" | "import", request: { params: unknown }) => {
     const { jobId } = uuidParameterSchema.parse(request.params);
-    const owner = await options.resolveOwner();
-    return checkedJob(await options.application.getJob({
-      ...owner,
-      jobId: toSystemArchiveJobId(jobId),
-    }), kind);
+    const value = await atBoundary("get-job", async () => {
+      const owner = await options.resolveOwner();
+      return options.application.getJob({
+        ...owner,
+        jobId: toSystemArchiveJobId(jobId),
+      });
+    });
+    return checkedJob(value, kind);
   };
 
   app.get("/api/v1/system-exports/:jobId", async (request) => getJob("export", request));
@@ -226,11 +330,14 @@ export async function registerSystemArchiveRoutes(
     reply: { code(value: number): { send(value: unknown): unknown } },
   ) => {
     const { jobId } = uuidParameterSchema.parse(request.params);
-    const owner = await options.resolveOwner();
-    const job = checkedJob(await options.application.cancelJob({
-      ...owner,
-      jobId: toSystemArchiveJobId(jobId),
-    }), kind);
+    const value = await atBoundary("cancel-job", async () => {
+      const owner = await options.resolveOwner();
+      return options.application.cancelJob({
+        ...owner,
+        jobId: toSystemArchiveJobId(jobId),
+      });
+    });
+    const job = checkedJob(value, kind);
     return reply.code(202).send(job);
   };
 
@@ -239,8 +346,10 @@ export async function registerSystemArchiveRoutes(
 
   app.get("/api/v1/system-exports/:jobId/download", async (request, reply) => {
     const { jobId } = uuidParameterSchema.parse(request.params);
-    const owner = await options.resolveOwner();
-    const metadata = await options.downloads.metadata(owner, jobId);
+    const { owner, metadata } = await atBoundary("download", async () => {
+      const owner = await options.resolveOwner();
+      return { owner, metadata: await options.downloads.metadata(owner, jobId) };
+    });
     if (!Number.isSafeInteger(metadata.byteLength)
       || metadata.byteLength < 1
       || metadata.byteLength > options.limits.maximumDownloadBytes) {
@@ -268,7 +377,7 @@ export async function registerSystemArchiveRoutes(
       throw error;
     }
     const range = requestedRange ?? { start: 0, end: metadata.byteLength - 1 };
-    const session = await options.downloads.open({
+    const session = await atBoundary("download", () => options.downloads.open({
       owner,
       jobId,
       start: range.start,
@@ -276,7 +385,7 @@ export async function registerSystemArchiveRoutes(
       expectedSha256: metadata.sha256,
       maximumBytes: options.limits.maximumDownloadBytes,
       deadlineAt: new Date(Date.now() + options.limits.downloadDeadlineMs).toISOString(),
-    });
+    }));
     if (session.sha256 !== metadata.sha256
       || session.totalByteLength !== metadata.byteLength
       || session.byteLength !== range.end - range.start + 1) {
@@ -285,7 +394,9 @@ export async function registerSystemArchiveRoutes(
     }
     let finalization: Promise<void> | undefined;
     const finalize = (reason: PrivateStreamTerminalReason) => {
-      finalization ??= session.finalize(reason);
+      finalization ??= session.finalize(reason).catch(() => {
+        throw httpError("System Archive download finalization failed.", 500, "system-archive-operation-failed");
+      });
       return finalization;
     };
     const chunks = (async function* () {
@@ -293,6 +404,8 @@ export async function registerSystemArchiveRoutes(
       try {
         for await (const chunk of session.chunks) yield chunk;
         reason = "eof";
+      } catch {
+        throw httpError("System Archive download stream failed.", 500, "system-archive-operation-failed");
       } finally {
         await finalize(reason);
       }
@@ -317,26 +430,32 @@ export async function registerSystemArchiveRoutes(
     if (body.byteLength > options.limits.maximumUploadBytes) {
       throw httpError("System Archive upload exceeds the configured limit.", 413, "system-archive-upload-too-large");
     }
-    const owner = await options.resolveOwner();
-    const created = parseResponse(systemUploadViewSchema, await options.application.createUpload({ ...owner, ...body }));
+    const created = parseResponse(systemUploadViewSchema, await atBoundary("create-upload", async () => {
+      const owner = await options.resolveOwner();
+      return options.application.createUpload({ ...owner, ...body });
+    }));
     return reply.code(201).send(created);
   });
 
   app.get("/api/v1/system-imports/uploads/:uploadId", async (request) => {
     const { uploadId } = uploadParameterSchema.parse(request.params);
-    const owner = await options.resolveOwner();
-    return parseResponse(systemUploadViewSchema, await options.application.getUpload({
-      ...owner,
-      uploadId: toSystemArchiveUploadId(uploadId),
+    return parseResponse(systemUploadViewSchema, await atBoundary("get-upload", async () => {
+      const owner = await options.resolveOwner();
+      return options.application.getUpload({
+        ...owner,
+        uploadId: toSystemArchiveUploadId(uploadId),
+      });
     }));
   });
 
   app.delete("/api/v1/system-imports/uploads/:uploadId", async (request) => {
     const { uploadId } = uploadParameterSchema.parse(request.params);
-    const owner = await options.resolveOwner();
-    return parseResponse(systemUploadViewSchema, await options.application.cancelUpload({
-      ...owner,
-      uploadId: toSystemArchiveUploadId(uploadId),
+    return parseResponse(systemUploadViewSchema, await atBoundary("cancel-upload", async () => {
+      const owner = await options.resolveOwner();
+      return options.application.cancelUpload({
+        ...owner,
+        uploadId: toSystemArchiveUploadId(uploadId),
+      });
     }));
   });
 
@@ -366,50 +485,73 @@ export async function registerSystemArchiveRoutes(
       request.body.byteLength,
     );
     const sha256 = sha256Schema.parse(requireHeader(request.headers["x-chunk-sha256"], "X-Chunk-SHA256"));
-    const owner = await options.resolveOwner();
-    const current = parseResponse(systemUploadViewSchema, await options.application.getUpload({
-      ...owner,
-      uploadId: toSystemArchiveUploadId(uploadId),
-    }));
+    const { owner, currentValue } = await atBoundary("get-upload", async () => {
+      const owner = await options.resolveOwner();
+      return {
+        owner,
+        currentValue: await options.application.getUpload({
+          ...owner,
+          uploadId: toSystemArchiveUploadId(uploadId),
+        }),
+      };
+    });
+    const current = parseResponse(systemUploadViewSchema, currentValue);
     if (contentRange.total !== current.byteLength) {
       throw httpError("Content-Range total does not match upload authority.", 409, "system-archive-upload-stale");
     }
-    return parseResponse(systemUploadViewSchema, await options.application.putChunk({
-      ...owner,
-      uploadId: toSystemArchiveUploadId(uploadId),
-      index,
-      offset: contentRange.offset,
-      bytes: new Uint8Array(request.body),
-      sha256,
-    }));
+    if (contentRange.offset > current.receivedBytes) {
+      throw httpError(
+        "System Archive chunk does not begin at the durable upload prefix.",
+        409,
+        "system-archive-upload-offset-conflict",
+      );
+    }
+    const bytes = new Uint8Array(request.body);
+    return parseResponse(systemUploadViewSchema, await atBoundary("put-chunk", () => (
+      options.application.putChunk({
+        ...owner,
+        uploadId: toSystemArchiveUploadId(uploadId),
+        index,
+        offset: contentRange.offset,
+        bytes,
+        sha256,
+      })
+    )));
   });
 
   app.post("/api/v1/system-imports/uploads/:uploadId/complete", async (request) => {
     const { uploadId } = uploadParameterSchema.parse(request.params);
-    const owner = await options.resolveOwner();
-    return parseResponse(systemUploadViewSchema, await options.application.completeUpload({
-      ...owner,
-      uploadId: toSystemArchiveUploadId(uploadId),
+    return parseResponse(systemUploadViewSchema, await atBoundary("complete-upload", async () => {
+      const owner = await options.resolveOwner();
+      return options.application.completeUpload({
+        ...owner,
+        uploadId: toSystemArchiveUploadId(uploadId),
+      });
     }));
   });
 
   app.post("/api/v1/system-imports/preview", async (request) => {
     const { uploadId } = previewRequestSchema.parse(request.body);
-    const owner = await options.resolveOwner();
-    return parseResponse(systemImportPreviewViewSchema, await options.application.previewImport({
-      ...owner,
-      uploadId: toSystemArchiveUploadId(uploadId),
+    return parseResponse(systemImportPreviewViewSchema, await atBoundary("preview-import", async () => {
+      const owner = await options.resolveOwner();
+      return options.application.previewImport({
+        ...owner,
+        uploadId: toSystemArchiveUploadId(uploadId),
+      });
     }));
   });
 
   app.post("/api/v1/system-imports", async (request, reply) => {
     const body = systemArchiveImportCommitRequestSchema.parse(request.body);
-    const owner = await options.resolveOwner();
-    const job = checkedJob(await options.application.commitImport({
-      ...owner,
-      previewHandle: toSystemArchivePreviewHandle(body.previewHandle),
-      idempotencyKey: body.idempotencyKey,
-    }), "import");
+    const value = await atBoundary("commit-import", async () => {
+      const owner = await options.resolveOwner();
+      return options.application.commitImport({
+        ...owner,
+        previewHandle: toSystemArchivePreviewHandle(body.previewHandle),
+        idempotencyKey: body.idempotencyKey,
+      });
+    });
+    const job = checkedJob(value, "import");
     return reply.code(202).send(job);
   });
 }

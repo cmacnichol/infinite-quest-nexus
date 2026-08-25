@@ -6,6 +6,7 @@ import type {
 } from "../../../packages/application/src/index.js";
 import type { RuntimeConfig } from "../../../packages/database/src/config.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
+import { archiveErrorCodeSchema } from "../../../packages/contracts/src/archives.js";
 import { logger } from "../../../packages/logger/src/index.js";
 import {
   createPrivateAssetMaintenanceComposition,
@@ -100,6 +101,14 @@ type ActiveLane = {
   nextEligibleAt: number;
   run(): Promise<boolean>;
 };
+
+function safeSystemArchiveErrorCode(error: unknown): string {
+  const value = typeof error === "object" && error !== null && "code" in error
+    ? String((error as { code?: unknown }).code)
+    : "";
+  const parsed = archiveErrorCodeSchema.safeParse(value);
+  return parsed.success ? parsed.data : "archive-operation-failed";
+}
 
 function defaultOptionalLanes(
   pool: DatabasePool,
@@ -295,7 +304,9 @@ export async function runWorker(
           logger.error({
             event: `worker_${lane.name}_error`,
             workerId,
-            message: error instanceof Error ? error.message : String(error)
+            ...(lane.name === "system-archive"
+              ? { errorCode: safeSystemArchiveErrorCode(error) }
+              : { message: error instanceof Error ? error.message : String(error) })
           });
           return false;
         })
@@ -343,9 +354,21 @@ export async function runWorker(
       await Promise.allSettled(draining);
     }
   } finally {
-    await illustrationPublication?.close();
-    await maintenance?.close();
-    await systemArchive?.close();
+    const closeTasks = [
+      () => illustrationPublication?.close(),
+      () => maintenance?.close(),
+      () => systemArchive?.close(),
+    ];
+    const closed = await Promise.allSettled(closeTasks.map(async (close) => close()));
     logger.info({ event: "worker_stopped", workerId });
+    const failures = closed.flatMap((result, index) => result.status === "rejected"
+      ? [index === 2
+        ? Object.assign(new Error("System Archive worker shutdown failed."), {
+          code: "archive-operation-failed",
+        })
+        : result.reason]
+      : []);
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, "Worker resource shutdown failed.");
   }
 }

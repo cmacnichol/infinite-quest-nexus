@@ -62,6 +62,53 @@ describe("System Archive ambiguous persistence reconciliation", () => {
     expect(compensate).not.toHaveBeenCalled();
   });
 
+  it("rejects a new chunk beyond the durable sequential prefix before advancing received bytes", async () => {
+    const uploadRow = {
+      id: uploadId,
+      owner_user_id: owner.ownerUserId,
+      filesystem_operation_id: "44444444-4444-4444-8444-444444444444",
+      status: "uploading" as const,
+      byte_length: 12,
+      received_bytes: 4,
+      content_hash: "a".repeat(64),
+      staged_input_id: null,
+      expires_at: new Date("2026-08-26T12:00:00.000Z"),
+      is_expired: false,
+    };
+    const query = vi.fn(async (sql: string) => {
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [], rowCount: 0 };
+      if (sql.includes("FROM system_archive_uploads") && sql.includes("FOR UPDATE")) {
+        return { rows: [uploadRow], rowCount: 1 };
+      }
+      if (sql.includes("FROM system_archive_upload_chunks") && sql.includes("chunk_index=$2")) {
+        return { rows: [], rowCount: 0 };
+      }
+      if (sql.includes("INSERT INTO system_archive_upload_chunks")) return { rows: [], rowCount: 1 };
+      if (sql.includes("UPDATE system_archive_uploads") && sql.includes("received_bytes=received_bytes")) {
+        return { rows: [{ ...uploadRow, received_bytes: 8 }], rowCount: 1 };
+      }
+      if (sql.includes("UPDATE durable_filesystem_operations")) return { rows: [], rowCount: 1 };
+      throw new Error(`Unexpected query: ${sql}`);
+    });
+    const client = { query, release: vi.fn() };
+    const uploads = createPostgresSystemArchiveUploadRepository({
+      connect: vi.fn(async () => client),
+    } as never, { uploadTtlSeconds: 300 });
+
+    await expect(uploads.recordChunk(owner, {
+      uploadId,
+      index: 1,
+      offset: 8,
+      bytes: 4,
+      sha256: "b".repeat(64),
+    })).rejects.toMatchObject({
+      statusCode: 409,
+      code: "system-archive-upload-offset-conflict",
+    });
+    expect(query.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO system_archive_upload_chunks")))
+      .toBe(false);
+  });
+
   it("preserves finalized staged authority when completion committed before an error", async () => {
     let committed = false;
     const rollback = vi.fn(async () => undefined);

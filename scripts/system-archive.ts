@@ -2,10 +2,29 @@ import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { basename, resolve } from "node:path";
+import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
 import { request as undiciRequest } from "undici";
 
 type JobKind = "export" | "import";
+
+export type SystemArchiveImportConfirmation = Readonly<{
+  archiveFingerprint: string;
+  acknowledgeSensitiveArchive: boolean;
+  acknowledgeEmptyDestination: boolean;
+  acknowledgeInvalidatedAccess: boolean;
+  acknowledgeProviderReentry: boolean;
+  acknowledgeNonCancellableBoundary: boolean;
+}>;
+
+type PartialSystemArchiveImportConfirmation = Readonly<{
+  archiveFingerprint?: string;
+  acknowledgeSensitiveArchive: boolean;
+  acknowledgeEmptyDestination: boolean;
+  acknowledgeInvalidatedAccess: boolean;
+  acknowledgeProviderReentry: boolean;
+  acknowledgeNonCancellableBoundary: boolean;
+}>;
 
 export type SystemArchiveCliArgs =
   | Readonly<{ command: "export"; baseUrl: string; output: string; idempotencyKey: string }>
@@ -13,7 +32,7 @@ export type SystemArchiveCliArgs =
     command: "import";
     baseUrl: string;
     file: string;
-    confirm: boolean;
+    confirmation: PartialSystemArchiveImportConfirmation;
     idempotencyKey: string;
     chunkBytes: number;
     upload?: string;
@@ -51,14 +70,25 @@ export type SystemArchiveCliDependencies = Readonly<{
   readChunks(path: string, chunkBytes: number, start: number): AsyncIterable<Uint8Array>;
   existingBytes(path: string): Promise<number>;
   writeDownload(path: string, chunks: AsyncIterable<Uint8Array>, append: boolean): Promise<void>;
+  confirmImport(preview: Readonly<Record<string, unknown>>): Promise<SystemArchiveImportConfirmation>;
 }>;
+
+const ACKNOWLEDGEMENT_FLAGS = new Set([
+  "--acknowledge-sensitive-archive",
+  "--acknowledge-empty-destination",
+  "--acknowledge-invalidated-access",
+  "--acknowledge-provider-reentry",
+  "--acknowledge-non-cancellable-boundary",
+]);
 
 function usage(message?: string): Error {
   return new Error([
     message,
     "Usage:",
     "  pnpm system-archive -- export --base-url URL --output FILE [--idempotency-key KEY]",
-    "  pnpm system-archive -- import --base-url URL --file FILE --confirm [--upload UUID] [--chunk-bytes N] [--idempotency-key KEY]",
+    "  pnpm system-archive -- import --base-url URL --file FILE [--upload UUID] [--chunk-bytes N] [--idempotency-key KEY]",
+    "    Interactive terminals confirm the exact Preview after it is displayed.",
+    "    Noninteractive commit additionally requires --confirm-fingerprint SHA256 and all five --acknowledge-* flags.",
     "  pnpm system-archive -- status --base-url URL --job UUID [--kind export|import]",
     "  pnpm system-archive -- cancel --base-url URL --job UUID --kind export|import",
   ].filter(Boolean).join("\n"));
@@ -69,7 +99,7 @@ function flags(argv: readonly string[]): Map<string, string | true> {
   for (let index = 0; index < argv.length; index += 1) {
     const item = argv[index]!;
     if (!item.startsWith("--")) throw usage(`Unexpected argument: ${item}`);
-    if (item === "--confirm") {
+    if (ACKNOWLEDGEMENT_FLAGS.has(item)) {
       values.set(item, true);
       continue;
     }
@@ -125,11 +155,26 @@ export function parseSystemArchiveCliArgs(argv: readonly string[]): SystemArchiv
     if (!Number.isSafeInteger(rawChunkBytes) || rawChunkBytes < 1 || rawChunkBytes > 67_108_864) {
       throw usage("--chunk-bytes must be a whole number from 1 through 67108864.");
     }
+    const rawConfirmationFingerprint = values.get("--confirm-fingerprint");
+    if (rawConfirmationFingerprint !== undefined
+      && (typeof rawConfirmationFingerprint !== "string"
+        || !/^[a-f0-9]{64}$/u.test(rawConfirmationFingerprint))) {
+      throw usage("--confirm-fingerprint must be the lowercase SHA-256 fingerprint from the exact Preview.");
+    }
     return Object.freeze({
       command,
       baseUrl: commonBaseUrl,
       file: required(values, "--file"),
-      confirm: values.get("--confirm") === true,
+      confirmation: Object.freeze({
+        ...(typeof rawConfirmationFingerprint === "string"
+          ? { archiveFingerprint: rawConfirmationFingerprint }
+          : {}),
+        acknowledgeSensitiveArchive: values.get("--acknowledge-sensitive-archive") === true,
+        acknowledgeEmptyDestination: values.get("--acknowledge-empty-destination") === true,
+        acknowledgeInvalidatedAccess: values.get("--acknowledge-invalidated-access") === true,
+        acknowledgeProviderReentry: values.get("--acknowledge-provider-reentry") === true,
+        acknowledgeNonCancellableBoundary: values.get("--acknowledge-non-cancellable-boundary") === true,
+      }),
       idempotencyKey: typeof values.get("--idempotency-key") === "string"
         ? String(values.get("--idempotency-key"))
         : `system-import:${randomUUID()}`,
@@ -159,6 +204,17 @@ export function parseSystemArchiveCliArgs(argv: readonly string[]): SystemArchiv
 function bodyHeader(headers: HttpResponse["headers"], name: string): string | undefined {
   const value = headers?.[name] ?? headers?.[name.toLowerCase()];
   return Array.isArray(value) ? value[0] : value;
+}
+
+function strongEtagHash(headers: HttpResponse["headers"]): string | null {
+  return /^"([a-f0-9]{64})"$/u.exec(bodyHeader(headers, "etag") ?? "")?.[1] ?? null;
+}
+
+function unsatisfiedRangeTotal(headers: HttpResponse["headers"]): number | null {
+  const match = /^bytes \*\/(0|[1-9]\d*)$/u.exec(bodyHeader(headers, "content-range") ?? "");
+  if (!match) return null;
+  const total = Number(match[1]);
+  return Number.isSafeInteger(total) && total > 0 ? total : null;
 }
 
 async function responseJson(response: HttpResponse): Promise<unknown> {
@@ -252,6 +308,39 @@ async function runExport(
     method: "GET",
     ...(existing > 0 ? { headers: { range: `bytes=${existing}-` } } : {}),
   });
+  const restartFullDownload = async () => {
+    const restarted = await dependencies.request(downloadUrl, { method: "GET" });
+    if (restarted.statusCode !== 200) {
+      const error = await responseJson(restarted).catch(() => ({}));
+      await requireSuccess({ statusCode: restarted.statusCode, value: error }, "System Export restart");
+      throw new Error("System Export restart did not return a complete response.");
+    }
+    const restartedHash = strongEtagHash(restarted.headers);
+    if (!restartedHash) throw new Error("System Export restart did not provide a strong content hash ETag.");
+    await dependencies.writeDownload(args.output, restarted.body, false);
+    const identity = await dependencies.statFile(args.output);
+    const rawLength = bodyHeader(restarted.headers, "content-length");
+    if (identity.sha256 !== restartedHash
+      || (rawLength !== undefined && Number(rawLength) !== identity.byteLength)) {
+      throw new Error("System Export download did not match its content hash ETag.");
+    }
+  };
+  if (response.statusCode === 416 && existing > 0) {
+    await responseJson(response).catch(() => ({}));
+    const expectedHash = strongEtagHash(response.headers);
+    const expectedTotal = unsatisfiedRangeTotal(response.headers);
+    if (expectedHash !== null && expectedTotal !== null) {
+      const local = await dependencies.statFile(args.output);
+      if (local.byteLength === expectedTotal && local.sha256 === expectedHash) {
+        dependencies.stdout.write(`Downloaded ${basename(args.output)}.\n`);
+        return;
+      }
+    }
+    dependencies.stderr.write("Local download state is not the complete artifact; restarting once from byte zero.\n");
+    await restartFullDownload();
+    dependencies.stdout.write(`Downloaded ${basename(args.output)}.\n`);
+    return;
+  }
   if (![200, 206].includes(response.statusCode)) {
     const error = await responseJson(response).catch(() => ({}));
     await requireSuccess({ statusCode: response.statusCode, value: error }, "System Export download");
@@ -264,28 +353,14 @@ async function runExport(
   if (append && !contentRange?.startsWith(`bytes ${existing}-`)) {
     throw new Error("System Export resume response did not match the local file length.");
   }
-  const etag = bodyHeader(response.headers, "etag");
-  const etagMatch = /^"([a-f0-9]{64})"$/u.exec(etag ?? "");
-  if (!etagMatch) throw new Error("System Export download did not provide a strong content hash ETag.");
+  const expectedHash = strongEtagHash(response.headers);
+  if (!expectedHash) throw new Error("System Export download did not provide a strong content hash ETag.");
   await dependencies.writeDownload(args.output, response.body, append);
-  let identity = await dependencies.statFile(args.output);
-  if (identity.sha256 !== etagMatch[1]) {
+  const identity = await dependencies.statFile(args.output);
+  if (identity.sha256 !== expectedHash) {
     if (!append) throw new Error("System Export download did not match its content hash ETag.");
     dependencies.stderr.write("Partial file did not match this artifact; restarting the download.\n");
-    const restarted = await dependencies.request(downloadUrl, { method: "GET" });
-    if (restarted.statusCode !== 200) {
-      const error = await responseJson(restarted).catch(() => ({}));
-      await requireSuccess({ statusCode: restarted.statusCode, value: error }, "System Export restart");
-      throw new Error("System Export restart did not return a complete response.");
-    }
-    const restartedEtag = bodyHeader(restarted.headers, "etag");
-    const restartedMatch = /^"([a-f0-9]{64})"$/u.exec(restartedEtag ?? "");
-    if (!restartedMatch) throw new Error("System Export restart did not provide a strong content hash ETag.");
-    await dependencies.writeDownload(args.output, restarted.body, false);
-    identity = await dependencies.statFile(args.output);
-    if (identity.sha256 !== restartedMatch[1]) {
-      throw new Error("System Export download did not match its content hash ETag.");
-    }
+    await restartFullDownload();
   }
   dependencies.stdout.write(`Downloaded ${basename(args.output)}.\n`);
 }
@@ -294,9 +369,6 @@ async function runImport(
   args: Extract<SystemArchiveCliArgs, { command: "import" }>,
   dependencies: SystemArchiveCliDependencies,
 ): Promise<void> {
-  if (!args.confirm) {
-    throw new Error("System Import requires --confirm after reviewing the empty-destination and non-cancellable boundaries.");
-  }
   const identity = await dependencies.statFile(args.file);
   const upload = args.upload === undefined
     ? await requireSuccess(await requestJson(
@@ -367,8 +439,29 @@ async function runImport(
     { uploadId },
   ), "System Import preview") as Record<string, unknown>;
   dependencies.stdout.write(`${JSON.stringify(preview, null, 2)}\n`);
-  if (preview.valid !== true || typeof preview.previewHandle !== "string") {
+  if (preview.valid !== true
+    || typeof preview.previewHandle !== "string"
+    || typeof preview.archiveFingerprint !== "string"
+    || !/^[a-f0-9]{64}$/u.test(preview.archiveFingerprint)) {
     throw new Error("System Import preview did not authorize commit.");
+  }
+  const confirmation = dependencies.isInteractive
+    ? await dependencies.confirmImport(preview)
+    : args.confirmation;
+  const requiredAcknowledgements = [
+    ["acknowledgeSensitiveArchive", "acknowledge-sensitive-archive"],
+    ["acknowledgeEmptyDestination", "acknowledge-empty-destination"],
+    ["acknowledgeInvalidatedAccess", "acknowledge-invalidated-access"],
+    ["acknowledgeProviderReentry", "acknowledge-provider-reentry"],
+    ["acknowledgeNonCancellableBoundary", "acknowledge-non-cancellable-boundary"],
+  ] as const;
+  for (const [field, flag] of requiredAcknowledgements) {
+    if (confirmation[field] !== true) {
+      throw new Error(`System Import requires --${flag} for this exact Preview.`);
+    }
+  }
+  if (confirmation.archiveFingerprint !== preview.archiveFingerprint) {
+    throw new Error("System Import confirmation fingerprint does not match the exact Preview.");
   }
   const committed = await requireSuccess(await requestJson(
     dependencies,
@@ -377,11 +470,11 @@ async function runImport(
     {
       previewHandle: preview.previewHandle,
       idempotencyKey: args.idempotencyKey,
-      acknowledgeSensitiveArchive: true,
-      acknowledgeEmptyDestination: true,
-      acknowledgeInvalidatedAccess: true,
-      acknowledgeProviderReentry: true,
-      acknowledgeNonCancellableBoundary: true,
+      acknowledgeSensitiveArchive: confirmation.acknowledgeSensitiveArchive,
+      acknowledgeEmptyDestination: confirmation.acknowledgeEmptyDestination,
+      acknowledgeInvalidatedAccess: confirmation.acknowledgeInvalidatedAccess,
+      acknowledgeProviderReentry: confirmation.acknowledgeProviderReentry,
+      acknowledgeNonCancellableBoundary: confirmation.acknowledgeNonCancellableBoundary,
     },
   ), "System Import commit") as Record<string, unknown>;
   const job = String(committed.id ?? "");
@@ -442,6 +535,26 @@ function defaultDependencies(): SystemArchiveCliDependencies {
     },
     existingBytes: existingFileBytes,
     writeDownload,
+    async confirmImport(preview) {
+      const fingerprint = String(preview.archiveFingerprint ?? "");
+      const terminal = createInterface({ input: process.stdin, output: process.stdout });
+      try {
+        const yes = async (question: string) => (await terminal.question(`${question} Type yes: `))
+          .trim().toLowerCase() === "yes";
+        return Object.freeze({
+          acknowledgeSensitiveArchive: await yes("Acknowledge that this System Archive contains sensitive data."),
+          acknowledgeEmptyDestination: await yes("Acknowledge that the Destination Instance must remain empty."),
+          acknowledgeInvalidatedAccess: await yes("Acknowledge that external access will be invalidated."),
+          acknowledgeProviderReentry: await yes("Acknowledge that provider credentials must be re-entered."),
+          acknowledgeNonCancellableBoundary: await yes("Acknowledge that import becomes non-cancellable at the commit boundary."),
+          archiveFingerprint: (await terminal.question(
+            `Type the exact Preview archive fingerprint ${fingerprint} to commit: `,
+          )).trim(),
+        });
+      } finally {
+        terminal.close();
+      }
+    },
   });
 }
 

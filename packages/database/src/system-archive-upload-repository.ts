@@ -103,8 +103,15 @@ const UPLOAD_COLUMNS = `id,owner_user_id,filesystem_operation_id,status,byte_len
   received_bytes,content_hash,staged_input_id,expires_at`;
 const POSTGRES_INTEGER_MAX = 2_147_483_647;
 
-function repositoryError(message: string, statusCode: number): Error & { statusCode: number } {
-  return Object.assign(new Error(message), { statusCode });
+function repositoryError(
+  message: string,
+  statusCode: number,
+  code?: string
+): Error & { statusCode: number; code?: string } {
+  return Object.assign(new Error(message), {
+    statusCode,
+    ...(code === undefined ? {} : { code })
+  });
 }
 
 function requireHash(value: string, name: string): void {
@@ -443,6 +450,14 @@ export function createPostgresSystemArchiveUploadRepository(
             options.uploadTtlSeconds
           );
           return toView(renewed);
+        }
+
+        if (request.offset !== Number(upload.received_bytes)) {
+          throw repositoryError(
+            "System Archive chunk does not begin at the durable upload prefix.",
+            409,
+            "system-archive-upload-offset-conflict"
+          );
         }
 
         try {

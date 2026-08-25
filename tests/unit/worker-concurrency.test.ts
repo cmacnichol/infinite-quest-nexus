@@ -116,6 +116,44 @@ describe("worker concurrency scheduler", () => {
     expect(maintenanceClose).toHaveBeenCalledOnce();
   });
 
+  it("attempts every production close when an earlier shutdown close rejects", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const publicationClose = vi.fn(async () => undefined);
+    const maintenanceClose = vi.fn(() => {
+      throw new Error("synthetic maintenance close failure");
+    });
+    const systemArchiveClose = vi.fn(async () => undefined);
+    productionCompositions.createMaintenance.mockResolvedValue({
+      scheduler: { tick: vi.fn() },
+      close: maintenanceClose,
+    });
+    productionCompositions.createIllustrationPublication.mockResolvedValue({
+      coordinator: {},
+      close: publicationClose,
+    });
+    productionCompositions.createSystemArchive.mockResolvedValue({
+      runNext: vi.fn(async () => false),
+      close: systemArchiveClose,
+    });
+
+    await expect(runWorker(pool, {
+      ...workerConfig(1),
+      systemArchiveEnabled: true,
+    }, controller.signal, {
+      generation: {
+        claimNext: vi.fn(async () => null),
+        executeClaimed: vi.fn(async () => false),
+      },
+      illustration: inertWorkerIllustration,
+      memory: inertWorkerMemory,
+    })).rejects.toThrow("synthetic maintenance close failure");
+
+    expect(publicationClose).toHaveBeenCalledOnce();
+    expect(maintenanceClose).toHaveBeenCalledOnce();
+    expect(systemArchiveClose).toHaveBeenCalledOnce();
+  });
+
   it("fills every configured generation slot and refills only the released slot", async () => {
     const controller = new AbortController();
     const executions = new Map<string, ReturnType<typeof deferred<boolean>>>();
@@ -340,6 +378,42 @@ describe("worker concurrency scheduler", () => {
       event: "worker_illustration_error",
       message: "synthetic illustration failure"
     }));
+  });
+
+  it("never logs a raw System Archive worker failure at the shared scheduler boundary", async () => {
+    const controller = new AbortController();
+    const marker = "C:\\private\\story-secret-token.txt";
+    const untrustedCode = "story-secret-token";
+    const optionalLanes: WorkerOptionalLanes = {
+      illustration: vi.fn(async () => false),
+      chronicle: vi.fn(async () => false),
+      asset: vi.fn(async () => false),
+      systemArchive: vi.fn(async () => {
+        controller.abort();
+        throw Object.assign(new Error(marker), { code: untrustedCode });
+      }),
+    };
+
+    await runWorker(pool, workerConfig(1), controller.signal, {
+      generation: {
+        claimNext: vi.fn(async () => null),
+        executeClaimed: vi.fn(async () => false),
+      },
+      illustration: inertWorkerIllustration,
+      memory: inertWorkerMemory,
+      optionalLanes,
+    });
+
+    const systemArchiveLogs = log.error.mock.calls.filter(([fields]) => (
+      fields as Record<string, unknown>
+    ).event === "worker_system-archive_error");
+    expect(systemArchiveLogs).toHaveLength(1);
+    expect(systemArchiveLogs[0]?.[0]).toMatchObject({
+      event: "worker_system-archive_error",
+      errorCode: "archive-operation-failed",
+    });
+    expect(JSON.stringify(systemArchiveLogs)).not.toContain(marker);
+    expect(JSON.stringify(systemArchiveLogs)).not.toContain(untrustedCode);
   });
 
   it("stops all claims after abort, drains every lane, and never passes the scheduler signal to story execution", async () => {

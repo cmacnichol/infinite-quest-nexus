@@ -594,7 +594,10 @@ export async function buildServer({
     }
   });
 
-  app.get("/api/v1/meta", async () => parseResponseProjection(metaResponseSchema, { application: applicationMetadata() }));
+  app.get("/api/v1/meta", async () => parseResponseProjection(metaResponseSchema, {
+    application: applicationMetadata(),
+    capabilities: { systemArchive: config.systemArchiveEnabled === true },
+  }));
 
   app.get("/api/v1/dashboard/stats", async () => {
     const ownerScope = await resolveWorldCampaignOwnerScope();

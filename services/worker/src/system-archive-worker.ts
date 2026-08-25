@@ -2,6 +2,7 @@ import type { ClaimedSystemArchiveJob, SystemArchiveJobRepository } from "../../
 import { createPostgresSystemArchiveJobRepository } from "../../../packages/database/src/system-archive-job-repository.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import type { RuntimeConfig } from "../../../packages/database/src/config.js";
+import { archiveErrorCodeSchema } from "../../../packages/contracts/src/archives.js";
 import { createSystemArchiveAssetStorageComposition } from "../../runtime/src/api-asset-composition.js";
 import {
   createFilesystemSystemArchiveCapacity,
@@ -26,13 +27,20 @@ export type SystemArchiveWorkerLaneOptions = Readonly<{
   }>;
 }>;
 
-function safeFailureCode(error: unknown): string {
+export function safeSystemArchiveWorkerFailureCode(error: unknown): string {
   const value = typeof error === "object" && error !== null && "code" in error
     ? String((error as { code?: unknown }).code)
     : "";
-  return /^[a-z][a-z0-9-]{0,63}$/u.test(value)
-    ? value
-    : "archive-operation-failed";
+  const parsed = archiveErrorCodeSchema.safeParse(value);
+  return parsed.success ? parsed.data : "archive-operation-failed";
+}
+
+function safeWorkerError(error: unknown): Error & { code: string } {
+  const sanitized = Object.assign(new Error("System Archive worker operation failed."), {
+    code: safeSystemArchiveWorkerFailureCode(error),
+  });
+  sanitized.name = "SystemArchiveWorkerError";
+  return sanitized;
 }
 
 function requireOptions(options: SystemArchiveWorkerLaneOptions): void {
@@ -104,10 +112,10 @@ export function createSystemArchiveWorkerLane(
           await options.jobs.markFailed(
             job.id,
             options.workerId,
-            safeFailureCode(error),
+            safeSystemArchiveWorkerFailureCode(error),
           ).catch(() => undefined);
         }
-        throw error;
+        throw safeWorkerError(error);
       } finally {
         stopped = true;
         clearInterval(timer);

@@ -80,20 +80,24 @@ async function appFor(input: Readonly<{
   downloads?: ReturnType<typeof downloads>;
   owner?: string;
   chunkBytes?: number;
+  capturedErrors?: unknown[];
 }> = {}) {
   const app = Fastify();
-  app.setErrorHandler((error, _request, reply) => reply.code(
-    typeof error === "object" && error !== null && "statusCode" in error
-      ? Number(error.statusCode)
-      : typeof error === "object" && error !== null && "issues" in error
-        ? 400
-      : 500,
-  ).send({
-    code: typeof error === "object" && error !== null && "code" in error
-      ? String(error.code)
-      : undefined,
-    message: error instanceof Error ? error.message : String(error),
-  }));
+  app.setErrorHandler((error, _request, reply) => {
+    input.capturedErrors?.push(error);
+    return reply.code(
+      typeof error === "object" && error !== null && "statusCode" in error
+        ? Number(error.statusCode)
+        : typeof error === "object" && error !== null && "issues" in error
+          ? 400
+          : 500,
+    ).send({
+      code: typeof error === "object" && error !== null && "code" in error
+        ? String(error.code)
+        : undefined,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  });
   const api = input.application ?? application();
   const transfer = input.downloads ?? downloads();
   await app.register(registerSystemArchiveRoutes, {
@@ -201,6 +205,64 @@ describe("System Archive routes", () => {
     }
   });
 
+  it("maps production repository failures to stable typed API codes without logging raw authority", async () => {
+    const marker = "C:\\private\\story-secret-token.txt";
+    const api = application();
+    api.getJob.mockRejectedValueOnce(Object.assign(new Error(marker), { statusCode: 404 }));
+    api.cancelJob.mockRejectedValueOnce(Object.assign(new Error(marker), { statusCode: 409 }));
+    api.getUpload.mockRejectedValueOnce(Object.assign(new Error(marker), { statusCode: 410 }));
+    api.commitImport.mockRejectedValueOnce(Object.assign(new Error(marker), { statusCode: 409 }));
+    api.enqueueExport.mockRejectedValueOnce(new Error(marker));
+    const capturedErrors: unknown[] = [];
+    const { app } = await appFor({ application: api, capturedErrors });
+    try {
+      const notFound = await app.inject({ method: "GET", url: `/api/v1/system-exports/${jobId}` });
+      expect(notFound.statusCode).toBe(404);
+      expect(notFound.json()).toMatchObject({ code: "system-archive-job-not-found" });
+
+      const cancelConflict = await app.inject({ method: "DELETE", url: `/api/v1/system-imports/${jobId}` });
+      expect(cancelConflict.statusCode).toBe(409);
+      expect(cancelConflict.json()).toMatchObject({ code: "system-archive-cancellation-boundary" });
+
+      const expired = await app.inject({ method: "GET", url: `/api/v1/system-imports/uploads/${uploadId}` });
+      expect(expired.statusCode).toBe(410);
+      expect(expired.json()).toMatchObject({ code: "system-archive-upload-expired" });
+
+      const stale = await app.inject({
+        method: "POST",
+        url: "/api/v1/system-imports",
+        payload: {
+          previewHandle: "opaque-stale-preview",
+          idempotencyKey: "stale-import",
+          acknowledgeSensitiveArchive: true,
+          acknowledgeEmptyDestination: true,
+          acknowledgeInvalidatedAccess: true,
+          acknowledgeProviderReentry: true,
+          acknowledgeNonCancellableBoundary: true,
+        },
+      });
+      expect(stale.statusCode).toBe(409);
+      expect(stale.json()).toMatchObject({ code: "system-archive-preview-stale" });
+
+      const failed = await app.inject({
+        method: "POST",
+        url: "/api/v1/system-exports",
+        payload: { idempotencyKey: "fail-safely" },
+      });
+      expect(failed.statusCode).toBe(500);
+      expect(failed.json()).toMatchObject({ code: "system-archive-operation-failed" });
+
+      const fullErrorLogProjection = capturedErrors.map((error) => error instanceof Error
+        ? `${error.name}\n${error.message}\n${error.stack ?? ""}`
+        : JSON.stringify(error)).join("\n");
+      expect(fullErrorLogProjection).not.toContain(marker);
+      expect([notFound.body, cancelConflict.body, expired.body, stale.body, failed.body].join("\n"))
+        .not.toContain(marker);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("bounds raw chunks, verifies range metadata, and passes only opaque upload authority", async () => {
     const { app, api } = await appFor({ chunkBytes: 4 });
     const bytes = Buffer.from([1, 2, 3, 4]);
@@ -240,6 +302,32 @@ describe("System Archive routes", () => {
       });
       expect(oversized.statusCode).toBe(413);
       expect(api.putChunk).toHaveBeenCalledTimes(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects a chunk gap before publishing bytes while retaining the replay path behind persisted authority", async () => {
+    const api = application();
+    api.getUpload.mockResolvedValueOnce({ ...upload, status: "uploading", receivedBytes: 2 } as never);
+    const { app } = await appFor({ application: api, chunkBytes: 4 });
+    const bytes = Buffer.from([4]);
+    try {
+      const response = await app.inject({
+        method: "PUT",
+        url: `/api/v1/system-imports/uploads/${uploadId}/chunks/1`,
+        headers: {
+          "content-type": "application/octet-stream",
+          "content-length": "1",
+          "content-range": "bytes 3-3/4",
+          "x-chunk-sha256": createHash("sha256").update(bytes).digest("hex"),
+        },
+        payload: bytes,
+      });
+
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toMatchObject({ code: "system-archive-upload-offset-conflict" });
+      expect(api.putChunk).not.toHaveBeenCalled();
     } finally {
       await app.close();
     }
