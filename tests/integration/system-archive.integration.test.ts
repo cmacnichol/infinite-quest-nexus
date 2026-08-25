@@ -28,6 +28,7 @@ import {
 import {
   SYSTEM_IMPORT_LOCK_KEY,
   createPostgresSystemArchiveImportRepository,
+  type SystemArchiveAtomicImportTransaction,
 } from "../../packages/database/src/system-archive-import-repository.js";
 import { createPostgresSystemArchiveJobRepository } from "../../packages/database/src/system-archive-job-repository.js";
 import {
@@ -2589,7 +2590,7 @@ integration("deterministic owner-wide System Archive export", () => {
     }] });
   });
 
-  it("rolls back when the worker lease expires after the report is staged but before commit", async () => {
+  it("renews retained worker authority when a locked import crosses its original lease", async () => {
     await pool.query("TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE");
     await pool.query("DELETE FROM system_archive_jobs");
     await pool.query("DELETE FROM system_archive_uploads");
@@ -2619,37 +2620,87 @@ integration("deterministic owner-wide System Archive export", () => {
     const leaseOwner = "system-import-expiring-lease-test";
     const queued = await pool.query<{ id: string }>(
       `INSERT INTO system_archive_jobs (
-         owner_user_id,kind,status,idempotency_key_hash,staged_input_id,
-         lease_owner,lease_expires_at
-       ) VALUES ($1,'import','revalidating',$2,$3,$4,
-                 clock_timestamp()+interval '250 milliseconds') RETURNING id`,
-      [ownerUserId, sha256(randomUUID()), staged.rows[0]!.id, leaseOwner],
+         owner_user_id,kind,status,idempotency_key_hash,staged_input_id
+       ) VALUES ($1,'import','queued',$2,$3) RETURNING id`,
+      [ownerUserId, sha256(randomUUID()), staged.rows[0]!.id],
     );
     const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const jobs = createPostgresSystemArchiveJobRepository(pool);
     const owner = { ownerUserId };
     const ignore = { ignoreJobId: queued.rows[0]!.id, ignoreUploadId: upload.rows[0]!.id };
     const destination = await imports.destinationFingerprint(owner, ignore);
-    const recordsByDomain = Object.fromEntries(SYSTEM_ARCHIVE_DOMAINS.map((domain) => [domain, 0]));
-
-    await expect(imports.withAtomicImport(owner, {
-      destination,
-      ignore,
-      jobId: queued.rows[0]!.id,
+    await expect(jobs.claimNext(leaseOwner, 1)).resolves.toMatchObject({
+      id: queued.rows[0]!.id,
       leaseOwner,
-    }, async (transaction) => {
+    });
+    const recordsByDomain = Object.fromEntries(SYSTEM_ARCHIVE_DOMAINS.map((domain) => [domain, 0]));
+    let signalImportStarted!: () => void;
+    const importStarted = new Promise<void>((resolveStarted) => {
+      signalImportStarted = resolveStarted;
+    });
+    const work = vi.fn(async (transaction: SystemArchiveAtomicImportTransaction) => {
       await transaction.recordImportReport(importReport({
         ownerUserId,
         completedAt: "2026-08-25T12:00:00.000Z",
         archiveFingerprint: sha256("lease-expiry-report"),
         recordsByDomain,
       }));
-      await transaction.database.query("SELECT pg_sleep(0.4)");
-    })).rejects.toMatchObject({ statusCode: 409 });
+      signalImportStarted();
+      await transaction.database.query("SELECT pg_sleep(2)");
+    });
+    const importing = imports.withAtomicImport(owner, {
+      destination,
+      ignore,
+      jobId: queued.rows[0]!.id,
+      leaseOwner,
+    }, work);
+    void importing.catch(() => undefined);
+    await importStarted;
+    const heartbeat = jobs.heartbeat(queued.rows[0]!.id, leaseOwner, 30);
+    void heartbeat.catch(() => undefined);
 
-    await expect(pool.query<{ status: string; report: unknown }>(
-      "SELECT status,report FROM system_archive_jobs WHERE id=$1",
+    let originalLeaseExpired = false;
+    for (let attempt = 0; attempt < 300; attempt += 1) {
+      const observed = await pool.query<{ expired: boolean }>(
+        "SELECT lease_expires_at<=clock_timestamp() AS expired FROM system_archive_jobs WHERE id=$1",
+        [queued.rows[0]!.id],
+      );
+      originalLeaseExpired = observed.rows[0]?.expired === true;
+      if (originalLeaseExpired) break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    }
+    expect(originalLeaseExpired).toBe(true);
+    await expect(jobs.claimNext("system-import-competing-worker", 30)).resolves.toBeNull();
+    const staleWork = vi.fn(async () => undefined);
+    const staleImport = imports.withAtomicImport(owner, {
+      destination,
+      ignore,
+      jobId: queued.rows[0]!.id,
+      leaseOwner: "system-import-stale-worker",
+    }, staleWork);
+    void staleImport.catch(() => undefined);
+
+    await expect(importing).resolves.toBeUndefined();
+    await expect(heartbeat).resolves.toBe(true);
+    await expect(staleImport).rejects.toMatchObject({ statusCode: 409 });
+    expect(work).toHaveBeenCalledOnce();
+    expect(staleWork).not.toHaveBeenCalled();
+    await expect(pool.query<{
+      status: string;
+      report: unknown;
+      lease_owner: string;
+      renewed: boolean;
+    }>(
+      `SELECT status,report,lease_owner,
+              lease_expires_at>clock_timestamp() AS renewed
+         FROM system_archive_jobs WHERE id=$1`,
       [queued.rows[0]!.id],
-    )).resolves.toMatchObject({ rows: [{ status: "revalidating", report: null }] });
+    )).resolves.toMatchObject({ rows: [{
+      status: "authoritative_committed",
+      report: expect.objectContaining({ archiveFingerprint: sha256("lease-expiry-report") }),
+      lease_owner: leaseOwner,
+      renewed: true,
+    }] });
   });
 
   it("rejects an expired opaque preview authority without enqueueing its import", async () => {

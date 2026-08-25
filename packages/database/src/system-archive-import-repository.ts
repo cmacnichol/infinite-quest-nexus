@@ -1841,6 +1841,7 @@ export function createPostgresSystemArchiveImportRepository(
       let reportRecorded = false;
       let stagedImportReport: SystemArchiveImportReport | null = null;
       let previewProjection: SystemImportPreviewProjection | null = null;
+      let retainedLeaseSeconds: number | null = null;
       try {
         await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
         const gate = await client.query<{ acquired: boolean }>(
@@ -1873,18 +1874,39 @@ export function createPostgresSystemArchiveImportRepository(
           if (!request.leaseOwner?.trim()) {
             throw repositoryError("System Archive import lease is required.", 409);
           }
-          const started = await client.query<{ progress: unknown }>(
-            `UPDATE system_archive_jobs
+          const started = await client.query<{ progress: unknown; lease_seconds: number }>(
+            `WITH current_authority AS MATERIALIZED (
+               SELECT id,GREATEST(
+                        1,
+                        LEAST(
+                          3600,
+                          CEIL(EXTRACT(EPOCH FROM (lease_expires_at-updated_at)))::integer
+                        )
+                      ) AS lease_seconds
+                 FROM system_archive_jobs
+                WHERE id=$1 AND owner_user_id=$2 AND kind='import'
+                  AND status IN ('revalidating','importing')
+                  AND lease_owner=$3 AND lease_expires_at>clock_timestamp()
+                FOR UPDATE
+             )
+             UPDATE system_archive_jobs job
                 SET status='importing',updated_at=clock_timestamp()
-              WHERE id=$1 AND owner_user_id=$2 AND kind='import'
-                AND status IN ('revalidating','importing')
-                AND lease_owner=$3 AND lease_expires_at>clock_timestamp()
-            RETURNING progress`,
+               FROM current_authority
+              WHERE job.id=current_authority.id
+            RETURNING job.progress,current_authority.lease_seconds`,
             [request.jobId, owner.ownerUserId, request.leaseOwner]
           );
           if (started.rowCount !== 1) {
             throw repositoryError("System Archive import lease or state was lost.", 409);
           }
+          const startedLeaseSeconds = started.rows[0]?.lease_seconds;
+          if (typeof startedLeaseSeconds !== "number"
+            || !Number.isSafeInteger(startedLeaseSeconds)
+            || startedLeaseSeconds < 1
+            || startedLeaseSeconds > 3_600) {
+            throw repositoryError("System Archive import lease duration was invalid.", 409);
+          }
+          retainedLeaseSeconds = startedLeaseSeconds;
           const progress = started.rows[0]?.progress as Partial<{
             archiveFingerprint: unknown;
             commitIdempotencyKeyHash: unknown;
@@ -2085,15 +2107,21 @@ export function createPostgresSystemArchiveImportRepository(
           throw repositoryError("System Archive import completed without a durable Import Report.", 409);
         }
         if (request.jobId) {
-          if (stagedImportReport === null) {
+          if (stagedImportReport === null || retainedLeaseSeconds === null) {
             throw repositoryError("System Archive import completed without a durable Import Report.", 409);
           }
+          // The live worker fence was validated before this transaction locked
+          // the job row. That row lock and the transaction advisory gate prevent
+          // another worker from claiming authority while the import is open, so
+          // renew the retained owner here instead of rejecting its old timestamp.
           const updated = await client.query(
             `UPDATE system_archive_jobs
                 SET status='authoritative_committed',report=$3::jsonb,
-                    progress=progress || $4::jsonb,updated_at=clock_timestamp()
+                    progress=progress || $4::jsonb,
+                    lease_expires_at=clock_timestamp()+($6::text || ' seconds')::interval,
+                    updated_at=clock_timestamp()
               WHERE id=$1 AND owner_user_id=$2 AND kind='import' AND status='importing'
-                AND lease_owner=$5 AND lease_expires_at>clock_timestamp()`,
+                AND lease_owner=$5`,
             [
               request.jobId,
               owner.ownerUserId,
@@ -2102,7 +2130,8 @@ export function createPostgresSystemArchiveImportRepository(
                 rebuildCampaignIds: [...campaignIds].sort(),
                 rebuildAssetIds: [...assetIds].sort()
               }),
-              request.leaseOwner
+              request.leaseOwner,
+              retainedLeaseSeconds
             ]
           );
           if (updated.rowCount !== 1) {
