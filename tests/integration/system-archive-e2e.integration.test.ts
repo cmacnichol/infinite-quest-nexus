@@ -5,14 +5,24 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { Readable } from "node:stream";
-import { chromium, type Browser, type BrowserContext } from "@playwright/test";
+import { chromium, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import JSZip from "jszip";
 import sharp from "sharp";
 import { describe, expect, it } from "vitest";
+import type { ArchiveAssetBinding } from "../../packages/contracts/src/archives.js";
 import { worldContentSchema } from "../../packages/contracts/src/world-library.js";
 import {
+  SYSTEM_ARCHIVE_DOMAINS,
+  systemArchiveAssetsPayloadSchema,
+  systemArchiveJobViewSchema,
   systemArchiveManifestSchema,
   systemArchivePayloadSchema,
+  systemImportPreviewViewSchema,
+  systemRecordEnvelopeSchema,
+  type SystemArchiveDomain,
+  type SystemArchiveJobView,
+  type SystemImportPreviewView,
+  type SystemRecordEnvelope,
 } from "../../packages/contracts/src/system-archives.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import {
@@ -38,8 +48,49 @@ const fixtureLimits = Object.freeze({
   maxOriginalImageBytes: 1024 * 1024,
 });
 const databaseUrl = process.env.TEST_DATABASE_URL;
-const releaseGate = databaseUrl && supportsSecureGeneratedArchiveStaging() ? it : it.skip;
+const releaseGate = process.platform === "linux"
+  && databaseUrl
+  && supportsSecureGeneratedArchiveStaging()
+  ? it
+  : it.skip;
 const releaseChunkBytes = 1024 * 1024;
+const representativeDomainCounts = Object.freeze({
+  providers: 3,
+  prompts: 3,
+  worlds: 2,
+  "world-versions": 3,
+  "world-drafts": 2,
+  campaigns: 2,
+  turns: 3,
+  "turn-corrections": 1,
+  "campaign-state": 2,
+  "campaign-history": 5,
+  "canonical-facts": 1,
+  chronicle: 2,
+  illustrations: 2,
+  imports: 1,
+  "cost-events": 2,
+  "activity-events": 1,
+} satisfies Record<SystemArchiveDomain, number>);
+const excludedSecretSentinels = Object.freeze([
+  "fixture-user-sentinel",
+  "fixture-password-sentinel",
+  "api_key=query-secret-sentinel",
+  "configuration-password-sentinel",
+  "configuration-token-sentinel",
+  "encrypted-api-key-sentinel",
+  "credential-nonce-sentinel",
+  "credential-auth-tag-sentinel",
+]);
+const excludedOperationalSentinels = Object.freeze([
+  "excluded-endpoint",
+  "excluded-response",
+  "excluded-release-job",
+  "excluded provider response",
+  "excluded chronicle job",
+  "excluded release chunk",
+  sha256("excluded-share-link"),
+]);
 
 type StartedRuntime = Readonly<{
   baseUrl: string;
@@ -47,14 +98,56 @@ type StartedRuntime = Readonly<{
   stop(): Promise<void>;
 }>;
 
+type StartedWorker = Readonly<{
+  logs(): string;
+  stop(): Promise<void>;
+  terminate(): Promise<void>;
+}>;
+
+type SystemExportJobView = Extract<SystemArchiveJobView, { kind: "export" }>;
+
+type RepresentativeProvider = Readonly<{
+  id: string;
+  kind: "text" | "image" | "embedding";
+  displayName: string;
+  baseUrl: string;
+  selectedModel: string;
+}>;
+
+type RepresentativeAsset = Readonly<{
+  id: string;
+  contentHash: string;
+  title: string;
+  reuseScope: "campaign" | "world" | "owner_library";
+  favorite: boolean;
+  archived: boolean;
+  bindings: readonly ArchiveAssetBinding[];
+}>;
+
 type RepresentativeOwner = Readonly<{
   ownerUserId: string;
   worldIds: readonly string[];
   worldVersionIds: readonly string[];
+  latestWorldVersionIds: readonly string[];
   campaignIds: readonly string[];
   turnIds: readonly string[];
+  promptIds: readonly string[];
   providerIds: readonly string[];
+  providers: readonly RepresentativeProvider[];
+  correctionId: string;
+  canonicalFactId: string;
+  memoryId: string;
+  summaryCheckpointId: string;
+  checkpointOpenThreadId: string;
+  importId: string;
+  costEventIds: readonly string[];
+  activitySourceId: string;
+  illustrationSetId: string;
+  illustrationSegmentId: string;
+  assetIds: readonly string[];
+  assets: readonly RepresentativeAsset[];
   originalHashes: readonly string[];
+  expectedDomainCounts: Readonly<Record<SystemArchiveDomain, number>>;
 }>;
 
 type FrozenFixture = Readonly<{
@@ -134,6 +227,44 @@ async function waitForReady(baseUrl: string, child: ChildProcess, logs: () => st
   throw new Error(`Compiled runtime did not become ready:\n${logs()}`);
 }
 
+function compiledRuntimeEnvironment(input: Readonly<{
+  databaseUrl: string;
+  archiveRoot: string;
+  assetRoot: string;
+  port: number;
+  role: "api" | "all" | "worker";
+  pollIntervalMs?: number;
+}>): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    APP_ROLE: input.role,
+    APP_HOST: "127.0.0.1",
+    APP_PORT: String(input.port),
+    DATABASE_URL: input.databaseUrl,
+    DATABASE_MAX_CONNECTIONS: "12",
+    MIGRATION_DIRECTORY: resolve("database/migrations"),
+    WORKER_POLL_INTERVAL_MS: String(input.pollIntervalMs ?? 250),
+    WORKER_LEASE_SECONDS: "15",
+    WORKER_GENERATION_CONCURRENCY: "1",
+    LEGACY_WEB_ROOT: resolve("apps/web/dist"),
+    NEXT_WEB_ROOT: resolve("apps/web-next/dist"),
+    ASSET_STORAGE_ROOT: input.assetRoot,
+    ARCHIVE_STORAGE_ROOT: input.archiveRoot,
+    ARCHIVE_PREVIEW_TTL_SECONDS: "300",
+    SYSTEM_ARCHIVE_ARTIFACT_TTL_SECONDS: "300",
+    SYSTEM_ARCHIVE_ENABLED: "true",
+    SYSTEM_ARCHIVE_UPLOAD_TTL_SECONDS: "300",
+    SYSTEM_ARCHIVE_CHUNK_BYTES: String(releaseChunkBytes),
+    SYSTEM_ARCHIVE_ALLOW_LIMIT_INCREASE: "false",
+    SYSTEM_ARCHIVE_ALLOW_UNKNOWN_FREE_SPACE: "false",
+    API_RATE_LIMIT_IMPORT_REQUESTS: "1000",
+    API_CONCURRENCY_IMPORT_REQUESTS: "2",
+    CREDENTIAL_ENCRYPTION_KEY: "system-archive-release-gate-only",
+    LOG_LEVEL: input.role === "worker" ? "info" : "warn",
+    NEXUS_VERSION: "0.1.0",
+  };
+}
+
 async function startCompiledRuntime(input: Readonly<{
   databaseUrl: string;
   archiveRoot: string;
@@ -144,34 +275,7 @@ async function startCompiledRuntime(input: Readonly<{
   const baseUrl = `http://127.0.0.1:${input.port}`;
   const child = spawn(process.execPath, [resolve("dist/services/runtime/src/main.js")], {
     cwd: resolve("."),
-    env: {
-      ...process.env,
-      APP_ROLE: input.role,
-      APP_HOST: "127.0.0.1",
-      APP_PORT: String(input.port),
-      DATABASE_URL: input.databaseUrl,
-      DATABASE_MAX_CONNECTIONS: "12",
-      MIGRATION_DIRECTORY: resolve("database/migrations"),
-      WORKER_POLL_INTERVAL_MS: "250",
-      WORKER_LEASE_SECONDS: "15",
-      WORKER_GENERATION_CONCURRENCY: "1",
-      LEGACY_WEB_ROOT: resolve("apps/web/dist"),
-      NEXT_WEB_ROOT: resolve("apps/web-next/dist"),
-      ASSET_STORAGE_ROOT: input.assetRoot,
-      ARCHIVE_STORAGE_ROOT: input.archiveRoot,
-      ARCHIVE_PREVIEW_TTL_SECONDS: "300",
-      SYSTEM_ARCHIVE_ARTIFACT_TTL_SECONDS: "300",
-      SYSTEM_ARCHIVE_ENABLED: "true",
-      SYSTEM_ARCHIVE_UPLOAD_TTL_SECONDS: "300",
-      SYSTEM_ARCHIVE_CHUNK_BYTES: String(releaseChunkBytes),
-      SYSTEM_ARCHIVE_ALLOW_LIMIT_INCREASE: "false",
-      SYSTEM_ARCHIVE_ALLOW_UNKNOWN_FREE_SPACE: "false",
-      API_RATE_LIMIT_IMPORT_REQUESTS: "1000",
-      API_CONCURRENCY_IMPORT_REQUESTS: "2",
-      CREDENTIAL_ENCRYPTION_KEY: "system-archive-release-gate-only",
-      LOG_LEVEL: "warn",
-      NEXUS_VERSION: "0.1.0",
-    },
+    env: compiledRuntimeEnvironment({ ...input, role: input.role }),
     stdio: ["ignore", "pipe", "pipe"],
   });
   let output = "";
@@ -203,6 +307,58 @@ async function startCompiledRuntime(input: Readonly<{
   });
 }
 
+async function startCompiledWorker(input: Readonly<{
+  databaseUrl: string;
+  archiveRoot: string;
+  assetRoot: string;
+}>): Promise<StartedWorker> {
+  const child = spawn(process.execPath, [resolve("dist/services/runtime/src/main.js")], {
+    cwd: resolve("."),
+    env: compiledRuntimeEnvironment({
+      ...input,
+      port: await freePort(),
+      role: "worker",
+      pollIntervalMs: 25,
+    }),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  const append = (chunk: Buffer | string) => {
+    output = `${output}${String(chunk)}`.slice(-100_000);
+  };
+  child.stdout?.on("data", append);
+  child.stderr?.on("data", append);
+  const exited = new Promise<void>((resolvePromise) => child.once("exit", () => resolvePromise()));
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+  if (child.exitCode !== null || child.signalCode !== null) {
+    throw new Error(`Compiled worker exited during startup:\n${output}`);
+  }
+
+  let stopped = false;
+  return Object.freeze({
+    logs: () => output,
+    async stop() {
+      if (stopped) return;
+      stopped = true;
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+      const graceful = await Promise.race([
+        exited.then(() => true),
+        new Promise<false>((resolvePromise) => setTimeout(() => resolvePromise(false), 10_000)),
+      ]);
+      if (!graceful && child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+        await exited;
+      }
+    },
+    async terminate() {
+      if (stopped) return;
+      stopped = true;
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      await exited;
+    },
+  });
+}
+
 async function jsonRequest<Result>(
   baseUrl: string,
   path: string,
@@ -212,6 +368,80 @@ async function jsonRequest<Result>(
   const body = await response.text();
   if (!response.ok) throw new Error(`${init.method ?? "GET"} ${path} returned ${response.status}: ${body}`);
   return JSON.parse(body) as Result;
+}
+
+type SystemJobState = Readonly<{
+  status: string;
+  lease_owner: string | null;
+  lease_expired: boolean;
+}>;
+
+async function waitForSystemJob(
+  pool: DatabasePool,
+  jobId: string,
+  predicate: (state: SystemJobState) => boolean,
+  description: string,
+  logs: () => string,
+  timeoutMs = 120_000,
+): Promise<SystemJobState> {
+  const deadline = Date.now() + timeoutMs;
+  let last: SystemJobState | undefined;
+  while (Date.now() < deadline) {
+    const result = await pool.query<SystemJobState>(
+      `SELECT status,lease_owner,
+              lease_expires_at IS NOT NULL AND lease_expires_at<=clock_timestamp() AS lease_expired
+         FROM system_archive_jobs WHERE id=$1`,
+      [jobId],
+    );
+    last = result.rows[0];
+    if (last && predicate(last)) return last;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+  }
+  throw new Error(
+    `Timed out waiting for System Archive job ${jobId} to ${description}; last=${JSON.stringify(last)}:\n${logs()}`,
+  );
+}
+
+async function holdWorldExportRead(pool: DatabasePool): Promise<Readonly<{ release(): Promise<void> }>> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("LOCK TABLE worlds IN ACCESS EXCLUSIVE MODE");
+  } catch (error) {
+    client.release();
+    throw error;
+  }
+  let released = false;
+  return Object.freeze({
+    async release() {
+      if (released) return;
+      released = true;
+      try {
+        await client.query("ROLLBACK");
+      } finally {
+        client.release();
+      }
+    },
+  });
+}
+
+async function waitForBlockedWorldExportRead(
+  pool: DatabasePool,
+  logs: () => string,
+  timeoutMs = 30_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const result = await pool.query<{ blocked: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM pg_locks
+          WHERE relation='worlds'::regclass AND mode='AccessShareLock' AND NOT granted
+       ) AS blocked`,
+    );
+    if (result.rows[0]?.blocked) return;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+  }
+  throw new Error(`Timed out waiting for a compiled worker to block mid-export on worlds:\n${logs()}`);
 }
 
 async function putUploadChunk(
@@ -343,10 +573,16 @@ async function seedRepresentativeOwner(pool: DatabasePool, assetRoot: string): P
   await pool.query("UPDATE users SET display_name='Release Gate Owner' WHERE id=$1", [ownerUserId]);
 
   const providerIds: string[] = [];
-  for (const [displayName, role, baseUrl] of [
-    ["Release text", "text", "https://fixture-user:fixture-password@text.invalid/v1?api_key=hidden"],
-    ["Release image", "image", "https://image.invalid/v1"],
-    ["Release embedding", "embedding", "https://embedding.invalid/v1"],
+  const providers: RepresentativeProvider[] = [];
+  for (const [displayName, role, baseUrl, portableBaseUrl] of [
+    [
+      "Release text",
+      "text",
+      "https://fixture-user-sentinel:fixture-password-sentinel@text.invalid/v1?api_key=query-secret-sentinel",
+      "https://text.invalid/v1",
+    ],
+    ["Release image", "image", "https://image.invalid/v1", "https://image.invalid/v1"],
+    ["Release embedding", "embedding", "https://embedding.invalid/v1", "https://embedding.invalid/v1"],
   ] as const) {
     const inserted = await pool.query<{ id: string }>(
       `INSERT INTO provider_profiles (
@@ -354,15 +590,38 @@ async function seedRepresentativeOwner(pool: DatabasePool, assetRoot: string): P
          request_timeout_ms,configuration,encrypted_api_key,credential_nonce,
          credential_auth_tag,credential_key_version,enabled,health_status
        ) VALUES ($1,$2,'openai_compatible',$3,$4,$5,321000,$6::jsonb,
-                 'encrypted-secret','nonce','tag',1,true,'healthy') RETURNING id`,
-      [ownerUserId, displayName, role, baseUrl, `${role}-model`, JSON.stringify({ retryLimit: 3, password: "excluded" })],
+                 'encrypted-api-key-sentinel','credential-nonce-sentinel',
+                 'credential-auth-tag-sentinel',1,true,'healthy') RETURNING id`,
+      [
+        ownerUserId,
+        displayName,
+        role,
+        baseUrl,
+        `${role}-model`,
+        JSON.stringify({
+          retryLimit: 3,
+          password: "configuration-password-sentinel",
+          bearerToken: "configuration-token-sentinel",
+        }),
+      ],
     );
-    providerIds.push(inserted.rows[0]!.id);
+    const id = inserted.rows[0]!.id;
+    providerIds.push(id);
+    providers.push(Object.freeze({
+      id,
+      kind: role,
+      displayName,
+      baseUrl: portableBaseUrl,
+      selectedModel: `${role}-model`,
+    }));
   }
-  await pool.query(
-    "INSERT INTO prompt_template_overrides (owner_user_id,prompt_key,content) VALUES ($1,'story_system','Owner-wide release prompt')",
+  const promptIds: string[] = [];
+  const ownerPrompt = await pool.query<{ id: string }>(
+    `INSERT INTO prompt_template_overrides (owner_user_id,prompt_key,content)
+     VALUES ($1,'story_system','Owner-wide release prompt') RETURNING id`,
     [ownerUserId],
   );
+  promptIds.push(ownerPrompt.rows[0]!.id);
 
   const worldIds: string[] = [];
   const worldVersionIds: string[] = [];
@@ -443,11 +702,12 @@ async function seedRepresentativeOwner(pool: DatabasePool, assetRoot: string): P
        ) VALUES ($1,$2,$3,$4::jsonb,'[]'::jsonb,'[]'::jsonb,'[]'::jsonb,'[]'::jsonb,2)`,
       [campaignId, ownerUserId, `Continuity ${campaignIndex + 1}`, JSON.stringify([{ id: "gate", name: "Gate", value: "open", rules: "Preserve" }])],
     );
-    await pool.query(
+    const campaignPrompt = await pool.query<{ id: string }>(
       `INSERT INTO prompt_template_overrides (owner_user_id,campaign_id,prompt_key,content)
-       VALUES ($1,$2,'story_system',$3)`,
+       VALUES ($1,$2,'story_system',$3) RETURNING id`,
       [ownerUserId, campaignId, `Campaign prompt ${campaignIndex + 1}`],
     );
+    promptIds.push(campaignPrompt.rows[0]!.id);
     const turnCount = campaignIndex === 0 ? 2 : 1;
     for (let turnNumber = 1; turnNumber <= turnCount; turnNumber += 1) {
       const turn = await pool.query<{ id: string }>(
@@ -479,20 +739,29 @@ async function seedRepresentativeOwner(pool: DatabasePool, assetRoot: string): P
     }
   }
 
-  await pool.query(
+  const correction = await pool.query<{ id: string }>(
     `INSERT INTO turn_narration_corrections (
        owner_user_id,campaign_id,turn_id,revision,narration,
        previous_effective_narration_hash,reason,source,created_by_user_id
      ) VALUES ($1,$2,$3,1,'Corrected release narration',$4,
-               'Release gate correction','user_edit',$1)`,
+               'Release gate correction','user_edit',$1) RETURNING id`,
     [ownerUserId, campaignIds[0], turnIds[0], sha256("Narration 1.1")],
   );
+  const canonicalFactId = randomUUID();
   await pool.query(
     `INSERT INTO campaign_canonical_facts (
        id,owner_user_id,campaign_id,world_version_id,source_turn_id,source_turn_number,
-       source_fact_index,content,normalized_content,valid_from_turn
-     ) VALUES ($1,$2,$3,$4,$5,1,0,'The release gate is open.','the release gate is open',1)`,
-    [randomUUID(), ownerUserId, campaignIds[0], latestVersionByWorld.get(worldIds[0]!), turnIds[0]],
+       source_fact_index,content,normalized_content,valid_from_turn,metadata
+     ) VALUES ($1,$2,$3,$4,$5,1,0,'The release gate is open.',
+               'the release gate is open',1,$6::jsonb)`,
+    [
+      canonicalFactId,
+      ownerUserId,
+      campaignIds[0],
+      latestVersionByWorld.get(worldIds[0]!),
+      turnIds[0],
+      JSON.stringify({ subject: "release gate", predicate: "status" }),
+    ],
   );
   const memory = await pool.query<{ id: string }>(
     `INSERT INTO chronicle_memories (
@@ -512,11 +781,16 @@ async function seedRepresentativeOwner(pool: DatabasePool, assetRoot: string): P
       WHERE id=$1`,
     [memory.rows[0]!.id, providerIds[2]],
   );
-  await pool.query(
+  const checkpointOpenThreadId = randomUUID();
+  const summaryCheckpoint = await pool.query<{ id: string }>(
     `INSERT INTO summary_checkpoints (
        owner_user_id,campaign_id,through_turn,summary_kind,content,token_estimate
-     ) VALUES ($1,$2,2,'campaign_summary',$3::jsonb,4)`,
-    [ownerUserId, campaignIds[0], JSON.stringify({ summary: "Release summary", openThreadIds: [randomUUID()] })],
+     ) VALUES ($1,$2,2,'campaign_summary',$3::jsonb,4) RETURNING id`,
+    [
+      ownerUserId,
+      campaignIds[0],
+      JSON.stringify({ summary: "Release summary", openThreadIds: [checkpointOpenThreadId] }),
+    ],
   );
   await pool.query(
     `INSERT INTO chronicle_memory_chunks (
@@ -528,17 +802,18 @@ async function seedRepresentativeOwner(pool: DatabasePool, assetRoot: string): P
          FROM chronicle_memories WHERE id=$1`,
     [memory.rows[0]!.id],
   );
-  await pool.query(
+  const importProvenance = await pool.query<{ id: string }>(
     `INSERT INTO imports (owner_user_id,source_type,source_name,source_hash,status,campaign_id,completed_at)
-     VALUES ($1,'legacy_story','Release source',$2,'completed',$3,now())`,
+     VALUES ($1,'legacy_story','Release source',$2,'completed',$3,now()) RETURNING id`,
     [ownerUserId, sha256("release-source"), campaignIds[0]],
   );
+  const costEventIds: string[] = [];
   for (const [index, category] of ["story", "image"].entries()) {
-    await pool.query(
+    const cost = await pool.query<{ id: string }>(
       `INSERT INTO provider_cost_events (
          owner_user_id,campaign_id,turn_id,provider_profile_id,provider_type,category,
          operation,amount,currency
-       ) VALUES ($1,$2,$3,$4,'openai_compatible',$5,'response',$6,'USD')`,
+       ) VALUES ($1,$2,$3,$4,'openai_compatible',$5,'response',$6,'USD') RETURNING id`,
       [
         ownerUserId,
         campaignIds[index]!,
@@ -548,12 +823,15 @@ async function seedRepresentativeOwner(pool: DatabasePool, assetRoot: string): P
         index === 0 ? 0.01 : 0.02,
       ],
     );
+    costEventIds.push(cost.rows[0]!.id);
   }
-  await pool.query(
+  const activity = await pool.query<{ id: string }>(
     `INSERT INTO activity_events (owner_user_id,campaign_id,event_type,details)
-     VALUES ($1,$2,'campaign.accepted_turn',$3::jsonb)`,
+     VALUES ($1,$2,'campaign.accepted_turn',$3::jsonb) RETURNING id::text AS id`,
     [ownerUserId, campaignIds[0], JSON.stringify({ summary: "Release activity" })],
   );
+  const activityHex = BigInt(activity.rows[0]!.id).toString(16).padStart(12, "0").slice(-12);
+  const activitySourceId = `00000000-0000-4000-8000-${activityHex}`;
 
   await pool.query(
     `INSERT INTO world_share_links (owner_user_id,world_id,world_version_id,token_hash,expires_at)
@@ -583,12 +861,12 @@ async function seedRepresentativeOwner(pool: DatabasePool, assetRoot: string): P
   );
 
   const originalHashes: string[] = [];
-  const largeRaw = randomBytes(800 * 800 * 4);
+  const largeRaw = randomBytes(2_200 * 2_200 * 4);
   const originals = await Promise.all([
     sharp({ create: { width: 4, height: 4, channels: 4, background: "#ff0000" } }).png().toBuffer(),
     sharp({ create: { width: 4, height: 4, channels: 4, background: "#00ff00" } }).png().toBuffer(),
     sharp({ create: { width: 4, height: 4, channels: 4, background: "#0000ff" } }).png().toBuffer(),
-    sharp(largeRaw, { raw: { width: 800, height: 800, channels: 4 } }).png({ compressionLevel: 0 }).toBuffer(),
+    sharp(largeRaw, { raw: { width: 2_200, height: 2_200, channels: 4 } }).png({ compressionLevel: 0 }).toBuffer(),
   ]);
   const assetIds: string[] = [];
   const titles = ["cover", "selected", "alternate", "unbound-archived"] as const;
@@ -654,59 +932,555 @@ async function seedRepresentativeOwner(pool: DatabasePool, assetRoot: string): P
     [segment.rows[0]!.id, ownerUserId, assetIds[1], assetIds[2]],
   );
 
+  const latestWorldVersionIds = worldIds.map((worldId) => latestVersionByWorld.get(worldId)!);
+  const assets: RepresentativeAsset[] = [
+    Object.freeze({
+      id: assetIds[0]!,
+      contentHash: originalHashes[0]!,
+      title: titles[0],
+      reuseScope: "world",
+      favorite: false,
+      archived: false,
+      bindings: Object.freeze([
+        { role: "world_cover", worldId: worldIds[0]! },
+        {
+          role: "world_version_asset",
+          worldId: worldIds[0]!,
+          worldVersionId: latestWorldVersionIds[0]!,
+        },
+      ] satisfies ArchiveAssetBinding[]),
+    }),
+    Object.freeze({
+      id: assetIds[1]!,
+      contentHash: originalHashes[1]!,
+      title: titles[1],
+      reuseScope: "campaign",
+      favorite: true,
+      archived: false,
+      bindings: Object.freeze([
+        {
+          role: "world_version_asset",
+          worldId: worldIds[0]!,
+          worldVersionId: latestWorldVersionIds[0]!,
+        },
+        {
+          role: "illustration_segment_variant",
+          campaignId: campaignIds[0]!,
+          turnId: turnIds[0]!,
+          segmentId: segment.rows[0]!.id,
+          variantIndex: 0,
+        },
+      ] satisfies ArchiveAssetBinding[]),
+    }),
+    Object.freeze({
+      id: assetIds[2]!,
+      contentHash: originalHashes[2]!,
+      title: titles[2],
+      reuseScope: "campaign",
+      favorite: false,
+      archived: false,
+      bindings: Object.freeze([{
+        role: "illustration_segment_variant",
+        campaignId: campaignIds[0]!,
+        turnId: turnIds[0]!,
+        segmentId: segment.rows[0]!.id,
+        variantIndex: 1,
+      }] satisfies ArchiveAssetBinding[]),
+    }),
+    Object.freeze({
+      id: assetIds[3]!,
+      contentHash: originalHashes[3]!,
+      title: titles[3],
+      reuseScope: "owner_library",
+      favorite: false,
+      archived: true,
+      bindings: Object.freeze([]),
+    }),
+  ];
+
   return Object.freeze({
     ownerUserId,
     worldIds: Object.freeze(worldIds),
     worldVersionIds: Object.freeze(worldVersionIds),
+    latestWorldVersionIds: Object.freeze(latestWorldVersionIds),
     campaignIds: Object.freeze(campaignIds),
     turnIds: Object.freeze(turnIds),
+    promptIds: Object.freeze(promptIds),
     providerIds: Object.freeze(providerIds),
+    providers: Object.freeze(providers),
+    correctionId: correction.rows[0]!.id,
+    canonicalFactId,
+    memoryId: memory.rows[0]!.id,
+    summaryCheckpointId: summaryCheckpoint.rows[0]!.id,
+    checkpointOpenThreadId,
+    importId: importProvenance.rows[0]!.id,
+    costEventIds: Object.freeze(costEventIds),
+    activitySourceId,
+    illustrationSetId: illustrationSet.rows[0]!.id,
+    illustrationSegmentId: segment.rows[0]!.id,
+    assetIds: Object.freeze(assetIds),
+    assets: Object.freeze(assets),
     originalHashes: Object.freeze(originalHashes),
+    expectedDomainCounts: representativeDomainCounts,
   });
+}
+
+async function createExportThroughPage(page: Page): Promise<SystemExportJobView> {
+  const responsePromise = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname === "/api/v1/system-exports" && response.request().method() === "POST";
+  });
+  await page.locator('[data-action="create-system-export"]').click();
+  const response = await responsePromise;
+  expect(response.status()).toBe(202);
+  const job = systemArchiveJobViewSchema.parse(await response.json());
+  if (job.kind !== "export") throw new Error("Replacement UI created a non-export System Archive job.");
+  await page.getByText(`System Export: ${job.status.replaceAll("_", " ")}.`, { exact: true }).waitFor();
+  return job;
 }
 
 async function exportThroughReplacementUi(
   browser: Browser,
   runtime: StartedRuntime,
-  restart: () => Promise<StartedRuntime>,
+  databaseUrl: string,
+  archiveRoot: string,
+  assetRoot: string,
   downloadPath: string,
-): Promise<StartedRuntime> {
+): Promise<SystemExportJobView> {
+  const pool = createDatabasePool(databaseUrl, 6);
+  const workerInput = { databaseUrl, archiveRoot, assetRoot } as const;
+
   const cancellationContext = await browser.newContext({ acceptDownloads: true });
+  let cancellationWorker: StartedWorker | undefined;
   try {
     const cancellationPage = await cancellationContext.newPage();
     await cancellationPage.goto(`${runtime.baseUrl}/app/data-transfer`);
-    const createExport = cancellationPage.locator('[data-action="create-system-export"]');
-    await createExport.waitFor({ state: "visible" });
-    await createExport.click();
-    const cancel = cancellationPage.locator('[data-action="cancel-system-operation"]');
-    await cancel.waitFor({ state: "visible" });
-    await cancel.click();
+    const job = await createExportThroughPage(cancellationPage);
+    expect(job.status).toBe("queued");
+
+    const cancellationResponse = cancellationPage.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === `/api/v1/system-exports/${job.id}` && response.request().method() === "DELETE";
+    });
+    await cancellationPage.locator('[data-action="cancel-system-operation"]').click();
+    const cancelling = systemArchiveJobViewSchema.parse(await (await cancellationResponse).json());
+    expect(cancelling).toMatchObject({ id: job.id, kind: "export", status: "cancelling" });
+
+    cancellationWorker = await startCompiledWorker(workerInput);
+    const cancelledState = await waitForSystemJob(
+      pool,
+      job.id,
+      (state) => state.status === "cancelled" && state.lease_owner === null,
+      "reach durable cancellation",
+      cancellationWorker.logs,
+    );
+    expect(cancelledState).toMatchObject({ status: "cancelled", lease_owner: null });
+    const durableCancelled = systemArchiveJobViewSchema.parse(
+      await jsonRequest(runtime.baseUrl, `/api/v1/system-exports/${job.id}`),
+    );
+    expect(durableCancelled).toMatchObject({ id: job.id, kind: "export", status: "cancelled" });
+    await cancellationPage.reload();
     await cancellationPage.getByText("System Export: cancelled.", { exact: true }).waitFor();
+  } catch (error) {
+    throw new Error(
+      `Replacement UI durable cancellation failed:\n${runtime.logs()}\n${cancellationWorker?.logs() ?? ""}`,
+      { cause: error },
+    );
   } finally {
+    await cancellationWorker?.stop().catch(() => undefined);
     await cancellationContext.close();
   }
 
   const durableContext = await browser.newContext({ acceptDownloads: true });
-  const page = await durableContext.newPage();
-  await page.goto(`${runtime.baseUrl}/app/data-transfer`);
-  await page.locator('[data-action="create-system-export"]').click();
-  await page.locator('[data-action="cancel-system-operation"]').waitFor({ state: "visible" });
-  await runtime.stop();
-  const restarted = await restart();
+  let firstWorker: StartedWorker | undefined;
+  let replacementWorker: StartedWorker | undefined;
+  let firstBlocker: Awaited<ReturnType<typeof holdWorldExportRead>> | undefined;
+  let replacementBlocker: Awaited<ReturnType<typeof holdWorldExportRead>> | undefined;
   try {
-    await page.reload();
+    const page = await durableContext.newPage();
+    await page.goto(`${runtime.baseUrl}/app/data-transfer`);
+    const job = await createExportThroughPage(page);
+    expect(job.status).toBe("queued");
+
+    firstBlocker = await holdWorldExportRead(pool);
+    firstWorker = await startCompiledWorker(workerInput);
+    const firstClaim = await waitForSystemJob(
+      pool,
+      job.id,
+      (state) => state.status === "capturing" && state.lease_owner !== null,
+      "be claimed by the first worker",
+      firstWorker.logs,
+    );
+    const firstLeaseOwner = firstClaim.lease_owner!;
+    await waitForBlockedWorldExportRead(pool, firstWorker.logs);
+    await firstWorker.terminate();
+    firstWorker = undefined;
+
+    const abandoned = await waitForSystemJob(
+      pool,
+      job.id,
+      (state) => state.status === "capturing" && state.lease_owner === firstLeaseOwner,
+      "retain the terminated worker lease",
+      runtime.logs,
+    );
+    expect(abandoned).toMatchObject({ status: "capturing", lease_owner: firstLeaseOwner });
+    await firstBlocker.release();
+    firstBlocker = undefined;
+
+    await waitForSystemJob(
+      pool,
+      job.id,
+      (state) => state.lease_owner === firstLeaseOwner && state.lease_expired,
+      "expire the terminated worker lease by PostgreSQL time",
+      runtime.logs,
+      45_000,
+    );
+
+    replacementBlocker = await holdWorldExportRead(pool);
+    replacementWorker = await startCompiledWorker(workerInput);
+    const reclaimed = await waitForSystemJob(
+      pool,
+      job.id,
+      (state) => state.status === "capturing"
+        && state.lease_owner !== null
+        && state.lease_owner !== firstLeaseOwner,
+      "be reclaimed by a distinct replacement worker",
+      replacementWorker.logs,
+    );
+    expect(reclaimed.lease_owner).not.toBe(firstLeaseOwner);
+    await waitForBlockedWorldExportRead(pool, replacementWorker.logs);
+    await replacementBlocker.release();
+    replacementBlocker = undefined;
+
     const downloadLink = page.locator("[data-system-download]");
     await downloadLink.waitFor({ state: "visible", timeout: 120_000 });
+    const published = systemArchiveJobViewSchema.parse(
+      await jsonRequest(runtime.baseUrl, `/api/v1/system-exports/${job.id}`),
+    );
+    if (published.kind !== "export") throw new Error("Replacement UI recovered a non-export job.");
+    expect(published.status).toBe("published");
     const downloadPromise = page.waitForEvent("download", { timeout: 30_000 });
     await downloadLink.click();
     const download = await downloadPromise;
     await download.saveAs(downloadPath);
+    return published;
   } catch (error) {
-    throw new Error(`Replacement UI export failed:\n${restarted.logs()}`, { cause: error });
+    throw new Error(
+      `Replacement UI worker termination/reclaim export failed:\n${runtime.logs()}\n`
+      + `${firstWorker?.logs() ?? ""}\n${replacementWorker?.logs() ?? ""}`,
+      { cause: error },
+    );
   } finally {
+    await firstBlocker?.release().catch(() => undefined);
+    await replacementBlocker?.release().catch(() => undefined);
+    await firstWorker?.stop().catch(() => undefined);
+    await replacementWorker?.stop().catch(() => undefined);
     await durableContext.close();
+    await pool.end();
   }
-  return restarted;
+}
+
+async function assertRepresentativeArchive(
+  archive: Buffer,
+  published: SystemExportJobView,
+  source: RepresentativeOwner,
+): Promise<void> {
+  expect(published.status).toBe("published");
+  if (!published.report) throw new Error("Published System Archive export lacks its durable report.");
+  expect(published.report.recordsByDomain).toEqual(source.expectedDomainCounts);
+  expect(published.report.assetCount).toBe(source.assets.length);
+  expect(published.report.operationalOmissions).toMatchObject({
+    generation: expect.any(Number),
+    chronicle: expect.any(Number),
+    "system-archive": expect.any(Number),
+  });
+
+  const zip = await JSZip.loadAsync(archive);
+  const files = Object.values(zip.files).filter((entry) => !entry.dir);
+  const serialized = Buffer.concat(await Promise.all(files.map((entry) => entry.async("nodebuffer")))).toString("utf8");
+  for (const sentinel of [...excludedSecretSentinels, ...excludedOperationalSentinels]) {
+    expect(serialized, `archive must exclude ${sentinel}`).not.toContain(sentinel);
+  }
+
+  const manifestEntry = zip.file("manifest.json");
+  const systemEntry = zip.file("system.json");
+  const assetsEntry = zip.file("assets/assets.json");
+  if (!manifestEntry || !systemEntry || !assetsEntry) throw new Error("Representative archive lacks a required logical payload.");
+  const manifest = systemArchiveManifestSchema.parse(JSON.parse(await manifestEntry.async("string")));
+  const systemPayload = systemArchivePayloadSchema.parse(JSON.parse(await systemEntry.async("string")));
+  const assetPayload = systemArchiveAssetsPayloadSchema.parse(JSON.parse(await assetsEntry.async("string")));
+  expect(manifest).toMatchObject({
+    archiveType: "system",
+    sourceInstallationId: source.ownerUserId,
+    sourceOwnerCount: 1,
+    sourceOwner: { sourceId: source.ownerUserId, displayName: "Release Gate Owner" },
+    assets: expect.any(Array),
+  });
+  expect(systemPayload).toMatchObject({
+    sourceOwnerCount: 1,
+    sourceOwner: { sourceId: source.ownerUserId, displayName: "Release Gate Owner" },
+    records: [],
+  });
+  expect(manifest.assets).toEqual(assetPayload.assets);
+
+  const records: SystemRecordEnvelope[] = [];
+  for (const domain of SYSTEM_ARCHIVE_DOMAINS) {
+    const entries = files
+      .filter((entry) => entry.name.startsWith(`records/${domain}/`))
+      .sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const lines = (await entry.async("string")).trim().split("\n").filter(Boolean);
+      records.push(...lines.map((line) => systemRecordEnvelopeSchema.parse(JSON.parse(line))));
+    }
+  }
+  const actualDomainCounts = Object.fromEntries(SYSTEM_ARCHIVE_DOMAINS.map((domain) => [
+    domain,
+    records.filter((record) => record.domain === domain).length,
+  ])) as Record<SystemArchiveDomain, number>;
+  expect(actualDomainCounts).toEqual(source.expectedDomainCounts);
+
+  const providers = records.filter((entry) => entry.domain === "providers");
+  expect(providers).toHaveLength(3);
+  for (const expected of source.providers) {
+    expect(providers.find((entry) => entry.sourceId === expected.id)?.record).toEqual({
+      sourceId: expected.id,
+      kind: expected.kind,
+      displayName: expected.displayName,
+      baseUrl: expected.baseUrl,
+      selectedModel: expected.selectedModel,
+      contextWindow: null,
+      timeoutMs: 321000,
+      retryLimit: 3,
+      enabled: false,
+      health: "unknown",
+    });
+  }
+
+  const prompts = records.filter((entry) => entry.domain === "prompts");
+  expect(prompts.map((entry) => entry.record)).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      sourceId: source.promptIds[0],
+      campaignId: null,
+      templateKey: "story_system",
+      overrideText: "Owner-wide release prompt",
+    }),
+    expect.objectContaining({
+      sourceId: source.promptIds[1],
+      campaignId: source.campaignIds[0],
+      templateKey: "story_system",
+      overrideText: "Campaign prompt 1",
+    }),
+    expect.objectContaining({
+      sourceId: source.promptIds[2],
+      campaignId: source.campaignIds[1],
+      templateKey: "story_system",
+      overrideText: "Campaign prompt 2",
+    }),
+  ]));
+
+  const worlds = records.filter((entry) => entry.domain === "worlds");
+  expect(worlds.map((entry) => entry.record)).toEqual(expect.arrayContaining([
+    expect.objectContaining({ sourceId: source.worldIds[0], title: "Release World 1", status: "active" }),
+    expect.objectContaining({ sourceId: source.worldIds[1], title: "Release World 2", status: "draft" }),
+  ]));
+  const versions = records.filter((entry) => entry.domain === "world-versions");
+  for (const [index, versionId] of source.worldVersionIds.entries()) {
+    const worldIndex = index < 2 ? 0 : 1;
+    const versionNumber = index < 2 ? index + 1 : 1;
+    expect(versions.find((entry) => entry.sourceId === versionId)?.record).toMatchObject({
+      sourceId: versionId,
+      worldId: source.worldIds[worldIndex],
+      versionNumber,
+      title: `Release World ${worldIndex + 1}`,
+      releaseNotes: `Release ${versionNumber}`,
+      createdFromRevision: versionNumber,
+      content: {
+        world: { premise: `Portable world ${worldIndex + 1}, version ${versionNumber}.` },
+      },
+    });
+  }
+  const latestWorldVersion = versions.find((entry) => entry.sourceId === source.latestWorldVersionIds[0]);
+  expect(latestWorldVersion?.record.content.assets).toEqual([
+    { assetId: source.assetIds[0], role: "world_cover" },
+    { assetId: source.assetIds[1], role: "world_version_asset" },
+  ]);
+  const drafts = records.filter((entry) => entry.domain === "world-drafts");
+  expect(drafts.map((entry) => entry.record)).toEqual(expect.arrayContaining(source.worldIds.map((worldId, index) => (
+    expect.objectContaining({
+      sourceId: worldId,
+      worldId,
+      basedOnWorldVersionId: source.latestWorldVersionIds[index],
+      revision: 3,
+      content: expect.objectContaining({
+        world: expect.objectContaining({ premise: `Editable draft ${index + 1}.` }),
+      }),
+    })
+  ))));
+
+  const campaigns = records.filter((entry) => entry.domain === "campaigns");
+  expect(campaigns.map((entry) => entry.record)).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      sourceId: source.campaignIds[0],
+      worldVersionId: source.latestWorldVersionIds[0],
+      title: "Release Campaign 1",
+      activeTurnNumber: 2,
+      settings: { turnControlStyle: "Scene Direction" },
+    }),
+    expect.objectContaining({
+      sourceId: source.campaignIds[1],
+      worldVersionId: source.latestWorldVersionIds[1],
+      title: "Release Campaign 2",
+      activeTurnNumber: 1,
+      settings: { turnControlStyle: "Action" },
+    }),
+  ]));
+  const turns = records.filter((entry) => entry.domain === "turns");
+  expect(turns.map((entry) => entry.record)).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      sourceId: source.turnIds[0], campaignId: source.campaignIds[0], turnNumber: 1,
+      action: "Action 1.1", narration: "Narration 1.1", imagePrompt: "Illustrate 1.1",
+    }),
+    expect.objectContaining({
+      sourceId: source.turnIds[1], campaignId: source.campaignIds[0], turnNumber: 2,
+      action: "Action 1.2", narration: "Narration 1.2", imagePrompt: "Illustrate 1.2",
+    }),
+    expect.objectContaining({
+      sourceId: source.turnIds[2], campaignId: source.campaignIds[1], turnNumber: 1,
+      action: "Action 2.1", narration: "Narration 2.1", imagePrompt: "Illustrate 2.1",
+    }),
+  ]));
+  expect(records.find((entry) => entry.domain === "turn-corrections")?.record).toMatchObject({
+    sourceId: source.correctionId,
+    turnId: source.turnIds[0],
+    revision: 1,
+    narration: "Corrected release narration",
+    reason: "Release gate correction",
+    source: "user_edit",
+  });
+
+  const states = records.filter((entry) => entry.domain === "campaign-state");
+  for (const [index, campaignId] of source.campaignIds.entries()) {
+    expect(states.find((entry) => entry.record.campaignId === campaignId)?.record).toMatchObject({
+      sourceId: campaignId,
+      campaignId,
+      revision: 2,
+      state: {
+        continuitySummary: `Continuity ${index + 1}`,
+        openThreads: [`Thread ${index + 1}`],
+        scratchpad: `Continuity ${index + 1}`,
+      },
+    });
+  }
+  expect(states.find((entry) => entry.record.campaignId === source.campaignIds[0])?.record.state.canonicalFacts)
+    .toEqual([{ id: source.canonicalFactId, content: "The release gate is open." }]);
+
+  const history = records.filter((entry) => entry.domain === "campaign-history");
+  const acceptedModes = history.filter((entry) => entry.record.eventType === "accepted-turn-mode")
+    .map((entry) => ({ campaignId: entry.record.campaignId, ...JSON.parse(entry.record.content) as Record<string, unknown> }));
+  expect(acceptedModes).toEqual(expect.arrayContaining([
+    { campaignId: source.campaignIds[0], turnId: source.turnIds[0], turnNumber: 1, inputMode: "scene", inputModeSource: "auto" },
+    { campaignId: source.campaignIds[0], turnId: source.turnIds[1], turnNumber: 2, inputMode: "scene", inputModeSource: "auto" },
+    { campaignId: source.campaignIds[1], turnId: source.turnIds[2], turnNumber: 1, inputMode: "scene", inputModeSource: "auto" },
+  ]));
+  const setHistory = history.find((entry) => entry.record.eventType === "illustration-set");
+  expect(setHistory).toMatchObject({
+    sourceId: source.illustrationSetId,
+    record: { campaignId: source.campaignIds[0] },
+  });
+  expect(JSON.parse(setHistory!.record.content)).toMatchObject({
+    turnId: source.turnIds[0], segmentWordCount: 100, imagesPerSegment: 2,
+    promptMode: "direct", status: "completed", isActive: true,
+  });
+  const segmentHistory = history.find((entry) => entry.record.eventType === "illustration-segment");
+  expect(segmentHistory).toMatchObject({
+    sourceId: source.illustrationSegmentId,
+    record: { campaignId: source.campaignIds[0] },
+  });
+  expect(JSON.parse(segmentHistory!.record.content)).toMatchObject({
+    illustrationSetId: source.illustrationSetId,
+    turnId: source.turnIds[0], ordinal: 0, directPrompt: "Release gate",
+    resolvedPrompt: "Release gate", promptSource: "direct", status: "completed",
+  });
+
+  expect(records.find((entry) => entry.domain === "canonical-facts")?.record).toMatchObject({
+    sourceId: source.canonicalFactId,
+    campaignId: source.campaignIds[0],
+    subject: "release gate",
+    predicate: "status",
+    object: "The release gate is open.",
+  });
+  const chronicle = records.filter((entry) => entry.domain === "chronicle");
+  expect(chronicle.find((entry) => entry.sourceId === source.memoryId)?.record).toMatchObject({
+    sourceId: source.memoryId,
+    campaignId: source.campaignIds[0],
+    kind: "memory",
+    turnId: source.turnIds[0],
+    memoryKind: "turn_fiction",
+    content: "Release memory",
+    metadata: { entityNames: ["Gate"], openThreadIds: [] },
+  });
+  expect(chronicle.find((entry) => entry.sourceId === source.summaryCheckpointId)?.record).toMatchObject({
+    sourceId: source.summaryCheckpointId,
+    campaignId: source.campaignIds[0],
+    kind: "summary-checkpoint",
+    throughTurn: 2,
+    summaryKind: "campaign_summary",
+    content: "Release summary",
+    metadata: { entityNames: [], openThreadIds: [source.checkpointOpenThreadId] },
+  });
+
+  const illustrations = records.filter((entry) => entry.domain === "illustrations");
+  expect(illustrations.map((entry) => entry.record)).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      campaignId: source.campaignIds[0], turnId: source.turnIds[0], assetId: source.assetIds[1],
+      fictionPrompt: "Release gate", selected: true,
+    }),
+    expect.objectContaining({
+      campaignId: source.campaignIds[0], turnId: source.turnIds[0], assetId: source.assetIds[2],
+      fictionPrompt: "Release gate", selected: false,
+    }),
+  ]));
+  expect(records.find((entry) => entry.domain === "imports")?.record).toMatchObject({
+    sourceId: source.importId,
+    sourceType: "legacy_story",
+    sourceName: "Release source",
+    sourceHash: sha256("release-source"),
+  });
+  const costs = records.filter((entry) => entry.domain === "cost-events");
+  expect(costs.map((entry) => entry.record)).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      sourceId: source.costEventIds[0], campaignId: source.campaignIds[0], providerKind: "text", amountMicros: 10000,
+    }),
+    expect.objectContaining({
+      sourceId: source.costEventIds[1], campaignId: source.campaignIds[1], providerKind: "image", amountMicros: 20000,
+    }),
+  ]));
+  expect(records.find((entry) => entry.domain === "activity-events")?.record).toMatchObject({
+    sourceId: source.activitySourceId,
+    campaignId: source.campaignIds[0],
+    eventType: "campaign.accepted_turn",
+    summary: "Release activity",
+  });
+
+  expect(assetPayload.assets).toHaveLength(source.assets.length);
+  for (const expected of source.assets) {
+    const asset = assetPayload.assets.find((candidate) => candidate.sourceAssetId === expected.id);
+    expect(asset).toMatchObject({
+      sourceAssetId: expected.id,
+      contentHash: expected.contentHash,
+      library: {
+        title: expected.title,
+        reuseScope: expected.reuseScope,
+        favorite: expected.favorite,
+        archivedAt: expected.archived ? expect.any(String) : null,
+      },
+    });
+    expect(asset?.bindings).toHaveLength(expected.bindings.length);
+    expect(asset?.bindings).toEqual(expect.arrayContaining([...expected.bindings]));
+    const original = asset ? zip.file(asset.archivePath) : null;
+    expect(original).not.toBeNull();
+    if (original) expect(sha256(await original.async("nodebuffer"))).toBe(expected.contentHash);
+  }
 }
 
 async function proveResumableUpload(
@@ -752,12 +1526,21 @@ async function importThroughLegacyUi(
   runtime: StartedRuntime,
   archivePath: string,
   sourceOwnerId: string,
-): Promise<string> {
+): Promise<Readonly<{
+  reportText: string;
+  preview: SystemImportPreviewView;
+  completed: Extract<SystemArchiveJobView, { kind: "import" }>;
+}>> {
   const context: BrowserContext = await browser.newContext();
   try {
     const page = await context.newPage();
     await page.goto(`${runtime.baseUrl}/nexus/index.html#data-transfer`);
+    const previewResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === "/api/v1/system-imports/preview" && response.request().method() === "POST";
+    });
     await page.locator("#systemArchiveFile").setInputFiles(archivePath);
+    const previewView = systemImportPreviewViewSchema.parse(await (await previewResponse).json());
     const preview = page.locator('#systemImportPreview[data-system-preview="ready"]');
     await preview.waitFor({ state: "visible", timeout: 120_000 });
     const previewText = await preview.textContent();
@@ -767,7 +1550,13 @@ async function importThroughLegacyUi(
     const checkboxes = page.locator('#systemImportAcknowledgements input[type="checkbox"]');
     expect(await checkboxes.count()).toBe(5);
     for (const checkbox of await checkboxes.all()) await checkbox.check();
+    const commitResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === "/api/v1/system-imports" && response.request().method() === "POST";
+    });
     await page.locator("#commitSystemImport").click();
+    const accepted = systemArchiveJobViewSchema.parse(await (await commitResponse).json());
+    if (accepted.kind !== "import") throw new Error("Legacy UI created a non-import System Archive job.");
     const report = page.locator('#systemImportReport[data-system-import-state="completed"]');
     await report.waitFor({ state: "visible", timeout: 120_000 });
     const reportText = await report.textContent() ?? "";
@@ -777,7 +1566,12 @@ async function importThroughLegacyUi(
     expect(reportText).toContain("Original assets matched");
     expect(reportText).toContain("Chronicle index: queued");
     expect(reportText).toContain("Asset thumbnails: queued");
-    return reportText;
+    const completed = systemArchiveJobViewSchema.parse(
+      await jsonRequest(runtime.baseUrl, `/api/v1/system-imports/${accepted.id}`),
+    );
+    if (completed.kind !== "import") throw new Error("Legacy UI recovered a non-import System Archive job.");
+    expect(completed.status).toBe("completed");
+    return Object.freeze({ reportText, preview: previewView, completed });
   } catch (error) {
     throw new Error(`Legacy UI import failed:\n${runtime.logs()}`, { cause: error });
   } finally {
@@ -797,37 +1591,37 @@ async function assertImportedAuthority(
     const sourceOwnerRows = await pool.query<{ count: string }>("SELECT count(*)::text AS count FROM users WHERE id=$1", [source.ownerUserId]);
     expect(sourceOwnerRows.rows[0]!.count).toBe("0");
 
-    for (const [table, ids] of [
-      ["worlds", source.worldIds],
-      ["world_versions", source.worldVersionIds],
-      ["campaigns", source.campaignIds],
-      ["turns", source.turnIds],
-      ["provider_profiles", source.providerIds],
-    ] as const) {
-      const restored = await pool.query<{ id: string; owner_user_id: string }>(
-        `SELECT id,owner_user_id FROM ${table} WHERE id=ANY($1::uuid[]) ORDER BY id`,
-        [ids],
-      );
-      expect(restored.rows.map((row) => row.id).sort()).toEqual([...ids].sort());
-      expect(new Set(restored.rows.map((row) => row.owner_user_id))).toEqual(new Set([destinationOwnerId]));
-    }
-    const drafts = await pool.query<{ world_id: string; owner_user_id: string }>(
-      "SELECT world_id,owner_user_id FROM world_drafts ORDER BY world_id",
-    );
-    expect(drafts.rows.map((row) => row.world_id).sort()).toEqual([...source.worldIds].sort());
-    expect(new Set(drafts.rows.map((row) => row.owner_user_id))).toEqual(new Set([destinationOwnerId]));
-
     const providers = await pool.query<{
       id: string;
+      owner_user_id: string;
+      name: string;
+      provider_role: string;
+      base_url: string;
+      default_model: string;
+      request_timeout_ms: number;
+      configuration: Record<string, unknown>;
       enabled: boolean;
       health_status: string;
       encrypted_api_key: string | null;
       credential_nonce: string | null;
       credential_auth_tag: string | null;
-    }>("SELECT id,enabled,health_status,encrypted_api_key,credential_nonce,credential_auth_tag FROM provider_profiles ORDER BY id");
+    }>(
+      `SELECT id,owner_user_id,name,provider_role,base_url,default_model,
+              request_timeout_ms,configuration,enabled,health_status,
+              encrypted_api_key,credential_nonce,credential_auth_tag
+         FROM provider_profiles ORDER BY id`,
+    );
     expect(providers.rows).toHaveLength(3);
-    for (const provider of providers.rows) {
-      expect(provider).toMatchObject({
+    for (const expected of source.providers) {
+      expect(providers.rows.find((provider) => provider.id === expected.id)).toEqual({
+        id: expected.id,
+        owner_user_id: destinationOwnerId,
+        name: expected.displayName,
+        provider_role: expected.kind,
+        base_url: expected.baseUrl,
+        default_model: expected.selectedModel,
+        request_timeout_ms: 321000,
+        configuration: { retryLimit: 3 },
         enabled: false,
         health_status: "unknown",
         encrypted_api_key: null,
@@ -835,38 +1629,457 @@ async function assertImportedAuthority(
         credential_auth_tag: null,
       });
     }
-    const campaigns = await pool.query<{ id: string; active_turn_number: number; turn_control_style: string }>(
-      "SELECT id,active_turn_number,turn_control_style FROM campaigns ORDER BY title",
+    const serializedProviders = providers.rows.map((provider) => JSON.stringify(provider)).join("\n");
+    for (const sentinel of excludedSecretSentinels) {
+      expect(serializedProviders, `destination providers must exclude ${sentinel}`).not.toContain(sentinel);
+    }
+
+    const prompts = await pool.query<{
+      id: string;
+      owner_user_id: string;
+      campaign_id: string | null;
+      prompt_key: string;
+      content: string;
+    }>("SELECT id,owner_user_id,campaign_id,prompt_key,content FROM prompt_template_overrides ORDER BY id");
+    expect(prompts.rows).toHaveLength(3);
+    expect(prompts.rows).toEqual(expect.arrayContaining([
+      {
+        id: source.promptIds[0], owner_user_id: destinationOwnerId, campaign_id: null,
+        prompt_key: "story_system", content: "Owner-wide release prompt",
+      },
+      {
+        id: source.promptIds[1], owner_user_id: destinationOwnerId, campaign_id: source.campaignIds[0],
+        prompt_key: "story_system", content: "Campaign prompt 1",
+      },
+      {
+        id: source.promptIds[2], owner_user_id: destinationOwnerId, campaign_id: source.campaignIds[1],
+        prompt_key: "story_system", content: "Campaign prompt 2",
+      },
+    ]));
+
+    const worlds = await pool.query<{
+      id: string;
+      owner_user_id: string;
+      title: string;
+      status: string;
+      cover_asset_id: string | null;
+    }>("SELECT id,owner_user_id,title,status,cover_asset_id FROM worlds ORDER BY title");
+    expect(worlds.rows).toEqual([
+      {
+        id: source.worldIds[0], owner_user_id: destinationOwnerId, title: "Release World 1",
+        status: "active", cover_asset_id: source.assetIds[0],
+      },
+      {
+        id: source.worldIds[1], owner_user_id: destinationOwnerId, title: "Release World 2",
+        status: "draft", cover_asset_id: null,
+      },
+    ]);
+    const versions = await pool.query<{
+      id: string;
+      owner_user_id: string;
+      world_id: string;
+      version_number: number;
+      content: ReturnType<typeof worldContentSchema.parse>;
+      release_notes: string;
+      created_from_revision: number | null;
+    }>(
+      `SELECT id,owner_user_id,world_id,version_number,content,release_notes,created_from_revision
+         FROM world_versions ORDER BY world_id,version_number`,
+    );
+    expect(versions.rows.map((row) => row.id).sort()).toEqual([...source.worldVersionIds].sort());
+    for (const [index, versionId] of source.worldVersionIds.entries()) {
+      const worldIndex = index < 2 ? 0 : 1;
+      const versionNumber = index < 2 ? index + 1 : 1;
+      expect(versions.rows.find((row) => row.id === versionId)).toMatchObject({
+        id: versionId,
+        owner_user_id: destinationOwnerId,
+        world_id: source.worldIds[worldIndex],
+        version_number: versionNumber,
+        release_notes: `Release ${versionNumber}`,
+        created_from_revision: versionNumber,
+        content: { world: { premise: `Portable world ${worldIndex + 1}, version ${versionNumber}.` } },
+      });
+    }
+    expect(versions.rows.find((row) => row.id === source.latestWorldVersionIds[0])?.content.assets).toEqual([
+      { assetId: source.assetIds[0], role: "world_cover" },
+      { assetId: source.assetIds[1], role: "world_version_asset" },
+    ]);
+
+    const drafts = await pool.query<{
+      world_id: string;
+      owner_user_id: string;
+      based_on_world_version_id: string | null;
+      revision: number;
+      content: ReturnType<typeof worldContentSchema.parse>;
+    }>("SELECT world_id,owner_user_id,based_on_world_version_id,revision,content FROM world_drafts ORDER BY world_id");
+    expect(drafts.rows).toHaveLength(2);
+    for (const [index, worldId] of source.worldIds.entries()) {
+      expect(drafts.rows.find((row) => row.world_id === worldId)).toMatchObject({
+        world_id: worldId,
+        owner_user_id: destinationOwnerId,
+        based_on_world_version_id: source.latestWorldVersionIds[index],
+        revision: 3,
+        content: { world: { premise: `Editable draft ${index + 1}.` } },
+      });
+    }
+
+    const campaigns = await pool.query<{
+      id: string;
+      owner_user_id: string;
+      world_version_id: string;
+      title: string;
+      active_turn_number: number;
+      turn_control_style: string;
+    }>(
+      `SELECT id,owner_user_id,world_version_id,title,active_turn_number,turn_control_style
+         FROM campaigns ORDER BY title`,
     );
     expect(campaigns.rows).toEqual([
-      expect.objectContaining({ active_turn_number: 2, turn_control_style: "flexible_scene" }),
-      expect.objectContaining({ active_turn_number: 1, turn_control_style: "flexible_action" }),
+      {
+        id: source.campaignIds[0], owner_user_id: destinationOwnerId,
+        world_version_id: source.latestWorldVersionIds[0], title: "Release Campaign 1",
+        active_turn_number: 2, turn_control_style: "flexible_scene",
+      },
+      {
+        id: source.campaignIds[1], owner_user_id: destinationOwnerId,
+        world_version_id: source.latestWorldVersionIds[1], title: "Release Campaign 2",
+        active_turn_number: 1, turn_control_style: "flexible_action",
+      },
     ]);
-    const correction = await pool.query<{ narration: string }>("SELECT narration FROM turn_narration_corrections");
-    expect(correction.rows).toEqual([{ narration: "Corrected release narration" }]);
-    const state = await pool.query<{ scratchpad_private: string }>("SELECT scratchpad_private FROM campaign_state ORDER BY scratchpad_private");
-    expect(state.rows.map((row) => row.scratchpad_private)).toEqual(["Continuity 1", "Continuity 2"]);
-    const prompts = await pool.query<{ count: string }>("SELECT count(*)::text AS count FROM prompt_template_overrides");
-    expect(prompts.rows[0]!.count).toBe("3");
 
-    const assets = await pool.query<{ content_hash: string; storage_path: string }>(
-      "SELECT content_hash,storage_path FROM assets ORDER BY content_hash",
+    const turns = await pool.query<{
+      id: string;
+      owner_user_id: string;
+      campaign_id: string;
+      turn_number: number;
+      action: string;
+      narration: string;
+      input_mode: string;
+      input_mode_source: string;
+    }>(
+      `SELECT id,owner_user_id,campaign_id,turn_number,action,narration,input_mode,input_mode_source
+         FROM turns ORDER BY campaign_id,turn_number`,
     );
-    expect(assets.rows.map((row) => row.content_hash).sort()).toEqual([...source.originalHashes].sort());
+    expect(turns.rows).toHaveLength(3);
+    for (const [index, turnId] of source.turnIds.entries()) {
+      const campaignIndex = index < 2 ? 0 : 1;
+      const turnNumber = index < 2 ? index + 1 : 1;
+      expect(turns.rows.find((row) => row.id === turnId)).toEqual({
+        id: turnId,
+        owner_user_id: destinationOwnerId,
+        campaign_id: source.campaignIds[campaignIndex],
+        turn_number: turnNumber,
+        action: `Action ${campaignIndex + 1}.${turnNumber}`,
+        narration: `Narration ${campaignIndex + 1}.${turnNumber}`,
+        input_mode: "scene",
+        input_mode_source: "auto",
+      });
+    }
+    const correction = await pool.query<{
+      id: string;
+      owner_user_id: string;
+      campaign_id: string;
+      turn_id: string;
+      revision: number;
+      narration: string;
+      reason: string | null;
+      source: string;
+    }>(
+      `SELECT id,owner_user_id,campaign_id,turn_id,revision,narration,reason,source
+         FROM turn_narration_corrections`,
+    );
+    expect(correction.rows).toEqual([{
+      id: source.correctionId,
+      owner_user_id: destinationOwnerId,
+      campaign_id: source.campaignIds[0],
+      turn_id: source.turnIds[0],
+      revision: 1,
+      narration: "Corrected release narration",
+      reason: "Release gate correction",
+      source: "user_edit",
+    }]);
+
+    const states = await pool.query<{
+      campaign_id: string;
+      owner_user_id: string;
+      scratchpad_private: string;
+      revision: number;
+      initial_state_snapshot: Record<string, unknown>;
+    }>(
+      `SELECT campaign_id,owner_user_id,scratchpad_private,revision,initial_state_snapshot
+         FROM campaign_state ORDER BY campaign_id`,
+    );
+    expect(states.rows).toHaveLength(2);
+    for (const [index, campaignId] of source.campaignIds.entries()) {
+      expect(states.rows.find((row) => row.campaign_id === campaignId)).toMatchObject({
+        campaign_id: campaignId,
+        owner_user_id: destinationOwnerId,
+        scratchpad_private: `Continuity ${index + 1}`,
+        revision: 2,
+        initial_state_snapshot: {
+          continuitySummary: `Continuity ${index + 1}`,
+          openThreads: [`Thread ${index + 1}`],
+          scratchpad: `Continuity ${index + 1}`,
+        },
+      });
+    }
+
+    const facts = await pool.query<{
+      id: string;
+      owner_user_id: string;
+      campaign_id: string;
+      content: string;
+      metadata: Record<string, unknown>;
+    }>("SELECT id,owner_user_id,campaign_id,content,metadata FROM campaign_canonical_facts");
+    expect(facts.rows).toEqual([{
+      id: source.canonicalFactId,
+      owner_user_id: destinationOwnerId,
+      campaign_id: source.campaignIds[0],
+      content: "The release gate is open.",
+      metadata: { subject: "release gate", predicate: "status" },
+    }]);
+
+    const memories = await pool.query<{
+      id: string;
+      owner_user_id: string;
+      campaign_id: string;
+      turn_id: string | null;
+      memory_kind: string;
+      content: string;
+      entities: string[];
+      metadata: Record<string, unknown>;
+      embedding: string | null;
+    }>(
+      `SELECT id,owner_user_id,campaign_id,turn_id,memory_kind,content,entities,metadata,
+              embedding::text AS embedding FROM chronicle_memories`,
+    );
+    expect(memories.rows).toEqual([{
+      id: source.memoryId,
+      owner_user_id: destinationOwnerId,
+      campaign_id: source.campaignIds[0],
+      turn_id: source.turnIds[0],
+      memory_kind: "turn_fiction",
+      content: "Release memory",
+      entities: ["Gate"],
+      metadata: { openThreadIds: [] },
+      embedding: null,
+    }]);
+    const checkpoints = await pool.query<{
+      id: string;
+      owner_user_id: string;
+      campaign_id: string;
+      through_turn: number;
+      summary_kind: string;
+      content: Record<string, unknown>;
+    }>(
+      `SELECT id,owner_user_id,campaign_id,through_turn,summary_kind,content
+         FROM summary_checkpoints`,
+    );
+    expect(checkpoints.rows).toEqual([{
+      id: source.summaryCheckpointId,
+      owner_user_id: destinationOwnerId,
+      campaign_id: source.campaignIds[0],
+      through_turn: 2,
+      summary_kind: "campaign_summary",
+      content: { summary: "Release summary", entityNames: [], openThreadIds: [source.checkpointOpenThreadId] },
+    }]);
+
+    const provenance = await pool.query<{
+      id: string;
+      owner_user_id: string;
+      source_type: string;
+      source_name: string;
+      source_hash: string;
+      status: string;
+      campaign_id: string | null;
+    }>(
+      `SELECT id,owner_user_id,source_type,source_name,source_hash,status,campaign_id
+         FROM imports WHERE id=$1`,
+      [source.importId],
+    );
+    expect(provenance.rows).toEqual([{
+      id: source.importId,
+      owner_user_id: destinationOwnerId,
+      source_type: "legacy_story",
+      source_name: "Release source",
+      source_hash: sha256("release-source"),
+      status: "completed",
+      campaign_id: null,
+    }]);
+
+    const costs = await pool.query<{
+      id: string;
+      owner_user_id: string;
+      campaign_id: string;
+      turn_id: string | null;
+      provider_profile_id: string | null;
+      provider_type: string;
+      category: string;
+      operation: string;
+      amount_micros: number;
+      usage_metadata: Record<string, unknown>;
+    }>(
+      `SELECT id,owner_user_id,campaign_id,turn_id,provider_profile_id,provider_type,
+              category,operation,round(amount*1000000)::int AS amount_micros,usage_metadata
+         FROM provider_cost_events ORDER BY id`,
+    );
+    expect(costs.rows).toHaveLength(2);
+    for (const [index, id] of source.costEventIds.entries()) {
+      const kind = index === 0 ? "text" : "image";
+      expect(costs.rows.find((row) => row.id === id)).toEqual({
+        id,
+        owner_user_id: destinationOwnerId,
+        campaign_id: source.campaignIds[index],
+        turn_id: null,
+        provider_profile_id: null,
+        provider_type: "system_archive",
+        category: index === 0 ? "story" : "image",
+        operation: "restored",
+        amount_micros: index === 0 ? 10000 : 20000,
+        usage_metadata: { providerKind: kind },
+      });
+    }
+
+    const activity = await pool.query<{
+      owner_user_id: string;
+      campaign_id: string | null;
+      event_type: string;
+      correlation_id: string | null;
+      details: Record<string, unknown>;
+    }>(
+      `SELECT owner_user_id,campaign_id,event_type,correlation_id,details
+         FROM activity_events WHERE correlation_id=$1`,
+      [source.activitySourceId],
+    );
+    expect(activity.rows).toEqual([{
+      owner_user_id: destinationOwnerId,
+      campaign_id: source.campaignIds[0],
+      event_type: "campaign.accepted_turn",
+      correlation_id: source.activitySourceId,
+      details: { summary: "Release activity", sourceId: source.activitySourceId },
+    }]);
+
+    const illustrationSets = await pool.query<{
+      id: string;
+      owner_user_id: string;
+      campaign_id: string;
+      turn_id: string;
+      segment_word_count: number;
+      images_per_segment: number;
+      prompt_mode: string;
+      status: string;
+      is_active: boolean;
+    }>(
+      `SELECT id,owner_user_id,campaign_id,turn_id,segment_word_count,images_per_segment,
+              prompt_mode,status,is_active FROM turn_illustration_sets`,
+    );
+    expect(illustrationSets.rows).toEqual([{
+      id: source.illustrationSetId,
+      owner_user_id: destinationOwnerId,
+      campaign_id: source.campaignIds[0],
+      turn_id: source.turnIds[0],
+      segment_word_count: 100,
+      images_per_segment: 2,
+      prompt_mode: "direct",
+      status: "completed",
+      is_active: true,
+    }]);
+    const illustrationSegments = await pool.query<{
+      id: string;
+      owner_user_id: string;
+      illustration_set_id: string;
+      campaign_id: string;
+      turn_id: string;
+      ordinal: number;
+      source_text: string;
+      direct_prompt: string;
+      resolved_prompt: string;
+      prompt_source: string;
+      status: string;
+    }>(
+      `SELECT id,owner_user_id,illustration_set_id,campaign_id,turn_id,ordinal,source_text,
+              direct_prompt,resolved_prompt,prompt_source,status FROM turn_illustration_segments`,
+    );
+    expect(illustrationSegments.rows).toEqual([{
+      id: source.illustrationSegmentId,
+      owner_user_id: destinationOwnerId,
+      illustration_set_id: source.illustrationSetId,
+      campaign_id: source.campaignIds[0],
+      turn_id: source.turnIds[0],
+      ordinal: 0,
+      source_text: "Narration 1.1",
+      direct_prompt: "Release gate",
+      resolved_prompt: "Release gate",
+      prompt_source: "direct",
+      status: "completed",
+    }]);
+    const segmentAssets = await pool.query<{
+      segment_id: string;
+      owner_user_id: string;
+      asset_id: string;
+      variant_index: number;
+    }>(
+      `SELECT segment_id,owner_user_id,asset_id,variant_index
+         FROM turn_illustration_segment_assets ORDER BY variant_index`,
+    );
+    expect(segmentAssets.rows).toEqual([
+      {
+        segment_id: source.illustrationSegmentId, owner_user_id: destinationOwnerId,
+        asset_id: source.assetIds[1], variant_index: 0,
+      },
+      {
+        segment_id: source.illustrationSegmentId, owner_user_id: destinationOwnerId,
+        asset_id: source.assetIds[2], variant_index: 1,
+      },
+    ]);
+
+    const assets = await pool.query<{
+      id: string;
+      owner_user_id: string;
+      content_hash: string;
+      storage_path: string;
+      title: string;
+      reuse_scope: string;
+      favorite: boolean;
+      archived_at: Date | null;
+    }>(
+      `SELECT asset.id,asset.owner_user_id,asset.content_hash,asset.storage_path,
+              library.title,library.reuse_scope,library.favorite,library.archived_at
+         FROM assets asset
+         JOIN asset_library_entries library
+           ON library.asset_id=asset.id AND library.owner_user_id=asset.owner_user_id
+        ORDER BY asset.id`,
+    );
+    expect(assets.rows).toHaveLength(4);
+    expect(assets.rows.map((row) => row.id).sort()).toEqual([...source.assetIds].sort());
     for (const asset of assets.rows) {
       const bytes = await readFile(join(assetRoot, asset.storage_path));
       expect(sha256(bytes)).toBe(asset.content_hash);
+      const expected = source.assets.find((candidate) => candidate.id === asset.id)!;
+      expect(asset).toMatchObject({
+        owner_user_id: destinationOwnerId,
+        content_hash: expected.contentHash,
+        title: expected.title,
+        reuse_scope: expected.reuseScope,
+        favorite: expected.favorite,
+        archived_at: expected.archived ? expect.any(Date) : null,
+      });
     }
-    const archived = await pool.query<{ title: string; reuse_scope: string; archived_at: Date | null }>(
-      "SELECT title,reuse_scope,archived_at FROM asset_library_entries WHERE title='unbound-archived'",
-    );
-    expect(archived.rows).toEqual([
-      expect.objectContaining({ title: "unbound-archived", reuse_scope: "owner_library", archived_at: expect.any(Date) }),
-    ]);
 
     for (const table of ["generation_jobs", "model_chains", "chronicle_memory_chunks", "world_share_links"] as const) {
       const excluded = await pool.query<{ count: string }>(`SELECT count(*)::text AS count FROM ${table}`);
       expect(excluded.rows[0]!.count).toBe("0");
+    }
+    for (const table of [
+      "generation_jobs", "model_chains", "chronicle_memory_chunks", "chronicle_jobs", "world_share_links",
+    ] as const) {
+      const contents = await pool.query<{ serialized: string }>(
+        `SELECT COALESCE(string_agg(to_jsonb(row_value)::text,E'\\n'),'') AS serialized
+           FROM ${table} row_value`,
+      );
+      for (const sentinel of excludedOperationalSentinels) {
+        expect(contents.rows[0]!.serialized, `destination ${table} must exclude ${sentinel}`).not.toContain(sentinel);
+      }
     }
     const embeddings = await pool.query<{ count: string }>(
       "SELECT count(*)::text AS count FROM chronicle_memories WHERE embedding IS NOT NULL",
@@ -882,6 +2095,7 @@ async function assertImportedAuthority(
       ownerMapping: { sourceOwnerId: source.ownerUserId, destinationOwnerId },
       disabledProviders: 3,
       assetCount: 4,
+      recordsByDomain: source.expectedDomainCounts,
       integrityReconciliation: {
         archiveFingerprintVerified: true,
         recordsMatched: true,
@@ -1025,13 +2239,15 @@ describe("System Archive v1 release compatibility", () => {
       ]);
 
       const admin = createDatabasePool(databaseUrl!, 2);
+      let source: Awaited<ReturnType<typeof createDestinationDatabase>> | undefined;
       let destination: Awaited<ReturnType<typeof createDestinationDatabase>> | undefined;
       let sourceRuntime: StartedRuntime | undefined;
       let destinationRuntime: StartedRuntime | undefined;
       let browser: Browser | undefined;
       try {
+        source = await createDestinationDatabase(admin, databaseUrl!);
         destination = await createDestinationDatabase(admin, databaseUrl!);
-        const sourcePool = createDatabasePool(databaseUrl!, 4);
+        const sourcePool = createDatabasePool(source.url, 4);
         let representative: RepresentativeOwner;
         try {
           representative = await seedRepresentativeOwner(sourcePool, sourceAssetRoot);
@@ -1042,27 +2258,27 @@ describe("System Archive v1 release compatibility", () => {
         browser = await chromium.launch({ headless: true });
         const sourcePort = await freePort();
         sourceRuntime = await startCompiledRuntime({
-          databaseUrl: databaseUrl!,
+          databaseUrl: source.url,
           archiveRoot: sourceArchiveRoot,
           assetRoot: sourceAssetRoot,
           port: sourcePort,
           role: "api",
         });
-        sourceRuntime = await exportThroughReplacementUi(
+        const published = await exportThroughReplacementUi(
           browser,
           sourceRuntime,
-          () => startCompiledRuntime({
-            databaseUrl: databaseUrl!,
-            archiveRoot: sourceArchiveRoot,
-            assetRoot: sourceAssetRoot,
-            port: sourcePort,
-            role: "all",
-          }),
+          source.url,
+          sourceArchiveRoot,
+          sourceAssetRoot,
           downloadPath,
         );
         const archive = await readFile(downloadPath);
         expect(archive.byteLength).toBeGreaterThan(releaseChunkBytes);
         expect(archive.subarray(0, 2).toString("ascii")).toBe("PK");
+        expect(representative.canonicalFactId).toMatch(/^[a-f0-9-]{36}$/u);
+        expect(representative.summaryCheckpointId).toMatch(/^[a-f0-9-]{36}$/u);
+        expect(representative.expectedDomainCounts.chronicle).toBe(2);
+        await assertRepresentativeArchive(archive, published, representative);
         await sourceRuntime.stop();
         sourceRuntime = undefined;
 
@@ -1093,13 +2309,27 @@ describe("System Archive v1 release compatibility", () => {
           port: destinationPort,
           role: "all",
         });
-        const reportText = await importThroughLegacyUi(
+        const imported = await importThroughLegacyUi(
           browser,
           destinationRuntime,
           downloadPath,
           representative.ownerUserId,
         );
-        expect(reportText).toMatch(/Original images\s*4/u);
+        expect(imported.reportText).toMatch(/Original images\s*4/u);
+        expect(imported.preview.recordsByDomain).toEqual(representative.expectedDomainCounts);
+        expect(imported.preview.assets).toEqual({
+          originalCount: published.report?.assetCount,
+          totalBytes: published.report?.assetBytes,
+        });
+        expect(imported.preview.archiveFingerprint).toBe(published.report?.archiveFingerprint);
+        expect(imported.preview.disabledProviders).toBe(3);
+        expect(imported.completed.report).not.toBeNull();
+        expect(imported.completed.report?.recordsByDomain).toEqual(representative.expectedDomainCounts);
+        expect(imported.completed.report?.recordsByDomain).toEqual(imported.preview.recordsByDomain);
+        expect(imported.completed.report?.assetCount).toBe(imported.preview.assets.originalCount);
+        expect(imported.completed.report?.assetBytes).toBe(imported.preview.assets.totalBytes);
+        expect(imported.completed.report?.archiveFingerprint).toBe(imported.preview.archiveFingerprint);
+        expect(imported.completed.report?.operationalOmissions).toEqual(imported.preview.operationalOmissions);
         await assertImportedAuthority(destination.url, destinationAssetRoot, representative);
 
         const playable = await fetch(`${destinationRuntime.baseUrl}/api/v1/campaigns/${representative.campaignIds[0]}/turns?limit=1`);
@@ -1109,6 +2339,7 @@ describe("System Archive v1 release compatibility", () => {
         await destinationRuntime?.stop().catch(() => undefined);
         await sourceRuntime?.stop().catch(() => undefined);
         if (destination) await dropDestinationDatabase(admin, destination.name);
+        if (source) await dropDestinationDatabase(admin, source.name);
         await admin.end();
         await Promise.all([
           rm(sourceRoot, { recursive: true, force: true }),
@@ -1116,6 +2347,6 @@ describe("System Archive v1 release compatibility", () => {
         ]);
       }
     },
-    240_000,
+    360_000,
   );
 });
