@@ -54,6 +54,7 @@ type SystemArchiveUploadRepositoryOptions = Readonly<{
 
 const UPLOAD_COLUMNS = `id,owner_user_id,filesystem_operation_id,status,byte_length,
   received_bytes,content_hash,expires_at`;
+const POSTGRES_INTEGER_MAX = 2_147_483_647;
 
 function repositoryError(message: string, statusCode: number): Error & { statusCode: number } {
   return Object.assign(new Error(message), { statusCode });
@@ -68,6 +69,15 @@ function requireHash(value: string, name: string): void {
 function requireSafeInteger(value: number, name: string, minimum: number): void {
   if (!Number.isSafeInteger(value) || value < minimum) {
     throw repositoryError(`${name} must be a safe integer of at least ${minimum}.`, 400);
+  }
+}
+
+function requireChunkIndex(value: number): void {
+  if (!Number.isSafeInteger(value) || value < 0 || value > POSTGRES_INTEGER_MAX) {
+    throw repositoryError(
+      `System Archive chunk index must be a PostgreSQL integer between 0 and ${POSTGRES_INTEGER_MAX}.`,
+      400
+    );
   }
 }
 
@@ -131,7 +141,7 @@ export function createPostgresSystemArchiveUploadRepository(
     },
 
     async recordChunk(owner, request) {
-      requireSafeInteger(request.index, "System Archive chunk index", 0);
+      requireChunkIndex(request.index);
       requireSafeInteger(request.offset, "System Archive chunk offset", 0);
       requireSafeInteger(request.bytes, "System Archive chunk byte length", 1);
       requireHash(request.sha256, "System Archive chunk hash");
@@ -139,7 +149,7 @@ export function createPostgresSystemArchiveUploadRepository(
         throw repositoryError("System Archive chunk range exceeds safe integer bounds.", 400);
       }
 
-      return withTransaction(pool, async (client) => {
+      const outcome = await withTransaction(pool, async (client) => {
         const locked = await client.query<SystemArchiveUploadRow>(
           `SELECT ${UPLOAD_COLUMNS}
              FROM system_archive_uploads
@@ -157,7 +167,7 @@ export function createPostgresSystemArchiveUploadRepository(
             "UPDATE system_archive_uploads SET status='expired',updated_at=clock_timestamp() WHERE id=$1",
             [request.uploadId]
           );
-          throw repositoryError("System Archive upload has expired.", 410);
+          return null;
         }
         if (request.offset + request.bytes > Number(upload.byte_length)) {
           throw repositoryError("System Archive chunk exceeds the declared upload length.", 400);
@@ -207,6 +217,8 @@ export function createPostgresSystemArchiveUploadRepository(
         if (!row) throw new Error("System Archive chunk persistence lost its upload session.");
         return toView(row);
       });
+      if (!outcome) throw repositoryError("System Archive upload has expired.", 410);
+      return outcome;
     }
   };
 }

@@ -3,15 +3,9 @@
 -- artifact records.
 
 ALTER TABLE portable_export_artifacts
-  DROP CONSTRAINT portable_export_artifacts_export_kind_check,
-  DROP CONSTRAINT portable_export_scope_check,
-  ALTER COLUMN world_id DROP NOT NULL,
-  ALTER COLUMN world_version_id DROP NOT NULL;
-
-ALTER TABLE portable_export_artifacts
-  ADD CONSTRAINT portable_export_artifacts_export_kind_check
-    CHECK (export_kind IN ('campaign_zip', 'world_json', 'system_zip')),
-  ADD CONSTRAINT portable_export_scope_check CHECK (
+  ADD CONSTRAINT portable_export_artifacts_export_kind_check_system_archive
+    CHECK (export_kind IN ('campaign_zip', 'world_json', 'system_zip')) NOT VALID,
+  ADD CONSTRAINT portable_export_scope_check_system_archive CHECK (
     (export_kind = 'campaign_zip'
       AND campaign_id IS NOT NULL
       AND world_id IS NOT NULL
@@ -29,7 +23,29 @@ ALTER TABLE portable_export_artifacts
       AND world_id IS NULL
       AND world_version_id IS NULL
       AND content_type = 'application/zip')
-  );
+  ) NOT VALID;
+
+ALTER TABLE portable_export_artifacts
+  VALIDATE CONSTRAINT portable_export_artifacts_export_kind_check_system_archive;
+
+ALTER TABLE portable_export_artifacts
+  VALIDATE CONSTRAINT portable_export_scope_check_system_archive;
+
+-- The expanded constraints are already valid and enforce concurrent writes.
+-- This transaction-visible metadata swap is the only short exclusive-lock phase.
+ALTER TABLE portable_export_artifacts
+  DROP CONSTRAINT portable_export_artifacts_export_kind_check,
+  DROP CONSTRAINT portable_export_scope_check,
+  ALTER COLUMN world_id DROP NOT NULL,
+  ALTER COLUMN world_version_id DROP NOT NULL;
+
+ALTER TABLE portable_export_artifacts
+  RENAME CONSTRAINT portable_export_artifacts_export_kind_check_system_archive
+  TO portable_export_artifacts_export_kind_check;
+
+ALTER TABLE portable_export_artifacts
+  RENAME CONSTRAINT portable_export_scope_check_system_archive
+  TO portable_export_scope_check;
 
 CREATE OR REPLACE FUNCTION validate_portable_export_artifact_scope() RETURNS trigger
 LANGUAGE plpgsql AS $$
@@ -99,17 +115,43 @@ CREATE TABLE system_archive_jobs (
   CONSTRAINT system_archive_jobs_published_artifact_check CHECK (
     kind <> 'export' OR status <> 'published' OR export_artifact_id IS NOT NULL
   ),
-  CONSTRAINT system_archive_jobs_lease_check CHECK (
-    (lease_owner IS NULL AND lease_expires_at IS NULL)
+  CONSTRAINT system_archive_jobs_kind_status_check CHECK (
+    (kind = 'export' AND status IN (
+      'queued', 'capturing', 'writing', 'verifying', 'published',
+      'cancelling', 'cancelled', 'failed', 'expired'
+    ))
     OR
-    (lease_owner IS NOT NULL
+    (kind = 'import' AND status IN (
+      'queued', 'uploading', 'validating', 'previewed', 'revalidating',
+      'waiting_for_gate', 'importing', 'authoritative_committed',
+      'rebuilding', 'completed', 'cancelling', 'cancelled',
+      'rolled_back', 'failed', 'expired'
+    ))
+  ),
+  CONSTRAINT system_archive_jobs_lease_check CHECK (
+    (status IN (
+      'capturing', 'writing', 'verifying', 'uploading', 'validating',
+      'revalidating', 'importing', 'authoritative_committed', 'rebuilding'
+    )
+      AND lease_owner IS NOT NULL
       AND btrim(lease_owner) <> ''
-      AND lease_expires_at IS NOT NULL
-      AND status IN (
-        'capturing', 'writing', 'verifying', 'uploading', 'validating',
-        'revalidating', 'waiting_for_gate', 'importing',
-        'authoritative_committed', 'rebuilding', 'cancelling'
+      AND lease_expires_at IS NOT NULL)
+    OR
+    (status = 'cancelling'
+      AND (
+        (lease_owner IS NULL AND lease_expires_at IS NULL)
+        OR
+        (lease_owner IS NOT NULL
+          AND btrim(lease_owner) <> ''
+          AND lease_expires_at IS NOT NULL)
       ))
+    OR
+    (status IN (
+      'queued', 'previewed', 'waiting_for_gate', 'published', 'completed',
+      'cancelled', 'rolled_back', 'failed', 'expired'
+    )
+      AND lease_owner IS NULL
+      AND lease_expires_at IS NULL)
   )
 );
 
@@ -131,7 +173,7 @@ CREATE INDEX system_archive_jobs_claim_idx
   ON system_archive_jobs(status, lease_expires_at, created_at, id)
   WHERE status IN (
     'queued', 'capturing', 'writing', 'verifying', 'uploading', 'validating',
-    'revalidating', 'waiting_for_gate', 'importing',
+    'revalidating', 'importing',
     'authoritative_committed', 'rebuilding', 'cancelling'
   );
 

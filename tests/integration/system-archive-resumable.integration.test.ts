@@ -92,6 +92,54 @@ integration("durable System Archive jobs and resumable uploads", () => {
       .rejects.toMatchObject({ statusCode: 404 });
   });
 
+  it("rejects job statuses that belong to the other job kind", async () => {
+    await expect(pool.query(
+      `INSERT INTO system_archive_jobs (
+         owner_user_id,kind,status,idempotency_key_hash
+       ) VALUES ($1,'export','previewed',$2)`,
+      [owner.ownerUserId, hash(`export-as-import-${randomUUID()}`)]
+    )).rejects.toMatchObject({ constraint: "system_archive_jobs_kind_status_check" });
+
+    const stagedInputId = await createStagedInput(owner);
+    await expect(pool.query(
+      `INSERT INTO system_archive_jobs (
+         owner_user_id,kind,status,idempotency_key_hash,staged_input_id
+       ) VALUES ($1,'import','published',$2,$3)`,
+      [owner.ownerUserId, hash(`import-as-export-${randomUUID()}`), stagedInputId]
+    )).rejects.toMatchObject({ constraint: "system_archive_jobs_kind_status_check" });
+  });
+
+  it("requires worker-owned states to carry complete lease evidence", async () => {
+    await expect(pool.query(
+      `INSERT INTO system_archive_jobs (
+         owner_user_id,kind,status,idempotency_key_hash
+       ) VALUES ($1,'export','capturing',$2)`,
+      [owner.ownerUserId, hash(`unleased-worker-state-${randomUUID()}`)]
+    )).rejects.toMatchObject({ constraint: "system_archive_jobs_lease_check" });
+
+    await expect(pool.query(
+      `INSERT INTO system_archive_jobs (
+         owner_user_id,kind,status,idempotency_key_hash,lease_owner,lease_expires_at
+       ) VALUES ($1,'export','queued',$2,'worker-that-must-not-own-waiting',now()+interval '1 minute')`,
+      [owner.ownerUserId, hash(`leased-waiting-state-${randomUUID()}`)]
+    )).rejects.toMatchObject({ constraint: "system_archive_jobs_lease_check" });
+
+    await expect(pool.query(
+      `INSERT INTO system_archive_jobs (
+         owner_user_id,kind,status,idempotency_key_hash,lease_owner,lease_expires_at
+       ) VALUES ($1,'export','capturing',$2,'system-archive-worker',now()+interval '1 minute')`,
+      [owner.ownerUserId, hash(`valid-worker-state-${randomUUID()}`)]
+    )).resolves.toMatchObject({ rowCount: 1 });
+
+    const stagedInputId = await createStagedInput(owner);
+    await expect(pool.query(
+      `INSERT INTO system_archive_jobs (
+         owner_user_id,kind,status,idempotency_key_hash,staged_input_id
+       ) VALUES ($1,'import','waiting_for_gate',$2,$3)`,
+      [owner.ownerUserId, hash(`valid-unleased-waiting-state-${randomUUID()}`), stagedInputId]
+    )).resolves.toMatchObject({ rowCount: 1 });
+  });
+
   it("claims jobs once, heartbeats only a live owned lease, and reclaims an expired lease", async () => {
     const repository = createPostgresSystemArchiveJobRepository(pool);
     await pool.query("UPDATE system_archive_jobs SET status='failed',lease_owner=NULL,lease_expires_at=NULL WHERE status IN ('queued','capturing','revalidating','cancelling')");
@@ -172,6 +220,52 @@ integration("durable System Archive jobs and resumable uploads", () => {
       bytes: 4,
       sha256: hash("efgh")
     })).rejects.toMatchObject({ statusCode: 404 });
+  });
+
+  it("persists an upload expiry before returning the safe expiry error", async () => {
+    const uploads = createPostgresSystemArchiveUploadRepository(pool, { uploadTtlSeconds: 86_400 });
+    const filesystemOperationId = await reservePortableOperation(owner, "portable_staging");
+    const upload = await uploads.createUpload(owner, {
+      handleTokenHash: hash(`expired-upload-${randomUUID()}`),
+      filesystemOperationId,
+      byteLength: 4,
+      sha256: hash("abcd")
+    });
+    await pool.query(
+      "UPDATE system_archive_uploads SET expires_at=now()-interval '1 second' WHERE id=$1",
+      [upload.id]
+    );
+
+    await expect(uploads.recordChunk(owner, {
+      uploadId: upload.id,
+      index: 0,
+      offset: 0,
+      bytes: 4,
+      sha256: hash("abcd")
+    })).rejects.toMatchObject({ statusCode: 410 });
+    await expect(uploads.getUpload(owner, upload.id)).resolves.toMatchObject({ status: "expired" });
+  });
+
+  it("rejects chunk indexes outside the PostgreSQL integer range before persistence", async () => {
+    const uploads = createPostgresSystemArchiveUploadRepository(pool, { uploadTtlSeconds: 86_400 });
+    const filesystemOperationId = await reservePortableOperation(owner, "portable_staging");
+    const upload = await uploads.createUpload(owner, {
+      handleTokenHash: hash(`chunk-index-upload-${randomUUID()}`),
+      filesystemOperationId,
+      byteLength: 4,
+      sha256: hash("abcd")
+    });
+
+    await expect(uploads.recordChunk(owner, {
+      uploadId: upload.id,
+      index: 2_147_483_648,
+      offset: 0,
+      bytes: 4,
+      sha256: hash("abcd")
+    })).rejects.toMatchObject({
+      statusCode: 400,
+      message: "System Archive chunk index must be a PostgreSQL integer between 0 and 2147483647."
+    });
   });
 
   it("accepts System ZIP artifacts only with null campaign/world/version scope and preserves existing kinds", async () => {

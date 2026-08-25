@@ -151,7 +151,7 @@ export function createPostgresSystemArchiveJobRepository(pool: DatabasePool): Sy
                OR (lease_expires_at < clock_timestamp()
                  AND status IN (
                    'capturing','writing','verifying','uploading','validating','revalidating',
-                   'waiting_for_gate','importing','authoritative_committed','rebuilding','cancelling'
+                   'importing','authoritative_committed','rebuilding','cancelling'
                  ))
             ORDER BY CASE kind WHEN 'import' THEN 0 ELSE 1 END,created_at,id
             FOR UPDATE SKIP LOCKED
@@ -183,7 +183,7 @@ export function createPostgresSystemArchiveJobRepository(pool: DatabasePool): Sy
           WHERE id=$1 AND lease_owner=$2 AND lease_expires_at>clock_timestamp()
             AND status IN (
               'capturing','writing','verifying','uploading','validating','revalidating',
-              'waiting_for_gate','importing','authoritative_committed','rebuilding','cancelling'
+              'importing','authoritative_committed','rebuilding','cancelling'
             )`,
         [jobId, workerId, leaseSeconds]
       );

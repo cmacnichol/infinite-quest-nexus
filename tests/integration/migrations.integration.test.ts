@@ -302,6 +302,28 @@ integration("standard database migration runner", () => {
     ]));
   });
 
+  it("validates expanded portable artifact constraints before the short final swap", async () => {
+    const migration = await readFile(resolve("database/migrations/0078_system_archive_jobs.sql"), "utf8");
+    const addKind = migration.indexOf("portable_export_artifacts_export_kind_check_system_archive");
+    const addScope = migration.indexOf("portable_export_scope_check_system_archive");
+    const validateKind = migration.indexOf(
+      "VALIDATE CONSTRAINT portable_export_artifacts_export_kind_check_system_archive"
+    );
+    const validateScope = migration.indexOf(
+      "VALIDATE CONSTRAINT portable_export_scope_check_system_archive"
+    );
+    const dropOriginal = migration.indexOf("DROP CONSTRAINT portable_export_artifacts_export_kind_check");
+
+    expect(addKind).toBeGreaterThanOrEqual(0);
+    expect(addScope).toBeGreaterThanOrEqual(0);
+    expect(migration.slice(addKind, validateKind)).toContain("NOT VALID");
+    expect(migration.slice(addScope, validateScope)).toContain("NOT VALID");
+    expect(validateKind).toBeGreaterThan(addKind);
+    expect(validateScope).toBeGreaterThan(addScope);
+    expect(dropOriginal).toBeGreaterThan(validateKind);
+    expect(dropOriginal).toBeGreaterThan(validateScope);
+  });
+
   it("adds restart-realizable private filesystem authority without classifying legacy asset paths", async () => {
     const authorityTables = [
       "durable_filesystem_candidate_authorities",
