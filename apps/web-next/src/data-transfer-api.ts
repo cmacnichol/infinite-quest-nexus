@@ -1,4 +1,4 @@
-import { metaResponseSchema } from "../../../packages/contracts/src/client-api.js";
+import { metaResponseSchema, sessionResponseSchema } from "../../../packages/contracts/src/client-api.js";
 import {
   systemArchiveJobViewSchema,
   systemImportPreviewViewSchema,
@@ -27,6 +27,7 @@ export type CreateSystemUploadOptions = Readonly<{
 
 export interface DataTransferApi {
   capability(signal?: AbortSignal): Promise<SystemArchiveCapability>;
+  sessionOwnerId(signal?: AbortSignal): Promise<string>;
   createExport(idempotencyKey: string, signal?: AbortSignal): Promise<SystemArchiveJobView>;
   getJob(kind: SystemArchiveJobKind, jobId: string, signal?: AbortSignal): Promise<SystemArchiveJobView>;
   cancelJob(kind: SystemArchiveJobKind, jobId: string, signal?: AbortSignal): Promise<SystemArchiveJobView>;
@@ -270,6 +271,10 @@ export function createDataTransferApi(options: DataTransferApiOptions = {}): Dat
     async capability(signal) {
       const value = metaResponseSchema.parse(await requestJson(fetchImpl, "/api/v1/meta", { signal }));
       return { systemArchive: value.capabilities.systemArchive };
+    },
+    async sessionOwnerId(signal) {
+      const value = sessionResponseSchema.parse(await requestJson(fetchImpl, "/api/v1/session", { signal }));
+      return value.user.id;
     },
     async createExport(idempotencyKey, signal) {
       const value = await requestJson(fetchImpl, "/api/v1/system-exports", {

@@ -16,6 +16,7 @@ const OWNER_A = "11111111-1111-4111-8111-111111111111";
 const OWNER_B = "22222222-2222-4222-8222-222222222222";
 const JOB_ID = "33333333-3333-4333-8333-333333333333";
 const UPLOAD_ID = "44444444-4444-4444-8444-444444444444";
+const EXPORT_JOB_ID = "55555555-5555-4555-8555-555555555555";
 const NOW = "2026-08-25T12:00:00.000Z";
 const LATER = "2026-08-26T12:00:00.000Z";
 
@@ -132,6 +133,7 @@ function importJob(status: SystemArchiveJobView["status"] = "completed"): System
 function fakeApi(overrides: Partial<DataTransferApi> = {}): DataTransferApi {
   return {
     capability: vi.fn(async () => ({ systemArchive: true })),
+    sessionOwnerId: vi.fn(async () => OWNER_B),
     createExport: vi.fn(async () => ({
       id: JOB_ID,
       kind: "export",
@@ -149,6 +151,19 @@ function fakeApi(overrides: Partial<DataTransferApi> = {}): DataTransferApi {
     preview: vi.fn(async () => preview()),
     commit: vi.fn(async () => importJob("queued")),
     ...overrides
+  };
+}
+
+function memoryStorage(): Storage & { entries(): Array<[string, string]> } {
+  const values = new Map<string, string>();
+  return {
+    get length() { return values.size; },
+    clear() { values.clear(); },
+    getItem(key) { return values.get(key) ?? null; },
+    key(index) { return [...values.keys()][index] ?? null; },
+    removeItem(key) { values.delete(key); },
+    setItem(key, value) { values.set(key, value); },
+    entries() { return [...values.entries()]; }
   };
 }
 
@@ -362,6 +377,216 @@ describe("web-next Data Transfer page", () => {
     await vi.waitFor(() => expect(api.cancelJob).toHaveBeenCalledWith("export", JOB_ID, expect.any(AbortSignal)));
     releaseWait();
     await vi.waitFor(() => expect(root.textContent).toContain("cancelled"));
+    mounted.dispose();
+  });
+
+  it("persists owner-scoped export identity and restores its published download after reload", async () => {
+    const storage = memoryStorage();
+    const publishedExport: SystemArchiveJobView = {
+      id: JOB_ID,
+      kind: "export",
+      status: "published",
+      report: null,
+      createdAt: NOW,
+      updatedAt: NOW
+    };
+    const firstApi = Object.assign(fakeApi({ createExport: vi.fn(async () => publishedExport) }), {
+      sessionOwnerId: vi.fn(async () => OWNER_B)
+    });
+    const firstDom = parseHTML('<html><body><div id="app"></div></body></html>');
+    const firstRoot = firstDom.document.querySelector<HTMLElement>("#app")!;
+    const firstMount = mountDataTransferPage(firstRoot, {
+      api: firstApi,
+      storage,
+      operationStorage: storage,
+      wait: async () => undefined
+    } as Parameters<typeof mountDataTransferPage>[1]);
+    await vi.waitFor(() => expect(firstRoot.querySelector('[data-system-archive-state="available"]')).not.toBeNull());
+    firstRoot.querySelector<HTMLButtonElement>('[data-action="create-system-export"]')!.click();
+    await vi.waitFor(() => expect(firstRoot.querySelector<HTMLAnchorElement>("[data-system-download]")?.hidden).toBe(false));
+    const stored = storage.entries();
+    expect(stored).toHaveLength(1);
+    expect(stored[0]?.[0]).toContain(OWNER_B);
+    expect(JSON.parse(stored[0]![1])).toMatchObject({
+      kind: "export",
+      jobId: JOB_ID,
+      idempotencyKey: expect.stringMatching(/^browser-export-/)
+    });
+    firstMount.dispose();
+
+    const restoredApi = Object.assign(fakeApi({
+      createExport: vi.fn(async () => { throw new Error("A reload must not create another export."); }),
+      getJob: vi.fn(async () => publishedExport)
+    }), { sessionOwnerId: vi.fn(async () => OWNER_B) });
+    const restoredDom = parseHTML('<html><body><div id="app"></div></body></html>');
+    const restoredRoot = restoredDom.document.querySelector<HTMLElement>("#app")!;
+    const restoredMount = mountDataTransferPage(restoredRoot, {
+      api: restoredApi,
+      storage,
+      operationStorage: storage,
+      wait: async () => undefined
+    } as Parameters<typeof mountDataTransferPage>[1]);
+
+    await vi.waitFor(() => expect(restoredRoot.querySelector<HTMLAnchorElement>("[data-system-download]")?.hidden).toBe(false));
+    expect(restoredApi.getJob).toHaveBeenCalledWith("export", JOB_ID, expect.any(AbortSignal));
+    expect(restoredRoot.querySelector<HTMLAnchorElement>("[data-system-download]")?.href).toContain(`/system-exports/${JOB_ID}/download`);
+    restoredMount.dispose();
+  });
+
+  it("recovers an import report without waiting for an active export poll to finish", async () => {
+    const storage = memoryStorage();
+    storage.setItem(`infiniteQuest.systemArchiveOperation.v1:${OWNER_B}:export`, JSON.stringify({
+      kind: "export",
+      idempotencyKey: "persisted-export-key",
+      jobId: EXPORT_JOB_ID
+    }));
+    storage.setItem(`infiniteQuest.systemArchiveOperation.v1:${OWNER_B}:import`, JSON.stringify({
+      kind: "import",
+      idempotencyKey: "persisted-import-key",
+      jobId: JOB_ID,
+      previewHandle: "opaque-preview-authority"
+    }));
+    let releaseExportPoll!: () => void;
+    const api = fakeApi({
+      getJob: vi.fn(async (kind) => kind === "export"
+        ? {
+            id: EXPORT_JOB_ID,
+            kind: "export",
+            status: "queued",
+            report: null,
+            createdAt: NOW,
+            updatedAt: NOW
+          }
+        : importJob("completed"))
+    });
+    const { document } = parseHTML('<html><body><div id="app"></div></body></html>');
+    const root = document.querySelector<HTMLElement>("#app")!;
+    const mounted = mountDataTransferPage(root, {
+      api,
+      storage: null,
+      operationStorage: storage,
+      wait: async () => new Promise<void>((resolve) => { releaseExportPoll = resolve; })
+    });
+
+    await vi.waitFor(() => expect(root.querySelector('[data-system-import-state="completed"]')).not.toBeNull());
+    expect(api.getJob).toHaveBeenCalledWith("export", EXPORT_JOB_ID, expect.any(AbortSignal));
+    expect(api.getJob).toHaveBeenCalledWith("import", JOB_ID, expect.any(AbortSignal));
+    mounted.dispose();
+    releaseExportPoll();
+  });
+
+  it("recovers an ambiguously accepted import without reusing stale preview authority", async () => {
+    const storage = memoryStorage();
+    const firstApi = fakeApi({ commit: vi.fn(async () => { throw new Error("Commit response disconnected"); }) });
+    const firstDom = parseHTML('<html><body><div id="app"></div></body></html>');
+    const firstRoot = firstDom.document.querySelector<HTMLElement>("#app")!;
+    const firstMount = mountDataTransferPage(firstRoot, {
+      api: firstApi,
+      storage: null,
+      operationStorage: storage,
+      wait: async () => undefined
+    });
+    await vi.waitFor(() => expect(firstRoot.querySelector<HTMLInputElement>("#system-archive-file")?.disabled).toBe(false));
+    const fileInput = firstRoot.querySelector<HTMLInputElement>("#system-archive-file")!;
+    Object.defineProperty(fileInput, "files", {
+      configurable: true,
+      value: [new File(["system"], "ambiguous.zip", { type: "application/zip" })]
+    });
+    fileInput.dispatchEvent(new firstDom.window.Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(firstRoot.querySelector('[data-system-preview="ready"]')).not.toBeNull());
+    for (const checkbox of firstRoot.querySelectorAll<HTMLInputElement>('[data-system-acknowledgements] input[type="checkbox"]')) checkbox.checked = true;
+    firstRoot.querySelector<HTMLButtonElement>('[data-action="commit-system-import"]')!.click();
+    await vi.waitFor(() => expect(firstRoot.querySelector('[role="alert"]')?.textContent).toContain("Commit response disconnected"));
+
+    expect(firstRoot.querySelector<HTMLElement>('[data-system-preview]')?.hidden).toBe(true);
+    expect(firstRoot.querySelector<HTMLButtonElement>('[data-action="commit-system-import"]')?.disabled).toBe(true);
+    const stored = storage.entries();
+    expect(stored).toHaveLength(1);
+    const pending = JSON.parse(stored[0]![1]);
+    expect(stored[0]?.[0]).toContain(`${OWNER_B}:import`);
+    expect(pending).toMatchObject({
+      kind: "import",
+      jobId: null,
+      previewHandle: "opaque-preview-authority",
+      idempotencyKey: expect.stringMatching(/^browser-import-/)
+    });
+    firstMount.dispose();
+
+    const restoredApi = fakeApi({ commit: vi.fn(async () => importJob("completed")) });
+    const restoredDom = parseHTML('<html><body><div id="app"></div></body></html>');
+    const restoredRoot = restoredDom.document.querySelector<HTMLElement>("#app")!;
+    const restoredMount = mountDataTransferPage(restoredRoot, {
+      api: restoredApi,
+      storage: null,
+      operationStorage: storage,
+      wait: async () => undefined
+    });
+
+    await vi.waitFor(() => expect(restoredRoot.querySelector('[data-system-import-state="completed"]')).not.toBeNull());
+    expect(restoredApi.commit).toHaveBeenCalledWith(
+      "opaque-preview-authority",
+      pending.idempotencyKey,
+      expect.any(AbortSignal)
+    );
+    expect(JSON.parse(storage.entries()[0]![1])).toMatchObject({ kind: "import", jobId: JOB_ID });
+    restoredMount.dispose();
+  });
+
+  it("invalidates preview authority when its staged upload is cancelled", async () => {
+    const api = fakeApi();
+    const { window } = parseHTML('<html><body><div id="app"></div></body></html>');
+    const root = window.document.querySelector<HTMLElement>("#app")!;
+    const mounted = mountDataTransferPage(root, { api, storage: null, operationStorage: memoryStorage() });
+    await vi.waitFor(() => expect(root.querySelector<HTMLInputElement>("#system-archive-file")?.disabled).toBe(false));
+    const input = root.querySelector<HTMLInputElement>("#system-archive-file")!;
+    Object.defineProperty(input, "files", {
+      configurable: true,
+      value: [new File(["system"], "cancel-preview.zip", { type: "application/zip" })]
+    });
+    input.dispatchEvent(new window.Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(root.querySelector('[data-system-preview="ready"]')).not.toBeNull());
+
+    root.querySelector<HTMLButtonElement>('[data-action="cancel-system-operation"]')!.click();
+    await vi.waitFor(() => expect(api.cancelUpload).toHaveBeenCalledWith(UPLOAD_ID, expect.any(AbortSignal)));
+
+    expect(root.querySelector<HTMLElement>("[data-system-preview]")?.hidden).toBe(true);
+    expect(root.querySelector<HTMLFieldSetElement>("[data-system-acknowledgements]")?.disabled).toBe(true);
+    expect(root.querySelector<HTMLButtonElement>('[data-action="commit-system-import"]')?.disabled).toBe(true);
+    mounted.dispose();
+  });
+
+  it("recovers an ambiguous import identity before attempting cancellation", async () => {
+    const storage = memoryStorage();
+    const commit = vi.fn()
+      .mockRejectedValueOnce(new Error("Commit response disconnected"))
+      .mockResolvedValueOnce(importJob("queued"));
+    const api = fakeApi({
+      commit,
+      cancelJob: vi.fn(async () => importJob("cancelled"))
+    });
+    const { window } = parseHTML('<html><body><div id="app"></div></body></html>');
+    const root = window.document.querySelector<HTMLElement>("#app")!;
+    const mounted = mountDataTransferPage(root, { api, storage: null, operationStorage: storage, wait: async () => undefined });
+    await vi.waitFor(() => expect(root.querySelector<HTMLInputElement>("#system-archive-file")?.disabled).toBe(false));
+    const input = root.querySelector<HTMLInputElement>("#system-archive-file")!;
+    Object.defineProperty(input, "files", {
+      configurable: true,
+      value: [new File(["system"], "ambiguous-cancel.zip", { type: "application/zip" })]
+    });
+    input.dispatchEvent(new window.Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(root.querySelector('[data-system-preview="ready"]')).not.toBeNull());
+    for (const checkbox of root.querySelectorAll<HTMLInputElement>('[data-system-acknowledgements] input[type="checkbox"]')) checkbox.checked = true;
+    root.querySelector<HTMLButtonElement>('[data-action="commit-system-import"]')!.click();
+    await vi.waitFor(() => expect(root.querySelector('[role="alert"]')?.textContent).toContain("Commit response disconnected"));
+    const pending = JSON.parse(storage.entries()[0]![1]);
+
+    root.querySelector<HTMLButtonElement>('[data-action="cancel-system-operation"]')!.click();
+    await vi.waitFor(() => expect(api.cancelJob).toHaveBeenCalledWith("import", JOB_ID, expect.any(AbortSignal)));
+
+    expect(commit).toHaveBeenNthCalledWith(2, "opaque-preview-authority", pending.idempotencyKey, expect.any(AbortSignal));
+    expect(api.cancelUpload).not.toHaveBeenCalled();
+    expect(JSON.parse(storage.entries()[0]![1])).toMatchObject({ kind: "import", jobId: JOB_ID });
+    expect(root.textContent).toContain("cancelled");
     mounted.dispose();
   });
 

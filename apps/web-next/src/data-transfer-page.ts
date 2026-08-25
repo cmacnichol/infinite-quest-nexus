@@ -11,6 +11,7 @@ import {
 export interface DataTransferPageDependencies {
   api?: DataTransferApi;
   storage?: Storage | null;
+  operationStorage?: Storage | null;
   wait?: (milliseconds: number) => Promise<void>;
   pollIntervalMs?: number;
 }
@@ -38,6 +39,49 @@ const ACKNOWLEDGEMENTS = [
   "acknowledgeProviderReentry",
   "acknowledgeNonCancellableBoundary"
 ] as const;
+
+type StoredSystemOperation = Readonly<{
+  kind: "export" | "import";
+  idempotencyKey: string;
+  jobId: string | null;
+  previewHandle?: string;
+}>;
+
+const OPERATION_STORAGE_PREFIX = "infiniteQuest.systemArchiveOperation.v1";
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+
+function operationStorageKey(ownerId: string, kind: StoredSystemOperation["kind"]): string {
+  return `${OPERATION_STORAGE_PREFIX}:${ownerId}:${kind}`;
+}
+
+function readStoredOperation(storage: Storage | null, ownerId: string, kind: StoredSystemOperation["kind"]): StoredSystemOperation | null {
+  if (!storage) return null;
+  try {
+    const value: unknown = JSON.parse(storage.getItem(operationStorageKey(ownerId, kind)) ?? "null");
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+    const record = value as Record<string, unknown>;
+    if (record.kind !== kind || typeof record.idempotencyKey !== "string" || record.idempotencyKey.length < 1 || record.idempotencyKey.length > 200) return null;
+    if (record.jobId !== null && (typeof record.jobId !== "string" || !UUID_PATTERN.test(record.jobId))) return null;
+    if (record.previewHandle !== undefined && (typeof record.previewHandle !== "string" || record.previewHandle.length < 1 || record.previewHandle.length > 200)) return null;
+    return {
+      kind,
+      idempotencyKey: record.idempotencyKey,
+      jobId: record.jobId as string | null,
+      ...(typeof record.previewHandle === "string" ? { previewHandle: record.previewHandle } : {})
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredOperation(storage: Storage | null, ownerId: string, operation: StoredSystemOperation): void {
+  if (!storage) return;
+  try {
+    storage.setItem(operationStorageKey(ownerId, operation.kind), JSON.stringify(operation));
+  } catch {
+    // The transfer remains usable for this page when browser session storage is blocked.
+  }
+}
 
 const pageMarkup = `
   <main id="main-content" class="data-transfer-page" data-page="data-transfer">
@@ -96,9 +140,9 @@ const pageMarkup = `
             <button type="button" data-action="upload-system-archive" disabled>Upload and preview</button>
             <button type="button" data-action="cancel-system-operation" disabled>Cancel current operation</button>
           </div>
-          <div class="system-transfer-progress" data-system-progress hidden>
-            <div><strong data-system-progress-label>Preparing transfer…</strong><span data-system-progress-value>0%</span></div>
-            <progress max="100" value="0"></progress>
+          <div class="system-transfer-progress" data-system-progress role="status" aria-live="polite" aria-atomic="true" hidden>
+            <div><strong id="system-transfer-progress-label" data-system-progress-label>Preparing transfer…</strong><span data-system-progress-value>0%</span></div>
+            <progress max="100" value="0" aria-labelledby="system-transfer-progress-label"></progress>
           </div>
         </section>
       </div>
@@ -110,6 +154,10 @@ const pageMarkup = `
         <header><div><p class="data-transfer-kicker">Server-owned inspection</p><h3 id="system-preview-title">Import Preview</h3></div><span data-system-preview-expiry></span></header>
         <div class="preview-summary-grid" data-system-preview-summary></div>
         <div class="preview-detail-grid">
+          <section><h4>Ownership mapping</h4><p data-system-owner-mapping></p></section>
+          <section><h4>Version provenance</h4><p data-system-version-summary></p><p class="archive-identity" data-system-fingerprint></p></section>
+          <section><h4>Normalization</h4><p data-system-normalization></p></section>
+          <section><h4>Capacity checks</h4><p data-system-staging-capacity></p><p data-system-asset-capacity></p></section>
           <section><h4>Provider recovery</h4><p data-system-provider-summary></p></section>
           <section><h4>External access</h4><p data-system-access-summary></p></section>
           <section><h4>Rebuild work</h4><p data-system-rebuild-summary></p></section>
@@ -130,6 +178,14 @@ const pageMarkup = `
       <section class="system-import-report" data-system-import-state="idle" aria-labelledby="system-report-title" hidden>
         <header><div><p class="data-transfer-kicker">Durable outcome</p><h3 id="system-report-title">Import Report</h3></div><strong data-system-report-status></strong></header>
         <div class="report-summary-grid" data-system-report-summary></div>
+        <div class="report-evidence-grid">
+          <section><h4>Ownership mapping</h4><p data-system-report-owner-mapping></p></section>
+          <section><h4>Version and archive identity</h4><p data-system-report-version-summary></p><p class="archive-identity" data-system-report-fingerprint></p></section>
+          <section><h4>Normalization and access</h4><p data-system-report-normalization></p><p data-system-report-access></p></section>
+          <section><h4>Integrity reconciliation</h4><p data-system-report-integrity></p></section>
+          <section><h4>Categorized omissions</h4><p data-system-report-omissions></p></section>
+          <section><h4>Terminal diagnostics</h4><p data-system-report-diagnostics></p></section>
+        </div>
         <div class="recovery-checklist">
           <section><h4>Provider recovery</h4><p>Enter credentials, verify health and model discovery, then explicitly enable each imported profile.</p><a href="/nexus/#providers">Open Provider Setup</a></section>
           <section><h4>Access recovery</h4><p>Create new access relationships on this destination. Source share links and sessions remain invalid.</p></section>
@@ -167,6 +223,25 @@ function formatBytes(value: number): string {
   return `${size.toFixed(size >= 10 ? 0 : 1)} ${units[index]}`;
 }
 
+function formatOwnerMapping(mapping: SystemImportPreviewView["ownerMapping"]): string {
+  return `Source owner ${mapping.sourceOwnerId}. Destination owner ${mapping.destinationOwnerId}.`;
+}
+
+function formatVersions(versions: SystemImportPreviewView["versions"]): string {
+  return `Archive format ${versions.archiveFormat}. Source application ${versions.sourceApplication}. Source migration ${versions.sourceMigration}. `
+    + `Destination application ${versions.destinationApplication}. Destination migration ${versions.destinationMigration}.`;
+}
+
+function formatCapacity(label: string, capacity: SystemImportPreviewView["space"]["staging"]): string {
+  const available = capacity.availableBytes === null ? "unknown available" : `${formatBytes(capacity.availableBytes)} available`;
+  return `${label} capacity: ${formatBytes(capacity.requiredBytes)} required · ${available} · ${capacity.verified ? "verified" : "not verified"} · `
+    + `${capacity.sufficient ? "sufficient" : "insufficient"} · ${capacity.overrideUsed ? "operator override used" : "no capacity override"}.`;
+}
+
+function formatOperationalOmissions(omissions: SystemImportPreviewView["operationalOmissions"]): string {
+  return Object.entries(omissions).map(([category, count]) => `${category} ${formatCount(count)}`).join(" · ");
+}
+
 function appendSummary(document: Document, container: Element, label: string, value: string): void {
   const item = document.createElement("div");
   const term = document.createElement("span");
@@ -196,6 +271,14 @@ export function mountDataTransferPage(
     throw new Error("The Data Transfer interface could not be initialized.");
   }
   const api = dependencies.api ?? createDataTransferApi({ storage: dependencies.storage });
+  let operationStorage = dependencies.operationStorage;
+  if (operationStorage === undefined) {
+    try {
+      operationStorage = view.sessionStorage;
+    } catch {
+      operationStorage = null;
+    }
+  }
   const wait = dependencies.wait ?? ((milliseconds: number) => new Promise<void>((resolve) => view.setTimeout(resolve, milliseconds)));
   const pollIntervalMs = dependencies.pollIntervalMs ?? 1_000;
   const controller = new AbortController();
@@ -221,11 +304,15 @@ export function mountDataTransferPage(
   let capabilityAvailable = false;
   let selectedFile: File | null = null;
   let currentUpload: SystemUploadView | null = null;
-  let currentJob: SystemArchiveJobView | null = null;
+  const currentJobs: Record<SystemArchiveJobView["kind"], SystemArchiveJobView | null> = {
+    export: null,
+    import: null
+  };
   let currentPreview: SystemImportPreviewView | null = null;
   let actionBusy = false;
   let operationController: AbortController | null = null;
   let operationKind: "export" | "upload" | "import" | null = null;
+  let sessionOwnerId: string | null = null;
 
   function announce(message: string): void {
     status.textContent = message;
@@ -244,10 +331,10 @@ export function mountDataTransferPage(
   }
 
   function updateControls(): void {
-    const jobCancellable = currentJob !== null && isJobCancellable(currentJob);
+    const jobCancellable = Object.values(currentJobs).some((job) => job !== null && isJobCancellable(job));
     const localOperationCancellable = operationController !== null
-      && (operationKind === "upload" || (operationKind === "export" && currentJob === null));
-    exportButton.disabled = !capabilityAvailable || actionBusy || (currentJob?.kind === "export" && !TERMINAL_JOB_STATUSES.has(currentJob.status));
+      && (operationKind === "upload" || (operationKind === "export" && currentJobs.export === null));
+    exportButton.disabled = !capabilityAvailable || actionBusy || (currentJobs.export !== null && !TERMINAL_JOB_STATUSES.has(currentJobs.export.status));
     fileInput.disabled = !capabilityAvailable || actionBusy;
     uploadButton.disabled = !capabilityAvailable || actionBusy || selectedFile === null;
     cancelButton.disabled = !capabilityAvailable || (!jobCancellable && currentUpload === null && !localOperationCancellable);
@@ -285,6 +372,15 @@ export function mountDataTransferPage(
     requiredElement<HTMLElement>(previewRegion, "[data-system-preview-expiry]").textContent = value.expiresAt
       ? `Preview expires ${new Date(value.expiresAt).toLocaleString()}`
       : "No commit authority issued";
+    requiredElement<HTMLElement>(previewRegion, "[data-system-owner-mapping]").textContent = formatOwnerMapping(value.ownerMapping);
+    requiredElement<HTMLElement>(previewRegion, "[data-system-version-summary]").textContent = formatVersions(value.versions);
+    requiredElement<HTMLElement>(previewRegion, "[data-system-fingerprint]").textContent = value.archiveFingerprint
+      ? `Archive fingerprint ${value.archiveFingerprint}.`
+      : "Archive fingerprint unavailable.";
+    requiredElement<HTMLElement>(previewRegion, "[data-system-normalization]").textContent =
+      `Normalization ${value.normalization.join(" · ") || "none"}.`;
+    requiredElement<HTMLElement>(previewRegion, "[data-system-staging-capacity]").textContent = formatCapacity("Staging", value.space.staging);
+    requiredElement<HTMLElement>(previewRegion, "[data-system-asset-capacity]").textContent = formatCapacity("Asset-root", value.space.assetRoot);
     requiredElement<HTMLElement>(previewRegion, "[data-system-provider-summary]").textContent =
       `${formatCount(value.disabledProviders)} disabled providers. Credentials are excluded and must be entered again.`;
     requiredElement<HTMLElement>(previewRegion, "[data-system-access-summary]").textContent = value.invalidatedAccess.length
@@ -293,12 +389,24 @@ export function mountDataTransferPage(
     requiredElement<HTMLElement>(previewRegion, "[data-system-rebuild-summary]").textContent =
       `Chronicle index: ${formatCount(value.rebuilds.chronicleIndex.itemCount)} campaigns. Asset thumbnails: ${formatCount(value.rebuilds.assetThumbnails.itemCount)} originals.`;
     requiredElement<HTMLElement>(previewRegion, "[data-system-omission-summary]").textContent =
-      `${formatCount(value.omittedOperationalRows)} active or rebuildable operational rows are intentionally excluded.`;
+      `${formatCount(value.omittedOperationalRows)} rows excluded · ${formatOperationalOmissions(value.operationalOmissions)}.`;
     const warnings = requiredElement<HTMLElement>(previewRegion, "[data-system-preview-warnings]");
     const diagnostics = [...value.warnings, ...value.errors];
     warnings.hidden = diagnostics.length === 0;
     warnings.textContent = diagnostics.join(" ");
     acknowledgements.disabled = !value.valid;
+    for (const checkbox of acknowledgements.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')) {
+      checkbox.checked = false;
+      checkbox.removeAttribute("aria-invalid");
+    }
+    updateControls();
+  }
+
+  function invalidatePreviewAuthority(): void {
+    currentPreview = null;
+    previewRegion.hidden = true;
+    previewRegion.dataset.systemPreview = "empty";
+    acknowledgements.disabled = true;
     for (const checkbox of acknowledgements.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')) {
       checkbox.checked = false;
       checkbox.removeAttribute("aria-invalid");
@@ -320,13 +428,31 @@ export function mountDataTransferPage(
     appendSummary(document, summary, "Original images", `${formatCount(report.assetCount)} · ${formatBytes(report.assetBytes)}`);
     appendSummary(document, summary, "Providers disabled", formatCount(report.disabledProviders));
     appendSummary(document, summary, "Access categories invalidated", formatCount(report.invalidatedAccess.length));
+    requiredElement<HTMLElement>(reportRegion, "[data-system-report-owner-mapping]").textContent = formatOwnerMapping(report.ownerMapping);
+    requiredElement<HTMLElement>(reportRegion, "[data-system-report-version-summary]").textContent = formatVersions(report.versions);
+    requiredElement<HTMLElement>(reportRegion, "[data-system-report-fingerprint]").textContent = `Archive fingerprint ${report.archiveFingerprint}.`;
+    requiredElement<HTMLElement>(reportRegion, "[data-system-report-normalization]").textContent =
+      `Normalization ${report.normalization.join(" · ")}.`;
+    requiredElement<HTMLElement>(reportRegion, "[data-system-report-access]").textContent =
+      `Invalidated access ${report.invalidatedAccess.join(" · ")}.`;
+    requiredElement<HTMLElement>(reportRegion, "[data-system-report-integrity]").textContent =
+      "Fingerprint verified · Records matched · Original assets matched.";
+    requiredElement<HTMLElement>(reportRegion, "[data-system-report-omissions]").textContent =
+      `${formatCount(report.omittedOperationalRows)} rows excluded · ${formatOperationalOmissions(report.operationalOmissions)}.`;
+    const diagnostics = [
+      ...report.warnings.map((warning) => `Warning ${warning}`),
+      ...report.errors.map((code) => `Error ${code}`)
+    ];
+    requiredElement<HTMLElement>(reportRegion, "[data-system-report-diagnostics]").textContent = diagnostics.length
+      ? diagnostics.join(" · ")
+      : "No terminal warnings or errors.";
     requiredElement<HTMLElement>(reportRegion, "[data-system-report-rebuilds]").textContent =
       `Chronicle index: ${report.rebuildState.chronicleIndex.status} for ${formatCount(report.rebuildState.chronicleIndex.itemCount)} campaigns. `
       + `Asset thumbnails: ${report.rebuildState.assetThumbnails.status} for ${formatCount(report.rebuildState.assetThumbnails.itemCount)} originals.`;
   }
 
   function renderJob(job: SystemArchiveJobView): void {
-    currentJob = job;
+    currentJobs[job.kind] = job;
     announce(`${job.kind === "export" ? "System Export" : "System Import"}: ${job.status.replaceAll("_", " ")}.`);
     if (job.kind === "export" && job.status === "published") {
       download.href = api.downloadUrl(job.id);
@@ -391,26 +517,78 @@ export function mountDataTransferPage(
   async function createExport(): Promise<void> {
     await runAction("export", async (signal) => {
       download.hidden = true;
-      currentJob = null;
-      const job = await api.createExport(randomIdempotencyKey("browser-export"), signal);
+      currentJobs.export = null;
+      const idempotencyKey = randomIdempotencyKey("browser-export");
+      if (sessionOwnerId) writeStoredOperation(operationStorage ?? null, sessionOwnerId, { kind: "export", idempotencyKey, jobId: null });
+      const job = await api.createExport(idempotencyKey, signal);
+      if (sessionOwnerId) writeStoredOperation(operationStorage ?? null, sessionOwnerId, { kind: "export", idempotencyKey, jobId: job.id });
       await monitorJob(job);
     });
+  }
+
+  async function recoverExport(ownerId: string): Promise<void> {
+    const stored = readStoredOperation(operationStorage ?? null, ownerId, "export");
+    if (!stored) return;
+    const job = stored.jobId
+      ? await api.getJob("export", stored.jobId, controller.signal)
+      : await api.createExport(stored.idempotencyKey, controller.signal);
+    writeStoredOperation(operationStorage ?? null, ownerId, { ...stored, jobId: job.id });
+    await monitorJob(job);
+  }
+
+  async function resolveStoredImport(
+    ownerId: string,
+    stored: StoredSystemOperation,
+    signal: AbortSignal
+  ): Promise<SystemArchiveJobView> {
+    const job = stored.jobId
+      ? await api.getJob("import", stored.jobId, signal)
+      : await api.commit(stored.previewHandle!, stored.idempotencyKey, signal);
+    writeStoredOperation(operationStorage ?? null, ownerId, { ...stored, jobId: job.id });
+    return job;
+  }
+
+  async function recoverImport(ownerId: string): Promise<void> {
+    const stored = readStoredOperation(operationStorage ?? null, ownerId, "import");
+    if (!stored || (!stored.jobId && !stored.previewHandle)) return;
+    invalidatePreviewAuthority();
+    const job = await resolveStoredImport(ownerId, stored, controller.signal);
+    currentUpload = null;
+    await monitorJob(job);
   }
 
   async function cancelCurrent(): Promise<void> {
     clearError();
     operationController?.abort(new DOMException("Transfer cancelled", "AbortError"));
     try {
-      if (currentJob && isJobCancellable(currentJob)) {
-        renderJob(await api.cancelJob(currentJob.kind, currentJob.id, controller.signal));
+      const storedImport = sessionOwnerId
+        ? readStoredOperation(operationStorage ?? null, sessionOwnerId, "import")
+        : null;
+      if (sessionOwnerId && storedImport && currentJobs.import === null) {
+        invalidatePreviewAuthority();
+        const recovered = await resolveStoredImport(sessionOwnerId, storedImport, controller.signal);
+        currentUpload = null;
+        renderJob(recovered);
+        if (isJobCancellable(recovered)) {
+          renderJob(await api.cancelJob("import", recovered.id, controller.signal));
+        }
+        return;
+      }
+      const jobToCancel = [currentJobs.import, currentJobs.export]
+        .find((job): job is SystemArchiveJobView => job !== null && isJobCancellable(job));
+      if (jobToCancel) {
+        if (jobToCancel.kind === "import") invalidatePreviewAuthority();
+        renderJob(await api.cancelJob(jobToCancel.kind, jobToCancel.id, controller.signal));
         return;
       }
       if (currentUpload) {
+        invalidatePreviewAuthority();
         await api.cancelUpload(currentUpload.id, controller.signal);
         currentUpload = null;
         announce("System Archive upload cancelled.");
         return;
       }
+      if (operationKind === "upload") invalidatePreviewAuthority();
       announce("Local System Archive work cancelled.");
     } catch (reason) {
       if (!disposed) announceError(reason);
@@ -435,8 +613,27 @@ export function mountDataTransferPage(
       firstInvalid.focus();
       return;
     }
+    const previewHandle = currentPreview.previewHandle;
+    const idempotencyKey = randomIdempotencyKey("browser-import");
+    if (sessionOwnerId) {
+      writeStoredOperation(operationStorage ?? null, sessionOwnerId, {
+        kind: "import",
+        idempotencyKey,
+        jobId: null,
+        previewHandle
+      });
+    }
+    invalidatePreviewAuthority();
     await runAction("import", async (signal) => {
-      const job = await api.commit(currentPreview!.previewHandle!, randomIdempotencyKey("browser-import"), signal);
+      const job = await api.commit(previewHandle, idempotencyKey, signal);
+      if (sessionOwnerId) {
+        writeStoredOperation(operationStorage ?? null, sessionOwnerId, {
+          kind: "import",
+          idempotencyKey,
+          jobId: job.id,
+          previewHandle
+        });
+      }
       currentUpload = null;
       await monitorJob(job);
     });
@@ -461,8 +658,9 @@ export function mountDataTransferPage(
   cancelButton.addEventListener("click", onCancel);
   commitButton.addEventListener("click", onCommit);
 
-  void api.capability(controller.signal).then((capability) => {
+  void Promise.all([api.capability(controller.signal), api.sessionOwnerId(controller.signal)]).then(([capability, ownerId]) => {
     if (disposed) return;
+    sessionOwnerId = ownerId;
     capabilityAvailable = capability.systemArchive;
     workbench.dataset.systemArchiveState = capabilityAvailable ? "available" : "disabled";
     capabilityBadge.textContent = capabilityAvailable ? "Available" : "Disabled by operator";
@@ -471,6 +669,10 @@ export function mountDataTransferPage(
       : "System Archive is not enabled on this instance. World, Campaign, legacy, external, and readable formats remain available.";
     announce(capabilityAvailable ? "Choose an owner-wide export or a System Archive file." : "Specialized Data Transfer tools remain available.");
     updateControls();
+    if (capabilityAvailable) {
+      void recoverExport(ownerId).catch((reason) => { if (!disposed) announceError(reason); });
+      void recoverImport(ownerId).catch((reason) => { if (!disposed) announceError(reason); });
+    }
   }).catch((reason) => {
     if (disposed) return;
     capabilityAvailable = false;

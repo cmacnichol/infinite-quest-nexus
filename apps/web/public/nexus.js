@@ -75,9 +75,11 @@ let systemArchiveEnabled = false;
 let systemArchiveSelectedFile = null;
 let systemArchiveUpload = null;
 let systemArchivePreview = null;
-let systemArchiveJob = null;
+const systemArchiveJobs = { export: null, import: null };
 let systemArchiveBusy = false;
 let systemArchiveOperationController = null;
+let systemArchiveOwnerId = null;
+let systemArchiveRecoveryStarted = false;
 
 function campaignSettingsPanelIndexForKey(key, currentIndex, count) {
   if (key === "Home") return 0;
@@ -373,6 +375,8 @@ const SYSTEM_ARCHIVE_ACKNOWLEDGEMENT_IDS = Object.freeze([
   "acknowledgeProviderReentry",
   "acknowledgeNonCancellableBoundary"
 ]);
+const SYSTEM_ARCHIVE_OPERATION_STORAGE_PREFIX = "infiniteQuest.systemArchiveOperation.v1";
+const SYSTEM_ARCHIVE_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const SYSTEM_SHA256_CONSTANTS = new Uint32Array([
   0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
   0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -489,12 +493,65 @@ function systemArchiveFormatBytes(value) {
   return `${size.toFixed(size >= 10 ? 0 : 1)} ${units[index]}`;
 }
 
+function systemArchiveOwnerMappingText(mapping) {
+  return `Source owner ${mapping.sourceOwnerId}. Destination owner ${mapping.destinationOwnerId}.`;
+}
+
+function systemArchiveVersionsText(versions) {
+  return `Archive format ${versions.archiveFormat}. Source application ${versions.sourceApplication}. Source migration ${versions.sourceMigration}. `
+    + `Destination application ${versions.destinationApplication}. Destination migration ${versions.destinationMigration}.`;
+}
+
+function systemArchiveCapacityText(label, capacity) {
+  const available = capacity.availableBytes === null ? "unknown available" : `${systemArchiveFormatBytes(capacity.availableBytes)} available`;
+  return `${label} capacity: ${systemArchiveFormatBytes(capacity.requiredBytes)} required · ${available} · ${capacity.verified ? "verified" : "not verified"} · `
+    + `${capacity.sufficient ? "sufficient" : "insufficient"} · ${capacity.overrideUsed ? "operator override used" : "no capacity override"}.`;
+}
+
+function systemArchiveOperationalOmissionsText(omissions) {
+  return Object.entries(omissions).map(([category, count]) => `${category} ${number(count)}`).join(" · ");
+}
+
 function systemArchiveIdempotencyKey(prefix) {
   return `${prefix}-${crypto.randomUUID()}`;
 }
 
 function systemArchiveUploadStorageKey(byteLength, sha256) {
   return `infiniteQuest.systemArchiveUpload.v1:${byteLength}:${sha256}`;
+}
+
+function systemArchiveOperationStorageKey(kind) {
+  return systemArchiveOwnerId ? `${SYSTEM_ARCHIVE_OPERATION_STORAGE_PREFIX}:${systemArchiveOwnerId}:${kind}` : null;
+}
+
+function readSystemArchiveOperation(kind) {
+  const key = systemArchiveOperationStorageKey(kind);
+  if (!key) return null;
+  try {
+    const value = JSON.parse(sessionStorage.getItem(key) || "null");
+    if (!value || typeof value !== "object" || Array.isArray(value) || value.kind !== kind) return null;
+    if (typeof value.idempotencyKey !== "string" || !value.idempotencyKey || value.idempotencyKey.length > 200) return null;
+    if (value.jobId !== null && (typeof value.jobId !== "string" || !SYSTEM_ARCHIVE_UUID_PATTERN.test(value.jobId))) return null;
+    if (value.previewHandle !== undefined && (typeof value.previewHandle !== "string" || !value.previewHandle || value.previewHandle.length > 200)) return null;
+    return {
+      kind,
+      idempotencyKey: value.idempotencyKey,
+      jobId: value.jobId,
+      ...(typeof value.previewHandle === "string" ? { previewHandle: value.previewHandle } : {})
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeSystemArchiveOperation(operation) {
+  const key = systemArchiveOperationStorageKey(operation.kind);
+  if (!key) return;
+  try {
+    sessionStorage.setItem(key, JSON.stringify(operation));
+  } catch {
+    // The operation remains usable on this page when browser session storage is blocked.
+  }
 }
 
 function readSystemArchiveUploadSession(key) {
@@ -524,7 +581,7 @@ function setSystemArchiveCapability(enabled, message = "") {
     ? "System Archive is available. Transfers are durable and can resume after a disconnected browser session."
     : "System Archive is not enabled on this instance. World, Campaign, legacy, external, and readable formats remain available.");
   elements.systemArchiveStatus.textContent = enabled ? "Choose an owner-wide export or a System Archive file." : "Specialized Data Transfer tools remain available.";
-  updateSystemArchiveControls();
+  beginSystemArchiveRecoveryWhenReady();
 }
 
 function systemArchiveJobCancellable(job) {
@@ -533,12 +590,14 @@ function systemArchiveJobCancellable(job) {
 
 function updateSystemArchiveControls() {
   if (!elements.systemArchiveTransfer) return;
-  const activeExport = systemArchiveJob?.kind === "export" && !SYSTEM_ARCHIVE_TERMINAL_STATUSES.has(systemArchiveJob.status);
-  elements.createSystemArchive.disabled = !systemArchiveEnabled || systemArchiveBusy || activeExport;
-  elements.systemArchiveFile.disabled = !systemArchiveEnabled || systemArchiveBusy;
-  elements.uploadSystemArchive.disabled = !systemArchiveEnabled || systemArchiveBusy || !systemArchiveSelectedFile;
-  elements.cancelSystemArchive.disabled = !systemArchiveEnabled || (!systemArchiveOperationController && !systemArchiveJobCancellable(systemArchiveJob) && !systemArchiveUpload);
-  elements.commitSystemImport.disabled = !systemArchiveEnabled || systemArchiveBusy || !systemArchivePreview?.valid;
+  const activeExport = systemArchiveJobs.export && !SYSTEM_ARCHIVE_TERMINAL_STATUSES.has(systemArchiveJobs.export.status);
+  const jobCancellable = Object.values(systemArchiveJobs).some((job) => systemArchiveJobCancellable(job));
+  const sessionReady = Boolean(systemArchiveOwnerId);
+  elements.createSystemArchive.disabled = !systemArchiveEnabled || !sessionReady || systemArchiveBusy || activeExport;
+  elements.systemArchiveFile.disabled = !systemArchiveEnabled || !sessionReady || systemArchiveBusy;
+  elements.uploadSystemArchive.disabled = !systemArchiveEnabled || !sessionReady || systemArchiveBusy || !systemArchiveSelectedFile;
+  elements.cancelSystemArchive.disabled = !systemArchiveEnabled || !sessionReady || (!systemArchiveOperationController && !jobCancellable && !systemArchiveUpload);
+  elements.commitSystemImport.disabled = !systemArchiveEnabled || !sessionReady || systemArchiveBusy || !systemArchivePreview?.valid;
 }
 
 function setSystemArchiveBusy(busy) {
@@ -597,15 +656,35 @@ function renderSystemImportPreview(preview) {
     systemArchiveSummaryItem("Source owners", String(preview.sourceOwnerCount))
   );
   elements.systemImportPreviewExpiry.textContent = preview.expiresAt ? `Preview expires ${new Date(preview.expiresAt).toLocaleString()}` : "No commit authority issued";
+  elements.systemImportOwnerMapping.textContent = systemArchiveOwnerMappingText(preview.ownerMapping);
+  elements.systemImportVersionSummary.textContent = systemArchiveVersionsText(preview.versions);
+  elements.systemImportFingerprint.textContent = preview.archiveFingerprint
+    ? `Archive fingerprint ${preview.archiveFingerprint}.`
+    : "Archive fingerprint unavailable.";
+  elements.systemImportNormalization.textContent = `Normalization ${preview.normalization.join(" · ") || "none"}.`;
+  elements.systemImportStagingCapacity.textContent = systemArchiveCapacityText("Staging", preview.space.staging);
+  elements.systemImportAssetCapacity.textContent = systemArchiveCapacityText("Asset-root", preview.space.assetRoot);
   elements.systemImportProviderSummary.textContent = `${number(preview.disabledProviders)} disabled providers. Credentials are excluded and must be entered again.`;
   elements.systemImportAccessSummary.textContent = preview.invalidatedAccess?.length
     ? `External access will be invalidated: ${preview.invalidatedAccess.join(", ")}.` : "No external access categories were reported.";
   elements.systemImportRebuildSummary.textContent = `Chronicle index: ${number(preview.rebuilds.chronicleIndex.itemCount)} campaigns. Asset thumbnails: ${number(preview.rebuilds.assetThumbnails.itemCount)} originals.`;
-  elements.systemImportOmissionSummary.textContent = `${number(preview.omittedOperationalRows)} active or rebuildable operational rows are intentionally excluded.`;
+  elements.systemImportOmissionSummary.textContent = `${number(preview.omittedOperationalRows)} rows excluded · ${systemArchiveOperationalOmissionsText(preview.operationalOmissions)}.`;
   const diagnostics = [...(preview.warnings || []), ...(preview.errors || [])];
   elements.systemImportPreviewWarnings.textContent = diagnostics.join(" ");
   elements.systemImportPreviewWarnings.classList.toggle("hidden", diagnostics.length === 0);
   elements.systemImportAcknowledgements.disabled = !preview.valid;
+  SYSTEM_ARCHIVE_ACKNOWLEDGEMENT_IDS.forEach((id) => {
+    elements[id].checked = false;
+    elements[id].removeAttribute("aria-invalid");
+  });
+  updateSystemArchiveControls();
+}
+
+function invalidateSystemImportPreviewAuthority() {
+  systemArchivePreview = null;
+  elements.systemImportPreview.classList.add("hidden");
+  elements.systemImportPreview.dataset.systemPreview = "empty";
+  elements.systemImportAcknowledgements.disabled = true;
   SYSTEM_ARCHIVE_ACKNOWLEDGEMENT_IDS.forEach((id) => {
     elements[id].checked = false;
     elements[id].removeAttribute("aria-invalid");
@@ -626,11 +705,23 @@ function renderSystemImportReport(job) {
     systemArchiveSummaryItem("Providers disabled", number(report.disabledProviders)),
     systemArchiveSummaryItem("Access categories invalidated", number(report.invalidatedAccess.length))
   );
+  elements.systemImportReportOwnerMapping.textContent = systemArchiveOwnerMappingText(report.ownerMapping);
+  elements.systemImportReportVersionSummary.textContent = systemArchiveVersionsText(report.versions);
+  elements.systemImportReportFingerprint.textContent = `Archive fingerprint ${report.archiveFingerprint}.`;
+  elements.systemImportReportNormalization.textContent = `Normalization ${report.normalization.join(" · ")}.`;
+  elements.systemImportReportAccess.textContent = `Invalidated access ${report.invalidatedAccess.join(" · ")}.`;
+  elements.systemImportReportIntegrity.textContent = "Fingerprint verified · Records matched · Original assets matched.";
+  elements.systemImportReportOmissions.textContent = `${number(report.omittedOperationalRows)} rows excluded · ${systemArchiveOperationalOmissionsText(report.operationalOmissions)}.`;
+  const diagnostics = [
+    ...(report.warnings || []).map((warning) => `Warning ${warning}`),
+    ...(report.errors || []).map((code) => `Error ${code}`)
+  ];
+  elements.systemImportReportDiagnostics.textContent = diagnostics.length ? diagnostics.join(" · ") : "No terminal warnings or errors.";
   elements.systemImportReportRebuilds.textContent = `Chronicle index: ${report.rebuildState.chronicleIndex.status} for ${number(report.rebuildState.chronicleIndex.itemCount)} campaigns. Asset thumbnails: ${report.rebuildState.assetThumbnails.status} for ${number(report.rebuildState.assetThumbnails.itemCount)} originals.`;
 }
 
 function renderSystemArchiveJob(job) {
-  systemArchiveJob = job;
+  systemArchiveJobs[job.kind] = job;
   setSystemArchiveStatus(`${job.kind === "export" ? "System Export" : "System Import"}: ${job.status.replaceAll("_", " ")}.`);
   if (job.kind === "export" && job.status === "published") {
     elements.systemArchiveDownload.href = `/api/v1/system-exports/${encodeURIComponent(job.id)}/download`;
@@ -751,26 +842,102 @@ async function uploadAndPreviewSystemArchive() {
 async function createSystemArchiveExport() {
   await runSystemArchiveAction(async (signal) => {
     elements.systemArchiveDownload.classList.add("hidden");
+    systemArchiveJobs.export = null;
+    const idempotencyKey = systemArchiveIdempotencyKey("legacy-export");
+    writeSystemArchiveOperation({ kind: "export", idempotencyKey, jobId: null });
     const job = await api("/api/v1/system-exports", {
       method: "POST",
-      body: JSON.stringify({ idempotencyKey: systemArchiveIdempotencyKey("legacy-export") }),
+      body: JSON.stringify({ idempotencyKey }),
       signal
     });
+    writeSystemArchiveOperation({ kind: "export", idempotencyKey, jobId: job.id });
     await monitorSystemArchiveJob(job, signal);
   });
+}
+
+async function recoverSystemArchiveExport() {
+  const stored = readSystemArchiveOperation("export");
+  if (!stored) return;
+  const controller = new AbortController();
+  const job = stored.jobId
+    ? await api(`/api/v1/system-exports/${encodeURIComponent(stored.jobId)}`, { signal: controller.signal })
+    : await api("/api/v1/system-exports", {
+        method: "POST",
+        body: JSON.stringify({ idempotencyKey: stored.idempotencyKey }),
+        signal: controller.signal
+      });
+  writeSystemArchiveOperation({ ...stored, jobId: job.id });
+  await monitorSystemArchiveJob(job, controller.signal);
+}
+
+async function resolveStoredSystemImport(stored, signal) {
+  const job = stored.jobId
+    ? await api(`/api/v1/system-imports/${encodeURIComponent(stored.jobId)}`, { signal })
+    : await api("/api/v1/system-imports", {
+        method: "POST",
+        body: JSON.stringify({
+          previewHandle: stored.previewHandle,
+          idempotencyKey: stored.idempotencyKey,
+          acknowledgeSensitiveArchive: true,
+          acknowledgeEmptyDestination: true,
+          acknowledgeInvalidatedAccess: true,
+          acknowledgeProviderReentry: true,
+          acknowledgeNonCancellableBoundary: true
+        }),
+        signal
+      });
+  writeSystemArchiveOperation({ ...stored, jobId: job.id });
+  return job;
+}
+
+async function recoverSystemArchiveImport() {
+  const stored = readSystemArchiveOperation("import");
+  if (!stored || (!stored.jobId && !stored.previewHandle)) return;
+  invalidateSystemImportPreviewAuthority();
+  const controller = new AbortController();
+  const job = await resolveStoredSystemImport(stored, controller.signal);
+  systemArchiveUpload = null;
+  await monitorSystemArchiveJob(job, controller.signal);
+}
+
+function recoverSystemArchiveOperations() {
+  if (!systemArchiveEnabled || !systemArchiveOwnerId || systemArchiveRecoveryStarted) return;
+  systemArchiveRecoveryStarted = true;
+  void recoverSystemArchiveExport().catch(showSystemArchiveError);
+  void recoverSystemArchiveImport().catch(showSystemArchiveError);
+}
+
+function beginSystemArchiveRecoveryWhenReady() {
+  updateSystemArchiveControls();
+  if (systemArchiveEnabled && systemArchiveOwnerId) void recoverSystemArchiveOperations();
 }
 
 async function cancelSystemArchiveOperation() {
   const controller = systemArchiveOperationController;
   controller?.abort(new DOMException("Transfer cancelled", "AbortError"));
   try {
-    if (systemArchiveJobCancellable(systemArchiveJob)) {
-      const segment = systemArchiveJob.kind === "export" ? "system-exports" : "system-imports";
-      renderSystemArchiveJob(await api(`/api/v1/${segment}/${encodeURIComponent(systemArchiveJob.id)}`, { method: "DELETE" }));
+    const storedImport = readSystemArchiveOperation("import");
+    if (storedImport && systemArchiveJobs.import === null) {
+      invalidateSystemImportPreviewAuthority();
+      const recovered = await resolveStoredSystemImport(storedImport);
+      systemArchiveUpload = null;
+      renderSystemArchiveJob(recovered);
+      if (systemArchiveJobCancellable(recovered)) {
+        renderSystemArchiveJob(await api(`/api/v1/system-imports/${encodeURIComponent(recovered.id)}`, { method: "DELETE" }));
+      }
+      return;
+    }
+    const jobToCancel = [systemArchiveJobs.import, systemArchiveJobs.export].find((job) => systemArchiveJobCancellable(job));
+    if (jobToCancel) {
+      if (jobToCancel.kind === "import") invalidateSystemImportPreviewAuthority();
+      const segment = jobToCancel.kind === "export" ? "system-exports" : "system-imports";
+      renderSystemArchiveJob(await api(`/api/v1/${segment}/${encodeURIComponent(jobToCancel.id)}`, { method: "DELETE" }));
     } else if (systemArchiveUpload) {
+      invalidateSystemImportPreviewAuthority();
       systemArchiveUpload = await api(`/api/v1/system-imports/uploads/${encodeURIComponent(systemArchiveUpload.id)}`, { method: "DELETE" });
       setSystemArchiveStatus("System Archive upload cancelled.");
     } else {
+      invalidateSystemImportPreviewAuthority();
       setSystemArchiveStatus("Local System Archive work cancelled.");
     }
   } catch (error) {
@@ -795,12 +962,16 @@ async function commitSystemArchiveImport() {
     firstInvalid.focus();
     return;
   }
+  const previewHandle = systemArchivePreview.previewHandle;
+  const idempotencyKey = systemArchiveIdempotencyKey("legacy-import");
+  writeSystemArchiveOperation({ kind: "import", idempotencyKey, jobId: null, previewHandle });
+  invalidateSystemImportPreviewAuthority();
   await runSystemArchiveAction(async (signal) => {
     const job = await api("/api/v1/system-imports", {
       method: "POST",
       body: JSON.stringify({
-        previewHandle: systemArchivePreview.previewHandle,
-        idempotencyKey: systemArchiveIdempotencyKey("legacy-import"),
+        previewHandle,
+        idempotencyKey,
         acknowledgeSensitiveArchive: true,
         acknowledgeEmptyDestination: true,
         acknowledgeInvalidatedAccess: true,
@@ -809,6 +980,7 @@ async function commitSystemArchiveImport() {
       }),
       signal
     });
+    writeSystemArchiveOperation({ kind: "import", idempotencyKey, jobId: job.id, previewHandle });
     systemArchiveUpload = null;
     await monitorSystemArchiveJob(job, signal);
   });
@@ -5808,6 +5980,8 @@ window.addEventListener("beforeunload", (event) => {
 async function loadSessionPreferences() {
   const response = await api("/api/v1/session");
   sessionUser = response.user || null;
+  systemArchiveOwnerId = typeof sessionUser?.id === "string" ? sessionUser.id : null;
+  beginSystemArchiveRecoveryWhenReady();
   const defaultTurnControlStyle = sessionUser?.settings?.defaultTurnControlStyle;
   if (["action_only", "flexible_auto", "flexible_action", "flexible_scene"].includes(defaultTurnControlStyle)) {
     elements.newCampaignTurnControlStyle.value = defaultTurnControlStyle;

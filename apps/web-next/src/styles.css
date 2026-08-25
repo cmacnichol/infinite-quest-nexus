@@ -2794,6 +2794,7 @@ footer p:first-child {
 
 .operation-heading h3,
 .preview-detail-grid h4,
+.report-evidence-grid h4,
 .recovery-checklist h4 {
   margin: 0 0 7px;
   font-size: 1rem;
@@ -2801,6 +2802,7 @@ footer p:first-child {
 
 .operation-heading p,
 .preview-detail-grid p,
+.report-evidence-grid p,
 .recovery-checklist p {
   margin: 0;
   color: var(--text-secondary);
@@ -2912,6 +2914,7 @@ footer p:first-child {
 }
 
 .preview-detail-grid,
+.report-evidence-grid,
 .recovery-checklist {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -2922,10 +2925,20 @@ footer p:first-child {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.report-evidence-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .preview-detail-grid section,
+.report-evidence-grid section,
 .recovery-checklist section {
+  min-width: 0;
   padding: 20px 24px;
   border-right: 1px solid var(--rule);
+}
+
+.archive-identity {
+  overflow-wrap: anywhere;
 }
 
 .system-preview-warnings {
@@ -2986,7 +2999,8 @@ footer p:first-child {
   .transfer-purpose-grid,
   .preview-summary-grid,
   .report-summary-grid,
-  .preview-detail-grid {
+  .preview-detail-grid,
+  .report-evidence-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -3007,6 +3021,7 @@ footer p:first-child {
   .preview-summary-grid,
   .report-summary-grid,
   .preview-detail-grid,
+  .report-evidence-grid,
   .recovery-checklist {
     grid-template-columns: 1fr;
   }
@@ -3028,6 +3043,7 @@ footer p:first-child {
   .preview-summary-grid > div,
   .report-summary-grid > div,
   .preview-detail-grid section,
+  .report-evidence-grid section,
   .recovery-checklist section {
     border-right: 0;
     border-bottom: 1px solid var(--rule);
