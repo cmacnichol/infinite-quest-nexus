@@ -22,9 +22,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Open } from "unzipper";
 import {
   ArchiveError,
+  consumeVerifiedContainerEntry,
   createArchiveArtifactSource,
   createArchiveStagingDirectory,
   inspectArchive,
+  inspectArchiveContainer,
   readVerifiedEntry,
   rehydratePersistedStagedArchive,
   removeArchivePath,
@@ -1181,6 +1183,41 @@ describe("bounded manifest and entry verification", () => {
       "archive-checksum-mismatch"
     );
   });
+
+  it("consumes a verified container entry incrementally without returning its body", async () => {
+    const root = await temporaryRoot();
+    const zipPath = join(root, "stream-container-entry.zip");
+    const data = Buffer.alloc(256 * 1024, 0x41);
+    await writeZip(zipPath, [{ name: "records/worlds/000001.ndjson", content: data }]);
+    const staged = await stagedFixture(root, zipPath);
+    const inspected = await inspectArchiveContainer(staged, DEFAULT_LIMITS);
+    let chunks = 0;
+    let largestChunk = 0;
+
+    const consumed = await consumeVerifiedContainerEntry(
+      inspected,
+      "records/worlds/000001.ndjson",
+      data.byteLength,
+      async (source) => {
+        let observed = 0;
+        for await (const chunk of source) {
+          chunks += 1;
+          largestChunk = Math.max(largestChunk, chunk.byteLength);
+          observed += chunk.byteLength;
+        }
+        return observed;
+      }
+    );
+
+    expect(consumed).toEqual({
+      value: data.byteLength,
+      byteLength: data.byteLength,
+      sha256: createHash("sha256").update(data).digest("hex")
+    });
+    expect(chunks).toBeGreaterThan(1);
+    expect(largestChunk).toBeLessThan(data.byteLength);
+    expect(consumed).not.toHaveProperty("buffer");
+  });
 });
 
 describe("archive artifact writing and cleanup", () => {
@@ -1191,6 +1228,8 @@ describe("archive artifact writing and cleanup", () => {
       [{ path: "system.json", logicalType: "system", mediaType: "application/json", source: Readable.from(data) }],
       (entries) => systemArchiveManifestSchema.parse({
         ...systemManifest(entries),
+        sourceApplication: "0.1.0",
+        sourceMigration: "0079_resumable_system_archive_uploads",
         sourceInstallationId: "55555555-5555-4555-8555-555555555555",
         sourceOwnerCount: 1,
         sourceOwner: {
@@ -1258,6 +1297,8 @@ describe("archive artifact writing and cleanup", () => {
       [{ path: "system.json", logicalType: "system", mediaType: "application/json", source: Readable.from(data) }],
       (entries) => systemArchiveManifestSchema.parse({
         ...systemManifest(entries),
+        sourceApplication: "0.1.0",
+        sourceMigration: "0079_resumable_system_archive_uploads",
         sourceInstallationId: "55555555-5555-4555-8555-555555555555",
         sourceOwnerCount: 1,
         sourceOwner: {

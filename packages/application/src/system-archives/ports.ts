@@ -11,6 +11,11 @@ export type SystemArchiveOwnerRecord = Readonly<{
   displayName: string;
 }>;
 
+export type SystemArchiveSourceCompatibility = Readonly<{
+  sourceApplication: string;
+  sourceMigration: string;
+}>;
+
 export type SystemArchiveOriginalAssetRecord = Readonly<{
   sourceAssetId: string;
   archivePath: string;
@@ -24,6 +29,7 @@ export type SystemArchiveOriginalAssetRecord = Readonly<{
 
 export interface SystemArchiveSnapshot {
   readOwner(): Promise<SystemArchiveOwnerRecord>;
+  readCompatibility(): Promise<SystemArchiveSourceCompatibility>;
   streamDomain(domain: SystemArchiveDomain, afterId?: string): AsyncIterable<SystemRecordEnvelope>;
   listOriginalAssets(): AsyncIterable<SystemArchiveOriginalAssetRecord>;
   summarizeExcludedOperationalWork(): Promise<Readonly<Record<string, number>>>;
@@ -64,6 +70,8 @@ export type SystemArchivePublicationResult =
   | Readonly<{ status: "published"; artifact: SystemArchivePublishedArtifact }>;
 
 export type SystemArchiveManifestDescriptor = Readonly<{
+  sourceApplication: string;
+  sourceMigration: string;
   sourceInstallationId: string;
   sourceOwner: SystemArchiveOwnerRecord;
   sourceOwnerCount: 1;

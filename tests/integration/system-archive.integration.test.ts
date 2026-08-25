@@ -155,6 +155,26 @@ async function archiveText(bytes: Buffer): Promise<Readonly<{
   return { zip, serialized };
 }
 
+type MutableSystemManifest = {
+  contentFingerprint: string;
+  entries: { path: string; logicalType: string; mediaType: string; byteLength: number; sha256: string }[];
+  assets: Array<{ bindings: unknown[] }>;
+};
+
+function refreshSystemFingerprint(manifest: MutableSystemManifest): void {
+  const payloadHashes = manifest.entries
+    .filter((entry) => entry.logicalType !== "asset-original")
+    .map((entry) => entry.sha256)
+    .sort();
+  const originalAssetHashes = [...new Set(manifest.entries
+    .filter((entry) => entry.logicalType === "asset-original")
+    .map((entry) => entry.sha256))]
+    .sort();
+  manifest.contentFingerprint = createHash("sha256")
+    .update(JSON.stringify({ originalAssetHashes, payloadHashes }))
+    .digest("hex");
+}
+
 integration("deterministic owner-wide System Archive export", () => {
   let pool: DatabasePool;
   let ownerUserId = "";
@@ -421,7 +441,10 @@ integration("deterministic owner-wide System Archive export", () => {
   }
 
   async function exportArchive() {
-    const snapshots = createPostgresSystemArchiveExportRepository(pool, { pageSize: 2 });
+    const snapshots = createPostgresSystemArchiveExportRepository(pool, {
+      pageSize: 2,
+      sourceApplicationVersion: "0.1.0",
+    });
     const publication = memoryPublisher();
     const writer = await createFilesystemSystemArchiveWriter({
       limits,
@@ -465,6 +488,8 @@ integration("deterministic owner-wide System Archive export", () => {
       JSON.parse(await zip.file("manifest.json")!.async("string")),
     );
     expect(manifest).toMatchObject({
+      sourceApplication: "0.1.0",
+      sourceMigration: "0079_resumable_system_archive_uploads",
       sourceInstallationId: ownerUserId,
       sourceOwnerCount: 1,
       sourceOwner: {
@@ -528,6 +553,8 @@ integration("deterministic owner-wide System Archive export", () => {
 
     expect(preview).toMatchObject({
       formatVersion: 1,
+      sourceApplication: "0.1.0",
+      sourceMigration: "0079_resumable_system_archive_uploads",
       archiveFingerprint: exported.result.artifact.contentFingerprint,
       sourceOwnerCount: 1,
       assetCount: 4,
@@ -585,7 +612,8 @@ integration("deterministic owner-wide System Archive export", () => {
         previewHandle: "opaque-preview-authority-token",
         versions: {
           archiveFormat: 1,
-          sourceApplication: null,
+          sourceApplication: "0.1.0",
+          sourceMigration: "0079_resumable_system_archive_uploads",
           destinationApplication: "0.1.0",
           destinationMigration: "0079_resumable_system_archive_uploads",
         },
@@ -603,6 +631,49 @@ integration("deterministic owner-wide System Archive export", () => {
       const persistedProjection = createPreview.mock.calls[0]![1].projection;
       expect(JSON.stringify(persistedProjection)).not.toContain(archiveRoot);
       expect(persistedProjection).not.toHaveProperty("previewHandle");
+    });
+  });
+
+  it("rejects a source migration watermark newer than the supported destination", async () => {
+    const exported = await exportArchive();
+    const zip = await JSZip.loadAsync(exported.bytes);
+    const manifest = JSON.parse(await zip.file("manifest.json")!.async("string")) as Record<string, unknown>;
+    manifest.sourceMigration = "0080_future_system_archive_shape";
+    zip.file("manifest.json", JSON.stringify(manifest));
+    const newer = await zip.generateAsync({ type: "nodebuffer" });
+
+    await withStagedArchive(newer, limits, async (staged) => {
+      const createPreview = vi.fn();
+      const service = createSystemArchiveImportPreviewService({
+        imports: {
+          destinationFingerprint: vi.fn(async () => ({
+            initialOwnerId: ownerUserId,
+            latestMigration: "0079_resumable_system_archive_uploads",
+            authoritativeCountsHash: sha256("empty-authority"),
+            activeJobsHash: sha256("no-active-work"),
+            checkedAt: "2026-08-25T12:00:00.000Z",
+            destinationEmpty: true,
+          })),
+          createPreview,
+        },
+        source: {
+          async withCompletedUpload(_owner, _uploadId, inspect) {
+            return inspect(staged);
+          },
+        },
+        capacity: { availableBytes: vi.fn(async () => ({ staging: 10_000_000, assetRoot: 10_000_000 })) },
+        limits,
+        destinationApplicationVersion: "0.1.0",
+        allowUnknownFreeSpace: false,
+      });
+
+      await expect(service.preview({ ownerUserId }, randomUUID())).resolves.toMatchObject({
+        valid: false,
+        previewHandle: null,
+        versions: { sourceMigration: "0080_future_system_archive_shape" },
+        errors: ["archive-version-unsupported"],
+      });
+      expect(createPreview).not.toHaveBeenCalled();
     });
   });
 
@@ -777,6 +848,91 @@ integration("deterministic owner-wide System Archive export", () => {
     });
   });
 
+  it.each(["entity relationship", "selected character"] as const)(
+    "rejects an invalid world-content %s before preview authority exists",
+    async (invalidRelationship) => {
+      const exported = await exportArchive();
+      const zip = await JSZip.loadAsync(exported.bytes);
+      const manifest = JSON.parse(await zip.file("manifest.json")!.async("string")) as MutableSystemManifest;
+      const versionEntry = manifest.entries.find((entry) => entry.path.startsWith("records/world-versions/"))!;
+      const version = JSON.parse((await zip.file(versionEntry.path)!.async("string")).trim()) as {
+        record: {
+          content: {
+            relationships: unknown[];
+            defaults: { selectedCharacterId: string | null };
+          };
+        };
+      };
+      if (invalidRelationship === "entity relationship") {
+        version.record.content.relationships = [{
+          id: "broken-relationship",
+          fromEntityId: "missing-from-entity",
+          toEntityId: "missing-to-entity",
+          kind: "knows",
+          description: "Both endpoints are absent."
+        }];
+      } else {
+        version.record.content.defaults.selectedCharacterId = "missing-playable-character";
+      }
+      const bytes = Buffer.from(`${JSON.stringify(version)}\n`, "utf8");
+      zip.file(versionEntry.path, bytes);
+      versionEntry.byteLength = bytes.byteLength;
+      versionEntry.sha256 = sha256(bytes);
+      refreshSystemFingerprint(manifest);
+      zip.file("manifest.json", JSON.stringify(manifest));
+
+      await withStagedArchive(await zip.generateAsync({ type: "nodebuffer" }), limits, async (staged) => {
+        await expect(inspectSystemArchiveForPreview(staged, limits)).rejects.toMatchObject({
+          code: "archive-world-mismatch",
+        });
+      });
+    }
+  );
+
+  it.each(["turn", "world-version"] as const)(
+    "requires generation-context %s authority to include its matching parent scope",
+    async (bindingKind) => {
+      const exported = await exportArchive();
+      const zip = await JSZip.loadAsync(exported.bytes);
+      const manifest = JSON.parse(await zip.file("manifest.json")!.async("string")) as MutableSystemManifest;
+      const readFirstRecord = async (domain: string) => {
+        const entry = manifest.entries.find((candidate) => candidate.path.startsWith(`records/${domain}/`))!;
+        return JSON.parse((await zip.file(entry.path)!.async("string")).trim()) as {
+          sourceId: string;
+          record: Record<string, unknown>;
+        };
+      };
+      const turn = await readFirstRecord("turns");
+      const worldVersion = await readFirstRecord("world-versions");
+      const binding = {
+        role: "generation_context",
+        campaignId: null,
+        worldId: null,
+        worldVersionId: bindingKind === "world-version" ? worldVersion.sourceId : null,
+        turnId: bindingKind === "turn" ? turn.sourceId : null,
+        sourceContextId: randomUUID(),
+      };
+      manifest.assets[0]!.bindings.push(binding);
+      const assetsEntry = manifest.entries.find((entry) => entry.path === "assets/assets.json")!;
+      const assetsPayload = JSON.parse(await zip.file(assetsEntry.path)!.async("string")) as {
+        assets: Array<{ bindings: unknown[] }>;
+      };
+      assetsPayload.assets[0]!.bindings.push(binding);
+      const assetsBytes = Buffer.from(JSON.stringify(assetsPayload), "utf8");
+      zip.file(assetsEntry.path, assetsBytes);
+      assetsEntry.byteLength = assetsBytes.byteLength;
+      assetsEntry.sha256 = sha256(assetsBytes);
+      refreshSystemFingerprint(manifest);
+      zip.file("manifest.json", JSON.stringify(manifest));
+
+      await withStagedArchive(await zip.generateAsync({ type: "nodebuffer" }), limits, async (staged) => {
+        await expect(inspectSystemArchiveForPreview(staged, limits)).rejects.toMatchObject({
+          code: "archive-world-mismatch",
+        });
+      });
+    }
+  );
+
   it("rejects corrupt Original Assets and multiple-owner manifests during preview", async () => {
     const exported = await exportArchive();
     const corruptZip = await JSZip.loadAsync(exported.bytes);
@@ -833,7 +989,10 @@ integration("deterministic owner-wide System Archive export", () => {
   });
 
   it("counts every active or retryable excluded generation and illustration job family", async () => {
-    const snapshots = createPostgresSystemArchiveExportRepository(pool, { pageSize: 2 });
+    const snapshots = createPostgresSystemArchiveExportRepository(pool, {
+      pageSize: 2,
+      sourceApplicationVersion: "0.1.0",
+    });
     const before = await snapshots.withOwnerSnapshot(
       { ownerUserId },
       (snapshot) => snapshot.summarizeExcludedOperationalWork(),
@@ -926,7 +1085,10 @@ integration("deterministic owner-wide System Archive export", () => {
     };
 
     await expect(runSystemExport(job(ownerUserId), {
-      snapshots: createPostgresSystemArchiveExportRepository(pool, { pageSize: 2 }),
+      snapshots: createPostgresSystemArchiveExportRepository(pool, {
+        pageSize: 2,
+        sourceApplicationVersion: "0.1.0",
+      }),
       originals: reader,
       writer,
       jobs,
@@ -992,6 +1154,8 @@ integration("deterministic owner-wide System Archive export", () => {
 
     await expect(writer.publish({
       manifest: {
+        sourceApplication: "0.1.0",
+        sourceMigration: "0079_resumable_system_archive_uploads",
         sourceInstallationId: ownerUserId,
         sourceOwnerCount: 1,
         sourceOwner: {
@@ -1038,6 +1202,8 @@ integration("deterministic owner-wide System Archive export", () => {
 
     await expect(writer.publish({
       manifest: {
+        sourceApplication: "0.1.0",
+        sourceMigration: "0079_resumable_system_archive_uploads",
         sourceInstallationId: ownerUserId,
         sourceOwnerCount: 1,
         sourceOwner: {
@@ -1097,6 +1263,8 @@ integration("deterministic owner-wide System Archive export", () => {
 
         await expect(writer.publish({
           manifest: {
+            sourceApplication: "0.1.0",
+            sourceMigration: "0079_resumable_system_archive_uploads",
             sourceInstallationId: ownerUserId,
             sourceOwnerCount: 1,
             sourceOwner: {
@@ -1149,7 +1317,10 @@ integration("deterministic owner-wide System Archive export", () => {
       ownerUserId,
       leaseOwner,
     }, {
-      snapshots: createPostgresSystemArchiveExportRepository(pool, { pageSize: 2 }),
+      snapshots: createPostgresSystemArchiveExportRepository(pool, {
+        pageSize: 2,
+        sourceApplicationVersion: "0.1.0",
+      }),
       originals: originalsReader(),
       writer,
       jobs: createPostgresSystemArchiveExportJobPort(pool),

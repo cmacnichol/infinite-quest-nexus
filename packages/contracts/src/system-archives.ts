@@ -405,6 +405,9 @@ const systemArchiveCapacityCheckSchema = z.object({
   if (capacity.overrideUsed && (capacity.availableBytes !== null || !capacity.sufficient)) {
     context.addIssue({ code: "custom", message: "Only an unknown capacity may use the explicit sufficient-capacity override." });
   }
+  if (capacity.availableBytes === null && capacity.sufficient !== capacity.overrideUsed) {
+    context.addIssue({ code: "custom", message: "Unknown capacity is sufficient if and only if the operator override was used." });
+  }
 });
 
 export const systemImportPreviewViewSchema = z.object({
@@ -412,9 +415,8 @@ export const systemImportPreviewViewSchema = z.object({
   previewHandle: boundedStringSchema(200).nullable(),
   versions: z.object({
     archiveFormat: z.literal(1),
-    // Format v1 did not encode a source application build. Keeping this
-    // explicit prevents a destination version from being mistaken for it.
-    sourceApplication: z.null(),
+    sourceApplication: boundedStringSchema(100),
+    sourceMigration: z.string().regex(/^\d{4}_[a-z0-9_]+$/u).max(200),
     destinationApplication: boundedStringSchema(100),
     destinationMigration: boundedStringSchema(200)
   }).strict(),
@@ -475,6 +477,8 @@ export const systemArchiveImportCommitRequestSchema = z.object({
 
 export const systemArchiveManifestSchema = archiveManifestSchema.safeExtend({
   archiveType: z.literal("system"),
+  sourceApplication: boundedStringSchema(100),
+  sourceMigration: z.string().regex(/^\d{4}_[a-z0-9_]+$/u).max(200),
   sourceInstallationId: z.string().uuid(),
   sourceOwnerCount: z.literal(1),
   sourceOwner: z.object({

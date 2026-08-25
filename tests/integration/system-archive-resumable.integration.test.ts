@@ -1,5 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
-import { resolve } from "node:path";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import JSZip from "jszip";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { SYSTEM_ARCHIVE_DOMAINS, type SystemArchiveDomain } from "@infinite-quest/contracts";
 import type { OwnerScope } from "../../packages/application/src/generation/types.js";
@@ -8,24 +11,82 @@ import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../pac
 import { createPostgresSystemArchiveJobRepository } from "../../packages/database/src/system-archive-job-repository.js";
 import { createPostgresSystemArchiveExportJobPort } from "../../packages/database/src/system-archive-export-repository.js";
 import { createPostgresSystemArchiveImportRepository } from "../../packages/database/src/system-archive-import-repository.js";
+import { createPostgresSystemArchivePrivateStorageRepository } from "../../packages/database/src/system-archive-private-storage-repository.js";
 import { createPostgresSystemArchiveUploadRepository } from "../../packages/database/src/system-archive-upload-repository.js";
 import {
+  createSystemArchiveImportComposition,
   createSystemArchiveUploadService,
   type SystemArchiveUploadStoragePort,
 } from "../../services/runtime/src/system-archive-composition.js";
+import { createAssetImportStorageComposition } from "../../services/runtime/src/asset-import-composition.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe.sequential : describe.skip;
 
-function hash(value: string): string {
-  return createHash("sha256").update(value, "utf8").digest("hex");
+function hash(value: string | Uint8Array): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+async function emptySystemArchive(ownerUserId: string): Promise<Buffer> {
+  const system = Buffer.from(JSON.stringify({
+    formatVersion: 1,
+    sourceInstallationId: ownerUserId,
+    sourceOwnerCount: 1,
+    sourceOwner: { sourceId: ownerUserId, displayName: "Initial owner" },
+    records: [],
+  }), "utf8");
+  const assets = Buffer.from(JSON.stringify({ formatVersion: 1, assets: [] }), "utf8");
+  const entries = [
+    {
+      path: "system.json",
+      logicalType: "system",
+      mediaType: "application/json",
+      byteLength: system.byteLength,
+      sha256: hash(system),
+    },
+    {
+      path: "assets/assets.json",
+      logicalType: "assets",
+      mediaType: "application/json",
+      byteLength: assets.byteLength,
+      sha256: hash(assets),
+    },
+  ];
+  const contentFingerprint = hash(JSON.stringify({
+    originalAssetHashes: [],
+    payloadHashes: entries.map((entry) => entry.sha256).sort(),
+  }));
+  const manifest = {
+    format: "infinite-quest-archive",
+    formatVersion: 1,
+    archiveType: "system",
+    createdAt: "2026-08-25T12:00:00.000Z",
+    contentFingerprint,
+    sourceApplication: "0.1.0",
+    sourceMigration: "0079_resumable_system_archive_uploads",
+    sourceInstallationId: ownerUserId,
+    sourceOwnerCount: 1,
+    sourceOwner: { sourceId: ownerUserId, displayName: "Initial owner" },
+    entries,
+    payloads: [
+      { kind: "system", path: "system.json", formatVersion: 1 },
+      { kind: "assets", path: "assets/assets.json", formatVersion: 1 },
+    ],
+    assets: [],
+  };
+  const zip = new JSZip();
+  zip.file("system.json", system);
+  zip.file("assets/assets.json", assets);
+  zip.file("manifest.json", JSON.stringify(manifest));
+  return zip.generateAsync({ type: "nodebuffer" });
 }
 
 function safePreviewProjection(ownerUserId: string, archiveFingerprint: string) {
   return {
     versions: {
       archiveFormat: 1 as const,
-      sourceApplication: null,
+      sourceApplication: "0.1.0",
+      sourceMigration: "0079_resumable_system_archive_uploads",
       destinationApplication: "0.1.0",
       destinationMigration: "0079_resumable_system_archive_uploads"
     },
@@ -165,7 +226,10 @@ integration("durable System Archive jobs and resumable uploads", () => {
     expect(persisted.rows[0]!.idempotency_key_hash).toBe(hash(authority.previewHandle));
     expect(JSON.stringify(persisted.rows[0])).not.toContain(authority.previewHandle);
     expect(JSON.stringify(persisted.rows[0])).not.toMatch(/[A-Za-z]:[\\/]|\/tmp\//u);
-    await expect(imports.destinationFingerprint(owner, { ignoreJobId: authority.jobId }))
+    await expect(imports.destinationFingerprint(owner, {
+      ignoreJobId: authority.jobId,
+      ignoreUploadId: upload.id
+    }))
       .resolves.toMatchObject({
         destinationEmpty: true,
         authoritativeCountsHash: destination.authoritativeCountsHash,
@@ -262,12 +326,191 @@ integration("durable System Archive jobs and resumable uploads", () => {
     expect(activeWork.activeJobsHash).not.toBe(clean.activeJobsHash);
     await pool.query("DELETE FROM world_generation_progress WHERE owner_user_id=$1", [owner.ownerUserId]);
 
-    await foreign();
-    const populated = await imports.destinationFingerprint(owner, { ignoreUploadId: current.id });
-    expect(populated.destinationEmpty).toBe(false);
-    expect(populated.authoritativeCountsHash).not.toBe(clean.authoritativeCountsHash);
-    expect(populated).not.toHaveProperty("path");
   });
+
+  it("counts every unexpired competing completed upload while ignoring only the current upload", async () => {
+    const uploads = createPostgresSystemArchiveUploadRepository(pool, { uploadTtlSeconds: 86_400 });
+    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const complete = async (content: string) => {
+      const filesystemOperationId = await reservePortableOperation(owner, "portable_staging");
+      const upload = await uploads.createUpload(owner, {
+        handleTokenHash: hash(`completed-${content}-${randomUUID()}`),
+        filesystemOperationId,
+        byteLength: content.length,
+        sha256: hash(content)
+      });
+      await uploads.recordChunk(owner, {
+        uploadId: upload.id,
+        index: 0,
+        offset: 0,
+        bytes: content.length,
+        sha256: hash(content)
+      });
+      const staged = await pool.query<{ id: string }>(
+        `INSERT INTO portable_staged_inputs (
+           owner_user_id,handle_token_hash,filesystem_operation_id,content_hash,byte_length,expires_at
+         ) VALUES ($1,$2,$3,$4,$5,now()+interval '1 day') RETURNING id`,
+        [owner.ownerUserId, hash(randomUUID()), filesystemOperationId, hash(content), content.length]
+      );
+      await uploads.completeUpload(owner, { uploadId: upload.id, stagedInputId: staged.rows[0]!.id });
+      return upload.id;
+    };
+    const currentUploadId = await complete("abcd");
+    const competingUploadId = await complete("efgh");
+
+    await expect(imports.destinationFingerprint(owner, { ignoreUploadId: currentUploadId }))
+      .resolves.toMatchObject({ destinationEmpty: false });
+    await pool.query(
+      "UPDATE system_archive_uploads SET expires_at=now()-interval '1 second' WHERE id=$1",
+      [competingUploadId]
+    );
+    await expect(imports.destinationFingerprint(owner, { ignoreUploadId: currentUploadId }))
+      .resolves.toMatchObject({ destinationEmpty: true });
+  });
+
+  it.each([
+    ["upload expiry", "upload"],
+    ["staged-input expiry", "staged-expiry"],
+    ["staged-input status", "staged-status"],
+  ] as const)("refuses preview issuance after %s invalidates completed staging", async (_label, invalidation) => {
+    const uploads = createPostgresSystemArchiveUploadRepository(pool, { uploadTtlSeconds: 86_400 });
+    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const filesystemOperationId = await reservePortableOperation(owner, "portable_staging");
+    const upload = await uploads.createUpload(owner, {
+      handleTokenHash: hash(`expiry-preview-${randomUUID()}`),
+      filesystemOperationId,
+      byteLength: 4,
+      sha256: hash("abcd")
+    });
+    await uploads.recordChunk(owner, {
+      uploadId: upload.id,
+      index: 0,
+      offset: 0,
+      bytes: 4,
+      sha256: hash("abcd")
+    });
+    const staged = await pool.query<{ id: string }>(
+      `INSERT INTO portable_staged_inputs (
+         owner_user_id,handle_token_hash,filesystem_operation_id,content_hash,byte_length,expires_at
+       ) VALUES ($1,$2,$3,$4,4,now()+$5::interval) RETURNING id`,
+      [
+        owner.ownerUserId,
+        hash(randomUUID()),
+        filesystemOperationId,
+        hash("abcd"),
+        invalidation === "staged-expiry" ? "200 milliseconds" : "1 day"
+      ]
+    );
+    await uploads.completeUpload(owner, { uploadId: upload.id, stagedInputId: staged.rows[0]!.id });
+    const destination = await imports.destinationFingerprint(owner, { ignoreUploadId: upload.id });
+    if (invalidation === "upload") {
+      await pool.query(
+        "UPDATE system_archive_uploads SET expires_at=now()-interval '1 second' WHERE id=$1",
+        [upload.id]
+      );
+    } else if (invalidation === "staged-expiry") {
+      await pool.query("SELECT pg_sleep(0.25)");
+    } else {
+      await pool.query(
+        "UPDATE portable_staged_inputs SET status='expired' WHERE id=$1",
+        [staged.rows[0]!.id]
+      );
+    }
+
+    await expect(imports.createPreview(owner, {
+      uploadId: upload.id,
+      archiveFingerprint: hash("expiry-preview-archive"),
+      destination,
+      projection: safePreviewProjection(owner.ownerUserId, hash("expiry-preview-archive"))
+    })).rejects.toMatchObject({ statusCode: 404 });
+    await expect(pool.query(
+      "SELECT id FROM system_archive_jobs WHERE kind='import' AND status='previewed'"
+    )).resolves.toMatchObject({ rowCount: 0 });
+  });
+
+  it("rehydrates identity-bound private authority and fences a live foreign lease", async () => {
+    const uploads = createPostgresSystemArchiveUploadRepository(pool, { uploadTtlSeconds: 86_400 });
+    const storage = createPostgresSystemArchivePrivateStorageRepository(pool);
+    const filesystemOperationId = await reservePortableOperation(owner, "portable_staging");
+    const upload = await uploads.createUpload(owner, {
+      handleTokenHash: hash(`private-storage-${randomUUID()}`),
+      filesystemOperationId,
+      byteLength: 4,
+      sha256: hash("abcd")
+    });
+    const relativePath = `staging/${filesystemOperationId}.pending`;
+    await pool.query(
+      `INSERT INTO durable_filesystem_prewrite_nodes (
+         operation_id,owner_user_id,purpose,relative_path,authority_state
+       ) VALUES ($1,$2,'portable_staging',$3,'target_only')`,
+      [filesystemOperationId, owner.ownerUserId, relativePath]
+    );
+    await pool.query(
+      `UPDATE durable_filesystem_prewrite_nodes
+          SET authority_state='identity_bound',device_id='device-1',file_id='file-1',
+              identity_bound_at=clock_timestamp()
+        WHERE operation_id=$1 AND authority_state='target_only'`,
+      [filesystemOperationId]
+    );
+
+    await expect(storage.withUploadLock({
+      ownerUserId: owner.ownerUserId,
+      uploadId: upload.id,
+      filesystemOperationId,
+      leaseOwner: "system-archive-test",
+      leaseSeconds: 30
+    }, async (authority) => authority)).resolves.toMatchObject({
+      state: "assembling",
+      relativePath,
+      identity: { deviceId: "device-1", fileId: "file-1" },
+      claim: { leaseOwner: "system-archive-test" }
+    });
+
+    await pool.query(
+      `UPDATE durable_filesystem_operations
+          SET lease_owner='other-worker',lease_expires_at=clock_timestamp()+interval '5 minutes'
+        WHERE id=$1`,
+      [filesystemOperationId]
+    );
+    await expect(storage.withUploadLock({
+      ownerUserId: owner.ownerUserId,
+      uploadId: upload.id,
+      filesystemOperationId,
+      leaseOwner: "system-archive-test",
+      leaseSeconds: 30
+    }, async (authority) => authority)).rejects.toMatchObject({ statusCode: 409 });
+    await expect(pool.query<{ lease_owner: string }>(
+      "SELECT lease_owner FROM durable_filesystem_operations WHERE id=$1",
+      [filesystemOperationId]
+    )).resolves.toMatchObject({ rows: [{ lease_owner: "other-worker" }] });
+
+    await pool.query(
+      "UPDATE durable_filesystem_operations SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",
+      [filesystemOperationId]
+    );
+    await expect(storage.withUploadLock({
+      ownerUserId: owner.ownerUserId,
+      uploadId: upload.id,
+      filesystemOperationId,
+      leaseOwner: "system-archive-test",
+      leaseSeconds: 30
+    }, async (authority) => authority)).resolves.toMatchObject({
+      state: "assembling",
+      claim: { leaseOwner: "system-archive-test" }
+    });
+    await expect(storage.withUploadLock({
+      ownerUserId: owner.ownerUserId,
+      uploadId: upload.id,
+      filesystemOperationId,
+      leaseOwner: "system-archive-test",
+      leaseSeconds: 301
+    }, async (authority) => authority)).rejects.toThrow("system_archive_storage_lease_invalid");
+  });
+
+  it.skipIf(process.platform !== "linux")(
+    "recovers the production private upload across adapter recreation and previews without mutation",
+    verifyProductionPrivateUploadRecovery,
+  );
 
   it("idempotently enqueues one active export per owner while allowing another owner", async () => {
     const repository = createPostgresSystemArchiveJobRepository(pool);
@@ -281,8 +524,13 @@ integration("durable System Archive jobs and resumable uploads", () => {
     });
     await expect(repository.enqueueExport(owner, hash(`competing-${randomUUID()}`)))
       .rejects.toMatchObject({ statusCode: 409 });
-    await expect(repository.enqueueExport(await foreign(), hash(`foreign-${randomUUID()}`)))
+    const scopedForeign = await foreign();
+    await expect(repository.enqueueExport(scopedForeign, hash(`foreign-${randomUUID()}`)))
       .resolves.toMatchObject({ kind: "export", status: "queued" });
+    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const populated = await imports.destinationFingerprint(owner, {});
+    expect(populated.destinationEmpty).toBe(false);
+    expect(populated).not.toHaveProperty("path");
   });
 
   it("allows only one active import globally and enforces staged-input ownership", async () => {
@@ -502,7 +750,7 @@ integration("durable System Archive jobs and resumable uploads", () => {
           }
         };
       },
-      async publishChunk(input) {
+      async publishChunk(input, persist) {
         const operation = chunks.get(input.assemblyOperationId);
         if (!operation) throw new Error("private_upload_operation_unavailable");
         const existing = operation.get(input.index);
@@ -517,11 +765,12 @@ integration("durable System Archive jobs and resumable uploads", () => {
           bytes: Buffer.from(input.bytes),
           sha256: input.sha256
         });
-        return {
-          async rollback() {
-            if (created) operation.delete(input.index);
-          }
-        };
+        try {
+          return await persist();
+        } catch (error) {
+          if (created) operation.delete(input.index);
+          throw error;
+        }
       },
       async assemble(input) {
         const operation = chunks.get(input.assembly.filesystemOperationId);
@@ -627,6 +876,84 @@ integration("durable System Archive jobs and resumable uploads", () => {
       receivedBytes: 12
     });
   });
+
+  async function verifyProductionPrivateUploadRecovery(): Promise<void> {
+      const root = await mkdtemp(join(tmpdir(), "infinitequest-system-upload-production-"));
+      const archiveRoot = join(root, "archive");
+      const assetRoot = join(root, "assets");
+      await mkdir(archiveRoot, { recursive: true });
+      await mkdir(assetRoot, { recursive: true });
+      const archive = await emptySystemArchive(owner.ownerUserId);
+      const compositionOptions = {
+        pool,
+        archiveRoot,
+        capacity: { availableBytes: async () => ({ staging: 10_000_000, assetRoot: 10_000_000 }) },
+        limits: {
+          maxCompressedBytes: 10_000_000,
+          maxUncompressedBytes: 20_000_000,
+          maxEntries: 100,
+          maxManifestBytes: 1_000_000,
+          maxJsonEntryBytes: 2_000_000,
+          maxExpansionRatio: 100,
+          maxOriginalImageBytes: 2_000_000,
+        },
+        destinationApplicationVersion: "0.1.0",
+        uploadTtlSeconds: 3_600,
+        previewTtlSeconds: 1_800,
+        chunkBytes: archive.byteLength,
+        maximumUploadBytes: 10_000_000,
+        leaseOwner: "system-archive-production-restart-test",
+        leaseSeconds: 300,
+        allowUnknownFreeSpace: false,
+      } as const;
+      let firstStorage: Awaited<ReturnType<typeof createAssetImportStorageComposition>> | undefined;
+      let secondStorage: Awaited<ReturnType<typeof createAssetImportStorageComposition>> | undefined;
+      try {
+        firstStorage = await createAssetImportStorageComposition(pool, { archiveRoot, assetRoot });
+        const first = createSystemArchiveImportComposition({
+          ...compositionOptions,
+          storage: firstStorage.adapter,
+        });
+        const upload = await first.uploads.createUpload(owner, {
+          byteLength: archive.byteLength,
+          sha256: hash(archive),
+        });
+        await first.uploads.putChunk(owner, {
+          uploadId: upload.id,
+          index: 0,
+          offset: 0,
+          bytes: archive,
+          sha256: hash(archive),
+        });
+        await firstStorage.close();
+        firstStorage = undefined;
+
+        secondStorage = await createAssetImportStorageComposition(pool, { archiveRoot, assetRoot });
+        const second = createSystemArchiveImportComposition({
+          ...compositionOptions,
+          storage: secondStorage.adapter,
+        });
+        await expect(second.uploads.completeUpload(owner, upload.id)).resolves.toMatchObject({
+          id: upload.id,
+          status: "completed",
+          receivedBytes: archive.byteLength,
+        });
+        await expect(second.previews.preview(owner, upload.id)).resolves.toMatchObject({
+          valid: true,
+          previewHandle: expect.any(String),
+          archiveFingerprint: expect.any(String),
+          recordsByDomain: Object.fromEntries(SYSTEM_ARCHIVE_DOMAINS.map((domain) => [domain, 0])),
+        });
+        await expect(pool.query(
+          "SELECT count(*)::int AS count FROM worlds WHERE owner_user_id=$1",
+          [owner.ownerUserId],
+        )).resolves.toMatchObject({ rows: [{ count: 0 }] });
+      } finally {
+        await firstStorage?.close().catch(() => undefined);
+        await secondStorage?.close().catch(() => undefined);
+        await rm(root, { recursive: true, force: true });
+      }
+  }
 
   it("refuses incomplete assembly and completes only against the exact durable staged input", async () => {
     const uploads = createPostgresSystemArchiveUploadRepository(pool, { uploadTtlSeconds: 86_400 });

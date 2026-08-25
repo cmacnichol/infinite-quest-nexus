@@ -162,7 +162,7 @@ async function activeWorkCounts(
        (SELECT count(*) FROM archive_previews
          WHERE status='previewed' AND expires_at > clock_timestamp()) AS archive_previews,
        (SELECT count(*) FROM system_archive_uploads
-         WHERE status IN ('created','uploading') AND expires_at > clock_timestamp()
+         WHERE status IN ('created','uploading','completed') AND expires_at > clock_timestamp()
            AND ($1::uuid IS NULL OR id <> $1::uuid)) AS system_archive_uploads,
        (SELECT count(*) FROM system_archive_jobs
          WHERE (
@@ -284,8 +284,14 @@ export function createPostgresSystemArchiveImportRepository(
            )
            SELECT upload.owner_user_id,'import','previewed',$3,upload.staged_input_id,$4::jsonb,$5::jsonb
              FROM system_archive_uploads upload
+             JOIN portable_staged_inputs staged
+               ON staged.id=upload.staged_input_id
+              AND staged.owner_user_id=upload.owner_user_id
+              AND staged.filesystem_operation_id=upload.filesystem_operation_id
             WHERE upload.id=$1 AND upload.owner_user_id=$2
               AND upload.status='completed' AND upload.staged_input_id IS NOT NULL
+              AND upload.expires_at > clock_timestamp()
+              AND staged.status='staged' AND staged.expires_at > clock_timestamp()
            RETURNING id`,
           [
             request.uploadId,

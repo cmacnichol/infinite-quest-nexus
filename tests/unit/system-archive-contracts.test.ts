@@ -189,6 +189,8 @@ describe("System Archive contracts", () => {
       archiveType: "system",
       createdAt: "2026-08-25T12:00:00.000Z",
       contentFingerprint: "a".repeat(64),
+      sourceApplication: "0.1.0",
+      sourceMigration: "0079_resumable_system_archive_uploads",
       sourceInstallationId: validPayload.sourceInstallationId,
       sourceOwnerCount: 1,
       sourceOwner: validPayload.sourceOwner,
@@ -199,12 +201,18 @@ describe("System Archive contracts", () => {
 
     expect(systemArchiveManifestSchema.parse(manifest)).toMatchObject({
       sourceInstallationId: validPayload.sourceInstallationId,
+      sourceApplication: "0.1.0",
+      sourceMigration: "0079_resumable_system_archive_uploads",
       sourceOwnerCount: 1,
       sourceOwner: validPayload.sourceOwner
     });
     expect(systemArchiveManifestSchema.safeParse({
       ...manifest,
       sourceInstallationId: undefined
+    }).success).toBe(false);
+    expect(systemArchiveManifestSchema.safeParse({
+      ...manifest,
+      sourceMigration: undefined
     }).success).toBe(false);
     expect(systemArchiveManifestSchema.safeParse({
       ...manifest,
@@ -298,7 +306,8 @@ describe("System Archive contracts", () => {
       previewHandle: "p".repeat(43),
       versions: {
         archiveFormat: 1,
-        sourceApplication: null,
+        sourceApplication: "0.1.0",
+        sourceMigration: "0079_resumable_system_archive_uploads",
         destinationApplication: "0.1.0",
         destinationMigration: "0079_resumable_system_archive_uploads"
       },
@@ -325,11 +334,31 @@ describe("System Archive contracts", () => {
     expect(systemImportPreviewViewSchema.safeParse({ ...preview, localPath: "C:/private/system.zip" }).success).toBe(false);
     expect(systemImportPreviewViewSchema.safeParse({
       ...preview,
-      versions: { ...preview.versions, sourceApplication: "0.1.0" }
+      versions: { ...preview.versions, sourceMigration: undefined }
     }).success).toBe(false);
     expect(systemImportPreviewViewSchema.safeParse({
       ...preview,
       space: { ...preview.space, staging: { ...preview.space.staging, availableBytes: null } }
+    }).success).toBe(false);
+    expect(systemImportPreviewViewSchema.safeParse({
+      ...preview,
+      space: {
+        ...preview.space,
+        staging: {
+          ...preview.space.staging,
+          availableBytes: null,
+          verified: false,
+          sufficient: true,
+          overrideUsed: false
+        }
+      }
+    }).success).toBe(false);
+    expect(systemImportPreviewViewSchema.safeParse({
+      ...preview,
+      space: {
+        ...preview.space,
+        staging: { ...preview.space.staging, overrideUsed: true }
+      }
     }).success).toBe(false);
   });
 });

@@ -95,6 +95,13 @@ function dependencies(input: Readonly<{
         displayName: "Current owner",
       };
     },
+    async readCompatibility() {
+      expect(snapshotOpen).toBe(true);
+      return {
+        sourceApplication: "0.1.0",
+        sourceMigration: "0079_resumable_system_archive_uploads",
+      };
+    },
     async *streamDomain(domain) {
       expect(snapshotOpen).toBe(true);
       if (domain === "worlds") yield world;
@@ -137,6 +144,10 @@ function dependencies(input: Readonly<{
     },
     async publish(inputValue) {
       expect(inputValue.contentFingerprint).toMatch(/^[a-f0-9]{64}$/u);
+      expect(inputValue.manifest).toMatchObject({
+        sourceApplication: "0.1.0",
+        sourceMigration: "0079_resumable_system_archive_uploads",
+      });
       events.push("publish");
       if (input.checkCancellationInsidePublish && await inputValue.cancellationRequested()) {
         events.push("publish-cancelled-before-finalization");

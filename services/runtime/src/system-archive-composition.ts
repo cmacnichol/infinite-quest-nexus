@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
+import { once } from "node:events";
 import { Readable } from "node:stream";
 import sharp from "sharp";
+import type { Metadata as SharpMetadata } from "sharp";
 import {
   SYSTEM_ARCHIVE_DOMAINS,
   canonicalArchiveJson,
@@ -33,24 +35,31 @@ import {
   createPostgresSystemArchiveExportRepository,
 } from "../../../packages/database/src/system-archive-export-repository.js";
 import type { SystemArchiveImportRepository } from "../../../packages/database/src/system-archive-import-repository.js";
+import { createPostgresSystemArchiveImportRepository } from "../../../packages/database/src/system-archive-import-repository.js";
 import type {
   SystemArchiveUploadAssembly,
   SystemArchiveUploadRepository,
 } from "../../../packages/database/src/system-archive-upload-repository.js";
+import { createPostgresSystemArchiveUploadRepository } from "../../../packages/database/src/system-archive-upload-repository.js";
+import { createPostgresSystemArchivePrivateStorageRepository } from "../../../packages/database/src/system-archive-private-storage-repository.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { detectImageMimeType } from "../../../packages/domain/src/image-media.js";
 import { sha256 as legacySha256 } from "../../../packages/domain/src/text.js";
 import {
   ArchiveError,
+  consumeVerifiedContainerEntry,
   createArchiveArtifactSource,
   inspectArchiveContainer,
+  rehydratePersistedAnchoredStagedArchive,
   readVerifiedContainerEntry,
+  releaseAnchoredStagedArchive,
   type ArchiveArtifactEntry,
   type ArchiveLimits,
   type StagedArchive,
 } from "../../api/src/archive-io.js";
 import type { ApiAssetComposition } from "./api-asset-composition.js";
 import type { SecureFilesystemAdapter } from "./secure-filesystem-adapter.js";
+import { SystemArchivePreviewIndex } from "./system-archive-preview-index.js";
 
 export type SystemArchiveStagedContent = Readonly<{
   byteLength: number;
@@ -130,6 +139,8 @@ async function collectStaged(
 
 export type SystemArchiveInspection = Readonly<{
   formatVersion: 1;
+  sourceApplication: string;
+  sourceMigration: string;
   archiveFingerprint: string;
   sourceInstallationId: string;
   sourceOwnerId: string;
@@ -142,8 +153,6 @@ export type SystemArchiveInspection = Readonly<{
   normalization: readonly string[];
   rebuilds: readonly string[];
 }>;
-
-type RecordsByDomain = Record<SystemArchiveDomain, SystemRecordEnvelope[]>;
 
 function importFailure(code: ArchiveErrorCode, message: string): ArchiveError {
   return new ArchiveError(code, message);
@@ -164,124 +173,99 @@ function parseJson(bytes: Buffer, label: string): unknown {
   }
 }
 
-function requireSystemRelationship(condition: boolean): void {
-  if (!condition) {
-    throw importFailure("archive-world-mismatch", "System Archive logical relationships are inconsistent.");
+const MAX_SYSTEM_RECORD_BYTES = 256 * 1024 * 1024;
+
+async function consumeSystemRecordShard(
+  source: AsyncIterable<Uint8Array>,
+  domain: SystemArchiveDomain,
+  index: SystemArchivePreviewIndex,
+  assetIds: ReadonlySet<string>,
+): Promise<void> {
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let pending = "";
+  let pendingBytes = 0;
+  const append = (value: string) => {
+    pendingBytes += Buffer.byteLength(value, "utf8");
+    if (pendingBytes > MAX_SYSTEM_RECORD_BYTES) {
+      throw importFailure("archive-limit-exceeded", "A System Archive logical record exceeds its bounded size.");
+    }
+    pending += value;
+  };
+  const acceptLine = () => {
+    if (!pending) throw importFailure("archive-json-invalid", "System Archive NDJSON contains an empty record.");
+    let raw: unknown;
+    try {
+      raw = JSON.parse(pending) as unknown;
+    } catch (error) {
+      const failure = importFailure("archive-json-invalid", "System Archive record is not valid JSON.");
+      failure.cause = error;
+      throw failure;
+    }
+    const parsed = systemRecordEnvelopeSchema.safeParse(raw);
+    if (!parsed.success || parsed.data.domain !== domain || parsed.data.sourceId !== parsed.data.record.sourceId) {
+      throw importFailure("archive-json-invalid", "System Archive record does not match its shard contract.");
+    }
+    index.add(parsed.data, assetIds);
+    pending = "";
+    pendingBytes = 0;
+  };
+
+  try {
+    for await (const chunk of source) {
+      const text = decoder.decode(chunk, { stream: true });
+      let start = 0;
+      for (let newline = text.indexOf("\n", start); newline !== -1; newline = text.indexOf("\n", start)) {
+        append(text.slice(start, newline));
+        acceptLine();
+        start = newline + 1;
+      }
+      append(text.slice(start));
+    }
+    append(decoder.decode());
+  } catch (error) {
+    if (error instanceof ArchiveError) throw error;
+    const failure = importFailure("archive-json-invalid", "System Archive NDJSON is not valid UTF-8.");
+    failure.cause = error;
+    throw failure;
+  }
+  if (pendingBytes !== 0) {
+    throw importFailure("archive-json-invalid", "System Archive NDJSON is truncated.");
   }
 }
 
-function validateRecordRelationships(
-  records: RecordsByDomain,
-  assets: readonly ArchiveAssetRecord[],
-): void {
-  const ids = <Domain extends SystemArchiveDomain>(domain: Domain) =>
-    new Set(records[domain].map((envelope) => envelope.sourceId));
-  const worlds = ids("worlds");
-  const worldVersions = ids("world-versions");
-  const campaigns = ids("campaigns");
-  const turns = ids("turns");
-  const assetIds = new Set(assets.map((asset) => asset.sourceAssetId));
-  const worldVersionParents = new Map(
-    records["world-versions"].map((envelope) => {
-      const record = envelope.record as Extract<SystemRecordEnvelope, { domain: "world-versions" }>["record"];
-      return [envelope.sourceId, record.worldId] as const;
-    }),
-  );
-  const campaignParents = new Map(
-    records.campaigns.map((envelope) => {
-      const record = envelope.record as Extract<SystemRecordEnvelope, { domain: "campaigns" }>["record"];
-      return [envelope.sourceId, record.worldVersionId] as const;
-    }),
-  );
-  const turnParents = new Map(
-    records.turns.map((envelope) => {
-      const record = envelope.record as Extract<SystemRecordEnvelope, { domain: "turns" }>["record"];
-      return [envelope.sourceId, record.campaignId] as const;
-    }),
-  );
-
-  for (const envelope of records["world-versions"]) {
-    const record = envelope.record as Extract<SystemRecordEnvelope, { domain: "world-versions" }>["record"];
-    requireSystemRelationship(worlds.has(record.worldId));
-    for (const binding of record.content.assets) requireSystemRelationship(assetIds.has(binding.assetId));
-  }
-  for (const envelope of records["world-drafts"]) {
-    const record = envelope.record as Extract<SystemRecordEnvelope, { domain: "world-drafts" }>["record"];
-    requireSystemRelationship(worlds.has(record.worldId));
-    requireSystemRelationship(record.basedOnWorldVersionId === null || worldVersions.has(record.basedOnWorldVersionId));
-    for (const binding of record.content.assets) requireSystemRelationship(assetIds.has(binding.assetId));
-  }
-  for (const envelope of records.campaigns) {
-    const record = envelope.record as Extract<SystemRecordEnvelope, { domain: "campaigns" }>["record"];
-    requireSystemRelationship(worldVersions.has(record.worldVersionId));
-  }
-  for (const envelope of records.turns) {
-    const record = envelope.record as Extract<SystemRecordEnvelope, { domain: "turns" }>["record"];
-    requireSystemRelationship(campaigns.has(record.campaignId));
-  }
-  for (const envelope of records["turn-corrections"]) {
-    const record = envelope.record as Extract<SystemRecordEnvelope, { domain: "turn-corrections" }>["record"];
-    requireSystemRelationship(turns.has(record.turnId));
-  }
-  for (const domain of ["campaign-state", "campaign-history", "canonical-facts", "chronicle"] as const) {
-    for (const envelope of records[domain]) {
-      const record = envelope.record as { campaignId: string };
-      requireSystemRelationship(campaigns.has(record.campaignId));
+async function inspectOriginalStream(source: AsyncIterable<Uint8Array>): Promise<Readonly<{
+  legacyHash: string;
+  signature: Buffer;
+}>> {
+  const legacy = createHash("sha256");
+  let carry = Buffer.alloc(0);
+  let signature = Buffer.alloc(0);
+  for await (const chunk of source) {
+    const value = Buffer.from(chunk);
+    if (signature.byteLength < 16) {
+      signature = Buffer.concat([signature, value.subarray(0, 16 - signature.byteLength)]);
     }
+    const combined = carry.byteLength === 0 ? value : Buffer.concat([carry, value]);
+    const completeBytes = combined.byteLength - (combined.byteLength % 3);
+    if (completeBytes > 0) legacy.update(combined.subarray(0, completeBytes).toString("base64"));
+    carry = Buffer.from(combined.subarray(completeBytes));
   }
-  for (const envelope of records.illustrations) {
-    const record = envelope.record as Extract<SystemRecordEnvelope, { domain: "illustrations" }>["record"];
-    requireSystemRelationship(campaigns.has(record.campaignId));
-    requireSystemRelationship(record.turnId === null || (
-      turns.has(record.turnId) && turnParents.get(record.turnId) === record.campaignId
-    ));
-    requireSystemRelationship(assetIds.has(record.assetId));
-  }
-  for (const domain of ["cost-events", "activity-events"] as const) {
-    for (const envelope of records[domain]) {
-      const record = envelope.record as { campaignId: string | null };
-      requireSystemRelationship(record.campaignId === null || campaigns.has(record.campaignId));
-    }
-  }
+  if (carry.byteLength > 0) legacy.update(carry.toString("base64"));
+  return Object.freeze({ legacyHash: legacy.digest("hex"), signature });
+}
 
-  for (const asset of assets) {
-    for (const binding of asset.bindings) {
-      switch (binding.role) {
-        case "world_cover":
-          requireSystemRelationship(worlds.has(binding.worldId));
-          break;
-        case "world_version_asset":
-          requireSystemRelationship(worlds.has(binding.worldId)
-            && worldVersions.has(binding.worldVersionId)
-            && worldVersionParents.get(binding.worldVersionId) === binding.worldId);
-          break;
-        case "campaign_asset":
-          requireSystemRelationship(campaigns.has(binding.campaignId));
-          break;
-        case "turn_illustration":
-        case "illustration_segment_variant":
-          requireSystemRelationship(campaigns.has(binding.campaignId)
-            && turns.has(binding.turnId)
-            && turnParents.get(binding.turnId) === binding.campaignId);
-          break;
-        case "imported_attachment":
-          requireSystemRelationship(campaigns.has(binding.campaignId)
-            && (binding.turnId === null || (
-              turns.has(binding.turnId) && turnParents.get(binding.turnId) === binding.campaignId
-            )));
-          break;
-        case "generation_context":
-          requireSystemRelationship((binding.campaignId === null || campaigns.has(binding.campaignId))
-            && (binding.worldId === null || worlds.has(binding.worldId))
-            && (binding.worldVersionId === null || worldVersions.has(binding.worldVersionId))
-            && (binding.turnId === null || turns.has(binding.turnId)));
-          break;
-      }
+async function inspectOriginalMetadata(source: AsyncIterable<Uint8Array>): Promise<SharpMetadata> {
+  const image = sharp({ failOn: "error", limitInputPixels: false });
+  const metadata = image.metadata();
+  try {
+    for await (const chunk of source) {
+      if (!image.write(Buffer.from(chunk))) await once(image, "drain");
     }
-  }
-
-  for (const [campaignId, worldVersionId] of campaignParents) {
-    requireSystemRelationship(campaigns.has(campaignId) && worldVersions.has(worldVersionId));
+    image.end();
+    return await metadata;
+  } catch (error) {
+    image.destroy();
+    throw error;
   }
 }
 
@@ -333,140 +317,159 @@ export async function inspectSystemArchiveForPreview(
     throw importFailure("archive-entry-missing", "System Archive entries do not exactly match the manifest.");
   }
 
-  const records = Object.fromEntries(
-    SYSTEM_ARCHIVE_DOMAINS.map((domain) => [domain, [] as SystemRecordEnvelope[]]),
-  ) as unknown as RecordsByDomain;
-  const recordIds = new Map<SystemArchiveDomain, Set<string>>(
-    SYSTEM_ARCHIVE_DOMAINS.map((domain) => [domain, new Set<string>()]),
-  );
+  const index = await SystemArchivePreviewIndex.create();
+  const assetIds = new Set(manifest.assets.map((asset) => asset.sourceAssetId));
   let systemPayload: ReturnType<typeof systemArchivePayloadSchema.parse> | undefined;
   let assetsPayload: ReturnType<typeof systemArchiveAssetsPayloadSchema.parse> | undefined;
-  const originalBytesByPath = new Map<string, Buffer>();
+  const originalsByPath = new Map<string, Readonly<{
+    actualHash: string;
+    legacyHash: string;
+    signature: Buffer;
+  }>>();
   const payloadHashes: string[] = [];
   const originalAssetHashes: string[] = [];
-
-  for (const entry of manifest.entries) {
-    const maximumBytes = entry.logicalType === "asset-original"
-      ? limits.maxOriginalImageBytes
-      : limits.maxJsonEntryBytes;
-    const containerEntry = container.entries.get(normalizedPath(entry.path));
-    if (!containerEntry) throw importFailure("archive-entry-missing", "A declared System Archive entry is missing.");
-    if (entry.byteLength > maximumBytes || containerEntry.uncompressedBytes > maximumBytes) {
-      throw importFailure("archive-limit-exceeded", "A System Archive entry exceeds its configured byte limit.");
-    }
-    if (containerEntry.uncompressedBytes !== entry.byteLength) {
-      throw importFailure("archive-checksum-mismatch", "A System Archive entry does not match its declared byte length.");
-    }
-    const bytes = await readVerifiedContainerEntry(container, entry.path, maximumBytes);
-    const actualHash = createHash("sha256").update(bytes).digest("hex");
-    if (bytes.byteLength !== entry.byteLength || actualHash !== entry.sha256) {
-      throw importFailure("archive-checksum-mismatch", "A System Archive entry does not match its manifest checksum.");
-    }
-    if (entry.logicalType === "asset-original") {
-      originalAssetHashes.push(actualHash);
-      originalBytesByPath.set(normalizedPath(entry.path), bytes);
-      continue;
-    }
-    payloadHashes.push(actualHash);
-
-    if (entry.path === "system.json" && entry.logicalType === "system" && entry.mediaType === "application/json") {
-      const parsed = systemArchivePayloadSchema.safeParse(parseJson(bytes, "System Archive system payload"));
-      if (!parsed.success || parsed.data.records.length !== 0) {
-        throw importFailure("archive-json-invalid", "System Archive system payload does not match the required schema.");
-      }
-      systemPayload = parsed.data;
-      continue;
-    }
-    if (entry.path === "assets/assets.json" && entry.logicalType === "assets" && entry.mediaType === "application/json") {
-      const parsed = systemArchiveAssetsPayloadSchema.safeParse(parseJson(bytes, "System Archive asset inventory"));
-      if (!parsed.success) {
-        throw importFailure("archive-json-invalid", "System Archive asset inventory does not match the required schema.");
-      }
-      assetsPayload = parsed.data;
-      continue;
-    }
-    const match = /^records\/([^/]+)\/\d{6}\.ndjson$/u.exec(entry.path);
-    if (!match || entry.logicalType !== "records" || entry.mediaType !== "application/x-ndjson"
-      || !SYSTEM_ARCHIVE_DOMAINS.includes(match[1] as SystemArchiveDomain)) {
-      throw importFailure("archive-json-invalid", "System Archive contains an unexpected logical entry.");
-    }
-    const domain = match[1] as SystemArchiveDomain;
-    let text: string;
-    try {
-      text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    } catch (error) {
-      const failure = importFailure("archive-json-invalid", "System Archive NDJSON is not valid UTF-8.");
-      failure.cause = error;
-      throw failure;
-    }
-    if (!text.endsWith("\n")) throw importFailure("archive-json-invalid", "System Archive NDJSON is truncated.");
-    for (const line of text.slice(0, -1).split("\n")) {
-      if (!line) throw importFailure("archive-json-invalid", "System Archive NDJSON contains an empty record.");
-      const parsed = systemRecordEnvelopeSchema.safeParse(parseJson(Buffer.from(line, "utf8"), "System Archive record"));
-      if (!parsed.success || parsed.data.domain !== domain || parsed.data.sourceId !== parsed.data.record.sourceId) {
-        throw importFailure("archive-json-invalid", "System Archive record does not match its shard contract.");
-      }
-      const seen = recordIds.get(domain)!;
-      if (seen.has(parsed.data.sourceId)) {
-        throw importFailure("archive-json-invalid", "System Archive contains a duplicate logical record identifier.");
-      }
-      seen.add(parsed.data.sourceId);
-      records[domain].push(parsed.data);
-    }
-  }
-
-  if (!systemPayload || !assetsPayload
-    || canonicalArchiveJson(assetsPayload.assets) !== canonicalArchiveJson(manifest.assets)
-    || systemPayload.sourceInstallationId !== manifest.sourceInstallationId
-    || systemPayload.sourceOwner.sourceId !== manifest.sourceOwner.sourceId
-    || systemPayload.sourceOwner.displayName !== manifest.sourceOwner.displayName) {
-    throw importFailure("archive-world-mismatch", "System Archive manifest and logical payloads are inconsistent.");
-  }
-  const calculatedFingerprint = calculateContentFingerprint({ payloadHashes, originalAssetHashes });
-  if (calculatedFingerprint !== manifest.contentFingerprint) {
-    throw importFailure("archive-checksum-mismatch", "System Archive content fingerprint does not match its verified entries.");
-  }
-
-  const uniqueOriginals = new Set<string>();
+  let recordsByDomain: Readonly<Record<SystemArchiveDomain, number>>;
   let assetBytes = 0;
-  for (const asset of manifest.assets) {
-    const path = normalizedPath(asset.archivePath);
-    const bytes = originalBytesByPath.get(path);
-    if (!bytes) throw importFailure("archive-asset-missing", "A System Archive Original Asset is missing.");
-    const entry = manifestEntriesByPath.get(path);
-    const legacyHash = legacySha256(bytes.toString("base64"));
-    try {
-      const metadata = await sharp(bytes, { failOn: "error" }).metadata();
-      if (!entry || entry.logicalType !== "asset-original"
-        || entry.byteLength !== asset.byteLength
-        || entry.mediaType !== asset.mimeType
-        || (entry.sha256 !== asset.contentHash && legacyHash !== asset.contentHash)
-        || detectImageMimeType(bytes) !== asset.mimeType
-        || metadata.width !== asset.pixelWidth
-        || metadata.height !== asset.pixelHeight) {
-        throw importFailure("archive-asset-invalid", "A System Archive Original Asset does not match its inventory.");
+  try {
+    for (const entry of manifest.entries) {
+      const maximumBytes = entry.logicalType === "asset-original"
+        ? limits.maxOriginalImageBytes
+        : limits.maxJsonEntryBytes;
+      const containerEntry = container.entries.get(normalizedPath(entry.path));
+      if (!containerEntry) throw importFailure("archive-entry-missing", "A declared System Archive entry is missing.");
+      if (entry.byteLength > maximumBytes || containerEntry.uncompressedBytes > maximumBytes) {
+        throw importFailure("archive-limit-exceeded", "A System Archive entry exceeds its configured byte limit.");
       }
-    } catch (error) {
-      if (error instanceof ArchiveError) throw error;
-      const failure = importFailure("archive-asset-invalid", "A System Archive Original Asset failed image validation.");
-      failure.cause = error;
-      throw failure;
-    }
-    if (!uniqueOriginals.has(path)) {
-      uniqueOriginals.add(path);
-      assetBytes += bytes.byteLength;
-    }
-  }
-  if (uniqueOriginals.size !== originalBytesByPath.size) {
-    throw importFailure("archive-asset-invalid", "System Archive contains an uninventoried Original Asset.");
-  }
-  validateRecordRelationships(records, manifest.assets);
+      if (containerEntry.uncompressedBytes !== entry.byteLength) {
+        throw importFailure("archive-checksum-mismatch", "A System Archive entry does not match its declared byte length.");
+      }
 
-  const recordsByDomain = Object.freeze(Object.fromEntries(
-    SYSTEM_ARCHIVE_DOMAINS.map((domain) => [domain, records[domain].length]),
-  ) as Record<SystemArchiveDomain, number>);
+      if (entry.logicalType === "asset-original") {
+        const streamed = await consumeVerifiedContainerEntry(
+          container,
+          entry.path,
+          maximumBytes,
+          inspectOriginalStream,
+        );
+        if (streamed.byteLength !== entry.byteLength || streamed.sha256 !== entry.sha256) {
+          throw importFailure("archive-checksum-mismatch", "A System Archive entry does not match its manifest checksum.");
+        }
+        originalAssetHashes.push(streamed.sha256);
+        originalsByPath.set(normalizedPath(entry.path), Object.freeze({
+          actualHash: streamed.sha256,
+          legacyHash: streamed.value.legacyHash,
+          signature: streamed.value.signature,
+        }));
+        continue;
+      }
+
+      if (entry.path === "system.json" && entry.logicalType === "system" && entry.mediaType === "application/json") {
+        const bytes = await readVerifiedContainerEntry(container, entry.path, maximumBytes);
+        const actualHash = createHash("sha256").update(bytes).digest("hex");
+        if (bytes.byteLength !== entry.byteLength || actualHash !== entry.sha256) {
+          throw importFailure("archive-checksum-mismatch", "A System Archive entry does not match its manifest checksum.");
+        }
+        payloadHashes.push(actualHash);
+        const parsed = systemArchivePayloadSchema.safeParse(parseJson(bytes, "System Archive system payload"));
+        if (!parsed.success || parsed.data.records.length !== 0) {
+          throw importFailure("archive-json-invalid", "System Archive system payload does not match the required schema.");
+        }
+        systemPayload = parsed.data;
+        continue;
+      }
+      if (entry.path === "assets/assets.json" && entry.logicalType === "assets" && entry.mediaType === "application/json") {
+        const bytes = await readVerifiedContainerEntry(container, entry.path, maximumBytes);
+        const actualHash = createHash("sha256").update(bytes).digest("hex");
+        if (bytes.byteLength !== entry.byteLength || actualHash !== entry.sha256) {
+          throw importFailure("archive-checksum-mismatch", "A System Archive entry does not match its manifest checksum.");
+        }
+        payloadHashes.push(actualHash);
+        const parsed = systemArchiveAssetsPayloadSchema.safeParse(parseJson(bytes, "System Archive asset inventory"));
+        if (!parsed.success) {
+          throw importFailure("archive-json-invalid", "System Archive asset inventory does not match the required schema.");
+        }
+        assetsPayload = parsed.data;
+        continue;
+      }
+      const match = /^records\/([^/]+)\/\d{6}\.ndjson$/u.exec(entry.path);
+      if (!match || entry.logicalType !== "records" || entry.mediaType !== "application/x-ndjson"
+        || !SYSTEM_ARCHIVE_DOMAINS.includes(match[1] as SystemArchiveDomain)) {
+        throw importFailure("archive-json-invalid", "System Archive contains an unexpected logical entry.");
+      }
+      const domain = match[1] as SystemArchiveDomain;
+      const streamed = await consumeVerifiedContainerEntry(
+        container,
+        entry.path,
+        maximumBytes,
+        (source) => consumeSystemRecordShard(source, domain, index, assetIds),
+      );
+      if (streamed.byteLength !== entry.byteLength || streamed.sha256 !== entry.sha256) {
+        throw importFailure("archive-checksum-mismatch", "A System Archive entry does not match its manifest checksum.");
+      }
+      payloadHashes.push(streamed.sha256);
+    }
+
+    if (!systemPayload || !assetsPayload
+      || canonicalArchiveJson(assetsPayload.assets) !== canonicalArchiveJson(manifest.assets)
+      || systemPayload.sourceInstallationId !== manifest.sourceInstallationId
+      || systemPayload.sourceOwner.sourceId !== manifest.sourceOwner.sourceId
+      || systemPayload.sourceOwner.displayName !== manifest.sourceOwner.displayName) {
+      throw importFailure("archive-world-mismatch", "System Archive manifest and logical payloads are inconsistent.");
+    }
+    const calculatedFingerprint = calculateContentFingerprint({ payloadHashes, originalAssetHashes });
+    if (calculatedFingerprint !== manifest.contentFingerprint) {
+      throw importFailure("archive-checksum-mismatch", "System Archive content fingerprint does not match its verified entries.");
+    }
+
+    const uniqueOriginals = new Set<string>();
+    for (const asset of manifest.assets) {
+      const path = normalizedPath(asset.archivePath);
+      const streamed = originalsByPath.get(path);
+      if (!streamed) throw importFailure("archive-asset-missing", "A System Archive Original Asset is missing.");
+      const entry = manifestEntriesByPath.get(path);
+      try {
+        if (!entry || entry.logicalType !== "asset-original"
+          || entry.byteLength !== asset.byteLength
+          || entry.mediaType !== asset.mimeType
+          || (streamed.actualHash !== asset.contentHash && streamed.legacyHash !== asset.contentHash)
+          || detectImageMimeType(streamed.signature) !== asset.mimeType) {
+          throw importFailure("archive-asset-invalid", "A System Archive Original Asset does not match its inventory.");
+        }
+        if (!uniqueOriginals.has(path)) {
+          const metadata = await consumeVerifiedContainerEntry(
+            container,
+            entry.path,
+            limits.maxOriginalImageBytes,
+            inspectOriginalMetadata,
+          );
+          if (metadata.sha256 !== entry.sha256
+            || metadata.value.width !== asset.pixelWidth
+            || metadata.value.height !== asset.pixelHeight) {
+            throw importFailure("archive-asset-invalid", "A System Archive Original Asset does not match its inventory.");
+          }
+          uniqueOriginals.add(path);
+          assetBytes += entry.byteLength;
+        }
+      } catch (error) {
+        if (error instanceof ArchiveError) throw error;
+        const failure = importFailure("archive-asset-invalid", "A System Archive Original Asset failed image validation.");
+        failure.cause = error;
+        throw failure;
+      }
+    }
+    if (uniqueOriginals.size !== originalsByPath.size) {
+      throw importFailure("archive-asset-invalid", "System Archive contains an uninventoried Original Asset.");
+    }
+    index.validate(manifest.assets);
+    recordsByDomain = index.counts();
+  } finally {
+    await index.close();
+  }
+
   return Object.freeze({
     formatVersion: 1,
+    sourceApplication: manifest.sourceApplication,
+    sourceMigration: manifest.sourceMigration,
     archiveFingerprint: manifest.contentFingerprint,
     sourceInstallationId: manifest.sourceInstallationId,
     sourceOwnerId: manifest.sourceOwner.sourceId,
@@ -474,7 +477,7 @@ export async function inspectSystemArchiveForPreview(
     recordsByDomain,
     assetCount: manifest.assets.length,
     assetBytes,
-    disabledProviderCount: records.providers.length,
+    disabledProviderCount: recordsByDomain.providers,
     invalidatedAccess: Object.freeze(["share-links", "sessions", "oidc-identities", "external-authorizations"]),
     normalization: Object.freeze(["map-source-owner-to-initial-owner", "disable-provider-profiles"]),
     rebuilds: Object.freeze(["chronicle-index", "asset-thumbnails"]),
@@ -492,14 +495,13 @@ export interface SystemArchiveUploadStoragePort {
   }>>;
   publishChunk(input: Readonly<{
     ownerUserId: string;
+    uploadId: string;
     assemblyOperationId: string;
     index: number;
     offset: number;
     bytes: Uint8Array;
     sha256: string;
-  }>): Promise<Readonly<{
-    rollback(): Promise<void>;
-  }>>;
+  }>, persist: () => Promise<SystemArchiveUploadView>): Promise<SystemArchiveUploadView>;
   assemble(input: Readonly<{
     ownerUserId: string;
     assembly: SystemArchiveUploadAssembly;
@@ -595,15 +597,15 @@ export function createSystemArchiveUploadService(
         || request.offset + request.bytes.byteLength > session.byteLength) {
         throw Object.assign(new Error("System Archive upload chunk range is invalid."), { statusCode: 400 });
       }
-      const publication = await options.storage.publishChunk({
+      return options.storage.publishChunk({
         ownerUserId: owner.ownerUserId,
+        uploadId: request.uploadId,
         assemblyOperationId: session.filesystemOperationId,
         index: request.index,
         offset: request.offset,
         bytes: request.bytes,
         sha256: request.sha256,
-      });
-      try {
+      }, async () => {
         if (session.status !== "created" && session.status !== "uploading") {
           throw Object.assign(new Error("System Archive upload cannot accept another chunk."), { statusCode: 409 });
         }
@@ -614,10 +616,7 @@ export function createSystemArchiveUploadService(
           bytes: request.bytes.byteLength,
           sha256: request.sha256,
         });
-      } catch (error) {
-        await publication.rollback().catch(() => undefined);
-        throw error;
-      }
+      });
     },
 
     async completeUpload(owner, uploadId) {
@@ -639,6 +638,61 @@ export function createSystemArchiveUploadService(
       }
     },
   });
+}
+
+export function createPrivateSystemArchiveUploadStorage(
+  storage: Pick<SecureFilesystemAdapter,
+    "prepareSystemArchiveUpload"
+    | "publishSystemArchiveUploadChunk"
+    | "assembleSystemArchiveUpload">,
+  options: Readonly<{
+    leaseOwner: string;
+    leaseSeconds: number;
+    uploadTtlSeconds: number;
+    now?: () => Date;
+  }>,
+): SystemArchiveUploadStoragePort {
+  if (!options.leaseOwner.trim()
+    || !Number.isSafeInteger(options.leaseSeconds) || options.leaseSeconds < 1
+    || !Number.isSafeInteger(options.uploadTtlSeconds)
+    || options.uploadTtlSeconds < options.leaseSeconds) {
+    throw new Error("system_archive_upload_storage_options_invalid");
+  }
+  const adapter: SystemArchiveUploadStoragePort = {
+    prepare(input) {
+      const issuedAt = (options.now ?? (() => new Date()))();
+      return storage.prepareSystemArchiveUpload({
+        ownerUserId: input.ownerUserId,
+        operationScopeId: randomUUID(),
+        leaseOwner: options.leaseOwner,
+        expiresAt: new Date(issuedAt.getTime() + options.uploadTtlSeconds * 1_000).toISOString(),
+      });
+    },
+    publishChunk(input, persist) {
+      return storage.publishSystemArchiveUploadChunk({
+        ownerUserId: input.ownerUserId,
+        uploadId: input.uploadId,
+        filesystemOperationId: input.assemblyOperationId,
+        leaseOwner: options.leaseOwner,
+        leaseSeconds: options.leaseSeconds,
+        offset: input.offset,
+        bytes: input.bytes,
+        sha256: input.sha256,
+      }, persist);
+    },
+    assemble(input) {
+      return storage.assembleSystemArchiveUpload({
+        ownerUserId: input.ownerUserId,
+        uploadId: input.assembly.uploadId,
+        filesystemOperationId: input.assembly.filesystemOperationId,
+        leaseOwner: options.leaseOwner,
+        leaseSeconds: options.leaseSeconds,
+        byteLength: input.assembly.byteLength,
+        sha256: input.assembly.sha256,
+      });
+    },
+  };
+  return Object.freeze(adapter);
 }
 
 export interface SystemArchivePreviewSourcePort {
@@ -696,6 +750,16 @@ function unknownCapacityWarning(
     : `${label} free space was not measurable; preview cannot be authorized without an operator override.`];
 }
 
+function supportsSourceMigration(source: string, destination: string): boolean {
+  const sourceMatch = /^(\d{4})_/u.exec(source);
+  const destinationMatch = /^(\d{4})_/u.exec(destination);
+  if (!sourceMatch || !destinationMatch) return false;
+  const sourceOrdinal = Number(sourceMatch[1]);
+  const destinationOrdinal = Number(destinationMatch[1]);
+  return sourceOrdinal < destinationOrdinal
+    || (sourceOrdinal === destinationOrdinal && source === destination);
+}
+
 /**
  * Creates a short-lived opaque preview only after bounded server-side archive
  * inspection, exact destination fingerprinting, and capacity preflight. An
@@ -732,6 +796,10 @@ export function createSystemArchiveImportPreviewService(
         options.allowUnknownFreeSpace,
       );
       const errors: ArchiveErrorCode[] = [];
+      if (!supportsSourceMigration(
+        inspected.inspection.sourceMigration,
+        destination.latestMigration,
+      )) errors.push("archive-version-unsupported");
       if (!destination.destinationEmpty) errors.push("archive-destination-not-empty");
       if (!staging.sufficient || !assetRoot.sufficient) errors.push("archive-storage-insufficient");
       const warnings = [
@@ -741,7 +809,8 @@ export function createSystemArchiveImportPreviewService(
       const safeProjection = {
         versions: {
           archiveFormat: inspected.inspection.formatVersion,
-          sourceApplication: null,
+          sourceApplication: inspected.inspection.sourceApplication,
+          sourceMigration: inspected.inspection.sourceMigration,
           destinationApplication: options.destinationApplicationVersion,
           destinationMigration: destination.latestMigration,
         },
@@ -798,6 +867,107 @@ export function createSystemArchiveImportPreviewService(
         expiresAt: authority.expiresAt,
       });
     },
+  });
+}
+
+export function createPrivateSystemArchivePreviewSource(
+  options: Readonly<{
+    archiveRoot: string;
+    maximumCompressedBytes: number;
+    repository: ReturnType<typeof createPostgresSystemArchivePrivateStorageRepository>;
+  }>,
+): SystemArchivePreviewSourcePort {
+  const source: SystemArchivePreviewSourcePort = {
+    async withCompletedUpload(owner, uploadId, inspect) {
+      const authority = await options.repository.completedUpload(owner.ownerUserId, uploadId);
+      if (!authority) {
+        throw Object.assign(new Error("System Archive completed upload was not found."), { statusCode: 404 });
+      }
+      const change = authority.descriptor.identity.changeToken.split(":");
+      if (change.length !== 2) throw new Error("system_archive_staged_identity_invalid");
+      const staged = await rehydratePersistedAnchoredStagedArchive({
+        archiveRoot: options.archiveRoot,
+        relativePath: authority.descriptor.relativePath,
+        compressedBytes: authority.descriptor.byteLength,
+        maximumCompressedBytes: options.maximumCompressedBytes,
+        sha256: authority.descriptor.contentHash,
+        identity: {
+          device: BigInt(authority.descriptor.identity.deviceId),
+          inode: BigInt(authority.descriptor.identity.fileId),
+          size: BigInt(authority.descriptor.byteLength),
+          modifiedNanoseconds: BigInt(change[0]!),
+          changedNanoseconds: BigInt(change[1]!),
+        },
+      });
+      try {
+        return await inspect(staged);
+      } finally {
+        await releaseAnchoredStagedArchive(staged);
+      }
+    },
+  };
+  return Object.freeze(source);
+}
+
+export type SystemArchiveImportCompositionOptions = Readonly<{
+  pool: DatabasePool;
+  storage: Pick<SecureFilesystemAdapter,
+    "prepareSystemArchiveUpload"
+    | "publishSystemArchiveUploadChunk"
+    | "assembleSystemArchiveUpload">;
+  archiveRoot: string;
+  capacity: SystemArchiveCapacityPort;
+  limits: ArchiveLimits;
+  destinationApplicationVersion: string;
+  uploadTtlSeconds: number;
+  previewTtlSeconds: number;
+  chunkBytes: number;
+  maximumUploadBytes: number;
+  leaseOwner: string;
+  leaseSeconds: number;
+  allowUnknownFreeSpace: boolean;
+  now?: () => Date;
+}>;
+
+/** Production import composition only; Task 6 owns API routes and enablement. */
+export function createSystemArchiveImportComposition(
+  options: SystemArchiveImportCompositionOptions,
+): Readonly<{
+  uploads: ReturnType<typeof createSystemArchiveUploadService>;
+  previews: ReturnType<typeof createSystemArchiveImportPreviewService>;
+}> {
+  const uploadRepository = createPostgresSystemArchiveUploadRepository(options.pool, {
+    uploadTtlSeconds: options.uploadTtlSeconds,
+  });
+  const importRepository = createPostgresSystemArchiveImportRepository(options.pool, {
+    previewTtlSeconds: options.previewTtlSeconds,
+  });
+  const privateRepository = createPostgresSystemArchivePrivateStorageRepository(options.pool);
+  const storage = createPrivateSystemArchiveUploadStorage(options.storage, {
+    leaseOwner: options.leaseOwner,
+    leaseSeconds: options.leaseSeconds,
+    uploadTtlSeconds: options.uploadTtlSeconds,
+    ...(options.now === undefined ? {} : { now: options.now }),
+  });
+  return Object.freeze({
+    uploads: createSystemArchiveUploadService({
+      uploads: uploadRepository,
+      storage,
+      chunkBytes: options.chunkBytes,
+      maximumBytes: options.maximumUploadBytes,
+    }),
+    previews: createSystemArchiveImportPreviewService({
+      imports: importRepository,
+      source: createPrivateSystemArchivePreviewSource({
+        archiveRoot: options.archiveRoot,
+        maximumCompressedBytes: options.limits.maxCompressedBytes,
+        repository: privateRepository,
+      }),
+      capacity: options.capacity,
+      limits: options.limits,
+      destinationApplicationVersion: options.destinationApplicationVersion,
+      allowUnknownFreeSpace: options.allowUnknownFreeSpace,
+    }),
   });
 }
 
@@ -1141,6 +1311,8 @@ export async function createFilesystemSystemArchiveWriter(
         archiveType: "system",
         createdAt,
         contentFingerprint: input.contentFingerprint,
+        sourceApplication: input.manifest.sourceApplication,
+        sourceMigration: input.manifest.sourceMigration,
         sourceInstallationId: input.manifest.sourceInstallationId,
         sourceOwnerCount: 1,
         sourceOwner: {
@@ -1257,6 +1429,7 @@ export function createSystemArchiveOriginalAssetReader(
 
 export type SystemArchiveCompositionOptions = Readonly<{
   pool: DatabasePool;
+  applicationVersion: string;
   limits: ArchiveLimits;
   artifactTtlSeconds: number;
   originals: SystemArchiveOriginalAssetReaderPort;
@@ -1270,7 +1443,9 @@ export type SystemArchiveCompositionOptions = Readonly<{
 export function createSystemArchiveComposition(options: SystemArchiveCompositionOptions): Readonly<{
   runSystemExport(job: SystemArchiveExportJob): Promise<import("../../../packages/application/src/system-archives/ports.js").SystemArchiveExportResult>;
 }> {
-  const snapshots = createPostgresSystemArchiveExportRepository(options.pool);
+  const snapshots = createPostgresSystemArchiveExportRepository(options.pool, {
+    sourceApplicationVersion: options.applicationVersion,
+  });
   const jobs = createPostgresSystemArchiveExportJobPort(options.pool);
   return Object.freeze({
     async runSystemExport(job) {

@@ -18,7 +18,10 @@ import type {
 import type { OwnerScope } from "../../application/src/generation/types.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 
-type ExportRepositoryOptions = Readonly<{ pageSize?: number }>;
+type ExportRepositoryOptions = Readonly<{
+  pageSize?: number;
+  sourceApplicationVersion: string;
+}>;
 type EnvelopeRow = Readonly<{ sort_key: string; envelope: unknown }>;
 
 const DEFAULT_PAGE_SIZE = 500;
@@ -884,8 +887,11 @@ async function excludedOperationalWork(
 /** PostgreSQL adapter: one repeatable-read, read-only transaction per owner snapshot. */
 export function createPostgresSystemArchiveExportRepository(
   pool: DatabasePool,
-  options: ExportRepositoryOptions = {},
+  options: ExportRepositoryOptions,
 ): SystemArchiveSnapshotPort {
+  if (!options.sourceApplicationVersion.trim()) {
+    throw exportError("System Archive source application version is required.");
+  }
   const maximumPageSize = pageSize(options.pageSize);
   return {
     async withOwnerSnapshot(owner: OwnerScope, consume) {
@@ -899,12 +905,23 @@ export function createPostgresSystemArchiveExportRepository(
         );
         const ownerRow = ownerResult.rows[0];
         if (!ownerRow) throw Object.assign(new Error("System Archive owner was not found."), { statusCode: 404 });
+        const migrationResult = await client.query<{ name: string }>(
+          "SELECT name FROM schema_migrations ORDER BY run_on DESC,name DESC LIMIT 1",
+        );
+        const sourceMigration = migrationResult.rows[0]?.name;
+        if (!sourceMigration) throw exportError("System Archive source migration watermark is unavailable.");
         const snapshot: SystemArchiveSnapshot = Object.freeze({
           async readOwner() {
             return Object.freeze({
               sourceId: ownerRow.id,
               sourceInstallationId: ownerRow.id,
               displayName: ownerRow.display_name,
+            });
+          },
+          async readCompatibility() {
+            return Object.freeze({
+              sourceApplication: options.sourceApplicationVersion,
+              sourceMigration,
             });
           },
           streamDomain(domain: SystemArchiveDomain, afterId?: string) {

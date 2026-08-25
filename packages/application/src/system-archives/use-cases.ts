@@ -123,6 +123,7 @@ export async function runSystemExport(
       { ownerUserId: job.ownerUserId },
       async (snapshot) => {
         const owner = await snapshot.readOwner();
+        const compatibility = await snapshot.readCompatibility();
         if (owner.sourceId !== job.ownerUserId) {
           throw Object.assign(new Error("System Archive snapshot owner changed."), {
             code: "archive-export-inconsistent",
@@ -146,7 +147,7 @@ export async function runSystemExport(
         for await (const asset of snapshot.listOriginalAssets()) assets.push(requireAsset(asset));
         assets.sort((left, right) => left.record.sourceAssetId.localeCompare(right.record.sourceAssetId));
         const excludedOperationalWork = await snapshot.summarizeExcludedOperationalWork();
-        return { owner, payloads, domainCounts, assets, excludedOperationalWork };
+        return { owner, compatibility, payloads, domainCounts, assets, excludedOperationalWork };
       },
     );
 
@@ -190,6 +191,8 @@ export async function runSystemExport(
 
     const publication = await dependencies.writer.publish({
       manifest: {
+        sourceApplication: captured.compatibility.sourceApplication,
+        sourceMigration: captured.compatibility.sourceMigration,
         sourceInstallationId: captured.owner.sourceInstallationId,
         sourceOwner: captured.owner,
         sourceOwnerCount: 1,

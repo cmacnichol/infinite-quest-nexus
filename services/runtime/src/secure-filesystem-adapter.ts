@@ -69,6 +69,7 @@ import type {
   PortablePreviewHandle,
   PortableStagedInput
 } from "../../../packages/application/src/imports/types.js";
+import type { SystemArchivePrivateStorageRepositoryPort } from "../../../packages/application/src/system-archives/private-storage.js";
 
 const READ_FLAGS = filesystemConstants.O_RDONLY | filesystemConstants.O_NOFOLLOW;
 const DIRECTORY_FLAGS = READ_FLAGS | filesystemConstants.O_DIRECTORY;
@@ -76,6 +77,7 @@ const CREATE_FLAGS = filesystemConstants.O_WRONLY
   | filesystemConstants.O_CREAT
   | filesystemConstants.O_EXCL
   | filesystemConstants.O_NOFOLLOW;
+const UPDATE_FLAGS = filesystemConstants.O_RDWR | filesystemConstants.O_NOFOLLOW;
 // Do not begin a read at the database/reaper boundary. The claim is the last
 // durable authority known locally, so a stalled renewal must fail closed.
 const PORTABLE_READ_LEASE_SAFETY_MARGIN_MILLISECONDS = 50;
@@ -99,6 +101,7 @@ export type SecureFilesystemAdapterOptions = Readonly<{
   atomicPortable?: PrivateAtomicPortableIssuancePort;
   prewrite?: PrivatePrewriteNodeRepositoryPort;
   expiry?: PrivatePortableExpiryRecoveryPort;
+  systemArchiveStorage?: SystemArchivePrivateStorageRepositoryPort;
   /** Private recovery seam used to coordinate an in-process filesystem drain. */
   recoveryHooks?: Readonly<{
     beforePhysicalDelete?(input: Readonly<{
@@ -142,6 +145,39 @@ export type SecureFilesystemAdapter = Readonly<{
     claim: import("../../../packages/application/src/assets/private-storage-lifecycle.js").DurableFilesystemRecoveryClaim;
     byteLength: number;
     contentHash: string;
+  }>>;
+  prepareSystemArchiveUpload(input: Readonly<{
+    ownerUserId: string;
+    operationScopeId: string;
+    leaseOwner: string;
+    expiresAt: string;
+  }>): Promise<Readonly<{
+    filesystemOperationId: string;
+    rollback(): Promise<void>;
+  }>>;
+  publishSystemArchiveUploadChunk<Result>(input: Readonly<{
+    ownerUserId: string;
+    uploadId: string;
+    filesystemOperationId: string;
+    leaseOwner: string;
+    leaseSeconds: number;
+    offset: number;
+    bytes: Uint8Array;
+    sha256: string;
+  }>, persist: () => Promise<Result>): Promise<Result>;
+  assembleSystemArchiveUpload(input: Readonly<{
+    ownerUserId: string;
+    uploadId: string;
+    filesystemOperationId: string;
+    leaseOwner: string;
+    leaseSeconds: number;
+    byteLength: number;
+    sha256: string;
+  }>): Promise<Readonly<{
+    stagedInputId: string;
+    byteLength: number;
+    sha256: string;
+    rollback(): Promise<void>;
   }>>;
   discardPortableStagedInput(input: Readonly<{
     owner: ImportOwnerScope;
@@ -1320,6 +1356,232 @@ export async function createSecureFilesystemAdapter(
     }
   });
 
+  const prepareSystemArchiveUpload: SecureFilesystemAdapter["prepareSystemArchiveUpload"] = async (input) => {
+    requireAdapterOpen();
+    if (!options.journal || !options.prewrite) {
+      throw new Error("system_archive_storage_repository_unavailable");
+    }
+    const reserved = await options.journal.reserve(
+      {
+        resourceKind: "portable",
+        ownerUserId: input.ownerUserId,
+        operationScopeId: input.operationScopeId,
+      },
+      { purpose: "portable_staging", leaseOwner: input.leaseOwner, expiresAt: input.expiresAt },
+    );
+    const operation = reserved.operation;
+    if (operation.resourceKind !== "portable"
+      || operation.ownerUserId !== input.ownerUserId
+      || operation.operationScopeId !== input.operationScopeId
+      || operation.purpose !== "portable_staging"
+      || operation.expiresAt !== input.expiresAt) {
+      throw new Error("system_archive_storage_reservation_mismatch");
+    }
+    const relativePath = `staging/${operation.operationId}.pending`;
+    let handle: FileHandle | undefined;
+    let identity: Readonly<{ deviceId: string; fileId: string }> | undefined;
+    let identityPersisted = false;
+    let rollbackPromise: Promise<void> | undefined;
+    const rollback = (): Promise<void> => {
+      rollbackPromise ??= (async () => {
+        const cleanup = await options.journal!.markCleanup(operation, reserved.claim, { cause: "rollback" });
+        if (cleanup.outcome !== "cleanup_pending" || !identity || !identityPersisted) return;
+        await identitySafeDeletePrewrite(archiveRoot, relativePath, identity);
+        const completed = await options.journal!.completeCleanup(operation, reserved.claim);
+        if (!["cleaned", "already_cleaned"].includes(completed.outcome)) {
+          throw new Error(`system_archive_storage_cleanup_${completed.outcome}`);
+        }
+      })();
+      return rollbackPromise;
+    };
+    try {
+      await ensureAnchoredDirectory(archiveRoot, "staging");
+      await options.prewrite.recordPrewriteTarget(
+        bindPrivatePrewriteTargetAuthority(operation, relativePath),
+      );
+      handle = await openAnchored(archiveRoot, relativePath, CREATE_FLAGS, 0o600);
+      const created = statIdentity(await handle.stat({ bigint: true }) as BigIntStat);
+      identity = Object.freeze({ deviceId: created.deviceId, fileId: created.fileId });
+      await options.prewrite.recordPrewriteNode(
+        bindPrivatePrewriteNodeAuthority(operation, relativePath, identity),
+      );
+      identityPersisted = true;
+      await handle.sync();
+      await handle.close();
+      handle = undefined;
+      return Object.freeze({ filesystemOperationId: operation.operationId, rollback });
+    } catch (error) {
+      await handle?.close().catch(() => undefined);
+      await rollback().catch(() => undefined);
+      throw error;
+    }
+  };
+
+  const publishSystemArchiveUploadChunk: SecureFilesystemAdapter["publishSystemArchiveUploadChunk"] = async (
+    input,
+    persist,
+  ) => {
+    requireAdapterOpen();
+    if (!options.systemArchiveStorage) throw new Error("system_archive_storage_repository_unavailable");
+    if (!Number.isSafeInteger(input.offset) || input.offset < 0
+      || input.bytes.byteLength < 1
+      || createHash("sha256").update(input.bytes).digest("hex") !== input.sha256) {
+      throw new Error("system_archive_chunk_invalid");
+    }
+    return options.systemArchiveStorage.withUploadLock({
+      ownerUserId: input.ownerUserId,
+      uploadId: input.uploadId,
+      filesystemOperationId: input.filesystemOperationId,
+      leaseOwner: input.leaseOwner,
+      leaseSeconds: input.leaseSeconds,
+    }, async (authority) => {
+      if (authority.state !== "assembling") throw new Error("system_archive_upload_already_staged");
+      const handle = await openAnchored(archiveRoot, authority.relativePath, UPDATE_FLAGS);
+      let originalSize = 0;
+      let previous = Buffer.alloc(0);
+      try {
+        const before = await handle.stat({ bigint: true }) as BigIntStat;
+        const beforeIdentity = statIdentity(before);
+        if (!before.isFile()
+          || beforeIdentity.deviceId !== authority.identity.deviceId
+          || beforeIdentity.fileId !== authority.identity.fileId) {
+          throw new Error("system_archive_upload_identity_mismatch");
+        }
+        originalSize = beforeIdentity.byteLength;
+        const overlap = Math.max(0, Math.min(input.bytes.byteLength, originalSize - input.offset));
+        if (overlap > 0) {
+          previous = Buffer.allocUnsafe(overlap);
+          const read = await handle.read(previous, 0, overlap, input.offset);
+          if (read.bytesRead !== overlap) throw new Error("system_archive_upload_read_partial");
+        }
+        let written = 0;
+        while (written < input.bytes.byteLength) {
+          const result = await handle.write(
+            input.bytes,
+            written,
+            input.bytes.byteLength - written,
+            input.offset + written,
+          );
+          if (result.bytesWritten <= 0) throw new Error("system_archive_upload_write_partial");
+          written += result.bytesWritten;
+        }
+        await handle.sync();
+        const after = statIdentity(await handle.stat({ bigint: true }) as BigIntStat);
+        if (after.deviceId !== authority.identity.deviceId || after.fileId !== authority.identity.fileId) {
+          throw new Error("system_archive_upload_identity_mismatch");
+        }
+        try {
+          return await persist();
+        } catch (error) {
+          let restored = 0;
+          while (restored < previous.byteLength) {
+            const result = await handle.write(
+              previous,
+              restored,
+              previous.byteLength - restored,
+              input.offset + restored,
+            );
+            if (result.bytesWritten <= 0) throw new Error("system_archive_upload_rollback_partial");
+            restored += result.bytesWritten;
+          }
+          await handle.truncate(originalSize);
+          await handle.sync();
+          throw error;
+        }
+      } finally {
+        await handle.close();
+      }
+    });
+  };
+
+  const assembleSystemArchiveUpload: SecureFilesystemAdapter["assembleSystemArchiveUpload"] = async (input) => {
+    requireAdapterOpen();
+    if (!options.systemArchiveStorage || !options.candidates || !options.atomicPortable || !options.journal) {
+      throw new Error("system_archive_storage_repository_unavailable");
+    }
+    return options.systemArchiveStorage.withUploadLock({
+      ownerUserId: input.ownerUserId,
+      uploadId: input.uploadId,
+      filesystemOperationId: input.filesystemOperationId,
+      leaseOwner: input.leaseOwner,
+      leaseSeconds: input.leaseSeconds,
+    }, async (authority) => {
+      if (authority.state === "staged") {
+        return Object.freeze({
+          stagedInputId: authority.stagedInputId,
+          byteLength: authority.descriptor.byteLength,
+          sha256: authority.descriptor.contentHash,
+          async rollback() {},
+        });
+      }
+      const handle = await openAnchored(archiveRoot, authority.relativePath);
+      let descriptor: PrivateStorageDescriptor;
+      try {
+        const initial = await handle.stat({ bigint: true }) as BigIntStat;
+        const initialIdentity = statIdentity(initial);
+        if (!initial.isFile()
+          || initialIdentity.deviceId !== authority.identity.deviceId
+          || initialIdentity.fileId !== authority.identity.fileId
+          || initialIdentity.byteLength !== input.byteLength) {
+          throw new Error("system_archive_upload_identity_mismatch");
+        }
+        const hash = createHash("sha256");
+        const buffer = Buffer.alloc(Math.min(64 * 1024, Math.max(1, input.byteLength)));
+        let position = 0;
+        while (position < input.byteLength) {
+          const requested = Math.min(buffer.byteLength, input.byteLength - position);
+          const read = await handle.read(buffer, 0, requested, position);
+          if (read.bytesRead !== requested) throw new Error("system_archive_upload_read_partial");
+          hash.update(buffer.subarray(0, read.bytesRead));
+          position += read.bytesRead;
+        }
+        const contentHash = hash.digest("hex");
+        if (contentHash !== input.sha256) throw new Error("system_archive_upload_hash_mismatch");
+        descriptor = descriptorFromStat(
+          authority.relativePath,
+          await handle.stat({ bigint: true }) as BigIntStat,
+          contentHash,
+          input.byteLength,
+        );
+      } finally {
+        await handle.close();
+      }
+      const candidate = await options.candidates!.issuePublicationCandidate(authority.operation, {
+        deliveryRelativePath: authority.relativePath,
+        cleanupDescriptors: [descriptor],
+      });
+      await options.candidates!.completePublicationCandidate(authority.operation, candidate, descriptor);
+      const attachment = bindPrivateFilesystemCandidateAttachment(
+        authority.operation,
+        candidate,
+        descriptor,
+        authority.claim,
+      );
+      const issued = await options.transactions.run((database) => options.atomicPortable!.issueStagedInput(
+        database,
+        bindPrivateAtomicStagedIssuance({ ownerUserId: input.ownerUserId }, attachment),
+      ));
+      const finalized = await options.journal!.finalizeAfterCommit(issued.operation, issued.claim);
+      if (!["finalized", "already_finalized"].includes(finalized.outcome)) {
+        throw new Error(`system_archive_storage_finalize_${finalized.outcome}`);
+      }
+      const stagedInputId = await options.systemArchiveStorage!.stagedInputIdForOperation(
+        input.ownerUserId,
+        input.filesystemOperationId,
+      );
+      return Object.freeze({
+        stagedInputId,
+        byteLength: descriptor.byteLength,
+        sha256: descriptor.contentHash,
+        rollback: () => discardPortableStagedInput({
+          owner: { ownerUserId: input.ownerUserId },
+          stagedInput: issued.stagedInput,
+          claim: { leaseOwner: input.leaseOwner, leaseSeconds: input.leaseSeconds },
+        }),
+      });
+    });
+  };
+
   const publishPortableExport: SecureFilesystemAdapter["publishPortableExport"] = async (input) => {
     if (!options.atomicPortable || !options.journal) {
       throw new Error("portable_publication_repository_unavailable");
@@ -1743,6 +2005,9 @@ export async function createSecureFilesystemAdapter(
     finalizeAssetPublication,
     stagePortableInput,
     stagePortableScratch,
+    prepareSystemArchiveUpload,
+    publishSystemArchiveUploadChunk,
+    assembleSystemArchiveUpload,
     discardPortableStagedInput,
     publishPortableExport,
     openStagedInputSession,

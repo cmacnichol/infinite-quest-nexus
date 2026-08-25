@@ -1450,6 +1450,86 @@ export async function readVerifiedContainerEntry(
   });
 }
 
+export type VerifiedContainerEntryConsumption<Value> = Readonly<{
+  value: Value;
+  byteLength: number;
+  sha256: string;
+}>;
+
+/**
+ * Consume one verified container entry without collecting its body. The
+ * consumer must drain the supplied source; returning early fails closed so a
+ * checksum cannot describe bytes that the consumer never inspected.
+ */
+export async function consumeVerifiedContainerEntry<Value>(
+  archive: InspectedArchiveContainer,
+  path: string,
+  maximumBytes: number,
+  consume: (source: AsyncIterable<Uint8Array>) => Promise<Value>
+): Promise<VerifiedContainerEntryConsumption<Value>> {
+  if (!safeInteger(maximumBytes)) {
+    throw archiveError("archive-limit-exceeded", "The requested archive read limit is invalid.");
+  }
+  const normalized = normalizeArchivePath(path);
+  const entry = archive.entries.get(normalized.comparisonPath);
+  const internal = archive as InternalInspectedArchiveContainer;
+  const identity = internal[INSPECTED_IDENTITY];
+  const limits = internal[INSPECTED_LIMITS];
+  if (!entry || !identity || !limits) {
+    throw archiveError("archive-entry-missing", "The requested archive entry does not exist.", {
+      path: normalized.comparisonPath
+    });
+  }
+  if (entry.uncompressedBytes > maximumBytes) {
+    throw archiveError("archive-limit-exceeded", "The requested archive entry exceeds the configured byte limit.", {
+      path: normalized.comparisonPath
+    });
+  }
+
+  return withVerifiedStagedArchive(archive.staged, limits, identity, async (handle, _identity, archiveSize) => {
+    const directory = await openArchiveFromHandle(handle, archiveSize, limits);
+    const central = inspectCentralDirectory(directory.files, limits);
+    await inspectLocalHeaders(handle, directory.files, archiveSize);
+    const file = central.filesByPath.get(normalized.comparisonPath);
+    if (!file
+      || file.compressedSize !== entry.compressedBytes
+      || file.uncompressedSize !== entry.uncompressedBytes) {
+      throw archiveError("archive-checksum-mismatch", "The requested archive entry metadata changed.", {
+        path: normalized.comparisonPath
+      });
+    }
+
+    const hash = createHash("sha256");
+    let byteLength = 0;
+    const source: AsyncIterable<Uint8Array> = {
+      async *[Symbol.asyncIterator]() {
+        try {
+          for await (const chunk of file.stream()) {
+            const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            const nextLength = byteLength + value.byteLength;
+            if (!Number.isSafeInteger(nextLength) || nextLength > maximumBytes) {
+              throw archiveError("archive-limit-exceeded", "An archive entry exceeds its configured byte limit.");
+            }
+            byteLength = nextLength;
+            hash.update(value);
+            yield value;
+          }
+        } catch (error) {
+          if (error instanceof ArchiveError) throw error;
+          throw archiveError("archive-checksum-mismatch", "An archive entry could not be decoded and verified.");
+        }
+      }
+    };
+    const value = await consume(source);
+    if (byteLength !== entry.uncompressedBytes) {
+      throw archiveError("archive-checksum-mismatch", "The requested archive entry was not consumed completely.", {
+        path: normalized.comparisonPath
+      });
+    }
+    return Object.freeze({ value, byteLength, sha256: hash.digest("hex") });
+  });
+}
+
 function assertWriterEntries(entries: readonly ArchiveArtifactEntry[]): void {
   const paths = new Set<string>();
   for (const entry of entries) {

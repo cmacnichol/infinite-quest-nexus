@@ -89,6 +89,8 @@ describe("System Archive durable writer composition", () => {
 
     const result = await writer.publish({
       manifest: {
+        sourceApplication: "0.1.0",
+        sourceMigration: "0079_resumable_system_archive_uploads",
         sourceInstallationId: ownerUserId,
         sourceOwnerCount: 1,
         sourceOwner: {
@@ -194,6 +196,8 @@ describe("System Archive durable writer composition", () => {
 
     const publication = await writer.publish({
       manifest: {
+        sourceApplication: "0.1.0",
+        sourceMigration: "0079_resumable_system_archive_uploads",
         sourceInstallationId: ownerUserId,
         sourceOwnerCount: 1,
         sourceOwner: {
