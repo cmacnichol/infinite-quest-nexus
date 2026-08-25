@@ -3,7 +3,25 @@ import { archiveAssetRecordSchema, archiveErrorCodeSchema, archiveManifestSchema
 
 const nonnegativeSafeIntegerSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const boundedStringSchema = (maximum: number) => z.string().trim().min(1).max(maximum);
-const portableJsonValueSchema = z.json();
+const forbiddenPortableRecordKey = /(?:credential|secret|password|api[_-]?key|encryption|nonce|auth(?:entication|orization)?|access[_-]?token|refresh[_-]?token|capability|grant|cookie|private[_-]?key|embedding|vector|chunk|cache|thumbnail|filesystem|storage|(?:file|temp)[_-]?(?:path|dir|directory|location)|(?:^|[_-])(path|directory|location)(?:$|[_-])|job|lease|model[_-]?chain|previous[_-]?response[_-]?id)/i;
+
+function rejectForbiddenPortableRecordKeys(value: unknown, context: z.RefinementCtx, path: PropertyKey[] = []): void {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => rejectForbiddenPortableRecordKeys(item, context, [...path, index]));
+    return;
+  }
+  if (value === null || typeof value !== "object") return;
+
+  for (const [key, child] of Object.entries(value)) {
+    if (forbiddenPortableRecordKey.test(key)) {
+      context.addIssue({ code: "custom", path: [...path, key], message: `System Archive records cannot contain ${key}.` });
+    } else {
+      rejectForbiddenPortableRecordKeys(child, context, [...path, key]);
+    }
+  }
+}
+
+const portableJsonValueSchema = z.json().superRefine(rejectForbiddenPortableRecordKeys);
 
 export const SYSTEM_ARCHIVE_DOMAINS = [
   "providers", "prompts", "worlds", "world-versions", "world-drafts",
@@ -21,13 +39,6 @@ export const systemArchiveJobStatusSchema = z.enum([
   "rebuilding", "completed", "cancelling", "cancelled",
   "rolled_back", "failed", "expired"
 ]);
-
-export const systemRecordEnvelopeSchema = z.object({
-  domain: systemArchiveDomainSchema,
-  formatVersion: z.literal(1),
-  sourceId: z.string().uuid(),
-  record: z.record(z.string(), portableJsonValueSchema)
-}).strict();
 
 /** Provider imports retain only configuration that can be safely re-entered without a credential. */
 export const systemPortableProviderSchema = z.object({
@@ -52,6 +63,40 @@ export const systemChronicleRecordSchema = z.object({
   occurredAt: z.iso.datetime({ offset: true }),
   metadata: z.record(z.string(), portableJsonValueSchema)
 }).strict();
+
+const systemPortableAuthorityRecordSchema = z.object({
+  sourceId: z.string().uuid(),
+  payload: portableJsonValueSchema
+}).strict();
+
+const systemRecordEnvelopeBase = {
+  formatVersion: z.literal(1),
+  sourceId: z.string().uuid()
+};
+
+/**
+ * The archive stream is deliberately closed by domain. Logical authority may
+ * carry JSON payload data, but never operational, capability, secret, vector,
+ * chunk, cache, filesystem, job, or model-chain fields.
+ */
+export const systemRecordEnvelopeSchema = z.discriminatedUnion("domain", [
+  z.object({ domain: z.literal("providers"), ...systemRecordEnvelopeBase, record: systemPortableProviderSchema }).strict(),
+  z.object({ domain: z.literal("prompts"), ...systemRecordEnvelopeBase, record: systemPortableAuthorityRecordSchema }).strict(),
+  z.object({ domain: z.literal("worlds"), ...systemRecordEnvelopeBase, record: systemPortableAuthorityRecordSchema }).strict(),
+  z.object({ domain: z.literal("world-versions"), ...systemRecordEnvelopeBase, record: systemPortableAuthorityRecordSchema }).strict(),
+  z.object({ domain: z.literal("world-drafts"), ...systemRecordEnvelopeBase, record: systemPortableAuthorityRecordSchema }).strict(),
+  z.object({ domain: z.literal("campaigns"), ...systemRecordEnvelopeBase, record: systemPortableAuthorityRecordSchema }).strict(),
+  z.object({ domain: z.literal("turns"), ...systemRecordEnvelopeBase, record: systemPortableAuthorityRecordSchema }).strict(),
+  z.object({ domain: z.literal("turn-corrections"), ...systemRecordEnvelopeBase, record: systemPortableAuthorityRecordSchema }).strict(),
+  z.object({ domain: z.literal("campaign-state"), ...systemRecordEnvelopeBase, record: systemPortableAuthorityRecordSchema }).strict(),
+  z.object({ domain: z.literal("campaign-history"), ...systemRecordEnvelopeBase, record: systemPortableAuthorityRecordSchema }).strict(),
+  z.object({ domain: z.literal("canonical-facts"), ...systemRecordEnvelopeBase, record: systemPortableAuthorityRecordSchema }).strict(),
+  z.object({ domain: z.literal("chronicle"), ...systemRecordEnvelopeBase, record: systemChronicleRecordSchema }).strict(),
+  z.object({ domain: z.literal("illustrations"), ...systemRecordEnvelopeBase, record: systemPortableAuthorityRecordSchema }).strict(),
+  z.object({ domain: z.literal("imports"), ...systemRecordEnvelopeBase, record: systemPortableAuthorityRecordSchema }).strict(),
+  z.object({ domain: z.literal("cost-events"), ...systemRecordEnvelopeBase, record: systemPortableAuthorityRecordSchema }).strict(),
+  z.object({ domain: z.literal("activity-events"), ...systemRecordEnvelopeBase, record: systemPortableAuthorityRecordSchema }).strict()
+]);
 
 export const systemArchivePayloadSchema = z.object({
   formatVersion: z.literal(1),

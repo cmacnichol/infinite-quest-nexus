@@ -41,7 +41,7 @@ export const SYSTEM_ARCHIVE_TABLE_CLASSIFICATIONS = {
   campaign_world_migrations: "portable_authority",
   campaign_world_transfers: "portable_authority",
   campaigns: "portable_authority",
-  chronicle_chunk_jobs: "rebuildable",
+  chronicle_chunk_jobs: "operational",
   chronicle_jobs: "operational",
   chronicle_memories: "portable_authority",
   chronicle_memory_chunks: "rebuildable",
