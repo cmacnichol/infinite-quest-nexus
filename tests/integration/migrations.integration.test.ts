@@ -445,7 +445,77 @@ INSERT INTO migration_phase_audit VALUES ('final-swap', txid_current());
     }
   });
 
-  it("accepts quoted, dollar-quoted, DO, and SQL-standard atomic function bodies", async () => {
+  it("rejects transaction control after begin atomic appears in a routine header", async () => {
+    const databaseName = `infinitequest_atomic_header_migration_${crypto.randomUUID().replaceAll("-", "")}`;
+    const databaseUrlValue = new URL(databaseUrl!);
+    databaseUrlValue.pathname = `/${databaseName}`;
+    const migrationDirectory = await mkdtemp(join(tmpdir(), "infinitequest-atomic-header-migration-"));
+    const migrationName = "0001_unregistered_after_atomic_header";
+    const tableNames = [
+      "unregistered_atomic_header_audit_a",
+      "unregistered_atomic_header_audit_b"
+    ] as const;
+    const migrationSql = `CREATE TABLE ${tableNames[0]} (id integer);
+CREATE DOMAIN atomic AS integer;
+CREATE FUNCTION migration_atomic_header(begin atomic) RETURNS integer
+LANGUAGE SQL RETURN 1;
+COMMIT;
+CREATE TABLE ${tableNames[1]} (id integer);`;
+    let isolatedPool: DatabasePool | null = null;
+    try {
+      await pool.query(`CREATE DATABASE ${databaseName}`);
+      isolatedPool = createDatabasePool(databaseUrlValue.toString(), 2);
+      await writeFile(join(migrationDirectory, `${migrationName}.sql`), migrationSql);
+
+      await expect(migrateDatabase(isolatedPool, migrationDirectory)).rejects.toThrow(
+        `Migration ${migrationName} contains transaction control without an approved phased contract.`
+      );
+      await expect(isolatedPool.query<{ table_name: string | null }>(
+        "SELECT to_regclass('public.' || name)::text AS table_name FROM unnest($1::text[]) AS name ORDER BY name",
+        [[...tableNames]]
+      )).resolves.toMatchObject({ rows: [{ table_name: null }, { table_name: null }] });
+    } finally {
+      if (isolatedPool) await isolatedPool.end();
+      await dropTestDatabaseWhenIdle(pool, databaseName);
+      await rm(migrationDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects transaction control after high-bit dollar-bearing identifiers before any side effect", async () => {
+    const databaseName = `infinitequest_high_bit_identifier_migration_${crypto.randomUUID().replaceAll("-", "")}`;
+    const databaseUrlValue = new URL(databaseUrl!);
+    databaseUrlValue.pathname = `/${databaseName}`;
+    const migrationDirectory = await mkdtemp(join(tmpdir(), "infinitequest-high-bit-identifier-migration-"));
+    const migrationName = "0001_unregistered_high_bit_identifier_commit";
+    const tableNames = [
+      "unregistered_high_bit_identifier_audit_a",
+      "unregistered_high_bit_identifier_audit_b"
+    ] as const;
+    let isolatedPool: DatabasePool | null = null;
+    try {
+      await pool.query(`CREATE DATABASE ${databaseName}`);
+      isolatedPool = createDatabasePool(databaseUrlValue.toString(), 2);
+      await writeFile(
+        join(migrationDirectory, `${migrationName}.sql`),
+        `CREATE TABLE ${tableNames[0]} (foo😀$tag$ integer); COMMIT; `
+          + `CREATE TABLE ${tableNames[1]} (bar😀$tag$ integer);`
+      );
+
+      await expect(migrateDatabase(isolatedPool, migrationDirectory)).rejects.toThrow(
+        `Migration ${migrationName} contains transaction control without an approved phased contract.`
+      );
+      await expect(isolatedPool.query<{ table_name: string | null }>(
+        "SELECT to_regclass('public.' || name)::text AS table_name FROM unnest($1::text[]) AS name ORDER BY name",
+        [[...tableNames]]
+      )).resolves.toMatchObject({ rows: [{ table_name: null }, { table_name: null }] });
+    } finally {
+      if (isolatedPool) await isolatedPool.end();
+      await dropTestDatabaseWhenIdle(pool, databaseName);
+      await rm(migrationDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts quoted, ASCII and high-bit dollar-quoted, DO, and SQL-standard atomic function bodies", async () => {
     const databaseName = `infinitequest_function_body_migration_${crypto.randomUUID().replaceAll("-", "")}`;
     const databaseUrlValue = new URL(databaseUrl!);
     databaseUrlValue.pathname = `/${databaseName}`;
@@ -463,6 +533,14 @@ END;
 $function$
 LANGUAGE plpgsql;
 
+CREATE FUNCTION migration_high_bit_dollar_body(input_value integer) RETURNS integer
+AS $😀$
+BEGIN
+  RETURN input_value + 3;
+END;
+$😀$
+LANGUAGE plpgsql;
+
 DO $body$
 BEGIN
   PERFORM migration_dollar_body(1);
@@ -472,7 +550,7 @@ $body$;
 CREATE FUNCTION migration_atomic_body(input_value integer) RETURNS integer
 LANGUAGE SQL
 BEGIN ATOMIC
-  RETURN input_value + 3;
+  RETURN input_value + 4;
 END;
 `;
     let isolatedPool: DatabasePool | null = null;
@@ -485,13 +563,15 @@ END;
       await expect(isolatedPool.query<{
         quoted_result: number;
         dollar_result: number;
+        high_bit_dollar_result: number;
         atomic_result: number;
       }>(
         `SELECT migration_quoted_body(1) AS quoted_result,
                 migration_dollar_body(1) AS dollar_result,
+                migration_high_bit_dollar_body(1) AS high_bit_dollar_result,
                 migration_atomic_body(1) AS atomic_result`
       )).resolves.toMatchObject({
-        rows: [{ quoted_result: 2, dollar_result: 3, atomic_result: 4 }]
+        rows: [{ quoted_result: 2, dollar_result: 3, high_bit_dollar_result: 4, atomic_result: 5 }]
       });
     } finally {
       if (isolatedPool) await isolatedPool.end();

@@ -29,7 +29,7 @@ const silentMigrationLogger: NonNullable<RunnerOption["logger"]> = {
 };
 
 function isIdentifierContinuation(character: string | undefined): boolean {
-  return character !== undefined && /[\p{L}\p{M}\p{N}_$]/u.test(character);
+  return character !== undefined && /[A-Za-z0-9_$\u0080-\u{10FFFF}]/u.test(character);
 }
 
 function precedingCharacter(source: string, index: number): string | undefined {
@@ -48,6 +48,10 @@ function topLevelSqlStatements(source: string): string[] {
   let statementTokens: string[] = [];
   let atomicBody = false;
   let atomicStatementStart = false;
+  let atomicBeginCandidate = false;
+  let parenthesisDepth = 0;
+  let routineSignatureDepth: number | null = null;
+  let routineSignatureClosed = false;
   let index = 0;
   const finishStatement = (): void => {
     const value = statement.trim();
@@ -56,6 +60,10 @@ function topLevelSqlStatements(source: string): string[] {
     statementTokens = [];
     atomicBody = false;
     atomicStatementStart = false;
+    atomicBeginCandidate = false;
+    parenthesisDepth = 0;
+    routineSignatureDepth = null;
+    routineSignatureClosed = false;
   };
 
   while (index < source.length) {
@@ -85,6 +93,7 @@ function topLevelSqlStatements(source: string): string[] {
 
     const character = source[index]!;
     if (character === "'" || character === "\"") {
+      atomicBeginCandidate = false;
       const quote = character;
       const escapeQuoted = quote === "'"
         && (/^[eE]$/u.test(source[index - 1] ?? "")
@@ -107,8 +116,10 @@ function topLevelSqlStatements(source: string): string[] {
     }
 
     if (character === "$" && !isIdentifierContinuation(precedingCharacter(source, index))) {
-      const dollarTag = /^\$(?:[\p{L}_][\p{L}\p{M}\p{N}_]*)?\$/u.exec(source.slice(index))?.[0];
+      const dollarTag = /^\$(?:[A-Za-z_\u0080-\u{10FFFF}][A-Za-z0-9_\u0080-\u{10FFFF}]*)?\$/u
+        .exec(source.slice(index))?.[0];
       if (dollarTag) {
+        atomicBeginCandidate = false;
         const closing = source.indexOf(dollarTag, index + dollarTag.length);
         index = closing < 0 ? source.length : closing + dollarTag.length;
         statement += " ";
@@ -116,12 +127,15 @@ function topLevelSqlStatements(source: string): string[] {
       }
     }
 
-    const word = /^[A-Za-z_][A-Za-z0-9_$]*/u.exec(source.slice(index))?.[0];
+    const word = /^[A-Za-z_\u0080-\u{10FFFF}][A-Za-z0-9_$\u0080-\u{10FFFF}]*/u
+      .exec(source.slice(index))?.[0];
     if (word) {
       const token = word.toUpperCase();
       const beginsAtomicBody = !atomicBody
         && token === "ATOMIC"
-        && statementTokens.at(-1) === "BEGIN"
+        && atomicBeginCandidate
+        && parenthesisDepth === 0
+        && routineSignatureClosed
         && isCreateRoutineStatement(statementTokens);
       statement += word;
       statementTokens.push(token);
@@ -129,13 +143,36 @@ function topLevelSqlStatements(source: string): string[] {
       if (beginsAtomicBody) {
         atomicBody = true;
         atomicStatementStart = true;
+        atomicBeginCandidate = false;
       } else if (atomicBody) {
         if (atomicStatementStart && token === "END") {
           atomicBody = false;
         }
         atomicStatementStart = false;
+      } else {
+        atomicBeginCandidate = token === "BEGIN"
+          && parenthesisDepth === 0
+          && routineSignatureClosed
+          && isCreateRoutineStatement(statementTokens);
       }
       continue;
+    }
+
+    if (character === "(") {
+      if (parenthesisDepth === 0
+        && !routineSignatureClosed
+        && isCreateRoutineStatement(statementTokens)) {
+        routineSignatureDepth = 1;
+      }
+      parenthesisDepth += 1;
+      atomicBeginCandidate = false;
+    } else if (character === ")") {
+      if (routineSignatureDepth === parenthesisDepth) {
+        routineSignatureClosed = true;
+        routineSignatureDepth = null;
+      }
+      parenthesisDepth = Math.max(0, parenthesisDepth - 1);
+      atomicBeginCandidate = false;
     }
 
     if (character === ";") {
@@ -149,7 +186,10 @@ function topLevelSqlStatements(source: string): string[] {
       index += 1;
       continue;
     }
-    if (atomicBody && !/\s/u.test(character)) atomicStatementStart = false;
+    if (!/[\t\n\v\f\r ]/u.test(character)) {
+      atomicBeginCandidate = false;
+      if (atomicBody) atomicStatementStart = false;
+    }
     statement += character;
     index += 1;
   }
@@ -163,7 +203,8 @@ type TransactionControl = Readonly<{
 }>;
 
 function transactionControl(statement: string): TransactionControl | null {
-  const tokens = statement.match(/[A-Za-z_][A-Za-z0-9_$]*/gu)?.map((token) => token.toUpperCase()) ?? [];
+  const tokens = statement.match(/[A-Za-z_\u0080-\u{10FFFF}][A-Za-z0-9_$\u0080-\u{10FFFF}]*/gu)
+    ?.map((token) => token.toUpperCase()) ?? [];
   const first = tokens[0];
   if (!first) return null;
   if (["ABORT", "BEGIN", "COMMIT", "END", "RELEASE", "ROLLBACK", "SAVEPOINT"].includes(first)) {
