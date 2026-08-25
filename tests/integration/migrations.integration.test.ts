@@ -384,6 +384,14 @@ INSERT INTO migration_phase_audit VALUES ('final-swap', txid_current());
           migrationName: "0081_unregistered_same_line",
           tableName: "unregistered_same_line_audit",
           sql: "CREATE TABLE unregistered_same_line_audit (id integer); COMMIT; BEGIN;"
+        },
+        {
+          migrationName: "0082_unregistered_after_atomic_body",
+          tableName: "unregistered_after_atomic_body_audit",
+          sql: `CREATE FUNCTION unregistered_atomic_body() RETURNS integer
+                LANGUAGE SQL BEGIN ATOMIC RETURN 1; END;
+                CREATE TABLE unregistered_after_atomic_body_audit (id integer);
+                COMMIT;`
         }
       ] as const;
       for (const unregistered of unregisteredCases) {
@@ -396,6 +404,95 @@ INSERT INTO migration_phase_audit VALUES ('final-swap', txid_current());
           .resolves.toMatchObject({ rows: [{ table_name: null }] });
         await rm(migrationPath);
       }
+    } finally {
+      if (isolatedPool) await isolatedPool.end();
+      await dropTestDatabaseWhenIdle(pool, databaseName);
+      await rm(migrationDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects transaction control after dollar-bearing unquoted identifiers before any side effect", async () => {
+    const databaseName = `infinitequest_identifier_dollar_migration_${crypto.randomUUID().replaceAll("-", "")}`;
+    const databaseUrlValue = new URL(databaseUrl!);
+    databaseUrlValue.pathname = `/${databaseName}`;
+    const migrationDirectory = await mkdtemp(join(tmpdir(), "infinitequest-identifier-dollar-migration-"));
+    const migrationName = "0001_unregistered_identifier_dollar_commit";
+    const tableNames = [
+      "unregistered_identifier_dollar_audit_a",
+      "unregistered_identifier_dollar_audit_b"
+    ] as const;
+    let isolatedPool: DatabasePool | null = null;
+    try {
+      await pool.query(`CREATE DATABASE ${databaseName}`);
+      isolatedPool = createDatabasePool(databaseUrlValue.toString(), 2);
+      await writeFile(
+        join(migrationDirectory, `${migrationName}.sql`),
+        `CREATE TABLE ${tableNames[0]} (foo$tag$ integer); COMMIT; `
+          + `CREATE TABLE ${tableNames[1]} (bar$tag$ integer);`
+      );
+
+      await expect(migrateDatabase(isolatedPool, migrationDirectory)).rejects.toThrow(
+        `Migration ${migrationName} contains transaction control without an approved phased contract.`
+      );
+      await expect(isolatedPool.query<{ table_name: string | null }>(
+        "SELECT to_regclass('public.' || name)::text AS table_name FROM unnest($1::text[]) AS name ORDER BY name",
+        [[...tableNames]]
+      )).resolves.toMatchObject({ rows: [{ table_name: null }, { table_name: null }] });
+    } finally {
+      if (isolatedPool) await isolatedPool.end();
+      await dropTestDatabaseWhenIdle(pool, databaseName);
+      await rm(migrationDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts quoted, dollar-quoted, DO, and SQL-standard atomic function bodies", async () => {
+    const databaseName = `infinitequest_function_body_migration_${crypto.randomUUID().replaceAll("-", "")}`;
+    const databaseUrlValue = new URL(databaseUrl!);
+    databaseUrlValue.pathname = `/${databaseName}`;
+    const migrationDirectory = await mkdtemp(join(tmpdir(), "infinitequest-function-body-migration-"));
+    const migrationName = "0001_valid_function_bodies";
+    const migrationSql = `CREATE FUNCTION migration_quoted_body(input_value integer) RETURNS integer
+AS 'BEGIN RETURN input_value + 1; END;'
+LANGUAGE plpgsql;
+
+CREATE FUNCTION migration_dollar_body(input_value integer) RETURNS integer
+AS $function$
+BEGIN
+  RETURN input_value + 2;
+END;
+$function$
+LANGUAGE plpgsql;
+
+DO $body$
+BEGIN
+  PERFORM migration_dollar_body(1);
+END;
+$body$;
+
+CREATE FUNCTION migration_atomic_body(input_value integer) RETURNS integer
+LANGUAGE SQL
+BEGIN ATOMIC
+  RETURN input_value + 3;
+END;
+`;
+    let isolatedPool: DatabasePool | null = null;
+    try {
+      await pool.query(`CREATE DATABASE ${databaseName}`);
+      isolatedPool = createDatabasePool(databaseUrlValue.toString(), 2);
+      await writeFile(join(migrationDirectory, `${migrationName}.sql`), migrationSql);
+
+      await expect(migrateDatabase(isolatedPool, migrationDirectory)).resolves.toEqual([migrationName]);
+      await expect(isolatedPool.query<{
+        quoted_result: number;
+        dollar_result: number;
+        atomic_result: number;
+      }>(
+        `SELECT migration_quoted_body(1) AS quoted_result,
+                migration_dollar_body(1) AS dollar_result,
+                migration_atomic_body(1) AS atomic_result`
+      )).resolves.toMatchObject({
+        rows: [{ quoted_result: 2, dollar_result: 3, atomic_result: 4 }]
+      });
     } finally {
       if (isolatedPool) await isolatedPool.end();
       await dropTestDatabaseWhenIdle(pool, databaseName);

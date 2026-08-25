@@ -28,14 +28,34 @@ const silentMigrationLogger: NonNullable<RunnerOption["logger"]> = {
   error: () => undefined
 };
 
+function isIdentifierContinuation(character: string | undefined): boolean {
+  return character !== undefined && /[\p{L}\p{M}\p{N}_$]/u.test(character);
+}
+
+function precedingCharacter(source: string, index: number): string | undefined {
+  return Array.from(source.slice(Math.max(0, index - 2), index)).at(-1);
+}
+
+function isCreateRoutineStatement(tokens: readonly string[]): boolean {
+  if (tokens[0] !== "CREATE") return false;
+  const routineIndex = tokens[1] === "OR" && tokens[2] === "REPLACE" ? 3 : 1;
+  return tokens[routineIndex] === "FUNCTION" || tokens[routineIndex] === "PROCEDURE";
+}
+
 function topLevelSqlStatements(source: string): string[] {
   const statements: string[] = [];
   let statement = "";
+  let statementTokens: string[] = [];
+  let atomicBody = false;
+  let atomicStatementStart = false;
   let index = 0;
   const finishStatement = (): void => {
     const value = statement.trim();
     if (value) statements.push(value);
     statement = "";
+    statementTokens = [];
+    atomicBody = false;
+    atomicStatementStart = false;
   };
 
   while (index < source.length) {
@@ -86,8 +106,8 @@ function topLevelSqlStatements(source: string): string[] {
       continue;
     }
 
-    if (character === "$") {
-      const dollarTag = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/u.exec(source.slice(index))?.[0];
+    if (character === "$" && !isIdentifierContinuation(precedingCharacter(source, index))) {
+      const dollarTag = /^\$(?:[\p{L}_][\p{L}\p{M}\p{N}_]*)?\$/u.exec(source.slice(index))?.[0];
       if (dollarTag) {
         const closing = source.indexOf(dollarTag, index + dollarTag.length);
         index = closing < 0 ? source.length : closing + dollarTag.length;
@@ -96,11 +116,40 @@ function topLevelSqlStatements(source: string): string[] {
       }
     }
 
+    const word = /^[A-Za-z_][A-Za-z0-9_$]*/u.exec(source.slice(index))?.[0];
+    if (word) {
+      const token = word.toUpperCase();
+      const beginsAtomicBody = !atomicBody
+        && token === "ATOMIC"
+        && statementTokens.at(-1) === "BEGIN"
+        && isCreateRoutineStatement(statementTokens);
+      statement += word;
+      statementTokens.push(token);
+      index += word.length;
+      if (beginsAtomicBody) {
+        atomicBody = true;
+        atomicStatementStart = true;
+      } else if (atomicBody) {
+        if (atomicStatementStart && token === "END") {
+          atomicBody = false;
+        }
+        atomicStatementStart = false;
+      }
+      continue;
+    }
+
     if (character === ";") {
+      if (atomicBody) {
+        statement += character;
+        atomicStatementStart = true;
+        index += 1;
+        continue;
+      }
       finishStatement();
       index += 1;
       continue;
     }
+    if (atomicBody && !/\s/u.test(character)) atomicStatementStart = false;
     statement += character;
     index += 1;
   }
