@@ -7,7 +7,12 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { createPostgresSystemArchiveJobRepository } from "../../packages/database/src/system-archive-job-repository.js";
 import { createPostgresSystemArchiveExportJobPort } from "../../packages/database/src/system-archive-export-repository.js";
+import { createPostgresSystemArchiveImportRepository } from "../../packages/database/src/system-archive-import-repository.js";
 import { createPostgresSystemArchiveUploadRepository } from "../../packages/database/src/system-archive-upload-repository.js";
+import {
+  createSystemArchiveUploadService,
+  type SystemArchiveUploadStoragePort,
+} from "../../services/runtime/src/system-archive-composition.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe.sequential : describe.skip;
@@ -16,20 +21,42 @@ function hash(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
+function safePreviewProjection(ownerUserId: string, archiveFingerprint: string) {
+  return {
+    versions: {
+      archiveFormat: 1 as const,
+      sourceApplication: null,
+      destinationApplication: "0.1.0",
+      destinationMigration: "0079_resumable_system_archive_uploads"
+    },
+    sourceOwnerCount: 1 as const,
+    archiveFingerprint,
+    recordsByDomain: Object.fromEntries(SYSTEM_ARCHIVE_DOMAINS.map((domain) => [domain, 0])),
+    assets: { originalCount: 0, totalBytes: 0 },
+    destinationEmpty: true,
+    ownerMapping: { sourceOwnerId: ownerUserId, destinationOwnerId: ownerUserId },
+    disabledProviders: 0,
+    invalidatedAccess: ["share-links", "sessions", "oidc-identities", "external-authorizations"] as const,
+    normalization: ["map-source-owner-to-initial-owner", "disable-provider-profiles"],
+    rebuilds: ["chronicle-index", "asset-thumbnails"] as const,
+    space: {
+      staging: { requiredBytes: 0, availableBytes: 0, verified: true, sufficient: true, overrideUsed: false },
+      assetRoot: { requiredBytes: 0, availableBytes: 0, verified: true, sufficient: true, overrideUsed: false }
+    },
+    warnings: [],
+    errors: []
+  };
+}
+
 integration("durable System Archive jobs and resumable uploads", () => {
   let pool: DatabasePool;
   let owner: OwnerScope;
-  let foreignOwner: OwnerScope;
+  let foreignOwner: OwnerScope | undefined;
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 8);
     await migrateDatabase(pool, resolve("database/migrations"));
     owner = { ownerUserId: await initialOwnerId(pool) };
-    const created = await pool.query<{ id: string }>(
-      "INSERT INTO users (system_key,display_name) VALUES ($1,$2) RETURNING id",
-      [`system-archive-foreign-${randomUUID()}`, "System Archive foreign owner"]
-    );
-    foreignOwner = { ownerUserId: created.rows[0]!.id };
   });
 
   afterAll(async () => {
@@ -54,6 +81,16 @@ integration("durable System Archive jobs and resumable uploads", () => {
     return inserted.rows[0]!.id;
   }
 
+  async function foreign(): Promise<OwnerScope> {
+    if (foreignOwner) return foreignOwner;
+    const created = await pool.query<{ id: string }>(
+      "INSERT INTO users (system_key,display_name) VALUES ($1,$2) RETURNING id",
+      [`system-archive-foreign-${randomUUID()}`, "System Archive foreign owner"]
+    );
+    foreignOwner = { ownerUserId: created.rows[0]!.id };
+    return foreignOwner;
+  }
+
   async function createStagedInput(scopedOwner: OwnerScope): Promise<string> {
     const operationId = await reservePortableOperation(scopedOwner, "portable_staging");
     const staged = await pool.query<{ id: string }>(
@@ -64,6 +101,173 @@ integration("durable System Archive jobs and resumable uploads", () => {
     );
     return staged.rows[0]!.id;
   }
+
+  it("binds an opaque 30-minute preview to the completed upload and exact destination fingerprint", async () => {
+    expect(() => createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_799 }))
+      .toThrow("system_archive_preview_ttl_invalid");
+    const uploads = createPostgresSystemArchiveUploadRepository(pool, { uploadTtlSeconds: 86_400 });
+    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const filesystemOperationId = await reservePortableOperation(owner, "portable_staging");
+    const upload = await uploads.createUpload(owner, {
+      handleTokenHash: hash(randomUUID()),
+      filesystemOperationId,
+      byteLength: 4,
+      sha256: hash("abcd")
+    });
+    await uploads.recordChunk(owner, {
+      uploadId: upload.id,
+      index: 0,
+      offset: 0,
+      bytes: 4,
+      sha256: hash("abcd")
+    });
+    const staged = await pool.query<{ id: string }>(
+      `INSERT INTO portable_staged_inputs (
+         owner_user_id,handle_token_hash,filesystem_operation_id,content_hash,byte_length,expires_at
+       ) VALUES ($1,$2,$3,$4,4,now()+interval '1 day') RETURNING id`,
+      [owner.ownerUserId, hash(randomUUID()), filesystemOperationId, hash("abcd")]
+    );
+    await uploads.completeUpload(owner, { uploadId: upload.id, stagedInputId: staged.rows[0]!.id });
+
+    const destination = await imports.destinationFingerprint(owner, { ignoreUploadId: upload.id });
+    expect(destination.destinationEmpty).toBe(true);
+    const archiveFingerprint = hash("validated-system-archive");
+    const projection = safePreviewProjection(owner.ownerUserId, archiveFingerprint);
+    await expect(imports.createPreview(owner, {
+      uploadId: upload.id,
+      archiveFingerprint,
+      destination,
+      projection: { ...projection, localPath: "C:/private/system.zip" }
+    })).rejects.toMatchObject({ statusCode: 400 });
+    await expect(imports.createPreview(owner, {
+      uploadId: upload.id,
+      archiveFingerprint,
+      destination,
+      projection: { ...projection, archiveFingerprint: hash("different-archive") }
+    })).rejects.toMatchObject({ statusCode: 400 });
+    const before = Date.now();
+    const authority = await imports.createPreview(owner, {
+      uploadId: upload.id,
+      archiveFingerprint,
+      destination,
+      projection
+    });
+    const lifetime = new Date(authority.expiresAt).getTime() - before;
+    expect(lifetime).toBeGreaterThanOrEqual(1_795_000);
+    expect(lifetime).toBeLessThanOrEqual(1_805_000);
+    expect(authority.previewHandle).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+
+    const persisted = await pool.query<{
+      idempotency_key_hash: string;
+      progress: unknown;
+      report: unknown;
+    }>("SELECT idempotency_key_hash,progress,report FROM system_archive_jobs WHERE id=$1", [authority.jobId]);
+    expect(persisted.rows[0]!.idempotency_key_hash).toBe(hash(authority.previewHandle));
+    expect(JSON.stringify(persisted.rows[0])).not.toContain(authority.previewHandle);
+    expect(JSON.stringify(persisted.rows[0])).not.toMatch(/[A-Za-z]:[\\/]|\/tmp\//u);
+    await expect(imports.destinationFingerprint(owner, { ignoreJobId: authority.jobId }))
+      .resolves.toMatchObject({
+        destinationEmpty: true,
+        authoritativeCountsHash: destination.authoritativeCountsHash,
+        activeJobsHash: destination.activeJobsHash
+      });
+    await expect(imports.destinationFingerprint(owner, {}))
+      .resolves.toMatchObject({ destinationEmpty: false });
+
+    await pool.query(
+      `UPDATE system_archive_jobs
+          SET progress=jsonb_set(progress,'{expiresAt}',to_jsonb((now()-interval '1 second')::text))
+        WHERE id=$1`,
+      [authority.jobId]
+    );
+    const afterExpiry = await imports.destinationFingerprint(owner, { ignoreUploadId: upload.id });
+    expect(afterExpiry.destinationEmpty).toBe(true);
+    const replacement = await imports.createPreview(owner, {
+      uploadId: upload.id,
+      archiveFingerprint,
+      destination: afterExpiry,
+      projection
+    });
+    expect(replacement.jobId).not.toBe(authority.jobId);
+    await expect(pool.query<{ status: string }>(
+      "SELECT status FROM system_archive_jobs WHERE id=$1",
+      [authority.jobId]
+    )).resolves.toMatchObject({ rows: [{ status: "expired" }] });
+  });
+
+  it("fingerprints an exactly empty destination and rejects unrelated owner or active-upload state", async () => {
+    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const clean = await imports.destinationFingerprint(owner, {});
+    expect(clean).toMatchObject({
+      initialOwnerId: owner.ownerUserId,
+      latestMigration: "0079_resumable_system_archive_uploads",
+      destinationEmpty: true
+    });
+
+    const expiredStagedInputId = await createStagedInput(owner);
+    const expiredPortablePreview = await pool.query<{ id: string }>(
+      `INSERT INTO portable_import_operations (
+         owner_user_id,staged_input_id,import_kind,preview_token_hash,content_fingerprint,
+         destination_fingerprint,destination_kind,preview_projection,expires_at
+       ) VALUES ($1,$2,'world_text',$3,$4,$5,'create_world','{}'::jsonb,now()-interval '1 second')
+       RETURNING id`,
+      [owner.ownerUserId, expiredStagedInputId, hash(randomUUID()), hash("expired-portable-preview"), hash("empty")]
+    );
+    await expect(imports.destinationFingerprint(owner, {})).resolves.toMatchObject({
+      destinationEmpty: true,
+      activeJobsHash: clean.activeJobsHash
+    });
+    await pool.query(
+      "UPDATE portable_import_operations SET expires_at=now()+interval '5 minutes' WHERE id=$1",
+      [expiredPortablePreview.rows[0]!.id]
+    );
+    await expect(imports.destinationFingerprint(owner, {}))
+      .resolves.toMatchObject({ destinationEmpty: false });
+    await pool.query("DELETE FROM portable_import_operations WHERE id=$1", [expiredPortablePreview.rows[0]!.id]);
+
+    const currentOperation = await reservePortableOperation(owner, "portable_staging");
+    const uploads = createPostgresSystemArchiveUploadRepository(pool, { uploadTtlSeconds: 86_400 });
+    const current = await uploads.createUpload(owner, {
+      handleTokenHash: hash(`current-upload-${randomUUID()}`),
+      filesystemOperationId: currentOperation,
+      byteLength: 4,
+      sha256: hash("abcd")
+    });
+    await expect(imports.destinationFingerprint(owner, { ignoreUploadId: current.id }))
+      .resolves.toMatchObject({
+        destinationEmpty: true,
+        authoritativeCountsHash: clean.authoritativeCountsHash,
+        activeJobsHash: clean.activeJobsHash
+      });
+
+    const unrelatedOperation = await reservePortableOperation(owner, "portable_staging");
+    await uploads.createUpload(owner, {
+      handleTokenHash: hash(`unrelated-upload-${randomUUID()}`),
+      filesystemOperationId: unrelatedOperation,
+      byteLength: 4,
+      sha256: hash("efgh")
+    });
+    await expect(imports.destinationFingerprint(owner, { ignoreUploadId: current.id }))
+      .resolves.toMatchObject({ destinationEmpty: false });
+
+    await pool.query("DELETE FROM system_archive_uploads");
+    await pool.query(
+      `INSERT INTO world_generation_progress (
+         progress_key,owner_user_id,status,phase,expires_at
+       ) VALUES ($1,$2,'processing','drafting',now()+interval '5 minutes')`,
+      [`system-archive-active-${randomUUID()}`, owner.ownerUserId]
+    );
+    const activeWork = await imports.destinationFingerprint(owner, {});
+    expect(activeWork.destinationEmpty).toBe(false);
+    expect(activeWork.activeJobsHash).not.toBe(clean.activeJobsHash);
+    await pool.query("DELETE FROM world_generation_progress WHERE owner_user_id=$1", [owner.ownerUserId]);
+
+    await foreign();
+    const populated = await imports.destinationFingerprint(owner, { ignoreUploadId: current.id });
+    expect(populated.destinationEmpty).toBe(false);
+    expect(populated.authoritativeCountsHash).not.toBe(clean.authoritativeCountsHash);
+    expect(populated).not.toHaveProperty("path");
+  });
 
   it("idempotently enqueues one active export per owner while allowing another owner", async () => {
     const repository = createPostgresSystemArchiveJobRepository(pool);
@@ -77,18 +281,19 @@ integration("durable System Archive jobs and resumable uploads", () => {
     });
     await expect(repository.enqueueExport(owner, hash(`competing-${randomUUID()}`)))
       .rejects.toMatchObject({ statusCode: 409 });
-    await expect(repository.enqueueExport(foreignOwner, hash(`foreign-${randomUUID()}`)))
+    await expect(repository.enqueueExport(await foreign(), hash(`foreign-${randomUUID()}`)))
       .resolves.toMatchObject({ kind: "export", status: "queued" });
   });
 
   it("allows only one active import globally and enforces staged-input ownership", async () => {
     const repository = createPostgresSystemArchiveJobRepository(pool);
     const ownerStaged = await createStagedInput(owner);
-    const foreignStaged = await createStagedInput(foreignOwner);
+    const scopedForeign = await foreign();
+    const foreignStaged = await createStagedInput(scopedForeign);
 
     await expect(repository.enqueueImport(owner, ownerStaged, hash(`import-${randomUUID()}`)))
       .resolves.toMatchObject({ kind: "import", status: "queued" });
-    await expect(repository.enqueueImport(foreignOwner, foreignStaged, hash(`foreign-import-${randomUUID()}`)))
+    await expect(repository.enqueueImport(scopedForeign, foreignStaged, hash(`foreign-import-${randomUUID()}`)))
       .rejects.toMatchObject({ statusCode: 409 });
     await expect(repository.enqueueImport(owner, foreignStaged, hash(`wrong-owner-${randomUUID()}`)))
       .rejects.toMatchObject({ statusCode: 404 });
@@ -170,7 +375,7 @@ integration("durable System Archive jobs and resumable uploads", () => {
     await pool.query("UPDATE system_archive_jobs SET status='failed',lease_owner=NULL,lease_expires_at=NULL WHERE status IN ('queued','capturing','revalidating','cancelling')");
     const queued = await repository.enqueueExport(owner, hash(`cancel-${randomUUID()}`));
 
-    await expect(repository.requestCancellation(foreignOwner, queued.id))
+    await expect(repository.requestCancellation(await foreign(), queued.id))
       .rejects.toMatchObject({ statusCode: 404 });
     await expect(repository.requestCancellation(owner, queued.id))
       .resolves.toMatchObject({ id: queued.id, status: "cancelling" });
@@ -271,13 +476,257 @@ integration("durable System Archive jobs and resumable uploads", () => {
       bytes: 4,
       sha256: hash("cdef")
     })).rejects.toMatchObject({ statusCode: 409 });
-    await expect(uploads.recordChunk(foreignOwner, {
+    await expect(uploads.recordChunk(await foreign(), {
       uploadId: upload.id,
       index: 1,
       offset: 4,
       bytes: 4,
       sha256: hash("efgh")
     })).rejects.toMatchObject({ statusCode: 404 });
+  });
+
+  it("publishes bounded chunks privately and completes after a process recreation", async () => {
+    const chunks = new Map<string, Map<number, Readonly<{ offset: number; bytes: Buffer; sha256: string }>>>();
+    const stagedByOperation = new Map<string, string>();
+    const createStorage = (): SystemArchiveUploadStoragePort => ({
+      async prepare(input) {
+        const filesystemOperationId = await reservePortableOperation(
+          { ownerUserId: input.ownerUserId },
+          "portable_staging"
+        );
+        chunks.set(filesystemOperationId, new Map());
+        return {
+          filesystemOperationId,
+          async rollback() {
+            chunks.delete(filesystemOperationId);
+          }
+        };
+      },
+      async publishChunk(input) {
+        const operation = chunks.get(input.assemblyOperationId);
+        if (!operation) throw new Error("private_upload_operation_unavailable");
+        const existing = operation.get(input.index);
+        if (existing && (existing.offset !== input.offset
+          || existing.sha256 !== input.sha256
+          || !existing.bytes.equals(Buffer.from(input.bytes)))) {
+          throw Object.assign(new Error("private_upload_chunk_conflict"), { statusCode: 409 });
+        }
+        const created = !existing;
+        if (created) operation.set(input.index, {
+          offset: input.offset,
+          bytes: Buffer.from(input.bytes),
+          sha256: input.sha256
+        });
+        return {
+          async rollback() {
+            if (created) operation.delete(input.index);
+          }
+        };
+      },
+      async assemble(input) {
+        const operation = chunks.get(input.assembly.filesystemOperationId);
+        if (!operation) throw new Error("private_upload_operation_unavailable");
+        const bytes = Buffer.concat(input.assembly.chunks.map((chunk) => {
+          const stored = operation.get(chunk.index);
+          if (!stored || stored.offset !== chunk.offset || stored.bytes.byteLength !== chunk.bytes
+            || stored.sha256 !== chunk.sha256) {
+            throw new Error("private_upload_chunk_identity_changed");
+          }
+          return stored.bytes;
+        }));
+        const sha256 = hash(bytes.toString("utf8"));
+        let stagedInputId = stagedByOperation.get(input.assembly.filesystemOperationId);
+        let created = false;
+        if (!stagedInputId) {
+          const inserted = await pool.query<{ id: string }>(
+            `INSERT INTO portable_staged_inputs (
+               owner_user_id,handle_token_hash,filesystem_operation_id,content_hash,byte_length,expires_at
+             ) VALUES ($1,$2,$3,$4,$5,now()+interval '1 day') RETURNING id`,
+            [input.ownerUserId, hash(randomUUID()), input.assembly.filesystemOperationId,
+              sha256, bytes.byteLength]
+          );
+          stagedInputId = inserted.rows[0]!.id;
+          stagedByOperation.set(input.assembly.filesystemOperationId, stagedInputId);
+          created = true;
+        }
+        return {
+          stagedInputId,
+          byteLength: bytes.byteLength,
+          sha256,
+          async rollback() {
+            if (!created) return;
+            await pool.query("DELETE FROM portable_staged_inputs WHERE id=$1", [stagedInputId]);
+            stagedByOperation.delete(input.assembly.filesystemOperationId);
+          }
+        };
+      }
+    });
+    const repository = createPostgresSystemArchiveUploadRepository(pool, { uploadTtlSeconds: 86_400 });
+    const firstProcess = createSystemArchiveUploadService({
+      uploads: repository,
+      storage: createStorage(),
+      chunkBytes: 4,
+      maximumBytes: 12
+    });
+    const archiveBytes = Buffer.from("abcdefghijkl");
+    await expect(firstProcess.createUpload(owner, {
+      byteLength: 13,
+      sha256: hash("oversized-system-archive")
+    })).rejects.toMatchObject({ statusCode: 400 });
+    const upload = await firstProcess.createUpload(owner, {
+      byteLength: archiveBytes.byteLength,
+      sha256: hash(archiveBytes.toString("utf8"))
+    });
+
+    await firstProcess.putChunk(owner, {
+      uploadId: upload.id,
+      index: 0,
+      offset: 0,
+      bytes: Buffer.from("abcd"),
+      sha256: hash("abcd")
+    });
+    await expect(firstProcess.putChunk(owner, {
+      uploadId: upload.id,
+      index: 1,
+      offset: 4,
+      bytes: Buffer.from("efghx"),
+      sha256: hash("efghx")
+    })).rejects.toMatchObject({ statusCode: 413 });
+    await expect(firstProcess.completeUpload(owner, upload.id)).rejects.toMatchObject({ statusCode: 409 });
+
+    const secondProcess = createSystemArchiveUploadService({
+      uploads: createPostgresSystemArchiveUploadRepository(pool, { uploadTtlSeconds: 86_400 }),
+      storage: createStorage(),
+      chunkBytes: 4,
+      maximumBytes: 12
+    });
+    await secondProcess.putChunk(owner, {
+      uploadId: upload.id,
+      index: 1,
+      offset: 4,
+      bytes: Buffer.from("efgh"),
+      sha256: hash("efgh")
+    });
+    await secondProcess.putChunk(owner, {
+      uploadId: upload.id,
+      index: 2,
+      offset: 8,
+      bytes: Buffer.from("ijkl"),
+      sha256: hash("ijkl")
+    });
+    await expect(secondProcess.putChunk(owner, {
+      uploadId: upload.id,
+      index: 2,
+      offset: 8,
+      bytes: Buffer.from("ijkl"),
+      sha256: hash("ijkl")
+    })).resolves.toMatchObject({ receivedBytes: 12 });
+    await expect(secondProcess.completeUpload(owner, upload.id)).resolves.toMatchObject({
+      id: upload.id,
+      status: "completed",
+      receivedBytes: 12
+    });
+  });
+
+  it("refuses incomplete assembly and completes only against the exact durable staged input", async () => {
+    const uploads = createPostgresSystemArchiveUploadRepository(pool, { uploadTtlSeconds: 86_400 });
+    const filesystemOperationId = await reservePortableOperation(owner, "portable_staging");
+    const uploadBytes = Buffer.from("abcdefghijkl");
+    const upload = await uploads.createUpload(owner, {
+      handleTokenHash: hash(`assembly-upload-${randomUUID()}`),
+      filesystemOperationId,
+      byteLength: uploadBytes.byteLength,
+      sha256: hash(uploadBytes.toString("utf8"))
+    });
+    await uploads.recordChunk(owner, {
+      uploadId: upload.id,
+      index: 0,
+      offset: 0,
+      bytes: 4,
+      sha256: hash("abcd")
+    });
+    await uploads.recordChunk(owner, {
+      uploadId: upload.id,
+      index: 2,
+      offset: 8,
+      bytes: 4,
+      sha256: hash("ijkl")
+    });
+
+    await expect(uploads.getAssembly(owner, upload.id)).rejects.toMatchObject({
+      statusCode: 409,
+      message: "System Archive upload is missing a contiguous chunk range."
+    });
+
+    await uploads.recordChunk(owner, {
+      uploadId: upload.id,
+      index: 1,
+      offset: 4,
+      bytes: 4,
+      sha256: hash("efgh")
+    });
+    const assembly = await uploads.getAssembly(owner, upload.id);
+    expect(assembly).toMatchObject({
+      uploadId: upload.id,
+      filesystemOperationId,
+      byteLength: 12,
+      sha256: hash("abcdefghijkl"),
+      chunks: [
+        { index: 0, offset: 0, bytes: 4, sha256: hash("abcd") },
+        { index: 1, offset: 4, bytes: 4, sha256: hash("efgh") },
+        { index: 2, offset: 8, bytes: 4, sha256: hash("ijkl") }
+      ]
+    });
+
+    const staged = await pool.query<{ id: string }>(
+      `INSERT INTO portable_staged_inputs (
+         owner_user_id,handle_token_hash,filesystem_operation_id,content_hash,byte_length,expires_at
+       ) VALUES ($1,$2,$3,$4,$5,now()+interval '1 day') RETURNING id`,
+      [owner.ownerUserId, hash(randomUUID()), filesystemOperationId, hash("abcdefghijkl"), uploadBytes.byteLength]
+    );
+    const recreated = createPostgresSystemArchiveUploadRepository(pool, { uploadTtlSeconds: 86_400 });
+    await expect(recreated.completeUpload(owner, {
+      uploadId: upload.id,
+      stagedInputId: staged.rows[0]!.id
+    })).resolves.toMatchObject({
+      id: upload.id,
+      status: "completed",
+      receivedBytes: 12
+    });
+    await expect(recreated.getAssembly(owner, upload.id)).rejects.toMatchObject({ statusCode: 409 });
+  });
+
+  it("rejects a truncated or hash-mismatched staged input without completing the upload", async () => {
+    const uploads = createPostgresSystemArchiveUploadRepository(pool, { uploadTtlSeconds: 86_400 });
+    const filesystemOperationId = await reservePortableOperation(owner, "portable_staging");
+    const upload = await uploads.createUpload(owner, {
+      handleTokenHash: hash(`truncated-upload-${randomUUID()}`),
+      filesystemOperationId,
+      byteLength: 4,
+      sha256: hash("abcd")
+    });
+    await uploads.recordChunk(owner, {
+      uploadId: upload.id,
+      index: 0,
+      offset: 0,
+      bytes: 4,
+      sha256: hash("abcd")
+    });
+    const truncated = await pool.query<{ id: string }>(
+      `INSERT INTO portable_staged_inputs (
+         owner_user_id,handle_token_hash,filesystem_operation_id,content_hash,byte_length,expires_at
+       ) VALUES ($1,$2,$3,$4,3,now()+interval '1 day') RETURNING id`,
+      [owner.ownerUserId, hash(randomUUID()), filesystemOperationId, hash("abc")]
+    );
+
+    await expect(uploads.completeUpload(owner, {
+      uploadId: upload.id,
+      stagedInputId: truncated.rows[0]!.id
+    })).rejects.toMatchObject({ statusCode: 409 });
+    await expect(uploads.getUpload(owner, upload.id)).resolves.toMatchObject({
+      status: "uploading",
+      receivedBytes: 4
+    });
   });
 
   it("persists an upload expiry before returning the safe expiry error", async () => {

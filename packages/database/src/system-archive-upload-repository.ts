@@ -3,7 +3,7 @@ import {
   type SystemArchiveUploadView
 } from "@infinite-quest/contracts";
 import type { OwnerScope } from "../../application/src/generation/types.js";
-import type { DatabasePool } from "./pool.js";
+import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
 
 type SystemArchiveUploadRow = Readonly<{
@@ -14,6 +14,7 @@ type SystemArchiveUploadRow = Readonly<{
   byte_length: string | number;
   received_bytes: string | number;
   content_hash: string;
+  staged_input_id: string | null;
   expires_at: Date;
 }>;
 
@@ -22,6 +23,10 @@ type SystemArchiveUploadChunkRow = Readonly<{
   byte_offset: string | number;
   byte_length: string | number;
   content_hash: string;
+}>;
+
+type LockedSystemArchiveUploadRow = SystemArchiveUploadRow & Readonly<{
+  is_expired: boolean;
 }>;
 
 export type CreateSystemArchiveUploadRequest = Readonly<{
@@ -39,12 +44,45 @@ export type RecordSystemArchiveUploadChunkRequest = Readonly<{
   sha256: string;
 }>;
 
+export type SystemArchiveUploadAssembly = Readonly<{
+  uploadId: string;
+  filesystemOperationId: string;
+  byteLength: number;
+  sha256: string;
+  expiresAt: string;
+  chunks: readonly Readonly<{
+    index: number;
+    offset: number;
+    bytes: number;
+    sha256: string;
+  }>[];
+}>;
+
+export type SystemArchiveUploadSession = Readonly<{
+  uploadId: string;
+  filesystemOperationId: string;
+  status: "created" | "uploading" | "completed" | "expired" | "failed";
+  byteLength: number;
+  sha256: string;
+}>;
+
+export type CompleteSystemArchiveUploadRequest = Readonly<{
+  uploadId: string;
+  stagedInputId: string;
+}>;
+
 export interface SystemArchiveUploadRepository {
   createUpload(owner: OwnerScope, request: CreateSystemArchiveUploadRequest): Promise<SystemArchiveUploadView>;
   getUpload(owner: OwnerScope, uploadId: string): Promise<SystemArchiveUploadView>;
+  getUploadSession(owner: OwnerScope, uploadId: string): Promise<SystemArchiveUploadSession>;
   recordChunk(
     owner: OwnerScope,
     request: RecordSystemArchiveUploadChunkRequest
+  ): Promise<SystemArchiveUploadView>;
+  getAssembly(owner: OwnerScope, uploadId: string): Promise<SystemArchiveUploadAssembly>;
+  completeUpload(
+    owner: OwnerScope,
+    request: CompleteSystemArchiveUploadRequest
   ): Promise<SystemArchiveUploadView>;
 }
 
@@ -53,7 +91,7 @@ type SystemArchiveUploadRepositoryOptions = Readonly<{
 }>;
 
 const UPLOAD_COLUMNS = `id,owner_user_id,filesystem_operation_id,status,byte_length,
-  received_bytes,content_hash,expires_at`;
+  received_bytes,content_hash,staged_input_id,expires_at`;
 const POSTGRES_INTEGER_MAX = 2_147_483_647;
 
 function repositoryError(message: string, statusCode: number): Error & { statusCode: number } {
@@ -91,10 +129,87 @@ function toView(row: SystemArchiveUploadRow): SystemArchiveUploadView {
   });
 }
 
+function toSession(row: SystemArchiveUploadRow): SystemArchiveUploadSession {
+  return Object.freeze({
+    uploadId: row.id,
+    filesystemOperationId: row.filesystem_operation_id,
+    status: row.status,
+    byteLength: Number(row.byte_length),
+    sha256: row.content_hash
+  });
+}
+
 function postgresCode(error: unknown): string | undefined {
   return typeof error === "object" && error !== null && "code" in error
     ? String((error as { code?: unknown }).code)
     : undefined;
+}
+
+function assemblyFromRows(
+  upload: SystemArchiveUploadRow,
+  chunks: readonly SystemArchiveUploadChunkRow[],
+  expired: boolean
+): SystemArchiveUploadAssembly {
+  if (upload.status !== "created" && upload.status !== "uploading") {
+    throw repositoryError(`System Archive upload cannot be assembled from ${upload.status}.`, 409);
+  }
+  if (expired) {
+    throw repositoryError("System Archive upload has expired.", 410);
+  }
+  const byteLength = Number(upload.byte_length);
+  let expectedOffset = 0;
+  const ordered = chunks.map((chunk) => {
+    const offset = Number(chunk.byte_offset);
+    const bytes = Number(chunk.byte_length);
+    if (offset !== expectedOffset) {
+      throw repositoryError("System Archive upload is missing a contiguous chunk range.", 409);
+    }
+    expectedOffset += bytes;
+    return Object.freeze({
+      index: chunk.chunk_index,
+      offset,
+      bytes,
+      sha256: chunk.content_hash
+    });
+  });
+  if (expectedOffset !== byteLength || Number(upload.received_bytes) !== byteLength) {
+    throw repositoryError("System Archive upload is missing a contiguous chunk range.", 409);
+  }
+  return Object.freeze({
+    uploadId: upload.id,
+    filesystemOperationId: upload.filesystem_operation_id,
+    byteLength,
+    sha256: upload.content_hash,
+    expiresAt: upload.expires_at.toISOString(),
+    chunks: Object.freeze(ordered)
+  });
+}
+
+async function lockedAssembly(
+  client: DatabaseClient,
+  owner: OwnerScope,
+  uploadId: string
+): Promise<Readonly<{
+  upload: SystemArchiveUploadRow;
+  assembly: SystemArchiveUploadAssembly;
+}>> {
+  const selected = await client.query<LockedSystemArchiveUploadRow>(
+    `SELECT ${UPLOAD_COLUMNS},expires_at<=clock_timestamp() AS is_expired
+       FROM system_archive_uploads
+      WHERE id=$1 AND owner_user_id=$2
+      FOR UPDATE`,
+    [uploadId, owner.ownerUserId]
+  );
+  const upload = selected.rows[0];
+  if (!upload) throw repositoryError("System Archive upload was not found.", 404);
+  const chunks = await client.query<SystemArchiveUploadChunkRow>(
+    `SELECT chunk_index,byte_offset,byte_length,content_hash
+       FROM system_archive_upload_chunks
+      WHERE upload_id=$1 AND owner_user_id=$2
+      ORDER BY byte_offset,chunk_index`,
+    [uploadId, owner.ownerUserId]
+  );
+  return Object.freeze({ upload, assembly: assemblyFromRows(upload, chunks.rows, upload.is_expired) });
 }
 
 export function createPostgresSystemArchiveUploadRepository(
@@ -140,6 +255,15 @@ export function createPostgresSystemArchiveUploadRepository(
       return toView(result.rows[0]);
     },
 
+    async getUploadSession(owner, uploadId) {
+      const result = await pool.query<SystemArchiveUploadRow>(
+        `SELECT ${UPLOAD_COLUMNS} FROM system_archive_uploads WHERE id=$1 AND owner_user_id=$2`,
+        [uploadId, owner.ownerUserId]
+      );
+      if (!result.rows[0]) throw repositoryError("System Archive upload was not found.", 404);
+      return toSession(result.rows[0]);
+    },
+
     async recordChunk(owner, request) {
       requireChunkIndex(request.index);
       requireSafeInteger(request.offset, "System Archive chunk offset", 0);
@@ -150,8 +274,8 @@ export function createPostgresSystemArchiveUploadRepository(
       }
 
       const outcome = await withTransaction(pool, async (client) => {
-        const locked = await client.query<SystemArchiveUploadRow>(
-          `SELECT ${UPLOAD_COLUMNS}
+        const locked = await client.query<LockedSystemArchiveUploadRow>(
+          `SELECT ${UPLOAD_COLUMNS},expires_at<=clock_timestamp() AS is_expired
              FROM system_archive_uploads
             WHERE id=$1 AND owner_user_id=$2
             FOR UPDATE`,
@@ -162,7 +286,7 @@ export function createPostgresSystemArchiveUploadRepository(
         if (upload.status !== "created" && upload.status !== "uploading") {
           throw repositoryError(`System Archive upload cannot accept chunks from ${upload.status}.`, 409);
         }
-        if (upload.expires_at.getTime() <= Date.now()) {
+        if (upload.is_expired) {
           await client.query(
             "UPDATE system_archive_uploads SET status='expired',updated_at=clock_timestamp() WHERE id=$1",
             [request.uploadId]
@@ -219,6 +343,56 @@ export function createPostgresSystemArchiveUploadRepository(
       });
       if (!outcome) throw repositoryError("System Archive upload has expired.", 410);
       return outcome;
+    },
+
+    async getAssembly(owner, uploadId) {
+      return withTransaction(pool, async (client) => (
+        await lockedAssembly(client, owner, uploadId)
+      ).assembly);
+    },
+
+    async completeUpload(owner, request) {
+      return withTransaction(pool, async (client) => {
+        const { upload, assembly } = await lockedAssembly(client, owner, request.uploadId);
+        const staged = await client.query<{
+          id: string;
+          filesystem_operation_id: string;
+          content_hash: string;
+          byte_length: string | number;
+        }>(
+          `SELECT id,filesystem_operation_id,content_hash,byte_length
+             FROM portable_staged_inputs
+            WHERE id=$1 AND owner_user_id=$2 AND status='staged'
+              AND expires_at > clock_timestamp()
+            FOR NO KEY UPDATE`,
+          [request.stagedInputId, owner.ownerUserId]
+        );
+        const input = staged.rows[0];
+        if (!input
+          || input.filesystem_operation_id !== assembly.filesystemOperationId
+          || input.content_hash !== assembly.sha256
+          || Number(input.byte_length) !== assembly.byteLength) {
+          throw repositoryError(
+            "System Archive assembled input does not match the declared upload identity.",
+            409
+          );
+        }
+        const updated = await client.query<SystemArchiveUploadRow>(
+          `UPDATE system_archive_uploads
+              SET status='completed',staged_input_id=$3,updated_at=clock_timestamp()
+            WHERE id=$1 AND owner_user_id=$2
+              AND status IN ('created','uploading')
+              AND received_bytes=byte_length
+              AND staged_input_id IS NULL
+           RETURNING ${UPLOAD_COLUMNS}`,
+          [request.uploadId, owner.ownerUserId, request.stagedInputId]
+        );
+        const row = updated.rows[0];
+        if (!row || upload.id !== row.id) {
+          throw repositoryError("System Archive upload completion conflicted with another request.", 409);
+        }
+        return toView(row);
+      });
     }
   };
 }

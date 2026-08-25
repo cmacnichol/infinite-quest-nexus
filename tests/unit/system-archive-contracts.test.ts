@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   systemArchiveManifestSchema,
   systemArchiveJobViewSchema,
-  systemArchivePayloadSchema
+  systemArchivePayloadSchema,
+  systemImportPreviewViewSchema
 } from "../../packages/contracts/src/system-archives.js";
 
 const sourceOwnerId = "11111111-1111-4111-8111-111111111111";
@@ -283,5 +284,52 @@ describe("System Archive contracts", () => {
     };
 
     expect(systemArchiveJobViewSchema.parse(job).status).toBe("queued");
+  });
+
+  it("requires a complete safe Import Preview and rejects local storage details", () => {
+    const recordsByDomain = Object.fromEntries([
+      "providers", "prompts", "worlds", "world-versions", "world-drafts",
+      "campaigns", "turns", "turn-corrections", "campaign-state",
+      "campaign-history", "canonical-facts", "chronicle", "illustrations",
+      "imports", "cost-events", "activity-events"
+    ].map((domain) => [domain, domain === "campaigns" ? 2 : 0]));
+    const preview = {
+      valid: true,
+      previewHandle: "p".repeat(43),
+      versions: {
+        archiveFormat: 1,
+        sourceApplication: null,
+        destinationApplication: "0.1.0",
+        destinationMigration: "0079_resumable_system_archive_uploads"
+      },
+      sourceOwnerCount: 1,
+      archiveFingerprint: "a".repeat(64),
+      recordsByDomain,
+      assets: { originalCount: 3, totalBytes: 4_096 },
+      destinationEmpty: true,
+      ownerMapping: { sourceOwnerId, destinationOwnerId: sourceOwnerId },
+      disabledProviders: 1,
+      invalidatedAccess: ["share-links", "sessions", "oidc-identities", "external-authorizations"],
+      normalization: ["map-source-owner-to-initial-owner", "disable-provider-profiles"],
+      rebuilds: ["chronicle-index", "asset-thumbnails"],
+      space: {
+        staging: { requiredBytes: 8_192, availableBytes: 16_384, verified: true, sufficient: true, overrideUsed: false },
+        assetRoot: { requiredBytes: 4_096, availableBytes: 8_192, verified: true, sufficient: true, overrideUsed: false }
+      },
+      warnings: [],
+      errors: [],
+      expiresAt: "2026-08-25T12:30:00.000Z"
+    };
+
+    expect(systemImportPreviewViewSchema.parse(preview)).toEqual(preview);
+    expect(systemImportPreviewViewSchema.safeParse({ ...preview, localPath: "C:/private/system.zip" }).success).toBe(false);
+    expect(systemImportPreviewViewSchema.safeParse({
+      ...preview,
+      versions: { ...preview.versions, sourceApplication: "0.1.0" }
+    }).success).toBe(false);
+    expect(systemImportPreviewViewSchema.safeParse({
+      ...preview,
+      space: { ...preview.space, staging: { ...preview.space.staging, availableBytes: null } }
+    }).success).toBe(false);
   });
 });

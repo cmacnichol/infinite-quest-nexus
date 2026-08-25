@@ -3,6 +3,7 @@ import { createReadStream } from "node:fs";
 import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { Readable } from "node:stream";
 import JSZip from "jszip";
 import sharp from "sharp";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -25,11 +26,16 @@ import {
 import {
   createPrivateSystemArchiveStaging,
   createFilesystemSystemArchiveWriter,
+  createSystemArchiveImportPreviewService,
+  inspectSystemArchiveForPreview,
   type SystemArchiveArtifactPublisherPort,
   type SystemArchiveStagingPort,
 } from "../../services/runtime/src/system-archive-composition.js";
 import { createAssetImportStorageComposition } from "../../services/runtime/src/asset-import-composition.js";
-import { supportsSecureGeneratedArchiveStaging } from "../../services/api/src/archive-io.js";
+import {
+  stageArchiveUpload,
+  supportsSecureGeneratedArchiveStaging,
+} from "../../services/api/src/archive-io.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -432,6 +438,19 @@ integration("deterministic owner-wide System Archive export", () => {
     return { result, writer, bytes: publication.read(result.artifact.relativePath) };
   }
 
+  async function withStagedArchive<Result>(
+    bytes: Buffer,
+    archiveLimits: typeof limits,
+    work: (staged: Awaited<ReturnType<typeof stageArchiveUpload>>) => Promise<Result>,
+  ): Promise<Result> {
+    const staged = await stageArchiveUpload(Readable.from(bytes), archiveRoot, archiveLimits);
+    try {
+      return await work(staged);
+    } finally {
+      await rm(staged.absolutePath, { force: true });
+    }
+  }
+
   it("exports exhaustive logical authority, all retained originals, and no excluded state", async () => {
     const first = await exportArchive();
     const second = await exportArchive();
@@ -497,6 +516,320 @@ integration("deterministic owner-wide System Archive export", () => {
     const inventory = JSON.parse(await zip.file("assets/assets.json")!.async("string")) as { assets: unknown[] };
     expect(inventory.assets).toHaveLength(4);
     expect(serialized).toContain("The gate opens silently.");
+  });
+
+  it("validates the exported System Archive into a non-mutating logical preview", async () => {
+    const exported = await exportArchive();
+    const preview = await withStagedArchive(
+      exported.bytes,
+      limits,
+      (staged) => inspectSystemArchiveForPreview(staged, limits),
+    );
+
+    expect(preview).toMatchObject({
+      formatVersion: 1,
+      archiveFingerprint: exported.result.artifact.contentFingerprint,
+      sourceOwnerCount: 1,
+      assetCount: 4,
+      disabledProviderCount: 1,
+    });
+    expect(preview.recordsByDomain.campaigns).toBe(1);
+    expect(preview.recordsByDomain.turns).toBe(1);
+    expect(preview.assetBytes).toBe(originals.reduce((total, original) => total + original.bytes.byteLength, 0));
+    expect(preview.rebuilds).toEqual(expect.arrayContaining(["chronicle-index", "asset-thumbnails"]));
+  });
+
+  it("issues only safe 30-minute preview authority after empty-destination and capacity checks", async () => {
+    const exported = await exportArchive();
+    await withStagedArchive(exported.bytes, limits, async (staged) => {
+      const createPreview = vi.fn(async (
+        _owner: Readonly<{ ownerUserId: string }>,
+        _request: Readonly<{ projection: Readonly<Record<string, unknown>> }>,
+      ) => ({
+        jobId: randomUUID(),
+        previewHandle: "opaque-preview-authority-token",
+        expiresAt: "2026-08-25T12:30:00.000Z",
+      }));
+      const destination = {
+        initialOwnerId: ownerUserId,
+        latestMigration: "0079_resumable_system_archive_uploads",
+        authoritativeCountsHash: sha256("empty-authority"),
+        activeJobsHash: sha256("no-active-work"),
+        checkedAt: "2026-08-25T12:00:00.000Z",
+        destinationEmpty: true,
+      } as const;
+      const service = createSystemArchiveImportPreviewService({
+        imports: {
+          destinationFingerprint: vi.fn(async () => destination),
+          createPreview,
+        },
+        source: {
+          async withCompletedUpload(_owner, _uploadId, inspect) {
+            return inspect(staged);
+          },
+        },
+        capacity: {
+          availableBytes: vi.fn(async () => ({
+            staging: exported.bytes.byteLength * 2,
+            assetRoot: originals.reduce((total, original) => total + original.bytes.byteLength, 0) * 2,
+          })),
+        },
+        limits,
+        destinationApplicationVersion: "0.1.0",
+        allowUnknownFreeSpace: false,
+      });
+
+      const preview = await service.preview({ ownerUserId }, randomUUID());
+      expect(preview).toMatchObject({
+        valid: true,
+        previewHandle: "opaque-preview-authority-token",
+        versions: {
+          archiveFormat: 1,
+          sourceApplication: null,
+          destinationApplication: "0.1.0",
+          destinationMigration: "0079_resumable_system_archive_uploads",
+        },
+        archiveFingerprint: exported.result.artifact.contentFingerprint,
+        destinationEmpty: true,
+        ownerMapping: { sourceOwnerId: ownerUserId, destinationOwnerId: ownerUserId },
+        disabledProviders: 1,
+        space: {
+          staging: { verified: true, sufficient: true, overrideUsed: false },
+          assetRoot: { verified: true, sufficient: true, overrideUsed: false },
+        },
+        expiresAt: "2026-08-25T12:30:00.000Z",
+      });
+      expect(createPreview).toHaveBeenCalledOnce();
+      const persistedProjection = createPreview.mock.calls[0]![1].projection;
+      expect(JSON.stringify(persistedProjection)).not.toContain(archiveRoot);
+      expect(persistedProjection).not.toHaveProperty("previewHandle");
+    });
+  });
+
+  it("validates the complete preview projection before creating opaque authority", async () => {
+    const exported = await exportArchive();
+    await withStagedArchive(exported.bytes, limits, async (staged) => {
+      const createPreview = vi.fn(async () => ({
+        jobId: randomUUID(),
+        previewHandle: "authority-must-not-be-created",
+        expiresAt: "2026-08-25T12:30:00.000Z",
+      }));
+      const service = createSystemArchiveImportPreviewService({
+        imports: {
+          destinationFingerprint: vi.fn(async () => ({
+            initialOwnerId: ownerUserId,
+            latestMigration: "0079_resumable_system_archive_uploads",
+            authoritativeCountsHash: sha256("empty-authority"),
+            activeJobsHash: sha256("no-active-work"),
+            checkedAt: "2026-08-25T12:00:00.000Z",
+            destinationEmpty: true,
+          })),
+          createPreview,
+        },
+        source: {
+          async withCompletedUpload(_owner, _uploadId, inspect) {
+            return inspect(staged);
+          },
+        },
+        capacity: {
+          availableBytes: vi.fn(async () => ({
+            staging: exported.bytes.byteLength * 2,
+            assetRoot: originals.reduce((total, original) => total + original.bytes.byteLength, 0) * 2,
+          })),
+        },
+        limits,
+        destinationApplicationVersion: "x".repeat(101),
+        allowUnknownFreeSpace: false,
+      });
+
+      await expect(service.preview({ ownerUserId }, randomUUID())).rejects.toThrow();
+      expect(createPreview).not.toHaveBeenCalled();
+    });
+  });
+
+  it("fails closed without creating preview authority for a non-empty destination and insufficient space", async () => {
+    const exported = await exportArchive();
+    await withStagedArchive(exported.bytes, limits, async (staged) => {
+      const createPreview = vi.fn();
+      const service = createSystemArchiveImportPreviewService({
+        imports: {
+          destinationFingerprint: vi.fn(async () => ({
+            initialOwnerId: ownerUserId,
+            latestMigration: "0079_resumable_system_archive_uploads",
+            authoritativeCountsHash: sha256("empty-authority"),
+            activeJobsHash: sha256("no-active-work"),
+            checkedAt: "2026-08-25T12:00:00.000Z",
+            destinationEmpty: false,
+          })),
+          createPreview,
+        },
+        source: {
+          async withCompletedUpload(_owner, _uploadId, inspect) {
+            return inspect(staged);
+          },
+        },
+        capacity: { availableBytes: vi.fn(async () => ({ staging: null, assetRoot: 0 })) },
+        limits,
+        destinationApplicationVersion: "0.1.0",
+        allowUnknownFreeSpace: false,
+      });
+
+      const preview = await service.preview({ ownerUserId }, randomUUID());
+      expect(preview).toMatchObject({
+        valid: false,
+        previewHandle: null,
+        errors: ["archive-destination-not-empty", "archive-storage-insufficient"],
+        expiresAt: null,
+        space: {
+          staging: { verified: false, sufficient: false, overrideUsed: false },
+          assetRoot: { verified: true, sufficient: false, overrideUsed: false },
+        },
+      });
+      expect(preview.warnings).toEqual([
+        expect.stringContaining("cannot be authorized without an operator override"),
+      ]);
+      expect(preview.warnings).not.toEqual(expect.arrayContaining([
+        expect.stringContaining("override was used"),
+      ]));
+      expect(createPreview).not.toHaveBeenCalled();
+    });
+  });
+
+  it("marks the explicit operator override when free space cannot be measured", async () => {
+    const exported = await exportArchive();
+    await withStagedArchive(exported.bytes, limits, async (staged) => {
+      const createPreview = vi.fn(async () => ({
+        jobId: randomUUID(),
+        previewHandle: "opaque-unknown-capacity-authority",
+        expiresAt: "2026-08-25T12:30:00.000Z",
+      }));
+      const service = createSystemArchiveImportPreviewService({
+        imports: {
+          destinationFingerprint: vi.fn(async () => ({
+            initialOwnerId: ownerUserId,
+            latestMigration: "0079_resumable_system_archive_uploads",
+            authoritativeCountsHash: sha256("empty-authority"),
+            activeJobsHash: sha256("no-active-work"),
+            checkedAt: "2026-08-25T12:00:00.000Z",
+            destinationEmpty: true,
+          })),
+          createPreview,
+        },
+        source: {
+          async withCompletedUpload(_owner, _uploadId, inspect) {
+            return inspect(staged);
+          },
+        },
+        capacity: { availableBytes: vi.fn(async () => ({ staging: null, assetRoot: null })) },
+        limits,
+        destinationApplicationVersion: "0.1.0",
+        allowUnknownFreeSpace: true,
+      });
+
+      await expect(service.preview({ ownerUserId }, randomUUID())).resolves.toMatchObject({
+        valid: true,
+        warnings: expect.arrayContaining([
+          expect.stringContaining("operator override"),
+        ]),
+        space: {
+          staging: { verified: false, sufficient: true, overrideUsed: true },
+          assetRoot: { verified: false, sufficient: true, overrideUsed: true },
+        },
+      });
+      expect(createPreview).toHaveBeenCalledOnce();
+    });
+  });
+
+  it("rejects broken System Archive relationships before preview authority exists", async () => {
+    const exported = await exportArchive();
+    const zip = await JSZip.loadAsync(exported.bytes);
+    const manifest = JSON.parse(await zip.file("manifest.json")!.async("string")) as {
+      contentFingerprint: string;
+      entries: { path: string; logicalType: string; mediaType: string; byteLength: number; sha256: string }[];
+    };
+    const campaignEntry = manifest.entries.find((entry) => entry.path.startsWith("records/campaigns/"))!;
+    const line = JSON.parse((await zip.file(campaignEntry.path)!.async("string")).trim()) as {
+      record: { worldVersionId: string };
+    };
+    line.record.worldVersionId = randomUUID();
+    const bytes = Buffer.from(`${JSON.stringify(line)}\n`, "utf8");
+    zip.file(campaignEntry.path, bytes);
+    campaignEntry.byteLength = bytes.byteLength;
+    campaignEntry.sha256 = sha256(bytes);
+    const payloadHashes = manifest.entries
+      .filter((entry) => entry.logicalType !== "asset-original")
+      .sort((left, right) => left.path.localeCompare(right.path))
+      .map((entry) => entry.sha256);
+    const originalAssetHashes = manifest.entries
+      .filter((entry) => entry.logicalType === "asset-original")
+      .sort((left, right) => left.path.localeCompare(right.path))
+      .map((entry) => entry.sha256);
+    manifest.contentFingerprint = createHash("sha256")
+      .update(JSON.stringify({ originalAssetHashes: [...originalAssetHashes].sort(), payloadHashes: [...payloadHashes].sort() }))
+      .digest("hex");
+    zip.file("manifest.json", JSON.stringify(manifest));
+    const malformed = await zip.generateAsync({ type: "nodebuffer" });
+
+    await withStagedArchive(malformed, limits, async (staged) => {
+      await expect(inspectSystemArchiveForPreview(staged, limits)).rejects.toMatchObject({
+        code: "archive-world-mismatch",
+      });
+    });
+  });
+
+  it("rejects corrupt Original Assets and multiple-owner manifests during preview", async () => {
+    const exported = await exportArchive();
+    const corruptZip = await JSZip.loadAsync(exported.bytes);
+    const assetPath = Object.keys(corruptZip.files).find((path) => path.startsWith("assets/sha256/") && !corruptZip.files[path]!.dir)!;
+    corruptZip.file(assetPath, Buffer.from("not an image"));
+    const corrupt = await corruptZip.generateAsync({ type: "nodebuffer" });
+    await withStagedArchive(corrupt, limits, async (staged) => {
+      await expect(inspectSystemArchiveForPreview(staged, limits)).rejects.toMatchObject({
+        code: expect.stringMatching(/^archive-(checksum-mismatch|asset-invalid)$/),
+      });
+    });
+
+    const ownersZip = await JSZip.loadAsync(exported.bytes);
+    const manifest = JSON.parse(await ownersZip.file("manifest.json")!.async("string")) as Record<string, unknown>;
+    manifest.sourceOwnerCount = 2;
+    ownersZip.file("manifest.json", JSON.stringify(manifest));
+    const multipleOwners = await ownersZip.generateAsync({ type: "nodebuffer" });
+    await withStagedArchive(multipleOwners, limits, async (staged) => {
+      await expect(inspectSystemArchiveForPreview(staged, limits)).rejects.toMatchObject({
+        code: "archive-owner-count-unsupported",
+      });
+    });
+  });
+
+  it("inherits unsafe-name, Unicode-duplicate, and expansion defenses for System Preview", async () => {
+    const unsafeZip = new JSZip();
+    unsafeZip.file("C:/private/system.json", "{}", { createFolders: false });
+    const unsafe = await unsafeZip.generateAsync({ type: "nodebuffer" });
+    await withStagedArchive(unsafe, limits, async (staged) => {
+      await expect(inspectSystemArchiveForPreview(staged, limits)).rejects.toMatchObject({
+        code: "archive-entry-unsafe",
+      });
+    });
+
+    const duplicateZip = new JSZip();
+    duplicateZip.file("records/caf\u00e9.ndjson", "{}\n", { createFolders: false });
+    duplicateZip.file("records/cafe\u0301.ndjson", "{}\n", { createFolders: false });
+    const duplicate = await duplicateZip.generateAsync({ type: "nodebuffer" });
+    await withStagedArchive(duplicate, limits, async (staged) => {
+      await expect(inspectSystemArchiveForPreview(staged, limits)).rejects.toMatchObject({
+        code: "archive-entry-duplicate",
+      });
+    });
+
+    const expansionZip = new JSZip();
+    expansionZip.file("system.json", Buffer.alloc(64 * 1024), { createFolders: false });
+    const expansion = await expansionZip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+    await withStagedArchive(expansion, limits, async (staged) => {
+      await expect(inspectSystemArchiveForPreview(staged, {
+        ...limits,
+        maxExpansionRatio: 1,
+      })).rejects.toMatchObject({ code: "archive-limit-exceeded" });
+    });
   });
 
   it("counts every active or retryable excluded generation and illustration job family", async () => {

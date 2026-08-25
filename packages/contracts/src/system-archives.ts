@@ -388,15 +388,76 @@ export const systemUploadViewSchema = z.object({
   }
 });
 
+const systemArchiveCapacityCheckSchema = z.object({
+  requiredBytes: nonnegativeSafeIntegerSchema,
+  availableBytes: nonnegativeSafeIntegerSchema.nullable(),
+  verified: z.boolean(),
+  sufficient: z.boolean(),
+  overrideUsed: z.boolean()
+}).strict().superRefine((capacity, context) => {
+  if ((capacity.availableBytes === null) === capacity.verified) {
+    context.addIssue({ code: "custom", message: "Verified capacity requires an available-byte measurement." });
+  }
+  if (capacity.availableBytes !== null
+    && capacity.sufficient !== (capacity.availableBytes >= capacity.requiredBytes)) {
+    context.addIssue({ code: "custom", message: "Capacity sufficiency must match the measured available bytes." });
+  }
+  if (capacity.overrideUsed && (capacity.availableBytes !== null || !capacity.sufficient)) {
+    context.addIssue({ code: "custom", message: "Only an unknown capacity may use the explicit sufficient-capacity override." });
+  }
+});
+
 export const systemImportPreviewViewSchema = z.object({
   valid: z.boolean(),
+  previewHandle: boundedStringSchema(200).nullable(),
+  versions: z.object({
+    archiveFormat: z.literal(1),
+    // Format v1 did not encode a source application build. Keeping this
+    // explicit prevents a destination version from being mistaken for it.
+    sourceApplication: z.null(),
+    destinationApplication: boundedStringSchema(100),
+    destinationMigration: boundedStringSchema(200)
+  }).strict(),
   sourceOwnerCount: z.literal(1),
   archiveFingerprint: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
+  recordsByDomain: z.record(systemArchiveDomainSchema, nonnegativeSafeIntegerSchema),
+  assets: z.object({
+    originalCount: nonnegativeSafeIntegerSchema,
+    totalBytes: nonnegativeSafeIntegerSchema
+  }).strict(),
   destinationEmpty: z.boolean(),
+  ownerMapping: z.object({
+    sourceOwnerId: z.string().uuid(),
+    destinationOwnerId: z.string().uuid()
+  }).strict(),
+  disabledProviders: nonnegativeSafeIntegerSchema,
+  invalidatedAccess: z.array(z.enum([
+    "share-links", "sessions", "oidc-identities", "external-authorizations"
+  ])).max(4),
+  normalization: z.array(z.enum([
+    "map-source-owner-to-initial-owner", "disable-provider-profiles"
+  ])).max(2),
+  rebuilds: z.array(z.enum(["chronicle-index", "asset-thumbnails"])).max(2),
+  space: z.object({
+    staging: systemArchiveCapacityCheckSchema,
+    assetRoot: systemArchiveCapacityCheckSchema
+  }).strict(),
   warnings: z.array(boundedStringSchema(1_000)),
   errors: z.array(archiveErrorCodeSchema),
-  expiresAt: z.iso.datetime({ offset: true })
-}).strict();
+  expiresAt: z.iso.datetime({ offset: true }).nullable()
+}).strict().superRefine((preview, context) => {
+  const valid = preview.destinationEmpty
+    && preview.archiveFingerprint !== null
+    && preview.space.staging.sufficient
+    && preview.space.assetRoot.sufficient
+    && preview.errors.length === 0;
+  if (preview.valid !== valid) {
+    context.addIssue({ code: "custom", message: "System Import Preview validity does not match its verified checks." });
+  }
+  if ((preview.previewHandle === null) !== !preview.valid || (preview.expiresAt === null) !== !preview.valid) {
+    context.addIssue({ code: "custom", message: "Only a valid preview may carry opaque preview authority." });
+  }
+});
 
 export const systemArchiveExportRequestSchema = z.object({
   idempotencyKey: boundedStringSchema(200)
