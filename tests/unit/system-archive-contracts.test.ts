@@ -31,6 +31,17 @@ const validChronicleRecord = {
   metadata: { entityNames: ["party", "observatory"] }
 };
 
+const validCampaignRecord = {
+  sourceId: campaignId,
+  worldVersionId: "77777777-7777-4777-8777-777777777777",
+  title: "Observatory",
+  status: "active",
+  activeTurnNumber: 4,
+  settings: { turnControlStyle: "Auto" },
+  createdAt: "2026-08-25T12:00:00.000Z",
+  updatedAt: "2026-08-25T12:00:00.000Z"
+};
+
 const validPayload = {
   formatVersion: 1,
   sourceInstallationId: "55555555-5555-4555-8555-555555555555",
@@ -39,7 +50,12 @@ const validPayload = {
   records: [
     { domain: "providers", formatVersion: 1, sourceId: providerId, record: validProviderRecord },
     { domain: "chronicle", formatVersion: 1, sourceId: chronicleId, record: validChronicleRecord },
-    { domain: "campaigns", formatVersion: 1, sourceId: campaignId, record: { sourceId: campaignId, payload: { title: "Observatory" } } }
+    {
+      domain: "campaigns",
+      formatVersion: 1,
+      sourceId: campaignId,
+      record: validCampaignRecord
+    }
   ]
 };
 
@@ -53,10 +69,13 @@ describe("System Archive contracts", () => {
     ["Chronicle embedding", 1, { ...validChronicleRecord, embedding: [0.1] }],
     ["Chronicle chunk", 1, { ...validChronicleRecord, chunk: "raw chunk" }],
     ["Chronicle cache", 1, { ...validChronicleRecord, queryCache: { key: "value" } }],
-    ["filesystem path", 2, { sourceId: campaignId, payload: { filesystemPath: "C:/archive/private.zip" } }],
-    ["access capability", 2, { sourceId: campaignId, payload: { deliveryCapability: "opaque-token" } }],
-    ["active job", 2, { sourceId: campaignId, payload: { generationJob: { status: "queued" } } }],
-    ["model chain", 2, { sourceId: campaignId, payload: { modelChain: { previousResponseId: "response" } } }]
+    ["filesystem path", 2, { ...validCampaignRecord, assetPath: "C:/archive/private.zip" }],
+    ["equivalent filesystem path", 2, { ...validCampaignRecord, localFile: "private.zip" }],
+    ["access capability", 2, { ...validCampaignRecord, deliveryCapability: "opaque-token" }],
+    ["provider token", 2, { ...validCampaignRecord, providerToken: "secret" }],
+    ["equivalent secret", 2, { ...validCampaignRecord, authToken: "secret" }],
+    ["active job", 2, { ...validCampaignRecord, generationJob: { status: "queued" } }],
+    ["model chain", 2, { ...validCampaignRecord, modelChain: { previousResponseId: "response" } }]
   ])("rejects %s at the System Archive payload boundary", (_label, recordIndex, record) => {
     const records = validPayload.records.map((entry, index) => index === recordIndex ? { ...entry, record } : entry);
     expect(systemArchivePayloadSchema.safeParse({ ...validPayload, records }).success).toBe(false);
