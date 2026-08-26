@@ -49,6 +49,10 @@ const validCampaignRecord = {
   status: "active",
   activeTurnNumber: 4,
   settings: { turnControlStyle: "Auto" },
+  selectedCharacterId: null,
+  characterSnapshot: null,
+  characterProfile: null,
+  characterProfileRevision: 0,
   createdAt: "2026-08-25T12:00:00.000Z",
   updatedAt: "2026-08-25T12:00:00.000Z"
 };
@@ -341,6 +345,115 @@ describe("System Archive contracts", () => {
     for (const record of records) {
       expect(systemRecordEnvelopeSchema.parse(record)).toEqual(record);
     }
+  });
+
+  it("rejects nested secret and operational fields from portable state and character authority", () => {
+    const snapshot = {
+      id: "scholar",
+      name: "Nia",
+      characterText: "A determined scholar.",
+      profile: validCharacterProfile,
+      rpgStats: [],
+      defaultTriggers: [],
+      source: { type: "world-version", revision: 3 }
+    };
+    const invalidRecords = [
+      {
+        domain: "turns", formatVersion: 1, sourceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa4",
+        record: {
+          sourceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa4", campaignId, turnNumber: 4,
+          action: "Open.", narration: "Opened.", choices: [], imagePrompt: "Door.",
+          stateSnapshotPrivate: {
+            ...validCampaignState,
+            trackers: [{ ...validCampaignState.trackers[0], credentials: { token: "must-reject" } }]
+          },
+          acceptedAt: "2026-08-25T12:00:04.000Z"
+        }
+      },
+      {
+        domain: "campaigns", formatVersion: 1, sourceId: campaignId,
+        record: {
+          ...validCampaignRecord,
+          selectedCharacterId: "scholar",
+          characterSnapshot: {
+            ...snapshot,
+            source: { ...snapshot.source, nonce: "must-reject" }
+          }
+        }
+      },
+      {
+        domain: "campaigns", formatVersion: 1, sourceId: campaignId,
+        record: {
+          ...validCampaignRecord,
+          selectedCharacterId: "scholar",
+          characterSnapshot: snapshot,
+          characterProfile: {
+            name: "Nia",
+            profile: {
+              ...validCharacterProfile,
+              story: { ...validCharacterProfile.story, modelChain: { previousResponseId: "must-reject" } }
+            }
+          },
+          characterProfileRevision: 3
+        }
+      }
+    ] as const;
+
+    for (const record of invalidRecords) {
+      expect(systemRecordEnvelopeSchema.safeParse(record).success).toBe(false);
+    }
+  });
+
+  it("requires every declared v1 authority key instead of synthesizing import defaults", () => {
+    const turn = {
+      domain: "turns", formatVersion: 1, sourceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa4",
+      record: {
+        sourceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa4", campaignId, turnNumber: 4,
+        action: "Open.", narration: "Opened.", choices: [], imagePrompt: "Door.",
+        stateSnapshotPrivate: validCampaignState,
+        acceptedAt: "2026-08-25T12:00:04.000Z"
+      }
+    } as const;
+    const world = {
+      domain: "worlds", formatVersion: 1, sourceId: worldId,
+      record: {
+        sourceId: worldId, title: "The Observatory", status: "active",
+        forkedFromWorldId: null, forkedFromWorldVersionId: null,
+        createdAt: "2026-08-25T12:00:00.000Z", updatedAt: "2026-08-25T12:00:00.000Z"
+      }
+    } as const;
+
+    expect(systemRecordEnvelopeSchema.safeParse({
+      ...turn, record: { ...turn.record, stateSnapshotPrivate: undefined }
+    }).success).toBe(false);
+    expect(systemRecordEnvelopeSchema.safeParse({
+      ...world, record: { ...world.record, forkedFromWorldId: undefined }
+    }).success).toBe(false);
+    for (const key of [
+      "selectedCharacterId", "characterSnapshot", "characterProfile", "characterProfileRevision",
+    ] as const) {
+      const record = { ...validCampaignRecord } as Record<string, unknown>;
+      delete record[key];
+      expect(systemRecordEnvelopeSchema.safeParse({
+        domain: "campaigns", formatVersion: 1, sourceId: campaignId, record,
+      }).success).toBe(false);
+    }
+    expect(systemCampaignHistoryDetailsSchema.safeParse({
+      eventType: "memory-config",
+      details: {
+        embeddingEnabled: false, embeddingProviderProfileId: null,
+        embeddingModel: "", embeddingBatchSize: 16,
+      }
+    }).success).toBe(false);
+    expect(systemCampaignHistoryDetailsSchema.safeParse({
+      eventType: "illustration-config",
+      details: {
+        enabled: false, providerProfileId: null, model: "", size: "1024x1024",
+        aspectRatio: "1:1", quality: "auto", outputFormat: "png", maxAttempts: 3,
+        segmentWordCount: 500, imagesPerSegment: 1, segmentPromptMode: "direct",
+        refinementPrompt: "",
+      }
+    }).success).toBe(false);
   });
 
   it("validates exact campaign history and portable configuration authority", () => {

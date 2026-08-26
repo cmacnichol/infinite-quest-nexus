@@ -106,15 +106,32 @@ export class SystemArchivePreviewIndex {
         asset_id TEXT NOT NULL,
         PRIMARY KEY (world_id,world_version_id,asset_id)
       ) WITHOUT ROWID;
-      CREATE TABLE world_characters (
-        world_version_id TEXT NOT NULL,
-        character_id TEXT NOT NULL,
-        PRIMARY KEY (world_version_id,character_id)
-      ) WITHOUT ROWID;
-      CREATE TABLE selected_characters (
+      CREATE TABLE campaign_profiles (
         campaign_id TEXT PRIMARY KEY,
-        world_version_id TEXT NOT NULL,
-        character_id TEXT NOT NULL
+        revision INTEGER NOT NULL,
+        profile_json TEXT
+      ) WITHOUT ROWID;
+      CREATE TABLE campaign_states (
+        campaign_id TEXT PRIMARY KEY,
+        revision INTEGER NOT NULL,
+        state_json TEXT NOT NULL
+      ) WITHOUT ROWID;
+      CREATE TABLE character_profile_edits (
+        campaign_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        profile_json TEXT NOT NULL,
+        PRIMARY KEY (campaign_id,revision)
+      ) WITHOUT ROWID;
+      CREATE TABLE campaign_state_edits (
+        campaign_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        state_json TEXT NOT NULL,
+        PRIMARY KEY (campaign_id,revision)
+      ) WITHOUT ROWID;
+      CREATE TABLE world_migrations (
+        history_id TEXT PRIMARY KEY,
+        from_version_id TEXT NOT NULL,
+        to_version_id TEXT NOT NULL
       ) WITHOUT ROWID;
     `);
   }
@@ -225,15 +242,6 @@ export class SystemArchivePreviewIndex {
             throw relationshipFailure();
           }
         }
-        for (const character of envelope.record.content.playableCharacters) {
-          try {
-            this.#database.prepare(
-              "INSERT INTO world_characters (world_version_id,character_id) VALUES (?,?)",
-            ).run(envelope.sourceId, character.id);
-          } catch {
-            throw relationshipFailure();
-          }
-        }
         this.#require("worlds", envelope.record.worldId);
         break;
       case "world-drafts":
@@ -261,21 +269,23 @@ export class SystemArchivePreviewIndex {
           envelope.record.activeTurnNumber,
         );
         this.#require("world-versions", envelope.record.worldVersionId);
-        if ((envelope.record.selectedCharacterId ?? null) !== null) {
+        if (envelope.record.selectedCharacterId !== null) {
           if (envelope.record.characterSnapshot?.id !== envelope.record.selectedCharacterId) {
             throw relationshipFailure();
           }
-          this.#database.prepare(
-            `INSERT INTO selected_characters
-               (campaign_id,world_version_id,character_id) VALUES (?,?,?)`,
-          ).run(
-            envelope.sourceId,
-            envelope.record.worldVersionId,
-            envelope.record.selectedCharacterId!,
-          );
-        } else if ((envelope.record.characterSnapshot ?? null) !== null) {
+        } else if (envelope.record.characterSnapshot !== null
+          || envelope.record.characterProfile !== null
+          || envelope.record.characterProfileRevision !== 0) {
           throw relationshipFailure();
         }
+        this.#database.prepare(
+          "INSERT INTO campaign_profiles (campaign_id,revision,profile_json) VALUES (?,?,?)",
+        ).run(
+          envelope.sourceId,
+          envelope.record.characterProfileRevision,
+          envelope.record.characterProfile === null
+            ? null : canonicalArchiveJson(envelope.record.characterProfile),
+        );
         break;
       case "turns":
         this.#insertRecord(
@@ -301,6 +311,13 @@ export class SystemArchivePreviewIndex {
       case "campaign-state":
         if (envelope.sourceId !== envelope.record.campaignId) throw relationshipFailure();
         this.#insertRecord(envelope.domain, envelope.sourceId, envelope.record.campaignId);
+        this.#database.prepare(
+          "INSERT INTO campaign_states (campaign_id,revision,state_json) VALUES (?,?,?)",
+        ).run(
+          envelope.record.campaignId,
+          envelope.record.revision,
+          canonicalArchiveJson(envelope.record.state),
+        );
         this.#require("campaigns", envelope.record.campaignId);
         break;
       case "campaign-history": {
@@ -325,8 +342,19 @@ export class SystemArchivePreviewIndex {
           case "world-migration":
             this.#require("world-versions", history.details.fromWorldVersionId);
             this.#require("world-versions", history.details.toWorldVersionId);
+            this.#database.prepare(
+              "INSERT INTO world_migrations (history_id,from_version_id,to_version_id) VALUES (?,?,?)",
+            ).run(
+              envelope.sourceId,
+              history.details.fromWorldVersionId,
+              history.details.toWorldVersionId,
+            );
             break;
           case "world-transfer":
+            if (envelope.record.campaignId
+              !== (history.details.targetCampaignId ?? history.details.sourceCampaignId)) {
+              throw relationshipFailure();
+            }
             if (history.details.sourceCampaignId) {
               this.#require("campaigns", history.details.sourceCampaignId);
             }
@@ -360,7 +388,23 @@ export class SystemArchivePreviewIndex {
             );
             break;
           case "character-profile-edit":
+            this.#database.prepare(
+              `INSERT INTO character_profile_edits
+                 (campaign_id,revision,profile_json) VALUES (?,?,?)`,
+            ).run(
+              envelope.record.campaignId,
+              history.details.revision,
+              canonicalArchiveJson(history.details.nextProfile),
+            );
+            break;
           case "campaign-state-edit":
+            this.#database.prepare(
+              "INSERT INTO campaign_state_edits (campaign_id,revision,state_json) VALUES (?,?,?)",
+            ).run(
+              envelope.record.campaignId,
+              history.details.revision,
+              canonicalArchiveJson(history.details.stateSnapshot),
+            );
             break;
         }
         break;
@@ -493,16 +537,59 @@ export class SystemArchivePreviewIndex {
     `).get();
     if (checkpointBeyondCampaign !== undefined) throw relationshipFailure();
 
-    const selectedCharacterMissing = this.#database.prepare(`
+    const currentProfileMismatch = this.#database.prepare(`
       SELECT 1 AS broken
-        FROM selected_characters selected
-        LEFT JOIN world_characters character
-          ON character.world_version_id=selected.world_version_id
-         AND character.character_id=selected.character_id
-       WHERE character.character_id IS NULL
+        FROM campaign_profiles current
+        LEFT JOIN character_profile_edits edit
+          ON edit.campaign_id=current.campaign_id
+         AND edit.revision=current.revision
+         AND edit.profile_json=current.profile_json
+       WHERE (current.revision=0 AND EXISTS (
+                SELECT 1 FROM character_profile_edits declared
+                 WHERE declared.campaign_id=current.campaign_id
+             ))
+          OR (current.revision>0 AND edit.campaign_id IS NULL)
+          OR EXISTS (
+               SELECT 1 FROM character_profile_edits newer
+                WHERE newer.campaign_id=current.campaign_id
+                  AND newer.revision>current.revision
+             )
        LIMIT 1
     `).get();
-    if (selectedCharacterMissing !== undefined) throw relationshipFailure();
+    if (currentProfileMismatch !== undefined) throw relationshipFailure();
+
+    const currentStateMismatch = this.#database.prepare(`
+      SELECT 1 AS broken
+        FROM campaign_states current
+        LEFT JOIN campaign_state_edits edit
+          ON edit.campaign_id=current.campaign_id
+         AND edit.revision=current.revision
+         AND edit.state_json=current.state_json
+       WHERE (current.revision=0 AND EXISTS (
+                SELECT 1 FROM campaign_state_edits declared
+                 WHERE declared.campaign_id=current.campaign_id
+             ))
+          OR (current.revision>0 AND edit.campaign_id IS NULL)
+          OR EXISTS (
+               SELECT 1 FROM campaign_state_edits newer
+                WHERE newer.campaign_id=current.campaign_id
+                  AND newer.revision>current.revision
+             )
+       LIMIT 1
+    `).get();
+    if (currentStateMismatch !== undefined) throw relationshipFailure();
+
+    const crossWorldMigration = this.#database.prepare(`
+      SELECT 1 AS broken
+        FROM world_migrations migration
+        JOIN records source
+          ON source.domain='world-versions' AND source.source_id=migration.from_version_id
+        JOIN records target
+          ON target.domain='world-versions' AND target.source_id=migration.to_version_id
+       WHERE source.parent_id IS NOT target.parent_id
+       LIMIT 1
+    `).get();
+    if (crossWorldMigration !== undefined) throw relationshipFailure();
 
     for (const asset of assets) {
       for (const binding of asset.bindings) {

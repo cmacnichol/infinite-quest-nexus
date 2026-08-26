@@ -329,9 +329,20 @@ integration("deterministic owner-wide System Archive export", () => {
     );
     const campaign = await pool.query<{ id: string }>(
       `INSERT INTO campaigns (
-         owner_user_id,world_version_id,title,active_turn_number,turn_control_style
-       ) VALUES ($1,$2,'System campaign',1,'flexible_scene') RETURNING id`,
-      [ownerUserId, worldVersionId],
+         owner_user_id,world_version_id,title,active_turn_number,turn_control_style,
+         selected_character_id,character_snapshot,character_profile,character_profile_revision
+       ) VALUES ($1,$2,'System campaign',1,'flexible_scene','avery',$3::jsonb,$4::jsonb,1)
+       RETURNING id`,
+      [
+        ownerUserId,
+        worldVersionId,
+        JSON.stringify({
+          id: "avery", name: "Avery", characterText: "Avery guards the portable gate.",
+          profile: { identity: { aliases: [], pronouns: "they" } },
+          rpgStats: [], defaultTriggers: [], source: { type: "integration-fixture" },
+        }),
+        JSON.stringify({ name: "Avery", profile: { identity: { aliases: [], pronouns: "they" } } }),
+      ],
     );
     campaignId = campaign.rows[0]!.id;
     await pool.query(
@@ -1578,6 +1589,8 @@ integration("deterministic owner-wide System Archive export", () => {
           sourceId: worldId,
           title: "Rollback World",
           status: "active",
+          forkedFromWorldId: null,
+          forkedFromWorldVersionId: null,
           createdAt: "2026-08-25T12:00:00.000Z",
           updatedAt: "2026-08-25T12:00:00.000Z",
         },
@@ -1646,7 +1659,11 @@ integration("deterministic owner-wide System Archive export", () => {
       }),
       systemRecordEnvelopeSchema.parse({
         domain: "worlds", formatVersion: 1, sourceId: worldId,
-        record: { sourceId: worldId, title: "Prompt World", status: "active", createdAt: timestamp, updatedAt: timestamp },
+        record: {
+          sourceId: worldId, title: "Prompt World", status: "active",
+          forkedFromWorldId: null, forkedFromWorldVersionId: null,
+          createdAt: timestamp, updatedAt: timestamp,
+        },
       }),
       systemRecordEnvelopeSchema.parse({
         domain: "world-versions", formatVersion: 1, sourceId: versionId,
@@ -1665,7 +1682,9 @@ integration("deterministic owner-wide System Archive export", () => {
         domain: "campaigns", formatVersion: 1, sourceId: campaignId,
         record: {
           sourceId: campaignId, worldVersionId: versionId, title: "Prompt Campaign", status: "active", activeTurnNumber: 0,
-          settings: { turnControlStyle: "Auto" }, createdAt: timestamp, updatedAt: timestamp,
+          settings: { turnControlStyle: "Auto" }, selectedCharacterId: null,
+          characterSnapshot: null, characterProfile: null, characterProfileRevision: 0,
+          createdAt: timestamp, updatedAt: timestamp,
         },
       }),
     ];
@@ -1700,6 +1719,7 @@ integration("deterministic owner-wide System Archive export", () => {
         domain: "worlds", formatVersion: 1, sourceId: worldId,
         record: {
           sourceId: worldId, title: "Unreconciled World", status: "active",
+          forkedFromWorldId: null, forkedFromWorldVersionId: null,
           createdAt: "2026-08-25T12:00:00.000Z", updatedAt: "2026-08-25T12:00:00.000Z",
         },
       })]);
@@ -1926,7 +1946,11 @@ integration("deterministic owner-wide System Archive export", () => {
     const records = [
       systemRecordEnvelopeSchema.parse({
         domain: "worlds", formatVersion: 1, sourceId: worldId,
-        record: { sourceId: worldId, title: "Fact World", status: "active", createdAt: timestamp, updatedAt: timestamp },
+        record: {
+          sourceId: worldId, title: "Fact World", status: "active",
+          forkedFromWorldId: null, forkedFromWorldVersionId: null,
+          createdAt: timestamp, updatedAt: timestamp,
+        },
       }),
       systemRecordEnvelopeSchema.parse({
         domain: "world-versions", formatVersion: 1, sourceId: versionId,
@@ -1945,7 +1969,9 @@ integration("deterministic owner-wide System Archive export", () => {
         domain: "campaigns", formatVersion: 1, sourceId: campaignId,
         record: {
           sourceId: campaignId, worldVersionId: versionId, title: "Fact Campaign", status: "active", activeTurnNumber: 0,
-          settings: { turnControlStyle: "Auto" }, createdAt: timestamp, updatedAt: timestamp,
+          settings: { turnControlStyle: "Auto" }, selectedCharacterId: null,
+          characterSnapshot: null, characterProfile: null, characterProfileRevision: 0,
+          createdAt: timestamp, updatedAt: timestamp,
         },
       }),
       systemRecordEnvelopeSchema.parse({
@@ -1999,6 +2025,7 @@ integration("deterministic owner-wide System Archive export", () => {
     const sourceWorldId = randomUUID();
     const sourceVersionId = randomUUID();
     const worldId = randomUUID();
+    const priorVersionId = randomUUID();
     const versionId = randomUUID();
     const campaignId = randomUUID();
     const turnId = randomUUID();
@@ -2110,9 +2137,23 @@ integration("deterministic owner-wide System Archive export", () => {
         },
       }),
       systemRecordEnvelopeSchema.parse({
+        domain: "world-versions", formatVersion: 1, sourceId: priorVersionId,
+        record: {
+          sourceId: priorVersionId, worldId, versionNumber: 1, title: "Restored World",
+          content: {
+            schemaVersion: 1,
+            world: { title: "Restored World", genre: "Fantasy", tone: "Hopeful", premise: "Prepare.", backgroundStory: "", firstAction: "Begin.", rules: "" },
+            playableCharacters: [restoredWorldCharacter], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [],
+            defaults: { selectedCharacterId: restoredSnapshot.id, initialLocation: "" },
+          },
+          contentFingerprint: null, releaseNotes: "", createdFromRevision: null,
+          publishedAt: "2026-08-25T11:30:00.000Z",
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
         domain: "world-versions", formatVersion: 1, sourceId: versionId,
         record: {
-          sourceId: versionId, worldId, versionNumber: 1, title: "Restored World",
+          sourceId: versionId, worldId, versionNumber: 2, title: "Restored World",
           content: {
             schemaVersion: 1,
             world: { title: "Restored World", genre: "Fantasy", tone: "Hopeful", premise: "Return.", backgroundStory: "", firstAction: "Begin.", rules: "" },
@@ -2179,7 +2220,7 @@ integration("deterministic owner-wide System Archive export", () => {
         record: {
           sourceId: worldMigrationId, campaignId, eventType: "world-migration",
           content: JSON.stringify({
-            fromWorldVersionId: sourceVersionId, toWorldVersionId: versionId,
+            fromWorldVersionId: priorVersionId, toWorldVersionId: versionId,
             note: "Restore the exact migration authority.",
           }),
           occurredAt: "2026-08-25T11:58:00.000Z",
@@ -2254,6 +2295,7 @@ integration("deterministic owner-wide System Archive export", () => {
             status: "generating",
             isActive: true,
             characterVisualReference: "",
+            completedAt: null,
           }),
           occurredAt: "2026-08-25T12:00:00.000Z",
         },
@@ -2409,7 +2451,7 @@ integration("deterministic owner-wide System Archive export", () => {
       state_revision: 5,
       state_snapshot_private: restoredTurnState,
       changed_fields: ["continuitySummary", "openThreads"],
-      migration_from_version_id: sourceVersionId,
+      migration_from_version_id: priorVersionId,
       migration_to_version_id: versionId,
       migration_note: "Restore the exact migration authority.",
       source_campaign_id: campaignId,
@@ -2874,6 +2916,8 @@ integration("deterministic owner-wide System Archive export", () => {
           sourceId: worldId,
           title: "Preview mismatch world",
           status: "active",
+          forkedFromWorldId: null,
+          forkedFromWorldVersionId: null,
           createdAt: "2026-08-25T12:00:00.000Z",
           updatedAt: "2026-08-25T12:00:00.000Z",
         },

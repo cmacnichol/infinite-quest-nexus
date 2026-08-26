@@ -1587,6 +1587,12 @@ function assertRoundThreeArchiveRelationships(
     embeddingProviderProfileId: source.providerIds[2],
     embeddingModel: "release-embedding",
     embeddingBatchSize: 24,
+    embeddingDocumentPrefix: null,
+    embeddingQueryPrefix: null,
+    retrievalImplementation: "legacy_hybrid",
+    retrievalShadowEnabled: false,
+    createdAt: representativeTimestamp,
+    updatedAt: representativeTimestamp,
   });
 
   const illustrationConfig = history.find((entry) => entry.domain === "campaign-history"
@@ -1615,6 +1621,8 @@ function assertRoundThreeArchiveRelationships(
     imagesPerSegment: 2,
     segmentPromptMode: "ai_refined",
     refinementPrompt: "Preserve the fiction-only release aesthetic.",
+    createdAt: representativeTimestamp,
+    updatedAt: representativeTimestamp,
   });
 }
 

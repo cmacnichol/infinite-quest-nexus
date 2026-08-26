@@ -129,6 +129,12 @@ describe("System Archive preview restore keys", () => {
     assets: [],
     defaults: { selectedCharacterId: null, initialLocation: "" },
   };
+  const noCharacterAuthority = {
+    selectedCharacterId: null,
+    characterSnapshot: null,
+    characterProfile: null,
+    characterProfileRevision: 0,
+  };
   const worldDraftEnvelope = (sourceId: string, worldId: string) => systemRecordEnvelopeSchema.parse({
     domain: "world-drafts",
     formatVersion: 1,
@@ -183,10 +189,12 @@ describe("System Archive preview restore keys", () => {
         record: { worldId: "world-1", versionNumber: 1, content },
       } as never, new Set());
       index.add({
-        domain: "campaigns", sourceId: "campaign-1", record: { worldVersionId: "version-1" },
+        domain: "campaigns", sourceId: "campaign-1",
+        record: { worldVersionId: "version-1", ...noCharacterAuthority },
       } as never, new Set());
       index.add({
-        domain: "campaigns", sourceId: "campaign-2", record: { worldVersionId: "version-1" },
+        domain: "campaigns", sourceId: "campaign-2",
+        record: { worldVersionId: "version-1", ...noCharacterAuthority },
       } as never, new Set());
       index.add({
         domain: "turns", sourceId: "turn-1", record: { campaignId: "campaign-1", turnNumber: 1 },
@@ -218,7 +226,7 @@ describe("System Archive preview restore keys", () => {
       } as never, new Set());
       index.add({
         domain: "campaigns", sourceId: "campaign-1",
-        record: { worldVersionId: "version-1", activeTurnNumber: 2 },
+        record: { worldVersionId: "version-1", activeTurnNumber: 2, ...noCharacterAuthority },
       } as never, new Set());
       index.add({
         domain: "chronicle", sourceId: "checkpoint-1",
@@ -330,7 +338,7 @@ describe("System Archive preview restore keys", () => {
       } as never, new Set());
       index.add({
         domain: "campaigns", sourceId: "campaign-1",
-        record: { worldVersionId: "version-1", activeTurnNumber: 0 },
+        record: { worldVersionId: "version-1", activeTurnNumber: 0, ...noCharacterAuthority },
       } as never, new Set());
 
       expect(() => index.validate([{
@@ -473,7 +481,7 @@ describe("System Archive preview restore keys", () => {
     }
   });
 
-  it("rejects selected character authority absent from the pinned world version", async () => {
+  it("accepts a campaign-owned selected snapshot absent from the pinned world roster", async () => {
     const index = await SystemArchivePreviewIndex.create();
     try {
       index.add({ domain: "worlds", sourceId: "world-1", record: {} } as never, new Set());
@@ -493,12 +501,11 @@ describe("System Archive preview restore keys", () => {
         record: {
           worldVersionId: "version-1", activeTurnNumber: 0,
           selectedCharacterId: "missing", characterSnapshot: { id: "missing" },
+          characterProfile: null, characterProfileRevision: 0,
         },
       } as never, new Set());
 
-      expect(() => index.validate([])).toThrow(expect.objectContaining({
-        code: "archive-world-mismatch",
-      }));
+      expect(() => index.validate([])).not.toThrow();
     } finally {
       await index.close();
     }
@@ -518,11 +525,11 @@ describe("System Archive preview restore keys", () => {
       } as never, new Set());
       index.add({
         domain: "campaigns", sourceId: "campaign-1",
-        record: { worldVersionId: "version-1", activeTurnNumber: 1 },
+        record: { worldVersionId: "version-1", activeTurnNumber: 1, ...noCharacterAuthority },
       } as never, new Set());
       index.add({
         domain: "campaigns", sourceId: "campaign-2",
-        record: { worldVersionId: "version-1", activeTurnNumber: 1 },
+        record: { worldVersionId: "version-1", activeTurnNumber: 1, ...noCharacterAuthority },
       } as never, new Set());
       index.add({
         domain: "turns", sourceId: "turn-2",
@@ -563,7 +570,7 @@ describe("System Archive preview restore keys", () => {
       } as never, new Set());
       index.add({
         domain: "campaigns", sourceId: "campaign-1",
-        record: { worldVersionId: "version-1", activeTurnNumber: 1 },
+        record: { worldVersionId: "version-1", activeTurnNumber: 1, ...noCharacterAuthority },
       } as never, new Set());
       index.add({
         domain: "turns", sourceId: "turn-1",
@@ -579,6 +586,200 @@ describe("System Archive preview restore keys", () => {
       } as never, new Set());
 
       expect(() => index.validate([])).toThrow(expect.objectContaining({
+        code: "archive-world-mismatch",
+      }));
+    } finally {
+      await index.close();
+    }
+  });
+
+  it("rejects a current character profile that disagrees with its declared revision history", async () => {
+    const index = await SystemArchivePreviewIndex.create();
+    try {
+      index.add({ domain: "worlds", sourceId: "world-1", record: {} } as never, new Set());
+      index.add({
+        domain: "world-versions", sourceId: "version-1",
+        record: {
+          worldId: "world-1", versionNumber: 1,
+          content: { ...worldContent, playableCharacters: [{ id: "hero" }] },
+        },
+      } as never, new Set());
+      index.add({
+        domain: "campaigns", sourceId: "campaign-1",
+        record: {
+          worldVersionId: "version-1", activeTurnNumber: 0,
+          selectedCharacterId: "hero", characterSnapshot: { id: "hero" },
+          characterProfile: { name: "Current", profile: { unclassifiedNotes: "current" } },
+          characterProfileRevision: 2,
+        },
+      } as never, new Set());
+      index.add({
+        domain: "campaign-history", sourceId: "profile-edit-2",
+        record: {
+          campaignId: "campaign-1", eventType: "character-profile-edit",
+          content: JSON.stringify({
+            revision: 2, previousProfile: null,
+            nextProfile: { name: "Different", profile: { unclassifiedNotes: "history" } },
+            editSource: "manual",
+          }),
+        },
+      } as never, new Set());
+
+      expect(() => index.validate([])).toThrow(expect.objectContaining({
+        code: "archive-world-mismatch",
+      }));
+    } finally {
+      await index.close();
+    }
+  });
+
+  it("rejects current campaign state that disagrees with its declared revision history", async () => {
+    const index = await SystemArchivePreviewIndex.create();
+    try {
+      const currentState = {
+        continuitySummary: "Current", openThreads: [], canonicalFacts: [], scratchpad: "",
+        trackers: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], pendingEventTriggers: [],
+      };
+      index.add({ domain: "worlds", sourceId: "world-1", record: {} } as never, new Set());
+      index.add({
+        domain: "world-versions", sourceId: "version-1",
+        record: { worldId: "world-1", versionNumber: 1, content: worldContent },
+      } as never, new Set());
+      index.add({
+        domain: "campaigns", sourceId: "campaign-1",
+        record: { worldVersionId: "version-1", activeTurnNumber: 0, ...noCharacterAuthority },
+      } as never, new Set());
+      index.add({
+        domain: "campaign-state", sourceId: "campaign-1",
+        record: { campaignId: "campaign-1", revision: 2, state: currentState },
+      } as never, new Set());
+      index.add({
+        domain: "campaign-history", sourceId: "state-edit-2",
+        record: {
+          campaignId: "campaign-1", eventType: "campaign-state-edit",
+          content: JSON.stringify({
+            effectiveTurnNumber: 0, revision: 2,
+            stateSnapshot: { ...currentState, continuitySummary: "Different" },
+            changedFields: ["continuitySummary"],
+          }),
+        },
+      } as never, new Set());
+
+      expect(() => index.validate([])).toThrow(expect.objectContaining({
+        code: "archive-world-mismatch",
+      }));
+    } finally {
+      await index.close();
+    }
+  });
+
+  it("rejects world migrations whose versions belong to different worlds", async () => {
+    const index = await SystemArchivePreviewIndex.create();
+    try {
+      const fromVersionId = randomUUID();
+      const toVersionId = randomUUID();
+      index.add({ domain: "worlds", sourceId: "world-1", record: {} } as never, new Set());
+      index.add({ domain: "worlds", sourceId: "world-2", record: {} } as never, new Set());
+      index.add({
+        domain: "world-versions", sourceId: fromVersionId,
+        record: { worldId: "world-1", versionNumber: 1, content: worldContent },
+      } as never, new Set());
+      index.add({
+        domain: "world-versions", sourceId: toVersionId,
+        record: { worldId: "world-2", versionNumber: 1, content: worldContent },
+      } as never, new Set());
+      index.add({
+        domain: "campaigns", sourceId: "campaign-1",
+        record: { worldVersionId: fromVersionId, activeTurnNumber: 0, ...noCharacterAuthority },
+      } as never, new Set());
+      index.add({
+        domain: "campaign-history", sourceId: "migration-1",
+        record: {
+          campaignId: "campaign-1", eventType: "world-migration",
+          content: JSON.stringify({
+            fromWorldVersionId: fromVersionId, toWorldVersionId: toVersionId,
+            note: "Invalid cross-world migration",
+          }),
+        },
+      } as never, new Set());
+
+      expect(() => index.validate([])).toThrow(expect.objectContaining({
+        code: "archive-world-mismatch",
+      }));
+    } finally {
+      await index.close();
+    }
+  });
+
+  it("accepts distinct migration events that repeat the same valid version pair", async () => {
+    const index = await SystemArchivePreviewIndex.create();
+    try {
+      const fromVersionId = randomUUID();
+      const toVersionId = randomUUID();
+      index.add({ domain: "worlds", sourceId: "world-1", record: {} } as never, new Set());
+      index.add({
+        domain: "world-versions", sourceId: fromVersionId,
+        record: { worldId: "world-1", versionNumber: 1, content: worldContent },
+      } as never, new Set());
+      index.add({
+        domain: "world-versions", sourceId: toVersionId,
+        record: { worldId: "world-1", versionNumber: 2, content: worldContent },
+      } as never, new Set());
+      index.add({
+        domain: "campaigns", sourceId: "campaign-1",
+        record: { worldVersionId: toVersionId, activeTurnNumber: 0, ...noCharacterAuthority },
+      } as never, new Set());
+      for (const sourceId of ["migration-1", "migration-2"]) {
+        index.add({
+          domain: "campaign-history", sourceId,
+          record: {
+            campaignId: "campaign-1", eventType: "world-migration",
+            content: JSON.stringify({
+              fromWorldVersionId: fromVersionId, toWorldVersionId: toVersionId,
+              note: sourceId,
+            }),
+          },
+        } as never, new Set());
+      }
+
+      expect(() => index.validate([])).not.toThrow();
+    } finally {
+      await index.close();
+    }
+  });
+
+  it("rejects a transfer envelope not scoped to COALESCE(target, source) campaign authority", async () => {
+    const index = await SystemArchivePreviewIndex.create();
+    try {
+      const versionId = randomUUID();
+      const sourceCampaignId = randomUUID();
+      const targetCampaignId = randomUUID();
+      index.add({ domain: "worlds", sourceId: "world-1", record: {} } as never, new Set());
+      index.add({
+        domain: "world-versions", sourceId: versionId,
+        record: { worldId: "world-1", versionNumber: 1, content: worldContent },
+      } as never, new Set());
+      index.add({
+        domain: "campaigns", sourceId: sourceCampaignId,
+        record: { worldVersionId: versionId, activeTurnNumber: 0, ...noCharacterAuthority },
+      } as never, new Set());
+      index.add({
+        domain: "campaigns", sourceId: targetCampaignId,
+        record: { worldVersionId: versionId, activeTurnNumber: 0, ...noCharacterAuthority },
+      } as never, new Set());
+      expect(() => index.add({
+          domain: "campaign-history", sourceId: "transfer-1",
+          record: {
+            campaignId: sourceCampaignId, eventType: "world-transfer",
+            content: JSON.stringify({
+              sourceCampaignId, targetCampaignId,
+              fromWorldVersionId: versionId, toWorldVersionId: versionId,
+              characterStrategy: "preserve_source", stateStrategy: "preserve",
+              targetDefaultsPolicy: "retain_source", sourceFingerprint: "f".repeat(64),
+              warnings: [], note: "Envelope must belong to the target campaign",
+            }),
+          },
+        } as never, new Set())).toThrow(expect.objectContaining({
         code: "archive-world-mismatch",
       }));
     } finally {

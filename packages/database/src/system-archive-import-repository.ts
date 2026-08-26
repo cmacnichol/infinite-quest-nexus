@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import {
   SYSTEM_ARCHIVE_DOMAINS,
   canonicalArchiveJson,
+  parseSystemCampaignHistoryDetails,
   systemArchiveImportReportSchema,
   systemRecordEnvelopeSchema,
   systemImportPreviewViewSchema,
@@ -482,19 +483,6 @@ function invalidHistory(eventType: string, field?: string): never {
   );
 }
 
-function historyContent(eventType: string, content: string): HistoryContent {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(content);
-  } catch {
-    invalidHistory(eventType);
-  }
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    invalidHistory(eventType);
-  }
-  return parsed as HistoryContent;
-}
-
 function historyString(
   eventType: string,
   content: HistoryContent,
@@ -757,12 +745,10 @@ async function insertLogicalRecord(
           record.activeTurnNumber,
           json(record.settings),
           turnControlStyle(record.settings.turnControlStyle),
-          record.selectedCharacterId ?? null,
-          record.characterSnapshot === undefined || record.characterSnapshot === null
-            ? null : json(record.characterSnapshot),
-          record.characterProfile === undefined || record.characterProfile === null
-            ? null : json(record.characterProfile),
-          record.characterProfileRevision ?? 0,
+          record.selectedCharacterId,
+          record.characterSnapshot === null ? null : json(record.characterSnapshot),
+          record.characterProfile === null ? null : json(record.characterProfile),
+          record.characterProfileRevision,
           record.createdAt,
           record.updatedAt
         ]
@@ -789,7 +775,7 @@ async function insertLogicalRecord(
           record.imagePrompt,
           json({ source: "system_archive" }),
           record.acceptedAt,
-          json(record.stateSnapshotPrivate ?? {})
+          json(record.stateSnapshotPrivate)
         ]
       ), envelope.domain);
       return true;
@@ -847,7 +833,10 @@ async function insertLogicalRecord(
     }
     case "campaign-history": {
       const { record } = envelope;
-      const content = historyContent(record.eventType, record.content);
+      const content = parseSystemCampaignHistoryDetails(
+        record.eventType,
+        record.content
+      ).details as Record<string, unknown>;
       switch (record.eventType) {
         case "character-profile-edit": {
           const revision = historyInteger(record.eventType, content, "revision", 1);
@@ -871,12 +860,6 @@ async function insertLogicalRecord(
               record.occurredAt
             ]
           ), record.eventType);
-          await database.query(
-            `UPDATE campaigns
-                SET character_profile=$3::jsonb,character_profile_revision=$4
-              WHERE id=$1 AND owner_user_id=$2 AND character_profile_revision<$4`,
-            [record.campaignId, ownerUserId, json(nextProfile), revision]
-          );
           return true;
         }
         case "campaign-state-edit": {
@@ -971,15 +954,12 @@ async function insertLogicalRecord(
               historyInteger(record.eventType, content, "embeddingBatchSize", 1, 128),
               historyOptionalString(record.eventType, content, "embeddingDocumentPrefix"),
               historyOptionalString(record.eventType, content, "embeddingQueryPrefix"),
-              content.retrievalImplementation === undefined
-                ? "legacy_hybrid"
-                : historyEnum(record.eventType, content, "retrievalImplementation", [
-                    "legacy_hybrid", "chunked_hybrid"
-                  ] as const),
-              content.retrievalShadowEnabled === undefined
-                ? false : historyBoolean(record.eventType, content, "retrievalShadowEnabled"),
-              historyOptionalString(record.eventType, content, "createdAt") ?? record.occurredAt,
-              historyOptionalString(record.eventType, content, "updatedAt") ?? record.occurredAt
+              historyEnum(record.eventType, content, "retrievalImplementation", [
+                "legacy_hybrid", "chunked_hybrid"
+              ] as const),
+              historyBoolean(record.eventType, content, "retrievalShadowEnabled"),
+              historyString(record.eventType, content, "createdAt"),
+              historyString(record.eventType, content, "updatedAt")
             ]
           ), record.eventType);
           return true;
@@ -1009,29 +989,22 @@ async function insertLogicalRecord(
               historyEnum(record.eventType, content, "quality", ["auto", "low", "medium", "high"] as const),
               historyEnum(record.eventType, content, "outputFormat", ["png", "jpeg", "webp"] as const),
               historyInteger(record.eventType, content, "maxAttempts", 1, 10),
-              content.sourcePolicy === undefined
-                ? enabled ? "generate_only" : "off"
-                : historyEnum(record.eventType, content, "sourcePolicy", [
-                    "off", "library_only", "library_then_generate", "generate_only"
-                  ] as const),
-              content.matchingScope === undefined
-                ? "world"
-                : historyEnum(record.eventType, content, "matchingScope", [
-                    "campaign", "world", "owner_library", "shared"
-                  ] as const),
-              content.confidenceProfile === undefined
-                ? "balanced"
-                : historyEnum(record.eventType, content, "confidenceProfile", [
-                    "strict", "balanced", "broad"
-                  ] as const),
-              content.repetitionWindow === undefined
-                ? 5 : historyInteger(record.eventType, content, "repetitionWindow", 0, 100),
+              historyEnum(record.eventType, content, "sourcePolicy", [
+                "off", "library_only", "library_then_generate", "generate_only"
+              ] as const),
+              historyEnum(record.eventType, content, "matchingScope", [
+                "campaign", "world", "owner_library", "shared"
+              ] as const),
+              historyEnum(record.eventType, content, "confidenceProfile", [
+                "strict", "balanced", "broad"
+              ] as const),
+              historyInteger(record.eventType, content, "repetitionWindow", 0, 100),
               historyInteger(record.eventType, content, "segmentWordCount", 100, 5_000),
               historyInteger(record.eventType, content, "imagesPerSegment", 1, 2),
               historyEnum(record.eventType, content, "segmentPromptMode", ["direct", "ai_refined"] as const),
               historyString(record.eventType, content, "refinementPrompt"),
-              historyOptionalString(record.eventType, content, "createdAt") ?? record.occurredAt,
-              historyOptionalString(record.eventType, content, "updatedAt") ?? record.occurredAt
+              historyString(record.eventType, content, "createdAt"),
+              historyString(record.eventType, content, "updatedAt")
             ]
           ), record.eventType);
           return true;
@@ -1081,7 +1054,7 @@ async function insertLogicalRecord(
                 "queued", "refining", "generating", "completed", "partial", "failed", "superseded"
               ] as const),
               historyBoolean(record.eventType, content, "isActive"),
-              historyOptionalString(record.eventType, content, "characterVisualReference") ?? "",
+              historyString(record.eventType, content, "characterVisualReference"),
               record.occurredAt,
               historyOptionalString(record.eventType, content, "completedAt")
             ]
@@ -2060,8 +2033,8 @@ export function createPostgresSystemArchiveImportRepository(
                 pendingIllustrations
               );
               if (envelope.domain === "worlds") {
-                const forkedFromWorldId = envelope.record.forkedFromWorldId ?? null;
-                const forkedFromWorldVersionId = envelope.record.forkedFromWorldVersionId ?? null;
+                const forkedFromWorldId = envelope.record.forkedFromWorldId;
+                const forkedFromWorldVersionId = envelope.record.forkedFromWorldVersionId;
                 if ((forkedFromWorldId === null) !== (forkedFromWorldVersionId === null)) {
                   throw repositoryError("System Archive world-fork provenance is incomplete.", 400);
                 }

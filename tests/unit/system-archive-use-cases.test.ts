@@ -26,6 +26,8 @@ const world: SystemRecordEnvelope = {
     sourceId: "33333333-3333-4333-8333-333333333333",
     title: "Test world",
     status: "active",
+    forkedFromWorldId: null,
+    forkedFromWorldVersionId: null,
     createdAt: "2026-08-25T00:00:00.000Z",
     updatedAt: "2026-08-25T00:00:00.000Z",
   },
