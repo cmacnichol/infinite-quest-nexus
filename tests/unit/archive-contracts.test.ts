@@ -105,6 +105,54 @@ describe("portable archive contracts", () => {
     expect(archiveManifestSchema.safeParse({ ...validManifest, unexpected: true }).success).toBe(false);
   });
 
+  it("keeps System-only asset authority outside existing Campaign Archive manifests", () => {
+    expect(archiveManifestSchema.safeParse({
+      ...validManifest,
+      assets: [{ ...validAsset, authority: { references: [], library: null } }],
+    }).success).toBe(false);
+    expect(archiveAssetRecordSchema.safeParse({
+      ...validAsset,
+      bindings: [{
+        role: "illustration_segment_variant",
+        campaignId,
+        turnId,
+        segmentId: secondAssetId,
+        variantIndex: 0,
+        createdAt: validAsset.createdAt,
+      }],
+    }).success).toBe(false);
+    expect(archiveAssetRecordSchema.safeParse({
+      ...validAsset,
+      bindings: [{
+        role: "generation_context",
+        campaignId,
+        worldId,
+        worldVersionId,
+        turnId,
+        sourceContextId: secondAssetId,
+        authority: {
+          createdByUserId: assetId,
+          targetType: "turn_illustration",
+          variantIndex: 0,
+          fictionPrompt: "Portable prompt",
+          negativePrompt: null,
+          entities: [],
+          characters: [],
+          locations: [],
+          factions: [],
+          sceneAttributes: {},
+          providerProfileId: null,
+          providerType: null,
+          model: "portable-model",
+          generationParameters: {},
+          parentAssetIds: [],
+          metadataSchemaVersion: 1,
+          createdAt: validAsset.createdAt,
+        },
+      }],
+    }).success).toBe(false);
+  });
+
   it("rejects uppercase entry checksums and unsupported format versions", () => {
     expect(archiveManifestSchema.safeParse({
       ...validManifest,

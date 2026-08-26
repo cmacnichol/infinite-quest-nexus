@@ -54,6 +54,7 @@ import type {
 import {
   createPostgresSystemArchiveImportRepository,
   isSystemArchiveWaitingForGateError,
+  SYSTEM_ARCHIVE_PREVIEW_TTL_SECONDS,
 } from "../../../packages/database/src/system-archive-import-repository.js";
 import {
   createPostgresSystemArchiveJobRepository,
@@ -165,6 +166,7 @@ async function collectStaged(
 
 export type SystemArchiveInspection = Readonly<{
   formatVersion: 1;
+  payloadFormatVersion: 1 | 2;
   sourceApplication: string;
   sourceMigration: string;
   archiveFingerprint: string;
@@ -209,6 +211,7 @@ const MAX_SYSTEM_RECORD_BYTES = 256 * 1024 * 1024;
 async function consumeSystemRecordShard(
   source: AsyncIterable<Uint8Array>,
   domain: SystemArchiveDomain,
+  payloadFormatVersion: 1 | 2,
   index: SystemArchivePreviewIndex,
   assetIds: ReadonlySet<string>,
 ): Promise<void> {
@@ -233,7 +236,10 @@ async function consumeSystemRecordShard(
       throw failure;
     }
     const parsed = systemRecordEnvelopeSchema.safeParse(raw);
-    if (!parsed.success || parsed.data.domain !== domain || parsed.data.sourceId !== parsed.data.record.sourceId) {
+    if (!parsed.success
+      || parsed.data.formatVersion !== payloadFormatVersion
+      || parsed.data.domain !== domain
+      || parsed.data.sourceId !== parsed.data.record.sourceId) {
       throw importFailure("archive-json-invalid", "System Archive record does not match its shard contract.");
     }
     index.add(parsed.data, assetIds);
@@ -267,6 +273,7 @@ async function consumeSystemRecordShard(
 async function* parseSystemRecordShard(
   source: AsyncIterable<Uint8Array>,
   domain: SystemArchiveDomain,
+  payloadFormatVersion: 1 | 2,
 ): AsyncGenerator<SystemRecordEnvelope> {
   const decoder = new TextDecoder("utf-8", { fatal: true });
   let pending = "";
@@ -289,7 +296,10 @@ async function* parseSystemRecordShard(
       throw failure;
     }
     const parsed = systemRecordEnvelopeSchema.safeParse(raw);
-    if (!parsed.success || parsed.data.domain !== domain || parsed.data.sourceId !== parsed.data.record.sourceId) {
+    if (!parsed.success
+      || parsed.data.formatVersion !== payloadFormatVersion
+      || parsed.data.domain !== domain
+      || parsed.data.sourceId !== parsed.data.record.sourceId) {
       throw importFailure("archive-json-invalid", "System Archive record does not match its shard contract.");
     }
     pending = "";
@@ -385,13 +395,21 @@ export async function inspectSystemArchiveForPreview(
     throw importFailure("archive-json-invalid", "System Archive manifest does not match the required schema.");
   }
   const manifest = parsedManifest.data;
+  const payloadVersions = new Set(manifest.payloads.map((payload) => payload.formatVersion));
+  if (payloadVersions.size !== 1) {
+    throw importFailure("archive-json-invalid", "System Archive payload versions are incomplete or inconsistent.");
+  }
+  const payloadFormatVersion = [...payloadVersions][0];
+  if (payloadFormatVersion !== 1 && payloadFormatVersion !== 2) {
+    throw importFailure("archive-version-unsupported", "System Archive payload version is unsupported.");
+  }
   const declaredPaths = new Set(manifest.entries.map((entry) => normalizedPath(entry.path)));
   const manifestEntriesByPath = new Map(
     manifest.entries.map((entry) => [normalizedPath(entry.path), entry] as const),
   );
   const expectedPayloads = manifest.entries
     .filter((entry) => entry.logicalType !== "asset-original")
-    .map((entry) => ({ kind: entry.logicalType, path: entry.path, formatVersion: 1 }))
+    .map((entry) => ({ kind: entry.logicalType, path: entry.path, formatVersion: payloadFormatVersion }))
     .sort((left, right) => left.path.localeCompare(right.path));
   const declaredPayloads = [...manifest.payloads].sort((left, right) => left.path.localeCompare(right.path));
   if (canonicalArchiveJson(expectedPayloads) !== canonicalArchiveJson(declaredPayloads)) {
@@ -463,7 +481,9 @@ export async function inspectSystemArchiveForPreview(
         }
         payloadHashes.push(actualHash);
         const parsed = systemArchivePayloadSchema.safeParse(parseJson(bytes, "System Archive system payload"));
-        if (!parsed.success || parsed.data.records.length !== 0) {
+        if (!parsed.success
+          || parsed.data.formatVersion !== payloadFormatVersion
+          || parsed.data.records.length !== 0) {
           throw importFailure("archive-json-invalid", "System Archive system payload does not match the required schema.");
         }
         systemPayload = parsed.data;
@@ -477,7 +497,7 @@ export async function inspectSystemArchiveForPreview(
         }
         payloadHashes.push(actualHash);
         const parsed = systemArchiveAssetsPayloadSchema.safeParse(parseJson(bytes, "System Archive asset inventory"));
-        if (!parsed.success) {
+        if (!parsed.success || parsed.data.formatVersion !== payloadFormatVersion) {
           throw importFailure("archive-json-invalid", "System Archive asset inventory does not match the required schema.");
         }
         assetsPayload = parsed.data;
@@ -493,7 +513,7 @@ export async function inspectSystemArchiveForPreview(
         container,
         entry.path,
         maximumBytes,
-        (source) => consumeSystemRecordShard(source, domain, index, assetIds),
+        (source) => consumeSystemRecordShard(source, domain, payloadFormatVersion, index, assetIds),
       );
       if (streamed.byteLength !== entry.byteLength || streamed.sha256 !== entry.sha256) {
         throw importFailure("archive-checksum-mismatch", "A System Archive entry does not match its manifest checksum.");
@@ -560,6 +580,7 @@ export async function inspectSystemArchiveForPreview(
 
   return Object.freeze({
     formatVersion: 1,
+    payloadFormatVersion,
     sourceApplication: manifest.sourceApplication,
     sourceMigration: manifest.sourceMigration,
     archiveFingerprint: manifest.contentFingerprint,
@@ -1140,6 +1161,7 @@ async function insertLogicalShards(
   transaction: import("../../../packages/database/src/system-archive-import-repository.js").SystemArchiveAtomicImportTransaction,
   container: Awaited<ReturnType<typeof inspectArchiveContainer>>,
   manifest: ReturnType<typeof systemArchiveManifestSchema.parse>,
+  payloadFormatVersion: 1 | 2,
   limits: ArchiveLimits,
 ): Promise<void> {
   for (const domain of SYSTEM_ARCHIVE_DOMAINS) {
@@ -1152,7 +1174,9 @@ async function insertLogicalShards(
         container,
         entry.path,
         limits.maxJsonEntryBytes,
-        (source) => transaction.insertLogicalDomains(parseSystemRecordShard(source, domain)),
+        (source) => transaction.insertLogicalDomains(
+          parseSystemRecordShard(source, domain, payloadFormatVersion),
+        ),
       );
       if (streamed.byteLength !== entry.byteLength || streamed.sha256 !== entry.sha256) {
         throw importFailure("archive-checksum-mismatch", "A System Archive logical shard changed after preview.");
@@ -1292,12 +1316,34 @@ export function createSystemArchiveImportExecutionService(
             jobId: job.id,
             leaseOwner: job.leaseOwner,
           }, async (transaction) => {
-            await transaction.database.query(
-              `UPDATE users SET display_name=$2,updated_at=clock_timestamp()
-                WHERE id=$1 AND system_key='initial-owner'`,
-              [owner.ownerUserId, systemPayload.sourceOwner.displayName],
+            if (systemPayload.formatVersion === 2) {
+              await transaction.database.query(
+                `UPDATE users
+                    SET display_name=$2,status=$3,settings=$4::jsonb,created_at=$5,updated_at=$6
+                  WHERE id=$1 AND system_key='initial-owner'`,
+                [
+                  owner.ownerUserId,
+                  systemPayload.sourceOwner.displayName,
+                  systemPayload.sourceOwner.status,
+                  JSON.stringify(systemPayload.sourceOwner.settings),
+                  systemPayload.sourceOwner.createdAt,
+                  systemPayload.sourceOwner.updatedAt,
+                ],
+              );
+            } else {
+              await transaction.database.query(
+                `UPDATE users SET display_name=$2,updated_at=clock_timestamp()
+                  WHERE id=$1 AND system_key='initial-owner'`,
+                [owner.ownerUserId, systemPayload.sourceOwner.displayName],
+              );
+            }
+            await insertLogicalShards(
+              transaction,
+              container,
+              manifest,
+              inspection.payloadFormatVersion,
+              options.limits,
             );
-            await insertLogicalShards(transaction, container, manifest, options.limits);
             for (const publication of prepared) {
               const bytes = await readSystemOriginal(
                 container,
@@ -1420,7 +1466,6 @@ export type SystemArchiveImportCompositionOptions = Readonly<{
   limits: ArchiveLimits;
   destinationApplicationVersion: string;
   uploadTtlSeconds: number;
-  previewTtlSeconds: number;
   chunkBytes: number;
   maximumUploadBytes: number;
   leaseOwner: string;
@@ -1440,9 +1485,7 @@ export function createSystemArchiveImportComposition(
   const uploadRepository = createPostgresSystemArchiveUploadRepository(options.pool, {
     uploadTtlSeconds: options.uploadTtlSeconds,
   });
-  const importRepository = createPostgresSystemArchiveImportRepository(options.pool, {
-    previewTtlSeconds: options.previewTtlSeconds,
-  });
+  const importRepository = createPostgresSystemArchiveImportRepository(options.pool);
   const privateRepository = createPostgresSystemArchivePrivateStorageRepository(options.pool);
   const previewSource = createPrivateSystemArchivePreviewSource({
     archiveRoot: options.archiveRoot,
@@ -1450,7 +1493,7 @@ export function createSystemArchiveImportComposition(
     repository: privateRepository,
     leaseOwner: options.leaseOwner,
     leaseSeconds: options.leaseSeconds,
-    activitySeconds: Math.max(options.uploadTtlSeconds, options.previewTtlSeconds),
+    activitySeconds: Math.max(options.uploadTtlSeconds, SYSTEM_ARCHIVE_PREVIEW_TTL_SECONDS),
   });
   const storage = createPrivateSystemArchiveUploadStorage(options.storage, {
     leaseOwner: options.leaseOwner,
@@ -1579,6 +1622,7 @@ export async function createFilesystemSystemArchiveWriter(
   const stagedForCleanup = new Set<SystemArchiveStagedContent>();
   const paths = new Set<string>();
   let ownerUserId: string | undefined;
+  let systemPayloadVersion: 1 | 2 | undefined;
   let state: "open" | "published" | "aborted" = "open";
 
   const requireOpen = () => {
@@ -1644,11 +1688,22 @@ export async function createFilesystemSystemArchiveWriter(
         throw archiveFailure("archive-export-inconsistent", "System Archive staging owner changed.");
       }
       ownerUserId = owner.sourceId;
+      systemPayloadVersion = owner.status !== undefined
+        && owner.settings !== undefined
+        && owner.createdAt !== undefined
+        && owner.updatedAt !== undefined ? 2 : 1;
       const value = systemArchivePayloadSchema.parse({
-        formatVersion: 1,
+        formatVersion: systemPayloadVersion,
         sourceInstallationId: owner.sourceInstallationId,
         sourceOwnerCount: 1,
-        sourceOwner: { sourceId: owner.sourceId, displayName: owner.displayName },
+        sourceOwner: systemPayloadVersion === 2 ? {
+          sourceId: owner.sourceId,
+          displayName: owner.displayName,
+          status: owner.status,
+          settings: owner.settings,
+          createdAt: owner.createdAt,
+          updatedAt: owner.updatedAt,
+        } : { sourceId: owner.sourceId, displayName: owner.displayName },
         records: [],
       });
       return writeBufferEntry(
@@ -1688,6 +1743,9 @@ export async function createFilesystemSystemArchiveWriter(
                   const record = systemRecordEnvelopeSchema.parse(next.value);
                   if (record.domain !== domain) {
                     throw archiveFailure("archive-export-inconsistent", "System Archive shard received the wrong domain.");
+                  }
+                  if (systemPayloadVersion === undefined || record.formatVersion !== systemPayloadVersion) {
+                    throw archiveFailure("archive-export-inconsistent", "System Archive record version does not match its system payload.");
                   }
                   pending = Buffer.from(`${canonicalArchiveJson(record)}\n`, "utf8");
                   if (pending.byteLength > shardOptions.targetBytes) {
@@ -1733,7 +1791,13 @@ export async function createFilesystemSystemArchiveWriter(
     },
 
     async writeAssetInventory(records) {
-      const value = systemArchiveAssetsPayloadSchema.parse({ formatVersion: 1, assets: records });
+      if (systemPayloadVersion === undefined) {
+        throw archiveFailure("archive-export-inconsistent", "System Archive metadata must be written before assets.");
+      }
+      const value = systemArchiveAssetsPayloadSchema.parse({
+        formatVersion: systemPayloadVersion,
+        assets: records,
+      });
       return writeBufferEntry(
         "assets/assets.json",
         "assets",
@@ -1847,7 +1911,7 @@ export async function createFilesystemSystemArchiveWriter(
           .map((entry) => ({
             kind: entry.logicalType,
             path: entry.path,
-            formatVersion: 1,
+            formatVersion: systemPayloadVersion ?? 1,
           })),
         assets: [...input.manifest.assets],
       });
@@ -2144,9 +2208,7 @@ export function createApiSystemArchiveComposition(options: Readonly<{
   }
   const jobs = createPostgresSystemArchiveJobRepository(options.pool);
   const uploadRepository = createPostgresSystemArchiveUploadRepository(options.pool, { uploadTtlSeconds });
-  const importRepository = createPostgresSystemArchiveImportRepository(options.pool, {
-    previewTtlSeconds: options.config.archivePreviewTtlSeconds,
-  });
+  const importRepository = createPostgresSystemArchiveImportRepository(options.pool);
   const privateRepository = createPostgresSystemArchivePrivateStorageRepository(options.pool);
   const leaseOwner = `api-system-archive-${randomUUID()}`;
   const leaseSeconds = Math.min(options.config.workerLeaseSeconds, 300);
@@ -2167,7 +2229,7 @@ export function createApiSystemArchiveComposition(options: Readonly<{
     repository: privateRepository,
     leaseOwner,
     leaseSeconds,
-    activitySeconds: Math.max(uploadTtlSeconds, options.config.archivePreviewTtlSeconds),
+    activitySeconds: Math.max(uploadTtlSeconds, SYSTEM_ARCHIVE_PREVIEW_TTL_SECONDS),
   });
   const previews = createSystemArchiveImportPreviewService({
     imports: importRepository,

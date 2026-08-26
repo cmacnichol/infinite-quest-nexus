@@ -319,13 +319,16 @@ describe("provider application contracts", () => {
     const configuration = toSafeProviderConfiguration({
       streaming: true,
       maximumAttempts: 3,
+      retryLimit: 4,
       apiKey: "must-not-cross",
       credentialNonce: "must-not-cross",
       lastHealthError: "raw provider failure"
     });
 
-    expect(configuration).toEqual({ streaming: true, maximumAttempts: 3 });
+    expect(configuration).toEqual({ streaming: true, maximumAttempts: 3, retryLimit: 4 });
     expect(Object.isFrozen(configuration)).toBe(true);
+    expect(toSafeProviderConfiguration({ retryLimit: -1 })).toEqual({});
+    expect(toSafeProviderConfiguration({ retryLimit: 1.5 })).toEqual({});
   });
 
   it("keeps only in-range Chronicle embedding capability overrides", () => {

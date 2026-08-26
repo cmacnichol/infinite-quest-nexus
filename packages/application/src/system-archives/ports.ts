@@ -1,5 +1,5 @@
 import type {
-  ArchiveAssetRecord,
+  SystemArchiveAssetRecord,
   SystemArchiveDomain,
   SystemRecordEnvelope,
 } from "@infinite-quest/contracts";
@@ -9,6 +9,10 @@ export type SystemArchiveOwnerRecord = Readonly<{
   sourceId: string;
   sourceInstallationId: string;
   displayName: string;
+  status?: "active" | "disabled";
+  settings?: Readonly<Record<string, unknown>>;
+  createdAt?: string;
+  updatedAt?: string;
 }>;
 
 export type SystemArchiveSourceCompatibility = Readonly<{
@@ -21,10 +25,10 @@ export type SystemArchiveOriginalAssetRecord = Readonly<{
   archivePath: string;
   expectedSha256: string;
   expectedBytes: number;
-  expectedMimeType: ArchiveAssetRecord["mimeType"];
+  expectedMimeType: SystemArchiveAssetRecord["mimeType"];
   expectedPixelWidth: number;
   expectedPixelHeight: number;
-  record: ArchiveAssetRecord;
+  record: SystemArchiveAssetRecord;
 }>;
 
 export interface SystemArchiveSnapshot {
@@ -77,7 +81,7 @@ export type SystemArchiveManifestDescriptor = Readonly<{
   sourceOwnerCount: 1;
   domainCounts: Readonly<Record<SystemArchiveDomain, number>>;
   excludedOperationalWork: Readonly<Record<string, number>>;
-  assets: readonly ArchiveAssetRecord[];
+  assets: readonly SystemArchiveAssetRecord[];
 }>;
 
 export interface SystemArchiveWriterPort {
@@ -87,12 +91,12 @@ export interface SystemArchiveWriterPort {
     records: AsyncIterable<SystemRecordEnvelope>,
     options: Readonly<{ targetBytes: number }>,
   ): Promise<readonly SystemArchiveWrittenPayload[]>;
-  writeAssetInventory(records: readonly ArchiveAssetRecord[]): Promise<SystemArchiveWrittenPayload>;
+  writeAssetInventory(records: readonly SystemArchiveAssetRecord[]): Promise<SystemArchiveWrittenPayload>;
   writeOriginal(input: Readonly<{
     archivePath: string;
     expectedSha256: string;
     expectedBytes: number;
-    expectedMimeType: ArchiveAssetRecord["mimeType"];
+    expectedMimeType: SystemArchiveAssetRecord["mimeType"];
     expectedPixelWidth: number;
     expectedPixelHeight: number;
     stream: AsyncIterable<Uint8Array>;

@@ -178,7 +178,6 @@ export async function createProductionSystemArchiveWorkerLane(input: Readonly<{
       limits: input.config.systemArchiveLimits,
       destinationApplicationVersion: applicationVersion,
       uploadTtlSeconds,
-      previewTtlSeconds: input.config.archivePreviewTtlSeconds,
       chunkBytes,
       maximumUploadBytes: input.config.systemArchiveLimits.maxCompressedBytes,
       leaseOwner: input.workerId,

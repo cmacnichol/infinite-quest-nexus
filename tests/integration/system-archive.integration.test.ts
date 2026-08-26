@@ -11,6 +11,7 @@ import { characterProfileSchema, worldContentSchema } from "../../packages/contr
 import { archiveAssetRecordSchema } from "../../packages/contracts/src/archives.js";
 import {
   SYSTEM_ARCHIVE_DOMAINS,
+  systemArchiveAssetRecordV2Schema,
   systemArchiveAssetsPayloadSchema,
   systemArchiveImportReportSchema,
   systemArchiveManifestSchema,
@@ -33,6 +34,7 @@ import {
 import { createPostgresSystemArchiveJobRepository } from "../../packages/database/src/system-archive-job-repository.js";
 import {
   runSystemExport,
+  SYSTEM_ARCHIVE_SOURCE_COLUMN_CLASSIFICATIONS,
   type SystemArchiveExportDependencies,
   type SystemArchiveExportJob,
 } from "../../packages/application/src/system-archives/index.js";
@@ -47,6 +49,7 @@ import {
   type SystemArchiveStagingPort,
 } from "../../services/runtime/src/system-archive-composition.js";
 import { createAssetImportStorageComposition } from "../../services/runtime/src/asset-import-composition.js";
+import { createPrivateAssetMetadataBackfillComposition } from "../../services/runtime/src/private-asset-metadata-backfill-composition.js";
 import {
   stageArchiveUpload,
   supportsSecureGeneratedArchiveStaging,
@@ -55,10 +58,20 @@ import {
   withExclusiveSystemImport,
   withSystemMutationPermit,
 } from "../../services/api/src/system-import-gate.js";
+import { workerMemoryApplication } from "../helpers/memory-applications.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
 const sha256 = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
+const illustrationIdentity = (segmentId: string, variantIndex: number): string => {
+  const digest = createHash("md5")
+    .update(`illustration:${segmentId}:${variantIndex}`)
+    .digest("hex")
+    .split("");
+  digest[12] = "5";
+  digest[16] = "8";
+  return `${digest.slice(0, 8).join("")}-${digest.slice(8, 12).join("")}-${digest.slice(12, 16).join("")}-${digest.slice(16, 20).join("")}-${digest.slice(20).join("")}`;
+};
 const limits = {
   maxCompressedBytes: 20 * 1024 * 1024,
   maxUncompressedBytes: 50 * 1024 * 1024,
@@ -354,9 +367,11 @@ integration("deterministic owner-wide System Archive export", () => {
       `INSERT INTO campaign_state (
          campaign_id,owner_user_id,scratchpad_private,trackers,default_triggers,
          event_triggers,pending_event_triggers,rpg_stats,revision
-       ) VALUES ($1,$2,'Retained continuity','[]'::jsonb,'[]'::jsonb,'[]'::jsonb,
+       ) VALUES ($1,$2,'Row-only state authority',$3::jsonb,'[]'::jsonb,'[]'::jsonb,
                  '[]'::jsonb,'[]'::jsonb,1)`,
-      [campaignId, ownerUserId],
+      [campaignId, ownerUserId, JSON.stringify([{
+        id: "state-row-sentinel", name: "State row", value: "exact", rules: "row authority",
+      }])],
     );
     const turn = await pool.query<{ id: string }>(
       `INSERT INTO turns (
@@ -619,6 +634,31 @@ integration("deterministic owner-wide System Archive export", () => {
     }
   }
 
+  it("keeps the source-column portability matrix exhaustive against PostgreSQL", async () => {
+    const tables = Object.keys(SYSTEM_ARCHIVE_SOURCE_COLUMN_CLASSIFICATIONS).sort();
+    const result = await pool.query<{ table_name: string; column_name: string }>(
+      `SELECT table_name,column_name
+         FROM information_schema.columns
+        WHERE table_schema='public' AND table_name=ANY($1::text[])
+        ORDER BY table_name,column_name`,
+      [tables],
+    );
+    const live = new Map<string, string[]>();
+    for (const row of result.rows) {
+      const columns = live.get(row.table_name) ?? [];
+      columns.push(row.column_name);
+      live.set(row.table_name, columns);
+    }
+    expect([...live.keys()].sort()).toEqual(tables);
+    for (const table of tables) {
+      const classification = SYSTEM_ARCHIVE_SOURCE_COLUMN_CLASSIFICATIONS[
+        table as keyof typeof SYSTEM_ARCHIVE_SOURCE_COLUMN_CLASSIFICATIONS
+      ];
+      expect(Object.keys(classification).sort(), table)
+        .toEqual(live.get(table));
+    }
+  });
+
   it("exports exhaustive logical authority, all retained originals, and no excluded state", async () => {
     const first = await exportArchive();
     const second = await exportArchive();
@@ -656,11 +696,18 @@ integration("deterministic owner-wide System Archive export", () => {
     const providerEntry = Object.values(zip.files)
       .find((entry) => entry.name.startsWith("records/providers/") && !entry.dir);
     const portableProvider = JSON.parse((await providerEntry!.async("string")).trim()) as {
-      record: { baseUrl: string; timeoutMs: number };
+      formatVersion: number;
+      record: {
+        baseUrl: string;
+        timeoutMs: number;
+        authority: { configuration: Record<string, unknown> };
+      };
     };
+    expect(portableProvider.formatVersion).toBe(2);
     expect(portableProvider.record).toMatchObject({
       baseUrl: "https://portable.invalid/v1",
       timeoutMs: 654321,
+      authority: { configuration: { retryLimit: 2 } },
     });
     const promptRecords = (await Promise.all(Object.values(zip.files)
       .filter((entry) => entry.name.startsWith("records/prompts/") && !entry.dir)
@@ -722,8 +769,10 @@ integration("deterministic owner-wide System Archive export", () => {
     expect(chronicleRecords.find((entry) => entry.record.kind === "summary-checkpoint")?.record).toMatchObject({
       throughTurn: 1,
       summaryKind: "campaign_summary",
-      content: "The gate opened.",
-      metadata: { openThreadIds: [checkpointOpenThreadId] },
+      content: {
+        summary: "The gate opened.",
+        openThreadIds: [checkpointOpenThreadId],
+      },
     });
     expect(serialized).not.toContain("encrypted_api_key");
     expect(serialized).not.toContain("provider-password");
@@ -762,11 +811,13 @@ integration("deterministic owner-wide System Archive export", () => {
     const stateEntry = Object.values(zip.files)
       .find((entry) => entry.name.startsWith("records/campaign-state/") && !entry.dir);
     const currentState = JSON.parse((await stateEntry!.async("string")).trim()) as {
-      record: { state: { continuitySummary: string; openThreads: string[] } };
+      record: { state: { continuitySummary: string; openThreads: string[]; scratchpad: string; trackers: unknown[] } };
     };
     expect(currentState.record.state).toMatchObject({
       continuitySummary: "Portable current continuity",
       openThreads: ["Find the gate key"],
+      scratchpad: "Row-only state authority",
+      trackers: [{ id: "state-row-sentinel", name: "State row", value: "exact", rules: "row authority" }],
     });
     for (const original of originals) {
       expect(zip.file(`assets/sha256/${original.contentHash.slice(0, 2)}/${original.contentHash}.png`)).not.toBeNull();
@@ -1147,6 +1198,25 @@ integration("deterministic owner-wide System Archive export", () => {
         worldVersionId: bindingKind === "world-version" ? worldVersion.sourceId : null,
         turnId: bindingKind === "turn" ? turn.sourceId : null,
         sourceContextId: randomUUID(),
+        authority: {
+          createdByUserId: ownerUserId,
+          targetType: "other",
+          variantIndex: 0,
+          fictionPrompt: "Relationship validation sentinel.",
+          negativePrompt: null,
+          entities: {},
+          characters: {},
+          locations: {},
+          factions: {},
+          sceneAttributes: {},
+          providerProfileId: null,
+          providerType: null,
+          model: "",
+          generationParameters: {},
+          parentAssetIds: [],
+          metadataSchemaVersion: 1,
+          createdAt: "2026-08-25T12:00:00.000Z",
+        },
       };
       manifest.assets[0]!.bindings.push(binding);
       const assetsEntry = manifest.entries.find((entry) => entry.path === "assets/assets.json")!;
@@ -1573,7 +1643,7 @@ integration("deterministic owner-wide System Archive export", () => {
     await pool.query("TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE");
     await pool.query("DELETE FROM system_archive_jobs");
     await pool.query("DELETE FROM system_archive_uploads");
-    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const imports = createPostgresSystemArchiveImportRepository(pool);
     const owner = { ownerUserId };
     const destination = await imports.destinationFingerprint(owner, {});
     expect(destination.destinationEmpty).toBe(true);
@@ -1633,7 +1703,7 @@ integration("deterministic owner-wide System Archive export", () => {
     await pool.query("TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE");
     await pool.query("DELETE FROM system_archive_jobs");
     await pool.query("DELETE FROM system_archive_uploads");
-    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const imports = createPostgresSystemArchiveImportRepository(pool);
     const owner = { ownerUserId };
     const destination = await imports.destinationFingerprint(owner, {});
     const globalPromptId = randomUUID();
@@ -1708,7 +1778,7 @@ integration("deterministic owner-wide System Archive export", () => {
     await pool.query("TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE");
     await pool.query("DELETE FROM system_archive_jobs");
     await pool.query("DELETE FROM system_archive_uploads");
-    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const imports = createPostgresSystemArchiveImportRepository(pool);
     const owner = { ownerUserId };
     const destination = await imports.destinationFingerprint(owner, {});
     const worldId = randomUUID();
@@ -1796,7 +1866,7 @@ integration("deterministic owner-wide System Archive export", () => {
     );
     const jobId = queued.rows[0]!.id;
     const ignore = { ignoreJobId: jobId, ignoreUploadId: upload.rows[0]!.id };
-    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const imports = createPostgresSystemArchiveImportRepository(pool);
     const jobs = createPostgresSystemArchiveJobRepository(pool);
     const owner = { ownerUserId };
     const destination = await imports.destinationFingerprint(owner, ignore);
@@ -1862,7 +1932,7 @@ integration("deterministic owner-wide System Archive export", () => {
     await pool.query("TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE");
     await pool.query("DELETE FROM system_archive_jobs");
     await pool.query("DELETE FROM system_archive_uploads");
-    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const imports = createPostgresSystemArchiveImportRepository(pool);
     const owner = { ownerUserId };
     const destination = await imports.destinationFingerprint(owner, {});
     const worldId = randomUUID();
@@ -1935,7 +2005,7 @@ integration("deterministic owner-wide System Archive export", () => {
     await pool.query("TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE");
     await pool.query("DELETE FROM system_archive_jobs");
     await pool.query("DELETE FROM system_archive_uploads");
-    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const imports = createPostgresSystemArchiveImportRepository(pool);
     const owner = { ownerUserId };
     const destination = await imports.destinationFingerprint(owner, {});
     const worldId = randomUUID();
@@ -2003,7 +2073,7 @@ integration("deterministic owner-wide System Archive export", () => {
   });
 
   it("rejects cross-wired migration and transfer authority during PostgreSQL import", async () => {
-    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const imports = createPostgresSystemArchiveImportRepository(pool);
     const owner = { ownerUserId };
     const timestamp = "2026-08-25T12:00:00.000Z";
     const worldAId = randomUUID();
@@ -2152,7 +2222,7 @@ integration("deterministic owner-wide System Archive export", () => {
     await pool.query("TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE");
     await pool.query("DELETE FROM system_archive_jobs");
     await pool.query("DELETE FROM system_archive_uploads");
-    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const imports = createPostgresSystemArchiveImportRepository(pool);
     const owner = { ownerUserId };
     const stale = await imports.destinationFingerprint(owner, {});
     const competingWorldId = randomUUID();
@@ -2761,11 +2831,627 @@ integration("deterministic owner-wide System Archive export", () => {
         WHERE illustration_set.id=$1 AND segment.id=$2`,
       [illustrationSetHistoryId, illustrationSegmentHistoryId],
     )).resolves.toMatchObject({ rows: [{ set_status: "failed", segment_status: "failed" }] });
+    await expect(pool.query<{ job_type: string }>(
+      `SELECT job_type FROM chronicle_jobs
+        WHERE campaign_id=$1 AND status IN ('queued','running') ORDER BY job_type`,
+      [campaignId],
+    )).resolves.toMatchObject({ rows: [{ job_type: "embed_campaign" }] });
     await expect(pool.query<{ count: string }>(
-      "SELECT count(*)::text AS count FROM chronicle_jobs WHERE campaign_id=$1 AND status IN ('queued','running')",
+      `SELECT count(*)::text AS count FROM chronicle_chunk_jobs
+        WHERE campaign_id=$1 AND status IN ('queued','running')`,
       [campaignId],
     )).resolves.toMatchObject({ rows: [{ count: "1" }] });
   });
+
+  it("round-trips non-default v2 authority exactly and executes non-destructive Chronicle rebuilds", async () => {
+    await pool.query("TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE");
+    await pool.query("DELETE FROM system_archive_jobs");
+    await pool.query("DELETE FROM system_archive_uploads");
+    const imports = createPostgresSystemArchiveImportRepository(pool);
+    const owner = { ownerUserId };
+    const destination = await imports.destinationFingerprint(owner, {});
+    const providerId = randomUUID();
+    const worldId = randomUUID();
+    const worldVersionId = randomUUID();
+    const campaignId = randomUUID();
+    const turnId = randomUUID();
+    const correctionId = randomUUID();
+    const memoryConfigId = randomUUID();
+    const illustrationSetId = randomUUID();
+    const illustrationSegmentId = randomUUID();
+    const canonicalFactId = randomUUID();
+    const chronicleMemoryId = randomUUID();
+    const checkpointId = randomUUID();
+    const importId = randomUUID();
+    const costId = randomUUID();
+    const localCallId = randomUUID();
+    const assetId = randomUUID();
+    const assetReferenceId = randomUUID();
+    const generationContextId = randomUUID();
+    const assetOperationId = randomUUID();
+    const exactText = "  \n# Exact authority\n\n```text\n  preserve these bytes  \n```\n  ";
+    const createdAt = "2026-08-25T12:00:00.123Z";
+    const updatedAt = "2026-08-25T12:01:02.456Z";
+    const acceptedAt = "2026-08-25T12:02:03.789Z";
+    const sourceTextHash = sha256(exactText);
+    const state = {
+      continuitySummary: exactText,
+      openThreads: ["  unresolved thread  "],
+      canonicalFacts: [{ id: canonicalFactId, content: exactText }],
+      scratchpad: exactText,
+      trackers: [{ id: "sentinel", name: " Sentinel ", value: " 7 ", rules: exactText }],
+      rpgStats: [{ id: "resolve", name: "Resolve", value: 17, note: exactText }],
+      defaultTriggers: [{ id: "bell", name: "Bell", value: "silent", rules: exactText }],
+      eventTriggers: [],
+      pendingEventTriggers: [],
+    };
+    const worldContent = worldContentSchema.parse({
+      schemaVersion: 1,
+      world: {
+        title: "V2 Sentinel World",
+        genre: "Archive fantasy",
+        tone: "Exact",
+        premise: exactText,
+        backgroundStory: exactText,
+        firstAction: "Begin exactly.",
+        rules: exactText,
+      },
+      playableCharacters: [],
+      entities: [],
+      relationships: [],
+      rpgStats: [],
+      defaultTriggers: [],
+      eventTriggers: [],
+      assets: [],
+      defaults: { selectedCharacterId: null, initialLocation: "  Threshold  " },
+    });
+    const records = [
+      systemRecordEnvelopeSchema.parse({
+        domain: "providers", formatVersion: 2, sourceId: providerId,
+        record: {
+          sourceId: providerId, kind: "intent", displayName: "Intent sentinel",
+          baseUrl: "https://provider.invalid/v2", selectedModel: "intent-model",
+          contextWindow: 12_345, timeoutMs: 45_678, retryLimit: 4,
+          enabled: false, health: "unknown",
+          authority: {
+            providerType: "openrouter", providerRole: "intent", defaultModel: "intent-model",
+            contextWindowTokens: 12_345, maxOutputTokens: 678, temperature: 0.37,
+            configuration: { modelDiscoveryEnabled: true, maximumAttempts: 4, retryLimit: 4 },
+            requestTimeoutMs: 45_678, enabled: true, isDefault: true, createdAt, updatedAt,
+          },
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "worlds", formatVersion: 2, sourceId: worldId,
+        record: {
+          sourceId: worldId, title: "V2 Sentinel World", status: "active",
+          forkedFromWorldId: null, forkedFromWorldVersionId: null,
+          createdAt, updatedAt,
+          authority: { nextVersionNumber: 9, coverAssetId: null },
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "world-versions", formatVersion: 2, sourceId: worldVersionId,
+        record: {
+          sourceId: worldVersionId, worldId, versionNumber: 8, title: "V2 Sentinel World",
+          content: worldContent, contentFingerprint: sourceTextHash, releaseNotes: exactText,
+          createdFromRevision: 7, publishedAt: updatedAt,
+          authority: { sourceHash: sourceTextHash, createdAt },
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "campaigns", formatVersion: 2, sourceId: campaignId,
+        record: {
+          sourceId: campaignId, worldVersionId, title: "V2 Sentinel Campaign", status: "archived",
+          activeTurnNumber: 1, settings: { turnControlStyle: "Scene Direction" },
+          selectedCharacterId: null, characterSnapshot: null, characterProfile: null,
+          characterProfileRevision: 0, createdAt, updatedAt,
+          authority: {
+            textProviderProfileId: providerId, imageProviderProfileId: null,
+            storyLengthProfile: "extended", turnControlStyle: "flexible_scene",
+            legacySettings: { markdown: exactText, nested: { sentinel: 73 } },
+          },
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "turns", formatVersion: 2, sourceId: turnId,
+        record: {
+          sourceId: turnId, campaignId, turnNumber: 1, action: exactText,
+          narration: exactText, choices: [exactText], imagePrompt: exactText,
+          stateSnapshotPrivate: state, acceptedAt,
+          authority: {
+            sourceTurnId: "legacy-turn-sentinel", customActionSuggestion: exactText,
+            imageUrl: "https://images.invalid/sentinel.png", mechanicsPrivate: { roll: 17, private: exactText },
+            modelMetadata: { model: "story-sentinel", markdown: exactText },
+            importMetadata: { source: "v2-sentinel", exactText }, createdAt,
+            inputMode: "scene", inputModeSource: "explicit",
+          },
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "turn-corrections", formatVersion: 2, sourceId: correctionId,
+        record: {
+          sourceId: correctionId, turnId, revision: 3, narration: exactText,
+          previousEffectiveNarrationHash: sourceTextHash, reason: exactText,
+          source: "administrative", correctedAt: updatedAt,
+          authority: { campaignId, createdByUserId: ownerUserId, createdAt: updatedAt },
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "campaign-state", formatVersion: 2, sourceId: campaignId,
+        record: {
+          sourceId: campaignId, campaignId, revision: 11, state, updatedAt,
+          authority: {
+            importProvenance: { source: "v2-sentinel", exactText },
+            scratchpadSafeForPrompt: true, initialStateSnapshot: { ...state, continuitySummary: "Initial exact" },
+          },
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "campaign-history", formatVersion: 2, sourceId: memoryConfigId,
+        record: {
+          sourceId: memoryConfigId, campaignId, eventType: "memory-config",
+          content: JSON.stringify({
+            embeddingEnabled: false, embeddingProviderProfileId: null, embeddingModel: "",
+            embeddingBatchSize: 31, embeddingDocumentPrefix: exactText,
+            embeddingQueryPrefix: " query sentinel ", retrievalImplementation: "chunked_hybrid",
+            retrievalShadowEnabled: true, createdAt, updatedAt,
+          }),
+          occurredAt: updatedAt, authority: {},
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "campaign-history", formatVersion: 2, sourceId: illustrationSetId,
+        record: {
+          sourceId: illustrationSetId, campaignId, eventType: "illustration-set",
+          content: JSON.stringify({
+            turnId, segmentWordCount: 250, imagesPerSegment: 2, promptMode: "ai_refined",
+            status: "completed", isActive: true, characterVisualReference: exactText,
+            completedAt: updatedAt,
+          }),
+          occurredAt: createdAt, authority: { sourceTextHash },
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "campaign-history", formatVersion: 2, sourceId: illustrationSegmentId,
+        record: {
+          sourceId: illustrationSegmentId, campaignId, eventType: "illustration-segment",
+          content: JSON.stringify({
+            illustrationSetId, turnId, ordinal: 3, startOffset: 2, endOffset: exactText.length - 2,
+            startWord: 1, endWord: 5, directPrompt: exactText, resolvedPrompt: exactText,
+            promptSource: "ai_refined", status: "completed",
+          }),
+          occurredAt: createdAt, authority: { sourceText: exactText, sourceTextHash, updatedAt },
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "canonical-facts", formatVersion: 2, sourceId: canonicalFactId,
+        record: {
+          sourceId: canonicalFactId, campaignId, worldVersionId, sourceTurnId: turnId,
+          sourceStateEditId: null, sourceTurnNumber: 1, sourceFactIndex: 7,
+          subject: "sentinel", predicate: "preserves", object: exactText,
+          validFromTurn: 1, validUntilTurn: null, supersededByFactId: null,
+          createdAt, updatedAt,
+          authority: {
+            content: exactText, normalizedContent: "exact authority", entities: ["  Sentinel  "],
+            metadata: { markdown: exactText, ordinal: 7 }, entityIds: [],
+          },
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "chronicle", formatVersion: 2, sourceId: chronicleMemoryId,
+        record: {
+          sourceId: chronicleMemoryId, campaignId, kind: "memory", turnId,
+          memoryKind: "turn_fiction", content: exactText,
+          authority: {
+            worldVersionId, ordinal: 27, tokenEstimate: 83, importance: 0.73,
+            entities: ["  Sentinel  "], metadata: { markdown: exactText, ordinal: 27 },
+            entityIds: [], contentHash: sourceTextHash, createdAt, updatedAt,
+          },
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "chronicle", formatVersion: 2, sourceId: checkpointId,
+        record: {
+          sourceId: checkpointId, campaignId, kind: "summary-checkpoint", throughTurn: 1,
+          summaryKind: "campaign_summary", content: { summary: exactText, openThreadIds: [] },
+          authority: { tokenEstimate: 91, createdAt: updatedAt },
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "imports", formatVersion: 2, sourceId: importId,
+        record: {
+          sourceId: importId, campaignId, sourceType: "campaign_archive", sourceName: exactText,
+          sourceHash: sourceTextHash, completedAt: acceptedAt,
+          authority: {
+            status: "completed", worldId, worldVersionId, stats: { imported: 9, markdown: exactText },
+            errorMessage: null, createdAt,
+          },
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "cost-events", formatVersion: 2, sourceId: costId,
+        record: {
+          sourceId: costId, campaignId,
+          authority: {
+            turnId, providerProfileId: providerId, localCallId, providerType: "openrouter",
+            providerResponseId: " response sentinel ", category: "story", operation: "response",
+            requestedModel: "requested-sentinel", resolvedModel: "resolved-sentinel",
+            amount: "12.345678", currency: "EUR", usageMetadata: { tokens: 73, markdown: exactText },
+            occurredAt: updatedAt, createdAt: acceptedAt,
+          },
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "activity-events", formatVersion: 2, sourceId: "9001",
+        record: {
+          sourceId: "9001", campaignId, eventType: "system-archive-sentinel",
+          authority: { correlationId: " correlation sentinel ", details: { markdown: exactText }, createdAt: acceptedAt },
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "illustrations", formatVersion: 2,
+        sourceId: illustrationIdentity(illustrationSegmentId, 1),
+        record: {
+          sourceId: illustrationIdentity(illustrationSegmentId, 1),
+          campaignId, turnId, assetId, fictionPrompt: exactText,
+          selected: false, createdAt: updatedAt,
+          authority: { segmentId: illustrationSegmentId, variantIndex: 1, createdAt: updatedAt },
+        },
+      }),
+    ];
+    records.sort((left, right) =>
+      SYSTEM_ARCHIVE_DOMAINS.indexOf(left.domain) - SYSTEM_ARCHIVE_DOMAINS.indexOf(right.domain));
+    const assetBytes = Buffer.from("v2-system-archive-asset-sentinel");
+    const assetHash = sha256(assetBytes);
+    const asset = systemArchiveAssetRecordV2Schema.parse({
+      sourceAssetId: assetId, contentHash: assetHash,
+      archivePath: `assets/sha256/${assetHash.slice(0, 2)}/${assetHash}.png`,
+      mimeType: "image/png", byteLength: assetBytes.byteLength, pixelWidth: 17, pixelHeight: 19,
+      technicalMetadata: { format: "png", markdown: exactText },
+      library: {
+        title: "  library sentinel  ", caption: exactText, notes: exactText,
+        tags: [" sentinel ", "v2"], origin: "generated", reviewStatus: "restricted",
+        reuseScope: "campaign", automaticReuseEnabled: true,
+        contentCategories: ["illustration"], favorite: true, archivedAt: null,
+      },
+      createdAt,
+      bindings: [
+        { role: "turn_illustration", campaignId, turnId },
+        {
+          role: "generation_context", campaignId, worldId, worldVersionId, turnId,
+          sourceContextId: generationContextId,
+          authority: {
+            createdByUserId: ownerUserId, targetType: "turn_illustration", variantIndex: 1,
+            fictionPrompt: exactText, negativePrompt: " negative sentinel ",
+            entities: { exactText }, characters: [" Sentinel "], locations: [" Threshold "],
+            factions: [], sceneAttributes: { lighting: "gold" }, providerProfileId: providerId,
+            providerType: "openrouter", model: "image-sentinel",
+            generationParameters: { steps: 37, markdown: exactText }, parentAssetIds: [],
+            metadataSchemaVersion: 7, createdAt: updatedAt,
+          },
+        },
+        {
+          role: "illustration_segment_variant", campaignId, turnId,
+          segmentId: illustrationSegmentId, variantIndex: 1, createdAt: updatedAt,
+        },
+      ],
+      authority: {
+        references: [{
+          sourceId: assetReferenceId, campaignId, turnId,
+          assetRole: "turn_illustration", createdAt: updatedAt,
+        }],
+        library: {
+          createdByUserId: ownerUserId, metadataRevision: 13,
+          createdAt, updatedAt,
+        },
+      },
+    });
+    await pool.query(
+      `INSERT INTO asset_publication_identities (
+         asset_id,owner_user_id,idempotency_key_hash,request_fingerprint,lifecycle
+       ) VALUES ($1,$2,$3,$4,'prepared')`,
+      [assetId, ownerUserId, sha256("v2-asset-idempotency"), sha256("v2-asset-request")],
+    );
+    await pool.query(
+      `INSERT INTO durable_filesystem_operations (
+         id,owner_user_id,operation_token_hash,purpose,resource_kind,asset_id,
+         lease_id,lease_owner,lease_expires_at,expires_at
+       ) VALUES ($1,$2,$3,'asset_original','asset',$4,gen_random_uuid(),
+                 'v2-system-import',clock_timestamp()+interval '5 minutes',clock_timestamp()+interval '1 day')`,
+      [assetOperationId, ownerUserId, sha256("v2-asset-operation"), assetId],
+    );
+    const recordsByDomain = Object.fromEntries(SYSTEM_ARCHIVE_DOMAINS.map((domain) => [
+      domain,
+      records.filter((record) => record.domain === domain).length,
+    ]));
+    await imports.withAtomicImport(owner, { destination, ignore: {} }, async (transaction) => {
+      await transaction.insertLogicalDomains(records);
+      await transaction.insertOriginalAsset(asset, {
+        storagePath: `assets/content/${assetHash}`,
+        filesystemOperationId: assetOperationId,
+      });
+      await transaction.insertAssetBindings(asset);
+      await transaction.recordImportReport(importReport({
+        ownerUserId, recordsByDomain, assetCount: 1, assetBytes: assetBytes.byteLength,
+      }));
+    });
+
+    const canonicalBefore = await pool.query(
+      `SELECT id,content,normalized_content,entities,metadata,entity_ids,created_at,updated_at
+         FROM campaign_canonical_facts WHERE campaign_id=$1 ORDER BY source_fact_index,id`,
+      [campaignId],
+    );
+    const chronicleBefore = await pool.query(
+      `SELECT id,memory_kind,ordinal,content,token_estimate,importance,entities,metadata,entity_ids,
+              content_hash,created_at,updated_at
+         FROM chronicle_memories WHERE campaign_id=$1 ORDER BY ordinal,id`,
+      [campaignId],
+    );
+    const checkpointsBefore = await pool.query(
+      `SELECT id,through_turn,summary_kind,content,token_estimate,created_at
+         FROM summary_checkpoints WHERE campaign_id=$1 ORDER BY through_turn,id`,
+      [campaignId],
+    );
+    await imports.enqueueDerivedRebuilds(owner, { campaignIds: [campaignId], assetIds: [] });
+    const worker = workerMemoryApplication(pool);
+    await expect(worker.runNextChronicle({
+      workerId: "v2-system-archive-rebuild-1", leaseSeconds: 30, retrieval: { batchLimit: 128 },
+    })).resolves.toBe(true);
+    await expect(worker.runNextChronicle({
+      workerId: "v2-system-archive-rebuild-2", leaseSeconds: 30, retrieval: { batchLimit: 128 },
+    })).resolves.toBe(true);
+    await expect(worker.runNextChronicle({
+      workerId: "v2-system-archive-rebuild-idle", leaseSeconds: 30, retrieval: { batchLimit: 128 },
+    })).resolves.toBe(false);
+    await expect(pool.query<{ status: string }>(
+      "SELECT status FROM chronicle_jobs WHERE campaign_id=$1 UNION ALL SELECT status FROM chronicle_chunk_jobs WHERE campaign_id=$1 ORDER BY status",
+      [campaignId],
+    )).resolves.toMatchObject({ rows: [{ status: "completed" }, { status: "completed" }] });
+    expect((await pool.query(
+      `SELECT id,content,normalized_content,entities,metadata,entity_ids,created_at,updated_at
+         FROM campaign_canonical_facts WHERE campaign_id=$1 ORDER BY source_fact_index,id`,
+      [campaignId],
+    )).rows).toEqual(canonicalBefore.rows);
+    expect((await pool.query(
+      `SELECT id,memory_kind,ordinal,content,token_estimate,importance,entities,metadata,entity_ids,
+              content_hash,created_at,updated_at
+         FROM chronicle_memories WHERE campaign_id=$1 ORDER BY ordinal,id`,
+      [campaignId],
+    )).rows).toEqual(chronicleBefore.rows);
+    expect((await pool.query(
+      `SELECT id,through_turn,summary_kind,content,token_estimate,created_at
+         FROM summary_checkpoints WHERE campaign_id=$1 ORDER BY through_turn,id`,
+      [campaignId],
+    )).rows).toEqual(checkpointsBefore.rows);
+
+    await expect(pool.query(
+      `SELECT profile.provider_type,profile.provider_role,profile.default_model,
+              profile.context_window_tokens,profile.max_output_tokens,profile.temperature,
+              profile.configuration,profile.request_timeout_ms,profile.enabled,profile.is_default,
+              campaign.text_provider_profile_id,campaign.image_provider_profile_id,
+              campaign.story_length_profile,campaign.turn_control_style,campaign.legacy_settings,
+              turn_row.action,turn_row.narration,turn_row.custom_action_suggestion,
+              turn_row.mechanics_private,turn_row.model_metadata,turn_row.import_metadata,
+              state.revision,state.import_provenance,state.scratchpad_safe_for_prompt,state.initial_state_snapshot
+         FROM provider_profiles profile
+         JOIN campaigns campaign ON campaign.id=$2
+         JOIN turns turn_row ON turn_row.campaign_id=campaign.id
+         JOIN campaign_state state ON state.campaign_id=campaign.id
+        WHERE profile.id=$1`,
+      [providerId, campaignId],
+    )).resolves.toMatchObject({ rows: [{
+      provider_type: "openrouter",
+      provider_role: "intent",
+      default_model: "intent-model",
+      context_window_tokens: 12_345,
+      max_output_tokens: 678,
+      temperature: 0.37,
+      configuration: { modelDiscoveryEnabled: true, maximumAttempts: 4 },
+      request_timeout_ms: 45_678,
+      enabled: false,
+      is_default: true,
+      text_provider_profile_id: providerId,
+      image_provider_profile_id: null,
+      story_length_profile: "extended",
+      turn_control_style: "flexible_scene",
+      legacy_settings: { markdown: exactText, nested: { sentinel: 73 } },
+      action: exactText,
+      narration: exactText,
+      custom_action_suggestion: exactText,
+      mechanics_private: { roll: 17, private: exactText },
+      model_metadata: { model: "story-sentinel", markdown: exactText },
+      import_metadata: { source: "v2-sentinel", exactText },
+      revision: 11,
+      import_provenance: { source: "v2-sentinel", exactText },
+      scratchpad_safe_for_prompt: true,
+      initial_state_snapshot: { ...state, continuitySummary: "Initial exact" },
+    }] });
+    await expect(pool.query(
+      `SELECT memory.ordinal,memory.token_estimate,memory.importance,
+              memory.entities AS memory_entities,memory.metadata,
+              checkpoint.token_estimate AS checkpoint_tokens,
+              imported.status AS import_status,imported.world_id,imported.world_version_id,
+              imported.stats,imported.error_message,
+              cost.local_call_id,cost.provider_type,cost.provider_response_id,cost.amount::text,
+              cost.currency,cost.usage_metadata,
+              activity.id::text AS activity_id,activity.correlation_id,activity.details,
+              segment.source_text,segment.source_text_hash,segment.updated_at,
+              context.id AS context_id,context.target_type,context.variant_index,
+              context.fiction_prompt,context.negative_prompt,context.entities AS context_entities,context.characters,
+              context.locations,context.factions,context.scene_attributes,context.provider_profile_id,
+              context.provider_type AS context_provider_type,context.model,
+              context.generation_parameters,context.parent_asset_ids,context.metadata_schema_version,
+              library.metadata_revision,reference.id AS reference_id,segment_asset.variant_index AS asset_variant
+         FROM chronicle_memories memory
+         JOIN summary_checkpoints checkpoint ON checkpoint.campaign_id=memory.campaign_id
+         JOIN imports imported ON imported.campaign_id=memory.campaign_id
+         JOIN provider_cost_events cost ON cost.campaign_id=memory.campaign_id
+         JOIN activity_events activity ON activity.campaign_id=memory.campaign_id
+         JOIN turn_illustration_segments segment ON segment.campaign_id=memory.campaign_id
+         JOIN asset_generation_contexts context ON context.campaign_id=memory.campaign_id
+         JOIN asset_library_entries library ON library.asset_id=context.asset_id
+         JOIN asset_references reference ON reference.asset_id=context.asset_id
+         JOIN turn_illustration_segment_assets segment_asset ON segment_asset.asset_id=context.asset_id
+        WHERE memory.id=$1`,
+      [chronicleMemoryId],
+    )).resolves.toMatchObject({ rows: [{
+      ordinal: 27,
+      token_estimate: 83,
+      importance: 0.73,
+      memory_entities: ["  Sentinel  "],
+      metadata: { markdown: exactText, ordinal: 27 },
+      checkpoint_tokens: 91,
+      import_status: "completed",
+      world_id: worldId,
+      world_version_id: worldVersionId,
+      stats: { imported: 9, markdown: exactText },
+      error_message: null,
+      local_call_id: localCallId,
+      provider_type: "openrouter",
+      provider_response_id: " response sentinel ",
+      amount: "12.345678000000",
+      currency: "EUR",
+      usage_metadata: { tokens: 73, markdown: exactText },
+      activity_id: "9001",
+      correlation_id: " correlation sentinel ",
+      details: { markdown: exactText },
+      source_text: exactText,
+      source_text_hash: sourceTextHash,
+      context_id: generationContextId,
+      target_type: "turn_illustration",
+      variant_index: 1,
+      fiction_prompt: exactText,
+      negative_prompt: " negative sentinel ",
+      context_entities: { exactText },
+      characters: [" Sentinel "],
+      locations: [" Threshold "],
+      factions: [],
+      scene_attributes: { lighting: "gold" },
+      provider_profile_id: providerId,
+      context_provider_type: "openrouter",
+      model: "image-sentinel",
+      generation_parameters: { steps: 37, markdown: exactText },
+      parent_asset_ids: [],
+      metadata_schema_version: 7,
+      metadata_revision: 13,
+      reference_id: assetReferenceId,
+      asset_variant: 1,
+    }] });
+    await pool.query("TRUNCATE TABLE assets CASCADE");
+    await pool.query(
+      `UPDATE durable_filesystem_operations
+          SET lifecycle='cleanup_pending',cleanup_requested_at=clock_timestamp()
+        WHERE id=$1 AND lifecycle='reserved'`,
+      [assetOperationId],
+    );
+    await pool.query(
+      `UPDATE durable_filesystem_operations
+          SET lifecycle='cleaned',cleaned_at=clock_timestamp()
+        WHERE id=$1 AND lifecycle='cleanup_pending'`,
+      [assetOperationId],
+    );
+    await pool.query("DELETE FROM durable_filesystem_operations WHERE id=$1", [assetOperationId]);
+    await pool.query("DELETE FROM asset_publication_identities WHERE asset_id=$1", [assetId]);
+  }, 30_000);
+
+  it.runIf(supportsSecureGeneratedArchiveStaging())(
+    "executes every queued post-import asset rebuild without changing Original Asset authority",
+    async () => {
+      await pool.query("TRUNCATE TABLE assets RESTART IDENTITY CASCADE");
+      const imports = createPostgresSystemArchiveImportRepository(pool);
+      const assetId = randomUUID();
+      const createdAt = "2026-08-25T14:15:16.789Z";
+      const bytes = await sharp({
+        create: {
+          width: 9,
+          height: 7,
+          channels: 4,
+          background: { r: 17, g: 73, b: 149, alpha: 1 },
+        },
+      }).png().toBuffer();
+      const contentHash = sha256(bytes);
+      const storagePath = `assets/content/${contentHash}`;
+      await mkdir(dirname(join(assetRoot, storagePath)), { recursive: true });
+      await writeFile(join(assetRoot, storagePath), bytes);
+      await pool.query(
+        `INSERT INTO assets (
+           id,owner_user_id,content_hash,storage_driver,storage_path,mime_type,byte_length,
+           pixel_width,pixel_height,technical_metadata,created_at
+         ) VALUES ($1,$2,$3,'filesystem',$4,'image/png',$5,9,7,$6::jsonb,$7)`,
+        [
+          assetId,
+          ownerUserId,
+          contentHash,
+          storagePath,
+          bytes.byteLength,
+          JSON.stringify({ state: "verified", format: "png", pages: 1, orientation: null, sentinel: "preserve" }),
+          createdAt,
+        ],
+      );
+      await pool.query(
+        `UPDATE asset_library_entries
+            SET title='Post-import exact asset',metadata_revision=37,created_at=$3,updated_at=$3
+          WHERE owner_user_id=$1 AND asset_id=$2`,
+        [ownerUserId, assetId, createdAt],
+      );
+      const before = (await pool.query(
+        `SELECT asset.id,asset.content_hash,asset.storage_driver,asset.storage_path,asset.mime_type,
+                asset.byte_length,asset.pixel_width,asset.pixel_height,asset.technical_metadata,
+                asset.created_at,library.title,library.metadata_revision,
+                library.created_at AS library_created_at,library.updated_at AS library_updated_at
+           FROM assets asset
+           JOIN asset_library_entries library
+             ON library.owner_user_id=asset.owner_user_id AND library.asset_id=asset.id
+          WHERE asset.owner_user_id=$1 AND asset.id=$2`,
+        [ownerUserId, assetId],
+      )).rows;
+
+      await imports.enqueueDerivedRebuilds(
+        { ownerUserId },
+        { campaignIds: [], assetIds: [assetId] },
+      );
+      const composition = await createPrivateAssetMetadataBackfillComposition(
+        pool,
+        { archiveRoot, assetRoot },
+      );
+      try {
+        await expect(composition.executor.processOne({
+          workerId: "system-archive-asset-rebuild",
+          leaseSeconds: 30,
+        })).resolves.toEqual({ outcome: "completed", assetId });
+        await expect(composition.executor.processOne({
+          workerId: "system-archive-asset-rebuild-idle",
+          leaseSeconds: 30,
+        })).resolves.toEqual({ outcome: "idle" });
+      } finally {
+        await composition.close();
+      }
+
+      expect((await pool.query(
+        `SELECT asset.id,asset.content_hash,asset.storage_driver,asset.storage_path,asset.mime_type,
+                asset.byte_length,asset.pixel_width,asset.pixel_height,asset.technical_metadata,
+                asset.created_at,library.title,library.metadata_revision,
+                library.created_at AS library_created_at,library.updated_at AS library_updated_at
+           FROM assets asset
+           JOIN asset_library_entries library
+             ON library.owner_user_id=asset.owner_user_id AND library.asset_id=asset.id
+          WHERE asset.owner_user_id=$1 AND asset.id=$2`,
+        [ownerUserId, assetId],
+      )).rows).toEqual(before);
+      await expect(pool.query(
+        `SELECT job.status,
+                (SELECT count(*)::text FROM asset_derivatives derivative
+                  WHERE derivative.owner_user_id=job.owner_user_id
+                    AND derivative.source_asset_id=job.asset_id
+                    AND derivative.derivative_kind='thumbnail') AS derivative_count
+           FROM asset_metadata_backfill_jobs job
+          WHERE job.owner_user_id=$1 AND job.asset_id=$2`,
+        [ownerUserId, assetId],
+      )).resolves.toMatchObject({ rows: [{ status: "completed", derivative_count: "1" }] });
+    },
+    30_000,
+  );
 
   it("reconciles an ambiguous atomic-import response before compensating prepared assets", async () => {
     const exported = await exportArchive();
@@ -2975,7 +3661,7 @@ integration("deterministic owner-wide System Archive export", () => {
        RETURNING id`,
       [ownerUserId, sha256(randomUUID()), operation.rows[0]!.id, sha256("data"), staged.rows[0]!.id],
     );
-    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const imports = createPostgresSystemArchiveImportRepository(pool);
     const owner = { ownerUserId };
     const destination = await imports.destinationFingerprint(owner, { ignoreUploadId: upload.rows[0]!.id });
     const archiveFingerprint = sha256("idempotent-preview");
@@ -3023,8 +3709,11 @@ integration("deterministic owner-wide System Archive export", () => {
     });
     const idempotencyKey = `commit-${randomUUID()}`;
 
+    const applicationClock = vi.spyOn(Date, "now")
+      .mockReturnValue(new Date(preview.expiresAt).getTime() + 86_400_000);
     const first = await imports.consumePreviewAuthority(owner, preview.previewHandle, idempotencyKey);
     const replay = await imports.consumePreviewAuthority(owner, preview.previewHandle, idempotencyKey);
+    applicationClock.mockRestore();
 
     expect(replay).toEqual(first);
     expect(first.jobId).toBe(preview.jobId);
@@ -3153,7 +3842,7 @@ integration("deterministic owner-wide System Archive export", () => {
        ) VALUES ($1,'import','queued',$2,$3) RETURNING id`,
       [ownerUserId, sha256(randomUUID()), staged.rows[0]!.id],
     );
-    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const imports = createPostgresSystemArchiveImportRepository(pool);
     const jobs = createPostgresSystemArchiveJobRepository(pool);
     const owner = { ownerUserId };
     const ignore = { ignoreJobId: queued.rows[0]!.id, ignoreUploadId: upload.rows[0]!.id };
@@ -3281,7 +3970,7 @@ integration("deterministic owner-wide System Archive export", () => {
         }),
       ],
     );
-    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const imports = createPostgresSystemArchiveImportRepository(pool);
     await expect(imports.consumePreviewAuthority({ ownerUserId }, previewHandle, randomUUID()))
       .rejects.toMatchObject({ statusCode: 409 });
     await expect(pool.query<{ status: string }>(
@@ -3355,7 +4044,7 @@ integration("deterministic owner-wide System Archive export", () => {
       ],
     );
 
-    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const imports = createPostgresSystemArchiveImportRepository(pool);
     await expect(imports.loadImportJobAuthority(
       { ownerUserId },
       jobId,
@@ -3476,7 +4165,6 @@ integration("deterministic owner-wide System Archive export", () => {
           limits,
           destinationApplicationVersion: "0.1.0",
           uploadTtlSeconds: 3_600,
-          previewTtlSeconds: 1_800,
           chunkBytes: exported.bytes.byteLength,
           maximumUploadBytes: limits.maxCompressedBytes,
           leaseOwner: "system-import-production-test",
@@ -3499,7 +4187,7 @@ integration("deterministic owner-wide System Archive export", () => {
         expect(preview.valid).toBe(true);
         if (!preview.previewHandle) throw new Error("Expected opaque System Import preview authority.");
 
-        const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const imports = createPostgresSystemArchiveImportRepository(pool);
         await imports.consumePreviewAuthority({ ownerUserId }, preview.previewHandle, randomUUID());
         const claimed = await createPostgresSystemArchiveJobRepository(pool).claimNext(
           "system-import-production-test",
@@ -3554,7 +4242,7 @@ integration("deterministic owner-wide System Archive export", () => {
       });
       try {
         await withStagedArchive(exported.bytes, limits, async (staged) => {
-          const repository = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+          const repository = createPostgresSystemArchiveImportRepository(pool);
           const destination = await repository.destinationFingerprint({ ownerUserId }, {});
           expect(destination.destinationEmpty).toBe(true);
           const jobId = randomUUID();

@@ -1,7 +1,10 @@
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { SYSTEM_ARCHIVE_TABLE_CLASSIFICATIONS } from "../../packages/application/src/system-archives/portability-registry.js";
+import {
+  SYSTEM_ARCHIVE_SOURCE_COLUMN_CLASSIFICATIONS,
+  SYSTEM_ARCHIVE_TABLE_CLASSIFICATIONS,
+} from "../../packages/application/src/system-archives/portability-registry.js";
 
 async function readCreatedTableNames(directory: string): Promise<string[]> {
   const names = new Set<string>();
@@ -34,6 +37,30 @@ describe("System Archive portability registry", () => {
       system_archive_jobs: "operational",
       system_archive_uploads: "operational",
       system_archive_upload_chunks: "operational"
+    });
+  });
+
+  it("maintains a source-column decision for every portable source table", () => {
+    const portableTables = Object.entries(SYSTEM_ARCHIVE_TABLE_CLASSIFICATIONS)
+      .filter(([, classification]) => classification === "portable_authority" || classification === "portable_normalized")
+      .map(([table]) => table)
+      .sort();
+
+    expect(Object.keys(SYSTEM_ARCHIVE_SOURCE_COLUMN_CLASSIFICATIONS).sort()).toEqual(portableTables);
+    expect(SYSTEM_ARCHIVE_SOURCE_COLUMN_CLASSIFICATIONS.provider_profiles).toMatchObject({
+      base_url: "portable_sanitized",
+      encrypted_api_key: "secret_excluded",
+      health_status: "operational_excluded",
+    });
+    expect(SYSTEM_ARCHIVE_SOURCE_COLUMN_CLASSIFICATIONS.chronicle_memories).toMatchObject({
+      metadata: "portable_sanitized",
+      embedding: "derived_rebuild",
+      search_document: "derived_rebuild",
+    });
+    expect(SYSTEM_ARCHIVE_SOURCE_COLUMN_CLASSIFICATIONS.assets).toMatchObject({
+      storage_driver: "storage_rebound",
+      storage_path: "storage_rebound",
+      filesystem_operation_id: "operational_excluded",
     });
   });
 });

@@ -192,6 +192,107 @@ const validPayload = {
 };
 
 describe("System Archive contracts", () => {
+  it("accepts only field-complete version-two portable authority records", () => {
+    const exact = "  \n# Authority sentinel\n\n```text\n  exact bytes  \n```\n  ";
+    const createdAt = "2026-08-25T12:00:00.123Z";
+    const updatedAt = "2026-08-25T12:00:01.456Z";
+    const records = [
+      {
+        domain: "providers", formatVersion: 2, sourceId: providerId,
+        record: {
+          ...validProviderRecord,
+          kind: "intent",
+          authority: {
+            providerType: "openrouter", providerRole: "intent", defaultModel: "intent-model",
+            contextWindowTokens: 12_345, maxOutputTokens: 678, temperature: 0.37,
+            configuration: { modelDiscoveryEnabled: true, maximumAttempts: 4 },
+            requestTimeoutMs: 45_678, enabled: true, isDefault: true, createdAt, updatedAt
+          }
+        }
+      },
+      {
+        domain: "campaigns", formatVersion: 2, sourceId: campaignId,
+        record: {
+          ...validCampaignRecord,
+          authority: {
+            textProviderProfileId: providerId, imageProviderProfileId: null,
+            storyLengthProfile: "extended", turnControlStyle: "flexible_scene",
+            legacySettings: { exact }
+          }
+        }
+      },
+      {
+        domain: "turns", formatVersion: 2, sourceId: chronicleId,
+        record: {
+          sourceId: chronicleId, campaignId, turnNumber: 4, action: exact,
+          narration: exact, choices: [exact], imagePrompt: exact,
+          stateSnapshotPrivate: {}, acceptedAt: updatedAt,
+          authority: {
+            sourceTurnId: "legacy-turn-4", customActionSuggestion: exact, imageUrl: null,
+            mechanicsPrivate: { roll: 17 }, modelMetadata: { model: "story-model" },
+            importMetadata: { source: "sentinel" }, createdAt, inputMode: "scene",
+            inputModeSource: "explicit"
+          }
+        }
+      },
+      {
+        domain: "chronicle", formatVersion: 2, sourceId: chronicleId,
+        record: {
+          sourceId: chronicleId, campaignId, kind: "memory", turnId: null,
+          memoryKind: "campaign_summary", content: exact,
+          authority: {
+            worldVersionId, ordinal: 27, tokenEstimate: 83, importance: 0.73,
+            entities: ["  Nia  "], metadata: { markdown: exact }, entityIds: [],
+            contentHash: "e".repeat(64), createdAt, updatedAt
+          }
+        }
+      },
+      {
+        domain: "imports", formatVersion: 2, sourceId: worldDraftId,
+        record: {
+          sourceId: worldDraftId, campaignId, sourceType: "legacy_story",
+          sourceName: exact, sourceHash: "f".repeat(64), completedAt: updatedAt,
+          authority: {
+            status: "completed", worldId, worldVersionId, stats: { imported: 9 },
+            errorMessage: null, createdAt
+          }
+        }
+      }
+    ];
+
+    const parsed = records.map((record) => systemRecordEnvelopeSchema.parse(record));
+    expect(parsed.map((entry) => entry.formatVersion)).toEqual([2, 2, 2, 2, 2]);
+    expect((parsed[2]!.record as { action: string }).action).toBe(exact);
+    expect((parsed[3]!.record as { authority: { ordinal: number } }).authority.ordinal).toBe(27);
+    expect(() => systemRecordEnvelopeSchema.parse({
+      ...records[3],
+      record: { ...records[3]!.record, authority: undefined }
+    })).toThrow();
+  });
+  it("validates authoritative prose without transforming exact bytes", () => {
+    const exact = "  \n# Exact Markdown\n\n```text\n  keep leading spaces  \n```\n  ";
+    const promptId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa90";
+    const parsed = systemRecordEnvelopeSchema.parse({
+      domain: "prompts",
+      formatVersion: 1,
+      sourceId: promptId,
+      record: {
+        sourceId: promptId,
+        campaignId,
+        templateKey: "story_system",
+        overrideText: exact,
+        updatedAt: "2026-08-25T12:00:00.000Z"
+      }
+    });
+
+    expect(parsed.domain).toBe("prompts");
+    if (parsed.domain !== "prompts") throw new Error("Expected a prompt record.");
+    expect(parsed.record.overrideText).toBe(exact);
+    expect(() => systemRecordEnvelopeSchema.parse({
+      ...parsed,
+      record: { ...parsed.record, templateKey: " \r\n\t " }
+    })).toThrow();
+  });
   it("preserves distinct global and campaign-scoped prompt override authority", () => {
     const globalPromptId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
     const campaignPromptId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2";
@@ -550,6 +651,48 @@ describe("System Archive contracts", () => {
     expect(systemCampaignHistoryDetailsSchema.safeParse({
       eventType: "illustration-config",
       details: { ...records[3].details, sourcePolicy: "off" }
+    }).success).toBe(false);
+  });
+
+  it("requires event-specific version-two campaign-history authority", () => {
+    const sourceId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa14";
+    const turnId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa15";
+    const illustrationSetId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa16";
+    const exactSource = "  \n# Segment source\n\n```text\n exact bytes \n```\n  ";
+    const record = {
+      domain: "campaign-history",
+      formatVersion: 2,
+      sourceId,
+      record: {
+        sourceId,
+        campaignId,
+        eventType: "illustration-segment",
+        content: JSON.stringify({
+          illustrationSetId,
+          turnId,
+          ordinal: 0,
+          startOffset: 0,
+          endOffset: exactSource.length,
+          startWord: 0,
+          endWord: 4,
+          directPrompt: "Exact segment.",
+          resolvedPrompt: "Exact segment.",
+          promptSource: "direct",
+          status: "completed",
+        }),
+        occurredAt: "2026-08-25T12:00:00.000Z",
+        authority: {
+          sourceText: exactSource,
+          sourceTextHash: "d".repeat(64),
+          updatedAt: "2026-08-25T12:01:00.000Z",
+        },
+      },
+    } as const;
+
+    expect(systemRecordEnvelopeSchema.parse(record).record).toMatchObject(record.record);
+    expect(systemRecordEnvelopeSchema.safeParse({
+      ...record,
+      record: { ...record.record, authority: {} },
     }).success).toBe(false);
   });
 

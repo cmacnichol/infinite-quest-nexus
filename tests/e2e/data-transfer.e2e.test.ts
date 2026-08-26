@@ -7,6 +7,8 @@ const JOB_ID = "33333333-3333-4333-8333-333333333333";
 const UPLOAD_ID = "44444444-4444-4444-8444-444444444444";
 const PRIOR_IMPORT_JOB_ID = "66666666-6666-4666-8666-666666666666";
 const AMBIGUOUS_IMPORT_JOB_ID = "77777777-7777-4777-8777-777777777777";
+const NEWER_EXPORT_JOB_ID = "88888888-8888-4888-8888-888888888888";
+const NEWER_IMPORT_JOB_ID = "99999999-9999-4999-8999-999999999999";
 const recordsByDomain = {
   providers: 2, prompts: 4, worlds: 1, "world-versions": 1, "world-drafts": 1,
   campaigns: 2, turns: 8, "turn-corrections": 0, "campaign-state": 2,
@@ -251,6 +253,99 @@ async function installDisconnectingUploadApi(page: Page): Promise<{ uploadsCreat
   return evidence;
 }
 
+async function installRecoveryFenceApi(
+  page: Page,
+  kind: "export" | "import",
+): Promise<Readonly<{
+  evidence: { oldRecoveryGets: number; newerCreates: number };
+  releaseOldRecovery(): void;
+}>> {
+  let releaseOldRecovery = (): void => undefined;
+  const oldRecoveryGate = new Promise<void>((resolve) => { releaseOldRecovery = resolve; });
+  const evidence = { oldRecoveryGets: 0, newerCreates: 0 };
+  let uploadReceived = 0;
+  await page.route("**/api/v1/**", async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (path === "/api/v1/meta") return json(route, {
+      application: { name: "Infinite Quest Nexus", version: "0.1.0", commit: null, builtAt: null },
+      capabilities: { systemArchive: true },
+    });
+    if (path === "/api/v1/session") return json(route, {
+      user: { id: OWNER_B, systemKey: "initial-owner", displayName: "Initial Owner", settings: {} },
+      authentication: "deferred",
+    });
+    if (path === `/api/v1/system-exports/${JOB_ID}` && request.method() === "GET") {
+      evidence.oldRecoveryGets += 1;
+      await oldRecoveryGate;
+      return json(route, {
+        id: JOB_ID, kind: "export", status: "published", report: null,
+        createdAt: NOW, updatedAt: NOW,
+      }).catch(() => undefined);
+    }
+    if (kind === "export" && path === "/api/v1/system-exports" && request.method() === "POST") {
+      evidence.newerCreates += 1;
+      return json(route, {
+        id: NEWER_EXPORT_JOB_ID, kind: "export", status: "published", report: null,
+        createdAt: NOW, updatedAt: NOW,
+      }, 202);
+    }
+    if (path === `/api/v1/system-exports/${NEWER_EXPORT_JOB_ID}` && request.method() === "GET") {
+      return json(route, {
+        id: NEWER_EXPORT_JOB_ID, kind: "export", status: "published", report: null,
+        createdAt: NOW, updatedAt: NOW,
+      });
+    }
+    if (kind === "import" && path === `/api/v1/system-imports/${PRIOR_IMPORT_JOB_ID}` && request.method() === "GET") {
+      evidence.oldRecoveryGets += 1;
+      await oldRecoveryGate;
+      return json(route, {
+        id: PRIOR_IMPORT_JOB_ID, kind: "import", status: "completed", report,
+        createdAt: NOW, updatedAt: NOW,
+      }).catch(() => undefined);
+    }
+    if (path === "/api/v1/system-imports/uploads" && request.method() === "POST") {
+      return json(route, {
+        id: UPLOAD_ID, status: "created", byteLength: 6, receivedBytes: 0,
+        expiresAt: preview.expiresAt,
+      }, 201);
+    }
+    if (path.includes(`/system-imports/uploads/${UPLOAD_ID}/chunks/`)) {
+      uploadReceived += request.postDataBuffer()?.byteLength ?? 0;
+      return json(route, {
+        id: UPLOAD_ID, status: "uploading", byteLength: 6,
+        receivedBytes: uploadReceived, expiresAt: preview.expiresAt,
+      });
+    }
+    if (path === `/api/v1/system-imports/uploads/${UPLOAD_ID}/complete`) {
+      return json(route, {
+        id: UPLOAD_ID, status: "completed", byteLength: 6,
+        receivedBytes: 6, expiresAt: preview.expiresAt,
+      });
+    }
+    if (path === "/api/v1/system-imports/preview") return json(route, preview);
+    if (kind === "import" && path === "/api/v1/system-imports" && request.method() === "POST") {
+      evidence.newerCreates += 1;
+      return json(route, {
+        id: NEWER_IMPORT_JOB_ID, kind: "import", status: "completed", report,
+        createdAt: NOW, updatedAt: NOW,
+      }, 202);
+    }
+    if (path === `/api/v1/system-imports/${NEWER_IMPORT_JOB_ID}` && request.method() === "GET") {
+      return json(route, {
+        id: NEWER_IMPORT_JOB_ID, kind: "import", status: "completed", report,
+        createdAt: NOW, updatedAt: NOW,
+      });
+    }
+    if (path === "/api/v1/providers") return json(route, { providers: [] });
+    if (path === "/api/v1/worlds") return json(route, { worlds: [] });
+    if (path === "/api/v1/campaigns") return json(route, { campaigns: [] });
+    if (path === "/api/v1/dashboard/stats") return json(route, {});
+    return json(route, {});
+  });
+  return Object.freeze({ evidence, releaseOldRecovery });
+}
+
 const surfaces = [
   {
     name: "replacement",
@@ -443,6 +538,70 @@ for (const surface of surfaces) {
     await expect(page.locator(surface.cancel)).toBeEnabled();
     await page.locator(surface.cancel).click();
     await expect(page.getByText("System Export: cancelled.", { exact: true })).toBeVisible();
+  });
+
+  test(`${surface.name} fences a delayed recovered export behind a newer export identity`, async ({ page }) => {
+    const recovery = await installRecoveryFenceApi(page, "export");
+    await page.addInitScript(({ ownerId, jobId }) => {
+      sessionStorage.setItem(`infiniteQuest.systemArchiveOperation.v1:${ownerId}:export`, JSON.stringify({
+        kind: "export", idempotencyKey: "delayed-export-a", jobId,
+      }));
+    }, { ownerId: OWNER_B, jobId: JOB_ID });
+    await page.goto(surface.url);
+    await expect.poll(() => recovery.evidence.oldRecoveryGets).toBe(1);
+
+    await page.locator(surface.createExport).click();
+    await expect(page.locator(surface.download)).toHaveAttribute("href", new RegExp(NEWER_EXPORT_JOB_ID));
+    const newerStored = await page.evaluate((ownerId) => JSON.parse(
+      sessionStorage.getItem(`infiniteQuest.systemArchiveOperation.v1:${ownerId}:export`) ?? "null",
+    ), OWNER_B);
+    expect(newerStored).toMatchObject({ kind: "export", jobId: NEWER_EXPORT_JOB_ID });
+    expect(recovery.evidence.newerCreates).toBe(1);
+
+    recovery.releaseOldRecovery();
+    await page.waitForTimeout(20);
+    const afterRecoveredA = await page.evaluate((ownerId) => JSON.parse(
+      sessionStorage.getItem(`infiniteQuest.systemArchiveOperation.v1:${ownerId}:export`) ?? "null",
+    ), OWNER_B);
+    expect(afterRecoveredA).toEqual(newerStored);
+    await expect(page.locator(surface.download)).toHaveAttribute("href", new RegExp(NEWER_EXPORT_JOB_ID));
+    await expect(page.locator(surface.error)).toBeHidden();
+  });
+
+  test(`${surface.name} fences a delayed recovered import behind a newer import identity`, async ({ page }) => {
+    const recovery = await installRecoveryFenceApi(page, "import");
+    await page.addInitScript(({ ownerId, jobId }) => {
+      sessionStorage.setItem(`infiniteQuest.systemArchiveOperation.v1:${ownerId}:import`, JSON.stringify({
+        kind: "import", idempotencyKey: "delayed-import-a", jobId,
+        previewHandle: "delayed-preview-a",
+      }));
+    }, { ownerId: OWNER_B, jobId: PRIOR_IMPORT_JOB_ID });
+    await page.goto(surface.url);
+    await expect.poll(() => recovery.evidence.oldRecoveryGets).toBe(1);
+
+    await page.locator(surface.file).setInputFiles({
+      name: "newer-owner-system.zip",
+      mimeType: "application/zip",
+      buffer: Buffer.from("system"),
+    });
+    await expect(page.locator(surface.preview)).toBeVisible();
+    for (const checkbox of await page.locator(surface.acknowledgements).all()) await checkbox.check();
+    await page.locator(surface.commit).click();
+    await expect(page.locator(surface.report)).toBeVisible();
+    const newerStored = await page.evaluate((ownerId) => JSON.parse(
+      sessionStorage.getItem(`infiniteQuest.systemArchiveOperation.v1:${ownerId}:import`) ?? "null",
+    ), OWNER_B);
+    expect(newerStored).toMatchObject({ kind: "import", jobId: NEWER_IMPORT_JOB_ID });
+    expect(recovery.evidence.newerCreates).toBe(1);
+
+    recovery.releaseOldRecovery();
+    await page.waitForTimeout(20);
+    const afterRecoveredA = await page.evaluate((ownerId) => JSON.parse(
+      sessionStorage.getItem(`infiniteQuest.systemArchiveOperation.v1:${ownerId}:import`) ?? "null",
+    ), OWNER_B);
+    expect(afterRecoveredA).toEqual(newerStored);
+    await expect(page.locator(surface.report)).toBeVisible();
+    await expect(page.locator(surface.error)).toBeHidden();
   });
 
   test(`${surface.name} recovers a mocked ambiguous import commit after reload`, async ({ page }) => {

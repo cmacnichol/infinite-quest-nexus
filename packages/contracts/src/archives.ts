@@ -65,7 +65,7 @@ function canonicalizeArchiveValue(value: unknown, parentKey?: string): unknown {
   return value;
 }
 
-const boundedString = (maximum: number) => z.string().trim().max(maximum);
+const boundedString = (maximum: number) => z.string().max(maximum);
 const boundedStringArray = (maximum: number) => z.array(boundedString(maximum)).max(100);
 const nonnegativeSafeInteger = z.number().int().min(0).max(MAX_SAFE_INTEGER);
 const positiveSafeInteger = z.number().int().min(1).max(MAX_SAFE_INTEGER);

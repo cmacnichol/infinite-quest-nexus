@@ -1,15 +1,16 @@
 import {
-  archiveAssetRecordSchema,
   canonicalArchiveJson,
   sanitizePortableMetadata,
+  systemArchiveAssetRecordV2Schema,
   systemArchiveOperationalOmissionsSchema,
   systemArchiveReportSchema,
   systemRecordEnvelopeSchema,
-  type ArchiveAssetBinding,
+  type SystemArchiveAssetBindingV2,
   type SystemArchiveDomain,
   type SystemRecordEnvelope,
 } from "../../contracts/src/index.js";
 import { canonicalizeWorldContent } from "../../contracts/src/world-library.js";
+import { toSafeProviderConfiguration } from "../../application/src/providers/use-cases.js";
 import type {
   SystemArchiveExportJobPort,
   SystemArchiveOriginalAssetRecord,
@@ -24,6 +25,7 @@ type ExportRepositoryOptions = Readonly<{
   sourceApplicationVersion: string;
 }>;
 type EnvelopeRow = Readonly<{ sort_key: string; envelope: unknown }>;
+type PortableJson = string | number | boolean | null | PortableJson[] | { [key: string]: PortableJson };
 
 const DEFAULT_PAGE_SIZE = 500;
 const SHA_256 = /^[a-f0-9]{64}$/u;
@@ -170,6 +172,14 @@ function portableProviderBaseUrl(value: unknown): string | null {
   }
 }
 
+function sanitizedPortableObject(value: unknown, field: string): Record<string, unknown> {
+  return objectValue(sanitizePortableMetadata(value), field);
+}
+
+function sanitizedPortableJson(value: unknown): PortableJson {
+  return sanitizePortableMetadata(value) as PortableJson;
+}
+
 function parseEnvelope(domain: SystemArchiveDomain, value: unknown): SystemRecordEnvelope {
   let candidate = value;
   if (domain === "providers" && typeof value === "object" && value !== null) {
@@ -179,8 +189,69 @@ function parseEnvelope(domain: SystemArchiveDomain, value: unknown): SystemRecor
       record: {
         ...envelope.record,
         baseUrl: portableProviderBaseUrl(envelope.record?.baseUrl),
+        ...(envelope.formatVersion === 2 ? {
+          authority: {
+            ...envelope.record?.authority,
+            configuration: toSafeProviderConfiguration(envelope.record?.authority?.configuration),
+          },
+        } : {}),
       },
     };
+  }
+  if (typeof candidate === "object" && candidate !== null
+    && (candidate as Record<string, unknown>).formatVersion === 2) {
+    const envelope = candidate as Record<string, any>;
+    const authority = envelope.record?.authority;
+    switch (domain) {
+      case "turns":
+        candidate = { ...envelope, record: { ...envelope.record, authority: {
+          ...authority,
+          modelMetadata: sanitizedPortableObject(authority?.modelMetadata, "turn model metadata"),
+          importMetadata: sanitizedPortableObject(authority?.importMetadata, "turn import metadata"),
+        } } };
+        break;
+      case "campaign-state":
+        candidate = { ...envelope, record: { ...envelope.record, authority: {
+          ...authority,
+          importProvenance: sanitizePortableMetadata(authority?.importProvenance),
+          initialStateSnapshot: sanitizePortableMetadata(authority?.initialStateSnapshot),
+        } } };
+        break;
+      case "canonical-facts":
+        candidate = { ...envelope, record: { ...envelope.record, authority: {
+          ...authority,
+          metadata: sanitizedPortableObject(authority?.metadata, "canonical fact metadata"),
+        } } };
+        break;
+      case "chronicle":
+        if (envelope.record?.kind === "memory") {
+          candidate = { ...envelope, record: { ...envelope.record, authority: {
+            ...authority,
+            metadata: sanitizedPortableObject(authority?.metadata, "Chronicle metadata"),
+          } } };
+        }
+        break;
+      case "imports":
+        candidate = { ...envelope, record: { ...envelope.record, authority: {
+          ...authority,
+          stats: sanitizedPortableObject(authority?.stats, "import statistics"),
+        } } };
+        break;
+      case "cost-events":
+        candidate = { ...envelope, record: { ...envelope.record, authority: {
+          ...authority,
+          usageMetadata: sanitizedPortableObject(authority?.usageMetadata, "cost usage metadata"),
+        } } };
+        break;
+      case "activity-events":
+        candidate = { ...envelope, record: { ...envelope.record, authority: {
+          ...authority,
+          details: sanitizedPortableObject(authority?.details, "activity details"),
+        } } };
+        break;
+      default:
+        break;
+    }
   }
   if ((domain === "world-versions" || domain === "world-drafts")
     && typeof value === "object" && value !== null) {
@@ -200,7 +271,7 @@ const DOMAIN_SQL = {
   providers: `
     SELECT '00:' || profile.id::text AS sort_key,
            jsonb_build_object(
-             'domain','providers','formatVersion',1,'sourceId',profile.id,
+             'domain','providers','formatVersion',2,'sourceId',profile.id,
              'record',jsonb_build_object(
                'sourceId',profile.id,
                'kind',profile.provider_role,
@@ -211,7 +282,17 @@ const DOMAIN_SQL = {
                'timeoutMs',profile.request_timeout_ms,
                'retryLimit',CASE WHEN profile.configuration->>'retryLimit' ~ '^[0-9]+$'
                                  THEN (profile.configuration->>'retryLimit')::bigint ELSE NULL END,
-               'enabled',false,'health','unknown'
+               'enabled',false,'health','unknown',
+               'authority',jsonb_build_object(
+                 'providerType',profile.provider_type,'providerRole',profile.provider_role,
+                 'defaultModel',profile.default_model,
+                 'contextWindowTokens',profile.context_window_tokens,
+                 'maxOutputTokens',profile.max_output_tokens,'temperature',profile.temperature,
+                 'configuration',profile.configuration,
+                 'requestTimeoutMs',profile.request_timeout_ms,
+                 'enabled',profile.enabled,'isDefault',profile.is_default,
+                 'createdAt',profile.created_at,'updatedAt',profile.updated_at
+               )
              )
            ) AS envelope
       FROM provider_profiles profile
@@ -219,10 +300,11 @@ const DOMAIN_SQL = {
   prompts: `
     SELECT '00:' || COALESCE(prompt.campaign_id::text,'') || ':' || prompt.prompt_key || ':' || prompt.id::text AS sort_key,
            jsonb_build_object(
-             'domain','prompts','formatVersion',1,'sourceId',prompt.id,
+             'domain','prompts','formatVersion',2,'sourceId',prompt.id,
              'record',jsonb_build_object(
                'sourceId',prompt.id,'campaignId',prompt.campaign_id,'templateKey',prompt.prompt_key,
-               'overrideText',prompt.content,'updatedAt',prompt.updated_at
+               'overrideText',prompt.content,'updatedAt',prompt.updated_at,
+               'authority',jsonb_build_object('createdAt',prompt.created_at)
              )
            ) AS envelope
       FROM prompt_template_overrides prompt
@@ -230,12 +312,15 @@ const DOMAIN_SQL = {
   worlds: `
     SELECT '00:' || world.id::text AS sort_key,
            jsonb_build_object(
-             'domain','worlds','formatVersion',1,'sourceId',world.id,
+             'domain','worlds','formatVersion',2,'sourceId',world.id,
              'record',jsonb_build_object(
                'sourceId',world.id,'title',world.title,'status',world.status,
                'forkedFromWorldId',world.forked_from_world_id,
                'forkedFromWorldVersionId',world.forked_from_world_version_id,
-               'createdAt',world.created_at,'updatedAt',world.updated_at
+               'createdAt',world.created_at,'updatedAt',world.updated_at,
+               'authority',jsonb_build_object(
+                 'nextVersionNumber',world.next_version_number,'coverAssetId',world.cover_asset_id
+               )
              )
            ) AS envelope
       FROM worlds world
@@ -243,7 +328,7 @@ const DOMAIN_SQL = {
   "world-versions": `
     SELECT '00:' || version.id::text AS sort_key,
            jsonb_build_object(
-             'domain','world-versions','formatVersion',1,'sourceId',version.id,
+             'domain','world-versions','formatVersion',2,'sourceId',version.id,
              'record',jsonb_build_object(
                'sourceId',version.id,'worldId',version.world_id,
                'versionNumber',version.version_number,'title',world.title,
@@ -252,7 +337,10 @@ const DOMAIN_SQL = {
                                          THEN version.source_hash ELSE NULL END,
                'releaseNotes',version.release_notes,
                'createdFromRevision',version.created_from_revision,
-               'publishedAt',version.published_at
+               'publishedAt',version.published_at,
+               'authority',jsonb_build_object(
+                 'sourceHash',version.source_hash,'createdAt',version.created_at
+               )
              )
            ) AS envelope
       FROM world_versions version
@@ -261,12 +349,13 @@ const DOMAIN_SQL = {
   "world-drafts": `
     SELECT '00:' || draft.world_id::text AS sort_key,
            jsonb_build_object(
-             'domain','world-drafts','formatVersion',1,'sourceId',draft.world_id,
+             'domain','world-drafts','formatVersion',2,'sourceId',draft.world_id,
              'record',jsonb_build_object(
                'sourceId',draft.world_id,'worldId',draft.world_id,
                'basedOnWorldVersionId',draft.based_on_world_version_id,
                'title',world.title,'revision',draft.revision,'content',draft.content,
-               'createdAt',draft.created_at,'updatedAt',draft.updated_at
+               'createdAt',draft.created_at,'updatedAt',draft.updated_at,
+               'authority','{}'::jsonb
              )
            ) AS envelope
       FROM world_drafts draft
@@ -275,7 +364,7 @@ const DOMAIN_SQL = {
   campaigns: `
     SELECT '00:' || campaign.id::text AS sort_key,
            jsonb_build_object(
-             'domain','campaigns','formatVersion',1,'sourceId',campaign.id,
+             'domain','campaigns','formatVersion',2,'sourceId',campaign.id,
              'record',jsonb_build_object(
                'sourceId',campaign.id,'worldVersionId',campaign.world_version_id,
                'title',campaign.title,'status',campaign.status,
@@ -290,7 +379,14 @@ const DOMAIN_SQL = {
                'characterSnapshot',campaign.character_snapshot,
                'characterProfile',campaign.character_profile,
                'characterProfileRevision',campaign.character_profile_revision,
-               'createdAt',campaign.created_at,'updatedAt',campaign.updated_at
+               'createdAt',campaign.created_at,'updatedAt',campaign.updated_at,
+               'authority',jsonb_build_object(
+                 'textProviderProfileId',campaign.text_provider_profile_id,
+                 'imageProviderProfileId',campaign.image_provider_profile_id,
+                 'storyLengthProfile',campaign.story_length_profile,
+                 'turnControlStyle',campaign.turn_control_style,
+                 'legacySettings',campaign.legacy_settings
+               )
              )
            ) AS envelope
       FROM campaigns campaign
@@ -298,14 +394,22 @@ const DOMAIN_SQL = {
   turns: `
     SELECT '00:' || turn_row.id::text AS sort_key,
            jsonb_build_object(
-             'domain','turns','formatVersion',1,'sourceId',turn_row.id,
+             'domain','turns','formatVersion',2,'sourceId',turn_row.id,
              'record',jsonb_build_object(
                'sourceId',turn_row.id,'campaignId',turn_row.campaign_id,
                'turnNumber',turn_row.turn_number,'action',turn_row.action,
                'narration',turn_row.narration,'choices',turn_row.choices,
                'imagePrompt',turn_row.image_prompt,
                'stateSnapshotPrivate',turn_row.state_snapshot_private,
-               'acceptedAt',turn_row.accepted_at
+               'acceptedAt',turn_row.accepted_at,
+               'authority',jsonb_build_object(
+                 'sourceTurnId',turn_row.source_turn_id,
+                 'customActionSuggestion',turn_row.custom_action_suggestion,
+                 'imageUrl',turn_row.image_url,'mechanicsPrivate',turn_row.mechanics_private,
+                 'modelMetadata',turn_row.model_metadata,'importMetadata',turn_row.import_metadata,
+                 'createdAt',turn_row.created_at,'inputMode',turn_row.input_mode,
+                 'inputModeSource',turn_row.input_mode_source
+               )
              )
            ) AS envelope
       FROM turns turn_row
@@ -314,13 +418,18 @@ const DOMAIN_SQL = {
     SELECT '00:' || correction.turn_id::text || ':' || lpad(correction.revision::text,10,'0')
            || ':' || correction.id::text AS sort_key,
            jsonb_build_object(
-             'domain','turn-corrections','formatVersion',1,'sourceId',correction.id,
+             'domain','turn-corrections','formatVersion',2,'sourceId',correction.id,
              'record',jsonb_build_object(
                'sourceId',correction.id,'turnId',correction.turn_id,
                'revision',correction.revision,'narration',correction.narration,
                'previousEffectiveNarrationHash',correction.previous_effective_narration_hash,
                'reason',correction.reason,'source',correction.source,
-               'correctedAt',correction.created_at
+               'correctedAt',correction.created_at,
+               'authority',jsonb_build_object(
+                 'campaignId',correction.campaign_id,
+                 'createdByUserId',correction.created_by_user_id,
+                 'createdAt',correction.created_at
+               )
              )
            ) AS envelope
       FROM turn_narration_corrections correction
@@ -328,7 +437,7 @@ const DOMAIN_SQL = {
   "campaign-state": `
     SELECT '00:' || state.campaign_id::text AS sort_key,
            jsonb_build_object(
-             'domain','campaign-state','formatVersion',1,'sourceId',state.campaign_id,
+             'domain','campaign-state','formatVersion',2,'sourceId',state.campaign_id,
              'record',jsonb_build_object(
                'sourceId',state.campaign_id,'campaignId',state.campaign_id,
                'revision',state.revision,
@@ -348,19 +457,19 @@ const DOMAIN_SQL = {
                         AND fact.valid_from_turn<=campaign.active_turn_number
                         AND (fact.valid_until_turn IS NULL OR fact.valid_until_turn>campaign.active_turn_number)
                    ),'[]'::jsonb) END,
-                 'scratchpad',CASE WHEN exact_edit.snapshot IS NULL THEN state.scratchpad_private
-                                    ELSE COALESCE(exact_edit.snapshot->>'scratchpad','') END,
-                 'trackers',CASE WHEN exact_edit.snapshot IS NULL THEN state.trackers
-                                 ELSE COALESCE(exact_edit.snapshot->'trackers','[]'::jsonb) END,
-                 'rpgStats',CASE WHEN exact_edit.snapshot IS NULL THEN state.rpg_stats
-                                 ELSE COALESCE(exact_edit.snapshot->'rpgStats','[]'::jsonb) END,
+                 'scratchpad',state.scratchpad_private,
+                 'trackers',state.trackers,
+                 'rpgStats',state.rpg_stats,
                  'defaultTriggers',state.default_triggers,
-                 'eventTriggers',CASE WHEN exact_edit.snapshot IS NULL THEN state.event_triggers
-                                      ELSE COALESCE(exact_edit.snapshot->'eventTriggers','[]'::jsonb) END,
-                 'pendingEventTriggers',CASE WHEN exact_edit.snapshot IS NULL THEN state.pending_event_triggers
-                                             ELSE COALESCE(exact_edit.snapshot->'pendingEventTriggers','[]'::jsonb) END
+                 'eventTriggers',state.event_triggers,
+                 'pendingEventTriggers',state.pending_event_triggers
                ),
-               'updatedAt',COALESCE(exact_edit.created_at,accepted_turn.accepted_at,state.updated_at)
+               'updatedAt',state.updated_at,
+               'authority',jsonb_build_object(
+                 'importProvenance',state.import_provenance,
+                 'scratchpadSafeForPrompt',state.scratchpad_safe_for_prompt,
+                 'initialStateSnapshot',state.initial_state_snapshot
+               )
              )
            ) AS envelope
       FROM campaign_state state
@@ -396,11 +505,27 @@ const DOMAIN_SQL = {
   "campaign-history": `
     SELECT history.sort_key,
            jsonb_build_object(
-             'domain','campaign-history','formatVersion',1,'sourceId',history.source_id,
+             'domain','campaign-history','formatVersion',2,'sourceId',history.source_id,
              'record',jsonb_build_object(
                'sourceId',history.source_id,'campaignId',history.campaign_id,
                'eventType',history.event_type,'content',history.content,
-               'occurredAt',history.occurred_at
+               'occurredAt',history.occurred_at,
+               'authority',CASE history.event_type
+                 WHEN 'world-transfer' THEN COALESCE((
+                   SELECT jsonb_build_object('idempotencyKey',transfer.idempotency_key)
+                     FROM campaign_world_transfers transfer WHERE transfer.id=history.source_id
+                 ),'{}'::jsonb)
+                 WHEN 'illustration-set' THEN COALESCE((
+                   SELECT jsonb_build_object('sourceTextHash',illustration_set.source_text_hash)
+                     FROM turn_illustration_sets illustration_set WHERE illustration_set.id=history.source_id
+                 ),'{}'::jsonb)
+                 WHEN 'illustration-segment' THEN COALESCE((
+                   SELECT jsonb_build_object(
+                     'sourceText',segment.source_text,'sourceTextHash',segment.source_text_hash,
+                     'updatedAt',segment.updated_at
+                   ) FROM turn_illustration_segments segment WHERE segment.id=history.source_id
+                 ),'{}'::jsonb)
+                 ELSE '{}'::jsonb END
              )
            ) AS envelope
       FROM (
@@ -513,7 +638,7 @@ const DOMAIN_SQL = {
   "canonical-facts": `
     SELECT '00:' || fact.id::text AS sort_key,
            jsonb_build_object(
-             'domain','canonical-facts','formatVersion',1,'sourceId',fact.id,
+             'domain','canonical-facts','formatVersion',2,'sourceId',fact.id,
              'record',jsonb_build_object(
                'sourceId',fact.id,'campaignId',fact.campaign_id,
                'worldVersionId',fact.world_version_id,
@@ -526,59 +651,51 @@ const DOMAIN_SQL = {
                'object',fact.content,'validFromTurn',fact.valid_from_turn,
                'validUntilTurn',fact.valid_until_turn,
                'supersededByFactId',fact.superseded_by_fact_id,
-               'createdAt',fact.created_at,'updatedAt',fact.updated_at
+               'createdAt',fact.created_at,'updatedAt',fact.updated_at,
+               'authority',jsonb_build_object(
+                 'content',fact.content,'normalizedContent',fact.normalized_content,
+                 'entities',to_jsonb(fact.entities),'metadata',fact.metadata,
+                 'entityIds',to_jsonb(fact.entity_ids)
+               )
              )
            ) AS envelope
       FROM campaign_canonical_facts fact
      WHERE fact.owner_user_id=$1`,
   chronicle: `
-    SELECT chronicle.sort_key,
+    SELECT '01:' || memory.id::text AS sort_key,
            jsonb_build_object(
-             'domain','chronicle','formatVersion',1,'sourceId',chronicle.source_id,
+             'domain','chronicle','formatVersion',2,'sourceId',memory.id,
              'record',jsonb_build_object(
-               'sourceId',chronicle.source_id,'campaignId',chronicle.campaign_id,
-                'kind',chronicle.kind,'content',chronicle.content,
-                'occurredAt',chronicle.occurred_at,
-                'metadata',jsonb_build_object(
-                  'entityNames',chronicle.entity_names,'openThreadIds',chronicle.open_thread_ids
-                )
-              ) || CASE WHEN chronicle.kind='memory'
-                        THEN jsonb_build_object('turnId',chronicle.turn_id,'memoryKind',chronicle.memory_kind)
-                        ELSE jsonb_build_object(
-                          'throughTurn',chronicle.through_turn,
-                          'summaryKind',chronicle.summary_kind
-                        ) END
-            ) AS envelope
-      FROM (
-        SELECT '01:' || memory.id::text AS sort_key,memory.id AS source_id,memory.campaign_id,
-               'memory'::text AS kind,memory.content,memory.created_at AS occurred_at,
-               to_jsonb(memory.entities) AS entity_names,
-               CASE WHEN jsonb_typeof(memory.metadata->'openThreadIds')='array'
-                    THEN memory.metadata->'openThreadIds' ELSE '[]'::jsonb END AS open_thread_ids,
-               memory.turn_id,memory.memory_kind,NULL::integer AS through_turn,
-               NULL::text AS summary_kind
-          FROM chronicle_memories memory WHERE memory.owner_user_id=$1
-        UNION ALL
-        SELECT '02:' || checkpoint.id::text,checkpoint.id,checkpoint.campaign_id,
-               'summary-checkpoint',CASE
-                 WHEN jsonb_typeof(checkpoint.content)='string' THEN checkpoint.content#>>'{}'
-                 WHEN jsonb_typeof(checkpoint.content->'summary')='string' THEN checkpoint.content->>'summary'
-                 WHEN jsonb_typeof(checkpoint.content->'history')='string' THEN checkpoint.content->>'history'
-                 WHEN jsonb_typeof(checkpoint.content->'text')='string' THEN checkpoint.content->>'text'
-                 ELSE checkpoint.content::text
-               END,
-               checkpoint.created_at,
-               CASE WHEN jsonb_typeof(checkpoint.content->'entityNames')='array'
-                    THEN checkpoint.content->'entityNames' ELSE '[]'::jsonb END,
-               CASE WHEN jsonb_typeof(checkpoint.content->'openThreadIds')='array'
-                    THEN checkpoint.content->'openThreadIds' ELSE '[]'::jsonb END,
-               NULL::uuid,NULL::text,checkpoint.through_turn,checkpoint.summary_kind
-          FROM summary_checkpoints checkpoint WHERE checkpoint.owner_user_id=$1
-      ) chronicle`,
+               'sourceId',memory.id,'campaignId',memory.campaign_id,'kind','memory',
+               'turnId',memory.turn_id,'memoryKind',memory.memory_kind,'content',memory.content,
+               'authority',jsonb_build_object(
+                 'worldVersionId',memory.world_version_id,'ordinal',memory.ordinal,
+                 'tokenEstimate',memory.token_estimate,'importance',memory.importance,
+                 'entities',to_jsonb(memory.entities),'metadata',memory.metadata,
+                 'entityIds',to_jsonb(memory.entity_ids),'contentHash',memory.content_hash,
+                 'createdAt',memory.created_at,'updatedAt',memory.updated_at
+               )
+             )
+           ) AS envelope
+      FROM chronicle_memories memory WHERE memory.owner_user_id=$1
+    UNION ALL
+    SELECT '02:' || checkpoint.id::text AS sort_key,
+           jsonb_build_object(
+             'domain','chronicle','formatVersion',2,'sourceId',checkpoint.id,
+             'record',jsonb_build_object(
+               'sourceId',checkpoint.id,'campaignId',checkpoint.campaign_id,
+               'kind','summary-checkpoint','throughTurn',checkpoint.through_turn,
+               'summaryKind',checkpoint.summary_kind,'content',checkpoint.content,
+               'authority',jsonb_build_object(
+                 'tokenEstimate',checkpoint.token_estimate,'createdAt',checkpoint.created_at
+               )
+             )
+           ) AS envelope
+      FROM summary_checkpoints checkpoint WHERE checkpoint.owner_user_id=$1`,
   illustrations: `
     SELECT '00:' || segment_asset.asset_id::text || ':' || segment_asset.segment_id::text AS sort_key,
            jsonb_build_object(
-             'domain','illustrations','formatVersion',1,
+             'domain','illustrations','formatVersion',2,
              'sourceId',overlay(overlay(md5('illustration:' || segment_asset.segment_id::text || ':' || segment_asset.variant_index::text)
                placing '5' from 13) placing '8' from 17)::uuid,
              'record',jsonb_build_object(
@@ -587,7 +704,11 @@ const DOMAIN_SQL = {
                'campaignId',segment.campaign_id,
                'turnId',segment.turn_id,'assetId',segment_asset.asset_id,
                'fictionPrompt',COALESCE(NULLIF(segment.resolved_prompt,''),segment.direct_prompt),
-               'selected',segment_asset.variant_index=0,'createdAt',segment_asset.created_at
+               'selected',segment_asset.variant_index=0,'createdAt',segment_asset.created_at,
+               'authority',jsonb_build_object(
+                 'segmentId',segment_asset.segment_id,'variantIndex',segment_asset.variant_index,
+                 'createdAt',segment_asset.created_at
+               )
              )
            ) AS envelope
       FROM turn_illustration_segment_assets segment_asset
@@ -597,12 +718,17 @@ const DOMAIN_SQL = {
   imports: `
     SELECT '00:' || import_row.id::text AS sort_key,
            jsonb_build_object(
-             'domain','imports','formatVersion',1,'sourceId',import_row.id,
+             'domain','imports','formatVersion',2,'sourceId',import_row.id,
              'record',jsonb_build_object(
                'sourceId',import_row.id,'sourceType',import_row.source_type,
                'campaignId',import_row.campaign_id,
                'sourceName',import_row.source_name,'sourceHash',import_row.source_hash,
-               'completedAt',import_row.completed_at
+               'completedAt',import_row.completed_at,
+               'authority',jsonb_build_object(
+                 'status',import_row.status,'worldId',import_row.world_id,
+                 'worldVersionId',import_row.world_version_id,'stats',import_row.stats,
+                 'errorMessage',import_row.error_message,'createdAt',import_row.created_at
+               )
              )
            ) AS envelope
       FROM imports import_row
@@ -610,13 +736,19 @@ const DOMAIN_SQL = {
   "cost-events": `
     SELECT '00:' || cost.id::text AS sort_key,
            jsonb_build_object(
-             'domain','cost-events','formatVersion',1,'sourceId',cost.id,
+             'domain','cost-events','formatVersion',2,'sourceId',cost.id,
              'record',jsonb_build_object(
                'sourceId',cost.id,'campaignId',cost.campaign_id,
-               'providerKind',CASE cost.category WHEN 'image' THEN 'image'
-                                                   WHEN 'memory' THEN 'embedding' ELSE 'text' END,
-               'amountMicros',round(cost.amount*1000000)::bigint,
-               'occurredAt',cost.occurred_at
+               'authority',jsonb_build_object(
+                 'turnId',cost.turn_id,'providerProfileId',cost.provider_profile_id,
+                 'localCallId',cost.local_call_id,
+                 'providerType',cost.provider_type,'providerResponseId',cost.provider_response_id,
+                 'category',cost.category,'operation',cost.operation,
+                 'requestedModel',cost.requested_model,'resolvedModel',cost.resolved_model,
+                 'amount',cost.amount::text,'currency',cost.currency,
+                 'usageMetadata',cost.usage_metadata,
+                 'occurredAt',cost.occurred_at,'createdAt',cost.created_at
+               )
              )
            ) AS envelope
       FROM provider_cost_events cost
@@ -624,13 +756,15 @@ const DOMAIN_SQL = {
   "activity-events": `
     SELECT '00:' || lpad(to_hex(activity.id),16,'0') AS sort_key,
            jsonb_build_object(
-             'domain','activity-events','formatVersion',1,
-             'sourceId','00000000-0000-4000-8000-' || right(lpad(to_hex(activity.id),12,'0'),12),
+             'domain','activity-events','formatVersion',2,
+             'sourceId',activity.id::text,
              'record',jsonb_build_object(
-               'sourceId','00000000-0000-4000-8000-' || right(lpad(to_hex(activity.id),12,'0'),12),
+               'sourceId',activity.id::text,
                'campaignId',activity.campaign_id,'eventType',activity.event_type,
-               'summary',COALESCE(activity.details->>'summary',''),
-               'occurredAt',activity.created_at
+               'authority',jsonb_build_object(
+                 'correlationId',activity.correlation_id,'details',activity.details,
+                 'createdAt',activity.created_at
+               )
              )
            ) AS envelope
       FROM activity_events activity
@@ -691,9 +825,26 @@ type AssetRow = Readonly<{
   content_categories: string[] | null;
   favorite: boolean | null;
   archived_at: Date | string | null;
+  library_created_by_user_id: string | null;
+  metadata_revision: number | null;
+  library_created_at: Date | string | null;
+  library_updated_at: Date | string | null;
 }>;
 
-function bindingKey(binding: ArchiveAssetBinding): string {
+type AssetReferenceAuthority = Readonly<{
+  sourceId: string;
+  campaignId: string;
+  turnId: string | null;
+  assetRole: string;
+  createdAt: string;
+}>;
+
+type AssetBindingInventory = Readonly<{
+  bindings: ReadonlyMap<string, readonly SystemArchiveAssetBindingV2[]>;
+  references: ReadonlyMap<string, readonly AssetReferenceAuthority[]>;
+}>;
+
+function bindingKey(binding: SystemArchiveAssetBindingV2): string {
   return canonicalArchiveJson(binding);
 }
 
@@ -701,12 +852,15 @@ async function assetBindings(
   client: DatabaseClient,
   ownerUserId: string,
   rows: readonly AssetRow[],
-): Promise<ReadonlyMap<string, readonly ArchiveAssetBinding[]>> {
+): Promise<AssetBindingInventory> {
   const assetIds = rows.map((row) => row.id);
-  const bindings = new Map<string, Map<string, ArchiveAssetBinding>>(
+  const bindings = new Map<string, Map<string, SystemArchiveAssetBindingV2>>(
     assetIds.map((id) => [id, new Map()]),
   );
-  const add = (assetId: string, binding: ArchiveAssetBinding) => {
+  const referenceAuthority = new Map<string, AssetReferenceAuthority[]>(
+    assetIds.map((id) => [id, []]),
+  );
+  const add = (assetId: string, binding: SystemArchiveAssetBindingV2) => {
     const target = bindings.get(assetId);
     if (target) target.set(bindingKey(binding), binding);
   };
@@ -751,17 +905,26 @@ async function assetBindings(
   }
 
   const references = await client.query<{
+    id: string;
     asset_id: string;
     campaign_id: string;
     turn_id: string | null;
     asset_role: string;
+    created_at: Date | string;
   }>(
-    `SELECT asset_id,campaign_id,turn_id,asset_role
+    `SELECT id,asset_id,campaign_id,turn_id,asset_role,created_at
        FROM asset_references
       WHERE owner_user_id=$1 AND asset_id=ANY($2::uuid[])`,
     [ownerUserId, assetIds],
   );
   for (const row of references.rows) {
+    referenceAuthority.get(row.asset_id)?.push(Object.freeze({
+      sourceId: row.id,
+      campaignId: row.campaign_id,
+      turnId: row.turn_id,
+      assetRole: row.asset_role,
+      createdAt: iso(row.created_at),
+    }));
     if (row.asset_role === "turn_illustration" && row.turn_id) {
       add(row.asset_id, { role: "turn_illustration", campaignId: row.campaign_id, turnId: row.turn_id });
     } else if (row.asset_role === "import_attachment") {
@@ -777,9 +940,10 @@ async function assetBindings(
     turn_id: string;
     segment_id: string;
     variant_index: number;
+    created_at: Date | string;
   }>(
     `SELECT segment_asset.asset_id,segment.campaign_id,segment.turn_id,
-            segment_asset.segment_id,segment_asset.variant_index
+            segment_asset.segment_id,segment_asset.variant_index,segment_asset.created_at
        FROM turn_illustration_segment_assets segment_asset
        JOIN turn_illustration_segments segment
          ON segment.id=segment_asset.segment_id AND segment.owner_user_id=segment_asset.owner_user_id
@@ -793,6 +957,7 @@ async function assetBindings(
       turnId: row.turn_id,
       segmentId: row.segment_id,
       variantIndex: row.variant_index,
+      createdAt: iso(row.created_at),
     });
   }
 
@@ -803,8 +968,29 @@ async function assetBindings(
     world_id: string | null;
     world_version_id: string | null;
     turn_id: string | null;
+    created_by_user_id: string;
+    target_type: "world_cover" | "turn_illustration" | "streaming_illustration" | "other";
+    variant_index: number;
+    fiction_prompt: string;
+    negative_prompt: string | null;
+    entities: unknown;
+    characters: unknown;
+    locations: unknown;
+    factions: unknown;
+    scene_attributes: unknown;
+    provider_profile_id: string | null;
+    provider_type: string | null;
+    model: string;
+    generation_parameters: unknown;
+    parent_asset_ids: string[];
+    metadata_schema_version: number;
+    created_at: Date | string;
   }>(
-    `SELECT id,asset_id,campaign_id,world_id,world_version_id,turn_id
+    `SELECT id,asset_id,campaign_id,world_id,world_version_id,turn_id,
+            created_by_user_id,target_type,variant_index,fiction_prompt,negative_prompt,
+            entities,characters,locations,factions,scene_attributes,provider_profile_id,
+            provider_type,model,generation_parameters,parent_asset_ids,
+            metadata_schema_version,created_at
        FROM asset_generation_contexts
       WHERE owner_user_id=$1 AND asset_id=ANY($2::uuid[])`,
     [ownerUserId, assetIds],
@@ -817,12 +1003,37 @@ async function assetBindings(
       worldVersionId: row.world_version_id,
       turnId: row.turn_id,
       sourceContextId: row.id,
+      authority: {
+        createdByUserId: row.created_by_user_id,
+        targetType: row.target_type,
+        variantIndex: row.variant_index,
+        fictionPrompt: row.fiction_prompt,
+        negativePrompt: row.negative_prompt,
+        entities: sanitizedPortableJson(row.entities),
+        characters: sanitizedPortableJson(row.characters),
+        locations: sanitizedPortableJson(row.locations),
+        factions: sanitizedPortableJson(row.factions),
+        sceneAttributes: sanitizedPortableJson(row.scene_attributes),
+        providerProfileId: row.provider_profile_id,
+        providerType: row.provider_type,
+        model: row.model,
+        generationParameters: sanitizedPortableJson(row.generation_parameters),
+        parentAssetIds: row.parent_asset_ids,
+        metadataSchemaVersion: row.metadata_schema_version,
+        createdAt: iso(row.created_at),
+      },
     });
   }
-  return new Map([...bindings].map(([assetId, values]) => [
-    assetId,
-    [...values.values()].sort((left, right) => bindingKey(left).localeCompare(bindingKey(right))),
-  ]));
+  return Object.freeze({
+    bindings: new Map([...bindings].map(([assetId, values]) => [
+      assetId,
+      [...values.values()].sort((left, right) => bindingKey(left).localeCompare(bindingKey(right))),
+    ])),
+    references: new Map([...referenceAuthority].map(([assetId, values]) => [
+      assetId,
+      [...values].sort((left, right) => left.sourceId.localeCompare(right.sourceId)),
+    ])),
+  });
 }
 
 async function* originalAssets(
@@ -838,7 +1049,10 @@ async function* originalAssets(
               asset.created_at,asset.campaign_id,asset.turn_id,
               library.title,library.caption,library.notes,library.tags,library.origin,
               library.review_status,library.reuse_scope,library.automatic_reuse_enabled,
-              library.content_categories,library.favorite,library.archived_at
+              library.content_categories,library.favorite,library.archived_at,
+              library.created_by_user_id AS library_created_by_user_id,
+              library.metadata_revision,library.created_at AS library_created_at,
+              library.updated_at AS library_updated_at
          FROM assets asset
          LEFT JOIN asset_library_entries library
            ON library.asset_id=asset.id AND library.owner_user_id=asset.owner_user_id
@@ -848,7 +1062,7 @@ async function* originalAssets(
       [ownerUserId, cursor, maximumPageSize],
     );
     if (result.rows.length === 0) return;
-    const bindings = await assetBindings(client, ownerUserId, result.rows);
+    const inventory = await assetBindings(client, ownerUserId, result.rows);
     for (const row of result.rows) {
       cursor = row.id;
       if (!SHA_256.test(row.content_hash)) throw exportError("System Archive source asset hash is invalid.");
@@ -858,9 +1072,9 @@ async function* originalAssets(
       if (pixelWidth < 1 || pixelHeight < 1) throw exportError("System Archive source asset dimensions are missing.");
       const mimeType = row.mime_type as "image/png" | "image/jpeg" | "image/webp" | "image/gif";
       const archivePath = `assets/sha256/${row.content_hash.slice(0, 2)}/${row.content_hash}${imageExtension(mimeType)}`;
-      const assetBindings = bindings.get(row.id) ?? [];
+      const assetBindings = inventory.bindings.get(row.id) ?? [];
       const reuseScope = assetBindings.length === 0 ? "owner_library" : (row.reuse_scope ?? "private");
-      const record = archiveAssetRecordSchema.parse({
+      const record = systemArchiveAssetRecordV2Schema.parse({
         sourceAssetId: row.id,
         contentHash: row.content_hash,
         archivePath,
@@ -884,6 +1098,20 @@ async function* originalAssets(
         },
         createdAt: iso(row.created_at),
         bindings: assetBindings,
+        authority: {
+          references: inventory.references.get(row.id) ?? [],
+          library: row.library_created_by_user_id === null
+            || row.metadata_revision === null
+            || row.library_created_at === null
+            || row.library_updated_at === null
+            ? null
+            : {
+                createdByUserId: row.library_created_by_user_id,
+                metadataRevision: row.metadata_revision,
+                createdAt: iso(row.library_created_at),
+                updatedAt: iso(row.library_updated_at),
+              },
+        },
       });
       yield Object.freeze({
         sourceAssetId: row.id,
@@ -950,8 +1178,15 @@ export function createPostgresSystemArchiveExportRepository(
       const client = await pool.connect();
       try {
         await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
-        const ownerResult = await client.query<{ id: string; display_name: string }>(
-          "SELECT id,display_name FROM users WHERE id=$1 AND status='active'",
+        const ownerResult = await client.query<{
+          id: string;
+          display_name: string;
+          status: "active" | "disabled";
+          settings: unknown;
+          created_at: Date | string;
+          updated_at: Date | string;
+        }>(
+          "SELECT id,display_name,status,settings,created_at,updated_at FROM users WHERE id=$1 AND status='active'",
           [owner.ownerUserId],
         );
         const ownerRow = ownerResult.rows[0];
@@ -967,6 +1202,10 @@ export function createPostgresSystemArchiveExportRepository(
               sourceId: ownerRow.id,
               sourceInstallationId: ownerRow.id,
               displayName: ownerRow.display_name,
+              status: ownerRow.status,
+              settings: sanitizedPortableObject(ownerRow.settings, "owner settings"),
+              createdAt: iso(ownerRow.created_at),
+              updatedAt: iso(ownerRow.updated_at),
             });
           },
           async readCompatibility() {

@@ -1,8 +1,9 @@
 import {
   SYSTEM_ARCHIVE_DOMAINS,
   archiveAssetRecordSchema,
+  systemArchiveAssetRecordV2Schema,
   systemRecordEnvelopeSchema,
-  type ArchiveAssetRecord,
+  type SystemArchiveAssetRecord,
   type SystemArchiveDomain,
   type SystemRecordEnvelope,
 } from "@infinite-quest/contracts";
@@ -59,7 +60,10 @@ function recordsForDomain(
 }
 
 function requireAsset(candidate: SystemArchiveOriginalAssetRecord): SystemArchiveOriginalAssetRecord {
-  const record = archiveAssetRecordSchema.parse(candidate.record);
+  const versionTwo = systemArchiveAssetRecordV2Schema.safeParse(candidate.record);
+  const record = versionTwo.success
+    ? versionTwo.data
+    : archiveAssetRecordSchema.parse(candidate.record);
   if (candidate.sourceAssetId !== record.sourceAssetId
     || candidate.archivePath !== record.archivePath
     || candidate.expectedSha256 !== record.contentHash
@@ -157,7 +161,7 @@ export async function runSystemExport(
     });
     if (await cancelIfRequested(job, dependencies)) return { status: "cancelled" };
 
-    const assetRecords: ArchiveAssetRecord[] = captured.assets.map((asset) => asset.record);
+    const assetRecords: SystemArchiveAssetRecord[] = captured.assets.map((asset) => asset.record);
     const inventoryPayload = await dependencies.writer.writeAssetInventory(assetRecords);
     const originals = uniqueOriginals(captured.assets);
     const originalPayloads: SystemArchiveWrittenPayload[] = [];

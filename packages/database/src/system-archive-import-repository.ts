@@ -3,10 +3,11 @@ import {
   SYSTEM_ARCHIVE_DOMAINS,
   canonicalArchiveJson,
   parseSystemCampaignHistoryDetails,
+  systemArchiveAssetRecordV2Schema,
   systemArchiveImportReportSchema,
   systemRecordEnvelopeSchema,
   systemImportPreviewViewSchema,
-  type ArchiveAssetRecord,
+  type SystemArchiveAssetRecord,
   type SystemArchiveDomain,
   type SystemArchiveImportReport,
   type SystemImportPreviewView,
@@ -18,6 +19,7 @@ import type {
   PrivateAssetPublicationIdentity
 } from "../../application/src/assets/private-asset-publication.js";
 import { SYSTEM_ARCHIVE_TABLE_CLASSIFICATIONS } from "../../application/src/system-archives/portability-registry.js";
+import { enqueuePostgresChronicleChunkIndex } from "./chronicle-chunk-repository.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 
 export type SystemImportDestinationFingerprint = Readonly<{
@@ -87,13 +89,13 @@ export interface SystemArchiveAtomicImportTransaction {
     records: Iterable<SystemRecordEnvelope> | AsyncIterable<SystemRecordEnvelope>
   ): Promise<SystemArchiveImportResult>;
   insertOriginalAsset(
-    asset: ArchiveAssetRecord,
+    asset: SystemArchiveAssetRecord,
     persistence: Readonly<{
       filesystemOperationId: string;
       storagePath: string;
     }>
   ): Promise<void>;
-  insertAssetBindings(asset: ArchiveAssetRecord): Promise<void>;
+  insertAssetBindings(asset: SystemArchiveAssetRecord): Promise<void>;
   recordImportReport(report: SystemArchiveImportReport): Promise<void>;
 }
 
@@ -140,9 +142,8 @@ export interface SystemArchiveImportRepository {
   completeImportedJob(owner: OwnerScope, jobId: string, leaseOwner: string): Promise<void>;
 }
 
-type SystemArchiveImportRepositoryOptions = Readonly<{
-  previewTtlSeconds: number;
-}>;
+/** System Import Preview authority is intentionally independent of Campaign Archive configuration. */
+export const SYSTEM_ARCHIVE_PREVIEW_TTL_SECONDS = 1_800;
 
 const AUTHORITY_TABLES = Object.entries(SYSTEM_ARCHIVE_TABLE_CLASSIFICATIONS)
   .filter(([, classification]) => classification === "portable_authority"
@@ -251,12 +252,6 @@ function parsePersistedPreviewProjection(value: unknown): SystemImportPreviewPro
     ...projection
   } = parsed.data;
   return Object.freeze(projection);
-}
-
-function requireTtl(value: number): void {
-  if (value !== 1_800) {
-    throw new Error("system_archive_preview_ttl_invalid");
-  }
 }
 
 function quoteIdentifier(value: string): string {
@@ -608,6 +603,11 @@ async function requireLogicalMutation(
 
 type SystemPromptEnvelope = Extract<SystemRecordEnvelope, { domain: "prompts" }>;
 type SystemIllustrationEnvelope = Extract<SystemRecordEnvelope, { domain: "illustrations" }>;
+type SystemRecordEnvelopeV2 = Extract<SystemRecordEnvelope, { formatVersion: 2 }>;
+
+function isV2Envelope(envelope: SystemRecordEnvelope): envelope is SystemRecordEnvelopeV2 {
+  return 2 === envelope.formatVersion;
+}
 type PendingWorldFork = Readonly<{
   worldId: string;
   forkedFromWorldId: string;
@@ -641,6 +641,38 @@ async function insertLogicalRecord(
   }
   switch (envelope.domain) {
     case "providers": {
+      if (isV2Envelope(envelope)) {
+        const { record } = envelope;
+        await requireLogicalMutation(database.query(
+          `INSERT INTO provider_profiles (
+             id,owner_user_id,name,provider_type,provider_role,base_url,default_model,
+             context_window_tokens,max_output_tokens,temperature,configuration,enabled,
+             health_status,consecutive_failures,last_health_check_at,last_health_error,
+             request_timeout_ms,is_default,created_at,updated_at
+           ) VALUES (
+             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,false,
+             'unknown',0,NULL,NULL,$12,$13,$14,$15
+           )`,
+          [
+            record.sourceId,
+            ownerUserId,
+            record.displayName,
+            record.authority.providerType,
+            record.authority.providerRole,
+            record.baseUrl ?? "http://disabled.invalid",
+            record.authority.defaultModel,
+            record.authority.contextWindowTokens,
+            record.authority.maxOutputTokens,
+            record.authority.temperature,
+            json(record.authority.configuration),
+            record.authority.requestTimeoutMs,
+            record.authority.isDefault,
+            record.authority.createdAt,
+            record.authority.updatedAt
+          ]
+        ), envelope.domain);
+        return true;
+      }
       const { record } = envelope;
       await requireLogicalMutation(database.query(
         `INSERT INTO provider_profiles (
@@ -675,17 +707,33 @@ async function insertLogicalRecord(
       await requireLogicalMutation(database.query(
         `INSERT INTO prompt_template_overrides
            (id,owner_user_id,campaign_id,prompt_key,content,created_at,updated_at)
-         VALUES ($1,$2,NULL,$3,$4,$5,$5)`,
-        [record.sourceId, ownerUserId, record.templateKey, record.overrideText, record.updatedAt]
+         VALUES ($1,$2,NULL,$3,$4,$5,$6)`,
+        [
+          record.sourceId,
+          ownerUserId,
+          record.templateKey,
+          record.overrideText,
+          isV2Envelope(envelope) ? envelope.record.authority.createdAt : record.updatedAt,
+          record.updatedAt
+        ]
       ), envelope.domain);
       return true;
     }
     case "worlds": {
       const { record } = envelope;
       await requireLogicalMutation(database.query(
-        `INSERT INTO worlds (id,owner_user_id,title,status,created_at,updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6)`,
-        [record.sourceId, ownerUserId, record.title, record.status, record.createdAt, record.updatedAt]
+        `INSERT INTO worlds (
+           id,owner_user_id,title,status,created_at,updated_at,next_version_number
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [
+          record.sourceId,
+          ownerUserId,
+          record.title,
+          record.status,
+          record.createdAt,
+          record.updatedAt,
+          isV2Envelope(envelope) ? envelope.record.authority.nextVersionNumber : 1
+        ]
       ), envelope.domain);
       return true;
     }
@@ -695,15 +743,16 @@ async function insertLogicalRecord(
         `INSERT INTO world_versions (
            id,world_id,owner_user_id,version_number,content,source_hash,published_at,
            created_at,release_notes,created_from_revision
-         ) VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$7,$8,$9)`,
+         ) VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10)`,
         [
           record.sourceId,
           record.worldId,
           ownerUserId,
           record.versionNumber,
           json(record.content),
-          record.contentFingerprint,
+          isV2Envelope(envelope) ? envelope.record.authority.sourceHash : record.contentFingerprint,
           record.publishedAt,
+          isV2Envelope(envelope) ? envelope.record.authority.createdAt : record.publishedAt,
           record.releaseNotes,
           record.createdFromRevision
         ]
@@ -729,6 +778,39 @@ async function insertLogicalRecord(
       return true;
     }
     case "campaigns": {
+      if (isV2Envelope(envelope)) {
+        const { record } = envelope;
+        await requireLogicalMutation(database.query(
+          `INSERT INTO campaigns (
+             id,owner_user_id,world_version_id,title,status,active_turn_number,
+             legacy_settings,text_provider_profile_id,image_provider_profile_id,
+             story_length_profile,turn_control_style,selected_character_id,character_snapshot,
+             character_profile,character_profile_revision,created_at,updated_at
+           ) VALUES (
+             $1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb,$15,$16,$17
+           )`,
+          [
+            record.sourceId,
+            ownerUserId,
+            record.worldVersionId,
+            record.title,
+            record.status,
+            record.activeTurnNumber,
+            json(record.authority.legacySettings),
+            record.authority.textProviderProfileId,
+            record.authority.imageProviderProfileId,
+            record.authority.storyLengthProfile,
+            record.authority.turnControlStyle,
+            record.selectedCharacterId,
+            record.characterSnapshot === null ? null : json(record.characterSnapshot),
+            record.characterProfile === null ? null : json(record.characterProfile),
+            record.characterProfileRevision,
+            record.createdAt,
+            record.updatedAt
+          ]
+        ), envelope.domain);
+        return true;
+      }
       const { record } = envelope;
       await requireLogicalMutation(database.query(
         `INSERT INTO campaigns (
@@ -756,6 +838,41 @@ async function insertLogicalRecord(
       return true;
     }
     case "turns": {
+      if (isV2Envelope(envelope)) {
+        const { record } = envelope;
+        await requireLogicalMutation(database.query(
+          `INSERT INTO turns (
+             id,owner_user_id,campaign_id,turn_number,source_turn_id,action,narration,choices,
+             custom_action_suggestion,image_prompt,image_url,mechanics_private,state_snapshot_private,
+             model_metadata,import_metadata,accepted_at,created_at,input_mode,input_mode_source
+           ) VALUES (
+             $1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12::jsonb,$13::jsonb,
+             $14::jsonb,$15::jsonb,$16,$17,$18,$19
+           )`,
+          [
+            record.sourceId,
+            ownerUserId,
+            record.campaignId,
+            record.turnNumber,
+            record.authority.sourceTurnId,
+            record.action,
+            record.narration,
+            json(record.choices),
+            record.authority.customActionSuggestion,
+            record.imagePrompt,
+            record.authority.imageUrl,
+            record.authority.mechanicsPrivate === null ? null : json(record.authority.mechanicsPrivate),
+            json(record.stateSnapshotPrivate),
+            json(record.authority.modelMetadata),
+            json(record.authority.importMetadata),
+            record.acceptedAt,
+            record.authority.createdAt,
+            record.authority.inputMode,
+            record.authority.inputModeSource
+          ]
+        ), envelope.domain);
+        return true;
+      }
       const { record } = envelope;
       await requireLogicalMutation(database.query(
         `INSERT INTO turns (
@@ -789,7 +906,8 @@ async function insertLogicalRecord(
          )
          SELECT $1,$2,turn_row.campaign_id,turn_row.id,$3,$4,$5,$6,$7,$2,$8
            FROM turns turn_row
-          WHERE turn_row.id=$9 AND turn_row.owner_user_id=$2`,
+          WHERE turn_row.id=$9 AND turn_row.owner_user_id=$2
+            AND ($10::uuid IS NULL OR turn_row.campaign_id=$10)`,
         [
           record.sourceId,
           ownerUserId,
@@ -798,8 +916,9 @@ async function insertLogicalRecord(
           record.previousEffectiveNarrationHash,
           record.reason,
           record.source,
-          record.correctedAt,
-          record.turnId
+          isV2Envelope(envelope) ? envelope.record.authority.createdAt : record.correctedAt,
+          record.turnId,
+          isV2Envelope(envelope) ? envelope.record.authority.campaignId : null
         ]
       ), envelope.domain);
       return true;
@@ -811,9 +930,9 @@ async function insertLogicalRecord(
         `INSERT INTO campaign_state (
            campaign_id,owner_user_id,scratchpad_private,trackers,default_triggers,
            event_triggers,pending_event_triggers,rpg_stats,import_provenance,
-           initial_state_snapshot,revision,updated_at
+           scratchpad_safe_for_prompt,initial_state_snapshot,revision,updated_at
          ) VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6::jsonb,$7::jsonb,$8::jsonb,
-                   $9::jsonb,$10::jsonb,$11,$12)`,
+                   $9::jsonb,$10,$11::jsonb,$12,$13)`,
         [
           record.campaignId,
           ownerUserId,
@@ -823,8 +942,13 @@ async function insertLogicalRecord(
           json(state.eventTriggers),
           json(state.pendingEventTriggers),
           json(state.rpgStats),
-          json({ source: "system_archive" }),
-          json(state),
+          isV2Envelope(envelope)
+            ? json(envelope.record.authority.importProvenance)
+            : json({ source: "system_archive" }),
+          isV2Envelope(envelope) ? envelope.record.authority.scratchpadSafeForPrompt : false,
+          isV2Envelope(envelope)
+            ? json(envelope.record.authority.initialStateSnapshot)
+            : json(state),
           record.revision,
           record.updatedAt
         ]
@@ -934,7 +1058,7 @@ async function insertLogicalRecord(
                from_world_version_id,to_world_version_id,character_strategy,state_strategy,
                target_defaults_policy,source_fingerprint,warnings,note,created_at
              )
-             SELECT $1,$2,$1,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13
+             SELECT $1,$2,$14,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13
               WHERE $5::uuid<>$6::uuid
                 AND EXISTS (
                   SELECT 1 FROM world_versions source_version
@@ -979,7 +1103,10 @@ async function insertLogicalRecord(
               sourceFingerprint,
               json(historyArray(record.eventType, content, "warnings")),
               historyString(record.eventType, content, "note"),
-              record.occurredAt
+              record.occurredAt,
+              isV2Envelope(envelope) && envelope.record.eventType === "world-transfer"
+                ? envelope.record.authority.idempotencyKey
+                : record.sourceId
             ]
           ), record.eventType);
           return true;
@@ -1095,7 +1222,7 @@ async function insertLogicalRecord(
                created_at,completed_at
              )
              SELECT $1,$2,$3,turn_row.id,
-                    encode(digest(convert_to(turn_row.narration,'UTF8'),'sha256'),'hex'),
+                    COALESCE($13,encode(digest(convert_to(turn_row.narration,'UTF8'),'sha256'),'hex')),
                     $5,$6,$7,$8,$9,$10,$11,$12
                FROM turns turn_row
               WHERE turn_row.id=$4 AND turn_row.owner_user_id=$2 AND turn_row.campaign_id=$3`,
@@ -1113,7 +1240,10 @@ async function insertLogicalRecord(
               historyBoolean(record.eventType, content, "isActive"),
               historyString(record.eventType, content, "characterVisualReference"),
               record.occurredAt,
-              historyOptionalString(record.eventType, content, "completedAt")
+              historyOptionalString(record.eventType, content, "completedAt"),
+              isV2Envelope(envelope) && envelope.record.eventType === "illustration-set"
+                ? envelope.record.authority.sourceTextHash
+                : null
             ]
           ), record.eventType);
           return true;
@@ -1126,9 +1256,10 @@ async function insertLogicalRecord(
                start_offset,end_offset,start_word,end_word,source_text,source_text_hash,
                direct_prompt,resolved_prompt,prompt_source,status,created_at,updated_at
              )
-             SELECT $1,$2,$3,$4,turn_row.id,$6,$7,$8,$9,$10,turn_row.narration,
-                    encode(digest(convert_to(turn_row.narration,'UTF8'),'sha256'),'hex'),
-                    $11,$12,$13,$14,$15,$15
+             SELECT $1,$2,$3,$4,turn_row.id,$6,$7,$8,$9,$10,
+                    COALESCE($16,turn_row.narration),
+                    COALESCE($17,encode(digest(convert_to(turn_row.narration,'UTF8'),'sha256'),'hex')),
+                    $11,$12,$13,$14,$15,$18
                FROM turns turn_row
                JOIN turn_illustration_sets illustration_set
                  ON illustration_set.id=$3 AND illustration_set.owner_user_id=$2
@@ -1153,7 +1284,16 @@ async function insertLogicalRecord(
               historyEnum(record.eventType, content, "status", [
                 "queued", "refining", "generating", "completed", "recoverable", "failed"
               ] as const),
-              record.occurredAt
+              record.occurredAt,
+              isV2Envelope(envelope) && envelope.record.eventType === "illustration-segment"
+                ? envelope.record.authority.sourceText
+                : null,
+              isV2Envelope(envelope) && envelope.record.eventType === "illustration-segment"
+                ? envelope.record.authority.sourceTextHash
+                : null,
+              isV2Envelope(envelope) && envelope.record.eventType === "illustration-segment"
+                ? envelope.record.authority.updatedAt
+                : record.occurredAt
             ]
           ), record.eventType);
           return true;
@@ -1175,6 +1315,54 @@ async function insertLogicalRecord(
       return true;
     }
     case "canonical-facts": {
+      if (isV2Envelope(envelope)) {
+        const { record } = envelope;
+        await requireLogicalMutation(database.query(
+          `INSERT INTO campaign_canonical_facts (
+             id,owner_user_id,campaign_id,world_version_id,source_turn_id,source_turn_number,
+             source_state_edit_id,source_fact_index,content,normalized_content,entities,
+             valid_from_turn,valid_until_turn,superseded_by_fact_id,metadata,created_at,updated_at,
+             entity_ids
+           )
+           SELECT $1,$2,campaign.id,$3,$4,$5,$6,$7,$8,$9,$10::text[],
+                  $11,$12,NULL,$13::jsonb,$14,$15,$16::uuid[]
+             FROM campaigns campaign
+            WHERE campaign.id=$17 AND campaign.owner_user_id=$2
+              AND EXISTS (
+                SELECT 1 FROM world_versions version
+                 WHERE version.id=$3 AND version.owner_user_id=$2
+              )
+              AND ($4::uuid IS NULL OR EXISTS (
+                SELECT 1 FROM turns turn_row
+                 WHERE turn_row.id=$4 AND turn_row.owner_user_id=$2
+                   AND turn_row.campaign_id=campaign.id AND turn_row.turn_number=$5
+              ))
+              AND ($6::uuid IS NULL OR EXISTS (
+                SELECT 1 FROM campaign_state_edits edit
+                 WHERE edit.id=$6 AND edit.owner_user_id=$2 AND edit.campaign_id=campaign.id
+              ))`,
+          [
+            record.sourceId,
+            ownerUserId,
+            record.worldVersionId,
+            record.sourceTurnId,
+            record.sourceTurnNumber,
+            record.sourceStateEditId,
+            record.sourceFactIndex,
+            record.authority.content,
+            record.authority.normalizedContent,
+            record.authority.entities,
+            record.validFromTurn,
+            record.validUntilTurn,
+            json(record.authority.metadata),
+            record.createdAt,
+            record.updatedAt,
+            record.authority.entityIds,
+            record.campaignId
+          ]
+        ), envelope.domain);
+        return true;
+      }
       const { record } = envelope;
       await requireLogicalMutation(database.query(
         `INSERT INTO campaign_canonical_facts (
@@ -1219,6 +1407,68 @@ async function insertLogicalRecord(
       return true;
     }
     case "chronicle": {
+      if (isV2Envelope(envelope)) {
+        const { record } = envelope;
+        if (record.kind === "summary-checkpoint") {
+          await requireLogicalMutation(database.query(
+            `INSERT INTO summary_checkpoints (
+               id,owner_user_id,campaign_id,through_turn,summary_kind,content,token_estimate,created_at
+             ) SELECT $1,$2,campaign.id,$3,$4,$5::jsonb,$6,$7
+                 FROM campaigns campaign
+                WHERE campaign.id=$8 AND campaign.owner_user_id=$2
+                  AND $3<=campaign.active_turn_number`,
+            [
+              record.sourceId,
+              ownerUserId,
+              record.throughTurn,
+              record.summaryKind,
+              json(record.content),
+              record.authority.tokenEstimate,
+              record.authority.createdAt,
+              record.campaignId
+            ]
+          ), envelope.domain);
+        } else {
+          await requireLogicalMutation(database.query(
+            `INSERT INTO chronicle_memories (
+               id,owner_user_id,campaign_id,world_version_id,turn_id,memory_kind,ordinal,
+               content,token_estimate,importance,entities,metadata,embedding,
+               created_at,updated_at,embedding_provider_profile_id,embedding_model,
+               embedding_dimensions,embedding_content_hash,embedding_updated_at,
+               embedding_provider_fingerprint,entity_ids
+             ) SELECT $1,$2,campaign.id,$3,$4::uuid,$5,$6,$7,$8,$9,$10::text[],$11::jsonb,
+                      NULL,$12,$13,NULL,NULL,NULL,NULL,NULL,NULL,$14::uuid[]
+                 FROM campaigns campaign
+                WHERE campaign.id=$16 AND campaign.owner_user_id=$2
+                  AND campaign.world_version_id=$3
+                  AND encode(digest($7::text,'sha256'),'hex')=$15
+                  AND ($4::uuid IS NULL OR EXISTS (
+                    SELECT 1 FROM turns turn_row
+                     WHERE turn_row.id=$4 AND turn_row.owner_user_id=$2
+                       AND turn_row.campaign_id=campaign.id
+                  ))`,
+            [
+              record.sourceId,
+              ownerUserId,
+              record.authority.worldVersionId,
+              record.turnId,
+              record.memoryKind,
+              record.authority.ordinal,
+              record.content,
+              record.authority.tokenEstimate,
+              record.authority.importance,
+              record.authority.entities,
+              json(record.authority.metadata),
+              record.authority.createdAt,
+              record.authority.updatedAt,
+              record.authority.entityIds,
+              record.authority.contentHash,
+              record.campaignId
+            ]
+          ), envelope.domain);
+        }
+        return true;
+      }
       const { record } = envelope;
       if (record.kind === "summary-checkpoint") {
         await requireLogicalMutation(database.query(
@@ -1280,6 +1530,31 @@ async function insertLogicalRecord(
       pendingIllustrations.push(envelope);
       return false;
     case "imports": {
+      if (isV2Envelope(envelope)) {
+        const { record } = envelope;
+        await requireLogicalMutation(database.query(
+          `INSERT INTO imports (
+             id,owner_user_id,campaign_id,source_type,source_name,source_hash,status,
+             world_id,world_version_id,stats,error_message,created_at,completed_at
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13)`,
+          [
+            record.sourceId,
+            ownerUserId,
+            record.campaignId,
+            record.sourceType,
+            record.sourceName,
+            record.sourceHash,
+            record.authority.status,
+            record.authority.worldId,
+            record.authority.worldVersionId,
+            json(record.authority.stats),
+            record.authority.errorMessage,
+            record.authority.createdAt,
+            record.completedAt
+          ]
+        ), envelope.domain);
+        return true;
+      }
       const { record } = envelope;
       await requireLogicalMutation(database.query(
         `INSERT INTO imports (
@@ -1302,6 +1577,38 @@ async function insertLogicalRecord(
       return true;
     }
     case "cost-events": {
+      if (isV2Envelope(envelope)) {
+        const { record } = envelope;
+        await requireLogicalMutation(database.query(
+          `INSERT INTO provider_cost_events (
+             id,owner_user_id,campaign_id,turn_id,provider_profile_id,local_call_id,
+             provider_type,provider_response_id,category,operation,requested_model,
+             resolved_model,amount,currency,usage_metadata,occurred_at,created_at
+           ) VALUES (
+             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16,$17
+           )`,
+          [
+            record.sourceId,
+            ownerUserId,
+            record.campaignId,
+            record.authority.turnId,
+            record.authority.providerProfileId,
+            record.authority.localCallId,
+            record.authority.providerType,
+            record.authority.providerResponseId,
+            record.authority.category,
+            record.authority.operation,
+            record.authority.requestedModel,
+            record.authority.resolvedModel,
+            record.authority.amount,
+            record.authority.currency,
+            json(record.authority.usageMetadata),
+            record.authority.occurredAt,
+            record.authority.createdAt
+          ]
+        ), envelope.domain);
+        return true;
+      }
       const { record } = envelope;
       if (record.campaignId === null) {
         await requireLogicalMutation(database.query(
@@ -1331,7 +1638,12 @@ async function insertLogicalRecord(
     }
     case "activity-events": {
       const { record } = envelope;
-      const activityId = activityEventIdentity(record.sourceId);
+      const activityId = isV2Envelope(envelope)
+        ? Number.parseInt(record.sourceId, 10)
+        : activityEventIdentity(record.sourceId);
+      if (!Number.isSafeInteger(activityId) || activityId < 1) {
+        throw repositoryError("System Archive activity identity is invalid.", 400);
+      }
       await requireLogicalMutation(database.query(
         `INSERT INTO activity_events
            (id,owner_user_id,campaign_id,event_type,correlation_id,details,created_at)
@@ -1341,9 +1653,11 @@ async function insertLogicalRecord(
           ownerUserId,
           record.campaignId,
           record.eventType,
-          record.sourceId,
-          json({ summary: record.summary, sourceId: record.sourceId }),
-          record.occurredAt
+          isV2Envelope(envelope) ? envelope.record.authority.correlationId : record.sourceId,
+          isV2Envelope(envelope)
+            ? json(envelope.record.authority.details)
+            : json({ summary: envelope.record.summary, sourceId: record.sourceId }),
+          isV2Envelope(envelope) ? envelope.record.authority.createdAt : envelope.record.occurredAt
         ]
       ), envelope.domain);
       await database.query(
@@ -1380,7 +1694,7 @@ async function restorePendingPrompts(
     await requireLogicalMutation(database.query(
       `INSERT INTO prompt_template_overrides
          (id,owner_user_id,campaign_id,prompt_key,content,created_at,updated_at)
-       SELECT $1,$2,campaign.id,$4,$5,$6,$6
+       SELECT $1,$2,campaign.id,$4,$5,$6,$7
          FROM campaigns campaign
         WHERE campaign.id=$3 AND campaign.owner_user_id=$2`,
       [
@@ -1389,6 +1703,7 @@ async function restorePendingPrompts(
         record.campaignId,
         record.templateKey,
         record.overrideText,
+        isV2Envelope(envelope) ? envelope.record.authority.createdAt : record.updatedAt,
         record.updatedAt
       ]
     ), envelope.domain);
@@ -1401,10 +1716,12 @@ async function restorePendingPrompts(
 async function insertAssetBindings(
   database: DatabaseClient,
   ownerUserId: string,
-  asset: ArchiveAssetRecord,
+  asset: SystemArchiveAssetRecord,
   pendingIllustrations: readonly SystemIllustrationEnvelope[],
   restoredIllustrationIds: Set<string>
 ): Promise<number> {
+  const parsedV2Asset = systemArchiveAssetRecordV2Schema.safeParse(asset);
+  const v2Authority = parsedV2Asset.success ? parsedV2Asset.data.authority : null;
   const updatedAsset = await database.query(
     `UPDATE assets
         SET pixel_width=$3,pixel_height=$4,technical_metadata=$5::jsonb,created_at=$6
@@ -1421,35 +1738,46 @@ async function insertAssetBindings(
   if (updatedAsset.rowCount !== 1) {
     throw repositoryError("System Archive Original Asset authority was not attached exactly once.", 400);
   }
-  await database.query(
-    `INSERT INTO asset_library_entries (asset_id,owner_user_id,created_by_user_id)
-     VALUES ($1,$2,$2) ON CONFLICT (asset_id) DO NOTHING`,
-    [asset.sourceAssetId, ownerUserId]
-  );
-  const updatedLibrary = await database.query(
-    `UPDATE asset_library_entries
-        SET created_by_user_id=$2,title=$3,caption=$4,notes=$5,tags=$6::text[],origin=$7,
-            reuse_scope=$8,automatic_reuse_enabled=$9,review_status=$10,
-            content_categories=$11::text[],favorite=$12,archived_at=$13,updated_at=clock_timestamp()
-      WHERE asset_id=$1 AND owner_user_id=$2`,
-    [
-      asset.sourceAssetId,
-      ownerUserId,
-      asset.library.title,
-      asset.library.caption,
-      asset.library.notes,
-      asset.library.tags,
-      asset.library.origin,
-      asset.library.reuseScope,
-      asset.library.automaticReuseEnabled,
-      asset.library.reviewStatus,
-      asset.library.contentCategories,
-      asset.library.favorite,
-      asset.library.archivedAt
-    ]
-  );
-  if (updatedLibrary.rowCount !== 1) {
-    throw repositoryError("System Archive Original Asset library authority was not attached exactly once.", 400);
+  if (v2Authority?.library === null) {
+    await database.query(
+      "DELETE FROM asset_library_entries WHERE asset_id=$1 AND owner_user_id=$2",
+      [asset.sourceAssetId, ownerUserId]
+    );
+  } else {
+    await database.query(
+      `INSERT INTO asset_library_entries (asset_id,owner_user_id,created_by_user_id)
+       VALUES ($1,$2,$2) ON CONFLICT (asset_id) DO NOTHING`,
+      [asset.sourceAssetId, ownerUserId]
+    );
+    const updatedLibrary = await database.query(
+      `UPDATE asset_library_entries
+          SET created_by_user_id=$2,title=$3,caption=$4,notes=$5,tags=$6::text[],origin=$7,
+              reuse_scope=$8,automatic_reuse_enabled=$9,review_status=$10,
+              content_categories=$11::text[],favorite=$12,archived_at=$13,
+              metadata_revision=$14,created_at=$15,updated_at=$16
+        WHERE asset_id=$1 AND owner_user_id=$2`,
+      [
+        asset.sourceAssetId,
+        ownerUserId,
+        asset.library.title,
+        asset.library.caption,
+        asset.library.notes,
+        asset.library.tags,
+        asset.library.origin,
+        asset.library.reuseScope,
+        asset.library.automaticReuseEnabled,
+        asset.library.reviewStatus,
+        asset.library.contentCategories,
+        asset.library.favorite,
+        asset.library.archivedAt,
+        v2Authority?.library.metadataRevision ?? 1,
+        v2Authority?.library.createdAt ?? asset.createdAt,
+        v2Authority?.library.updatedAt ?? asset.createdAt
+      ]
+    );
+    if (updatedLibrary.rowCount !== 1) {
+      throw repositoryError("System Archive Original Asset library authority was not attached exactly once.", 400);
+    }
   }
   // The generic publication seam creates conservative defaults. The archive
   // inventory is the complete logical binding authority, so replace them.
@@ -1457,6 +1785,31 @@ async function insertAssetBindings(
     "DELETE FROM asset_references WHERE asset_id=$1 AND owner_user_id=$2",
     [asset.sourceAssetId, ownerUserId]
   );
+  if (v2Authority) {
+    for (const reference of v2Authority.references) {
+      await requireLogicalMutation(database.query(
+        `INSERT INTO asset_references
+           (id,owner_user_id,asset_id,campaign_id,turn_id,asset_role,created_at)
+         SELECT $1,$2,$3,campaign.id,$4,$5,$6
+           FROM campaigns campaign
+          WHERE campaign.id=$7 AND campaign.owner_user_id=$2
+            AND ($4::uuid IS NULL OR EXISTS (
+              SELECT 1 FROM turns turn_row
+               WHERE turn_row.id=$4 AND turn_row.owner_user_id=$2
+                 AND turn_row.campaign_id=campaign.id
+            ))`,
+        [
+          reference.sourceId,
+          ownerUserId,
+          asset.sourceAssetId,
+          reference.turnId,
+          reference.assetRole,
+          reference.createdAt,
+          reference.campaignId
+        ]
+      ), "illustrations");
+    }
+  }
   await database.query(
     "DELETE FROM asset_generation_contexts WHERE asset_id=$1 AND owner_user_id=$2",
     [asset.sourceAssetId, ownerUserId]
@@ -1498,6 +1851,29 @@ async function insertAssetBindings(
       case "campaign_asset":
       case "turn_illustration":
       case "imported_attachment": {
+        if (v2Authority) {
+          const expectedRole = binding.role === "turn_illustration"
+            ? "turn_illustration"
+            : binding.role === "campaign_asset" ? null : "import_attachment";
+          const matched = await database.query<{ count: string }>(
+            `SELECT count(*)::bigint AS count FROM asset_references
+              WHERE owner_user_id=$1 AND asset_id=$2 AND campaign_id=$3
+                AND turn_id IS NOT DISTINCT FROM $4::uuid
+                AND ($5::text IS NULL OR asset_role=$5)`,
+            [
+              ownerUserId,
+              asset.sourceAssetId,
+              binding.campaignId,
+              "turnId" in binding ? binding.turnId : null,
+              expectedRole
+            ]
+          );
+          if (Number(matched.rows[0]?.count ?? 0) < 1) {
+            throw repositoryError("System Archive asset reference authority did not match its binding.", 400);
+          }
+          persistedBindings += 1;
+          break;
+        }
         const inserted = await database.query(
           `INSERT INTO asset_references
              (owner_user_id,asset_id,campaign_id,turn_id,asset_role)
@@ -1520,11 +1896,18 @@ async function insertAssetBindings(
         break;
       }
       case "generation_context": {
+        const authority = v2Authority && "authority" in binding ? binding.authority : undefined;
         const inserted = await database.query(
           `INSERT INTO asset_generation_contexts (
              id,owner_user_id,asset_id,created_by_user_id,world_id,world_version_id,
-             campaign_id,turn_id,target_type,created_at
-           ) VALUES ($1,$2,$3,$2,$4,$5,$6,$7,'other',$8)`,
+             campaign_id,turn_id,target_type,variant_index,fiction_prompt,negative_prompt,
+             entities,characters,locations,factions,scene_attributes,provider_profile_id,
+             provider_type,model,generation_parameters,parent_asset_ids,
+             metadata_schema_version,created_at
+           ) VALUES (
+             $1,$2,$3,$2,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::jsonb,$14::jsonb,
+             $15::jsonb,$16::jsonb,$17,$18,$19,$20::jsonb,$21::uuid[],$22,$23
+           )`,
           [
             binding.sourceContextId,
             ownerUserId,
@@ -1533,7 +1916,22 @@ async function insertAssetBindings(
             binding.worldVersionId,
             binding.campaignId,
             binding.turnId,
-            asset.createdAt
+            authority?.targetType ?? "other",
+            authority?.variantIndex ?? 0,
+            authority?.fictionPrompt ?? "",
+            authority?.negativePrompt ?? null,
+            json(authority?.entities ?? {}),
+            json(authority?.characters ?? {}),
+            json(authority?.locations ?? {}),
+            json(authority?.factions ?? {}),
+            json(authority?.sceneAttributes ?? {}),
+            authority?.providerProfileId ?? null,
+            authority?.providerType ?? null,
+            authority?.model ?? "",
+            json(authority?.generationParameters ?? {}),
+            authority?.parentAssetIds ?? [],
+            authority?.metadataSchemaVersion ?? 1,
+            authority?.createdAt ?? asset.createdAt
           ]
         );
         if (inserted.rowCount !== 1) {
@@ -1547,7 +1945,13 @@ async function insertAssetBindings(
           `INSERT INTO turn_illustration_segment_assets
              (segment_id,owner_user_id,asset_id,image_job_id,variant_index,created_at)
            VALUES ($1,$2,$3,NULL,$4,$5)`,
-          [binding.segmentId, ownerUserId, asset.sourceAssetId, binding.variantIndex, asset.createdAt]
+          [
+            binding.segmentId,
+            ownerUserId,
+            asset.sourceAssetId,
+            binding.variantIndex,
+            "createdAt" in binding ? binding.createdAt : asset.createdAt
+          ]
         );
         if (inserted.rowCount !== 1) {
           throw repositoryError("System Archive illustration asset binding did not restore exactly once.", 400);
@@ -1574,25 +1978,33 @@ async function insertAssetBindings(
           AND segment.campaign_id=$3 AND segment.turn_id IS NOT DISTINCT FROM $4::uuid
           AND (segment_asset.variant_index=0)=$5
           AND overlay(overlay(md5('illustration:' || segment.id::text || ':'
-                || segment_asset.variant_index::text) placing '5' from 13) placing '8' from 17)::uuid=$6`,
+                || segment_asset.variant_index::text) placing '5' from 13) placing '8' from 17)::uuid=$6
+          AND ($7::uuid IS NULL OR segment.id=$7)
+          AND ($8::integer IS NULL OR segment_asset.variant_index=$8)
+          AND ($9::timestamptz IS NULL OR segment_asset.created_at=$9)`,
       [
         ownerUserId,
         asset.sourceAssetId,
         illustration.record.campaignId,
         illustration.record.turnId,
         illustration.record.selected,
-        illustration.sourceId
+        illustration.sourceId,
+        illustration.formatVersion === 2 ? illustration.record.authority.segmentId : null,
+        illustration.formatVersion === 2 ? illustration.record.authority.variantIndex : null,
+        illustration.formatVersion === 2 ? illustration.record.authority.createdAt : null
       ]
     );
     if (Number(matched.rows[0]?.count ?? 0) !== 1) {
       throw repositoryError("System Archive illustrations record did not restore exactly once.", 400);
     }
-    await database.query(
-      `UPDATE asset_generation_contexts
-          SET fiction_prompt=$3,target_type='turn_illustration'
-        WHERE owner_user_id=$1 AND asset_id=$2`,
-      [ownerUserId, asset.sourceAssetId, illustration.record.fictionPrompt]
-    );
+    if (illustration.formatVersion === 1) {
+      await database.query(
+        `UPDATE asset_generation_contexts
+            SET fiction_prompt=$3,target_type='turn_illustration'
+          WHERE owner_user_id=$1 AND asset_id=$2`,
+        [ownerUserId, asset.sourceAssetId, illustration.record.fictionPrompt]
+      );
+    }
     restoredIllustrationIds.add(illustration.sourceId);
     restoredIllustrations += 1;
   }
@@ -1654,10 +2066,7 @@ async function normalizeImportedIllustrations(
 
 export function createPostgresSystemArchiveImportRepository(
   pool: DatabasePool,
-  options: SystemArchiveImportRepositoryOptions
 ): SystemArchiveImportRepository {
-  requireTtl(options.previewTtlSeconds);
-
   const repository: SystemArchiveImportRepository = {
     async destinationFingerprint(owner, request) {
       const client = await pool.connect();
@@ -1699,7 +2108,7 @@ export function createPostgresSystemArchiveImportRepository(
         }
         const expiry = await client.query<{ expires_at: Date }>(
           "SELECT clock_timestamp()+($1::text || ' seconds')::interval AS expires_at",
-          [options.previewTtlSeconds]
+          [SYSTEM_ARCHIVE_PREVIEW_TTL_SECONDS]
         );
         const expiresAt = expiry.rows[0]!.expires_at.toISOString();
         const authority = await client.query<{
@@ -1820,6 +2229,15 @@ export function createPostgresSystemArchiveImportRepository(
                ON upload.owner_user_id=job.owner_user_id
               AND upload.staged_input_id=job.staged_input_id
             WHERE job.owner_user_id=$1 AND job.kind='import' AND job.idempotency_key_hash=$2
+              AND (
+                job.status <> 'previewed'
+                OR (
+                  job.progress->>'expiresAt' IS NOT NULL
+                  AND (job.progress->>'expiresAt')::timestamptz > clock_timestamp()
+                  AND upload.status='completed'
+                  AND upload.expires_at > clock_timestamp()
+                )
+              )
             FOR UPDATE OF job,upload`,
           [owner.ownerUserId, previewHash]
         );
@@ -1838,17 +2256,23 @@ export function createPostgresSystemArchiveImportRepository(
           throw new Error("System Archive preview authority is malformed.");
         }
         if (row.status === "previewed") {
-          if (typeof progress.expiresAt !== "string"
-            || Date.parse(progress.expiresAt) <= Date.now()
-            || row.upload_status !== "completed"
-            || row.upload_expires_at.getTime() <= Date.now()) {
+          if (typeof progress.expiresAt !== "string") {
             throw repositoryError("System Archive preview authority is unavailable or expired.", 409);
           }
           const queued = await client.query(
             `UPDATE system_archive_jobs
                 SET status='queued',report=NULL,
                     progress=progress || $3::jsonb,updated_at=clock_timestamp()
-              WHERE id=$1 AND owner_user_id=$2 AND status='previewed'`,
+              WHERE id=$1 AND owner_user_id=$2 AND status='previewed'
+                AND progress->>'expiresAt' IS NOT NULL
+                AND (progress->>'expiresAt')::timestamptz > clock_timestamp()
+                AND EXISTS (
+                  SELECT 1 FROM system_archive_uploads current_upload
+                   WHERE current_upload.owner_user_id=system_archive_jobs.owner_user_id
+                     AND current_upload.staged_input_id=system_archive_jobs.staged_input_id
+                     AND current_upload.status='completed'
+                     AND current_upload.expires_at > clock_timestamp()
+                )`,
             [
               row.id,
               owner.ownerUserId,
@@ -1931,6 +2355,7 @@ export function createPostgresSystemArchiveImportRepository(
       const assetIds = new Set<string>();
       let persistedAssetBytes = 0;
       let reportRecorded = false;
+      let sawV2Authority = false;
       let stagedImportReport: SystemArchiveImportReport | null = null;
       let previewProjection: SystemImportPreviewProjection | null = null;
       let retainedLeaseSeconds: number | null = null;
@@ -2076,6 +2501,7 @@ export function createPostgresSystemArchiveImportRepository(
             }
             for await (const candidate of asyncRecords(records)) {
               const envelope = systemRecordEnvelopeSchema.parse(candidate);
+              if (isV2Envelope(envelope)) sawV2Authority = true;
               const domainIndex = SYSTEM_ARCHIVE_DOMAINS.indexOf(envelope.domain);
               if (domainIndex < lastDomainIndex) {
                 throw repositoryError("System Archive logical domains are not dependency ordered.", 400);
@@ -2124,6 +2550,7 @@ export function createPostgresSystemArchiveImportRepository(
             });
           },
           async insertOriginalAsset(asset, persistence) {
+            if (systemArchiveAssetRecordV2Schema.safeParse(asset).success) sawV2Authority = true;
             if (reportRecorded) {
               throw repositoryError("System Archive authority cannot change after its Import Report.", 409);
             }
@@ -2222,7 +2649,9 @@ export function createPostgresSystemArchiveImportRepository(
                 throw repositoryError("System Archive preview did not reconcile with imported authority.", 409);
               }
             }
-            await normalizeImportedIllustrations(client, owner.ownerUserId);
+            if (!sawV2Authority) {
+              await normalizeImportedIllustrations(client, owner.ownerUserId);
+            }
             const durableReport = systemArchiveImportReportSchema.parse({
               ...parsedReport,
               recordsByDomain: { ...persistedCounts },
@@ -2303,7 +2732,7 @@ export function createPostgresSystemArchiveImportRepository(
         if (campaignIds.length > 0) {
           const inserted = await client.query(
             `INSERT INTO chronicle_jobs (owner_user_id,campaign_id,job_type,status)
-             SELECT $1,campaign.id,'reindex_campaign','queued'
+             SELECT $1,campaign.id,'embed_campaign','queued'
                FROM campaigns campaign
               WHERE campaign.owner_user_id=$1 AND campaign.id=ANY($2::uuid[])
              ON CONFLICT (campaign_id,job_type) WHERE status IN ('queued','running')
@@ -2312,13 +2741,25 @@ export function createPostgresSystemArchiveImportRepository(
           );
           const visible = await client.query<{ count: string }>(
             `SELECT count(DISTINCT campaign_id)::bigint AS count
-               FROM chronicle_jobs
+              FROM chronicle_jobs
               WHERE owner_user_id=$1 AND campaign_id=ANY($2::uuid[])
-                AND job_type='reindex_campaign' AND status IN ('queued','running')`,
+                AND job_type='embed_campaign' AND status IN ('queued','running')`,
             [owner.ownerUserId, campaignIds]
           );
           if (Number(visible.rows[0]?.count ?? 0) !== campaignIds.length) {
             throw new Error(`System Archive Chronicle rebuild enqueue was incomplete (${inserted.rowCount}).`);
+          }
+          const campaigns = await client.query<{ id: string; world_version_id: string }>(
+            `SELECT id,world_version_id FROM campaigns
+              WHERE owner_user_id=$1 AND id=ANY($2::uuid[]) ORDER BY id`,
+            [owner.ownerUserId, campaignIds]
+          );
+          for (const campaign of campaigns.rows) {
+            await enqueuePostgresChronicleChunkIndex(client, {
+              ownerUserId: owner.ownerUserId,
+              campaignId: campaign.id,
+              worldVersionId: campaign.world_version_id
+            });
           }
         }
         if (assetIds.length > 0) {

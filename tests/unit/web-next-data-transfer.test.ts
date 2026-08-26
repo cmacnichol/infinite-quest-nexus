@@ -488,6 +488,50 @@ describe("web-next Data Transfer page", () => {
     mounted.dispose();
   });
 
+  it("fences a delayed recovered export behind a newer same-kind export identity", async () => {
+    const storage = memoryStorage();
+    storage.setItem(`infiniteQuest.systemArchiveOperation.v1:${OWNER_B}:export`, JSON.stringify({
+      kind: "export",
+      idempotencyKey: "recovered-export-a",
+      jobId: EXPORT_JOB_ID
+    }));
+    const newerJobId = "66666666-6666-4666-8666-666666666666";
+    let releaseRecovered!: () => void;
+    const recovered = new Promise<SystemArchiveJobView>((resolve) => {
+      releaseRecovered = () => resolve({
+        id: EXPORT_JOB_ID, kind: "export", status: "published", report: null,
+        createdAt: NOW, updatedAt: NOW
+      });
+    });
+    const api = fakeApi({
+      getJob: vi.fn(async () => recovered),
+      createExport: vi.fn(async () => ({
+        id: newerJobId, kind: "export", status: "published", report: null,
+        createdAt: NOW, updatedAt: NOW
+      }))
+    });
+    const { window } = parseHTML('<html><body><div id="app"></div></body></html>');
+    const root = window.document.querySelector<HTMLElement>("#app")!;
+    const mounted = mountDataTransferPage(root, {
+      api,
+      storage: null,
+      operationStorage: storage,
+      wait: async () => undefined
+    });
+    await vi.waitFor(() => expect(api.getJob).toHaveBeenCalledWith("export", EXPORT_JOB_ID, expect.any(AbortSignal)));
+
+    root.querySelector<HTMLButtonElement>('[data-action="create-system-export"]')!.click();
+    await vi.waitFor(() => expect(root.querySelector<HTMLAnchorElement>("[data-system-download]")?.href).toContain(newerJobId));
+    const newerStored = JSON.parse(storage.entries()[0]![1]);
+    releaseRecovered();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(JSON.parse(storage.entries()[0]![1])).toEqual(newerStored);
+    expect(newerStored).toMatchObject({ kind: "export", jobId: newerJobId });
+    expect(root.querySelector<HTMLAnchorElement>("[data-system-download]")?.href).toContain(newerJobId);
+    mounted.dispose();
+  });
+
   it("persists owner-scoped export identity and restores its published download after reload", async () => {
     const storage = memoryStorage();
     const publishedExport: SystemArchiveJobView = {
@@ -638,6 +682,51 @@ describe("web-next Data Transfer page", () => {
     );
     expect(JSON.parse(storage.entries()[0]![1])).toMatchObject({ kind: "import", jobId: JOB_ID });
     restoredMount.dispose();
+  });
+
+  it("fences a delayed recovered import behind a newer same-kind commit identity", async () => {
+    const storage = memoryStorage();
+    storage.setItem(`infiniteQuest.systemArchiveOperation.v1:${OWNER_B}:import`, JSON.stringify({
+      kind: "import",
+      idempotencyKey: "recovered-import-a",
+      jobId: JOB_ID,
+      previewHandle: "recovered-preview-a"
+    }));
+    const newerJobId = "77777777-7777-4777-8777-777777777777";
+    let releaseRecovered!: () => void;
+    const recovered = new Promise<SystemArchiveJobView>((resolve) => {
+      releaseRecovered = () => resolve({ ...importJob("completed"), id: JOB_ID });
+    });
+    const api = fakeApi({
+      getJob: vi.fn(async () => recovered),
+      commit: vi.fn(async () => ({ ...importJob("completed"), id: newerJobId }))
+    });
+    const { window } = parseHTML('<html><body><div id="app"></div></body></html>');
+    const root = window.document.querySelector<HTMLElement>("#app")!;
+    const mounted = mountDataTransferPage(root, {
+      api,
+      storage: null,
+      operationStorage: storage,
+      wait: async () => undefined
+    });
+    await vi.waitFor(() => expect(api.getJob).toHaveBeenCalledWith("import", JOB_ID, expect.any(AbortSignal)));
+    const input = root.querySelector<HTMLInputElement>("#system-archive-file")!;
+    Object.defineProperty(input, "files", {
+      configurable: true,
+      value: [new File(["system"], "newer-import.zip", { type: "application/zip" })]
+    });
+    input.dispatchEvent(new window.Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(root.querySelector('[data-system-preview="ready"]')).not.toBeNull());
+    for (const checkbox of root.querySelectorAll<HTMLInputElement>('[data-system-acknowledgements] input[type="checkbox"]')) checkbox.checked = true;
+    root.querySelector<HTMLButtonElement>('[data-action="commit-system-import"]')!.click();
+    await vi.waitFor(() => expect(JSON.parse(storage.entries()[0]![1])).toMatchObject({ kind: "import", jobId: newerJobId }));
+    const newerStored = JSON.parse(storage.entries()[0]![1]);
+    releaseRecovered();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(JSON.parse(storage.entries()[0]![1])).toEqual(newerStored);
+    expect(root.querySelector('[data-system-import-state="completed"]')).not.toBeNull();
+    mounted.dispose();
   });
 
   it("invalidates preview authority when its staged upload is cancelled", async () => {

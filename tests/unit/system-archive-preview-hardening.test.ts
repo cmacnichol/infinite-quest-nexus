@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -106,6 +106,69 @@ describe("System Archive bounded preview metadata", () => {
       });
     },
   );
+});
+
+describe("System Archive governed relationship index", () => {
+  it("keeps private relationship authority in a bounded process-local index", async () => {
+    const prefix = "infinitequest-system-preview-index-";
+    const before = new Set((await readdir(tmpdir())).filter((name) => name.startsWith(prefix)));
+    const index = await SystemArchivePreviewIndex.create({ maximumRecords: 1 });
+    try {
+      index.add({ domain: "worlds", sourceId: "world-1", record: {} } as never, new Set());
+      expect(() => index.add(
+        { domain: "worlds", sourceId: "world-2", record: {} } as never,
+        new Set(),
+      )).toThrow(expect.objectContaining({ code: "archive-limit-exceeded" }));
+
+      const during = new Set((await readdir(tmpdir())).filter((name) => name.startsWith(prefix)));
+      expect(during).toEqual(before);
+    } finally {
+      await index.close();
+    }
+  });
+
+  it("bounds relationship rows independently from the logical-record count", async () => {
+    const index = await SystemArchivePreviewIndex.create({
+      maximumRecords: 10,
+      maximumRelationships: 1,
+    });
+    try {
+      expect(() => index.add({
+        domain: "world-versions",
+        sourceId: "version-1",
+        record: {
+          worldId: "world-1",
+          content: {
+            entities: [],
+            playableCharacters: [],
+            relationships: [],
+            defaults: { selectedCharacterId: null },
+            assets: [{ assetId: "asset-1", role: "world_version_asset" }],
+          },
+        },
+      } as never, new Set(["asset-1"]))).toThrow(expect.objectContaining({
+        code: "archive-limit-exceeded",
+      }));
+    } finally {
+      await index.close();
+    }
+  });
+
+  it("drops all private relationship authority across a process restart boundary", async () => {
+    const first = await SystemArchivePreviewIndex.create();
+    first.add({ domain: "worlds", sourceId: "world-before-restart", record: {} } as never, new Set());
+    expect(first.counts().worlds).toBe(1);
+    await first.close();
+
+    const restarted = await SystemArchivePreviewIndex.create();
+    try {
+      expect(restarted.counts().worlds).toBe(0);
+      restarted.add({ domain: "worlds", sourceId: "world-after-restart", record: {} } as never, new Set());
+      expect(restarted.counts().worlds).toBe(1);
+    } finally {
+      await restarted.close();
+    }
+  });
 });
 
 describe("System Archive preview restore keys", () => {
@@ -751,12 +814,14 @@ describe("System Archive preview restore keys", () => {
     }
   });
 
-  it("rejects current campaign state that disagrees with its declared revision history", async () => {
+  it("accepts independent current-state row authority at the same revision as a state edit", async () => {
     const index = await SystemArchivePreviewIndex.create();
     try {
       const currentState = {
-        continuitySummary: "Current", openThreads: [], canonicalFacts: [], scratchpad: "",
-        trackers: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], pendingEventTriggers: [],
+        continuitySummary: "Current", openThreads: [], canonicalFacts: [],
+        scratchpad: "Row-only state authority",
+        trackers: [{ id: "state-row-sentinel", value: "exact" }],
+        rpgStats: [], defaultTriggers: [], eventTriggers: [], pendingEventTriggers: [],
       };
       index.add({ domain: "worlds", sourceId: "world-1", record: {} } as never, new Set());
       index.add({
@@ -777,15 +842,17 @@ describe("System Archive preview restore keys", () => {
           campaignId: "campaign-1", eventType: "campaign-state-edit",
           content: JSON.stringify({
             effectiveTurnNumber: 0, revision: 2,
-            stateSnapshot: { ...currentState, continuitySummary: "Different" },
-            changedFields: ["continuitySummary"],
+            stateSnapshot: {
+              ...currentState,
+              scratchpad: "Historical edit authority",
+              trackers: [],
+            },
+            changedFields: ["scratchpad", "trackers"],
           }),
         },
       } as never, new Set());
 
-      expect(() => index.validate([])).toThrow(expect.objectContaining({
-        code: "archive-world-mismatch",
-      }));
+      expect(() => index.validate([])).not.toThrow();
     } finally {
       await index.close();
     }

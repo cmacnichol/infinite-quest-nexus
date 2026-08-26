@@ -178,10 +178,8 @@ integration("durable System Archive jobs and resumable uploads", () => {
   }
 
   it("binds an opaque 30-minute preview to the completed upload and exact destination fingerprint", async () => {
-    expect(() => createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_799 }))
-      .toThrow("system_archive_preview_ttl_invalid");
     const uploads = createPostgresSystemArchiveUploadRepository(pool, { uploadTtlSeconds: 86_400 });
-    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const imports = createPostgresSystemArchiveImportRepository(pool);
     const filesystemOperationId = await reservePortableOperation(owner, "portable_staging");
     const upload = await uploads.createUpload(owner, {
       handleTokenHash: hash(randomUUID()),
@@ -275,7 +273,7 @@ integration("durable System Archive jobs and resumable uploads", () => {
 
   it("extends every private staging authority through the full preview lifetime", async () => {
     const uploads = createPostgresSystemArchiveUploadRepository(pool, { uploadTtlSeconds: 300 });
-    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const imports = createPostgresSystemArchiveImportRepository(pool);
     const filesystemOperationId = await reservePortableOperation(owner, "portable_staging");
     const upload = await uploads.createUpload(owner, {
       handleTokenHash: hash(`preview-lifetime-${randomUUID()}`),
@@ -326,7 +324,7 @@ integration("durable System Archive jobs and resumable uploads", () => {
   });
 
   it("fingerprints an exactly empty destination and rejects unrelated owner or active-upload state", async () => {
-    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const imports = createPostgresSystemArchiveImportRepository(pool);
     const clean = await imports.destinationFingerprint(owner, {});
     expect(clean).toMatchObject({
       initialOwnerId: owner.ownerUserId,
@@ -396,7 +394,7 @@ integration("durable System Archive jobs and resumable uploads", () => {
 
   it("counts every unexpired competing completed upload while ignoring only the current upload", async () => {
     const uploads = createPostgresSystemArchiveUploadRepository(pool, { uploadTtlSeconds: 86_400 });
-    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const imports = createPostgresSystemArchiveImportRepository(pool);
     const complete = async (content: string) => {
       const filesystemOperationId = await reservePortableOperation(owner, "portable_staging");
       const upload = await uploads.createUpload(owner, {
@@ -442,7 +440,7 @@ integration("durable System Archive jobs and resumable uploads", () => {
     const uploads = createPostgresSystemArchiveUploadRepository(pool, {
       uploadTtlSeconds: invalidation === "staged-expiry" ? 1 : 86_400
     });
-    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const imports = createPostgresSystemArchiveImportRepository(pool);
     const filesystemOperationId = await reservePortableOperation(owner, "portable_staging");
     const upload = await uploads.createUpload(owner, {
       handleTokenHash: hash(`expiry-preview-${randomUUID()}`),
@@ -611,7 +609,7 @@ integration("durable System Archive jobs and resumable uploads", () => {
     const scopedForeign = await foreign();
     await expect(repository.enqueueExport(scopedForeign, hash(`foreign-${randomUUID()}`)))
       .resolves.toMatchObject({ kind: "export", status: "queued" });
-    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const imports = createPostgresSystemArchiveImportRepository(pool);
     const populated = await imports.destinationFingerprint(owner, {});
     expect(populated.destinationEmpty).toBe(false);
     expect(populated).not.toHaveProperty("path");
@@ -1263,7 +1261,6 @@ integration("durable System Archive jobs and resumable uploads", () => {
         },
         destinationApplicationVersion: "0.1.0",
         uploadTtlSeconds: 3_600,
-        previewTtlSeconds: 1_800,
         chunkBytes: archive.byteLength,
         maximumUploadBytes: 10_000_000,
         leaseOwner: "system-archive-production-restart-test",

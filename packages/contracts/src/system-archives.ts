@@ -1,12 +1,21 @@
 import { z } from "zod";
-import { archiveAssetRecordSchema, archiveErrorCodeSchema, archiveManifestSchema } from "./archives.js";
+import {
+  archiveAssetRecordSchema,
+  archiveErrorCodeSchema,
+  archiveManifestSchema
+} from "./archives.js";
+import { providerRoleSchema, providerTypeSchema } from "./generation.js";
 
 const nonnegativeSafeIntegerSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
-const boundedStringSchema = (maximum: number) => z.string().trim().min(1).max(maximum);
+const nonBlankStringSchema = (maximum: number) => z.string().max(maximum).refine(
+  (value) => value.trim().length > 0,
+  "String must contain a non-whitespace character."
+);
+const boundedStringSchema = nonBlankStringSchema;
 const archiveTimestampSchema = z.iso.datetime({ offset: true });
-const identifierSchema = z.string().trim().min(1).max(300);
-const shortTextSchema = z.string().trim().max(10_000);
-const longTextSchema = z.string().trim().max(1_000_000);
+const identifierSchema = nonBlankStringSchema(300);
+const shortTextSchema = z.string().max(10_000);
+const longTextSchema = z.string().max(1_000_000);
 
 export const SYSTEM_ARCHIVE_DOMAINS = [
   "providers", "prompts", "worlds", "world-versions", "world-drafts",
@@ -38,7 +47,7 @@ export const systemArchiveJobStatusSchema = z.enum([
 /** Provider imports retain only configuration that can be safely re-entered without a credential. */
 export const systemPortableProviderSchema = z.object({
   sourceId: z.string().uuid(),
-  kind: z.enum(["text", "image", "embedding"]),
+  kind: providerRoleSchema,
   displayName: boundedStringSchema(200),
   baseUrl: z.url().max(2_000).nullable(),
   selectedModel: boundedStringSchema(300).nullable(),
@@ -47,6 +56,42 @@ export const systemPortableProviderSchema = z.object({
   retryLimit: nonnegativeSafeIntegerSchema.nullable(),
   enabled: z.literal(false),
   health: z.literal("unknown")
+}).strict();
+
+const portableJsonSchema = z.json();
+const portableJsonObjectSchema = z.record(z.string(), portableJsonSchema);
+const safeProviderConfigurationSchema = z.object({
+  streaming: z.boolean().optional(),
+  streamingSupport: z.boolean().optional(),
+  httpReferer: z.string().optional(),
+  modelDiscoveryEnabled: z.boolean().optional(),
+  network: z.enum(["fast", "relaxed"]).optional(),
+  tokenType: z.enum(["auto", "sogni", "spark"]).optional(),
+  contentFilter: z.enum(["enabled", "disabled"]).optional(),
+  defaultWidth: z.number().finite().optional(),
+  defaultHeight: z.number().finite().optional(),
+  defaultAspectRatio: z.string().optional(),
+  defaultSizePreset: z.string().optional(),
+  defaultOutputFormat: z.enum(["png", "jpeg", "webp"]).optional(),
+  defaultQuality: z.enum(["auto", "low", "medium", "high"]).optional(),
+  defaultImageCount: z.number().finite().optional(),
+  defaultSteps: z.number().finite().optional(),
+  defaultGuidance: z.number().finite().optional(),
+  defaultSeed: z.number().finite().optional(),
+  defaultSampler: z.string().optional(),
+  defaultScheduler: z.string().optional(),
+  defaultPreviewCount: z.number().finite().optional(),
+  pollIntervalMs: z.number().finite().optional(),
+  maximumPollIntervalMs: z.number().finite().optional(),
+  generationTimeoutMs: z.number().finite().optional(),
+  maximumAttempts: z.number().finite().optional(),
+  retryLimit: nonnegativeSafeIntegerSchema.optional(),
+  allowPrivateArtifactHosts: z.boolean().optional(),
+  embeddingMaxInputTokens: z.number().int().optional(),
+  embeddingMaxBatchItems: z.number().int().optional(),
+  embeddingMaxBatchTokens: z.number().int().optional(),
+  embeddingDimensions: z.number().int().optional(),
+  embeddingMaxRetries: z.number().int().optional()
 }).strict();
 
 const systemChronicleRecordBase = {
@@ -116,8 +161,8 @@ const systemDefaultTriggerSchema = z.object({
   rules: z.string().max(4_000)
 }).strict();
 
-const characterProfileTextSchema = z.string().trim().max(20_000);
-const characterProfileShortTextSchema = z.string().trim().max(2_000);
+const characterProfileTextSchema = z.string().max(20_000);
+const characterProfileShortTextSchema = z.string().max(2_000);
 
 const systemCharacterProfileSchema = z.object({
   identity: z.object({
@@ -664,9 +709,228 @@ const systemActivityEventRecordSchema = z.object({
   occurredAt: archiveTimestampSchema
 }).strict();
 
-const systemRecordEnvelopeBase = {
+const systemPortableProviderV2Schema = systemPortableProviderSchema.safeExtend({
+  authority: z.object({
+    providerType: providerTypeSchema,
+    providerRole: providerRoleSchema,
+    defaultModel: z.string().max(300),
+    contextWindowTokens: nonnegativeSafeIntegerSchema,
+    maxOutputTokens: nonnegativeSafeIntegerSchema,
+    temperature: z.number().finite(),
+    configuration: safeProviderConfigurationSchema,
+    requestTimeoutMs: nonnegativeSafeIntegerSchema,
+    enabled: z.boolean(),
+    isDefault: z.boolean(),
+    createdAt: archiveTimestampSchema,
+    updatedAt: archiveTimestampSchema
+  }).strict()
+});
+
+const systemPromptRecordV2Schema = systemPromptRecordSchema.safeExtend({
+  authority: z.object({ createdAt: archiveTimestampSchema }).strict()
+});
+
+const systemWorldRecordV2Schema = systemWorldRecordSchema.safeExtend({
+  authority: z.object({
+    nextVersionNumber: z.number().int().positive(),
+    coverAssetId: z.string().uuid().nullable()
+  }).strict()
+});
+
+const systemWorldVersionRecordV2Schema = systemWorldVersionRecordSchema.safeExtend({
+  authority: z.object({
+    sourceHash: z.string().max(2_000).nullable(),
+    createdAt: archiveTimestampSchema
+  }).strict()
+});
+
+const systemWorldDraftRecordV2Schema = systemWorldDraftRecordSchema.safeExtend({
+  authority: z.object({}).strict()
+});
+
+const systemCampaignRecordV2Schema = systemCampaignRecordSchema.safeExtend({
+  authority: z.object({
+    textProviderProfileId: z.string().uuid().nullable(),
+    imageProviderProfileId: z.string().uuid().nullable(),
+    storyLengthProfile: z.enum(["brief", "standard", "long", "extended"]),
+    turnControlStyle: z.enum(["action_only", "flexible_auto", "flexible_action", "flexible_scene"]),
+    legacySettings: portableJsonObjectSchema
+  }).strict()
+});
+
+const systemTurnRecordV2Schema = systemTurnRecordSchema.safeExtend({
+  authority: z.object({
+    sourceTurnId: z.string().max(2_000).nullable(),
+    customActionSuggestion: z.string().max(1_000_000),
+    imageUrl: z.string().max(1_000_000).nullable(),
+    mechanicsPrivate: portableJsonSchema.nullable(),
+    modelMetadata: portableJsonObjectSchema,
+    importMetadata: portableJsonObjectSchema,
+    createdAt: archiveTimestampSchema,
+    inputMode: z.enum(["action", "scene"]),
+    inputModeSource: z.enum(["explicit", "auto", "generated_choice", "opening_action", "fallback"])
+  }).strict()
+});
+
+const systemTurnCorrectionRecordV2Schema = systemTurnCorrectionRecordSchema.safeExtend({
+  authority: z.object({
+    campaignId: z.string().uuid(),
+    createdByUserId: z.string().uuid(),
+    createdAt: archiveTimestampSchema
+  }).strict()
+});
+
+const systemCampaignStateRecordV2Schema = systemCampaignStateRecordSchema.safeExtend({
+  authority: z.object({
+    importProvenance: portableJsonSchema,
+    scratchpadSafeForPrompt: z.boolean(),
+    initialStateSnapshot: portableJsonSchema
+  }).strict()
+});
+
+const systemCampaignHistoryRecordV2Base = {
+  sourceId: z.string().uuid(),
+  campaignId: z.string().uuid(),
+  content: longTextSchema,
+  occurredAt: archiveTimestampSchema
+};
+const systemCampaignHistoryRecordV2Schema = z.union([
+  z.object({
+    ...systemCampaignHistoryRecordV2Base,
+    eventType: z.enum([
+      "character-profile-edit", "campaign-state-edit", "world-migration",
+      "memory-config", "illustration-config", "accepted-turn-mode"
+    ]),
+    authority: z.object({}).strict()
+  }).strict(),
+  z.object({
+    ...systemCampaignHistoryRecordV2Base,
+    eventType: z.literal("world-transfer"),
+    authority: z.object({ idempotencyKey: z.string().uuid() }).strict()
+  }).strict(),
+  z.object({
+    ...systemCampaignHistoryRecordV2Base,
+    eventType: z.literal("illustration-set"),
+    authority: z.object({
+      sourceTextHash: z.string().regex(/^[a-f0-9]{64}$/)
+    }).strict()
+  }).strict(),
+  z.object({
+    ...systemCampaignHistoryRecordV2Base,
+    eventType: z.literal("illustration-segment"),
+    authority: z.object({
+      sourceText: z.string().max(1_000_000),
+      sourceTextHash: z.string().regex(/^[a-f0-9]{64}$/),
+      updatedAt: archiveTimestampSchema
+    }).strict()
+  }).strict()
+]);
+
+const systemCanonicalFactRecordV2Schema = systemCanonicalFactRecordSchema.safeExtend({
+  authority: z.object({
+    content: longTextSchema,
+    normalizedContent: longTextSchema,
+    entities: z.array(z.string().max(10_000)).max(10_000),
+    metadata: portableJsonObjectSchema,
+    entityIds: z.array(z.string().uuid()).max(10_000)
+  }).strict()
+});
+
+const systemChronicleRecordV2Schema = z.discriminatedUnion("kind", [
+  z.object({
+    sourceId: z.string().uuid(),
+    campaignId: z.string().uuid(),
+    kind: z.literal("memory"),
+    turnId: z.string().uuid().nullable(),
+    memoryKind: z.enum([
+      "turn_fiction", "legacy_summary", "campaign_summary", "canonical_fact", "open_thread"
+    ]),
+    content: z.string().max(1_000_000),
+    authority: z.object({
+      worldVersionId: z.string().uuid(),
+      ordinal: nonnegativeSafeIntegerSchema,
+      tokenEstimate: nonnegativeSafeIntegerSchema,
+      importance: z.number().finite(),
+      entities: z.array(z.string().max(10_000)).max(10_000),
+      metadata: portableJsonObjectSchema,
+      entityIds: z.array(z.string().uuid()).max(10_000),
+      contentHash: z.string().regex(/^[a-f0-9]{64}$/),
+      createdAt: archiveTimestampSchema,
+      updatedAt: archiveTimestampSchema
+    }).strict()
+  }).strict(),
+  z.object({
+    sourceId: z.string().uuid(),
+    campaignId: z.string().uuid(),
+    kind: z.literal("summary-checkpoint"),
+    throughTurn: nonnegativeSafeIntegerSchema,
+    summaryKind: systemSummaryCheckpointKindSchema,
+    content: portableJsonSchema,
+    authority: z.object({
+      tokenEstimate: nonnegativeSafeIntegerSchema,
+      createdAt: archiveTimestampSchema
+    }).strict()
+  }).strict()
+]);
+
+const systemIllustrationRecordV2Schema = systemIllustrationRecordSchema.safeExtend({
+  authority: z.object({
+    segmentId: z.string().uuid(),
+    variantIndex: nonnegativeSafeIntegerSchema,
+    createdAt: archiveTimestampSchema
+  }).strict()
+});
+
+const systemImportRecordV2Schema = systemImportRecordSchema.safeExtend({
+  authority: z.object({
+    status: z.enum(["processing", "completed", "failed"]),
+    worldId: z.string().uuid().nullable(),
+    worldVersionId: z.string().uuid().nullable(),
+    stats: portableJsonObjectSchema,
+    errorMessage: z.string().max(1_000_000).nullable(),
+    createdAt: archiveTimestampSchema
+  }).strict()
+});
+
+const systemCostEventRecordV2Schema = z.object({
+  sourceId: z.string().uuid(),
+  campaignId: z.string().uuid(),
+  authority: z.object({
+    turnId: z.string().uuid().nullable(),
+    providerProfileId: z.string().uuid().nullable(),
+    localCallId: z.string().uuid(),
+    providerType: providerTypeSchema,
+    providerResponseId: z.string().max(2_000).nullable(),
+    category: z.enum(["story", "image", "memory"]),
+    operation: nonBlankStringSchema(300),
+    requestedModel: z.string().max(300).nullable(),
+    resolvedModel: z.string().max(300).nullable(),
+    amount: z.string().regex(/^-?\d+(?:\.\d+)?$/),
+    currency: nonBlankStringSchema(20),
+    usageMetadata: portableJsonObjectSchema,
+    occurredAt: archiveTimestampSchema,
+    createdAt: archiveTimestampSchema
+  }).strict()
+}).strict();
+
+const systemActivityEventRecordV2Schema = z.object({
+  sourceId: z.string().regex(/^\d+$/),
+  campaignId: z.string().uuid().nullable(),
+  eventType: identifierSchema,
+  authority: z.object({
+    correlationId: z.string().max(2_000).nullable(),
+    details: portableJsonObjectSchema,
+    createdAt: archiveTimestampSchema
+  }).strict()
+}).strict();
+
+const systemRecordEnvelopeV1Base = {
   formatVersion: z.literal(1),
   sourceId: z.string().uuid()
+};
+const systemRecordEnvelopeV2Base = {
+  formatVersion: z.literal(2),
+  sourceId: identifierSchema
 };
 
 /**
@@ -674,26 +938,50 @@ const systemRecordEnvelopeBase = {
  * only explicitly portable logical fields; operational and secret-bearing
  * source structures have no representation in this contract.
  */
-export const systemRecordEnvelopeSchema = z.discriminatedUnion("domain", [
-  z.object({ domain: z.literal("providers"), ...systemRecordEnvelopeBase, record: systemPortableProviderSchema }).strict(),
-  z.object({ domain: z.literal("prompts"), ...systemRecordEnvelopeBase, record: systemPromptRecordSchema }).strict(),
-  z.object({ domain: z.literal("worlds"), ...systemRecordEnvelopeBase, record: systemWorldRecordSchema }).strict(),
-  z.object({ domain: z.literal("world-versions"), ...systemRecordEnvelopeBase, record: systemWorldVersionRecordSchema }).strict(),
-  z.object({ domain: z.literal("world-drafts"), ...systemRecordEnvelopeBase, record: systemWorldDraftRecordSchema }).strict(),
-  z.object({ domain: z.literal("campaigns"), ...systemRecordEnvelopeBase, record: systemCampaignRecordSchema }).strict(),
-  z.object({ domain: z.literal("turns"), ...systemRecordEnvelopeBase, record: systemTurnRecordSchema }).strict(),
-  z.object({ domain: z.literal("turn-corrections"), ...systemRecordEnvelopeBase, record: systemTurnCorrectionRecordSchema }).strict(),
-  z.object({ domain: z.literal("campaign-state"), ...systemRecordEnvelopeBase, record: systemCampaignStateRecordSchema }).strict(),
-  z.object({ domain: z.literal("campaign-history"), ...systemRecordEnvelopeBase, record: systemCampaignHistoryRecordSchema }).strict(),
-  z.object({ domain: z.literal("canonical-facts"), ...systemRecordEnvelopeBase, record: systemCanonicalFactRecordSchema }).strict(),
-  z.object({ domain: z.literal("chronicle"), ...systemRecordEnvelopeBase, record: systemChronicleRecordSchema }).strict(),
-  z.object({ domain: z.literal("illustrations"), ...systemRecordEnvelopeBase, record: systemIllustrationRecordSchema }).strict(),
-  z.object({ domain: z.literal("imports"), ...systemRecordEnvelopeBase, record: systemImportRecordSchema }).strict(),
-  z.object({ domain: z.literal("cost-events"), ...systemRecordEnvelopeBase, record: systemCostEventRecordSchema }).strict(),
-  z.object({ domain: z.literal("activity-events"), ...systemRecordEnvelopeBase, record: systemActivityEventRecordSchema }).strict()
+const systemRecordEnvelopeV1Schema = z.discriminatedUnion("domain", [
+  z.object({ domain: z.literal("providers"), ...systemRecordEnvelopeV1Base, record: systemPortableProviderSchema }).strict(),
+  z.object({ domain: z.literal("prompts"), ...systemRecordEnvelopeV1Base, record: systemPromptRecordSchema }).strict(),
+  z.object({ domain: z.literal("worlds"), ...systemRecordEnvelopeV1Base, record: systemWorldRecordSchema }).strict(),
+  z.object({ domain: z.literal("world-versions"), ...systemRecordEnvelopeV1Base, record: systemWorldVersionRecordSchema }).strict(),
+  z.object({ domain: z.literal("world-drafts"), ...systemRecordEnvelopeV1Base, record: systemWorldDraftRecordSchema }).strict(),
+  z.object({ domain: z.literal("campaigns"), ...systemRecordEnvelopeV1Base, record: systemCampaignRecordSchema }).strict(),
+  z.object({ domain: z.literal("turns"), ...systemRecordEnvelopeV1Base, record: systemTurnRecordSchema }).strict(),
+  z.object({ domain: z.literal("turn-corrections"), ...systemRecordEnvelopeV1Base, record: systemTurnCorrectionRecordSchema }).strict(),
+  z.object({ domain: z.literal("campaign-state"), ...systemRecordEnvelopeV1Base, record: systemCampaignStateRecordSchema }).strict(),
+  z.object({ domain: z.literal("campaign-history"), ...systemRecordEnvelopeV1Base, record: systemCampaignHistoryRecordSchema }).strict(),
+  z.object({ domain: z.literal("canonical-facts"), ...systemRecordEnvelopeV1Base, record: systemCanonicalFactRecordSchema }).strict(),
+  z.object({ domain: z.literal("chronicle"), ...systemRecordEnvelopeV1Base, record: systemChronicleRecordSchema }).strict(),
+  z.object({ domain: z.literal("illustrations"), ...systemRecordEnvelopeV1Base, record: systemIllustrationRecordSchema }).strict(),
+  z.object({ domain: z.literal("imports"), ...systemRecordEnvelopeV1Base, record: systemImportRecordSchema }).strict(),
+  z.object({ domain: z.literal("cost-events"), ...systemRecordEnvelopeV1Base, record: systemCostEventRecordSchema }).strict(),
+  z.object({ domain: z.literal("activity-events"), ...systemRecordEnvelopeV1Base, record: systemActivityEventRecordSchema }).strict()
 ]);
 
-export const systemArchivePayloadSchema = z.object({
+const systemRecordEnvelopeV2Schema = z.discriminatedUnion("domain", [
+  z.object({ domain: z.literal("providers"), ...systemRecordEnvelopeV2Base, record: systemPortableProviderV2Schema }).strict(),
+  z.object({ domain: z.literal("prompts"), ...systemRecordEnvelopeV2Base, record: systemPromptRecordV2Schema }).strict(),
+  z.object({ domain: z.literal("worlds"), ...systemRecordEnvelopeV2Base, record: systemWorldRecordV2Schema }).strict(),
+  z.object({ domain: z.literal("world-versions"), ...systemRecordEnvelopeV2Base, record: systemWorldVersionRecordV2Schema }).strict(),
+  z.object({ domain: z.literal("world-drafts"), ...systemRecordEnvelopeV2Base, record: systemWorldDraftRecordV2Schema }).strict(),
+  z.object({ domain: z.literal("campaigns"), ...systemRecordEnvelopeV2Base, record: systemCampaignRecordV2Schema }).strict(),
+  z.object({ domain: z.literal("turns"), ...systemRecordEnvelopeV2Base, record: systemTurnRecordV2Schema }).strict(),
+  z.object({ domain: z.literal("turn-corrections"), ...systemRecordEnvelopeV2Base, record: systemTurnCorrectionRecordV2Schema }).strict(),
+  z.object({ domain: z.literal("campaign-state"), ...systemRecordEnvelopeV2Base, record: systemCampaignStateRecordV2Schema }).strict(),
+  z.object({ domain: z.literal("campaign-history"), ...systemRecordEnvelopeV2Base, record: systemCampaignHistoryRecordV2Schema }).strict(),
+  z.object({ domain: z.literal("canonical-facts"), ...systemRecordEnvelopeV2Base, record: systemCanonicalFactRecordV2Schema }).strict(),
+  z.object({ domain: z.literal("chronicle"), ...systemRecordEnvelopeV2Base, record: systemChronicleRecordV2Schema }).strict(),
+  z.object({ domain: z.literal("illustrations"), ...systemRecordEnvelopeV2Base, record: systemIllustrationRecordV2Schema }).strict(),
+  z.object({ domain: z.literal("imports"), ...systemRecordEnvelopeV2Base, record: systemImportRecordV2Schema }).strict(),
+  z.object({ domain: z.literal("cost-events"), ...systemRecordEnvelopeV2Base, record: systemCostEventRecordV2Schema }).strict(),
+  z.object({ domain: z.literal("activity-events"), ...systemRecordEnvelopeV2Base, record: systemActivityEventRecordV2Schema }).strict()
+]);
+
+export const systemRecordEnvelopeSchema = z.union([
+  systemRecordEnvelopeV2Schema,
+  systemRecordEnvelopeV1Schema
+]);
+
+const systemArchivePayloadV1Schema = z.object({
   formatVersion: z.literal(1),
   sourceInstallationId: z.string().uuid(),
   sourceOwnerCount: z.literal(1),
@@ -702,7 +990,31 @@ export const systemArchivePayloadSchema = z.object({
     displayName: boundedStringSchema(300)
   }).strict(),
   records: z.array(systemRecordEnvelopeSchema)
+}).strict().superRefine((payload, context) => {
+  if (payload.records.some((record) => record.formatVersion !== 1)) {
+    context.addIssue({ code: "custom", path: ["records"], message: "Version-one payloads require version-one records." });
+  }
+});
+
+const systemArchivePayloadV2Schema = z.object({
+  formatVersion: z.literal(2),
+  sourceInstallationId: z.string().uuid(),
+  sourceOwnerCount: z.literal(1),
+  sourceOwner: z.object({
+    sourceId: z.string().uuid(),
+    displayName: boundedStringSchema(300),
+    status: z.enum(["active", "disabled"]),
+    settings: portableJsonObjectSchema,
+    createdAt: archiveTimestampSchema,
+    updatedAt: archiveTimestampSchema
+  }).strict(),
+  records: z.array(systemRecordEnvelopeV2Schema)
 }).strict();
+
+export const systemArchivePayloadSchema = z.union([
+  systemArchivePayloadV2Schema,
+  systemArchivePayloadV1Schema
+]);
 
 export const systemArchiveSafeVersionsSchema = z.object({
   archiveFormat: z.literal(1),
@@ -914,8 +1226,98 @@ export const systemArchiveImportCommitRequestSchema = z.object({
   acknowledgeNonCancellableBoundary: z.literal(true)
 }).strict();
 
+const systemArchiveAssetsPayloadV1Schema = z.object({
+  formatVersion: z.literal(1),
+  assets: z.array(archiveAssetRecordSchema)
+}).strict();
+
+export const systemArchiveAssetBindingV2Schema = z.discriminatedUnion("role", [
+  z.object({ role: z.literal("world_cover"), worldId: z.uuid() }).strict(),
+  z.object({
+    role: z.literal("world_version_asset"),
+    worldId: z.uuid(),
+    worldVersionId: z.uuid()
+  }).strict(),
+  z.object({ role: z.literal("campaign_asset"), campaignId: z.uuid() }).strict(),
+  z.object({
+    role: z.literal("turn_illustration"),
+    campaignId: z.uuid(),
+    turnId: z.uuid()
+  }).strict(),
+  z.object({
+    role: z.literal("illustration_segment_variant"),
+    campaignId: z.uuid(),
+    turnId: z.uuid(),
+    segmentId: z.uuid(),
+    variantIndex: nonnegativeSafeIntegerSchema,
+    createdAt: archiveTimestampSchema
+  }).strict(),
+  z.object({
+    role: z.literal("imported_attachment"),
+    campaignId: z.uuid(),
+    turnId: z.uuid().nullable()
+  }).strict(),
+  z.object({
+    role: z.literal("generation_context"),
+    campaignId: z.uuid().nullable(),
+    worldId: z.uuid().nullable(),
+    worldVersionId: z.uuid().nullable(),
+    turnId: z.uuid().nullable(),
+    sourceContextId: z.uuid(),
+    authority: z.object({
+      createdByUserId: z.uuid(),
+      targetType: z.enum(["world_cover", "turn_illustration", "streaming_illustration", "other"]),
+      variantIndex: nonnegativeSafeIntegerSchema,
+      fictionPrompt: z.string().max(20_000),
+      negativePrompt: z.string().max(10_000).nullable(),
+      entities: portableJsonSchema,
+      characters: portableJsonSchema,
+      locations: portableJsonSchema,
+      factions: portableJsonSchema,
+      sceneAttributes: portableJsonSchema,
+      providerProfileId: z.uuid().nullable(),
+      providerType: z.string().max(300).nullable(),
+      model: z.string().max(500),
+      generationParameters: portableJsonSchema,
+      parentAssetIds: z.array(z.uuid()).max(10_000),
+      metadataSchemaVersion: z.number().int().positive(),
+      createdAt: archiveTimestampSchema
+    }).strict()
+  }).strict()
+]);
+
+export const systemArchiveAssetRecordV2Schema = archiveAssetRecordSchema.safeExtend({
+  bindings: z.array(systemArchiveAssetBindingV2Schema),
+  authority: z.object({
+    references: z.array(z.object({
+      sourceId: z.string().uuid(),
+      campaignId: z.string().uuid(),
+      turnId: z.string().uuid().nullable(),
+      assetRole: identifierSchema,
+      createdAt: archiveTimestampSchema
+    }).strict()).max(100_000),
+    library: z.object({
+      createdByUserId: z.string().uuid(),
+      metadataRevision: z.number().int().positive(),
+      createdAt: archiveTimestampSchema,
+      updatedAt: archiveTimestampSchema
+    }).strict().nullable()
+  }).strict()
+});
+
+const systemArchiveAssetsPayloadV2Schema = z.object({
+  formatVersion: z.literal(2),
+  assets: z.array(systemArchiveAssetRecordV2Schema)
+}).strict();
+
+export const systemArchiveAssetsPayloadSchema = z.union([
+  systemArchiveAssetsPayloadV2Schema,
+  systemArchiveAssetsPayloadV1Schema
+]);
+
 export const systemArchiveManifestSchema = archiveManifestSchema.safeExtend({
   archiveType: z.literal("system"),
+  assets: z.array(z.union([systemArchiveAssetRecordV2Schema, archiveAssetRecordSchema])),
   sourceApplication: boundedStringSchema(100),
   sourceMigration: z.string().regex(/^\d{4}_[a-z0-9_]+$/u).max(200),
   sourceInstallationId: z.string().uuid(),
@@ -936,11 +1338,6 @@ export const systemArchiveManifestSchema = archiveManifestSchema.safeExtend({
   }
 });
 
-export const systemArchiveAssetsPayloadSchema = z.object({
-  formatVersion: z.literal(1),
-  assets: z.array(archiveAssetRecordSchema)
-}).strict();
-
 export type SystemArchiveDomain = z.infer<typeof systemArchiveDomainSchema>;
 export type SystemArchiveJobKind = z.infer<typeof systemArchiveJobKindSchema>;
 export type SystemArchiveJobStatus = z.infer<typeof systemArchiveJobStatusSchema>;
@@ -951,3 +1348,8 @@ export type SystemArchiveImportReport = z.infer<typeof systemArchiveImportReport
 export type SystemArchiveUploadView = z.infer<typeof systemUploadViewSchema>;
 export type SystemImportPreviewView = z.infer<typeof systemImportPreviewViewSchema>;
 export type SystemRecordEnvelope = z.infer<typeof systemRecordEnvelopeSchema>;
+export type SystemArchiveAssetBindingV2 = z.infer<typeof systemArchiveAssetBindingV2Schema>;
+export type SystemArchiveAssetRecordV2 = z.infer<typeof systemArchiveAssetRecordV2Schema>;
+export type SystemArchiveAssetRecord =
+  | z.infer<typeof archiveAssetRecordSchema>
+  | SystemArchiveAssetRecordV2;

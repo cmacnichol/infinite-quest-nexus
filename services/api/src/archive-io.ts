@@ -47,6 +47,31 @@ const EOCD_MINIMUM_BYTES = 22;
 const EOCD_MAXIMUM_COMMENT_BYTES = 65_535;
 const EOCD_TAIL_BYTES = EOCD_MINIMUM_BYTES + EOCD_MAXIMUM_COMMENT_BYTES;
 
+function baseManifestAssets(manifest: ArchiveManifest): readonly unknown[] {
+  if (manifest.archiveType !== "system") return manifest.assets;
+  return manifest.assets.map((asset) => {
+    const { authority: _systemAuthority, ...baseAsset } = asset as typeof asset & {
+      authority?: unknown;
+    };
+    const bindings = asset.bindings.map((binding) => {
+      if (binding.role === "illustration_segment_variant") {
+        const { createdAt: _systemCreatedAt, ...baseBinding } = binding as typeof binding & {
+          createdAt?: unknown;
+        };
+        return baseBinding;
+      }
+      if (binding.role === "generation_context") {
+        const { authority: _systemBindingAuthority, ...baseBinding } = binding as typeof binding & {
+          authority?: unknown;
+        };
+        return baseBinding;
+      }
+      return binding;
+    });
+    return { ...baseAsset, bindings };
+  });
+}
+
 export function supportsSecureGeneratedArchiveStaging(
   platform: NodeJS.Platform = process.platform
 ): boolean {
@@ -1763,7 +1788,7 @@ async function writeArchiveArtifactStream(
       worldVersionId: manifest.worldVersionId,
       entries: manifest.entries,
       payloads: manifest.payloads,
-      assets: manifest.assets,
+      assets: baseManifestAssets(manifest),
     });
     if (canonicalArchiveJson(manifest.entries) !== canonicalArchiveJson(measuredEntries)) {
       throw archiveError("archive-export-inconsistent", "The archive manifest entries do not match the streamed artifact entries.");
@@ -1938,7 +1963,7 @@ export async function writeArchiveArtifact(
       worldVersionId: manifest.worldVersionId,
       entries: manifest.entries,
       payloads: manifest.payloads,
-      assets: manifest.assets
+      assets: baseManifestAssets(manifest)
     });
     if (canonicalArchiveJson(manifest.entries) !== canonicalArchiveJson(measuredEntries)) {
       throw archiveError("archive-export-inconsistent", "The archive manifest entries do not match the streamed artifact entries.");

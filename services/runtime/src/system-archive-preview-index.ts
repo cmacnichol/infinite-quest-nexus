@@ -1,6 +1,3 @@
-import { chmod, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   SYSTEM_ARCHIVE_DOMAINS,
@@ -50,19 +47,27 @@ function validateWorldContent(content: WorldContent, assetIds: ReadonlySet<strin
 
 export class SystemArchivePreviewIndex {
   readonly #database: DatabaseSync;
-  readonly #directory: string;
+  readonly #maximumRecords: number;
+  readonly #maximumRelationships: number;
   readonly #counts = Object.fromEntries(
     SYSTEM_ARCHIVE_DOMAINS.map((domain) => [domain, 0]),
   ) as Record<SystemArchiveDomain, number>;
+  #recordCount = 0;
+  #relationshipCount = 0;
   #closed = false;
 
-  private constructor(database: DatabaseSync, directory: string) {
+  private constructor(
+    database: DatabaseSync,
+    maximumRecords: number,
+    maximumRelationships: number,
+  ) {
     this.#database = database;
-    this.#directory = directory;
+    this.#maximumRecords = maximumRecords;
+    this.#maximumRelationships = maximumRelationships;
     database.exec(`
       PRAGMA journal_mode=OFF;
       PRAGMA synchronous=OFF;
-      PRAGMA temp_store=FILE;
+      PRAGMA temp_store=MEMORY;
       PRAGMA locking_mode=EXCLUSIVE;
       CREATE TABLE records (
         domain TEXT NOT NULL,
@@ -145,18 +150,33 @@ export class SystemArchivePreviewIndex {
     `);
   }
 
-  static async create(): Promise<SystemArchivePreviewIndex> {
-    const directory = await mkdtemp(join(tmpdir(), "infinitequest-system-preview-index-"));
-    await chmod(directory, 0o700);
-    const path = join(directory, "relationships.sqlite");
-    try {
-      const database = new DatabaseSync(path);
-      await chmod(path, 0o600);
-      return new SystemArchivePreviewIndex(database, directory);
-    } catch (error) {
-      await rm(directory, { recursive: true, force: true }).catch(() => undefined);
-      throw error;
+  static async create(options: Readonly<{
+    maximumRecords?: number;
+    maximumRelationships?: number;
+  }> = {}): Promise<SystemArchivePreviewIndex> {
+    const maximumRecords = options.maximumRecords ?? 2_000_000;
+    const maximumRelationships = options.maximumRelationships ?? 2_000_000;
+    if (!Number.isSafeInteger(maximumRecords) || maximumRecords < 1) {
+      throw new RangeError("System Archive preview maximumRecords must be a positive safe integer.");
     }
+    if (!Number.isSafeInteger(maximumRelationships) || maximumRelationships < 1) {
+      throw new RangeError("System Archive preview maximumRelationships must be a positive safe integer.");
+    }
+    return new SystemArchivePreviewIndex(
+      new DatabaseSync(":memory:"),
+      maximumRecords,
+      maximumRelationships,
+    );
+  }
+
+  #reserveRelationship(): void {
+    if (this.#relationshipCount >= this.#maximumRelationships) {
+      throw new ArchiveError(
+        "archive-limit-exceeded",
+        "System Archive relationship index exceeds its bounded relationship allowance.",
+      );
+    }
+    this.#relationshipCount += 1;
   }
 
   #insertRecord(
@@ -167,6 +187,12 @@ export class SystemArchivePreviewIndex {
     restoreKey: string | null = null,
     numericValue: number | null = null,
   ): void {
+    if (this.#recordCount >= this.#maximumRecords) {
+      throw new ArchiveError(
+        "archive-limit-exceeded",
+        "System Archive relationship index exceeds its bounded record allowance.",
+      );
+    }
     try {
       this.#database.prepare(
         "INSERT INTO records (domain,source_id,parent_id,secondary_id,restore_key,numeric_value) VALUES (?,?,?,?,?,?)",
@@ -174,6 +200,7 @@ export class SystemArchivePreviewIndex {
     } catch {
       throw jsonFailure();
     }
+    this.#recordCount += 1;
     this.#counts[domain] += 1;
   }
 
@@ -184,6 +211,7 @@ export class SystemArchivePreviewIndex {
     expectedSecondaryId: string | null = null,
     expectedNumericValue: number | null = null,
   ): void {
+    this.#reserveRelationship();
     this.#database.prepare(
       `INSERT INTO required_references
          (target_domain,target_id,expected_parent_id,expected_secondary_id,expected_numeric_value)
@@ -242,6 +270,7 @@ export class SystemArchivePreviewIndex {
           String(envelope.record.versionNumber),
         );
         for (const binding of envelope.record.content.assets) {
+          this.#reserveRelationship();
           try {
             this.#database.prepare(`
               INSERT INTO expected_world_version_assets
@@ -287,6 +316,7 @@ export class SystemArchivePreviewIndex {
           || envelope.record.characterProfileRevision !== 0) {
           throw relationshipFailure();
         }
+        this.#reserveRelationship();
         this.#database.prepare(
           "INSERT INTO campaign_profiles (campaign_id,revision,profile_json) VALUES (?,?,?)",
         ).run(
@@ -320,6 +350,7 @@ export class SystemArchivePreviewIndex {
       case "campaign-state":
         if (envelope.sourceId !== envelope.record.campaignId) throw relationshipFailure();
         this.#insertRecord(envelope.domain, envelope.sourceId, envelope.record.campaignId);
+        this.#reserveRelationship();
         this.#database.prepare(
           "INSERT INTO campaign_states (campaign_id,revision,state_json) VALUES (?,?,?)",
         ).run(
@@ -354,6 +385,7 @@ export class SystemArchivePreviewIndex {
             }
             this.#require("world-versions", history.details.fromWorldVersionId);
             this.#require("world-versions", history.details.toWorldVersionId);
+            this.#reserveRelationship();
             this.#database.prepare(
               `INSERT INTO world_migrations
                  (history_id,campaign_id,from_version_id,to_version_id) VALUES (?,?,?,?)`,
@@ -382,6 +414,7 @@ export class SystemArchivePreviewIndex {
             }
             this.#require("world-versions", history.details.fromWorldVersionId);
             this.#require("world-versions", history.details.toWorldVersionId);
+            this.#reserveRelationship();
             this.#database.prepare(
               `INSERT INTO world_transfers (
                  history_id,envelope_campaign_id,source_campaign_id,target_campaign_id,
@@ -421,6 +454,7 @@ export class SystemArchivePreviewIndex {
             );
             break;
           case "character-profile-edit":
+            this.#reserveRelationship();
             this.#database.prepare(
               `INSERT INTO character_profile_edits
                  (campaign_id,revision,profile_json) VALUES (?,?,?)`,
@@ -431,6 +465,7 @@ export class SystemArchivePreviewIndex {
             );
             break;
           case "campaign-state-edit":
+            this.#reserveRelationship();
             this.#database.prepare(
               "INSERT INTO campaign_state_edits (campaign_id,revision,state_json) VALUES (?,?,?)",
             ).run(
@@ -591,23 +626,17 @@ export class SystemArchivePreviewIndex {
     `).get();
     if (currentProfileMismatch !== undefined) throw relationshipFailure();
 
-    const currentStateMismatch = this.#database.prepare(`
+    const currentStateBehindHistory = this.#database.prepare(`
       SELECT 1 AS broken
         FROM campaign_states current
        WHERE EXISTS (
-               SELECT 1 FROM campaign_state_edits same_revision
-                WHERE same_revision.campaign_id=current.campaign_id
-                  AND same_revision.revision=current.revision
-                  AND same_revision.state_json IS NOT current.state_json
-             )
-          OR EXISTS (
                SELECT 1 FROM campaign_state_edits newer
                 WHERE newer.campaign_id=current.campaign_id
                   AND newer.revision>current.revision
              )
        LIMIT 1
     `).get();
-    if (currentStateMismatch !== undefined) throw relationshipFailure();
+    if (currentStateBehindHistory !== undefined) throw relationshipFailure();
 
     const crossWorldMigration = this.#database.prepare(`
       SELECT 1 AS broken
@@ -670,6 +699,7 @@ export class SystemArchivePreviewIndex {
 
     for (const asset of assets) {
       for (const binding of asset.bindings) {
+        this.#reserveRelationship();
         try {
           this.#database.prepare(
             "INSERT INTO actual_asset_bindings (asset_id,binding_key) VALUES (?,?)",
@@ -680,6 +710,7 @@ export class SystemArchivePreviewIndex {
         switch (binding.role) {
           case "world_cover":
             if (!this.#recordExists("worlds", binding.worldId)) throw relationshipFailure();
+            this.#reserveRelationship();
             try {
               this.#database.prepare(
                 "INSERT INTO actual_world_covers (world_id,asset_id) VALUES (?,?)",
@@ -693,6 +724,7 @@ export class SystemArchivePreviewIndex {
               || !this.#parentMatches("world-versions", binding.worldVersionId, binding.worldId)) {
               throw relationshipFailure();
             }
+            this.#reserveRelationship();
             try {
               this.#database.prepare(`
                 INSERT INTO actual_world_version_assets
@@ -769,6 +801,5 @@ export class SystemArchivePreviewIndex {
     if (this.#closed) return;
     this.#closed = true;
     this.#database.close();
-    await rm(this.#directory, { recursive: true, force: true });
   }
 }

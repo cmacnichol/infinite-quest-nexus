@@ -397,6 +397,24 @@ describe("archive runtime configuration", () => {
     expect(config.systemArchiveArtifactTtlSeconds).toBe(604_800);
   });
 
+  it("keeps Campaign Archive preview TTL configurable when System Archive is enabled", async () => {
+    process.env.DATABASE_URL = "postgresql://test@localhost/test";
+    process.env.SYSTEM_ARCHIVE_ENABLED = "true";
+    process.env.ARCHIVE_PREVIEW_TTL_SECONDS = "137";
+
+    const config = loadRuntimeConfig();
+
+    expect(config.systemArchiveEnabled).toBe(true);
+    expect(config.archivePreviewTtlSeconds).toBe(137);
+    const guide = await readFile("docs/installation/environment-configuration.md", "utf8");
+    expect(guide).toContain(
+      "Campaign and World Archive previews remain configurable through `ARCHIVE_PREVIEW_TTL_SECONDS`",
+    );
+    expect(guide).toContain(
+      "System Archive Preview authority always expires after an independent 1,800 seconds",
+    );
+  });
+
   it.each([
     ["CAMPAIGN_ARCHIVE_MAX_COMPRESSED_BYTES", "1048576bytes"],
     ["SYSTEM_ARCHIVE_MAX_ENTRIES", "1.5"],

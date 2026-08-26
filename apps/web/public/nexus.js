@@ -85,6 +85,9 @@ let systemArchiveOperationController = null;
 let systemArchiveOperationKind = null;
 let systemArchiveOwnerId = null;
 let systemArchiveRecoveryStarted = false;
+const systemArchiveOperationGenerations = { export: 0, import: 0 };
+const systemArchiveOperationFences = { export: null, import: null };
+const systemArchiveRecoveryControllers = { export: null, import: null };
 
 function campaignSettingsPanelIndexForKey(key, currentIndex, count) {
   if (key === "Home") return 0;
@@ -736,7 +739,50 @@ function renderSystemImportReport(job) {
   elements.systemImportReportRebuilds.textContent = `Chronicle index: ${report.rebuildState.chronicleIndex.status} for ${number(report.rebuildState.chronicleIndex.itemCount)} campaigns. Asset thumbnails: ${report.rebuildState.assetThumbnails.status} for ${number(report.rebuildState.assetThumbnails.itemCount)} originals.`;
 }
 
-function renderSystemArchiveJob(job) {
+function systemArchiveOperationFor(kind) {
+  return kind === "export" ? systemArchiveExportOperation : systemArchiveImportOperation;
+}
+
+function setSystemArchiveOperation(kind, operation) {
+  if (kind === "export") systemArchiveExportOperation = operation;
+  else systemArchiveImportOperation = operation;
+}
+
+function systemArchiveFenceCurrent(fence) {
+  const operation = systemArchiveOperationFor(fence.kind);
+  return systemArchiveOperationFences[fence.kind] === fence
+    && systemArchiveOperationGenerations[fence.kind] === fence.generation
+    && operation?.kind === fence.kind
+    && operation.idempotencyKey === fence.idempotencyKey
+    && operation.jobId === fence.jobId;
+}
+
+function beginSystemArchiveOperation(kind, operation) {
+  systemArchiveRecoveryControllers[kind]?.abort(new DOMException("Superseded by newer transfer", "AbortError"));
+  systemArchiveOperationGenerations[kind] += 1;
+  const fence = {
+    kind,
+    generation: systemArchiveOperationGenerations[kind],
+    idempotencyKey: operation.idempotencyKey,
+    jobId: operation.jobId
+  };
+  systemArchiveOperationFences[kind] = fence;
+  setSystemArchiveOperation(kind, operation);
+  systemArchiveJobs[kind] = null;
+  return fence;
+}
+
+function systemArchiveFenceForOperation(kind, operation) {
+  const existing = systemArchiveOperationFences[kind];
+  if (existing
+    && existing.idempotencyKey === operation.idempotencyKey
+    && existing.jobId === operation.jobId
+    && systemArchiveFenceCurrent(existing)) return existing;
+  return beginSystemArchiveOperation(kind, operation);
+}
+
+function renderSystemArchiveJob(job, fence = null) {
+  if (fence && (!systemArchiveFenceCurrent(fence) || fence.kind !== job.kind || fence.jobId !== job.id)) return false;
   systemArchiveJobs[job.kind] = job;
   setSystemArchiveStatus(`${job.kind === "export" ? "System Export" : "System Import"}: ${job.status.replaceAll("_", " ")}.`);
   if (job.kind === "export" && job.status === "published") {
@@ -745,17 +791,24 @@ function renderSystemArchiveJob(job) {
   }
   renderSystemImportReport(job);
   updateSystemArchiveControls();
+  return true;
 }
 
-async function monitorSystemArchiveJob(job, signal) {
+async function monitorSystemArchiveJob(job, signal, fence) {
   let latest = job;
-  renderSystemArchiveJob(latest);
-  while (!SYSTEM_ARCHIVE_TERMINAL_STATUSES.has(latest.status)) {
+  if (!renderSystemArchiveJob(latest, fence)) return latest;
+  while (systemArchiveFenceCurrent(fence) && !SYSTEM_ARCHIVE_TERMINAL_STATUSES.has(latest.status)) {
     await new Promise((resolve) => setTimeout(resolve, 1000));
     if (signal.aborted) throw signal.reason || new DOMException("Transfer cancelled", "AbortError");
+    if (!systemArchiveFenceCurrent(fence)) return latest;
     const segment = latest.kind === "export" ? "system-exports" : "system-imports";
-    latest = await api(`/api/v1/${segment}/${encodeURIComponent(latest.id)}`, { signal });
-    renderSystemArchiveJob(latest);
+    const polled = await api(`/api/v1/${segment}/${encodeURIComponent(latest.id)}`, { signal });
+    if (!systemArchiveFenceCurrent(fence)) return latest;
+    if (polled.kind !== fence.kind || polled.id !== fence.jobId) {
+      throw new Error("System Archive job identity changed while it was being monitored.");
+    }
+    latest = polled;
+    if (!renderSystemArchiveJob(latest, fence)) return latest;
   }
   return latest;
 }
@@ -866,14 +919,14 @@ async function createSystemArchiveExport() {
     systemArchiveJobs.export = null;
     const idempotencyKey = systemArchiveIdempotencyKey("legacy-export");
     const exportOperation = { kind: "export", idempotencyKey, jobId: null };
-    systemArchiveExportOperation = exportOperation;
+    const fence = beginSystemArchiveOperation("export", exportOperation);
     writeSystemArchiveOperation(exportOperation);
-    const job = await resolveStoredSystemExport(exportOperation, signal);
-    await monitorSystemArchiveJob(job, signal);
+    const job = await resolveStoredSystemExport(exportOperation, signal, fence);
+    if (systemArchiveFenceCurrent(fence)) await monitorSystemArchiveJob(job, signal, fence);
   });
 }
 
-async function resolveStoredSystemExport(stored, signal) {
+async function resolveStoredSystemExport(stored, signal, fence) {
   const job = stored.jobId
     ? await api(`/api/v1/system-exports/${encodeURIComponent(stored.jobId)}`, { signal })
     : await api("/api/v1/system-exports", {
@@ -881,21 +934,36 @@ async function resolveStoredSystemExport(stored, signal) {
         body: JSON.stringify({ idempotencyKey: stored.idempotencyKey }),
         signal
       });
-  systemArchiveExportOperation = { ...stored, jobId: job.id };
-  writeSystemArchiveOperation(systemArchiveExportOperation);
+  if (!systemArchiveFenceCurrent(fence)) return job;
+  if (job.kind !== "export" || (stored.jobId !== null && stored.jobId !== job.id)) {
+    throw new Error("Recovered System Export identity did not match its stored operation.");
+  }
+  fence.jobId = job.id;
+  const resolved = { ...stored, jobId: job.id };
+  setSystemArchiveOperation("export", resolved);
+  if (systemArchiveFenceCurrent(fence)) writeSystemArchiveOperation(resolved);
   return job;
 }
 
 async function recoverSystemArchiveExport() {
   const stored = readSystemArchiveOperation("export");
   if (!stored) return;
-  systemArchiveExportOperation = stored;
   const controller = new AbortController();
-  const job = await resolveStoredSystemExport(stored, controller.signal);
-  await monitorSystemArchiveJob(job, controller.signal);
+  const fence = beginSystemArchiveOperation("export", stored);
+  systemArchiveRecoveryControllers.export = controller;
+  try {
+    const job = await resolveStoredSystemExport(stored, controller.signal, fence);
+    if (!controller.signal.aborted && systemArchiveFenceCurrent(fence)) {
+      await monitorSystemArchiveJob(job, controller.signal, fence);
+    }
+  } catch (error) {
+    if (error?.name !== "AbortError") throw error;
+  } finally {
+    if (systemArchiveRecoveryControllers.export === controller) systemArchiveRecoveryControllers.export = null;
+  }
 }
 
-async function resolveStoredSystemImport(stored, signal) {
+async function resolveStoredSystemImport(stored, signal, fence) {
   const job = stored.jobId
     ? await api(`/api/v1/system-imports/${encodeURIComponent(stored.jobId)}`, { signal })
     : await api("/api/v1/system-imports", {
@@ -911,20 +979,34 @@ async function resolveStoredSystemImport(stored, signal) {
         }),
         signal
       });
-  systemArchiveImportOperation = { ...stored, jobId: job.id };
-  writeSystemArchiveOperation(systemArchiveImportOperation);
+  if (!systemArchiveFenceCurrent(fence)) return job;
+  if (job.kind !== "import" || (stored.jobId !== null && stored.jobId !== job.id)) {
+    throw new Error("Recovered System Import identity did not match its stored operation.");
+  }
+  fence.jobId = job.id;
+  const resolved = { ...stored, jobId: job.id };
+  setSystemArchiveOperation("import", resolved);
+  if (systemArchiveFenceCurrent(fence)) writeSystemArchiveOperation(resolved);
   return job;
 }
 
 async function recoverSystemArchiveImport() {
   const stored = readSystemArchiveOperation("import");
   if (!stored || (!stored.jobId && !stored.previewHandle)) return;
-  systemArchiveImportOperation = stored;
   invalidateSystemImportPreviewAuthority();
   const controller = new AbortController();
-  const job = await resolveStoredSystemImport(stored, controller.signal);
-  systemArchiveUpload = null;
-  await monitorSystemArchiveJob(job, controller.signal);
+  const fence = beginSystemArchiveOperation("import", stored);
+  systemArchiveRecoveryControllers.import = controller;
+  try {
+    const job = await resolveStoredSystemImport(stored, controller.signal, fence);
+    if (controller.signal.aborted || !systemArchiveFenceCurrent(fence)) return;
+    systemArchiveUpload = null;
+    await monitorSystemArchiveJob(job, controller.signal, fence);
+  } catch (error) {
+    if (error?.name !== "AbortError") throw error;
+  } finally {
+    if (systemArchiveRecoveryControllers.import === controller) systemArchiveRecoveryControllers.import = null;
+  }
 }
 
 function recoverSystemArchiveOperations() {
@@ -953,28 +1035,42 @@ async function cancelSystemArchiveOperation() {
     const activeExportOperation = systemArchiveExportOperation || storedExport;
 
     async function cancelImportOperation(operation) {
+      const fence = systemArchiveFenceForOperation("import", operation);
       invalidateSystemImportPreviewAuthority();
       systemArchiveUpload = null;
       if (operation.jobId) {
-        renderSystemArchiveJob(await api(`/api/v1/system-imports/${encodeURIComponent(operation.jobId)}`, { method: "DELETE" }));
+        renderSystemArchiveJob(
+          await api(`/api/v1/system-imports/${encodeURIComponent(operation.jobId)}`, { method: "DELETE" }),
+          fence
+        );
         return;
       }
-      const recovered = await resolveStoredSystemImport(operation);
-      renderSystemArchiveJob(recovered);
-      if (systemArchiveJobCancellable(recovered)) {
-        renderSystemArchiveJob(await api(`/api/v1/system-imports/${encodeURIComponent(recovered.id)}`, { method: "DELETE" }));
+      const recovered = await resolveStoredSystemImport(operation, undefined, fence);
+      renderSystemArchiveJob(recovered, fence);
+      if (systemArchiveFenceCurrent(fence) && systemArchiveJobCancellable(recovered)) {
+        renderSystemArchiveJob(
+          await api(`/api/v1/system-imports/${encodeURIComponent(recovered.id)}`, { method: "DELETE" }),
+          fence
+        );
       }
     }
 
     async function cancelExportOperation(operation) {
+      const fence = systemArchiveFenceForOperation("export", operation);
       if (operation.jobId) {
-        renderSystemArchiveJob(await api(`/api/v1/system-exports/${encodeURIComponent(operation.jobId)}`, { method: "DELETE" }));
+        renderSystemArchiveJob(
+          await api(`/api/v1/system-exports/${encodeURIComponent(operation.jobId)}`, { method: "DELETE" }),
+          fence
+        );
         return;
       }
-      const recovered = await resolveStoredSystemExport(operation);
-      renderSystemArchiveJob(recovered);
-      if (systemArchiveJobCancellable(recovered)) {
-        renderSystemArchiveJob(await api(`/api/v1/system-exports/${encodeURIComponent(recovered.id)}`, { method: "DELETE" }));
+      const recovered = await resolveStoredSystemExport(operation, undefined, fence);
+      renderSystemArchiveJob(recovered, fence);
+      if (systemArchiveFenceCurrent(fence) && systemArchiveJobCancellable(recovered)) {
+        renderSystemArchiveJob(
+          await api(`/api/v1/system-exports/${encodeURIComponent(recovered.id)}`, { method: "DELETE" }),
+          fence
+        );
       }
     }
 
@@ -995,7 +1091,9 @@ async function cancelSystemArchiveOperation() {
     if (systemArchiveJobCancellable(activeJob)) {
       if (activeJob.kind === "import") invalidateSystemImportPreviewAuthority();
       const segment = activeJob.kind === "export" ? "system-exports" : "system-imports";
-      renderSystemArchiveJob(await api(`/api/v1/${segment}/${encodeURIComponent(activeJob.id)}`, { method: "DELETE" }));
+      const cancelled = await api(`/api/v1/${segment}/${encodeURIComponent(activeJob.id)}`, { method: "DELETE" });
+      const fence = systemArchiveOperationFences[activeJob.kind];
+      renderSystemArchiveJob(cancelled, fence || null);
       return;
     }
     if (cancellingKind === "upload" && systemArchiveUpload) {
@@ -1015,7 +1113,9 @@ async function cancelSystemArchiveOperation() {
     if (jobToCancel) {
       if (jobToCancel.kind === "import") invalidateSystemImportPreviewAuthority();
       const segment = jobToCancel.kind === "export" ? "system-exports" : "system-imports";
-      renderSystemArchiveJob(await api(`/api/v1/${segment}/${encodeURIComponent(jobToCancel.id)}`, { method: "DELETE" }));
+      const cancelled = await api(`/api/v1/${segment}/${encodeURIComponent(jobToCancel.id)}`, { method: "DELETE" });
+      const fence = systemArchiveOperationFences[jobToCancel.kind];
+      renderSystemArchiveJob(cancelled, fence || null);
       return;
     }
     if (activeImportOperation?.jobId === null) {
@@ -1066,8 +1166,7 @@ async function commitSystemArchiveImport() {
   const previewHandle = systemArchivePreview.previewHandle;
   const idempotencyKey = systemArchiveIdempotencyKey("legacy-import");
   const importOperation = { kind: "import", idempotencyKey, jobId: null, previewHandle };
-  systemArchiveImportOperation = importOperation;
-  systemArchiveJobs.import = null;
+  const fence = beginSystemArchiveOperation("import", importOperation);
   writeSystemArchiveOperation(importOperation);
   invalidateSystemImportPreviewAuthority();
   await runSystemArchiveAction("import", async (signal) => {
@@ -1084,10 +1183,15 @@ async function commitSystemArchiveImport() {
       }),
       signal
     });
-    systemArchiveImportOperation = { ...importOperation, jobId: job.id };
-    writeSystemArchiveOperation(systemArchiveImportOperation);
+    if (!systemArchiveFenceCurrent(fence)) return;
+    if (job.kind !== "import") throw new Error("System Import returned the wrong job kind.");
+    fence.jobId = job.id;
+    const resolved = { ...importOperation, jobId: job.id };
+    setSystemArchiveOperation("import", resolved);
+    if (systemArchiveFenceCurrent(fence)) writeSystemArchiveOperation(resolved);
+    if (!systemArchiveFenceCurrent(fence)) return;
     systemArchiveUpload = null;
-    await monitorSystemArchiveJob(job, signal);
+    await monitorSystemArchiveJob(job, signal, fence);
   });
 }
 

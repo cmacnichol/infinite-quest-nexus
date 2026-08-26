@@ -312,6 +312,17 @@ export function mountDataTransferPage(
     export: null,
     import: null
   };
+  type OperationFence = {
+    readonly kind: SystemArchiveJobView["kind"];
+    readonly generation: number;
+    readonly idempotencyKey: string;
+    jobId: string | null;
+  };
+  const operationGenerations: Record<SystemArchiveJobView["kind"], number> = { export: 0, import: 0 };
+  const activeFences: Record<SystemArchiveJobView["kind"], OperationFence | null> = {
+    export: null,
+    import: null
+  };
   let currentExportOperation: StoredSystemOperation | null = null;
   let currentImportOperation: StoredSystemOperation | null = null;
   let currentPreview: SystemImportPreviewView | null = null;
@@ -320,6 +331,48 @@ export function mountDataTransferPage(
   let operationController: AbortController | null = null;
   let operationKind: "export" | "upload" | "import" | null = null;
   let sessionOwnerId: string | null = null;
+
+  function operationFor(kind: SystemArchiveJobView["kind"]): StoredSystemOperation | null {
+    return kind === "export" ? currentExportOperation : currentImportOperation;
+  }
+
+  function setOperation(kind: SystemArchiveJobView["kind"], operation: StoredSystemOperation): void {
+    if (kind === "export") currentExportOperation = operation;
+    else currentImportOperation = operation;
+  }
+
+  function isFenceCurrent(fence: OperationFence): boolean {
+    const operation = operationFor(fence.kind);
+    return activeFences[fence.kind] === fence
+      && operationGenerations[fence.kind] === fence.generation
+      && operation?.kind === fence.kind
+      && operation.idempotencyKey === fence.idempotencyKey
+      && operation.jobId === fence.jobId;
+  }
+
+  function beginOperation(kind: SystemArchiveJobView["kind"], operation: StoredSystemOperation): OperationFence {
+    recoveryControllers[kind]?.abort(new DOMException("Superseded by newer transfer", "AbortError"));
+    operationGenerations[kind] += 1;
+    const fence: OperationFence = {
+      kind,
+      generation: operationGenerations[kind],
+      idempotencyKey: operation.idempotencyKey,
+      jobId: operation.jobId
+    };
+    activeFences[kind] = fence;
+    setOperation(kind, operation);
+    currentJobs[kind] = null;
+    return fence;
+  }
+
+  function fenceForOperation(kind: SystemArchiveJobView["kind"], operation: StoredSystemOperation): OperationFence {
+    const existing = activeFences[kind];
+    if (existing
+      && existing.idempotencyKey === operation.idempotencyKey
+      && existing.jobId === operation.jobId
+      && isFenceCurrent(existing)) return existing;
+    return beginOperation(kind, operation);
+  }
 
   function announce(message: string): void {
     status.textContent = message;
@@ -459,7 +512,8 @@ export function mountDataTransferPage(
       + `Asset thumbnails: ${report.rebuildState.assetThumbnails.status} for ${formatCount(report.rebuildState.assetThumbnails.itemCount)} originals.`;
   }
 
-  function renderJob(job: SystemArchiveJobView): void {
+  function renderJob(job: SystemArchiveJobView, fence?: OperationFence): boolean {
+    if (fence && (!isFenceCurrent(fence) || fence.jobId !== job.id || fence.kind !== job.kind)) return false;
     currentJobs[job.kind] = job;
     announce(`${job.kind === "export" ? "System Export" : "System Import"}: ${job.status.replaceAll("_", " ")}.`);
     if (job.kind === "export" && job.status === "published") {
@@ -468,18 +522,26 @@ export function mountDataTransferPage(
     }
     if (job.kind === "import") renderReport(job);
     updateControls();
+    return true;
   }
 
-  async function monitorJob(job: SystemArchiveJobView, signal: AbortSignal): Promise<SystemArchiveJobView> {
+  async function monitorJob(
+    job: SystemArchiveJobView,
+    signal: AbortSignal,
+    fence: OperationFence
+  ): Promise<SystemArchiveJobView> {
     let latest = job;
-    renderJob(latest);
-    while (!disposed && !signal.aborted && !TERMINAL_JOB_STATUSES.has(latest.status)) {
+    if (!renderJob(latest, fence)) return latest;
+    while (!disposed && !signal.aborted && isFenceCurrent(fence) && !TERMINAL_JOB_STATUSES.has(latest.status)) {
       await wait(pollIntervalMs);
-      if (disposed || signal.aborted) return latest;
+      if (disposed || signal.aborted || !isFenceCurrent(fence)) return latest;
       const polled = await api.getJob(latest.kind, latest.id, signal);
-      if (disposed || signal.aborted) return latest;
+      if (disposed || signal.aborted || !isFenceCurrent(fence)) return latest;
+      if (polled.kind !== fence.kind || polled.id !== fence.jobId) {
+        throw new Error("System Archive job identity changed while it was being monitored.");
+      }
       latest = polled;
-      renderJob(polled);
+      if (!renderJob(polled, fence)) return latest;
     }
     return latest;
   }
@@ -530,24 +592,32 @@ export function mountDataTransferPage(
       currentJobs.export = null;
       const idempotencyKey = randomIdempotencyKey("browser-export");
       const exportOperation: StoredSystemOperation = { kind: "export", idempotencyKey, jobId: null };
-      currentExportOperation = exportOperation;
+      const fence = beginOperation("export", exportOperation);
       if (!sessionOwnerId) throw new Error("The Current Owner session is not available for System Archive export.");
       writeStoredOperation(operationStorage ?? null, sessionOwnerId, exportOperation);
-      const job = await resolveStoredExport(sessionOwnerId, exportOperation, signal);
-      await monitorJob(job, signal);
+      const job = await resolveStoredExport(sessionOwnerId, exportOperation, signal, fence);
+      if (isFenceCurrent(fence)) await monitorJob(job, signal, fence);
     });
   }
 
   async function resolveStoredExport(
     ownerId: string,
     stored: StoredSystemOperation,
-    signal: AbortSignal
+    signal: AbortSignal,
+    fence: OperationFence
   ): Promise<SystemArchiveJobView> {
     const job = stored.jobId
       ? await api.getJob("export", stored.jobId, signal)
       : await api.createExport(stored.idempotencyKey, signal);
-    currentExportOperation = { ...stored, jobId: job.id };
-    writeStoredOperation(operationStorage ?? null, ownerId, currentExportOperation);
+    if (!isFenceCurrent(fence)) return job;
+    if (job.kind !== "export" || (stored.jobId !== null && stored.jobId !== job.id)) {
+      throw new Error("Recovered System Export identity did not match its stored operation.");
+    }
+    fence.jobId = job.id;
+    const resolved = { ...stored, jobId: job.id };
+    setOperation("export", resolved);
+    if (!isFenceCurrent(fence)) return job;
+    writeStoredOperation(operationStorage ?? null, ownerId, resolved);
     return job;
   }
 
@@ -555,11 +625,13 @@ export function mountDataTransferPage(
     const stored = readStoredOperation(operationStorage ?? null, ownerId, "export");
     if (!stored) return;
     const recoveryController = new AbortController();
+    const fence = beginOperation("export", stored);
     recoveryControllers.export = recoveryController;
-    currentExportOperation = stored;
     try {
-      const job = await resolveStoredExport(ownerId, stored, recoveryController.signal);
-      if (!recoveryController.signal.aborted) await monitorJob(job, recoveryController.signal);
+      const job = await resolveStoredExport(ownerId, stored, recoveryController.signal, fence);
+      if (!recoveryController.signal.aborted && isFenceCurrent(fence)) {
+        await monitorJob(job, recoveryController.signal, fence);
+      }
     } catch (reason) {
       if (!(reason instanceof Error && reason.name === "AbortError")) throw reason;
     } finally {
@@ -570,13 +642,21 @@ export function mountDataTransferPage(
   async function resolveStoredImport(
     ownerId: string,
     stored: StoredSystemOperation,
-    signal: AbortSignal
+    signal: AbortSignal,
+    fence: OperationFence
   ): Promise<SystemArchiveJobView> {
     const job = stored.jobId
       ? await api.getJob("import", stored.jobId, signal)
       : await api.commit(stored.previewHandle!, stored.idempotencyKey, signal);
-    currentImportOperation = { ...stored, jobId: job.id };
-    writeStoredOperation(operationStorage ?? null, ownerId, currentImportOperation);
+    if (!isFenceCurrent(fence)) return job;
+    if (job.kind !== "import" || (stored.jobId !== null && stored.jobId !== job.id)) {
+      throw new Error("Recovered System Import identity did not match its stored operation.");
+    }
+    fence.jobId = job.id;
+    const resolved = { ...stored, jobId: job.id };
+    setOperation("import", resolved);
+    if (!isFenceCurrent(fence)) return job;
+    writeStoredOperation(operationStorage ?? null, ownerId, resolved);
     return job;
   }
 
@@ -584,14 +664,14 @@ export function mountDataTransferPage(
     const stored = readStoredOperation(operationStorage ?? null, ownerId, "import");
     if (!stored || (!stored.jobId && !stored.previewHandle)) return;
     const recoveryController = new AbortController();
+    const fence = beginOperation("import", stored);
     recoveryControllers.import = recoveryController;
-    currentImportOperation = stored;
     invalidatePreviewAuthority();
     try {
-      const job = await resolveStoredImport(ownerId, stored, recoveryController.signal);
-      if (recoveryController.signal.aborted) return;
+      const job = await resolveStoredImport(ownerId, stored, recoveryController.signal, fence);
+      if (recoveryController.signal.aborted || !isFenceCurrent(fence)) return;
       currentUpload = null;
-      await monitorJob(job, recoveryController.signal);
+      await monitorJob(job, recoveryController.signal, fence);
     } catch (reason) {
       if (!(reason instanceof Error && reason.name === "AbortError")) throw reason;
     } finally {
@@ -622,29 +702,31 @@ export function mountDataTransferPage(
 
       async function cancelImportOperation(operation: StoredSystemOperation): Promise<void> {
         abortRecovery("import");
+        const fence = fenceForOperation("import", operation);
         invalidatePreviewAuthority();
         currentUpload = null;
         if (operation.jobId) {
-          renderJob(await api.cancelJob("import", operation.jobId, controller.signal));
+          renderJob(await api.cancelJob("import", operation.jobId, controller.signal), fence);
           return;
         }
-        const recovered = await resolveStoredImport(sessionOwnerId!, operation, controller.signal);
-        renderJob(recovered);
-        if (isJobCancellable(recovered)) {
-          renderJob(await api.cancelJob("import", recovered.id, controller.signal));
+        const recovered = await resolveStoredImport(sessionOwnerId!, operation, controller.signal, fence);
+        renderJob(recovered, fence);
+        if (isFenceCurrent(fence) && isJobCancellable(recovered)) {
+          renderJob(await api.cancelJob("import", recovered.id, controller.signal), fence);
         }
       }
 
       async function cancelExportOperation(operation: StoredSystemOperation): Promise<void> {
         abortRecovery("export");
+        const fence = fenceForOperation("export", operation);
         if (operation.jobId) {
-          renderJob(await api.cancelJob("export", operation.jobId, controller.signal));
+          renderJob(await api.cancelJob("export", operation.jobId, controller.signal), fence);
           return;
         }
-        const recovered = await resolveStoredExport(sessionOwnerId!, operation, controller.signal);
-        renderJob(recovered);
-        if (isJobCancellable(recovered)) {
-          renderJob(await api.cancelJob("export", recovered.id, controller.signal));
+        const recovered = await resolveStoredExport(sessionOwnerId!, operation, controller.signal, fence);
+        renderJob(recovered, fence);
+        if (isFenceCurrent(fence) && isJobCancellable(recovered)) {
+          renderJob(await api.cancelJob("export", recovered.id, controller.signal), fence);
         }
       }
 
@@ -663,7 +745,10 @@ export function mountDataTransferPage(
       if (activeJob && isJobCancellable(activeJob)) {
         abortRecovery(activeJob.kind);
         if (activeJob.kind === "import") invalidatePreviewAuthority();
-        renderJob(await api.cancelJob(activeJob.kind, activeJob.id, controller.signal));
+        const fence = activeFences[activeJob.kind];
+        const cancelled = await api.cancelJob(activeJob.kind, activeJob.id, controller.signal);
+        if (fence) renderJob(cancelled, fence);
+        else renderJob(cancelled);
         return;
       }
       if (cancellingKind === "upload" && currentUpload) {
@@ -684,7 +769,10 @@ export function mountDataTransferPage(
       if (jobToCancel) {
         abortRecovery(jobToCancel.kind);
         if (jobToCancel.kind === "import") invalidatePreviewAuthority();
-        renderJob(await api.cancelJob(jobToCancel.kind, jobToCancel.id, controller.signal));
+        const fence = activeFences[jobToCancel.kind];
+        const cancelled = await api.cancelJob(jobToCancel.kind, jobToCancel.id, controller.signal);
+        if (fence) renderJob(cancelled, fence);
+        else renderJob(cancelled);
         return;
       }
       if (sessionOwnerId && activeImportOperation?.jobId === null) {
@@ -741,20 +829,24 @@ export function mountDataTransferPage(
       jobId: null,
       previewHandle
     };
-    currentImportOperation = importOperation;
-    currentJobs.import = null;
+    const fence = beginOperation("import", importOperation);
     if (sessionOwnerId) {
       writeStoredOperation(operationStorage ?? null, sessionOwnerId, importOperation);
     }
     invalidatePreviewAuthority();
     await runAction("import", async (signal) => {
       const job = await api.commit(previewHandle, idempotencyKey, signal);
-      if (sessionOwnerId) {
-        currentImportOperation = { ...importOperation, jobId: job.id };
-        writeStoredOperation(operationStorage ?? null, sessionOwnerId, currentImportOperation);
+      if (!isFenceCurrent(fence)) return;
+      if (job.kind !== "import") throw new Error("System Import returned the wrong job kind.");
+      fence.jobId = job.id;
+      const resolved = { ...importOperation, jobId: job.id };
+      setOperation("import", resolved);
+      if (sessionOwnerId && isFenceCurrent(fence)) {
+        writeStoredOperation(operationStorage ?? null, sessionOwnerId, resolved);
       }
+      if (!isFenceCurrent(fence)) return;
       currentUpload = null;
-      await monitorJob(job, signal);
+      await monitorJob(job, signal, fence);
     });
   }
 
