@@ -285,3 +285,9 @@ Result: exit 0; 1 passed and 44 skipped by the name filter. Export bytes omitted
 - `git diff --check c384a39..HEAD`, `git diff --check 82d79c9..HEAD`, `git diff --check`, and `git diff --cached --check`: exit 0 at the implementation revision. The same range/worktree checks are repeated after the evidence commit in the handoff.
 
 No new platform skip was introduced. The four Windows-skipped System Archive private-staging cases and previously listed Linux-only private filesystem, resumable recovery, metadata-backfill, process-death, inode/reaper, permission, and private-root paths remain unverified rather than being called passed. The unrelated dirty documentation, untracked user files, and inaccessible `.repowise-seed` paths remain untouched; repository-root historical `index.html` is unchanged.
+
+### Final independent acceptance
+
+The consolidated reviewer returned **CLEAN** after direct schema/sanitizer probes and focused PostgreSQL verification of the last normalization repairs. It confirmed `artifact.url` is rejected at root, nested-object, and nested-array depths and removed on export; whitespace/parser-normalized empty userinfo and NFKC signed-query aliases are rejected; safe story metadata and stable public HTTP(S) image URLs remain accepted; and no new Critical or Important regression was introduced.
+
+The controller then reran the final gates on code HEAD `9d42dd2`: `pnpm check` exited 0; `pnpm build` exited 0 with normal filesystem visibility after the expected linked-worktree sandbox denial; the full unit suite passed 211 files with 2,544 tests passed and 44 skipped; the complete isolated PostgreSQL runner passed all 68 files with exit 0; Data Transfer Playwright passed 27/27; range and worktree `git diff --check` passed; root historical `index.html` remained unchanged; and `SYSTEM_ARCHIVE_ENABLED` still defaults to `false`.
