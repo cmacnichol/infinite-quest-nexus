@@ -2,7 +2,8 @@ import { z } from "zod";
 import {
   archiveAssetRecordSchema,
   archiveErrorCodeSchema,
-  archiveManifestSchema
+  archiveManifestSchema,
+  isExcludedPortableMetadataKey
 } from "./archives.js";
 import { providerRoleSchema, providerTypeSchema } from "./generation.js";
 
@@ -58,8 +59,114 @@ export const systemPortableProviderSchema = z.object({
   health: z.literal("unknown")
 }).strict();
 
-const portableJsonSchema = z.json();
-const portableJsonObjectSchema = z.record(z.string(), portableJsonSchema);
+function validatePortableAuthorityJson(
+  value: unknown,
+  context: z.RefinementCtx,
+  path: readonly PropertyKey[] = [],
+): void {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => validatePortableAuthorityJson(item, context, [...path, index]));
+    return;
+  }
+  if (value === null || typeof value !== "object") return;
+  for (const [key, child] of Object.entries(value)) {
+    if (isExcludedPortableMetadataKey(key)) {
+      context.addIssue({
+        code: "custom",
+        path: [...path, key],
+        message: "Portable authority JSON cannot contain secrets, capabilities, operational state, or local storage authority."
+      });
+    } else {
+      validatePortableAuthorityJson(child, context, [...path, key]);
+    }
+  }
+}
+
+export const systemPortableAuthorityJsonSchema = z.json().superRefine((value, context) => {
+  validatePortableAuthorityJson(value, context);
+});
+const portableJsonSchema = systemPortableAuthorityJsonSchema;
+const portableJsonObjectSchema = z.record(z.string(), z.json()).superRefine((value, context) => {
+  validatePortableAuthorityJson(value, context);
+});
+
+const SIGNED_OR_TEMPORARY_QUERY_KEYS = new Set([
+  "exp", "expires", "expiry", "se", "sig", "signature", "sp", "sr", "sv"
+]);
+
+function isLocalIpv4(parts: readonly [number, number, number, number]): boolean {
+  const [first, second] = parts;
+  return first === 0 || first === 10 || first === 127 || first >= 224
+    || (first === 100 && second >= 64 && second <= 127)
+    || (first === 169 && second === 254)
+    || (first === 172 && second >= 16 && second <= 31)
+    || (first === 192 && second === 168);
+}
+
+function isLocalPortableImageHost(hostname: string): boolean {
+  const normalized = hostname.toLocaleLowerCase("en-US")
+    .replace(/^\[|\]$/gu, "")
+    .replace(/\.$/u, "");
+  if (normalized === "localhost" || normalized.endsWith(".localhost")
+    || normalized.endsWith(".local") || normalized.endsWith(".internal")) return true;
+  const ipv4 = normalized.split(".").map(Number);
+  if (ipv4.length === 4 && ipv4.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)) {
+    return isLocalIpv4(ipv4 as [number, number, number, number]);
+  }
+  const mappedIpv4 = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/u.exec(normalized);
+  if (mappedIpv4) {
+    const high = Number.parseInt(mappedIpv4[1]!, 16);
+    const low = Number.parseInt(mappedIpv4[2]!, 16);
+    return isLocalIpv4([high >>> 8, high & 0xff, low >>> 8, low & 0xff]);
+  }
+  return normalized === "::" || normalized === "::1"
+    || /^(?:fc|fd)/u.test(normalized)
+    || /^fe[89ab]/u.test(normalized)
+    || /^ff/u.test(normalized);
+}
+
+function isSecretBearingImageQueryKey(key: string): boolean {
+  const compact = key.toLocaleLowerCase("en-US").replace(/[^a-z0-9]/gu, "");
+  return isExcludedPortableMetadataKey(key)
+    || SIGNED_OR_TEMPORARY_QUERY_KEYS.has(compact)
+    || /^(?:xamz|xgoog|xms)/u.test(compact);
+}
+
+interface ParsedPortableImageUrl {
+  readonly protocol: string;
+  readonly username: string;
+  readonly password: string;
+  readonly hash: string;
+  readonly hostname: string;
+  readonly pathname: string;
+  readonly searchParams: { keys(): IterableIterator<string> };
+}
+
+export const systemPortableImageUrlSchema = z.string().max(1_000_000).superRefine((value, context) => {
+  if (value === "" || /^\/api\/v1\/assets\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value)) return;
+  let url: ParsedPortableImageUrl;
+  try {
+    const Url = Reflect.get(globalThis, "URL") as
+      | (new (input: string) => ParsedPortableImageUrl)
+      | undefined;
+    if (Url === undefined) throw new TypeError("URL parser is unavailable.");
+    url = new Url(value);
+  } catch {
+    context.addIssue({ code: "custom", message: "Portable image authority must be a stable HTTP(S) URL." });
+    return;
+  }
+  if ((url.protocol !== "http:" && url.protocol !== "https:")
+    || url.username !== "" || url.password !== ""
+    || /^https?:\/\/[^/?#]*@/iu.test(value) || value.includes("#") || url.hash !== ""
+    || isLocalPortableImageHost(url.hostname)
+    || [...url.searchParams.keys()].some(isSecretBearingImageQueryKey)
+    || /(?:^|\/)(?:temporary|temp|signed|presigned|capability)(?:\/|$)/iu.test(url.pathname)) {
+    context.addIssue({
+      code: "custom",
+      message: "Portable image authority cannot contain local, temporary, signed, credentialed, or secret-bearing URLs."
+    });
+  }
+});
 const safeProviderConfigurationSchema = z.object({
   streaming: z.boolean().optional(),
   streamingSupport: z.boolean().optional(),
@@ -762,7 +869,7 @@ const systemTurnRecordV2Schema = systemTurnRecordSchema.safeExtend({
   authority: z.object({
     sourceTurnId: z.string().max(2_000).nullable(),
     customActionSuggestion: z.string().max(1_000_000),
-    imageUrl: z.string().max(1_000_000).nullable(),
+    imageUrl: systemPortableImageUrlSchema.nullable(),
     mechanicsPrivate: portableJsonSchema.nullable(),
     modelMetadata: portableJsonObjectSchema,
     importMetadata: portableJsonObjectSchema,
@@ -914,7 +1021,12 @@ const systemCostEventRecordV2Schema = z.object({
 }).strict();
 
 const systemActivityEventRecordV2Schema = z.object({
-  sourceId: z.string().regex(/^\d+$/),
+  sourceId: z.string().refine(
+    (value) => value.length <= 19
+      && /^[1-9]\d*$/u.test(value)
+      && BigInt(value) <= 9_223_372_036_854_775_807n,
+    "Activity identity must fit a positive PostgreSQL signed bigint."
+  ),
   campaignId: z.string().uuid().nullable(),
   eventType: identifierSchema,
   authority: z.object({
@@ -1287,6 +1399,7 @@ export const systemArchiveAssetBindingV2Schema = z.discriminatedUnion("role", [
 ]);
 
 export const systemArchiveAssetRecordV2Schema = archiveAssetRecordSchema.safeExtend({
+  technicalMetadata: portableJsonObjectSchema,
   bindings: z.array(systemArchiveAssetBindingV2Schema),
   authority: z.object({
     references: z.array(z.object({

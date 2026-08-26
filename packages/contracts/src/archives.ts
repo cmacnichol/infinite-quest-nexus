@@ -28,14 +28,26 @@ function validatePortableArchivePath(path: string, context: z.RefinementCtx): vo
   }
 }
 
-function isExcludedMetadataKey(key: string): boolean {
+export function isExcludedPortableMetadataKey(key: string): boolean {
   const normalized = key.toLocaleLowerCase("en-US");
+  const compact = normalized.replace(/[^a-z0-9]/gu, "");
+  const semantic = key
+    .replace(/([a-z0-9])([A-Z])/gu, "$1_$2")
+    .toLocaleLowerCase("en-US")
+    .replace(/[^a-z0-9]+/gu, "_");
   return /(?:credential|secret|password|api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|auth[_-]?header|cookie|private[_-]?key)/.test(normalized)
     || /(?:provider|temporary|temp|signed|presigned|upload|download).*(?:url|uri|endpoint)/.test(normalized)
     || normalized === "artifacturl"
     || /(?:local|cache|storage|file|temp).*(?:path|dir|directory|location)/.test(normalized)
     || /(?:embedding|thumbnail|raw.*provider.*response|provider.*response|private.*reasoning|reasoning.*private)/.test(normalized)
-    || /(?:response|chain|lease|job|remote)/.test(normalized);
+    || /(?:response|chain|lease|job|remote)/.test(normalized)
+    || compact === "token"
+    || /^(?:api|auth|bearer|provider|access|refresh|share|delivery|read|write|upload|download|session)token(?:hash|value|ciphertext)?$/u.test(compact)
+    || compact.includes("capability")
+    || /^(?:authorization|access|delivery|read|write|upload|download|share)grant$/u.test(compact)
+    || /(?:^|_)(?:authorization|authentication|auth|oauth|access|delivery|read|write|upload|download|share|signed|presigned|temporary)_grant(?:_(?:hash|value|ciphertext))?$/u.test(semantic)
+    || /^(?:nonce|authtag|bearer|session|sessionid|sessionkey)$/u.test(compact)
+    || /^(?:credential|encryption|auth)(?:nonce|tag|material|keyversion)$/u.test(compact);
 }
 
 function isPortableMetadataValue(value: unknown): boolean {
@@ -256,7 +268,7 @@ export function sanitizePortableMetadata(value: unknown): unknown {
 
   const sanitized: PlainRecord = {};
   for (const [key, child] of Object.entries(value)) {
-    if (!isExcludedMetadataKey(key)) sanitized[key] = sanitizePortableMetadata(child);
+    if (!isExcludedPortableMetadataKey(key)) sanitized[key] = sanitizePortableMetadata(child);
   }
   return sanitized;
 }

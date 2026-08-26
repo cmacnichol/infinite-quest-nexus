@@ -269,6 +269,96 @@ describe("System Archive contracts", () => {
       record: { ...records[3]!.record, authority: undefined }
     })).toThrow();
   });
+
+  it("rejects nested secret and capability aliases from version-two portable authority", () => {
+    const turnId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa70";
+    const base = {
+      domain: "turns",
+      formatVersion: 2,
+      sourceId: turnId,
+      record: {
+        sourceId: turnId,
+        campaignId,
+        turnNumber: 4,
+        action: "Open the door.",
+        narration: "The door opens.",
+        choices: [],
+        imagePrompt: "An opening observatory door.",
+        stateSnapshotPrivate: validCampaignState,
+        acceptedAt: "2026-08-25T12:00:04.123456Z",
+        authority: {
+          sourceTurnId: null,
+          customActionSuggestion: "",
+          imageUrl: "https://images.example.test/story/door.png?width=1200&format=webp",
+          mechanicsPrivate: { roll: 17 },
+          modelMetadata: { markdown: "**safe**" },
+          importMetadata: { nested: [null, true, 3.25, { source: "portable" }] },
+          createdAt: "2026-08-25T12:00:04.123456Z",
+          inputMode: "action",
+          inputModeSource: "explicit"
+        }
+      }
+    } as const;
+
+    const parsed = systemRecordEnvelopeSchema.parse(base);
+    expect(parsed).toEqual(base);
+
+    for (const authority of [
+      { ...base.record.authority, mechanicsPrivate: { roll: 17, nested: [{ bearerToken: "secret-sentinel" }] } },
+      { ...base.record.authority, modelMetadata: { bearerToken: "secret-sentinel" } },
+      { ...base.record.authority, modelMetadata: { nested: { credentialNonce: "secret-sentinel" } } },
+      { ...base.record.authority, importMetadata: { nested: { deliveryCapability: "capability-sentinel" } } }
+    ]) {
+      expect(systemRecordEnvelopeSchema.safeParse({
+        ...base,
+        record: { ...base.record, authority }
+      }).success).toBe(false);
+    }
+  });
+
+  it.each([
+    "https://user:password@images.example.test/story.png",
+    "https://@images.example.test/story.png",
+    "https://images.example.test/story.png#private-fragment",
+    "https://images.example.test/story.png#",
+    "https://images.example.test/story.png?access_token=secret-sentinel",
+    "https://images.example.test/story.png?X-Amz-Signature=capability-sentinel",
+    "http://127.0.0.1/private.png",
+    "http://[::ffff:127.0.0.1]/private.png",
+    "file:///private/story.png",
+    "data:image/png;base64,c2VjcmV0",
+    "blob:https://images.example.test/private"
+  ])("rejects unsafe version-two turn image authority %s", (imageUrl) => {
+    const turnId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa71";
+    expect(systemRecordEnvelopeSchema.safeParse({
+      domain: "turns",
+      formatVersion: 2,
+      sourceId: turnId,
+      record: {
+        sourceId: turnId,
+        campaignId,
+        turnNumber: 4,
+        action: "Open.",
+        narration: "Opened.",
+        choices: [],
+        imagePrompt: "Door.",
+        stateSnapshotPrivate: validCampaignState,
+        acceptedAt: "2026-08-25T12:00:04.123456Z",
+        authority: {
+          sourceTurnId: null,
+          customActionSuggestion: "",
+          imageUrl,
+          mechanicsPrivate: null,
+          modelMetadata: {},
+          importMetadata: {},
+          createdAt: "2026-08-25T12:00:04.123456Z",
+          inputMode: "action",
+          inputModeSource: "explicit"
+        }
+      }
+    }).success).toBe(false);
+  });
+
   it("validates authoritative prose without transforming exact bytes", () => {
     const exact = "  \n# Exact Markdown\n\n```text\n  keep leading spaces  \n```\n  ";
     const promptId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa90";

@@ -127,6 +127,57 @@ describe("System Archive governed relationship index", () => {
     }
   });
 
+  it("fails before retaining index values beyond the configured byte budget", async () => {
+    const index = await SystemArchivePreviewIndex.create({
+      maximumIndexedBytes: 300,
+    });
+    try {
+      expect(() => index.add({
+        domain: "worlds",
+        sourceId: "world-authority-that-cannot-fit-inside-sixty-four-indexed-bytes",
+        record: {},
+      } as never, new Set())).toThrow(expect.objectContaining({
+        code: "archive-limit-exceeded",
+      }));
+      expect(index.counts().worlds).toBe(0);
+    } finally {
+      await index.close();
+    }
+  });
+
+  it("preserves the typed byte-limit failure while indexing asset bindings", async () => {
+    const index = await SystemArchivePreviewIndex.create({ maximumIndexedBytes: 500 });
+    try {
+      index.add({ domain: "worlds", sourceId: "world-1", record: {} } as never, new Set());
+      expect(() => index.validate([{
+        sourceAssetId: "asset-1",
+        bindings: [{ role: "world_cover", worldId: "world-1" }],
+      }] as never)).toThrow(expect.objectContaining({
+        code: "archive-limit-exceeded",
+      }));
+    } finally {
+      await index.close();
+    }
+  });
+
+  it("does not retain campaign-state JSON that relationship validation never reads", async () => {
+    const index = await SystemArchivePreviewIndex.create({ maximumIndexedBytes: 1_100 });
+    try {
+      expect(() => index.add({
+        domain: "campaign-state",
+        sourceId: "campaign-1",
+        record: {
+          campaignId: "campaign-1",
+          revision: 1,
+          state: { narrative: "x".repeat(1_000_000) },
+        },
+      } as never, new Set())).not.toThrow();
+      expect(index.counts()["campaign-state"]).toBe(1);
+    } finally {
+      await index.close();
+    }
+  });
+
   it("bounds relationship rows independently from the logical-record count", async () => {
     const index = await SystemArchivePreviewIndex.create({
       maximumRecords: 10,

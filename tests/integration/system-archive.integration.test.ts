@@ -659,6 +659,79 @@ integration("deterministic owner-wide System Archive export", () => {
     }
   });
 
+  it("preserves exact PostgreSQL microseconds in directly queried owner and asset authority", async () => {
+    await ensureOriginalAssetFixtures();
+    const exactTimestamp = "2026-08-25T12:34:56.123456Z";
+    const referenceId = randomUUID();
+    const generationContextId = randomUUID();
+    await pool.query(
+      "UPDATE users SET created_at=$2,updated_at=$2 WHERE id=$1",
+      [ownerUserId, exactTimestamp],
+    );
+    await pool.query(
+      `UPDATE assets SET created_at=$3 WHERE owner_user_id=$1 AND id=$2`,
+      [ownerUserId, originals[0]!.id, exactTimestamp],
+    );
+    await pool.query(
+      `UPDATE asset_library_entries
+          SET archived_at=$3,created_at=$3,updated_at=$3
+        WHERE owner_user_id=$1 AND asset_id=$2`,
+      [ownerUserId, originals[0]!.id, exactTimestamp],
+    );
+    await pool.query(
+      `INSERT INTO asset_references (
+         id,owner_user_id,asset_id,campaign_id,turn_id,asset_role,created_at
+       ) VALUES ($1,$2,$3,$4,$5,'turn_illustration',$6)`,
+      [referenceId, ownerUserId, originals[0]!.id, campaignId, turnId, exactTimestamp],
+    );
+    await pool.query(
+      `INSERT INTO asset_generation_contexts (
+         id,owner_user_id,asset_id,created_by_user_id,world_id,world_version_id,
+         campaign_id,turn_id,target_type,created_at
+       ) VALUES ($1,$2,$3,$2,$4,$5,$6,$7,'turn_illustration',$8)`,
+      [generationContextId, ownerUserId, originals[0]!.id, worldId, worldVersionId, campaignId, turnId, exactTimestamp],
+    );
+    await pool.query(
+      `UPDATE turn_illustration_segment_assets
+          SET created_at=$3
+        WHERE owner_user_id=$1 AND asset_id=$2`,
+      [ownerUserId, originals[1]!.id, exactTimestamp],
+    );
+
+    const snapshots = createPostgresSystemArchiveExportRepository(pool, {
+      pageSize: 2,
+      sourceApplicationVersion: "0.1.0",
+    });
+    const captured = await snapshots.withOwnerSnapshot({ ownerUserId }, async (snapshot) => {
+      const owner = await snapshot.readOwner();
+      const assets = [];
+      for await (const asset of snapshot.listOriginalAssets()) assets.push(asset.record);
+      return { owner, assets };
+    });
+    const primary = captured.assets.find((asset) => asset.sourceAssetId === originals[0]!.id)!;
+    const variant = captured.assets.find((asset) => asset.sourceAssetId === originals[1]!.id)!;
+
+    expect(captured.owner).toMatchObject({ createdAt: exactTimestamp, updatedAt: exactTimestamp });
+    expect(primary).toMatchObject({
+      createdAt: exactTimestamp,
+      library: { archivedAt: exactTimestamp },
+      authority: {
+        references: [expect.objectContaining({ sourceId: referenceId, createdAt: exactTimestamp })],
+        library: { createdAt: exactTimestamp, updatedAt: exactTimestamp },
+      },
+    });
+    expect(primary.bindings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        role: "generation_context",
+        sourceContextId: generationContextId,
+        authority: expect.objectContaining({ createdAt: exactTimestamp }),
+      }),
+    ]));
+    expect(variant.bindings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: "illustration_segment_variant", createdAt: exactTimestamp }),
+    ]));
+  });
+
   it("exports exhaustive logical authority, all retained originals, and no excluded state", async () => {
     const first = await exportArchive();
     const second = await exportArchive();
@@ -1638,6 +1711,115 @@ integration("deterministic owner-wide System Archive export", () => {
     )).resolves.toMatchObject({ rows: [{ status: "cancelled" }] });
     expect(await writer.unpublishedArtifactCount()).toBe(0);
   });
+
+  it("removes recursive secret and capability authority from export bytes and restored rows", async () => {
+    const sentinel = "second-final-capability-sentinel";
+    const excludedAuthority = { nested: [{ oneTimeReadGrant: sentinel }], safe: { markdown: "retained" } };
+    await pool.query(
+      "UPDATE users SET settings=$2::jsonb WHERE id=$1",
+      [ownerUserId, JSON.stringify(excludedAuthority)],
+    );
+    await pool.query(
+      "UPDATE campaigns SET legacy_settings=$2::jsonb WHERE id=$1",
+      [campaignId, JSON.stringify(excludedAuthority)],
+    );
+    await pool.query(
+      `UPDATE turns
+          SET image_url=$2,mechanics_private=$3::jsonb,
+              model_metadata=$3::jsonb,import_metadata=$3::jsonb
+        WHERE id=$1`,
+      [turnId, `https://images.invalid/story.png?X-Amz-Signature=${sentinel}`, JSON.stringify(excludedAuthority)],
+    );
+    await pool.query(
+      `UPDATE campaign_state
+          SET import_provenance=$2::jsonb,initial_state_snapshot=$2::jsonb
+        WHERE campaign_id=$1`,
+      [campaignId, JSON.stringify(excludedAuthority)],
+    );
+    await pool.query(
+      "UPDATE chronicle_memories SET metadata=$2::jsonb WHERE campaign_id=$1",
+      [campaignId, JSON.stringify(excludedAuthority)],
+    );
+    await pool.query(
+      "UPDATE summary_checkpoints SET content=$2::jsonb WHERE campaign_id=$1",
+      [campaignId, JSON.stringify(excludedAuthority)],
+    );
+    await pool.query(
+      "UPDATE imports SET stats=$2::jsonb WHERE campaign_id=$1",
+      [campaignId, JSON.stringify(excludedAuthority)],
+    );
+    await pool.query(
+      "UPDATE provider_cost_events SET usage_metadata=$2::jsonb WHERE campaign_id=$1",
+      [campaignId, JSON.stringify(excludedAuthority)],
+    );
+    await pool.query(
+      "UPDATE activity_events SET details=$2::jsonb WHERE campaign_id=$1",
+      [campaignId, JSON.stringify(excludedAuthority)],
+    );
+    await pool.query(
+      "UPDATE assets SET technical_metadata=$2::jsonb WHERE owner_user_id=$1",
+      [ownerUserId, JSON.stringify(excludedAuthority)],
+    );
+
+    const exported = await exportArchive();
+    const { zip, serialized } = await archiveText(exported.bytes);
+    expect(serialized).not.toContain(sentinel);
+    expect(serialized).toContain('"markdown":"retained"');
+
+    const records = (await Promise.all(Object.values(zip.files)
+      .filter((entry) => entry.name.startsWith("records/") && !entry.dir)
+      .map((entry) => entry.async("string"))))
+      .flatMap((entry) => entry.trim().split("\n").filter(Boolean)
+        .map((line) => systemRecordEnvelopeSchema.parse(JSON.parse(line))))
+      .filter((record) => record.domain !== "illustrations")
+      .sort((left, right) =>
+        SYSTEM_ARCHIVE_DOMAINS.indexOf(left.domain) - SYSTEM_ARCHIVE_DOMAINS.indexOf(right.domain));
+
+    await pool.query(
+      "TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE",
+    );
+    await pool.query("DELETE FROM system_archive_jobs");
+    await pool.query("DELETE FROM system_archive_uploads");
+    const imports = createPostgresSystemArchiveImportRepository(pool);
+    const owner = { ownerUserId };
+    const destination = await imports.destinationFingerprint(owner, {});
+    await imports.withAtomicImport(owner, { destination, ignore: {} }, async (transaction) => {
+      await transaction.insertLogicalDomains(records);
+    });
+
+    const persisted = await pool.query<{ payload: unknown }>(
+      `SELECT jsonb_build_object(
+                'legacySettings',campaign.legacy_settings,
+                'imageUrl',turn_row.image_url,
+                'mechanics',turn_row.mechanics_private,
+                'model',turn_row.model_metadata,
+                'import',turn_row.import_metadata,
+                'provenance',state.import_provenance,
+                'initialState',state.initial_state_snapshot,
+                'memory',memory.metadata,
+                'checkpoint',checkpoint.content,
+                'importStats',imported.stats,
+                'costUsage',cost.usage_metadata,
+                'activity',activity.details
+              ) AS payload
+         FROM campaigns campaign
+         JOIN turns turn_row ON turn_row.campaign_id=campaign.id
+         JOIN campaign_state state ON state.campaign_id=campaign.id
+         JOIN chronicle_memories memory ON memory.campaign_id=campaign.id
+         JOIN summary_checkpoints checkpoint ON checkpoint.campaign_id=campaign.id
+         JOIN imports imported ON imported.campaign_id=campaign.id
+         JOIN provider_cost_events cost ON cost.campaign_id=campaign.id
+         JOIN activity_events activity ON activity.campaign_id=campaign.id
+        WHERE campaign.id=$1`,
+      [campaignId],
+    );
+    expect(persisted.rows).toHaveLength(1);
+    expect(JSON.stringify(persisted.rows[0]!.payload)).not.toContain(sentinel);
+    expect(persisted.rows[0]!.payload).toMatchObject({
+      imageUrl: "",
+      mechanics: { nested: [{}], safe: { markdown: "retained" } },
+    });
+  }, 30_000);
 
   it("rolls back every logical domain when an atomic System Import fails mid-graph", async () => {
     await pool.query("TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE");
@@ -3083,9 +3265,9 @@ integration("deterministic owner-wide System Archive export", () => {
         },
       }),
       systemRecordEnvelopeSchema.parse({
-        domain: "activity-events", formatVersion: 2, sourceId: "9001",
+        domain: "activity-events", formatVersion: 2, sourceId: "9007199254740993",
         record: {
-          sourceId: "9001", campaignId, eventType: "system-archive-sentinel",
+          sourceId: "9007199254740993", campaignId, eventType: "system-archive-sentinel",
           authority: { correlationId: " correlation sentinel ", details: { markdown: exactText }, createdAt: acceptedAt },
         },
       }),
@@ -3231,7 +3413,7 @@ integration("deterministic owner-wide System Archive export", () => {
               profile.configuration,profile.request_timeout_ms,profile.enabled,profile.is_default,
               campaign.text_provider_profile_id,campaign.image_provider_profile_id,
               campaign.story_length_profile,campaign.turn_control_style,campaign.legacy_settings,
-              turn_row.action,turn_row.narration,turn_row.custom_action_suggestion,
+              turn_row.action,turn_row.narration,turn_row.custom_action_suggestion,turn_row.image_url,
               turn_row.mechanics_private,turn_row.model_metadata,turn_row.import_metadata,
               state.revision,state.import_provenance,state.scratchpad_safe_for_prompt,state.initial_state_snapshot
          FROM provider_profiles profile
@@ -3259,6 +3441,7 @@ integration("deterministic owner-wide System Archive export", () => {
       action: exactText,
       narration: exactText,
       custom_action_suggestion: exactText,
+      image_url: "https://images.invalid/sentinel.png",
       mechanics_private: { roll: 17, private: exactText },
       model_metadata: { model: "story-sentinel", markdown: exactText },
       import_metadata: { source: "v2-sentinel", exactText },
@@ -3313,7 +3496,7 @@ integration("deterministic owner-wide System Archive export", () => {
       amount: "12.345678000000",
       currency: "EUR",
       usage_metadata: { tokens: 73, markdown: exactText },
-      activity_id: "9001",
+      activity_id: "9007199254740993",
       correlation_id: " correlation sentinel ",
       details: { markdown: exactText },
       source_text: exactText,
@@ -3338,6 +3521,9 @@ integration("deterministic owner-wide System Archive export", () => {
       reference_id: assetReferenceId,
       asset_variant: 1,
     }] });
+    await expect(pool.query<{ next_id: string }>(
+      "SELECT nextval(pg_get_serial_sequence('activity_events','id'))::text AS next_id",
+    )).resolves.toMatchObject({ rows: [{ next_id: "9007199254740994" }] });
     await pool.query("TRUNCATE TABLE assets CASCADE");
     await pool.query(
       `UPDATE durable_filesystem_operations

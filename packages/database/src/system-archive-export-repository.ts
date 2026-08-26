@@ -4,6 +4,7 @@ import {
   systemArchiveAssetRecordV2Schema,
   systemArchiveOperationalOmissionsSchema,
   systemArchiveReportSchema,
+  systemPortableImageUrlSchema,
   systemRecordEnvelopeSchema,
   type SystemArchiveAssetBindingV2,
   type SystemArchiveDomain,
@@ -49,6 +50,7 @@ function safeInteger(value: unknown, field: string): number {
 }
 
 function iso(value: Date | string): string {
+  if (typeof value === "string") return value;
   const parsed = value instanceof Date ? value : new Date(value);
   if (!Number.isFinite(parsed.valueOf())) throw exportError("System Archive source timestamp is invalid.");
   return parsed.toISOString();
@@ -180,6 +182,12 @@ function sanitizedPortableJson(value: unknown): PortableJson {
   return sanitizePortableMetadata(value) as PortableJson;
 }
 
+function sanitizedPortableImageUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const parsed = systemPortableImageUrlSchema.safeParse(value);
+  return parsed.success ? parsed.data : "";
+}
+
 function parseEnvelope(domain: SystemArchiveDomain, value: unknown): SystemRecordEnvelope {
   let candidate = value;
   if (domain === "providers" && typeof value === "object" && value !== null) {
@@ -203,9 +211,19 @@ function parseEnvelope(domain: SystemArchiveDomain, value: unknown): SystemRecor
     const envelope = candidate as Record<string, any>;
     const authority = envelope.record?.authority;
     switch (domain) {
+      case "campaigns":
+        candidate = { ...envelope, record: { ...envelope.record, authority: {
+          ...authority,
+          legacySettings: sanitizedPortableObject(authority?.legacySettings, "campaign legacy settings"),
+        } } };
+        break;
       case "turns":
         candidate = { ...envelope, record: { ...envelope.record, authority: {
           ...authority,
+          imageUrl: sanitizedPortableImageUrl(authority?.imageUrl),
+          mechanicsPrivate: authority?.mechanicsPrivate === null
+            ? null
+            : sanitizedPortableJson(authority?.mechanicsPrivate),
           modelMetadata: sanitizedPortableObject(authority?.modelMetadata, "turn model metadata"),
           importMetadata: sanitizedPortableObject(authority?.importMetadata, "turn import metadata"),
         } } };
@@ -229,6 +247,11 @@ function parseEnvelope(domain: SystemArchiveDomain, value: unknown): SystemRecor
             ...authority,
             metadata: sanitizedPortableObject(authority?.metadata, "Chronicle metadata"),
           } } };
+        } else if (envelope.record?.kind === "summary-checkpoint") {
+          candidate = { ...envelope, record: {
+            ...envelope.record,
+            content: sanitizedPortableJson(envelope.record.content),
+          } };
         }
         break;
       case "imports":
@@ -912,7 +935,8 @@ async function assetBindings(
     asset_role: string;
     created_at: Date | string;
   }>(
-    `SELECT id,asset_id,campaign_id,turn_id,asset_role,created_at
+    `SELECT id,asset_id,campaign_id,turn_id,asset_role,
+            to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at
        FROM asset_references
       WHERE owner_user_id=$1 AND asset_id=ANY($2::uuid[])`,
     [ownerUserId, assetIds],
@@ -943,7 +967,8 @@ async function assetBindings(
     created_at: Date | string;
   }>(
     `SELECT segment_asset.asset_id,segment.campaign_id,segment.turn_id,
-            segment_asset.segment_id,segment_asset.variant_index,segment_asset.created_at
+            segment_asset.segment_id,segment_asset.variant_index,
+            to_char(segment_asset.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at
        FROM turn_illustration_segment_assets segment_asset
        JOIN turn_illustration_segments segment
          ON segment.id=segment_asset.segment_id AND segment.owner_user_id=segment_asset.owner_user_id
@@ -990,7 +1015,8 @@ async function assetBindings(
             created_by_user_id,target_type,variant_index,fiction_prompt,negative_prompt,
             entities,characters,locations,factions,scene_attributes,provider_profile_id,
             provider_type,model,generation_parameters,parent_asset_ids,
-            metadata_schema_version,created_at
+            metadata_schema_version,
+            to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at
        FROM asset_generation_contexts
       WHERE owner_user_id=$1 AND asset_id=ANY($2::uuid[])`,
     [ownerUserId, assetIds],
@@ -1046,13 +1072,16 @@ async function* originalAssets(
     const result = await client.query<AssetRow>(
       `SELECT asset.id,asset.content_hash,asset.mime_type,asset.byte_length,
               asset.pixel_width,asset.pixel_height,asset.technical_metadata,
-              asset.created_at,asset.campaign_id,asset.turn_id,
+              to_char(asset.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at,
+              asset.campaign_id,asset.turn_id,
               library.title,library.caption,library.notes,library.tags,library.origin,
               library.review_status,library.reuse_scope,library.automatic_reuse_enabled,
-              library.content_categories,library.favorite,library.archived_at,
+              library.content_categories,library.favorite,
+              to_char(library.archived_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS archived_at,
               library.created_by_user_id AS library_created_by_user_id,
-              library.metadata_revision,library.created_at AS library_created_at,
-              library.updated_at AS library_updated_at
+              library.metadata_revision,
+              to_char(library.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS library_created_at,
+              to_char(library.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS library_updated_at
          FROM assets asset
          LEFT JOIN asset_library_entries library
            ON library.asset_id=asset.id AND library.owner_user_id=asset.owner_user_id
@@ -1186,7 +1215,10 @@ export function createPostgresSystemArchiveExportRepository(
           created_at: Date | string;
           updated_at: Date | string;
         }>(
-          "SELECT id,display_name,status,settings,created_at,updated_at FROM users WHERE id=$1 AND status='active'",
+          `SELECT id,display_name,status,settings,
+                  to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at,
+                  to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at
+             FROM users WHERE id=$1 AND status='active'`,
           [owner.ownerUserId],
         );
         const ownerRow = ownerResult.rows[0];

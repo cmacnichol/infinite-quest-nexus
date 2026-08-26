@@ -1638,10 +1638,10 @@ async function insertLogicalRecord(
     }
     case "activity-events": {
       const { record } = envelope;
-      const activityId = isV2Envelope(envelope)
-        ? Number.parseInt(record.sourceId, 10)
-        : activityEventIdentity(record.sourceId);
-      if (!Number.isSafeInteger(activityId) || activityId < 1) {
+      const versionTwo = isV2Envelope(envelope);
+      const activityId = versionTwo ? record.sourceId : activityEventIdentity(record.sourceId);
+      if (!versionTwo && (typeof activityId !== "number"
+        || !Number.isSafeInteger(activityId) || activityId < 1)) {
         throw repositoryError("System Archive activity identity is invalid.", 400);
       }
       await requireLogicalMutation(database.query(
@@ -1653,11 +1653,11 @@ async function insertLogicalRecord(
           ownerUserId,
           record.campaignId,
           record.eventType,
-          isV2Envelope(envelope) ? envelope.record.authority.correlationId : record.sourceId,
-          isV2Envelope(envelope)
+          versionTwo ? envelope.record.authority.correlationId : record.sourceId,
+          versionTwo
             ? json(envelope.record.authority.details)
             : json({ summary: envelope.record.summary, sourceId: record.sourceId }),
-          isV2Envelope(envelope) ? envelope.record.authority.createdAt : envelope.record.occurredAt
+          versionTwo ? envelope.record.authority.createdAt : envelope.record.occurredAt
         ]
       ), envelope.domain);
       await database.query(

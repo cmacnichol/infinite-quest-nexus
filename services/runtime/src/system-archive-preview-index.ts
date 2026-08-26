@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import {
   SYSTEM_ARCHIVE_DOMAINS,
@@ -28,6 +29,14 @@ function jsonFailure(): ArchiveError {
   );
 }
 
+const DEFAULT_MAXIMUM_INDEXED_BYTES = 512 * 1024 * 1024;
+const CONSERVATIVE_INDEX_ROW_OVERHEAD_BYTES = 256;
+const CONSERVATIVE_INDEX_TEXT_MULTIPLIER = 4;
+
+function canonicalValueHash(value: unknown): string {
+  return createHash("sha256").update(canonicalArchiveJson(value)).digest("hex");
+}
+
 function validateWorldContent(content: WorldContent, assetIds: ReadonlySet<string>): void {
   const entityIds = new Set(content.entities.map((entity) => entity.id));
   const characterIds = new Set(content.playableCharacters.map((character) => character.id));
@@ -49,21 +58,25 @@ export class SystemArchivePreviewIndex {
   readonly #database: DatabaseSync;
   readonly #maximumRecords: number;
   readonly #maximumRelationships: number;
+  readonly #maximumIndexedBytes: number;
   readonly #counts = Object.fromEntries(
     SYSTEM_ARCHIVE_DOMAINS.map((domain) => [domain, 0]),
   ) as Record<SystemArchiveDomain, number>;
   #recordCount = 0;
   #relationshipCount = 0;
+  #indexedBytes = 0;
   #closed = false;
 
   private constructor(
     database: DatabaseSync,
     maximumRecords: number,
     maximumRelationships: number,
+    maximumIndexedBytes: number,
   ) {
     this.#database = database;
     this.#maximumRecords = maximumRecords;
     this.#maximumRelationships = maximumRelationships;
+    this.#maximumIndexedBytes = maximumIndexedBytes;
     database.exec(`
       PRAGMA journal_mode=OFF;
       PRAGMA synchronous=OFF;
@@ -96,8 +109,8 @@ export class SystemArchivePreviewIndex {
       ) WITHOUT ROWID;
       CREATE TABLE actual_asset_bindings (
         asset_id TEXT NOT NULL,
-        binding_key TEXT NOT NULL,
-        PRIMARY KEY (asset_id,binding_key)
+        binding_hash TEXT NOT NULL,
+        PRIMARY KEY (asset_id,binding_hash)
       ) WITHOUT ROWID;
       CREATE TABLE expected_world_version_assets (
         world_id TEXT NOT NULL,
@@ -114,23 +127,21 @@ export class SystemArchivePreviewIndex {
       CREATE TABLE campaign_profiles (
         campaign_id TEXT PRIMARY KEY,
         revision INTEGER NOT NULL,
-        profile_json TEXT
+        profile_hash TEXT
       ) WITHOUT ROWID;
       CREATE TABLE campaign_states (
         campaign_id TEXT PRIMARY KEY,
-        revision INTEGER NOT NULL,
-        state_json TEXT NOT NULL
+        revision INTEGER NOT NULL
       ) WITHOUT ROWID;
       CREATE TABLE character_profile_edits (
         campaign_id TEXT NOT NULL,
         revision INTEGER NOT NULL,
-        profile_json TEXT NOT NULL,
+        profile_hash TEXT NOT NULL,
         PRIMARY KEY (campaign_id,revision)
       ) WITHOUT ROWID;
       CREATE TABLE campaign_state_edits (
         campaign_id TEXT NOT NULL,
         revision INTEGER NOT NULL,
-        state_json TEXT NOT NULL,
         PRIMARY KEY (campaign_id,revision)
       ) WITHOUT ROWID;
       CREATE TABLE world_migrations (
@@ -153,20 +164,50 @@ export class SystemArchivePreviewIndex {
   static async create(options: Readonly<{
     maximumRecords?: number;
     maximumRelationships?: number;
+    maximumIndexedBytes?: number;
   }> = {}): Promise<SystemArchivePreviewIndex> {
     const maximumRecords = options.maximumRecords ?? 2_000_000;
     const maximumRelationships = options.maximumRelationships ?? 2_000_000;
+    const maximumIndexedBytes = options.maximumIndexedBytes ?? DEFAULT_MAXIMUM_INDEXED_BYTES;
     if (!Number.isSafeInteger(maximumRecords) || maximumRecords < 1) {
       throw new RangeError("System Archive preview maximumRecords must be a positive safe integer.");
     }
     if (!Number.isSafeInteger(maximumRelationships) || maximumRelationships < 1) {
       throw new RangeError("System Archive preview maximumRelationships must be a positive safe integer.");
     }
+    if (!Number.isSafeInteger(maximumIndexedBytes) || maximumIndexedBytes < 1) {
+      throw new RangeError("System Archive preview maximumIndexedBytes must be a positive safe integer.");
+    }
     return new SystemArchivePreviewIndex(
       new DatabaseSync(":memory:"),
       maximumRecords,
       maximumRelationships,
+      maximumIndexedBytes,
     );
+  }
+
+  #insertRetainedValues(
+    sql: string,
+    values: readonly (string | number | null)[],
+    onFailure: () => ArchiveError,
+  ): void {
+    const retainedTextBytes = values.reduce<number>((total, value) => (
+      total + (typeof value === "string" ? Buffer.byteLength(value, "utf8") : 0)
+    ), 0);
+    const indexedBytes = CONSERVATIVE_INDEX_ROW_OVERHEAD_BYTES
+      + retainedTextBytes * CONSERVATIVE_INDEX_TEXT_MULTIPLIER;
+    if (indexedBytes > this.#maximumIndexedBytes - this.#indexedBytes) {
+      throw new ArchiveError(
+        "archive-limit-exceeded",
+        "System Archive relationship index exceeds its bounded indexed-byte allowance.",
+      );
+    }
+    try {
+      this.#database.prepare(sql).run(...values);
+    } catch {
+      throw onFailure();
+    }
+    this.#indexedBytes += indexedBytes;
   }
 
   #reserveRelationship(): void {
@@ -193,13 +234,11 @@ export class SystemArchivePreviewIndex {
         "System Archive relationship index exceeds its bounded record allowance.",
       );
     }
-    try {
-      this.#database.prepare(
-        "INSERT INTO records (domain,source_id,parent_id,secondary_id,restore_key,numeric_value) VALUES (?,?,?,?,?,?)",
-      ).run(domain, sourceId, parentId, secondaryId, restoreKey, numericValue);
-    } catch {
-      throw jsonFailure();
-    }
+    this.#insertRetainedValues(
+      "INSERT INTO records (domain,source_id,parent_id,secondary_id,restore_key,numeric_value) VALUES (?,?,?,?,?,?)",
+      [domain, sourceId, parentId, secondaryId, restoreKey, numericValue],
+      jsonFailure,
+    );
     this.#recordCount += 1;
     this.#counts[domain] += 1;
   }
@@ -212,11 +251,13 @@ export class SystemArchivePreviewIndex {
     expectedNumericValue: number | null = null,
   ): void {
     this.#reserveRelationship();
-    this.#database.prepare(
+    this.#insertRetainedValues(
       `INSERT INTO required_references
          (target_domain,target_id,expected_parent_id,expected_secondary_id,expected_numeric_value)
        VALUES (?,?,?,?,?)`,
-    ).run(targetDomain, targetId, expectedParentId, expectedSecondaryId, expectedNumericValue);
+      [targetDomain, targetId, expectedParentId, expectedSecondaryId, expectedNumericValue],
+      relationshipFailure,
+    );
   }
 
   add(envelope: SystemRecordEnvelope, assetIds: ReadonlySet<string>): void {
@@ -271,14 +312,14 @@ export class SystemArchivePreviewIndex {
         );
         for (const binding of envelope.record.content.assets) {
           this.#reserveRelationship();
-          try {
-            this.#database.prepare(`
+          this.#insertRetainedValues(
+            `
               INSERT INTO expected_world_version_assets
                 (world_id,world_version_id,asset_id) VALUES (?,?,?)
-            `).run(envelope.record.worldId, envelope.sourceId, binding.assetId);
-          } catch {
-            throw relationshipFailure();
-          }
+            `,
+            [envelope.record.worldId, envelope.sourceId, binding.assetId],
+            relationshipFailure,
+          );
         }
         this.#require("worlds", envelope.record.worldId);
         break;
@@ -317,13 +358,15 @@ export class SystemArchivePreviewIndex {
           throw relationshipFailure();
         }
         this.#reserveRelationship();
-        this.#database.prepare(
-          "INSERT INTO campaign_profiles (campaign_id,revision,profile_json) VALUES (?,?,?)",
-        ).run(
-          envelope.sourceId,
-          envelope.record.characterProfileRevision,
-          envelope.record.characterProfile === null
-            ? null : canonicalArchiveJson(envelope.record.characterProfile),
+        this.#insertRetainedValues(
+          "INSERT INTO campaign_profiles (campaign_id,revision,profile_hash) VALUES (?,?,?)",
+          [
+            envelope.sourceId,
+            envelope.record.characterProfileRevision,
+            envelope.record.characterProfile === null
+              ? null : canonicalValueHash(envelope.record.characterProfile),
+          ],
+          relationshipFailure,
         );
         break;
       case "turns":
@@ -351,12 +394,13 @@ export class SystemArchivePreviewIndex {
         if (envelope.sourceId !== envelope.record.campaignId) throw relationshipFailure();
         this.#insertRecord(envelope.domain, envelope.sourceId, envelope.record.campaignId);
         this.#reserveRelationship();
-        this.#database.prepare(
-          "INSERT INTO campaign_states (campaign_id,revision,state_json) VALUES (?,?,?)",
-        ).run(
-          envelope.record.campaignId,
-          envelope.record.revision,
-          canonicalArchiveJson(envelope.record.state),
+        this.#insertRetainedValues(
+          "INSERT INTO campaign_states (campaign_id,revision) VALUES (?,?)",
+          [
+            envelope.record.campaignId,
+            envelope.record.revision,
+          ],
+          relationshipFailure,
         );
         this.#require("campaigns", envelope.record.campaignId);
         break;
@@ -386,14 +430,16 @@ export class SystemArchivePreviewIndex {
             this.#require("world-versions", history.details.fromWorldVersionId);
             this.#require("world-versions", history.details.toWorldVersionId);
             this.#reserveRelationship();
-            this.#database.prepare(
+            this.#insertRetainedValues(
               `INSERT INTO world_migrations
                  (history_id,campaign_id,from_version_id,to_version_id) VALUES (?,?,?,?)`,
-            ).run(
-              envelope.sourceId,
-              envelope.record.campaignId,
-              history.details.fromWorldVersionId,
-              history.details.toWorldVersionId,
+              [
+                envelope.sourceId,
+                envelope.record.campaignId,
+                history.details.fromWorldVersionId,
+                history.details.toWorldVersionId,
+              ],
+              relationshipFailure,
             );
             break;
           case "world-transfer": {
@@ -415,18 +461,20 @@ export class SystemArchivePreviewIndex {
             this.#require("world-versions", history.details.fromWorldVersionId);
             this.#require("world-versions", history.details.toWorldVersionId);
             this.#reserveRelationship();
-            this.#database.prepare(
+            this.#insertRetainedValues(
               `INSERT INTO world_transfers (
                  history_id,envelope_campaign_id,source_campaign_id,target_campaign_id,
                  from_version_id,to_version_id
                ) VALUES (?,?,?,?,?,?)`,
-            ).run(
-              envelope.sourceId,
-              envelope.record.campaignId,
-              sourceCampaignId,
-              targetCampaignId,
-              history.details.fromWorldVersionId,
-              history.details.toWorldVersionId,
+              [
+                envelope.sourceId,
+                envelope.record.campaignId,
+                sourceCampaignId,
+                targetCampaignId,
+                history.details.fromWorldVersionId,
+                history.details.toWorldVersionId,
+              ],
+              relationshipFailure,
             );
             break;
           }
@@ -455,23 +503,26 @@ export class SystemArchivePreviewIndex {
             break;
           case "character-profile-edit":
             this.#reserveRelationship();
-            this.#database.prepare(
+            this.#insertRetainedValues(
               `INSERT INTO character_profile_edits
-                 (campaign_id,revision,profile_json) VALUES (?,?,?)`,
-            ).run(
-              envelope.record.campaignId,
-              history.details.revision,
-              canonicalArchiveJson(history.details.nextProfile),
+                 (campaign_id,revision,profile_hash) VALUES (?,?,?)`,
+              [
+                envelope.record.campaignId,
+                history.details.revision,
+                canonicalValueHash(history.details.nextProfile),
+              ],
+              relationshipFailure,
             );
             break;
           case "campaign-state-edit":
             this.#reserveRelationship();
-            this.#database.prepare(
-              "INSERT INTO campaign_state_edits (campaign_id,revision,state_json) VALUES (?,?,?)",
-            ).run(
-              envelope.record.campaignId,
-              history.details.revision,
-              canonicalArchiveJson(history.details.stateSnapshot),
+            this.#insertRetainedValues(
+              "INSERT INTO campaign_state_edits (campaign_id,revision) VALUES (?,?)",
+              [
+                envelope.record.campaignId,
+                history.details.revision,
+              ],
+              relationshipFailure,
             );
             break;
         }
@@ -611,7 +662,7 @@ export class SystemArchivePreviewIndex {
         LEFT JOIN character_profile_edits edit
           ON edit.campaign_id=current.campaign_id
          AND edit.revision=current.revision
-         AND edit.profile_json=current.profile_json
+         AND edit.profile_hash=current.profile_hash
        WHERE (current.revision=0 AND EXISTS (
                 SELECT 1 FROM character_profile_edits declared
                  WHERE declared.campaign_id=current.campaign_id
@@ -700,24 +751,20 @@ export class SystemArchivePreviewIndex {
     for (const asset of assets) {
       for (const binding of asset.bindings) {
         this.#reserveRelationship();
-        try {
-          this.#database.prepare(
-            "INSERT INTO actual_asset_bindings (asset_id,binding_key) VALUES (?,?)",
-          ).run(asset.sourceAssetId, canonicalArchiveJson(binding));
-        } catch {
-          throw relationshipFailure();
-        }
+        this.#insertRetainedValues(
+          "INSERT INTO actual_asset_bindings (asset_id,binding_hash) VALUES (?,?)",
+          [asset.sourceAssetId, canonicalValueHash(binding)],
+          relationshipFailure,
+        );
         switch (binding.role) {
           case "world_cover":
             if (!this.#recordExists("worlds", binding.worldId)) throw relationshipFailure();
             this.#reserveRelationship();
-            try {
-              this.#database.prepare(
-                "INSERT INTO actual_world_covers (world_id,asset_id) VALUES (?,?)",
-              ).run(binding.worldId, asset.sourceAssetId);
-            } catch {
-              throw relationshipFailure();
-            }
+            this.#insertRetainedValues(
+              "INSERT INTO actual_world_covers (world_id,asset_id) VALUES (?,?)",
+              [binding.worldId, asset.sourceAssetId],
+              relationshipFailure,
+            );
             break;
           case "world_version_asset":
             if (!this.#recordExists("worlds", binding.worldId)
@@ -725,14 +772,10 @@ export class SystemArchivePreviewIndex {
               throw relationshipFailure();
             }
             this.#reserveRelationship();
-            try {
-              this.#database.prepare(`
-                INSERT INTO actual_world_version_assets
-                  (world_id,world_version_id,asset_id) VALUES (?,?,?)
-              `).run(binding.worldId, binding.worldVersionId, asset.sourceAssetId);
-            } catch {
-              throw relationshipFailure();
-            }
+            this.#insertRetainedValues(`
+              INSERT INTO actual_world_version_assets
+                (world_id,world_version_id,asset_id) VALUES (?,?,?)
+            `, [binding.worldId, binding.worldVersionId, asset.sourceAssetId], relationshipFailure);
             break;
           case "campaign_asset":
             if (!this.#recordExists("campaigns", binding.campaignId)) throw relationshipFailure();
