@@ -28,17 +28,23 @@ function validatePortableArchivePath(path: string, context: z.RefinementCtx): vo
   }
 }
 
+export function compactPortableAuthorityName(value: string): string {
+  return value.normalize("NFKC")
+    .toLocaleLowerCase("en-US")
+    .replace(/[^a-z0-9]/gu, "");
+}
+
 export function isExcludedPortableMetadataKey(key: string): boolean {
   const canonical = key.normalize("NFKC");
   const normalized = canonical.toLocaleLowerCase("en-US");
-  const compact = normalized.replace(/[^a-z0-9]/gu, "");
+  const compact = compactPortableAuthorityName(key);
   const semantic = canonical
     .replace(/([a-z0-9])([A-Z])/gu, "$1_$2")
     .toLocaleLowerCase("en-US")
     .replace(/[^a-z0-9]+/gu, "_");
   return /(?:credential|secret|password|apikey|accesstoken|refreshtoken|authorization|authheader|cookie|privatekey)/u.test(compact)
     || /(?:provider|temporary|temp|signed|presigned|upload|download).*(?:url|uri|endpoint)/.test(normalized)
-    || normalized === "artifacturl"
+    || compact === "artifacturl"
     || /(?:local|cache|storage|file|temp).*(?:path|dir|directory|location)/.test(normalized)
     || /(?:embedding|thumbnail|raw.*provider.*response|provider.*response|private.*reasoning|reasoning.*private)/.test(normalized)
     || /(?:response|chain|lease|job|remote)/.test(normalized)

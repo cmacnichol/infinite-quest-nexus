@@ -7,6 +7,7 @@ import {
   systemArchivePayloadSchema,
   systemCampaignHistoryDetailsSchema,
   systemImportPreviewViewSchema,
+  systemPortableImageUrlSchema,
   systemRecordEnvelopeSchema
 } from "../../packages/contracts/src/system-archives.js";
 
@@ -296,7 +297,8 @@ describe("System Archive contracts", () => {
             keyMoment: "The door opens.",
             grantWish: "The regent relents.",
             bearerStory: "A courier crosses the valley.",
-            apiLore: "The Api dynasty predates the observatory."
+            apiLore: "The Api dynasty predates the observatory.",
+            artifactLore: "The astrolabe is part of the observatory's history."
           },
           importMetadata: { nested: [null, true, 3.25, { source: "portable" }] },
           createdAt: "2026-08-25T12:00:04.123456Z",
@@ -362,12 +364,54 @@ describe("System Archive contracts", () => {
   });
 
   it.each([
+    ["root", { "artifact.url": "artifact-url-authority-sentinel" }],
+    ["nested object", { nested: { "artifact.url": "artifact-url-authority-sentinel" } }],
+    ["nested array", { nested: [{ "artifact.url": "artifact-url-authority-sentinel" }] }]
+  ] as const)("rejects separator-obfuscated artifact URL authority at the %s v2 JSON path", (_path, modelMetadata) => {
+    const turnId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa75";
+    expect(systemRecordEnvelopeSchema.safeParse({
+      domain: "turns",
+      formatVersion: 2,
+      sourceId: turnId,
+      record: {
+        sourceId: turnId,
+        campaignId,
+        turnNumber: 4,
+        action: "Open.",
+        narration: "Opened.",
+        choices: [],
+        imagePrompt: "Door.",
+        stateSnapshotPrivate: validCampaignState,
+        acceptedAt: "2026-08-25T12:00:04.123456Z",
+        authority: {
+          sourceTurnId: null,
+          customActionSuggestion: "",
+          imageUrl: "https://images.example.test/story/door.png?width=1200&format=webp",
+          mechanicsPrivate: null,
+          modelMetadata,
+          importMetadata: { artifactLore: "Safe story metadata remains portable." },
+          createdAt: "2026-08-25T12:00:04.123456Z",
+          inputMode: "action",
+          inputModeSource: "explicit"
+        }
+      }
+    }).success).toBe(false);
+  });
+
+  it.each([
     "https://user:password@images.example.test/story.png",
     "https://@images.example.test/story.png",
+    " https://@images.example.test/story.png ",
+    "\u2003https://@images.example.test/story.png",
+    "https://@images.example.test/story.png\u00a0",
+    "https:\t//@images.example.test/story.png",
+    "https:/\\@images.example.test/story.png",
+    "https:////@images.example.test/story.png",
     "https://images.example.test/story.png#private-fragment",
     "https://images.example.test/story.png#",
     "https://images.example.test/story.png?access_token=secret-sentinel",
     "https://images.example.test/story.png?api.key=secret-sentinel",
+    "https://images.example.test/story.png?ｓｉｇ=secret-sentinel",
     "https://images.example.test/story.png?X-Amz-Signature=capability-sentinel",
     "https://images.example.test/%73igned/story.png",
     "https://images.example.test/%74emp/story.png",
@@ -407,6 +451,13 @@ describe("System Archive contracts", () => {
         }
       }
     }).success).toBe(false);
+  });
+
+  it.each([
+    "https://images.example.test/story/door.png?width=1200&format=webp",
+    "https://images.example.test/story/door.png?ｗｉｄｔｈ=1200"
+  ])("preserves stable public image authority with safe query keys %s", (imageUrl) => {
+    expect(systemPortableImageUrlSchema.parse(imageUrl)).toBe(imageUrl);
   });
 
   it("preserves v1 cost compatibility while prohibiting v2 provider response authority", () => {

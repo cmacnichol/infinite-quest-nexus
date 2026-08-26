@@ -3,6 +3,7 @@ import {
   archiveAssetRecordSchema,
   archiveErrorCodeSchema,
   archiveManifestSchema,
+  compactPortableAuthorityName,
   isExcludedPortableMetadataKey
 } from "./archives.js";
 import { providerRoleSchema, providerTypeSchema } from "./generation.js";
@@ -93,6 +94,7 @@ const portableJsonObjectSchema = z.record(z.string(), z.json()).superRefine((val
 const SIGNED_OR_TEMPORARY_QUERY_KEYS = new Set([
   "exp", "expires", "expiry", "se", "sig", "signature", "sp", "sr", "sv"
 ]);
+const RAW_HTTP_URL_AUTHORITY_PATTERN = /^https?:\/\/([^/?#]+)(?:[/?#]|$)/iu;
 
 function isLocalIpv4(parts: readonly [number, number, number, number]): boolean {
   const [first, second] = parts;
@@ -126,7 +128,7 @@ function isLocalPortableImageHost(hostname: string): boolean {
 }
 
 function isSecretBearingImageQueryKey(key: string): boolean {
-  const compact = key.toLocaleLowerCase("en-US").replace(/[^a-z0-9]/gu, "");
+  const compact = compactPortableAuthorityName(key);
   return isExcludedPortableMetadataKey(key)
     || SIGNED_OR_TEMPORARY_QUERY_KEYS.has(compact)
     || /^(?:xamz|xgoog|xms)/u.test(compact);
@@ -147,9 +149,7 @@ function hasUnsafePortableImagePath(pathname: string): boolean {
     if (decodedSegment.includes("%") || decodedSegment.includes("/") || decodedSegment.includes("\\")) {
       return true;
     }
-    const compact = decodedSegment.normalize("NFKC")
-      .toLocaleLowerCase("en-US")
-      .replace(/[^a-z0-9]/gu, "");
+    const compact = compactPortableAuthorityName(decodedSegment);
     return UNSAFE_PORTABLE_IMAGE_PATH_SEGMENTS.has(compact);
   });
 }
@@ -165,7 +165,16 @@ interface ParsedPortableImageUrl {
 }
 
 export const systemPortableImageUrlSchema = z.string().max(1_000_000).superRefine((value, context) => {
+  if (value.trim() !== value) {
+    context.addIssue({ code: "custom", message: "Portable image authority must not contain surrounding whitespace." });
+    return;
+  }
   if (value === "" || /^\/api\/v1\/assets\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value)) return;
+  const rawAuthority = RAW_HTTP_URL_AUTHORITY_PATTERN.exec(value);
+  if (!rawAuthority) {
+    context.addIssue({ code: "custom", message: "Portable image authority must use canonical HTTP(S) authority syntax." });
+    return;
+  }
   let url: ParsedPortableImageUrl;
   try {
     const Url = Reflect.get(globalThis, "URL") as
@@ -179,7 +188,7 @@ export const systemPortableImageUrlSchema = z.string().max(1_000_000).superRefin
   }
   if ((url.protocol !== "http:" && url.protocol !== "https:")
     || url.username !== "" || url.password !== ""
-    || /^https?:\/\/[^/?#]*@/iu.test(value) || value.includes("#") || url.hash !== ""
+    || rawAuthority[1]!.includes("@") || value.includes("#") || url.hash !== ""
     || isLocalPortableImageHost(url.hostname)
     || [...url.searchParams.keys()].some(isSecretBearingImageQueryKey)
     || hasUnsafePortableImagePath(url.pathname)) {

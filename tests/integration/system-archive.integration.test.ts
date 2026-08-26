@@ -1714,8 +1714,16 @@ integration("deterministic owner-wide System Archive export", () => {
 
   it("removes recursive secret and capability authority from export bytes and restored rows", async () => {
     const sentinel = "second-final-capability-sentinel";
+    const artifactUrlSentinel = "artifact-url-authority-sentinel";
     const providerResponseSentinel = "provider-response-authority-sentinel";
-    const excludedAuthority = { nested: [{ oneTimeReadGrant: sentinel }], safe: { markdown: "retained" } };
+    const excludedAuthority = {
+      "artifact.url": artifactUrlSentinel,
+      nested: [
+        { oneTimeReadGrant: sentinel, "artifact.url": artifactUrlSentinel }
+      ],
+      nestedObject: { "artifact.url": artifactUrlSentinel },
+      safe: { markdown: "retained", artifactLore: "retained" }
+    };
     await pool.query(
       "UPDATE users SET settings=$2::jsonb WHERE id=$1",
       [ownerUserId, JSON.stringify(excludedAuthority)],
@@ -1767,8 +1775,10 @@ integration("deterministic owner-wide System Archive export", () => {
     const exported = await exportArchive();
     const { zip, serialized } = await archiveText(exported.bytes);
     expect(serialized).not.toContain(sentinel);
+    expect(serialized).not.toContain(artifactUrlSentinel);
     expect(serialized).not.toContain(providerResponseSentinel);
     expect(serialized).toContain('"markdown":"retained"');
+    expect(serialized).toContain('"artifactLore":"retained"');
 
     const records = (await Promise.all(Object.values(zip.files)
       .filter((entry) => entry.name.startsWith("records/") && !entry.dir)
