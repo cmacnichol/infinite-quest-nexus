@@ -394,7 +394,7 @@ function compiledRuntimeEnvironment(input: Readonly<{
     NEXT_WEB_ROOT: resolve("apps/web-next/dist"),
     ASSET_STORAGE_ROOT: input.assetRoot,
     ARCHIVE_STORAGE_ROOT: input.archiveRoot,
-    ARCHIVE_PREVIEW_TTL_SECONDS: "300",
+    ARCHIVE_PREVIEW_TTL_SECONDS: "1800",
     SYSTEM_ARCHIVE_ARTIFACT_TTL_SECONDS: "300",
     SYSTEM_ARCHIVE_ENABLED: "true",
     SYSTEM_ARCHIVE_UPLOAD_TTL_SECONDS: "300",
@@ -3116,6 +3116,18 @@ async function assertImportedAuthority(
 
 describe("System Archive v1 release compatibility", () => {
   it("pins and inspects the frozen minimal fixture without regenerating its exact payload bytes", async () => {
+    const releaseEnvironment = compiledRuntimeEnvironment({
+      databaseUrl: "postgresql://release-gate.invalid/infinitequest",
+      archiveRoot: resolve("release-gate/archives"),
+      assetRoot: resolve("release-gate/assets"),
+      port: 8080,
+      role: "all",
+    });
+    expect(
+      releaseEnvironment.ARCHIVE_PREVIEW_TTL_SECONDS,
+      "compiled release services must use the import repository's fixed 1,800-second preview authority TTL",
+    ).toBe("1800");
+
     const { manifestBytes, systemBytes, assetsBytes, archiveBytes } = await frozenFixture();
 
     expect(sha256(manifestBytes)).toBe("71bc16ab105ec19027a83c3efa2853f3f96f55987f5f14720f3a53838106c8b8");
