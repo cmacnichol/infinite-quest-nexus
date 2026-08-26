@@ -884,16 +884,32 @@ async function insertLogicalRecord(
           return true;
         }
         case "world-migration": {
+          const fromWorldVersionId = historyUuid(record.eventType, content, "fromWorldVersionId");
+          const toWorldVersionId = historyUuid(record.eventType, content, "toWorldVersionId");
+          if (fromWorldVersionId === toWorldVersionId) invalidHistory(record.eventType);
           await requireHistoryMutation(database.query(
             `INSERT INTO campaign_world_migrations (
                id,owner_user_id,campaign_id,from_world_version_id,to_world_version_id,note,created_at
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+             )
+             SELECT $1,$2,$3,$4,$5,$6,$7
+               FROM campaigns campaign
+               JOIN world_versions campaign_version
+                 ON campaign_version.id=campaign.world_version_id
+                AND campaign_version.owner_user_id=campaign.owner_user_id
+               JOIN world_versions source_version
+                 ON source_version.id=$4 AND source_version.owner_user_id=$2
+               JOIN world_versions target_version
+                 ON target_version.id=$5 AND target_version.owner_user_id=$2
+              WHERE campaign.id=$3 AND campaign.owner_user_id=$2
+                AND source_version.id<>target_version.id
+                AND source_version.world_id=target_version.world_id
+                AND campaign_version.world_id=source_version.world_id`,
             [
               record.sourceId,
               ownerUserId,
               record.campaignId,
-              historyUuid(record.eventType, content, "fromWorldVersionId"),
-              historyUuid(record.eventType, content, "toWorldVersionId"),
+              fromWorldVersionId,
+              toWorldVersionId,
               historyString(record.eventType, content, "note"),
               record.occurredAt
             ]
@@ -901,6 +917,15 @@ async function insertLogicalRecord(
           return true;
         }
         case "world-transfer": {
+          const sourceCampaignId = historyOptionalUuid(record.eventType, content, "sourceCampaignId");
+          const targetCampaignId = historyOptionalUuid(record.eventType, content, "targetCampaignId");
+          const fromWorldVersionId = historyUuid(record.eventType, content, "fromWorldVersionId");
+          const toWorldVersionId = historyUuid(record.eventType, content, "toWorldVersionId");
+          if ((targetCampaignId ?? sourceCampaignId) !== record.campaignId
+            || (sourceCampaignId !== null && sourceCampaignId === targetCampaignId)
+            || fromWorldVersionId === toWorldVersionId) {
+            invalidHistory(record.eventType);
+          }
           const sourceFingerprint = historyString(record.eventType, content, "sourceFingerprint");
           requireHash(sourceFingerprint, "System Archive world-transfer source fingerprint");
           await requireHistoryMutation(database.query(
@@ -908,14 +933,46 @@ async function insertLogicalRecord(
                id,owner_user_id,idempotency_key,source_campaign_id,target_campaign_id,
                from_world_version_id,to_world_version_id,character_strategy,state_strategy,
                target_defaults_policy,source_fingerprint,warnings,note,created_at
-             ) VALUES ($1,$2,$1,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13)`,
+             )
+             SELECT $1,$2,$1,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13
+              WHERE $5::uuid<>$6::uuid
+                AND EXISTS (
+                  SELECT 1 FROM world_versions source_version
+                   WHERE source_version.id=$5 AND source_version.owner_user_id=$2
+                )
+                AND EXISTS (
+                  SELECT 1 FROM world_versions target_version
+                   WHERE target_version.id=$6 AND target_version.owner_user_id=$2
+                )
+                AND ($3::uuid IS NULL OR EXISTS (
+                  SELECT 1
+                    FROM campaigns source_campaign
+                    JOIN world_versions source_campaign_version
+                      ON source_campaign_version.id=source_campaign.world_version_id
+                     AND source_campaign_version.owner_user_id=source_campaign.owner_user_id
+                    JOIN world_versions source_version
+                      ON source_version.id=$5 AND source_version.owner_user_id=$2
+                   WHERE source_campaign.id=$3 AND source_campaign.owner_user_id=$2
+                     AND source_campaign_version.world_id=source_version.world_id
+                ))
+                AND ($4::uuid IS NULL OR EXISTS (
+                  SELECT 1
+                    FROM campaigns target_campaign
+                    JOIN world_versions target_campaign_version
+                      ON target_campaign_version.id=target_campaign.world_version_id
+                     AND target_campaign_version.owner_user_id=target_campaign.owner_user_id
+                    JOIN world_versions target_version
+                      ON target_version.id=$6 AND target_version.owner_user_id=$2
+                   WHERE target_campaign.id=$4 AND target_campaign.owner_user_id=$2
+                     AND target_campaign_version.world_id=target_version.world_id
+                ))`,
             [
               record.sourceId,
               ownerUserId,
-              historyOptionalUuid(record.eventType, content, "sourceCampaignId"),
-              historyOptionalUuid(record.eventType, content, "targetCampaignId"),
-              historyUuid(record.eventType, content, "fromWorldVersionId"),
-              historyUuid(record.eventType, content, "toWorldVersionId"),
+              sourceCampaignId,
+              targetCampaignId,
+              fromWorldVersionId,
+              toWorldVersionId,
               historyEnum(record.eventType, content, "characterStrategy", ["preserve_source"] as const),
               historyEnum(record.eventType, content, "stateStrategy", ["preserve"] as const),
               historyEnum(record.eventType, content, "targetDefaultsPolicy", ["retain_source"] as const),

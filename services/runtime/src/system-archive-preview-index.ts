@@ -130,6 +130,15 @@ export class SystemArchivePreviewIndex {
       ) WITHOUT ROWID;
       CREATE TABLE world_migrations (
         history_id TEXT PRIMARY KEY,
+        campaign_id TEXT NOT NULL,
+        from_version_id TEXT NOT NULL,
+        to_version_id TEXT NOT NULL
+      ) WITHOUT ROWID;
+      CREATE TABLE world_transfers (
+        history_id TEXT PRIMARY KEY,
+        envelope_campaign_id TEXT NOT NULL,
+        source_campaign_id TEXT,
+        target_campaign_id TEXT,
         from_version_id TEXT NOT NULL,
         to_version_id TEXT NOT NULL
       ) WITHOUT ROWID;
@@ -340,30 +349,54 @@ export class SystemArchivePreviewIndex {
         this.#require("campaigns", envelope.record.campaignId);
         switch (history.eventType) {
           case "world-migration":
+            if (history.details.fromWorldVersionId === history.details.toWorldVersionId) {
+              throw relationshipFailure();
+            }
             this.#require("world-versions", history.details.fromWorldVersionId);
             this.#require("world-versions", history.details.toWorldVersionId);
             this.#database.prepare(
-              "INSERT INTO world_migrations (history_id,from_version_id,to_version_id) VALUES (?,?,?)",
+              `INSERT INTO world_migrations
+                 (history_id,campaign_id,from_version_id,to_version_id) VALUES (?,?,?,?)`,
             ).run(
               envelope.sourceId,
+              envelope.record.campaignId,
               history.details.fromWorldVersionId,
               history.details.toWorldVersionId,
             );
             break;
-          case "world-transfer":
-            if (envelope.record.campaignId
-              !== (history.details.targetCampaignId ?? history.details.sourceCampaignId)) {
+          case "world-transfer": {
+            const sourceCampaignId = history.details.sourceCampaignId;
+            const targetCampaignId = history.details.targetCampaignId;
+            const envelopeCampaignId = targetCampaignId ?? sourceCampaignId;
+            if (envelopeCampaignId === null
+              || envelope.record.campaignId !== envelopeCampaignId
+              || history.details.fromWorldVersionId === history.details.toWorldVersionId
+              || (sourceCampaignId !== null && sourceCampaignId === targetCampaignId)) {
               throw relationshipFailure();
             }
-            if (history.details.sourceCampaignId) {
-              this.#require("campaigns", history.details.sourceCampaignId);
+            if (sourceCampaignId) {
+              this.#require("campaigns", sourceCampaignId);
             }
-            if (history.details.targetCampaignId) {
-              this.#require("campaigns", history.details.targetCampaignId);
+            if (targetCampaignId) {
+              this.#require("campaigns", targetCampaignId);
             }
             this.#require("world-versions", history.details.fromWorldVersionId);
             this.#require("world-versions", history.details.toWorldVersionId);
+            this.#database.prepare(
+              `INSERT INTO world_transfers (
+                 history_id,envelope_campaign_id,source_campaign_id,target_campaign_id,
+                 from_version_id,to_version_id
+               ) VALUES (?,?,?,?,?,?)`,
+            ).run(
+              envelope.sourceId,
+              envelope.record.campaignId,
+              sourceCampaignId,
+              targetCampaignId,
+              history.details.fromWorldVersionId,
+              history.details.toWorldVersionId,
+            );
             break;
+          }
           case "memory-config":
             if (history.details.embeddingProviderProfileId !== null) {
               this.#require("providers", history.details.embeddingProviderProfileId, null, "embedding");
@@ -561,15 +594,12 @@ export class SystemArchivePreviewIndex {
     const currentStateMismatch = this.#database.prepare(`
       SELECT 1 AS broken
         FROM campaign_states current
-        LEFT JOIN campaign_state_edits edit
-          ON edit.campaign_id=current.campaign_id
-         AND edit.revision=current.revision
-         AND edit.state_json=current.state_json
-       WHERE (current.revision=0 AND EXISTS (
-                SELECT 1 FROM campaign_state_edits declared
-                 WHERE declared.campaign_id=current.campaign_id
-             ))
-          OR (current.revision>0 AND edit.campaign_id IS NULL)
+       WHERE EXISTS (
+               SELECT 1 FROM campaign_state_edits same_revision
+                WHERE same_revision.campaign_id=current.campaign_id
+                  AND same_revision.revision=current.revision
+                  AND same_revision.state_json IS NOT current.state_json
+             )
           OR EXISTS (
                SELECT 1 FROM campaign_state_edits newer
                 WHERE newer.campaign_id=current.campaign_id
@@ -582,14 +612,61 @@ export class SystemArchivePreviewIndex {
     const crossWorldMigration = this.#database.prepare(`
       SELECT 1 AS broken
         FROM world_migrations migration
+        JOIN records campaign
+          ON campaign.domain='campaigns' AND campaign.source_id=migration.campaign_id
+        JOIN records campaign_version
+          ON campaign_version.domain='world-versions'
+         AND campaign_version.source_id=campaign.parent_id
         JOIN records source
           ON source.domain='world-versions' AND source.source_id=migration.from_version_id
         JOIN records target
           ON target.domain='world-versions' AND target.source_id=migration.to_version_id
-       WHERE source.parent_id IS NOT target.parent_id
+       WHERE migration.from_version_id=migration.to_version_id
+          OR source.parent_id IS NOT target.parent_id
+          OR campaign_version.parent_id IS NOT source.parent_id
        LIMIT 1
     `).get();
     if (crossWorldMigration !== undefined) throw relationshipFailure();
+
+    const crossWiredTransfer = this.#database.prepare(`
+      SELECT 1 AS broken
+        FROM world_transfers transfer
+        JOIN records source_version
+          ON source_version.domain='world-versions'
+         AND source_version.source_id=transfer.from_version_id
+        JOIN records target_version
+          ON target_version.domain='world-versions'
+         AND target_version.source_id=transfer.to_version_id
+       WHERE transfer.from_version_id=transfer.to_version_id
+          OR (transfer.source_campaign_id IS NOT NULL
+              AND transfer.source_campaign_id=transfer.target_campaign_id)
+          OR transfer.envelope_campaign_id IS NOT COALESCE(
+               transfer.target_campaign_id,
+               transfer.source_campaign_id
+             )
+          OR (transfer.source_campaign_id IS NOT NULL AND NOT EXISTS (
+               SELECT 1
+                 FROM records source_campaign
+                 JOIN records source_campaign_version
+                   ON source_campaign_version.domain='world-versions'
+                  AND source_campaign_version.source_id=source_campaign.parent_id
+                WHERE source_campaign.domain='campaigns'
+                  AND source_campaign.source_id=transfer.source_campaign_id
+                  AND source_campaign_version.parent_id=source_version.parent_id
+             ))
+          OR (transfer.target_campaign_id IS NOT NULL AND NOT EXISTS (
+               SELECT 1
+                 FROM records target_campaign
+                 JOIN records target_campaign_version
+                   ON target_campaign_version.domain='world-versions'
+                  AND target_campaign_version.source_id=target_campaign.parent_id
+                WHERE target_campaign.domain='campaigns'
+                  AND target_campaign.source_id=transfer.target_campaign_id
+                  AND target_campaign_version.parent_id=target_version.parent_id
+             ))
+       LIMIT 1
+    `).get();
+    if (crossWiredTransfer !== undefined) throw relationshipFailure();
 
     for (const asset of assets) {
       for (const binding of asset.bindings) {

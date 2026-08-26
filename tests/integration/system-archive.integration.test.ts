@@ -2002,6 +2002,152 @@ integration("deterministic owner-wide System Archive export", () => {
       .resolves.toMatchObject({ rows: [{ count: "0" }] });
   });
 
+  it("rejects cross-wired migration and transfer authority during PostgreSQL import", async () => {
+    const imports = createPostgresSystemArchiveImportRepository(pool, { previewTtlSeconds: 1_800 });
+    const owner = { ownerUserId };
+    const timestamp = "2026-08-25T12:00:00.000Z";
+    const worldAId = randomUUID();
+    const worldBId = randomUUID();
+    const worldAVersion1Id = randomUUID();
+    const worldAVersion2Id = randomUUID();
+    const worldBVersion1Id = randomUUID();
+    const campaignAId = randomUUID();
+    const campaignA2Id = randomUUID();
+    const campaignBId = randomUUID();
+    const campaignB2Id = randomUUID();
+    const content = worldContentSchema.parse({
+      schemaVersion: 1,
+      world: {
+        title: "Relationship world", genre: "", tone: "", premise: "",
+        backgroundStory: "", firstAction: "", rules: "",
+      },
+      playableCharacters: [], entities: [], relationships: [], rpgStats: [],
+      defaultTriggers: [], eventTriggers: [], assets: [],
+      defaults: { selectedCharacterId: null, initialLocation: "" },
+    });
+    const worldRecord = (sourceId: string, title: string) => systemRecordEnvelopeSchema.parse({
+      domain: "worlds", formatVersion: 1, sourceId,
+      record: {
+        sourceId, title, status: "active", forkedFromWorldId: null,
+        forkedFromWorldVersionId: null, createdAt: timestamp, updatedAt: timestamp,
+      },
+    });
+    const versionRecord = (
+      sourceId: string,
+      worldId: string,
+      versionNumber: number,
+    ) => systemRecordEnvelopeSchema.parse({
+      domain: "world-versions", formatVersion: 1, sourceId,
+      record: {
+        sourceId, worldId, versionNumber, title: "Relationship world", content,
+        contentFingerprint: null, releaseNotes: "", createdFromRevision: null,
+        publishedAt: timestamp,
+      },
+    });
+    const campaignRecord = (sourceId: string, worldVersionId: string) => systemRecordEnvelopeSchema.parse({
+      domain: "campaigns", formatVersion: 1, sourceId,
+      record: {
+        sourceId, worldVersionId, title: "Relationship campaign", status: "active",
+        activeTurnNumber: 0, settings: { turnControlStyle: "Auto" },
+        selectedCharacterId: null, characterSnapshot: null, characterProfile: null,
+        characterProfileRevision: 0, createdAt: timestamp, updatedAt: timestamp,
+      },
+    });
+    const historyRecord = (
+      campaignId: string,
+      eventType: "world-migration" | "world-transfer",
+      details: Readonly<Record<string, unknown>>,
+    ) => {
+      const sourceId = randomUUID();
+      return systemRecordEnvelopeSchema.parse({
+        domain: "campaign-history", formatVersion: 1, sourceId,
+        record: {
+          sourceId, campaignId, eventType, content: JSON.stringify(details),
+          occurredAt: timestamp,
+        },
+      });
+    };
+    const baseRecords = [
+      worldRecord(worldAId, "World A"),
+      worldRecord(worldBId, "World B"),
+      versionRecord(worldAVersion1Id, worldAId, 1),
+      versionRecord(worldAVersion2Id, worldAId, 2),
+      versionRecord(worldBVersion1Id, worldBId, 1),
+      campaignRecord(campaignAId, worldAVersion2Id),
+      campaignRecord(campaignA2Id, worldAVersion2Id),
+      campaignRecord(campaignBId, worldBVersion1Id),
+      campaignRecord(campaignB2Id, worldBVersion1Id),
+    ];
+    const transferDetails = (sourceCampaignId: string, targetCampaignId: string) => ({
+      sourceCampaignId,
+      targetCampaignId,
+      fromWorldVersionId: worldAVersion1Id,
+      toWorldVersionId: worldBVersion1Id,
+      characterStrategy: "preserve_source",
+      stateStrategy: "preserve",
+      targetDefaultsPolicy: "retain_source",
+      sourceFingerprint: sha256("cross-wired-transfer"),
+      warnings: [],
+      note: "Relationship boundary regression",
+    });
+    const invalidCases = [
+      {
+        name: "migration campaign belongs to another world",
+        history: historyRecord(campaignBId, "world-migration", {
+          fromWorldVersionId: worldAVersion1Id,
+          toWorldVersionId: worldAVersion2Id,
+          note: "Cross-wired migration",
+        }),
+      },
+      {
+        name: "transfer source campaign belongs to another world",
+        history: historyRecord(
+          campaignB2Id,
+          "world-transfer",
+          transferDetails(campaignBId, campaignB2Id),
+        ),
+      },
+      {
+        name: "transfer target campaign belongs to another world",
+        history: historyRecord(
+          campaignA2Id,
+          "world-transfer",
+          transferDetails(campaignAId, campaignA2Id),
+        ),
+      },
+      {
+        name: "transfer envelope is not the exact target campaign authority",
+        history: historyRecord(
+          campaignAId,
+          "world-transfer",
+          transferDetails(campaignAId, campaignBId),
+        ),
+      },
+    ];
+
+    for (const invalidCase of invalidCases) {
+      await pool.query("TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE");
+      await pool.query("DELETE FROM system_archive_jobs");
+      await pool.query("DELETE FROM system_archive_uploads");
+      const destination = await imports.destinationFingerprint(owner, {});
+      const records = [...baseRecords, invalidCase.history];
+      const recordsByDomain = Object.fromEntries(SYSTEM_ARCHIVE_DOMAINS.map((domain) => [
+        domain,
+        records.filter((record) => record.domain === domain).length,
+      ]));
+
+      await expect(imports.withAtomicImport(owner, { destination, ignore: {} }, async (transaction) => {
+        await transaction.insertLogicalDomains(records);
+        await transaction.recordImportReport(importReport({ ownerUserId, recordsByDomain }));
+      }), invalidCase.name).rejects.toMatchObject({ statusCode: 400 });
+      await expect(pool.query<{ worlds: string; migrations: string; transfers: string }>(
+        `SELECT (SELECT count(*)::text FROM worlds) AS worlds,
+                (SELECT count(*)::text FROM campaign_world_migrations) AS migrations,
+                (SELECT count(*)::text FROM campaign_world_transfers) AS transfers`,
+      )).resolves.toMatchObject({ rows: [{ worlds: "0", migrations: "0", transfers: "0" }] });
+    }
+  });
+
   it("remaps source ownership, rejects a stale destination, and queues rebuilds idempotently after commit", async () => {
     await pool.query("TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE");
     await pool.query("DELETE FROM system_archive_jobs");
@@ -2231,7 +2377,7 @@ integration("deterministic owner-wide System Archive export", () => {
         record: {
           sourceId: worldTransferId, campaignId, eventType: "world-transfer",
           content: JSON.stringify({
-            sourceCampaignId: campaignId, targetCampaignId: null,
+            sourceCampaignId: null, targetCampaignId: campaignId,
             fromWorldVersionId: sourceVersionId, toWorldVersionId: versionId,
             characterStrategy: "preserve_source", stateStrategy: "preserve",
             targetDefaultsPolicy: "retain_source", sourceFingerprint: sha256("restored-transfer"),
@@ -2454,8 +2600,8 @@ integration("deterministic owner-wide System Archive export", () => {
       migration_from_version_id: priorVersionId,
       migration_to_version_id: versionId,
       migration_note: "Restore the exact migration authority.",
-      source_campaign_id: campaignId,
-      target_campaign_id: null,
+      source_campaign_id: null,
+      target_campaign_id: campaignId,
       transfer_from_version_id: sourceVersionId,
       transfer_to_version_id: versionId,
       character_strategy: "preserve_source",
