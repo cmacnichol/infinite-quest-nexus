@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import {
   SYSTEM_ARCHIVE_DOMAINS,
   canonicalArchiveJson,
+  parseSystemCampaignHistoryDetails,
   type ArchiveAssetRecord,
   type SystemArchiveDomain,
   type SystemRecordEnvelope,
@@ -78,7 +79,9 @@ export class SystemArchivePreviewIndex {
       CREATE TABLE required_references (
         target_domain TEXT NOT NULL,
         target_id TEXT NOT NULL,
-        expected_parent_id TEXT
+        expected_parent_id TEXT,
+        expected_secondary_id TEXT,
+        expected_numeric_value INTEGER
       );
       CREATE INDEX required_reference_target
         ON required_references(target_domain,target_id);
@@ -102,6 +105,16 @@ export class SystemArchivePreviewIndex {
         world_version_id TEXT NOT NULL,
         asset_id TEXT NOT NULL,
         PRIMARY KEY (world_id,world_version_id,asset_id)
+      ) WITHOUT ROWID;
+      CREATE TABLE world_characters (
+        world_version_id TEXT NOT NULL,
+        character_id TEXT NOT NULL,
+        PRIMARY KEY (world_version_id,character_id)
+      ) WITHOUT ROWID;
+      CREATE TABLE selected_characters (
+        campaign_id TEXT PRIMARY KEY,
+        world_version_id TEXT NOT NULL,
+        character_id TEXT NOT NULL
       ) WITHOUT ROWID;
     `);
   }
@@ -138,18 +151,48 @@ export class SystemArchivePreviewIndex {
     this.#counts[domain] += 1;
   }
 
-  #require(targetDomain: SystemArchiveDomain, targetId: string, expectedParentId: string | null = null): void {
+  #require(
+    targetDomain: SystemArchiveDomain,
+    targetId: string,
+    expectedParentId: string | null = null,
+    expectedSecondaryId: string | null = null,
+    expectedNumericValue: number | null = null,
+  ): void {
     this.#database.prepare(
-      "INSERT INTO required_references (target_domain,target_id,expected_parent_id) VALUES (?,?,?)",
-    ).run(targetDomain, targetId, expectedParentId);
+      `INSERT INTO required_references
+         (target_domain,target_id,expected_parent_id,expected_secondary_id,expected_numeric_value)
+       VALUES (?,?,?,?,?)`,
+    ).run(targetDomain, targetId, expectedParentId, expectedSecondaryId, expectedNumericValue);
   }
 
   add(envelope: SystemRecordEnvelope, assetIds: ReadonlySet<string>): void {
     switch (envelope.domain) {
       case "providers":
+        this.#insertRecord(envelope.domain, envelope.sourceId, null, envelope.record.kind);
+        break;
       case "worlds":
+        this.#insertRecord(
+          envelope.domain,
+          envelope.sourceId,
+          envelope.record.forkedFromWorldId ?? null,
+          envelope.record.forkedFromWorldVersionId ?? null,
+        );
+        if ((envelope.record.forkedFromWorldId ?? null) !== null
+          || (envelope.record.forkedFromWorldVersionId ?? null) !== null) {
+          if (!envelope.record.forkedFromWorldId || !envelope.record.forkedFromWorldVersionId) {
+            throw relationshipFailure();
+          }
+          this.#require("worlds", envelope.record.forkedFromWorldId);
+          this.#require(
+            "world-versions",
+            envelope.record.forkedFromWorldVersionId,
+            envelope.record.forkedFromWorldId,
+          );
+        }
+        break;
       case "imports":
-        this.#insertRecord(envelope.domain, envelope.sourceId);
+        this.#insertRecord(envelope.domain, envelope.sourceId, envelope.record.campaignId ?? null);
+        if (envelope.record.campaignId) this.#require("campaigns", envelope.record.campaignId);
         break;
       case "prompts":
         this.#insertRecord(
@@ -182,6 +225,15 @@ export class SystemArchivePreviewIndex {
             throw relationshipFailure();
           }
         }
+        for (const character of envelope.record.content.playableCharacters) {
+          try {
+            this.#database.prepare(
+              "INSERT INTO world_characters (world_version_id,character_id) VALUES (?,?)",
+            ).run(envelope.sourceId, character.id);
+          } catch {
+            throw relationshipFailure();
+          }
+        }
         this.#require("worlds", envelope.record.worldId);
         break;
       case "world-drafts":
@@ -209,6 +261,21 @@ export class SystemArchivePreviewIndex {
           envelope.record.activeTurnNumber,
         );
         this.#require("world-versions", envelope.record.worldVersionId);
+        if ((envelope.record.selectedCharacterId ?? null) !== null) {
+          if (envelope.record.characterSnapshot?.id !== envelope.record.selectedCharacterId) {
+            throw relationshipFailure();
+          }
+          this.#database.prepare(
+            `INSERT INTO selected_characters
+               (campaign_id,world_version_id,character_id) VALUES (?,?,?)`,
+          ).run(
+            envelope.sourceId,
+            envelope.record.worldVersionId,
+            envelope.record.selectedCharacterId!,
+          );
+        } else if ((envelope.record.characterSnapshot ?? null) !== null) {
+          throw relationshipFailure();
+        }
         break;
       case "turns":
         this.#insertRecord(
@@ -217,6 +284,7 @@ export class SystemArchivePreviewIndex {
           envelope.record.campaignId,
           null,
           String(envelope.record.turnNumber),
+          envelope.record.turnNumber,
         );
         this.#require("campaigns", envelope.record.campaignId);
         break;
@@ -235,10 +303,100 @@ export class SystemArchivePreviewIndex {
         this.#insertRecord(envelope.domain, envelope.sourceId, envelope.record.campaignId);
         this.#require("campaigns", envelope.record.campaignId);
         break;
-      case "campaign-history":
-      case "canonical-facts":
-        this.#insertRecord(envelope.domain, envelope.sourceId, envelope.record.campaignId);
+      case "campaign-history": {
+        let history;
+        try {
+          history = parseSystemCampaignHistoryDetails(envelope.record.eventType, envelope.record.content);
+        } catch {
+          throw relationshipFailure();
+        }
+        this.#insertRecord(
+          envelope.domain,
+          envelope.sourceId,
+          envelope.record.campaignId,
+          envelope.record.eventType,
+          null,
+          history.eventType === "campaign-state-edit"
+            ? history.details.effectiveTurnNumber
+            : history.eventType === "character-profile-edit" ? history.details.revision : null,
+        );
         this.#require("campaigns", envelope.record.campaignId);
+        switch (history.eventType) {
+          case "world-migration":
+            this.#require("world-versions", history.details.fromWorldVersionId);
+            this.#require("world-versions", history.details.toWorldVersionId);
+            break;
+          case "world-transfer":
+            if (history.details.sourceCampaignId) {
+              this.#require("campaigns", history.details.sourceCampaignId);
+            }
+            if (history.details.targetCampaignId) {
+              this.#require("campaigns", history.details.targetCampaignId);
+            }
+            this.#require("world-versions", history.details.fromWorldVersionId);
+            this.#require("world-versions", history.details.toWorldVersionId);
+            break;
+          case "memory-config":
+            if (history.details.embeddingProviderProfileId !== null) {
+              this.#require("providers", history.details.embeddingProviderProfileId, null, "embedding");
+            }
+            break;
+          case "illustration-config":
+            if (history.details.providerProfileId !== null) {
+              this.#require("providers", history.details.providerProfileId, null, "image");
+            }
+            break;
+          case "accepted-turn-mode":
+          case "illustration-set":
+            this.#require("turns", history.details.turnId, envelope.record.campaignId);
+            break;
+          case "illustration-segment":
+            this.#require("turns", history.details.turnId, envelope.record.campaignId);
+            this.#require(
+              "campaign-history",
+              history.details.illustrationSetId,
+              envelope.record.campaignId,
+              "illustration-set",
+            );
+            break;
+          case "character-profile-edit":
+          case "campaign-state-edit":
+            break;
+        }
+        break;
+      }
+      case "canonical-facts":
+        this.#insertRecord(
+          envelope.domain,
+          envelope.sourceId,
+          envelope.record.campaignId,
+          envelope.record.worldVersionId,
+          null,
+          envelope.record.sourceTurnNumber,
+        );
+        this.#require("campaigns", envelope.record.campaignId);
+        this.#require("world-versions", envelope.record.worldVersionId);
+        if (envelope.record.sourceTurnId !== null) {
+          this.#require(
+            "turns",
+            envelope.record.sourceTurnId,
+            envelope.record.campaignId,
+            null,
+            envelope.record.sourceTurnNumber,
+          );
+        }
+        if (envelope.record.sourceStateEditId !== null) {
+          this.#require(
+            "campaign-history",
+            envelope.record.sourceStateEditId,
+            envelope.record.campaignId,
+            "campaign-state-edit",
+            envelope.record.sourceTurnNumber,
+          );
+        }
+        if (envelope.record.supersededByFactId !== null) {
+          this.#require("canonical-facts", envelope.record.supersededByFactId, envelope.record.campaignId);
+        }
         break;
       case "chronicle":
         this.#insertRecord(
@@ -314,6 +472,10 @@ export class SystemArchivePreviewIndex {
        WHERE target.source_id IS NULL
           OR (reference.expected_parent_id IS NOT NULL
               AND target.parent_id IS NOT reference.expected_parent_id)
+          OR (reference.expected_secondary_id IS NOT NULL
+              AND target.secondary_id IS NOT reference.expected_secondary_id)
+          OR (reference.expected_numeric_value IS NOT NULL
+              AND target.numeric_value IS NOT reference.expected_numeric_value)
        LIMIT 1
     `).get();
     if (brokenReference !== undefined) throw relationshipFailure();
@@ -330,6 +492,17 @@ export class SystemArchivePreviewIndex {
        LIMIT 1
     `).get();
     if (checkpointBeyondCampaign !== undefined) throw relationshipFailure();
+
+    const selectedCharacterMissing = this.#database.prepare(`
+      SELECT 1 AS broken
+        FROM selected_characters selected
+        LEFT JOIN world_characters character
+          ON character.world_version_id=selected.world_version_id
+         AND character.character_id=selected.character_id
+       WHERE character.character_id IS NULL
+       LIMIT 1
+    `).get();
+    if (selectedCharacterMissing !== undefined) throw relationshipFailure();
 
     for (const asset of assets) {
       for (const binding of asset.bindings) {

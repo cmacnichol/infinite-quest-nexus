@@ -7,7 +7,7 @@ import { Readable } from "node:stream";
 import JSZip from "jszip";
 import sharp from "sharp";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { worldContentSchema } from "../../packages/contracts/src/world-library.js";
+import { characterProfileSchema, worldContentSchema } from "../../packages/contracts/src/world-library.js";
 import { archiveAssetRecordSchema } from "../../packages/contracts/src/archives.js";
 import {
   SYSTEM_ARCHIVE_DOMAINS,
@@ -671,6 +671,33 @@ integration("deterministic owner-wide System Archive export", () => {
       reason: "Preserve accepted wording.",
       source: "user_edit",
     });
+    const turnRecord = JSON.parse((await Object.values(zip.files)
+      .find((entry) => entry.name.startsWith("records/turns/") && !entry.dir)!
+      .async("string")).trim()) as { record: Record<string, unknown> };
+    expect(turnRecord.record).toMatchObject({
+      stateSnapshotPrivate: {
+        continuitySummary: "Portable current continuity",
+        openThreads: ["Find the gate key"],
+      },
+    });
+    const factRecord = JSON.parse((await Object.values(zip.files)
+      .find((entry) => entry.name.startsWith("records/canonical-facts/") && !entry.dir)!
+      .async("string")).trim()) as { record: Record<string, unknown> };
+    expect(factRecord.record).toMatchObject({
+      campaignId,
+      worldVersionId,
+      sourceTurnId: turnId,
+      sourceStateEditId: null,
+      sourceTurnNumber: 1,
+      sourceFactIndex: 0,
+      validFromTurn: 1,
+      validUntilTurn: null,
+      supersededByFactId: null,
+    });
+    const importRecord = JSON.parse((await Object.values(zip.files)
+      .find((entry) => entry.name.startsWith("records/imports/") && !entry.dir)!
+      .async("string")).trim()) as { record: Record<string, unknown> };
+    expect(importRecord.record).toMatchObject({ campaignId });
     const chronicleRecords = (await Promise.all(Object.values(zip.files)
       .filter((entry) => entry.name.startsWith("records/chronicle/") && !entry.dir)
       .map((entry) => entry.async("string"))))
@@ -707,6 +734,20 @@ integration("deterministic owner-wide System Archive export", () => {
     const acceptedTurnMode = history.find((entry) => entry.record.eventType === "accepted-turn-mode");
     expect(acceptedTurnMode).toBeDefined();
     expect(JSON.parse(acceptedTurnMode!.record.content)).toMatchObject({ inputMode: "scene", inputModeSource: "auto" });
+    expect(JSON.parse(history.find((entry) => entry.record.eventType === "memory-config")!.record.content))
+      .toMatchObject({
+        embeddingDocumentPrefix: null,
+        embeddingQueryPrefix: null,
+        retrievalImplementation: "legacy_hybrid",
+        retrievalShadowEnabled: false,
+      });
+    expect(JSON.parse(history.find((entry) => entry.record.eventType === "illustration-config")!.record.content))
+      .toMatchObject({
+        sourcePolicy: "off",
+        matchingScope: "world",
+        confidenceProfile: "balanced",
+        repetitionWindow: 5,
+      });
     const stateEntry = Object.values(zip.files)
       .find((entry) => entry.name.startsWith("records/campaign-state/") && !entry.dir);
     const currentState = JSON.parse((await stateEntry!.async("string")).trim()) as {
@@ -1910,7 +1951,11 @@ integration("deterministic owner-wide System Archive export", () => {
       systemRecordEnvelopeSchema.parse({
         domain: "canonical-facts", formatVersion: 1, sourceId: factId,
         record: {
-          sourceId: factId, campaignId, subject: "gate", predicate: "is", object: "sealed", updatedAt: timestamp,
+          sourceId: factId, campaignId, worldVersionId: versionId,
+          sourceTurnId: randomUUID(), sourceStateEditId: null, sourceTurnNumber: 1,
+          sourceFactIndex: 0, subject: "gate", predicate: "is", object: "sealed",
+          validFromTurn: 1, validUntilTurn: null, supersededByFactId: null,
+          createdAt: timestamp, updatedAt: timestamp,
         },
       }),
     ];
@@ -1949,6 +1994,10 @@ integration("deterministic owner-wide System Archive export", () => {
 
     const destination = await imports.destinationFingerprint(owner, {});
     const providerId = randomUUID();
+    const embeddingProviderId = randomUUID();
+    const imageProviderId = randomUUID();
+    const sourceWorldId = randomUUID();
+    const sourceVersionId = randomUUID();
     const worldId = randomUUID();
     const versionId = randomUUID();
     const campaignId = randomUUID();
@@ -1958,10 +2007,50 @@ integration("deterministic owner-wide System Archive export", () => {
     const memoryConfigHistoryId = randomUUID();
     const illustrationSetHistoryId = randomUUID();
     const illustrationSegmentHistoryId = randomUUID();
+    const illustrationConfigHistoryId = randomUUID();
+    const characterProfileEditId = randomUUID();
+    const campaignStateEditId = randomUUID();
+    const worldMigrationId = randomUUID();
+    const worldTransferId = randomUUID();
+    const canonicalFactId = randomUUID();
+    const supersedingFactId = randomUUID();
+    const importedProvenanceId = randomUUID();
     const chronicleMemoryIds = [randomUUID(), randomUUID()];
     const summaryCheckpointId = randomUUID();
     const checkpointOpenThreadId = randomUUID();
     const activitySourceId = "00000000-0000-4000-8000-00000000002a";
+    const restoredProfile = {
+      name: "Avery Vale",
+      profile: characterProfileSchema.parse({ identity: { aliases: ["Gatekeeper"], pronouns: "they/them" } }),
+    };
+    const restoredSnapshot = {
+      id: "restored-hero",
+      name: "Avery",
+      characterText: "Avery opens the gate between installations.",
+      profile: restoredProfile.profile,
+      rpgStats: [],
+      defaultTriggers: [],
+      source: { type: "system-archive", revision: 4 },
+    };
+    const restoredTurnState = {
+      continuitySummary: "The restored gate is open.",
+      openThreads: ["Cross the restored threshold"],
+      scratchpad: "Portable turn authority",
+      trackers: [],
+      canonicalFacts: [],
+      rpgStats: [],
+      defaultTriggers: [],
+      eventTriggers: [],
+      pendingEventTriggers: [],
+    };
+    const restoredWorldCharacter = {
+      id: restoredSnapshot.id,
+      name: restoredSnapshot.name,
+      characterText: restoredSnapshot.characterText,
+      profile: restoredSnapshot.profile,
+      rpgStats: restoredSnapshot.rpgStats,
+      defaultTriggers: restoredSnapshot.defaultTriggers,
+    };
     const records = [
       systemRecordEnvelopeSchema.parse({
         domain: "providers", formatVersion: 1, sourceId: providerId,
@@ -1973,19 +2062,63 @@ integration("deterministic owner-wide System Archive export", () => {
         },
       }),
       systemRecordEnvelopeSchema.parse({
+        domain: "providers", formatVersion: 1, sourceId: embeddingProviderId,
+        record: {
+          sourceId: embeddingProviderId, kind: "embedding", displayName: "Imported embedding provider",
+          baseUrl: "https://embedding.invalid/v1", selectedModel: "restored-embedding-model",
+          contextWindow: 8192, timeoutMs: 300000, retryLimit: 2,
+          enabled: false, health: "unknown",
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "providers", formatVersion: 1, sourceId: imageProviderId,
+        record: {
+          sourceId: imageProviderId, kind: "image", displayName: "Imported image provider",
+          baseUrl: "https://image.invalid/v1", selectedModel: "restored-image-model",
+          contextWindow: null, timeoutMs: 300000, retryLimit: 2,
+          enabled: false, health: "unknown",
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "worlds", formatVersion: 1, sourceId: sourceWorldId,
+        record: {
+          sourceId: sourceWorldId, title: "Source World", status: "active",
+          forkedFromWorldId: null, forkedFromWorldVersionId: null,
+          createdAt: "2026-08-25T11:00:00.000Z", updatedAt: "2026-08-25T11:00:00.000Z",
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
         domain: "worlds", formatVersion: 1, sourceId: worldId,
-        record: { sourceId: worldId, title: "Restored World", status: "active", createdAt: "2026-08-25T12:00:00.000Z", updatedAt: "2026-08-25T12:00:00.000Z" },
+        record: {
+          sourceId: worldId, title: "Restored World", status: "active",
+          forkedFromWorldId: sourceWorldId, forkedFromWorldVersionId: sourceVersionId,
+          createdAt: "2026-08-25T12:00:00.000Z", updatedAt: "2026-08-25T12:00:00.000Z",
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "world-versions", formatVersion: 1, sourceId: sourceVersionId,
+        record: {
+          sourceId: sourceVersionId, worldId: sourceWorldId, versionNumber: 1, title: "Source World",
+          content: {
+            schemaVersion: 1,
+            world: { title: "Source World", genre: "Fantasy", tone: "Hopeful", premise: "Depart.", backgroundStory: "", firstAction: "Begin.", rules: "" },
+            playableCharacters: [restoredWorldCharacter], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [],
+            defaults: { selectedCharacterId: restoredSnapshot.id, initialLocation: "" },
+          },
+          contentFingerprint: null, releaseNotes: "", createdFromRevision: null,
+          publishedAt: "2026-08-25T11:00:00.000Z",
+        },
       }),
       systemRecordEnvelopeSchema.parse({
         domain: "world-versions", formatVersion: 1, sourceId: versionId,
         record: {
           sourceId: versionId, worldId, versionNumber: 1, title: "Restored World",
-          content: worldContentSchema.parse({
+          content: {
             schemaVersion: 1,
             world: { title: "Restored World", genre: "Fantasy", tone: "Hopeful", premise: "Return.", backgroundStory: "", firstAction: "Begin.", rules: "" },
-            playableCharacters: [], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [],
-            defaults: { selectedCharacterId: null, initialLocation: "" },
-          }),
+            playableCharacters: [restoredWorldCharacter], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [],
+            defaults: { selectedCharacterId: restoredSnapshot.id, initialLocation: "" },
+          },
           contentFingerprint: null, releaseNotes: "", createdFromRevision: null, publishedAt: "2026-08-25T12:00:00.000Z",
         },
       }),
@@ -1993,13 +2126,16 @@ integration("deterministic owner-wide System Archive export", () => {
         domain: "campaigns", formatVersion: 1, sourceId: campaignId,
         record: {
           sourceId: campaignId, worldVersionId: versionId, title: "Restored Campaign", status: "active", activeTurnNumber: 1,
-          settings: { turnControlStyle: "Auto" }, createdAt: "2026-08-25T12:00:00.000Z", updatedAt: "2026-08-25T12:00:00.000Z",
+          settings: { turnControlStyle: "Auto" }, selectedCharacterId: restoredSnapshot.id,
+          characterSnapshot: restoredSnapshot, characterProfile: restoredProfile, characterProfileRevision: 4,
+          createdAt: "2026-08-25T12:00:00.000Z", updatedAt: "2026-08-25T12:00:00.000Z",
         },
       }),
       systemRecordEnvelopeSchema.parse({
         domain: "turns", formatVersion: 1, sourceId: turnId,
         record: {
-          sourceId: turnId, campaignId, turnNumber: 1, action: "Open the gate.", narration: "The gate opens.", choices: [], imagePrompt: "A gate at dawn", acceptedAt: "2026-08-25T12:00:00.000Z",
+          sourceId: turnId, campaignId, turnNumber: 1, action: "Open the gate.", narration: "The gate opens.", choices: [], imagePrompt: "A gate at dawn",
+          stateSnapshotPrivate: restoredTurnState, acceptedAt: "2026-08-25T12:00:00.000Z",
         },
       }),
       ...correctionIds.map((correctionId, index) => systemRecordEnvelopeSchema.parse({
@@ -2018,6 +2154,52 @@ integration("deterministic owner-wide System Archive export", () => {
         },
       })),
       systemRecordEnvelopeSchema.parse({
+        domain: "campaign-history", formatVersion: 1, sourceId: characterProfileEditId,
+        record: {
+          sourceId: characterProfileEditId, campaignId, eventType: "character-profile-edit",
+          content: JSON.stringify({
+            revision: 4, previousProfile: null, nextProfile: restoredProfile, editSource: "imported",
+          }),
+          occurredAt: "2026-08-25T11:56:00.000Z",
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "campaign-history", formatVersion: 1, sourceId: campaignStateEditId,
+        record: {
+          sourceId: campaignStateEditId, campaignId, eventType: "campaign-state-edit",
+          content: JSON.stringify({
+            effectiveTurnNumber: 1, revision: 5, stateSnapshot: restoredTurnState,
+            changedFields: ["continuitySummary", "openThreads"],
+          }),
+          occurredAt: "2026-08-25T11:57:00.000Z",
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "campaign-history", formatVersion: 1, sourceId: worldMigrationId,
+        record: {
+          sourceId: worldMigrationId, campaignId, eventType: "world-migration",
+          content: JSON.stringify({
+            fromWorldVersionId: sourceVersionId, toWorldVersionId: versionId,
+            note: "Restore the exact migration authority.",
+          }),
+          occurredAt: "2026-08-25T11:58:00.000Z",
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "campaign-history", formatVersion: 1, sourceId: worldTransferId,
+        record: {
+          sourceId: worldTransferId, campaignId, eventType: "world-transfer",
+          content: JSON.stringify({
+            sourceCampaignId: campaignId, targetCampaignId: null,
+            fromWorldVersionId: sourceVersionId, toWorldVersionId: versionId,
+            characterStrategy: "preserve_source", stateStrategy: "preserve",
+            targetDefaultsPolicy: "retain_source", sourceFingerprint: sha256("restored-transfer"),
+            warnings: ["Restored warning"], note: "Restore the exact transfer authority.",
+          }),
+          occurredAt: "2026-08-25T11:59:00.000Z",
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
         domain: "campaign-history", formatVersion: 1, sourceId: turnModeHistoryId,
         record: {
           sourceId: turnModeHistoryId, campaignId, eventType: "accepted-turn-mode",
@@ -2031,9 +2213,31 @@ integration("deterministic owner-wide System Archive export", () => {
           sourceId: memoryConfigHistoryId, campaignId, eventType: "memory-config",
           content: JSON.stringify({
             embeddingEnabled: true,
-            embeddingProviderProfileId: providerId,
-            embeddingModel: "restored-model",
+            embeddingProviderProfileId: embeddingProviderId,
+            embeddingModel: "restored-embedding-model",
             embeddingBatchSize: 24,
+            embeddingDocumentPrefix: "search_document: ",
+            embeddingQueryPrefix: "search_query: ",
+            retrievalImplementation: "chunked_hybrid",
+            retrievalShadowEnabled: true,
+            createdAt: "2026-08-25T11:59:00.000Z",
+            updatedAt: "2026-08-25T12:00:00.000Z",
+          }),
+          occurredAt: "2026-08-25T12:00:00.000Z",
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "campaign-history", formatVersion: 1, sourceId: illustrationConfigHistoryId,
+        record: {
+          sourceId: illustrationConfigHistoryId, campaignId, eventType: "illustration-config",
+          content: JSON.stringify({
+            enabled: true, providerProfileId: imageProviderId, model: "restored-image-model",
+            size: "1536x1024", aspectRatio: "3:2", quality: "high", outputFormat: "webp",
+            maxAttempts: 4, sourcePolicy: "library_then_generate", matchingScope: "campaign",
+            confidenceProfile: "strict", repetitionWindow: 9, segmentWordCount: 250,
+            imagesPerSegment: 2, segmentPromptMode: "ai_refined",
+            refinementPrompt: "Preserve the restored fiction-only aesthetic.",
+            createdAt: "2026-08-25T11:58:00.000Z", updatedAt: "2026-08-25T12:00:00.000Z",
           }),
           occurredAt: "2026-08-25T12:00:00.000Z",
         },
@@ -2074,6 +2278,26 @@ integration("deterministic owner-wide System Archive export", () => {
           occurredAt: "2026-08-25T12:00:00.000Z",
         },
       }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "canonical-facts", formatVersion: 1, sourceId: canonicalFactId,
+        record: {
+          sourceId: canonicalFactId, campaignId, worldVersionId: versionId,
+          sourceTurnId: turnId, sourceStateEditId: null, sourceTurnNumber: 1, sourceFactIndex: 7,
+          subject: "gate", predicate: "status", object: "open", validFromTurn: 1,
+          validUntilTurn: 2, supersededByFactId: supersedingFactId,
+          createdAt: "2026-08-25T11:59:00.000Z", updatedAt: "2026-08-25T12:00:00.000Z",
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "canonical-facts", formatVersion: 1, sourceId: supersedingFactId,
+        record: {
+          sourceId: supersedingFactId, campaignId, worldVersionId: versionId,
+          sourceTurnId: null, sourceStateEditId: campaignStateEditId, sourceTurnNumber: 1, sourceFactIndex: 8,
+          subject: "gate", predicate: "status", object: "secured", validFromTurn: 2,
+          validUntilTurn: null, supersededByFactId: null,
+          createdAt: "2026-08-25T12:00:00.000Z", updatedAt: "2026-08-25T12:01:00.000Z",
+        },
+      }),
       ...chronicleMemoryIds.map((memoryId, index) => systemRecordEnvelopeSchema.parse({
         domain: "chronicle", formatVersion: 1, sourceId: memoryId,
         record: {
@@ -2098,6 +2322,14 @@ integration("deterministic owner-wide System Archive export", () => {
           content: "Complete restored story through turn one.",
           occurredAt: "2026-08-25T12:00:02.000Z",
           metadata: { entityNames: ["Gate"], openThreadIds: [checkpointOpenThreadId] },
+        },
+      }),
+      systemRecordEnvelopeSchema.parse({
+        domain: "imports", formatVersion: 1, sourceId: importedProvenanceId,
+        record: {
+          sourceId: importedProvenanceId, campaignId, sourceType: "campaign_archive",
+          sourceName: "Restored source campaign", sourceHash: sha256("restored-source"),
+          completedAt: "2026-08-25T12:00:02.000Z",
         },
       }),
       systemRecordEnvelopeSchema.parse({
@@ -2128,11 +2360,14 @@ integration("deterministic owner-wide System Archive export", () => {
     await expect(pool.query<{
       world_owner: string;
       provider_owner: string;
+      forked_from_world_id: string;
+      forked_from_world_version_id: string;
       enabled: boolean;
       health_status: string;
       encrypted_api_key: string | null;
     }>(
       `SELECT world.owner_user_id AS world_owner,provider.owner_user_id AS provider_owner,
+              world.forked_from_world_id,world.forked_from_world_version_id,
               provider.enabled,provider.health_status,provider.encrypted_api_key
          FROM worlds world CROSS JOIN provider_profiles provider
         WHERE world.id=$1 AND provider.id=$2`,
@@ -2140,9 +2375,53 @@ integration("deterministic owner-wide System Archive export", () => {
     )).resolves.toMatchObject({ rows: [{
       world_owner: ownerUserId,
       provider_owner: ownerUserId,
+      forked_from_world_id: sourceWorldId,
+      forked_from_world_version_id: sourceVersionId,
       enabled: false,
       health_status: "unknown",
       encrypted_api_key: null,
+    }] });
+    await expect(pool.query(
+      `SELECT profile.revision AS profile_revision,profile.previous_profile,
+              profile.next_profile,profile.edit_source,
+              state_edit.effective_turn_number,state_edit.revision AS state_revision,
+              state_edit.state_snapshot_private,state_edit.changed_fields,
+              migration.from_world_version_id AS migration_from_version_id,
+              migration.to_world_version_id AS migration_to_version_id,migration.note AS migration_note,
+              transfer.source_campaign_id,transfer.target_campaign_id,
+              transfer.from_world_version_id AS transfer_from_version_id,
+              transfer.to_world_version_id AS transfer_to_version_id,
+              transfer.character_strategy,transfer.state_strategy,
+              transfer.target_defaults_policy,transfer.source_fingerprint,
+              transfer.warnings,transfer.note AS transfer_note
+         FROM campaign_character_profile_edits profile
+         CROSS JOIN campaign_state_edits state_edit
+         CROSS JOIN campaign_world_migrations migration
+         CROSS JOIN campaign_world_transfers transfer
+        WHERE profile.id=$1 AND state_edit.id=$2 AND migration.id=$3 AND transfer.id=$4`,
+      [characterProfileEditId, campaignStateEditId, worldMigrationId, worldTransferId],
+    )).resolves.toMatchObject({ rows: [{
+      profile_revision: 4,
+      previous_profile: null,
+      next_profile: restoredProfile,
+      edit_source: "imported",
+      effective_turn_number: 1,
+      state_revision: 5,
+      state_snapshot_private: restoredTurnState,
+      changed_fields: ["continuitySummary", "openThreads"],
+      migration_from_version_id: sourceVersionId,
+      migration_to_version_id: versionId,
+      migration_note: "Restore the exact migration authority.",
+      source_campaign_id: campaignId,
+      target_campaign_id: null,
+      transfer_from_version_id: sourceVersionId,
+      transfer_to_version_id: versionId,
+      character_strategy: "preserve_source",
+      state_strategy: "preserve",
+      target_defaults_policy: "retain_source",
+      source_fingerprint: sha256("restored-transfer"),
+      warnings: ["Restored warning"],
+      transfer_note: "Restore the exact transfer authority.",
     }] });
     await expect(pool.query<{
       input_mode: string;
@@ -2151,10 +2430,16 @@ integration("deterministic owner-wide System Archive export", () => {
       embedding_provider_profile_id: string;
       embedding_model: string;
       embedding_batch_size: number;
+      embedding_document_prefix: string | null;
+      embedding_query_prefix: string | null;
+      retrieval_implementation: string;
+      retrieval_shadow_enabled: boolean;
     }>(
       `SELECT turn_row.input_mode,turn_row.input_mode_source,
               config.embedding_enabled,config.embedding_provider_profile_id,
-              config.embedding_model,config.embedding_batch_size
+              config.embedding_model,config.embedding_batch_size,
+              config.embedding_document_prefix,config.embedding_query_prefix,
+              config.retrieval_implementation,config.retrieval_shadow_enabled
          FROM turns turn_row
          JOIN campaign_memory_configs config
            ON config.campaign_id=turn_row.campaign_id
@@ -2165,9 +2450,63 @@ integration("deterministic owner-wide System Archive export", () => {
       input_mode: "scene",
       input_mode_source: "explicit",
       embedding_enabled: true,
-      embedding_provider_profile_id: providerId,
-      embedding_model: "restored-model",
+      embedding_provider_profile_id: embeddingProviderId,
+      embedding_model: "restored-embedding-model",
       embedding_batch_size: 24,
+      embedding_document_prefix: "search_document: ",
+      embedding_query_prefix: "search_query: ",
+      retrieval_implementation: "chunked_hybrid",
+      retrieval_shadow_enabled: true,
+    }] });
+    await expect(pool.query(
+      `SELECT campaign.selected_character_id,campaign.character_snapshot,
+              campaign.character_profile,campaign.character_profile_revision,
+              turn_row.state_snapshot_private,
+              fact.source_turn_id,fact.source_state_edit_id,fact.source_turn_number,
+              fact.source_fact_index,fact.valid_from_turn,fact.valid_until_turn,
+              fact.superseded_by_fact_id,
+              imported.campaign_id AS imported_campaign_id,
+              illustration.source_policy,illustration.matching_scope,
+              illustration.confidence_profile,illustration.repetition_window
+         FROM campaigns campaign
+         JOIN turns turn_row ON turn_row.campaign_id=campaign.id
+         JOIN campaign_canonical_facts fact ON fact.campaign_id=campaign.id
+         JOIN imports imported ON imported.campaign_id=campaign.id
+         JOIN campaign_illustration_configs illustration ON illustration.campaign_id=campaign.id
+        WHERE campaign.id=$1 AND fact.id=$2`,
+      [campaignId, canonicalFactId],
+    )).resolves.toMatchObject({ rows: [{
+      selected_character_id: restoredSnapshot.id,
+      character_snapshot: restoredSnapshot,
+      character_profile: restoredProfile,
+      character_profile_revision: 4,
+      state_snapshot_private: restoredTurnState,
+      source_turn_id: turnId,
+      source_state_edit_id: null,
+      source_turn_number: 1,
+      source_fact_index: 7,
+      valid_from_turn: 1,
+      valid_until_turn: 2,
+      superseded_by_fact_id: supersedingFactId,
+      imported_campaign_id: campaignId,
+      source_policy: "library_then_generate",
+      matching_scope: "campaign",
+      confidence_profile: "strict",
+      repetition_window: 9,
+    }] });
+    await expect(pool.query(
+      `SELECT source_turn_id,source_state_edit_id,source_turn_number,source_fact_index,
+              valid_from_turn,valid_until_turn,superseded_by_fact_id
+         FROM campaign_canonical_facts WHERE id=$1`,
+      [supersedingFactId],
+    )).resolves.toMatchObject({ rows: [{
+      source_turn_id: null,
+      source_state_edit_id: campaignStateEditId,
+      source_turn_number: 1,
+      source_fact_index: 8,
+      valid_from_turn: 2,
+      valid_until_turn: null,
+      superseded_by_fact_id: null,
     }] });
     await expect(pool.query<{ id: string; turn_id: string | null; memory_kind: string }>(
       "SELECT id,turn_id,memory_kind FROM chronicle_memories WHERE campaign_id=$1 ORDER BY id",

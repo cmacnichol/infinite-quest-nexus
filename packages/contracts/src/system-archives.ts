@@ -96,6 +96,8 @@ const systemWorldRecordSchema = z.object({
   sourceId: z.string().uuid(),
   title: identifierSchema,
   status: z.enum(["draft", "active", "archived"]),
+  forkedFromWorldId: z.string().uuid().nullable().optional(),
+  forkedFromWorldVersionId: z.string().uuid().nullable().optional(),
   createdAt: archiveTimestampSchema,
   updatedAt: archiveTimestampSchema
 }).strict();
@@ -245,6 +247,38 @@ const systemWorldDraftRecordSchema = z.object({
   updatedAt: archiveTimestampSchema
 }).strict();
 
+const systemCharacterSnapshotSchema = z.object({
+  id: identifierSchema.optional(),
+  name: identifierSchema,
+  characterText: longTextSchema,
+  profile: systemCharacterProfileSchema.optional(),
+  rpgStats: z.array(systemRpgStatSchema).max(10_000).optional(),
+  defaultTriggers: z.array(systemDefaultTriggerSchema).max(10_000).optional(),
+  source: z.record(z.string().max(300), z.json()).optional()
+}).strict();
+
+const systemCampaignCharacterProfileSchema = z.object({
+  name: identifierSchema,
+  profile: z.record(z.string().max(300), z.json())
+}).strict();
+
+const systemCampaignStateSnapshotSchema = z.object({
+  continuitySummary: longTextSchema,
+  openThreads: z.array(shortTextSchema).max(500),
+  canonicalFacts: z.array(z.object({ id: z.string().uuid().nullable(), content: longTextSchema }).strict()).max(2_000),
+  scratchpad: longTextSchema,
+  trackers: z.array(z.object({
+    id: identifierSchema,
+    name: identifierSchema,
+    value: shortTextSchema,
+    rules: shortTextSchema
+  }).strict()).max(200),
+  rpgStats: z.array(systemRpgStatSchema).max(100),
+  defaultTriggers: z.array(systemDefaultTriggerSchema).max(200),
+  eventTriggers: z.array(systemEventTriggerSchema).max(200),
+  pendingEventTriggers: z.array(systemPendingEventTriggerSchema).max(200)
+}).strict();
+
 const systemCampaignRecordSchema = z.object({
   sourceId: z.string().uuid(),
   worldVersionId: z.string().uuid(),
@@ -254,6 +288,10 @@ const systemCampaignRecordSchema = z.object({
   settings: z.object({
     turnControlStyle: z.enum(["Auto", "Action", "Scene Direction"])
   }).strict(),
+  selectedCharacterId: identifierSchema.nullable().optional(),
+  characterSnapshot: systemCharacterSnapshotSchema.nullable().optional(),
+  characterProfile: systemCampaignCharacterProfileSchema.nullable().optional(),
+  characterProfileRevision: nonnegativeSafeIntegerSchema.optional(),
   createdAt: archiveTimestampSchema,
   updatedAt: archiveTimestampSchema
 }).strict();
@@ -266,6 +304,7 @@ const systemTurnRecordSchema = z.object({
   narration: longTextSchema,
   choices: z.array(shortTextSchema).max(100),
   imagePrompt: longTextSchema,
+  stateSnapshotPrivate: z.record(z.string().max(300), z.json()).optional(),
   acceptedAt: archiveTimestampSchema
 }).strict();
 
@@ -284,24 +323,165 @@ const systemCampaignStateRecordSchema = z.object({
   sourceId: z.string().uuid(),
   campaignId: z.string().uuid(),
   revision: nonnegativeSafeIntegerSchema,
-  state: z.object({
-    continuitySummary: longTextSchema,
-    openThreads: z.array(shortTextSchema).max(500),
-    canonicalFacts: z.array(z.object({ id: z.string().uuid().nullable(), content: longTextSchema }).strict()).max(2_000),
-    scratchpad: longTextSchema,
-    trackers: z.array(z.object({
-      id: identifierSchema,
-      name: identifierSchema,
-      value: shortTextSchema,
-      rules: shortTextSchema
-    }).strict()).max(200),
-    rpgStats: z.array(systemRpgStatSchema).max(100),
-    defaultTriggers: z.array(systemDefaultTriggerSchema).max(200),
-    eventTriggers: z.array(systemEventTriggerSchema).max(200),
-    pendingEventTriggers: z.array(systemPendingEventTriggerSchema).max(200)
-  }).strict(),
+  state: systemCampaignStateSnapshotSchema,
   updatedAt: archiveTimestampSchema
 }).strict();
+
+const systemCharacterProfileEditDetailsSchema = z.object({
+  revision: z.number().int().positive(),
+  previousProfile: systemCampaignCharacterProfileSchema.nullable().optional(),
+  nextProfile: systemCampaignCharacterProfileSchema,
+  editSource: z.enum(["world_version_seed", "manual", "ai_organized", "imported", "branch", "transfer"])
+}).strict();
+
+const systemCampaignStateEditDetailsSchema = z.object({
+  effectiveTurnNumber: nonnegativeSafeIntegerSchema,
+  revision: z.number().int().positive(),
+  stateSnapshot: systemCampaignStateSnapshotSchema,
+  changedFields: z.array(identifierSchema).max(1_000)
+}).strict();
+
+const systemWorldMigrationDetailsSchema = z.object({
+  fromWorldVersionId: z.string().uuid(),
+  toWorldVersionId: z.string().uuid(),
+  note: shortTextSchema
+}).strict();
+
+const systemWorldTransferDetailsSchema = z.object({
+  sourceCampaignId: z.string().uuid().nullable().optional(),
+  targetCampaignId: z.string().uuid().nullable().optional(),
+  fromWorldVersionId: z.string().uuid(),
+  toWorldVersionId: z.string().uuid(),
+  characterStrategy: z.literal("preserve_source"),
+  stateStrategy: z.literal("preserve"),
+  targetDefaultsPolicy: z.literal("retain_source"),
+  sourceFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  warnings: z.array(shortTextSchema).max(1_000),
+  note: shortTextSchema
+}).strict().superRefine((details, context) => {
+  if ((details.sourceCampaignId ?? null) === null && (details.targetCampaignId ?? null) === null) {
+    context.addIssue({
+      code: "custom",
+      path: ["sourceCampaignId"],
+      message: "World transfers require a source or target campaign."
+    });
+  }
+});
+
+const systemMemoryConfigDetailsSchema = z.object({
+  embeddingEnabled: z.boolean(),
+  embeddingProviderProfileId: z.string().uuid().nullable(),
+  embeddingModel: z.string().max(300),
+  embeddingBatchSize: z.number().int().min(1).max(128),
+  embeddingDocumentPrefix: z.string().max(4_000).nullable().optional(),
+  embeddingQueryPrefix: z.string().max(4_000).nullable().optional(),
+  retrievalImplementation: z.enum(["legacy_hybrid", "chunked_hybrid"]).optional(),
+  retrievalShadowEnabled: z.boolean().optional(),
+  createdAt: archiveTimestampSchema.optional(),
+  updatedAt: archiveTimestampSchema.optional()
+}).strict().superRefine((details, context) => {
+  if (details.embeddingEnabled
+    && (details.embeddingProviderProfileId === null || details.embeddingModel.length === 0)) {
+    context.addIssue({
+      code: "custom",
+      path: ["embeddingProviderProfileId"],
+      message: "Enabled memory configuration requires a provider and model."
+    });
+  }
+});
+
+const systemIllustrationConfigDetailsSchema = z.object({
+  enabled: z.boolean(),
+  providerProfileId: z.string().uuid().nullable(),
+  model: z.string().max(300),
+  size: boundedStringSchema(100),
+  aspectRatio: boundedStringSchema(100),
+  quality: z.enum(["auto", "low", "medium", "high"]),
+  outputFormat: z.enum(["png", "jpeg", "webp"]),
+  maxAttempts: z.number().int().min(1).max(10),
+  sourcePolicy: z.enum(["off", "library_only", "library_then_generate", "generate_only"]).optional(),
+  matchingScope: z.enum(["campaign", "world", "owner_library", "shared"]).optional(),
+  confidenceProfile: z.enum(["strict", "balanced", "broad"]).optional(),
+  repetitionWindow: z.number().int().min(0).max(100).optional(),
+  segmentWordCount: z.number().int().min(100).max(5_000),
+  imagesPerSegment: z.number().int().min(1).max(2),
+  segmentPromptMode: z.enum(["direct", "ai_refined"]),
+  refinementPrompt: z.string().max(4_000),
+  createdAt: archiveTimestampSchema.optional(),
+  updatedAt: archiveTimestampSchema.optional()
+}).strict().superRefine((details, context) => {
+  if (details.sourcePolicy !== undefined && details.enabled !== (details.sourcePolicy !== "off")) {
+    context.addIssue({
+      code: "custom",
+      path: ["sourcePolicy"],
+      message: "Illustration source policy must match enabled state."
+    });
+  }
+  if (details.enabled && (details.providerProfileId === null || details.model.length === 0)) {
+    context.addIssue({
+      code: "custom",
+      path: ["providerProfileId"],
+      message: "Enabled illustration configuration requires a provider and model."
+    });
+  }
+});
+
+export const systemCampaignHistoryDetailsSchema = z.discriminatedUnion("eventType", [
+  z.object({ eventType: z.literal("character-profile-edit"), details: systemCharacterProfileEditDetailsSchema }).strict(),
+  z.object({ eventType: z.literal("campaign-state-edit"), details: systemCampaignStateEditDetailsSchema }).strict(),
+  z.object({ eventType: z.literal("world-migration"), details: systemWorldMigrationDetailsSchema }).strict(),
+  z.object({ eventType: z.literal("world-transfer"), details: systemWorldTransferDetailsSchema }).strict(),
+  z.object({ eventType: z.literal("memory-config"), details: systemMemoryConfigDetailsSchema }).strict(),
+  z.object({ eventType: z.literal("illustration-config"), details: systemIllustrationConfigDetailsSchema }).strict(),
+  z.object({
+    eventType: z.literal("accepted-turn-mode"),
+    details: z.object({
+      turnId: z.string().uuid(),
+      turnNumber: z.number().int().positive(),
+      inputMode: z.enum(["action", "scene"]),
+      inputModeSource: z.enum(["explicit", "auto", "generated_choice", "opening_action", "fallback"])
+    }).strict()
+  }).strict(),
+  z.object({
+    eventType: z.literal("illustration-set"),
+    details: z.object({
+      turnId: z.string().uuid(),
+      segmentWordCount: z.number().int().min(100).max(5_000),
+      imagesPerSegment: z.number().int().min(1).max(2),
+      promptMode: z.enum(["direct", "ai_refined", "legacy"]),
+      status: z.enum(["queued", "refining", "generating", "completed", "partial", "failed", "superseded"]),
+      isActive: z.boolean(),
+      characterVisualReference: z.string().max(20_000).nullable().optional(),
+      completedAt: archiveTimestampSchema.nullable().optional()
+    }).strict()
+  }).strict(),
+  z.object({
+    eventType: z.literal("illustration-segment"),
+    details: z.object({
+      illustrationSetId: z.string().uuid(),
+      turnId: z.string().uuid(),
+      ordinal: nonnegativeSafeIntegerSchema,
+      startOffset: nonnegativeSafeIntegerSchema,
+      endOffset: nonnegativeSafeIntegerSchema,
+      startWord: nonnegativeSafeIntegerSchema,
+      endWord: nonnegativeSafeIntegerSchema,
+      directPrompt: longTextSchema,
+      resolvedPrompt: longTextSchema,
+      promptSource: z.enum(["direct", "ai_refined", "ai_fallback", "legacy"]),
+      status: z.enum(["queued", "refining", "generating", "completed", "recoverable", "failed"])
+    }).strict()
+  }).strict()
+]);
+
+export function parseSystemCampaignHistoryDetails(eventType: string, content: string) {
+  let details: unknown;
+  try {
+    details = JSON.parse(content);
+  } catch {
+    details = undefined;
+  }
+  return systemCampaignHistoryDetailsSchema.parse({ eventType, details });
+}
 
 const systemCampaignHistoryRecordSchema = z.object({
   sourceId: z.string().uuid(),
@@ -314,11 +494,35 @@ const systemCampaignHistoryRecordSchema = z.object({
 const systemCanonicalFactRecordSchema = z.object({
   sourceId: z.string().uuid(),
   campaignId: z.string().uuid(),
+  worldVersionId: z.string().uuid(),
+  sourceTurnId: z.string().uuid().nullable(),
+  sourceStateEditId: z.string().uuid().nullable(),
+  sourceTurnNumber: nonnegativeSafeIntegerSchema,
+  sourceFactIndex: nonnegativeSafeIntegerSchema,
   subject: shortTextSchema,
   predicate: shortTextSchema,
   object: longTextSchema,
+  validFromTurn: nonnegativeSafeIntegerSchema,
+  validUntilTurn: nonnegativeSafeIntegerSchema.nullable(),
+  supersededByFactId: z.string().uuid().nullable(),
+  createdAt: archiveTimestampSchema,
   updatedAt: archiveTimestampSchema
-}).strict();
+}).strict().superRefine((record, context) => {
+  if ((record.sourceTurnId === null) === (record.sourceStateEditId === null)) {
+    context.addIssue({
+      code: "custom",
+      path: ["sourceTurnId"],
+      message: "Canonical facts require exactly one authoritative source turn or state edit."
+    });
+  }
+  if (record.validUntilTurn !== null && record.validUntilTurn <= record.validFromTurn) {
+    context.addIssue({
+      code: "custom",
+      path: ["validUntilTurn"],
+      message: "Canonical fact validity cannot end before it begins."
+    });
+  }
+});
 
 const systemIllustrationRecordSchema = z.object({
   sourceId: z.string().uuid(),
@@ -332,6 +536,7 @@ const systemIllustrationRecordSchema = z.object({
 
 const systemImportRecordSchema = z.object({
   sourceId: z.string().uuid(),
+  campaignId: z.string().uuid().nullable(),
   sourceType: identifierSchema,
   sourceName: shortTextSchema,
   sourceHash: z.string().regex(/^[a-f0-9]{64}$/),

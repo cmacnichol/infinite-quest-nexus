@@ -5,6 +5,7 @@ import {
   systemArchiveManifestSchema,
   systemArchiveJobViewSchema,
   systemArchivePayloadSchema,
+  systemCampaignHistoryDetailsSchema,
   systemImportPreviewViewSchema,
   systemRecordEnvelopeSchema
 } from "../../packages/contracts/src/system-archives.js";
@@ -251,6 +252,192 @@ describe("System Archive contracts", () => {
       reason: "Restore exact accepted history.",
       source: "user_edit"
     });
+  });
+
+  it("requires portable campaign, turn, canonical-fact, import, and world-fork authority", () => {
+    const turnId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa4";
+    const stateEditId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa7";
+    const factId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa8";
+    const importedId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa9";
+    const snapshot = {
+      id: "scholar",
+      name: "Nia",
+      characterText: "A determined scholar.",
+      profile: validCharacterProfile,
+      rpgStats: [],
+      defaultTriggers: [],
+      source: { type: "world-version", revision: 3 }
+    };
+    const records = [
+      {
+        domain: "worlds", formatVersion: 1, sourceId: worldId,
+        record: {
+          sourceId: worldId,
+          title: "The Observatory",
+          status: "active",
+          forkedFromWorldId: null,
+          forkedFromWorldVersionId: null,
+          createdAt: "2026-08-25T12:00:00.000Z",
+          updatedAt: "2026-08-25T12:00:00.000Z"
+        }
+      },
+      {
+        domain: "campaigns", formatVersion: 1, sourceId: campaignId,
+        record: {
+          ...validCampaignRecord,
+          selectedCharacterId: "scholar",
+          characterSnapshot: snapshot,
+          characterProfile: { name: "Nia", profile: validCharacterProfile },
+          characterProfileRevision: 3
+        }
+      },
+      {
+        domain: "turns", formatVersion: 1, sourceId: turnId,
+        record: {
+          sourceId: turnId,
+          campaignId,
+          turnNumber: 4,
+          action: "Open the door.",
+          narration: "The door opens.",
+          choices: [],
+          imagePrompt: "An opening observatory door.",
+          stateSnapshotPrivate: validCampaignState,
+          acceptedAt: "2026-08-25T12:00:04.000Z"
+        }
+      },
+      {
+        domain: "canonical-facts", formatVersion: 1, sourceId: factId,
+        record: {
+          sourceId: factId,
+          campaignId,
+          worldVersionId,
+          sourceTurnId: turnId,
+          sourceStateEditId: null,
+          sourceTurnNumber: 4,
+          sourceFactIndex: 7,
+          subject: "observatory door",
+          predicate: "status",
+          object: "open",
+          validFromTurn: 4,
+          validUntilTurn: 6,
+          supersededByFactId: null,
+          createdAt: "2026-08-25T12:00:04.000Z",
+          updatedAt: "2026-08-25T12:00:06.000Z"
+        }
+      },
+      {
+        domain: "imports", formatVersion: 1, sourceId: importedId,
+        record: {
+          sourceId: importedId,
+          campaignId,
+          sourceType: "campaign_archive",
+          sourceName: "Observatory campaign",
+          sourceHash: "e".repeat(64),
+          completedAt: "2026-08-25T12:00:07.000Z"
+        }
+      }
+    ] as const;
+
+    for (const record of records) {
+      expect(systemRecordEnvelopeSchema.parse(record)).toEqual(record);
+    }
+  });
+
+  it("validates exact campaign history and portable configuration authority", () => {
+    const providerProfileId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa10";
+    const records = [
+      {
+        eventType: "character-profile-edit",
+        details: {
+          revision: 3,
+          previousProfile: { name: "Nia", profile: validCharacterProfile },
+          nextProfile: { name: "Nia Vale", profile: validCharacterProfile },
+          editSource: "manual"
+        }
+      },
+      {
+        eventType: "campaign-state-edit",
+        details: {
+          effectiveTurnNumber: 4,
+          revision: 6,
+          stateSnapshot: validCampaignState,
+          changedFields: ["canonicalFacts", "trackers"]
+        }
+      },
+      {
+        eventType: "memory-config",
+        details: {
+          embeddingEnabled: true,
+          embeddingProviderProfileId: providerProfileId,
+          embeddingModel: "embed-model",
+          embeddingBatchSize: 24,
+          embeddingDocumentPrefix: "search_document: ",
+          embeddingQueryPrefix: "search_query: ",
+          retrievalImplementation: "chunked_hybrid",
+          retrievalShadowEnabled: true,
+          createdAt: "2026-08-25T12:00:00.000Z",
+          updatedAt: "2026-08-25T12:01:00.000Z"
+        }
+      },
+      {
+        eventType: "illustration-config",
+        details: {
+          enabled: true,
+          providerProfileId,
+          model: "image-model",
+          size: "1536x1024",
+          aspectRatio: "3:2",
+          quality: "high",
+          outputFormat: "webp",
+          maxAttempts: 4,
+          sourcePolicy: "library_then_generate",
+          matchingScope: "campaign",
+          confidenceProfile: "strict",
+          repetitionWindow: 9,
+          segmentWordCount: 250,
+          imagesPerSegment: 2,
+          segmentPromptMode: "ai_refined",
+          refinementPrompt: "Preserve the fiction-only aesthetic.",
+          createdAt: "2026-08-25T12:00:00.000Z",
+          updatedAt: "2026-08-25T12:01:00.000Z"
+        }
+      },
+      {
+        eventType: "world-migration",
+        details: {
+          fromWorldVersionId: worldVersionId,
+          toWorldVersionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa12",
+          note: "Advance the campaign."
+        }
+      },
+      {
+        eventType: "world-transfer",
+        details: {
+          sourceCampaignId: campaignId,
+          targetCampaignId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa13",
+          fromWorldVersionId: worldVersionId,
+          toWorldVersionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa12",
+          characterStrategy: "preserve_source",
+          stateStrategy: "preserve",
+          targetDefaultsPolicy: "retain_source",
+          sourceFingerprint: "f".repeat(64),
+          warnings: ["Review imported provider assignments."],
+          note: "Transfer the campaign."
+        }
+      }
+    ] as const;
+
+    for (const record of records) {
+      expect(systemCampaignHistoryDetailsSchema.parse(record)).toEqual(record);
+    }
+    expect(systemCampaignHistoryDetailsSchema.safeParse({
+      eventType: "campaign-state-edit",
+      details: { ...records[1].details, stateSnapshot: undefined }
+    }).success).toBe(false);
+    expect(systemCampaignHistoryDetailsSchema.safeParse({
+      eventType: "illustration-config",
+      details: { ...records[3].details, sourcePolicy: "off" }
+    }).success).toBe(false);
   });
 
   it("requires Chronicle memories to carry their authoritative turn and memory kind", () => {

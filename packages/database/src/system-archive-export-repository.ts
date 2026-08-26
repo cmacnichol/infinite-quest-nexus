@@ -233,6 +233,8 @@ const DOMAIN_SQL = {
              'domain','worlds','formatVersion',1,'sourceId',world.id,
              'record',jsonb_build_object(
                'sourceId',world.id,'title',world.title,'status',world.status,
+               'forkedFromWorldId',world.forked_from_world_id,
+               'forkedFromWorldVersionId',world.forked_from_world_version_id,
                'createdAt',world.created_at,'updatedAt',world.updated_at
              )
            ) AS envelope
@@ -284,6 +286,10 @@ const DOMAIN_SQL = {
                    WHEN 'flexible_scene' THEN 'Scene Direction'
                    ELSE 'Action' END
                ),
+               'selectedCharacterId',campaign.selected_character_id,
+               'characterSnapshot',campaign.character_snapshot,
+               'characterProfile',campaign.character_profile,
+               'characterProfileRevision',campaign.character_profile_revision,
                'createdAt',campaign.created_at,'updatedAt',campaign.updated_at
              )
            ) AS envelope
@@ -297,7 +303,9 @@ const DOMAIN_SQL = {
                'sourceId',turn_row.id,'campaignId',turn_row.campaign_id,
                'turnNumber',turn_row.turn_number,'action',turn_row.action,
                'narration',turn_row.narration,'choices',turn_row.choices,
-               'imagePrompt',turn_row.image_prompt,'acceptedAt',turn_row.accepted_at
+               'imagePrompt',turn_row.image_prompt,
+               'stateSnapshotPrivate',turn_row.state_snapshot_private,
+               'acceptedAt',turn_row.accepted_at
              )
            ) AS envelope
       FROM turns turn_row
@@ -398,10 +406,10 @@ const DOMAIN_SQL = {
       FROM (
         SELECT '01:' || edit.id::text AS sort_key,edit.id AS source_id,edit.campaign_id,
                'character-profile-edit'::text AS event_type,
-               jsonb_strip_nulls(jsonb_build_object(
+               jsonb_build_object(
                  'revision',edit.revision,'previousProfile',edit.previous_profile,
                  'nextProfile',edit.next_profile,'editSource',edit.edit_source
-               ))::text AS content,
+               )::text AS content,
                edit.created_at AS occurred_at
           FROM campaign_character_profile_edits edit WHERE edit.owner_user_id=$1
         UNION ALL
@@ -421,14 +429,14 @@ const DOMAIN_SQL = {
         UNION ALL
         SELECT '04:' || transfer.id::text,transfer.id,
                COALESCE(transfer.target_campaign_id,transfer.source_campaign_id),'world-transfer',
-               jsonb_strip_nulls(jsonb_build_object(
+               jsonb_build_object(
                  'sourceCampaignId',transfer.source_campaign_id,'targetCampaignId',transfer.target_campaign_id,
                  'fromWorldVersionId',transfer.from_world_version_id,
                  'toWorldVersionId',transfer.to_world_version_id,
                  'characterStrategy',transfer.character_strategy,'stateStrategy',transfer.state_strategy,
                  'targetDefaultsPolicy',transfer.target_defaults_policy,
                  'sourceFingerprint',transfer.source_fingerprint,'warnings',transfer.warnings,'note',transfer.note
-               ))::text,transfer.created_at
+               )::text,transfer.created_at
           FROM campaign_world_transfers transfer
          WHERE transfer.owner_user_id=$1
            AND COALESCE(transfer.target_campaign_id,transfer.source_campaign_id) IS NOT NULL
@@ -437,25 +445,34 @@ const DOMAIN_SQL = {
                overlay(overlay(md5('memory-config:' || config.campaign_id::text)
                  placing '5' from 13) placing '8' from 17)::uuid,
                config.campaign_id,'memory-config',
-               jsonb_strip_nulls(jsonb_build_object(
+               jsonb_build_object(
                  'embeddingEnabled',config.embedding_enabled,
                  'embeddingProviderProfileId',config.embedding_provider_profile_id,
-                 'embeddingModel',config.embedding_model,'embeddingBatchSize',config.embedding_batch_size
-               ))::text,config.updated_at
+                 'embeddingModel',config.embedding_model,'embeddingBatchSize',config.embedding_batch_size,
+                 'embeddingDocumentPrefix',config.embedding_document_prefix,
+                 'embeddingQueryPrefix',config.embedding_query_prefix,
+                 'retrievalImplementation',config.retrieval_implementation,
+                 'retrievalShadowEnabled',config.retrieval_shadow_enabled,
+                 'createdAt',config.created_at,'updatedAt',config.updated_at
+               )::text,config.updated_at
           FROM campaign_memory_configs config WHERE config.owner_user_id=$1
         UNION ALL
         SELECT '06:' || config.campaign_id::text,
                overlay(overlay(md5('illustration-config:' || config.campaign_id::text)
                  placing '5' from 13) placing '8' from 17)::uuid,
                config.campaign_id,'illustration-config',
-               jsonb_strip_nulls(jsonb_build_object(
+               jsonb_build_object(
                  'enabled',config.enabled,'providerProfileId',config.provider_profile_id,
                  'model',config.model,'size',config.size,'aspectRatio',config.aspect_ratio,
                  'quality',config.quality,'outputFormat',config.output_format,
                  'maxAttempts',config.max_attempts,'segmentWordCount',config.segment_word_count,
                  'imagesPerSegment',config.images_per_segment,'segmentPromptMode',config.segment_prompt_mode,
-                 'refinementPrompt',config.refinement_prompt
-               ))::text,config.updated_at
+                 'refinementPrompt',config.refinement_prompt,
+                 'sourcePolicy',config.source_policy,'matchingScope',config.matching_scope,
+                 'confidenceProfile',config.confidence_profile,
+                 'repetitionWindow',config.repetition_window,
+                 'createdAt',config.created_at,'updatedAt',config.updated_at
+               )::text,config.updated_at
           FROM campaign_illustration_configs config WHERE config.owner_user_id=$1
         UNION ALL
         SELECT '07:' || turn_row.id::text,
@@ -469,13 +486,13 @@ const DOMAIN_SQL = {
           FROM turns turn_row WHERE turn_row.owner_user_id=$1
         UNION ALL
         SELECT '08:' || illustration_set.id::text,illustration_set.id,illustration_set.campaign_id,'illustration-set',
-               jsonb_strip_nulls(jsonb_build_object(
+               jsonb_build_object(
                  'turnId',illustration_set.turn_id,'segmentWordCount',illustration_set.segment_word_count,
                  'imagesPerSegment',illustration_set.images_per_segment,'promptMode',illustration_set.prompt_mode,
                  'status',illustration_set.status,'isActive',illustration_set.is_active,
                  'characterVisualReference',illustration_set.character_visual_reference,
                  'completedAt',illustration_set.completed_at
-               ))::text,
+               )::text,
                illustration_set.created_at
           FROM turn_illustration_sets illustration_set
          WHERE illustration_set.owner_user_id=$1
@@ -499,9 +516,17 @@ const DOMAIN_SQL = {
              'domain','canonical-facts','formatVersion',1,'sourceId',fact.id,
              'record',jsonb_build_object(
                'sourceId',fact.id,'campaignId',fact.campaign_id,
+               'worldVersionId',fact.world_version_id,
+               'sourceTurnId',fact.source_turn_id,
+               'sourceStateEditId',fact.source_state_edit_id,
+               'sourceTurnNumber',fact.source_turn_number,
+               'sourceFactIndex',fact.source_fact_index,
                'subject',COALESCE(fact.metadata->>'subject',''),
                'predicate',COALESCE(fact.metadata->>'predicate',''),
-               'object',fact.content,'updatedAt',fact.updated_at
+               'object',fact.content,'validFromTurn',fact.valid_from_turn,
+               'validUntilTurn',fact.valid_until_turn,
+               'supersededByFactId',fact.superseded_by_fact_id,
+               'createdAt',fact.created_at,'updatedAt',fact.updated_at
              )
            ) AS envelope
       FROM campaign_canonical_facts fact
@@ -575,6 +600,7 @@ const DOMAIN_SQL = {
              'domain','imports','formatVersion',1,'sourceId',import_row.id,
              'record',jsonb_build_object(
                'sourceId',import_row.id,'sourceType',import_row.source_type,
+               'campaignId',import_row.campaign_id,
                'sourceName',import_row.source_name,'sourceHash',import_row.source_hash,
                'completedAt',import_row.completed_at
              )

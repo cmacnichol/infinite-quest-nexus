@@ -446,4 +446,143 @@ describe("System Archive preview restore keys", () => {
       await index.close();
     }
   });
+
+  it("rejects world-fork provenance whose source version belongs to another world", async () => {
+    const index = await SystemArchivePreviewIndex.create();
+    try {
+      const content = {
+        entities: [], relationships: [], playableCharacters: [], assets: [],
+        defaults: { selectedCharacterId: null },
+      };
+      index.add({ domain: "worlds", sourceId: "world-1", record: {} } as never, new Set());
+      index.add({ domain: "worlds", sourceId: "world-2", record: {} } as never, new Set());
+      index.add({
+        domain: "worlds", sourceId: "world-3",
+        record: { forkedFromWorldId: "world-1", forkedFromWorldVersionId: "version-2" },
+      } as never, new Set());
+      index.add({
+        domain: "world-versions", sourceId: "version-2",
+        record: { worldId: "world-2", versionNumber: 1, content },
+      } as never, new Set());
+
+      expect(() => index.validate([])).toThrow(expect.objectContaining({
+        code: "archive-world-mismatch",
+      }));
+    } finally {
+      await index.close();
+    }
+  });
+
+  it("rejects selected character authority absent from the pinned world version", async () => {
+    const index = await SystemArchivePreviewIndex.create();
+    try {
+      index.add({ domain: "worlds", sourceId: "world-1", record: {} } as never, new Set());
+      index.add({
+        domain: "world-versions", sourceId: "version-1",
+        record: {
+          worldId: "world-1", versionNumber: 1,
+          content: {
+            entities: [], relationships: [], assets: [],
+            playableCharacters: [{ id: "hero" }],
+            defaults: { selectedCharacterId: "hero" },
+          },
+        },
+      } as never, new Set());
+      index.add({
+        domain: "campaigns", sourceId: "campaign-1",
+        record: {
+          worldVersionId: "version-1", activeTurnNumber: 0,
+          selectedCharacterId: "missing", characterSnapshot: { id: "missing" },
+        },
+      } as never, new Set());
+
+      expect(() => index.validate([])).toThrow(expect.objectContaining({
+        code: "archive-world-mismatch",
+      }));
+    } finally {
+      await index.close();
+    }
+  });
+
+  it("rejects canonical-fact and import provenance outside their campaign authority", async () => {
+    const index = await SystemArchivePreviewIndex.create();
+    try {
+      const content = {
+        entities: [], relationships: [], playableCharacters: [], assets: [],
+        defaults: { selectedCharacterId: null },
+      };
+      index.add({ domain: "worlds", sourceId: "world-1", record: {} } as never, new Set());
+      index.add({
+        domain: "world-versions", sourceId: "version-1",
+        record: { worldId: "world-1", versionNumber: 1, content },
+      } as never, new Set());
+      index.add({
+        domain: "campaigns", sourceId: "campaign-1",
+        record: { worldVersionId: "version-1", activeTurnNumber: 1 },
+      } as never, new Set());
+      index.add({
+        domain: "campaigns", sourceId: "campaign-2",
+        record: { worldVersionId: "version-1", activeTurnNumber: 1 },
+      } as never, new Set());
+      index.add({
+        domain: "turns", sourceId: "turn-2",
+        record: { campaignId: "campaign-2", turnNumber: 1 },
+      } as never, new Set());
+      index.add({
+        domain: "canonical-facts", sourceId: "fact-1",
+        record: {
+          campaignId: "campaign-1", worldVersionId: "version-1",
+          sourceTurnId: "turn-2", sourceStateEditId: null,
+          sourceTurnNumber: 1, supersededByFactId: null,
+        },
+      } as never, new Set());
+      index.add({
+        domain: "imports", sourceId: "import-1",
+        record: { campaignId: "missing-campaign" },
+      } as never, new Set());
+
+      expect(() => index.validate([])).toThrow(expect.objectContaining({
+        code: "archive-world-mismatch",
+      }));
+    } finally {
+      await index.close();
+    }
+  });
+
+  it("rejects canonical-fact authority whose historical world version is absent", async () => {
+    const index = await SystemArchivePreviewIndex.create();
+    try {
+      const content = {
+        entities: [], relationships: [], playableCharacters: [], assets: [],
+        defaults: { selectedCharacterId: null },
+      };
+      index.add({ domain: "worlds", sourceId: "world-1", record: {} } as never, new Set());
+      index.add({
+        domain: "world-versions", sourceId: "version-1",
+        record: { worldId: "world-1", versionNumber: 1, content },
+      } as never, new Set());
+      index.add({
+        domain: "campaigns", sourceId: "campaign-1",
+        record: { worldVersionId: "version-1", activeTurnNumber: 1 },
+      } as never, new Set());
+      index.add({
+        domain: "turns", sourceId: "turn-1",
+        record: { campaignId: "campaign-1", turnNumber: 1 },
+      } as never, new Set());
+      index.add({
+        domain: "canonical-facts", sourceId: "fact-1",
+        record: {
+          campaignId: "campaign-1", worldVersionId: "missing-version",
+          sourceTurnId: "turn-1", sourceStateEditId: null,
+          sourceTurnNumber: 1, supersededByFactId: null,
+        },
+      } as never, new Set());
+
+      expect(() => index.validate([])).toThrow(expect.objectContaining({
+        code: "archive-world-mismatch",
+      }));
+    } finally {
+      await index.close();
+    }
+  });
 });

@@ -620,6 +620,16 @@ async function requireLogicalMutation(
 
 type SystemPromptEnvelope = Extract<SystemRecordEnvelope, { domain: "prompts" }>;
 type SystemIllustrationEnvelope = Extract<SystemRecordEnvelope, { domain: "illustrations" }>;
+type PendingWorldFork = Readonly<{
+  worldId: string;
+  forkedFromWorldId: string;
+  forkedFromWorldVersionId: string;
+}>;
+type PendingCanonicalSupersession = Readonly<{
+  factId: string;
+  campaignId: string;
+  supersededByFactId: string;
+}>;
 
 function activityEventIdentity(sourceId: string): number {
   const matched = /^00000000-0000-4000-8000-([0-9a-f]{12})$/iu.exec(sourceId);
@@ -735,8 +745,9 @@ async function insertLogicalRecord(
       await requireLogicalMutation(database.query(
         `INSERT INTO campaigns (
            id,owner_user_id,world_version_id,title,status,active_turn_number,
-           legacy_settings,turn_control_style,created_at,updated_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10)`,
+           legacy_settings,turn_control_style,selected_character_id,character_snapshot,
+           character_profile,character_profile_revision,created_at,updated_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10::jsonb,$11::jsonb,$12,$13,$14)`,
         [
           record.sourceId,
           ownerUserId,
@@ -746,6 +757,12 @@ async function insertLogicalRecord(
           record.activeTurnNumber,
           json(record.settings),
           turnControlStyle(record.settings.turnControlStyle),
+          record.selectedCharacterId ?? null,
+          record.characterSnapshot === undefined || record.characterSnapshot === null
+            ? null : json(record.characterSnapshot),
+          record.characterProfile === undefined || record.characterProfile === null
+            ? null : json(record.characterProfile),
+          record.characterProfileRevision ?? 0,
           record.createdAt,
           record.updatedAt
         ]
@@ -759,7 +776,7 @@ async function insertLogicalRecord(
            id,owner_user_id,campaign_id,turn_number,action,narration,choices,image_prompt,
            mechanics_private,state_snapshot_private,model_metadata,import_metadata,
            accepted_at,created_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,NULL,'{}'::jsonb,'{}'::jsonb,
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,NULL,$11::jsonb,'{}'::jsonb,
                    $9::jsonb,$10,$10)`,
         [
           record.sourceId,
@@ -771,7 +788,8 @@ async function insertLogicalRecord(
           json(record.choices),
           record.imagePrompt,
           json({ source: "system_archive" }),
-          record.acceptedAt
+          record.acceptedAt,
+          json(record.stateSnapshotPrivate ?? {})
         ]
       ), envelope.domain);
       return true;
@@ -940,8 +958,10 @@ async function insertLogicalRecord(
           await requireHistoryMutation(database.query(
             `INSERT INTO campaign_memory_configs (
                campaign_id,owner_user_id,embedding_enabled,embedding_provider_profile_id,
-               embedding_model,embedding_batch_size,created_at,updated_at
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$7)`,
+               embedding_model,embedding_batch_size,embedding_document_prefix,
+               embedding_query_prefix,retrieval_implementation,retrieval_shadow_enabled,
+               created_at,updated_at
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
             [
               record.campaignId,
               ownerUserId,
@@ -949,7 +969,17 @@ async function insertLogicalRecord(
               providerProfileId,
               embeddingModel,
               historyInteger(record.eventType, content, "embeddingBatchSize", 1, 128),
-              record.occurredAt
+              historyOptionalString(record.eventType, content, "embeddingDocumentPrefix"),
+              historyOptionalString(record.eventType, content, "embeddingQueryPrefix"),
+              content.retrievalImplementation === undefined
+                ? "legacy_hybrid"
+                : historyEnum(record.eventType, content, "retrievalImplementation", [
+                    "legacy_hybrid", "chunked_hybrid"
+                  ] as const),
+              content.retrievalShadowEnabled === undefined
+                ? false : historyBoolean(record.eventType, content, "retrievalShadowEnabled"),
+              historyOptionalString(record.eventType, content, "createdAt") ?? record.occurredAt,
+              historyOptionalString(record.eventType, content, "updatedAt") ?? record.occurredAt
             ]
           ), record.eventType);
           return true;
@@ -964,9 +994,10 @@ async function insertLogicalRecord(
           await requireHistoryMutation(database.query(
             `INSERT INTO campaign_illustration_configs (
                campaign_id,owner_user_id,enabled,provider_profile_id,model,size,aspect_ratio,
-               quality,output_format,max_attempts,source_policy,segment_word_count,
-               images_per_segment,segment_prompt_mode,refinement_prompt,created_at,updated_at
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16)`,
+               quality,output_format,max_attempts,source_policy,matching_scope,
+               confidence_profile,repetition_window,segment_word_count,images_per_segment,
+               segment_prompt_mode,refinement_prompt,created_at,updated_at
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
             [
               record.campaignId,
               ownerUserId,
@@ -978,12 +1009,29 @@ async function insertLogicalRecord(
               historyEnum(record.eventType, content, "quality", ["auto", "low", "medium", "high"] as const),
               historyEnum(record.eventType, content, "outputFormat", ["png", "jpeg", "webp"] as const),
               historyInteger(record.eventType, content, "maxAttempts", 1, 10),
-              enabled ? "generate_only" : "off",
+              content.sourcePolicy === undefined
+                ? enabled ? "generate_only" : "off"
+                : historyEnum(record.eventType, content, "sourcePolicy", [
+                    "off", "library_only", "library_then_generate", "generate_only"
+                  ] as const),
+              content.matchingScope === undefined
+                ? "world"
+                : historyEnum(record.eventType, content, "matchingScope", [
+                    "campaign", "world", "owner_library", "shared"
+                  ] as const),
+              content.confidenceProfile === undefined
+                ? "balanced"
+                : historyEnum(record.eventType, content, "confidenceProfile", [
+                    "strict", "balanced", "broad"
+                  ] as const),
+              content.repetitionWindow === undefined
+                ? 5 : historyInteger(record.eventType, content, "repetitionWindow", 0, 100),
               historyInteger(record.eventType, content, "segmentWordCount", 100, 5_000),
               historyInteger(record.eventType, content, "imagesPerSegment", 1, 2),
               historyEnum(record.eventType, content, "segmentPromptMode", ["direct", "ai_refined"] as const),
               historyString(record.eventType, content, "refinementPrompt"),
-              record.occurredAt
+              historyOptionalString(record.eventType, content, "createdAt") ?? record.occurredAt,
+              historyOptionalString(record.eventType, content, "updatedAt") ?? record.occurredAt
             ]
           ), record.eventType);
           return true;
@@ -1101,28 +1149,39 @@ async function insertLogicalRecord(
       await requireLogicalMutation(database.query(
         `INSERT INTO campaign_canonical_facts (
            id,owner_user_id,campaign_id,world_version_id,source_turn_id,source_turn_number,
-           source_fact_index,content,normalized_content,entities,valid_from_turn,metadata,
-           created_at,updated_at
+           source_state_edit_id,source_fact_index,content,normalized_content,entities,
+           valid_from_turn,valid_until_turn,superseded_by_fact_id,metadata,created_at,updated_at
          )
-         SELECT $1,$2,campaign.id,campaign.world_version_id,turn_row.id,turn_row.turn_number,
-                COALESCE((SELECT max(existing.source_fact_index)+1
-                            FROM campaign_canonical_facts existing
-                           WHERE existing.campaign_id=campaign.id
-                             AND existing.source_turn_id=turn_row.id),0),
-                $3,lower($3),ARRAY[]::text[],turn_row.turn_number,$4::jsonb,$5,$5
+         SELECT $1,$2,campaign.id,$3,$4,$5,$6,$7,$8,lower($8),ARRAY[]::text[],
+                $9,$10,NULL,$11::jsonb,$12,$13
            FROM campaigns campaign
-           JOIN LATERAL (
-             SELECT candidate.id,candidate.turn_number
-               FROM turns candidate
-              WHERE candidate.campaign_id=campaign.id AND candidate.owner_user_id=$2
-              ORDER BY candidate.turn_number DESC LIMIT 1
-           ) turn_row ON true
-          WHERE campaign.id=$6 AND campaign.owner_user_id=$2`,
+          WHERE campaign.id=$14 AND campaign.owner_user_id=$2
+            AND EXISTS (
+              SELECT 1 FROM world_versions version
+               WHERE version.id=$3 AND version.owner_user_id=$2
+            )
+            AND ($4::uuid IS NULL OR EXISTS (
+              SELECT 1 FROM turns turn_row
+               WHERE turn_row.id=$4 AND turn_row.owner_user_id=$2
+                 AND turn_row.campaign_id=campaign.id AND turn_row.turn_number=$5
+            ))
+            AND ($6::uuid IS NULL OR EXISTS (
+              SELECT 1 FROM campaign_state_edits edit
+               WHERE edit.id=$6 AND edit.owner_user_id=$2 AND edit.campaign_id=campaign.id
+            ))`,
         [
           record.sourceId,
           ownerUserId,
+          record.worldVersionId,
+          record.sourceTurnId,
+          record.sourceTurnNumber,
+          record.sourceStateEditId,
+          record.sourceFactIndex,
           record.object,
+          record.validFromTurn,
+          record.validUntilTurn,
           json({ subject: record.subject, predicate: record.predicate }),
+          record.createdAt,
           record.updatedAt,
           record.campaignId
         ]
@@ -1194,12 +1253,13 @@ async function insertLogicalRecord(
       const { record } = envelope;
       await requireLogicalMutation(database.query(
         `INSERT INTO imports (
-           id,owner_user_id,source_type,source_name,source_hash,status,stats,error_message,
-           created_at,completed_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,COALESCE($9,clock_timestamp()),$9)`,
+           id,owner_user_id,campaign_id,source_type,source_name,source_hash,status,stats,
+           error_message,created_at,completed_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,COALESCE($10,clock_timestamp()),$10)`,
         [
           record.sourceId,
           ownerUserId,
+          record.campaignId,
           record.sourceType,
           record.sourceName,
           record.sourceHash,
@@ -1831,6 +1891,8 @@ export function createPostgresSystemArchiveImportRepository(
       const client = await pool.connect();
       const pendingPrompts: SystemPromptEnvelope[] = [];
       const pendingIllustrations: SystemIllustrationEnvelope[] = [];
+      const pendingWorldForks: PendingWorldFork[] = [];
+      const pendingCanonicalSupersessions: PendingCanonicalSupersession[] = [];
       const restoredPromptIds = new Set<string>();
       const restoredIllustrationIds = new Set<string>();
       const expectedCounts = emptyDomainCounts();
@@ -1932,6 +1994,38 @@ export function createPostgresSystemArchiveImportRepository(
             pendingPrompts,
             restoredPromptIds
           );
+          for (const fork of pendingWorldForks) {
+            const updated = await client.query(
+              `UPDATE worlds
+                  SET forked_from_world_id=$3,forked_from_world_version_id=$4
+                WHERE id=$1 AND owner_user_id=$2`,
+              [
+                fork.worldId,
+                owner.ownerUserId,
+                fork.forkedFromWorldId,
+                fork.forkedFromWorldVersionId
+              ]
+            );
+            if (updated.rowCount !== 1) {
+              throw repositoryError("System Archive world-fork provenance did not restore exactly once.", 400);
+            }
+          }
+          for (const supersession of pendingCanonicalSupersessions) {
+            const updated = await client.query(
+              `UPDATE campaign_canonical_facts
+                  SET superseded_by_fact_id=$4
+                WHERE id=$1 AND owner_user_id=$2 AND campaign_id=$3`,
+              [
+                supersession.factId,
+                owner.ownerUserId,
+                supersession.campaignId,
+                supersession.supersededByFactId
+              ]
+            );
+            if (updated.rowCount !== 1) {
+              throw repositoryError("System Archive canonical-fact supersession did not restore exactly once.", 400);
+            }
+          }
         };
         const reconcileLogicalCounts = () => {
           for (const domain of SYSTEM_ARCHIVE_DOMAINS) {
@@ -1965,6 +2059,28 @@ export function createPostgresSystemArchiveImportRepository(
                 pendingPrompts,
                 pendingIllustrations
               );
+              if (envelope.domain === "worlds") {
+                const forkedFromWorldId = envelope.record.forkedFromWorldId ?? null;
+                const forkedFromWorldVersionId = envelope.record.forkedFromWorldVersionId ?? null;
+                if ((forkedFromWorldId === null) !== (forkedFromWorldVersionId === null)) {
+                  throw repositoryError("System Archive world-fork provenance is incomplete.", 400);
+                }
+                if (forkedFromWorldId !== null && forkedFromWorldVersionId !== null) {
+                  pendingWorldForks.push({
+                    worldId: envelope.record.sourceId,
+                    forkedFromWorldId,
+                    forkedFromWorldVersionId
+                  });
+                }
+              }
+              if (envelope.domain === "canonical-facts"
+                && envelope.record.supersededByFactId !== null) {
+                pendingCanonicalSupersessions.push({
+                  factId: envelope.record.sourceId,
+                  campaignId: envelope.record.campaignId,
+                  supersededByFactId: envelope.record.supersededByFactId
+                });
+              }
               if (persisted) persistedCounts[envelope.domain] += 1;
               if ("campaignId" in envelope.record && envelope.record.campaignId) {
                 campaignIds.add(envelope.record.campaignId);
