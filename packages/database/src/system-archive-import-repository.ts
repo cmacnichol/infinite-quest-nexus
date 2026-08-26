@@ -1582,10 +1582,10 @@ async function insertLogicalRecord(
         await requireLogicalMutation(database.query(
           `INSERT INTO provider_cost_events (
              id,owner_user_id,campaign_id,turn_id,provider_profile_id,local_call_id,
-             provider_type,provider_response_id,category,operation,requested_model,
+             provider_type,category,operation,requested_model,
              resolved_model,amount,currency,usage_metadata,occurred_at,created_at
            ) VALUES (
-             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16,$17
+             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15,$16
            )`,
           [
             record.sourceId,
@@ -1595,7 +1595,6 @@ async function insertLogicalRecord(
             record.authority.providerProfileId,
             record.authority.localCallId,
             record.authority.providerType,
-            record.authority.providerResponseId,
             record.authority.category,
             record.authority.operation,
             record.authority.requestedModel,

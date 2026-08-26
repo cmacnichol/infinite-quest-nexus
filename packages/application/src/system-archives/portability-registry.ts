@@ -261,12 +261,12 @@ export const SYSTEM_ARCHIVE_SOURCE_COLUMN_CLASSIFICATIONS = Object.freeze({
   provider_cost_events: sourceColumns({
     portable_exact: [
       "id", "campaign_id", "turn_id", "provider_profile_id", "local_call_id", "provider_type",
-      "provider_response_id", "category", "operation", "requested_model", "resolved_model", "amount",
+      "category", "operation", "requested_model", "resolved_model", "amount",
       "currency", "occurred_at", "created_at"
     ],
     portable_sanitized: ["usage_metadata"],
     owner_remapped: ["owner_user_id"],
-    operational_excluded: ["generation_job_id", "image_job_id", "chronicle_job_id"]
+    operational_excluded: ["generation_job_id", "image_job_id", "chronicle_job_id", "provider_response_id"]
   }),
   provider_profiles: sourceColumns({
     portable_exact: [

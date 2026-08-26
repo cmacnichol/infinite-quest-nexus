@@ -289,9 +289,15 @@ describe("System Archive contracts", () => {
         authority: {
           sourceTurnId: null,
           customActionSuggestion: "",
-          imageUrl: "https://images.example.test/story/door.png?width=1200&format=webp",
+          imageUrl: "https://images.example.test/story/%E2%98%85-door.png?width=1200&format=webp",
           mechanicsPrivate: { roll: 17 },
-          modelMetadata: { markdown: "**safe**" },
+          modelMetadata: {
+            markdown: "**safe**",
+            keyMoment: "The door opens.",
+            grantWish: "The regent relents.",
+            bearerStory: "A courier crosses the valley.",
+            apiLore: "The Api dynasty predates the observatory."
+          },
           importMetadata: { nested: [null, true, 3.25, { source: "portable" }] },
           createdAt: "2026-08-25T12:00:04.123456Z",
           inputMode: "action",
@@ -317,12 +323,56 @@ describe("System Archive contracts", () => {
   });
 
   it.each([
+    "api.key",
+    "private.key",
+    "auth.header",
+    "bearer.grant",
+    "api\u2024key",
+    "private\uFF0Ekey",
+    "bearer\u2007grant"
+  ])("rejects separator-obfuscated portable authority key %s", (metadataKey) => {
+    const turnId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa72";
+    expect(systemRecordEnvelopeSchema.safeParse({
+      domain: "turns",
+      formatVersion: 2,
+      sourceId: turnId,
+      record: {
+        sourceId: turnId,
+        campaignId,
+        turnNumber: 4,
+        action: "Open.",
+        narration: "Opened.",
+        choices: [],
+        imagePrompt: "Door.",
+        stateSnapshotPrivate: validCampaignState,
+        acceptedAt: "2026-08-25T12:00:04.123456Z",
+        authority: {
+          sourceTurnId: null,
+          customActionSuggestion: "",
+          imageUrl: "https://images.example.test/story/door.png",
+          mechanicsPrivate: null,
+          modelMetadata: { [metadataKey]: "secret-sentinel" },
+          importMetadata: {},
+          createdAt: "2026-08-25T12:00:04.123456Z",
+          inputMode: "action",
+          inputModeSource: "explicit"
+        }
+      }
+    }).success).toBe(false);
+  });
+
+  it.each([
     "https://user:password@images.example.test/story.png",
     "https://@images.example.test/story.png",
     "https://images.example.test/story.png#private-fragment",
     "https://images.example.test/story.png#",
     "https://images.example.test/story.png?access_token=secret-sentinel",
+    "https://images.example.test/story.png?api.key=secret-sentinel",
     "https://images.example.test/story.png?X-Amz-Signature=capability-sentinel",
+    "https://images.example.test/%73igned/story.png",
+    "https://images.example.test/%74emp/story.png",
+    "https://images.example.test/%2573igned/story.png",
+    "https://images.example.test/%zz/story.png",
     "http://127.0.0.1/private.png",
     "http://[::ffff:127.0.0.1]/private.png",
     "file:///private/story.png",
@@ -357,6 +407,60 @@ describe("System Archive contracts", () => {
         }
       }
     }).success).toBe(false);
+  });
+
+  it("preserves v1 cost compatibility while prohibiting v2 provider response authority", () => {
+    const costId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa73";
+    const versionTwo = {
+      domain: "cost-events",
+      formatVersion: 2,
+      sourceId: costId,
+      record: {
+        sourceId: costId,
+        campaignId,
+        authority: {
+          turnId: null,
+          providerProfileId: providerId,
+          localCallId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa74",
+          providerType: "openrouter",
+          category: "story",
+          operation: "response",
+          requestedModel: "story-model",
+          resolvedModel: "story-model",
+          amount: "0.125",
+          currency: "USD",
+          usageMetadata: { tokens: 73 },
+          occurredAt: "2026-08-25T12:00:04.123456Z",
+          createdAt: "2026-08-25T12:00:04.123456Z"
+        }
+      }
+    } as const;
+
+    expect(systemRecordEnvelopeSchema.safeParse({
+      ...versionTwo,
+      record: {
+        ...versionTwo.record,
+        authority: {
+          ...versionTwo.record.authority,
+          providerResponseId: "provider-response-secret-sentinel"
+        }
+      }
+    }).success).toBe(false);
+    expect(systemRecordEnvelopeSchema.parse(versionTwo)).toEqual(versionTwo);
+
+    const versionOne = {
+      domain: "cost-events",
+      formatVersion: 1,
+      sourceId: costId,
+      record: {
+        sourceId: costId,
+        campaignId: null,
+        providerKind: "text",
+        amountMicros: 125_000,
+        occurredAt: "2026-08-25T12:00:04.123Z"
+      }
+    } as const;
+    expect(systemRecordEnvelopeSchema.parse(versionOne)).toEqual(versionOne);
   });
 
   it("validates authoritative prose without transforming exact bytes", () => {

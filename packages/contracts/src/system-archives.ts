@@ -132,6 +132,28 @@ function isSecretBearingImageQueryKey(key: string): boolean {
     || /^(?:xamz|xgoog|xms)/u.test(compact);
 }
 
+const UNSAFE_PORTABLE_IMAGE_PATH_SEGMENTS = new Set([
+  "capability", "presigned", "signed", "temp", "temporary"
+]);
+
+function hasUnsafePortableImagePath(pathname: string): boolean {
+  return pathname.split("/").some((encodedSegment) => {
+    let decodedSegment: string;
+    try {
+      decodedSegment = decodeURIComponent(encodedSegment);
+    } catch {
+      return true;
+    }
+    if (decodedSegment.includes("%") || decodedSegment.includes("/") || decodedSegment.includes("\\")) {
+      return true;
+    }
+    const compact = decodedSegment.normalize("NFKC")
+      .toLocaleLowerCase("en-US")
+      .replace(/[^a-z0-9]/gu, "");
+    return UNSAFE_PORTABLE_IMAGE_PATH_SEGMENTS.has(compact);
+  });
+}
+
 interface ParsedPortableImageUrl {
   readonly protocol: string;
   readonly username: string;
@@ -160,7 +182,7 @@ export const systemPortableImageUrlSchema = z.string().max(1_000_000).superRefin
     || /^https?:\/\/[^/?#]*@/iu.test(value) || value.includes("#") || url.hash !== ""
     || isLocalPortableImageHost(url.hostname)
     || [...url.searchParams.keys()].some(isSecretBearingImageQueryKey)
-    || /(?:^|\/)(?:temporary|temp|signed|presigned|capability)(?:\/|$)/iu.test(url.pathname)) {
+    || hasUnsafePortableImagePath(url.pathname)) {
     context.addIssue({
       code: "custom",
       message: "Portable image authority cannot contain local, temporary, signed, credentialed, or secret-bearing URLs."
@@ -1007,7 +1029,6 @@ const systemCostEventRecordV2Schema = z.object({
     providerProfileId: z.string().uuid().nullable(),
     localCallId: z.string().uuid(),
     providerType: providerTypeSchema,
-    providerResponseId: z.string().max(2_000).nullable(),
     category: z.enum(["story", "image", "memory"]),
     operation: nonBlankStringSchema(300),
     requestedModel: z.string().max(300).nullable(),

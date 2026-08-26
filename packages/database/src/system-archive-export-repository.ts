@@ -765,7 +765,7 @@ const DOMAIN_SQL = {
                'authority',jsonb_build_object(
                  'turnId',cost.turn_id,'providerProfileId',cost.provider_profile_id,
                  'localCallId',cost.local_call_id,
-                 'providerType',cost.provider_type,'providerResponseId',cost.provider_response_id,
+                 'providerType',cost.provider_type,
                  'category',cost.category,'operation',cost.operation,
                  'requestedModel',cost.requested_model,'resolvedModel',cost.resolved_model,
                  'amount',cost.amount::text,'currency',cost.currency,

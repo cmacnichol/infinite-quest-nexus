@@ -29,13 +29,14 @@ function validatePortableArchivePath(path: string, context: z.RefinementCtx): vo
 }
 
 export function isExcludedPortableMetadataKey(key: string): boolean {
-  const normalized = key.toLocaleLowerCase("en-US");
+  const canonical = key.normalize("NFKC");
+  const normalized = canonical.toLocaleLowerCase("en-US");
   const compact = normalized.replace(/[^a-z0-9]/gu, "");
-  const semantic = key
+  const semantic = canonical
     .replace(/([a-z0-9])([A-Z])/gu, "$1_$2")
     .toLocaleLowerCase("en-US")
     .replace(/[^a-z0-9]+/gu, "_");
-  return /(?:credential|secret|password|api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|auth[_-]?header|cookie|private[_-]?key)/.test(normalized)
+  return /(?:credential|secret|password|apikey|accesstoken|refreshtoken|authorization|authheader|cookie|privatekey)/u.test(compact)
     || /(?:provider|temporary|temp|signed|presigned|upload|download).*(?:url|uri|endpoint)/.test(normalized)
     || normalized === "artifacturl"
     || /(?:local|cache|storage|file|temp).*(?:path|dir|directory|location)/.test(normalized)
@@ -44,8 +45,8 @@ export function isExcludedPortableMetadataKey(key: string): boolean {
     || compact === "token"
     || /^(?:api|auth|bearer|provider|access|refresh|share|delivery|read|write|upload|download|session)token(?:hash|value|ciphertext)?$/u.test(compact)
     || compact.includes("capability")
-    || /^(?:authorization|access|delivery|read|write|upload|download|share)grant$/u.test(compact)
-    || /(?:^|_)(?:authorization|authentication|auth|oauth|access|delivery|read|write|upload|download|share|signed|presigned|temporary)_grant(?:_(?:hash|value|ciphertext))?$/u.test(semantic)
+    || /^(?:authorization|access|bearer|delivery|read|write|upload|download|share)grant$/u.test(compact)
+    || /(?:^|_)(?:authorization|authentication|auth|oauth|access|bearer|delivery|read|write|upload|download|share|signed|presigned|temporary)_grant(?:_(?:hash|value|ciphertext))?$/u.test(semantic)
     || /^(?:nonce|authtag|bearer|session|sessionid|sessionkey)$/u.test(compact)
     || /^(?:credential|encryption|auth)(?:nonce|tag|material|keyversion)$/u.test(compact);
 }

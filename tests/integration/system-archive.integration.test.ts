@@ -1714,6 +1714,7 @@ integration("deterministic owner-wide System Archive export", () => {
 
   it("removes recursive secret and capability authority from export bytes and restored rows", async () => {
     const sentinel = "second-final-capability-sentinel";
+    const providerResponseSentinel = "provider-response-authority-sentinel";
     const excludedAuthority = { nested: [{ oneTimeReadGrant: sentinel }], safe: { markdown: "retained" } };
     await pool.query(
       "UPDATE users SET settings=$2::jsonb WHERE id=$1",
@@ -1749,8 +1750,10 @@ integration("deterministic owner-wide System Archive export", () => {
       [campaignId, JSON.stringify(excludedAuthority)],
     );
     await pool.query(
-      "UPDATE provider_cost_events SET usage_metadata=$2::jsonb WHERE campaign_id=$1",
-      [campaignId, JSON.stringify(excludedAuthority)],
+      `UPDATE provider_cost_events
+          SET usage_metadata=$2::jsonb,provider_response_id=$3
+        WHERE campaign_id=$1`,
+      [campaignId, JSON.stringify(excludedAuthority), providerResponseSentinel],
     );
     await pool.query(
       "UPDATE activity_events SET details=$2::jsonb WHERE campaign_id=$1",
@@ -1764,6 +1767,7 @@ integration("deterministic owner-wide System Archive export", () => {
     const exported = await exportArchive();
     const { zip, serialized } = await archiveText(exported.bytes);
     expect(serialized).not.toContain(sentinel);
+    expect(serialized).not.toContain(providerResponseSentinel);
     expect(serialized).toContain('"markdown":"retained"');
 
     const records = (await Promise.all(Object.values(zip.files)
@@ -1800,6 +1804,7 @@ integration("deterministic owner-wide System Archive export", () => {
                 'checkpoint',checkpoint.content,
                 'importStats',imported.stats,
                 'costUsage',cost.usage_metadata,
+                'providerResponseId',cost.provider_response_id,
                 'activity',activity.details
               ) AS payload
          FROM campaigns campaign
@@ -1818,6 +1823,7 @@ integration("deterministic owner-wide System Archive export", () => {
     expect(persisted.rows[0]!.payload).toMatchObject({
       imageUrl: "",
       mechanics: { nested: [{}], safe: { markdown: "retained" } },
+      providerResponseId: null,
     });
   }, 30_000);
 
@@ -3257,7 +3263,7 @@ integration("deterministic owner-wide System Archive export", () => {
           sourceId: costId, campaignId,
           authority: {
             turnId, providerProfileId: providerId, localCallId, providerType: "openrouter",
-            providerResponseId: " response sentinel ", category: "story", operation: "response",
+            category: "story", operation: "response",
             requestedModel: "requested-sentinel", resolvedModel: "resolved-sentinel",
             amount: "12.345678", currency: "EUR", usageMetadata: { tokens: 73, markdown: exactText },
             occurredAt: updatedAt, createdAt: acceptedAt,
@@ -3492,7 +3498,7 @@ integration("deterministic owner-wide System Archive export", () => {
       error_message: null,
       local_call_id: localCallId,
       provider_type: "openrouter",
-      provider_response_id: " response sentinel ",
+      provider_response_id: null,
       amount: "12.345678000000",
       currency: "EUR",
       usage_metadata: { tokens: 73, markdown: exactText },

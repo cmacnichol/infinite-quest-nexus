@@ -62,5 +62,8 @@ describe("System Archive portability registry", () => {
       storage_path: "storage_rebound",
       filesystem_operation_id: "operational_excluded",
     });
+    expect(SYSTEM_ARCHIVE_SOURCE_COLUMN_CLASSIFICATIONS.provider_cost_events).toMatchObject({
+      provider_response_id: "operational_excluded",
+    });
   });
 });
