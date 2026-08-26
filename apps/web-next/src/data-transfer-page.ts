@@ -576,38 +576,74 @@ export function mountDataTransferPage(
 
   async function cancelCurrent(): Promise<void> {
     clearError();
+    const cancellingKind = operationKind;
     operationController?.abort(new DOMException("Transfer cancelled", "AbortError"));
     try {
       const storedImport = sessionOwnerId
         ? readStoredOperation(operationStorage ?? null, sessionOwnerId, "import")
         : null;
       const activeImportOperation = currentImportOperation ?? storedImport;
-      const currentJobMatchesActiveImport = activeImportOperation?.jobId !== null
-        && currentJobs.import?.id === activeImportOperation?.jobId;
-      if (sessionOwnerId && activeImportOperation && !currentJobMatchesActiveImport) {
-        invalidatePreviewAuthority();
-        const recovered = await resolveStoredImport(sessionOwnerId, activeImportOperation, controller.signal);
-        currentUpload = null;
-        renderJob(recovered);
-        if (isJobCancellable(recovered)) {
-          renderJob(await api.cancelJob("import", recovered.id, controller.signal));
-        }
-        return;
-      }
       const storedExport = sessionOwnerId
         ? readStoredOperation(operationStorage ?? null, sessionOwnerId, "export")
         : null;
       const activeExportOperation = currentExportOperation ?? storedExport;
-      const currentJobMatchesActiveExport = activeExportOperation?.jobId !== null
-        && currentJobs.export?.id === activeExportOperation?.jobId;
-      if (sessionOwnerId && activeExportOperation && !currentJobMatchesActiveExport) {
-        const recovered = await resolveStoredExport(sessionOwnerId, activeExportOperation, controller.signal);
+
+      async function cancelImportOperation(operation: StoredSystemOperation): Promise<void> {
+        invalidatePreviewAuthority();
+        currentUpload = null;
+        if (operation.jobId) {
+          renderJob(await api.cancelJob("import", operation.jobId, controller.signal));
+          return;
+        }
+        const recovered = await resolveStoredImport(sessionOwnerId!, operation, controller.signal);
+        renderJob(recovered);
+        if (isJobCancellable(recovered)) {
+          renderJob(await api.cancelJob("import", recovered.id, controller.signal));
+        }
+      }
+
+      async function cancelExportOperation(operation: StoredSystemOperation): Promise<void> {
+        if (operation.jobId) {
+          renderJob(await api.cancelJob("export", operation.jobId, controller.signal));
+          return;
+        }
+        const recovered = await resolveStoredExport(sessionOwnerId!, operation, controller.signal);
         renderJob(recovered);
         if (isJobCancellable(recovered)) {
           renderJob(await api.cancelJob("export", recovered.id, controller.signal));
         }
+      }
+
+      async function cancelUpload(): Promise<void> {
+        invalidatePreviewAuthority();
+        await api.cancelUpload(currentUpload!.id, controller.signal);
+        currentUpload = null;
+        announce("System Archive upload cancelled.");
+      }
+
+      const activeJob = cancellingKind === "import"
+        ? currentJobs.import
+        : cancellingKind === "export"
+          ? currentJobs.export
+          : null;
+      if (activeJob && isJobCancellable(activeJob)) {
+        if (activeJob.kind === "import") invalidatePreviewAuthority();
+        renderJob(await api.cancelJob(activeJob.kind, activeJob.id, controller.signal));
         return;
       }
+      if (cancellingKind === "upload" && currentUpload) {
+        await cancelUpload();
+        return;
+      }
+      if (sessionOwnerId && cancellingKind === "import" && activeImportOperation) {
+        await cancelImportOperation(activeImportOperation);
+        return;
+      }
+      if (sessionOwnerId && cancellingKind === "export" && activeExportOperation) {
+        await cancelExportOperation(activeExportOperation);
+        return;
+      }
+
       const jobToCancel = [currentJobs.import, currentJobs.export]
         .find((job): job is SystemArchiveJobView => job !== null && isJobCancellable(job));
       if (jobToCancel) {
@@ -615,14 +651,27 @@ export function mountDataTransferPage(
         renderJob(await api.cancelJob(jobToCancel.kind, jobToCancel.id, controller.signal));
         return;
       }
-      if (currentUpload) {
-        invalidatePreviewAuthority();
-        await api.cancelUpload(currentUpload.id, controller.signal);
-        currentUpload = null;
-        announce("System Archive upload cancelled.");
+      if (sessionOwnerId && activeImportOperation?.jobId === null) {
+        await cancelImportOperation(activeImportOperation);
         return;
       }
-      if (operationKind === "upload") invalidatePreviewAuthority();
+      if (currentUpload) {
+        await cancelUpload();
+        return;
+      }
+      if (sessionOwnerId && activeExportOperation?.jobId === null) {
+        await cancelExportOperation(activeExportOperation);
+        return;
+      }
+      if (sessionOwnerId && activeImportOperation) {
+        await cancelImportOperation(activeImportOperation);
+        return;
+      }
+      if (sessionOwnerId && activeExportOperation) {
+        await cancelExportOperation(activeExportOperation);
+        return;
+      }
+      if (cancellingKind === "upload") invalidatePreviewAuthority();
       announce("Local System Archive work cancelled.");
     } catch (reason) {
       if (!disposed) announceError(reason);

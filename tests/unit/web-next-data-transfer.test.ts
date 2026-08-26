@@ -334,7 +334,15 @@ describe("web-next Data Transfer page", () => {
   });
 
   it("keeps cancellation available while a durable export is being monitored", async () => {
+    const operationStorage = memoryStorage();
+    operationStorage.setItem(`infiniteQuest.systemArchiveOperation.v1:${OWNER_B}:import`, JSON.stringify({
+      kind: "import",
+      idempotencyKey: "prior-import-key",
+      jobId: EXPORT_JOB_ID,
+      previewHandle: "prior-preview-authority"
+    }));
     let releaseWait!: () => void;
+    let releasePriorImportRecovery!: () => void;
     const api = fakeApi({
       createExport: vi.fn(async () => ({
         id: JOB_ID,
@@ -344,14 +352,25 @@ describe("web-next Data Transfer page", () => {
         createdAt: NOW,
         updatedAt: NOW
       })),
-      getJob: vi.fn(async () => ({
-        id: JOB_ID,
-        kind: "export",
-        status: "cancelled",
-        report: null,
-        createdAt: NOW,
-        updatedAt: NOW
-      })),
+      getJob: vi.fn(async (kind) => kind === "import"
+        ? new Promise<SystemArchiveJobView>((resolve) => {
+            releasePriorImportRecovery = () => resolve({
+              id: EXPORT_JOB_ID,
+              kind: "import",
+              status: "completed",
+              report: null,
+              createdAt: NOW,
+              updatedAt: NOW
+            });
+          })
+        : {
+            id: JOB_ID,
+            kind: "export",
+            status: "cancelled",
+            report: null,
+            createdAt: NOW,
+            updatedAt: NOW
+          }),
       cancelJob: vi.fn(async () => ({
         id: JOB_ID,
         kind: "export",
@@ -366,9 +385,11 @@ describe("web-next Data Transfer page", () => {
     const mounted = mountDataTransferPage(root, {
       api,
       storage: null,
+      operationStorage,
       wait: async () => new Promise<void>((resolve) => { releaseWait = resolve; })
     });
     await vi.waitFor(() => expect(root.querySelector('[data-system-archive-state="available"]')).not.toBeNull());
+    await vi.waitFor(() => expect(api.getJob).toHaveBeenCalledWith("import", EXPORT_JOB_ID, expect.any(AbortSignal)));
     root.querySelector<HTMLButtonElement>('[data-action="create-system-export"]')!.click();
     const cancel = root.querySelector<HTMLButtonElement>('[data-action="cancel-system-operation"]')!;
 
@@ -376,6 +397,7 @@ describe("web-next Data Transfer page", () => {
     await vi.waitFor(() => expect(releaseWait).toBeTypeOf("function"));
     cancel.click();
     await vi.waitFor(() => expect(api.cancelJob).toHaveBeenCalledWith("export", JOB_ID, expect.any(AbortSignal)));
+    releasePriorImportRecovery();
     releaseWait();
     await vi.waitFor(() => expect(root.textContent).toContain("cancelled"));
     mounted.dispose();
@@ -595,8 +617,27 @@ describe("web-next Data Transfer page", () => {
     type CancellableUploadOptions = CreateSystemUploadOptions & Readonly<{
       onUploadAvailable?(value: SystemUploadView): void;
     }>;
+    const operationStorage = memoryStorage();
+    operationStorage.setItem(`infiniteQuest.systemArchiveOperation.v1:${OWNER_B}:export`, JSON.stringify({
+      kind: "export",
+      idempotencyKey: "prior-export-key",
+      jobId: EXPORT_JOB_ID
+    }));
     let operationSignal: AbortSignal | undefined;
+    let releasePriorExportRecovery!: () => void;
     const api = fakeApi({
+      getJob: vi.fn(async (kind) => kind === "export"
+        ? new Promise<SystemArchiveJobView>((resolve) => {
+            releasePriorExportRecovery = () => resolve({
+              id: EXPORT_JOB_ID,
+              kind: "export",
+              status: "published",
+              report: null,
+              createdAt: NOW,
+              updatedAt: NOW
+            });
+          })
+        : importJob()),
       createUpload: vi.fn((_file: File, options: CreateSystemUploadOptions = {}) => new Promise<SystemUploadView>((_resolve, reject) => {
         operationSignal = options.signal;
         (options as CancellableUploadOptions).onUploadAvailable?.(upload({ status: "uploading", receivedBytes: 4 }));
@@ -606,8 +647,9 @@ describe("web-next Data Transfer page", () => {
     });
     const { window } = parseHTML('<html><body><div id="app"></div></body></html>');
     const root = window.document.querySelector<HTMLElement>("#app")!;
-    const mounted = mountDataTransferPage(root, { api, storage: null });
+    const mounted = mountDataTransferPage(root, { api, storage: null, operationStorage });
     await vi.waitFor(() => expect(root.querySelector<HTMLInputElement>("#system-archive-file")?.disabled).toBe(false));
+    await vi.waitFor(() => expect(api.getJob).toHaveBeenCalledWith("export", EXPORT_JOB_ID, expect.any(AbortSignal)));
     const input = root.querySelector<HTMLInputElement>("#system-archive-file")!;
     Object.defineProperty(input, "files", {
       configurable: true,
@@ -622,6 +664,7 @@ describe("web-next Data Transfer page", () => {
 
     await vi.waitFor(() => expect(operationSignal?.aborted).toBe(true));
     await vi.waitFor(() => expect(api.cancelUpload).toHaveBeenCalledWith(UPLOAD_ID, expect.any(AbortSignal)));
+    releasePriorExportRecovery();
     expect(root.textContent).toContain("upload cancelled");
     mounted.dispose();
   });

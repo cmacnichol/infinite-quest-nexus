@@ -80,6 +80,7 @@ let systemArchiveExportOperation = null;
 let systemArchiveImportOperation = null;
 let systemArchiveBusy = false;
 let systemArchiveOperationController = null;
+let systemArchiveOperationKind = null;
 let systemArchiveOwnerId = null;
 let systemArchiveRecoveryStarted = false;
 
@@ -746,17 +747,21 @@ async function monitorSystemArchiveJob(job, signal) {
   return latest;
 }
 
-async function runSystemArchiveAction(work) {
+async function runSystemArchiveAction(kind, work) {
   clearSystemArchiveError();
   const controller = new AbortController();
   systemArchiveOperationController = controller;
+  systemArchiveOperationKind = kind;
   setSystemArchiveBusy(true);
   try {
     await work(controller.signal);
   } catch (error) {
     if (error?.name !== "AbortError") showSystemArchiveError(error);
   } finally {
-    if (systemArchiveOperationController === controller) systemArchiveOperationController = null;
+    if (systemArchiveOperationController === controller) {
+      systemArchiveOperationController = null;
+      systemArchiveOperationKind = null;
+    }
     setSystemArchiveBusy(false);
   }
 }
@@ -809,7 +814,7 @@ async function createOrResumeSystemArchiveUpload(file, sha256, signal) {
 
 async function uploadAndPreviewSystemArchive() {
   if (!systemArchiveSelectedFile) return;
-  await runSystemArchiveAction(async (signal) => {
+  await runSystemArchiveAction("upload", async (signal) => {
     const file = systemArchiveSelectedFile;
     if (!file.size) throw new Error("System Archive file must not be empty.");
     renderSystemArchiveProgress("hashing", 0, file.size);
@@ -842,7 +847,7 @@ async function uploadAndPreviewSystemArchive() {
 }
 
 async function createSystemArchiveExport() {
-  await runSystemArchiveAction(async (signal) => {
+  await runSystemArchiveAction("export", async (signal) => {
     elements.systemArchiveDownload.classList.add("hidden");
     systemArchiveJobs.export = null;
     const idempotencyKey = systemArchiveIdempotencyKey("legacy-export");
@@ -922,47 +927,99 @@ function beginSystemArchiveRecoveryWhenReady() {
 
 async function cancelSystemArchiveOperation() {
   const controller = systemArchiveOperationController;
+  const cancellingKind = systemArchiveOperationKind;
   controller?.abort(new DOMException("Transfer cancelled", "AbortError"));
   try {
     const storedImport = readSystemArchiveOperation("import");
     const activeImportOperation = systemArchiveImportOperation || storedImport;
-    const currentJobMatchesActiveImport = activeImportOperation?.jobId !== null
-      && systemArchiveJobs.import?.id === activeImportOperation?.jobId;
-    if (activeImportOperation && !currentJobMatchesActiveImport) {
+    const storedExport = readSystemArchiveOperation("export");
+    const activeExportOperation = systemArchiveExportOperation || storedExport;
+
+    async function cancelImportOperation(operation) {
       invalidateSystemImportPreviewAuthority();
-      const recovered = await resolveStoredSystemImport(activeImportOperation);
       systemArchiveUpload = null;
+      if (operation.jobId) {
+        renderSystemArchiveJob(await api(`/api/v1/system-imports/${encodeURIComponent(operation.jobId)}`, { method: "DELETE" }));
+        return;
+      }
+      const recovered = await resolveStoredSystemImport(operation);
       renderSystemArchiveJob(recovered);
       if (systemArchiveJobCancellable(recovered)) {
         renderSystemArchiveJob(await api(`/api/v1/system-imports/${encodeURIComponent(recovered.id)}`, { method: "DELETE" }));
       }
-      return;
     }
-    const storedExport = readSystemArchiveOperation("export");
-    const activeExportOperation = systemArchiveExportOperation || storedExport;
-    const currentJobMatchesActiveExport = activeExportOperation?.jobId !== null
-      && systemArchiveJobs.export?.id === activeExportOperation?.jobId;
-    if (activeExportOperation && !currentJobMatchesActiveExport) {
-      const recovered = await resolveStoredSystemExport(activeExportOperation);
+
+    async function cancelExportOperation(operation) {
+      if (operation.jobId) {
+        renderSystemArchiveJob(await api(`/api/v1/system-exports/${encodeURIComponent(operation.jobId)}`, { method: "DELETE" }));
+        return;
+      }
+      const recovered = await resolveStoredSystemExport(operation);
       renderSystemArchiveJob(recovered);
       if (systemArchiveJobCancellable(recovered)) {
         renderSystemArchiveJob(await api(`/api/v1/system-exports/${encodeURIComponent(recovered.id)}`, { method: "DELETE" }));
       }
+    }
+
+    async function cancelUpload() {
+      invalidateSystemImportPreviewAuthority();
+      systemArchiveUpload = await api(`/api/v1/system-imports/uploads/${encodeURIComponent(systemArchiveUpload.id)}`, { method: "DELETE" });
+      setSystemArchiveStatus("System Archive upload cancelled.");
+    }
+
+    const activeJob = cancellingKind === "import"
+      ? systemArchiveJobs.import
+      : cancellingKind === "export"
+        ? systemArchiveJobs.export
+        : null;
+    if (systemArchiveJobCancellable(activeJob)) {
+      if (activeJob.kind === "import") invalidateSystemImportPreviewAuthority();
+      const segment = activeJob.kind === "export" ? "system-exports" : "system-imports";
+      renderSystemArchiveJob(await api(`/api/v1/${segment}/${encodeURIComponent(activeJob.id)}`, { method: "DELETE" }));
       return;
     }
+    if (cancellingKind === "upload" && systemArchiveUpload) {
+      await cancelUpload();
+      return;
+    }
+    if (cancellingKind === "import" && activeImportOperation) {
+      await cancelImportOperation(activeImportOperation);
+      return;
+    }
+    if (cancellingKind === "export" && activeExportOperation) {
+      await cancelExportOperation(activeExportOperation);
+      return;
+    }
+
     const jobToCancel = [systemArchiveJobs.import, systemArchiveJobs.export].find((job) => systemArchiveJobCancellable(job));
     if (jobToCancel) {
       if (jobToCancel.kind === "import") invalidateSystemImportPreviewAuthority();
       const segment = jobToCancel.kind === "export" ? "system-exports" : "system-imports";
       renderSystemArchiveJob(await api(`/api/v1/${segment}/${encodeURIComponent(jobToCancel.id)}`, { method: "DELETE" }));
-    } else if (systemArchiveUpload) {
-      invalidateSystemImportPreviewAuthority();
-      systemArchiveUpload = await api(`/api/v1/system-imports/uploads/${encodeURIComponent(systemArchiveUpload.id)}`, { method: "DELETE" });
-      setSystemArchiveStatus("System Archive upload cancelled.");
-    } else {
-      invalidateSystemImportPreviewAuthority();
-      setSystemArchiveStatus("Local System Archive work cancelled.");
+      return;
     }
+    if (activeImportOperation?.jobId === null) {
+      await cancelImportOperation(activeImportOperation);
+      return;
+    }
+    if (systemArchiveUpload) {
+      await cancelUpload();
+      return;
+    }
+    if (activeExportOperation?.jobId === null) {
+      await cancelExportOperation(activeExportOperation);
+      return;
+    }
+    if (activeImportOperation) {
+      await cancelImportOperation(activeImportOperation);
+      return;
+    }
+    if (activeExportOperation) {
+      await cancelExportOperation(activeExportOperation);
+      return;
+    }
+    invalidateSystemImportPreviewAuthority();
+    setSystemArchiveStatus("Local System Archive work cancelled.");
   } catch (error) {
     showSystemArchiveError(error);
   } finally {
@@ -992,7 +1049,7 @@ async function commitSystemArchiveImport() {
   systemArchiveJobs.import = null;
   writeSystemArchiveOperation(importOperation);
   invalidateSystemImportPreviewAuthority();
-  await runSystemArchiveAction(async (signal) => {
+  await runSystemArchiveAction("import", async (signal) => {
     const job = await api("/api/v1/system-imports", {
       method: "POST",
       body: JSON.stringify({
