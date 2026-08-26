@@ -10,7 +10,7 @@ import JSZip from "jszip";
 import sharp from "sharp";
 import { describe, expect, it } from "vitest";
 import type { ArchiveAssetBinding } from "../../packages/contracts/src/archives.js";
-import { worldContentSchema } from "../../packages/contracts/src/world-library.js";
+import { characterProfileSchema, worldContentSchema } from "../../packages/contracts/src/world-library.js";
 import {
   SYSTEM_ARCHIVE_DOMAINS,
   systemArchiveAssetsPayloadSchema,
@@ -38,6 +38,13 @@ import { inspectSystemArchiveForPreview } from "../../services/runtime/src/syste
 
 const fixtureRoot = resolve("tests/fixtures/system-archives/v1-minimal");
 const sha256 = (value: Uint8Array | string): string => createHash("sha256").update(value).digest("hex");
+const deterministicHistorySourceId = (eventType: string, campaignId: string): string => {
+  const digest = [...createHash("md5").update(`${eventType}:${campaignId}`).digest("hex")];
+  digest[12] = "5";
+  digest[16] = "8";
+  const value = digest.join("");
+  return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
+};
 const fixtureLimits = Object.freeze({
   maxCompressedBytes: 1024 * 1024,
   maxUncompressedBytes: 4 * 1024 * 1024,
@@ -64,7 +71,7 @@ const representativeDomainCounts = Object.freeze({
   turns: 3,
   "turn-corrections": 1,
   "campaign-state": 2,
-  "campaign-history": 5,
+  "campaign-history": 11,
   "canonical-facts": 1,
   chronicle: 2,
   illustrations: 2,
@@ -83,19 +90,26 @@ const excludedSecretSentinels = Object.freeze([
   "credential-nonce-sentinel",
   "credential-auth-tag-sentinel",
 ]);
-const excludedSecretSentinelVariants = Object.freeze([...new Set(excludedSecretSentinels.flatMap((sentinel) => {
-  const encoded = encodeURIComponent(sentinel);
-  const lowerPercentEncoding = encoded.replace(/%[0-9A-F]{2}/gu, (value) => value.toLowerCase());
-  return [sentinel, encoded, lowerPercentEncoding];
-}))]);
 const excludedOperationalSentinels = Object.freeze([
   "excluded-endpoint",
   "excluded-response",
+  "release-model",
+  "story-v1",
+  sha256("excluded-chain"),
   "excluded-release-job",
+  "Excluded job",
+  "fixture-failure",
   "excluded provider response",
   "excluded chronicle job",
   "excluded release chunk",
   sha256("excluded-share-link"),
+]);
+const excludedSecretAndOperationalSentinelVariants = Object.freeze([
+  ...new Set([...excludedSecretSentinels, ...excludedOperationalSentinels].flatMap((sentinel) => {
+    const encoded = encodeURIComponent(sentinel);
+    const lowerPercentEncoding = encoded.replace(/%[0-9A-F]{2}/gu, (value) => value.toLowerCase());
+    return [sentinel, encoded, lowerPercentEncoding];
+  })),
 ]);
 const representativeTimestamp = "2026-08-25T12:00:00.000Z";
 const representativeTrackers = Object.freeze([
@@ -104,10 +118,48 @@ const representativeTrackers = Object.freeze([
 
 function expectNoSecretSentinels(value: unknown, surface: string): void {
   const serialized = typeof value === "string" ? value : JSON.stringify(value) ?? String(value);
-  for (const sentinel of excludedSecretSentinelVariants) {
+  for (const sentinel of excludedSecretAndOperationalSentinelVariants) {
     expect(serialized, `${surface} must exclude ${sentinel}`).not.toContain(sentinel);
   }
 }
+
+function representativeStructuredProfile(role: string, note: string): ReturnType<typeof characterProfileSchema.parse> {
+  const profile = characterProfileSchema.parse({});
+  return {
+    ...profile,
+    identity: { aliases: ["The Gatekeeper"], pronouns: "they/them" },
+    story: {
+      ...profile.story,
+      role,
+      background: "Aster guards the portable release gate.",
+      motivations: "Preserve every authoritative relationship.",
+    },
+    appearance: {
+      ...profile.appearance,
+      eyes: "silver",
+      distinguishingFeatures: ["A luminous archive sigil"],
+    },
+    unclassifiedNotes: note,
+  };
+}
+
+const previousCharacterProfile = Object.freeze({
+  name: "Aster",
+  profile: representativeStructuredProfile("Gate sentinel", "Profile before the portable edit."),
+});
+const currentCharacterProfile = Object.freeze({
+  name: "Aster Vale",
+  profile: representativeStructuredProfile("Archive steward", "Profile after the portable edit."),
+});
+const representativeCharacterSnapshot = Object.freeze({
+  id: "release-hero",
+  name: "Aster",
+  characterText: "Aster guards the gate between installations.",
+  profile: previousCharacterProfile.profile,
+  rpgStats: [{ id: "resolve", name: "Resolve", value: 17, note: "Portable" }],
+  defaultTriggers: [{ id: "sigil", name: "Sigil", value: "lit", rules: "Preserve" }],
+  source: { type: "release-gate-fixture", revision: 7 },
+});
 
 function representativeWorldVersionContent(
   worldIndex: number,
@@ -221,6 +273,11 @@ type RepresentativeOwner = Readonly<{
   promptIds: readonly string[];
   providerIds: readonly string[];
   providers: readonly RepresentativeProvider[];
+  turnSnapshots: readonly Readonly<Record<string, unknown>>[];
+  characterProfileEditId: string;
+  stateEditId: string;
+  worldMigrationId: string;
+  worldTransferId: string;
   correctionId: string;
   canonicalFactId: string;
   memoryId: string;
@@ -461,6 +518,8 @@ type SystemJobState = Readonly<{
   status: string;
   lease_owner: string | null;
   lease_expired: boolean;
+  progress: Record<string, unknown>;
+  report: Record<string, unknown> | null;
 }>;
 
 async function waitForSystemJob(
@@ -476,11 +535,13 @@ async function waitForSystemJob(
   while (Date.now() < deadline) {
     const result = await pool.query<SystemJobState>(
       `SELECT status,lease_owner,
-              lease_expires_at IS NOT NULL AND lease_expires_at<=clock_timestamp() AS lease_expired
+              lease_expires_at IS NOT NULL AND lease_expires_at<=clock_timestamp() AS lease_expired,
+              progress,report
          FROM system_archive_jobs WHERE id=$1`,
       [jobId],
     );
     last = result.rows[0];
+    expectNoSecretSentinels(last, `durable System Archive progress while waiting to ${description}`);
     if (last && predicate(last)) return last;
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
   }
@@ -539,16 +600,22 @@ async function putUploadChunk(
   offset: number,
 ): Promise<{ id: string; status: string; byteLength: number; receivedBytes: number }> {
   const bytes = archive.subarray(offset, Math.min(offset + releaseChunkBytes, archive.byteLength));
-  return jsonRequest(baseUrl, `/api/v1/system-imports/uploads/${uploadId}/chunks/${index}`, {
-    method: "PUT",
-    headers: {
-      "content-type": "application/octet-stream",
-      "content-length": String(bytes.byteLength),
-      "content-range": `bytes ${offset}-${offset + bytes.byteLength - 1}/${archive.byteLength}`,
-      "x-chunk-sha256": sha256(bytes),
+  const progress = await jsonRequest<{ id: string; status: string; byteLength: number; receivedBytes: number }>(
+    baseUrl,
+    `/api/v1/system-imports/uploads/${uploadId}/chunks/${index}`,
+    {
+      method: "PUT",
+      headers: {
+        "content-type": "application/octet-stream",
+        "content-length": String(bytes.byteLength),
+        "content-range": `bytes ${offset}-${offset + bytes.byteLength - 1}/${archive.byteLength}`,
+        "x-chunk-sha256": sha256(bytes),
+      },
+      body: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
     },
-    body: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
-  });
+  );
+  expectNoSecretSentinels(progress, `upload progress chunk ${index}`);
+  return progress;
 }
 
 async function frozenFixture(): Promise<FrozenFixture> {
@@ -578,6 +645,7 @@ async function importArchiveThroughApi(
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ byteLength: archive.byteLength, sha256: sha256(archive) }),
   });
+  expectNoSecretSentinels(upload, "frozen-fixture upload creation payload");
   let index = 0;
   for (let offset = 0; offset < archive.byteLength; offset += releaseChunkBytes) {
     await putUploadChunk(runtime.baseUrl, upload.id, archive, index, offset);
@@ -589,6 +657,7 @@ async function importArchiveThroughApi(
     { method: "POST" },
   );
   expect(completedUpload.status).toBe("completed");
+  expectNoSecretSentinels(completedUpload, "frozen-fixture completed upload payload");
   const preview = await jsonRequest<{ valid: boolean; previewHandle: string | null }>(
     runtime.baseUrl,
     "/api/v1/system-imports/preview",
@@ -600,6 +669,7 @@ async function importArchiveThroughApi(
   );
   expect(preview.valid).toBe(true);
   expect(preview.previewHandle).toEqual(expect.any(String));
+  expectNoSecretSentinels(preview, "frozen-fixture import preview payload");
   const accepted = await jsonRequest<{ id: string }>(runtime.baseUrl, "/api/v1/system-imports", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -613,13 +683,18 @@ async function importArchiveThroughApi(
       acknowledgeNonCancellableBoundary: true,
     }),
   });
+  expectNoSecretSentinels(accepted, "frozen-fixture accepted import payload");
   const deadline = Date.now() + 120_000;
   while (Date.now() < deadline) {
     const job = await jsonRequest<{ id: string; status: string; report: Record<string, unknown> | null }>(
       runtime.baseUrl,
       `/api/v1/system-imports/${accepted.id}`,
     );
-    if (job.status === "completed") return job;
+    expectNoSecretSentinels(job, "frozen-fixture import progress/report payload");
+    if (job.status === "completed") {
+      expectNoSecretSentinels(runtime.logs(), "frozen-fixture runtime and worker logs");
+      return job;
+    }
     if (["failed", "cancelled", "expired"].includes(job.status)) {
       throw new Error(`Frozen fixture import ended in ${job.status}:\n${runtime.logs()}`);
     }
@@ -749,19 +824,33 @@ async function seedRepresentativeOwner(pool: DatabasePool, assetRoot: string): P
     );
   }
 
+  await pool.query(
+    `UPDATE worlds
+        SET forked_from_world_id=$2,forked_from_world_version_id=$3
+      WHERE id=$1 AND owner_user_id=$4`,
+    [worldIds[1], worldIds[0], latestVersionByWorld.get(worldIds[0]!), ownerUserId],
+  );
+
+  const canonicalFactId = randomUUID();
   const campaignIds: string[] = [];
   const turnIds: string[] = [];
+  const turnSnapshots: Readonly<Record<string, unknown>>[] = [];
   for (const [campaignIndex, worldId] of worldIds.entries()) {
     const campaign = await pool.query<{ id: string }>(
       `INSERT INTO campaigns (
-         owner_user_id,world_version_id,title,active_turn_number,turn_control_style
-       ) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+         owner_user_id,world_version_id,title,active_turn_number,turn_control_style,
+         selected_character_id,character_snapshot,character_profile,character_profile_revision
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9) RETURNING id`,
       [
         ownerUserId,
         latestVersionByWorld.get(worldId),
         `Release Campaign ${campaignIndex + 1}`,
         campaignIndex === 0 ? 2 : 1,
         campaignIndex === 0 ? "flexible_scene" : "flexible_action",
+        campaignIndex === 0 ? representativeCharacterSnapshot.id : null,
+        campaignIndex === 0 ? JSON.stringify(representativeCharacterSnapshot) : null,
+        campaignIndex === 0 ? JSON.stringify(currentCharacterProfile) : null,
+        campaignIndex === 0 ? 2 : 0,
       ],
     );
     const campaignId = campaign.rows[0]!.id;
@@ -781,6 +870,10 @@ async function seedRepresentativeOwner(pool: DatabasePool, assetRoot: string): P
     promptIds.push(campaignPrompt.rows[0]!.id);
     const turnCount = campaignIndex === 0 ? 2 : 1;
     for (let turnNumber = 1; turnNumber <= turnCount; turnNumber += 1) {
+      const stateSnapshot = Object.freeze(representativeCampaignState(
+        campaignIndex,
+        campaignIndex === 0 ? canonicalFactId : undefined,
+      ));
       const turn = await pool.query<{ id: string }>(
         `INSERT INTO turns (
            owner_user_id,campaign_id,turn_number,action,narration,choices,image_prompt,
@@ -795,20 +888,12 @@ async function seedRepresentativeOwner(pool: DatabasePool, assetRoot: string): P
           `Narration ${campaignIndex + 1}.${turnNumber}`,
           JSON.stringify(["Continue"]),
           `Illustrate ${campaignIndex + 1}.${turnNumber}`,
-          JSON.stringify({
-            continuitySummary: `Continuity ${campaignIndex + 1}`,
-            openThreads: [`Thread ${campaignIndex + 1}`],
-            scratchpad: `Continuity ${campaignIndex + 1}`,
-            trackers: representativeTrackers,
-            rpgStats: [],
-            defaultTriggers: [],
-            eventTriggers: [],
-            pendingEventTriggers: [],
-          }),
+          JSON.stringify(stateSnapshot),
           representativeTimestamp,
         ],
       );
       turnIds.push(turn.rows[0]!.id);
+      turnSnapshots.push(stateSnapshot);
     }
   }
 
@@ -820,13 +905,12 @@ async function seedRepresentativeOwner(pool: DatabasePool, assetRoot: string): P
                'Release gate correction','user_edit',$1) RETURNING id`,
     [ownerUserId, campaignIds[0], turnIds[0], sha256("Narration 1.1")],
   );
-  const canonicalFactId = randomUUID();
   await pool.query(
     `INSERT INTO campaign_canonical_facts (
        id,owner_user_id,campaign_id,world_version_id,source_turn_id,source_turn_number,
-       source_fact_index,content,normalized_content,valid_from_turn,metadata
-     ) VALUES ($1,$2,$3,$4,$5,1,0,'The release gate is open.',
-               'the release gate is open',1,$6::jsonb)`,
+       source_fact_index,content,normalized_content,valid_from_turn,valid_until_turn,metadata
+     ) VALUES ($1,$2,$3,$4,$5,1,7,'The release gate is open.',
+               'the release gate is open',1,3,$6::jsonb)`,
     [
       canonicalFactId,
       ownerUserId,
@@ -835,6 +919,71 @@ async function seedRepresentativeOwner(pool: DatabasePool, assetRoot: string): P
       turnIds[0],
       JSON.stringify({ subject: "release gate", predicate: "status" }),
     ],
+  );
+  const characterProfileEdit = await pool.query<{ id: string }>(
+    `INSERT INTO campaign_character_profile_edits (
+       owner_user_id,campaign_id,revision,previous_profile,next_profile,edit_source
+     ) VALUES ($1,$2,2,$3::jsonb,$4::jsonb,'manual') RETURNING id`,
+    [
+      ownerUserId,
+      campaignIds[0],
+      JSON.stringify(previousCharacterProfile),
+      JSON.stringify(currentCharacterProfile),
+    ],
+  );
+  const stateEdit = await pool.query<{ id: string }>(
+    `INSERT INTO campaign_state_edits (
+       owner_user_id,campaign_id,effective_turn_number,revision,state_snapshot_private,changed_fields
+     ) VALUES ($1,$2,2,2,$3::jsonb,$4::jsonb) RETURNING id`,
+    [
+      ownerUserId,
+      campaignIds[0],
+      JSON.stringify(representativeCampaignState(0, canonicalFactId)),
+      JSON.stringify(["canonicalFacts", "trackers"]),
+    ],
+  );
+  const worldMigration = await pool.query<{ id: string }>(
+    `INSERT INTO campaign_world_migrations (
+       owner_user_id,campaign_id,from_world_version_id,to_world_version_id,note
+     ) VALUES ($1,$2,$3,$4,'Promote the release campaign to version two.') RETURNING id`,
+    [ownerUserId, campaignIds[0], worldVersionIds[0], worldVersionIds[1]],
+  );
+  const worldTransferId = randomUUID();
+  await pool.query(
+    `INSERT INTO campaign_world_transfers (
+       id,owner_user_id,idempotency_key,source_campaign_id,target_campaign_id,
+       from_world_version_id,to_world_version_id,character_strategy,state_strategy,
+       target_defaults_policy,source_fingerprint,warnings,note
+     ) VALUES ($1,$2,$1,$3,$4,$5,$6,'preserve_source','preserve','retain_source',$7,$8::jsonb,$9)`,
+    [
+      worldTransferId,
+      ownerUserId,
+      campaignIds[0],
+      campaignIds[1],
+      latestVersionByWorld.get(worldIds[0]!),
+      latestVersionByWorld.get(worldIds[1]!),
+      sha256("release-world-transfer"),
+      JSON.stringify(["Release transfer warning"]),
+      "Transfer the release campaign between worlds.",
+    ],
+  );
+  await pool.query(
+    `INSERT INTO campaign_memory_configs (
+       campaign_id,owner_user_id,embedding_enabled,embedding_provider_profile_id,
+       embedding_model,embedding_batch_size
+     ) VALUES ($1,$2,true,$3,'release-embedding',24)`,
+    [campaignIds[0], ownerUserId, providerIds[2]],
+  );
+  await pool.query(
+    `INSERT INTO campaign_illustration_configs (
+       campaign_id,owner_user_id,enabled,provider_profile_id,model,size,aspect_ratio,
+       quality,output_format,max_attempts,source_policy,matching_scope,confidence_profile,
+       repetition_window,segment_word_count,images_per_segment,segment_prompt_mode,
+       refinement_prompt
+     ) VALUES ($1,$2,true,$3,'image-model','1536x1024','3:2','high','webp',4,
+               'library_then_generate','campaign','strict',9,250,2,'ai_refined',
+               'Preserve the fiction-only release aesthetic.')`,
+    [campaignIds[0], ownerUserId, providerIds[1]],
   );
   const memory = await pool.query<{ id: string }>(
     `INSERT INTO chronicle_memories (
@@ -1023,6 +1172,12 @@ async function seedRepresentativeOwner(pool: DatabasePool, assetRoot: string): P
     "UPDATE turns SET created_at=$1,accepted_at=$1 WHERE owner_user_id=$2",
     "UPDATE turn_narration_corrections SET created_at=$1 WHERE owner_user_id=$2",
     "UPDATE campaign_state SET updated_at=$1 WHERE owner_user_id=$2",
+    "UPDATE campaign_character_profile_edits SET created_at=$1 WHERE owner_user_id=$2",
+    "UPDATE campaign_state_edits SET created_at=$1 WHERE owner_user_id=$2",
+    "UPDATE campaign_world_migrations SET created_at=$1 WHERE owner_user_id=$2",
+    "UPDATE campaign_world_transfers SET created_at=$1 WHERE owner_user_id=$2",
+    "UPDATE campaign_memory_configs SET created_at=$1,updated_at=$1 WHERE owner_user_id=$2",
+    "UPDATE campaign_illustration_configs SET created_at=$1,updated_at=$1 WHERE owner_user_id=$2",
     "UPDATE campaign_canonical_facts SET created_at=$1,updated_at=$1 WHERE owner_user_id=$2",
     "UPDATE chronicle_memories SET created_at=$1,updated_at=$1 WHERE owner_user_id=$2",
     "UPDATE summary_checkpoints SET created_at=$1 WHERE owner_user_id=$2",
@@ -1121,6 +1276,11 @@ async function seedRepresentativeOwner(pool: DatabasePool, assetRoot: string): P
     promptIds: Object.freeze(promptIds),
     providerIds: Object.freeze(providerIds),
     providers: Object.freeze(providers),
+    turnSnapshots: Object.freeze(turnSnapshots),
+    characterProfileEditId: characterProfileEdit.rows[0]!.id,
+    stateEditId: stateEdit.rows[0]!.id,
+    worldMigrationId: worldMigration.rows[0]!.id,
+    worldTransferId,
     correctionId: correction.rows[0]!.id,
     canonicalFactId,
     memoryId: memory.rows[0]!.id,
@@ -1148,6 +1308,7 @@ async function createExportThroughPage(page: Page): Promise<SystemExportJobView>
   expect(response.status()).toBe(202);
   const job = systemArchiveJobViewSchema.parse(await response.json());
   if (job.kind !== "export") throw new Error("Replacement UI created a non-export System Archive job.");
+  expectNoSecretSentinels(job, "queued export API job payload");
   await page.getByText(`System Export: ${job.status.replaceAll("_", " ")}.`, { exact: true }).waitFor();
   return job;
 }
@@ -1178,6 +1339,7 @@ async function exportThroughReplacementUi(
     await cancellationPage.locator('[data-action="cancel-system-operation"]').click();
     const cancelling = systemArchiveJobViewSchema.parse(await (await cancellationResponse).json());
     expect(cancelling).toMatchObject({ id: job.id, kind: "export", status: "cancelling" });
+    expectNoSecretSentinels(cancelling, "cancelling export API job payload");
 
     cancellationWorker = await startCompiledWorker(workerInput);
     const cancelledState = await waitForSystemJob(
@@ -1192,8 +1354,12 @@ async function exportThroughReplacementUi(
       await jsonRequest(runtime.baseUrl, `/api/v1/system-exports/${job.id}`),
     );
     expect(durableCancelled).toMatchObject({ id: job.id, kind: "export", status: "cancelled" });
+    expectNoSecretSentinels(durableCancelled, "cancelled export API job payload");
     await cancellationPage.reload();
     await cancellationPage.getByText("System Export: cancelled.", { exact: true }).waitFor();
+    expectNoSecretSentinels(await cancellationPage.locator("body").textContent(), "rendered cancelled export output");
+    expectNoSecretSentinels(runtime.logs(), "source runtime cancellation logs");
+    expectNoSecretSentinels(cancellationWorker.logs(), "cancellation worker logs");
   } catch (error) {
     throw new Error(
       `Replacement UI durable cancellation failed:\n${runtime.logs()}\n${cancellationWorker?.logs() ?? ""}`,
@@ -1209,6 +1375,7 @@ async function exportThroughReplacementUi(
   let replacementWorker: StartedWorker | undefined;
   let firstBlocker: Awaited<ReturnType<typeof holdWorldExportRead>> | undefined;
   let replacementBlocker: Awaited<ReturnType<typeof holdWorldExportRead>> | undefined;
+  let terminatedWorkerLogs = "";
   try {
     const page = await durableContext.newPage();
     await page.goto(`${runtime.baseUrl}/app/data-transfer`);
@@ -1227,6 +1394,7 @@ async function exportThroughReplacementUi(
     const firstLeaseOwner = firstClaim.lease_owner!;
     await waitForBlockedWorldExportRead(pool, firstWorker.logs);
     await firstWorker.terminate();
+    terminatedWorkerLogs = firstWorker.logs();
     firstWorker = undefined;
 
     const abandoned = await waitForSystemJob(
@@ -1284,6 +1452,10 @@ async function exportThroughReplacementUi(
     expectNoSecretSentinels(durable.rows[0], "durable export database progress and report");
     expectNoSecretSentinels(durable.rows[0]!.report?.warnings, "durable export warnings");
     expectNoSecretSentinels(durable.rows[0]!.report?.errors, "durable export errors");
+    expectNoSecretSentinels(runtime.logs(), "source runtime export logs");
+    expectNoSecretSentinels(terminatedWorkerLogs, "terminated export worker logs");
+    expectNoSecretSentinels(replacementWorker.logs(), "replacement export worker logs");
+    expectNoSecretSentinels(await page.locator("body").textContent(), "rendered published export output");
     const downloadPromise = page.waitForEvent("download", { timeout: 30_000 });
     await downloadLink.click();
     const download = await downloadPromise;
@@ -1292,7 +1464,7 @@ async function exportThroughReplacementUi(
   } catch (error) {
     throw new Error(
       `Replacement UI worker termination/reclaim export failed:\n${runtime.logs()}\n`
-      + `${firstWorker?.logs() ?? ""}\n${replacementWorker?.logs() ?? ""}`,
+      + `${terminatedWorkerLogs}\n${firstWorker?.logs() ?? ""}\n${replacementWorker?.logs() ?? ""}`,
       { cause: error },
     );
   } finally {
@@ -1303,6 +1475,147 @@ async function exportThroughReplacementUi(
     await durableContext.close();
     await pool.end();
   }
+}
+
+function assertRoundThreeArchiveRelationships(
+  records: readonly SystemRecordEnvelope[],
+  source: RepresentativeOwner,
+): void {
+  for (const [index, turnId] of source.turnIds.entries()) {
+    const turn = records.find((entry) => entry.domain === "turns" && entry.sourceId === turnId);
+    const portableTurn = turn?.record as unknown as Record<string, unknown> | undefined;
+    expect(portableTurn?.stateSnapshotPrivate, `turn ${turnId} must archive its exact private state snapshot`)
+      .toEqual(source.turnSnapshots[index]);
+  }
+
+  const fact = records.find((entry) => entry.domain === "canonical-facts"
+    && entry.sourceId === source.canonicalFactId)?.record as unknown as Record<string, unknown> | undefined;
+  expect(fact, "canonical fact must retain exact turn/index/validity provenance").toMatchObject({
+    sourceTurnId: source.turnIds[0],
+    sourceTurnNumber: 1,
+    sourceFactIndex: 7,
+    validFromTurn: 1,
+    validUntilTurn: 3,
+    supersededByFactId: null,
+  });
+
+  const provenance = records.find((entry) => entry.domain === "imports"
+    && entry.sourceId === source.importId)?.record as unknown as Record<string, unknown> | undefined;
+  expect(provenance?.campaignId, "import provenance must retain its campaign relationship")
+    .toBe(source.campaignIds[0]);
+
+  const fork = records.find((entry) => entry.domain === "worlds"
+    && entry.sourceId === source.worldIds[1])?.record as unknown as Record<string, unknown> | undefined;
+  expect(fork, "forked world must retain exact source world/version provenance").toMatchObject({
+    forkedFromWorldId: source.worldIds[0],
+    forkedFromWorldVersionId: source.latestWorldVersionIds[0],
+  });
+
+  const campaign = records.find((entry) => entry.domain === "campaigns"
+    && entry.sourceId === source.campaignIds[0])?.record as unknown as Record<string, unknown> | undefined;
+  expect(campaign, "campaign must retain selected-character and structured-profile authority").toMatchObject({
+    selectedCharacterId: representativeCharacterSnapshot.id,
+    characterSnapshot: representativeCharacterSnapshot,
+    characterProfile: currentCharacterProfile,
+    characterProfileRevision: 2,
+  });
+
+  const history = records.filter((entry) => entry.domain === "campaign-history");
+  const historyBySource = (sourceId: string): Extract<SystemRecordEnvelope, { domain: "campaign-history" }> | undefined => (
+    history.find((entry) => entry.sourceId === sourceId) as
+      | Extract<SystemRecordEnvelope, { domain: "campaign-history" }>
+      | undefined
+  );
+  const assertHistory = (
+    sourceId: string,
+    campaignId: string,
+    eventType: string,
+    content: Record<string, unknown>,
+  ): void => {
+    const event = historyBySource(sourceId);
+    expect(event?.record).toEqual({
+      sourceId,
+      campaignId,
+      eventType,
+      content: event?.record.content,
+      occurredAt: representativeTimestamp,
+    });
+    expect(JSON.parse(event!.record.content)).toEqual(content);
+  };
+
+  assertHistory(source.characterProfileEditId, source.campaignIds[0]!, "character-profile-edit", {
+    revision: 2,
+    previousProfile: previousCharacterProfile,
+    nextProfile: currentCharacterProfile,
+    editSource: "manual",
+  });
+  assertHistory(source.stateEditId, source.campaignIds[0]!, "campaign-state-edit", {
+    effectiveTurnNumber: 2,
+    revision: 2,
+    stateSnapshot: representativeCampaignState(0, source.canonicalFactId),
+    changedFields: ["canonicalFacts", "trackers"],
+  });
+  assertHistory(source.worldMigrationId, source.campaignIds[0]!, "world-migration", {
+    fromWorldVersionId: source.worldVersionIds[0],
+    toWorldVersionId: source.worldVersionIds[1],
+    note: "Promote the release campaign to version two.",
+  });
+  assertHistory(source.worldTransferId, source.campaignIds[1]!, "world-transfer", {
+    sourceCampaignId: source.campaignIds[0],
+    targetCampaignId: source.campaignIds[1],
+    fromWorldVersionId: source.latestWorldVersionIds[0],
+    toWorldVersionId: source.latestWorldVersionIds[1],
+    characterStrategy: "preserve_source",
+    stateStrategy: "preserve",
+    targetDefaultsPolicy: "retain_source",
+    sourceFingerprint: sha256("release-world-transfer"),
+    warnings: ["Release transfer warning"],
+    note: "Transfer the release campaign between worlds.",
+  });
+
+  const memoryConfig = history.find((entry) => entry.domain === "campaign-history"
+    && entry.record.eventType === "memory-config");
+  expect(memoryConfig?.record).toEqual({
+    sourceId: deterministicHistorySourceId("memory-config", source.campaignIds[0]!),
+    campaignId: source.campaignIds[0],
+    eventType: "memory-config",
+    content: memoryConfig?.record.content,
+    occurredAt: representativeTimestamp,
+  });
+  expect(JSON.parse(memoryConfig!.record.content)).toEqual({
+    embeddingEnabled: true,
+    embeddingProviderProfileId: source.providerIds[2],
+    embeddingModel: "release-embedding",
+    embeddingBatchSize: 24,
+  });
+
+  const illustrationConfig = history.find((entry) => entry.domain === "campaign-history"
+    && entry.record.eventType === "illustration-config");
+  expect(illustrationConfig?.record).toEqual({
+    sourceId: deterministicHistorySourceId("illustration-config", source.campaignIds[0]!),
+    campaignId: source.campaignIds[0],
+    eventType: "illustration-config",
+    content: illustrationConfig?.record.content,
+    occurredAt: representativeTimestamp,
+  });
+  expect(JSON.parse(illustrationConfig!.record.content)).toEqual({
+    enabled: true,
+    providerProfileId: source.providerIds[1],
+    model: "image-model",
+    size: "1536x1024",
+    aspectRatio: "3:2",
+    quality: "high",
+    outputFormat: "webp",
+    maxAttempts: 4,
+    sourcePolicy: "library_then_generate",
+    matchingScope: "campaign",
+    confidenceProfile: "strict",
+    repetitionWindow: 9,
+    segmentWordCount: 250,
+    imagesPerSegment: 2,
+    segmentPromptMode: "ai_refined",
+    refinementPrompt: "Preserve the fiction-only release aesthetic.",
+  });
 }
 
 async function assertRepresentativeArchive(
@@ -1328,9 +1641,6 @@ async function assertRepresentativeArchive(
   const files = Object.values(zip.files).filter((entry) => !entry.dir);
   const serialized = Buffer.concat(await Promise.all(files.map((entry) => entry.async("nodebuffer")))).toString("utf8");
   expectNoSecretSentinels(serialized, "archive payloads and originals");
-  for (const sentinel of excludedOperationalSentinels) {
-    expect(serialized, `archive must exclude ${sentinel}`).not.toContain(sentinel);
-  }
 
   const manifestEntry = zip.file("manifest.json");
   const systemEntry = zip.file("system.json");
@@ -1368,6 +1678,7 @@ async function assertRepresentativeArchive(
     records.filter((record) => record.domain === domain).length,
   ])) as Record<SystemArchiveDomain, number>;
   expect(actualDomainCounts).toEqual(source.expectedDomainCounts);
+  assertRoundThreeArchiveRelationships(records, source);
 
   const providers = records.filter((entry) => entry.domain === "providers");
   expect(providers).toHaveLength(3);
@@ -1415,10 +1726,13 @@ async function assertRepresentativeArchive(
   expect(worlds.map((entry) => entry.record)).toEqual(expect.arrayContaining([
     {
       sourceId: source.worldIds[0], title: "Release World 1", status: "active",
+      forkedFromWorldId: null, forkedFromWorldVersionId: null,
       createdAt: representativeTimestamp, updatedAt: representativeTimestamp,
     },
     {
       sourceId: source.worldIds[1], title: "Release World 2", status: "draft",
+      forkedFromWorldId: source.worldIds[0],
+      forkedFromWorldVersionId: source.latestWorldVersionIds[0],
       createdAt: representativeTimestamp, updatedAt: representativeTimestamp,
     },
   ]));
@@ -1467,6 +1781,10 @@ async function assertRepresentativeArchive(
       status: "active",
       activeTurnNumber: 2,
       settings: { turnControlStyle: "Scene Direction" },
+      selectedCharacterId: representativeCharacterSnapshot.id,
+      characterSnapshot: representativeCharacterSnapshot,
+      characterProfile: currentCharacterProfile,
+      characterProfileRevision: 2,
       createdAt: representativeTimestamp,
       updatedAt: representativeTimestamp,
     },
@@ -1477,6 +1795,10 @@ async function assertRepresentativeArchive(
       status: "active",
       activeTurnNumber: 1,
       settings: { turnControlStyle: "Action" },
+      selectedCharacterId: null,
+      characterSnapshot: null,
+      characterProfile: null,
+      characterProfileRevision: 0,
       createdAt: representativeTimestamp,
       updatedAt: representativeTimestamp,
     },
@@ -1486,17 +1808,20 @@ async function assertRepresentativeArchive(
     {
       sourceId: source.turnIds[0], campaignId: source.campaignIds[0], turnNumber: 1,
       action: "Action 1.1", narration: "Narration 1.1", choices: ["Continue"],
-      imagePrompt: "Illustrate 1.1", acceptedAt: representativeTimestamp,
+      imagePrompt: "Illustrate 1.1", stateSnapshotPrivate: source.turnSnapshots[0],
+      acceptedAt: representativeTimestamp,
     },
     {
       sourceId: source.turnIds[1], campaignId: source.campaignIds[0], turnNumber: 2,
       action: "Action 1.2", narration: "Narration 1.2", choices: ["Continue"],
-      imagePrompt: "Illustrate 1.2", acceptedAt: representativeTimestamp,
+      imagePrompt: "Illustrate 1.2", stateSnapshotPrivate: source.turnSnapshots[1],
+      acceptedAt: representativeTimestamp,
     },
     {
       sourceId: source.turnIds[2], campaignId: source.campaignIds[1], turnNumber: 1,
       action: "Action 2.1", narration: "Narration 2.1", choices: ["Continue"],
-      imagePrompt: "Illustrate 2.1", acceptedAt: representativeTimestamp,
+      imagePrompt: "Illustrate 2.1", stateSnapshotPrivate: source.turnSnapshots[2],
+      acceptedAt: representativeTimestamp,
     },
   ]));
   expect(records.find((entry) => entry.domain === "turn-corrections")?.record).toEqual({
@@ -1591,6 +1916,12 @@ async function assertRepresentativeArchive(
     subject: "release gate",
     predicate: "status",
     object: "The release gate is open.",
+    sourceTurnId: source.turnIds[0],
+    sourceTurnNumber: 1,
+    sourceFactIndex: 7,
+    validFromTurn: 1,
+    validUntilTurn: 3,
+    supersededByFactId: null,
     updatedAt: representativeTimestamp,
   });
   const chronicle = records.filter((entry) => entry.domain === "chronicle");
@@ -1635,6 +1966,7 @@ async function assertRepresentativeArchive(
     sourceType: "legacy_story",
     sourceName: "Release source",
     sourceHash: sha256("release-source"),
+    campaignId: source.campaignIds[0],
     completedAt: representativeTimestamp,
   });
   const costs = records.filter((entry) => entry.domain === "cost-events");
@@ -1701,9 +2033,11 @@ async function proveResumableUpload(
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ byteLength: archive.byteLength, sha256: sha256(archive) }),
   });
+  expectNoSecretSentinels(upload, "resumable-upload creation payload");
   const first = await putUploadChunk(runtime.baseUrl, upload.id, archive, 0, 0);
   expect(first.receivedBytes).toBe(releaseChunkBytes);
 
+  expectNoSecretSentinels(runtime.logs(), "pre-restart resumable-upload runtime logs");
   await runtime.stop();
   const restarted = await restart();
   const recovered = await jsonRequest<{ id: string; status: string; receivedBytes: number }>(
@@ -1711,6 +2045,7 @@ async function proveResumableUpload(
     `/api/v1/system-imports/uploads/${upload.id}`,
   );
   expect(recovered).toMatchObject({ id: upload.id, status: "uploading", receivedBytes: releaseChunkBytes });
+  expectNoSecretSentinels(recovered, "recovered resumable-upload progress payload");
 
   const replayed = await putUploadChunk(restarted.baseUrl, upload.id, archive, 0, 0);
   expect(replayed.receivedBytes).toBe(releaseChunkBytes);
@@ -1726,6 +2061,8 @@ async function proveResumableUpload(
     { method: "DELETE" },
   );
   expect(cancelled.status).toBe("expired");
+  expectNoSecretSentinels(cancelled, "cancelled resumable-upload payload");
+  expectNoSecretSentinels(restarted.logs(), "post-restart resumable-upload runtime logs");
   return restarted;
 }
 
@@ -1789,6 +2126,7 @@ async function importThroughLegacyUi(
     expectNoSecretSentinels(completed, "completed import API job and report");
     expectNoSecretSentinels(completed.report?.warnings, "completed import warnings");
     expectNoSecretSentinels(completed.report?.errors, "completed import errors");
+    expectNoSecretSentinels(runtime.logs(), "destination import runtime and worker logs");
     return Object.freeze({ previewText, reportText, preview: previewView, completed });
   } catch (error) {
     throw new Error(`Legacy UI import failed:\n${runtime.logs()}`, { cause: error });
@@ -1895,18 +2233,27 @@ async function assertImportedAuthority(
       title: string;
       status: string;
       cover_asset_id: string | null;
+      forked_from_world_id: string | null;
+      forked_from_world_version_id: string | null;
       created_at: Date;
       updated_at: Date;
-    }>("SELECT id,owner_user_id,title,status,cover_asset_id,created_at,updated_at FROM worlds ORDER BY title");
+    }>(
+      `SELECT id,owner_user_id,title,status,cover_asset_id,forked_from_world_id,
+              forked_from_world_version_id,created_at,updated_at
+         FROM worlds ORDER BY title`,
+    );
     expect(worlds.rows).toEqual([
       {
         id: source.worldIds[0], owner_user_id: destinationOwnerId, title: "Release World 1",
         status: "active", cover_asset_id: source.assetIds[0],
+        forked_from_world_id: null, forked_from_world_version_id: null,
         created_at: expect.any(Date), updated_at: expect.any(Date),
       },
       {
         id: source.worldIds[1], owner_user_id: destinationOwnerId, title: "Release World 2",
         status: "draft", cover_asset_id: null,
+        forked_from_world_id: source.worldIds[0],
+        forked_from_world_version_id: source.latestWorldVersionIds[0],
         created_at: expect.any(Date), updated_at: expect.any(Date),
       },
     ]);
@@ -1994,11 +2341,16 @@ async function assertImportedAuthority(
       active_turn_number: number;
       legacy_settings: Record<string, unknown>;
       turn_control_style: string;
+      selected_character_id: string | null;
+      character_snapshot: Record<string, unknown> | null;
+      character_profile: Record<string, unknown> | null;
+      character_profile_revision: number;
       created_at: Date;
       updated_at: Date;
     }>(
       `SELECT id,owner_user_id,world_version_id,title,status,active_turn_number,legacy_settings,
-              turn_control_style,created_at,updated_at
+              turn_control_style,selected_character_id,character_snapshot,character_profile,
+              character_profile_revision,created_at,updated_at
          FROM campaigns ORDER BY title`,
     );
     expect(campaigns.rows).toEqual([
@@ -2007,14 +2359,24 @@ async function assertImportedAuthority(
         world_version_id: source.latestWorldVersionIds[0], title: "Release Campaign 1",
         status: "active", active_turn_number: 2,
         legacy_settings: { turnControlStyle: "Scene Direction" },
-        turn_control_style: "flexible_scene", created_at: expect.any(Date), updated_at: expect.any(Date),
+        turn_control_style: "flexible_scene",
+        selected_character_id: representativeCharacterSnapshot.id,
+        character_snapshot: representativeCharacterSnapshot,
+        character_profile: currentCharacterProfile,
+        character_profile_revision: 2,
+        created_at: expect.any(Date), updated_at: expect.any(Date),
       },
       {
         id: source.campaignIds[1], owner_user_id: destinationOwnerId,
         world_version_id: source.latestWorldVersionIds[1], title: "Release Campaign 2",
         status: "active", active_turn_number: 1,
         legacy_settings: { turnControlStyle: "Action" },
-        turn_control_style: "flexible_action", created_at: expect.any(Date), updated_at: expect.any(Date),
+        turn_control_style: "flexible_action",
+        selected_character_id: null,
+        character_snapshot: null,
+        character_profile: null,
+        character_profile_revision: 0,
+        created_at: expect.any(Date), updated_at: expect.any(Date),
       },
     ]);
     for (const campaign of campaigns.rows) {
@@ -2033,11 +2395,12 @@ async function assertImportedAuthority(
       image_prompt: string;
       input_mode: string;
       input_mode_source: string;
+      state_snapshot_private: Record<string, unknown>;
       accepted_at: Date;
       created_at: Date;
     }>(
       `SELECT id,owner_user_id,campaign_id,turn_number,action,narration,choices,image_prompt,
-              input_mode,input_mode_source,accepted_at,created_at
+              input_mode,input_mode_source,state_snapshot_private,accepted_at,created_at
          FROM turns ORDER BY campaign_id,turn_number`,
     );
     expect(turns.rows).toHaveLength(3);
@@ -2055,6 +2418,7 @@ async function assertImportedAuthority(
         image_prompt: `Illustrate ${campaignIndex + 1}.${turnNumber}`,
         input_mode: "scene",
         input_mode_source: "auto",
+        state_snapshot_private: source.turnSnapshots[index],
         accepted_at: expect.any(Date),
         created_at: expect.any(Date),
       });
@@ -2134,12 +2498,21 @@ async function assertImportedAuthority(
       owner_user_id: string;
       campaign_id: string;
       world_version_id: string;
+      source_turn_id: string | null;
+      source_state_edit_id: string | null;
+      source_turn_number: number;
+      source_fact_index: number;
       content: string;
       metadata: Record<string, unknown>;
+      valid_from_turn: number;
+      valid_until_turn: number | null;
+      superseded_by_fact_id: string | null;
       created_at: Date;
       updated_at: Date;
     }>(
-      `SELECT id,owner_user_id,campaign_id,world_version_id,content,metadata,created_at,updated_at
+      `SELECT id,owner_user_id,campaign_id,world_version_id,source_turn_id,source_state_edit_id,
+              source_turn_number,source_fact_index,content,metadata,valid_from_turn,
+              valid_until_turn,superseded_by_fact_id,created_at,updated_at
          FROM campaign_canonical_facts`,
     );
     expect(facts.rows).toEqual([{
@@ -2147,13 +2520,215 @@ async function assertImportedAuthority(
       owner_user_id: destinationOwnerId,
       campaign_id: source.campaignIds[0],
       world_version_id: source.latestWorldVersionIds[0],
+      source_turn_id: source.turnIds[0],
+      source_state_edit_id: null,
+      source_turn_number: 1,
+      source_fact_index: 7,
       content: "The release gate is open.",
       metadata: { subject: "release gate", predicate: "status" },
+      valid_from_turn: 1,
+      valid_until_turn: 3,
+      superseded_by_fact_id: null,
       created_at: expect.any(Date),
       updated_at: expect.any(Date),
     }]);
     expect(facts.rows[0]!.created_at.toISOString()).toBe(representativeTimestamp);
     expect(facts.rows[0]!.updated_at.toISOString()).toBe(representativeTimestamp);
+
+    const characterProfileEdits = await pool.query<{
+      id: string;
+      owner_user_id: string;
+      campaign_id: string;
+      revision: number;
+      previous_profile: Record<string, unknown> | null;
+      next_profile: Record<string, unknown>;
+      edit_source: string;
+      created_at: Date;
+    }>(
+      `SELECT id,owner_user_id,campaign_id,revision,previous_profile,next_profile,
+              edit_source,created_at
+         FROM campaign_character_profile_edits`,
+    );
+    expect(characterProfileEdits.rows).toEqual([{
+      id: source.characterProfileEditId,
+      owner_user_id: destinationOwnerId,
+      campaign_id: source.campaignIds[0],
+      revision: 2,
+      previous_profile: previousCharacterProfile,
+      next_profile: currentCharacterProfile,
+      edit_source: "manual",
+      created_at: expect.any(Date),
+    }]);
+    expect(characterProfileEdits.rows[0]!.created_at.toISOString()).toBe(representativeTimestamp);
+
+    const stateEdits = await pool.query<{
+      id: string;
+      owner_user_id: string;
+      campaign_id: string;
+      effective_turn_number: number;
+      revision: number;
+      state_snapshot_private: Record<string, unknown>;
+      changed_fields: string[];
+      created_at: Date;
+    }>(
+      `SELECT id,owner_user_id,campaign_id,effective_turn_number,revision,
+              state_snapshot_private,changed_fields,created_at
+         FROM campaign_state_edits`,
+    );
+    expect(stateEdits.rows).toEqual([{
+      id: source.stateEditId,
+      owner_user_id: destinationOwnerId,
+      campaign_id: source.campaignIds[0],
+      effective_turn_number: 2,
+      revision: 2,
+      state_snapshot_private: representativeCampaignState(0, source.canonicalFactId),
+      changed_fields: ["canonicalFacts", "trackers"],
+      created_at: expect.any(Date),
+    }]);
+    expect(stateEdits.rows[0]!.created_at.toISOString()).toBe(representativeTimestamp);
+
+    const worldMigrations = await pool.query<{
+      id: string;
+      owner_user_id: string;
+      campaign_id: string;
+      from_world_version_id: string;
+      to_world_version_id: string;
+      note: string;
+      created_at: Date;
+    }>(
+      `SELECT id,owner_user_id,campaign_id,from_world_version_id,to_world_version_id,
+              note,created_at
+         FROM campaign_world_migrations`,
+    );
+    expect(worldMigrations.rows).toEqual([{
+      id: source.worldMigrationId,
+      owner_user_id: destinationOwnerId,
+      campaign_id: source.campaignIds[0],
+      from_world_version_id: source.worldVersionIds[0],
+      to_world_version_id: source.worldVersionIds[1],
+      note: "Promote the release campaign to version two.",
+      created_at: expect.any(Date),
+    }]);
+    expect(worldMigrations.rows[0]!.created_at.toISOString()).toBe(representativeTimestamp);
+
+    const worldTransfers = await pool.query<{
+      id: string;
+      owner_user_id: string;
+      idempotency_key: string;
+      source_campaign_id: string | null;
+      target_campaign_id: string | null;
+      from_world_version_id: string;
+      to_world_version_id: string;
+      character_strategy: string;
+      state_strategy: string;
+      target_defaults_policy: string;
+      source_fingerprint: string;
+      warnings: string[];
+      note: string;
+      created_at: Date;
+    }>(
+      `SELECT id,owner_user_id,idempotency_key,source_campaign_id,target_campaign_id,
+              from_world_version_id,to_world_version_id,character_strategy,state_strategy,
+              target_defaults_policy,source_fingerprint,warnings,note,created_at
+         FROM campaign_world_transfers`,
+    );
+    expect(worldTransfers.rows).toEqual([{
+      id: source.worldTransferId,
+      owner_user_id: destinationOwnerId,
+      idempotency_key: source.worldTransferId,
+      source_campaign_id: source.campaignIds[0],
+      target_campaign_id: source.campaignIds[1],
+      from_world_version_id: source.latestWorldVersionIds[0],
+      to_world_version_id: source.latestWorldVersionIds[1],
+      character_strategy: "preserve_source",
+      state_strategy: "preserve",
+      target_defaults_policy: "retain_source",
+      source_fingerprint: sha256("release-world-transfer"),
+      warnings: ["Release transfer warning"],
+      note: "Transfer the release campaign between worlds.",
+      created_at: expect.any(Date),
+    }]);
+    expect(worldTransfers.rows[0]!.created_at.toISOString()).toBe(representativeTimestamp);
+
+    const memoryConfigs = await pool.query<{
+      campaign_id: string;
+      owner_user_id: string;
+      embedding_enabled: boolean;
+      embedding_provider_profile_id: string | null;
+      embedding_model: string;
+      embedding_batch_size: number;
+      created_at: Date;
+      updated_at: Date;
+    }>(
+      `SELECT campaign_id,owner_user_id,embedding_enabled,embedding_provider_profile_id,
+              embedding_model,embedding_batch_size,created_at,updated_at
+         FROM campaign_memory_configs`,
+    );
+    expect(memoryConfigs.rows).toEqual([{
+      campaign_id: source.campaignIds[0],
+      owner_user_id: destinationOwnerId,
+      embedding_enabled: true,
+      embedding_provider_profile_id: source.providerIds[2],
+      embedding_model: "release-embedding",
+      embedding_batch_size: 24,
+      created_at: expect.any(Date),
+      updated_at: expect.any(Date),
+    }]);
+    expect(memoryConfigs.rows[0]!.created_at.toISOString()).toBe(representativeTimestamp);
+    expect(memoryConfigs.rows[0]!.updated_at.toISOString()).toBe(representativeTimestamp);
+
+    const illustrationConfigs = await pool.query<{
+      campaign_id: string;
+      owner_user_id: string;
+      enabled: boolean;
+      provider_profile_id: string | null;
+      model: string;
+      size: string;
+      aspect_ratio: string;
+      quality: string;
+      output_format: string;
+      max_attempts: number;
+      source_policy: string;
+      matching_scope: string;
+      confidence_profile: string;
+      repetition_window: number;
+      segment_word_count: number;
+      images_per_segment: number;
+      segment_prompt_mode: string;
+      refinement_prompt: string;
+      created_at: Date;
+      updated_at: Date;
+    }>(
+      `SELECT campaign_id,owner_user_id,enabled,provider_profile_id,model,size,aspect_ratio,
+              quality,output_format,max_attempts,source_policy,matching_scope,confidence_profile,
+              repetition_window,segment_word_count,images_per_segment,segment_prompt_mode,
+              refinement_prompt,created_at,updated_at
+         FROM campaign_illustration_configs`,
+    );
+    expect(illustrationConfigs.rows).toEqual([{
+      campaign_id: source.campaignIds[0],
+      owner_user_id: destinationOwnerId,
+      enabled: true,
+      provider_profile_id: source.providerIds[1],
+      model: "image-model",
+      size: "1536x1024",
+      aspect_ratio: "3:2",
+      quality: "high",
+      output_format: "webp",
+      max_attempts: 4,
+      source_policy: "library_then_generate",
+      matching_scope: "campaign",
+      confidence_profile: "strict",
+      repetition_window: 9,
+      segment_word_count: 250,
+      images_per_segment: 2,
+      segment_prompt_mode: "ai_refined",
+      refinement_prompt: "Preserve the fiction-only release aesthetic.",
+      created_at: expect.any(Date),
+      updated_at: expect.any(Date),
+    }]);
+    expect(illustrationConfigs.rows[0]!.created_at.toISOString()).toBe(representativeTimestamp);
+    expect(illustrationConfigs.rows[0]!.updated_at.toISOString()).toBe(representativeTimestamp);
 
     const memories = await pool.query<{
       id: string;
@@ -2234,7 +2809,7 @@ async function assertImportedAuthority(
       source_name: "Release source",
       source_hash: sha256("release-source"),
       status: "completed",
-      campaign_id: null,
+      campaign_id: source.campaignIds[0],
       created_at: expect.any(Date),
       completed_at: expect.any(Date),
     }]);
@@ -2491,9 +3066,7 @@ async function assertImportedAuthority(
         `SELECT COALESCE(string_agg(to_jsonb(row_value)::text,E'\\n'),'') AS serialized
            FROM ${table} row_value`,
       );
-      for (const sentinel of excludedOperationalSentinels) {
-        expect(contents.rows[0]!.serialized, `destination ${table} must exclude ${sentinel}`).not.toContain(sentinel);
-      }
+      expectNoSecretSentinels(contents.rows[0]!.serialized, `destination ${table}`);
     }
     const embeddings = await pool.query<{ count: string }>(
       "SELECT count(*)::text AS count FROM chronicle_memories WHERE embedding IS NOT NULL",
@@ -2756,6 +3329,7 @@ describe("System Archive v1 release compatibility", () => {
 
         const playable = await fetch(`${destinationRuntime.baseUrl}/api/v1/campaigns/${representative.campaignIds[0]}/turns?limit=1`);
         expect(playable.status).toBe(200);
+        expectNoSecretSentinels(destinationRuntime.logs(), "completed destination runtime and worker logs");
       } finally {
         await browser?.close().catch(() => undefined);
         await destinationRuntime?.stop().catch(() => undefined);
