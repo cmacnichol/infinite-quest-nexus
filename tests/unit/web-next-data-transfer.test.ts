@@ -403,6 +403,91 @@ describe("web-next Data Transfer page", () => {
     mounted.dispose();
   });
 
+  it("does not let an obsolete export poll repaint a cancelled job", async () => {
+    let releasePoll: (() => void) | null = null;
+    const queuedExport: SystemArchiveJobView = {
+      id: JOB_ID,
+      kind: "export",
+      status: "queued",
+      report: null,
+      createdAt: NOW,
+      updatedAt: NOW
+    };
+    const api = fakeApi({
+      createExport: vi.fn(async () => queuedExport),
+      getJob: vi.fn(async () => new Promise<SystemArchiveJobView>((resolve) => {
+        releasePoll = () => resolve(queuedExport);
+      })),
+      cancelJob: vi.fn(async () => ({ ...queuedExport, status: "cancelled" }))
+    });
+    const { window } = parseHTML('<html><body><div id="app"></div></body></html>');
+    const root = window.document.querySelector<HTMLElement>("#app")!;
+    const mounted = mountDataTransferPage(root, {
+      api,
+      storage: null,
+      operationStorage: memoryStorage(),
+      wait: async () => undefined
+    });
+    await vi.waitFor(() => expect(root.querySelector('[data-system-archive-state="available"]')).not.toBeNull());
+    root.querySelector<HTMLButtonElement>('[data-action="create-system-export"]')!.click();
+    await vi.waitFor(() => expect(api.getJob).toHaveBeenCalledWith("export", JOB_ID, expect.any(AbortSignal)));
+
+    root.querySelector<HTMLButtonElement>('[data-action="cancel-system-operation"]')!.click();
+    await vi.waitFor(() => expect(root.textContent).toContain("System Export: cancelled."));
+    releasePoll?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(root.textContent).toContain("System Export: cancelled.");
+    expect(root.textContent).not.toContain("System Export: queued.");
+    mounted.dispose();
+  });
+
+  it("does not let an obsolete recovered export poll repaint a cancelled job", async () => {
+    const operationStorage = memoryStorage();
+    operationStorage.setItem(`infiniteQuest.systemArchiveOperation.v1:${OWNER_B}:export`, JSON.stringify({
+      kind: "export",
+      idempotencyKey: "recovered-export-key",
+      jobId: JOB_ID
+    }));
+    let releasePoll: (() => void) | null = null;
+    const queuedExport: SystemArchiveJobView = {
+      id: JOB_ID,
+      kind: "export",
+      status: "queued",
+      report: null,
+      createdAt: NOW,
+      updatedAt: NOW
+    };
+    const api = fakeApi({
+      getJob: vi.fn()
+        .mockResolvedValueOnce(queuedExport)
+        .mockImplementation(async () => new Promise<SystemArchiveJobView>((resolve) => {
+          if (!releasePoll) {
+            releasePoll = () => resolve(queuedExport);
+          }
+        })),
+      cancelJob: vi.fn(async () => ({ ...queuedExport, status: "cancelled" }))
+    });
+    const { window } = parseHTML('<html><body><div id="app"></div></body></html>');
+    const root = window.document.querySelector<HTMLElement>("#app")!;
+    const mounted = mountDataTransferPage(root, {
+      api,
+      storage: null,
+      operationStorage,
+      wait: async () => undefined
+    });
+    await vi.waitFor(() => expect(api.getJob).toHaveBeenCalledTimes(2));
+
+    root.querySelector<HTMLButtonElement>('[data-action="cancel-system-operation"]')!.click();
+    await vi.waitFor(() => expect(root.textContent).toContain("System Export: cancelled."));
+    releasePoll?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(root.textContent).toContain("System Export: cancelled.");
+    expect(root.textContent).not.toContain("System Export: queued.");
+    mounted.dispose();
+  });
+
   it("persists owner-scoped export identity and restores its published download after reload", async () => {
     const storage = memoryStorage();
     const publishedExport: SystemArchiveJobView = {

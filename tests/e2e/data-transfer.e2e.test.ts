@@ -85,6 +85,7 @@ async function installDataTransferApi(
   options: Readonly<{
     initialExportStatus?: "queued" | "published";
     holdFirstExportCreate?: boolean;
+    holdExportCancel?: boolean;
     disconnectFirstImportCommit?: boolean;
     acceptedImportJobId?: string;
     holdUploadCreate?: boolean;
@@ -94,29 +95,35 @@ async function installDataTransferApi(
   exportPosts: number;
   exportGets: number;
   exportCreates: Array<Record<string, unknown>>;
+  exportCancelRequests: number;
   cancelledExportJobIds: string[];
   importCommits: Array<Record<string, unknown>>;
   cancelledImportJobIds: string[];
   cancelledUploadIds: string[];
   releaseFirstExportCreate(): void;
+  releaseExportCancel(): void;
   releaseUploadCreate(): void;
   releaseFirstUploadChunk(): void;
 }> {
   let releaseFirstExportCreate: () => void = () => undefined;
+  let releaseExportCancel: () => void = () => undefined;
   let releaseUploadCreate: () => void = () => undefined;
   let releaseFirstUploadChunk: () => void = () => undefined;
   const firstExportCreateGate = new Promise<void>((resolve) => { releaseFirstExportCreate = resolve; });
+  const exportCancelGate = new Promise<void>((resolve) => { releaseExportCancel = resolve; });
   const uploadCreateGate = new Promise<void>((resolve) => { releaseUploadCreate = resolve; });
   const firstUploadChunkGate = new Promise<void>((resolve) => { releaseFirstUploadChunk = resolve; });
   const evidence = {
     exportPosts: 0,
     exportGets: 0,
     exportCreates: [] as Array<Record<string, unknown>>,
+    exportCancelRequests: 0,
     cancelledExportJobIds: [] as string[],
     importCommits: [] as Array<Record<string, unknown>>,
     cancelledImportJobIds: [] as string[],
     cancelledUploadIds: [] as string[],
     releaseFirstExportCreate: () => releaseFirstExportCreate(),
+    releaseExportCancel: () => releaseExportCancel(),
     releaseUploadCreate: () => releaseUploadCreate(),
     releaseFirstUploadChunk: () => releaseFirstUploadChunk()
   };
@@ -145,6 +152,8 @@ async function installDataTransferApi(
       return json(route, { id: JOB_ID, kind: "export", status: exportStatus, report: null, createdAt: NOW, updatedAt: NOW });
     }
     if (path === `/api/v1/system-exports/${JOB_ID}` && request.method() === "DELETE") {
+      evidence.exportCancelRequests += 1;
+      if (options.holdExportCancel) await exportCancelGate;
       exportStatus = "cancelled";
       evidence.cancelledExportJobIds.push(JOB_ID);
       return json(route, { id: JOB_ID, kind: "export", status: exportStatus, report: null, createdAt: NOW, updatedAt: NOW });
@@ -164,7 +173,7 @@ async function installDataTransferApi(
     }
     if (path === `/api/v1/system-imports/uploads/${UPLOAD_ID}` && request.method() === "DELETE") {
       evidence.cancelledUploadIds.push(UPLOAD_ID);
-      return json(route, { id: UPLOAD_ID, status: "cancelled", byteLength: 6, receivedBytes: 6, expiresAt: preview.expiresAt });
+      return json(route, { id: UPLOAD_ID, status: "failed", byteLength: 6, receivedBytes: 6, expiresAt: preview.expiresAt });
     }
     if (path === `/api/v1/system-imports/uploads/${UPLOAD_ID}` && request.method() === "GET") {
       return json(route, { id: UPLOAD_ID, status: "uploading", byteLength: 6, receivedBytes: uploadReceived, expiresAt: preview.expiresAt });
@@ -375,6 +384,29 @@ for (const surface of surfaces) {
     }
   });
 
+  test(`${surface.name} keeps durable cancellation single-flight while the server response is delayed`, async ({ page }) => {
+    const evidence = await installDataTransferApi(page, true, { holdExportCancel: true });
+    await page.goto(surface.url);
+    await page.locator(surface.createExport).click();
+    await expect(page.locator(surface.cancel)).toBeEnabled();
+
+    try {
+      await page.locator(surface.cancel).evaluate((element) => {
+        if (!(element instanceof HTMLElement)) {
+          throw new Error("Expected the Data Transfer cancel control to be an HTML element.");
+        }
+        element.click();
+        element.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await expect(page.locator(surface.cancel)).toBeDisabled();
+      await expect.poll(() => evidence.exportCancelRequests).toBe(1);
+    } finally {
+      evidence.releaseExportCancel();
+    }
+    await expect(page.getByText("System Export: cancelled.", { exact: true })).toBeVisible();
+    expect(evidence.cancelledExportJobIds).toEqual([JOB_ID]);
+  });
+
   test(`${surface.name} restores a mocked published export after reload without duplicate creation`, async ({ page }) => {
     const evidence = await installDataTransferApi(page, true, { initialExportStatus: "published" });
     await page.goto(surface.url);
@@ -490,6 +522,28 @@ for (const surface of surfaces) {
     await expect(progressRegion.getByRole("progressbar", { name: /Uploading resumable chunks/i })).toBeVisible();
     evidence.releaseFirstUploadChunk();
     await expect(page.locator(surface.preview)).toBeVisible();
+  });
+
+  test(`${surface.name} clears a cancelled durable upload so it cannot be cancelled twice`, async ({ page }) => {
+    const evidence = await installDataTransferApi(page, true, { holdFirstUploadChunk: true });
+    await page.goto(surface.url);
+    await page.locator(surface.file).setInputFiles({
+      name: "cancel-durable-upload.zip",
+      mimeType: "application/zip",
+      buffer: Buffer.from("system")
+    });
+    await expect(page.locator(surface.progress).getByRole("progressbar", { name: /Uploading resumable chunks/i })).toBeVisible();
+    await expect(page.locator(surface.cancel)).toBeEnabled();
+
+    try {
+      await page.locator(surface.cancel).click();
+      await expect(page.getByText("System Archive upload cancelled.", { exact: true })).toBeVisible();
+      await expect(page.locator(surface.cancel)).toBeDisabled();
+      await page.locator(surface.cancel).dispatchEvent("click");
+      expect(evidence.cancelledUploadIds).toEqual([UPLOAD_ID]);
+    } finally {
+      evidence.releaseFirstUploadChunk();
+    }
   });
 
   test(`${surface.name} resumes a mocked durable upload after a disconnect and reload`, async ({ page }) => {

@@ -74,11 +74,13 @@ let promptLibraryPreviewSequence = 0;
 let systemArchiveEnabled = false;
 let systemArchiveSelectedFile = null;
 let systemArchiveUpload = null;
+let systemArchiveUploadSessionKey = null;
 let systemArchivePreview = null;
 const systemArchiveJobs = { export: null, import: null };
 let systemArchiveExportOperation = null;
 let systemArchiveImportOperation = null;
 let systemArchiveBusy = false;
+let systemArchiveCancellationPending = false;
 let systemArchiveOperationController = null;
 let systemArchiveOperationKind = null;
 let systemArchiveOwnerId = null;
@@ -575,6 +577,16 @@ function saveSystemArchiveUploadSession(key, upload, sha256) {
   }
 }
 
+function clearSystemArchiveUploadSession() {
+  if (!systemArchiveUploadSessionKey) return;
+  try {
+    localStorage.removeItem(systemArchiveUploadSessionKey);
+  } catch {
+    // The cancelled server upload is still forgotten on this page when browser storage is blocked.
+  }
+  systemArchiveUploadSessionKey = null;
+}
+
 function setSystemArchiveCapability(enabled, message = "") {
   systemArchiveEnabled = enabled;
   if (!elements.systemArchiveTransfer) return;
@@ -599,7 +611,8 @@ function updateSystemArchiveControls() {
   elements.createSystemArchive.disabled = !systemArchiveEnabled || !sessionReady || systemArchiveBusy || activeExport;
   elements.systemArchiveFile.disabled = !systemArchiveEnabled || !sessionReady || systemArchiveBusy;
   elements.uploadSystemArchive.disabled = !systemArchiveEnabled || !sessionReady || systemArchiveBusy || !systemArchiveSelectedFile;
-  elements.cancelSystemArchive.disabled = !systemArchiveEnabled || !sessionReady || (!systemArchiveOperationController && !jobCancellable && !systemArchiveUpload);
+  elements.cancelSystemArchive.disabled = !systemArchiveEnabled || !sessionReady || systemArchiveCancellationPending
+    || (!systemArchiveOperationController && !jobCancellable && !systemArchiveUpload);
   elements.commitSystemImport.disabled = !systemArchiveEnabled || !sessionReady || systemArchiveBusy || !systemArchivePreview?.valid;
 }
 
@@ -791,6 +804,7 @@ async function systemArchiveChunkRequest(upload, index, offset, bytes, fileSize,
 
 async function createOrResumeSystemArchiveUpload(file, sha256, signal) {
   const storageKey = systemArchiveUploadStorageKey(file.size, sha256);
+  systemArchiveUploadSessionKey = storageKey;
   const saved = readSystemArchiveUploadSession(storageKey);
   let upload = null;
   if (saved?.byteLength === file.size && saved.sha256 === sha256) {
@@ -926,6 +940,9 @@ function beginSystemArchiveRecoveryWhenReady() {
 }
 
 async function cancelSystemArchiveOperation() {
+  if (systemArchiveCancellationPending) return;
+  systemArchiveCancellationPending = true;
+  updateSystemArchiveControls();
   const controller = systemArchiveOperationController;
   const cancellingKind = systemArchiveOperationKind;
   controller?.abort(new DOMException("Transfer cancelled", "AbortError"));
@@ -963,7 +980,10 @@ async function cancelSystemArchiveOperation() {
 
     async function cancelUpload() {
       invalidateSystemImportPreviewAuthority();
-      systemArchiveUpload = await api(`/api/v1/system-imports/uploads/${encodeURIComponent(systemArchiveUpload.id)}`, { method: "DELETE" });
+      const uploadId = systemArchiveUpload.id;
+      await api(`/api/v1/system-imports/uploads/${encodeURIComponent(uploadId)}`, { method: "DELETE" });
+      if (systemArchiveUpload?.id === uploadId) systemArchiveUpload = null;
+      clearSystemArchiveUploadSession();
       setSystemArchiveStatus("System Archive upload cancelled.");
     }
 
@@ -1023,6 +1043,7 @@ async function cancelSystemArchiveOperation() {
   } catch (error) {
     showSystemArchiveError(error);
   } finally {
+    systemArchiveCancellationPending = false;
     updateSystemArchiveControls();
   }
 }

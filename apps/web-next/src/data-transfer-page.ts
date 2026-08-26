@@ -308,10 +308,15 @@ export function mountDataTransferPage(
     export: null,
     import: null
   };
+  const recoveryControllers: Record<SystemArchiveJobView["kind"], AbortController | null> = {
+    export: null,
+    import: null
+  };
   let currentExportOperation: StoredSystemOperation | null = null;
   let currentImportOperation: StoredSystemOperation | null = null;
   let currentPreview: SystemImportPreviewView | null = null;
   let actionBusy = false;
+  let cancellationPending = false;
   let operationController: AbortController | null = null;
   let operationKind: "export" | "upload" | "import" | null = null;
   let sessionOwnerId: string | null = null;
@@ -339,7 +344,8 @@ export function mountDataTransferPage(
     exportButton.disabled = !capabilityAvailable || actionBusy || (currentJobs.export !== null && !TERMINAL_JOB_STATUSES.has(currentJobs.export.status));
     fileInput.disabled = !capabilityAvailable || actionBusy;
     uploadButton.disabled = !capabilityAvailable || actionBusy || selectedFile === null;
-    cancelButton.disabled = !capabilityAvailable || (!jobCancellable && currentUpload === null && !localOperationCancellable);
+    cancelButton.disabled = !capabilityAvailable || cancellationPending
+      || (!jobCancellable && currentUpload === null && !localOperationCancellable);
     commitButton.disabled = !capabilityAvailable || actionBusy || currentPreview?.valid !== true;
   }
 
@@ -464,14 +470,16 @@ export function mountDataTransferPage(
     updateControls();
   }
 
-  async function monitorJob(job: SystemArchiveJobView): Promise<SystemArchiveJobView> {
+  async function monitorJob(job: SystemArchiveJobView, signal: AbortSignal): Promise<SystemArchiveJobView> {
     let latest = job;
     renderJob(latest);
-    while (!disposed && !TERMINAL_JOB_STATUSES.has(latest.status)) {
+    while (!disposed && !signal.aborted && !TERMINAL_JOB_STATUSES.has(latest.status)) {
       await wait(pollIntervalMs);
-      if (disposed) return latest;
-      latest = await api.getJob(latest.kind, latest.id, controller.signal);
-      renderJob(latest);
+      if (disposed || signal.aborted) return latest;
+      const polled = await api.getJob(latest.kind, latest.id, signal);
+      if (disposed || signal.aborted) return latest;
+      latest = polled;
+      renderJob(polled);
     }
     return latest;
   }
@@ -526,7 +534,7 @@ export function mountDataTransferPage(
       if (!sessionOwnerId) throw new Error("The Current Owner session is not available for System Archive export.");
       writeStoredOperation(operationStorage ?? null, sessionOwnerId, exportOperation);
       const job = await resolveStoredExport(sessionOwnerId, exportOperation, signal);
-      await monitorJob(job);
+      await monitorJob(job, signal);
     });
   }
 
@@ -546,9 +554,17 @@ export function mountDataTransferPage(
   async function recoverExport(ownerId: string): Promise<void> {
     const stored = readStoredOperation(operationStorage ?? null, ownerId, "export");
     if (!stored) return;
+    const recoveryController = new AbortController();
+    recoveryControllers.export = recoveryController;
     currentExportOperation = stored;
-    const job = await resolveStoredExport(ownerId, stored, controller.signal);
-    await monitorJob(job);
+    try {
+      const job = await resolveStoredExport(ownerId, stored, recoveryController.signal);
+      if (!recoveryController.signal.aborted) await monitorJob(job, recoveryController.signal);
+    } catch (reason) {
+      if (!(reason instanceof Error && reason.name === "AbortError")) throw reason;
+    } finally {
+      if (recoveryControllers.export === recoveryController) recoveryControllers.export = null;
+    }
   }
 
   async function resolveStoredImport(
@@ -567,14 +583,30 @@ export function mountDataTransferPage(
   async function recoverImport(ownerId: string): Promise<void> {
     const stored = readStoredOperation(operationStorage ?? null, ownerId, "import");
     if (!stored || (!stored.jobId && !stored.previewHandle)) return;
+    const recoveryController = new AbortController();
+    recoveryControllers.import = recoveryController;
     currentImportOperation = stored;
     invalidatePreviewAuthority();
-    const job = await resolveStoredImport(ownerId, stored, controller.signal);
-    currentUpload = null;
-    await monitorJob(job);
+    try {
+      const job = await resolveStoredImport(ownerId, stored, recoveryController.signal);
+      if (recoveryController.signal.aborted) return;
+      currentUpload = null;
+      await monitorJob(job, recoveryController.signal);
+    } catch (reason) {
+      if (!(reason instanceof Error && reason.name === "AbortError")) throw reason;
+    } finally {
+      if (recoveryControllers.import === recoveryController) recoveryControllers.import = null;
+    }
+  }
+
+  function abortRecovery(kind: SystemArchiveJobView["kind"]): void {
+    recoveryControllers[kind]?.abort(new DOMException("Transfer cancelled", "AbortError"));
   }
 
   async function cancelCurrent(): Promise<void> {
+    if (cancellationPending) return;
+    cancellationPending = true;
+    updateControls();
     clearError();
     const cancellingKind = operationKind;
     operationController?.abort(new DOMException("Transfer cancelled", "AbortError"));
@@ -589,6 +621,7 @@ export function mountDataTransferPage(
       const activeExportOperation = currentExportOperation ?? storedExport;
 
       async function cancelImportOperation(operation: StoredSystemOperation): Promise<void> {
+        abortRecovery("import");
         invalidatePreviewAuthority();
         currentUpload = null;
         if (operation.jobId) {
@@ -603,6 +636,7 @@ export function mountDataTransferPage(
       }
 
       async function cancelExportOperation(operation: StoredSystemOperation): Promise<void> {
+        abortRecovery("export");
         if (operation.jobId) {
           renderJob(await api.cancelJob("export", operation.jobId, controller.signal));
           return;
@@ -627,6 +661,7 @@ export function mountDataTransferPage(
           ? currentJobs.export
           : null;
       if (activeJob && isJobCancellable(activeJob)) {
+        abortRecovery(activeJob.kind);
         if (activeJob.kind === "import") invalidatePreviewAuthority();
         renderJob(await api.cancelJob(activeJob.kind, activeJob.id, controller.signal));
         return;
@@ -647,6 +682,7 @@ export function mountDataTransferPage(
       const jobToCancel = [currentJobs.import, currentJobs.export]
         .find((job): job is SystemArchiveJobView => job !== null && isJobCancellable(job));
       if (jobToCancel) {
+        abortRecovery(jobToCancel.kind);
         if (jobToCancel.kind === "import") invalidatePreviewAuthority();
         renderJob(await api.cancelJob(jobToCancel.kind, jobToCancel.id, controller.signal));
         return;
@@ -676,6 +712,7 @@ export function mountDataTransferPage(
     } catch (reason) {
       if (!disposed) announceError(reason);
     } finally {
+      cancellationPending = false;
       if (!disposed) updateControls();
     }
   }
@@ -717,7 +754,7 @@ export function mountDataTransferPage(
         writeStoredOperation(operationStorage ?? null, sessionOwnerId, currentImportOperation);
       }
       currentUpload = null;
-      await monitorJob(job);
+      await monitorJob(job, signal);
     });
   }
 
@@ -770,6 +807,8 @@ export function mountDataTransferPage(
       if (disposed) return;
       disposed = true;
       operationController?.abort(new DOMException("Data Transfer page closed", "AbortError"));
+      recoveryControllers.export?.abort(new DOMException("Data Transfer page closed", "AbortError"));
+      recoveryControllers.import?.abort(new DOMException("Data Transfer page closed", "AbortError"));
       controller.abort(new DOMException("Data Transfer page closed", "AbortError"));
       fileInput.removeEventListener("change", onFileChange);
       uploadButton.removeEventListener("click", onUpload);
