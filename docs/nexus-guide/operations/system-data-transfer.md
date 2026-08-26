@@ -5,7 +5,9 @@ System Archive format version 1 moves the Current Owner's portable library from 
 ::: danger Release gate: keep disabled
 System Archive is implemented behind `SYSTEM_ARCHIVE_ENABLED=false` and is not approved for production enablement. The API routes are not registered and both Data Transfer clients report **Disabled by operator** while the setting is false. Existing World, Campaign, legacy/external, and readable export workflows remain available.
 
-Current release evidence still has three gaps: a parked same-kind browser reload/cancellation race, a Docker/PostgreSQL expiry test affected by application/database clock divergence, and two Linux-only compiled-service/private-root scenarios that have not run on this Windows host. Do not describe those paths as passed. Enable the capability only after a separate review closes the blockers and records a representative source-to-empty-destination round trip.
+Current release evidence remains incomplete. Known blockers and incomplete gates include a parked same-kind browser reload/cancellation race; the latest full integration run, which stopped on a Chronicle lease-time assertion before completing the suite even though that file later passed 7/7 alone; a Docker/PostgreSQL expiry test affected by application/database clock divergence; and two Linux-only compiled-service/private-root scenarios that have not run on this Windows host. The focused rerun does not make the interrupted full integration gate green. Do not describe the full integration, Linux, or private-root paths as passed. Enable the capability only after a separate review closes the blockers and records a representative source-to-empty-destination round trip.
+
+In the parked UI race, recovered operation A can overwrite the browser's reference to a newer ambiguously accepted same-kind operation B. **Cancel** can then target A while B remains active. Until this is fixed, do not start another export during export recovery or another import during import recovery. Record every accepted job ID, verify status with the CLI or owner-scoped API, and explicitly cancel every unwanted durable job by its recorded ID.
 :::
 
 ## Choose the right transfer product
@@ -50,9 +52,11 @@ A System Archive never contains:
 - generation, image, Chronicle, import, System Archive, admission, lease, retry, progress, or other operational jobs;
 - model response chains, raw provider responses, temporary provider URLs, provider health state, or deployment capabilities;
 - embeddings, Chronicle chunks/jobs, retrieval candidates/runs, query caches, thumbnails, or other derived files; or
-- database URLs, filesystem roots, hostnames, network allowlists, Swarm secrets/configs, worker sizing, or other deployment configuration.
+- database URLs, filesystem roots, deployment hostnames, network allowlists, Swarm secrets/configs, worker sizing, or other deployment configuration.
 
-The ZIP is not encrypted and has no archive password. Checksums detect corruption but do not authenticate the source. Store and transport it only through trusted encrypted channels and access-controlled storage. Anyone who can read the ZIP can read its portable story and image content.
+Allowlisted provider configuration is portable content, not deployment configuration. Consequently, sanitized provider endpoint topology—including its host and port—can remain in the archive even though credentials and secret-bearing URL components are removed. Review that exposure before transfer.
+
+The ZIP is not encrypted and has no archive password. Checksums detect corruption but do not authenticate the source. Store and transport it only through trusted encrypted channels and access-controlled storage. Anyone who can read the ZIP can read its portable story, image, and sanitized provider-topology content.
 
 ## Destination requirements
 
@@ -73,11 +77,11 @@ In a release-approved validation deployment, open **Data Transfer** in Nexus or 
 2. Select **Create System Archive**.
 3. Monitor the durable export through capture, write, checksum verification, and publication.
 4. Download the published ZIP before it expires.
-5. Record the job ID and SHA-256/ETag with your migration evidence.
+5. Record the job ID and published ZIP-byte SHA-256/strong ETag with your migration evidence.
 
 Only one export can be active for the Current Owner. Export captures a repeatable-read logical snapshot while unrelated operational work may continue. That work is omitted and reported only as safe category counts. Original files are re-read and verified while the ZIP is written; a missing or changed original fails the export instead of publishing an incomplete archive.
 
-Published downloads support byte ranges, a strong content-hash ETag, `Cache-Control: no-store`, and restart after an interrupted connection. The default publication lifetime is 24 hours. Export cancellation is accepted only before publication; a published or expired job is terminal.
+Published downloads support byte ranges, a strong content-hash ETag, `Cache-Control: no-store`, and restart after an interrupted connection. That ETag is the SHA-256 of the exact published ZIP bytes. The default publication lifetime is 24 hours. Export cancellation is accepted only before publication; a published or expired job is terminal.
 
 The official CLI queues the job, monitors it until publication, resumes a partial local download when the ETag still matches, and verifies the completed file hash:
 
@@ -112,7 +116,7 @@ After upload completion, the server creates an **Import Preview**. Preview is re
 - staging and asset-root capacity checks; and
 - warnings, typed errors, and preview expiry.
 
-A valid preview returns an opaque, short-lived handle bound to the exact archive fingerprint, destination fingerprint, compatibility decision, capacity preflight, and normalization summary. The default preview TTL is 30 minutes. Re-upload or preview again if it expires or if destination authority changes.
+A valid preview returns an opaque, short-lived handle bound to the exact logical Archive Fingerprint, destination fingerprint, compatibility decision, capacity preflight, and normalization summary. `archiveFingerprint` is the manifest's logical content fingerprint; it is distinct from the SHA-256/ETag of the container ZIP bytes and the two values are not interchangeable. Preview authority lives for exactly 1,800 seconds (30 minutes), matching the current repository default and compiled-release test invariant. It is not an operator-tunable window. Re-upload or preview again if it expires or if destination authority changes.
 
 The browser cannot raise limits, assert free space, choose a server path, or bypass preview. Unknown free space fails closed unless the operator explicitly enabled the platform-specific override before startup.
 
@@ -126,13 +130,13 @@ Review the complete preview before committing. System Import requires five expli
 4. provider credentials must be re-entered; and
 5. import becomes non-cancellable at the authoritative commit boundary.
 
-Interactive CLI use displays Preview first, asks all five questions, and requires the exact fingerprint. Noninteractive use additionally requires `--confirm-fingerprint` and every acknowledgement flag:
+Interactive CLI use displays Preview first, asks all five questions, and requires the exact logical `archiveFingerprint` returned by that Preview. Noninteractive use additionally requires `--confirm-fingerprint` with that value—not the downloaded ZIP's byte hash—and every acknowledgement flag:
 
 ```powershell
 pnpm system-archive -- import `
   --base-url https://destination.example `
   --file .\nexus-system.zip `
-  --confirm-fingerprint ARCHIVE_SHA256 `
+  --confirm-fingerprint PREVIEW_ARCHIVE_FINGERPRINT `
   --acknowledge-sensitive-archive `
   --acknowledge-empty-destination `
   --acknowledge-invalidated-access `
@@ -159,7 +163,7 @@ pnpm system-archive -- cancel --base-url https://destination.example --job JOB_U
 pnpm system-archive -- cancel --base-url https://destination.example --job JOB_UUID --kind import
 ```
 
-Terminal export states are `published`, `cancelled`, `failed`, and `expired`. Terminal import states are `completed`, `cancelled`, `rolled_back`, and `failed`. Do not delete private staging files manually: durable expiry, lease, fingerprint, and cleanup records are the authority for safe reaping.
+Terminal export states are `published`, `cancelled`, `failed`, and `expired`. Terminal import states are `completed`, `cancelled`, `rolled_back`, `failed`, and `expired`. Do not delete private staging files manually: durable expiry, lease, fingerprint, and cleanup records are the authority for safe reaping.
 
 ## Import Report and destination recovery
 

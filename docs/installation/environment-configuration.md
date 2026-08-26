@@ -39,7 +39,7 @@ Direct secret environment values take precedence over `_FILE` values.
 | `SYSTEM_ARCHIVE_ENABLED` | `false` | Registers the System Archive API and worker lane only when explicitly true. Separated API/worker deployments must pass the same value to both roles. |
 | `SYSTEM_ARCHIVE_ARTIFACT_TTL_SECONDS` | `86400` (24 hours) | 300 through 604800; lifetime of a published downloadable export and its private authority. |
 | `SYSTEM_ARCHIVE_UPLOAD_TTL_SECONDS` | `86400` (24 hours) | 300 through 604800; inactivity lifetime for resumable upload/staged input authority. |
-| `ARCHIVE_PREVIEW_TTL_SECONDS` | `1800` (30 minutes) | 60 through 86400; shared portable-preview authority lifetime. |
+| `ARCHIVE_PREVIEW_TTL_SECONDS` | `1800` (30 minutes) | Fixed compatibility invariant: it must be exactly 1800 seconds. The import repository and compiled-release test use the same literal value; do not override it. |
 | `SYSTEM_ARCHIVE_CHUNK_BYTES` | `16777216` (16 MiB) | 1048576 through 67108864; server maximum per resumable upload chunk. |
 | `SYSTEM_ARCHIVE_ALLOW_UNKNOWN_FREE_SPACE` | `false` | When false, unknown staging or asset-root capacity fails preview/commit closed. When true, only an unknown measurement may be accepted; a measured shortage still fails. |
 | `SYSTEM_ARCHIVE_ALLOW_LIMIT_INCREASE` | `false` | Allows the limit settings below to exceed their reviewed ceilings. Set only after resource and denial-of-service review. Lower limits never require this flag. |

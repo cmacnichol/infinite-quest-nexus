@@ -2,13 +2,14 @@
 
 ## Complete recovery set
 
-A useful backup requires three coordinated components:
+A useful Recovery Set requires four coordinated components captured for the same recovery point:
 
 1. PostgreSQL, containing authoritative worlds, campaigns, turns, state, and jobs
 2. Generated asset storage, containing image files referenced by the database
-3. The original credential-encryption key, stored separately and securely
+3. An application-version, database-migration, PostgreSQL/extensions, and runtime-environment inventory sufficient to recreate the compatible deployment
+4. The original credential-encryption key, stored separately and securely
 
-Database-only recovery loses generated files. Database and assets without the original key leave stored provider credentials unreadable.
+Database-only recovery loses generated files. Database and assets without the original key leave stored provider credentials unreadable. A database dump, asset snapshot, and key without the matching application/migration/environment inventory do not establish which executable, schema, extensions, roots, mounts, and non-secret runtime policy can safely restore them.
 
 ## Recovery Set versus System Archive
 
@@ -24,16 +25,24 @@ These are separate products with different restore contracts:
 
 A System Archive is unencrypted and cannot recover encrypted provider credentials or exact jobs, leases, model chains, vectors, chunks, thumbnails, host policy, or deployment state. It does not replace this Recovery Set. Conversely, a Recovery Set is not the supported cross-version owner-portability format. See [System data transfer](../nexus-guide/operations/system-data-transfer.md).
 
-## Create a logical database backup
+## Create a Recovery Set
 
-Example for the local Compose database:
+Coordinate the database dump, asset-volume snapshot, and inventory so they describe the same recovery point. Example database step for local Compose:
 
 ```powershell
 docker compose exec -T postgres pg_dump -U infinitequest -d infinitequest -Fc -f /tmp/infinitequest.dump
 docker compose cp postgres:/tmp/infinitequest.dump ./infinitequest.dump
 ```
 
-Copy the asset volume through an operator-approved volume-backup process and back up the encryption key outside the repository and outside the database dump.
+Copy the asset volume through an operator-approved volume-backup process. Alongside the dump and asset snapshot, record:
+
+- the exact application release, commit, image tag, and immutable image digest;
+- the applied migration IDs/checksums and PostgreSQL plus required-extension versions;
+- the sanitized Compose/Swarm manifest and non-secret environment/config inventory;
+- the logical asset/archive roots, volume or mount identities, network topology, and restore ordering; and
+- the backup timestamp, consistency procedure, checksums, retention, and restore owner.
+
+Do not put secret values in that inventory. Record the secret identifiers and restore locations, then escrow the original credential-encryption key separately from the repository, database dump, and ordinary inventory. Protect and checksum the four coordinated components as one Recovery Set.
 
 ## Restore drill
 
