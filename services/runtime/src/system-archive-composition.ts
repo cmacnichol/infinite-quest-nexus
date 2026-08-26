@@ -84,7 +84,6 @@ import {
 } from "../../api/src/archive-io.js";
 import type { ApiAssetComposition } from "./api-asset-composition.js";
 import type { SystemArchiveDownloadPort } from "../../api/src/system-archive-routes.js";
-import type { AssetImportStorageComposition } from "./asset-import-composition.js";
 import type { SecureFilesystemAdapter } from "./secure-filesystem-adapter.js";
 import { SystemArchivePreviewIndex } from "./system-archive-preview-index.js";
 
@@ -2079,7 +2078,7 @@ export function createFilesystemSystemArchiveCapacity(
 }
 
 export function createSystemArchiveArtifactPublisher(
-  storage: Pick<AssetImportStorageComposition, "adapter" | "portable">,
+  storage: Pick<ApiAssetComposition["storage"], "adapter" | "portable">,
   options: Readonly<{
     leaseOwner: string;
     artifactTtlSeconds: number;
@@ -2136,7 +2135,7 @@ export type ApiSystemArchiveComposition = Readonly<{
 export function createApiSystemArchiveComposition(options: Readonly<{
   pool: DatabasePool;
   config: RuntimeConfig;
-  storage: Pick<AssetImportStorageComposition, "adapter">;
+  storage: Pick<ApiAssetComposition["storage"], "adapter">;
 }>): ApiSystemArchiveComposition {
   const uploadTtlSeconds = options.config.systemArchiveUploadTtlSeconds;
   const chunkBytes = options.config.systemArchiveChunkBytes;
