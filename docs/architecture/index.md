@@ -51,6 +51,10 @@ ADR 0014 supersedes only the backward-compatibility portions of ADR 0013 that al
 
 - [ADR 0028: Modular client and application boundaries](./0028-modular-client-and-application-boundaries.md)
 
+## Operating guidance
+
+The ADRs define the System Archive, specialized-format, and disaster-recovery boundaries. For the current default-off release status, exact environment variables, transfer procedure, acknowledgements, and recovery checklist, use [System data transfer](../nexus-guide/operations/system-data-transfer.md). For exact-installation recovery, use [Back up and restore Nexus](../operations/backup-restore.md).
+
 ## Reading historical decisions
 
 Some early ADRs refer to the legacy player bridge or to provider work that was implemented later. Preserve that chronology when reading the records. For current deployment and product behavior, use the active guides and concept pages and follow their links back to the relevant decisions.

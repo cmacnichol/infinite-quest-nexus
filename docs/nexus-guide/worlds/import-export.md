@@ -8,7 +8,7 @@ Infinite Quest uses separate portable formats for different jobs:
 | --- | --- | --- |
 | **World JSON** | One explicit immutable world-version snapshot and its portability provenance. | Campaigns, campaign history, Chronicle records, or campaign images. |
 | **Campaign Archive** | One campaign, its exact pinned world version, accepted turns, state, portable Chronicle content, and associated original images. | Other campaigns, other world versions, provider profiles and credentials, jobs, thumbnails, and vectors. |
-| **System Archive** *(planned)* | Owner-wide portable data, with its own safeguards and import workflow. | It is not provided by either current world JSON or Campaign Archive import. |
+| **System Archive** *(planned release; default-off)* | One Current Owner's portable worlds, campaigns, settings, and every retained Original Asset. | Credentials, access authority, operational work, derived indexes/thumbnails, and deployment configuration. |
 
 None of these files proves that the source user is authorized on the receiving installation. Imported content is owned by the receiving server's resolved user; source IDs are provenance only.
 
@@ -39,6 +39,8 @@ Optional import controls can select a character, generate missing final-turn cho
 
 Imports are content-addressed or idempotent where the format supports it. Provider credentials are removed, and the imported records belong to the receiving server's current user. Treat every imported file and pasted value as untrusted input.
 
-## System Archive is separate and future work
+## System Archive is separate and release-gated
 
-The future **System Archive** will be an owner-wide portability and recovery format. It will have a distinct export/import option, its own destination checks, and its own documentation. Do not use World JSON or Campaign Archive as a substitute for an owner-wide system backup; neither format grants source authorization or restores provider credentials, operational jobs, or encryption material.
+**System Archive** is implemented as a separate owner-wide portability format, but its production release remains planned and the capability is default-off until its round-trip gate is approved. Its server-owned workflow requires an empty initialized destination, preserves portable non-user UUIDs, remaps ownership to that destination's initial owner, and never merges a world into populated data.
+
+See [System data transfer](../operations/system-data-transfer.md) for exact operation and current release blockers. Do not use World JSON or Campaign Archive as an owner-wide migration substitute. Do not use System Archive as a disaster-recovery substitute: none of these portable formats restores credentials, encryption material, deployment configuration, or exact operational state.
