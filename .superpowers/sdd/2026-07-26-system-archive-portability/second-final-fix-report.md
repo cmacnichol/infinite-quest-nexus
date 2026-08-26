@@ -223,3 +223,65 @@ Result: exit 0; 2 passed and 43 skipped by the name filter.
 - `pnpm test:e2e:data-transfer`: exit 0; all 27 Playwright tests passed across the replacement and legacy clients.
 
 No new platform skip was introduced. The Windows- and Linux-only private staging, recovery, metadata-backfill, process-death, and private-root paths listed above remain unverified rather than being called passed. The unrelated dirty documentation and inaccessible/untracked user files remained outside the commit, and repository-root historical `index.html` is unchanged.
+
+## Final consolidated normalization repair
+
+The consolidated re-review after `6c7eece` / `82d79c9` confirmed two remaining parser-normalization variants of the same authorized secret/capability boundary: separator-obfuscated `artifact.url` metadata and URL-parser normalization of empty-userinfo or signed-query authority. The implementation is committed in `cebd1c1` (`Close System Archive normalization gaps`). System Archive remains default-off.
+
+### Strict RED evidence
+
+The exact regressions were added before production edits:
+
+```powershell
+.\node_modules\.bin\vitest.cmd run tests/unit/system-archive-contracts.test.ts
+```
+
+Initial RED result: exit 1; 5 failed and 61 passed (66 total). The v2 root, nested-object, and nested-array `artifact.url` probes were accepted; whitespace-wrapped empty-userinfo authority was accepted; and the fullwidth `ｓｉｇ` query key was accepted. Safe `artifactLore`, ordinary public query keys, a fullwidth safe `ｗｉｄｔｈ` key, and the separately exercised Unicode-whitespace controls remained in the same test file.
+
+```powershell
+node --env-file=.env.test.local node_modules/vitest/vitest.mjs run --config vitest.integration.config.ts tests/integration/system-archive.integration.test.ts -t "removes recursive secret and capability authority"
+```
+
+Export-sanitizer RED result: exit 1; 1 failed and 44 skipped by the name filter because `artifact-url-authority-sentinel` remained in archive bytes across the root/nested metadata fixture.
+
+After the first production correction, the contract file passed 66/66. The first PostgreSQL rerun exposed a test-fixture shape mismatch: two independently sanitized malicious array objects became two empty objects while the established restoration expectation asserted one. Combining both malicious keys in the same array object preserved the recursive sanitizer probe and restored the established expected shape; the rerun then passed 1/1 with 44 name-filter skips. This diagnostic was not treated as a product-security failure.
+
+An adversarial review of the same URL-parser boundary then added three surrounding normalization probes before the final authority check:
+
+```powershell
+.\node_modules\.bin\vitest.cmd run tests/unit/system-archive-contracts.test.ts
+```
+
+Second RED result: exit 1; 3 failed and 66 passed (69 total). Node's URL parser accepted an internal-tab scheme delimiter, a backslash-normalized authority delimiter, and an extra-slash authority containing empty userinfo.
+
+### Minimal repair
+
+- The shared portable-authority normalizer now performs Unicode NFKC normalization, locale-stable lowercasing, and separator-insensitive alphanumeric compaction. Both metadata exclusion and URL query-key policy use this representation, so `artifact.url` matches the established `artifactUrl` exclusion and fullwidth `ｓｉｇ` matches the signed-query family without new ad hoc aliases.
+- The portable image URL boundary rejects leading or trailing whitespace before parsing and requires canonical raw `http://` or `https://` authority syntax. Empty userinfo, internal parser-stripped whitespace, backslash normalization, and extra-slash authority forms fail closed rather than being silently canonicalized.
+- Recursive v2 validation rejects unsafe input at root, nested-object, and nested-array paths. Export sanitation removes the same authority while preserving safe story metadata and stable public HTTP(S) image URLs with safe query keys.
+
+### Focused GREEN evidence
+
+```powershell
+.\node_modules\.bin\vitest.cmd run tests/unit/archive-contracts.test.ts tests/unit/system-archive-contracts.test.ts tests/unit/system-archive-portability.test.ts
+```
+
+Result: exit 0; 3 files and 99 tests passed. The final System Archive contract file alone passed 69/69.
+
+```powershell
+node --env-file=.env.test.local node_modules/vitest/vitest.mjs run --config vitest.integration.config.ts tests/integration/system-archive.integration.test.ts -t "removes recursive secret and capability authority"
+```
+
+Result: exit 0; 1 passed and 44 skipped by the name filter. Export bytes omitted both capability sentinels and retained the safe `markdown` and `artifactLore` controls.
+
+### Final-head full verification
+
+- `pnpm check`: exit 0. Repository boundary/data-safety, TypeScript, web, and syntax checks passed; warnings remained limited to the inaccessible user Git ignore file and pre-existing `.repowise-seed` paths.
+- `pnpm build`: exit 0. Both production web builds and the TypeScript build passed; existing font-resolution and large-chunk advisories remained warnings only.
+- `pnpm test:unit`: exit 0; 211 files passed, 2,544 tests passed, and 44 were explicitly skipped (2,588 total).
+- Full isolated `tests/integration/system-archive.integration.test.ts`: exit 0; 41 passed and 4 Windows-only platform skips remained unverified.
+- `node --env-file=.env.test.local scripts/run-isolated-integration.mjs`: exit 0 across all 68 isolated PostgreSQL integration files, including the previously timing-sensitive file 42.
+- `pnpm test:e2e:data-transfer`: exit 0; all 27 Playwright tests passed across the replacement and legacy clients.
+- `git diff --check c384a39..HEAD`, `git diff --check 82d79c9..HEAD`, `git diff --check`, and `git diff --cached --check`: exit 0 at the implementation revision. The same range/worktree checks are repeated after the evidence commit in the handoff.
+
+No new platform skip was introduced. The four Windows-skipped System Archive private-staging cases and previously listed Linux-only private filesystem, resumable recovery, metadata-backfill, process-death, inode/reaper, permission, and private-root paths remain unverified rather than being called passed. The unrelated dirty documentation, untracked user files, and inaccessible `.repowise-seed` paths remain untouched; repository-root historical `index.html` is unchanged.
