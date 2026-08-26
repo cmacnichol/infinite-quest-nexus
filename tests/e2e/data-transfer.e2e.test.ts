@@ -84,6 +84,7 @@ async function installDataTransferApi(
   enabled = true,
   options: Readonly<{
     initialExportStatus?: "queued" | "published";
+    holdFirstExportCreate?: boolean;
     disconnectFirstImportCommit?: boolean;
     acceptedImportJobId?: string;
     holdUploadCreate?: boolean;
@@ -92,22 +93,30 @@ async function installDataTransferApi(
 ): Promise<{
   exportPosts: number;
   exportGets: number;
+  exportCreates: Array<Record<string, unknown>>;
+  cancelledExportJobIds: string[];
   importCommits: Array<Record<string, unknown>>;
   cancelledImportJobIds: string[];
   cancelledUploadIds: string[];
+  releaseFirstExportCreate(): void;
   releaseUploadCreate(): void;
   releaseFirstUploadChunk(): void;
 }> {
+  let releaseFirstExportCreate: () => void = () => undefined;
   let releaseUploadCreate: () => void = () => undefined;
   let releaseFirstUploadChunk: () => void = () => undefined;
+  const firstExportCreateGate = new Promise<void>((resolve) => { releaseFirstExportCreate = resolve; });
   const uploadCreateGate = new Promise<void>((resolve) => { releaseUploadCreate = resolve; });
   const firstUploadChunkGate = new Promise<void>((resolve) => { releaseFirstUploadChunk = resolve; });
   const evidence = {
     exportPosts: 0,
     exportGets: 0,
+    exportCreates: [] as Array<Record<string, unknown>>,
+    cancelledExportJobIds: [] as string[],
     importCommits: [] as Array<Record<string, unknown>>,
     cancelledImportJobIds: [] as string[],
     cancelledUploadIds: [] as string[],
+    releaseFirstExportCreate: () => releaseFirstExportCreate(),
     releaseUploadCreate: () => releaseUploadCreate(),
     releaseFirstUploadChunk: () => releaseFirstUploadChunk()
   };
@@ -124,6 +133,11 @@ async function installDataTransferApi(
     });
     if (path === "/api/v1/system-exports" && request.method() === "POST") {
       evidence.exportPosts += 1;
+      evidence.exportCreates.push(request.postDataJSON() as Record<string, unknown>);
+      if (options.holdFirstExportCreate && evidence.exportPosts === 1) {
+        await firstExportCreateGate;
+        return route.abort("internetdisconnected");
+      }
       return json(route, { id: JOB_ID, kind: "export", status: exportStatus, report: null, createdAt: NOW, updatedAt: NOW }, 202);
     }
     if (path === `/api/v1/system-exports/${JOB_ID}` && request.method() === "GET") {
@@ -132,6 +146,7 @@ async function installDataTransferApi(
     }
     if (path === `/api/v1/system-exports/${JOB_ID}` && request.method() === "DELETE") {
       exportStatus = "cancelled";
+      evidence.cancelledExportJobIds.push(JOB_ID);
       return json(route, { id: JOB_ID, kind: "export", status: exportStatus, report: null, createdAt: NOW, updatedAt: NOW });
     }
     if (path === "/api/v1/system-imports/uploads" && request.method() === "POST") {
@@ -340,6 +355,24 @@ for (const surface of surfaces) {
     await expect(page.locator(surface.cancel)).toBeEnabled();
     await page.locator(surface.cancel).click();
     await expect(page.getByText("System Export: cancelled.", { exact: true })).toBeVisible();
+  });
+
+  test(`${surface.name} resolves and cancels an ambiguously accepted export before its durable handle returns`, async ({ page }) => {
+    const evidence = await installDataTransferApi(page, true, { holdFirstExportCreate: true });
+    await page.goto(surface.url);
+    await page.locator(surface.createExport).click();
+    await expect(page.locator(surface.cancel)).toBeEnabled();
+
+    try {
+      await page.locator(surface.cancel).click();
+      await expect(page.getByText("System Export: cancelled.", { exact: true })).toBeVisible();
+      expect(evidence.exportCreates).toHaveLength(2);
+      expect(evidence.exportCreates[1]?.idempotencyKey).toBe(evidence.exportCreates[0]?.idempotencyKey);
+      expect(evidence.cancelledExportJobIds).toEqual([JOB_ID]);
+      await expect(page.getByText("Local System Archive work cancelled.", { exact: true })).toHaveCount(0);
+    } finally {
+      evidence.releaseFirstExportCreate();
+    }
   });
 
   test(`${surface.name} restores a mocked published export after reload without duplicate creation`, async ({ page }) => {

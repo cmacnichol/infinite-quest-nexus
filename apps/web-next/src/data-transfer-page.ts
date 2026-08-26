@@ -308,6 +308,7 @@ export function mountDataTransferPage(
     export: null,
     import: null
   };
+  let currentExportOperation: StoredSystemOperation | null = null;
   let currentImportOperation: StoredSystemOperation | null = null;
   let currentPreview: SystemImportPreviewView | null = null;
   let actionBusy = false;
@@ -520,20 +521,33 @@ export function mountDataTransferPage(
       download.hidden = true;
       currentJobs.export = null;
       const idempotencyKey = randomIdempotencyKey("browser-export");
-      if (sessionOwnerId) writeStoredOperation(operationStorage ?? null, sessionOwnerId, { kind: "export", idempotencyKey, jobId: null });
-      const job = await api.createExport(idempotencyKey, signal);
-      if (sessionOwnerId) writeStoredOperation(operationStorage ?? null, sessionOwnerId, { kind: "export", idempotencyKey, jobId: job.id });
+      const exportOperation: StoredSystemOperation = { kind: "export", idempotencyKey, jobId: null };
+      currentExportOperation = exportOperation;
+      if (!sessionOwnerId) throw new Error("The Current Owner session is not available for System Archive export.");
+      writeStoredOperation(operationStorage ?? null, sessionOwnerId, exportOperation);
+      const job = await resolveStoredExport(sessionOwnerId, exportOperation, signal);
       await monitorJob(job);
     });
+  }
+
+  async function resolveStoredExport(
+    ownerId: string,
+    stored: StoredSystemOperation,
+    signal: AbortSignal
+  ): Promise<SystemArchiveJobView> {
+    const job = stored.jobId
+      ? await api.getJob("export", stored.jobId, signal)
+      : await api.createExport(stored.idempotencyKey, signal);
+    currentExportOperation = { ...stored, jobId: job.id };
+    writeStoredOperation(operationStorage ?? null, ownerId, currentExportOperation);
+    return job;
   }
 
   async function recoverExport(ownerId: string): Promise<void> {
     const stored = readStoredOperation(operationStorage ?? null, ownerId, "export");
     if (!stored) return;
-    const job = stored.jobId
-      ? await api.getJob("export", stored.jobId, controller.signal)
-      : await api.createExport(stored.idempotencyKey, controller.signal);
-    writeStoredOperation(operationStorage ?? null, ownerId, { ...stored, jobId: job.id });
+    currentExportOperation = stored;
+    const job = await resolveStoredExport(ownerId, stored, controller.signal);
     await monitorJob(job);
   }
 
@@ -577,6 +591,20 @@ export function mountDataTransferPage(
         renderJob(recovered);
         if (isJobCancellable(recovered)) {
           renderJob(await api.cancelJob("import", recovered.id, controller.signal));
+        }
+        return;
+      }
+      const storedExport = sessionOwnerId
+        ? readStoredOperation(operationStorage ?? null, sessionOwnerId, "export")
+        : null;
+      const activeExportOperation = currentExportOperation ?? storedExport;
+      const currentJobMatchesActiveExport = activeExportOperation?.jobId !== null
+        && currentJobs.export?.id === activeExportOperation?.jobId;
+      if (sessionOwnerId && activeExportOperation && !currentJobMatchesActiveExport) {
+        const recovered = await resolveStoredExport(sessionOwnerId, activeExportOperation, controller.signal);
+        renderJob(recovered);
+        if (isJobCancellable(recovered)) {
+          renderJob(await api.cancelJob("export", recovered.id, controller.signal));
         }
         return;
       }

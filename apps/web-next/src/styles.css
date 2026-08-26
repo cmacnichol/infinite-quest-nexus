@@ -2692,7 +2692,8 @@ footer p:first-child {
 }
 
 .transfer-purpose.system-purpose p {
-  color: color-mix(in srgb, var(--text-inverse) 72%, transparent);
+  color: var(--text-inverse);
+  opacity: 0.72;
 }
 
 .purpose-links {

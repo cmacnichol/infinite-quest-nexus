@@ -373,6 +373,7 @@ describe("web-next Data Transfer page", () => {
     const cancel = root.querySelector<HTMLButtonElement>('[data-action="cancel-system-operation"]')!;
 
     await vi.waitFor(() => expect(cancel.disabled).toBe(false));
+    await vi.waitFor(() => expect(releaseWait).toBeTypeOf("function"));
     cancel.click();
     await vi.waitFor(() => expect(api.cancelJob).toHaveBeenCalledWith("export", JOB_ID, expect.any(AbortSignal)));
     releaseWait();

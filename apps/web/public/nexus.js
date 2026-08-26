@@ -76,6 +76,7 @@ let systemArchiveSelectedFile = null;
 let systemArchiveUpload = null;
 let systemArchivePreview = null;
 const systemArchiveJobs = { export: null, import: null };
+let systemArchiveExportOperation = null;
 let systemArchiveImportOperation = null;
 let systemArchiveBusy = false;
 let systemArchiveOperationController = null;
@@ -845,29 +846,33 @@ async function createSystemArchiveExport() {
     elements.systemArchiveDownload.classList.add("hidden");
     systemArchiveJobs.export = null;
     const idempotencyKey = systemArchiveIdempotencyKey("legacy-export");
-    writeSystemArchiveOperation({ kind: "export", idempotencyKey, jobId: null });
-    const job = await api("/api/v1/system-exports", {
-      method: "POST",
-      body: JSON.stringify({ idempotencyKey }),
-      signal
-    });
-    writeSystemArchiveOperation({ kind: "export", idempotencyKey, jobId: job.id });
+    const exportOperation = { kind: "export", idempotencyKey, jobId: null };
+    systemArchiveExportOperation = exportOperation;
+    writeSystemArchiveOperation(exportOperation);
+    const job = await resolveStoredSystemExport(exportOperation, signal);
     await monitorSystemArchiveJob(job, signal);
   });
+}
+
+async function resolveStoredSystemExport(stored, signal) {
+  const job = stored.jobId
+    ? await api(`/api/v1/system-exports/${encodeURIComponent(stored.jobId)}`, { signal })
+    : await api("/api/v1/system-exports", {
+        method: "POST",
+        body: JSON.stringify({ idempotencyKey: stored.idempotencyKey }),
+        signal
+      });
+  systemArchiveExportOperation = { ...stored, jobId: job.id };
+  writeSystemArchiveOperation(systemArchiveExportOperation);
+  return job;
 }
 
 async function recoverSystemArchiveExport() {
   const stored = readSystemArchiveOperation("export");
   if (!stored) return;
+  systemArchiveExportOperation = stored;
   const controller = new AbortController();
-  const job = stored.jobId
-    ? await api(`/api/v1/system-exports/${encodeURIComponent(stored.jobId)}`, { signal: controller.signal })
-    : await api("/api/v1/system-exports", {
-        method: "POST",
-        body: JSON.stringify({ idempotencyKey: stored.idempotencyKey }),
-        signal: controller.signal
-      });
-  writeSystemArchiveOperation({ ...stored, jobId: job.id });
+  const job = await resolveStoredSystemExport(stored, controller.signal);
   await monitorSystemArchiveJob(job, controller.signal);
 }
 
@@ -930,6 +935,18 @@ async function cancelSystemArchiveOperation() {
       renderSystemArchiveJob(recovered);
       if (systemArchiveJobCancellable(recovered)) {
         renderSystemArchiveJob(await api(`/api/v1/system-imports/${encodeURIComponent(recovered.id)}`, { method: "DELETE" }));
+      }
+      return;
+    }
+    const storedExport = readSystemArchiveOperation("export");
+    const activeExportOperation = systemArchiveExportOperation || storedExport;
+    const currentJobMatchesActiveExport = activeExportOperation?.jobId !== null
+      && systemArchiveJobs.export?.id === activeExportOperation?.jobId;
+    if (activeExportOperation && !currentJobMatchesActiveExport) {
+      const recovered = await resolveStoredSystemExport(activeExportOperation);
+      renderSystemArchiveJob(recovered);
+      if (systemArchiveJobCancellable(recovered)) {
+        renderSystemArchiveJob(await api(`/api/v1/system-exports/${encodeURIComponent(recovered.id)}`, { method: "DELETE" }));
       }
       return;
     }
