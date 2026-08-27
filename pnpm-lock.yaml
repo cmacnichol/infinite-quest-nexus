@@ -120,14 +120,14 @@ importers:
   docs:
     devDependencies:
       mermaid:
-        specifier: ^11.17.0
-        version: 11.17.0
+        specifier: ^11.17.2
+        version: 11.17.2
       vitepress:
         specifier: ^1.6.4
         version: 1.6.4(@algolia/client-search@5.56.0)(@types/node@26.2.0)(jwt-decode@4.0.0)(postcss@8.5.19)(search-insights@2.17.3)(typescript@7.0.2)
       vitepress-plugin-mermaid:
         specifier: ^2.0.17
-        version: 2.0.17(mermaid@11.17.0)(vitepress@1.6.4(@algolia/client-search@5.56.0)(@types/node@26.2.0)(jwt-decode@4.0.0)(postcss@8.5.19)(search-insights@2.17.3)(typescript@7.0.2))
+        version: 2.0.17(mermaid@11.17.2)(vitepress@1.6.4(@algolia/client-search@5.56.0)(@types/node@26.2.0)(jwt-decode@4.0.0)(postcss@8.5.19)(search-insights@2.17.3)(typescript@7.0.2))
 
   packages/application:
     dependencies:
@@ -2142,8 +2142,8 @@ packages:
   mdast-util-to-hast@13.2.1:
     resolution: {integrity: sha512-cctsq2wp5vTsLIcaymblUriiTcZd0CwWtCbLvrOzYCDZoWyMNV8sZ7krj09FSnsiJi3WVsHLM4k6Dq/yaPyCXA==}
 
-  mermaid@11.17.0:
-    resolution: {integrity: sha512-Jo9N377Wb4MSnHFPTbLi2SxFpsQl4eVHoxnW5U1Md9EazvgMp3s+4ohDxr81YNTgbn5Kj7HJ3yslrSJ52kwpbA==}
+  mermaid@11.17.2:
+    resolution: {integrity: sha512-V6K3C8EBdEsPFZXSKMJe6ppQOENxuHARr9GvHX4hh47lAbhMRD9qf4oEK7LoaRQxULMa80/qt5gHO73aCleBBg==}
 
   micromark-util-character@2.1.1:
     resolution: {integrity: sha512-wv8tdUTJ3thSFFFJKtpYKOYiGP2+v96Hvk4Tu8KpCAsTMs6yi+nVmGh1syvSCsaxz45J6Jbw+9DD6g97+NV67Q==}
@@ -4717,7 +4717,7 @@ snapshots:
       unist-util-visit: 5.1.0
       vfile: 6.0.3
 
-  mermaid@11.17.0:
+  mermaid@11.17.2:
     dependencies:
       '@braintree/sanitize-url': 7.1.2
       '@iconify/utils': 3.1.4
@@ -5337,9 +5337,9 @@ snapshots:
       jiti: 2.7.0
       tsx: 4.23.1
 
-  vitepress-plugin-mermaid@2.0.17(mermaid@11.17.0)(vitepress@1.6.4(@algolia/client-search@5.56.0)(@types/node@26.2.0)(jwt-decode@4.0.0)(postcss@8.5.19)(search-insights@2.17.3)(typescript@7.0.2)):
+  vitepress-plugin-mermaid@2.0.17(mermaid@11.17.2)(vitepress@1.6.4(@algolia/client-search@5.56.0)(@types/node@26.2.0)(jwt-decode@4.0.0)(postcss@8.5.19)(search-insights@2.17.3)(typescript@7.0.2)):
     dependencies:
-      mermaid: 11.17.0
+      mermaid: 11.17.2
       vitepress: 1.6.4(@algolia/client-search@5.56.0)(@types/node@26.2.0)(jwt-decode@4.0.0)(postcss@8.5.19)(search-insights@2.17.3)(typescript@7.0.2)
     optionalDependencies:
       '@mermaid-js/mermaid-mindmap': 9.3.0
