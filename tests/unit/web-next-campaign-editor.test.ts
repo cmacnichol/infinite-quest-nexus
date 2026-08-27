@@ -84,6 +84,32 @@ describe("web-next campaign editor routing", () => {
 });
 
 describe("web-next campaign action feedback", () => {
+  it("builds Retry Latest requests with the server-owned Story context placeholder", () => {
+    const request = campaignEditorPage.buildRetryLatestGenerationRequest;
+    expect(typeof request).toBe("function");
+    if (typeof request !== "function") return;
+
+    expect((request as (
+      action: string,
+      idempotencyKey: string,
+      expectedCurrentTurnNumber: number,
+      storage: Pick<Storage, "getItem"> | null
+    ) => unknown)(
+      "Take the lantern.",
+      "retry-key",
+      4,
+      { getItem: (key) => key === "infinite-quest.story.context-budget-tokens" ? "256000" : null }
+    )).toEqual({
+      action: "Take the lantern.",
+      requestedInputMode: "action",
+      resolvedInputMode: "action",
+      inputModeSource: "explicit",
+      idempotencyKey: "retry-key",
+      context: { budgetTokens: 32_000, compression: "auto", recentTurns: 8 },
+      expectedCurrentTurnNumber: 4
+    });
+  });
+
   it("renders historical state as labeled read-only fields instead of raw JSON", () => {
     const markup = campaignStateInspectorMarkup({
       campaignId: "campaign-1",

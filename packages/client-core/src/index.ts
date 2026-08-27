@@ -7,6 +7,18 @@ export type {
   PendingSubmissionStore,
   SessionPort
 } from "./ports.js";
+export {
+  DEFAULT_STORY_CONTEXT_BUDGET_TOKENS,
+  STORY_CONTEXT_BUDGET_PRESETS,
+  STORY_CONTEXT_BUDGET_STORAGE_KEY,
+  loadStoryContextBudgetTokens,
+  normalizeStoryContextBudgetTokens,
+  saveStoryContextBudgetTokens
+} from "./story-context-budget.js";
+export type {
+  StoryContextBudgetStorage,
+  StoryContextBudgetTokens
+} from "./story-context-budget.js";
 export type { Immutable, Store } from "./store.js";
 export {
   CampaignProjectionProtocolError,

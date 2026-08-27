@@ -1,6 +1,7 @@
 import {
   toggleChoiceDraftSelection,
   type CampaignProjection,
+  type StoryContextBudgetTokens,
   type StoryTurnInputMode
 } from "@infinite-quest/client-core";
 import type {
@@ -401,13 +402,17 @@ export function mountStoryPlayerPage(
   const composerCampaign = () => projection.campaign !== null && selectedCampaign?.id === projection.campaign.id
     ? selectedCampaign : null;
   const campaignFallback = () => composerCampaign()?.turnControlStyle === "flexible_scene" ? "scene" as const : "action" as const;
-  const submitPreparedTurn = async (submission: PreparedStoryTurnSubmission) => {
+  const submitPreparedTurn = async (
+    submission: PreparedStoryTurnSubmission,
+    contextBudgetTokens: StoryContextBudgetTokens = ui.get().contextBudgetTokens
+  ) => {
+    const generationSubmission = { ...submission, contextBudgetTokens };
     submittedDraft = submission.action;
     const pinnedReplacementTurnId = replacementTurnId;
     replacementTurnId = null;
     const accepted = pinnedReplacementTurnId === null
-      ? await generation.submitAppend(submission)
-      : await tools.retryLatest(pinnedReplacementTurnId, submission);
+      ? await generation.submitAppend(generationSubmission)
+      : await tools.retryLatest(pinnedReplacementTurnId, generationSubmission);
     if (!accepted) {
       if (!disposed) ui.setMessage("Story generation could not be started. Your accepted turns are unchanged.");
       return;
@@ -419,6 +424,7 @@ export function mountStoryPlayerPage(
     const campaign = projection.campaign;
     const current = ui.get();
     const draft = current.draft;
+    const contextBudgetTokens = current.contextBudgetTokens;
     if (!campaign || !draft.trim()) {
       focusDraft();
       return;
@@ -439,11 +445,11 @@ export function mountStoryPlayerPage(
       );
       if (disposed || projection.campaign?.id !== campaign.id || ui.get().draft !== draft) return;
       if (preparation.kind === "confirmation") {
-        ui.setIntentConfirmation({ action: preparation.action, classificationId: preparation.classificationId, requestedInputMode: "auto" });
+        ui.setIntentConfirmation({ action: preparation.action, classificationId: preparation.classificationId, requestedInputMode: "auto", contextBudgetTokens });
         root.querySelector<HTMLButtonElement>("[data-action='confirm-intent-action']")?.focus();
         return;
       }
-      await submitPreparedTurn(preparation.submission);
+      await submitPreparedTurn(preparation.submission, contextBudgetTokens);
     } catch {
       if (!disposed) ui.setMessage("Prompt interpretation could not be completed. Choose Action or Scene Direction.");
     }
@@ -458,7 +464,7 @@ export function mountStoryPlayerPage(
       resolvedInputMode,
       inputModeSource: "auto",
       classificationId: intent.classificationId
-    });
+    }, intent.contextBudgetTokens);
   };
   const syncComposer = () => {
     const campaign = projection.campaign;
@@ -723,6 +729,11 @@ export function mountStoryPlayerPage(
         selectInputMode(mode);
       });
     }
+    for (const control of root.querySelectorAll<HTMLSelectElement>("[data-story-context-budget]")) {
+      control.addEventListener("change", () => {
+        ui.setContextBudgetTokens(Number(control.value));
+      });
+    }
     for (const textarea of root.querySelectorAll<HTMLTextAreaElement>("[data-story-draft]")) {
       textarea.addEventListener("input", () => {
         ui.setComposerDraft(textarea.value);
@@ -768,7 +779,8 @@ export function mountStoryPlayerPage(
           action: world.firstAction,
           requestedInputMode: "action",
           resolvedInputMode: "action",
-          inputModeSource: "opening_action"
+          inputModeSource: "opening_action",
+          contextBudgetTokens: ui.get().contextBudgetTokens
         }).then((accepted) => { if (accepted) ui.setGenerationFollowing(true); });
       });
     }

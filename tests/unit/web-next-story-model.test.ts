@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { STORY_CONTEXT_BUDGET_STORAGE_KEY } from "../../packages/client-core/src/index.js";
 import {
   STORY_READING_WIDTH_STORAGE_KEY,
   createStoryUiModel
@@ -25,6 +26,7 @@ describe("Story Player local UI model", () => {
       "activity",
       "choiceBaseText",
       "choiceSelection",
+      "contextBudgetTokens",
       "continuousReading",
       "draft",
       "draftOwnerKey",
@@ -39,12 +41,24 @@ describe("Story Player local UI model", () => {
       "requestedInputMode",
       "viewTurnNumber"
     ]);
+    expect(model.get().contextBudgetTokens).toBe(32_000);
   });
 
   it("restores a valid persisted reading width", () => {
     const model = createStoryUiModel({}, memoryStorage({ [STORY_READING_WIDTH_STORAGE_KEY]: "wide" }));
 
     expect(model.get().readingWidth).toBe("wide");
+  });
+
+  it("restores and persists the Story context budget without adopting campaign state", () => {
+    const values: Record<string, string> = { [STORY_CONTEXT_BUDGET_STORAGE_KEY]: "128000" };
+    const model = createStoryUiModel({}, memoryStorage(values));
+
+    expect(model.get().contextBudgetTokens).toBe(128_000);
+    model.setContextBudgetTokens(256_000);
+
+    expect(model.get().contextBudgetTokens).toBe(256_000);
+    expect(values[STORY_CONTEXT_BUDGET_STORAGE_KEY]).toBe("256000");
   });
 
   it("falls back to Standard when persisted reading width is invalid or storage is unavailable", () => {
@@ -79,7 +93,8 @@ describe("Story Player local UI model", () => {
     model.setIntentConfirmation({
       action: "  Keep this exact draft.  ",
       classificationId: "classification-a",
-      requestedInputMode: "auto"
+      requestedInputMode: "auto",
+      contextBudgetTokens: 32_000
     });
 
     expect(model.get()).toEqual(expect.objectContaining({

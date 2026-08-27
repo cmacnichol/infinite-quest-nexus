@@ -31,7 +31,8 @@ async function bootLegacyStory({
   updateProfile,
   rewindCampaign = vi.fn().mockResolvedValue({}),
   fetchCampaignState = vi.fn().mockResolvedValue({ activeTurnNumber: 100 }),
-  workflow = { resume: async () => null }
+  workflow = { resume: async () => null },
+  storyContextBudgetTokens = null
 }: {
   turns: Array<Record<string, unknown>>;
   nextCursor?: string | null;
@@ -42,6 +43,7 @@ async function bootLegacyStory({
   rewindCampaign?: ReturnType<typeof vi.fn>;
   fetchCampaignState?: ReturnType<typeof vi.fn>;
   workflow?: Record<string, unknown>;
+  storyContextBudgetTokens?: string | null;
 }) {
   const { document, window } = parseHTML(storyHtml);
   Object.defineProperty(window, "location", { value: { pathname: "/story/campaign-1" }, configurable: true });
@@ -54,8 +56,14 @@ async function bootLegacyStory({
   vi.stubGlobal("Element", window.Element);
   vi.stubGlobal("HTMLElement", window.HTMLElement);
   vi.stubGlobal("HTMLInputElement", window.HTMLInputElement);
-  vi.stubGlobal("localStorage", { getItem: () => null, removeItem: () => undefined, setItem: () => undefined });
-  Object.defineProperty(window.HTMLElement.prototype, "scrollIntoView", { value: () => undefined, configurable: true });
+  const storageValues = new Map<string, string>();
+  if (storyContextBudgetTokens !== null) storageValues.set("infinite-quest.story.context-budget-tokens", storyContextBudgetTokens);
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => storageValues.get(key) ?? null,
+    removeItem: (key: string) => { storageValues.delete(key); },
+    setItem: (key: string, value: string) => { storageValues.set(key, value); }
+  });
+  Object.defineProperty(window.HTMLElement.prototype, "scrollIntoView", { value: () => undefined, configurable: true, writable: true });
   Object.defineProperty(document.getElementById("userProfileDefaultTurnControlStyle"), "value", {
     value: "flexible_auto",
     writable: true,
@@ -90,7 +98,7 @@ async function bootLegacyStory({
   document.dispatchEvent(new window.Event("DOMContentLoaded"));
   await new Promise((resolve) => setTimeout(resolve, 0));
   await new Promise((resolve) => setTimeout(resolve, 0));
-  return { document, window, fetchTurns, fetchCampaignState, rewindCampaign };
+  return { document, window, fetchTurns, fetchCampaignState, rewindCampaign, storageValues };
 }
 
 function controlledPrintWindow() {
@@ -121,6 +129,47 @@ const makeTurns = (first: number, last: number) => Array.from(
 );
 
 describe("story-player: new Story Player UI contracts & gameplay logic", () => {
+  it("keeps Story context controls out of the legacy Story player and leaves the server authoritative", async () => {
+    const submissions: unknown[] = [];
+    const workflow = {
+      resume: async () => null,
+      submit: vi.fn(async (_campaignId: string, submission: unknown) => {
+        submissions.push(submission);
+        return {
+          jobId: "retry-context-job",
+          async *watch() { yield { type: "settled", outcome: "discarded", error: new Error("test discard") }; }
+        };
+      })
+    };
+    const { document, window, storageValues } = await bootLegacyStory({
+      turns: makeTurns(1, 1),
+      workflow,
+      storyContextBudgetTokens: "128000"
+    });
+
+    expect(document.getElementById("turnStoryContextBudget")).toBeNull();
+    expect(document.getElementById("retryStoryContextBudget")).toBeNull();
+    expect(storageValues.get("infinite-quest.story.context-budget-tokens")).toBe("128000");
+
+    document.getElementById("btnRetry")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+    const editor = document.getElementById("retryPromptEditor") as HTMLTextAreaElement;
+    Object.defineProperty(editor, "select", { configurable: true, value: () => undefined });
+    editor.value = "Take the lantern.";
+    document.getElementById("btnRetryPromptSubmit")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+    for (let attempt = 0; attempt < 8 && submissions.length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    expect(submissions).toHaveLength(1);
+    expect(submissions[0]).toMatchObject({
+      operationKind: "replace_latest",
+      request: {
+        action: "Take the lantern.",
+        context: { budgetTokens: 32_000, compression: "auto", recentTurns: 8 }
+      }
+    });
+  });
+
   it("uses semantic progress and a served stylesheet for printable story documents", () => {
     expect(storyScript).toContain('<progress class="turn-progress-meter" max="100" value="${percent}"');
     expect(storyScript).toContain('href="/nexus/story-print.css"');

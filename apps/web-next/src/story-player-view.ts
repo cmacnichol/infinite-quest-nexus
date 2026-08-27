@@ -1,4 +1,4 @@
-import type { CampaignProjection } from "@infinite-quest/client-core";
+import { type CampaignProjection } from "@infinite-quest/client-core";
 import type { AcceptedTurnCorrectionView, CampaignRuntimeStateResponse, CampaignSummary, MetaResponse } from "@infinite-quest/contracts";
 import { storyPlayerPath, type StoryRoute } from "./story-route";
 import type { ReadingWidth, StoryUiState } from "./story-player-model";
@@ -194,7 +194,6 @@ function storyComposer(
   }
   if (choices.length) composer.append(choiceList);
   composer.append(composerModeButtons(document, turnControlStyle, ui.requestedInputMode));
-
   const field = element(document, "div", "story-draft-field");
   const label = element(document, "label", "story-draft-label", "What happens next?");
   label.htmlFor = "story-draft";

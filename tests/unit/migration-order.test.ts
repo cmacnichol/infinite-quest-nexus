@@ -12,4 +12,10 @@ describe("database migration ordering", () => {
     expect(prefixes).toHaveLength(files.length);
     expect(new Set(prefixes).size).toBe(prefixes.length);
   });
+
+  it("places campaign Story context persistence immediately after migration 0077", async () => {
+    const files = (await readdir(resolve("database/migrations"))).filter((file) => file.endsWith(".sql")).sort();
+
+    expect(files.at(-1)).toBe("0078_campaign_story_context_budget.sql");
+  });
 });

@@ -167,6 +167,39 @@ function deferred<T>() {
 afterEach(() => vi.restoreAllMocks());
 
 describe("Story continuation composer", () => {
+  it("persists a selected Story context target and submits it with the turn", async () => {
+    const page = fixture();
+    const prepared = composition();
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, prepared);
+    await settle();
+
+    const context = page.document.querySelector<HTMLSelectElement>("[data-story-context-budget]");
+    expect(context?.getAttribute("aria-label")).toBe("Story context");
+    expect([...context?.options ?? []].map((option) => [option.value, option.textContent])).toEqual([
+      ["32000", "Standard · 32K"],
+      ["64000", "Expanded · 64K"],
+      ["128000", "Large · 128K"],
+      ["256000", "Very large · 256K"],
+      ["1000000", "Maximum available · up to 1M"]
+    ]);
+
+    if (!context) throw new Error("Story context control is missing.");
+    Object.defineProperty(context, "value", { configurable: true, value: "128000" });
+    context.dispatchEvent(new page.window.Event("change", { bubbles: true }));
+    await settle();
+    enter(page, "Open the observatory.");
+    page.document.querySelector<HTMLButtonElement>("[data-action='continue-story']")?.click();
+    await settle();
+
+    const submit = prepared.workflow.submit as ReturnType<typeof vi.fn>;
+    expect(submit.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
+      request: expect.objectContaining({
+        context: { budgetTokens: 128_000, compression: "auto", recentTurns: 8 }
+      })
+    }));
+    mounted.dispose();
+  });
+
   it("uses the campaign control style to render an action-only or flexible compact interpretation bar", async () => {
     const actionPage = fixture();
     const actionMounted = mountStoryPlayerPage(actionPage.root, { campaignId, turnNumber: 1 }, composition());

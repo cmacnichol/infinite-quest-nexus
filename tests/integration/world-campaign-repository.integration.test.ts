@@ -144,6 +144,7 @@ integration("PostgreSQL world campaign repository adapters", () => {
         worldVersionId,
         title,
         storyLengthProfile: "standard",
+        storyContextBudgetTokens: 32_000,
         turnControlStyle: "flexible_auto"
       }
     )));
@@ -514,6 +515,7 @@ integration("PostgreSQL world campaign repository adapters", () => {
         worldVersionId: ownVersion.worldVersionId,
         title: `Spoofed campaign ${crypto.randomUUID()}`,
         storyLengthProfile: "standard",
+        storyContextBudgetTokens: 32_000,
         turnControlStyle: "flexible_auto"
       }
     ));
@@ -614,6 +616,7 @@ integration("PostgreSQL world campaign repository adapters", () => {
           worldVersionId: version.worldVersionId,
           title: `Rolled back embedded campaign ${crypto.randomUUID()}`,
           storyLengthProfile: "standard",
+          storyContextBudgetTokens: 32_000,
           turnControlStyle: "flexible_auto"
         }
       ));

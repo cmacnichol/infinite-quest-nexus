@@ -1,16 +1,18 @@
 import {
   appendExpectedTurnNumber,
+  DEFAULT_STORY_CONTEXT_BUDGET_TOKENS,
   type CampaignStoreController,
   type GenerationEvent,
   type GenerationProjectionSession,
   type GenerationRun,
   type GenerationWorkflow,
   type IdFactory,
+  type StoryContextBudgetTokens,
   type StoryTurnInputMode
 } from "@infinite-quest/client-core";
 import type { GenerationResult, TurnInputModeSource } from "@infinite-quest/contracts";
 
-const GENERATION_CONTEXT = { budgetTokens: 32_000, compression: "auto" as const, recentTurns: 8 };
+const GENERATION_CONTEXT_OPTIONS = { compression: "auto" as const, recentTurns: 8 };
 
 export interface StoryGenerationCampaign {
   readonly id: string;
@@ -23,6 +25,7 @@ export interface StoryGenerationSubmission {
   readonly resolvedInputMode: "action" | "scene";
   readonly inputModeSource: TurnInputModeSource;
   readonly classificationId?: string;
+  readonly contextBudgetTokens?: StoryContextBudgetTokens;
 }
 
 export interface StoryGenerationController {
@@ -133,7 +136,7 @@ export function createStoryGenerationController(
     inputModeSource: submission.inputModeSource,
     ...(submission.classificationId ? { classificationId: submission.classificationId } : {}),
     idempotencyKey: dependencies.idFactory.create(),
-    context: GENERATION_CONTEXT
+    context: { budgetTokens: DEFAULT_STORY_CONTEXT_BUDGET_TOKENS, ...GENERATION_CONTEXT_OPTIONS }
   });
 
   return {

@@ -38,7 +38,13 @@ import {
   turnInputModeForControlStyle,
   toggleChoiceDraftSelection
 } from "./story-choice-selection.js";
-import { formatChronicleRetrievalAudit } from "@infinite-quest/client-core";
+import {
+  formatChronicleRetrievalAudit,
+  loadStoryContextBudgetTokens,
+  normalizeStoryContextBudgetTokens,
+  saveStoryContextBudgetTokens,
+  STORY_CONTEXT_BUDGET_PRESETS
+} from "@infinite-quest/client-core";
 
 "use strict";
 
@@ -123,6 +129,7 @@ const state = {
   streamingAutoFollow: true,
   streamingExpectedScrollY: null,
   turnInputMode: "auto",
+  contextBudgetTokens: loadStoryContextBudgetTokens(storyContextStorage()),
   nextTurnInputModeSource: null,
   choiceDraftOwnerKey: null,
   choiceDraftSelection: createChoiceDraftSelection(),
@@ -151,6 +158,14 @@ function completeHistorySupersededError() {
   const error = new Error("Story history load was superseded.");
   error.code = COMPLETE_HISTORY_SUPERSEDED;
   return error;
+}
+
+function storyContextStorage() {
+  try {
+    return localStorage;
+  } catch {
+    return null;
+  }
 }
 
 function isCompleteHistorySuperseded(error) {
@@ -309,6 +324,9 @@ function syncInputState() {
   if (freeAction) freeAction.disabled = storyInputLocked;
   document.querySelectorAll("[data-turn-input-mode]").forEach((button) => {
     button.disabled = storyInputLocked || campaignTurnControlStyle() === "action_only";
+  });
+  document.querySelectorAll("[data-story-context-budget]").forEach((control) => {
+    control.disabled = storyInputLocked;
   });
   document.querySelectorAll("#choiceArea .choice").forEach(b => { b.disabled = storyInputLocked; });
   syncClearTurnInputButton();
@@ -852,6 +870,27 @@ function clearTurnIntentDecision() {
   if (panel) panel.classList.add("hidden");
 }
 
+function syncStoryContextBudgetControls() {
+  const selectedValue = String(state.contextBudgetTokens);
+  document.querySelectorAll("[data-story-context-budget]").forEach((control) => {
+    control.replaceChildren();
+    STORY_CONTEXT_BUDGET_PRESETS.forEach((preset) => {
+      const option = document.createElement("option");
+      option.value = String(preset.value);
+      option.textContent = preset.label;
+      option.selected = option.value === selectedValue;
+      control.append(option);
+    });
+  });
+  syncInputState();
+}
+
+function setStoryContextBudgetTokens(value) {
+  state.contextBudgetTokens = normalizeStoryContextBudgetTokens(Number(value));
+  saveStoryContextBudgetTokens(storyContextStorage(), state.contextBudgetTokens);
+  syncStoryContextBudgetControls();
+}
+
 function setTurnInputMode(mode, options = {}) {
   const locked = campaignTurnControlStyle() === "action_only";
   state.turnInputMode = locked ? "action" : (["auto", "action", "scene"].includes(mode) ? mode : defaultTurnInputMode());
@@ -979,8 +1018,8 @@ function renderTurnInput() {
   }
 }
 
-function showAmbiguousTurnIntent(action, classification) {
-  state.pendingIntentDecision = { action, classification };
+function showAmbiguousTurnIntent(action, classification, contextBudgetTokens) {
+  state.pendingIntentDecision = { action, classification, contextBudgetTokens };
   const panel = $("turnIntentDecision");
   const message = $("turnIntentDecisionMessage");
   if (message) {
@@ -1022,9 +1061,10 @@ async function submitAction(actionText, options = {}) {
   if (!action) { toast("Enter an action first."); return; }
   const requestedInputMode = options.requestedInputMode || state.turnInputMode;
   const inputModeSource = options.inputModeSource || state.nextTurnInputModeSource || (requestedInputMode === "auto" ? "auto" : "explicit");
+  const contextBudgetTokens = normalizeStoryContextBudgetTokens(options.contextBudgetTokens ?? state.contextBudgetTokens);
   state.nextTurnInputModeSource = null;
   if (requestedInputMode !== "auto") {
-    await submitResolvedTurn(action, { requestedInputMode, resolvedInputMode: requestedInputMode, inputModeSource });
+    await submitResolvedTurn(action, { requestedInputMode, resolvedInputMode: requestedInputMode, inputModeSource, contextBudgetTokens });
     return;
   }
   showBusy("Determining how to interpret this turn…");
@@ -1039,14 +1079,15 @@ async function submitAction(actionText, options = {}) {
     return;
   }
   if (classification.confidenceBand === "ambiguous" || classification.classification === "mixed") {
-    showAmbiguousTurnIntent(action, classification);
+    showAmbiguousTurnIntent(action, classification, contextBudgetTokens);
     return;
   }
   await submitResolvedTurn(action, {
     requestedInputMode: classification.classificationId ? "auto" : classification.resolvedMode,
     resolvedInputMode: classification.resolvedMode,
     inputModeSource: classification.classificationId ? "auto" : "fallback",
-    classificationId: classification.classificationId
+    classificationId: classification.classificationId,
+    contextBudgetTokens
   });
 }
 
@@ -1078,7 +1119,7 @@ async function runGeneration(action, options = {}) {
       idempotencyKey: options.idempotencyKey || composition.idFactory.create(),
       createdAt: Number(options.createdAt) || composition.clock.now(),
       context: {
-        budgetTokens: 32000,
+        budgetTokens: 32_000,
         compression: "auto",
         recentTurns: 8
       }
@@ -1693,13 +1734,15 @@ async function executeRetryWithPrompt(submittedPromptText) {
   if (!currentTurnNumber) return;
   const originalTurn = state.turns.at(-1) || {};
   const resolvedInputMode = originalTurn.resolvedInputMode || originalTurn.inputMode || "action";
+  const contextBudgetTokens = state.contextBudgetTokens;
   closeRetryPromptDialog();
   await runGeneration(action, {
     operationKind: "replace_latest",
     expectedCurrentTurnNumber: currentTurnNumber,
     requestedInputMode: originalTurn.requestedInputMode || resolvedInputMode,
     resolvedInputMode,
-    inputModeSource: originalTurn.inputModeSource || "explicit"
+    inputModeSource: originalTurn.inputModeSource || "explicit",
+    contextBudgetTokens
   });
 }
 
@@ -2680,13 +2723,18 @@ document.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll("[data-turn-input-mode]").forEach((button) => {
     button.addEventListener("click", () => setTurnInputMode(button.dataset.turnInputMode, { refreshPlaceholder: true }));
   });
+  syncStoryContextBudgetControls();
+  document.querySelectorAll("[data-story-context-budget]").forEach((control) => {
+    control.addEventListener("change", () => setStoryContextBudgetTokens(control.value));
+  });
   const submitAmbiguousTurn = (resolvedInputMode) => {
     const pending = state.pendingIntentDecision;
     if (!pending) return;
     submitResolvedTurn(pending.action, {
       requestedInputMode: resolvedInputMode,
       resolvedInputMode,
-      inputModeSource: "explicit"
+      inputModeSource: "explicit",
+      contextBudgetTokens: pending.contextBudgetTokens
     });
   };
   const btnSubmitAsAction = $("btnSubmitAsAction");

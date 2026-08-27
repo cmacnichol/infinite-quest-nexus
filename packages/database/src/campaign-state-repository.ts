@@ -90,6 +90,13 @@ const branchCampaignRowSchema = z.object({
   worldVersionId: z.uuid(),
   title: z.string().trim().min(1),
   storyLengthProfile: z.enum(["brief", "standard", "long", "extended"]),
+  storyContextBudgetTokens: z.union([
+    z.literal(32_000),
+    z.literal(64_000),
+    z.literal(128_000),
+    z.literal(256_000),
+    z.literal(1_000_000)
+  ]),
   turnControlStyle: z.enum(["action_only", "flexible_auto", "flexible_action", "flexible_scene"]),
   selectedCharacterId: z.string().nullable(),
   characterSnapshot: z.record(z.string(), z.unknown()).nullable(),
@@ -611,6 +618,7 @@ function createPostgresCampaignAuthorityRepository(
         `SELECT c.active_turn_number AS "activeTurnNumber",
                 c.world_version_id AS "worldVersionId", c.title,
                 c.story_length_profile AS "storyLengthProfile",
+                c.story_context_budget_tokens AS "storyContextBudgetTokens",
                 c.turn_control_style AS "turnControlStyle",
                 c.selected_character_id AS "selectedCharacterId",
                 c.character_snapshot AS "characterSnapshot",
@@ -729,10 +737,10 @@ function createPostgresCampaignAuthorityRepository(
       const branchCampaign = await client.query<{ id: string }>(
         `INSERT INTO campaigns (
            owner_user_id, world_version_id, title, status, active_turn_number,
-           story_length_profile, turn_control_style, selected_character_id,
+           story_length_profile, story_context_budget_tokens, turn_control_style, selected_character_id,
            character_snapshot, character_profile, character_profile_revision,
            legacy_settings, text_provider_profile_id, image_provider_profile_id
-         ) VALUES ($1,$2,$3,'active',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+         ) VALUES ($1,$2,$3,'active',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
          RETURNING id`,
         [
           scope.ownerUserId,
@@ -740,6 +748,7 @@ function createPostgresCampaignAuthorityRepository(
           title,
           parsed.targetTurnNumber,
           source.storyLengthProfile,
+          source.storyContextBudgetTokens,
           source.turnControlStyle,
           source.selectedCharacterId,
           json(source.characterSnapshot),
@@ -1438,6 +1447,7 @@ type CampaignSyncRow = {
   activeTurnNumber: number;
   worldVersionId: string;
   storyLengthProfile: "brief" | "standard" | "long" | "extended";
+  storyContextBudgetTokens: 32_000 | 64_000 | 128_000 | 256_000 | 1_000_000;
   turnControlStyle: "action_only" | "flexible_auto" | "flexible_action" | "flexible_scene";
   updatedAt: Date | string;
   selectedCharacterId: string | null;
@@ -1485,7 +1495,9 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
       const client = worldCampaignDatabaseClient(transaction);
       const result = await client.query<CampaignSyncRow>(
         `SELECT c.id, c.title, c.active_turn_number AS "activeTurnNumber", c.world_version_id AS "worldVersionId",
-                c.story_length_profile AS "storyLengthProfile", c.turn_control_style AS "turnControlStyle",
+                c.story_length_profile AS "storyLengthProfile",
+                c.story_context_budget_tokens AS "storyContextBudgetTokens",
+                c.turn_control_style AS "turnControlStyle",
                 c.updated_at AS "updatedAt",
                 c.selected_character_id AS "selectedCharacterId", c.character_snapshot AS "characterSnapshot",
                 c.character_profile AS "characterProfile", c.character_profile_revision AS "characterProfileRevision",
@@ -1559,6 +1571,7 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
         activeTurnNumber: row.activeTurnNumber,
         worldVersionId: row.worldVersionId,
         storyLengthProfile: row.storyLengthProfile,
+        storyContextBudgetTokens: row.storyContextBudgetTokens,
         turnControlStyle: row.turnControlStyle,
         updatedAt: row.updatedAt,
         selectedCharacterId: row.selectedCharacterId,

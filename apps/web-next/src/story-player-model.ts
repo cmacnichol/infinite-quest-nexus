@@ -1,7 +1,11 @@
 import {
   createChoiceDraftSelection,
+  loadStoryContextBudgetTokens,
+  normalizeStoryContextBudgetTokens,
+  saveStoryContextBudgetTokens,
   turnInputModeForControlStyle,
   type ChoiceDraftSelection,
+  type StoryContextBudgetTokens,
   type StoryTurnInputMode
 } from "@infinite-quest/client-core";
 
@@ -15,12 +19,14 @@ export interface StoryIntentConfirmation {
   readonly action: string;
   readonly classificationId: string;
   readonly requestedInputMode: "auto";
+  readonly contextBudgetTokens: StoryContextBudgetTokens;
 }
 
 export interface StoryUiState {
   readonly phase: StoryUiPhase;
   readonly viewTurnNumber: number | null;
   readonly readingWidth: ReadingWidth;
+  readonly contextBudgetTokens: StoryContextBudgetTokens;
   readonly draft: string;
   readonly choiceSelection: readonly number[];
   readonly choiceBaseText: string;
@@ -41,6 +47,7 @@ export interface StoryUiModel {
   get(): Readonly<StoryUiState>;
   subscribe(listener: (state: Readonly<StoryUiState>) => void): () => void;
   setReadingWidth(width: ReadingWidth): void;
+  setContextBudgetTokens(value: unknown): void;
   setViewTurnNumber(turnNumber: number | null): void;
   setHistory(status: StoryUiState["history"]): void;
   setActiveDialog(dialog: string | null): void;
@@ -64,6 +71,7 @@ const DEFAULT_STATE: StoryUiState = {
   phase: "loading",
   viewTurnNumber: null,
   readingWidth: "standard",
+  contextBudgetTokens: 32_000,
   draft: "",
   choiceSelection: [],
   choiceBaseText: "",
@@ -104,6 +112,9 @@ function localInitialState(
     viewTurnNumber: typeof value.viewTurnNumber === "number" && Number.isSafeInteger(value.viewTurnNumber)
       ? value.viewTurnNumber : value.viewTurnNumber === null ? null : DEFAULT_STATE.viewTurnNumber,
     readingWidth: isReadingWidth(value.readingWidth) ? value.readingWidth : readingWidthFromStorage(storage),
+    contextBudgetTokens: value.contextBudgetTokens === undefined
+      ? loadStoryContextBudgetTokens(storage)
+      : normalizeStoryContextBudgetTokens(value.contextBudgetTokens),
     draft: typeof value.draft === "string" ? value.draft : DEFAULT_STATE.draft,
     choiceSelection: Array.isArray(value.choiceSelection)
       ? value.choiceSelection.filter((choice): choice is number => typeof choice === "number" && Number.isSafeInteger(choice) && choice >= 0)
@@ -139,7 +150,9 @@ function isIntentConfirmation(value: unknown): value is StoryIntentConfirmation 
   return typeof value === "object" && value !== null
     && typeof (value as { action?: unknown }).action === "string"
     && typeof (value as { classificationId?: unknown }).classificationId === "string"
-    && (value as { requestedInputMode?: unknown }).requestedInputMode === "auto";
+    && (value as { requestedInputMode?: unknown }).requestedInputMode === "auto"
+    && normalizeStoryContextBudgetTokens((value as { contextBudgetTokens?: unknown }).contextBudgetTokens)
+      === (value as { contextBudgetTokens?: unknown }).contextBudgetTokens;
 }
 
 export function createStoryUiModel(
@@ -171,6 +184,13 @@ export function createStoryUiModel(
         // Reader controls continue to work when browser storage is blocked.
       }
       publish({ ...state, readingWidth });
+    },
+    setContextBudgetTokens(value) {
+      if (disposed) return;
+      const contextBudgetTokens = normalizeStoryContextBudgetTokens(value);
+      if (state.contextBudgetTokens === contextBudgetTokens) return;
+      publish({ ...state, contextBudgetTokens });
+      saveStoryContextBudgetTokens(storage, contextBudgetTokens);
     },
     setViewTurnNumber(viewTurnNumber) {
       if (state.viewTurnNumber !== viewTurnNumber) publish({ ...state, viewTurnNumber });

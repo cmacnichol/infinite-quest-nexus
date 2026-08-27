@@ -241,6 +241,16 @@
                     <option value="extended">Extended — 1,200–2,000 words</option>
                   </select>
                 </label>
+                <label title="Sets the target context budget for future Story generation. Runtime provider limits still apply.">
+                  Story context budget
+                  <select id="campaignStoryContextBudgetTokens" form="campaignForm" disabled>
+                    <option value="32000" selected>32k tokens</option>
+                    <option value="64000">64k tokens</option>
+                    <option value="128000">128k tokens</option>
+                    <option value="256000">256k tokens</option>
+                    <option value="1000000">1m tokens</option>
+                  </select>
+                </label>
               </div>
             </section>
 

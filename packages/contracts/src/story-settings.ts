@@ -12,6 +12,16 @@ export type StoryLengthWordRange = {
 
 export const DEFAULT_STORY_LENGTH_PROFILE: StoryLengthProfile = "standard";
 
+export const DEFAULT_STORY_CONTEXT_BUDGET_TOKENS = 32_000;
+
+export const storyContextBudgetTokensSchema = z.union([
+  z.literal(32_000),
+  z.literal(64_000),
+  z.literal(128_000),
+  z.literal(256_000),
+  z.literal(1_000_000)
+]);
+
 export const STORY_LENGTH_WORD_RANGES: Record<StoryLengthProfile, StoryLengthWordRange> = {
   brief: { profile: "brief", minWords: 250, maxWords: 450 },
   standard: { profile: "standard", minWords: 450, maxWords: 900 },

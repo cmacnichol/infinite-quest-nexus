@@ -34,6 +34,28 @@ integration("standard database migration runner", () => {
     if (pool) await pool.end();
   });
 
+  it("adds a non-null campaign Story context budget with the standard default", async () => {
+    const columns = await pool.query<{
+      column_name: string;
+      data_type: string;
+      is_nullable: string;
+      column_default: string | null;
+    }>(
+      `SELECT column_name, data_type, is_nullable, column_default
+         FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'campaigns'
+          AND column_name = 'story_context_budget_tokens'`
+    );
+
+    expect(columns.rows).toEqual([{
+      column_name: "story_context_budget_tokens",
+      data_type: "integer",
+      is_nullable: "NO",
+      column_default: "32000"
+    }]);
+  });
+
   it("adds minimal owner-scoped admission buckets and leases", async () => {
     const columns = await pool.query<{
       table_name: string;

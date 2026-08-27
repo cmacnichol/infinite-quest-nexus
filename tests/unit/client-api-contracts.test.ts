@@ -75,6 +75,26 @@ describe("client API response contracts", () => {
     expect(schema.safeParse({}).success).toBe(false);
   });
 
+  it("rejects an unapproved Story context budget in a campaign creation response", () => {
+    const response = {
+      id: CAMPAIGN_ID,
+      title: "The Observatory",
+      status: "active" as const,
+      activeTurnNumber: 0,
+      storyLengthProfile: "standard",
+      storyContextBudgetTokens: 48_000,
+      worldId: WORLD_ID,
+      worldVersionId: WORLD_VERSION_ID,
+      worldVersionNumber: 1,
+      selectedCharacterId: "observer",
+      selectedCharacterName: "The Observer",
+      textProviderProfileId: null,
+      imageProviderProfileId: null
+    };
+
+    expect(campaignCreateResponseSchema.safeParse(response).success).toBe(false);
+  });
+
   it("keeps the transport error name separate from the domain detail code", () => {
     const parsed = apiErrorEnvelopeSchema.parse({
       error: "GenerationConflictError",
@@ -102,6 +122,7 @@ describe("client API response contracts", () => {
       activeTurnNumber: 0,
       worldVersionId: WORLD_VERSION_ID,
       storyLengthProfile: "standard",
+      storyContextBudgetTokens: 64_000,
       turnControlStyle: "flexible_auto",
       updatedAt: TIMESTAMP,
       selectedCharacterId: null,
@@ -116,6 +137,7 @@ describe("client API response contracts", () => {
         activeTurnNumber: 0,
         worldVersionId: WORLD_VERSION_ID,
         storyLengthProfile: "standard",
+        storyContextBudgetTokens: 64_000,
         turnControlStyle: "flexible_auto",
         updatedAt: TIMESTAMP,
         selectedCharacterId: null,
@@ -134,6 +156,8 @@ describe("client API response contracts", () => {
       generationRecovery: null
     });
     expect(sync.turnWindowMode).toBe("unchanged");
+    expect(sync.storyContextBudgetTokens).toBe(64_000);
+    expect(sync.campaign.storyContextBudgetTokens).toBe(64_000);
     const page = { campaignId: CAMPAIGN_ID, turns: [], nextCursor: null };
     expect(turnListResponseSchema.parse(page)).toEqual(page);
     expect(turnListResponseSchema.safeParse({ turns: [], nextCursor: null }).success).toBe(false);
@@ -204,6 +228,7 @@ describe("client API response contracts", () => {
       createdAt: TIMESTAMP,
       updatedAt: TIMESTAMP,
       storyLengthProfile: "standard",
+      storyContextBudgetTokens: 128_000,
       turnControlStyle: "flexible_auto",
       selectedCharacterId: "observer",
       selectedCharacterName: "The Observer",
@@ -218,7 +243,8 @@ describe("client API response contracts", () => {
       costInformation: []
     };
 
-    expect(campaignListResponseSchema.parse({ campaigns: [validCampaign] }).campaigns).toHaveLength(1);
+    const parsedCampaign = campaignListResponseSchema.parse({ campaigns: [validCampaign] }).campaigns[0];
+    expect(parsedCampaign?.storyContextBudgetTokens).toBe(128_000);
     const { activeTurnNumber: _removed, ...renamedCampaign } = validCampaign;
     expect(() => campaignListResponseSchema.parse({
       campaigns: [{ ...renamedCampaign, activeTurn: 2 }]
@@ -274,6 +300,7 @@ describe("client API response contracts", () => {
       activeTurnNumber: 2,
       worldVersionId: WORLD_VERSION_ID,
       storyLengthProfile: "standard",
+      storyContextBudgetTokens: 32_000,
       turnControlStyle: "flexible_auto",
       updatedAt: TIMESTAMP,
       selectedCharacterId: "observer",

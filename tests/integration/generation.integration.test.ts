@@ -1702,12 +1702,16 @@ integration("durable Story Engine integration", () => {
     expect(Number(after.rows[0]?.campaigns)).toBe(Number(before.rows[0]?.campaigns) + 1);
   });
 
-  it("snapshots the campaign story-length profile into the durable job and prompt", async () => {
+  it("snapshots campaign-owned story settings into the durable job and prompt", async () => {
     const imported = await campaign("extended");
     replies.push({ content: validStory() });
     const requestOffset = requests.length;
+    await pool.query("UPDATE campaigns SET story_context_budget_tokens = 128_000 WHERE id = $1", [imported.campaignId]);
     const job = await queue(imported.campaignId);
-    await pool.query("UPDATE campaigns SET story_length_profile = 'brief' WHERE id = $1", [imported.campaignId]);
+    await pool.query(
+      "UPDATE campaigns SET story_length_profile = 'brief', story_context_budget_tokens = 64_000 WHERE id = $1",
+      [imported.campaignId]
+    );
 
     await runGenerationJob(pool, "story-worker-length", 30, credentialSecret);
     const snapshot = await pool.query<{ context_options: Record<string, unknown> }>(
@@ -1716,6 +1720,7 @@ integration("durable Story Engine integration", () => {
     );
     expect(snapshot.rows[0]?.context_options).toMatchObject({
       storyLengthProfile: "extended",
+      budgetTokens: 128_000,
       narrationMinWords: 1200,
       narrationMaxWords: 2000
     });

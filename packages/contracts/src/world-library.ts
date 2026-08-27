@@ -1,5 +1,10 @@
 import { z } from "zod";
-import { DEFAULT_STORY_LENGTH_PROFILE, storyLengthProfileSchema } from "./story-settings.js";
+import {
+  DEFAULT_STORY_CONTEXT_BUDGET_TOKENS,
+  DEFAULT_STORY_LENGTH_PROFILE,
+  storyContextBudgetTokensSchema,
+  storyLengthProfileSchema
+} from "./story-settings.js";
 import { apiTimestampSchema } from "./http.js";
 
 const coerceToString = (val: unknown): string => {
@@ -220,6 +225,7 @@ export const campaignCreateSchema = z.object({
   title,
   selectedCharacterId: characterId.optional(),
   storyLengthProfile: storyLengthProfileSchema.default(DEFAULT_STORY_LENGTH_PROFILE),
+  storyContextBudgetTokens: storyContextBudgetTokensSchema.default(DEFAULT_STORY_CONTEXT_BUDGET_TOKENS),
   turnControlStyle: z.enum(["action_only", "flexible_auto", "flexible_action", "flexible_scene"]).default("flexible_auto")
 });
 
@@ -229,6 +235,7 @@ export const campaignUpdateSchema = z.object({
   textProviderProfileId: z.uuid().nullable().optional(),
   imageProviderProfileId: z.uuid().nullable().optional(),
   storyLengthProfile: storyLengthProfileSchema.optional(),
+  storyContextBudgetTokens: storyContextBudgetTokensSchema.optional(),
   turnControlStyle: z.enum(["action_only", "flexible_auto", "flexible_action", "flexible_scene"]).optional()
 }).refine((value) => Object.values(value).some((item) => item !== undefined), "At least one field is required.");
 

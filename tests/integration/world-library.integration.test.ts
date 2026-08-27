@@ -626,6 +626,25 @@ integration("World Library and campaign version integration", () => {
     expect(exported.settings.storyLength).toBe("extended");
   });
 
+  it("persists the selected campaign Story context budget", async () => {
+    const world = await publishedWorld("Story Context Budget");
+    const campaign = await createCampaign(pool, campaignCreateSchema.parse({
+      title: `Synthetic Context Campaign ${crypto.randomUUID()}`,
+      worldVersionId: world.version.worldVersionId,
+      storyContextBudgetTokens: 128_000
+    }));
+
+    expect(campaign.storyContextBudgetTokens).toBe(128_000);
+    expect((await listCampaigns(pool)).find((item: any) => item.id === campaign.id)?.storyContextBudgetTokens).toBe(128_000);
+
+    const updated = await updateCampaign(pool, campaign.id, campaignUpdateSchema.parse({
+      storyContextBudgetTokens: 256_000
+    }));
+
+    expect(updated.storyContextBudgetTokens).toBe(256_000);
+    expect((await listCampaigns(pool)).find((item: any) => item.id === campaign.id)?.storyContextBudgetTokens).toBe(256_000);
+  });
+
   it("seeds, revisions, audits, exports, and prompts from an editable structured campaign profile", async () => {
     const title = `Synthetic Structured Character ${crypto.randomUUID()}`;
     const originalProfile = characterProfileSchema.parse({
