@@ -45,7 +45,7 @@ These are the public or durable seams that tests may exercise. Do not replace th
 | Concern | Production files | Primary tests |
 |---|---|---|
 | Shared values and schemas | `packages/contracts/src/story-settings.ts`, `packages/contracts/src/index.ts`, `packages/client-core/src/story-context-budget.ts`, `packages/client-core/src/index.ts` | `tests/unit/client-core/story-context-budget.test.ts`, `tests/unit/world-library.test.ts`, `tests/unit/client-api-contracts.test.ts` |
-| Campaign contract and persistence | `packages/contracts/src/world-library.ts`, `packages/contracts/src/client-api.ts`, `packages/application/src/world-campaign/types.ts`, `database/migrations/0078_campaign_story_context_budget.sql`, `packages/database/src/world-repository.ts`, `packages/database/src/campaign-state-repository.ts` | `tests/unit/migration-order.test.ts`, `tests/unit/client-api-routes.test.ts`, `tests/integration/migrations.integration.test.ts`, `tests/integration/world-library.integration.test.ts` |
+| Campaign contract and persistence | `packages/contracts/src/world-library.ts`, `packages/contracts/src/client-api.ts`, `packages/application/src/world-campaign/types.ts`, `database/migrations/0081_campaign_story_context_budget.sql`, `packages/database/src/world-repository.ts`, `packages/database/src/campaign-state-repository.ts` | `tests/unit/migration-order.test.ts`, `tests/unit/client-api-routes.test.ts`, `tests/integration/migrations.integration.test.ts`, `tests/integration/world-library.integration.test.ts` |
 | Enqueue authority | `packages/database/src/generation-repository.ts` | `tests/integration/generation.integration.test.ts`, `tests/unit/generation.test.ts` |
 | Branch and transfer | `packages/database/src/campaign-state-repository.ts`, `packages/database/src/campaign-transfer-character-repository.ts` | `tests/integration/campaign-authority-repository.integration.test.ts`, `tests/integration/campaign-transfer.integration.test.ts`, `tests/integration/campaign-transfer-character-repository.integration.test.ts` |
 | Archive and imports | `services/runtime/src/campaign-archive-export-composition.ts`, `packages/database/src/portable-import-family-repository.ts` | `tests/unit/campaign-archive-service.test.ts`, `tests/integration/campaign-archive.integration.test.ts`, `tests/integration/world-library.integration.test.ts` |
@@ -195,7 +195,7 @@ git commit -m "Define campaign story context budgets"
 
 **Files:**
 
-- Create: `database/migrations/0078_campaign_story_context_budget.sql`
+- Create: `database/migrations/0081_campaign_story_context_budget.sql`
 - Modify: `tests/unit/migration-order.test.ts`
 - Modify: `tests/integration/migrations.integration.test.ts`
 - Modify: `tests/integration/world-library.integration.test.ts`
@@ -207,7 +207,7 @@ git commit -m "Define campaign story context budgets"
 
 ### RED 2A: migration default and database constraint
 
-- [ ] Add a migration-order expectation for `0078_campaign_story_context_budget.sql` after `0077_chronicle_chunk_processed_signature.sql`.
+- [ ] Confirm the migration-order test accepts `0081_campaign_story_context_budget.sql` after the migrations already present on the current base branch.
 - [ ] Extend the migration integration test to create a pre-0078 campaign row, apply pending migrations, and assert:
 
 ```sql
@@ -229,7 +229,7 @@ returns `32000`.
 
 ### GREEN 2A: additive migration
 
-- [ ] Create `database/migrations/0078_campaign_story_context_budget.sql` with exactly one additive campaign column and its comment:
+- [ ] Create `database/migrations/0081_campaign_story_context_budget.sql` with exactly one additive campaign column and its comment:
 
 ```sql
 ALTER TABLE campaigns
@@ -289,7 +289,7 @@ pnpm check
 - [ ] Commit the persistence/API slice:
 
 ```powershell
-git add database/migrations/0078_campaign_story_context_budget.sql packages/application/src/world-campaign/types.ts packages/database/src/world-repository.ts packages/database/src/campaign-state-repository.ts tests/unit/migration-order.test.ts tests/unit/client-api-routes.test.ts tests/integration/migrations.integration.test.ts tests/integration/world-library.integration.test.ts
+git add database/migrations/0081_campaign_story_context_budget.sql packages/application/src/world-campaign/types.ts packages/database/src/world-repository.ts packages/database/src/campaign-state-repository.ts tests/unit/migration-order.test.ts tests/unit/client-api-routes.test.ts tests/integration/migrations.integration.test.ts tests/integration/world-library.integration.test.ts
 git commit -m "Persist campaign story context budgets"
 ```
 
