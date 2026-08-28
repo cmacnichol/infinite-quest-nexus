@@ -1,5 +1,5 @@
 import type { CampaignProjection } from "@infinite-quest/client-core";
-import type { AcceptedTurnCorrectionView, CampaignRuntimeStateResponse, CampaignSummary, MetaResponse } from "@infinite-quest/contracts";
+import type { AcceptedTurnCorrectionView, CampaignRuntimeStateResponse, CampaignSummary, MetaResponse, StoryLengthProfile } from "@infinite-quest/contracts";
 import { storyPlayerPath, type StoryRoute } from "./story-route";
 import type { ReadingWidth, StoryUiState } from "./story-player-model";
 import { alignLatestSpine, latestCampaignSpine } from "./story-player-history";
@@ -173,6 +173,32 @@ function composerModeButtons(document: Document, turnControlStyle: string, curre
   return group;
 }
 
+function profileLabel(profile: StoryLengthProfile): string {
+  return profile[0]?.toUpperCase() + profile.slice(1);
+}
+
+function composerLengthSelect(
+  document: Document,
+  campaignProfile: StoryLengthProfile,
+  currentOverride: StoryLengthProfile | null
+): HTMLElement {
+  const wrapper = element(document, "label", "story-length-control");
+  wrapper.append(element(document, "span", undefined, "Turn length"));
+  const select = element(document, "select") as HTMLSelectElement;
+  select.dataset.storyLengthProfile = "";
+  for (const [value, label] of [
+    ["", `Campaign default — ${profileLabel(campaignProfile)}`],
+    ["brief", "Brief"], ["standard", "Standard"], ["long", "Long"], ["extended", "Extended"]
+  ] as const) {
+    const option = element(document, "option", undefined, label) as HTMLOptionElement;
+    option.value = value;
+    option.selected = value === (currentOverride ?? "");
+    select.append(option);
+  }
+  wrapper.append(select);
+  return wrapper;
+}
+
 function storyComposer(
   document: Document,
   state: StoryPlayerViewState,
@@ -194,6 +220,7 @@ function storyComposer(
   }
   if (choices.length) composer.append(choiceList);
   composer.append(composerModeButtons(document, turnControlStyle, ui.requestedInputMode));
+  composer.append(composerLengthSelect(document, state.selectedCampaign?.storyLengthProfile ?? "standard", ui.storyLengthProfileOverride));
 
   const field = element(document, "div", "story-draft-field");
   const label = element(document, "label", "story-draft-label", "What happens next?");

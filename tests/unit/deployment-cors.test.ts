@@ -16,8 +16,8 @@ describe("deployment security configuration", () => {
     const packageManifest = JSON.parse(readFileSync("package.json", "utf8")) as { packageManager?: string };
     const dockerfile = readFileSync("Dockerfile", "utf8");
 
-    expect(packageManifest.packageManager).toBe("pnpm@11.18.0");
-    expect(dockerfile).toContain("RUN npm install --global pnpm@11.18.0");
+    expect(packageManifest.packageManager).toBe("pnpm@11.24.0");
+    expect(dockerfile).toContain("RUN npm install --global pnpm@11.24.0");
     expect(dockerfile).not.toContain("corepack enable");
   });
 

@@ -244,11 +244,16 @@ integration("durable Story Engine integration", () => {
     return importLegacyStory(targetPool, storyImportRequestSchema.parse({ sourceName: "generation.story", story: fixture }));
   }
 
-  async function queue(campaignId: string, action = "Open Location Gamma.") {
+  async function queue(
+    campaignId: string,
+    action = "Open Location Gamma.",
+    storyLengthProfileOverride?: "brief" | "standard" | "long" | "extended"
+  ) {
     return enqueueGeneration(pool, campaignId, generationRequestSchema.parse({
       action,
       providerProfileId: providerId,
       idempotencyKey: crypto.randomUUID(),
+      ...(storyLengthProfileOverride ? { storyLengthProfileOverride } : {}),
       context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
     }));
   }
@@ -1702,12 +1707,12 @@ integration("durable Story Engine integration", () => {
     expect(Number(after.rows[0]?.campaigns)).toBe(Number(before.rows[0]?.campaigns) + 1);
   });
 
-  it("snapshots the campaign story-length profile into the durable job and prompt", async () => {
-    const imported = await campaign("extended");
+  it("snapshots the per-turn story-length profile into the durable job and prompt", async () => {
+    const imported = await campaign("brief");
     replies.push({ content: validStory() });
     const requestOffset = requests.length;
-    const job = await queue(imported.campaignId);
-    await pool.query("UPDATE campaigns SET story_length_profile = 'brief' WHERE id = $1", [imported.campaignId]);
+    const job = await queue(imported.campaignId, undefined, "extended");
+    await pool.query("UPDATE campaigns SET story_length_profile = 'standard' WHERE id = $1", [imported.campaignId]);
 
     await runGenerationJob(pool, "story-worker-length", 30, credentialSecret);
     const snapshot = await pool.query<{ context_options: Record<string, unknown> }>(

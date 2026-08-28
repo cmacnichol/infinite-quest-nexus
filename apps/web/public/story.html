@@ -99,6 +99,16 @@
             </div>
             <span id="turnInputModeLock" class="turn-input-mode-lock hidden">Action only for this campaign</span>
           </fieldset>
+          <label class="turn-length-override" for="turnStoryLengthProfileOverride">
+            <span>Turn length</span>
+            <select id="turnStoryLengthProfileOverride">
+              <option value="">Campaign default — Standard</option>
+              <option value="brief">Brief</option>
+              <option value="standard">Standard</option>
+              <option value="long">Long</option>
+              <option value="extended">Extended</option>
+            </select>
+          </label>
           <label for="freeAction"><span id="turnInputLabel">Describe what you want to do or what happens next</span></label>
           <div class="turn-input-editor">
             <textarea id="freeAction" maxlength="12000" aria-describedby="turnInputHelp turnInputCount" placeholder="Describe an action, dialogue, or the scene events and details that should happen..."></textarea>
@@ -453,6 +463,16 @@
       </div>
       <label>Turn prompt
         <textarea id="retryPromptEditor" class="retry-prompt-editor" placeholder="Edit the turn prompt text before retrying."></textarea>
+      </label>
+      <label class="turn-length-override" for="retryStoryLengthProfileOverride">
+        <span>Turn length</span>
+        <select id="retryStoryLengthProfileOverride">
+          <option value="">Campaign default — Standard</option>
+          <option value="brief">Brief</option>
+          <option value="standard">Standard</option>
+          <option value="long">Long</option>
+          <option value="extended">Extended</option>
+        </select>
       </label>
       <div class="row wrap dialog-actions">
         <button id="btnRetryPromptCancel" type="button">Cancel</button>
