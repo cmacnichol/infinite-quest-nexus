@@ -135,6 +135,45 @@ function selectOption(select: HTMLSelectElement, value: string) {
 }
 
 describe("story-player: new Story Player UI contracts & gameplay logic", () => {
+  it("keeps Story context controls out of the legacy Story player and leaves the server authoritative", async () => {
+    const submissions: unknown[] = [];
+    const workflow = {
+      resume: async () => null,
+      submit: vi.fn(async (_campaignId: string, submission: unknown) => {
+        submissions.push(submission);
+        return {
+          jobId: "retry-context-job",
+          async *watch() { yield { type: "settled", outcome: "discarded", error: new Error("test discard") }; }
+        };
+      })
+    };
+    const { document, window } = await bootLegacyStory({
+      turns: makeTurns(1, 1),
+      workflow
+    });
+
+    expect(document.getElementById("turnStoryContextBudget")).toBeNull();
+    expect(document.getElementById("retryStoryContextBudget")).toBeNull();
+
+    document.getElementById("btnRetry")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+    const editor = document.getElementById("retryPromptEditor") as HTMLTextAreaElement;
+    Object.defineProperty(editor, "select", { configurable: true, value: () => undefined });
+    editor.value = "Take the lantern.";
+    document.getElementById("btnRetryPromptSubmit")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+    for (let attempt = 0; attempt < 8 && submissions.length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    expect(submissions).toHaveLength(1);
+    expect(submissions[0]).toMatchObject({
+      operationKind: "replace_latest",
+      request: {
+        action: "Take the lantern.",
+        context: { budgetTokens: 32_000, compression: "auto", recentTurns: 8 }
+      }
+    });
+  });
+
   it("uses semantic progress and a served stylesheet for printable story documents", () => {
     expect(storyScript).toContain('<progress class="turn-progress-meter" max="100" value="${percent}"');
     expect(storyScript).toContain('href="/nexus/story-print.css"');

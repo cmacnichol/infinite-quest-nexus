@@ -34,6 +34,28 @@ integration("standard database migration runner", () => {
     if (pool) await pool.end();
   });
 
+  it("adds a non-null campaign Story context budget with the standard default", async () => {
+    const columns = await pool.query<{
+      column_name: string;
+      data_type: string;
+      is_nullable: string;
+      column_default: string | null;
+    }>(
+      `SELECT column_name, data_type, is_nullable, column_default
+         FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'campaigns'
+          AND column_name = 'story_context_budget_tokens'`
+    );
+
+    expect(columns.rows).toEqual([{
+      column_name: "story_context_budget_tokens",
+      data_type: "integer",
+      is_nullable: "NO",
+      column_default: "32000"
+    }]);
+  });
+
   it("adds minimal owner-scoped admission buckets and leases", async () => {
     const columns = await pool.query<{
       table_name: string;
@@ -1646,7 +1668,8 @@ END;
         "0077_chronicle_chunk_processed_signature",
         "0078_system_archive_jobs",
         "0079_resumable_system_archive_uploads",
-        "0080_published_asset_derivative_reservations"
+        "0080_published_asset_derivative_reservations",
+        "0081_campaign_story_context_budget"
       ]);
 
       const scrubbed = await isolatedPool.query<{ technical_metadata: Record<string, unknown> }>(
@@ -2633,7 +2656,8 @@ END;
         "0077_chronicle_chunk_processed_signature",
         "0078_system_archive_jobs",
         "0079_resumable_system_archive_uploads",
-        "0080_published_asset_derivative_reservations"
+        "0080_published_asset_derivative_reservations",
+        "0081_campaign_story_context_budget"
       ]);
 
       // Accepted turns and every derived vector survive the upgrade untouched.

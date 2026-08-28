@@ -426,6 +426,7 @@ describe("world and campaign application use cases", () => {
       activeTurnNumber: 1,
       worldVersionId: currentVersionId,
       storyLengthProfile: "standard" as const,
+      storyContextBudgetTokens: 32_000 as const,
       turnControlStyle: "flexible_auto" as const,
       updatedAt: repositoryCampaignUpdatedAt,
       selectedCharacterId: null,

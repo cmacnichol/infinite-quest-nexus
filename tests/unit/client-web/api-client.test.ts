@@ -163,6 +163,7 @@ describe("createNexusApiClient", () => {
         title: "A New Campaign",
         selectedCharacterId: "observer",
         storyLengthProfile: "standard",
+        storyContextBudgetTokens: 32_000,
         turnControlStyle: "flexible_auto"
       }, signal),
       () => client.campaigns.turns("campaign / id", signal),
@@ -293,6 +294,7 @@ describe("createNexusApiClient", () => {
       activeTurnNumber: 1,
       worldVersionId,
       storyLengthProfile: "standard",
+      storyContextBudgetTokens: 32_000,
       turnControlStyle: "flexible_auto",
       updatedAt: "2026-08-02T00:00:00.000Z",
       selectedCharacterId: null,
@@ -307,6 +309,7 @@ describe("createNexusApiClient", () => {
         activeTurnNumber: 1,
         worldVersionId,
         storyLengthProfile: "standard",
+        storyContextBudgetTokens: 32_000,
         turnControlStyle: "flexible_auto",
         updatedAt: "2026-08-02T00:00:00.000Z",
         selectedCharacterId: null,
@@ -361,6 +364,7 @@ describe("createNexusApiClient", () => {
       title: "Owned by the server",
       selectedCharacterId: "observer",
       storyLengthProfile: "standard",
+      storyContextBudgetTokens: 32_000,
       turnControlStyle: "flexible_auto",
       user_id: "spoofed"
     } as never).catch(() => undefined);

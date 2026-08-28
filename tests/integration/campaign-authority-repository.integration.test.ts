@@ -1797,7 +1797,7 @@ integration("PostgreSQL campaign sync adapters", () => {
     const scope = { ownerUserId, campaignId: imported.campaignId };
 
     await pool.query(
-      "UPDATE campaigns SET turn_control_style = 'flexible_scene' WHERE id = $1 AND owner_user_id = $2",
+      "UPDATE campaigns SET turn_control_style = 'flexible_scene', story_context_budget_tokens = 256_000 WHERE id = $1 AND owner_user_id = $2",
       [imported.campaignId, ownerUserId]
     );
 
@@ -1807,7 +1807,12 @@ integration("PostgreSQL campaign sync adapters", () => {
     expect(snapshot.projection.campaign.updatedAt).toBeInstanceOf(Date);
     expect(snapshot.projection).toMatchObject({
       id: imported.campaignId,
-      campaign: { id: imported.campaignId, activeTurnNumber: 2, turnControlStyle: "flexible_scene" },
+      campaign: {
+        id: imported.campaignId,
+        activeTurnNumber: 2,
+        turnControlStyle: "flexible_scene",
+        storyContextBudgetTokens: 256_000
+      },
       playerConfig: { useRpgStats: false, suppressEventTriggers: false },
       pendingGeneration: null
     });

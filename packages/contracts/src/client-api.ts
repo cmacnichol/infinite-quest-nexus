@@ -18,7 +18,7 @@ import {
 } from "./generation.js";
 import { apiTimestampSchema } from "./http.js";
 import { chronicleRetrievalAuditSchema } from "./memory.js";
-import { storyLengthProfileSchema } from "./story-settings.js";
+import { storyContextBudgetTokensSchema, storyLengthProfileSchema } from "./story-settings.js";
 import { userProfileSchema, userProfileUpdateSchema } from "./users.js";
 import { campaignCreateSchema, playableCharacterSchema, worldCreateSchema } from "./world-library.js";
 
@@ -53,6 +53,7 @@ export const campaignSummarySchema = z.object({
   createdAt: apiTimestampSchema,
   updatedAt: apiTimestampSchema,
   storyLengthProfile: storyLengthProfileSchema,
+  storyContextBudgetTokens: storyContextBudgetTokensSchema,
   turnControlStyle: turnControlStyleSchema,
   selectedCharacterId: z.string().nullable(),
   selectedCharacterName: z.string().nullable(),
@@ -131,6 +132,7 @@ export const campaignCreateResponseSchema = z.object({
   status: z.literal("active"),
   activeTurnNumber: z.literal(0),
   storyLengthProfile: storyLengthProfileSchema,
+  storyContextBudgetTokens: storyContextBudgetTokensSchema,
   worldId: z.uuid(),
   worldVersionId: z.uuid(),
   worldVersionNumber: z.number().int().positive(),
@@ -175,6 +177,7 @@ const campaignSyncCampaignSchema = z.object({
   activeTurnNumber: z.number().int().min(0),
   worldVersionId: z.uuid(),
   storyLengthProfile: storyLengthProfileSchema,
+  storyContextBudgetTokens: storyContextBudgetTokensSchema,
   turnControlStyle: turnControlStyleSchema,
   updatedAt: apiTimestampSchema,
   selectedCharacterId: z.string().nullable(),

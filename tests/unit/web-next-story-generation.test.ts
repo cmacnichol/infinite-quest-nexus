@@ -53,7 +53,12 @@ describe("StoryGenerationController", () => {
       request: expect.objectContaining({
         action: "Wake beneath the observatory.",
         inputModeSource: "opening_action",
-        idempotencyKey: "opening-idempotency-key"
+        idempotencyKey: "opening-idempotency-key",
+        context: {
+          budgetTokens: 32_000,
+          compression: "auto",
+          recentTurns: 8
+        }
       })
     })]);
     expect(submitted[0]?.request).not.toHaveProperty("storyLengthProfileOverride");

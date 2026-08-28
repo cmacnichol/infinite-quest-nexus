@@ -28,6 +28,14 @@ Classification runs only when Auto is submitted, not on every keystroke. Generat
 
 The editor and API accept up to 12,000 characters for one turn input. The Story Engine keeps that input in the fixed prompt envelope and removes lower-priority Chronicle memories first when fitting the model context. It does not silently truncate the submitted Action or Scene direction: if the provider's available input window cannot fit it, generation stops with an explicit context-budget error.
 
+## Story context
+
+Configure **Story context** from Campaign Management: the replacement UI's Campaign Overview and the legacy UI's Setup Campaign view offer Standard (32K), Expanded (64K), Large (128K), Very large (256K), and Maximum available (up to 1M). Standard remains the default.
+
+The choice is authoritative campaign configuration. It is included in campaign exports, restored when imported, and used for all newly queued Story requests from either Story Player. An already queued durable generation retains the context snapshot captured when it was queued.
+
+The target is not a promise that every token will be used. The Story Engine reserves output and protocol space, keeps required world and campaign authority first, and never exceeds the selected provider/model window. Larger targets can make more Chronicle material eligible, but the available provider window remains the hard limit.
+
 ## Campaign control styles
 
 Campaign administrators can choose:

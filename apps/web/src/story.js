@@ -38,7 +38,9 @@ import {
   turnInputModeForControlStyle,
   toggleChoiceDraftSelection
 } from "./story-choice-selection.js";
-import { formatChronicleRetrievalAudit } from "@infinite-quest/client-core";
+import {
+  formatChronicleRetrievalAudit
+} from "@infinite-quest/client-core";
 
 "use strict";
 
@@ -1121,7 +1123,7 @@ async function runGeneration(action, options = {}) {
       idempotencyKey: options.idempotencyKey || composition.idFactory.create(),
       createdAt: Number(options.createdAt) || composition.clock.now(),
       context: {
-        budgetTokens: 32000,
+        budgetTokens: 32_000,
         compression: "auto",
         recentTurns: 8
       }

@@ -114,6 +114,7 @@ function legacyPayload(snapshot: CampaignArchiveExportSnapshot, exportedAt: stri
     settings: {
       ...portableSettings(row.legacy_settings),
       storyLength: row.story_length_profile,
+      storyContextBudgetTokens: row.story_context_budget_tokens,
       turnControlStyle: row.turn_control_style,
     },
     turns: snapshot.turns.map((turn) => ({

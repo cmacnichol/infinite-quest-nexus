@@ -1088,6 +1088,7 @@ function createPostgresCampaignRepository(
         `SELECT c.id, c.title, c.status, c.active_turn_number AS "activeTurnNumber",
                 c.created_at AS "createdAt", c.updated_at AS "updatedAt",
                 c.story_length_profile AS "storyLengthProfile",
+                c.story_context_budget_tokens AS "storyContextBudgetTokens",
                 c.turn_control_style AS "turnControlStyle",
                 c.selected_character_id AS "selectedCharacterId",
                 COALESCE(c.character_profile->>'name', c.character_snapshot->>'name') AS "selectedCharacterName",
@@ -1156,11 +1157,11 @@ function createPostgresCampaignRepository(
       const campaignProfile = campaignProfileFromCharacter(seed.character);
       const campaign = await client.query<{ id: string }>(
         `INSERT INTO campaigns (
-           owner_user_id, world_version_id, title, story_length_profile, turn_control_style,
+           owner_user_id, world_version_id, title, story_length_profile, story_context_budget_tokens, turn_control_style,
            selected_character_id, character_snapshot, character_profile, character_profile_revision, legacy_settings
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
         [scope.ownerUserId, request.worldVersionId, request.title, request.storyLengthProfile,
-          request.turnControlStyle, seed.character.id, json(snapshot), campaignProfile ? json(campaignProfile) : null,
+          request.storyContextBudgetTokens, request.turnControlStyle, seed.character.id, json(snapshot), campaignProfile ? json(campaignProfile) : null,
           campaignProfile ? 1 : 0, json({ useRpgStats: seed.rpgStats.length > 0 })]
       );
       const campaignId = campaign.rows[0]?.id;
@@ -1217,6 +1218,7 @@ function createPostgresCampaignRepository(
         status: "active",
         activeTurnNumber: 0,
         storyLengthProfile: request.storyLengthProfile,
+        storyContextBudgetTokens: request.storyContextBudgetTokens,
         turnControlStyle: request.turnControlStyle,
         worldId: source.world_id,
         worldVersionId: request.worldVersionId,
@@ -1246,17 +1248,21 @@ function createPostgresCampaignRepository(
              text_provider_profile_id = CASE WHEN $5 THEN $6 ELSE text_provider_profile_id END,
              image_provider_profile_id = CASE WHEN $7 THEN $8 ELSE image_provider_profile_id END,
              story_length_profile = COALESCE($9, story_length_profile),
-             turn_control_style = COALESCE($10, turn_control_style), updated_at = now()
+             story_context_budget_tokens = COALESCE($10, story_context_budget_tokens),
+             turn_control_style = COALESCE($11, turn_control_style), updated_at = now()
           WHERE id = $1 AND owner_user_id = $2
           RETURNING id, title, status, active_turn_number AS "activeTurnNumber",
             text_provider_profile_id AS "textProviderProfileId",
             image_provider_profile_id AS "imageProviderProfileId",
-            story_length_profile AS "storyLengthProfile", turn_control_style AS "turnControlStyle",
+            story_length_profile AS "storyLengthProfile",
+            story_context_budget_tokens AS "storyContextBudgetTokens",
+            turn_control_style AS "turnControlStyle",
             updated_at AS "updatedAt"`,
         [scope.campaignId, scope.ownerUserId, request.title ?? null, request.status ?? null,
           request.textProviderProfileId !== undefined, request.textProviderProfileId ?? null,
           request.imageProviderProfileId !== undefined, request.imageProviderProfileId ?? null,
-          request.storyLengthProfile ?? null, request.turnControlStyle ?? null]
+          request.storyLengthProfile ?? null, request.storyContextBudgetTokens ?? null,
+          request.turnControlStyle ?? null]
       );
       const row = updated.rows[0];
       if (!row) return failure("campaign_not_found", { campaignId: scope.campaignId });

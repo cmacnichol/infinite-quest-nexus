@@ -15,7 +15,7 @@ import type {
   PortableJsonValue
 } from "../../application/src/imports/private-portable-composition.js";
 import type { WorldRepositoryPort } from "../../application/src/world-campaign/ports.js";
-import { legacyStorySchema, worldImportRequestSchema } from "../../contracts/src/index.js";
+import { legacyStorySchema, storyContextBudgetTokensFromUnknown, worldImportRequestSchema } from "../../contracts/src/index.js";
 import type {
   ImportOwnerScope,
   PortableArchiveDiagnosticCode,
@@ -1268,13 +1268,14 @@ async function commitRichPortableCampaign(
   const campaignId = input.targetPlan?.campaignId ?? randomUUID();
   await database.query(
     `INSERT INTO campaigns (
-       id,owner_user_id,world_version_id,title,active_turn_number,legacy_settings,story_length_profile,
+       id,owner_user_id,world_version_id,title,active_turn_number,legacy_settings,story_length_profile,story_context_budget_tokens,
        turn_control_style,selected_character_id,character_snapshot,character_profile,character_profile_revision
-     ) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10::jsonb,$11::jsonb,$12)`,
+     ) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13)`,
     [campaignId, input.owner.ownerUserId, input.destination.worldVersionId,
       typeof sourceCampaign.title === "string" && sourceCampaign.title.trim() ? sourceCampaign.title : "Imported campaign",
       activeTurnNumber, JSON.stringify(settings),
       typeof settings.storyLength === "string" ? settings.storyLength : "standard",
+      storyContextBudgetTokensFromUnknown(settings.storyContextBudgetTokens),
       ["action_only", "flexible_auto", "flexible_action", "flexible_scene"].includes(String(settings.turnControlStyle))
         ? settings.turnControlStyle : "flexible_action",
       typeof sourceCampaign.selectedCharacterId === "string" ? sourceCampaign.selectedCharacterId : null,
@@ -1609,11 +1610,12 @@ async function commitPortableCampaign(
   await database.query(
     `INSERT INTO campaigns (
        id,owner_user_id,world_version_id,title,active_turn_number,legacy_settings,
-       story_length_profile,turn_control_style,selected_character_id,character_snapshot,
+       story_length_profile,story_context_budget_tokens,turn_control_style,selected_character_id,character_snapshot,
        character_profile,character_profile_revision
-     ) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10::jsonb,$11::jsonb,$12)`,
+     ) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13)`,
     [campaignId, input.owner.ownerUserId, input.destination.worldVersionId, title, story.turns.length,
-      JSON.stringify(legacySettings), storyLengthProfile, turnControlStyle, selectedCharacterId,
+      JSON.stringify(legacySettings), storyLengthProfile,
+      storyContextBudgetTokensFromUnknown(legacySettings.storyContextBudgetTokens), turnControlStyle, selectedCharacterId,
       characterSnapshot ? JSON.stringify(characterSnapshot) : null,
       characterProfile ? JSON.stringify(characterProfile) : null,
       characterProfileRevision]
