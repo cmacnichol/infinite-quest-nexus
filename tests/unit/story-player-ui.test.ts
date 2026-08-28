@@ -31,6 +31,7 @@ async function bootLegacyStory({
   updateProfile,
   rewindCampaign = vi.fn().mockResolvedValue({}),
   fetchCampaignState = vi.fn().mockResolvedValue({ activeTurnNumber: 100 }),
+  classifyTurnInput,
   workflow = { resume: async () => null }
 }: {
   turns: Array<Record<string, unknown>>;
@@ -41,6 +42,7 @@ async function bootLegacyStory({
   updateProfile?: ReturnType<typeof vi.fn>;
   rewindCampaign?: ReturnType<typeof vi.fn>;
   fetchCampaignState?: ReturnType<typeof vi.fn>;
+  classifyTurnInput?: ReturnType<typeof vi.fn>;
   workflow?: Record<string, unknown>;
 }) {
   const { document, window } = parseHTML(storyHtml);
@@ -55,14 +57,14 @@ async function bootLegacyStory({
   vi.stubGlobal("HTMLElement", window.HTMLElement);
   vi.stubGlobal("HTMLInputElement", window.HTMLInputElement);
   vi.stubGlobal("localStorage", { getItem: () => null, removeItem: () => undefined, setItem: () => undefined });
-  Object.defineProperty(window.HTMLElement.prototype, "scrollIntoView", { value: () => undefined, configurable: true });
+  Object.defineProperty(window.HTMLElement.prototype, "scrollIntoView", { value: () => undefined, writable: true, configurable: true });
   Object.defineProperty(document.getElementById("userProfileDefaultTurnControlStyle"), "value", {
     value: "flexible_auto",
     writable: true,
     configurable: true
   });
   const syncCampaign = syncStatus || vi.fn().mockResolvedValue({
-    campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 100 },
+    campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 100, storyLengthProfile: "standard" },
     world: {},
     turns: { campaignId: "campaign-1", turns, nextCursor }
   });
@@ -78,7 +80,12 @@ async function bootLegacyStory({
       },
       providers: { list: async () => ({ providers: [{ providerRole: "text" }] }) },
       generation: { syncStatus: syncCampaign },
-      campaigns: { state: fetchCampaignState, turns: fetchTurns, rewind: rewindCampaign },
+      campaigns: {
+        state: fetchCampaignState,
+        turns: fetchTurns,
+        rewind: rewindCampaign,
+        ...(classifyTurnInput ? { classifyTurnInput } : {})
+      },
       meta: { get: async () => ({}) }
     },
     illustrations: { config: async () => ({ enabled: false, sourcePolicy: "off" }), segments: async () => ({ segments: [] }), imageJobs: async () => ({ jobs: [] }) },
@@ -119,6 +126,13 @@ const makeTurns = (first: number, last: number) => Array.from(
     narration: `Narration ${first + offset}`
   })
 );
+
+function selectOption(select: HTMLSelectElement, value: string) {
+  select.querySelectorAll("option").forEach((option) => { option.selected = false; });
+  const option = select.querySelector(`option[value="${value}"]`) as HTMLOptionElement | null;
+  if (!option) throw new Error(`Missing select option: ${value}`);
+  option.selected = true;
+}
 
 describe("story-player: new Story Player UI contracts & gameplay logic", () => {
   it("uses semantic progress and a served stylesheet for printable story documents", () => {
@@ -236,6 +250,199 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('inputModeSource: "opening_action"');
   });
 
+  it("exposes one-shot story-length overrides for normal and retry submissions", () => {
+    expect(storyHtml).toContain('id="turnStoryLengthProfileOverride"');
+    expect(storyHtml).toContain('id="retryStoryLengthProfileOverride"');
+    expect(storyHtml).toContain('Campaign default — Standard');
+    expect(storyHtml).toContain('<option value="brief">Brief</option>');
+    expect(storyHtml).toContain('<option value="standard">Standard</option>');
+    expect(storyHtml).toContain('<option value="long">Long</option>');
+    expect(storyHtml).toContain('<option value="extended">Extended</option>');
+    expect(storyScript).toContain('function selectedStoryLengthOverride(controlId)');
+    expect(storyScript).toContain('function syncStoryLengthOverrideControls()');
+    expect(storyScript).toContain('function resetStoryLengthOverrideControls()');
+    expect(storyScript).toContain('storyLengthProfileOverride: submission.storyLengthProfileOverride');
+  });
+
+  it("submits and resets a one-shot legacy turn-length override after durable attachment", async () => {
+    const workflow = {
+      resume: async () => null,
+      submit: vi.fn().mockResolvedValue({ jobId: "generation-override", watch: async function* () {} })
+    };
+    try {
+      const { document, window } = await bootLegacyStory({ turns: makeTurns(1, 1), workflow });
+      const length = document.getElementById("turnStoryLengthProfileOverride") as HTMLSelectElement;
+      const action = document.getElementById("freeAction") as HTMLTextAreaElement;
+      expect(length.options[0]?.textContent).toBe("Campaign default — Standard");
+
+      selectOption(length, "extended");
+      document.querySelector<HTMLElement>('[data-turn-input-mode="action"]')
+        ?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      action.value = "Inspect the ruins";
+      document.getElementById("btnTakeAction")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      for (let attempt = 0; attempt < 8 && workflow.submit.mock.calls.length === 0; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(workflow.submit).toHaveBeenCalledWith("campaign-1", expect.objectContaining({
+        request: expect.objectContaining({ storyLengthProfileOverride: "extended" })
+      }));
+      expect(length.value).toBe("");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps the captured Auto override through ambiguity and preserves it after an enqueue rejection", async () => {
+    const classified = vi.fn().mockResolvedValue({ classification: "mixed", confidenceBand: "ambiguous", resolvedMode: "scene" });
+    const rejectedWorkflow = {
+      resume: async () => null,
+      submit: vi.fn().mockRejectedValue(new Error("queue unavailable"))
+    };
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeTurns(1, 1),
+        workflow: rejectedWorkflow,
+        classifyTurnInput: classified,
+        syncStatus: vi.fn().mockResolvedValue({
+          campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 1, turnControlStyle: "flexible_auto", storyLengthProfile: "standard" },
+          world: {},
+          turns: { campaignId: "campaign-1", turns: makeTurns(1, 1), nextCursor: null }
+        })
+      });
+      const length = document.getElementById("turnStoryLengthProfileOverride") as HTMLSelectElement;
+      const action = document.getElementById("freeAction") as HTMLTextAreaElement;
+      selectOption(length, "extended");
+      action.value = "A mixed prompt";
+      document.getElementById("btnTakeAction")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      for (let attempt = 0; attempt < 8 && document.getElementById("turnIntentDecision")?.classList.contains("hidden"); attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+
+      expect(classified).toHaveBeenCalledWith("campaign-1", expect.objectContaining({ text: "A mixed prompt" }));
+      selectOption(length, "brief");
+      document.getElementById("btnSubmitAsAction")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      for (let attempt = 0; attempt < 8 && rejectedWorkflow.submit.mock.calls.length === 0; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(rejectedWorkflow.submit).toHaveBeenCalledWith("campaign-1", expect.objectContaining({
+        request: expect.objectContaining({ storyLengthProfileOverride: "extended" })
+      }));
+      expect(length.value).toBe("brief");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("preserves the selected length after a normal enqueue rejection", async () => {
+    const workflow = {
+      resume: async () => null,
+      submit: vi.fn().mockRejectedValue(new Error("queue unavailable"))
+    };
+    try {
+      const { document, window } = await bootLegacyStory({ turns: makeTurns(1, 1), workflow });
+      const length = document.getElementById("turnStoryLengthProfileOverride") as HTMLSelectElement;
+      const action = document.getElementById("freeAction") as HTMLTextAreaElement;
+      selectOption(length, "long");
+      document.querySelector<HTMLElement>('[data-turn-input-mode="action"]')
+        ?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      action.value = "Inspect the ruins";
+      document.getElementById("btnTakeAction")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      for (let attempt = 0; attempt < 8 && workflow.submit.mock.calls.length === 0; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(length.value).toBe("long");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("submits a retry-dialog override without inferring one from the accepted turn", async () => {
+    const workflow = {
+      resume: async () => null,
+      submit: vi.fn().mockResolvedValue({ jobId: "retry-override", watch: async function* () {} })
+    };
+    try {
+      const { document, window } = await bootLegacyStory({ turns: makeTurns(1, 1), workflow });
+      document.getElementById("btnRetry")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      const retryEditor = document.getElementById("retryPromptEditor") as HTMLTextAreaElement;
+      retryEditor.select = () => undefined;
+      const retryLength = document.getElementById("retryStoryLengthProfileOverride") as HTMLSelectElement;
+      expect(retryLength.options[0]?.textContent).toBe("Campaign default — Standard");
+      selectOption(retryLength, "brief");
+      document.getElementById("btnRetryPromptSubmit")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      for (let attempt = 0; attempt < 8 && workflow.submit.mock.calls.length === 0; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(workflow.submit).toHaveBeenCalledWith("campaign-1", expect.objectContaining({
+        operationKind: "replace_latest",
+        request: expect.objectContaining({ storyLengthProfileOverride: "brief" })
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps a rejected retry dialog's length selection for the next replacement attempt", async () => {
+    const workflow = {
+      resume: async () => null,
+      submit: vi.fn()
+        .mockRejectedValueOnce(new Error("queue unavailable"))
+        .mockResolvedValueOnce({ jobId: "retry-after-rejection", watch: async function* () {} })
+    };
+    try {
+      const { document, window } = await bootLegacyStory({ turns: makeTurns(1, 1), workflow });
+      const retryEditor = document.getElementById("retryPromptEditor") as HTMLTextAreaElement;
+      retryEditor.select = () => undefined;
+      document.getElementById("btnRetry")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      const retryDialog = document.getElementById("retryPromptDialog") as HTMLDialogElement;
+      const retryLength = document.getElementById("retryStoryLengthProfileOverride") as HTMLSelectElement;
+      selectOption(retryLength, "brief");
+      document.getElementById("btnRetryPromptSubmit")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      for (let attempt = 0; attempt < 8 && workflow.submit.mock.calls.length === 0; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(retryDialog.hasAttribute("open")).toBe(true);
+      expect(retryLength.value).toBe("brief");
+      expect(workflow.submit.mock.calls[0]).toEqual(["campaign-1", expect.objectContaining({
+        operationKind: "replace_latest",
+        request: expect.objectContaining({ storyLengthProfileOverride: "brief" })
+      })]);
+
+      document.getElementById("btnRetryPromptSubmit")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      for (let attempt = 0; attempt < 8 && workflow.submit.mock.calls.length < 2; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(workflow.submit).toHaveBeenCalledTimes(2);
+      expect(workflow.submit.mock.calls[1]).toEqual(["campaign-1", expect.objectContaining({
+        operationKind: "replace_latest",
+        request: expect.objectContaining({ storyLengthProfileOverride: "brief" })
+      })]);
+      expect(retryDialog.hasAttribute("open")).toBe(false);
+      expect(retryLength.value).toBe("");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("uses the campaign preference and preserves the draft while toggling multiple generated choices", async () => {
     const { document, window } = parseHTML(storyHtml);
     Object.defineProperty(window, "location", { value: { pathname: "/story/campaign-1" }, configurable: true });
@@ -347,7 +554,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
         api: {
           session: { get: async () => ({ user: { settings: { continuousReading: false, autoSubmitTurnChoices: true, defaultTurnControlStyle: "flexible_scene" } } }) },
           providers: { list: async () => ({ providers: [{ providerRole: "text" }] }) },
-          generation: { syncStatus: async () => ({ campaign: { title: "Auto campaign", activeTurnNumber: 1, turnControlStyle: "flexible_auto" }, world: {}, turns: { turns } }) },
+          generation: { syncStatus: async () => ({ campaign: { title: "Auto campaign", activeTurnNumber: 1, turnControlStyle: "flexible_auto", storyLengthProfile: "standard" }, world: {}, turns: { turns } }) },
           campaigns: {
             state: async () => ({ activeTurnNumber: 1 }),
             turns: async () => ({ turns }),
@@ -375,6 +582,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
         await new Promise((resolve) => setTimeout(resolve, 0));
       }
 
+      selectOption(document.getElementById("turnStoryLengthProfileOverride") as HTMLSelectElement, "extended");
       document.querySelector<HTMLButtonElement>("#choiceArea .choice")?.dispatchEvent(new window.Event("click", { bubbles: true }));
       for (let attempt = 0; attempt < 10 && submissions.length === 0; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 0));
@@ -388,7 +596,8 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
           action: "Open the gate.",
           requestedInputMode: "auto",
           resolvedInputMode: "action",
-          classificationId: "classification-1"
+          classificationId: "classification-1",
+          storyLengthProfileOverride: "extended"
         }
       });
       expect((document.getElementById("freeAction") as HTMLTextAreaElement).value).toBe("");

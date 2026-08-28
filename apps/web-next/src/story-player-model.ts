@@ -4,6 +4,7 @@ import {
   type ChoiceDraftSelection,
   type StoryTurnInputMode
 } from "@infinite-quest/client-core";
+import type { StoryLengthProfile } from "@infinite-quest/contracts";
 
 export type ReadingWidth = "narrow" | "standard" | "wide";
 
@@ -15,6 +16,7 @@ export interface StoryIntentConfirmation {
   readonly action: string;
   readonly classificationId: string;
   readonly requestedInputMode: "auto";
+  readonly storyLengthProfileOverride: StoryLengthProfile | null;
 }
 
 export interface StoryUiState {
@@ -27,6 +29,7 @@ export interface StoryUiState {
   readonly draftOwnerKey: string | null;
   readonly draftOwnerTurnNumber: number | null;
   readonly requestedInputMode: StoryTurnInputMode;
+  readonly storyLengthProfileOverride: StoryLengthProfile | null;
   readonly intentConfirmation: StoryIntentConfirmation | null;
   readonly activeDialog: string | null;
   readonly continuousReading: boolean;
@@ -52,6 +55,7 @@ export interface StoryUiModel {
   restoreComposerDraft(draft: string): void;
   setChoiceDraft(selection: ChoiceDraftSelection, draft: string): void;
   setRequestedInputMode(mode: StoryTurnInputMode): void;
+  setStoryLengthProfileOverride(profile: StoryLengthProfile | null): void;
   setIntentConfirmation(intent: StoryIntentConfirmation | null): void;
   clearComposerDraft(): void;
   clearSubmittedComposerDraft(submittedDraft: string): void;
@@ -70,6 +74,7 @@ const DEFAULT_STATE: StoryUiState = {
   draftOwnerKey: null,
   draftOwnerTurnNumber: null,
   requestedInputMode: "action",
+  storyLengthProfileOverride: null,
   intentConfirmation: null,
   activeDialog: null,
   continuousReading: false,
@@ -91,6 +96,10 @@ function readingWidthFromStorage(storage: Pick<Storage, "getItem"> | null | unde
 
 function isReadingWidth(value: unknown): value is ReadingWidth {
   return value === "narrow" || value === "wide" || value === "standard";
+}
+
+function isStoryLengthProfile(value: unknown): value is StoryLengthProfile {
+  return value === "brief" || value === "standard" || value === "long" || value === "extended";
 }
 
 function localInitialState(
@@ -115,6 +124,7 @@ function localInitialState(
       ? value.draftOwnerTurnNumber : value.draftOwnerTurnNumber === null ? null : DEFAULT_STATE.draftOwnerTurnNumber,
     requestedInputMode: value.requestedInputMode === "auto" || value.requestedInputMode === "scene" || value.requestedInputMode === "action"
       ? value.requestedInputMode : DEFAULT_STATE.requestedInputMode,
+    storyLengthProfileOverride: isStoryLengthProfile(value.storyLengthProfileOverride) ? value.storyLengthProfileOverride : null,
     intentConfirmation: isIntentConfirmation(value.intentConfirmation) ? value.intentConfirmation : DEFAULT_STATE.intentConfirmation,
     activeDialog: typeof value.activeDialog === "string" || value.activeDialog === null
       ? value.activeDialog : DEFAULT_STATE.activeDialog,
@@ -139,7 +149,9 @@ function isIntentConfirmation(value: unknown): value is StoryIntentConfirmation 
   return typeof value === "object" && value !== null
     && typeof (value as { action?: unknown }).action === "string"
     && typeof (value as { classificationId?: unknown }).classificationId === "string"
-    && (value as { requestedInputMode?: unknown }).requestedInputMode === "auto";
+    && (value as { requestedInputMode?: unknown }).requestedInputMode === "auto"
+    && ((value as { storyLengthProfileOverride?: unknown }).storyLengthProfileOverride === null
+      || isStoryLengthProfile((value as { storyLengthProfileOverride?: unknown }).storyLengthProfileOverride));
 }
 
 export function createStoryUiModel(
@@ -207,6 +219,7 @@ export function createStoryUiModel(
         draftOwnerKey: ownerKey,
         draftOwnerTurnNumber: acceptedTurnNumber,
         requestedInputMode: turnInputModeForControlStyle(turnControlStyle),
+        storyLengthProfileOverride: null,
         intentConfirmation: null,
         message: null
       });
@@ -231,6 +244,10 @@ export function createStoryUiModel(
       if (state.requestedInputMode !== requestedInputMode || state.intentConfirmation !== null) {
         publish({ ...state, requestedInputMode, intentConfirmation: null });
       }
+    },
+    setStoryLengthProfileOverride(storyLengthProfileOverride) {
+      if (storyLengthProfileOverride !== null && !isStoryLengthProfile(storyLengthProfileOverride)) return;
+      if (state.storyLengthProfileOverride !== storyLengthProfileOverride) publish({ ...state, storyLengthProfileOverride });
     },
     setIntentConfirmation(intentConfirmation) {
       if (state.intentConfirmation !== intentConfirmation) publish({ ...state, intentConfirmation });

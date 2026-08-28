@@ -99,21 +99,31 @@ integration("PostgreSQL generation command repository", () => {
     return importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "generation-repository.story", story: fixture }));
   }
 
-  function appendRequest(action: string, idempotencyKey = crypto.randomUUID()) {
+  function appendRequest(
+    action: string,
+    idempotencyKey = crypto.randomUUID(),
+    storyLengthProfileOverride?: "brief" | "standard" | "long" | "extended"
+  ) {
     return generationRequestSchema.parse({
       action,
       providerProfileId,
       idempotencyKey,
+      ...(storyLengthProfileOverride ? { storyLengthProfileOverride } : {}),
       context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 }
     });
   }
 
-  function replacementRequest(action: string, idempotencyKey = crypto.randomUUID()) {
+  function replacementRequest(
+    action: string,
+    idempotencyKey = crypto.randomUUID(),
+    storyLengthProfileOverride?: "brief" | "standard" | "long" | "extended"
+  ) {
     return generationRetryLatestRequestSchema.parse({
       action,
       providerProfileId,
       idempotencyKey,
       expectedCurrentTurnNumber: 2,
+      ...(storyLengthProfileOverride ? { storyLengthProfileOverride } : {}),
       context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 }
     });
   }
@@ -329,6 +339,64 @@ integration("PostgreSQL generation command repository", () => {
     await expect(commands.cancel({ ownerUserId, jobId: queued.id })).resolves.toMatchObject({ id: queued.id, status: "cancelled" });
     await expect(commands.discard({ ownerUserId, jobId: queued.id }))
       .rejects.toMatchObject({ kind: "invalid_state", details: { reason: "discard_source_state" } });
+  });
+
+  it("snapshots the effective per-turn story-length profile into durable generation context", async () => {
+    const imported = await campaign();
+    const commands = repository();
+    await pool.query("UPDATE campaigns SET story_length_profile = 'standard' WHERE id = $1", [imported.campaignId]);
+
+    const overridden = await commands.enqueueAppend(
+      { ownerUserId, campaignId: imported.campaignId },
+      appendRequest("Use the extended repository observatory.", crypto.randomUUID(), "extended")
+    );
+    expect((await pool.query(
+      "SELECT context_options FROM generation_jobs WHERE id = $1",
+      [overridden.id]
+    )).rows[0]?.context_options).toMatchObject({
+      storyLengthProfile: "extended",
+      narrationMinWords: 1200,
+      narrationMaxWords: 2000
+    });
+    await commands.cancel({ ownerUserId, jobId: overridden.id });
+
+    const defaulted = await commands.enqueueAppend(
+      { ownerUserId, campaignId: imported.campaignId },
+      appendRequest("Use the standard repository observatory.")
+    );
+    expect((await pool.query(
+      "SELECT context_options FROM generation_jobs WHERE id = $1",
+      [defaulted.id]
+    )).rows[0]?.context_options).toMatchObject({
+      storyLengthProfile: "standard",
+      narrationMinWords: 450,
+      narrationMaxWords: 900
+    });
+    await commands.cancel({ ownerUserId, jobId: defaulted.id });
+
+    const replacement = await commands.enqueueReplacement(
+      { ownerUserId, campaignId: imported.campaignId },
+      replacementRequest("Use the brief replacement observatory.", crypto.randomUUID(), "brief")
+    );
+    expect((await pool.query(
+      "SELECT context_options FROM generation_jobs WHERE id = $1",
+      [replacement.id]
+    )).rows[0]?.context_options).toMatchObject({
+      storyLengthProfile: "brief",
+      narrationMinWords: 250,
+      narrationMaxWords: 450
+    });
+    await commands.cancel({ ownerUserId, jobId: replacement.id });
+
+    const idempotencyKey = crypto.randomUUID();
+    await commands.enqueueAppend(
+      { ownerUserId, campaignId: imported.campaignId },
+      appendRequest("Use one idempotency key for story length.", idempotencyKey, "brief")
+    );
+    await expect(commands.enqueueAppend(
+      { ownerUserId, campaignId: imported.campaignId },
+      appendRequest("Use one idempotency key for story length.", idempotencyKey, "long")
+    )).rejects.toMatchObject({ kind: "conflict", details: { reason: "idempotency_mismatch" } });
   });
 
   it("classifies missing and resolved-mode-mismatched Auto classifications as conflicts", async () => {

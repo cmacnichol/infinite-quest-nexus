@@ -4,7 +4,7 @@ import { createCampaignStore, type CampaignStoreController } from "../../package
 import type { CampaignRuntimeStateResponse, CampaignSyncStatus } from "../../packages/contracts/src/index.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { StoryPlayerComposition } from "../../apps/web-next/src/story-player-composition.js";
-import { mountStoryPlayerPage } from "../../apps/web-next/src/story-player-page.js";
+import { mountStoryPlayerPage, prepareTurnSubmission } from "../../apps/web-next/src/story-player-page.js";
 
 const campaignId = "11111111-1111-4111-8111-111111111111";
 const worldVersionId = "22222222-2222-4222-8222-222222222222";
@@ -798,6 +798,19 @@ describe("Story Player page shell", () => {
 
     expect(page.document.querySelector<HTMLTextAreaElement>("[data-story-draft]")?.value).toBe("Action 1");
     mounted.dispose();
+  });
+
+  it("prepares an explicit composer submission with its selected turn length", async () => {
+    await expect(prepareTurnSubmission("Try another path.", "action", "action", undefined, "brief")).resolves.toEqual({
+      kind: "ready",
+      submission: {
+        action: "Try another path.",
+        requestedInputMode: "action",
+        resolvedInputMode: "action",
+        inputModeSource: "explicit",
+        storyLengthProfileOverride: "brief"
+      }
+    });
   });
 
   it("keeps accepted narration and Continue Story available when illustration loading fails", async () => {
