@@ -11,10 +11,10 @@ declare const privatePortableExportIssuanceBrand: unique symbol;
 
 export type PortableExportScope = Readonly<{
   ownerUserId: string;
-  exportKind: "campaign_zip" | "world_json";
+  exportKind: "campaign_zip" | "world_json" | "system_zip";
   campaignId: string | null;
-  worldId: string;
-  worldVersionId: string;
+  worldId: string | null;
+  worldVersionId: string | null;
 }>;
 
 export type PrivatePortableStagedIssuance = Readonly<{
@@ -103,12 +103,14 @@ export function bindPrivateAtomicStagedIssuance(
 }
 
 function requireExportScope(scope: PortableExportScope): void {
-  const baseIsInvalid = !nonBlank(scope.ownerUserId)
-    || !nonBlank(scope.worldId)
-    || !nonBlank(scope.worldVersionId);
-  const kindIsInvalid = !["campaign_zip", "world_json"].includes(scope.exportKind)
-    || (scope.exportKind === "campaign_zip" && (scope.campaignId === null || !nonBlank(scope.campaignId)))
-    || (scope.exportKind === "world_json" && scope.campaignId !== null);
+  const baseIsInvalid = !nonBlank(scope.ownerUserId);
+  const worldScoped = scope.worldId !== null && nonBlank(scope.worldId)
+    && scope.worldVersionId !== null && nonBlank(scope.worldVersionId);
+  const kindIsInvalid = !["campaign_zip", "world_json", "system_zip"].includes(scope.exportKind)
+    || (scope.exportKind === "campaign_zip" && (!worldScoped || scope.campaignId === null || !nonBlank(scope.campaignId)))
+    || (scope.exportKind === "world_json" && (!worldScoped || scope.campaignId !== null))
+    || (scope.exportKind === "system_zip"
+      && (scope.campaignId !== null || scope.worldId !== null || scope.worldVersionId !== null));
   if (baseIsInvalid || kindIsInvalid) throw new Error("portable_export_scope_invalid");
 }
 
@@ -119,6 +121,7 @@ export function bindPrivateAtomicExportIssuance(
 ): PrivatePortableExportIssuance {
   requireExportScope(exportScope);
   const expectedContentType = exportScope.exportKind === "campaign_zip"
+    || exportScope.exportKind === "system_zip"
     ? "application/zip"
     : "application/json";
   if (contentType !== expectedContentType) throw new Error("portable_export_content_type_invalid");

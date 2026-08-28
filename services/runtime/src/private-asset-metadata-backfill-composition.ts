@@ -170,12 +170,14 @@ export async function createPrivateAssetMetadataBackfillComposition(
         pixelHeight: normalized.thumbnail.slot.pixelHeight,
         transformVersion: 1 as const
       });
-      const technicalMetadata = Object.freeze({
+      const originalMetadata = Object.freeze({
+        pixelWidth: normalized.original.technicalMetadata.pixelWidth,
+        pixelHeight: normalized.original.technicalMetadata.pixelHeight,
         format: normalized.original.technicalMetadata.format,
         pages: 1 as const,
         orientation: normalized.original.technicalMetadata.orientation
       });
-      const existing = await repository.completeWithExistingThumbnail(claim, thumbnail, technicalMetadata);
+      const existing = await repository.completeWithExistingThumbnail(claim, thumbnail, originalMetadata);
       if (existing === "completed") return { outcome: "completed", assetId: claim.assetId };
       const renewedBeforePrepare = await repository.heartbeat(claim, leaseSeconds);
       if (!renewedBeforePrepare) return { outcome: "lease_lost", assetId: claim.assetId };
@@ -198,7 +200,7 @@ export async function createPrivateAssetMetadataBackfillComposition(
           claim,
           thumbnail,
           prepared.attachment,
-          technicalMetadata,
+          originalMetadata,
         ));
         if (!finalization) {
           await prepared.rollback();

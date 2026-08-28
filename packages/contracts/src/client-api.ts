@@ -77,7 +77,10 @@ export const metaResponseSchema = z.object({
     version: z.string().trim().min(1),
     commit: z.string().nullable(),
     builtAt: z.string().nullable()
-  })
+  }),
+  capabilities: z.object({
+    systemArchive: z.boolean()
+  }).strict()
 });
 
 export const sessionResponseSchema = z.object({

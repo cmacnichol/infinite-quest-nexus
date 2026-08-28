@@ -40,6 +40,7 @@ import {
 } from "../../../packages/database/src/import-repository.js";
 import { withTransaction, type DatabaseClient, type DatabasePool } from "../../../packages/database/src/pool.js";
 import { createPostgresSecureStorageRepository } from "../../../packages/database/src/secure-storage-repository.js";
+import { createPostgresSystemArchivePrivateStorageRepository } from "../../../packages/database/src/system-archive-private-storage-repository.js";
 import {
   createSecureFilesystemAdapter,
   type SecureFilesystemAdapter,
@@ -83,6 +84,7 @@ export async function createAssetImportStorageComposition(
   const durableRepository = createPostgresDurableFilesystemRepository(pool);
   const journal = createDurableFilesystemLifecycle(durableRepository.journal);
   const secureStorageRepository = createPostgresSecureStorageRepository(pool, durableRepository);
+  const systemArchiveStorageRepository = createPostgresSystemArchivePrivateStorageRepository(pool);
   const importRepository = createPostgresImportRepository(pool);
   const finalizedDeliveryRepository = createPostgresFinalizedAssetDeliveryRepository(pool);
   // Consumers that only need secure storage (for example e5's existing-asset
@@ -103,6 +105,7 @@ export async function createAssetImportStorageComposition(
       portablePreview: importRepository,
       prewrite: secureStorageRepository,
       expiry: secureStorageRepository,
+      systemArchiveStorage: systemArchiveStorageRepository,
       delivery: finalizedDeliveryRepository,
       ...recoveryHooks,
       transactions: Object.freeze({

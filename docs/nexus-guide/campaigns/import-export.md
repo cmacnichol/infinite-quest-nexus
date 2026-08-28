@@ -45,6 +45,8 @@ During the pre-authentication phase, imported records belong to the database-bac
 
 ## What a Campaign Archive is not
 
-A Campaign Archive is a portable, single-campaign transfer. It is not an in-place campaign update, a coordinated disaster-recovery backup, or the planned owner-wide **System Archive**. For disaster recovery, use a coordinated PostgreSQL, asset-storage, and encryption-key backup. System Archive will be a separate future import/export option with its own owner-wide scope and safeguards.
+A Campaign Archive is a portable, single-campaign transfer. It is not an in-place campaign update, a coordinated disaster-recovery backup, or the planned-release owner-wide **System Archive**. System Archive is implemented behind a default-off release gate and cannot be used on a normal installation while that gate remains closed. It imports one Current Owner only into an empty initialized destination; it is not a merge path for this campaign.
+
+See [System data transfer](../operations/system-data-transfer.md) for its exact portable scope, exclusions, release status, and destination safeguards. For disaster recovery, use a coordinated PostgreSQL, asset-storage, configuration-inventory, and separately escrowed encryption-key Recovery Set.
 
 Matching Infinite Worlds story TXT continues to use its explicit selected-version workflow; deferred selective campaign-update proposals are not current functionality.

@@ -11,6 +11,7 @@ import { mountWorldEditorPage } from "./world-editor-page";
 import { mountWorldLibraryPage, type MountedPage } from "./world-library-page";
 import { mountStoryPlayerPage } from "./story-player-page";
 import { storyRouteFromLocation } from "./story-route";
+import { mountDataTransferPage } from "./data-transfer-page";
 
 const root = document.querySelector<HTMLElement>("#app");
 if (!root) throw new Error("The replacement app root is missing.");
@@ -25,6 +26,8 @@ const mountedPage: MountedPage = characterSessionKey !== null
     ? mountStoryPlayerPage(root, storyRoute)
     : campaignRoute !== null
     ? mountCampaignEditorPage(root, campaignRoute)
+  : window.location.pathname === "/app/data-transfer" || window.location.pathname === "/app/data-transfer/"
+    ? mountDataTransferPage(root)
   : isWorldCreationPath(window.location.pathname)
     ? mountWorldCreationPage(root, { generateWorldPreview })
     : worldId === null

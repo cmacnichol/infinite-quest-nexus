@@ -263,6 +263,15 @@ describe("web theme integration", () => {
     expect(leaks).toEqual([]);
   });
 
+  it("uses the approved inverse-text token for System Archive purpose copy", () => {
+    const css = fs.readFileSync(path.join(webNextRoot, "src/styles.css"), "utf8");
+    const systemPurposeCopy = cssRule(css, ".transfer-purpose.system-purpose p");
+
+    expect(systemPurposeCopy).toMatch(/color:\s*var\(--text-inverse\)/);
+    expect(systemPurposeCopy).toMatch(/opacity:\s*0\.72/);
+    expect(systemPurposeCopy).not.toMatch(/color-mix\s*\(/);
+  });
+
   it("enforces compact 48px world-creation method controls in CSS", () => {
     const css = fs.readFileSync(path.join(webNextRoot, "src/styles.css"), "utf8");
     const methodControl = cssRule(css, ".creation-method-control");

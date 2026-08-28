@@ -237,6 +237,349 @@ integration("standard database migration runner", () => {
     ]);
   });
 
+  it("adds owner-scoped System Archive job and upload persistence with hashed-only handles", async () => {
+    const tableNames = [
+      "system_archive_jobs",
+      "system_archive_upload_chunks",
+      "system_archive_uploads"
+    ];
+    const tables = await pool.query<{ table_name: string }>(
+      `SELECT table_name
+         FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = ANY($1::text[])
+        ORDER BY table_name`,
+      [tableNames]
+    );
+    expect(tables.rows.map((row) => row.table_name)).toEqual([...tableNames].sort());
+
+    const columns = await pool.query<{ table_name: string; column_name: string; is_nullable: string }>(
+      `SELECT table_name,column_name,is_nullable
+         FROM information_schema.columns
+        WHERE table_schema='public' AND table_name=ANY($1::text[])
+        ORDER BY table_name,ordinal_position`,
+      [tableNames]
+    );
+    expect(columns.rows.filter((row) => row.column_name === "owner_user_id"))
+      .toEqual(tableNames.map((tableName) => ({
+        table_name: tableName,
+        column_name: "owner_user_id",
+        is_nullable: "NO"
+      })));
+    expect(columns.rows.filter((row) => row.column_name.includes("token") && !row.column_name.endsWith("_hash")))
+      .toEqual([]);
+
+    const constraints = await pool.query<{ table_name: string; definition: string }>(
+      `SELECT relations.relname AS table_name,pg_get_constraintdef(constraints.oid) AS definition
+         FROM pg_constraint constraints
+         JOIN pg_class relations ON relations.oid=constraints.conrelid
+         JOIN pg_namespace namespaces ON namespaces.oid=relations.relnamespace
+        WHERE namespaces.nspname='public'
+          AND relations.relname=ANY($1::text[])
+        ORDER BY relations.relname,constraints.conname`,
+      [tableNames]
+    );
+    const definitions = constraints.rows.map((row) => `${row.table_name}: ${row.definition}`).join("\n");
+    expect(definitions).toMatch(/system_archive_jobs:.*export.*import/i);
+    expect(definitions).toMatch(/system_archive_jobs:.*queued.*capturing.*authoritative_committed.*expired/i);
+    expect(definitions).toMatch(/system_archive_uploads:.*created.*uploading.*completed.*expired.*failed/i);
+    expect(definitions).toMatch(/system_archive_upload_chunks:.*durable_filesystem_operations/i);
+
+    const indexes = await pool.query<{ indexname: string; indexdef: string }>(
+      `SELECT indexname,indexdef
+         FROM pg_indexes
+        WHERE schemaname='public'
+          AND tablename=ANY($1::text[])
+        ORDER BY indexname`,
+      [tableNames]
+    );
+    expect(indexes.rows.map((row) => row.indexname)).toEqual(expect.arrayContaining([
+      "system_archive_jobs_claim_idx",
+      "system_archive_jobs_one_active_export_per_owner_idx",
+      "system_archive_jobs_one_active_import_idx",
+      "system_archive_upload_chunks_offset_key",
+      "system_archive_uploads_expiry_idx",
+      "system_archive_uploads_handle_token_hash_key"
+    ]));
+  });
+
+  it("validates expanded portable artifact constraints before the short final swap", async () => {
+    const migration = await readFile(resolve("database/migrations/0078_system_archive_jobs.sql"), "utf8");
+    expect(migration.startsWith("-- infinitequest:migration-mode=phased-transactions-v1\n")).toBe(true);
+    expect(migration.match(/^-- infinitequest:transaction-boundary$/gmu)).toHaveLength(2);
+    const addKind = migration.indexOf("portable_export_artifacts_export_kind_check_system_archive");
+    const addScope = migration.indexOf("portable_export_scope_check_system_archive");
+    const validateKind = migration.indexOf(
+      "VALIDATE CONSTRAINT portable_export_artifacts_export_kind_check_system_archive"
+    );
+    const validateScope = migration.indexOf(
+      "VALIDATE CONSTRAINT portable_export_scope_check_system_archive"
+    );
+    const dropOriginal = migration.indexOf("DROP CONSTRAINT portable_export_artifacts_export_kind_check");
+
+    expect(addKind).toBeGreaterThanOrEqual(0);
+    expect(addScope).toBeGreaterThanOrEqual(0);
+    expect(migration.slice(addKind, validateKind)).toContain("NOT VALID");
+    expect(migration.slice(addScope, validateScope)).toContain("NOT VALID");
+    expect(validateKind).toBeGreaterThan(addKind);
+    expect(validateScope).toBeGreaterThan(addScope);
+    expect(dropOriginal).toBeGreaterThan(validateKind);
+    expect(dropOriginal).toBeGreaterThan(validateScope);
+  });
+
+  it("runs only the registered online migration phases in separate transactions", async () => {
+    const databaseName = `infinitequest_phased_migration_${crypto.randomUUID().replaceAll("-", "")}`;
+    const databaseUrlValue = new URL(databaseUrl!);
+    databaseUrlValue.pathname = `/${databaseName}`;
+    const migrationDirectory = await mkdtemp(join(tmpdir(), "infinitequest-phased-migration-"));
+    const migrationName = "0078_system_archive_jobs";
+    const phasedSql = `-- infinitequest:migration-mode=phased-transactions-v1
+CREATE TABLE migration_phase_audit (
+  phase text PRIMARY KEY,
+  transaction_id bigint NOT NULL
+);
+INSERT INTO migration_phase_audit VALUES ('add-not-valid', txid_current());
+-- infinitequest:transaction-boundary
+COMMIT;
+BEGIN;
+INSERT INTO migration_phase_audit VALUES ('validate', txid_current());
+-- infinitequest:transaction-boundary
+COMMIT;
+BEGIN;
+INSERT INTO migration_phase_audit VALUES ('final-swap', txid_current());
+`;
+    let isolatedPool: DatabasePool | null = null;
+    try {
+      await pool.query(`CREATE DATABASE ${databaseName}`);
+      isolatedPool = createDatabasePool(databaseUrlValue.toString(), 2);
+      await writeFile(join(migrationDirectory, `${migrationName}.sql`), phasedSql);
+
+      await expect(migrateDatabase(isolatedPool, migrationDirectory)).resolves.toEqual([migrationName]);
+      const phases = await isolatedPool.query<{ phase: string; transaction_id: string }>(
+        "SELECT phase,transaction_id::text FROM migration_phase_audit ORDER BY transaction_id"
+      );
+      expect(phases.rows.map((row) => row.phase)).toEqual([
+        "add-not-valid",
+        "validate",
+        "final-swap"
+      ]);
+      expect(new Set(phases.rows.map((row) => row.transaction_id)).size).toBe(3);
+      await expect(isolatedPool.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM schema_migrations WHERE name=$1",
+        [migrationName]
+      )).resolves.toMatchObject({ rows: [{ count: "1" }] });
+      await expect(migrateDatabase(isolatedPool, migrationDirectory)).resolves.toEqual([]);
+
+      const unregisteredCases = [
+        {
+          migrationName: "0079_unregistered_end",
+          tableName: "unregistered_end_audit",
+          sql: "CREATE TABLE unregistered_end_audit (id integer); END;"
+        },
+        {
+          migrationName: "0080_unregistered_commit_chain",
+          tableName: "unregistered_commit_chain_audit",
+          sql: "CREATE TABLE unregistered_commit_chain_audit (id integer); COMMIT AND CHAIN;"
+        },
+        {
+          migrationName: "0081_unregistered_same_line",
+          tableName: "unregistered_same_line_audit",
+          sql: "CREATE TABLE unregistered_same_line_audit (id integer); COMMIT; BEGIN;"
+        },
+        {
+          migrationName: "0082_unregistered_after_atomic_body",
+          tableName: "unregistered_after_atomic_body_audit",
+          sql: `CREATE FUNCTION unregistered_atomic_body() RETURNS integer
+                LANGUAGE SQL BEGIN ATOMIC RETURN 1; END;
+                CREATE TABLE unregistered_after_atomic_body_audit (id integer);
+                COMMIT;`
+        }
+      ] as const;
+      for (const unregistered of unregisteredCases) {
+        const migrationPath = join(migrationDirectory, `${unregistered.migrationName}.sql`);
+        await writeFile(migrationPath, unregistered.sql);
+        await expect(migrateDatabase(isolatedPool, migrationDirectory)).rejects.toThrow(
+          `Migration ${unregistered.migrationName} contains transaction control without an approved phased contract.`
+        );
+        await expect(isolatedPool.query(`SELECT to_regclass('public.${unregistered.tableName}') AS table_name`))
+          .resolves.toMatchObject({ rows: [{ table_name: null }] });
+        await rm(migrationPath);
+      }
+    } finally {
+      if (isolatedPool) await isolatedPool.end();
+      await dropTestDatabaseWhenIdle(pool, databaseName);
+      await rm(migrationDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects transaction control after dollar-bearing unquoted identifiers before any side effect", async () => {
+    const databaseName = `infinitequest_identifier_dollar_migration_${crypto.randomUUID().replaceAll("-", "")}`;
+    const databaseUrlValue = new URL(databaseUrl!);
+    databaseUrlValue.pathname = `/${databaseName}`;
+    const migrationDirectory = await mkdtemp(join(tmpdir(), "infinitequest-identifier-dollar-migration-"));
+    const migrationName = "0001_unregistered_identifier_dollar_commit";
+    const tableNames = [
+      "unregistered_identifier_dollar_audit_a",
+      "unregistered_identifier_dollar_audit_b"
+    ] as const;
+    let isolatedPool: DatabasePool | null = null;
+    try {
+      await pool.query(`CREATE DATABASE ${databaseName}`);
+      isolatedPool = createDatabasePool(databaseUrlValue.toString(), 2);
+      await writeFile(
+        join(migrationDirectory, `${migrationName}.sql`),
+        `CREATE TABLE ${tableNames[0]} (foo$tag$ integer); COMMIT; `
+          + `CREATE TABLE ${tableNames[1]} (bar$tag$ integer);`
+      );
+
+      await expect(migrateDatabase(isolatedPool, migrationDirectory)).rejects.toThrow(
+        `Migration ${migrationName} contains transaction control without an approved phased contract.`
+      );
+      await expect(isolatedPool.query<{ table_name: string | null }>(
+        "SELECT to_regclass('public.' || name)::text AS table_name FROM unnest($1::text[]) AS name ORDER BY name",
+        [[...tableNames]]
+      )).resolves.toMatchObject({ rows: [{ table_name: null }, { table_name: null }] });
+    } finally {
+      if (isolatedPool) await isolatedPool.end();
+      await dropTestDatabaseWhenIdle(pool, databaseName);
+      await rm(migrationDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects transaction control after begin atomic appears in a routine header", async () => {
+    const databaseName = `infinitequest_atomic_header_migration_${crypto.randomUUID().replaceAll("-", "")}`;
+    const databaseUrlValue = new URL(databaseUrl!);
+    databaseUrlValue.pathname = `/${databaseName}`;
+    const migrationDirectory = await mkdtemp(join(tmpdir(), "infinitequest-atomic-header-migration-"));
+    const migrationName = "0001_unregistered_after_atomic_header";
+    const tableNames = [
+      "unregistered_atomic_header_audit_a",
+      "unregistered_atomic_header_audit_b"
+    ] as const;
+    const migrationSql = `CREATE TABLE ${tableNames[0]} (id integer);
+CREATE DOMAIN atomic AS integer;
+CREATE FUNCTION migration_atomic_header(begin atomic) RETURNS integer
+LANGUAGE SQL RETURN 1;
+COMMIT;
+CREATE TABLE ${tableNames[1]} (id integer);`;
+    let isolatedPool: DatabasePool | null = null;
+    try {
+      await pool.query(`CREATE DATABASE ${databaseName}`);
+      isolatedPool = createDatabasePool(databaseUrlValue.toString(), 2);
+      await writeFile(join(migrationDirectory, `${migrationName}.sql`), migrationSql);
+
+      await expect(migrateDatabase(isolatedPool, migrationDirectory)).rejects.toThrow(
+        `Migration ${migrationName} contains transaction control without an approved phased contract.`
+      );
+      await expect(isolatedPool.query<{ table_name: string | null }>(
+        "SELECT to_regclass('public.' || name)::text AS table_name FROM unnest($1::text[]) AS name ORDER BY name",
+        [[...tableNames]]
+      )).resolves.toMatchObject({ rows: [{ table_name: null }, { table_name: null }] });
+    } finally {
+      if (isolatedPool) await isolatedPool.end();
+      await dropTestDatabaseWhenIdle(pool, databaseName);
+      await rm(migrationDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects transaction control after high-bit dollar-bearing identifiers before any side effect", async () => {
+    const databaseName = `infinitequest_high_bit_identifier_migration_${crypto.randomUUID().replaceAll("-", "")}`;
+    const databaseUrlValue = new URL(databaseUrl!);
+    databaseUrlValue.pathname = `/${databaseName}`;
+    const migrationDirectory = await mkdtemp(join(tmpdir(), "infinitequest-high-bit-identifier-migration-"));
+    const migrationName = "0001_unregistered_high_bit_identifier_commit";
+    const tableNames = [
+      "unregistered_high_bit_identifier_audit_a",
+      "unregistered_high_bit_identifier_audit_b"
+    ] as const;
+    let isolatedPool: DatabasePool | null = null;
+    try {
+      await pool.query(`CREATE DATABASE ${databaseName}`);
+      isolatedPool = createDatabasePool(databaseUrlValue.toString(), 2);
+      await writeFile(
+        join(migrationDirectory, `${migrationName}.sql`),
+        `CREATE TABLE ${tableNames[0]} (foo😀$tag$ integer); COMMIT; `
+          + `CREATE TABLE ${tableNames[1]} (bar😀$tag$ integer);`
+      );
+
+      await expect(migrateDatabase(isolatedPool, migrationDirectory)).rejects.toThrow(
+        `Migration ${migrationName} contains transaction control without an approved phased contract.`
+      );
+      await expect(isolatedPool.query<{ table_name: string | null }>(
+        "SELECT to_regclass('public.' || name)::text AS table_name FROM unnest($1::text[]) AS name ORDER BY name",
+        [[...tableNames]]
+      )).resolves.toMatchObject({ rows: [{ table_name: null }, { table_name: null }] });
+    } finally {
+      if (isolatedPool) await isolatedPool.end();
+      await dropTestDatabaseWhenIdle(pool, databaseName);
+      await rm(migrationDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts quoted, ASCII and high-bit dollar-quoted, DO, and SQL-standard atomic function bodies", async () => {
+    const databaseName = `infinitequest_function_body_migration_${crypto.randomUUID().replaceAll("-", "")}`;
+    const databaseUrlValue = new URL(databaseUrl!);
+    databaseUrlValue.pathname = `/${databaseName}`;
+    const migrationDirectory = await mkdtemp(join(tmpdir(), "infinitequest-function-body-migration-"));
+    const migrationName = "0001_valid_function_bodies";
+    const migrationSql = `CREATE FUNCTION migration_quoted_body(input_value integer) RETURNS integer
+AS 'BEGIN RETURN input_value + 1; END;'
+LANGUAGE plpgsql;
+
+CREATE FUNCTION migration_dollar_body(input_value integer) RETURNS integer
+AS $function$
+BEGIN
+  RETURN input_value + 2;
+END;
+$function$
+LANGUAGE plpgsql;
+
+CREATE FUNCTION migration_high_bit_dollar_body(input_value integer) RETURNS integer
+AS $😀$
+BEGIN
+  RETURN input_value + 3;
+END;
+$😀$
+LANGUAGE plpgsql;
+
+DO $body$
+BEGIN
+  PERFORM migration_dollar_body(1);
+END;
+$body$;
+
+CREATE FUNCTION migration_atomic_body(input_value integer) RETURNS integer
+LANGUAGE SQL
+BEGIN ATOMIC
+  RETURN input_value + 4;
+END;
+`;
+    let isolatedPool: DatabasePool | null = null;
+    try {
+      await pool.query(`CREATE DATABASE ${databaseName}`);
+      isolatedPool = createDatabasePool(databaseUrlValue.toString(), 2);
+      await writeFile(join(migrationDirectory, `${migrationName}.sql`), migrationSql);
+
+      await expect(migrateDatabase(isolatedPool, migrationDirectory)).resolves.toEqual([migrationName]);
+      await expect(isolatedPool.query<{
+        quoted_result: number;
+        dollar_result: number;
+        high_bit_dollar_result: number;
+        atomic_result: number;
+      }>(
+        `SELECT migration_quoted_body(1) AS quoted_result,
+                migration_dollar_body(1) AS dollar_result,
+                migration_high_bit_dollar_body(1) AS high_bit_dollar_result,
+                migration_atomic_body(1) AS atomic_result`
+      )).resolves.toMatchObject({
+        rows: [{ quoted_result: 2, dollar_result: 3, high_bit_dollar_result: 4, atomic_result: 5 }]
+      });
+    } finally {
+      if (isolatedPool) await isolatedPool.end();
+      await dropTestDatabaseWhenIdle(pool, databaseName);
+      await rm(migrationDirectory, { recursive: true, force: true });
+    }
+  });
+
   it("adds restart-realizable private filesystem authority without classifying legacy asset paths", async () => {
     const authorityTables = [
       "durable_filesystem_candidate_authorities",
@@ -583,6 +926,85 @@ integration("standard database migration runner", () => {
         filesystem_operation_id: null,
         storage_path: "legacy/two.png"
       }]);
+    } finally {
+      await client.query("ROLLBACK");
+      client.release();
+    }
+  });
+
+  it("rejects original and derivative operations without a publication identity", async () => {
+    const client = await pool.connect();
+    const hash = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
+    let savepointOrdinal = 0;
+    const statementError = async (sql: string, parameters: unknown[] = []): Promise<Error | null> => {
+      const savepoint = `task_14e3b1_missing_identity_${savepointOrdinal += 1}`;
+      await client.query(`SAVEPOINT ${savepoint}`);
+      let rejection: Error | null = null;
+      try {
+        await client.query(sql, parameters);
+      } catch (error) {
+        rejection = error instanceof Error ? error : new Error(String(error));
+      } finally {
+        await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+        await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+      }
+      return rejection;
+    };
+
+    try {
+      await client.query("BEGIN");
+      const ownerUserId = (await client.query<{ id: string }>(
+        "SELECT id FROM users WHERE system_key='initial-owner'"
+      )).rows[0]!.id;
+      const assetId = (await client.query<{ id: string }>(
+        `INSERT INTO assets (
+           owner_user_id,content_hash,storage_driver,storage_path,mime_type,byte_length,pixel_width,pixel_height
+         ) VALUES ($1,$2,'filesystem',$3,'image/png',7,1,1) RETURNING id`,
+        [ownerUserId, hash(`missing-identity-${crypto.randomUUID()}`), `legacy/${crypto.randomUUID()}.png`]
+      )).rows[0]!.id;
+
+      // Remove the reciprocal foreign-key guard only inside this transaction so
+      // this migration test reaches the trigger's missing-identity branch.
+      await client.query(
+        "ALTER TABLE durable_filesystem_operations DROP CONSTRAINT durable_filesystem_operations_asset_identity_fk"
+      );
+      await client.query(
+        "ALTER TABLE durable_filesystem_operations DISABLE TRIGGER durable_asset_operation_retention_insert_trigger"
+      );
+      await client.query(
+        "DELETE FROM asset_publication_identities WHERE asset_id=$1 AND owner_user_id=$2",
+        [assetId, ownerUserId]
+      );
+      const missingIdentity = await client.query(
+        "SELECT 1 FROM asset_publication_identities WHERE asset_id=$1 AND owner_user_id=$2",
+        [assetId, ownerUserId]
+      );
+      expect(missingIdentity.rows).toEqual([]);
+
+      const insertOperationSql = `INSERT INTO durable_filesystem_operations (
+        owner_user_id,operation_token_hash,purpose,resource_kind,asset_id,
+        lease_id,lease_owner,lease_expires_at,expires_at
+      ) VALUES ($1,$2,$3,'asset',$4,gen_random_uuid(),'task-14e3b1',
+                now()+interval '5 minutes',now()+interval '1 hour')`;
+      const originalError = await statementError(insertOperationSql, [
+        ownerUserId,
+        hash(`missing-original-${crypto.randomUUID()}`),
+        "asset_original",
+        assetId
+      ]);
+      const derivativeError = await statementError(insertOperationSql, [
+        ownerUserId,
+        hash(`missing-derivative-${crypto.randomUUID()}`),
+        "asset_derivative",
+        assetId
+      ]);
+
+      expect(originalError).toMatchObject({
+        message: expect.stringContaining("asset filesystem operation requires live publication identity")
+      });
+      expect(derivativeError).toMatchObject({
+        message: expect.stringContaining("asset filesystem operation requires live publication identity")
+      });
     } finally {
       await client.query("ROLLBACK");
       client.release();
@@ -1221,7 +1643,10 @@ integration("standard database migration runner", () => {
         "0074_chronicle_retrieval_observability",
         "0075_chronicle_query_embedding_cache",
         "0076_chronicle_chunk_skip_reasons",
-        "0077_chronicle_chunk_processed_signature"
+        "0077_chronicle_chunk_processed_signature",
+        "0078_system_archive_jobs",
+        "0079_resumable_system_archive_uploads",
+        "0080_published_asset_derivative_reservations"
       ]);
 
       const scrubbed = await isolatedPool.query<{ technical_metadata: Record<string, unknown> }>(
@@ -2205,7 +2630,10 @@ integration("standard database migration runner", () => {
       const applied = await migrateDatabase(isolatedPool, resolve("database/migrations"));
       expect(applied).toEqual([
         "0076_chronicle_chunk_skip_reasons",
-        "0077_chronicle_chunk_processed_signature"
+        "0077_chronicle_chunk_processed_signature",
+        "0078_system_archive_jobs",
+        "0079_resumable_system_archive_uploads",
+        "0080_published_asset_derivative_reservations"
       ]);
 
       // Accepted turns and every derived vector survive the upgrade untouched.

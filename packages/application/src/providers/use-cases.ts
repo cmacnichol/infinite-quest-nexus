@@ -54,6 +54,9 @@ function isSafeConfigurationEntry(key: string, value: unknown): boolean {
     return typeof value === "number" && Number.isSafeInteger(value)
       && value >= embeddingRange[0] && value <= embeddingRange[1];
   }
+  if (key === "retryLimit") {
+    return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+  }
   if (BOOLEAN_CONFIGURATION_KEYS.has(key)) return typeof value === "boolean";
   if (NUMBER_CONFIGURATION_KEYS.has(key)) return typeof value === "number" && Number.isFinite(value);
   if (STRING_CONFIGURATION_KEYS.has(key)) return typeof value === "string";

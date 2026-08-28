@@ -2,7 +2,7 @@ import { initializeThemeControl, resolveThemeMediaQuery } from "./theme-control"
 import type { ThemeController } from "./theme";
 import { initializeUserProfileMenu } from "./user-profile-menu";
 
-export type AppNavigation = "world-library" | "world-editor" | "campaigns" | "story" | "setup";
+export type AppNavigation = "world-library" | "world-editor" | "campaigns" | "story" | "data-transfer" | "setup";
 
 /** Static application-owned header content. Page data must never be interpolated here. */
 export interface AppShellOptions {
@@ -33,6 +33,7 @@ export function renderAppShell(
           <a href="/app/"${currentAttribute(currentNavigation, "world-library")}>World Library</a>
           <a href="/app/campaigns"${currentAttribute(currentNavigation, "campaigns")}>Campaigns</a>
           <a href="${storyHref}"${currentAttribute(currentNavigation, "story")}>Story</a>
+          <a href="/app/data-transfer"${currentAttribute(currentNavigation, "data-transfer")}>Data Transfer</a>
           <a href="/nexus/#providers"${currentAttribute(currentNavigation, "setup")}>Setup</a>
         </nav>
         <a class="story-link" href="${storyHref}">
