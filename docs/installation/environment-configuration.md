@@ -30,13 +30,13 @@ Direct secret environment values take precedence over `_FILE` values.
 
 ## System Archive settings
 
-::: danger Default-off release gate
-Checked-in configuration must keep `SYSTEM_ARCHIVE_ENABLED=false`. Automated qualification does not authorize a real installation: enable it temporarily only for an explicitly reviewed non-production source-to-empty-destination drill through real PostgreSQL and private filesystem roots, then return the setting to `false`. Production enablement requires separate explicit approval. While disabled, `/api/v1/meta` reports the capability as false, System Archive routes are not registered, and Data Transfer keeps the specialized formats available.
+::: tip Released capability
+System Archive is enabled by default for the direct runtime and single-node Compose deployment. Set `SYSTEM_ARCHIVE_ENABLED=false` to withdraw its API routes and worker lane for an instance; `/api/v1/meta` then reports the capability as false while the specialized transfer formats remain available. The replicated base Swarm stack stays disabled because its node-local bind mounts are not shared System Archive storage.
 :::
 
 | Setting | Default | Accepted range or behavior |
 | --- | --- | --- |
-| `SYSTEM_ARCHIVE_ENABLED` | `false` | Registers the System Archive API and worker lane only when explicitly true. Separated API/worker deployments must pass the same value to both roles. |
+| `SYSTEM_ARCHIVE_ENABLED` | `true` | Registers the System Archive API and worker lane. Separated API/worker deployments must pass the same value to both roles. |
 | `SYSTEM_ARCHIVE_ARTIFACT_TTL_SECONDS` | `86400` (24 hours) | 300 through 604800; lifetime of a published downloadable export and its private authority. |
 | `SYSTEM_ARCHIVE_UPLOAD_TTL_SECONDS` | `86400` (24 hours) | 300 through 604800; inactivity lifetime for resumable upload/staged input authority. |
 | `ARCHIVE_PREVIEW_TTL_SECONDS` | `1800` (30 minutes) | 60 through 86400; controls Campaign and World Archive preview authority only. |
@@ -62,9 +62,9 @@ The private roots are not portable configuration. `ARCHIVE_STORAGE_ROOT` owns up
 
 Each setting can lower its limit. It cannot exceed the reviewed ceiling unless `SYSTEM_ARCHIVE_ALLOW_LIMIT_INCREASE=true` was explicitly configured before startup. Browser input, API request fields, archive metadata, and CLI flags cannot raise a server limit, approve unknown free space, choose a private root, or bypass Import Preview.
 
-The root Compose manifest mounts and passes `ARCHIVE_STORAGE_ROOT` and expands `SYSTEM_ARCHIVE_ENABLED` to `false` by default for its single combined application role. The base Swarm stack deliberately hard-disables System Archive, even if a shell supplies a different value, because its replicated services use node-local bind mounts. For a reviewed non-production source-to-empty-destination drill, combine `deploy/swarm/stack.yaml` with `deploy/swarm/system-archive-validation.override.yaml`, supply an explicit gate value and a named validation node, and make sure that node has both durable host roots mounted. The override pins one API and one worker replica to that same node. Return to the base stack to disable the capability again. Do not enable only the API: it exposes jobs that no System Archive worker can process.
+The root Compose manifest mounts and passes `ARCHIVE_STORAGE_ROOT` and expands `SYSTEM_ARCHIVE_ENABLED` to `true` by default for its single combined application role. The base Swarm stack deliberately hard-disables System Archive, even if a shell supplies a different value, because its replicated services use node-local bind mounts. For a reviewed source-to-empty-destination drill, combine `deploy/swarm/stack.yaml` with `deploy/swarm/system-archive-validation.override.yaml`, supply an explicit gate value and a named validation node, and make sure that node has both durable host roots mounted. The override pins one API and one worker replica to that same node. Return to the base stack to disable the capability again. Do not enable only the API: it exposes jobs that no System Archive worker can process.
 
-Future multi-node production enablement requires shared asset and archive storage mounted identically on every eligible API and worker node, not merely matching container path strings. It also requires separate explicit production approval.
+Future multi-node Swarm enablement requires shared asset and archive storage mounted identically on every eligible API and worker node, not merely matching container path strings.
 
 See [System data transfer](../nexus-guide/operations/system-data-transfer.md) for operation, exclusions, acknowledgements, and current release blockers.
 

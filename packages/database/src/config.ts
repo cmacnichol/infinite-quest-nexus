@@ -229,7 +229,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
     archiveStorageRoot: resolve(process.env.ARCHIVE_STORAGE_ROOT?.trim() || "local-data/archives"),
     archivePreviewTtlSeconds: boundedArchiveIntegerSetting("ARCHIVE_PREVIEW_TTL_SECONDS", 1800, 60, 86400),
     systemArchiveArtifactTtlSeconds: boundedArchiveIntegerSetting("SYSTEM_ARCHIVE_ARTIFACT_TTL_SECONDS", 86400, 300, 604800),
-    systemArchiveEnabled: booleanSetting("SYSTEM_ARCHIVE_ENABLED", false),
+    systemArchiveEnabled: booleanSetting("SYSTEM_ARCHIVE_ENABLED", true),
     systemArchiveUploadTtlSeconds: boundedArchiveIntegerSetting("SYSTEM_ARCHIVE_UPLOAD_TTL_SECONDS", 86_400, 300, 604_800),
     systemArchiveChunkBytes: boundedArchiveIntegerSetting("SYSTEM_ARCHIVE_CHUNK_BYTES", 16_777_216, 1_048_576, 67_108_864),
     systemArchiveAllowLimitIncrease,

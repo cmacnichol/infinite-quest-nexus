@@ -2,10 +2,10 @@
 
 The System Archive **ZIP container format is version 1**. It moves the Current Owner's portable library from one Infinite Quest Nexus installation to another and can carry logical payload/record version 1 or 2. It contains portable stories, worlds, settings, and every retained original image, including unbound and archived Image Library entries. It is a point-in-time logical migration, not a database clone, merge, synchronization service, or disaster-recovery backup.
 
-::: danger Release gate: keep disabled
-System Archive is implemented behind `SYSTEM_ARCHIVE_ENABLED=false` and is not approved for production enablement. The API routes are not registered and both Data Transfer clients report **Disabled by operator** while the setting is false. Existing World, Campaign, legacy/external, and readable export workflows remain available.
+::: tip Released capability
+System Archive is enabled by default for the direct runtime and single-node Compose deployment. Its API routes and both Data Transfer clients are available while `SYSTEM_ARCHIVE_ENABLED=true`. Set the value to `false` to withdraw the capability for an instance; World, Campaign, legacy/external, and readable export workflows remain available.
 
-The prior automated-qualification blockers (the parked browser race, interrupted integration run, clock divergence, and Windows-skipped Linux/private-root scenarios) are closed. That automated evidence does not substitute for an installation drill. The remaining release condition is an explicitly reviewed non-production source-to-empty-destination round trip under a deliberate temporary override, followed by explicit production-enablement approval. Do not enable the capability in a production installation before both conditions are recorded.
+The automated release matrix and an isolated source-to-empty-destination drill have completed. The replicated base Swarm stack remains disabled because its node-local bind mounts are not shared storage; use a reviewed shared-storage topology before enabling System Archive across multiple Swarm nodes.
 
 :::
 
@@ -210,7 +210,7 @@ Callers never submit a `user_id`; during the pre-authentication phase the server
 
 | Symptom | Meaning and response |
 | --- | --- |
-| **Disabled by operator** | Expected while the release gate is closed. Confirm `/api/v1/meta`; do not enable merely to make the control appear. |
+| **Disabled by operator** | The instance is explicitly disabled. Confirm `/api/v1/meta`, then set `SYSTEM_ARCHIVE_ENABLED=true` for both API and worker roles only when their private roots are compatible. |
 | `404` job/upload/download | The identifier is wrong for the Current Owner, the capability is disabled, or a published artifact is no longer available. |
 | `409` upload offset/conflict | Resume from the server's durable `receivedBytes`; do not skip a missing prefix or reuse a session for a different file/chunk layout. |
 | `410` upload/preview expired | Create or resume a current upload, then obtain a new Preview. |

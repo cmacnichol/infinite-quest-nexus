@@ -174,12 +174,12 @@ describe("worker concurrency configuration", () => {
 });
 
 describe("System Archive configuration", () => {
-  it("defaults the capability and operator exception gates off with bounded upload settings", () => {
+  it("defaults the released capability on while keeping operator exception gates off", () => {
     minimumEnvironment();
 
     const config = loadRuntimeConfig();
 
-    expect(config.systemArchiveEnabled).toBe(false);
+    expect(config.systemArchiveEnabled).toBe(true);
     expect(config.systemArchiveUploadTtlSeconds).toBe(86_400);
     expect(config.systemArchiveChunkBytes).toBe(16_777_216);
     expect(config.systemArchiveAllowLimitIncrease).toBe(false);
