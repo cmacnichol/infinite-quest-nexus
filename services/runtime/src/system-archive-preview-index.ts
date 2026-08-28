@@ -804,14 +804,10 @@ export class SystemArchivePreviewIndex {
             const versionValid = binding.worldVersionId === null
               || (binding.worldId !== null
                 && this.#parentMatches("world-versions", binding.worldVersionId, binding.worldId));
-            const campaignVersionValid = binding.campaignId === null
-              || binding.worldVersionId === null
-              || this.#parentMatches("campaigns", binding.campaignId, binding.worldVersionId);
             const campaignWorldValid = binding.campaignId === null
               || binding.worldId === null
               || this.#campaignBelongsToWorld(binding.campaignId, binding.worldId);
-            if (!campaignValid || !worldValid || !turnValid || !versionValid
-              || !campaignVersionValid || !campaignWorldValid) {
+            if (!campaignValid || !worldValid || !turnValid || !versionValid || !campaignWorldValid) {
               throw relationshipFailure();
             }
             break;

@@ -95,7 +95,7 @@ function safePreviewProjection(ownerUserId: string, archiveFingerprint: string) 
       sourceApplication: "0.1.0",
       sourceMigration: "0079_resumable_system_archive_uploads",
       destinationApplication: "0.1.0",
-      destinationMigration: "0079_resumable_system_archive_uploads"
+      destinationMigration: "0080_published_asset_derivative_reservations"
     },
     sourceOwnerCount: 1 as const,
     archiveFingerprint,
@@ -328,7 +328,7 @@ integration("durable System Archive jobs and resumable uploads", () => {
     const clean = await imports.destinationFingerprint(owner, {});
     expect(clean).toMatchObject({
       initialOwnerId: owner.ownerUserId,
-      latestMigration: "0079_resumable_system_archive_uploads",
+      latestMigration: "0080_published_asset_derivative_reservations",
       destinationEmpty: true
     });
 
@@ -545,6 +545,15 @@ integration("durable System Archive jobs and resumable uploads", () => {
       claim: { leaseOwner: "system-archive-test" }
     });
 
+    await expect(storage.withUploadLock({
+      ownerUserId: owner.ownerUserId,
+      uploadId: upload.id,
+      filesystemOperationId,
+      leaseOwner: "replacement-api-process",
+      leaseSeconds: 30,
+      activitySeconds: 86_400
+    }, async (authority) => authority.leaseCurrent())).resolves.toBe(true);
+
     await pool.query(
       `UPDATE durable_filesystem_operations
           SET lease_owner='other-worker',lease_expires_at=clock_timestamp()+interval '5 minutes'
@@ -587,6 +596,83 @@ integration("durable System Archive jobs and resumable uploads", () => {
       leaseSeconds: 301,
       activitySeconds: 86_400
     }, async (authority) => authority)).rejects.toThrow("system_archive_storage_lease_invalid");
+  });
+
+  it("hands completed upload authority from a successful API preview to a distinct worker immediately", async () => {
+    const uploads = createPostgresSystemArchiveUploadRepository(pool, { uploadTtlSeconds: 86_400 });
+    const storage = createPostgresSystemArchivePrivateStorageRepository(pool);
+    const filesystemOperationId = await reservePortableOperation(owner, "portable_staging");
+    const upload = await uploads.createUpload(owner, {
+      handleTokenHash: hash(`private-storage-handoff-${randomUUID()}`),
+      filesystemOperationId,
+      byteLength: 4,
+      sha256: hash("abcd")
+    });
+    await uploads.recordChunk(owner, {
+      uploadId: upload.id,
+      index: 0,
+      offset: 0,
+      bytes: 4,
+      sha256: hash("abcd")
+    });
+    const relativePath = `staging/${filesystemOperationId}.pending`;
+    await pool.query(
+      `INSERT INTO durable_filesystem_prewrite_nodes (
+         operation_id,owner_user_id,purpose,relative_path,authority_state
+       ) VALUES ($1,$2,'portable_staging',$3,'target_only')`,
+      [filesystemOperationId, owner.ownerUserId, relativePath]
+    );
+    await pool.query(
+      `UPDATE durable_filesystem_prewrite_nodes
+          SET authority_state='identity_bound',device_id='handoff-device',file_id='handoff-file',
+              identity_bound_at=clock_timestamp()
+        WHERE operation_id=$1 AND authority_state='target_only'`,
+      [filesystemOperationId]
+    );
+    await pool.query(
+      `UPDATE durable_filesystem_operations
+          SET lifecycle='attached',candidate_token_hash=$2,locator_token_hash=$3,
+              attached_at=clock_timestamp()
+        WHERE id=$1`,
+      [filesystemOperationId, hash(randomUUID()), hash(randomUUID())]
+    );
+    await pool.query(
+      `INSERT INTO durable_filesystem_descriptors (
+         operation_id,owner_user_id,descriptor_role,ordinal,relative_path,
+         device_id,file_id,change_token,content_hash,byte_length
+       ) VALUES ($1,$2,'delivery',0,$3,'handoff-device','handoff-file','1:1',$4,4)`,
+      [filesystemOperationId, owner.ownerUserId, relativePath, hash("abcd")]
+    );
+    const staged = await pool.query<{ id: string }>(
+      `INSERT INTO portable_staged_inputs (
+         owner_user_id,handle_token_hash,filesystem_operation_id,content_hash,byte_length,expires_at
+       ) VALUES ($1,$2,$3,$4,4,clock_timestamp()+interval '1 day') RETURNING id`,
+      [owner.ownerUserId, hash(randomUUID()), filesystemOperationId, hash("abcd")]
+    );
+    await pool.query(
+      `UPDATE durable_filesystem_operations
+          SET lifecycle='finalized',finalized_at=clock_timestamp(),
+              lease_expires_at=clock_timestamp()-interval '1 second'
+        WHERE id=$1`,
+      [filesystemOperationId]
+    );
+    await uploads.completeUpload(owner, { uploadId: upload.id, stagedInputId: staged.rows[0]!.id });
+
+    await expect(storage.withCompletedUploadLock({
+      ownerUserId: owner.ownerUserId,
+      uploadId: upload.id,
+      leaseOwner: "api-system-archive-preview",
+      leaseSeconds: 30,
+      activitySeconds: 1_800
+    }, async (authority) => authority.leaseCurrent())).resolves.toBe(true);
+
+    await expect(storage.withCompletedUploadLock({
+      ownerUserId: owner.ownerUserId,
+      uploadId: upload.id,
+      leaseOwner: "system-archive-worker",
+      leaseSeconds: 30,
+      activitySeconds: 1_800
+    }, async (authority) => authority.leaseCurrent())).resolves.toBe(true);
   });
 
   it.skipIf(process.platform !== "linux")(
@@ -927,11 +1013,12 @@ integration("durable System Archive jobs and resumable uploads", () => {
       pool,
       createPostgresDurableFilesystemRepository(pool)
     );
-    await expect(restartedReaper.claimExpiredPortableWork({
+    const beforeHeartbeat = await restartedReaper.claimExpiredPortableWork({
       leaseOwner: "generic-reaper-before-heartbeat",
       leaseSeconds: 30,
       limit: 10
-    })).resolves.toEqual([]);
+    });
+    expect(beforeHeartbeat.some((item) => item.operation.operationId === filesystemOperationId)).toBe(false);
 
     await privateStorage.withUploadLock({
       ownerUserId: owner.ownerUserId,
@@ -950,14 +1037,15 @@ integration("durable System Archive jobs and resumable uploads", () => {
     });
 
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 1_500));
-    await expect(createPostgresSecureStorageRepository(
+    const afterPause = await createPostgresSecureStorageRepository(
       pool,
       createPostgresDurableFilesystemRepository(pool)
     ).claimExpiredPortableWork({
       leaseOwner: "generic-reaper-after-pause",
       leaseSeconds: 30,
       limit: 10
-    })).resolves.toEqual([]);
+    });
+    expect(afterPause.some((item) => item.operation.operationId === filesystemOperationId)).toBe(false);
     await expect(createPostgresSystemArchivePrivateStorageRepository(pool).withUploadLock({
       ownerUserId: owner.ownerUserId,
       uploadId: upload.id,
@@ -980,14 +1068,15 @@ integration("durable System Archive jobs and resumable uploads", () => {
         WHERE id=$1`,
       [filesystemOperationId]
     );
-    await expect(createPostgresSecureStorageRepository(
+    const afterUploadExpiry = await createPostgresSecureStorageRepository(
       pool,
       createPostgresDurableFilesystemRepository(pool)
     ).claimExpiredPortableWork({
       leaseOwner: "generic-reaper-after-upload-expiry",
       leaseSeconds: 30,
       limit: 10
-    })).resolves.toHaveLength(1);
+    });
+    expect(afterUploadExpiry.some((item) => item.operation.operationId === filesystemOperationId)).toBe(true);
   });
 
   it("heartbeats completed preview staging and keeps every authority live through a long inspection", async () => {

@@ -1,8 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 import {
+  createSystemArchiveHttpRequest,
   parseSystemArchiveCliArgs,
   runSystemArchiveCli,
+  SYSTEM_ARCHIVE_HEADERS_TIMEOUT_MS,
 } from "../../scripts/system-archive.js";
 
 describe("System Archive CLI", () => {
@@ -10,6 +12,25 @@ describe("System Archive CLI", () => {
     const source = await readFile(new URL("../../scripts/system-archive.ts", import.meta.url), "utf8");
     expect(source).toContain('from "undici"');
     expect(source).not.toMatch(/packages\/database|pg\b|secure-filesystem|archiveStorageRoot|assetStorageRoot/u);
+  });
+
+  it("keeps archive API requests open long enough for a large preview", async () => {
+    const request = vi.fn(async () => ({ statusCode: 200, body: {} }));
+    const archiveRequest = createSystemArchiveHttpRequest(request as never);
+
+    await archiveRequest("http://example.test/api/v1/system-imports/uploads/upload/preview", {
+      method: "POST",
+      body: "{}",
+    });
+
+    expect(request).toHaveBeenCalledWith(
+      "http://example.test/api/v1/system-imports/uploads/upload/preview",
+      expect.objectContaining({
+        method: "POST",
+        body: "{}",
+        headersTimeout: SYSTEM_ARCHIVE_HEADERS_TIMEOUT_MS,
+      }),
+    );
   });
 
   it("parses the documented export, import, status, and cancel commands", () => {

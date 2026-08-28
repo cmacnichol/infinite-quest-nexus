@@ -60,6 +60,13 @@ type DescriptorRow = Readonly<{
   byte_length: string;
 }>;
 
+type PrewriteAuthorityRow = Readonly<{
+  relative_path: string;
+  device_id: string | null;
+  file_id: string | null;
+  authority_state: "target_only" | "identity_bound" | "quarantined";
+}>;
+
 type CandidateAuthorityRow = DescriptorRow & Readonly<{
   candidate_token_hash: string;
   operation_id: string;
@@ -262,6 +269,19 @@ async function descriptorRows(
     [operationId, role]
   );
   return selected.rows;
+}
+
+async function prewriteAuthorityRow(
+  client: DatabaseClient,
+  operationId: string,
+): Promise<PrewriteAuthorityRow | null> {
+  const selected = await client.query<PrewriteAuthorityRow>(
+    `SELECT relative_path,device_id,file_id,authority_state
+       FROM durable_filesystem_prewrite_nodes
+      WHERE operation_id=$1`,
+    [operationId],
+  );
+  return selected.rows[0] ?? null;
 }
 
 async function candidateByHash(
@@ -888,7 +908,17 @@ export function createPostgresDurableFilesystemRepository(
     if (row.lifecycle !== "cleanup_pending") return { outcome: "stale" };
     const cleanup = await descriptorRows(client, row.id, "cleanup");
     const delivery = await descriptorRows(client, row.id, "delivery");
-    const rows = cleanupDescriptorsByPath(cleanup, delivery);
+    const prewrite = await prewriteAuthorityRow(client, row.id);
+    const candidates = cleanupDescriptorsByPath(cleanup, delivery);
+    const rows = prewrite === null
+      ? candidates
+      : prewrite.authority_state !== "identity_bound"
+        ? []
+        : candidates.filter((value) => (
+            value.relative_path === prewrite.relative_path
+            && value.device_id === prewrite.device_id
+            && value.file_id === prewrite.file_id
+          ));
     await lockPhysicalPaths(client, rows.map((item) => item.relative_path));
     const retained = new Set<string>();
     for (const value of rows) {

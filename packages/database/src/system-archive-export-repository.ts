@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   canonicalArchiveJson,
   sanitizePortableMetadata,
@@ -30,6 +31,7 @@ type PortableJson = string | number | boolean | null | PortableJson[] | { [key: 
 
 const DEFAULT_PAGE_SIZE = 500;
 const SHA_256 = /^[a-f0-9]{64}$/u;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 function exportError(message: string): Error & { code: "archive-export-inconsistent" } {
   return Object.assign(new Error(message), { code: "archive-export-inconsistent" as const });
@@ -87,6 +89,257 @@ function projectArray(
   return value.map((entry) => pick(entry, fields, name));
 }
 
+function legacyText(value: unknown, maximumLength: number): string {
+  return typeof value === "string" ? value.trim().slice(0, maximumLength) : "";
+}
+
+function legacyEventTriggerTiming(value: unknown): "before" | "after" {
+  const normalized = legacyText(value, 100).toLowerCase();
+  return normalized.includes("after") || normalized === "post" || normalized === "post_response"
+    ? "after"
+    : "before";
+}
+
+function legacyNonnegativeInteger(value: unknown): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
+}
+
+function legacyPositiveIntegerOrNull(value: unknown): number | null {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function legacyTimestampOrNull(value: unknown): string | null {
+  if (typeof value !== "string" || Number.isNaN(Date.parse(value))) return null;
+  return value;
+}
+
+function projectDefaultTriggers(value: unknown): readonly Record<string, unknown>[] {
+  if (!Array.isArray(value)) throw exportError("System Archive default triggers is not a logical array.");
+  return value.flatMap((candidate, index) => {
+    const source = typeof candidate === "string"
+      ? { value: candidate }
+      : typeof candidate === "object" && candidate !== null && !Array.isArray(candidate)
+        ? candidate as Record<string, unknown>
+        : {};
+    const name = legacyText(source.name ?? source.label ?? source.title, 300) || `Default Trigger ${index + 1}`;
+    const valueText = legacyText(
+      source.value ?? source.current_value ?? source.currentValue ?? source.starting_value ?? source.startingValue,
+      10_000,
+    );
+    const rules = legacyText(source.rules ?? source.update_rules ?? source.updateRules, 10_000);
+    if (!valueText && !rules && typeof candidate !== "string") return [];
+    return [{
+      id: legacyText(source.id, 300) || `legacy-default-trigger-${index + 1}`,
+      name,
+      value: valueText,
+      rules,
+    }];
+  });
+}
+
+function projectRpgStats(value: unknown): readonly Record<string, unknown>[] {
+  if (!Array.isArray(value)) throw exportError("System Archive RPG stats is not a logical array.");
+  return value.flatMap((candidate, index) => {
+    const source = typeof candidate === "object" && candidate !== null && !Array.isArray(candidate)
+      ? candidate as Record<string, unknown>
+      : {};
+    const name = legacyText(source.name, 300);
+    if (!name) return [];
+    const numeric = Number(source.value);
+    return [{
+      id: legacyText(source.id, 300) || `legacy-rpg-stat-${index + 1}`,
+      name,
+      value: Number.isFinite(numeric) ? Math.max(1, Math.min(99, Math.round(numeric))) : 50,
+      note: legacyText(source.note, 10_000),
+    }];
+  });
+}
+
+function projectCanonicalFacts(value: unknown): readonly Record<string, unknown>[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((candidate) => {
+    if (typeof candidate === "string") return [{ id: null, content: candidate.slice(0, 1_000_000) }];
+    if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) return [];
+    const source = candidate as Record<string, unknown>;
+    const content = legacyText(source.content, 1_000_000);
+    if (!content) return [];
+    const id = typeof source.id === "string" && UUID.test(source.id) ? source.id : null;
+    return [{ id, content }];
+  });
+}
+
+function projectCampaignStateSnapshot(value: unknown, partial: boolean): Record<string, unknown> {
+  const source = typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const has = (field: string) => Object.prototype.hasOwnProperty.call(source, field);
+  const result: Record<string, unknown> = {};
+  if (!partial || has("continuitySummary")) result.continuitySummary = legacyText(source.continuitySummary, 1_000_000);
+  if (!partial || has("openThreads")) result.openThreads = Array.isArray(source.openThreads)
+    ? source.openThreads.filter((entry): entry is string => typeof entry === "string").map((entry) => entry.slice(0, 10_000))
+    : [];
+  if (!partial || has("canonicalFacts")) result.canonicalFacts = projectCanonicalFacts(source.canonicalFacts);
+  if (!partial || has("scratchpad")) result.scratchpad = legacyText(source.scratchpad, 1_000_000);
+  if (!partial || has("trackers")) result.trackers = projectDefaultTriggers(source.trackers ?? []);
+  if (!partial || has("rpgStats")) result.rpgStats = projectRpgStats(source.rpgStats ?? []);
+  if (!partial || has("defaultTriggers")) result.defaultTriggers = projectDefaultTriggers(source.defaultTriggers ?? []);
+  if (!partial || has("eventTriggers")) result.eventTriggers = projectEventTriggers(source.eventTriggers ?? []);
+  if (!partial || has("pendingEventTriggers")) result.pendingEventTriggers = Array.isArray(source.pendingEventTriggers)
+    ? source.pendingEventTriggers
+    : [];
+  return result;
+}
+
+function projectCharacterSnapshot(value: unknown): unknown {
+  if (value === null) return null;
+  const source = objectValue(value, "System Archive campaign character snapshot");
+  const { legacy: _legacy, ...portable } = source;
+  const originalSource = typeof source.source === "object" && source.source !== null && !Array.isArray(source.source)
+    ? source.source as Record<string, unknown>
+    : {};
+  return {
+    ...portable,
+    rpgStats: projectRpgStats(source.rpgStats ?? []),
+    defaultTriggers: projectDefaultTriggers(source.defaultTriggers ?? []),
+    ...(source.profile !== undefined ? { profile: projectCompatibleCharacterProfile(source.profile) } : {}),
+    source: {
+      ...(typeof originalSource.type === "string" ? { type: legacyText(originalSource.type, 100) } : {}),
+      ...(originalSource.revision !== undefined ? { revision: legacyNonnegativeInteger(originalSource.revision) } : {}),
+      ...(originalSource.index !== undefined ? { index: legacyNonnegativeInteger(originalSource.index) } : {}),
+      ...(typeof originalSource.externalId === "string" ? { externalId: legacyText(originalSource.externalId, 300) } : {}),
+    },
+  };
+}
+
+function portableHash(value: unknown, fallback: unknown): string {
+  if (typeof value === "string" && SHA_256.test(value)) return value;
+  return createHash("sha256").update(typeof fallback === "string" ? fallback : JSON.stringify(fallback)).digest("hex");
+}
+
+function portableEntityIds(value: unknown): readonly string[] {
+  return Array.isArray(value) ? value.filter((candidate): candidate is string => typeof candidate === "string" && UUID.test(candidate)) : [];
+}
+
+function projectCompatibleCharacterProfile(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const source = value as Record<string, unknown>;
+  const projectSection = (section: unknown, fields: readonly string[]) => {
+    if (typeof section !== "object" || section === null || Array.isArray(section)) return undefined;
+    const values = section as Record<string, unknown>;
+    return Object.fromEntries(fields.filter((field) => values[field] !== undefined).map((field) => [field, values[field]]));
+  };
+  const result: Record<string, unknown> = {};
+  const identity = projectSection(source.identity, ["aliases", "pronouns"]);
+  const story = projectSection(source.story, [
+    "role", "background", "personality", "motivations", "goals", "fearsAndConflicts",
+    "keyRelationships", "narrativeHooks", "voiceAndMannerisms", "otherGuidance",
+  ]);
+  const appearance = projectSection(source.appearance, [
+    "ancestryOrSpecies", "apparentAge", "genderPresentation", "build", "skinOrComplexion",
+    "face", "eyes", "hair", "distinguishingFeatures", "clothing", "equipmentAndAccessories", "otherVisualDetails",
+  ]);
+  if (identity) result.identity = identity;
+  if (story) result.story = story;
+  if (appearance) result.appearance = appearance;
+  const legacyEntries = Object.fromEntries(Object.entries(source).filter(([key]) => ![
+    "identity", "story", "appearance", "unclassifiedNotes",
+  ].includes(key)));
+  const notes = [
+    legacyText(source.unclassifiedNotes, 200_000),
+    Object.keys(legacyEntries).length ? legacyText(JSON.stringify(legacyEntries), 200_000) : "",
+  ].filter(Boolean).join("\n\n").slice(0, 200_000);
+  if (notes) result.unclassifiedNotes = notes;
+  return result;
+}
+
+function projectCampaignCharacterProfile(value: unknown): unknown {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return value;
+  const source = value as Record<string, unknown>;
+  return {
+    ...source,
+    profile: projectCompatibleCharacterProfile(source.profile),
+  };
+}
+
+function projectCharacterProfileEditContent(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return value;
+    const details = parsed as Record<string, unknown>;
+    return JSON.stringify({
+      ...details,
+      previousProfile: projectCampaignCharacterProfile(details.previousProfile),
+      nextProfile: projectCampaignCharacterProfile(details.nextProfile),
+    });
+  } catch {
+    return value;
+  }
+}
+
+function projectCampaignStateEditContent(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return value;
+    const details = parsed as Record<string, unknown>;
+    return JSON.stringify({
+      ...details,
+      stateSnapshot: projectCampaignStateSnapshot(details.stateSnapshot, false),
+    });
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * Older browser imports persisted several event-trigger shapes without applying
+ * the current campaign contract. Normalize those historical values at the
+ * System Archive boundary so a whole-installation backup remains portable.
+ */
+function projectEventTriggers(value: unknown): readonly Record<string, unknown>[] {
+  if (!Array.isArray(value)) throw exportError("System Archive event triggers is not a logical array.");
+  return value.flatMap((candidate, index) => {
+    const source = typeof candidate === "string"
+      ? { effect: candidate }
+      : typeof candidate === "object" && candidate !== null && !Array.isArray(candidate)
+        ? candidate as Record<string, unknown>
+        : {};
+    const timing = legacyEventTriggerTiming(
+      source.timing ?? source.checkTiming ?? source.check_timing ?? source.phase
+        ?? source.whenChecked ?? source.when_checked ?? source.trigger_timing,
+    );
+    const condition = legacyText(
+      source.condition ?? source.when ?? source.when_should_trigger ?? source.activation_condition
+        ?? source.activationCondition ?? source.triggerCondition ?? source.trigger_condition,
+      10_000,
+    );
+    const effect = legacyText(
+      source.effect ?? source.action ?? source.what_happens ?? source.whatHappens ?? source.event_effect
+        ?? source.eventEffect ?? source.instructions ?? source.result,
+      10_000,
+    );
+    if (!condition && !effect) return [];
+    return [{
+      id: legacyText(source.id, 300) || `legacy-event-trigger-${index + 1}`,
+      label: legacyText(source.label ?? source.name ?? source.title, 300) || `Event Trigger ${index + 1}`,
+      timing,
+      condition,
+      effect,
+      addTextAfter: timing === "after" && Boolean(
+        source.addTextAfter ?? source.add_text_after ?? source.additionalTextAfterResponse
+          ?? source.additional_text_after_response ?? source.appendAfterResponse
+          ?? source.append_after_response ?? source.appendAdditionalText ?? source.append_additional_text,
+      ),
+      triggeredCount: legacyNonnegativeInteger(source.triggeredCount ?? source.triggered_count),
+      lastTriggeredTurn: legacyPositiveIntegerOrNull(source.lastTriggeredTurn ?? source.last_triggered_turn),
+      lastTriggeredAt: legacyTimestampOrNull(source.lastTriggeredAt ?? source.last_triggered_at),
+    }];
+  });
+}
+
 /** Strip storage-era passthrough fields at the explicit versioned record boundary. */
 function projectWorldContent(value: unknown): Record<string, unknown> {
   const content = canonicalizeWorldContent(value);
@@ -98,11 +351,7 @@ function projectWorldContent(value: unknown): Record<string, unknown> {
     const projected: Record<string, unknown> = {
       ...pick(character, ["id", "name", "characterText"], "System Archive playable character"),
       rpgStats: projectArray(character.rpgStats, ["id", "name", "value", "note"], "System Archive character RPG stats"),
-      defaultTriggers: projectArray(
-        character.defaultTriggers,
-        ["id", "name", "value", "rules"],
-        "System Archive character default triggers",
-      ),
+      defaultTriggers: projectDefaultTriggers(character.defaultTriggers),
     };
     if (character.profile !== undefined) {
       const profile = objectValue(character.profile, "System Archive character profile");
@@ -138,15 +387,8 @@ function projectWorldContent(value: unknown): Record<string, unknown> {
       "System Archive relationships",
     ),
     rpgStats: projectArray(content.rpgStats, ["id", "name", "value", "note"], "System Archive RPG stats"),
-    defaultTriggers: projectArray(
-      content.defaultTriggers,
-      ["id", "name", "value", "rules"],
-      "System Archive default triggers",
-    ),
-    eventTriggers: projectArray(content.eventTriggers, [
-      "id", "label", "timing", "condition", "effect", "addTextAfter", "triggeredCount",
-      "lastTriggeredTurn", "lastTriggeredAt",
-    ], "System Archive event triggers"),
+    defaultTriggers: projectDefaultTriggers(content.defaultTriggers),
+    eventTriggers: projectEventTriggers(content.eventTriggers),
     assets: projectArray(content.assets, ["assetId", "role"], "System Archive world assets"),
     defaults: {
       selectedCharacterId: typeof defaults.selectedCharacterId === "string"
@@ -215,7 +457,8 @@ function parseEnvelope(domain: SystemArchiveDomain, value: unknown): SystemRecor
         candidate = { ...envelope, record: { ...envelope.record, authority: {
           ...authority,
           legacySettings: sanitizedPortableObject(authority?.legacySettings, "campaign legacy settings"),
-        } } };
+        }, characterSnapshot: projectCharacterSnapshot(envelope.record?.characterSnapshot),
+        characterProfile: projectCampaignCharacterProfile(envelope.record?.characterProfile) } };
         break;
       case "turns":
         candidate = { ...envelope, record: { ...envelope.record, authority: {
@@ -226,19 +469,34 @@ function parseEnvelope(domain: SystemArchiveDomain, value: unknown): SystemRecor
             : sanitizedPortableJson(authority?.mechanicsPrivate),
           modelMetadata: sanitizedPortableObject(authority?.modelMetadata, "turn model metadata"),
           importMetadata: sanitizedPortableObject(authority?.importMetadata, "turn import metadata"),
-        } } };
+        }, stateSnapshotPrivate: projectCampaignStateSnapshot(envelope.record?.stateSnapshotPrivate, true) } };
         break;
       case "campaign-state":
         candidate = { ...envelope, record: { ...envelope.record, authority: {
           ...authority,
           importProvenance: sanitizePortableMetadata(authority?.importProvenance),
           initialStateSnapshot: sanitizePortableMetadata(authority?.initialStateSnapshot),
-        } } };
+        }, state: projectCampaignStateSnapshot(envelope.record?.state, false) } };
+        break;
+      case "campaign-history":
+        candidate = { ...envelope, record: { ...envelope.record, authority: {
+          ...authority,
+          ...(envelope.record?.eventType === "illustration-segment" ? {
+            sourceTextHash: portableHash(authority?.sourceTextHash, authority?.sourceText),
+          } : envelope.record?.eventType === "illustration-set" ? {
+            sourceTextHash: portableHash(authority?.sourceTextHash, envelope.record?.content),
+          } : {}),
+        }, ...(envelope.record?.eventType === "character-profile-edit" ? {
+          content: projectCharacterProfileEditContent(envelope.record?.content),
+        } : envelope.record?.eventType === "campaign-state-edit" ? {
+          content: projectCampaignStateEditContent(envelope.record?.content),
+        } : {}) } };
         break;
       case "canonical-facts":
         candidate = { ...envelope, record: { ...envelope.record, authority: {
           ...authority,
           metadata: sanitizedPortableObject(authority?.metadata, "canonical fact metadata"),
+          entityIds: portableEntityIds(authority?.entityIds),
         } } };
         break;
       case "chronicle":
@@ -246,6 +504,7 @@ function parseEnvelope(domain: SystemArchiveDomain, value: unknown): SystemRecor
           candidate = { ...envelope, record: { ...envelope.record, authority: {
             ...authority,
             metadata: sanitizedPortableObject(authority?.metadata, "Chronicle metadata"),
+            entityIds: portableEntityIds(authority?.entityIds),
           } } };
         } else if (envelope.record?.kind === "summary-checkpoint") {
           candidate = { ...envelope, record: {
@@ -258,7 +517,7 @@ function parseEnvelope(domain: SystemArchiveDomain, value: unknown): SystemRecor
         candidate = { ...envelope, record: { ...envelope.record, authority: {
           ...authority,
           stats: sanitizedPortableObject(authority?.stats, "import statistics"),
-        } } };
+        }, sourceHash: portableHash(envelope.record?.sourceHash, `legacy-import:${envelope.sourceId}`) } };
         break;
       case "cost-events":
         candidate = { ...envelope, record: { ...envelope.record, authority: {
@@ -642,9 +901,10 @@ const DOMAIN_SQL = {
                  'completedAt',illustration_set.completed_at
                )::text,
                illustration_set.created_at
-          FROM turn_illustration_sets illustration_set
-         WHERE illustration_set.owner_user_id=$1
-           AND illustration_set.status IN ('completed','partial','superseded')
+      FROM turn_illustration_sets illustration_set
+     WHERE illustration_set.owner_user_id=$1
+       AND illustration_set.turn_id IS NOT NULL
+       AND illustration_set.status IN ('completed','partial','superseded')
         UNION ALL
         SELECT '09:' || segment.id::text,segment.id,segment.campaign_id,'illustration-segment',
                jsonb_build_object(
@@ -655,8 +915,16 @@ const DOMAIN_SQL = {
                  'promptSource',segment.prompt_source,'status',segment.status
                )::text,
                segment.created_at
-          FROM turn_illustration_segments segment
-         WHERE segment.owner_user_id=$1 AND segment.status='completed'
+      FROM turn_illustration_segments segment
+      JOIN turn_illustration_sets illustration_set
+        ON illustration_set.id=segment.illustration_set_id
+       AND illustration_set.owner_user_id=segment.owner_user_id
+       AND illustration_set.campaign_id=segment.campaign_id
+       AND illustration_set.turn_id=segment.turn_id
+     WHERE segment.owner_user_id=$1
+       AND segment.turn_id IS NOT NULL
+       AND segment.status='completed'
+       AND illustration_set.status IN ('completed','partial','superseded')
       ) history`,
   "canonical-facts": `
     SELECT '00:' || fact.id::text AS sort_key,
@@ -737,7 +1005,15 @@ const DOMAIN_SQL = {
       FROM turn_illustration_segment_assets segment_asset
       JOIN turn_illustration_segments segment
         ON segment.id=segment_asset.segment_id AND segment.owner_user_id=segment_asset.owner_user_id
-     WHERE segment_asset.owner_user_id=$1`,
+      JOIN turn_illustration_sets illustration_set
+        ON illustration_set.id=segment.illustration_set_id
+       AND illustration_set.owner_user_id=segment.owner_user_id
+       AND illustration_set.campaign_id=segment.campaign_id
+       AND illustration_set.turn_id=segment.turn_id
+     WHERE segment_asset.owner_user_id=$1
+       AND segment.turn_id IS NOT NULL
+       AND segment.status='completed'
+       AND illustration_set.status IN ('completed','partial','superseded')`,
   imports: `
     SELECT '00:' || import_row.id::text AS sort_key,
            jsonb_build_object(
@@ -961,7 +1237,7 @@ async function assetBindings(
   const variants = await client.query<{
     asset_id: string;
     campaign_id: string;
-    turn_id: string;
+    turn_id: string | null;
     segment_id: string;
     variant_index: number;
     created_at: Date | string;
@@ -976,14 +1252,18 @@ async function assetBindings(
     [ownerUserId, assetIds],
   );
   for (const row of variants.rows) {
-    add(row.asset_id, {
-      role: "illustration_segment_variant",
-      campaignId: row.campaign_id,
-      turnId: row.turn_id,
-      segmentId: row.segment_id,
-      variantIndex: row.variant_index,
-      createdAt: iso(row.created_at),
-    });
+    if (row.turn_id) {
+      add(row.asset_id, {
+        role: "illustration_segment_variant",
+        campaignId: row.campaign_id,
+        turnId: row.turn_id,
+        segmentId: row.segment_id,
+        variantIndex: row.variant_index,
+        createdAt: iso(row.created_at),
+      });
+    } else {
+      add(row.asset_id, { role: "campaign_asset", campaignId: row.campaign_id });
+    }
   }
 
   const contexts = await client.query<{

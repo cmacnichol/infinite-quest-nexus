@@ -372,7 +372,7 @@ describe("archive runtime configuration", () => {
       maxUncompressedBytes: 214_748_364_800,
       maxEntries: 1_000_000,
       maxExpansionRatio: 100,
-      maxManifestBytes: 5_242_880,
+      maxManifestBytes: 16_777_216,
       maxJsonEntryBytes: 1_073_741_824,
       maxOriginalImageBytes: 26_214_400
     });

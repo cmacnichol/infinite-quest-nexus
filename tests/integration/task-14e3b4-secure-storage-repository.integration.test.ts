@@ -235,6 +235,41 @@ integration("Task 14e3b4 secure storage repository", () => {
     });
   });
 
+  it("atomically persists an owner-wide System Archive ZIP", async () => {
+    const fixture = await candidate("portable_export");
+    const scope: PortableExportScope = {
+      ownerUserId,
+      exportKind: "system_zip",
+      campaignId: null,
+      worldId: null,
+      worldVersionId: null
+    };
+    const issuance = bindPrivateAtomicExportIssuance(scope, "application/zip", fixture.attachment);
+
+    const issued = await withTransaction(pool, (client) => secure.issueExportRetrieval(client, issuance));
+
+    const stored = await pool.query<{
+      retrieval_token_hash: string;
+      export_kind: string;
+      campaign_id: string | null;
+      world_id: string | null;
+      world_version_id: string | null;
+      content_type: string;
+    }>(
+      `SELECT retrieval_token_hash,export_kind,campaign_id,world_id,world_version_id,content_type
+         FROM portable_export_artifacts WHERE filesystem_operation_id=$1`,
+      [fixture.operation.operationId],
+    );
+    expect(stored.rows[0]).toEqual({
+      retrieval_token_hash: sha256(issued.retrieval),
+      export_kind: "system_zip",
+      campaign_id: null,
+      world_id: null,
+      world_version_id: null,
+      content_type: "application/zip"
+    });
+  });
+
   it("claims a crashed pre-write without bearer material and rehydrates its exact node identity", async () => {
     const expiresAt = new Date(Date.now() + 60_000).toISOString();
     const scopeId = `prewrite:${crypto.randomUUID()}`;

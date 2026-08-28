@@ -34,6 +34,7 @@ export type SystemImportDestinationFingerprint = Readonly<{
 export type SystemArchiveDestinationFingerprintRequest = Readonly<{
   ignoreUploadId?: string;
   ignoreJobId?: string;
+  ignoreAssetIds?: readonly string[];
 }>;
 
 export type SystemArchivePreviewAuthority = Readonly<{
@@ -299,7 +300,11 @@ async function activeWorkCounts(
        (SELECT count(*) FROM asset_mutation_idempotency WHERE status='pending')
          AS asset_mutation_idempotency,
        (SELECT count(*) FROM asset_publication_requests
-         WHERE lifecycle IN ('prepared','attached','cleanup_pending')) AS asset_publication_requests,
+         WHERE lifecycle IN ('prepared','attached','cleanup_pending')
+           AND (
+             COALESCE(cardinality($3::uuid[]),0)=0
+             OR canonical_asset_id <> ALL($3::uuid[])
+           )) AS asset_publication_requests,
        (SELECT count(*) FROM portable_import_operations
          WHERE status IN ('consuming','cleanup_pending')
             OR (status='previewed' AND expires_at > clock_timestamp())) AS portable_import_operations,
@@ -321,7 +326,7 @@ async function activeWorkCounts(
                OR (progress->>'expiresAt')::timestamptz > clock_timestamp())
            )
          ) AND ($2::uuid IS NULL OR id <> $2::uuid)) AS system_archive_jobs`,
-    [request.ignoreUploadId ?? null, request.ignoreJobId ?? null]
+    [request.ignoreUploadId ?? null, request.ignoreJobId ?? null, request.ignoreAssetIds ?? []]
   );
   const row = selected.rows[0] ?? {};
   return Object.freeze(Object.fromEntries(Object.entries(row).map(([name, count]) => [name, Number(count)])));
@@ -1854,25 +1859,36 @@ async function insertAssetBindings(
           const expectedRole = binding.role === "turn_illustration"
             ? "turn_illustration"
             : binding.role === "campaign_asset" ? null : "import_attachment";
-          const matched = await database.query<{ count: string }>(
-            `SELECT count(*)::bigint AS count FROM asset_references
-              WHERE owner_user_id=$1 AND asset_id=$2 AND campaign_id=$3
-                AND turn_id IS NOT DISTINCT FROM $4::uuid
-                AND ($5::text IS NULL OR asset_role=$5)`,
-            [
-              ownerUserId,
-              asset.sourceAssetId,
-              binding.campaignId,
-              "turnId" in binding ? binding.turnId : null,
-              expectedRole
-            ]
-          );
-          if (Number(matched.rows[0]?.count ?? 0) < 1) {
-            throw repositoryError("System Archive asset reference authority did not match its binding.", 400);
+          const bindingTurnId = "turnId" in binding ? binding.turnId : null;
+          const hasReferenceAuthority = v2Authority.references.some((reference) => (
+            reference.campaignId === binding.campaignId
+            && reference.turnId === bindingTurnId
+            && (expectedRole === null || reference.assetRole === expectedRole)
+          ));
+          if (hasReferenceAuthority) {
+            const matched = await database.query<{ count: string }>(
+              `SELECT count(*)::bigint AS count FROM asset_references
+                WHERE owner_user_id=$1 AND asset_id=$2 AND campaign_id=$3
+                  AND turn_id IS NOT DISTINCT FROM $4::uuid
+                  AND ($5::text IS NULL OR asset_role=$5)`,
+              [
+                ownerUserId,
+                asset.sourceAssetId,
+                binding.campaignId,
+                bindingTurnId,
+                expectedRole
+              ]
+            );
+            if (Number(matched.rows[0]?.count ?? 0) < 1) {
+              throw repositoryError("System Archive asset reference authority did not match its binding.", 400);
+            }
+            persistedBindings += 1;
+            break;
           }
-          persistedBindings += 1;
-          break;
         }
+        // Pre-reference assets carried their campaign/turn relationship on the
+        // asset row itself. Their verified binding is still authoritative, but
+        // there is no historical asset_references row to replay.
         const inserted = await database.query(
           `INSERT INTO asset_references
              (owner_user_id,asset_id,campaign_id,turn_id,asset_role)

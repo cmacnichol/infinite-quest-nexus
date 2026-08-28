@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { createPostgresSystemArchiveJobRepository } from "../../packages/database/src/system-archive-job-repository.js";
-import { createSystemArchiveWorkerLane } from "../../services/worker/src/system-archive-worker.js";
+import {
+  createSystemArchiveWorkerLane,
+  safeSystemArchiveWorkerDiagnostic,
+} from "../../services/worker/src/system-archive-worker.js";
 
 const job = Object.freeze({
   id: "11111111-1111-4111-8111-111111111111",
@@ -176,6 +179,18 @@ describe("System Archive worker lane", () => {
       "worker",
       "archive-operation-failed",
     );
+  });
+
+  it("permits only fixed-format System Archive diagnostics for operator logs", () => {
+    expect(safeSystemArchiveWorkerDiagnostic(
+      new Error("System Archive destination changed after preview."),
+    )).toBe("System Archive destination changed after preview.");
+    expect(safeSystemArchiveWorkerDiagnostic(
+      new Error("System Archive C:\\private\\story-secret-token.txt"),
+    )).toBeUndefined();
+    expect(safeSystemArchiveWorkerDiagnostic(
+      new Error("System Archive invalid\narchive content"),
+    )).toBeUndefined();
   });
 
   it("honors a cancellation requested while a pre-boundary import is running", async () => {

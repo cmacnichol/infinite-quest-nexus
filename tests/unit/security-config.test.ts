@@ -206,6 +206,14 @@ describe("System Archive configuration", () => {
     expect(loadRuntimeConfig().systemArchiveLimits.maxCompressedBytes).toBe(53_687_091_201);
   });
 
+  it("reserves a bounded 16 MiB manifest allowance for System Archive asset inventories", () => {
+    minimumEnvironment();
+    expect(loadRuntimeConfig().systemArchiveLimits.maxManifestBytes).toBe(16_777_216);
+
+    process.env.SYSTEM_ARCHIVE_MAX_MANIFEST_BYTES = "16777217";
+    expect(loadRuntimeConfig().systemArchiveLimits.maxManifestBytes).toBe(16_777_216);
+  });
+
   it.each([
     ["SYSTEM_ARCHIVE_UPLOAD_TTL_SECONDS", "299"],
     ["SYSTEM_ARCHIVE_UPLOAD_TTL_SECONDS", "604801"],

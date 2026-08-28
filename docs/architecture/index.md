@@ -9,6 +9,14 @@ See also [Repository Overview](./repository-overview.md) for project-goal/naming
 - [ADR 0001: PostgreSQL owns campaigns and Chronicle memory](./0001-postgresql-chronicle.md)
 - [ADR 0002: PostgreSQL provides the initial durable worker queue](./0002-postgresql-worker-jobs.md)
 - [ADR 0009: Automatic coordinated schema migrations](./0009-automatic-schema-migrations.md)
+- [ADR 0030: Separate System Archives from disaster recovery](./0030-separate-system-archives-from-disaster-recovery.md)
+- [ADR 0031: Import System Archives only into empty destinations](./0031-empty-destination-system-imports.md)
+- [ADR 0032: System Archives preserve portable authority and original assets](./0032-system-archives-preserve-portable-authority.md)
+- [ADR 0033: System Archives use versioned deterministic logical contracts](./0033-versioned-deterministic-system-archives.md)
+- [ADR 0034: System transfers are durable, staged, and auditable](./0034-durable-staged-system-transfers.md)
+- [ADR 0035: Unify portable data transfer without removing specialized formats](./0035-unified-data-transfer-experience.md)
+- [ADR 0036: Disaster recovery is an operator-managed isolated restore](./0036-operator-managed-disaster-recovery.md)
+- [ADR 0037: Every persisted domain has an explicit portability classification](./0037-exhaustive-portability-classification.md)
 
 ## Story Engine and Chronicle
 

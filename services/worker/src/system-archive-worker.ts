@@ -35,9 +35,18 @@ export function safeSystemArchiveWorkerFailureCode(error: unknown): string {
   return parsed.success ? parsed.data : "archive-operation-failed";
 }
 
-function safeWorkerError(error: unknown): Error & { code: string } {
+export function safeSystemArchiveWorkerDiagnostic(error: unknown): string | undefined {
+  return error instanceof Error
+    && /^System Archive [A-Za-z .-]{1,160}$/u.test(error.message)
+    ? error.message
+    : undefined;
+}
+
+function safeWorkerError(error: unknown): Error & { code: string; diagnostic?: string } {
+  const diagnostic = safeSystemArchiveWorkerDiagnostic(error);
   const sanitized = Object.assign(new Error("System Archive worker operation failed."), {
     code: safeSystemArchiveWorkerFailureCode(error),
+    ...(diagnostic === undefined ? {} : { diagnostic }),
   });
   sanitized.name = "SystemArchiveWorkerError";
   return sanitized;

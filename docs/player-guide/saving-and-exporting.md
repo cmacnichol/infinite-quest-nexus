@@ -19,7 +19,7 @@ Current portable exports retain the campaign turn-control style and each accepte
 
 ## Owner-wide System Archive
 
-The planned-release **System Archive** workflow is implemented in both Data Transfer interfaces but remains disabled by default until its production round-trip gate is approved. It moves the Current Owner's portable worlds, campaigns, stories, settings, and every retained original image to an empty initialized installation. It is not a way to merge content into another library.
+The planned-release **System Archive** workflow is implemented in both Data Transfer interfaces but remains disabled by default. It moves the Current Owner's portable worlds, campaigns, stories, settings, and every retained original image to an empty initialized installation. It is not a way to merge content into another library. A reviewed non-production source-to-empty-destination drill and separate production-enablement approval are still required before production use.
 
 System Archive files are sensitive, unencrypted ZIPs. They exclude credentials, external access, operational jobs, derived indexes and thumbnails, and deployment settings. Imported provider profiles remain disabled until an operator supplies and verifies new credentials. See [System data transfer](../nexus-guide/operations/system-data-transfer.md) for the release status and migration procedure.
 

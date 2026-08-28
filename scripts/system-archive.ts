@@ -55,6 +55,7 @@ type HttpRequest = (
     method?: string;
     headers?: Record<string, string>;
     body?: string | Uint8Array;
+    headersTimeout?: number;
   }>,
 ) => Promise<HttpResponse>;
 
@@ -80,6 +81,16 @@ const ACKNOWLEDGEMENT_FLAGS = new Set([
   "--acknowledge-provider-reentry",
   "--acknowledge-non-cancellable-boundary",
 ]);
+
+// Large archives can take several minutes to validate before the API writes a response.
+export const SYSTEM_ARCHIVE_HEADERS_TIMEOUT_MS = 20 * 60_000;
+
+export function createSystemArchiveHttpRequest(request: HttpRequest): HttpRequest {
+  return (url, options) => request(url, {
+    ...options,
+    headersTimeout: SYSTEM_ARCHIVE_HEADERS_TIMEOUT_MS,
+  });
+}
 
 function usage(message?: string): Error {
   return new Error([
@@ -524,7 +535,7 @@ async function writeDownload(
 
 function defaultDependencies(): SystemArchiveCliDependencies {
   return Object.freeze({
-    request: undiciRequest as unknown as HttpRequest,
+    request: createSystemArchiveHttpRequest(undiciRequest as unknown as HttpRequest),
     stdout: process.stdout,
     stderr: process.stderr,
     isInteractive: Boolean(process.stdin.isTTY && process.stdout.isTTY),

@@ -31,7 +31,7 @@ Direct secret environment values take precedence over `_FILE` values.
 ## System Archive settings
 
 ::: danger Default-off release gate
-`SYSTEM_ARCHIVE_ENABLED` must remain `false` until a separate release review records a complete representative round trip through real PostgreSQL, private filesystem roots, and both active clients on required platforms. While disabled, `/api/v1/meta` reports the capability as false, System Archive routes are not registered, and Data Transfer keeps the specialized formats available.
+Checked-in configuration must keep `SYSTEM_ARCHIVE_ENABLED=false`. Automated qualification does not authorize a real installation: enable it temporarily only for an explicitly reviewed non-production source-to-empty-destination drill through real PostgreSQL and private filesystem roots, then return the setting to `false`. Production enablement requires separate explicit approval. While disabled, `/api/v1/meta` reports the capability as false, System Archive routes are not registered, and Data Transfer keeps the specialized formats available.
 :::
 
 | Setting | Default | Accepted range or behavior |
@@ -56,13 +56,15 @@ The private roots are not portable configuration. `ARCHIVE_STORAGE_ROOT` owns up
 | `SYSTEM_ARCHIVE_MAX_UNCOMPRESSED_BYTES` | `214748364800` (200 GiB) |
 | `SYSTEM_ARCHIVE_MAX_ENTRIES` | `1000000` |
 | `SYSTEM_ARCHIVE_MAX_EXPANSION_RATIO` | `100` |
-| `SYSTEM_ARCHIVE_MAX_MANIFEST_BYTES` | `5242880` (5 MiB) |
+| `SYSTEM_ARCHIVE_MAX_MANIFEST_BYTES` | `16777216` (16 MiB) |
 | `SYSTEM_ARCHIVE_MAX_JSON_ENTRY_BYTES` | `1073741824` (1 GiB) |
 | `SYSTEM_ARCHIVE_MAX_ORIGINAL_IMAGE_BYTES` | `26214400` (25 MiB) |
 
 Each setting can lower its limit. It cannot exceed the reviewed ceiling unless `SYSTEM_ARCHIVE_ALLOW_LIMIT_INCREASE=true` was explicitly configured before startup. Browser input, API request fields, archive metadata, and CLI flags cannot raise a server limit, approve unknown free space, choose a private root, or bypass Import Preview.
 
-The root Compose and Swarm manifests already mount and pass `ARCHIVE_STORAGE_ROOT`, but they do not pass the System Archive release-gate settings. A validation deployment needs an explicit reviewed override. For Compose's combined `APP_ROLE=all`, add the settings to the application service. For separated deployments, apply consistent settings to every API and worker service that participates; enabling only the API exposes jobs that no System Archive worker can process.
+The root Compose manifest mounts and passes `ARCHIVE_STORAGE_ROOT` and expands `SYSTEM_ARCHIVE_ENABLED` to `false` by default for its single combined application role. The base Swarm stack deliberately hard-disables System Archive, even if a shell supplies a different value, because its replicated services use node-local bind mounts. For a reviewed non-production source-to-empty-destination drill, combine `deploy/swarm/stack.yaml` with `deploy/swarm/system-archive-validation.override.yaml`, supply an explicit gate value and a named validation node, and make sure that node has both durable host roots mounted. The override pins one API and one worker replica to that same node. Return to the base stack to disable the capability again. Do not enable only the API: it exposes jobs that no System Archive worker can process.
+
+Future multi-node production enablement requires shared asset and archive storage mounted identically on every eligible API and worker node, not merely matching container path strings. It also requires separate explicit production approval.
 
 See [System data transfer](../nexus-guide/operations/system-data-transfer.md) for operation, exclusions, acknowledgements, and current release blockers.
 

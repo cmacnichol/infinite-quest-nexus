@@ -1312,7 +1312,14 @@ export function createSystemArchiveImportExecutionService(
         try {
           await options.imports.withAtomicImport(owner, {
             destination: authority.destination,
-            ignore: { ignoreJobId: job.id, ignoreUploadId: authority.uploadId },
+            ignore: {
+              ignoreJobId: job.id,
+              ignoreUploadId: authority.uploadId,
+              // Originals are prepared before the atomic transaction so a failed
+              // import can compensate them. They are this import's provisional
+              // work, not destination authority that may invalidate its Preview.
+              ignoreAssetIds: prepared.map((entry) => entry.identity.assetId),
+            },
             jobId: job.id,
             leaseOwner: job.leaseOwner,
           }, async (transaction) => {
@@ -1991,6 +1998,7 @@ export function createSystemArchiveOriginalAssetReader(
         request: { kind: "original" },
         limits: bindPrivateBoundedStreamLimits({
           maximumBytes: input.maximumBytes,
+          chunkBytes: Math.min(64 * 1024, Math.max(1, input.maximumBytes)),
           deadlineAt: new Date(Date.now() + 60_000).toISOString(),
         }),
       });

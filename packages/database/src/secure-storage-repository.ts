@@ -234,6 +234,7 @@ export function createPostgresSecureStorageRepository(
   ): Promise<PrivateAtomicExportIssuanceResult> => {
     validateIssuance(issuance, "portable_export");
     const expectedContentType = issuance.exportScope.exportKind === "campaign_zip"
+      || issuance.exportScope.exportKind === "system_zip"
       ? "application/zip"
       : "application/json";
     if (issuance.exportScope.ownerUserId !== issuance.owner.ownerUserId

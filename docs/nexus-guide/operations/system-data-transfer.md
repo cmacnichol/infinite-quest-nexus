@@ -1,13 +1,12 @@
 # System data transfer
 
-System Archive format version 1 moves the Current Owner's portable library from one Infinite Quest Nexus installation to another. It contains portable stories, worlds, settings, and every retained original image, including unbound and archived Image Library entries. It is a point-in-time logical migration, not a database clone, merge, synchronization service, or disaster-recovery backup.
+The System Archive **ZIP container format is version 1**. It moves the Current Owner's portable library from one Infinite Quest Nexus installation to another and can carry logical payload/record version 1 or 2. It contains portable stories, worlds, settings, and every retained original image, including unbound and archived Image Library entries. It is a point-in-time logical migration, not a database clone, merge, synchronization service, or disaster-recovery backup.
 
 ::: danger Release gate: keep disabled
 System Archive is implemented behind `SYSTEM_ARCHIVE_ENABLED=false` and is not approved for production enablement. The API routes are not registered and both Data Transfer clients report **Disabled by operator** while the setting is false. Existing World, Campaign, legacy/external, and readable export workflows remain available.
 
-Current release evidence remains incomplete. Known blockers and incomplete gates include a parked same-kind browser reload/cancellation race; the latest full integration run, which stopped on a Chronicle lease-time assertion before completing the suite even though that file later passed 7/7 alone; a Docker/PostgreSQL expiry test affected by application/database clock divergence; and two Linux-only compiled-service/private-root scenarios that have not run on this Windows host. The focused rerun does not make the interrupted full integration gate green. Do not describe the full integration, Linux, or private-root paths as passed. Enable the capability only after a separate review closes the blockers and records a representative source-to-empty-destination round trip.
+The prior automated-qualification blockers (the parked browser race, interrupted integration run, clock divergence, and Windows-skipped Linux/private-root scenarios) are closed. That automated evidence does not substitute for an installation drill. The remaining release condition is an explicitly reviewed non-production source-to-empty-destination round trip under a deliberate temporary override, followed by explicit production-enablement approval. Do not enable the capability in a production installation before both conditions are recorded.
 
-In the parked UI race, recovered operation A can overwrite the browser's reference to a newer ambiguously accepted same-kind operation B. **Cancel** can then target A while B remains active. Until this is fixed, do not start another export during export recovery or another import during import recovery. Record every accepted job ID, verify status with the CLI or owner-scoped API, and explicitly cancel every unwanted durable job by its recorded ID.
 :::
 
 ## Choose the right transfer product
@@ -22,7 +21,7 @@ In the parked UI race, recovered operation A can overwrite the browser's referen
 
 System Archive augments these formats; it does not replace them. It is not the right way to add one campaign or world to a populated destination.
 
-## What format version 1 contains
+## What System Archive format version 1 contains
 
 System Archive exports versioned logical records rather than SQL or table dumps. Portable authority includes:
 
@@ -60,7 +59,7 @@ The ZIP is not encrypted and has no archive password. Checksums detect corruptio
 
 ## Destination requirements
 
-Format version 1 accepts exactly one source owner and exactly one empty initialized Destination Instance. The destination must:
+The version 1 ZIP container accepts exactly one source owner and exactly one empty initialized Destination Instance. The destination must support the archive's logical payload/record version (1 or 2) and must:
 
 - run all required database migrations and a compatible System Archive payload version;
 - contain its generated `initial-owner` user but no authoritative owner data;

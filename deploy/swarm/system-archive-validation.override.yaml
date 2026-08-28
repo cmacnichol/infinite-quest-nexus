@@ -1,0 +1,22 @@
+version: "3.9"
+
+# Validation-only override. Combine with stack.yaml for a reviewed,
+# non-production System Archive source-to-empty-destination drill.
+services:
+  infinitequest-api:
+    environment:
+      SYSTEM_ARCHIVE_ENABLED: ${SYSTEM_ARCHIVE_ENABLED:?Set an explicit System Archive validation value}
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.hostname == ${SYSTEM_ARCHIVE_VALIDATION_NODE:?Set the validation node hostname}
+
+  infinitequest-worker:
+    environment:
+      SYSTEM_ARCHIVE_ENABLED: ${SYSTEM_ARCHIVE_ENABLED:?Set an explicit System Archive validation value}
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.hostname == ${SYSTEM_ARCHIVE_VALIDATION_NODE:?Set the validation node hostname}

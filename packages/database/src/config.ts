@@ -95,10 +95,12 @@ function boundedArchiveIntegerSetting(
 
 function archiveLimitsSetting(
   scope: "CAMPAIGN" | "SYSTEM",
-  approved: Pick<ArchiveLimits, "maxCompressedBytes" | "maxUncompressedBytes" | "maxEntries">,
+  approved: Pick<ArchiveLimits, "maxCompressedBytes" | "maxUncompressedBytes" | "maxEntries"> &
+    Partial<Pick<ArchiveLimits, "maxManifestBytes">>,
   allowIncrease = false
 ): ArchiveLimits {
   const prefix = `${scope}_ARCHIVE`;
+  const approvedManifestBytes = approved.maxManifestBytes ?? 5_242_880;
   const maximum = (approvedMaximum: number): number => allowIncrease
     ? Number.MAX_SAFE_INTEGER
     : approvedMaximum;
@@ -107,7 +109,12 @@ function archiveLimitsSetting(
     maxUncompressedBytes: boundedArchiveIntegerSetting(`${prefix}_MAX_UNCOMPRESSED_BYTES`, approved.maxUncompressedBytes, 1, maximum(approved.maxUncompressedBytes)),
     maxEntries: boundedArchiveIntegerSetting(`${prefix}_MAX_ENTRIES`, approved.maxEntries, 1, maximum(approved.maxEntries)),
     maxExpansionRatio: boundedArchiveIntegerSetting(`${prefix}_MAX_EXPANSION_RATIO`, 100, 1, maximum(100)),
-    maxManifestBytes: boundedArchiveIntegerSetting(`${prefix}_MAX_MANIFEST_BYTES`, 5_242_880, 1, maximum(5_242_880)),
+    maxManifestBytes: boundedArchiveIntegerSetting(
+      `${prefix}_MAX_MANIFEST_BYTES`,
+      approvedManifestBytes,
+      1,
+      maximum(approvedManifestBytes),
+    ),
     maxJsonEntryBytes: boundedArchiveIntegerSetting(`${prefix}_MAX_JSON_ENTRY_BYTES`, 1_073_741_824, 1, maximum(1_073_741_824)),
     maxOriginalImageBytes: boundedArchiveIntegerSetting(`${prefix}_MAX_ORIGINAL_IMAGE_BYTES`, 26_214_400, 1, maximum(26_214_400))
   };
@@ -235,7 +242,10 @@ export function loadRuntimeConfig(): RuntimeConfig {
     systemArchiveLimits: archiveLimitsSetting("SYSTEM", {
       maxCompressedBytes: 53_687_091_200,
       maxUncompressedBytes: 214_748_364_800,
-      maxEntries: 1_000_000
+      maxEntries: 1_000_000,
+      // A System Archive manifest carries the complete image inventory so a
+      // restore can validate bindings before it touches destination state.
+      maxManifestBytes: 16_777_216,
     }, systemArchiveAllowLimitIncrease),
     credentialEncryptionKey: secretSetting("CREDENTIAL_ENCRYPTION_KEY"),
     worldSharingEnabled: booleanSetting("WORLD_SHARING_ENABLED", false),

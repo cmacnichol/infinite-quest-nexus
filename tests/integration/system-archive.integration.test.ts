@@ -140,9 +140,9 @@ function importReport(input: Readonly<{
     versions: {
       archiveFormat: 1,
       sourceApplication: "0.1.0",
-      sourceMigration: "0079_resumable_system_archive_uploads",
+      sourceMigration: "0080_published_asset_derivative_reservations",
       destinationApplication: "0.1.0",
-      destinationMigration: "0079_resumable_system_archive_uploads",
+      destinationMigration: "0080_published_asset_derivative_reservations",
     },
     sourceOwnerCount: 1,
     ownerMapping: {
@@ -287,6 +287,11 @@ integration("deterministic owner-wide System Archive export", () => {
   let turnId = "";
   let checkpointOpenThreadId = "";
   let originals: StoredOriginal[] = [];
+  let productionImportFixture: Readonly<{
+    bytes: Buffer;
+    contentFingerprint: string;
+    originalAssets: number;
+  }> | undefined;
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 4);
@@ -559,6 +564,12 @@ integration("deterministic owner-wide System Archive export", () => {
        ) VALUES ($1,$2,$3,0),($1,$2,$4,1)`,
       [segment.rows[0]!.id, ownerUserId, originals[1]!.id, originals[2]!.id],
     );
+    const exported = await exportArchive();
+    productionImportFixture = Object.freeze({
+      bytes: exported.bytes,
+      contentFingerprint: exported.result.artifact.contentFingerprint,
+      originalAssets: exported.result.report.originalAssets,
+    });
   }, 30_000);
 
   afterAll(async () => {
@@ -619,6 +630,19 @@ integration("deterministic owner-wide System Archive export", () => {
     });
     if (result.status !== "published") throw new Error("Expected a published System Archive fixture.");
     return { result, writer, bytes: publication.read(result.artifact.relativePath) };
+  }
+
+  async function resetSystemImportDestination(): Promise<void> {
+    await pool.query(
+      `TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events,
+                      assets,asset_publication_identities,system_archive_jobs,system_archive_uploads
+         RESTART IDENTITY CASCADE`,
+    );
+  }
+
+  function productionImportArchive(): NonNullable<typeof productionImportFixture> {
+    if (!productionImportFixture) throw new Error("System Import production fixture was not initialized.");
+    return productionImportFixture;
   }
 
   async function withStagedArchive<Result>(
@@ -747,7 +771,7 @@ integration("deterministic owner-wide System Archive export", () => {
     );
     expect(manifest).toMatchObject({
       sourceApplication: "0.1.0",
-      sourceMigration: "0079_resumable_system_archive_uploads",
+      sourceMigration: "0080_published_asset_derivative_reservations",
       sourceInstallationId: ownerUserId,
       sourceOwnerCount: 1,
       sourceOwner: {
@@ -900,6 +924,225 @@ integration("deterministic owner-wide System Archive export", () => {
     expect(serialized).toContain("The gate opens silently.");
   });
 
+  it("normalizes legacy world mechanics into portable v2 authority", async () => {
+    const original = await pool.query<{ content: Record<string, unknown> }>(
+      "SELECT content FROM world_versions WHERE id=$1",
+      [worldVersionId],
+    );
+    const legacyContent = structuredClone(original.rows[0]!.content);
+    legacyContent.defaultTriggers = [
+      { name: "Legacy tracker", value: "Unresolved", rules: "Update when the gate changes." },
+    ];
+    legacyContent.eventTriggers = [
+      { id: "legacy-action", name: "Legacy action", condition: "The gate opens.", action: "Reveal the route." },
+      "Record the omen when it occurs.",
+      { id: "legacy-condition", name: "Legacy condition", trigger_condition: "The bell rings.", effect: "Advance the mystery." },
+    ];
+    await pool.query("UPDATE world_versions SET content=$2::jsonb WHERE id=$1", [
+      worldVersionId,
+      JSON.stringify(legacyContent),
+    ]);
+
+    try {
+      const exported = await exportArchive();
+      const { zip } = await archiveText(exported.bytes);
+      const records = (await Promise.all(Object.values(zip.files)
+        .filter((entry) => entry.name.startsWith("records/world-versions/") && !entry.dir)
+        .map((entry) => entry.async("string"))))
+        .flatMap((entry) => entry.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as {
+          sourceId: string;
+          formatVersion: number;
+          record: { content: { eventTriggers: unknown[] } };
+        }));
+      expect(records.find((record) => record.sourceId === worldVersionId)).toEqual(expect.objectContaining({
+        formatVersion: 2,
+        record: expect.objectContaining({
+          content: expect.objectContaining({
+            defaultTriggers: [{
+              id: "legacy-default-trigger-1", name: "Legacy tracker", value: "Unresolved",
+              rules: "Update when the gate changes.",
+            }],
+            eventTriggers: [
+              {
+                id: "legacy-action", label: "Legacy action", timing: "before",
+                condition: "The gate opens.", effect: "Reveal the route.", addTextAfter: false,
+                triggeredCount: 0, lastTriggeredTurn: null, lastTriggeredAt: null,
+              },
+              {
+                id: "legacy-event-trigger-2", label: "Event Trigger 2", timing: "before",
+                condition: "", effect: "Record the omen when it occurs.", addTextAfter: false,
+                triggeredCount: 0, lastTriggeredTurn: null, lastTriggeredAt: null,
+              },
+              {
+                id: "legacy-condition", label: "Legacy condition", timing: "before",
+                condition: "The bell rings.", effect: "Advance the mystery.", addTextAfter: false,
+                triggeredCount: 0, lastTriggeredTurn: null, lastTriggeredAt: null,
+              },
+            ],
+          }),
+        }),
+      }));
+    } finally {
+      await pool.query("UPDATE world_versions SET content=$2::jsonb WHERE id=$1", [
+        worldVersionId,
+        JSON.stringify(original.rows[0]!.content),
+      ]);
+    }
+  });
+
+  it("normalizes legacy character profiles consistently with their edit history", async () => {
+    const originalCampaign = await pool.query<{
+      character_snapshot: unknown;
+      character_profile: unknown;
+    }>(
+      "SELECT character_snapshot,character_profile FROM campaigns WHERE id=$1",
+      [campaignId],
+    );
+    const originalEdit = await pool.query<{ next_profile: unknown }>(
+      `SELECT next_profile FROM campaign_character_profile_edits
+        WHERE owner_user_id=$1 AND campaign_id=$2 AND revision=1`,
+      [ownerUserId, campaignId],
+    );
+    const legacyProfile = {
+      name: "Avery",
+      profile: { legacyBiography: "Avery guards the portable gate." },
+    };
+    const legacySnapshot = {
+      id: "avery", name: "Avery", characterText: "Avery guards the portable gate.",
+      profile: legacyProfile.profile, rpgStats: [], defaultTriggers: [], source: { type: "integration-fixture" },
+    };
+    await pool.query(
+      `UPDATE campaigns SET character_snapshot=$2::jsonb,character_profile=$3::jsonb WHERE id=$1`,
+      [campaignId, JSON.stringify(legacySnapshot), JSON.stringify(legacyProfile)],
+    );
+    await pool.query(
+      `UPDATE campaign_character_profile_edits SET next_profile=$3::jsonb
+        WHERE owner_user_id=$1 AND campaign_id=$2 AND revision=1`,
+      [ownerUserId, campaignId, JSON.stringify(legacyProfile)],
+    );
+
+    try {
+      const exported = await exportArchive();
+      await expect(withStagedArchive(
+        exported.bytes,
+        limits,
+        (staged) => inspectSystemArchiveForPreview(staged, limits),
+      )).resolves.toMatchObject({ recordsByDomain: { campaigns: 1, "campaign-history": expect.any(Number) } });
+    } finally {
+      await pool.query(
+        `UPDATE campaigns SET character_snapshot=$2::jsonb,character_profile=$3::jsonb WHERE id=$1`,
+        [campaignId, JSON.stringify(originalCampaign.rows[0]!.character_snapshot), JSON.stringify(originalCampaign.rows[0]!.character_profile)],
+      );
+      await pool.query(
+        `UPDATE campaign_character_profile_edits SET next_profile=$3::jsonb
+          WHERE owner_user_id=$1 AND campaign_id=$2 AND revision=1`,
+        [ownerUserId, campaignId, JSON.stringify(originalEdit.rows[0]!.next_profile)],
+      );
+    }
+  });
+
+  it("normalizes legacy campaign state edits into complete portable authority", async () => {
+    const original = await pool.query<{ state_snapshot_private: unknown }>(
+      `SELECT state_snapshot_private FROM campaign_state_edits
+        WHERE owner_user_id=$1 AND campaign_id=$2 AND revision=1`,
+      [ownerUserId, campaignId],
+    );
+    await pool.query(
+      `UPDATE campaign_state_edits SET state_snapshot_private=$3::jsonb
+        WHERE owner_user_id=$1 AND campaign_id=$2 AND revision=1`,
+      [ownerUserId, campaignId, JSON.stringify({ trackers: [{ name: "Legacy state", value: "open" }] })],
+    );
+
+    try {
+      const exported = await exportArchive();
+      await expect(withStagedArchive(
+        exported.bytes,
+        limits,
+        (staged) => inspectSystemArchiveForPreview(staged, limits),
+      )).resolves.toMatchObject({ recordsByDomain: { campaigns: 1, "campaign-history": expect.any(Number) } });
+    } finally {
+      await pool.query(
+        `UPDATE campaign_state_edits SET state_snapshot_private=$3::jsonb
+          WHERE owner_user_id=$1 AND campaign_id=$2 AND revision=1`,
+        [ownerUserId, campaignId, JSON.stringify(original.rows[0]!.state_snapshot_private)],
+      );
+    }
+  });
+
+  it("excludes turnless legacy illustration history from the portable System Archive", async () => {
+    const illustrationSetId = randomUUID();
+    const illustrationSegmentId = randomUUID();
+    await pool.query(
+      `INSERT INTO turn_illustration_sets (
+         id,owner_user_id,campaign_id,turn_id,source_text_hash,segment_word_count,
+         images_per_segment,prompt_mode,status,is_active,character_visual_reference
+       ) VALUES ($1,$2,$3,NULL,'legacy-turnless-set',500,1,'legacy','completed',false,'')`,
+      [illustrationSetId, ownerUserId, campaignId],
+    );
+    await pool.query(
+      `INSERT INTO turn_illustration_segments (
+         id,owner_user_id,illustration_set_id,campaign_id,turn_id,ordinal,start_offset,end_offset,
+         start_word,end_word,source_text,source_text_hash,direct_prompt,resolved_prompt,prompt_source,status
+       ) VALUES ($1,$2,$3,$4,NULL,0,0,20,0,3,'Legacy provisional scene.','legacy-turnless-segment',
+                 'Legacy provisional scene.','Legacy provisional scene.','legacy','completed')`,
+      [illustrationSegmentId, ownerUserId, illustrationSetId, campaignId],
+    );
+
+    try {
+      const exported = await exportArchive();
+      await expect(withStagedArchive(
+        exported.bytes,
+        limits,
+        (staged) => inspectSystemArchiveForPreview(staged, limits),
+      )).resolves.toMatchObject({ recordsByDomain: { campaigns: 1, "campaign-history": expect.any(Number) } });
+
+      const archive = await JSZip.loadAsync(exported.bytes);
+      const history = (await Promise.all(Object.values(archive.files)
+        .filter((entry) => entry.name.startsWith("records/campaign-history/") && !entry.dir)
+        .map(async (entry) => (await entry.async("string")).trim().split("\n").filter(Boolean)
+          .map((line) => JSON.parse(line) as { sourceId: string })))).flat();
+      expect(history).not.toContainEqual(expect.objectContaining({ sourceId: illustrationSetId }));
+      expect(history).not.toContainEqual(expect.objectContaining({ sourceId: illustrationSegmentId }));
+    } finally {
+      await pool.query("DELETE FROM turn_illustration_segments WHERE id=$1", [illustrationSegmentId]);
+      await pool.query("DELETE FROM turn_illustration_sets WHERE id=$1", [illustrationSetId]);
+    }
+  });
+
+  it("retains generation context for another version of the campaign's world", async () => {
+    const historicalVersionId = randomUUID();
+    const generationContextId = randomUUID();
+    const sourceVersion = await pool.query<{ content: unknown }>(
+      "SELECT content FROM world_versions WHERE id=$1",
+      [worldVersionId],
+    );
+    await pool.query(
+      `INSERT INTO world_versions (
+         id,world_id,owner_user_id,version_number,content,source_hash,release_notes,created_from_revision
+       ) VALUES ($1,$2,$3,2,$4::jsonb,$5,'Historical image context',2)`,
+      [historicalVersionId, worldId, ownerUserId, JSON.stringify(sourceVersion.rows[0]!.content), sha256("historical-image-context")],
+    );
+    await pool.query(
+      `INSERT INTO asset_generation_contexts (
+         id,owner_user_id,asset_id,created_by_user_id,world_id,world_version_id,
+         campaign_id,turn_id,target_type
+       ) VALUES ($1,$2,$3,$2,$4,$5,$6,$7,'turn_illustration')`,
+      [generationContextId, ownerUserId, originals[0]!.id, worldId, historicalVersionId, campaignId, turnId],
+    );
+
+    try {
+      const exported = await exportArchive();
+      await expect(withStagedArchive(
+        exported.bytes,
+        limits,
+        (staged) => inspectSystemArchiveForPreview(staged, limits),
+      )).resolves.toMatchObject({ recordsByDomain: { campaigns: 1 } });
+    } finally {
+      await pool.query("DELETE FROM asset_generation_contexts WHERE id=$1", [generationContextId]);
+      await pool.query("DELETE FROM world_versions WHERE id=$1", [historicalVersionId]);
+    }
+  });
+
   it("validates the exported System Archive into a non-mutating logical preview", async () => {
     const exported = await exportArchive();
     const preview = await withStagedArchive(
@@ -911,7 +1154,7 @@ integration("deterministic owner-wide System Archive export", () => {
     expect(preview).toMatchObject({
       formatVersion: 1,
       sourceApplication: "0.1.0",
-      sourceMigration: "0079_resumable_system_archive_uploads",
+      sourceMigration: "0080_published_asset_derivative_reservations",
       archiveFingerprint: exported.result.artifact.contentFingerprint,
       sourceOwnerCount: 1,
       assetCount: 4,
@@ -939,7 +1182,7 @@ integration("deterministic owner-wide System Archive export", () => {
       }));
       const destination = {
         initialOwnerId: ownerUserId,
-        latestMigration: "0079_resumable_system_archive_uploads",
+        latestMigration: "0080_published_asset_derivative_reservations",
         authoritativeCountsHash: sha256("empty-authority"),
         activeJobsHash: sha256("no-active-work"),
         checkedAt: "2026-08-25T12:00:00.000Z",
@@ -973,9 +1216,9 @@ integration("deterministic owner-wide System Archive export", () => {
         versions: {
           archiveFormat: 1,
           sourceApplication: "0.1.0",
-          sourceMigration: "0079_resumable_system_archive_uploads",
+          sourceMigration: "0080_published_asset_derivative_reservations",
           destinationApplication: "0.1.0",
-          destinationMigration: "0079_resumable_system_archive_uploads",
+          destinationMigration: "0080_published_asset_derivative_reservations",
         },
         archiveFingerprint: exported.result.artifact.contentFingerprint,
         destinationEmpty: true,
@@ -1008,7 +1251,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0079_resumable_system_archive_uploads",
+            latestMigration: "0080_published_asset_derivative_reservations",
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1049,7 +1292,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0079_resumable_system_archive_uploads",
+            latestMigration: "0080_published_asset_derivative_reservations",
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1086,7 +1329,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0079_resumable_system_archive_uploads",
+            latestMigration: "0080_published_asset_derivative_reservations",
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1138,7 +1381,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0079_resumable_system_archive_uploads",
+            latestMigration: "0080_published_asset_derivative_reservations",
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1534,7 +1777,7 @@ integration("deterministic owner-wide System Archive export", () => {
     await expect(writer.publish({
       manifest: {
         sourceApplication: "0.1.0",
-        sourceMigration: "0079_resumable_system_archive_uploads",
+        sourceMigration: "0080_published_asset_derivative_reservations",
         sourceInstallationId: ownerUserId,
         sourceOwnerCount: 1,
         sourceOwner: {
@@ -1582,7 +1825,7 @@ integration("deterministic owner-wide System Archive export", () => {
     await expect(writer.publish({
       manifest: {
         sourceApplication: "0.1.0",
-        sourceMigration: "0079_resumable_system_archive_uploads",
+        sourceMigration: "0080_published_asset_derivative_reservations",
         sourceInstallationId: ownerUserId,
         sourceOwnerCount: 1,
         sourceOwner: {
@@ -1643,7 +1886,7 @@ integration("deterministic owner-wide System Archive export", () => {
         await expect(writer.publish({
           manifest: {
             sourceApplication: "0.1.0",
-            sourceMigration: "0079_resumable_system_archive_uploads",
+            sourceMigration: "0080_published_asset_derivative_reservations",
             sourceInstallationId: ownerUserId,
             sourceOwnerCount: 1,
             sourceOwner: {
@@ -1668,7 +1911,7 @@ integration("deterministic owner-wide System Archive export", () => {
           [ownerUserId, leaseOwner],
         )).resolves.toMatchObject({ rows: [{ status: "cleaned" }, { status: "cleaned" }] });
         expect(await readdir(join(privateRoot, "staging"))).toEqual([]);
-        expect(await readdir(join(privateRoot, "artifacts"))).toEqual([]);
+        await expect(stat(join(privateRoot, "artifacts"))).rejects.toMatchObject({ code: "ENOENT" });
       } finally {
         await storage.close();
         await rm(privateRoot, { recursive: true, force: true });
@@ -2197,6 +2440,79 @@ integration("deterministic owner-wide System Archive export", () => {
               (SELECT count(*)::text FROM asset_references WHERE asset_id=$2) AS references`,
       [worldId, assetId],
     )).resolves.toMatchObject({ rows: [{ worlds: "0", assets: "0", references: "0" }] });
+  });
+
+  it("restores a v2 legacy direct campaign asset binding without a reference-authority row", async () => {
+    await pool.query("TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE");
+    await pool.query("DELETE FROM system_archive_jobs");
+    await pool.query("DELETE FROM system_archive_uploads");
+    const imports = createPostgresSystemArchiveImportRepository(pool);
+    const owner = { ownerUserId };
+    const destination = await imports.destinationFingerprint(owner, {});
+    const worldId = randomUUID();
+    const versionId = randomUUID();
+    const campaignId = randomUUID();
+    const assetId = randomUUID();
+    const asset = systemArchiveAssetRecordV2Schema.parse({
+      sourceAssetId: assetId,
+      contentHash: sha256("legacy-direct-campaign-asset"),
+      archivePath: `assets/sha256/bb/${"b".repeat(64)}.png`,
+      mimeType: "image/png",
+      byteLength: 1,
+      pixelWidth: 1,
+      pixelHeight: 1,
+      technicalMetadata: {},
+      library: {
+        title: "Legacy direct campaign asset",
+        caption: "",
+        notes: "",
+        tags: [],
+        origin: "imported",
+        reviewStatus: "eligible",
+        reuseScope: "campaign",
+        automaticReuseEnabled: false,
+        contentCategories: [],
+        favorite: false,
+        archivedAt: null,
+      },
+      createdAt: "2026-08-25T12:00:00.000Z",
+      bindings: [{ role: "campaign_asset", campaignId }],
+      authority: { references: [], library: null },
+    });
+
+    await expect(imports.withAtomicImport(owner, { destination, ignore: {} }, async (transaction) => {
+      await transaction.database.query(
+        "INSERT INTO worlds (id,owner_user_id,title,status) VALUES ($1,$2,'Legacy binding world','active')",
+        [worldId, ownerUserId],
+      );
+      await transaction.database.query(
+        `INSERT INTO world_versions (id,world_id,owner_user_id,version_number,content)
+         VALUES ($1,$2,$3,1,'{}'::jsonb)`,
+        [versionId, worldId, ownerUserId],
+      );
+      await transaction.database.query(
+        `INSERT INTO campaigns (id,owner_user_id,world_version_id,title)
+         VALUES ($1,$2,$3,'Legacy binding campaign')`,
+        [campaignId, ownerUserId, versionId],
+      );
+      await transaction.database.query(
+        `INSERT INTO assets (
+           id,owner_user_id,content_hash,storage_driver,storage_path,mime_type,
+           byte_length,pixel_width,pixel_height,technical_metadata
+         ) VALUES ($1,$2,$3,'filesystem','legacy-binding-test','image/png',1,1,1,'{}'::jsonb)`,
+        [assetId, ownerUserId, asset.contentHash],
+      );
+      await transaction.insertAssetBindings(asset);
+    })).resolves.toBeUndefined();
+
+    await expect(pool.query<{ campaign_id: string; turn_id: string | null; asset_role: string }>(
+      "SELECT campaign_id,turn_id,asset_role FROM asset_references WHERE asset_id=$1",
+      [assetId],
+    )).resolves.toMatchObject({ rows: [{
+      campaign_id: campaignId,
+      turn_id: null,
+      asset_role: "world_asset",
+    }] });
   });
 
   it("rolls back when a logical record matches no destination authority row", async () => {
@@ -3560,7 +3876,6 @@ integration("deterministic owner-wide System Archive export", () => {
   it.runIf(supportsSecureGeneratedArchiveStaging())(
     "executes every queued post-import asset rebuild without changing Original Asset authority",
     async () => {
-      await pool.query("TRUNCATE TABLE assets RESTART IDENTITY CASCADE");
       const imports = createPostgresSystemArchiveImportRepository(pool);
       const assetId = randomUUID();
       const createdAt = "2026-08-25T14:15:16.789Z";
@@ -3656,7 +3971,7 @@ integration("deterministic owner-wide System Archive export", () => {
   );
 
   it("reconciles an ambiguous atomic-import response before compensating prepared assets", async () => {
-    const exported = await exportArchive();
+    const exported = productionImportArchive();
     await withStagedArchive(exported.bytes, limits, async (staged) => {
       const jobId = randomUUID();
       const stagedInputId = randomUUID();
@@ -3677,10 +3992,10 @@ integration("deterministic owner-wide System Archive export", () => {
         jobId,
         stagedInputId,
         uploadId,
-        archiveFingerprint: exported.result.artifact.contentFingerprint,
+        archiveFingerprint: exported.contentFingerprint,
         destination: {
           initialOwnerId: ownerUserId,
-          latestMigration: "0079_resumable_system_archive_uploads",
+          latestMigration: "0080_published_asset_derivative_reservations",
           authoritativeCountsHash: sha256("empty-authority"),
           activeJobsHash: sha256("ignored-active-import"),
           checkedAt: "2026-08-25T12:00:00.000Z",
@@ -3694,6 +4009,10 @@ integration("deterministic owner-wide System Archive export", () => {
       const markRebuilding = vi.fn(async () => undefined);
       const enqueueRebuilds = vi.fn(async () => undefined);
       const completeImport = vi.fn(async () => undefined);
+      const withAtomicImport = vi.fn(async (_owner, _request, work) => {
+        await work(transaction as never);
+        throw new Error("connection dropped after COMMIT");
+      });
       const transaction = {
         database: {
           query: vi.fn(async () => ({ rows: [], rowCount: 1 })),
@@ -3719,10 +4038,7 @@ integration("deterministic owner-wide System Archive export", () => {
             reservedAssetIds.push(assetId);
             return { assetId, ownerUserId, lifecycle: "prepared" };
           }),
-          withAtomicImport: vi.fn(async (_owner, _request, work) => {
-            await work(transaction as never);
-            throw new Error("connection dropped after COMMIT");
-          }),
+          withAtomicImport,
           markImportedJobRebuilding: markRebuilding,
           enqueueDerivedRebuilds: enqueueRebuilds,
           completeImportedJob: completeImport,
@@ -3787,6 +4103,13 @@ integration("deterministic owner-wide System Archive export", () => {
         { ownerUserId },
         { campaignIds: [rebuildCampaignId], assetIds: reservedAssetIds },
       );
+      expect(withAtomicImport).toHaveBeenCalledWith(
+        { ownerUserId },
+        expect.objectContaining({
+          ignore: expect.objectContaining({ ignoreAssetIds: reservedAssetIds }),
+        }),
+        expect.any(Function),
+      );
       expect(completeImport).toHaveBeenCalledOnce();
     });
   });
@@ -3837,9 +4160,7 @@ integration("deterministic owner-wide System Archive export", () => {
   });
 
   it("returns the same queued import when preview consumption is retried after response loss", async () => {
-    await pool.query("TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE");
-    await pool.query("DELETE FROM system_archive_jobs");
-    await pool.query("DELETE FROM system_archive_uploads");
+    await resetSystemImportDestination();
     const operation = await pool.query<{ id: string }>(
       `INSERT INTO durable_filesystem_operations (
          owner_user_id,operation_token_hash,purpose,resource_kind,operation_scope_hash,
@@ -4011,9 +4332,7 @@ integration("deterministic owner-wide System Archive export", () => {
   });
 
   it("renews retained worker authority when a locked import crosses its original lease", async () => {
-    await pool.query("TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE");
-    await pool.query("DELETE FROM system_archive_jobs");
-    await pool.query("DELETE FROM system_archive_uploads");
+    await resetSystemImportDestination();
     const operation = await pool.query<{ id: string }>(
       `INSERT INTO durable_filesystem_operations (
          owner_user_id,operation_token_hash,purpose,resource_kind,operation_scope_hash,
@@ -4162,7 +4481,7 @@ integration("deterministic owner-wide System Archive export", () => {
           archiveFingerprint: sha256("expired-preview"),
           destinationFingerprint: {
             initialOwnerId: ownerUserId,
-            latestMigration: "0079_resumable_system_archive_uploads",
+            latestMigration: "0080_published_asset_derivative_reservations",
             authoritativeCountsHash: sha256("authority"),
             activeJobsHash: sha256("jobs"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -4218,7 +4537,7 @@ integration("deterministic owner-wide System Archive export", () => {
     });
     const destination = {
       initialOwnerId: ownerUserId,
-      latestMigration: "0079_resumable_system_archive_uploads",
+      latestMigration: "0080_published_asset_derivative_reservations",
       authoritativeCountsHash: sha256("empty-authority"),
       activeJobsHash: sha256("ignored-import"),
       checkedAt: "2026-08-25T12:00:00.000Z",
@@ -4341,10 +4660,8 @@ integration("deterministic owner-wide System Archive export", () => {
   it.skipIf(!supportsSecureGeneratedArchiveStaging())(
     "consumes opaque preview authority and restores through production staging",
     async () => {
-      const exported = await exportArchive();
-      await pool.query("TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE");
-      await pool.query("DELETE FROM system_archive_jobs");
-      await pool.query("DELETE FROM system_archive_uploads");
+      const exported = productionImportArchive();
+      await resetSystemImportDestination();
 
       const privateRoot = await mkdtemp(join(tmpdir(), "infinitequest-system-import-production-"));
       const privateArchiveRoot = join(privateRoot, "archive");
@@ -4423,11 +4740,9 @@ integration("deterministic owner-wide System Archive export", () => {
   it.skipIf(!supportsSecureGeneratedArchiveStaging())(
     "rolls back logical authority when production Original Asset attachment fails and preserves shared bytes",
     async () => {
-      const exported = await exportArchive();
-      expect(exported.result.report.originalAssets).toBeGreaterThan(1);
-      await pool.query("TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE");
-      await pool.query("DELETE FROM system_archive_jobs");
-      await pool.query("DELETE FROM system_archive_uploads");
+      const exported = productionImportArchive();
+      expect(exported.originalAssets).toBeGreaterThan(1);
+      await resetSystemImportDestination();
 
       const privateRoot = await mkdtemp(join(tmpdir(), "infinitequest-system-import-rollback-"));
       const privateArchiveRoot = join(privateRoot, "archive");
@@ -4454,7 +4769,7 @@ integration("deterministic owner-wide System Archive export", () => {
             jobId,
             stagedInputId,
             uploadId,
-            archiveFingerprint: exported.result.artifact.contentFingerprint,
+            archiveFingerprint: exported.contentFingerprint,
             destination,
             status: "revalidating" as const,
             report: null,

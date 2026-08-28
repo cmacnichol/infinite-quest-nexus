@@ -110,6 +110,15 @@ function safeSystemArchiveErrorCode(error: unknown): string {
   return parsed.success ? parsed.data : "archive-operation-failed";
 }
 
+function safeSystemArchiveDiagnostic(error: unknown): string | undefined {
+  const value = typeof error === "object" && error !== null && "diagnostic" in error
+    ? (error as { diagnostic?: unknown }).diagnostic
+    : undefined;
+  return typeof value === "string" && /^System Archive [A-Za-z .-]{1,160}$/u.test(value)
+    ? value
+    : undefined;
+}
+
 function defaultOptionalLanes(
   pool: DatabasePool,
   config: RuntimeConfig,
@@ -305,7 +314,13 @@ export async function runWorker(
             event: `worker_${lane.name}_error`,
             workerId,
             ...(lane.name === "system-archive"
-              ? { errorCode: safeSystemArchiveErrorCode(error) }
+              ? (() => {
+                const diagnostic = safeSystemArchiveDiagnostic(error);
+                return {
+                  errorCode: safeSystemArchiveErrorCode(error),
+                  ...(diagnostic === undefined ? {} : { diagnostic }),
+                };
+              })()
               : { message: error instanceof Error ? error.message : String(error) })
           });
           return false;

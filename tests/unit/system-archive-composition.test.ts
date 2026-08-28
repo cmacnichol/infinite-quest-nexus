@@ -7,6 +7,7 @@ import { createSystemArchiveAssetStorageComposition } from "../../services/runti
 import {
   createFilesystemSystemArchiveWriter,
   createPrivateSystemArchiveStaging,
+  createSystemArchiveOriginalAssetReader,
   type SystemArchiveStagedContent,
   type SystemArchiveStagingPort,
 } from "../../services/runtime/src/system-archive-composition.js";
@@ -59,6 +60,35 @@ function memoryStaging(): SystemArchiveStagingPort & Readonly<{ activeCount(): n
 }
 
 describe("System Archive durable writer composition", () => {
+  it("opens an Original Asset smaller than the default private stream chunk", async () => {
+    const finalize = vi.fn(async () => undefined);
+    const openAssetSession = vi.fn(async () => ({
+      chunks: {
+        async *[Symbol.asyncIterator]() {
+          yield Buffer.from("tiny");
+        },
+      },
+      finalize,
+    }));
+    const reader = createSystemArchiveOriginalAssetReader({
+      storage: { adapter: { openAssetSession } },
+    } as never);
+
+    const source = await reader.openOriginal({
+      owner: { ownerUserId },
+      asset: { sourceAssetId: randomUUID() } as never,
+      maximumBytes: 4,
+    });
+    const chunks: Buffer[] = [];
+    for await (const chunk of source) chunks.push(Buffer.from(chunk));
+
+    expect(Buffer.concat(chunks).toString("utf8")).toBe("tiny");
+    expect(openAssetSession).toHaveBeenCalledWith(expect.objectContaining({
+      limits: expect.objectContaining({ maximumBytes: 4, chunkBytes: 4 }),
+    }));
+    expect(finalize).toHaveBeenCalledWith("eof");
+  });
+
   it("captures the existing private asset-publication boundary and closes storage once", async () => {
     const close = vi.fn(async () => undefined);
     const publication = { identity: "private-test-double" };
@@ -223,8 +253,8 @@ describe("System Archive durable writer composition", () => {
       finalize: vi.fn(async () => undefined),
     }));
     const now = vi.fn()
-      .mockReturnValueOnce(new Date("2026-08-25T12:00:00.000Z"))
-      .mockReturnValueOnce(new Date("2026-08-25T18:00:00.000Z"));
+      .mockReturnValueOnce(new Date("2030-08-25T12:00:00.000Z"))
+      .mockReturnValueOnce(new Date("2030-08-25T18:00:00.000Z"));
     const staging = createPrivateSystemArchiveStaging({
       stagePortableScratch,
       openStagedInputSession: openStagedInputSession as never,
@@ -245,11 +275,11 @@ describe("System Archive durable writer composition", () => {
     }
 
     expect(stagePortableScratch).toHaveBeenCalledWith(expect.objectContaining({
-      expiresAt: "2026-08-26T12:00:00.000Z",
+      expiresAt: "2030-08-26T12:00:00.000Z",
     }));
     expect(openStagedInputSession).toHaveBeenCalledWith(expect.objectContaining({
       limits: expect.objectContaining({
-        deadlineAt: "2026-08-26T18:00:00.000Z",
+        deadlineAt: "2030-08-26T18:00:00.000Z",
       }),
     }));
     expect(now).toHaveBeenCalledTimes(2);

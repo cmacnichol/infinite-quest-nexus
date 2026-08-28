@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -8,7 +8,7 @@ import { Readable } from "node:stream";
 import { chromium, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import JSZip from "jszip";
 import sharp from "sharp";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import type { ArchiveAssetBinding } from "../../packages/contracts/src/archives.js";
 import { characterProfileSchema, worldContentSchema } from "../../packages/contracts/src/world-library.js";
 import {
@@ -60,7 +60,7 @@ const releaseGate = process.platform === "linux"
   && supportsSecureGeneratedArchiveStaging()
   ? it
   : it.skip;
-const releaseChunkBytes = 1024 * 1024;
+const releaseChunkBytes = 4 * 1024 * 1024;
 const representativeDomainCounts = Object.freeze({
   providers: 3,
   prompts: 3,
@@ -112,6 +112,23 @@ const excludedSecretAndOperationalSentinelVariants = Object.freeze([
   })),
 ]);
 const representativeTimestamp = "2026-08-25T12:00:00.000Z";
+const archiveTimestampPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u;
+
+function normalizeArchiveTimestampsForAssertion<T>(value: T): T {
+  if (typeof value === "string" && archiveTimestampPattern.test(value)) {
+    return new Date(value).toISOString() as T;
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => normalizeArchiveTimestampsForAssertion(entry)) as T;
+  }
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [
+      key,
+      normalizeArchiveTimestampsForAssertion(entry),
+    ])) as T;
+  }
+  return value;
+}
 const representativeTrackers = Object.freeze([
   Object.freeze({ id: "gate", name: "Gate", value: "open", rules: "Preserve" }),
 ]);
@@ -285,6 +302,8 @@ type RepresentativeOwner = Readonly<{
   checkpointOpenThreadId: string;
   importId: string;
   costEventIds: readonly string[];
+  costEventLocalCallIds: readonly string[];
+  activityId: string;
   activitySourceId: string;
   illustrationSetId: string;
   illustrationSegmentId: string;
@@ -326,13 +345,73 @@ async function runProcess(executable: string, argumentsList: readonly string[]):
   });
 }
 
-let releaseBuild: Promise<void> | undefined;
+let releaseBuild: Promise<string> | undefined;
+let releaseRoot: string | undefined;
 
-async function buildReleaseArtifacts(): Promise<void> {
+async function assembleReleaseRoot(): Promise<string> {
   const packageManager = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
-  releaseBuild ??= runProcess(packageManager, ["build"]);
-  await releaseBuild;
+  await runProcess(packageManager, ["build"]);
+
+  const workspaceRoot = resolve(".");
+  const candidateRoot = await mkdtemp(join(tmpdir(), "iq-system-release-runtime-"));
+  try {
+    await Promise.all([
+      mkdir(join(candidateRoot, "packages/contracts"), { recursive: true }),
+      mkdir(join(candidateRoot, "node_modules/@infinite-quest"), { recursive: true }),
+      mkdir(join(candidateRoot, "database"), { recursive: true }),
+      mkdir(join(candidateRoot, "apps/web"), { recursive: true }),
+      mkdir(join(candidateRoot, "apps/web-next"), { recursive: true }),
+    ]);
+    await Promise.all([
+      cp(join(workspaceRoot, "dist"), join(candidateRoot, "dist"), { recursive: true }),
+      cp(join(workspaceRoot, "database/migrations"), join(candidateRoot, "database/migrations"), { recursive: true }),
+      cp(join(workspaceRoot, "scripts"), join(candidateRoot, "scripts"), { recursive: true }),
+      cp(join(workspaceRoot, "apps/web/dist"), join(candidateRoot, "apps/web/dist"), { recursive: true }),
+      cp(join(workspaceRoot, "apps/web-next/dist"), join(candidateRoot, "apps/web-next/dist"), { recursive: true }),
+      cp(
+        join(workspaceRoot, "packages/contracts/package.json"),
+        join(candidateRoot, "packages/contracts/package.json"),
+      ),
+      cp(
+        join(workspaceRoot, "dist/packages/contracts/src"),
+        join(candidateRoot, "packages/contracts/src"),
+        { recursive: true },
+      ),
+    ]);
+    const nodeModulesRoot = join(workspaceRoot, "node_modules");
+    for (const entry of await readdir(nodeModulesRoot, { withFileTypes: true })) {
+      if (entry.name === "@infinite-quest") continue;
+      await symlink(
+        join(nodeModulesRoot, entry.name),
+        join(candidateRoot, "node_modules", entry.name),
+        entry.isDirectory() ? "dir" : "file",
+      );
+    }
+    await symlink(
+      join(candidateRoot, "packages/contracts"),
+      join(candidateRoot, "node_modules/@infinite-quest/contracts"),
+      "dir",
+    );
+    return candidateRoot;
+  } catch (error) {
+    await rm(candidateRoot, { recursive: true, force: true });
+    throw error;
+  }
 }
+
+async function buildReleaseArtifacts(): Promise<string> {
+  releaseBuild ??= assembleReleaseRoot();
+  releaseRoot = await releaseBuild;
+  return releaseRoot;
+}
+
+afterAll(async () => {
+  if (releaseRoot !== undefined) {
+    await rm(releaseRoot, { recursive: true, force: true });
+    releaseRoot = undefined;
+    releaseBuild = undefined;
+  }
+});
 
 async function freePort(): Promise<number> {
   return new Promise<number>((resolvePromise, reject) => {
@@ -377,8 +456,10 @@ function compiledRuntimeEnvironment(input: Readonly<{
   assetRoot: string;
   port: number;
   role: "api" | "all" | "worker";
+  runtimeRoot?: string;
   pollIntervalMs?: number;
 }>): NodeJS.ProcessEnv {
+  const runtimeRoot = input.runtimeRoot ?? resolve(".");
   return {
     ...process.env,
     APP_ROLE: input.role,
@@ -386,12 +467,12 @@ function compiledRuntimeEnvironment(input: Readonly<{
     APP_PORT: String(input.port),
     DATABASE_URL: input.databaseUrl,
     DATABASE_MAX_CONNECTIONS: "12",
-    MIGRATION_DIRECTORY: resolve("database/migrations"),
+    MIGRATION_DIRECTORY: resolve(runtimeRoot, "database/migrations"),
     WORKER_POLL_INTERVAL_MS: String(input.pollIntervalMs ?? 250),
     WORKER_LEASE_SECONDS: "15",
     WORKER_GENERATION_CONCURRENCY: "1",
-    LEGACY_WEB_ROOT: resolve("apps/web/dist"),
-    NEXT_WEB_ROOT: resolve("apps/web-next/dist"),
+    LEGACY_WEB_ROOT: resolve(runtimeRoot, "apps/web/dist"),
+    NEXT_WEB_ROOT: resolve(runtimeRoot, "apps/web-next/dist"),
     ASSET_STORAGE_ROOT: input.assetRoot,
     ARCHIVE_STORAGE_ROOT: input.archiveRoot,
     ARCHIVE_PREVIEW_TTL_SECONDS: "1800",
@@ -415,10 +496,11 @@ async function startCompiledRuntime(input: Readonly<{
   assetRoot: string;
   port: number;
   role: "api" | "all";
+  runtimeRoot: string;
 }>): Promise<StartedRuntime> {
   const baseUrl = `http://127.0.0.1:${input.port}`;
-  const child = spawn(process.execPath, [resolve("dist/services/runtime/src/main.js")], {
-    cwd: resolve("."),
+  const child = spawn(process.execPath, [resolve(input.runtimeRoot, "dist/services/runtime/src/main.js")], {
+    cwd: input.runtimeRoot,
     env: compiledRuntimeEnvironment({ ...input, role: input.role }),
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -455,9 +537,10 @@ async function startCompiledWorker(input: Readonly<{
   databaseUrl: string;
   archiveRoot: string;
   assetRoot: string;
+  runtimeRoot: string;
 }>): Promise<StartedWorker> {
-  const child = spawn(process.execPath, [resolve("dist/services/runtime/src/main.js")], {
-    cwd: resolve("."),
+  const child = spawn(process.execPath, [resolve(input.runtimeRoot, "dist/services/runtime/src/main.js")], {
+    cwd: input.runtimeRoot,
     env: compiledRuntimeEnvironment({
       ...input,
       port: await freePort(),
@@ -1030,12 +1113,14 @@ async function seedRepresentativeOwner(pool: DatabasePool, assetRoot: string): P
     [ownerUserId, sha256("release-source"), campaignIds[0]],
   );
   const costEventIds: string[] = [];
+  const costEventLocalCallIds: string[] = [];
   for (const [index, category] of ["story", "image"].entries()) {
-    const cost = await pool.query<{ id: string }>(
+    const cost = await pool.query<{ id: string; local_call_id: string }>(
       `INSERT INTO provider_cost_events (
          owner_user_id,campaign_id,turn_id,provider_profile_id,provider_type,category,
          operation,amount,currency
-       ) VALUES ($1,$2,$3,$4,'openai_compatible',$5,'response',$6,'USD') RETURNING id`,
+       ) VALUES ($1,$2,$3,$4,'openai_compatible',$5,'response',$6,'USD')
+       RETURNING id,local_call_id`,
       [
         ownerUserId,
         campaignIds[index]!,
@@ -1046,6 +1131,7 @@ async function seedRepresentativeOwner(pool: DatabasePool, assetRoot: string): P
       ],
     );
     costEventIds.push(cost.rows[0]!.id);
+    costEventLocalCallIds.push(cost.rows[0]!.local_call_id);
   }
   const activity = await pool.query<{ id: string }>(
     `INSERT INTO activity_events (owner_user_id,campaign_id,event_type,details)
@@ -1084,12 +1170,12 @@ async function seedRepresentativeOwner(pool: DatabasePool, assetRoot: string): P
 
   const originalHashes: string[] = [];
   const originalDimensions: Array<Readonly<{ byteLength: number; pixelWidth: number; pixelHeight: number }>> = [];
-  const largeRaw = randomBytes(2_200 * 2_200 * 4);
+  const largeRaw = randomBytes(1_800 * 1_800 * 4);
   const originals = await Promise.all([
     sharp({ create: { width: 4, height: 4, channels: 4, background: "#ff0000" } }).png().toBuffer(),
     sharp({ create: { width: 4, height: 4, channels: 4, background: "#00ff00" } }).png().toBuffer(),
     sharp({ create: { width: 4, height: 4, channels: 4, background: "#0000ff" } }).png().toBuffer(),
-    sharp(largeRaw, { raw: { width: 2_200, height: 2_200, channels: 4 } }).png({ compressionLevel: 0 }).toBuffer(),
+    sharp(largeRaw, { raw: { width: 1_800, height: 1_800, channels: 4 } }).png({ compressionLevel: 0 }).toBuffer(),
   ]);
   const assetIds: string[] = [];
   const titles = ["cover", "selected", "alternate", "unbound-archived"] as const;
@@ -1164,32 +1250,34 @@ async function seedRepresentativeOwner(pool: DatabasePool, assetRoot: string): P
   );
 
   const timestampUpdates = [
-    "UPDATE prompt_template_overrides SET created_at=$1,updated_at=$1 WHERE owner_user_id=$2",
-    "UPDATE worlds SET created_at=$1,updated_at=$1 WHERE owner_user_id=$2",
-    "UPDATE world_versions SET created_at=$1,published_at=$1 WHERE owner_user_id=$2",
-    "UPDATE world_drafts SET created_at=$1,updated_at=$1 WHERE owner_user_id=$2",
-    "UPDATE campaigns SET created_at=$1,updated_at=$1 WHERE owner_user_id=$2",
-    "UPDATE turns SET created_at=$1,accepted_at=$1 WHERE owner_user_id=$2",
-    "UPDATE turn_narration_corrections SET created_at=$1 WHERE owner_user_id=$2",
-    "UPDATE campaign_state SET updated_at=$1 WHERE owner_user_id=$2",
-    "UPDATE campaign_character_profile_edits SET created_at=$1 WHERE owner_user_id=$2",
-    "UPDATE campaign_state_edits SET created_at=$1 WHERE owner_user_id=$2",
-    "UPDATE campaign_world_migrations SET created_at=$1 WHERE owner_user_id=$2",
-    "UPDATE campaign_world_transfers SET created_at=$1 WHERE owner_user_id=$2",
-    "UPDATE campaign_memory_configs SET created_at=$1,updated_at=$1 WHERE owner_user_id=$2",
-    "UPDATE campaign_illustration_configs SET created_at=$1,updated_at=$1 WHERE owner_user_id=$2",
-    "UPDATE campaign_canonical_facts SET created_at=$1,updated_at=$1 WHERE owner_user_id=$2",
-    "UPDATE chronicle_memories SET created_at=$1,updated_at=$1 WHERE owner_user_id=$2",
-    "UPDATE summary_checkpoints SET created_at=$1 WHERE owner_user_id=$2",
-    "UPDATE imports SET created_at=$1,completed_at=$1 WHERE owner_user_id=$2",
-    "UPDATE provider_cost_events SET occurred_at=$1,created_at=$1 WHERE owner_user_id=$2",
-    "UPDATE activity_events SET created_at=$1 WHERE owner_user_id=$2",
-    "UPDATE turn_illustration_sets SET created_at=$1,completed_at=$1 WHERE owner_user_id=$2",
-    "UPDATE turn_illustration_segments SET created_at=$1,updated_at=$1 WHERE owner_user_id=$2",
-    "UPDATE turn_illustration_segment_assets SET created_at=$1 WHERE owner_user_id=$2",
-    "UPDATE assets SET created_at=$1 WHERE owner_user_id=$2",
+    "UPDATE provider_profiles SET created_at=$1::timestamptz,updated_at=$1::timestamptz WHERE owner_user_id=$2",
+    "UPDATE prompt_template_overrides SET created_at=$1::timestamptz,updated_at=$1::timestamptz WHERE owner_user_id=$2",
+    "UPDATE worlds SET created_at=$1::timestamptz,updated_at=$1::timestamptz WHERE owner_user_id=$2",
+    "UPDATE world_versions SET created_at=$1::timestamptz,published_at=$1::timestamptz WHERE owner_user_id=$2",
+    "UPDATE world_drafts SET created_at=$1::timestamptz,updated_at=$1::timestamptz WHERE owner_user_id=$2",
+    "UPDATE campaigns SET created_at=$1::timestamptz,updated_at=$1::timestamptz WHERE owner_user_id=$2",
+    "UPDATE turns SET created_at=$1::timestamptz,accepted_at=$1::timestamptz WHERE owner_user_id=$2",
+    "UPDATE turn_narration_corrections SET created_at=$1::timestamptz WHERE owner_user_id=$2",
+    "UPDATE campaign_state SET updated_at=$1::timestamptz WHERE owner_user_id=$2",
+    "UPDATE campaign_character_profile_edits SET created_at=$1::timestamptz WHERE owner_user_id=$2",
+    "UPDATE campaign_state_edits SET created_at=$1::timestamptz WHERE owner_user_id=$2",
+    "UPDATE campaign_world_migrations SET created_at=$1::timestamptz WHERE owner_user_id=$2",
+    "UPDATE campaign_world_transfers SET created_at=$1::timestamptz WHERE owner_user_id=$2",
+    "UPDATE campaign_memory_configs SET created_at=$1::timestamptz,updated_at=$1::timestamptz WHERE owner_user_id=$2",
+    "UPDATE campaign_illustration_configs SET created_at=$1::timestamptz,updated_at=$1::timestamptz WHERE owner_user_id=$2",
+    "UPDATE campaign_canonical_facts SET created_at=$1::timestamptz,updated_at=$1::timestamptz WHERE owner_user_id=$2",
+    "UPDATE chronicle_memories SET created_at=$1::timestamptz,updated_at=$1::timestamptz WHERE owner_user_id=$2",
+    "UPDATE summary_checkpoints SET created_at=$1::timestamptz WHERE owner_user_id=$2",
+    "UPDATE imports SET created_at=$1::timestamptz,completed_at=$1::timestamptz WHERE owner_user_id=$2",
+    "UPDATE provider_cost_events SET occurred_at=$1::timestamptz,created_at=$1::timestamptz WHERE owner_user_id=$2",
+    "UPDATE activity_events SET created_at=$1::timestamptz WHERE owner_user_id=$2",
+    "UPDATE turn_illustration_sets SET created_at=$1::timestamptz,completed_at=$1::timestamptz WHERE owner_user_id=$2",
+    "UPDATE turn_illustration_segments SET created_at=$1::timestamptz,updated_at=$1::timestamptz WHERE owner_user_id=$2",
+    "UPDATE turn_illustration_segment_assets SET created_at=$1::timestamptz WHERE owner_user_id=$2",
+    "UPDATE assets SET created_at=$1::timestamptz WHERE owner_user_id=$2",
     `UPDATE asset_library_entries
-        SET created_at=$1,updated_at=$1,archived_at=CASE WHEN archived_at IS NULL THEN NULL ELSE $1 END
+        SET created_at=$1::timestamptz,updated_at=$1::timestamptz,
+            archived_at=CASE WHEN archived_at IS NULL THEN NULL ELSE $1::timestamptz END
       WHERE owner_user_id=$2`,
   ] as const;
   for (const update of timestampUpdates) {
@@ -1288,6 +1376,8 @@ async function seedRepresentativeOwner(pool: DatabasePool, assetRoot: string): P
     checkpointOpenThreadId,
     importId: importProvenance.rows[0]!.id,
     costEventIds: Object.freeze(costEventIds),
+    costEventLocalCallIds: Object.freeze(costEventLocalCallIds),
+    activityId: activity.rows[0]!.id,
     activitySourceId,
     illustrationSetId: illustrationSet.rows[0]!.id,
     illustrationSegmentId: segment.rows[0]!.id,
@@ -1316,13 +1406,14 @@ async function createExportThroughPage(page: Page): Promise<SystemExportJobView>
 async function exportThroughReplacementUi(
   browser: Browser,
   runtime: StartedRuntime,
+  runtimeRoot: string,
   databaseUrl: string,
   archiveRoot: string,
   assetRoot: string,
   downloadPath: string,
 ): Promise<SystemExportJobView> {
   const pool = createDatabasePool(databaseUrl, 6);
-  const workerInput = { databaseUrl, archiveRoot, assetRoot } as const;
+  const workerInput = { databaseUrl, archiveRoot, assetRoot, runtimeRoot } as const;
 
   const cancellationContext = await browser.newContext({ acceptDownloads: true });
   let cancellationWorker: StartedWorker | undefined;
@@ -1518,6 +1609,97 @@ function assertRoundThreeArchiveRelationships(
     characterSnapshot: representativeCharacterSnapshot,
     characterProfile: currentCharacterProfile,
     characterProfileRevision: 2,
+    authority: {
+      textProviderProfileId: null,
+      imageProviderProfileId: null,
+      storyLengthProfile: "standard",
+      turnControlStyle: "flexible_scene",
+      legacySettings: {},
+    },
+  });
+  const secondCampaign = records.find((entry) => entry.domain === "campaigns"
+    && entry.sourceId === source.campaignIds[1])?.record as unknown as Record<string, unknown> | undefined;
+  expect(secondCampaign, "campaign must retain exact typed control authority").toMatchObject({
+    authority: {
+      textProviderProfileId: null,
+      imageProviderProfileId: null,
+      storyLengthProfile: "standard",
+      turnControlStyle: "flexible_action",
+      legacySettings: {},
+    },
+  });
+
+  for (const campaignId of source.campaignIds) {
+    const campaignState = records.find((entry) => entry.domain === "campaign-state"
+      && entry.sourceId === campaignId)?.record as unknown as Record<string, unknown> | undefined;
+    const authority = campaignState?.authority as Record<string, unknown> | undefined;
+    expect(authority?.initialStateSnapshot, "campaign state must retain its exact initial authority")
+      .toEqual({});
+  }
+
+  expect(records.find((entry) => entry.domain === "chronicle"
+    && entry.sourceId === source.memoryId)?.record).toEqual({
+    sourceId: source.memoryId,
+    campaignId: source.campaignIds[0],
+    kind: "memory",
+    turnId: source.turnIds[0],
+    memoryKind: "turn_fiction",
+    content: "Release memory",
+    authority: {
+      worldVersionId: source.latestWorldVersionIds[0],
+      ordinal: 1,
+      tokenEstimate: 3,
+      importance: 0.5,
+      entities: ["Gate"],
+      metadata: {},
+      entityIds: [],
+      contentHash: sha256("Release memory"),
+      createdAt: representativeTimestamp,
+      updatedAt: representativeTimestamp,
+    },
+  });
+  expect(records.find((entry) => entry.domain === "chronicle"
+    && entry.sourceId === source.summaryCheckpointId)?.record).toEqual({
+    sourceId: source.summaryCheckpointId,
+    campaignId: source.campaignIds[0],
+    kind: "summary-checkpoint",
+    throughTurn: 2,
+    summaryKind: "campaign_summary",
+    content: { summary: "Release summary", openThreadIds: [source.checkpointOpenThreadId] },
+    authority: { tokenEstimate: 4, createdAt: representativeTimestamp },
+  });
+
+  for (const [index, id] of source.costEventIds.entries()) {
+    expect(records.find((entry) => entry.domain === "cost-events" && entry.sourceId === id)?.record)
+      .toEqual({
+        sourceId: id,
+        campaignId: source.campaignIds[index],
+        authority: {
+          turnId: source.turnIds[index === 0 ? 0 : 2],
+          providerProfileId: source.providerIds[index],
+          localCallId: source.costEventLocalCallIds[index],
+          providerType: "openai_compatible",
+          category: index === 0 ? "story" : "image",
+          operation: "response",
+          requestedModel: "",
+          resolvedModel: "",
+          amount: index === 0 ? "0.010000000000" : "0.020000000000",
+          currency: "USD",
+          usageMetadata: {},
+          occurredAt: representativeTimestamp,
+          createdAt: representativeTimestamp,
+        },
+      });
+  }
+  expect(records.find((entry) => entry.domain === "activity-events")?.record).toEqual({
+    sourceId: source.activityId,
+    campaignId: source.campaignIds[0],
+    eventType: "campaign.accepted_turn",
+    authority: {
+      correlationId: null,
+      details: { summary: "Release activity" },
+      createdAt: representativeTimestamp,
+    },
   });
 
   const history = records.filter((entry) => entry.domain === "campaign-history");
@@ -1538,8 +1720,10 @@ function assertRoundThreeArchiveRelationships(
       campaignId,
       eventType,
       content: event?.record.content,
-      occurredAt: representativeTimestamp,
+      occurredAt: event?.record.occurredAt,
+      authority: eventType === "world-transfer" ? { idempotencyKey: sourceId } : {},
     });
+    expect(new Date(event!.record.occurredAt).toISOString()).toBe(representativeTimestamp);
     expect(JSON.parse(event!.record.content)).toEqual(content);
   };
 
@@ -1581,8 +1765,9 @@ function assertRoundThreeArchiveRelationships(
     eventType: "memory-config",
     content: memoryConfig?.record.content,
     occurredAt: representativeTimestamp,
+    authority: {},
   });
-  expect(JSON.parse(memoryConfig!.record.content)).toEqual({
+  expect(normalizeArchiveTimestampsForAssertion(JSON.parse(memoryConfig!.record.content))).toEqual({
     embeddingEnabled: true,
     embeddingProviderProfileId: source.providerIds[2],
     embeddingModel: "release-embedding",
@@ -1603,8 +1788,9 @@ function assertRoundThreeArchiveRelationships(
     eventType: "illustration-config",
     content: illustrationConfig?.record.content,
     occurredAt: representativeTimestamp,
+    authority: {},
   });
-  expect(JSON.parse(illustrationConfig!.record.content)).toEqual({
+  expect(normalizeArchiveTimestampsForAssertion(JSON.parse(illustrationConfig!.record.content))).toEqual({
     enabled: true,
     providerProfileId: source.providerIds[1],
     model: "image-model",
@@ -1654,9 +1840,13 @@ async function assertRepresentativeArchive(
   const systemEntry = zip.file("system.json");
   const assetsEntry = zip.file("assets/assets.json");
   if (!manifestEntry || !systemEntry || !assetsEntry) throw new Error("Representative archive lacks a required logical payload.");
-  const manifest = systemArchiveManifestSchema.parse(JSON.parse(await manifestEntry.async("string")));
+  const manifest = normalizeArchiveTimestampsForAssertion(
+    systemArchiveManifestSchema.parse(JSON.parse(await manifestEntry.async("string"))),
+  );
   const systemPayload = systemArchivePayloadSchema.parse(JSON.parse(await systemEntry.async("string")));
-  const assetPayload = systemArchiveAssetsPayloadSchema.parse(JSON.parse(await assetsEntry.async("string")));
+  const assetPayload = normalizeArchiveTimestampsForAssertion(
+    systemArchiveAssetsPayloadSchema.parse(JSON.parse(await assetsEntry.async("string"))),
+  );
   expect(manifest).toMatchObject({
     archiveType: "system",
     sourceInstallationId: source.ownerUserId,
@@ -1678,7 +1868,9 @@ async function assertRepresentativeArchive(
       .sort((left, right) => left.name.localeCompare(right.name));
     for (const entry of entries) {
       const lines = (await entry.async("string")).trim().split("\n").filter(Boolean);
-      records.push(...lines.map((line) => systemRecordEnvelopeSchema.parse(JSON.parse(line))));
+      records.push(...lines.map((line) => normalizeArchiveTimestampsForAssertion(
+        systemRecordEnvelopeSchema.parse(JSON.parse(line)),
+      )));
     }
   }
   const actualDomainCounts = Object.fromEntries(SYSTEM_ARCHIVE_DOMAINS.map((domain) => [
@@ -1687,6 +1879,17 @@ async function assertRepresentativeArchive(
   ])) as Record<SystemArchiveDomain, number>;
   expect(actualDomainCounts).toEqual(source.expectedDomainCounts);
   assertRoundThreeArchiveRelationships(records, source);
+
+  for (const record of records) {
+    expect(record.formatVersion).toBe(2);
+    expect(Object.prototype.hasOwnProperty.call(record.record, "authority")).toBe(true);
+  }
+
+  const portableRecord = (record: SystemRecordEnvelope["record"]): Record<string, unknown> => {
+    const portable = { ...record } as Record<string, unknown>;
+    delete portable.authority;
+    return portable;
+  };
 
   const providers = records.filter((entry) => entry.domain === "providers");
   expect(providers).toHaveLength(3);
@@ -1702,11 +1905,25 @@ async function assertRepresentativeArchive(
       retryLimit: 3,
       enabled: false,
       health: "unknown",
+      authority: {
+        providerType: "openai_compatible",
+        providerRole: expected.kind,
+        defaultModel: expected.selectedModel,
+        contextWindowTokens: 32768,
+        maxOutputTokens: 4096,
+        temperature: 0.8,
+        configuration: { retryLimit: 3 },
+        requestTimeoutMs: 321000,
+        enabled: true,
+        isDefault: false,
+        createdAt: representativeTimestamp,
+        updatedAt: representativeTimestamp,
+      },
     });
   }
 
   const prompts = records.filter((entry) => entry.domain === "prompts");
-  expect(prompts.map((entry) => entry.record)).toEqual(expect.arrayContaining([
+  expect(prompts.map((entry) => portableRecord(entry.record))).toEqual(expect.arrayContaining([
     {
       sourceId: source.promptIds[0],
       campaignId: null,
@@ -1731,7 +1948,7 @@ async function assertRepresentativeArchive(
   ]));
 
   const worlds = records.filter((entry) => entry.domain === "worlds");
-  expect(worlds.map((entry) => entry.record)).toEqual(expect.arrayContaining([
+  expect(worlds.map((entry) => portableRecord(entry.record))).toEqual(expect.arrayContaining([
     {
       sourceId: source.worldIds[0], title: "Release World 1", status: "active",
       forkedFromWorldId: null, forkedFromWorldVersionId: null,
@@ -1754,7 +1971,7 @@ async function assertRepresentativeArchive(
           { assetId: source.assetIds[1]!, role: "world_version_asset" as const },
         ]
       : [];
-    expect(versions.find((entry) => entry.sourceId === versionId)?.record).toEqual({
+    expect(portableRecord(versions.find((entry) => entry.sourceId === versionId)!.record)).toEqual({
       sourceId: versionId,
       worldId: source.worldIds[worldIndex],
       versionNumber,
@@ -1767,7 +1984,7 @@ async function assertRepresentativeArchive(
     });
   }
   const drafts = records.filter((entry) => entry.domain === "world-drafts");
-  expect(drafts.map((entry) => entry.record)).toEqual(expect.arrayContaining(source.worldIds.map((worldId, index) => (
+  expect(drafts.map((entry) => portableRecord(entry.record))).toEqual(expect.arrayContaining(source.worldIds.map((worldId, index) => (
     {
       sourceId: worldId,
       worldId,
@@ -1795,6 +2012,13 @@ async function assertRepresentativeArchive(
       characterProfileRevision: 2,
       createdAt: representativeTimestamp,
       updatedAt: representativeTimestamp,
+      authority: {
+        textProviderProfileId: null,
+        imageProviderProfileId: null,
+        storyLengthProfile: "standard",
+        turnControlStyle: "flexible_scene",
+        legacySettings: {},
+      },
     },
     {
       sourceId: source.campaignIds[1],
@@ -1809,10 +2033,17 @@ async function assertRepresentativeArchive(
       characterProfileRevision: 0,
       createdAt: representativeTimestamp,
       updatedAt: representativeTimestamp,
+      authority: {
+        textProviderProfileId: null,
+        imageProviderProfileId: null,
+        storyLengthProfile: "standard",
+        turnControlStyle: "flexible_action",
+        legacySettings: {},
+      },
     },
   ]));
   const turns = records.filter((entry) => entry.domain === "turns");
-  expect(turns.map((entry) => entry.record)).toEqual(expect.arrayContaining([
+  expect(turns.map((entry) => portableRecord(entry.record))).toEqual(expect.arrayContaining([
     {
       sourceId: source.turnIds[0], campaignId: source.campaignIds[0], turnNumber: 1,
       action: "Action 1.1", narration: "Narration 1.1", choices: ["Continue"],
@@ -1832,7 +2063,7 @@ async function assertRepresentativeArchive(
       acceptedAt: representativeTimestamp,
     },
   ]));
-  expect(records.find((entry) => entry.domain === "turn-corrections")?.record).toEqual({
+  expect(portableRecord(records.find((entry) => entry.domain === "turn-corrections")!.record)).toEqual({
     sourceId: source.correctionId,
     turnId: source.turnIds[0],
     revision: 1,
@@ -1845,7 +2076,7 @@ async function assertRepresentativeArchive(
 
   const states = records.filter((entry) => entry.domain === "campaign-state");
   for (const [index, campaignId] of source.campaignIds.entries()) {
-    expect(states.find((entry) => entry.record.campaignId === campaignId)?.record).toEqual({
+    expect(portableRecord(states.find((entry) => entry.record.campaignId === campaignId)!.record)).toEqual({
       sourceId: campaignId,
       campaignId,
       revision: 2,
@@ -1861,7 +2092,7 @@ async function assertRepresentativeArchive(
     const campaignIndex = index < 2 ? 0 : 1;
     const turnNumber = index < 2 ? index + 1 : 1;
     const acceptedMode = acceptedModes.find((entry) => JSON.parse(entry.record.content).turnId === turnId);
-    expect(acceptedMode?.record).toEqual({
+    expect(portableRecord(acceptedMode!.record)).toEqual({
       sourceId: expect.stringMatching(/^[a-f0-9-]{36}$/u),
       campaignId: source.campaignIds[campaignIndex],
       eventType: "accepted-turn-mode",
@@ -1877,7 +2108,7 @@ async function assertRepresentativeArchive(
     expect(acceptedMode?.sourceId).toBe(acceptedMode?.record.sourceId);
   }
   const setHistory = history.find((entry) => entry.record.eventType === "illustration-set");
-  expect(setHistory?.record).toEqual({
+  expect(portableRecord(setHistory!.record)).toEqual({
     sourceId: source.illustrationSetId,
     campaignId: source.campaignIds[0],
     eventType: "illustration-set",
@@ -1885,7 +2116,7 @@ async function assertRepresentativeArchive(
     occurredAt: representativeTimestamp,
   });
   expect(setHistory?.sourceId).toBe(source.illustrationSetId);
-  expect(JSON.parse(setHistory!.record.content)).toEqual({
+  expect(normalizeArchiveTimestampsForAssertion(JSON.parse(setHistory!.record.content))).toEqual({
     turnId: source.turnIds[0],
     segmentWordCount: 100,
     imagesPerSegment: 2,
@@ -1896,7 +2127,7 @@ async function assertRepresentativeArchive(
     completedAt: representativeTimestamp,
   });
   const segmentHistory = history.find((entry) => entry.record.eventType === "illustration-segment");
-  expect(segmentHistory?.record).toEqual({
+  expect(portableRecord(segmentHistory!.record)).toEqual({
     sourceId: source.illustrationSegmentId,
     campaignId: source.campaignIds[0],
     eventType: "illustration-segment",
@@ -1918,47 +2149,35 @@ async function assertRepresentativeArchive(
     status: "completed",
   });
 
-  expect(records.find((entry) => entry.domain === "canonical-facts")?.record).toEqual({
+  expect(records.find((entry) => entry.domain === "canonical-facts")!.record).toEqual({
     sourceId: source.canonicalFactId,
     campaignId: source.campaignIds[0],
+    worldVersionId: source.latestWorldVersionIds[0],
     subject: "release gate",
     predicate: "status",
     object: "The release gate is open.",
     sourceTurnId: source.turnIds[0],
+    sourceStateEditId: null,
     sourceTurnNumber: 1,
     sourceFactIndex: 7,
     validFromTurn: 1,
     validUntilTurn: 3,
     supersededByFactId: null,
+    createdAt: representativeTimestamp,
     updatedAt: representativeTimestamp,
+    authority: {
+      content: "The release gate is open.",
+      normalizedContent: "the release gate is open",
+      entities: [],
+      metadata: { subject: "release gate", predicate: "status" },
+      entityIds: [],
+    },
   });
-  const chronicle = records.filter((entry) => entry.domain === "chronicle");
-  expect(chronicle.find((entry) => entry.sourceId === source.memoryId)?.record).toEqual({
-    sourceId: source.memoryId,
-    campaignId: source.campaignIds[0],
-    kind: "memory",
-    turnId: source.turnIds[0],
-    memoryKind: "turn_fiction",
-    content: "Release memory",
-    occurredAt: representativeTimestamp,
-    metadata: { entityNames: ["Gate"], openThreadIds: [] },
-  });
-  expect(chronicle.find((entry) => entry.sourceId === source.summaryCheckpointId)?.record).toEqual({
-    sourceId: source.summaryCheckpointId,
-    campaignId: source.campaignIds[0],
-    kind: "summary-checkpoint",
-    throughTurn: 2,
-    summaryKind: "campaign_summary",
-    content: "Release summary",
-    occurredAt: representativeTimestamp,
-    metadata: { entityNames: [], openThreadIds: [source.checkpointOpenThreadId] },
-  });
-
   const illustrations = records.filter((entry) => entry.domain === "illustrations");
   expect(illustrations).toHaveLength(2);
   for (const [variantIndex, assetId] of [source.assetIds[1], source.assetIds[2]].entries()) {
     const illustration = illustrations.find((entry) => entry.record.assetId === assetId);
-    expect(illustration?.record).toEqual({
+    expect(portableRecord(illustration!.record)).toEqual({
       sourceId: expect.stringMatching(/^[a-f0-9-]{36}$/u),
       campaignId: source.campaignIds[0],
       turnId: source.turnIds[0],
@@ -1969,7 +2188,7 @@ async function assertRepresentativeArchive(
     });
     expect(illustration?.sourceId).toBe(illustration?.record.sourceId);
   }
-  expect(records.find((entry) => entry.domain === "imports")?.record).toEqual({
+  expect(portableRecord(records.find((entry) => entry.domain === "imports")!.record)).toEqual({
     sourceId: source.importId,
     sourceType: "legacy_story",
     sourceName: "Release source",
@@ -1977,29 +2196,10 @@ async function assertRepresentativeArchive(
     campaignId: source.campaignIds[0],
     completedAt: representativeTimestamp,
   });
-  const costs = records.filter((entry) => entry.domain === "cost-events");
-  expect(costs.map((entry) => entry.record)).toEqual(expect.arrayContaining([
-    {
-      sourceId: source.costEventIds[0], campaignId: source.campaignIds[0], providerKind: "text",
-      amountMicros: 10000, occurredAt: representativeTimestamp,
-    },
-    {
-      sourceId: source.costEventIds[1], campaignId: source.campaignIds[1], providerKind: "image",
-      amountMicros: 20000, occurredAt: representativeTimestamp,
-    },
-  ]));
-  expect(records.find((entry) => entry.domain === "activity-events")?.record).toEqual({
-    sourceId: source.activitySourceId,
-    campaignId: source.campaignIds[0],
-    eventType: "campaign.accepted_turn",
-    summary: "Release activity",
-    occurredAt: representativeTimestamp,
-  });
-
   expect(assetPayload.assets).toHaveLength(source.assets.length);
   for (const expected of source.assets) {
     const asset = assetPayload.assets.find((candidate) => candidate.sourceAssetId === expected.id);
-    expect(asset).toEqual({
+    expect(asset).toMatchObject({
       sourceAssetId: expected.id,
       contentHash: expected.contentHash,
       archivePath: `assets/sha256/${expected.contentHash.slice(0, 2)}/${expected.contentHash}.png`,
@@ -2022,8 +2222,9 @@ async function assertRepresentativeArchive(
         archivedAt: expected.archived ? representativeTimestamp : null,
       },
       createdAt: representativeTimestamp,
-      bindings: expect.arrayContaining([...expected.bindings]),
+      bindings: expect.arrayContaining(expected.bindings.map((binding) => expect.objectContaining(binding))),
     });
+    expect(Object.prototype.hasOwnProperty.call(asset, "authority")).toBe(true);
     expect(asset?.bindings).toHaveLength(expected.bindings.length);
     const original = asset ? zip.file(asset.archivePath) : null;
     expect(original).not.toBeNull();
@@ -2035,7 +2236,7 @@ async function proveResumableUpload(
   runtime: StartedRuntime,
   restart: () => Promise<StartedRuntime>,
   archive: Buffer,
-): Promise<StartedRuntime> {
+): Promise<Readonly<{ runtime: StartedRuntime; uploadId: string }>> {
   const upload = await jsonRequest<{ id: string; receivedBytes: number }>(runtime.baseUrl, "/api/v1/system-imports/uploads", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -2063,15 +2264,14 @@ async function proveResumableUpload(
     expect(value.receivedBytes).toBe(Math.min(offset + releaseChunkBytes, archive.byteLength));
     chunkIndex += 1;
   }
-  const cancelled = await jsonRequest<{ status: string }>(
+  const ready = await jsonRequest<{ id: string; status: string; receivedBytes: number }>(
     restarted.baseUrl,
     `/api/v1/system-imports/uploads/${upload.id}`,
-    { method: "DELETE" },
   );
-  expect(cancelled.status).toBe("expired");
-  expectNoSecretSentinels(cancelled, "cancelled resumable-upload payload");
+  expect(ready).toMatchObject({ id: upload.id, status: "uploading", receivedBytes: archive.byteLength });
+  expectNoSecretSentinels(ready, "fully received resumable-upload payload");
   expectNoSecretSentinels(restarted.logs(), "post-restart resumable-upload runtime logs");
-  return restarted;
+  return Object.freeze({ runtime: restarted, uploadId: upload.id });
 }
 
 async function importThroughLegacyUi(
@@ -2079,6 +2279,7 @@ async function importThroughLegacyUi(
   runtime: StartedRuntime,
   archivePath: string,
   sourceOwnerId: string,
+  resumedUpload: Readonly<{ id: string; byteLength: number; sha256: string }>,
 ): Promise<Readonly<{
   previewText: string;
   reportText: string;
@@ -2089,12 +2290,50 @@ async function importThroughLegacyUi(
   try {
     const page = await context.newPage();
     await page.goto(`${runtime.baseUrl}/nexus/index.html#data-transfer`);
+    await page.evaluate((upload) => {
+      localStorage.setItem(
+        `infiniteQuest.systemArchiveUpload.v1:${upload.byteLength}:${upload.sha256}`,
+        JSON.stringify({ ...upload, chunkBytes: 4 * 1024 * 1024 }),
+      );
+    }, resumedUpload);
+    let newUploadRequests = 0;
+    page.on("request", (request) => {
+      const url = new URL(request.url());
+      if (url.pathname === "/api/v1/system-imports/uploads" && request.method() === "POST") {
+        newUploadRequests += 1;
+      }
+    });
+    const resumedResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === `/api/v1/system-imports/uploads/${resumedUpload.id}`
+        && response.request().method() === "GET";
+    });
+    const completionResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === `/api/v1/system-imports/uploads/${resumedUpload.id}/complete`
+        && response.request().method() === "POST";
+    });
     const previewResponse = page.waitForResponse((response) => {
       const url = new URL(response.url());
       return url.pathname === "/api/v1/system-imports/preview" && response.request().method() === "POST";
     });
     await page.locator("#systemArchiveFile").setInputFiles(archivePath);
-    const previewView = systemImportPreviewViewSchema.parse(await (await previewResponse).json());
+    const resumedView = await (await resumedResponse).json() as Record<string, unknown>;
+    expect(resumedView).toMatchObject({
+      id: resumedUpload.id,
+      status: "uploading",
+      receivedBytes: resumedUpload.byteLength,
+    });
+    const completedUpload = await (await completionResponse).json() as Record<string, unknown>;
+    expect(completedUpload).toMatchObject({
+      id: resumedUpload.id,
+      status: "completed",
+      receivedBytes: resumedUpload.byteLength,
+    });
+    const previewHttpResponse = await previewResponse;
+    expect(previewHttpResponse.request().postDataJSON()).toMatchObject({ uploadId: resumedUpload.id });
+    const previewView = systemImportPreviewViewSchema.parse(await previewHttpResponse.json());
+    expect(newUploadRequests).toBe(0);
     expectNoSecretSentinels(previewView, "import preview API payload");
     expectNoSecretSentinels(previewView.warnings, "import preview warnings");
     expectNoSecretSentinels(previewView.errors, "import preview errors");
@@ -2366,7 +2605,7 @@ async function assertImportedAuthority(
         id: source.campaignIds[0], owner_user_id: destinationOwnerId,
         world_version_id: source.latestWorldVersionIds[0], title: "Release Campaign 1",
         status: "active", active_turn_number: 2,
-        legacy_settings: { turnControlStyle: "Scene Direction" },
+        legacy_settings: {},
         turn_control_style: "flexible_scene",
         selected_character_id: representativeCharacterSnapshot.id,
         character_snapshot: representativeCharacterSnapshot,
@@ -2378,7 +2617,7 @@ async function assertImportedAuthority(
         id: source.campaignIds[1], owner_user_id: destinationOwnerId,
         world_version_id: source.latestWorldVersionIds[1], title: "Release Campaign 2",
         status: "active", active_turn_number: 1,
-        legacy_settings: { turnControlStyle: "Action" },
+        legacy_settings: {},
         turn_control_style: "flexible_action",
         selected_character_id: null,
         character_snapshot: null,
@@ -2483,7 +2722,6 @@ async function assertImportedAuthority(
     );
     expect(states.rows).toHaveLength(2);
     for (const [index, campaignId] of source.campaignIds.entries()) {
-      const expectedState = representativeCampaignState(index, index === 0 ? source.canonicalFactId : undefined);
       const actual = states.rows.find((row) => row.campaign_id === campaignId)!;
       expect(actual).toEqual({
         campaign_id: campaignId,
@@ -2495,7 +2733,7 @@ async function assertImportedAuthority(
         pending_event_triggers: [],
         rpg_stats: [],
         revision: 2,
-        initial_state_snapshot: expectedState,
+        initial_state_snapshot: {},
         updated_at: expect.any(Date),
       });
       expect(actual.updated_at.toISOString()).toBe(representativeTimestamp);
@@ -2745,15 +2983,21 @@ async function assertImportedAuthority(
       world_version_id: string;
       turn_id: string | null;
       memory_kind: string;
+      ordinal: number;
       content: string;
+      token_estimate: number;
+      importance: number;
       entities: string[];
       metadata: Record<string, unknown>;
+      entity_ids: string[];
+      content_hash: string;
       embedding: string | null;
       created_at: Date;
       updated_at: Date;
     }>(
-      `SELECT id,owner_user_id,campaign_id,world_version_id,turn_id,memory_kind,content,entities,
-              metadata,embedding::text AS embedding,created_at,updated_at FROM chronicle_memories`,
+      `SELECT id,owner_user_id,campaign_id,world_version_id,turn_id,memory_kind,ordinal,content,
+              token_estimate,importance,entities,metadata,entity_ids,content_hash,
+              embedding::text AS embedding,created_at,updated_at FROM chronicle_memories`,
     );
     expect(memories.rows).toEqual([{
       id: source.memoryId,
@@ -2762,9 +3006,14 @@ async function assertImportedAuthority(
       world_version_id: source.latestWorldVersionIds[0],
       turn_id: source.turnIds[0],
       memory_kind: "turn_fiction",
+      ordinal: 1,
       content: "Release memory",
+      token_estimate: 3,
+      importance: 0.5,
       entities: ["Gate"],
-      metadata: { openThreadIds: [] },
+      metadata: {},
+      entity_ids: [],
+      content_hash: sha256("Release memory"),
       embedding: null,
       created_at: expect.any(Date),
       updated_at: expect.any(Date),
@@ -2789,7 +3038,7 @@ async function assertImportedAuthority(
       campaign_id: source.campaignIds[0],
       through_turn: 2,
       summary_kind: "campaign_summary",
-      content: { summary: "Release summary", entityNames: [], openThreadIds: [source.checkpointOpenThreadId] },
+      content: { summary: "Release summary", openThreadIds: [source.checkpointOpenThreadId] },
       created_at: expect.any(Date),
     }]);
     expect(checkpoints.rows[0]!.created_at.toISOString()).toBe(representativeTimestamp);
@@ -2830,35 +3079,41 @@ async function assertImportedAuthority(
       campaign_id: string;
       turn_id: string | null;
       provider_profile_id: string | null;
+      local_call_id: string;
       provider_type: string;
       category: string;
       operation: string;
+      requested_model: string;
+      resolved_model: string;
       amount_micros: number;
       currency: string;
       usage_metadata: Record<string, unknown>;
       occurred_at: Date;
       created_at: Date;
     }>(
-      `SELECT id,owner_user_id,campaign_id,turn_id,provider_profile_id,provider_type,
-              category,operation,round(amount*1000000)::int AS amount_micros,currency,
+      `SELECT id,owner_user_id,campaign_id,turn_id,provider_profile_id,local_call_id,provider_type,
+              category,operation,requested_model,resolved_model,
+              round(amount*1000000)::int AS amount_micros,currency,
               usage_metadata,occurred_at,created_at
          FROM provider_cost_events ORDER BY id`,
     );
     expect(costs.rows).toHaveLength(2);
     for (const [index, id] of source.costEventIds.entries()) {
-      const kind = index === 0 ? "text" : "image";
       expect(costs.rows.find((row) => row.id === id)).toEqual({
         id,
         owner_user_id: destinationOwnerId,
         campaign_id: source.campaignIds[index],
-        turn_id: null,
-        provider_profile_id: null,
-        provider_type: "system_archive",
+        turn_id: source.turnIds[index === 0 ? 0 : 2],
+        provider_profile_id: source.providerIds[index],
+        local_call_id: source.costEventLocalCallIds[index],
+        provider_type: "openai_compatible",
         category: index === 0 ? "story" : "image",
-        operation: "restored",
+        operation: "response",
+        requested_model: "",
+        resolved_model: "",
         amount_micros: index === 0 ? 10000 : 20000,
         currency: "USD",
-        usage_metadata: { providerKind: kind },
+        usage_metadata: {},
         occurred_at: expect.any(Date),
         created_at: expect.any(Date),
       });
@@ -2868,6 +3123,7 @@ async function assertImportedAuthority(
     }
 
     const activity = await pool.query<{
+      id: string;
       owner_user_id: string;
       campaign_id: string | null;
       event_type: string;
@@ -2875,16 +3131,17 @@ async function assertImportedAuthority(
       details: Record<string, unknown>;
       created_at: Date;
     }>(
-      `SELECT owner_user_id,campaign_id,event_type,correlation_id,details,created_at
-         FROM activity_events WHERE correlation_id=$1`,
-      [source.activitySourceId],
+      `SELECT id::text AS id,owner_user_id,campaign_id,event_type,correlation_id,details,created_at
+         FROM activity_events WHERE id=$1::bigint`,
+      [source.activityId],
     );
     expect(activity.rows).toEqual([{
+      id: source.activityId,
       owner_user_id: destinationOwnerId,
       campaign_id: source.campaignIds[0],
       event_type: "campaign.accepted_turn",
-      correlation_id: source.activitySourceId,
-      details: { summary: "Release activity", sourceId: source.activitySourceId },
+      correlation_id: null,
+      details: { summary: "Release activity" },
       created_at: expect.any(Date),
     }]);
     expect(activity.rows[0]!.created_at.toISOString()).toBe(representativeTimestamp);
@@ -2996,6 +3253,34 @@ async function assertImportedAuthority(
       expect(asset.created_at.toISOString()).toBe(representativeTimestamp);
     }
 
+    type BackfillRow = Readonly<{
+      asset_id: string;
+      status: string;
+      diagnostic_code: string | null;
+    }>;
+    let backfills: readonly BackfillRow[] = [];
+    const backfillDeadline = Date.now() + 60_000;
+    while (Date.now() < backfillDeadline) {
+      backfills = (await pool.query<BackfillRow>(
+        `SELECT asset_id,status,diagnostic_code
+           FROM asset_metadata_backfill_jobs
+          WHERE owner_user_id=$1 AND asset_id=ANY($2::uuid[])
+          ORDER BY asset_id`,
+        [destinationOwnerId, source.assetIds],
+      )).rows;
+      const failed = backfills.find((backfill) => backfill.status === "failed");
+      if (failed) {
+        throw new Error(`Imported asset metadata backfill failed for ${failed.asset_id}: ${failed.diagnostic_code ?? "unknown"}`);
+      }
+      if (backfills.length === source.assetIds.length
+        && backfills.every((backfill) => backfill.status === "completed")) {
+        break;
+      }
+      await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 100));
+    }
+    expect(backfills).toHaveLength(source.assetIds.length);
+    expect(backfills.every((backfill) => backfill.status === "completed")).toBe(true);
+
     const assets = await pool.query<{
       id: string;
       owner_user_id: string;
@@ -3045,7 +3330,12 @@ async function assertImportedAuthority(
         byte_length: expected.byteLength,
         pixel_width: expected.pixelWidth,
         pixel_height: expected.pixelHeight,
-        technical_metadata: {},
+        technical_metadata: {
+          state: "verified",
+          format: "png",
+          pages: 1,
+          orientation: null,
+        },
         title: expected.title,
         caption: "",
         notes: "",
@@ -3061,6 +3351,32 @@ async function assertImportedAuthority(
       });
       expect(asset.created_at.toISOString()).toBe(representativeTimestamp);
       if (asset.archived_at) expect(asset.archived_at.toISOString()).toBe(representativeTimestamp);
+    }
+    const thumbnails = await pool.query<{
+      source_asset_id: string;
+      transform_version: number;
+      pixel_width: number;
+      pixel_height: number;
+      mime_type: string;
+    }>(
+      `SELECT source_asset_id,transform_version,pixel_width,pixel_height,mime_type
+         FROM asset_derivatives
+        WHERE owner_user_id=$1 AND source_asset_id=ANY($2::uuid[])
+          AND derivative_kind='thumbnail'
+        ORDER BY source_asset_id`,
+      [destinationOwnerId, source.assetIds],
+    );
+    expect(thumbnails.rows).toHaveLength(source.assetIds.length);
+    for (const expected of source.assets) {
+      const maximumDimension = Math.max(expected.pixelWidth, expected.pixelHeight);
+      const scale = Math.min(1, 480 / maximumDimension);
+      expect(thumbnails.rows.find((thumbnail) => thumbnail.source_asset_id === expected.id)).toEqual({
+        source_asset_id: expected.id,
+        transform_version: 1,
+        pixel_width: Math.round(expected.pixelWidth * scale),
+        pixel_height: Math.round(expected.pixelHeight * scale),
+        mime_type: "image/webp",
+      });
     }
 
     for (const table of ["generation_jobs", "model_chains", "chronicle_memory_chunks", "world_share_links"] as const) {
@@ -3182,7 +3498,7 @@ describe("System Archive v1 release compatibility", () => {
   releaseGate(
     "imports the frozen minimal fixture through the compiled service into isolated PostgreSQL and private roots (Linux only)",
     async () => {
-      await buildReleaseArtifacts();
+      const runtimeRoot = await buildReleaseArtifacts();
       const fixture = await frozenFixture();
       const privateRoot = await mkdtemp(join(tmpdir(), "iq-system-v1-import-"));
       const archiveRoot = join(privateRoot, "archives");
@@ -3202,6 +3518,7 @@ describe("System Archive v1 release compatibility", () => {
           assetRoot,
           port: await freePort(),
           role: "all",
+          runtimeRoot,
         });
         const imported = await importArchiveThroughApi(runtime, fixture.archiveBytes);
         expect(imported.report).toMatchObject({
@@ -3238,7 +3555,7 @@ describe("System Archive v1 release compatibility", () => {
   releaseGate(
     "round-trips representative authority through the compiled service, isolated PostgreSQL, private roots, and both built clients (Linux only)",
     async () => {
-      await buildReleaseArtifacts();
+      const runtimeRoot = await buildReleaseArtifacts();
       const sourceRoot = await mkdtemp(join(tmpdir(), "iq-system-release-source-"));
       const destinationRoot = await mkdtemp(join(tmpdir(), "iq-system-release-destination-"));
       const sourceArchiveRoot = join(sourceRoot, "archives");
@@ -3278,10 +3595,12 @@ describe("System Archive v1 release compatibility", () => {
           assetRoot: sourceAssetRoot,
           port: sourcePort,
           role: "api",
+          runtimeRoot,
         });
         const published = await exportThroughReplacementUi(
           browser,
           sourceRuntime,
+          runtimeRoot,
           source.url,
           sourceArchiveRoot,
           sourceAssetRoot,
@@ -3304,8 +3623,9 @@ describe("System Archive v1 release compatibility", () => {
           assetRoot: destinationAssetRoot,
           port: destinationPort,
           role: "api",
+          runtimeRoot,
         });
-        destinationRuntime = await proveResumableUpload(
+        const resumedUpload = await proveResumableUpload(
           destinationRuntime,
           () => startCompiledRuntime({
             databaseUrl: destination!.url,
@@ -3313,9 +3633,11 @@ describe("System Archive v1 release compatibility", () => {
             assetRoot: destinationAssetRoot,
             port: destinationPort,
             role: "api",
+            runtimeRoot,
           }),
           archive,
         );
+        destinationRuntime = resumedUpload.runtime;
         await destinationRuntime.stop();
         destinationRuntime = await startCompiledRuntime({
           databaseUrl: destination.url,
@@ -3323,12 +3645,14 @@ describe("System Archive v1 release compatibility", () => {
           assetRoot: destinationAssetRoot,
           port: destinationPort,
           role: "all",
+          runtimeRoot,
         });
         const imported = await importThroughLegacyUi(
           browser,
           destinationRuntime,
           downloadPath,
           representative.ownerUserId,
+          { id: resumedUpload.uploadId, byteLength: archive.byteLength, sha256: sha256(archive) },
         );
         expect(imported.reportText).toMatch(/Original images\s*4/u);
         expect(imported.preview.recordsByDomain).toEqual(representative.expectedDomainCounts);

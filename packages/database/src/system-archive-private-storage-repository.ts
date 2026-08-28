@@ -318,6 +318,23 @@ function startRenewableLease(
   });
 }
 
+async function releaseLease(
+  client: DatabaseClient,
+  ownerUserId: string,
+  claim: DurableFilesystemRecoveryClaim,
+): Promise<void> {
+  const released = await client.query(
+    `UPDATE durable_filesystem_operations operation
+        SET lease_expires_at=clock_timestamp(),updated_at=clock_timestamp()
+      WHERE operation.id=$1 AND operation.owner_user_id=$2
+        AND operation.lease_id=$3 AND operation.lease_owner=$4
+        AND operation.work_version=$5
+        AND operation.lifecycle IN ('reserved','finalized')`,
+    [claim.operationId, ownerUserId, claim.leaseId, claim.leaseOwner, claim.workVersion],
+  );
+  if (released.rowCount !== 1) throw new Error("system_archive_storage_lease_lost");
+}
+
 export function createPostgresSystemArchivePrivateStorageRepository(
   pool: DatabasePool,
 ): SystemArchivePrivateStorageRepositoryPort {
@@ -365,6 +382,8 @@ export function createPostgresSystemArchivePrivateStorageRepository(
       }
       const result = await work(authority);
       if (!lease.current()) throw new Error("system_archive_storage_lease_lost");
+      const claim = await lease.settle();
+      await releaseLease(client, input.ownerUserId, claim);
       return result;
     } catch (error) {
       await lease?.stop().catch(() => undefined);

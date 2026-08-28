@@ -25,6 +25,14 @@ Maintain separate deployment manifests where orchestrator behavior differs:
 - Optional `compose.override.yaml` for developer-only ports or mounts.
 - `deploy/swarm/stack.yaml` for replicated services, configs, secrets, health checks, placement, updates, and rollback policy.
 
+### System Archive validation topology
+
+The base Swarm stack deliberately sets `SYSTEM_ARCHIVE_ENABLED` to `false`, even when an environment variable has another value. Its API and worker replicas use node-local bind mounts and may be scheduled on different nodes, so enabling System Archive in that topology could leave durable transfer files visible to only one role.
+
+For a reviewed, non-production source-to-empty-destination validation drill only, render `deploy/swarm/stack.yaml` together with `deploy/swarm/system-archive-validation.override.yaml`. The override requires an explicit gate value and `SYSTEM_ARCHIVE_VALIDATION_NODE`; it places exactly one API and one worker replica on that hostname. Before deploying such a reviewed drill, ensure the named node has both `ASSET_STORAGE_ROOT` and `ARCHIVE_STORAGE_ROOT` host roots mounted with the required permissions. Returning to the base stack disables System Archive again.
+
+Do not use the validation override for multi-node production. A future multi-node enablement needs shared asset and archive storage mounted identically on every eligible API and worker node, not merely identical container path strings, plus separate explicit production approval. Root Compose remains false-by-default through its environment expansion and does not have this split-role, node-local bind-mount topology.
+
 Compose credentials may come from an ignored local environment/secrets file with a committed redacted example. Swarm credentials must use Swarm secrets. The application should support file-based secret inputs so the same image can consume either mechanism without placing credentials in image layers or source control.
 
 ## Deployment and Operations

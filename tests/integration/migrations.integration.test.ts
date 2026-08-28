@@ -932,6 +932,85 @@ END;
     }
   });
 
+  it("rejects original and derivative operations without a publication identity", async () => {
+    const client = await pool.connect();
+    const hash = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
+    let savepointOrdinal = 0;
+    const statementError = async (sql: string, parameters: unknown[] = []): Promise<Error | null> => {
+      const savepoint = `task_14e3b1_missing_identity_${savepointOrdinal += 1}`;
+      await client.query(`SAVEPOINT ${savepoint}`);
+      let rejection: Error | null = null;
+      try {
+        await client.query(sql, parameters);
+      } catch (error) {
+        rejection = error instanceof Error ? error : new Error(String(error));
+      } finally {
+        await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+        await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+      }
+      return rejection;
+    };
+
+    try {
+      await client.query("BEGIN");
+      const ownerUserId = (await client.query<{ id: string }>(
+        "SELECT id FROM users WHERE system_key='initial-owner'"
+      )).rows[0]!.id;
+      const assetId = (await client.query<{ id: string }>(
+        `INSERT INTO assets (
+           owner_user_id,content_hash,storage_driver,storage_path,mime_type,byte_length,pixel_width,pixel_height
+         ) VALUES ($1,$2,'filesystem',$3,'image/png',7,1,1) RETURNING id`,
+        [ownerUserId, hash(`missing-identity-${crypto.randomUUID()}`), `legacy/${crypto.randomUUID()}.png`]
+      )).rows[0]!.id;
+
+      // Remove the reciprocal foreign-key guard only inside this transaction so
+      // this migration test reaches the trigger's missing-identity branch.
+      await client.query(
+        "ALTER TABLE durable_filesystem_operations DROP CONSTRAINT durable_filesystem_operations_asset_identity_fk"
+      );
+      await client.query(
+        "ALTER TABLE durable_filesystem_operations DISABLE TRIGGER durable_asset_operation_retention_insert_trigger"
+      );
+      await client.query(
+        "DELETE FROM asset_publication_identities WHERE asset_id=$1 AND owner_user_id=$2",
+        [assetId, ownerUserId]
+      );
+      const missingIdentity = await client.query(
+        "SELECT 1 FROM asset_publication_identities WHERE asset_id=$1 AND owner_user_id=$2",
+        [assetId, ownerUserId]
+      );
+      expect(missingIdentity.rows).toEqual([]);
+
+      const insertOperationSql = `INSERT INTO durable_filesystem_operations (
+        owner_user_id,operation_token_hash,purpose,resource_kind,asset_id,
+        lease_id,lease_owner,lease_expires_at,expires_at
+      ) VALUES ($1,$2,$3,'asset',$4,gen_random_uuid(),'task-14e3b1',
+                now()+interval '5 minutes',now()+interval '1 hour')`;
+      const originalError = await statementError(insertOperationSql, [
+        ownerUserId,
+        hash(`missing-original-${crypto.randomUUID()}`),
+        "asset_original",
+        assetId
+      ]);
+      const derivativeError = await statementError(insertOperationSql, [
+        ownerUserId,
+        hash(`missing-derivative-${crypto.randomUUID()}`),
+        "asset_derivative",
+        assetId
+      ]);
+
+      expect(originalError).toMatchObject({
+        message: expect.stringContaining("asset filesystem operation requires live publication identity")
+      });
+      expect(derivativeError).toMatchObject({
+        message: expect.stringContaining("asset filesystem operation requires live publication identity")
+      });
+    } finally {
+      await client.query("ROLLBACK");
+      client.release();
+    }
+  });
+
   it("enforces durable authority, purpose, owner, retention, and portable scope relationships in PostgreSQL", async () => {
     const client = await pool.connect();
     const hash = (label: string) => createHash("sha256").update(`${label}-${crypto.randomUUID()}`, "utf8").digest("hex");
@@ -1566,7 +1645,8 @@ END;
         "0076_chronicle_chunk_skip_reasons",
         "0077_chronicle_chunk_processed_signature",
         "0078_system_archive_jobs",
-        "0079_resumable_system_archive_uploads"
+        "0079_resumable_system_archive_uploads",
+        "0080_published_asset_derivative_reservations"
       ]);
 
       const scrubbed = await isolatedPool.query<{ technical_metadata: Record<string, unknown> }>(
@@ -2552,7 +2632,8 @@ END;
         "0076_chronicle_chunk_skip_reasons",
         "0077_chronicle_chunk_processed_signature",
         "0078_system_archive_jobs",
-        "0079_resumable_system_archive_uploads"
+        "0079_resumable_system_archive_uploads",
+        "0080_published_asset_derivative_reservations"
       ]);
 
       // Accepted turns and every derived vector survive the upgrade untouched.

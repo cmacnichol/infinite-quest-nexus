@@ -964,7 +964,10 @@ async function preflightZipMetadata(
 function archiveHandleSource(handle: FileHandle, archiveSize: number): {
   size: () => Promise<number>;
   stream: (offset: number, length?: number) => Readable;
+  waitForActiveReads(): Promise<void>;
 } {
+  const activeReads = new Set<Promise<void>>();
+
   return {
     size: async () => archiveSize,
     stream: (offset, length) => {
@@ -979,7 +982,7 @@ function archiveHandleSource(handle: FileHandle, archiveSize: number): {
         : Math.min(archiveSize - 1, offset + length);
       let position = offset;
       let reading = false;
-      return new Readable({
+      const stream = new Readable({
         read(requestedBytes) {
           if (reading) return;
           if (position > end) {
@@ -989,7 +992,7 @@ function archiveHandleSource(handle: FileHandle, archiveSize: number): {
           reading = true;
           const byteLength = Math.min(Math.max(1, requestedBytes), 64 * 1024, end - position + 1);
           const buffer = Buffer.allocUnsafe(byteLength);
-          void handle.read(buffer, 0, byteLength, position).then((result) => {
+          const read = handle.read(buffer, 0, byteLength, position).then((result) => {
             reading = false;
             if (result.bytesRead === 0) {
               this.push(null);
@@ -1001,8 +1004,24 @@ function archiveHandleSource(handle: FileHandle, archiveSize: number): {
             reading = false;
             this.destroy(error);
           });
+          activeReads.add(read);
+          void read.finally(() => activeReads.delete(read));
         }
       });
+      // A consumer can finish its parent operation while the final asynchronous
+      // read is resolving. Retain an error listener so a late stream failure is
+      // returned through the operation rather than terminating the process.
+      stream.on("error", () => undefined);
+      return stream;
+    },
+    async waitForActiveReads() {
+      // unzipper's custom source resolves its directory before its final read
+      // callback has necessarily settled. The FileHandle must remain usable
+      // until those callbacks are done, otherwise a later callback can raise
+      // EBADF after the verified operation closes the handle.
+      while (activeReads.size > 0) await Promise.all(activeReads);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      while (activeReads.size > 0) await Promise.all(activeReads);
     }
   };
 }
@@ -1018,9 +1037,12 @@ async function openArchiveFromHandle(
       source: ReturnType<typeof archiveHandleSource>,
       options: { tailSize: number }
     ) => Promise<unzipper.CentralDirectory>;
-    return await customOpen(archiveHandleSource(handle, archiveSize), {
+    const source = archiveHandleSource(handle, archiveSize);
+    const directory = await customOpen(source, {
       tailSize: Math.min(archiveSize, EOCD_TAIL_BYTES)
     });
+    await source.waitForActiveReads();
+    return directory;
   } catch (error) {
     if (error instanceof ArchiveError) throw error;
     throw archiveError("archive-format-unrecognized", "The uploaded file is not a recognized ZIP archive.");
