@@ -10,6 +10,7 @@ COPY apps ./apps
 COPY scripts ./scripts
 COPY tests ./tests
 COPY vitest.integration.config.ts ./vitest.integration.config.ts
+COPY vitest.system-archive-e2e.config.ts ./vitest.system-archive-e2e.config.ts
 COPY pnpm-lock.yaml ./pnpm-lock.yaml
 RUN pnpm install --frozen-lockfile
 RUN pnpm build

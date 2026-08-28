@@ -35,3 +35,17 @@ For Docker Desktop host services, `host.docker.internal` is commonly available. 
 Saving an API key requires a non-empty, stable `CREDENTIAL_ENCRYPTION_KEY`. Provider keys are encrypted in PostgreSQL and are not returned to the browser.
 
 For Sogni, create a bearer API key in the [Sogni account dashboard](https://dashboard.sogni.ai/api-key), then create an **Illustrations** profile. Keep the official base URL unless a trusted deployment uses a documented alternative; Nexus appends `/v1/creative-agent/workflows` for generation and `/api/v1/models/list` for the media catalog. Leave the key field blank while editing to retain the encrypted credential; Nexus never repopulates it. See [Configure Sogni](../nexus-guide/providers/sogni.md) for image, retry, polling, and artifact-handling details.
+
+## Reconfigure providers after System Import
+
+System Archive preserves only allowlisted, non-secret provider configuration and assignments. Imported text, image, and embedding profiles remain separate, disabled, credentialless, and at unknown health. Nexus does not copy encrypted credentials, reuse one role's key for another, or automatically match a destination profile by name.
+
+After System Import:
+
+1. Review the disabled-provider count in the durable Import Report.
+2. Supply the destination credential for each text, image, and embedding profile independently.
+3. Verify endpoint health **and model discovery** for each profile. Confirm the selected model still supports the intended role.
+4. Explicitly enable the profile and review assignments before generating or rebuilding.
+5. Rebuild Chronicle indexes only after the embedding profile, model, dimensions, and prefix protocol are correct.
+
+Share links, sessions, OIDC bindings, and other external access are not provider credentials and do not transfer either; recreate those relationships separately. See [System data transfer](../nexus-guide/operations/system-data-transfer.md#import-report-and-destination-recovery).

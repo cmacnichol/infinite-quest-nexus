@@ -27,7 +27,7 @@
           <a id="navCampaigns" href="#campaigns"><strong>Campaign Management</strong><span>Advanced campaign, Chronicle, and image settings</span></a>
           <a id="navProviders" href="#providers"><strong>Provider Setup</strong><span>Text, embedding, intent, and image endpoints</span></a>
           <a id="navPromptLibrary" href="#prompt-library"><strong>Prompt Library</strong><span>Central application and campaign LLM instructions</span></a>
-          <a id="navImports" href="#imports"><strong>Import</strong><span>Bring in portable worlds and campaign backups</span></a>
+          <a id="navDataTransfer" href="#data-transfer"><strong>Data Transfer</strong><span>System, world, campaign, legacy, and readable formats</span></a>
         </div>
       </div>
       <button id="openNexusAbout" class="nav-text-button" type="button">About</button>
@@ -506,7 +506,97 @@
       </form>
     </section>
 
-    <section id="imports" class="card import-card world-management" aria-labelledby="import-title">
+    <section id="data-transfer" class="card data-transfer-overview data-transfer-management" aria-labelledby="dataTransferTitle">
+      <div class="section-heading">
+        <div><p class="eyebrow">Portable data, explicit boundaries</p><h2 id="dataTransferTitle">Data Transfer</h2><p>Move a whole owner library, one world, one campaign, or a readable story. Existing contextual actions and formats remain available.</p></div>
+      </div>
+      <div class="data-transfer-purpose-grid" aria-label="Data Transfer purposes">
+        <article><span aria-hidden="true">01</span><h3>System Archive</h3><p>Export or restore the Current Owner's complete portable library and every retained original image.</p></article>
+        <article><span aria-hidden="true">02</span><h3>World &amp; Campaign Archives</h3><p>Keep using targeted JSON and Campaign Archive exports where you manage their source.</p><div><a href="#world-library">World Management</a><a href="#campaigns">Campaign Management</a></div></article>
+        <article><span aria-hidden="true">03</span><h3>Legacy &amp; External Imports</h3><p>Import legacy stories, Infinite Worlds, CYOA JSON, text, and existing portable backups below.</p><a href="#imports">Open import tools</a></article>
+        <article><span aria-hidden="true">04</span><h3>Readable Story Exports</h3><p>Create Markdown, HTML, or PDF reading copies from Campaign Management.</p><a href="#campaigns">Open campaign exports</a></article>
+      </div>
+    </section>
+
+    <section id="systemArchiveTransfer" class="card system-archive-transfer data-transfer-management" data-system-archive-state="checking" aria-labelledby="systemArchiveTitle">
+      <div class="section-heading system-archive-heading">
+        <div><p class="eyebrow">Owner-wide portability</p><h2 id="systemArchiveTitle">System Archive</h2><p>One server-owned ZIP for the Current Owner's portable stories, original pictures, and settings. Credentials, access authority, deployment configuration, and active jobs remain excluded.</p></div>
+        <span id="systemArchiveCapability" class="system-archive-capability">Checking availability…</span>
+      </div>
+      <p id="systemArchiveCapabilityMessage" class="muted">Asking the server whether owner-wide transfer is enabled.</p>
+      <div class="system-archive-columns">
+        <section aria-labelledby="systemExportTitle">
+          <p class="eyebrow">Export</p>
+          <h3 id="systemExportTitle">Archive this owner</h3>
+          <p>Creates a durable logical snapshot and publishes it for a resumable download. Existing World, Campaign, and readable exports are unchanged.</p>
+          <button id="createSystemArchive" class="button primary" type="button" disabled>Create System Archive</button>
+          <a id="systemArchiveDownload" class="button secondary hidden">Download published archive</a>
+        </section>
+        <section aria-labelledby="systemImportTitle">
+          <p class="eyebrow">Import</p>
+          <h3 id="systemImportTitle">Restore an empty destination</h3>
+          <p>Destination must be empty. The browser uploads resumable chunks; the server alone opens and validates archive entries.</p>
+          <label class="file-field">System Archive file
+            <input id="systemArchiveFile" type="file" accept=".zip,application/zip,application/x-zip-compressed" disabled>
+          </label>
+          <div class="button-row">
+            <button id="uploadSystemArchive" class="button primary" type="button" disabled>Upload and preview</button>
+            <button id="cancelSystemArchive" class="button secondary" type="button" disabled>Cancel current operation</button>
+          </div>
+          <div id="systemArchiveProgress" class="system-archive-progress hidden" role="status" aria-live="polite" aria-atomic="true">
+            <div><strong id="systemArchiveProgressLabel">Preparing transfer…</strong><span id="systemArchiveProgressPercent">0%</span></div>
+            <progress id="systemArchiveProgressBar" max="100" value="0" aria-labelledby="systemArchiveProgressLabel"></progress>
+          </div>
+        </section>
+      </div>
+      <div id="systemArchiveStatus" class="status" role="status" aria-live="polite">System Archive controls are loading.</div>
+      <div id="systemArchiveError" class="status error hidden" role="alert"></div>
+
+      <section id="systemImportPreview" class="system-import-preview hidden" data-system-preview="empty" aria-labelledby="systemImportPreviewTitle">
+        <div class="section-heading"><div><p class="eyebrow">Server-owned inspection</p><h3 id="systemImportPreviewTitle">Import Preview</h3></div><span id="systemImportPreviewExpiry" class="muted"></span></div>
+        <div id="systemImportPreviewSummary" class="system-preview-summary"></div>
+        <div class="system-preview-details">
+          <section><h4>Ownership mapping</h4><p id="systemImportOwnerMapping"></p></section>
+          <section><h4>Version provenance</h4><p id="systemImportVersionSummary"></p><p id="systemImportFingerprint" class="archive-identity"></p></section>
+          <section><h4>Normalization</h4><p id="systemImportNormalization"></p></section>
+          <section><h4>Capacity checks</h4><p id="systemImportStagingCapacity"></p><p id="systemImportAssetCapacity"></p></section>
+          <section><h4>Provider recovery</h4><p id="systemImportProviderSummary">Imported provider credentials are excluded and must be entered again.</p></section>
+          <section><h4>External access</h4><p id="systemImportAccessSummary">Share links, sessions, and external authorization do not transfer.</p></section>
+          <section><h4>Rebuild work</h4><p id="systemImportRebuildSummary">Chronicle indexes and thumbnails are rebuilt after authority commits.</p></section>
+          <section><h4>Operational omissions</h4><p id="systemImportOmissionSummary">Active and rebuildable work is reported but never resumed.</p></section>
+        </div>
+        <div id="systemImportPreviewWarnings" class="status warning hidden"></div>
+        <fieldset id="systemImportAcknowledgements" class="system-import-acknowledgements" disabled>
+          <legend>Confirm every import boundary</legend>
+          <label><input id="acknowledgeSensitiveArchive" name="acknowledgeSensitiveArchive" type="checkbox"> This archive contains sensitive story and image data; I will protect the file.</label>
+          <label><input id="acknowledgeEmptyDestination" name="acknowledgeEmptyDestination" type="checkbox"> Destination must be empty; this does not merge, replace, or synchronize.</label>
+          <label><input id="acknowledgeInvalidatedAccess" name="acknowledgeInvalidatedAccess" type="checkbox"> External access will be invalidated and must be created again.</label>
+          <label><input id="acknowledgeProviderReentry" name="acknowledgeProviderReentry" type="checkbox"> I will enter provider credentials again, verify health and model discovery, and explicitly enable each profile.</label>
+          <label><input id="acknowledgeNonCancellableBoundary" name="acknowledgeNonCancellableBoundary" type="checkbox"> I understand the non-cancellable boundary begins when authoritative import starts.</label>
+        </fieldset>
+        <button id="commitSystemImport" class="button primary" type="button" disabled>Import System Archive</button>
+      </section>
+
+      <section id="systemImportReport" class="system-import-report hidden" data-system-import-state="idle" aria-labelledby="systemImportReportTitle">
+        <div class="section-heading"><div><p class="eyebrow">Durable outcome</p><h3 id="systemImportReportTitle">Import Report</h3></div><strong id="systemImportReportStatus"></strong></div>
+        <div id="systemImportReportSummary" class="system-preview-summary"></div>
+        <div class="system-report-evidence">
+          <section><h4>Ownership mapping</h4><p id="systemImportReportOwnerMapping"></p></section>
+          <section><h4>Version and archive identity</h4><p id="systemImportReportVersionSummary"></p><p id="systemImportReportFingerprint" class="archive-identity"></p></section>
+          <section><h4>Normalization and access</h4><p id="systemImportReportNormalization"></p><p id="systemImportReportAccess"></p></section>
+          <section><h4>Integrity reconciliation</h4><p id="systemImportReportIntegrity"></p></section>
+          <section><h4>Categorized omissions</h4><p id="systemImportReportOmissions"></p></section>
+          <section><h4>Terminal diagnostics</h4><p id="systemImportReportDiagnostics"></p></section>
+        </div>
+        <div class="system-recovery-checklist">
+          <section><h4>Provider recovery</h4><p>Enter credentials, verify health and model discovery, then explicitly enable each imported profile.</p><a href="#providers">Open Provider Setup</a></section>
+          <section><h4>Access recovery</h4><p>Create new access relationships on this destination. Source share links and sessions remain invalid.</p></section>
+          <section><h4>Rebuilds queued</h4><p id="systemImportReportRebuilds"></p></section>
+        </div>
+      </section>
+    </section>
+
+    <section id="imports" class="card import-card data-transfer-management" aria-labelledby="import-title">
       <div>
         <h2 id="import-title">Import a world or campaign</h2>
         <p>Upload a file or paste its copied contents. Campaign Archive imports one standalone campaign with its attached world and original images; provider profiles and credentials remain excluded. Infinite Quest <code>.story</code> exports include the world and story history. Infinite Worlds world JSON contains only world details; import its matching story TXT separately after selecting the imported world.</p>
@@ -1123,7 +1213,6 @@
     </form>
   </dialog>
 
-  <script src="/nexus/jszip.min.js"></script>
   <script type="module" src="/nexus/nexus.js"></script>
 </body>
 </html>

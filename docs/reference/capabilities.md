@@ -4,7 +4,7 @@ This page summarizes behavior implemented in the current repository. It is not a
 
 ## Platform and persistence
 
-- PostgreSQL 18.4-compatible local deployment with pgvector 0.8.5
+- PostgreSQL 18-compatible local deployment with pgvector 0.8.6
 - Idempotent initial-user bootstrap through the stable `initial-owner` system key
 - Automatic online schema migrations coordinated with PostgreSQL advisory locking
 - File-based secret inputs for database and credential-encryption values

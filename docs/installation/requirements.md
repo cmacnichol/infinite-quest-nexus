@@ -8,7 +8,7 @@
 - Host port 8080 by default
 - Network reachability from `infinitequest-app` to the selected external providers
 
-The included database image is `pgvector/pgvector:0.8.5-pg18-trixie`, providing PostgreSQL 18 and pgvector.
+The included database image is `pgvector/pgvector:0.8.6-pg18-trixie`, providing PostgreSQL 18 and pgvector.
 
 ## Source workflows
 

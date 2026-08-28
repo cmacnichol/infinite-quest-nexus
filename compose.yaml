@@ -2,7 +2,7 @@ name: infinitequest
 
 services:
   postgres:
-    image: pgvector/pgvector:0.8.5-pg18-trixie
+    image: pgvector/pgvector:0.8.6-pg18-trixie
     environment:
       POSTGRES_DB: infinitequest
       POSTGRES_USER: infinitequest
@@ -34,6 +34,7 @@ services:
       ASSET_STORAGE_DRIVER: filesystem
       ASSET_STORAGE_ROOT: /var/lib/infinitequest/assets
       ARCHIVE_STORAGE_ROOT: /var/lib/infinitequest/archives
+      SYSTEM_ARCHIVE_ENABLED: ${SYSTEM_ARCHIVE_ENABLED:-true}
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-}
       CREDENTIAL_ENCRYPTION_KEY_FILE: /var/lib/infinitequest/secrets/credential-encryption-key
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}

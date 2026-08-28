@@ -6,6 +6,7 @@ import type {
 } from "../../../packages/application/src/index.js";
 import type { RuntimeConfig } from "../../../packages/database/src/config.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
+import { archiveErrorCodeSchema } from "../../../packages/contracts/src/archives.js";
 import { logger } from "../../../packages/logger/src/index.js";
 import {
   createPrivateAssetMaintenanceComposition,
@@ -16,6 +17,10 @@ import {
   type PrivateIllustrationAssetPublicationComposition
 } from "../../runtime/src/illustration-asset-publication-composition.js";
 import { runImageJob } from "../../runtime/src/illustration-image-job-adapter.js";
+import {
+  createProductionSystemArchiveWorkerLane,
+  type ProductionSystemArchiveWorkerLane,
+} from "./system-archive-worker.js";
 
 export type WorkerDependencies = Readonly<{
   generation: GenerationWorkerApplication;
@@ -28,6 +33,7 @@ export type WorkerOptionalLanes = Readonly<{
   illustration(): Promise<boolean>;
   chronicle(): Promise<boolean>;
   asset(): Promise<boolean>;
+  systemArchive?(): Promise<boolean>;
 }>;
 
 export type StartedGeneration = Readonly<{
@@ -90,11 +96,28 @@ function wait(milliseconds: number, signal: AbortSignal): Promise<void> {
 }
 
 type ActiveLane = {
-  name: "illustration" | "chronicle" | "asset";
+  name: "illustration" | "chronicle" | "asset" | "system-archive";
   active: Set<Promise<boolean>>;
   nextEligibleAt: number;
   run(): Promise<boolean>;
 };
+
+function safeSystemArchiveErrorCode(error: unknown): string {
+  const value = typeof error === "object" && error !== null && "code" in error
+    ? String((error as { code?: unknown }).code)
+    : "";
+  const parsed = archiveErrorCodeSchema.safeParse(value);
+  return parsed.success ? parsed.data : "archive-operation-failed";
+}
+
+function safeSystemArchiveDiagnostic(error: unknown): string | undefined {
+  const value = typeof error === "object" && error !== null && "diagnostic" in error
+    ? (error as { diagnostic?: unknown }).diagnostic
+    : undefined;
+  return typeof value === "string" && /^System Archive [A-Za-z .-]{1,160}$/u.test(value)
+    ? value
+    : undefined;
+}
 
 function defaultOptionalLanes(
   pool: DatabasePool,
@@ -104,6 +127,7 @@ function defaultOptionalLanes(
   memory: MemoryWorkerApplication,
   maintenance: PrivateAssetMaintenanceComposition,
   illustrationPublication: PrivateIllustrationAssetPublicationComposition,
+  systemArchive: ProductionSystemArchiveWorkerLane | undefined,
   signal: AbortSignal,
 ): WorkerOptionalLanes {
   return {
@@ -132,7 +156,8 @@ function defaultOptionalLanes(
         signal
       });
       return result.completed > 0;
-    }
+    },
+    ...(systemArchive === undefined ? {} : { systemArchive: systemArchive.runNext }),
   };
 }
 
@@ -167,19 +192,34 @@ export async function runWorker(
   const workerId = `${hostname()}:${process.pid}:${crypto.randomUUID().slice(0, 8)}`;
   logger.info({ event: "worker_started", workerId });
 
-  const maintenance = injectedOptionalLanes
-    ? undefined
-    : await createPrivateAssetMaintenanceComposition(pool, {
-      archiveRoot: config.archiveStorageRoot,
-      assetRoot: config.assetStorageRoot
-    });
-  const illustrationPublication = injectedOptionalLanes
-    ? undefined
-    : await createPrivateIllustrationAssetPublicationComposition(
-      pool,
-      { archiveRoot: config.archiveStorageRoot, assetRoot: config.assetStorageRoot },
-      { downloadArtifact: (input) => illustration.downloadArtifact(input) }
-    );
+  let maintenance: PrivateAssetMaintenanceComposition | undefined;
+  let illustrationPublication: PrivateIllustrationAssetPublicationComposition | undefined;
+  let systemArchive: ProductionSystemArchiveWorkerLane | undefined;
+  try {
+    maintenance = injectedOptionalLanes
+      ? undefined
+      : await createPrivateAssetMaintenanceComposition(pool, {
+        archiveRoot: config.archiveStorageRoot,
+        assetRoot: config.assetStorageRoot
+      });
+    illustrationPublication = injectedOptionalLanes
+      ? undefined
+      : await createPrivateIllustrationAssetPublicationComposition(
+        pool,
+        { archiveRoot: config.archiveStorageRoot, assetRoot: config.assetStorageRoot },
+        { downloadArtifact: (input) => illustration.downloadArtifact(input) }
+      );
+    systemArchive = injectedOptionalLanes || config.systemArchiveEnabled !== true
+      ? undefined
+      : await createProductionSystemArchiveWorkerLane({ pool, config, workerId });
+  } catch (error) {
+    await Promise.allSettled([
+      systemArchive?.close(),
+      illustrationPublication?.close(),
+      maintenance?.close()
+    ]);
+    throw error;
+  }
   const activeGeneration = new Set<Promise<boolean>>();
   let generationNextEligibleAt = 0;
   const optionalLanes = injectedOptionalLanes ?? defaultOptionalLanes(
@@ -190,12 +230,19 @@ export async function runWorker(
     memory,
     maintenance!,
     illustrationPublication!,
+    systemArchive,
     signal,
   );
   const lanes: ActiveLane[] = [
     { name: "illustration", active: new Set(), nextEligibleAt: 0, run: optionalLanes.illustration },
     { name: "chronicle", active: new Set(), nextEligibleAt: 0, run: optionalLanes.chronicle },
-    { name: "asset", active: new Set(), nextEligibleAt: 0, run: optionalLanes.asset }
+    { name: "asset", active: new Set(), nextEligibleAt: 0, run: optionalLanes.asset },
+    ...(optionalLanes.systemArchive === undefined ? [] : [{
+      name: "system-archive" as const,
+      active: new Set<Promise<boolean>>(),
+      nextEligibleAt: 0,
+      run: optionalLanes.systemArchive,
+    }]),
   ];
 
   try {
@@ -266,7 +313,15 @@ export async function runWorker(
           logger.error({
             event: `worker_${lane.name}_error`,
             workerId,
-            message: error instanceof Error ? error.message : String(error)
+            ...(lane.name === "system-archive"
+              ? (() => {
+                const diagnostic = safeSystemArchiveDiagnostic(error);
+                return {
+                  errorCode: safeSystemArchiveErrorCode(error),
+                  ...(diagnostic === undefined ? {} : { diagnostic }),
+                };
+              })()
+              : { message: error instanceof Error ? error.message : String(error) })
           });
           return false;
         })
@@ -308,13 +363,27 @@ export async function runWorker(
         generationJobs: activeGeneration.size,
         illustrationJobs: lanes[0]!.active.size,
         chronicleJobs: lanes[1]!.active.size,
-        assetJobs: lanes[2]!.active.size
+        assetJobs: lanes[2]!.active.size,
+        systemArchiveJobs: lanes.find((lane) => lane.name === "system-archive")?.active.size ?? 0,
       });
       await Promise.allSettled(draining);
     }
   } finally {
-    await illustrationPublication?.close();
-    await maintenance?.close();
+    const closeTasks = [
+      () => illustrationPublication?.close(),
+      () => maintenance?.close(),
+      () => systemArchive?.close(),
+    ];
+    const closed = await Promise.allSettled(closeTasks.map(async (close) => close()));
     logger.info({ event: "worker_stopped", workerId });
+    const failures = closed.flatMap((result, index) => result.status === "rejected"
+      ? [index === 2
+        ? Object.assign(new Error("System Archive worker shutdown failed."), {
+          code: "archive-operation-failed",
+        })
+        : result.reason]
+      : []);
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, "Worker resource shutdown failed.");
   }
 }

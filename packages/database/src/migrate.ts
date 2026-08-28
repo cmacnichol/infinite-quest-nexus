@@ -1,9 +1,16 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { runner, type RunnerOption } from "node-pg-migrate";
 import type { DatabasePool } from "./pool.js";
 import { logger } from "../../logger/src/index.js";
 
 const MIGRATIONS_TABLE = "schema_migrations";
 const MAINTENANCE_SUFFIX = ".maintenance";
+const PHASED_MIGRATION_DIRECTIVE = "-- infinitequest:migration-mode=phased-transactions-v1";
+const PHASE_BOUNDARY = "-- infinitequest:transaction-boundary";
+const PHASED_MIGRATION_BOUNDARIES = new Map<string, number>([
+  ["0078_system_archive_jobs", 2]
+]);
 
 type MigrationRunOptions = {
   allowMaintenanceMigrations?: boolean;
@@ -21,11 +28,266 @@ const silentMigrationLogger: NonNullable<RunnerOption["logger"]> = {
   error: () => undefined
 };
 
+function isIdentifierContinuation(character: string | undefined): boolean {
+  return character !== undefined && /[A-Za-z0-9_$\u0080-\u{10FFFF}]/u.test(character);
+}
+
+function precedingCharacter(source: string, index: number): string | undefined {
+  return Array.from(source.slice(Math.max(0, index - 2), index)).at(-1);
+}
+
+function isCreateRoutineStatement(tokens: readonly string[]): boolean {
+  if (tokens[0] !== "CREATE") return false;
+  const routineIndex = tokens[1] === "OR" && tokens[2] === "REPLACE" ? 3 : 1;
+  return tokens[routineIndex] === "FUNCTION" || tokens[routineIndex] === "PROCEDURE";
+}
+
+function topLevelSqlStatements(source: string): string[] {
+  const statements: string[] = [];
+  let statement = "";
+  let statementTokens: string[] = [];
+  let atomicBody = false;
+  let atomicStatementStart = false;
+  let atomicBeginCandidate = false;
+  let parenthesisDepth = 0;
+  let routineSignatureDepth: number | null = null;
+  let routineSignatureClosed = false;
+  let index = 0;
+  const finishStatement = (): void => {
+    const value = statement.trim();
+    if (value) statements.push(value);
+    statement = "";
+    statementTokens = [];
+    atomicBody = false;
+    atomicStatementStart = false;
+    atomicBeginCandidate = false;
+    parenthesisDepth = 0;
+    routineSignatureDepth = null;
+    routineSignatureClosed = false;
+  };
+
+  while (index < source.length) {
+    if (source.startsWith("--", index)) {
+      const newline = source.indexOf("\n", index + 2);
+      index = newline < 0 ? source.length : newline + 1;
+      statement += " ";
+      continue;
+    }
+    if (source.startsWith("/*", index)) {
+      let depth = 1;
+      index += 2;
+      while (index < source.length && depth > 0) {
+        if (source.startsWith("/*", index)) {
+          depth += 1;
+          index += 2;
+        } else if (source.startsWith("*/", index)) {
+          depth -= 1;
+          index += 2;
+        } else {
+          index += 1;
+        }
+      }
+      statement += " ";
+      continue;
+    }
+
+    const character = source[index]!;
+    if (character === "'" || character === "\"") {
+      atomicBeginCandidate = false;
+      const quote = character;
+      const escapeQuoted = quote === "'"
+        && (/^[eE]$/u.test(source[index - 1] ?? "")
+          || source.slice(Math.max(0, index - 2), index).toUpperCase() === "U&");
+      index += 1;
+      while (index < source.length) {
+        if (escapeQuoted && source[index] === "\\") {
+          index += Math.min(2, source.length - index);
+        } else if (source[index] === quote && source[index + 1] === quote) {
+          index += 2;
+        } else if (source[index] === quote) {
+          index += 1;
+          break;
+        } else {
+          index += 1;
+        }
+      }
+      statement += " ";
+      continue;
+    }
+
+    if (character === "$" && !isIdentifierContinuation(precedingCharacter(source, index))) {
+      const dollarTag = /^\$(?:[A-Za-z_\u0080-\u{10FFFF}][A-Za-z0-9_\u0080-\u{10FFFF}]*)?\$/u
+        .exec(source.slice(index))?.[0];
+      if (dollarTag) {
+        atomicBeginCandidate = false;
+        const closing = source.indexOf(dollarTag, index + dollarTag.length);
+        index = closing < 0 ? source.length : closing + dollarTag.length;
+        statement += " ";
+        continue;
+      }
+    }
+
+    const word = /^[A-Za-z_\u0080-\u{10FFFF}][A-Za-z0-9_$\u0080-\u{10FFFF}]*/u
+      .exec(source.slice(index))?.[0];
+    if (word) {
+      const token = word.toUpperCase();
+      const beginsAtomicBody = !atomicBody
+        && token === "ATOMIC"
+        && atomicBeginCandidate
+        && parenthesisDepth === 0
+        && routineSignatureClosed
+        && isCreateRoutineStatement(statementTokens);
+      statement += word;
+      statementTokens.push(token);
+      index += word.length;
+      if (beginsAtomicBody) {
+        atomicBody = true;
+        atomicStatementStart = true;
+        atomicBeginCandidate = false;
+      } else if (atomicBody) {
+        if (atomicStatementStart && token === "END") {
+          atomicBody = false;
+        }
+        atomicStatementStart = false;
+      } else {
+        atomicBeginCandidate = token === "BEGIN"
+          && parenthesisDepth === 0
+          && routineSignatureClosed
+          && isCreateRoutineStatement(statementTokens);
+      }
+      continue;
+    }
+
+    if (character === "(") {
+      if (parenthesisDepth === 0
+        && !routineSignatureClosed
+        && isCreateRoutineStatement(statementTokens)) {
+        routineSignatureDepth = 1;
+      }
+      parenthesisDepth += 1;
+      atomicBeginCandidate = false;
+    } else if (character === ")") {
+      if (routineSignatureDepth === parenthesisDepth) {
+        routineSignatureClosed = true;
+        routineSignatureDepth = null;
+      }
+      parenthesisDepth = Math.max(0, parenthesisDepth - 1);
+      atomicBeginCandidate = false;
+    }
+
+    if (character === ";") {
+      if (atomicBody) {
+        statement += character;
+        atomicStatementStart = true;
+        index += 1;
+        continue;
+      }
+      finishStatement();
+      index += 1;
+      continue;
+    }
+    if (!/[\t\n\v\f\r ]/u.test(character)) {
+      atomicBeginCandidate = false;
+      if (atomicBody) atomicStatementStart = false;
+    }
+    statement += character;
+    index += 1;
+  }
+  finishStatement();
+  return statements;
+}
+
+type TransactionControl = Readonly<{
+  command: string;
+  statement: string;
+}>;
+
+function transactionControl(statement: string): TransactionControl | null {
+  const tokens = statement.match(/[A-Za-z_\u0080-\u{10FFFF}][A-Za-z0-9_$\u0080-\u{10FFFF}]*/gu)
+    ?.map((token) => token.toUpperCase()) ?? [];
+  const first = tokens[0];
+  if (!first) return null;
+  if (["ABORT", "BEGIN", "COMMIT", "END", "RELEASE", "ROLLBACK", "SAVEPOINT"].includes(first)) {
+    return { command: first, statement };
+  }
+  if (first === "START" && tokens[1] === "TRANSACTION") {
+    return { command: "START TRANSACTION", statement };
+  }
+  if (first === "PREPARE" && tokens[1] === "TRANSACTION") {
+    return { command: "PREPARE TRANSACTION", statement };
+  }
+  if (first === "SET" && (
+    tokens[1] === "TRANSACTION"
+    || tokens.slice(1, 5).join(" ") === "SESSION CHARACTERISTICS AS TRANSACTION"
+  )) {
+    return { command: "SET TRANSACTION", statement };
+  }
+  return null;
+}
+
+async function validateMigrationTransactionContracts(
+  migrationDirectory: string,
+  migrationNames: readonly string[]
+): Promise<void> {
+  for (const migrationName of migrationNames) {
+    let source: string;
+    try {
+      source = await readFile(join(migrationDirectory, `${migrationName}.sql`), "utf8");
+    } catch (error: any) {
+      if (error?.code === "ENOENT") continue;
+      throw error;
+    }
+
+    const controls = topLevelSqlStatements(source)
+      .map(transactionControl)
+      .filter((control): control is TransactionControl => control !== null);
+    const expectedBoundaries = PHASED_MIGRATION_BOUNDARIES.get(migrationName);
+    if (expectedBoundaries === undefined) {
+      if (controls.length > 0) {
+        throw new Error(
+          `Migration ${migrationName} contains transaction control without an approved phased contract.`
+        );
+      }
+      continue;
+    }
+
+    if (!source.startsWith(`${PHASED_MIGRATION_DIRECTIVE}\n`)) {
+      throw new Error(`Migration ${migrationName} is missing its approved phased transaction directive.`);
+    }
+    const boundaryCount = source.match(/^-- infinitequest:transaction-boundary$/gmu)?.length ?? 0;
+    if (boundaryCount !== expectedBoundaries) {
+      throw new Error(
+        `Migration ${migrationName} must contain exactly ${expectedBoundaries} approved transaction boundaries.`
+      );
+    }
+    const expectedControls = Array.from(
+      { length: expectedBoundaries },
+      () => ["COMMIT", "BEGIN"]
+    ).flat();
+    if (controls.length !== expectedControls.length
+      || controls.some((control, index) => (
+        control.command !== expectedControls[index]
+        || control.statement.toUpperCase() !== expectedControls[index]
+      ))) {
+      throw new Error(`Migration ${migrationName} has invalid phased transaction control.`);
+    }
+    for (const phase of source.split(PHASE_BOUNDARY).slice(1)) {
+      if (!/^\r?\nCOMMIT;\r?\nBEGIN;/u.test(phase)) {
+        throw new Error(`Migration ${migrationName} has an invalid transaction boundary marker.`);
+      }
+    }
+  }
+}
+
 async function runMigrations(
   pool: DatabasePool,
   migrationDirectory: string,
-  dryRun: boolean
+  dryRun: boolean,
+  expectedMigrations?: readonly string[]
 ): Promise<string[]> {
+  if (!dryRun && expectedMigrations) {
+    await validateMigrationTransactionContracts(migrationDirectory, expectedMigrations);
+  }
   const client = await pool.connect();
   try {
     const migrations = await runner({
@@ -40,7 +302,9 @@ async function runMigrations(
       verbose: false,
       logger: dryRun ? silentMigrationLogger : migrationLogger
     });
-    return migrations.map((migration) => migration.name);
+    const names = migrations.map((migration) => migration.name);
+    if (dryRun) await validateMigrationTransactionContracts(migrationDirectory, names);
+    return names;
   } finally {
     client.release();
   }
@@ -95,7 +359,7 @@ export async function migrateDatabase(
         "Back up the database and run the migrate role or set ALLOW_MAINTENANCE_MIGRATIONS=true."
       );
     }
-    return runMigrations(pool, migrationDirectory, false);
+    return runMigrations(pool, migrationDirectory, false, pending);
   });
 }
 

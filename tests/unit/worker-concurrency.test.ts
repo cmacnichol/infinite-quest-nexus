@@ -10,7 +10,22 @@ import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
 
 const log = vi.hoisted(() => ({ error: vi.fn(), info: vi.fn() }));
+const productionCompositions = vi.hoisted(() => ({
+  createMaintenance: vi.fn(),
+  createIllustrationPublication: vi.fn(),
+  createSystemArchive: vi.fn()
+}));
 vi.mock("../../packages/logger/src/index.js", () => ({ logger: log }));
+vi.mock("../../services/runtime/src/private-asset-maintenance-composition.js", () => ({
+  createPrivateAssetMaintenanceComposition: productionCompositions.createMaintenance
+}));
+vi.mock("../../services/runtime/src/illustration-asset-publication-composition.js", () => ({
+  createPrivateIllustrationAssetPublicationComposition:
+    productionCompositions.createIllustrationPublication
+}));
+vi.mock("../../services/worker/src/system-archive-worker.js", () => ({
+  createProductionSystemArchiveWorkerLane: productionCompositions.createSystemArchive
+}));
 
 import {
   runWorker,
@@ -65,6 +80,78 @@ describe("worker concurrency scheduler", () => {
   beforeEach(() => {
     log.error.mockReset();
     log.info.mockReset();
+    productionCompositions.createMaintenance.mockReset();
+    productionCompositions.createIllustrationPublication.mockReset();
+    productionCompositions.createSystemArchive.mockReset();
+  });
+
+  it("closes production resources when the gated System Archive lane fails to start", async () => {
+    const maintenanceClose = vi.fn(async () => undefined);
+    const publicationClose = vi.fn(async () => undefined);
+    productionCompositions.createMaintenance.mockResolvedValue({
+      scheduler: { tick: vi.fn() },
+      close: maintenanceClose
+    });
+    productionCompositions.createIllustrationPublication.mockResolvedValue({
+      coordinator: {},
+      close: publicationClose
+    });
+    productionCompositions.createSystemArchive.mockRejectedValue(
+      new Error("synthetic System Archive startup failure")
+    );
+
+    await expect(runWorker(pool, {
+      ...workerConfig(1),
+      systemArchiveEnabled: true
+    }, new AbortController().signal, {
+      generation: {
+        claimNext: vi.fn(async () => null),
+        executeClaimed: vi.fn(async () => false)
+      },
+      illustration: inertWorkerIllustration,
+      memory: inertWorkerMemory
+    })).rejects.toThrow("synthetic System Archive startup failure");
+
+    expect(publicationClose).toHaveBeenCalledOnce();
+    expect(maintenanceClose).toHaveBeenCalledOnce();
+  });
+
+  it("attempts every production close when an earlier shutdown close rejects", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const publicationClose = vi.fn(async () => undefined);
+    const maintenanceClose = vi.fn(() => {
+      throw new Error("synthetic maintenance close failure");
+    });
+    const systemArchiveClose = vi.fn(async () => undefined);
+    productionCompositions.createMaintenance.mockResolvedValue({
+      scheduler: { tick: vi.fn() },
+      close: maintenanceClose,
+    });
+    productionCompositions.createIllustrationPublication.mockResolvedValue({
+      coordinator: {},
+      close: publicationClose,
+    });
+    productionCompositions.createSystemArchive.mockResolvedValue({
+      runNext: vi.fn(async () => false),
+      close: systemArchiveClose,
+    });
+
+    await expect(runWorker(pool, {
+      ...workerConfig(1),
+      systemArchiveEnabled: true,
+    }, controller.signal, {
+      generation: {
+        claimNext: vi.fn(async () => null),
+        executeClaimed: vi.fn(async () => false),
+      },
+      illustration: inertWorkerIllustration,
+      memory: inertWorkerMemory,
+    })).rejects.toThrow("synthetic maintenance close failure");
+
+    expect(publicationClose).toHaveBeenCalledOnce();
+    expect(maintenanceClose).toHaveBeenCalledOnce();
+    expect(systemArchiveClose).toHaveBeenCalledOnce();
   });
 
   it("fills every configured generation slot and refills only the released slot", async () => {
@@ -108,7 +195,7 @@ describe("worker concurrency scheduler", () => {
     expect(generation.claimNext).toHaveBeenCalledTimes(4);
   });
 
-  it("completes a full generation-illustration-Chronicle-asset rotation before refilling", async () => {
+  it("completes a full generation-illustration-Chronicle-asset-System-Archive rotation before refilling", async () => {
     const controller = new AbortController();
     const trace: string[] = [];
     const generationExecutions: ReturnType<typeof deferred<boolean>>[] = [];
@@ -130,6 +217,7 @@ describe("worker concurrency scheduler", () => {
     const illustrationRefill = deferred<boolean>();
     const chronicle = deferred<boolean>();
     const asset = deferred<boolean>();
+    const systemArchive = deferred<boolean>();
     let illustrationCalls = 0;
     const optionalLanes: WorkerOptionalLanes = {
       illustration: vi.fn(() => {
@@ -146,7 +234,11 @@ describe("worker concurrency scheduler", () => {
       asset: vi.fn(() => {
         trace.push("asset");
         return asset.promise;
-      })
+      }),
+      systemArchive: vi.fn(() => {
+        trace.push("system-archive");
+        return systemArchive.promise;
+      }),
     };
 
     const running = runWorker(pool, workerConfig(2), controller.signal, {
@@ -156,7 +248,7 @@ describe("worker concurrency scheduler", () => {
       optionalLanes
     });
 
-    await vi.waitFor(() => expect(optionalLanes.asset).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(optionalLanes.systemArchive).toHaveBeenCalledOnce());
     expect(trace).toEqual([
       "generation:claim:1",
       "generation:execute:1",
@@ -164,18 +256,21 @@ describe("worker concurrency scheduler", () => {
       "generation:execute:2",
       "illustration",
       "chronicle",
-      "asset"
+      "asset",
+      "system-archive",
     ]);
 
     illustration.resolve(true);
     await vi.waitFor(() => expect(optionalLanes.illustration).toHaveBeenCalledTimes(2));
     expect(optionalLanes.chronicle).toHaveBeenCalledOnce();
     expect(optionalLanes.asset).toHaveBeenCalledOnce();
+    expect(optionalLanes.systemArchive).toHaveBeenCalledOnce();
 
     controller.abort();
     illustrationRefill.resolve(true);
     chronicle.resolve(true);
     asset.resolve(true);
+    systemArchive.resolve(true);
     generationExecutions.forEach((execution) => execution.resolve(true));
     await running;
   });
@@ -285,12 +380,49 @@ describe("worker concurrency scheduler", () => {
     }));
   });
 
+  it("never logs a raw System Archive worker failure at the shared scheduler boundary", async () => {
+    const controller = new AbortController();
+    const marker = "C:\\private\\story-secret-token.txt";
+    const untrustedCode = "story-secret-token";
+    const optionalLanes: WorkerOptionalLanes = {
+      illustration: vi.fn(async () => false),
+      chronicle: vi.fn(async () => false),
+      asset: vi.fn(async () => false),
+      systemArchive: vi.fn(async () => {
+        controller.abort();
+        throw Object.assign(new Error(marker), { code: untrustedCode });
+      }),
+    };
+
+    await runWorker(pool, workerConfig(1), controller.signal, {
+      generation: {
+        claimNext: vi.fn(async () => null),
+        executeClaimed: vi.fn(async () => false),
+      },
+      illustration: inertWorkerIllustration,
+      memory: inertWorkerMemory,
+      optionalLanes,
+    });
+
+    const systemArchiveLogs = log.error.mock.calls.filter(([fields]) => (
+      fields as Record<string, unknown>
+    ).event === "worker_system-archive_error");
+    expect(systemArchiveLogs).toHaveLength(1);
+    expect(systemArchiveLogs[0]?.[0]).toMatchObject({
+      event: "worker_system-archive_error",
+      errorCode: "archive-operation-failed",
+    });
+    expect(JSON.stringify(systemArchiveLogs)).not.toContain(marker);
+    expect(JSON.stringify(systemArchiveLogs)).not.toContain(untrustedCode);
+  });
+
   it("stops all claims after abort, drains every lane, and never passes the scheduler signal to story execution", async () => {
     const controller = new AbortController();
     const generationExecution = deferred<boolean>();
     const illustration = deferred<boolean>();
     const chronicle = deferred<boolean>();
     const asset = deferred<boolean>();
+    const systemArchive = deferred<boolean>();
     const generation: GenerationWorkerApplication = {
       claimNext: vi.fn(async () => claim("1")),
       executeClaimed: vi.fn(() => generationExecution.promise)
@@ -298,7 +430,8 @@ describe("worker concurrency scheduler", () => {
     const optionalLanes: WorkerOptionalLanes = {
       illustration: vi.fn(() => illustration.promise),
       chronicle: vi.fn(() => chronicle.promise),
-      asset: vi.fn(() => asset.promise)
+      asset: vi.fn(() => asset.promise),
+      systemArchive: vi.fn(() => systemArchive.promise),
     };
     let settled = false;
 
@@ -309,7 +442,7 @@ describe("worker concurrency scheduler", () => {
       optionalLanes
     }).finally(() => { settled = true; });
 
-    await vi.waitFor(() => expect(optionalLanes.asset).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(optionalLanes.systemArchive).toHaveBeenCalledOnce());
     controller.abort();
     await Promise.resolve();
     expect(settled).toBe(false);
@@ -324,12 +457,14 @@ describe("worker concurrency scheduler", () => {
     illustration.resolve(true);
     chronicle.resolve(true);
     asset.resolve(true);
+    systemArchive.resolve(true);
     await running;
 
     expect(generation.claimNext).toHaveBeenCalledOnce();
     expect(optionalLanes.illustration).toHaveBeenCalledOnce();
     expect(optionalLanes.chronicle).toHaveBeenCalledOnce();
     expect(optionalLanes.asset).toHaveBeenCalledOnce();
+    expect(optionalLanes.systemArchive).toHaveBeenCalledOnce();
   });
 });
 
