@@ -61,6 +61,56 @@ describe("StoryGenerationController", () => {
         }
       })
     })]);
+    expect(submitted[0]?.request).not.toHaveProperty("storyLengthProfileOverride");
+  });
+
+  it("serializes a requested per-turn length override into the durable append request", async () => {
+    const submitted: GenerationSubmissionInput[] = [];
+    const workflow: GenerationWorkflow = {
+      submit: vi.fn(async (_campaignId, input) => { submitted.push(input); return run(); }),
+      resume: vi.fn()
+    };
+    const controller = createStoryGenerationController({
+      workflow,
+      campaignStore: { attachGeneration: vi.fn(() => ({ campaignId, jobId, apply: vi.fn(), retryResult: vi.fn() })) } as never,
+      idFactory: { create: () => "length-idempotency-key" },
+      currentCampaign: () => ({ id: campaignId, activeTurnNumber: 0 })
+    });
+
+    await controller.submitAppend({
+      action: "Open the observatory.",
+      requestedInputMode: "action",
+      resolvedInputMode: "action",
+      inputModeSource: "explicit",
+      storyLengthProfileOverride: "long"
+    });
+
+    expect(submitted[0]).toMatchObject({ request: { storyLengthProfileOverride: "long" } });
+  });
+
+  it("serializes a requested per-turn length override into the durable replacement request", async () => {
+    const submitted: GenerationSubmissionInput[] = [];
+    const replacementTurnId = "33333333-3333-4333-8333-333333333333";
+    const replacementRun = { ...run(), operationKind: "replace_latest" as const, replacementTurnId };
+    const controller = createStoryGenerationController({
+      workflow: {
+        submit: vi.fn(async (_campaignId, input) => { submitted.push(input); return replacementRun; }),
+        resume: vi.fn()
+      },
+      campaignStore: { attachGeneration: vi.fn(() => ({ campaignId, jobId, apply: vi.fn(), retryResult: vi.fn() })) } as never,
+      idFactory: { create: () => "replacement-length-key" },
+      currentCampaign: () => ({ id: campaignId, activeTurnNumber: 4 })
+    });
+
+    await controller.submitReplacement(replacementTurnId, {
+      action: "Try another path.", requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit",
+      storyLengthProfileOverride: "brief"
+    });
+
+    expect(submitted[0]).toMatchObject({
+      operationKind: "replace_latest",
+      request: { storyLengthProfileOverride: "brief", expectedCurrentTurnNumber: 4 }
+    });
   });
 
   it("keeps streamed narration non-authoritative until the completed result reaches the store", async () => {

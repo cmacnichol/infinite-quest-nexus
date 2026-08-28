@@ -1,5 +1,7 @@
 # Story Context Budget Control Implementation Plan
 
+> **Superseded:** The browser-owned design was replaced by [2026-08-27-campaign-owned-story-context-budget.md](2026-08-27-campaign-owned-story-context-budget.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Let users choose how much Story context to request from both active Story Player UIs while preserving the current 32K default and relying on the existing runtime provider-window clamp.

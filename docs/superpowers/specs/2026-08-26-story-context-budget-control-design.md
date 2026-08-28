@@ -1,5 +1,7 @@
 # Story Context Budget Control Design
 
+> **Superseded:** The browser-owned design was replaced by the campaign-owned implementation plan in [2026-08-27-campaign-owned-story-context-budget.md](../plans/2026-08-27-campaign-owned-story-context-budget.md).
+
 ## Decision
 
 Add a persistent browser-side **Story context** preference to both active Story Player UIs. The preference selects an upper target for the context assembled for future story generations. It reuses the existing `generationRequestSchema.context.budgetTokens` field and therefore requires no API, database, migration, provider-adapter, or runtime change.

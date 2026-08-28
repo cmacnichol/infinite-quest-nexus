@@ -10,7 +10,7 @@ flowchart LR
   Budget --> Prompt["Fiction-only narrative prompt"]
 ```
 
-Each new story request carries a requested context budget in `request.context.budgetTokens`. The Story Player's persisted selector uses 32K by default and offers fixed targets through 1M; API callers may use any validated value in the existing contract range. The requested budget is snapshotted with the durable generation job.
+Each campaign owns its Story context budget. Campaign Management controls use 32K by default and offer fixed targets through 1M; the server, rather than either Story Player, resolves that setting when creating a request and snapshots it with the durable generation job. API callers may use any validated value in the existing contract range only where the campaign configuration allows it.
 
 The requested budget is distinct from the provider/model context window. Before retrieval, the runtime takes the smaller applicable window, reserves provider output and protocol overhead, then derives the effective Chronicle budget. High-priority authoritative context is retained while lower-priority derived material is compressed or omitted. If fixed authority cannot fit, generation reports the existing context-budget error rather than silently dropping it.
 

@@ -141,6 +141,14 @@ function enter(page: ReturnType<typeof fixture>, text: string): HTMLTextAreaElem
   return textarea;
 }
 
+function selectTurnLength(page: ReturnType<typeof fixture>, value: string): HTMLSelectElement {
+  const select = page.document.querySelector<HTMLSelectElement>("[data-story-length-profile]");
+  if (!select) throw new Error("Story length profile control is missing.");
+  for (const option of select.querySelectorAll<HTMLOptionElement>("option")) option.selected = option.value === value;
+  select.dispatchEvent(new page.window.Event("change", { bubbles: true }));
+  return select;
+}
+
 function keydown(page: ReturnType<typeof fixture>, target: HTMLElement, key: string): void {
   const event = new page.window.Event("keydown", { bubbles: true, cancelable: true });
   Object.defineProperty(event, "key", { value: key });
@@ -167,39 +175,106 @@ function deferred<T>() {
 afterEach(() => vi.restoreAllMocks());
 
 describe("Story continuation composer", () => {
-  it("persists a selected Story context target and submits it with the turn", async () => {
+  it("renders the compact turn length profile selector and resets it after a durable attachment", async () => {
     const page = fixture();
-    const prepared = composition();
-    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, prepared);
+    const observer = vi.fn();
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition(), { onSubmit: observer });
     await settle();
 
-    const context = page.document.querySelector<HTMLSelectElement>("[data-story-context-budget]");
-    expect(context?.getAttribute("aria-label")).toBe("Story context");
-    expect([...context?.options ?? []].map((option) => [option.value, option.textContent])).toEqual([
-      ["32000", "Standard · 32K"],
-      ["64000", "Expanded · 64K"],
-      ["128000", "Large · 128K"],
-      ["256000", "Very large · 256K"],
-      ["1000000", "Maximum available · up to 1M"]
-    ]);
-
-    if (!context) throw new Error("Story context control is missing.");
-    Object.defineProperty(context, "value", { configurable: true, value: "128000" });
-    context.dispatchEvent(new page.window.Event("change", { bubbles: true }));
-    await settle();
+    const select = page.document.querySelector<HTMLSelectElement>("[data-story-length-profile]");
+    expect([...select?.querySelectorAll("option") ?? []].map((option) => [option.getAttribute("value"), option.textContent]))
+      .toEqual([["", "Campaign default — Standard"], ["brief", "Brief"], ["standard", "Standard"], ["long", "Long"], ["extended", "Extended"]]);
+    selectTurnLength(page, "extended");
     enter(page, "Open the observatory.");
     page.document.querySelector<HTMLButtonElement>("[data-action='continue-story']")?.click();
     await settle();
 
-    const submit = prepared.workflow.submit as ReturnType<typeof vi.fn>;
-    expect(submit.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
-      request: expect.objectContaining({
-        context: { budgetTokens: 128_000, compression: "auto", recentTurns: 8 }
-      })
-    }));
+    expect(observer).toHaveBeenCalledWith(expect.objectContaining({ storyLengthProfileOverride: "extended" }));
+    expect(page.document.querySelector<HTMLSelectElement>("[data-story-length-profile]")?.value).toBe("");
     mounted.dispose();
   });
 
+  it("captures the turn length before Auto confirmation and retains it after a rejected submission", async () => {
+    const page = fixture();
+    const classifyTurnInput = vi.fn().mockResolvedValue({
+      classificationId: "11111111-1111-4111-8111-111111111111", classification: "mixed", resolvedMode: "scene",
+      confidenceBand: "ambiguous", providerSource: "story_text", expiresAt: "2026-08-18T00:01:00.000Z"
+    });
+    const observer = vi.fn();
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({ turnControlStyle: "flexible_auto", classifyTurnInput }), { onSubmit: observer });
+    await settle();
+
+    selectTurnLength(page, "extended");
+    enter(page, "Describe the moment.");
+    page.document.querySelector<HTMLButtonElement>("[data-action='continue-story']")?.click();
+    await settle();
+    selectTurnLength(page, "brief");
+    page.document.querySelector<HTMLButtonElement>("[data-action='confirm-intent-scene']")?.click();
+    await settle();
+
+    expect(observer).toHaveBeenCalledWith(expect.objectContaining({ storyLengthProfileOverride: "extended", resolvedInputMode: "scene" }));
+    mounted.dispose();
+
+    const rejectedPage = fixture();
+    const base = composition();
+    const rejected = {
+      ...base,
+      workflow: { submit: vi.fn(async () => { throw new Error("workflow unavailable"); }), resume: vi.fn(async () => null) }
+    } as StoryPlayerComposition;
+    const rejectedMounted = mountStoryPlayerPage(rejectedPage.root, { campaignId, turnNumber: 1 }, rejected);
+    await settle();
+    selectTurnLength(rejectedPage, "extended");
+    enter(rejectedPage, "Try the observatory.");
+    rejectedPage.document.querySelector<HTMLButtonElement>("[data-action='continue-story']")?.click();
+    await settle();
+
+    expect(rejectedPage.document.querySelector<HTMLSelectElement>("[data-story-length-profile]")?.value).toBe("extended");
+    rejectedMounted.dispose();
+  });
+
+  it("keeps Retry Latest targeted at replacement after a rejected enqueue", async () => {
+    const page = fixture();
+    const confirm = vi.fn(() => true);
+    Object.defineProperty(page.window, "confirm", { configurable: true, value: confirm });
+    const base = composition();
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, base);
+    await settle();
+
+    const replacementTurnId = "66666666-6666-4666-8666-666666666666";
+    const submit = vi.fn()
+      .mockRejectedValueOnce(new Error("temporary enqueue failure"))
+      .mockResolvedValueOnce({
+        campaignId,
+        jobId: "55555555-5555-4555-8555-555555555555",
+        operationKind: "replace_latest" as const,
+        replacementTurnId,
+        async *watch() {}, async *retryGeneration() {},
+        cancelGeneration: vi.fn(), discardGeneration: vi.fn(), fetchResult: vi.fn()
+      });
+    Object.assign(base.workflow as object, { submit, resume: vi.fn(async () => null) });
+
+    page.document.querySelector<HTMLButtonElement>("[data-action='retry-latest-generation']")?.click();
+    await settle();
+    selectTurnLength(page, "extended");
+    page.document.querySelector<HTMLButtonElement>("[data-action='continue-story']")?.click();
+    await settle();
+
+    expect(submit).toHaveBeenCalledWith(campaignId, expect.objectContaining({
+      operationKind: "replace_latest",
+      request: expect.objectContaining({ storyLengthProfileOverride: "extended", expectedCurrentTurnNumber: 1 })
+    }));
+    expect(page.document.querySelector<HTMLSelectElement>("[data-story-length-profile]")?.value).toBe("extended");
+    page.document.querySelector<HTMLButtonElement>("[data-action='continue-story']")?.click();
+    await settle();
+
+    expect(submit.mock.calls.map(([, request]) => (request as { operationKind: string }).operationKind))
+      .toEqual(["replace_latest", "replace_latest"]);
+    expect(submit.mock.calls[1]?.[1]).toEqual(expect.objectContaining({
+      request: expect.objectContaining({ storyLengthProfileOverride: "extended", expectedCurrentTurnNumber: 1 })
+    }));
+    expect(confirm).toHaveBeenCalledTimes(2);
+    mounted.dispose();
+  });
   it("uses the campaign control style to render an action-only or flexible compact interpretation bar", async () => {
     const actionPage = fixture();
     const actionMounted = mountStoryPlayerPage(actionPage.root, { campaignId, turnNumber: 1 }, composition());

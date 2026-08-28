@@ -30,9 +30,9 @@ The editor and API accept up to 12,000 characters for one turn input. The Story 
 
 ## Story context
 
-Both Story Player versions provide a **Story context** selector. It sets the upper target for the current browser's future Story requests: Standard (32K), Expanded (64K), Large (128K), Very large (256K), or Maximum available (up to 1M). Standard remains the default.
+Configure **Story context** from Campaign Management: the replacement UI's Campaign Overview and the legacy UI's Setup Campaign view offer Standard (32K), Expanded (64K), Large (128K), Very large (256K), and Maximum available (up to 1M). Standard remains the default.
 
-The choice is a same-browser preference shared by the legacy and replacement Story Players. It is not a campaign setting and is not included in campaign exports. New append and Retry Latest requests use the selected target; an already queued durable generation keeps the context snapshot captured when it was queued.
+The choice is authoritative campaign configuration. It is included in campaign exports, restored when imported, and used for all newly queued Story requests from either Story Player. An already queued durable generation retains the context snapshot captured when it was queued.
 
 The target is not a promise that every token will be used. The Story Engine reserves output and protocol space, keeps required world and campaign authority first, and never exceeds the selected provider/model window. Larger targets can make more Chronicle material eligible, but the available provider window remains the hard limit.
 

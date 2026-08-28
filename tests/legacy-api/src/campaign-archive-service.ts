@@ -258,7 +258,12 @@ function legacyPayload(snapshot: CampaignArchiveSnapshot, exportedAt = new Date(
     format: "infinite-quest-campaign", formatVersion: 3, exportedAt,
     campaign: { title: row.title, sourceCampaignId: row.id, sourceWorldVersionId: row.world_version_id, sourceWorldVersionNumber: row.version_number, selectedCharacterId: row.selected_character_id ?? null, characterSnapshot: row.character_snapshot ?? null, characterProfile: row.character_profile ?? null, characterProfileRevision: Number(row.character_profile_revision || 0), stateRevision: Number(row.revision || 0) },
     world: { ...worldWithoutStoredCharacter, ...(selectedCharacterText ? { character: selectedCharacterText } : {}) },
-    settings: { ...portableSettings(row.legacy_settings), storyLength: row.story_length_profile, turnControlStyle: row.turn_control_style },
+    settings: {
+      ...portableSettings(row.legacy_settings),
+      storyLength: row.story_length_profile,
+      storyContextBudgetTokens: row.story_context_budget_tokens,
+      turnControlStyle: row.turn_control_style
+    },
     turns: snapshot.turns.map((turn) => ({ id: turn.id, turnNumber: turn.turn_number, action: turn.action, inputMode: turn.input_mode || "action", inputModeSource: turn.input_mode_source || "explicit", narration: turn.narration, choices: turn.choices, customActionSuggestion: turn.custom_action_suggestion, imagePrompt: turn.image_prompt, imageUrl: turn.image_url, roll: turn.mechanics_private, worldStateSnapshot: turn.state_snapshot_private, llmModelInfo: portableModelMetadata(turn.model_metadata), createdAt: iso(turn.accepted_at) })),
     rpgStats: row.rpg_stats, defaultTriggers: row.default_triggers, eventTriggers: row.event_triggers, pendingEventTriggers: row.pending_event_triggers, trackers: row.trackers, baseTrackersAtStart: row.default_triggers, scratchpad: row.scratchpad_private,
     ...(snapshot.legacyHistory ? { fullHistory: snapshot.legacyHistory.content, fullHistoryCompressedThroughTurn: snapshot.legacyHistory.through_turn } : {}),

@@ -393,7 +393,8 @@ integration("World Library and campaign version integration", () => {
     const campaignTitle = `Synthetic Transfer Blocker ${crypto.randomUUID()}`;
     const campaign = await createCampaign(pool, campaignCreateSchema.parse({
       title: campaignTitle,
-      worldVersionId: source.version.worldVersionId
+      worldVersionId: source.version.worldVersionId,
+      storyContextBudgetTokens: 1_000_000
     }));
     const previewRequest = campaignTransferPreviewRequestSchema.parse({
       targetWorldVersionId: target.version.worldVersionId
@@ -406,7 +407,11 @@ integration("World Library and campaign version integration", () => {
       expectedStateRevision: preview.expectedStateRevision,
       sourceFingerprint: preview.sourceFingerprint
     }));
-    const targetCampaign = await pool.query<{ title: string }>("SELECT title FROM campaigns WHERE id = $1", [transferred.targetCampaignId]);
+    const targetCampaign = await pool.query<{ title: string; story_context_budget_tokens: number }>(
+      "SELECT title, story_context_budget_tokens FROM campaigns WHERE id = $1",
+      [transferred.targetCampaignId]
+    );
+    expect(targetCampaign.rows[0]?.story_context_budget_tokens).toBe(1_000_000);
 
     await deleteCampaign(pool, campaign.id, resourceDeleteSchema.parse({ confirmation: "DELETE", expectedTitle: campaignTitle }));
     await deleteCampaign(pool, transferred.targetCampaignId, resourceDeleteSchema.parse({
@@ -643,6 +648,7 @@ integration("World Library and campaign version integration", () => {
 
     expect(updated.storyContextBudgetTokens).toBe(256_000);
     expect((await listCampaigns(pool)).find((item: any) => item.id === campaign.id)?.storyContextBudgetTokens).toBe(256_000);
+    expect((await exportCampaign(pool, campaign.id, null)).settings.storyContextBudgetTokens).toBe(256_000);
   });
 
   it("seeds, revisions, audits, exports, and prompts from an editable structured campaign profile", async () => {
@@ -853,7 +859,8 @@ integration("World Library and campaign version integration", () => {
     const second = await createCampaign(pool, campaignCreateSchema.parse({
       title: `Second Campaign ${crypto.randomUUID()}`,
       worldVersionId: published.worldVersionId,
-      selectedCharacterId: "second-character"
+      selectedCharacterId: "second-character",
+      storyContextBudgetTokens: 1_000_000
     }));
     const rows = await pool.query<any>(
       `SELECT c.id, c.selected_character_id, c.character_snapshot, cs.rpg_stats, cs.default_triggers
@@ -886,18 +893,20 @@ integration("World Library and campaign version integration", () => {
     expect((await exportCampaign(pool, second.id, null)).world.character).toBe("Second Character\n\nSecond character canon.");
 
     const portableCampaign = await exportCampaign(pool, second.id, null);
+    expect(portableCampaign.settings.storyContextBudgetTokens).toBe(1_000_000);
     portableCampaign.world.title = `Roundtrip Character ${crypto.randomUUID()}`;
     const roundtrip = await importLegacyStory(pool, storyImportRequestSchema.parse({
       sourceName: "synthetic-character-roundtrip.story",
       story: portableCampaign
     }));
-    const roundtripCampaign = await pool.query<{ selected_character_id: string; character_snapshot: any }>(
-      "SELECT selected_character_id, character_snapshot FROM campaigns WHERE id = $1",
+    const roundtripCampaign = await pool.query<{ selected_character_id: string; character_snapshot: any; story_context_budget_tokens: number }>(
+      "SELECT selected_character_id, character_snapshot, story_context_budget_tokens FROM campaigns WHERE id = $1",
       [roundtrip.campaignId]
     );
     expect(roundtripCampaign.rows[0]).toMatchObject({
       selected_character_id: "second-character",
-      character_snapshot: { characterText: "Second character canon." }
+      character_snapshot: { characterText: "Second character canon." },
+      story_context_budget_tokens: 1_000_000
     });
   });
 

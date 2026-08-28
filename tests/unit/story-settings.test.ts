@@ -2,11 +2,19 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_STORY_LENGTH_PROFILE,
+  storyLengthProfileSchema,
   storyLengthProfileFromUnknown,
-  storyLengthWordRange
-} from "../../packages/contracts/src/story-settings.js";
+  storyLengthWordRange,
+  type StoryLengthProfile
+} from "../../packages/contracts/src/index.js";
 
 describe("campaign story-length settings", () => {
+  it("exports the shared story-length contract from the public barrel", () => {
+    const profile: StoryLengthProfile = storyLengthProfileSchema.parse("long");
+
+    expect(profile).toBe("long");
+  });
+
   it("normalizes profiles and exposes their authoritative word ranges", () => {
     expect(DEFAULT_STORY_LENGTH_PROFILE).toBe("standard");
     expect(storyLengthProfileFromUnknown(" Extended ")).toBe("extended");

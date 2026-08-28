@@ -39,11 +39,7 @@ import {
   toggleChoiceDraftSelection
 } from "./story-choice-selection.js";
 import {
-  formatChronicleRetrievalAudit,
-  loadStoryContextBudgetTokens,
-  normalizeStoryContextBudgetTokens,
-  saveStoryContextBudgetTokens,
-  STORY_CONTEXT_BUDGET_PRESETS
+  formatChronicleRetrievalAudit
 } from "@infinite-quest/client-core";
 
 "use strict";
@@ -129,7 +125,6 @@ const state = {
   streamingAutoFollow: true,
   streamingExpectedScrollY: null,
   turnInputMode: "auto",
-  contextBudgetTokens: loadStoryContextBudgetTokens(storyContextStorage()),
   nextTurnInputModeSource: null,
   choiceDraftOwnerKey: null,
   choiceDraftSelection: createChoiceDraftSelection(),
@@ -158,14 +153,6 @@ function completeHistorySupersededError() {
   const error = new Error("Story history load was superseded.");
   error.code = COMPLETE_HISTORY_SUPERSEDED;
   return error;
-}
-
-function storyContextStorage() {
-  try {
-    return localStorage;
-  } catch {
-    return null;
-  }
 }
 
 function isCompleteHistorySuperseded(error) {
@@ -322,11 +309,10 @@ function syncInputState() {
   const storyInputLocked = generationLocked || !isLatest;
   if (btnAction) btnAction.disabled = storyInputLocked;
   if (freeAction) freeAction.disabled = storyInputLocked;
+  const storyLengthOverride = $("turnStoryLengthProfileOverride");
+  if (storyLengthOverride) storyLengthOverride.disabled = storyInputLocked;
   document.querySelectorAll("[data-turn-input-mode]").forEach((button) => {
     button.disabled = storyInputLocked || campaignTurnControlStyle() === "action_only";
-  });
-  document.querySelectorAll("[data-story-context-budget]").forEach((control) => {
-    control.disabled = storyInputLocked;
   });
   document.querySelectorAll("#choiceArea .choice").forEach(b => { b.disabled = storyInputLocked; });
   syncClearTurnInputButton();
@@ -818,6 +804,43 @@ function campaignTurnControlStyle() {
   return state.campaign?.turnControlStyle || "flexible_auto";
 }
 
+function campaignStoryLengthProfile() {
+  const profile = state.campaign?.storyLengthProfile;
+  return ["brief", "standard", "long", "extended"].includes(profile) ? profile : "standard";
+}
+
+function storyLengthProfileLabel(profile) {
+  return ({ brief: "Brief", standard: "Standard", long: "Long", extended: "Extended" })[profile] || "Standard";
+}
+
+function selectedStoryLengthOverride(controlId) {
+  const value = String($(controlId)?.value || "");
+  return ["brief", "standard", "long", "extended"].includes(value) ? value : null;
+}
+
+function syncStoryLengthOverrideControls() {
+  const defaultLabel = `Campaign default — ${storyLengthProfileLabel(campaignStoryLengthProfile())}`;
+  ["turnStoryLengthProfileOverride", "retryStoryLengthProfileOverride"].forEach((controlId) => {
+    const control = $(controlId);
+    const defaultOption = control?.querySelector('option[value=""]');
+    if (defaultOption) defaultOption.textContent = defaultLabel;
+  });
+}
+
+function setStoryLengthOverride(controlId, value) {
+  const control = $(controlId);
+  control?.querySelectorAll("option").forEach((option) => { option.selected = false; });
+  const option = control?.querySelector(`option[value="${value}"]`);
+  if (option) option.selected = true;
+}
+
+function resetStoryLengthOverrideControls() {
+  ["turnStoryLengthProfileOverride", "retryStoryLengthProfileOverride"].forEach((controlId) => {
+    setStoryLengthOverride(controlId, "");
+  });
+  syncStoryLengthOverrideControls();
+}
+
 function defaultTurnInputMode() {
   return turnInputModeForControlStyle(campaignTurnControlStyle());
 }
@@ -868,27 +891,6 @@ function clearTurnIntentDecision() {
   state.pendingIntentDecision = null;
   const panel = $("turnIntentDecision");
   if (panel) panel.classList.add("hidden");
-}
-
-function syncStoryContextBudgetControls() {
-  const selectedValue = String(state.contextBudgetTokens);
-  document.querySelectorAll("[data-story-context-budget]").forEach((control) => {
-    control.replaceChildren();
-    STORY_CONTEXT_BUDGET_PRESETS.forEach((preset) => {
-      const option = document.createElement("option");
-      option.value = String(preset.value);
-      option.textContent = preset.label;
-      option.selected = option.value === selectedValue;
-      control.append(option);
-    });
-  });
-  syncInputState();
-}
-
-function setStoryContextBudgetTokens(value) {
-  state.contextBudgetTokens = normalizeStoryContextBudgetTokens(Number(value));
-  saveStoryContextBudgetTokens(storyContextStorage(), state.contextBudgetTokens);
-  syncStoryContextBudgetControls();
 }
 
 function setTurnInputMode(mode, options = {}) {
@@ -1004,6 +1006,7 @@ function renderTurnInput() {
   const isLatest = isViewingLatestTurn();
   const shouldShowInput = !state.generationDisplayActive && isLatest;
   inputPanel.classList.toggle("hidden", !shouldShowInput);
+  syncStoryLengthOverrideControls();
   if (!shouldShowInput) {
     clearTurnIntentDecision();
     return;
@@ -1018,8 +1021,8 @@ function renderTurnInput() {
   }
 }
 
-function showAmbiguousTurnIntent(action, classification, contextBudgetTokens) {
-  state.pendingIntentDecision = { action, classification, contextBudgetTokens };
+function showAmbiguousTurnIntent(action, classification, storyLengthProfileOverride) {
+  state.pendingIntentDecision = { action, classification, storyLengthProfileOverride };
   const panel = $("turnIntentDecision");
   const message = $("turnIntentDecisionMessage");
   if (message) {
@@ -1059,12 +1062,12 @@ async function submitAction(actionText, options = {}) {
     action = firstActionForNewAdventure();
   }
   if (!action) { toast("Enter an action first."); return; }
+  const storyLengthProfileOverride = selectedStoryLengthOverride("turnStoryLengthProfileOverride");
   const requestedInputMode = options.requestedInputMode || state.turnInputMode;
   const inputModeSource = options.inputModeSource || state.nextTurnInputModeSource || (requestedInputMode === "auto" ? "auto" : "explicit");
-  const contextBudgetTokens = normalizeStoryContextBudgetTokens(options.contextBudgetTokens ?? state.contextBudgetTokens);
   state.nextTurnInputModeSource = null;
   if (requestedInputMode !== "auto") {
-    await submitResolvedTurn(action, { requestedInputMode, resolvedInputMode: requestedInputMode, inputModeSource, contextBudgetTokens });
+    await submitResolvedTurn(action, { requestedInputMode, resolvedInputMode: requestedInputMode, inputModeSource, storyLengthProfileOverride });
     return;
   }
   showBusy("Determining how to interpret this turn…");
@@ -1079,7 +1082,7 @@ async function submitAction(actionText, options = {}) {
     return;
   }
   if (classification.confidenceBand === "ambiguous" || classification.classification === "mixed") {
-    showAmbiguousTurnIntent(action, classification, contextBudgetTokens);
+    showAmbiguousTurnIntent(action, classification, storyLengthProfileOverride);
     return;
   }
   await submitResolvedTurn(action, {
@@ -1087,7 +1090,7 @@ async function submitAction(actionText, options = {}) {
     resolvedInputMode: classification.resolvedMode,
     inputModeSource: classification.classificationId ? "auto" : "fallback",
     classificationId: classification.classificationId,
-    contextBudgetTokens
+    storyLengthProfileOverride
   });
 }
 
@@ -1114,6 +1117,7 @@ async function runGeneration(action, options = {}) {
       resolvedInputMode: options.resolvedInputMode || "action",
       inputModeSource: options.inputModeSource || "explicit",
       ...(options.classificationId ? { classificationId: options.classificationId } : {}),
+      ...(options.storyLengthProfileOverride ? { storyLengthProfileOverride: options.storyLengthProfileOverride } : {}),
       operationKind,
       expectedTurnNumber,
       idempotencyKey: options.idempotencyKey || composition.idFactory.create(),
@@ -1132,6 +1136,7 @@ async function runGeneration(action, options = {}) {
       resolvedInputMode: submission.resolvedInputMode,
       inputModeSource: submission.inputModeSource,
       ...(submission.classificationId ? { classificationId: submission.classificationId } : {}),
+      ...(submission.storyLengthProfileOverride ? { storyLengthProfileOverride: submission.storyLengthProfileOverride } : {}),
       idempotencyKey: submission.idempotencyKey,
       context: submission.context,
       ...(operationKind === "replace_latest" ? { expectedCurrentTurnNumber: expectedTurnNumber } : {})
@@ -1150,6 +1155,8 @@ async function runGeneration(action, options = {}) {
       run = conflict.run;
       state.pendingGeneration = conflict.pendingGeneration;
     }
+    resetStoryLengthOverrideControls();
+    options.onAttached?.();
     state.generationRun = run;
     state.pendingGeneration = state.pendingGeneration?.id === run.jobId
       ? state.pendingGeneration
@@ -1707,6 +1714,8 @@ function openRetryPromptDialog(originalPrompt) {
     return;
   }
   editor.value = originalPrompt || "";
+  syncStoryLengthOverrideControls();
+  setStoryLengthOverride("retryStoryLengthProfileOverride", "");
   openManagedModal(dialog);
   setTimeout(() => {
     editor.focus();
@@ -1716,7 +1725,7 @@ function openRetryPromptDialog(originalPrompt) {
 
 function closeRetryPromptDialog() {
   const dialog = $("retryPromptDialog");
-  if (dialog && dialog.open) dialog.close();
+  if (dialog?.hasAttribute("open")) dialog.close();
 }
 
 async function executeRetryWithPrompt(submittedPromptText) {
@@ -1734,15 +1743,15 @@ async function executeRetryWithPrompt(submittedPromptText) {
   if (!currentTurnNumber) return;
   const originalTurn = state.turns.at(-1) || {};
   const resolvedInputMode = originalTurn.resolvedInputMode || originalTurn.inputMode || "action";
-  const contextBudgetTokens = state.contextBudgetTokens;
-  closeRetryPromptDialog();
+  const storyLengthProfileOverride = selectedStoryLengthOverride("retryStoryLengthProfileOverride");
   await runGeneration(action, {
     operationKind: "replace_latest",
     expectedCurrentTurnNumber: currentTurnNumber,
     requestedInputMode: originalTurn.requestedInputMode || resolvedInputMode,
     resolvedInputMode,
     inputModeSource: originalTurn.inputModeSource || "explicit",
-    contextBudgetTokens
+    storyLengthProfileOverride,
+    onAttached: closeRetryPromptDialog
   });
 }
 
@@ -2723,10 +2732,6 @@ document.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll("[data-turn-input-mode]").forEach((button) => {
     button.addEventListener("click", () => setTurnInputMode(button.dataset.turnInputMode, { refreshPlaceholder: true }));
   });
-  syncStoryContextBudgetControls();
-  document.querySelectorAll("[data-story-context-budget]").forEach((control) => {
-    control.addEventListener("change", () => setStoryContextBudgetTokens(control.value));
-  });
   const submitAmbiguousTurn = (resolvedInputMode) => {
     const pending = state.pendingIntentDecision;
     if (!pending) return;
@@ -2734,7 +2739,7 @@ document.addEventListener("DOMContentLoaded", () => {
       requestedInputMode: resolvedInputMode,
       resolvedInputMode,
       inputModeSource: "explicit",
-      contextBudgetTokens: pending.contextBudgetTokens
+      storyLengthProfileOverride: pending.storyLengthProfileOverride
     });
   };
   const btnSubmitAsAction = $("btnSubmitAsAction");

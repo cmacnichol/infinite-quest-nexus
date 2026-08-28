@@ -12,6 +12,14 @@ export type StoryLengthWordRange = {
 
 export const DEFAULT_STORY_LENGTH_PROFILE: StoryLengthProfile = "standard";
 
+export const STORY_CONTEXT_BUDGET_TOKEN_VALUES = [
+  32_000,
+  64_000,
+  128_000,
+  256_000,
+  1_000_000
+] as const;
+
 export const DEFAULT_STORY_CONTEXT_BUDGET_TOKENS = 32_000;
 
 export const storyContextBudgetTokensSchema = z.union([
@@ -21,6 +29,13 @@ export const storyContextBudgetTokensSchema = z.union([
   z.literal(256_000),
   z.literal(1_000_000)
 ]);
+
+export type StoryContextBudgetTokens = z.infer<typeof storyContextBudgetTokensSchema>;
+
+export function storyContextBudgetTokensFromUnknown(value: unknown): StoryContextBudgetTokens {
+  const parsed = storyContextBudgetTokensSchema.safeParse(value);
+  return parsed.success ? parsed.data : DEFAULT_STORY_CONTEXT_BUDGET_TOKENS;
+}
 
 export const STORY_LENGTH_WORD_RANGES: Record<StoryLengthProfile, StoryLengthWordRange> = {
   brief: { profile: "brief", minWords: 250, maxWords: 450 },

@@ -10,6 +10,7 @@ import {
   PUBLIC_GENERATION_FAILURE_MESSAGE,
   type CampaignRuntimeStateContent
 } from "../../contracts/src/generation.js";
+import { storyContextBudgetTokensSchema } from "../../contracts/src/story-settings.js";
 import { z } from "zod";
 import {
   campaignSyncSourceProjectionSchema,
@@ -90,13 +91,7 @@ const branchCampaignRowSchema = z.object({
   worldVersionId: z.uuid(),
   title: z.string().trim().min(1),
   storyLengthProfile: z.enum(["brief", "standard", "long", "extended"]),
-  storyContextBudgetTokens: z.union([
-    z.literal(32_000),
-    z.literal(64_000),
-    z.literal(128_000),
-    z.literal(256_000),
-    z.literal(1_000_000)
-  ]),
+  storyContextBudgetTokens: storyContextBudgetTokensSchema,
   turnControlStyle: z.enum(["action_only", "flexible_auto", "flexible_action", "flexible_scene"]),
   selectedCharacterId: z.string().nullable(),
   characterSnapshot: z.record(z.string(), z.unknown()).nullable(),
