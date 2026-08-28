@@ -11,7 +11,7 @@ Each campaign stores a **Default story response length** independently from the 
 
 Change the campaign default in the selected campaign's Nexus management panel and select **Save campaign**.
 
-When submitting a turn from either the web-next or legacy **Story** view, the compact **Turn length** control appears beside the turn composer controls. It starts at **Campaign default — <Profile>** and uses the saved campaign preference for that submission. You may instead select **Brief**, **Standard**, **Long**, or **Extended** for just the submitted turn.
+When submitting a turn from either the web-next or legacy **Story** view, the compact **Turn length** control appears beside the turn composer controls. It starts at **Campaign default — &lt;Profile&gt;** and uses the saved campaign preference for that submission. You may instead select **Brief**, **Standard**, **Long**, or **Extended** for just the submitted turn.
 
 - The selected override is captured with the submitted action and applies to that turn only. Once the client workflow accepts the enqueue and attaches the active queued generation, the control resets to the current campaign default; it does not wait for narration to finish or a turn to be accepted.
 - If an enqueue attempt cannot be accepted, the selected override remains in the composer so you can retry without reselecting it. A later generation failure occurs after the one-shot control has reset.
