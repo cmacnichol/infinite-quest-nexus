@@ -292,7 +292,7 @@ docker compose up --build
 - Nexus: `http://localhost:8080/nexus/`
 - Story Player: `http://localhost:8080/story`
 - Liveness/readiness: `http://localhost:8080/health/live` / `/health/ready`
-- Default host port **8080** (`APP_PORT`); default two containers: `infinitequest-app` (`APP_ROLE=all`) + `postgres` (`pgvector/pgvector:0.8.5-pg18-trixie`).
+- Default host port **8080** (`APP_PORT`); default two containers: `infinitequest-app` (`APP_ROLE=all`) + `postgres` (`pgvector/pgvector:0.8.6-pg18-trixie`).
 
 **Source/dev mode:**
 ```
