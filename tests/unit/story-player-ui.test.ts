@@ -31,6 +31,10 @@ async function bootLegacyStory({
   updateProfile,
   rewindCampaign = vi.fn().mockResolvedValue({}),
   fetchCampaignState = vi.fn().mockResolvedValue({ activeTurnNumber: 100 }),
+  getTurnCorrection = vi.fn().mockResolvedValue({ effectiveNarration: "", correctionRevision: 0 }),
+  correctTurnNarration = vi.fn().mockResolvedValue({ effectiveNarration: "", correctionRevision: 0 }),
+  illustrationConfig = { enabled: false, sourcePolicy: "off" },
+  illustrationSegments = [],
   classifyTurnInput,
   workflow = { resume: async () => null },
   updateCampaignState = vi.fn().mockResolvedValue({})
@@ -43,6 +47,10 @@ async function bootLegacyStory({
   updateProfile?: ReturnType<typeof vi.fn>;
   rewindCampaign?: ReturnType<typeof vi.fn>;
   fetchCampaignState?: ReturnType<typeof vi.fn>;
+  getTurnCorrection?: ReturnType<typeof vi.fn>;
+  correctTurnNarration?: ReturnType<typeof vi.fn>;
+  illustrationConfig?: Record<string, unknown>;
+  illustrationSegments?: Array<Record<string, unknown>>;
   classifyTurnInput?: ReturnType<typeof vi.fn>;
   workflow?: Record<string, unknown>;
   updateCampaignState?: ReturnType<typeof vi.fn>;
@@ -91,11 +99,17 @@ async function bootLegacyStory({
         updateState: updateCampaignState,
         turns: fetchTurns,
         rewind: rewindCampaign,
+        getTurnCorrection,
+        correctTurnNarration,
         ...(classifyTurnInput ? { classifyTurnInput } : {})
       },
       meta: { get: async () => ({}) }
     },
-    illustrations: { config: async () => ({ enabled: false, sourcePolicy: "off" }), segments: async () => ({ segments: [] }), imageJobs: async () => ({ jobs: [] }) },
+    illustrations: {
+      config: async () => illustrationConfig,
+      segments: async () => ({ segments: illustrationSegments }),
+      imageJobs: async () => ({ jobs: [] })
+    },
     workflow,
     pendingSubmissions: { clear: () => undefined },
     idFactory: { create: () => "submission-101" },
@@ -104,7 +118,16 @@ async function bootLegacyStory({
   document.dispatchEvent(new window.Event("DOMContentLoaded"));
   await new Promise((resolve) => setTimeout(resolve, 0));
   await new Promise((resolve) => setTimeout(resolve, 0));
-  return { document, window, fetchTurns, fetchCampaignState, rewindCampaign, updateCampaignState };
+  return {
+    document,
+    window,
+    fetchTurns,
+    fetchCampaignState,
+    rewindCampaign,
+    updateCampaignState,
+    getTurnCorrection,
+    correctTurnNarration
+  };
 }
 
 function controlledPrintWindow() {
@@ -139,6 +162,16 @@ function selectOption(select: HTMLSelectElement, value: string) {
   const option = select.querySelector(`option[value="${value}"]`) as HTMLOptionElement | null;
   if (!option) throw new Error(`Missing select option: ${value}`);
   option.selected = true;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 describe("story-player: new Story Player UI contracts & gameplay logic", () => {
@@ -1319,6 +1352,235 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     }]);
     expect(appliedState).toBe(response);
     expect(dialog.hasAttribute("open")).toBe(false);
+  });
+
+  it("edits the latest completed response from Setup with the correction fences captured on open", async () => {
+    const getTurnCorrection = vi.fn().mockResolvedValue({
+      effectiveNarration: "Effective second narration",
+      correctionRevision: 7
+    });
+    const correctTurnNarration = vi.fn().mockResolvedValue({
+      effectiveNarration: "Corrected second narration",
+      correctionRevision: 8,
+      illustrationsMayBeStale: true
+    });
+    const syncStatus = vi.fn().mockResolvedValue({
+      campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 2, storyLengthProfile: "standard" },
+      world: {},
+      turns: { campaignId: "campaign-1", turns: makeTurns(1, 2), nextCursor: null }
+    });
+
+    const { document, window } = await bootLegacyStory({
+      turns: makeTurns(1, 2),
+      syncStatus,
+      getTurnCorrection,
+      correctTurnNarration
+    });
+    try {
+      const editButton = document.getElementById("btnOpenEditResponse") as HTMLButtonElement;
+      const dialog = document.getElementById("editResponseDialog") as HTMLDialogElement;
+      const editor = document.getElementById("responseEditor") as HTMLTextAreaElement;
+
+      expect(editButton).not.toBeNull();
+      expect(editButton.disabled).toBe(false);
+      expect(document.getElementById("btnEditResponse")).toBeNull();
+
+      editButton.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(getTurnCorrection).toHaveBeenCalledWith("campaign-1", "turn-2");
+      expect(dialog.open).toBe(true);
+      expect(editor.value).toBe("Effective second narration");
+
+      editor.value = "Corrected second narration";
+      document.getElementById("btnEditResponseSave")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(correctTurnNarration).toHaveBeenCalledWith("campaign-1", "turn-2", {
+        narration: "Corrected second narration",
+        expectedCorrectionRevision: 7,
+        expectedActiveTurnNumber: 2,
+        source: "user_edit"
+      });
+      expect(document.querySelector("#scene-2 .narration")?.textContent).toContain("Corrected second narration");
+      expect(dialog.open).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps response correction unavailable without a completed turn or while generation is pending", async () => {
+    const emptySyncStatus = vi.fn().mockResolvedValue({
+      campaign: { id: "campaign-1", title: "Empty campaign", activeTurnNumber: 0, storyLengthProfile: "standard" },
+      world: {},
+      turns: { campaignId: "campaign-1", turns: [], nextCursor: null }
+    });
+    const empty = await bootLegacyStory({
+      turns: [],
+      syncStatus: emptySyncStatus,
+      workflow: { resume: async () => ({}) }
+    });
+    try {
+      expect((empty.document.getElementById("btnOpenEditResponse") as HTMLButtonElement).disabled).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+
+    const pendingSyncStatus = vi.fn().mockResolvedValue({
+      campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 1, storyLengthProfile: "standard" },
+      world: {},
+      pendingGeneration: { id: "generation-1", status: "generating" },
+      turns: { campaignId: "campaign-1", turns: makeTurns(1, 1), nextCursor: null }
+    });
+    const pending = await bootLegacyStory({ turns: makeTurns(1, 1), syncStatus: pendingSyncStatus });
+    try {
+      expect((pending.document.getElementById("btnOpenEditResponse") as HTMLButtonElement).disabled).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("shows corrected narration and retains existing illustration controls when segment prose is stale", async () => {
+    const turns = makeTurns(1, 1);
+    turns[0].narration = "Silver rain patters across the observatory dome.";
+    const syncStatus = vi.fn().mockResolvedValue({
+      campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 1, storyLengthProfile: "standard" },
+      world: {},
+      turns: { campaignId: "campaign-1", turns, nextCursor: null }
+    });
+    const { document } = await bootLegacyStory({
+      turns,
+      syncStatus,
+      illustrationConfig: { enabled: true, sourcePolicy: "generated" },
+      illustrationSegments: [{
+        id: "segment-1",
+        turnId: "turn-1",
+        ordinal: 0,
+        startWord: 0,
+        endWord: 6,
+        text: "Brass rain patters across the observatory dome.",
+        variants: [{ variantIndex: 0, url: "https://images.example/old-segment.png" }]
+      }]
+    });
+    try {
+      expect(document.querySelector("#scene-1 .narration")?.textContent).toContain("Silver rain");
+      expect(document.querySelector("#scene-1 .narration")?.textContent).not.toContain("Brass rain");
+      expect(document.getElementById("storyIllustrationPanel")?.classList.contains("hidden")).toBe(false);
+      expect(document.querySelector("#storyIllustrationContent img")?.getAttribute("src")).toBe("https://images.example/old-segment.png");
+      expect(document.getElementById("storyIllustrationContent")?.textContent).not.toContain("no illustration segments yet");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("clears an editor load superseded by generation and allows reopening after generation resolves", async () => {
+    const correctionLoad = deferred<{ effectiveNarration: string; correctionRevision: number }>();
+    const generationGate = deferred<void>();
+    const getTurnCorrection = vi.fn()
+      .mockReturnValueOnce(correctionLoad.promise)
+      .mockResolvedValueOnce({ effectiveNarration: "Latest response", correctionRevision: 3 });
+    const workflow = {
+      resume: async () => null,
+      submit: vi.fn(async () => ({
+        jobId: "generation-1",
+        async *watch() {
+          await generationGate.promise;
+          yield { type: "settled", outcome: "discarded", error: new Error("Stopped for test") };
+        }
+      }))
+    };
+    const syncStatus = vi.fn().mockResolvedValue({
+      campaign: {
+        id: "campaign-1",
+        title: "Long campaign",
+        activeTurnNumber: 1,
+        storyLengthProfile: "standard",
+        turnControlStyle: "action_only"
+      },
+      world: {},
+      turns: { campaignId: "campaign-1", turns: makeTurns(1, 1), nextCursor: null }
+    });
+    const { document } = await bootLegacyStory({
+      turns: makeTurns(1, 1),
+      syncStatus,
+      getTurnCorrection,
+      workflow
+    });
+    try {
+      const editButton = document.getElementById("btnOpenEditResponse") as HTMLButtonElement;
+      const dialog = document.getElementById("editResponseDialog") as HTMLDialogElement;
+      editButton.click();
+      (document.getElementById("freeAction") as HTMLTextAreaElement).value = "Start the next scene.";
+      (document.getElementById("btnTakeAction") as HTMLButtonElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      correctionLoad.resolve({ effectiveNarration: "Old response", correctionRevision: 2 });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(dialog.open).toBe(false);
+      expect(editButton.disabled).toBe(true);
+
+      generationGate.resolve();
+      for (let attempt = 0; attempt < 8 && editButton.disabled; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      expect(editButton.disabled).toBe(false);
+      editButton.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(dialog.open).toBe(true);
+      expect((document.getElementById("responseEditor") as HTMLTextAreaElement).value).toBe("Latest response");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("ignores stale response loads and preserves a failed correction draft while a save is in flight", async () => {
+    const correctionLoad = deferred<{ effectiveNarration: string; correctionRevision: number }>();
+    const correctionSave = deferred<{ effectiveNarration: string; correctionRevision: number }>();
+    const getTurnCorrection = vi.fn()
+      .mockReturnValueOnce(correctionLoad.promise)
+      .mockResolvedValueOnce({ effectiveNarration: "Current response", correctionRevision: 4 });
+    const correctTurnNarration = vi.fn(() => correctionSave.promise);
+    const syncStatus = vi.fn().mockResolvedValue({
+      campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 2, storyLengthProfile: "standard" },
+      world: {},
+      turns: { campaignId: "campaign-1", turns: makeTurns(1, 2), nextCursor: null }
+    });
+    const { document, window } = await bootLegacyStory({
+      turns: makeTurns(1, 2),
+      syncStatus,
+      getTurnCorrection,
+      correctTurnNarration
+    });
+    try {
+      const editButton = document.getElementById("btnOpenEditResponse") as HTMLButtonElement;
+      const dialog = document.getElementById("editResponseDialog") as HTMLDialogElement;
+      const editor = document.getElementById("responseEditor") as HTMLTextAreaElement;
+
+      editButton.click();
+      (document.getElementById("btnPrev") as HTMLButtonElement).click();
+      correctionLoad.resolve({ effectiveNarration: "Old response", correctionRevision: 4 });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(dialog.open).toBe(false);
+      expect(editButton.disabled).toBe(true);
+
+      (document.getElementById("btnNext") as HTMLButtonElement).click();
+      expect(editButton.disabled).toBe(false);
+      editButton.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(editor.value).toBe("Current response");
+      editor.value = "Draft that must survive";
+      document.getElementById("btnEditResponseSave")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      document.getElementById("btnEditResponseSave")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      expect(correctTurnNarration).toHaveBeenCalledTimes(1);
+
+      correctionSave.reject(new Error("Revision conflict"));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(dialog.open).toBe(true);
+      expect(editor.value).toBe("Draft that must survive");
+      expect((document.getElementById("btnEditResponseSave") as HTMLButtonElement).disabled).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("keeps editor controls and state intact when a campaign-state save is rejected", async () => {
