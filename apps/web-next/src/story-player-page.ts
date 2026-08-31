@@ -18,7 +18,7 @@ import { createStoryPlayerComposition, type StoryPlayerComposition } from "./sto
 import { createStoryGenerationController } from "./story-player-generation";
 import { createStoryUiModel, type StoryUiPhase } from "./story-player-model";
 import { createStoryHistoryController } from "./story-player-history";
-import { renderStoryCommandRow, renderStoryDialogs, renderStoryPlayerView, type StoryPlayerViewState } from "./story-player-view";
+import { renderStoryDialogs, renderStoryPlayerView, type StoryPlayerViewState } from "./story-player-view";
 import { createStoryIllustrationController } from "./story-player-illustrations";
 import { createStoryToolsController, installStoryToolsDisclosure, storyCampaignToolsMarkup } from "./story-player-tools";
 import type { DisplayPreferencesStore } from "./preferences/display-preferences";
@@ -623,7 +623,8 @@ export function mountStoryPlayerPage(
         main.append(dialogSlot);
       }
       main.setAttribute("aria-busy", String(state.ui.phase === "loading"));
-      commandRow.replaceChildren(renderStoryCommandRow(root.ownerDocument, state));
+      commandRow.hidden = true;
+      commandRow.replaceChildren();
       spine.replaceChildren();
       illustration.replaceChildren();
       dialogSlot.replaceChildren(...renderStoryDialogs(root.ownerDocument, state));

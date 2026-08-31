@@ -30,6 +30,19 @@ it("uses the mounted Core shell for the validated campaign context", async () =>
   mounted.dispose();
 });
 
+it("keeps idle Core Story free of native command status and width controls", async () => {
+  const page = createStoryTestDom();
+  const composition = createStoryTestComposition({ turnControlStyle: "flexible_auto" });
+  const mounted = mountStoryPlayerPage(page.root, { campaignId: "11111111-1111-4111-8111-111111111111", turnNumber: null }, composition, { uiImplementation: "web-awesome" });
+  await settleStoryTest();
+
+  const commandRow = page.root.querySelector<HTMLElement>(".story-command-row");
+  expect(commandRow?.hidden).toBe(true);
+  expect(commandRow?.textContent).not.toContain("Story Engine ready");
+  expect(page.root.querySelector("[data-reading-width]")).toBeNull();
+  mounted.dispose();
+});
+
 it("routes a Core artwork command through display preferences", async () => {
   const page = createStoryTestDom();
   const display = createDisplayPreferences(null);
