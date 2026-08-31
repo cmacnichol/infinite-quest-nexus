@@ -280,6 +280,29 @@ async function activeCanonicalFacts(
   return result.rows;
 }
 
+async function runtimeCanonicalFactProjection(
+  client: DatabaseClient | DatabasePool,
+  scope: CampaignScope,
+  throughTurnNumber: number,
+  activeFacts: readonly CanonicalFactRow[],
+  effectiveEdit: CampaignStateEditRow | null,
+): Promise<Readonly<{ id: string; content: string }>[] | undefined> {
+  if (effectiveEdit?.effectiveTurnNumber === throughTurnNumber) return undefined;
+  if (activeFacts.length || effectiveEdit) {
+    return activeFacts.map((fact) => ({ id: fact.id, content: fact.content }));
+  }
+  // Only unprojected legacy snapshots may supply missing facts. Retired rows
+  // still establish an authoritative empty projection at this turn boundary.
+  const history = await client.query<{ hasProjection: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM campaign_canonical_facts
+        WHERE owner_user_id = $1 AND campaign_id = $2 AND valid_from_turn <= $3
+     ) AS "hasProjection"`,
+    [scope.ownerUserId, scope.campaignId, throughTurnNumber]
+  );
+  return history.rows[0]?.hasProjection ? [] : undefined;
+}
+
 async function loadStateRow(
   client: DatabaseClient | DatabasePool,
   scope: CampaignScope,
@@ -363,10 +386,11 @@ async function loadRuntimeState(
   }
   const edit = await loadEffectiveStateEdit(client, scope, viewedTurnNumber);
   const exactEdit = edit?.effectiveTurnNumber === viewedTurnNumber ? edit : null;
-  const canonicalFacts = exactEdit
-    ? undefined
-    : (await activeCanonicalFacts(client, scope, viewedTurnNumber))
-      .map((fact) => ({ id: fact.id, content: fact.content }));
+  const canonicalFacts = await runtimeCanonicalFactProjection(
+    client, scope, viewedTurnNumber,
+    exactEdit ? [] : await activeCanonicalFacts(client, scope, viewedTurnNumber),
+    edit
+  );
   const materializedSnapshot = viewedTurnNumber === row.activeTurnNumber && !exactEdit
     ? {
       ...objectValue(baseSnapshot),
@@ -481,8 +505,10 @@ function createPostgresCampaignStateRepository(
       const exactPriorEdit = priorEdit?.effectiveTurnNumber === current.activeTurnNumber ? priorEdit : null;
       const targetSnapshot = exactPriorEdit?.stateSnapshotPrivate ?? acceptedSnapshot;
 
-      const persistedFacts = await activeCanonicalFacts(client, scope, current.activeTurnNumber);
-      const existingFacts = persistedFacts;
+      const existingFacts = await activeCanonicalFacts(client, scope, current.activeTurnNumber);
+      const canonicalFacts = await runtimeCanonicalFactProjection(
+        client, scope, current.activeTurnNumber, existingFacts, priorEdit
+      );
       const existingById = new Map(existingFacts.map((fact) => [fact.id, fact]));
       const usedIds = new Set<string>();
       const correctedFacts: Array<{ id: string; content: string }> = [];
@@ -510,7 +536,7 @@ function createPostgresCampaignStateRepository(
         rpgStats: current.rpgStats,
         eventTriggers: current.eventTriggers,
         pendingEventTriggers: current.pendingEventTriggers
-      }, exactPriorEdit ? undefined : existingFacts.map((fact) => ({ id: fact.id, content: fact.content })), scope);
+      }, canonicalFacts, scope);
       const changedFields = (Object.keys(correctedContent) as Array<keyof CampaignRuntimeStateContent>)
         .filter((field) => json(correctedContent[field]) !== json(currentContent[field]));
       if (!changedFields.length) {
