@@ -25,7 +25,18 @@ function runPreRenderThemeBootstrap(options: {
   matchMedia?: PropertyDescriptor;
 }) {
   const script = fs.readFileSync(path.join(webNextRoot, "public/theme-bootstrap.js"), "utf8");
-  const root = { dataset: {} as Record<string, string>, style: {} as Record<string, string> };
+  const classes = new Set<string>();
+  const root = {
+    dataset: {} as Record<string, string>,
+    style: {} as Record<string, string>,
+    classList: {
+      contains: (value: string) => classes.has(value),
+      toggle: (value: string, enabled?: boolean) => {
+        if (enabled) classes.add(value);
+        else classes.delete(value);
+      }
+    }
+  };
   const sandbox = {
     document: { documentElement: root },
     localStorage: { getItem: () => options.stored ?? null }
@@ -207,6 +218,16 @@ describe("web theme integration", () => {
 
     expect(root.dataset.theme).toBe("light");
     expect(root.style.colorScheme).toBe("light");
+  });
+
+  it("matches application vendor classes before the application renders", () => {
+    const darkRoot = runPreRenderThemeBootstrap({ stored: "dark" });
+    const lightRoot = runPreRenderThemeBootstrap({ stored: "light" });
+
+    expect(darkRoot.classList.contains("wa-dark")).toBe(true);
+    expect(darkRoot.classList.contains("wa-light")).toBe(false);
+    expect(lightRoot.classList.contains("wa-dark")).toBe(false);
+    expect(lightRoot.classList.contains("wa-light")).toBe(true);
   });
 
   it("gives the theme control a square touch target and one visible icon per theme", () => {
@@ -550,11 +571,30 @@ describe("web theme policy", () => {
     expect(nextTheme("dark")).toBe("light");
   });
 
+  it("sets an explicit theme and stops notifying disposed subscribers", () => {
+    const { document } = parseHTML("<html></html>");
+    const values: string[] = [];
+    const controller = createThemeController({ root: document.documentElement, storage: null, mediaQuery: null });
+    const unsubscribe = controller.subscribe(value => values.push(value));
+    controller.set("dark");
+    expect(values).toEqual(["light", "dark"]);
+    expect(document.documentElement.classList.contains("wa-dark")).toBe(true);
+    unsubscribe();
+    controller.set("light");
+    expect(values).toEqual(["light", "dark"]);
+    controller.dispose();
+  });
+
   it("applies theme state to the document contract", () => {
     const { document } = parseHTML("<html><body></body></html>").window;
     applyTheme(document.documentElement, "dark");
     expect(document.documentElement.dataset.theme).toBe("dark");
     expect(document.documentElement.style.colorScheme).toBe("dark");
+    expect(document.documentElement.classList.contains("wa-dark")).toBe(true);
+    expect(document.documentElement.classList.contains("wa-light")).toBe(false);
+    applyTheme(document.documentElement, "light");
+    expect(document.documentElement.classList.contains("wa-dark")).toBe(false);
+    expect(document.documentElement.classList.contains("wa-light")).toBe(true);
   });
 
   it("tracks system changes until the user chooses a theme", () => {
@@ -569,21 +609,48 @@ describe("web theme policy", () => {
 
     media.emit(true);
     expect(controller.current()).toBe("dark");
-    expect(controller.toggle()).toBe("light");
+    expect(controller.set("light")).toBe("light");
     expect(stored.get(THEME_STORAGE_KEY)).toBe("light");
     media.emit(true);
     expect(controller.current()).toBe("light");
   });
 
-  it("continues toggling when storage throws", () => {
+  it("accepts an explicit choice when storage throws", () => {
     const { document } = parseHTML("<html><body></body></html>").window;
     const storage = {
       getItem: () => { throw new Error("blocked"); },
       setItem: () => { throw new Error("blocked"); }
     };
     const controller = createThemeController({ root: document.documentElement, storage, mediaQuery: mediaQuery(false) });
-    expect(controller.toggle()).toBe("dark");
+    expect(controller.set("dark")).toBe("dark");
     expect(document.documentElement.dataset.theme).toBe("dark");
+  });
+
+  it("does not republish an unchanged theme", () => {
+    const { document } = parseHTML("<html></html>");
+    const media = mediaQuery(false);
+    const values: string[] = [];
+    const controller = createThemeController({ root: document.documentElement, storage: null, mediaQuery: media });
+    controller.subscribe((value) => values.push(value));
+
+    controller.set("light");
+    media.emit(false);
+    controller.set("dark");
+    media.emit(true);
+
+    expect(values).toEqual(["light", "dark"]);
+  });
+
+  it("clears registered subscriptions on disposal", () => {
+    const { document } = parseHTML("<html></html>");
+    const values: string[] = [];
+    const controller = createThemeController({ root: document.documentElement, storage: null, mediaQuery: null });
+    controller.subscribe((value) => values.push(value));
+
+    controller.dispose();
+    controller.set("dark");
+
+    expect(values).toEqual(["light"]);
   });
 
   it("reads storage once during initialization", () => {
@@ -660,8 +727,29 @@ describe("web theme policy", () => {
     const controller = createThemeController({ root: document.documentElement, storage: null, mediaQuery: media });
 
     controller.dispose();
+    controller.dispose();
     media.emit(true);
 
     expect(controller.current()).toBe("light");
+  });
+
+  it("forwards explicit selection and subscriptions from the shell control", () => {
+    const { document } = parseHTML("<html><body><button type=\"button\"></button></body></html>").window;
+    const button = document.querySelector("button");
+    if (!button) throw new Error("Button fixture is missing.");
+    const values: string[] = [];
+    const control = initializeThemeControl(button, {
+      root: document.documentElement,
+      storage: null,
+      mediaQuery: null
+    });
+
+    const unsubscribe = control.subscribe((value) => values.push(value));
+    control.set("dark");
+
+    expect(values).toEqual(["light", "dark"]);
+    expect(button.getAttribute("aria-label")).toBe("Use light theme");
+    unsubscribe();
+    control.dispose();
   });
 });
