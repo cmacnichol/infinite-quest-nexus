@@ -1512,6 +1512,8 @@ integration("PostgreSQL campaign sync adapters", () => {
 
   it("retains snapshot-only canonical facts across current and historical reads and later corrections", async () => {
     const imported = await createCampaignFixture();
+    // Another campaign's populated projection must not suppress this legacy fallback.
+    await createCampaignFixture();
     const adapters = createAdapters();
     const scope = { ownerUserId, campaignId: imported.campaignId };
     const historicalFact = "The old bell rang only at moonrise.";
@@ -1564,6 +1566,108 @@ integration("PostgreSQL campaign sync adapters", () => {
     )).resolves.toMatchObject({
       rows: [{ canonicalFacts: [{ id: expect.any(String), content: currentFact }] }]
     });
+    const earlier = await adapters.transaction.read((transaction) =>
+      adapters.state.getCampaignRuntimeState(transaction, scope, 1));
+    expect(earlier.canonicalFacts).toEqual([{ id: null, content: historicalFact }]);
+  });
+
+  it("persists clearing snapshot-only facts without resurrecting them on later turns", async () => {
+    const imported = await createCampaignFixture();
+    const adapters = createAdapters();
+    const scope = { ownerUserId, campaignId: imported.campaignId };
+    const legacyFact = "The bell answers only to the keeper.";
+    await pool.query(
+      `UPDATE turns SET state_snapshot_private = jsonb_set(state_snapshot_private, '{canonicalFacts}', $3::jsonb)
+        WHERE owner_user_id = $1 AND campaign_id = $2`,
+      [ownerUserId, imported.campaignId, JSON.stringify([legacyFact])]
+    );
+    await pool.query(
+      "DELETE FROM campaign_canonical_facts WHERE owner_user_id = $1 AND campaign_id = $2",
+      [ownerUserId, imported.campaignId]
+    );
+    const acceptedBefore = await pool.query(
+      "SELECT state_snapshot_private FROM turns WHERE owner_user_id = $1 AND campaign_id = $2 ORDER BY turn_number",
+      [ownerUserId, imported.campaignId]
+    );
+    const before = await adapters.transaction.read((transaction) =>
+      adapters.state.getCampaignRuntimeState(transaction, scope));
+    const cleared = await adapters.transaction.command((transaction) =>
+      adapters.state.updateCampaignRuntimeState(transaction, scope, {
+        ...before,
+        expectedTurnNumber: before.activeTurnNumber,
+        expectedRevision: before.revision,
+        canonicalFacts: []
+      }));
+    expect(cleared).toMatchObject({ ok: true, value: { revision: 1, canonicalFacts: [] } });
+    await expect(pool.query(
+      "SELECT changed_fields FROM campaign_state_edits WHERE owner_user_id = $1 AND campaign_id = $2",
+      [ownerUserId, imported.campaignId]
+    )).resolves.toMatchObject({ rows: [{ changed_fields: ["canonicalFacts"] }] });
+    await expect(pool.query(
+      "SELECT state_snapshot_private FROM turns WHERE owner_user_id = $1 AND campaign_id = $2 ORDER BY turn_number",
+      [ownerUserId, imported.campaignId]
+    )).resolves.toMatchObject({ rows: acceptedBefore.rows });
+
+    // Simulate a later accepted snapshot that still carries the old legacy text.
+    await pool.query(
+      `INSERT INTO turns (owner_user_id, campaign_id, turn_number, action, narration, state_snapshot_private)
+       SELECT owner_user_id, campaign_id, 3, 'Listen at the tower.', 'The tower is quiet.', state_snapshot_private
+         FROM turns WHERE owner_user_id = $1 AND campaign_id = $2 AND turn_number = 2`,
+      [ownerUserId, imported.campaignId]
+    );
+    await pool.query(
+      "UPDATE campaigns SET active_turn_number = 3 WHERE owner_user_id = $1 AND id = $2",
+      [ownerUserId, imported.campaignId]
+    );
+    const later = await adapters.transaction.read((transaction) =>
+      adapters.state.getCampaignRuntimeState(transaction, scope));
+    expect(later.canonicalFacts).toEqual([]);
+    await expect(adapters.transaction.read((transaction) =>
+      adapters.state.getCampaignRuntimeState(transaction, scope, 2)))
+      .resolves.toMatchObject({ canonicalFacts: [] });
+    await expect(adapters.transaction.read((transaction) =>
+      adapters.state.getCampaignRuntimeState(transaction, scope, 1)))
+      .resolves.toMatchObject({ canonicalFacts: [{ id: null, content: legacyFact }] });
+    await expect(adapters.transaction.command((transaction) =>
+      adapters.state.updateCampaignRuntimeState(transaction, scope, {
+        ...later, expectedTurnNumber: 3, expectedRevision: later.revision
+      }))).resolves.toMatchObject({ ok: true, value: { revision: 1, canonicalFacts: [] } });
+  });
+
+  it("keeps a superseded fact projection empty instead of falling back to accepted snapshot text", async () => {
+    const imported = await createCampaignFixture();
+    const adapters = createAdapters();
+    const scope = { ownerUserId, campaignId: imported.campaignId };
+    const legacyFact = "The old gate opens to the harbor.";
+    await pool.query(
+      "DELETE FROM campaign_canonical_facts WHERE owner_user_id = $1 AND campaign_id = $2",
+      [ownerUserId, imported.campaignId]
+    );
+    await pool.query(
+      `UPDATE turns SET state_snapshot_private = jsonb_set(state_snapshot_private, '{canonicalFacts}', $3::jsonb)
+        WHERE owner_user_id = $1 AND campaign_id = $2`,
+      [ownerUserId, imported.campaignId, JSON.stringify([legacyFact])]
+    );
+    const factId = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO campaign_canonical_facts (
+         id, owner_user_id, campaign_id, world_version_id, source_turn_id, source_turn_number,
+         source_fact_index, content, normalized_content, valid_from_turn, valid_until_turn
+       ) SELECT $3, t.owner_user_id, t.campaign_id, c.world_version_id, t.id, 1, 0, $4, $4, 1, 2
+           FROM turns t JOIN campaigns c ON c.id = t.campaign_id AND c.owner_user_id = t.owner_user_id
+          WHERE t.owner_user_id = $1 AND t.campaign_id = $2 AND t.turn_number = 1`,
+      [ownerUserId, imported.campaignId, factId, legacyFact]
+    );
+    const current = await adapters.transaction.read((transaction) =>
+      adapters.state.getCampaignRuntimeState(transaction, scope));
+    expect(current.canonicalFacts).toEqual([]);
+    await expect(adapters.transaction.read((transaction) =>
+      adapters.state.getCampaignRuntimeState(transaction, scope, 1)))
+      .resolves.toMatchObject({ canonicalFacts: [{ id: factId, content: legacyFact }] });
+    await expect(adapters.transaction.command((transaction) =>
+      adapters.state.updateCampaignRuntimeState(transaction, scope, {
+        ...current, expectedTurnNumber: 2, expectedRevision: current.revision
+      }))).resolves.toMatchObject({ ok: true, value: { revision: 0, canonicalFacts: [] } });
   });
 
   it("updates campaign state only when both turn and state-revision fences match", async () => {
