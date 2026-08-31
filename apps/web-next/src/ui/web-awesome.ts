@@ -10,7 +10,6 @@ export function ensureWebAwesome(): Promise<void> {
       await import("@awesome.me/webawesome/dist/components/button/button.js");
       await import("@awesome.me/webawesome/dist/components/dropdown/dropdown.js");
       await import("@awesome.me/webawesome/dist/components/dropdown-item/dropdown-item.js");
-      await import("@awesome.me/webawesome/dist/components/dialog/dialog.js");
       await import("@awesome.me/webawesome/dist/components/input/input.js");
       await import("@awesome.me/webawesome/dist/components/textarea/textarea.js");
       await import("@awesome.me/webawesome/dist/components/checkbox/checkbox.js");

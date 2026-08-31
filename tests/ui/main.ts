@@ -1,3 +1,6 @@
+import "../../apps/web-next/src/theme/tokens.css";
+import { applyTheme } from "../../apps/web-next/src/theme.js";
+import { mountDialog } from "../../apps/web-next/src/ui/dialog.js";
 import { ensureWebAwesome } from "../../apps/web-next/src/ui/web-awesome.js";
 
 function element(name: string, attributes: Record<string, string> = {}): HTMLElement {
@@ -13,6 +16,7 @@ function textElement(name: string, text: string, attributes: Record<string, stri
 }
 
 async function main(): Promise<void> {
+  applyTheme(document.documentElement, "light");
   await ensureWebAwesome();
 
   const root = document.querySelector<HTMLElement>("#fixture");
@@ -36,12 +40,17 @@ async function main(): Promise<void> {
     textElement("wa-radio", "Wide", { value: "wide" })
   );
 
-  const dialog = element("wa-dialog", { label: "Campaign Settings" });
-  dialog.append(textElement("p", "Display preferences only."));
+  const dialog = mountDialog(document, { label: "Campaign Settings" });
+  dialog.body.append(textElement("p", "Display preferences only."));
   const openDialog = textElement("wa-button", "Campaign Settings");
   openDialog.addEventListener("click", () => {
-    dialog.setAttribute("open", "");
+    dialog.open(openDialog);
   });
+
+  const lightTheme = textElement("button", "Use light theme", { type: "button" });
+  lightTheme.addEventListener("click", () => applyTheme(document.documentElement, "light"));
+  const darkTheme = textElement("button", "Use dark theme", { type: "button" });
+  darkTheme.addEventListener("click", () => applyTheme(document.documentElement, "dark"));
 
   const menu = document.createElement("wa-dropdown");
   const menuButton = textElement("wa-button", "Open activity menu", { slot: "trigger", "aria-label": "Open activity menu" });
@@ -64,7 +73,10 @@ async function main(): Promise<void> {
     label: "Help"
   });
 
-  root.append(action, notes, illustration, controls, readingWidth, openDialog, menu, disabled, icon, dialog, output);
+  root.append(
+    action, notes, illustration, controls, readingWidth, lightTheme, darkTheme, openDialog,
+    menu, disabled, icon, dialog.element, output
+  );
 }
 
 void main();

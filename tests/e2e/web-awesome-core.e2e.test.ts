@@ -2,9 +2,12 @@ import { expect, test } from "@playwright/test";
 
 test("Core runs with production CSP and no external requests", async ({ page }) => {
   const external: string[] = [];
+  const systemIconRequests: string[] = [];
   const consoleErrors: string[] = [];
   page.on("request", request => {
-    if (!request.url().startsWith("http://127.0.0.1:43175/")) external.push(request.url());
+    const url = request.url();
+    if (!url.startsWith("http://127.0.0.1:43175/")) external.push(url);
+    if (url.endsWith("/ui-test/web-awesome/system/regular/circle-question.svg")) systemIconRequests.push(url);
   });
   page.on("console", message => {
     if (message.type() === "error") consoleErrors.push(message.text());
@@ -23,13 +26,16 @@ test("Core runs with production CSP and no external requests", async ({ page }) 
   const systemIcon = page.locator("wa-icon[name='circle-question']").first();
   await expect(systemIcon).toBeVisible();
   await expect(systemIcon.locator("svg")).toBeVisible();
+  expect(systemIconRequests).toEqual(["http://127.0.0.1:43175/ui-test/web-awesome/system/regular/circle-question.svg"]);
 
-  await page.getByRole("button", { name: "Campaign Settings" }).click();
+  const openDialog = page.getByRole("button", { name: "Campaign Settings" });
+  await openDialog.click();
   const dialog = page.getByRole("dialog", { name: "Campaign Settings" });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toBeFocused();
+  await expect(dialog.getByRole("button", { name: "Close Campaign Settings" })).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
+  await expect(openDialog).toBeFocused();
 
   await page.getByRole("button", { name: "Open activity menu" }).click();
   await page.getByText("Activity Log", { exact: true }).click();
