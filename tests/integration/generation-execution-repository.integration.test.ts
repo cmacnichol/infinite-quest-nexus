@@ -138,6 +138,28 @@ integration("PostgreSQL generation execution repository", () => {
     return "timeout";
   }
 
+  it("retains legacy string event rules in worker inputs without mutating stored history", async () => {
+    const imported = await campaign();
+    const rule = "When the keeper arrives, light the lantern.";
+    const structured = { id: "gate", label: "Gate", timing: "after", condition: "The gate closes.",
+      effect: "The keeper waves.", addTextAfter: false, triggeredCount: 2,
+      lastTriggeredTurn: 2, lastTriggeredAt: "2026-08-30T12:00:00Z" };
+    await pool.query("UPDATE campaign_state SET event_triggers=$2 WHERE campaign_id=$1", [imported.campaignId, JSON.stringify([rule, structured])]);
+    const originalTurns = await turnVersionSnapshot(imported.campaignId);
+    const queued = await queue(imported.campaignId, "Approach the keeper.");
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const claim = await repository.claimNext({ workerId: "trigger-worker", leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(queued.id);
+    const payload = await repository.loadExecutionPayload({ workerId: "trigger-worker", leaseSeconds: 30, claim: claim! });
+    expect(payload?.orchestration_inputs.eventTriggers).toEqual([{
+      id: "world-event-1", label: "World event 1", timing: "before", condition: rule, effect: rule,
+      addTextAfter: false, triggeredCount: 0, lastTriggeredTurn: null, lastTriggeredAt: null
+    }, structured]);
+    expect(await turnVersionSnapshot(imported.campaignId)).toEqual(originalTurns);
+    expect((await pool.query("SELECT event_triggers FROM campaign_state WHERE campaign_id=$1", [imported.campaignId])).rows[0].event_triggers).toEqual([rule, structured]);
+    await pool.query("UPDATE generation_jobs SET status='discarded' WHERE id=$1", [queued.id]);
+  });
+
   it("claims a minimal job once and reclaims an expired lease without an initial-owner lookup", async () => {
     const imported = await campaign();
     const queued = await queue(imported.campaignId, "Open the lease observatory.");
