@@ -12,6 +12,7 @@ import {
 } from "../../contracts/src/generation.js";
 import { storyContextBudgetTokensSchema } from "../../contracts/src/story-settings.js";
 import { z } from "zod";
+import { normalizeCampaignEventTriggers } from "../../domain/src/campaign-event-triggers.js";
 import {
   campaignSyncSourceProjectionSchema,
   turnSummarySchema
@@ -247,7 +248,9 @@ function runtimeStateContent(
     scratchpad: source.scratchpad ?? "",
     trackers: persistedTrackers(source.trackers ?? []),
     rpgStats: source.rpgStats ?? [],
-    eventTriggers: source.eventTriggers ?? [],
+    eventTriggers: Array.isArray(source.eventTriggers)
+      ? normalizeCampaignEventTriggers(source.eventTriggers)
+      : source.eventTriggers ?? [],
     pendingEventTriggers: source.pendingEventTriggers ?? []
   };
   return parseBoundary(campaignRuntimeStateContentSchema, candidate, "unavailable", scope);
@@ -1651,7 +1654,7 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
         characterProfileRevision: row.characterProfileRevision,
         rpgStats: row.rpgStats ?? [],
         trackers: row.trackers ?? [],
-        eventTriggers: row.eventTriggers ?? [],
+        eventTriggers: normalizeCampaignEventTriggers(row.eventTriggers ?? []),
         useRpgStats: Boolean(settings.useRpgStats),
         suppressEventTriggers: Boolean(settings.suppressEventTriggers)
       };

@@ -32,6 +32,8 @@ import {
   type WorldContent
 } from "../../contracts/src/world-library.js";
 import { normalizeCampaignTrackers } from "../../domain/src/campaign-trackers.js";
+import { normalizeCampaignEventTriggers } from "../../domain/src/campaign-event-triggers.js";
+import { playerEventTriggerSchema } from "../../contracts/src/generation.js";
 import { sha256, stableStringify } from "../../domain/src/text.js";
 import {
   assessWorldCampaignReadiness,
@@ -1155,6 +1157,11 @@ function createPostgresCampaignRepository(
       }
       const snapshot = characterSnapshot(seed.character);
       const campaignProfile = campaignProfileFromCharacter(seed.character);
+      const eventRules = playerEventTriggerSchema.array().max(200).safeParse(normalizeCampaignEventTriggers(content.eventTriggers));
+      if (!eventRules.success) {
+        return failure("invalid_transition", { worldVersionId: request.worldVersionId });
+      }
+      const initialEventTriggers = eventRules.data;
       const campaign = await client.query<{ id: string }>(
         `INSERT INTO campaigns (
            owner_user_id, world_version_id, title, story_length_profile, story_context_budget_tokens, turn_control_style,
@@ -1190,7 +1197,7 @@ function createPostgresCampaignRepository(
           scope.ownerUserId,
           json(initialTrackers),
           json(defaultTrackers),
-          json(content.eventTriggers),
+          json(initialEventTriggers),
           json(seed.rpgStats),
           json({
             sourceType: "world_library",
@@ -1201,7 +1208,7 @@ function createPostgresCampaignRepository(
           json({
             scratchpad: "",
             trackers: initialTrackers,
-            eventTriggers: content.eventTriggers,
+            eventTriggers: initialEventTriggers,
             pendingEventTriggers: [],
             rpgStats: seed.rpgStats
           })

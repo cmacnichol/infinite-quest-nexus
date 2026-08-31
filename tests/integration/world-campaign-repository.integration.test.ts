@@ -15,6 +15,8 @@ import {
   type DatabasePool
 } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
+import { createPostgresCampaignAuthorityAdapters } from "../../packages/database/src/campaign-state-repository.js";
+import { createPostgresGenerationExecutionRepository } from "../../packages/database/src/generation-execution-repository.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe.sequential : describe.skip;
@@ -150,6 +152,70 @@ integration("PostgreSQL world campaign repository adapters", () => {
     )));
     return { title, created };
   }
+
+  it("loads and preserves mixed authored event rules before the first turn", async () => {
+    const adapters = createAdapters();
+    const rule = "When the gate opens, the keeper greets the traveler.";
+    const structured = {
+      id: "keeper-leaves", label: "Departure", timing: "after", condition: "The keeper leaves.",
+      effect: "The lantern goes dark.", addTextAfter: true, triggeredCount: 0,
+      lastTriggeredTurn: null, lastTriggeredAt: null
+    };
+    const authored = content("Opening compatibility", "Opening");
+    authored.eventTriggers = [rule, structured];
+    const world = unwrap(await adapters.transaction.command((transaction) => adapters.worlds.createWorld(
+      transaction, { ownerUserId }, { title: authored.world.title, content: authored }
+    )));
+    const version = await publishFixtureWorld(adapters, world.id, world.draftRevision, "Opening rules");
+    const { created } = await createFixtureCampaign(adapters, version.worldVersionId, "Opening campaign");
+    const campaignId = created.id;
+    const scope = { ownerUserId, campaignId };
+    const authority = createPostgresCampaignAuthorityAdapters(pool, { memory: {} as never, turnPages: {} as never });
+    const expected = [{
+      id: "world-event-1", label: "World event 1", timing: "before", condition: rule, effect: rule,
+      addTextAfter: false, triggeredCount: 0, lastTriggeredTurn: null, lastTriggeredAt: null
+    }, structured];
+    const sync = await authority.transaction.read((transaction) => authority.sync.readCampaignSyncSnapshot(transaction, scope));
+    expect(sync.projection.world.firstAction).toBe(authored.world.firstAction);
+    expect(sync.projection.campaign.activeTurnNumber).toBe(0);
+    expect(sync.projection.playerConfig.eventTriggers).toEqual(expected);
+    for (const turnNumber of [undefined, 0]) {
+      const runtime = await authority.transaction.read((transaction) => authority.state.getCampaignRuntimeState(transaction, scope, turnNumber));
+      expect(runtime.eventTriggers).toEqual(expected);
+    }
+    const stored = await pool.query("SELECT event_triggers, initial_state_snapshot FROM campaign_state WHERE campaign_id=$1", [campaignId]);
+    expect(stored.rows[0].event_triggers).toEqual(expected);
+    expect(stored.rows[0].initial_state_snapshot.eventTriggers).toEqual(expected);
+    expect((await pool.query("SELECT content FROM world_versions WHERE id=$1", [version.worldVersionId])).rows[0].content.eventTriggers).toEqual([rule, structured]);
+    expect((await pool.query("SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1", [campaignId])).rows[0].count).toBe(0);
+    await expect(authority.transaction.read((transaction) => authority.sync.readCampaignSyncSnapshot(
+      transaction, { ownerUserId: crypto.randomUUID(), campaignId }
+    ))).rejects.toMatchObject({ kind: "not_found" });
+
+    // An already-created zero-turn campaign must also load without a data migration.
+    await pool.query("UPDATE campaign_state SET event_triggers=$2, initial_state_snapshot=jsonb_set(initial_state_snapshot,'{eventTriggers}',$2::jsonb) WHERE campaign_id=$1", [campaignId, JSON.stringify([rule, structured])]);
+    const legacySync = await authority.transaction.read((transaction) => authority.sync.readCampaignSyncSnapshot(transaction, scope));
+    expect(legacySync.projection.playerConfig.eventTriggers).toEqual(expected);
+    const initial = await authority.transaction.read((transaction) => authority.state.getCampaignRuntimeState(transaction, scope, 0));
+    expect(initial.eventTriggers).toEqual(expected);
+    expect((await pool.query("SELECT event_triggers FROM campaign_state WHERE campaign_id=$1", [campaignId])).rows[0].event_triggers).toEqual([rule, structured]);
+  });
+
+  it("rejects unsupported event rules before creating any campaign rows", async () => {
+    const adapters = createAdapters();
+    const authored = content("Invalid opening rules", "Invalid");
+    authored.eventTriggers = [42];
+    const world = unwrap(await adapters.transaction.command((transaction) => adapters.worlds.createWorld(
+      transaction, { ownerUserId }, { title: authored.world.title, content: authored }
+    )));
+    const version = await publishFixtureWorld(adapters, world.id, world.draftRevision, "Invalid rule");
+    const result = await adapters.transaction.command((transaction) => adapters.campaigns.createCampaign(transaction, { ownerUserId }, {
+      worldVersionId: version.worldVersionId, title: "Invalid campaign", storyLengthProfile: "standard",
+      storyContextBudgetTokens: 32_000, turnControlStyle: "flexible_auto"
+    }));
+    expect(result).toMatchObject({ ok: false, failure: { reason: "invalid_transition" } });
+    expect((await pool.query("SELECT count(*)::int AS count FROM campaigns WHERE world_version_id=$1", [version.worldVersionId])).rows[0].count).toBe(0);
+  });
 
   it("creates and lists raw-Date worlds only inside the explicit owner scope", async () => {
     const foreignOwner = await pool.query<{ id: string }>(
