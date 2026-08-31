@@ -119,6 +119,25 @@ it("preserves a real typed draft through display preference refreshes", async ()
   display.dispose();
 });
 
+it("keeps refreshed Quiet Leaf narration and history commands connected to the Story page", async () => {
+  const page = createStoryTestDom();
+  const display = createDisplayPreferences(null);
+  const composition = createStoryTestComposition();
+  const mounted = mountStoryPlayerPage(page.root, { campaignId: "11111111-1111-4111-8111-111111111111", turnNumber: null }, composition, {
+    uiImplementation: "web-awesome",
+    displayPreferences: display
+  });
+  await settleStoryTest();
+
+  display.setStoryWidth("full");
+  page.root.querySelector<HTMLElement>("[data-action='open-complete-history']")?.dispatchEvent(new page.window.Event("click", { bubbles: true }));
+  await settleStoryTest();
+
+  expect(page.root.querySelector("[data-story-history]")?.hasAttribute("open")).toBe(true);
+  mounted.dispose();
+  display.dispose();
+});
+
 it("clears a stale Core confirmation after real editor typing and focuses its action", async () => {
   const page = createStoryTestDom();
   const classifyTurnInput = vi.fn().mockResolvedValue({

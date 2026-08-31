@@ -167,7 +167,8 @@ export function mountStoryPlayerPage(
   let controller: AbortController | null = null;
   let projection: Readonly<CampaignProjection> = composition.campaignStore.store.get();
   let retryControl: HTMLButtonElement | null = null;
-  let historyDialogOpener: "history" | "inspect" | null = null;
+  let historyDialogOpener: Readonly<{ element: HTMLElement; selector: string }> | null = null;
+  let toolDialogOpener: HTMLElement | null = null;
   let focusHistoryDialog = false;
   let inspectedState: CampaignRuntimeStateResponse | null = null;
   let currentState: CampaignRuntimeStateResponse | null = null;
@@ -345,14 +346,29 @@ export function mountStoryPlayerPage(
   const unsubscribeIllustrations = illustrations.subscribe(() => render());
 
   const onRetry = () => { void load(); };
+  const historyOpener = (element: HTMLElement | null): Readonly<{ element: HTMLElement; selector: string }> | null => {
+    if (element === null) return null;
+    const selector = element.matches("[data-action='open-complete-history']")
+      ? "[data-action='open-complete-history']"
+      : element.matches("[data-action='inspect-state']")
+        ? "[data-story-reader] [data-action='inspect-state']"
+        : element.closest(".app-shell-campaign-menu")
+          ? ".app-shell-campaign-menu wa-button"
+        : element.matches("summary")
+          ? "[data-campaign-tools] summary"
+          : "[data-history]";
+    return { element, selector };
+  };
   const restoreHistoryFocus = () => {
     const opener = historyDialogOpener;
     if (opener === null) return;
     historyDialogOpener = null;
-    const selector = opener === "history"
-      ? "[data-action='open-complete-history']"
-      : "[data-story-reader] [data-action='inspect-state']";
-    root.querySelector<HTMLButtonElement>(selector)?.focus();
+    if (!disposed) root.querySelector<HTMLElement>(opener.selector)?.focus();
+  };
+  const restoreToolDialogFocus = () => {
+    const opener = toolDialogOpener;
+    toolDialogOpener = null;
+    if (opener?.isConnected) opener.focus();
   };
   const invalidateInspection = () => {
     inspectionRequestToken += 1;
@@ -411,6 +427,7 @@ export function mountStoryPlayerPage(
       event.preventDefault();
       tools.closeActiveDialog();
       toolsDisclosure?.querySelector<HTMLElement>("summary")?.focus();
+      restoreToolDialogFocus();
     });
     for (const control of dialog.querySelectorAll<HTMLButtonElement>("[data-action='copy-activity-diagnostics']")) {
       control.addEventListener("click", () => {
@@ -558,9 +575,10 @@ export function mountStoryPlayerPage(
     ui.restoreComposerDraft(latest.action);
     focusDraft();
   };
-  const openStoryHistory = (): void => {
+  const openStoryHistory = (opener: HTMLElement | null = null): void => {
     invalidateInspection();
-    historyDialogOpener = "history";
+    historyDialogOpener = historyOpener(opener ?? root.querySelector<HTMLElement>("[data-history]")
+      ?? toolsDisclosure?.querySelector<HTMLElement>("summary") ?? null);
     focusHistoryDialog = true;
     ui.setActiveDialog("history");
     void history.openCompleteHistory().catch(() => undefined);
@@ -583,14 +601,16 @@ export function mountStoryPlayerPage(
     length: (profile) => ui.setStoryLengthProfileOverride(profile),
     continueStory: () => { void submitComposer(); },
     retryTurn: () => prepareRetryTurn(),
-    history: () => openStoryHistory(),
+    history: () => openStoryHistory(root.querySelector<HTMLElement>("[data-history]")),
     confirm: (mode) => confirmStoryIntent(mode),
     returnToEditor: () => returnToStoryEditor()
   };
   if (selectedUiImplementation === "web-awesome") {
     const presenterRoot = root.querySelector<HTMLElement>(".story-reader");
     if (!presenterRoot) throw new Error("The Quiet Leaf Story root is missing.");
-    quietLeaf = mountQuietLeafPresenter(presenterRoot, displayPreferences, composerActions);
+    quietLeaf = mountQuietLeafPresenter(presenterRoot, displayPreferences, composerActions, () => {
+      if (quietLeaf) render();
+    });
   }
   function render(): void {
     retryControl?.removeEventListener("click", onRetry);
@@ -683,7 +703,7 @@ export function mountStoryPlayerPage(
     for (const control of root.querySelectorAll<HTMLElement>("[data-action='open-complete-history']")) {
       control.addEventListener("click", (event) => {
         event.stopPropagation();
-        openStoryHistory();
+        openStoryHistory(control);
       });
     }
     for (const control of root.querySelectorAll<HTMLElement>("[data-action='retry-complete-history']")) {
@@ -721,7 +741,7 @@ export function mountStoryPlayerPage(
           const requestedCampaignId = projection.campaign?.id;
           const requestToken = ++inspectionRequestToken;
           if (control.closest("[data-story-reader]")) {
-            historyDialogOpener = "inspect";
+            historyDialogOpener = historyOpener(control);
             focusHistoryDialog = true;
             ui.setActiveDialog("history");
           }
@@ -847,6 +867,7 @@ export function mountStoryPlayerPage(
       control.addEventListener("click", () => {
         tools.closeActiveDialog();
         toolsDisclosure?.querySelector<HTMLElement>("summary")?.focus();
+        restoreToolDialogFocus();
       });
     }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-input-mode]")) {
@@ -1059,6 +1080,9 @@ export function mountStoryPlayerPage(
     const campaign = projection.campaign;
     const turnNumber = ui.get().viewTurnNumber ?? campaign?.activeTurnNumber ?? null;
     const turn = turnNumber === null ? null : projection.turns.find((candidate) => candidate.turnNumber === turnNumber) ?? null;
+    if (selectedUiImplementation === "web-awesome") {
+      toolDialogOpener = root.querySelector<HTMLElement>(".app-shell-campaign-menu wa-button");
+    }
     if (action === "show-turn-artwork" || action === "hide-turn-artwork" || action === "reset-turn-artwork") {
       if (!campaign || !turn) return;
       displayPreferences.setTurnArtwork(campaign.id, turn.id, action === "show-turn-artwork" ? true : action === "hide-turn-artwork" ? false : null);
@@ -1081,7 +1105,7 @@ export function mountStoryPlayerPage(
       return;
     }
     if (action === "open-campaign-history") {
-      openStoryHistory();
+      openStoryHistory(root.querySelector<HTMLElement>(".app-shell-campaign-menu wa-button"));
       return;
     }
     if (action === "open-activity") {

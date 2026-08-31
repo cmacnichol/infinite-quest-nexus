@@ -1,4 +1,4 @@
-.story-draft-field {
+main[data-ui-implementation="web-awesome"] .story-draft-field {
   display: grid;
   grid-template-areas:
     "field clear"
@@ -9,18 +9,18 @@
   min-width: 0;
 }
 
-.story-draft-field wa-textarea {
+main[data-ui-implementation="web-awesome"] .story-draft-field wa-textarea {
   display: block;
   grid-area: field;
   width: 100%;
 }
 
-.story-draft-field wa-textarea::part(textarea) {
+main[data-ui-implementation="web-awesome"] .story-draft-field wa-textarea::part(textarea) {
   min-height: var(--story-draft-min-height, 132px);
   max-height: none;
 }
 
-.story-draft-field wa-textarea::part(textarea-wrapper) {
+main[data-ui-implementation="web-awesome"] .story-draft-field wa-textarea::part(textarea-wrapper) {
   min-height: var(--story-draft-min-height, 132px);
 }
 
@@ -56,10 +56,10 @@ main[data-ui-implementation="web-awesome"] .story-draft-field .story-clear-draft
   opacity: 0.55;
 }
 
-.story-draft-field .story-draft-help {
+main[data-ui-implementation="web-awesome"] .story-draft-field .story-draft-help {
   grid-area: help;
 }
 
-.story-draft-field .story-draft-count {
+main[data-ui-implementation="web-awesome"] .story-draft-field .story-draft-count {
   grid-area: count;
 }

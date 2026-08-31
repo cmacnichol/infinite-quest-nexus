@@ -3,6 +3,10 @@ main[data-ui-implementation="web-awesome"] .story-choice-controls {
   gap: 0.5rem;
 }
 
+main[data-ui-implementation="web-awesome"] .story-choice-controls[hidden] {
+  display: none;
+}
+
 main[data-ui-implementation="web-awesome"] .story-choice-controls .story-choices__inline,
 main[data-ui-implementation="web-awesome"] .story-choice-controls .story-choices__dialog-grid {
   display: grid;

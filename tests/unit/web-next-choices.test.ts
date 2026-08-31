@@ -30,11 +30,12 @@ describe("indexed Story choices", () => {
   });
 
   it("hides both choice presentations for an empty collection", () => {
-    const { control } = fixture();
+    const { document, control } = fixture();
     control.update({ choices: [], selected: [], disabled: false });
 
     expect(control.element.querySelector("[data-inline-choice]")).toBeNull();
     expect(control.element.hidden).toBe(true);
+    expect(document.querySelector<HTMLElement>("[data-expand-choices]")?.hasAttribute("disabled")).toBe(true);
     control.dispose();
   });
 

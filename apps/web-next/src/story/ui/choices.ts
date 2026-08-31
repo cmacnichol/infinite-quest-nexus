@@ -76,6 +76,7 @@ export function mountChoices(document: Document, onChoose: (index: number) => vo
     element.toggleAttribute("hidden", !hasChoices);
     if (!hasChoices) {
       dialog.close();
+      setDisabled(expandButton, true);
       inlineChoices.replaceChildren();
       dialog.body.replaceChildren();
       renderedChoices = [];

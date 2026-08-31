@@ -65,7 +65,31 @@ it("serializes profile saves without letting an older response replace newer typ
   await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(2));
 
   second.resolve({ ...PROFILE, displayName: "Server newer" });
-  await vi.waitFor(() => expect(name.value).toBe("Server newer"));
+  await vi.waitFor(() => expect(editor.element.querySelector("[data-profile-status]")?.textContent).toBe("Profile saved."));
+  expect(name.value).toBe("Newer draft");
+  editor.dispose();
+});
+
+it("keeps trailing display-name whitespace in the editor after its normalized save acknowledgment", async () => {
+  const { document, window } = parseHTML("<body></body>");
+  const saved = deferred<typeof PROFILE>();
+  const editor = mountProfileEditor(document, {
+    load: vi.fn().mockResolvedValue(PROFILE),
+    save: vi.fn().mockReturnValue(saved.promise)
+  });
+  document.body.append(editor.element);
+  await editor.load();
+
+  const name = editor.element.querySelector<HTMLInputElement>("[data-profile=display-name]")!;
+  name.value = "Ada ";
+  name.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await Promise.resolve();
+  saved.resolve({ ...PROFILE, displayName: "Ada" });
+  await vi.waitFor(() => expect(editor.element.querySelector("[data-profile-status]")?.textContent).toBe("Profile saved."));
+
+  expect(name.value).toBe("Ada ");
+  name.value += "Lovelace";
+  expect(name.value).toBe("Ada Lovelace");
   editor.dispose();
 });
 

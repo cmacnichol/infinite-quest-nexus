@@ -52,3 +52,25 @@ test("the direct World Library route renders the sanitized contract fixture", as
     api.assertNoUnexpectedRequests();
   }
 });
+
+test("the native default keeps the draft label and textarea in its native grid flow", async ({ page }) => {
+  test.skip(webAwesomeBuild, "Core has its own draft-field geometry coverage.");
+  const api = await installStoryApi(page);
+  try {
+    await page.goto(`/app/story/${api.campaignId}`);
+    const field = page.locator(".story-draft-field");
+    const textarea = page.locator("textarea[data-story-draft]");
+    const label = field.locator("label");
+    await expect(textarea).toBeVisible();
+    const geometry = await field.evaluate((element) => ({
+      areas: getComputedStyle(element).gridTemplateAreas,
+      labelBottom: element.querySelector("label")?.getBoundingClientRect().bottom ?? 0,
+      textareaTop: element.querySelector("textarea")?.getBoundingClientRect().top ?? 0
+    }));
+    expect(geometry.areas).toBe("none");
+    expect(geometry.labelBottom).toBeLessThanOrEqual(geometry.textareaTop);
+    await expect(label).toBeVisible();
+  } finally {
+    api.assertNoUnexpectedRequests();
+  }
+});

@@ -15,6 +15,13 @@ export interface MenuHandle {
 
 type DropdownElement = HTMLElement & { open: boolean };
 
+function activeElement(document: Document): HTMLElement | null {
+  const candidate = document.activeElement;
+  return candidate?.nodeType === 1 && typeof (candidate as HTMLElement).focus === "function"
+    ? candidate as HTMLElement
+    : null;
+}
+
 function selectedValue(event: Event): string | null {
   const detail = (event as CustomEvent<unknown>).detail;
   if (!detail || typeof detail !== "object") return null;
@@ -38,16 +45,46 @@ export function mountMenu(document: Document, label: string, items: readonly Men
   let currentItems = items;
   let disposed = false;
   let returnFocus = false;
+  const itemElements = new Map<string, HTMLElement>();
 
   const renderItems = (): void => {
-    for (const item of Array.from(dropdown.querySelectorAll("wa-dropdown-item"))) item.remove();
+    const focusedItem = activeElement(document);
+    const focusedId = focusedItem?.matches("wa-dropdown-item") && dropdown.contains(focusedItem)
+      ? focusedItem.getAttribute("value")
+      : null;
+    const nextIds = new Set(currentItems.map((item) => item.id));
     for (const item of currentItems) {
-      const element = document.createElement("wa-dropdown-item");
-      element.className = "command-menu__item";
-      element.setAttribute("value", item.id);
-      if (item.disabled) element.setAttribute("disabled", "");
-      element.textContent = item.label;
-      dropdown.append(element);
+      let element = itemElements.get(item.id);
+      if (!element) {
+        element = document.createElement("wa-dropdown-item");
+        element.className = "command-menu__item";
+        element.setAttribute("value", item.id);
+        itemElements.set(item.id, element);
+      }
+      if (element.getAttribute("value") !== item.id) element.setAttribute("value", item.id);
+      if (element.hasAttribute("disabled") !== (item.disabled === true)) element.toggleAttribute("disabled", item.disabled === true);
+      if (element.textContent !== item.label) element.textContent = item.label;
+    }
+    for (const [id, element] of itemElements) {
+      if (nextIds.has(id)) continue;
+      element.remove();
+      itemElements.delete(id);
+    }
+    const existingOrder = [...dropdown.querySelectorAll("wa-dropdown-item")].map((element) => element.getAttribute("value"));
+    const nextOrder = currentItems.map((item) => item.id);
+    if (existingOrder.length !== nextOrder.length || existingOrder.some((id, index) => id !== nextOrder[index])) {
+      let insertionPoint = trigger.nextSibling;
+      for (const item of currentItems) {
+        const element = itemElements.get(item.id);
+        if (!element) continue;
+        if (element !== insertionPoint) dropdown.insertBefore(element, insertionPoint);
+        insertionPoint = element.nextSibling;
+      }
+    }
+    const focusedNext = focusedId === null ? undefined : currentItems.find((item) => item.id === focusedId);
+    if (focusedId !== null && (focusedNext === undefined || focusedNext.disabled)) {
+      trigger.focus();
+      returnFocus = false;
     }
   };
 

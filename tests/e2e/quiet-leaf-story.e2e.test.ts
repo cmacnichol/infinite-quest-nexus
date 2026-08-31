@@ -126,3 +126,60 @@ test("action-only composer keeps duplicate choices distinct and disables an empt
     api.assertNoUnexpectedRequests();
   }
 });
+
+test("Core restores campaign-menu and footer-History focus after retained dialogs close", async ({ page }) => {
+  const { api } = await openStory(page);
+  try {
+    const campaignMenu = page.getByRole("button", { name: "Campaign settings", exact: true });
+    await campaignMenu.click();
+    await page.getByRole("menuitem", { name: "Edit Campaign State", exact: true }).click();
+    await expect(page.getByRole("dialog", { name: "Edit Campaign State", exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(campaignMenu).toBeFocused();
+
+    await campaignMenu.click();
+    await page.getByRole("menuitem", { name: "Turn History & State", exact: true }).click();
+    await expect(page.getByRole("dialog", { name: "Turn History", exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(campaignMenu).toBeFocused();
+
+    const history = page.getByRole("button", { name: "History", exact: true });
+    await history.click();
+    await expect(page.getByRole("dialog", { name: "Turn History", exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(history).toBeFocused();
+  } finally {
+    api.assertNoUnexpectedRequests();
+  }
+});
+
+test("Core keeps a focused campaign command through an unrelated Story update", async ({ page }) => {
+  const { api, field } = await openStory(page);
+  try {
+    await page.getByRole("button", { name: "Campaign settings", exact: true }).click();
+    const command = page.getByRole("menuitem", { name: "Current World Setup", exact: true });
+    await command.focus();
+    await expect(command).toBeFocused();
+    await field.fill("Keep the command focused");
+    await expect(command).toBeFocused();
+  } finally {
+    api.assertNoUnexpectedRequests();
+  }
+});
+
+test("Core hides an empty choice host and excludes its expand control from focus", async ({ page }) => {
+  const { api } = await openStory(page);
+  try {
+    const choices = page.locator(".story-choice-controls");
+    const expand = choices.locator("[data-expand-choices]");
+    await choices.evaluate((element) => { (element as HTMLElement).hidden = true; });
+    await expect(choices).toBeHidden();
+    const receivesFocus = await expand.evaluate((element) => {
+      (element as HTMLElement).focus();
+      return document.activeElement === element;
+    });
+    expect(receivesFocus).toBe(false);
+  } finally {
+    api.assertNoUnexpectedRequests();
+  }
+});

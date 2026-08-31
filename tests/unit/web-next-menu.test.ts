@@ -60,6 +60,28 @@ describe("web-next command menu", () => {
     expect(menu.element.querySelector("wa-dropdown-item")?.hasAttribute("disabled")).toBe(true);
   });
 
+  it("retains a focused command across an unrelated projection update and returns to the trigger when it becomes unavailable", () => {
+    const { document } = parseHTML("<body></body>");
+    const menu = mountMenu(document, "Campaign Settings", [
+      { id: "activity", label: "Activity Log" },
+      { id: "archive", label: "Archive" }
+    ], vi.fn());
+    document.body.append(menu.element);
+    const trigger = menu.element.querySelector<HTMLElement>("wa-button");
+    const activity = menu.element.querySelector<HTMLElement>('wa-dropdown-item[value="activity"]');
+    if (!trigger || !activity) throw new Error("Menu controls are missing.");
+    const focus = vi.spyOn(trigger, "focus");
+    setActiveElement(document, activity);
+
+    menu.update([{ id: "activity", label: "Activity Log" }, { id: "archive", label: "Archive", disabled: true }]);
+
+    expect(menu.element.querySelector('wa-dropdown-item[value="activity"]')).toBe(activity);
+    expect(document.activeElement).toBe(activity);
+    menu.update([{ id: "archive", label: "Archive", disabled: true }]);
+
+    expect(focus).toHaveBeenCalledExactlyOnceWith();
+  });
+
   it("makes disposal idempotent", () => {
     const { document, window } = parseHTML("<body></body>");
     const selected = vi.fn();

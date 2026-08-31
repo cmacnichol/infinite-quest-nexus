@@ -113,6 +113,12 @@ export function mountProfileEditor(document: Document, port: ProfilePort): Profi
     setControlValue(turnStyle, profile.settings.defaultTurnControlStyle);
   };
 
+  const applySavedSettings = (profile: UserProfile): void => {
+    autoSubmit.checked = profile.settings.autoSubmitTurnChoices;
+    continuousReading.checked = profile.settings.continuousReading;
+    setControlValue(turnStyle, profile.settings.defaultTurnControlStyle);
+  };
+
   const captureUpdate = (): UserProfileUpdate | null => {
     const parsed = userProfileUpdateSchema.safeParse({
       displayName: controlValue(displayName).trim(),
@@ -138,7 +144,7 @@ export function mountProfileEditor(document: Document, port: ProfilePort): Profi
         const saved = await port.save(update);
         if (!disposed && requestRevision === editRevision) {
           if (unsavedRevision === requestRevision) unsavedRevision = null;
-          applyProfile(saved);
+          applySavedSettings(saved);
           failedSave = null;
           setStatus("Profile saved.", "idle");
         }

@@ -51,7 +51,12 @@ function lengthProfile(state: StoryPlayerViewState): StoryLengthProfile {
   return state.selectedCampaign?.storyLengthProfile ?? "standard";
 }
 
-export function mountQuietLeafPresenter(root: HTMLElement, display: DisplayPreferencesStore, actions: ComposerActions): QuietLeafPresenter {
+export function mountQuietLeafPresenter(
+  root: HTMLElement,
+  display: DisplayPreferencesStore,
+  actions: ComposerActions,
+  onDisplayRefresh: (() => void) | undefined = undefined
+): QuietLeafPresenter {
   root.dataset.quietLeafPresenter = "";
   root.dataset.storyReader = "";
   const document = root.ownerDocument;
@@ -66,7 +71,10 @@ export function mountQuietLeafPresenter(root: HTMLElement, display: DisplayPrefe
   let queued = false;
 
   const artwork = mountStoryArtwork(document, display, () => requestRender());
-  const unsubscribeDisplay = display.subscribe(() => requestRender());
+  const unsubscribeDisplay = display.subscribe(() => {
+    requestRender();
+    onDisplayRefresh?.();
+  });
 
   function apply(): void {
     if (disposed || current === null) return;
