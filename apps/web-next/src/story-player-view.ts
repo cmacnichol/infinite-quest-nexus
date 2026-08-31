@@ -5,6 +5,7 @@ import type { ReadingWidth, StoryUiState } from "./story-player-model";
 import { alignLatestSpine, latestCampaignSpine } from "./story-player-history";
 import { storyIllustrationCapabilities, type StoryIllustrationState } from "./story-player-illustrations";
 import type { StoryActivityRecord } from "./story-player-tools";
+import type { CampaignContinuityEditor } from "./campaign-continuity-editor";
 
 export interface StoryPlayerViewState {
   readonly route: StoryRoute;
@@ -14,6 +15,12 @@ export interface StoryPlayerViewState {
   readonly projection: Readonly<CampaignProjection>;
   readonly inspectedState: CampaignRuntimeStateResponse | null;
   readonly currentState: CampaignRuntimeStateResponse | null;
+  readonly continuityEditor: CampaignContinuityEditor | null;
+  readonly currentStateLocked: boolean;
+  readonly currentStateGenerationLocked: boolean;
+  readonly currentStateReloadLocked: boolean;
+  readonly currentStateStale: boolean;
+  readonly currentStateError: string | null;
   readonly correction: AcceptedTurnCorrectionView | null;
   readonly about: MetaResponse | null;
   readonly activityRecords: readonly StoryActivityRecord[];
@@ -761,20 +768,25 @@ function toolDialog(document: Document, state: StoryPlayerViewState): HTMLDialog
     const runtime = state.currentState;
     if (runtime === null) dialog.append(element(document, "p", undefined, "Loading campaign state…"));
     else {
-      dialog.append(
-        editorField(document, "Continuity", "continuitySummary", runtime.continuitySummary),
-        editorField(document, "Open threads", "openThreads", JSON.stringify(runtime.openThreads, null, 2)),
-        editorField(document, "Canonical facts", "canonicalFacts", JSON.stringify(runtime.canonicalFacts, null, 2)),
-        editorField(document, "Scratchpad", "scratchpad", runtime.scratchpad),
-        editorField(document, "Trackers", "trackers", JSON.stringify(runtime.trackers, null, 2)),
-        editorField(document, "RPG stats", "rpgStats", JSON.stringify(runtime.rpgStats, null, 2)),
-        editorField(document, "Event triggers", "eventTriggers", JSON.stringify(runtime.eventTriggers, null, 2)),
-        editorField(document, "Pending triggers", "pendingEventTriggers", JSON.stringify(runtime.pendingEventTriggers, null, 2))
-      );
+      dialog.append(element(document, "p", undefined,
+        `Current state after turn ${runtime.activeTurnNumber} · revision ${runtime.revision}. Changes apply to future turns only.`));
+      if (state.currentStateGenerationLocked) {
+        dialog.append(element(document, "p", "story-status", "Story generation is active or needs attention. Campaign state changes are temporarily unavailable; your draft is preserved."));
+      }
+      if (state.currentStateStale) {
+        dialog.append(element(document, "p", "story-status", "Current state changed while you were editing. Reload before saving; your draft is still available."));
+      }
+      if (state.currentStateError) dialog.append(element(document, "p", "story-status", state.currentStateError));
+      if (state.continuityEditor) dialog.append(state.continuityEditor.element);
+      const reload = element(document, "button", undefined, "Reload current state");
+      reload.type = "button";
+      reload.dataset.action = "reload-current-state";
+      reload.disabled = state.currentStateReloadLocked;
       const save = element(document, "button", undefined, "Save Campaign State");
       save.type = "button";
       save.dataset.action = "save-current-state";
-      dialog.append(save);
+      save.disabled = state.currentStateLocked;
+      dialog.append(reload, save);
     }
   } else if (active === "correction") {
     const correction = state.correction;

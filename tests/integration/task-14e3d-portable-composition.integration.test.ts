@@ -16,6 +16,7 @@ import {
 import { toAssetMutationIdempotencyKey } from "../../packages/application/src/assets/types.js";
 import { canonicalArchiveJson, canonicalizeWorldContent } from "../../packages/contracts/src/index.js";
 import { calculateContentFingerprint } from "../../packages/contracts/src/archives-node.js";
+import { buildCanonicalChronicleFacts } from "../../packages/domain/src/chronicle-memory-helpers.js";
 import { createPostgresImportRepository } from "../../packages/database/src/import-repository.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import {
@@ -32,6 +33,10 @@ import {
   type DatabasePool,
   withTransaction
 } from "../../packages/database/src/pool.js";
+import {
+  getCampaignRuntimeState,
+  updateCampaignRuntimeState
+} from "../helpers/memory-aware-services.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -628,6 +633,276 @@ integration("Task 14e3d durable portable composition authority", () => {
     )).resolves.toMatchObject({
       rows: [{ worlds: 0, versions: 0, campaigns: 0, turns: 0, memories: 0, asset_refs: 0, imports: 0, assets: 0 }]
     });
+  });
+
+  it("assigns destination-local correction fact references in rich portable campaign imports", async () => {
+    const target = await createWorldScope(`14e3d correction import ${crypto.randomUUID()}`);
+    const sourceCampaignId = crypto.randomUUID();
+    const sourceInitialTurnId = crypto.randomUUID();
+    const sourceTurnId = crypto.randomUUID();
+    const sourceFinalTurnId = crypto.randomUUID();
+    const sourceFactId = buildCanonicalChronicleFacts({
+      campaignId: sourceCampaignId,
+      turnId: sourceInitialTurnId,
+      canonicalFactUpdates: [{ content: "The archive door is sealed by moonlight." }],
+      entityCatalog: []
+    })[0]!.id;
+    const sourceGeneratedFactId = buildCanonicalChronicleFacts({
+      campaignId: sourceCampaignId,
+      turnId: sourceTurnId,
+      canonicalFactUpdates: [{
+        content: "The archive door opens at sunrise.",
+        supersedesFactIds: [sourceFactId]
+      }],
+      entityCatalog: []
+    })[0]!.id;
+    const sourceManualFactId = crypto.randomUUID();
+    const mutations = createPostgresPortableFamilyMutationRepository(worldRepository());
+    const payload = {
+      archiveFormat: "manifest_v1",
+      sourceName: "correction-campaign.zip",
+      campaign: {
+        campaign: { sourceCampaignId, title: "Correction import", stateRevision: 2 },
+        settings: {},
+        turns: [{
+          id: sourceInitialTurnId,
+          turnNumber: 1,
+          action: "Listen",
+          narration: "Moonlight seals the archive door.",
+          worldStateSnapshot: {
+            canonicalFactUpdates: [{ content: "The archive door is sealed by moonlight." }]
+          }
+        }, {
+          id: sourceTurnId,
+          turnNumber: 2,
+          action: "Look",
+          narration: "The archive door opens at sunrise.",
+          worldStateSnapshot: {
+            canonicalFactUpdates: [{
+              content: "The archive door opens at sunrise.",
+              supersedesFactIds: [sourceFactId]
+            }]
+          }
+        }, {
+          id: sourceFinalTurnId,
+          turnNumber: 3,
+          action: "Wait",
+          narration: "The archive waits in silence.",
+          worldStateSnapshot: {}
+        }],
+        archiveRecords: {
+          formatVersion: 1,
+          characterProfileEdits: [],
+          stateEdits: [{
+            id: crypto.randomUUID(),
+            effective_turn_number: 1,
+            revision: 1,
+            state_snapshot_private: {
+              continuitySummary: "The archive door remains under moonlight.",
+              openThreads: ["Learn who sealed the archive door."],
+              canonicalFacts: [{ id: sourceFactId, content: "The archive door is sealed by moonlight." }],
+              scratchpad: "The seal has not yet broken.",
+              trackers: [],
+              rpgStats: [],
+              eventTriggers: [],
+              pendingEventTriggers: []
+            },
+            changed_fields: ["canonicalFacts"],
+            created_at: "2030-01-01T00:00:00.000Z"
+          }, {
+            id: crypto.randomUUID(),
+            effective_turn_number: 2,
+            revision: 2,
+            state_snapshot_private: {
+              continuitySummary: "The archive door opened at sunrise.",
+              openThreads: ["Find the keeper beyond the archive door."],
+              canonicalFacts: [
+                { id: sourceGeneratedFactId, content: "The archive door opens at sunrise." },
+                { id: sourceManualFactId, content: "The keeper carries a moon-glass key." }
+              ],
+              scratchpad: "The keeper has not yet appeared.",
+              trackers: [],
+              rpgStats: [],
+              eventTriggers: [],
+              pendingEventTriggers: []
+            },
+            changed_fields: ["canonicalFacts"],
+            created_at: "2030-01-01T00:01:00.000Z"
+          }],
+          narrationCorrections: [],
+          worldMigrations: [],
+          illustrationConfig: null,
+          illustrationSets: [],
+          illustrationSegments: [],
+          costs: []
+        }
+      },
+      world: { canonicalHash: hash("correction-world"), content: JSON.parse(JSON.stringify(target.content)) },
+      chronicle: {
+        formatVersion: 1,
+        memories: [{
+          turn_id: sourceTurnId,
+          memory_kind: "canonical_fact",
+          ordinal: 1,
+          content: "Linked legacy canonical parent is replaced by reconstructed facts.",
+          lexicalUnitEstimate: 9,
+          importance: 0.8,
+          entities: [],
+          entity_ids: [],
+          metadata: { legacyCanonicalParent: true }
+        }, {
+          turn_id: sourceFinalTurnId,
+          memory_kind: "canonical_fact",
+          ordinal: 3,
+          content: "Legacy canonical parent without a reconstructable source remains available.",
+          lexicalUnitEstimate: 9,
+          importance: 0.8,
+          entities: [],
+          entity_ids: [],
+          metadata: { legacyCanonicalParent: true }
+        }, {
+          turn_id: sourceTurnId,
+            memory_kind: "turn_fiction",
+            ordinal: 1,
+            content: "Imported accepted fiction remains available.",
+            lexicalUnitEstimate: 6,
+            importance: 0.7,
+            entities: [],
+            entity_ids: [],
+            metadata: { imported: true }
+          }, {
+            memory_kind: "campaign_summary",
+            ordinal: 1,
+            content: "Imported summary parent remains available.",
+            lexicalUnitEstimate: 6,
+            importance: 0.7,
+            entities: [],
+            entity_ids: [],
+            metadata: { imported: true }
+          }, {
+            memory_kind: "open_thread",
+            ordinal: 1,
+            content: "Imported thread parent remains available.",
+            lexicalUnitEstimate: 6,
+            importance: 0.7,
+            entities: [],
+            entity_ids: [],
+            metadata: { imported: true }
+          }, {
+            memory_kind: "legacy_summary",
+            ordinal: 1,
+            content: "Imported archive note that is unrelated to canonical facts.",
+            lexicalUnitEstimate: 8,
+            importance: 0.5,
+            entities: [],
+            entity_ids: [],
+            metadata: {}
+          }],
+        summaries: [{
+          through_turn: 1,
+          summary_kind: "imported_checkpoint",
+          content: { summary: "Imported checkpoint remains available." },
+          lexicalUnitEstimate: 5,
+          created_at: "2030-01-01T00:00:00.000Z"
+        }]
+      }
+    };
+    const sourcePayload = structuredClone(payload);
+    const imported = await withTransaction(pool, (database) => mutations.commitCampaignZip(database, {
+      owner: { ownerUserId },
+      destination: { kind: "existing_world_version", worldId: target.worldId, worldVersionId: target.worldVersionId },
+      authorityFingerprint: hash(`14e3d-correction-import-${crypto.randomUUID()}`),
+      payload,
+      publishedAssets: []
+    }));
+    if (!imported.campaignId) throw new Error("expected imported campaign");
+    expect(payload).toEqual(sourcePayload);
+
+    const historical = await getCampaignRuntimeState(pool, imported.campaignId, 1);
+    expect(historical.canonicalFacts).toEqual([
+      expect.objectContaining({ content: "The archive door is sealed by moonlight." })
+    ]);
+
+    const current = await getCampaignRuntimeState(pool, imported.campaignId);
+    expect(current.canonicalFacts).toEqual([
+      expect.objectContaining({ content: "The archive door opens at sunrise." }),
+      expect.objectContaining({ content: "The keeper carries a moon-glass key." })
+    ]);
+    const importedGeneratedFactId = current.canonicalFacts
+      .find((fact) => fact.content === "The archive door opens at sunrise.")?.id;
+    const importedManualFactId = current.canonicalFacts
+      .find((fact) => fact.content === "The keeper carries a moon-glass key.")?.id;
+    expect(importedGeneratedFactId).toEqual(expect.any(String));
+    expect(importedManualFactId).toEqual(expect.any(String));
+
+    const preservedMemories = await pool.query<{ memory_kind: string; content: string }>(
+      `SELECT memory_kind,content FROM chronicle_memories
+        WHERE campaign_id=$1 AND content = ANY($2::text[]) ORDER BY memory_kind,content`,
+      [imported.campaignId, [
+        "Legacy canonical parent without a reconstructable source remains available.",
+        "Imported accepted fiction remains available.",
+        "Imported summary parent remains available.",
+        "Imported thread parent remains available.",
+        "Imported archive note that is unrelated to canonical facts."
+      ]]
+    );
+    expect(preservedMemories.rows).toHaveLength(5);
+    await expect(pool.query(
+      `SELECT 1 FROM summary_checkpoints
+        WHERE campaign_id=$1 AND summary_kind='imported_checkpoint'
+          AND content=$2::jsonb`,
+      [imported.campaignId, JSON.stringify({ summary: "Imported checkpoint remains available." })]
+    )).resolves.toMatchObject({ rowCount: 1 });
+
+    const saved = await updateCampaignRuntimeState(pool, imported.campaignId, {
+      expectedTurnNumber: current.activeTurnNumber,
+      expectedRevision: current.revision,
+      continuitySummary: "Imported facts are immediately editable.",
+      openThreads: current.openThreads,
+      canonicalFacts: current.canonicalFacts,
+      scratchpad: current.scratchpad,
+      trackers: current.trackers,
+      rpgStats: current.rpgStats,
+      eventTriggers: current.eventTriggers,
+      pendingEventTriggers: current.pendingEventTriggers
+    });
+    expect(saved.canonicalFacts).toEqual([
+      expect.objectContaining({ id: importedGeneratedFactId, content: "The archive door opens at sunrise." }),
+      expect.objectContaining({ id: importedManualFactId, content: "The keeper carries a moon-glass key." })
+    ]);
+
+    const [edit, turn] = await Promise.all([
+      pool.query<{ effective_turn_number: number; revision: number; state_snapshot_private: { canonicalFacts?: Array<{ id?: string; content?: string }> } }>(
+        "SELECT effective_turn_number,revision,state_snapshot_private FROM campaign_state_edits WHERE campaign_id=$1 ORDER BY revision",
+        [imported.campaignId]
+      ),
+      pool.query<{ state_snapshot_private: { canonicalFactUpdates?: Array<{ supersedesFactIds?: string[] }> } }>(
+        "SELECT state_snapshot_private FROM turns WHERE campaign_id=$1 AND turn_number=2",
+        [imported.campaignId]
+      )
+    ]);
+    const importedInitialEdit = edit.rows.find((row) => row.effective_turn_number === 1);
+    const importedCurrentEdit = edit.rows.find((row) => row.revision === 2);
+    const destinationFactId = importedInitialEdit?.state_snapshot_private.canonicalFacts?.[0]?.id;
+    const destinationGeneratedFactId = importedCurrentEdit?.state_snapshot_private.canonicalFacts
+      ?.find((fact) => fact.content === "The archive door opens at sunrise.")?.id;
+    const destinationManualFactId = importedCurrentEdit?.state_snapshot_private.canonicalFacts
+      ?.find((fact) => fact.content === "The keeper carries a moon-glass key.")?.id;
+    expect(destinationFactId).toEqual(expect.any(String));
+    expect(destinationFactId).not.toBe(sourceFactId);
+    expect(destinationGeneratedFactId).toBe(importedGeneratedFactId);
+    expect(destinationManualFactId).toBe(importedManualFactId);
+    expect(turn.rows[0]?.state_snapshot_private.canonicalFactUpdates?.[0]?.supersedesFactIds)
+      .toEqual([destinationFactId]);
+    await expect(pool.query(
+      `SELECT id,content,valid_until_turn AS "validUntilTurn",superseded_by_fact_id AS "supersededByFactId"
+         FROM campaign_canonical_facts WHERE campaign_id=$1 ORDER BY content`,
+      [imported.campaignId]
+    )).resolves.toMatchObject({ rows: expect.arrayContaining([
+      { id: destinationFactId, content: "The archive door is sealed by moonlight.", validUntilTurn: 2, supersededByFactId: destinationGeneratedFactId },
+      expect.objectContaining({ id: destinationGeneratedFactId, content: "The archive door opens at sunrise.", validUntilTurn: null }),
+      expect.objectContaining({ id: destinationManualFactId, content: "The keeper carries a moon-glass key.", validUntilTurn: null })
+    ]) });
   });
 
   secureFilesystemIt("wires every non-ZIP family through real preview, commit, and same-key replay", async () => {

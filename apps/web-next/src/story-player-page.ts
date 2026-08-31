@@ -1,4 +1,7 @@
 import {
+  buildCurrentStateUpdate,
+  createCampaignContinuityDraft,
+  NexusApiError,
   toggleChoiceDraftSelection,
   type CampaignProjection,
   type StoryTurnInputMode
@@ -6,7 +9,6 @@ import {
 import type {
   AcceptedTurnCorrectionView,
   CampaignRuntimeStateResponse,
-  CampaignRuntimeStateUpdate,
   CampaignSummary,
   MetaResponse,
   StoryLengthProfile,
@@ -21,6 +23,7 @@ import { createStoryHistoryController } from "./story-player-history";
 import { renderStoryPlayerView } from "./story-player-view";
 import { createStoryIllustrationController } from "./story-player-illustrations";
 import { createStoryToolsController, installStoryToolsDisclosure, storyCampaignToolsMarkup } from "./story-player-tools";
+import { createCampaignContinuityEditor, type CampaignContinuityEditor } from "./campaign-continuity-editor";
 import type { StoryRoute } from "./story-route";
 import type { MountedPage } from "./world-library-page";
 import "./story-player.css";
@@ -154,6 +157,14 @@ export function mountStoryPlayerPage(
   let focusHistoryDialog = false;
   let inspectedState: CampaignRuntimeStateResponse | null = null;
   let currentState: CampaignRuntimeStateResponse | null = null;
+  let continuityEditor: CampaignContinuityEditor | null = null;
+  let continuityDirty = false;
+  let currentStateSaveInFlight = false;
+  let currentStateStale = false;
+  let currentStateReloading = false;
+  let currentStateError: string | null = null;
+  let currentStateRequestToken = 0;
+  let continuityFocus: HTMLElement | null = null;
   let correction: AcceptedTurnCorrectionView | null = null;
   let about: MetaResponse | null = null;
   let replacementTurnId: string | null = null;
@@ -389,6 +400,13 @@ export function mountStoryPlayerPage(
     }
     dialog.addEventListener("cancel", (event) => {
       event.preventDefault();
+      if (ui.get().activeDialog === "current-state" && continuityDirty
+        && !root.ownerDocument.defaultView?.confirm("Discard unsaved current state changes?")) return;
+      if (ui.get().activeDialog === "current-state") {
+        continuityEditor?.dispose();
+        continuityEditor = null;
+        continuityDirty = false;
+      }
       tools.closeActiveDialog();
       toolsDisclosure?.querySelector<HTMLElement>("summary")?.focus();
     });
@@ -405,7 +423,9 @@ export function mountStoryPlayerPage(
         if (!disposed) ui.setMessage("Activity log cleared.");
       });
     }
-    dialog.querySelector<HTMLElement>("textarea, button:not([disabled])")?.focus();
+    if (continuityFocus?.isConnected) continuityFocus.focus();
+    else dialog.querySelector<HTMLElement>("textarea, button:not([disabled])")?.focus();
+    continuityFocus = null;
   };
   const focusDraft = () => root.querySelector<HTMLTextAreaElement>("[data-story-draft]")?.focus();
   const composerCampaign = () => projection.campaign !== null && selectedCampaign?.id === projection.campaign.id
@@ -498,6 +518,12 @@ export function mountStoryPlayerPage(
     root.querySelector<HTMLButtonElement>(`[data-input-mode="${mode}"]`)?.focus();
   };
   function render(): void {
+    const activeElement = root.ownerDocument.activeElement as HTMLElement | null;
+    continuityFocus = continuityEditor?.element.contains(activeElement) ? activeElement : null;
+    const currentStateGenerationLocked = projection.generation !== null;
+    const currentStateReloadLocked = currentStateGenerationLocked || currentStateSaveInFlight || currentStateReloading;
+    const currentStateLocked = currentStateReloadLocked || currentStateStale;
+    continuityEditor?.setDisabled(currentStateLocked);
     retryControl?.removeEventListener("click", onRetry);
     renderStoryPlayerView(root, {
       route,
@@ -507,6 +533,12 @@ export function mountStoryPlayerPage(
       projection,
       inspectedState,
       currentState,
+      continuityEditor,
+      currentStateLocked,
+      currentStateGenerationLocked,
+      currentStateReloadLocked,
+      currentStateStale,
+      currentStateError,
       correction,
       about,
       activityRecords: tools.activity(),
@@ -514,8 +546,7 @@ export function mountStoryPlayerPage(
     });
     const activeCampaign = projection.campaign;
     const canWriteCampaign = activeCampaign !== null
-      && projection.generation === null
-      && ui.get().viewTurnNumber === activeCampaign.activeTurnNumber;
+      && projection.generation === null;
     const editState = toolsDisclosure?.querySelector<HTMLButtonElement>("[data-tool-action='edit-campaign-state']");
     if (editState) editState.disabled = !canWriteCampaign;
     const selectedTurnNumber = ui.get().viewTurnNumber ?? projection.campaign?.activeTurnNumber ?? null;
@@ -652,38 +683,73 @@ export function mountStoryPlayerPage(
     }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='save-current-state']")) {
       control.addEventListener("click", () => {
-        if (control.disabled) return;
+        if (control.disabled || projection.generation !== null || currentStateSaveInFlight || currentStateStale || currentStateReloading) return;
         const base = currentState;
-        if (base === null) return;
+        const editor = continuityEditor;
+        if (base === null || editor === null) return;
         try {
-          const field = (name: string) => root.querySelector<HTMLTextAreaElement>(`[data-state-field='${name}']`)?.value ?? "";
-          const parsed = (name: string) => JSON.parse(field(name)) as unknown;
-          const request: CampaignRuntimeStateUpdate = {
-            continuitySummary: field("continuitySummary"),
-            openThreads: parsed("openThreads") as CampaignRuntimeStateUpdate["openThreads"],
-            canonicalFacts: parsed("canonicalFacts") as CampaignRuntimeStateUpdate["canonicalFacts"],
-            scratchpad: field("scratchpad"),
-            trackers: parsed("trackers") as CampaignRuntimeStateUpdate["trackers"],
-            rpgStats: parsed("rpgStats") as CampaignRuntimeStateUpdate["rpgStats"],
-            eventTriggers: parsed("eventTriggers") as CampaignRuntimeStateUpdate["eventTriggers"],
-            pendingEventTriggers: parsed("pendingEventTriggers") as CampaignRuntimeStateUpdate["pendingEventTriggers"],
-            expectedTurnNumber: base.activeTurnNumber,
-            expectedRevision: base.revision,
-            effectiveTurnNumber: base.viewedTurnNumber
-          };
-          control.disabled = true;
+          const request = buildCurrentStateUpdate(base, editor.readDraft());
+          currentStateSaveInFlight = true;
+          currentStateError = null;
+          render();
           void tools.saveCurrentState(request).then((result) => {
-            if (result !== null && !disposed) {
+            if (result !== null && !disposed && continuityEditor === editor) {
               currentState = result;
+              continuityEditor?.dispose();
+              continuityEditor = null;
+              continuityDirty = false;
               ui.setActiveDialog(null);
             }
-          }).catch(() => undefined).finally(() => {
-            if (!disposed && control.isConnected) control.disabled = false;
+          }).catch((error: unknown) => {
+            if (!disposed && continuityEditor === editor) {
+              currentStateStale = error instanceof NexusApiError && error.statusCode === 409;
+              currentStateError = "Current state could not be saved. Your edits are preserved.";
+            }
+          }).finally(() => {
+            if (!disposed) {
+              currentStateSaveInFlight = false;
+              render();
+            }
           });
         } catch {
           const message = root.querySelector<HTMLElement>("[data-story-tool-dialog] [data-story-status]");
-          if (message) message.textContent = "State fields containing lists must be valid JSON. Your edits are preserved.";
+          if (message) message.textContent = "Current state could not be saved. Your edits are preserved.";
         }
+      });
+    }
+    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='reload-current-state']")) {
+      control.addEventListener("click", () => {
+        if (control.disabled || currentStateReloadLocked) return;
+        if (continuityDirty && !root.ownerDocument.defaultView?.confirm("Discard unsaved current state changes and reload?")) return;
+        const editor = continuityEditor;
+        const campaignId = projection.campaign?.id;
+        if (!editor || !campaignId) return;
+        const requestToken = ++currentStateRequestToken;
+        currentStateReloading = true;
+        currentStateError = null;
+        render();
+        void Promise.all([tools.openCurrentState(), composition.api.generation.syncStatus(campaignId)]).then(([result, sync]) => {
+          if (disposed || requestToken !== currentStateRequestToken || continuityEditor !== editor || result === null
+            || projection.campaign?.id !== result.campaignId) return;
+          currentState = result;
+          editor.dispose();
+          continuityEditor = createCampaignContinuityEditor(root.ownerDocument, createCampaignContinuityDraft(result), {
+            idPrefix: "story-current-state",
+            onChange: () => { continuityDirty = true; }
+          });
+          continuityDirty = false;
+          currentStateStale = false;
+          composition.campaignStore.load(sync);
+        }).catch(() => {
+          if (!disposed && requestToken === currentStateRequestToken && continuityEditor === editor) {
+            currentStateError = "Current state could not be reloaded. Your edits are preserved.";
+          }
+        }).finally(() => {
+          if (!disposed && requestToken === currentStateRequestToken) {
+            currentStateReloading = false;
+            render();
+          }
+        });
       });
     }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='save-narration-correction']")) {
@@ -718,6 +784,13 @@ export function mountStoryPlayerPage(
     }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='close-story-tool-dialog']")) {
       control.addEventListener("click", () => {
+        if (ui.get().activeDialog === "current-state" && continuityDirty
+          && !root.ownerDocument.defaultView?.confirm("Discard unsaved current state changes?")) return;
+        if (ui.get().activeDialog === "current-state") {
+          continuityEditor?.dispose();
+          continuityEditor = null;
+          continuityDirty = false;
+        }
         tools.closeActiveDialog();
         toolsDisclosure?.querySelector<HTMLElement>("summary")?.focus();
       });
@@ -959,11 +1032,23 @@ export function mountStoryPlayerPage(
       return;
     }
     if (action === "edit-campaign-state") {
+      const requestToken = ++currentStateRequestToken;
       currentState = null;
+      continuityEditor?.dispose();
+      continuityEditor = null;
+      continuityDirty = false;
+      currentStateStale = false;
+      currentStateReloading = false;
+      currentStateError = null;
       ui.setActiveDialog("current-state");
       void tools.openCurrentState().then((result) => {
-        if (!disposed && result !== null) {
+        if (!disposed && requestToken === currentStateRequestToken && result !== null
+          && projection.campaign?.id === result.campaignId) {
           currentState = result;
+          continuityEditor = createCampaignContinuityEditor(root.ownerDocument, createCampaignContinuityDraft(result), {
+            idPrefix: "story-current-state",
+            onChange: () => { continuityDirty = true; }
+          });
           render();
         }
       }).catch(() => undefined);

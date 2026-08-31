@@ -48,6 +48,7 @@ import { estimateTokens } from "../../domain/src/text.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
 import { enqueuePostgresChronicleChunkIndex } from "./chronicle-chunk-repository.js";
+import { applyPostgresStateCorrection, projectStateCorrection } from "./chronicle-state-correction-repository.js";
 import {
   CHRONICLE_HEALTH_COMPATIBLE_EMBEDDING_SQL,
   CHRONICLE_HEALTH_EMBEDDING_IDENTITY_SQL
@@ -265,7 +266,7 @@ async function loadCampaignProjection(
 
 type ProjectedFactRow = Readonly<{
   id: string;
-  source_turn_id: string;
+  source_turn_id: string | null;
   source_turn_number: number;
   content: string;
   entities: string[];
@@ -275,25 +276,36 @@ type ProjectedFactRow = Readonly<{
 async function syncCanonicalFactMemories(
   client: DatabaseClient,
   scope: CampaignWorldVersionMemoryScope,
-  sourceTurnIds: ReadonlySet<string>,
+  sourceTurnIds: ReadonlySet<string | null>,
 ): Promise<void> {
   if (!sourceTurnIds.size) return;
-  const turnIds = [...sourceTurnIds];
+  const turnIds = [...sourceTurnIds].filter((id): id is string => id !== null);
+  const includesManual = sourceTurnIds.has(null);
   const active = await client.query<ProjectedFactRow>(
     `SELECT id, source_turn_id, source_turn_number, content, entities, entity_ids
        FROM campaign_canonical_facts
       WHERE owner_user_id = $1 AND campaign_id = $2
-        AND source_turn_id = ANY($3::uuid[]) AND valid_until_turn IS NULL
+        AND (source_turn_id = ANY($3::uuid[]) OR ($4::boolean AND source_turn_id IS NULL)) AND valid_until_turn IS NULL
       ORDER BY source_turn_number, source_fact_index`,
-    [scope.ownerUserId, scope.campaignId, turnIds]
+    [scope.ownerUserId, scope.campaignId, turnIds, includesManual]
   );
+  const activeTurnIds = [...new Set(active.rows
+    .map((fact) => fact.source_turn_id)
+    .filter((id): id is string => id !== null))];
+  const includesActiveManual = active.rows.some((fact) => fact.source_turn_id === null);
   await client.query(
     `DELETE FROM chronicle_memories
-      WHERE owner_user_id = $1 AND campaign_id = $2 AND turn_id = ANY($3::uuid[])
-        AND memory_kind = 'canonical_fact' AND metadata->>'generatedFromAcceptedTurn' = 'true'`,
-    [scope.ownerUserId, scope.campaignId, turnIds]
+      WHERE owner_user_id = $1 AND campaign_id = $2
+        AND memory_kind = 'canonical_fact'
+        AND (
+          ((metadata->>'generatedFromAcceptedTurn' = 'true' OR metadata->>'manualCorrection' = 'true')
+            AND (turn_id = ANY($3::uuid[]) OR ($4::boolean AND turn_id IS NULL)))
+          OR turn_id = ANY($5::uuid[])
+          OR ($6::boolean AND turn_id IS NULL)
+        )`,
+    [scope.ownerUserId, scope.campaignId, turnIds, includesManual, activeTurnIds, includesActiveManual]
   );
-  const grouped = new Map<string, ProjectedFactRow[]>();
+  const grouped = new Map<string | null, ProjectedFactRow[]>();
   for (const fact of active.rows) {
     const facts = grouped.get(fact.source_turn_id) ?? [];
     facts.push(fact);
@@ -339,7 +351,7 @@ async function projectCanonicalFacts(
     ...(scope.derived.canonicalFacts ? { canonicalFacts: scope.derived.canonicalFacts } : {}),
     ...(scope.derived.canonicalFactUpdates ? { canonicalFactUpdates: scope.derived.canonicalFactUpdates } : {})
   });
-  const affectedTurnIds = new Set<string>([scope.turnId]);
+  const affectedTurnIds = new Set<string | null>([scope.turnId]);
   for (const projection of projections) {
     await client.query(
       `INSERT INTO campaign_canonical_facts (
@@ -355,7 +367,7 @@ async function projectCanonicalFacts(
         json({ generatedFromAcceptedTurn: true })]
     );
     if (projection.supersedesFactIds.length) {
-      const superseded = await client.query<{ id: string; source_turn_id: string }>(
+      const superseded = await client.query<{ id: string; source_turn_id: string | null }>(
         `UPDATE campaign_canonical_facts
             SET valid_until_turn = $4, superseded_by_fact_id = $5, updated_at = now()
           WHERE owner_user_id = $1 AND campaign_id = $2 AND id = ANY($3::uuid[])
@@ -379,7 +391,7 @@ async function projectCanonicalFacts(
   const legacySuperseded = sanitizeChronicleMemoryLines(scope.derived.supersededFacts)
     .map((fact) => canonicalFactDeduplicationKey(fact.replace(/^[-•]\s*/, "")));
   if (legacySuperseded.length) {
-    const superseded = await client.query<{ source_turn_id: string }>(
+    const superseded = await client.query<{ source_turn_id: string | null }>(
       `UPDATE campaign_canonical_facts
           SET valid_until_turn = $4, updated_at = now(), metadata = metadata || $5::jsonb
         WHERE owner_user_id = $1 AND campaign_id = $2
@@ -536,162 +548,6 @@ function stateCorrectionSnapshot(snapshot: Record<string, unknown>): StateCorrec
   };
 }
 
-function correctionFactId(campaignId: string, stateEditId: string, factIndex: number): string {
-  const hash = chronicleContentHash(`${campaignId}:${stateEditId}:${factIndex}`);
-  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-5${hash.slice(13, 16)}-a${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
-}
-
-async function projectStateCorrection(
-  client: DatabaseClient,
-  scope: CampaignWorldVersionMemoryScope,
-  campaign: CampaignProjectionRow,
-  edit: StateCorrection,
-): Promise<void> {
-  const entityCatalog = buildChronicleEntityCatalog({
-    worldContent: campaign.world_content,
-    characterSnapshot: campaign.character_snapshot,
-    characterProfile: campaign.character_profile
-  });
-  const canonicalFacts = edit.snapshot.canonicalFacts.flatMap((fact) => {
-    const content = sanitizeChronicleFictionString(fact.content, 20_000);
-    return content ? [{ ...fact, content }] : [];
-  });
-  const active = await client.query<{
-    id: string;
-    source_turn_number: number;
-    content: string;
-  }>(
-    `SELECT id, source_turn_number, content
-       FROM campaign_canonical_facts
-      WHERE owner_user_id = $1 AND campaign_id = $2
-        AND valid_from_turn <= $3
-        AND (valid_until_turn IS NULL OR valid_until_turn > $3)
-      ORDER BY source_turn_number, source_fact_index`,
-    [scope.ownerUserId, scope.campaignId, edit.effectiveTurnNumber]
-  );
-  const activeById = new Map(active.rows.map((fact) => [fact.id, fact]));
-  const desiredIds = new Set(canonicalFacts.flatMap((fact) => fact.id ? [fact.id] : []));
-  for (const fact of active.rows) {
-    if (desiredIds.has(fact.id)) continue;
-    if (fact.source_turn_number < edit.effectiveTurnNumber) {
-      await client.query(
-        `UPDATE campaign_canonical_facts
-            SET valid_until_turn = $4, updated_at = now()
-          WHERE id = $1 AND owner_user_id = $2 AND campaign_id = $3`,
-        [fact.id, scope.ownerUserId, scope.campaignId, edit.effectiveTurnNumber]
-      );
-    } else {
-      await client.query(
-        "DELETE FROM campaign_canonical_facts WHERE id = $1 AND owner_user_id = $2 AND campaign_id = $3",
-        [fact.id, scope.ownerUserId, scope.campaignId]
-      );
-    }
-  }
-  for (const [index, desired] of canonicalFacts.entries()) {
-    const id = desired.id ?? correctionFactId(scope.campaignId, edit.id, index);
-    const existing = activeById.get(id);
-    const entityMetadata = resolveEntityMetadata(desired.content, entityCatalog);
-    if (existing?.source_turn_number === edit.effectiveTurnNumber) {
-      await client.query(
-        `UPDATE campaign_canonical_facts
-            SET source_turn_id = NULL, source_state_edit_id = $4, source_fact_index = $5,
-                content = $6, normalized_content = $7, entities = $8, entity_ids = $9,
-                metadata = $10, updated_at = now()
-          WHERE id = $1 AND owner_user_id = $2 AND campaign_id = $3`,
-        [id, scope.ownerUserId, scope.campaignId, edit.id, index, desired.content,
-          canonicalFactDeduplicationKey(desired.content), entityMetadata.entities, entityMetadata.entityIds,
-          json({ stateEditId: edit.id, manualCorrection: true })]
-      );
-      continue;
-    }
-    if (existing) continue;
-    await client.query(
-      `INSERT INTO campaign_canonical_facts (
-         id, owner_user_id, campaign_id, world_version_id, source_state_edit_id, source_turn_number,
-         source_fact_index, content, normalized_content, entities, entity_ids, valid_from_turn, metadata
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$6,$12)`,
-      [id, scope.ownerUserId, scope.campaignId, scope.worldVersionId, edit.id, edit.effectiveTurnNumber, index,
-        desired.content, canonicalFactDeduplicationKey(desired.content), entityMetadata.entities, entityMetadata.entityIds,
-        json({ stateEditId: edit.id, manualCorrection: true })]
-    );
-  }
-
-  await client.query(
-    `DELETE FROM chronicle_memories
-      WHERE owner_user_id = $1 AND campaign_id = $2
-        AND memory_kind IN ('campaign_summary', 'canonical_fact', 'open_thread')`,
-    [scope.ownerUserId, scope.campaignId]
-  );
-  const projected = await client.query<{
-    id: string;
-    source_turn_id: string | null;
-    source_turn_number: number;
-    content: string;
-    entities: string[];
-    entity_ids: string[];
-  }>(
-    `SELECT id, source_turn_id, source_turn_number, content, entities, entity_ids
-       FROM campaign_canonical_facts
-      WHERE owner_user_id = $1 AND campaign_id = $2 AND valid_until_turn IS NULL
-      ORDER BY source_turn_number, source_fact_index`,
-    [scope.ownerUserId, scope.campaignId]
-  );
-  const grouped = new Map<string | null, typeof projected.rows>();
-  for (const fact of projected.rows) {
-    const facts = grouped.get(fact.source_turn_id) ?? [];
-    facts.push(fact);
-    grouped.set(fact.source_turn_id, facts);
-  }
-  for (const [sourceTurnId, facts] of grouped) {
-    const ordinal = facts[0]!.source_turn_number;
-    const content = [
-      `Canonical facts established or corrected at turn ${ordinal}`,
-      ...facts.map((fact) => `- [fact_id: ${fact.id}] ${fact.content}`)
-    ].join("\n");
-    const entities = [...new Set(facts.flatMap((fact) => fact.entities))].slice(0, 100);
-    const entityIds = [...new Set(facts.flatMap((fact) => fact.entity_ids))];
-    await client.query(
-      `INSERT INTO chronicle_memories (
-         owner_user_id, campaign_id, world_version_id, turn_id, memory_kind, ordinal, content,
-         token_estimate, importance, entities, entity_ids, metadata
-       ) VALUES ($1,$2,$3,$4,'canonical_fact',$5,$6,$7,0.85,$8,$9,$10)`,
-      [scope.ownerUserId, scope.campaignId, scope.worldVersionId, sourceTurnId, ordinal,
-        content, estimateTokens(content), entities, entityIds,
-        json({ stateEditId: edit.id, manualCorrection: true, structuredFactIds: facts.map((fact) => fact.id) })]
-    );
-  }
-  const summary = sanitizeChronicleFictionString(edit.snapshot.continuitySummary, 20_000);
-  if (summary) {
-    const entityMetadata = resolveEntityMetadata(summary, entityCatalog);
-    await client.query(
-      `INSERT INTO chronicle_memories (
-         owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content,
-         token_estimate, importance, entities, entity_ids, metadata
-       ) VALUES ($1,$2,$3,'campaign_summary',$4,$5,$6,0.9,$7,$8,$9)`,
-      [scope.ownerUserId, scope.campaignId, scope.worldVersionId, edit.effectiveTurnNumber, summary,
-        estimateTokens(summary), entityMetadata.entities, entityMetadata.entityIds,
-        json({ stateEditId: edit.id, manualCorrection: true })]
-    );
-  }
-  const threads = sanitizeChronicleMemoryLines(edit.snapshot.openThreads);
-  if (threads.length) {
-    const content = [
-      `Open story threads after turn ${edit.effectiveTurnNumber}`,
-      ...threads.map((thread) => `- ${thread}`)
-    ].join("\n");
-    const entityMetadata = resolveEntityMetadata(content, entityCatalog);
-    await client.query(
-      `INSERT INTO chronicle_memories (
-         owner_user_id, campaign_id, world_version_id, memory_kind, ordinal, content,
-         token_estimate, importance, entities, entity_ids, metadata
-       ) VALUES ($1,$2,$3,'open_thread',$4,$5,$6,0.95,$7,$8,$9)`,
-      [scope.ownerUserId, scope.campaignId, scope.worldVersionId, edit.effectiveTurnNumber, content,
-        estimateTokens(content), entityMetadata.entities, entityMetadata.entityIds,
-        json({ stateEditId: edit.id, manualCorrection: true })]
-    );
-  }
-}
-
 function derivedFromStateSnapshot(
   snapshot: Record<string, unknown>,
   entityCatalog: readonly EntityReference[],
@@ -723,6 +579,63 @@ function derivedFromStateSnapshot(
     entityCatalog,
     ...(openThreads ? { openThreads } : {})
   };
+}
+
+/**
+ * Replays only canonical-fact authority and its derived parent rows after a
+ * portable import. The caller owns the import transaction; this never queues
+ * work or contacts an embedding provider.
+ */
+export async function rebuildImportedCampaignCanonicalFactProjections(
+  client: DatabaseClient,
+  scope: CampaignWorldVersionMemoryScope,
+): Promise<void> {
+  const campaign = await loadCampaignProjection(client, scope);
+  const entityCatalog = buildChronicleEntityCatalog({
+    worldContent: campaign.world_content,
+    characterSnapshot: campaign.character_snapshot,
+    characterProfile: campaign.character_profile
+  });
+  const turns = await client.query<Pick<RebuildTurnRow, "id" | "turn_number" | "state_snapshot_private">>(
+    `SELECT id, turn_number, state_snapshot_private
+       FROM turns
+      WHERE owner_user_id = $1 AND campaign_id = $2
+      ORDER BY turn_number`,
+    [scope.ownerUserId, scope.campaignId]
+  );
+  const edits = await client.query<{
+    id: string;
+    effective_turn_number: number;
+    state_snapshot_private: Record<string, unknown>;
+  }>(
+    `SELECT id, effective_turn_number, state_snapshot_private
+       FROM campaign_state_edits
+      WHERE owner_user_id = $1 AND campaign_id = $2
+      ORDER BY effective_turn_number, revision`,
+    [scope.ownerUserId, scope.campaignId]
+  );
+
+  async function applyEditsAt(turnNumber: number): Promise<void> {
+    for (const edit of edits.rows.filter((row) => row.effective_turn_number === turnNumber)) {
+      await projectStateCorrection(client, scope, entityCatalog, {
+        id: edit.id,
+        effectiveTurnNumber: edit.effective_turn_number,
+        snapshot: stateCorrectionSnapshot(edit.state_snapshot_private)
+      }, new Set(["canonicalFacts"]));
+    }
+  }
+
+  await applyEditsAt(0);
+  for (const turn of turns.rows) {
+    const derived = derivedFromStateSnapshot(turn.state_snapshot_private, entityCatalog);
+    await projectCanonicalFacts(client, {
+      ...scope,
+      turnId: turn.id,
+      ordinal: turn.turn_number,
+      derived: { ...derived, entityCatalog }
+    });
+    await applyEditsAt(turn.turn_number);
+  }
 }
 
 async function rebuildMemories(
@@ -767,6 +680,27 @@ async function rebuildMemories(
         AND memory_kind IN ('campaign_summary','canonical_fact','open_thread')`,
     [scope.ownerUserId, scope.campaignId]
   );
+  const edits = await client.query<{
+    id: string;
+    effective_turn_number: number;
+    state_snapshot_private: Record<string, unknown>;
+  }>(
+    `SELECT id, effective_turn_number, state_snapshot_private
+       FROM campaign_state_edits
+      WHERE owner_user_id = $1 AND campaign_id = $2
+      ORDER BY effective_turn_number, revision`,
+    [scope.ownerUserId, scope.campaignId]
+  );
+  async function applyEditsAt(turnNumber: number): Promise<void> {
+    for (const edit of edits.rows.filter((row) => row.effective_turn_number === turnNumber)) {
+      await projectStateCorrection(client, scope, entityCatalog, {
+        id: edit.id,
+        effectiveTurnNumber: edit.effective_turn_number,
+        snapshot: stateCorrectionSnapshot(edit.state_snapshot_private)
+      });
+    }
+  }
+  await applyEditsAt(0);
   for (const turn of turns.rows) {
     await writeAcceptedFiction(client, {
       ...scope,
@@ -784,24 +718,7 @@ async function rebuildMemories(
       ordinal: turn.turn_number,
       derived: derivedFromStateSnapshot(turn.state_snapshot_private, entityCatalog)
     });
-  }
-  const edits = await client.query<{
-    id: string;
-    effective_turn_number: number;
-    state_snapshot_private: Record<string, unknown>;
-  }>(
-    `SELECT id, effective_turn_number, state_snapshot_private
-       FROM campaign_state_edits
-      WHERE owner_user_id = $1 AND campaign_id = $2
-      ORDER BY effective_turn_number, revision`,
-    [scope.ownerUserId, scope.campaignId]
-  );
-  for (const edit of edits.rows) {
-    await projectStateCorrection(client, scope, campaign, {
-      id: edit.id,
-      effectiveTurnNumber: edit.effective_turn_number,
-      snapshot: stateCorrectionSnapshot(edit.state_snapshot_private)
-    });
+    await applyEditsAt(turn.turn_number);
   }
   return turns.rows.length;
 }
@@ -872,16 +789,9 @@ export function createPostgresChronicleGenerationTransactionPort(
     async enqueueEmbeddingReindex(database, scope) {
       const client = transactionClient(database);
       const config = await loadConfig(client, scope);
-      if (!config.enabled) return null;
-      const resolution = await dependencies.embeddings.resolve(client, {
-        ownerUserId: scope.ownerUserId,
-        campaignId: scope.campaignId,
-        selectedProviderProfileId: config.providerProfileId ?? null
-      });
-      const providerProfileId = resolution.status === "resolved" ? resolution.providerProfileId : null;
       if (!embeddingEligibility({
         enabled: config.enabled,
-        providerProfileId,
+        providerProfileId: config.providerProfileId ?? null,
         model: config.model ?? null
       }).eligible) return null;
       const result = await client.query<{ id: string }>(
@@ -896,6 +806,9 @@ export function createPostgresChronicleGenerationTransactionPort(
     },
     async enqueueChunkIndex(database, scope) {
       return enqueuePostgresChronicleChunkIndex(transactionClient(database), scope);
+    },
+    async applyCampaignStateCorrection(database, scope) {
+      return applyPostgresStateCorrection(transactionClient(database), scope);
     },
     async writeAcceptedTurnFiction(database, scope) {
       const client = transactionClient(database);
@@ -1804,6 +1717,13 @@ type ChronicleMemoryRow = Readonly<{
   content: string;
   token_estimate: number;
   memory_kind: string;
+  has_embedding: boolean;
+  embedding_provider_profile_id: string | null;
+  embedding_model: string | null;
+  embedding_provider_fingerprint: string | null;
+  embedding_content_hash: string | null;
+  embedding_dimensions: number | null;
+  vector_dimensions: number | null;
 }>;
 
 function parseCursor(cursor: string | null | undefined): { ordinal: number; id: string } | null {
@@ -1830,7 +1750,9 @@ export function createPostgresChronicleWorkerRetrievalPort(pool: DatabasePool): 
       const config = await loadConfig(pool, scope);
       const effectiveBatchLimit = Math.min(request.batchLimit, config.batchSize ?? request.batchLimit);
       const result = await pool.query<ChronicleMemoryRow>(
-        `SELECT id, ordinal, content, token_estimate, memory_kind
+        `SELECT id, ordinal, content, token_estimate, memory_kind,
+                embedding IS NOT NULL AS has_embedding, embedding_provider_profile_id,embedding_model,
+                embedding_provider_fingerprint,embedding_content_hash,embedding_dimensions,vector_dims(embedding) AS vector_dimensions
            FROM chronicle_memories
           WHERE owner_user_id = $1 AND campaign_id = $2 AND world_version_id = $3
             AND ($4::integer IS NULL OR ordinal > $4 OR (ordinal = $4 AND id > $5::uuid))
@@ -1849,7 +1771,10 @@ export function createPostgresChronicleWorkerRetrievalPort(pool: DatabasePool): 
       return {
         config,
         memories: rows.map((row) => ({
-          id: row.id, ordinal: row.ordinal, content: row.content, tokenEstimate: row.token_estimate, kind: row.memory_kind
+          id: row.id, ordinal: row.ordinal, content: row.content, tokenEstimate: row.token_estimate, kind: row.memory_kind,
+          hasEmbedding: row.has_embedding, embeddingProviderProfileId: row.embedding_provider_profile_id,
+          embeddingModel: row.embedding_model, embeddingProviderFingerprint: row.embedding_provider_fingerprint,
+          embeddingContentHash: row.embedding_content_hash, embeddingDimensions: row.embedding_dimensions, vectorDimensions: row.vector_dimensions
         })),
         totalMemories: Number(total.rows[0]?.total ?? 0),
         batchLimit: effectiveBatchLimit,

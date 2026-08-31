@@ -35,6 +35,11 @@ import { assessCampaignTransferCompatibility } from "../../domain/src/campaign-t
 import { normalizeCampaignStateSnapshot, normalizeCampaignTrackers } from "../../domain/src/campaign-trackers.js";
 import { removeProviderSecrets, sha256, stableStringify } from "../../domain/src/text.js";
 import { effectiveCampaignCharacter } from "../../domain/src/world-characters.js";
+import {
+  preseedAcceptedTurnSnapshotFactIds,
+  remapAcceptedTurnSnapshotFactReferences,
+  remapCorrectionSnapshotFactIds
+} from "./canonical-fact-reference-remapping.js";
 import type { DatabaseClient } from "./pool.js";
 import { worldCampaignDatabaseClient } from "./world-campaign-transaction.js";
 
@@ -423,13 +428,53 @@ async function cloneTransferredCampaign(
       json(source.event_triggers), json(source.pending_event_triggers), json(source.rpg_stats), json(provenance),
       json(normalizeCampaignStateSnapshot(source.initial_state_snapshot)), source.state_revision],
   );
-  await client.query(
-    `INSERT INTO campaign_state_edits (
-       owner_user_id, campaign_id, effective_turn_number, revision, state_snapshot_private, changed_fields, created_at
-     ) SELECT owner_user_id, $1, effective_turn_number, revision, state_snapshot_private, changed_fields, created_at
-         FROM campaign_state_edits WHERE owner_user_id = $2 AND campaign_id = $3 ORDER BY revision`,
-    [campaignId, scope.ownerUserId, source.id],
+  const sourceStateEdits = await client.query<{
+    id: string;
+    effective_turn_number: number;
+    revision: number;
+    state_snapshot_private: Record<string, unknown>;
+    changed_fields: string[];
+    created_at: Date;
+  }>(
+    `SELECT id,effective_turn_number,revision,state_snapshot_private,changed_fields,created_at
+       FROM campaign_state_edits WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY revision`,
+    [scope.ownerUserId, source.id],
   );
+  const destinationFactIds = new Map<string, string>();
+  const sourceFactSnapshots = await client.query<{
+    id: string;
+    state_snapshot_private: Record<string, unknown>;
+  }>(
+    `SELECT id,state_snapshot_private
+       FROM turns
+      WHERE owner_user_id=$1 AND campaign_id=$2
+      ORDER BY turn_number`,
+    [scope.ownerUserId, source.id],
+  );
+  const destinationTurnIds = new Map(
+    sourceFactSnapshots.rows.map((turn) => [turn.id, crypto.randomUUID()])
+  );
+  for (const turn of sourceFactSnapshots.rows) {
+    const destinationTurnId = destinationTurnIds.get(turn.id);
+    if (!destinationTurnId) transferUnavailable(scope, target.id);
+    preseedAcceptedTurnSnapshotFactIds(turn.state_snapshot_private, {
+      sourceCampaignId: source.id,
+      sourceTurnId: turn.id,
+      destinationCampaignId: campaignId,
+      destinationTurnId,
+      factIds: destinationFactIds
+    });
+  }
+  for (const edit of sourceStateEdits.rows) {
+    await client.query(
+      `INSERT INTO campaign_state_edits (
+         id,owner_user_id,campaign_id,effective_turn_number,revision,state_snapshot_private,changed_fields,created_at
+       ) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8)`,
+      [crypto.randomUUID(), scope.ownerUserId, campaignId, edit.effective_turn_number, edit.revision,
+        json(remapCorrectionSnapshotFactIds(edit.state_snapshot_private, destinationFactIds, () => crypto.randomUUID())),
+        json(edit.changed_fields), edit.created_at],
+    );
+  }
 
   const sourceTurns = await client.query(
     `SELECT t.*,
@@ -468,19 +513,30 @@ async function cloneTransferredCampaign(
     if (priorTransfer && typeof priorTransfer === "object" && !Array.isArray(priorTransfer)) {
       turnProvenance.parent = priorTransfer;
     }
-    const inserted = await client.query<{ id: string }>(
+    const destinationTurnId = destinationTurnIds.get(turn.id);
+    if (!destinationTurnId) transferUnavailable(scope, target.id);
+    await client.query(
       `INSERT INTO turns (
-         campaign_id, owner_user_id, turn_number, source_turn_id, action, input_mode, input_mode_source,
+         id, campaign_id, owner_user_id, turn_number, source_turn_id, action, input_mode, input_mode_source,
          narration, choices, custom_action_suggestion, image_prompt, image_url, mechanics_private,
          state_snapshot_private, model_metadata, import_metadata, accepted_at, created_at
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING id`,
-      [campaignId, scope.ownerUserId, turn.turn_number, turn.source_turn_id, turn.action, turn.input_mode,
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
+      [destinationTurnId, campaignId, scope.ownerUserId, turn.turn_number, turn.source_turn_id, turn.action, turn.input_mode,
         turn.input_mode_source, turn.narration, json(turn.choices), turn.custom_action_suggestion,
-        turn.image_prompt, turn.image_url, json(turn.mechanics_private), json(turn.state_snapshot_private),
+        turn.image_prompt, turn.image_url, json(turn.mechanics_private), json(remapAcceptedTurnSnapshotFactReferences(
+          turn.state_snapshot_private,
+          {
+            sourceCampaignId: source.id,
+            sourceTurnId: turn.id,
+            destinationCampaignId: campaignId,
+            destinationTurnId,
+            factIds: destinationFactIds
+          }
+        )),
         json(turn.model_metadata), json({ ...turn.import_metadata, transfer: turnProvenance }),
         turn.accepted_at, turn.created_at],
     );
-    turnIds.set(turn.id, inserted.rows[0]!.id);
+    turnIds.set(turn.id, destinationTurnId);
   }
   await client.query(
     `INSERT INTO summary_checkpoints (owner_user_id, campaign_id, through_turn, summary_kind, content, token_estimate, created_at)

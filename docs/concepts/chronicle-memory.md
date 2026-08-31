@@ -12,7 +12,11 @@ Chronicle combines:
 - Scoped entity identities, aliases, and keyword matches
 - Optional semantic similarity
 
-The accepted-turn ledger remains the recovery source of truth. Structured fact projections, summaries, entity identities, and vectors can be rebuilt without rewriting accepted narration. New fact corrections reference an exact visible fact ID; normalized text matching is retained only for legacy snapshots.
+The accepted-turn ledger and append-only user correction ledger remain the recovery sources of truth. Structured fact projections, summaries, entity identities, and vectors can be rebuilt without rewriting accepted narration. New fact corrections reference an exact visible fact ID; normalized text matching is retained only for legacy snapshots.
+
+Ordinary current-state saves project only changed summary/thread documents and affected fact groups, preserving unrelated embeddings and chunks. Private scratchpad changes create no Chronicle work. Index eligibility/signature scans may still read the campaign; this is not a constant-time guarantee. A changed grouped fact document is embedded as a group, not one vector per edited word or fact.
+
+Reserve full rebuilds for maintenance/recovery. Replay turn-zero corrections first, then each accepted turn followed by corrections effective at that turn in revision order. Applying all old corrections after the latest turn can resurrect superseded facts and must not be used. Deploy matching API, worker, and both UIs together; an application rollback must retain the current-only guard and correction-aware prompt reader.
 
 Stable entity IDs are derived only from the campaign's pinned world version, selected-character snapshot, and campaign character profile. Authored world aliases, snapshot aliases, and schema-v5 profile aliases may identify the same scoped entity. Ambiguous aliases are not resolved.
 

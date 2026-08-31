@@ -1,3 +1,5 @@
+import { buildCurrentStateUpdate } from "@infinite-quest/client-core";
+
 export function canonicalFactContent(value) {
   if (typeof value === "string") return value;
   return value && typeof value === "object" && typeof value.content === "string"
@@ -43,22 +45,41 @@ export function normalizeCanonicalFacts(values) {
     : [];
 }
 
-export function createEditableStateRow(document, kind, value) {
+let nextEditorRowId = 0;
+
+function editorRowKey(kind, value, index = 0) {
+  if (value && typeof value === "object" && typeof value.key === "string" && value.key) {
+    return value.key;
+  }
+  if (kind === "fact" && value && typeof value === "object" && typeof value.id === "string" && value.id) {
+    return `fact:${value.id}`;
+  }
+  return `${kind}:new:${index}`;
+}
+
+export function createEditableStateRow(document, kind, value, index) {
   const row = document.createElement("div");
   row.className = "state-editor-row";
+  row.dataset.rowKey = editorRowKey(kind, value, index);
   if (kind === "fact") {
     row.dataset.itemId = value && typeof value === "object" && typeof value.id === "string"
       ? value.id
       : "";
   }
   const editor = document.createElement("textarea");
-  editor.value = kind === "fact" ? canonicalFactContent(value) : String(value ?? "");
+  editor.value = canonicalFactContent(value);
   editor.setAttribute("aria-label", kind === "fact" ? "Canonical fact" : "Open thread");
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "small danger";
-  remove.textContent = "Remove";
-  remove.addEventListener("click", () => row.remove());
+  remove.textContent = kind === "fact" ? "Remove fact" : "Remove thread";
+  remove.setAttribute("aria-label", remove.textContent);
+  remove.addEventListener("click", () => {
+    const focusTarget = row.nextElementSibling?.querySelector("textarea")
+      || row.previousElementSibling?.querySelector("textarea");
+    row.remove();
+    focusTarget?.focus();
+  });
   row.append(editor, remove);
   return row;
 }
@@ -69,14 +90,18 @@ export function addEditableStateRow(
   kind,
   value = kind === "fact" ? { id: null, content: "" } : ""
 ) {
-  if (container) container.appendChild(createEditableStateRow(document, kind, value));
+  if (!container) return null;
+  const row = createEditableStateRow(document, kind, value, nextEditorRowId++);
+  container.appendChild(row);
+  row.querySelector("textarea")?.focus();
+  return row;
 }
 
 export function renderEditableStateCollection(document, container, values, kind) {
   if (!container) return;
   container.replaceChildren();
-  (Array.isArray(values) ? values : []).forEach(value => {
-    container.appendChild(createEditableStateRow(document, kind, value));
+  (Array.isArray(values) ? values : []).forEach((value, index) => {
+    container.appendChild(createEditableStateRow(document, kind, value, index));
   });
 }
 
@@ -174,22 +199,72 @@ export function collectCanonicalFactEditorValues(container) {
     }));
 }
 
-export function buildCampaignStateUpdate(runtimeState, editorValues) {
-  return {
-    expectedTurnNumber: runtimeState.activeTurnNumber,
-    expectedRevision: runtimeState.revision,
-    effectiveTurnNumber: runtimeState.viewedTurnNumber ?? runtimeState.activeTurnNumber,
-    continuitySummary: String(editorValues.continuitySummary ?? ""),
-    openThreads: normalizeTextItems(editorValues.openThreads),
-    canonicalFacts: normalizeCanonicalFacts(editorValues.canonicalFacts),
-    scratchpad: String(editorValues.scratchpad ?? ""),
-    trackers: Array.isArray(editorValues.trackers) ? editorValues.trackers : [],
-    rpgStats: Array.isArray(runtimeState.rpgStats) ? runtimeState.rpgStats : [],
-    eventTriggers: Array.isArray(runtimeState.eventTriggers) ? runtimeState.eventTriggers : [],
-    pendingEventTriggers: Array.isArray(runtimeState.pendingEventTriggers)
-      ? runtimeState.pendingEventTriggers
-      : []
+export function collectCampaignContinuityDraft(editor, seedDraft) {
+  const previous = seedDraft || {
+    continuitySummary: "",
+    scratchpad: "",
+    openThreads: [],
+    canonicalFacts: []
   };
+  const previousThreadKeys = new Map(previous.openThreads.map(row => [row.key, row.key]));
+  const previousFactKeys = new Map(previous.canonicalFacts.map(row => [row.key, row.key]));
+  const threadRows = [...editor.threads.querySelectorAll(".state-editor-row")];
+  const factRows = [...editor.facts.querySelectorAll(".state-editor-row")];
+
+  return {
+    continuitySummary: editor.summary?.value || "",
+    scratchpad: editor.scratchpad?.value || "",
+    openThreads: threadRows.map((row, index) => {
+      const key = row.dataset.rowKey || `thread:new:${index}`;
+      return {
+        key: previousThreadKeys.get(key) || key,
+        content: row.querySelector("textarea")?.value || ""
+      };
+    }),
+    canonicalFacts: factRows.map((row, index) => {
+      const id = row.dataset.itemId || null;
+      const key = row.dataset.rowKey || (id ? `fact:${id}` : `fact:new:${index}`);
+      return {
+        key: previousFactKeys.get(key) || key,
+        id,
+        content: row.querySelector("textarea")?.value || ""
+      };
+    })
+  };
+}
+
+export function buildCampaignStateUpdate(runtimeState, editorValues) {
+  const draft = editorValues.openThreads.every(value => typeof value === "object")
+    ? editorValues
+    : {
+      continuitySummary: String(editorValues.continuitySummary ?? ""),
+      scratchpad: String(editorValues.scratchpad ?? ""),
+      openThreads: (editorValues.openThreads || []).map((content, index) => ({
+        key: `thread:${index}`,
+        content: typeof content === "string" ? content : content?.content || ""
+      })),
+      canonicalFacts: (editorValues.canonicalFacts || []).map((fact, index) => ({
+        key: fact?.id ? `fact:${fact.id}` : `fact:new:${index}`,
+        id: fact?.id || null,
+        content: canonicalFactContent(fact)
+      }))
+    };
+  const base = {
+    ...runtimeState,
+    isCurrent: runtimeState.isCurrent ?? true,
+    viewedTurnNumber: runtimeState.viewedTurnNumber ?? runtimeState.activeTurnNumber,
+    continuitySummary: runtimeState.continuitySummary ?? "",
+    scratchpad: runtimeState.scratchpad ?? "",
+    openThreads: runtimeState.openThreads ?? [],
+    canonicalFacts: runtimeState.canonicalFacts ?? [],
+    trackers: runtimeState.trackers ?? [],
+    rpgStats: runtimeState.rpgStats ?? [],
+    eventTriggers: runtimeState.eventTriggers ?? [],
+    pendingEventTriggers: runtimeState.pendingEventTriggers ?? []
+  };
+  return buildCurrentStateUpdate(base, draft, {
+    trackers: Array.isArray(editorValues.trackers) ? editorValues.trackers : base.trackers
+  });
 }
 
 export async function submitCampaignState(
@@ -209,13 +284,12 @@ export async function saveCampaignStateFromEditor(
   campaignId,
   runtimeState,
   editor,
-  onSaved
+  onSaved,
+  seedDraft
 ) {
+  const draft = collectCampaignContinuityDraft(editor, seedDraft);
   return submitCampaignState(updateState, campaignId, runtimeState, {
-    continuitySummary: editor.summary?.value || "",
-    openThreads: collectOpenThreadEditorValues(editor.threads),
-    canonicalFacts: collectCanonicalFactEditorValues(editor.facts),
-    scratchpad: editor.scratchpad?.value || "",
+    ...draft,
     trackers: editor.trackers
   }, onSaved);
 }

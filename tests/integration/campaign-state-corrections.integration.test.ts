@@ -1,10 +1,9 @@
-import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
-import { buildContextPreview, getCampaignRuntimeState, importLegacyStory, updateCampaignRuntimeState } from "../helpers/memory-aware-services.js";
+import { createCorrectionFixture, snapshotCorrectionEvidence } from "../helpers/campaign-state-correction-fixtures.js";
+import { buildContextPreview, getCampaignRuntimeState, rebuildCampaignMemories, rewindCampaign, updateCampaignRuntimeState } from "../helpers/memory-aware-services.js";
 import { snapshotTurnRows } from "../helpers/turn-row-snapshot.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -23,10 +22,52 @@ integration("campaign state corrections", () => {
   });
 
   async function campaign() {
-    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
-    fixture.world.title = `State corrections ${crypto.randomUUID()}`;
-    return importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "campaign-state-corrections.story", story: fixture }));
+    return createCorrectionFixture(pool).then(({ campaignId }) => ({ campaignId }));
   }
+
+  it("keeps a turn-zero correction fact through a Chronicle rebuild", async () => {
+    const imported = await campaign();
+    await rewindCampaign(pool, imported.campaignId, { targetTurnNumber: 0 });
+    const before = await getCampaignRuntimeState(pool, imported.campaignId);
+    expect(before.activeTurnNumber).toBe(0);
+
+    const corrected = await updateCampaignRuntimeState(pool, imported.campaignId, {
+      expectedTurnNumber: before.activeTurnNumber,
+      expectedRevision: before.revision,
+      continuitySummary: before.continuitySummary,
+      openThreads: before.openThreads,
+      canonicalFacts: [{ id: null, content: "The bell is silver." }],
+      scratchpad: before.scratchpad,
+      trackers: before.trackers,
+      rpgStats: before.rpgStats,
+      eventTriggers: before.eventTriggers,
+      pendingEventTriggers: before.pendingEventTriggers
+    });
+    const factId = corrected.canonicalFacts[0]?.id;
+    expect(factId).toEqual(expect.any(String));
+    await expect(pool.query(
+      `SELECT source_turn_id,source_state_edit_id,source_turn_number,valid_from_turn
+         FROM campaign_canonical_facts
+        WHERE campaign_id=$1 AND id=$2`,
+      [imported.campaignId, factId]
+    )).resolves.toMatchObject({
+      rows: [{ source_turn_id: null, source_state_edit_id: expect.any(String), source_turn_number: 0, valid_from_turn: 0 }]
+    });
+    await expect(pool.query(
+      "UPDATE campaign_canonical_facts SET source_turn_number=-1 WHERE campaign_id=$1 AND id=$2",
+      [imported.campaignId, factId]
+    )).rejects.toMatchObject({ code: "23514" });
+    await expect(pool.query(
+      "UPDATE campaign_canonical_facts SET valid_from_turn=-1 WHERE campaign_id=$1 AND id=$2",
+      [imported.campaignId, factId]
+    )).rejects.toMatchObject({ code: "23514" });
+
+    await rebuildCampaignMemories(pool, imported.campaignId);
+    await expect(getCampaignRuntimeState(pool, imported.campaignId)).resolves.toMatchObject({
+      activeTurnNumber: 0,
+      canonicalFacts: [{ id: factId, content: "The bell is silver." }]
+    });
+  });
 
   it("persists a complete append-only correction without rewriting the accepted turn", async () => {
     const imported = await campaign();
@@ -173,7 +214,7 @@ integration("campaign state corrections", () => {
     });
 
     await expect(pool.query("SELECT id FROM chronicle_memories WHERE id=$1", [oldParentRow.id]))
-      .resolves.toMatchObject({ rows: [] });
+      .resolves.toMatchObject({ rows: [{ id: oldParentRow.id }] });
     await expect(pool.query("SELECT id FROM chronicle_memory_chunks WHERE id=$1", [oldChunk.rows[0]!.id]))
       .resolves.toMatchObject({ rows: [] });
     await expect(pool.query<{ content: string }>(
@@ -188,100 +229,23 @@ integration("campaign state corrections", () => {
     await pool.query("DELETE FROM chronicle_chunk_jobs WHERE campaign_id=$1", [imported.campaignId]);
   });
 
-  it("applies a historical correction only to the targeted saved turn", async () => {
-    const imported = await campaign();
-    const beforeCurrent = await getCampaignRuntimeState(pool, imported.campaignId);
-    const beforeHistorical = await getCampaignRuntimeState(pool, imported.campaignId, 0);
-    expect(beforeCurrent.activeTurnNumber).toBeGreaterThan(0);
+  it("rejects historical corrections without changing campaign authority or derived work", async () => {
+    const { campaignId, before } = await createCorrectionFixture(pool);
+    expect(before.activeTurnNumber).toBeGreaterThan(0);
+    const evidence = await snapshotCorrectionEvidence(pool, campaignId);
 
-    const materializedBefore = await pool.query(
-      `SELECT scratchpad_private, scratchpad_safe_for_prompt, trackers, rpg_stats,
-              event_triggers, pending_event_triggers, initial_state_snapshot
-         FROM campaign_state WHERE campaign_id = $1`,
-      [imported.campaignId]
-    );
-    const turnsBefore = await pool.query(
-      `SELECT turn_number, state_snapshot_private FROM turns
-        WHERE campaign_id = $1 ORDER BY turn_number`,
-      [imported.campaignId]
-    );
-    const chronicleBefore = await pool.query(
-      `SELECT memory_kind, ordinal, content, metadata FROM chronicle_memories
-        WHERE campaign_id = $1 ORDER BY id`,
-      [imported.campaignId]
-    );
-    const chainsBefore = await pool.query(
-      `SELECT * FROM model_chains WHERE campaign_id = $1 ORDER BY id`,
-      [imported.campaignId]
-    );
-
-    const corrected = await updateCampaignRuntimeState(pool, imported.campaignId, {
-      expectedTurnNumber: beforeCurrent.activeTurnNumber,
-      expectedRevision: beforeCurrent.revision,
-      effectiveTurnNumber: 0,
-      continuitySummary: "The corrected opening state.",
-      openThreads: ["Meet the keeper."],
-      canonicalFacts: beforeHistorical.canonicalFacts,
-      scratchpad: "The keeper began below the western stair.",
-      trackers: beforeHistorical.trackers,
-      rpgStats: beforeHistorical.rpgStats,
-      eventTriggers: beforeHistorical.eventTriggers,
-      pendingEventTriggers: beforeHistorical.pendingEventTriggers
+    await expect(updateCampaignRuntimeState(pool, campaignId, {
+      ...before,
+      expectedTurnNumber: before.activeTurnNumber,
+      expectedRevision: before.revision,
+      effectiveTurnNumber: before.activeTurnNumber - 1,
+      continuitySummary: "A rejected historical correction.",
+    })).rejects.toMatchObject({
+      statusCode: 409,
+      details: { code: "active_turn_changed" },
     });
 
-    expect(corrected).toMatchObject({
-      activeTurnNumber: beforeCurrent.activeTurnNumber,
-      viewedTurnNumber: 0,
-      isCurrent: false,
-      revision: beforeCurrent.revision + 1,
-      continuitySummary: "The corrected opening state.",
-      scratchpad: "The keeper began below the western stair."
-    });
-    await expect(getCampaignRuntimeState(pool, imported.campaignId, 0)).resolves.toMatchObject({
-      continuitySummary: "The corrected opening state.",
-      openThreads: ["Meet the keeper."],
-      scratchpad: "The keeper began below the western stair."
-    });
-    await expect(getCampaignRuntimeState(pool, imported.campaignId)).resolves.toMatchObject({
-      continuitySummary: beforeCurrent.continuitySummary,
-      openThreads: beforeCurrent.openThreads,
-      scratchpad: beforeCurrent.scratchpad,
-      trackers: beforeCurrent.trackers,
-      revision: beforeCurrent.revision + 1
-    });
-
-    await expect(pool.query(
-      `SELECT scratchpad_private, scratchpad_safe_for_prompt, trackers, rpg_stats,
-              event_triggers, pending_event_triggers, initial_state_snapshot
-         FROM campaign_state WHERE campaign_id = $1`,
-      [imported.campaignId]
-    )).resolves.toMatchObject({ rows: materializedBefore.rows });
-    await expect(pool.query(
-      `SELECT turn_number, state_snapshot_private FROM turns
-        WHERE campaign_id = $1 ORDER BY turn_number`,
-      [imported.campaignId]
-    )).resolves.toMatchObject({ rows: turnsBefore.rows });
-    await expect(pool.query(
-      `SELECT memory_kind, ordinal, content, metadata FROM chronicle_memories
-        WHERE campaign_id = $1 ORDER BY id`,
-      [imported.campaignId]
-    )).resolves.toMatchObject({ rows: chronicleBefore.rows });
-    await expect(pool.query(
-      `SELECT * FROM model_chains WHERE campaign_id = $1 ORDER BY id`,
-      [imported.campaignId]
-    )).resolves.toMatchObject({ rows: chainsBefore.rows });
-
-    await expect(pool.query(
-      `SELECT effective_turn_number, revision, changed_fields FROM campaign_state_edits
-        WHERE campaign_id = $1 ORDER BY revision DESC LIMIT 1`,
-      [imported.campaignId]
-    )).resolves.toMatchObject({
-      rows: [{
-        effective_turn_number: 0,
-        revision: beforeCurrent.revision + 1,
-        changed_fields: expect.arrayContaining(["continuitySummary", "openThreads", "scratchpad"])
-      }]
-    });
+    expect(await snapshotCorrectionEvidence(pool, campaignId)).toEqual(evidence);
   });
 
   it("rejects a correction targeted beyond the active turn without writes", async () => {

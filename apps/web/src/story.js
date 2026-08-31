@@ -39,6 +39,7 @@ import {
   toggleChoiceDraftSelection
 } from "./story-choice-selection.js";
 import {
+  createCampaignContinuityDraft,
   formatChronicleRetrievalAudit
 } from "@infinite-quest/client-core";
 
@@ -145,8 +146,10 @@ const state = {
 
 const modalBaselines = new WeakMap();
 let discardModalTarget = null;
+let discardModalAction = null;
 let completeHistoryLoad = null;
 let storyTurnWindowEpoch = 0;
+let nextEditStateSessionId = 0;
 const COMPLETE_HISTORY_SUPERSEDED = "complete_history_superseded";
 
 function completeHistorySupersededError() {
@@ -191,17 +194,23 @@ function openManagedModal(dialog) {
 }
 
 function clickedDialogBackdrop(dialog, event) {
+  if (event.target !== dialog) return false;
   const bounds = dialog.getBoundingClientRect();
   return event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom;
 }
 
 function requestModalDismissal(dialog) {
+  requestDiscardChanges(dialog, () => dialog.close());
+}
+
+function requestDiscardChanges(dialog, onDiscard) {
   if (modalBaselines.get(dialog) !== modalFormSnapshot(dialog)) {
     discardModalTarget = dialog;
+    discardModalAction = onDiscard;
     openManagedModal($("discardChangesDialog"));
     return;
   }
-  dialog.close();
+  onDiscard();
 }
 
 function installClickAwayModalDismissal() {
@@ -213,8 +222,9 @@ function installClickAwayModalDismissal() {
   });
   const discardDialog = $("discardChangesDialog");
   discardDialog.addEventListener("close", () => {
-    if (discardDialog.returnValue === "discard" && discardModalTarget?.open) discardModalTarget.close();
+    if (discardDialog.returnValue === "discard" && discardModalTarget?.open) discardModalAction?.();
     discardModalTarget = null;
+    discardModalAction = null;
   });
 }
 
@@ -303,6 +313,16 @@ function syncInputState() {
   const btnAction = $("btnTakeAction");
   const freeAction = $("freeAction");
   const generationLocked = state.busy || Boolean(state.pendingGeneration);
+  const recoveryPanel = $("generationRecoveryPanel");
+  const recoveryVisible = Boolean(recoveryPanel && !recoveryPanel.classList.contains("hidden"));
+  const editStateLocked = generationLocked || recoveryVisible || Boolean(state.editStateSession?.saving);
+  const editStateButton = $("btnOpenEditState");
+  if (editStateButton) editStateButton.disabled = editStateLocked;
+  if (state.editStateSession) {
+    document.querySelectorAll("#editStateDialog textarea, #editStateDialog button").forEach(control => {
+      control.disabled = editStateLocked;
+    });
+  }
   const turnCount = state.turns ? state.turns.length : 0;
   const curr = viewedTurnIndex();
   const isLatest = isViewingLatestTurn();
@@ -402,6 +422,7 @@ async function loadCampaign(campaignId, options = {}) {
 
     publishStoryTurnWindow(turnData.turns || [], turnData.nextCursor || null);
     state.runtimeState = await apiClient.campaigns.state(campaignId);
+    markEditStateStaleForCurrentRuntimeState(state.runtimeState);
     try {
       state.illustrationConfig = await illustrationApi.config(campaignId);
       const segmentData = await illustrationApi.segments(campaignId);
@@ -1468,6 +1489,7 @@ async function reconcileCompletedGeneration(result) {
     state.pendingGeneration = syncData.pendingGeneration || null;
     syncTurnInputModeFromCampaign();
     state.runtimeState = await apiClient.campaigns.state(state.campaignId);
+    markEditStateStaleForCurrentRuntimeState(state.runtimeState);
     try {
       state.illustrationConfig = await illustrationApi.config(state.campaignId);
       const segmentData = await illustrationApi.segments(state.campaignId);
@@ -2129,28 +2151,35 @@ async function findAnotherLibraryMatch(turnId) {
 async function openEditState() {
   const dlg = $("editStateDialog");
   if (!dlg || !state.campaignId) return;
+  const recoveryPanel = $("generationRecoveryPanel");
+  const recoveryVisible = Boolean(recoveryPanel && !recoveryPanel.classList.contains("hidden"));
+  if (state.busy || state.pendingGeneration || recoveryVisible) {
+    toast("Finish or resolve the active generation before editing current state.");
+    return;
+  }
   const campaignId = state.campaignId;
   try {
-    const turnIndex = viewedTurnIndex();
-    const viewedTurnNumber = state.turns[turnIndex]?.turnNumber;
-    const isHistorical = Number.isInteger(viewedTurnNumber)
-      && viewedTurnNumber < Number(state.campaign?.activeTurnNumber || 0);
-    showBusy(isHistorical ? `Loading state after turn ${viewedTurnNumber}…` : "Loading current state…");
-    const editableRuntimeState = await apiClient.campaigns.state(campaignId, isHistorical ? viewedTurnNumber : undefined);
-    if (!isHistorical) state.runtimeState = editableRuntimeState;
-    state.editStateSession = Object.freeze({
+    showBusy("Loading current state…");
+    const editableRuntimeState = await apiClient.campaigns.state(campaignId);
+    if (state.campaignId !== campaignId) return;
+    const base = captureCampaignStateEditSession(editableRuntimeState);
+    if (!base.isCurrent || base.viewedTurnNumber !== base.activeTurnNumber) {
+      throw new Error("The server did not return the current campaign state.");
+    }
+    state.runtimeState = editableRuntimeState;
+    state.editStateSession = {
+      id: `edit-state:${++nextEditStateSessionId}`,
       campaignId,
-      runtimeState: captureCampaignStateEditSession({
-        ...editableRuntimeState,
-        viewedTurnNumber: isHistorical ? viewedTurnNumber : editableRuntimeState.activeTurnNumber
-      })
-    });
-    const previousRuntimeState = state.runtimeState;
-    state.runtimeState = state.editStateSession.runtimeState;
+      base,
+      draft: createCampaignContinuityDraft(base),
+      trackers: (base.trackers || []).map(tracker => ({ ...tracker })),
+      stale: false,
+      saving: false
+    };
     renderCurrentRuntimeState();
-    state.runtimeState = previousRuntimeState;
     switchEditStateTab("overview");
     openManagedModal(dlg);
+    syncInputState();
   } catch (err) {
     toast(`State could not be loaded: ${err.message}`);
   } finally {
@@ -2177,21 +2206,41 @@ function renderTextCollection(containerId, values, emptyText) {
 }
 
 function renderCurrentRuntimeState() {
-  const runtime = state.runtimeState || {};
-  const meta = $("editStateMeta");
-  if (meta) meta.textContent = `Current authoritative state after turn ${runtime.activeTurnNumber || 0} · revision ${runtime.revision || 0}`;
+  const session = state.editStateSession;
+  if (!session) return;
+  const runtime = session.base;
+  updateEditStateMetadata(session);
   const summary = $("editStateContinuitySummary");
-  if (summary) summary.value = runtime.continuitySummary || "";
-  renderEditableStateCollection(document, $("editStateOpenThreads"), runtime.openThreads || [], "thread");
-  renderEditableStateCollection(document, $("editStateCanonicalFacts"), runtime.canonicalFacts || [], "fact");
+  if (summary) summary.value = session.draft.continuitySummary;
+  renderEditableStateCollection(document, $("editStateOpenThreads"), session.draft.openThreads, "thread");
+  renderEditableStateCollection(document, $("editStateCanonicalFacts"), session.draft.canonicalFacts, "fact");
 
   const scratchpad = $("scratchpadEditor");
-  if (scratchpad) scratchpad.value = runtime.scratchpad || "";
+  if (scratchpad) scratchpad.value = session.draft.scratchpad;
   updateScratchpadCharacterCount();
   renderTrackerEditor();
   renderRpgStatsInEditState();
   renderTextCollection("editStateEventTriggers", (runtime.eventTriggers || []).map(trigger => trigger.label || trigger.name || trigger.id || "Unnamed trigger"), "No event triggers configured.");
   renderTextCollection("editStatePendingTriggers", (runtime.pendingEventTriggers || []).map(trigger => trigger.name || trigger.label || trigger.instructions || trigger.id || "Pending trigger"), "No pending triggers.");
+}
+
+function updateEditStateMetadata(session) {
+  const meta = $("editStateMeta");
+  if (!meta) return;
+  const runtime = session.base;
+  meta.textContent = session.stale
+    ? `Current state changed after turn ${runtime.activeTurnNumber || 0} · revision ${runtime.revision || 0}. Reload before saving.`
+    : `Current authoritative state after turn ${runtime.activeTurnNumber || 0} · revision ${runtime.revision || 0}`;
+}
+
+function markEditStateStaleForCurrentRuntimeState(runtimeState) {
+  const session = state.editStateSession;
+  if (!session || session.campaignId !== state.campaignId || !runtimeState) return;
+  if (Number(runtimeState.activeTurnNumber) > Number(session.base.activeTurnNumber)
+    || Number(runtimeState.revision) > Number(session.base.revision)) {
+    session.stale = true;
+    updateEditStateMetadata(session);
+  }
 }
 
 function updateScratchpadCharacterCount() {
@@ -2203,7 +2252,7 @@ function updateScratchpadCharacterCount() {
 function renderTrackerEditor() {
   const container = $("trackerList");
   if (!container) return;
-  const trackers = state.runtimeState?.trackers || [];
+  const trackers = state.editStateSession?.trackers || [];
   container.innerHTML = trackers.length ? "" : `<p class="dim mini">No current trackers.</p>`;
   trackers.forEach(tracker => {
     const card = document.createElement("div");
@@ -2217,7 +2266,8 @@ function renderTrackerEditor() {
     `;
     const remove = card.querySelector('[data-action="remove-tracker"]');
     if (remove) remove.addEventListener("click", () => {
-      state.runtimeState.trackers = state.runtimeState.trackers.filter(item => item.id !== tracker.id);
+      if (!state.editStateSession) return;
+      state.editStateSession.trackers = state.editStateSession.trackers.filter(item => item.id !== tracker.id);
       renderTrackerEditor();
     });
     container.appendChild(card);
@@ -2234,13 +2284,13 @@ function collectTrackerEditorValues() {
 }
 
 function addTrackerFromEditor() {
-  if (!state.runtimeState) return;
+  if (!state.editStateSession) return;
   const name = $("trackerName")?.value.trim() || "";
   if (!name) {
     toast("Tracker name is required.");
     return;
   }
-  state.runtimeState.trackers = [
+  state.editStateSession.trackers = [
     ...collectTrackerEditorValues(),
     {
       id: composition.idFactory.create(),
@@ -2256,7 +2306,7 @@ function addTrackerFromEditor() {
 function renderRpgStatsInEditState() {
   const container = $("editStateRpgStats");
   if (!container) return;
-  const stats = state.runtimeState?.rpgStats || [];
+  const stats = state.editStateSession?.base.rpgStats || [];
   container.innerHTML = stats.length
     ? `<div class="stat-block">${stats.map(stat => `<span class="stat-pill"><strong>${escapeHtml(stat.name || stat.id || "Stat")}</strong> ${escapeHtml(String(stat.value ?? ""))}</span>`).join("")}</div>`
     : `<p class="dim mini">No RPG stats configured for this campaign.</p>`;
@@ -2454,33 +2504,48 @@ async function inspectTurnState(turnNumber) {
 
 async function saveEditState() {
   const editSession = state.editStateSession;
-  if (!editSession) return;
+  if (!editSession || editSession.saving) return;
+  if (editSession.stale) {
+    toast("Current state changed. Reload it before saving your draft.");
+    return;
+  }
   const scratchpadEl = $("scratchpadEditor");
   const continuitySummaryEl = $("editStateContinuitySummary");
   const openThreads = $("editStateOpenThreads");
   const canonicalFacts = $("editStateCanonicalFacts");
+  const saveButton = $("btnSaveEditState") || $("btnSaveScratch");
+  editSession.saving = true;
+  if (saveButton) saveButton.disabled = true;
   try {
     showBusy("Saving state…");
-    await saveCampaignStateFromEditor(apiClient.campaigns.updateState, editSession.campaignId, editSession.runtimeState, {
+    let accepted = false;
+    await saveCampaignStateFromEditor(apiClient.campaigns.updateState, editSession.campaignId, editSession.base, {
       summary: continuitySummaryEl,
       threads: openThreads,
       facts: canonicalFacts,
       scratchpad: scratchpadEl,
       trackers: collectTrackerEditorValues()
     }, savedState => {
-      const historical = editSession.runtimeState.viewedTurnNumber < editSession.runtimeState.activeTurnNumber;
-      if (!historical) state.runtimeState = savedState;
+      if (state.campaignId !== editSession.campaignId || state.editStateSession?.id !== editSession.id) return;
+      accepted = true;
+      state.runtimeState = savedState;
       state.editStateSession = null;
       const dlg = $("editStateDialog");
       if (dlg && dlg.close) dlg.close();
-    });
-    const historical = editSession.runtimeState.viewedTurnNumber < editSession.runtimeState.activeTurnNumber;
-    toast(historical
-      ? `State after turn ${editSession.runtimeState.viewedTurnNumber} saved without changing the current campaign state.`
-      : "Current state saved. The next story turn will use these changes.");
+    }, editSession.draft);
+    if (accepted) toast("Current state saved. The next story turn will use these changes.");
   } catch (err) {
+    if (state.campaignId === editSession.campaignId && state.editStateSession?.id === editSession.id
+      && (err?.status === 409 || err?.statusCode === 409)) {
+      editSession.stale = true;
+      updateEditStateMetadata(editSession);
+    }
     toast(`Save failed: ${err.message}`);
   } finally {
+    if (state.editStateSession?.id === editSession.id) {
+      editSession.saving = false;
+      if (saveButton) saveButton.disabled = false;
+    }
     hideBusy();
   }
 }
@@ -2813,12 +2878,29 @@ document.addEventListener("DOMContentLoaded", () => {
   const btnSaveEditState = $("btnSaveEditState") || $("btnSaveScratch");
   if (btnSaveEditState) btnSaveEditState.addEventListener("click", saveEditState);
   const btnCancelEditState = $("btnCancelEditState");
-  if (btnCancelEditState) btnCancelEditState.addEventListener("click", () => { const d = $("editStateDialog"); if (d && d.close) d.close(); });
+  if (btnCancelEditState) btnCancelEditState.addEventListener("click", () => {
+    const d = $("editStateDialog");
+    if (d) requestModalDismissal(d);
+  });
   const btnEditStateViewHistory = $("btnEditStateViewHistory");
   if (btnEditStateViewHistory) btnEditStateViewHistory.addEventListener("click", () => {
     const d = $("editStateDialog");
-    if (d && d.close) d.close();
-    openTurnHistoryModal();
+    if (!d) return;
+    requestDiscardChanges(d, () => {
+      d.close();
+      state.editStateSession = null;
+      openTurnHistoryModal();
+    });
+  });
+  const btnReloadEditState = $("btnReloadEditState");
+  if (btnReloadEditState) btnReloadEditState.addEventListener("click", () => {
+    const d = $("editStateDialog");
+    if (!d) return;
+    requestDiscardChanges(d, () => {
+      d.close();
+      state.editStateSession = null;
+      void openEditState();
+    });
   });
   const scratchpadEditor = $("scratchpadEditor");
   if (scratchpadEditor) scratchpadEditor.addEventListener("input", updateScratchpadCharacterCount);
@@ -2833,7 +2915,14 @@ document.addEventListener("DOMContentLoaded", () => {
     addEditableStateRow(document, $("editStateCanonicalFacts"), "fact");
   });
   const btnCloseEditState = $("btnCloseEditState");
-  if (btnCloseEditState) btnCloseEditState.addEventListener("click", () => { const d = $("editStateDialog"); if (d && d.close) d.close(); });
+  if (btnCloseEditState) btnCloseEditState.addEventListener("click", () => {
+    const d = $("editStateDialog");
+    if (d) requestModalDismissal(d);
+  });
+  const editStateDialog = $("editStateDialog");
+  if (editStateDialog) editStateDialog.addEventListener("close", () => {
+    if (!state.editStateSession?.saving) state.editStateSession = null;
+  });
   document.querySelectorAll("#editStateDialog .tab").forEach(tab => {
     tab.addEventListener("click", () => switchEditStateTab(tab.dataset.tab));
   });

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ProviderResponseTooLargeError } from "../../packages/story-engine/src/provider-response.js";
 import { ProviderTransportError } from "../../packages/story-engine/src/providers.js";
 import { createChronicleClaimExecution } from "../../services/runtime/src/chronicle-worker-execution.js";
+import { chronicleContentHash } from "../../packages/domain/src/chronicle-memory-helpers.js";
 
 const claim = {
   jobId: "job-1",
@@ -52,6 +53,22 @@ function dependencies(overrides: Readonly<Record<string, unknown>> = {}) {
 }
 
 describe("createChronicleClaimExecution", () => {
+  it("skips compatible vectors across pages and embeds only the changed document", async () => {
+    const embed = vi.fn().mockResolvedValue({ embeddings: [[0.1]], responseId: "response", usage: {}, reportedCost: null });
+    const loadForClaim = vi.fn().mockResolvedValue(firstPage());
+    const commitClaimBatch = vi.fn().mockResolvedValue(true);
+    const execution = createChronicleClaimExecution({} as never, dependencies({
+      retrieval: { loadForClaim }, batches: { commitClaimBatch },
+      embeddings: { load: vi.fn().mockResolvedValue(provider), fingerprint: vi.fn().mockResolvedValue("fingerprint"), embed, recordHealth: vi.fn() }
+    }));
+    await expect(execution.execute(claim, {
+      ...firstPage("next"), memories: [{ id: "old", content: "Unchanged memory", hasEmbedding: true,
+        embeddingContentHash: chronicleContentHash("Unchanged memory"), embeddingProviderProfileId: "provider-1",
+        embeddingModel: "embed-v1", embeddingProviderFingerprint: "fingerprint", embeddingDimensions: 1, vectorDimensions: 1 }]
+    })).resolves.toEqual({ embedded: 1, skipped: 1, total: 2 });
+    expect(embed).toHaveBeenCalledExactlyOnceWith(provider, ["First memory"]);
+    expect(commitClaimBatch).toHaveBeenCalledWith(claim, expect.objectContaining({ processed: 1, total: 2 }));
+  });
   it("commits every bounded embedding page through the guarded claim-batch port", async () => {
     const loadForClaim = vi.fn().mockResolvedValue({
       ...firstPage(),

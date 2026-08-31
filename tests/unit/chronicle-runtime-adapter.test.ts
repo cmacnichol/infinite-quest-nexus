@@ -273,6 +273,7 @@ describe("Chronicle runtime adapters", () => {
         },
         batches: { commitClaimBatch: vi.fn().mockResolvedValue(true) },
         generation: {
+          applyCampaignStateCorrection: vi.fn(),
           autoEnableCampaignEmbedding: vi.fn(),
           buildContextPreview: vi.fn(),
           storeDerivedTurnMemories: vi.fn(),

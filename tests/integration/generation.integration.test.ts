@@ -19,6 +19,7 @@ import {
   branchCampaign,
   buildContextPreview,
   importLegacyStory,
+  rebuildCampaignMemories,
   rewindCampaign,
   setCampaignEmbeddingConfig,
   syncPlayerCampaignConfig,
@@ -1490,6 +1491,9 @@ integration("durable Story Engine integration", () => {
     );
     expect(retainedTurn.rows).toHaveLength(1);
     // Legacy campaigns can retain a manual correction with its surviving turn ID; rewind must rebuild derived indexes from it.
+    // Current saves preserve a separate accepted-turn fact group. Remove that
+    // derived parent only in this legacy fixture before assigning its old key.
+    await pool.query("DELETE FROM chronicle_memories WHERE campaign_id=$1 AND turn_id=$2 AND memory_kind='canonical_fact'", [imported.campaignId, retainedTurn.rows[0]!.id]);
     const legacyCorrection = await pool.query(
       `UPDATE chronicle_memories
           SET turn_id = $2
@@ -1523,11 +1527,13 @@ integration("durable Story Engine integration", () => {
         WHERE campaign_id = $1 AND memory_kind = 'canonical_fact'`,
       [imported.campaignId]
     );
-    expect(memories.rows).toEqual([expect.objectContaining({
+    expect(memories.rows).toHaveLength(2);
+    expect(memories.rows).toContainEqual(expect.objectContaining({
       turn_id: null,
       content: expect.stringContaining("The lighthouse lens is moon glass."),
       metadata: expect.objectContaining({ manualCorrection: true })
-    })]);
+    }));
+    expect(memories.rows).toContainEqual(expect.objectContaining({ turn_id: retainedTurn.rows[0]!.id, content: expect.stringContaining("Location Gamma is open.") }));
     expect(memories.rows).not.toContainEqual(expect.objectContaining({ turn_id: discardedTurn.rows[0]!.id }));
   });
 
@@ -1604,16 +1610,20 @@ integration("durable Story Engine integration", () => {
     expect(stateRow.rows[0]?.initial_state_snapshot?.rpgStats).toEqual([{ id: "stat1", name: "Strength", value: 18, note: "" }]);
   });
 
-  it("edits current runtime state with revision checks and preserves the accepted turn snapshot", async () => {
+  it("uses corrected current state for generation and preserves its meaning through replay and rewind", async () => {
     const imported = await campaign();
     const before = await getCampaignRuntimeState(pool, imported.campaignId);
     const historicalBefore = await getCampaignRuntimeState(pool, imported.campaignId, 1);
+    const acceptedBefore = await pool.query(
+      "SELECT to_jsonb(t) AS value FROM turns t WHERE campaign_id=$1 ORDER BY turn_number",
+      [imported.campaignId]
+    );
     const edited = await updateCampaignRuntimeState(pool, imported.campaignId, {
       expectedTurnNumber: before.activeTurnNumber,
       expectedRevision: before.revision,
-      continuitySummary: before.continuitySummary,
-      openThreads: before.openThreads,
-      canonicalFacts: before.canonicalFacts,
+      continuitySummary: "The silver doorway remains hidden in Location Beta.",
+      openThreads: [],
+      canonicalFacts: [{ id: null, content: "The silver doorway is hidden." }],
       scratchpad: "Location Beta contains a hidden silver doorway.",
       trackers: [{ id: "doorway", name: "Silver doorway", value: "hidden", rules: "Update when its visibility changes." }],
       rpgStats: before.rpgStats,
@@ -1643,12 +1653,39 @@ integration("durable Story Engine integration", () => {
     });
 
     const requestOffset = requests.length;
-    replies.push({ content: validStory("The silver doorway becomes visible in Location Beta.") });
+    const nextStory = JSON.parse(validStory("The silver doorway becomes visible in Location Beta."));
+    nextStory.canonical_facts = ["The silver doorway is visible."];
+    nextStory.canonical_fact_updates = [{
+      content: "The silver doorway is visible.", supersedes_fact_ids: [edited.canonicalFacts[0]!.id]
+    }];
+    replies.push({ content: JSON.stringify(nextStory) });
     const job = await queue(imported.campaignId, "Search Location Beta.");
     await runGenerationJob(pool, "story-worker-edited-state", 30, credentialSecret);
     expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
     const storyRequest = requests.slice(requestOffset).find((request) => JSON.stringify(request).includes("fiction writer for Infinite Quest"));
-    expect(JSON.stringify(storyRequest)).toContain("hidden silver doorway");
+    const storyUserMessage = storyRequest?.messages?.find((message: any) => message.role === "user");
+    const payload = JSON.parse(storyUserMessage?.content || "{}");
+    expect(payload.authoritative_context.currentContinuity).toEqual({
+      continuitySummary: edited.continuitySummary,
+      openThreads: [],
+      canonicalFacts: edited.canonicalFacts,
+      scratchpad: edited.scratchpad
+    });
+    const advanced = await getCampaignRuntimeState(pool, imported.campaignId);
+    expect(advanced).toMatchObject({
+      activeTurnNumber: before.activeTurnNumber + 1,
+      continuitySummary: nextStory.continuity_summary,
+      openThreads: nextStory.open_threads,
+      scratchpad: nextStory.scratchpad,
+      canonicalFacts: [{ id: expect.any(String), content: "The silver doorway is visible." }]
+    });
+    await rebuildCampaignMemories(pool, imported.campaignId);
+    expect(await getCampaignRuntimeState(pool, imported.campaignId)).toEqual(advanced);
+    const acceptedAfter = await pool.query(
+      "SELECT to_jsonb(t) AS value FROM turns t WHERE campaign_id=$1 AND turn_number<=$2 ORDER BY turn_number",
+      [imported.campaignId, before.activeTurnNumber]
+    );
+    expect(acceptedAfter.rows).toEqual(acceptedBefore.rows);
 
     await rewindCampaign(pool, imported.campaignId, { targetTurnNumber: before.activeTurnNumber });
     expect(await getCampaignRuntimeState(pool, imported.campaignId)).toMatchObject({

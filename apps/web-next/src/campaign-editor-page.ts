@@ -1,8 +1,10 @@
 import { initializeAppTheme, renderAppShell } from "./app-shell";
-import { formatChronicleRetrievalAudit } from "@infinite-quest/client-core";
-import { campaignApi, loadCampaign, loadCampaigns, type CampaignSummary } from "./campaign-editor-api";
+import { buildCurrentStateUpdate, createCampaignContinuityDraft, formatChronicleRetrievalAudit, hasCampaignContinuityChanges } from "@infinite-quest/client-core";
+import type { CampaignRuntimeStateResponse, CampaignRuntimeStateUpdate, CampaignSyncStatus } from "@infinite-quest/contracts";
+import { campaignApi, CampaignEditorApiError, loadCampaign, loadCampaigns, type CampaignSummary } from "./campaign-editor-api";
 import { CAMPAIGN_SECTIONS, CAMPAIGN_SECTION_LABELS, campaignEditorPath, campaignStateInspectorMarkup, escapeCampaignText, firstNarrationSentence, narrationCorrectionDialogMarkup, withCampaignActionState, type CampaignRoute, type CampaignSection } from "./campaign-editor-model";
 import { storyPlayerPath } from "./story-route";
+import { createCampaignContinuityEditor, type CampaignContinuityEditor } from "./campaign-continuity-editor";
 import type { MountedPage } from "./world-library-page";
 
 type JsonRecord = Record<string, unknown>;
@@ -122,9 +124,12 @@ function characterMarkup(value: JsonRecord): string {
   return `<header class="campaign-section-heading"><h2>Character</h2><p>Edit the campaign-local character copy without changing its immutable world-version source.</p></header><form id="character-form" class="campaign-form"><div class="campaign-field-grid">${field("Character name", `<input name="name" required value="${text(value.name)}">`)}${field("Revision", `<input name="revision" readonly value="${text(value.revision)}">`)}</div>${field("Profile", `<textarea name="profile" rows="18" spellcheck="false">${text(JSON.stringify(value.profile ?? {}, null, 2))}</textarea>`)}<div class="campaign-action-ledger"><button type="button" data-action="organize-character">Organize with AI</button><button class="primary-action" type="submit">Save campaign profile</button></div></form>`;
 }
 
-function stateMarkup(value: JsonRecord): string {
-  const facts = Array.isArray(value.canonicalFacts) ? value.canonicalFacts.map((x)=>record(x).content).join("\n") : "";
-  return `<header class="campaign-section-heading"><h2>Current state</h2><p>Edit only the authoritative current state used by the next accepted turn.</p></header><form id="state-form" class="campaign-form"><input type="hidden" name="revision" value="${text(value.revision)}"><input type="hidden" name="turn" value="${text(value.activeTurnNumber)}">${field("Continuity summary", `<textarea name="continuitySummary" rows="7">${text(value.continuitySummary)}</textarea>`)}<div class="campaign-field-grid">${field("Open threads — one per line", `<textarea name="openThreads" rows="9">${text(Array.isArray(value.openThreads) ? value.openThreads.join("\n") : "")}</textarea>`)}${field("Canonical facts — one per line", `<textarea name="canonicalFacts" rows="9">${text(facts)}</textarea>`)}</div>${field("Private continuity scratchpad", `<textarea name="scratchpad" rows="9">${text(value.scratchpad)}</textarea>`)}${field("Trackers — JSON", `<textarea name="trackers" rows="9" spellcheck="false">${text(JSON.stringify(value.trackers ?? [], null, 2))}</textarea>`)}<details><summary>Read-only mechanics and triggers</summary><pre>${text(JSON.stringify({ rpgStats:value.rpgStats,eventTriggers:value.eventTriggers,pendingEventTriggers:value.pendingEventTriggers }, null, 2))}</pre></details><div class="campaign-action-ledger"><span>Historical state remains read-only.</span><button class="primary-action" type="submit">Save current state</button></div></form>`;
+function stateMarkup(value: CampaignRuntimeStateResponse, generationLocked = false): string {
+  const disabled = generationLocked ? " disabled" : "";
+  const generationStatus = generationLocked
+    ? '<p class="campaign-error" role="status">Current-state editing is unavailable while a story generation needs attention.</p>'
+    : "";
+  return `<header class="campaign-section-heading"><h2>Current state</h2><p>Edit only the authoritative current state used by the next accepted turn.</p></header>${generationStatus}<form id="state-form" class="campaign-form" aria-busy="false"><div data-campaign-continuity-editor></div>${field("Trackers — JSON", `<textarea name="trackers" rows="9" spellcheck="false"${disabled}>${text(JSON.stringify(value.trackers ?? [], null, 2))}</textarea>`)}<details><summary>Read-only mechanics and triggers</summary><pre>${text(JSON.stringify({ rpgStats:value.rpgStats,eventTriggers:value.eventTriggers,pendingEventTriggers:value.pendingEventTriggers }, null, 2))}</pre></details><div class="campaign-action-ledger"><span>Historical state remains read-only.</span><button type="button" data-action="reload-current-state"${disabled}>Reload current state</button><button class="primary-action" type="submit"${disabled}>Save current state</button></div></form>`;
 }
 
 function chronicleRetrievalAuditMarkup(audit: unknown): string {
@@ -281,7 +286,7 @@ function dataMarkup(c: CampaignSummary): string { return `<header class="campaig
 
 function formObject(form: HTMLFormElement): Record<string,string> { return Object.fromEntries(new FormData(form).entries()) as Record<string,string>; }
 function parseJsonField(form: HTMLFormElement, name: string, label: string): unknown {
-  const control = form.elements.namedItem(name) as HTMLTextAreaElement | null;
+  const control = (form.elements?.namedItem(name) ?? form.querySelector(`[name="${name}"]`)) as HTMLTextAreaElement | null;
   if (!control) throw new Error(`${label} field is unavailable.`);
   control.removeAttribute("aria-invalid");
   control.closest("label")?.querySelector(".campaign-field-error")?.remove();
@@ -297,9 +302,43 @@ function parseJsonField(form: HTMLFormElement, name: string, label: string): unk
 
 export function mountCampaignEditorPage(root: HTMLElement, route: CampaignRoute): MountedPage {
   renderAppShell(root, route.campaignId ? `<main id="main-content"><p class="campaign-loading">Loading campaign…</p></main>` : campaignListMarkup(), "campaigns");
-  let theme = initializeAppTheme(root); const controller = new AbortController(); let disposed = false; let campaign: CampaignSummary | null = null; let transferPreview: JsonRecord | null = null; let chronicleConfig: JsonRecord = {}; let chronicleProviders: ProviderSummary[] = []; let chronicleOperationActive = false;
+  let theme = initializeAppTheme(root); const controller = new AbortController(); let disposed = false; let campaign: CampaignSummary | null = null; let transferPreview: JsonRecord | null = null; let chronicleConfig: JsonRecord = {}; let chronicleProviders: ProviderSummary[] = []; let chronicleOperationActive = false; let stateBase: CampaignRuntimeStateResponse | null = null; let continuityEditor: CampaignContinuityEditor | null = null; let stateGenerationLocked = false; let stateConflictLocked = false; let stateReloadInFlight = false; let stateSaveInFlight = false; let stateSessionId = 0;
+  const setStateFormBusy = (form: HTMLFormElement, busy: boolean) => {
+    form.setAttribute("aria-busy", String(busy));
+    form.querySelectorAll<HTMLButtonElement | HTMLTextAreaElement | HTMLInputElement | HTMLSelectElement>("button, textarea, input, select")
+      .forEach((control) => {
+        const reload = control.matches("button[data-action='reload-current-state']");
+        control.disabled = busy || stateGenerationLocked || (stateConflictLocked && !reload);
+      });
+  };
   const message = (copy: string, error = false) => { const el=root.querySelector<HTMLElement>("#campaign-message"); if(el){el.textContent=copy;el.dataset.state=error?"error":"success";} };
   const confirmAction = (copy: string) => root.ownerDocument.defaultView?.confirm(copy) ?? false;
+  const hasCurrentStateDraftChanges = (form: HTMLFormElement) => {
+    if (!stateBase || !continuityEditor) return false;
+    if (hasCampaignContinuityChanges(stateBase, continuityEditor.readDraft())) return true;
+    const trackers = form.querySelector<HTMLTextAreaElement>("textarea[name='trackers']");
+    return (trackers?.value ?? "") !== JSON.stringify(stateBase.trackers ?? [], null, 2);
+  };
+  const loadCurrentState = async (): Promise<[CampaignRuntimeStateResponse, CampaignSyncStatus]> => {
+    if (!campaign) throw new Error("Campaign is unavailable.");
+    return Promise.all([
+      campaignApi.get<CampaignRuntimeStateResponse>(campaign.id, "/state", controller.signal),
+      campaignApi.get<CampaignSyncStatus>(campaign.id, "/sync-status", controller.signal)
+    ]);
+  };
+  const replaceCurrentStateEditor = (target: HTMLElement, loadedState: CampaignRuntimeStateResponse, sync: CampaignSyncStatus) => {
+    stateBase = loadedState;
+    stateGenerationLocked = Boolean(sync.pendingGeneration || sync.generationRecovery);
+    stateConflictLocked = false;
+    stateReloadInFlight = false;
+    stateSaveInFlight = false;
+    stateSessionId += 1;
+    continuityEditor?.dispose();
+    continuityEditor = createCampaignContinuityEditor(root.ownerDocument, createCampaignContinuityDraft(loadedState), { idPrefix: "campaign-current-state", onChange: () => undefined });
+    continuityEditor.setDisabled(stateGenerationLocked);
+    target.innerHTML = stateMarkup(loadedState, stateGenerationLocked);
+    target.querySelector("[data-campaign-continuity-editor]")?.append(continuityEditor.element);
+  };
   const chroniclePollDelay = () => new Promise<void>((resolve, reject) => {
     const view = root.ownerDocument.defaultView;
     if (!view) { resolve(); return; }
@@ -360,7 +399,7 @@ export function mountCampaignEditorPage(root: HTMLElement, route: CampaignRoute)
     const loadProviders = async () => { const response=record(await campaignApi.general("/api/v1/providers",controller.signal)); return (Array.isArray(response.providers)?response.providers:[]).map(record).filter((value)=>typeof value.id==="string"&&typeof value.name==="string"&&typeof value.providerRole==="string"&&typeof value.providerType==="string") as ProviderSummary[]; };
     if(route.section==="overview") target.innerHTML=overviewMarkup(campaign,await loadProviders());
     else if(route.section==="character") target.innerHTML=characterMarkup(record(await campaignApi.get(campaign.id,"/character-profile",controller.signal)));
-    else if(route.section==="state") target.innerHTML=stateMarkup(record(await campaignApi.get(campaign.id,"/state",controller.signal)));
+    else if(route.section==="state") { const [loadedState,sync]=await loadCurrentState(); if(disposed)return; replaceCurrentStateEditor(target,loadedState,sync); }
     else if(route.section==="history") target.innerHTML=historyMarkup(record(await campaignApi.get(campaign.id,"/turns?limit=100",controller.signal)),campaign);
     else if(route.section==="chronicle") { const [m,c,p]=await Promise.all([campaignApi.get<JsonRecord>(campaign.id,"/memory/metrics",controller.signal),campaignApi.get<JsonRecord>(campaign.id,"/memory/embedding-config",controller.signal),loadProviders()]);chronicleConfig=record(c);chronicleProviders=p;target.innerHTML=chronicleMarkup(record(m),chronicleConfig,chronicleProviders,campaign.textProviderProfileId); }
     else if(route.section==="illustrations") { const [config,providers]=await Promise.all([campaignApi.get(campaign.id,"/illustration-config",controller.signal),loadProviders()]);target.innerHTML=illustrationsMarkup(record(config),providers); }
@@ -372,13 +411,14 @@ export function mountCampaignEditorPage(root: HTMLElement, route: CampaignRoute)
       if(form.id==="narration-correction-form"){const dialog=form.closest<HTMLDialogElement>("dialog")!;const error=dialog.querySelector<HTMLElement>(".narration-correction-error")!;const narration=(form.elements.namedItem("narration") as HTMLTextAreaElement).value.trim();if(!narration){error.textContent="Enter the corrected narration before saving.";error.hidden=false;(form.elements.namedItem("narration") as HTMLTextAreaElement).focus();return;}const submit=form.querySelector<HTMLButtonElement>('button[type="submit"]')!;await withCampaignActionState(submit,"Saving correction…",async()=>campaignApi.patch(campaign!.id,`/turns/${encodeURIComponent(form.dataset.turnId??"")}/correction`,{narration,expectedCorrectionRevision:Number(form.dataset.correctionRevision??0),expectedActiveTurnNumber:campaign!.activeTurnNumber,source:"user_edit"}));const article=Array.from(target.querySelectorAll<HTMLElement>("article[data-turn-id]")).find((candidate)=>candidate.dataset.turnId===form.dataset.turnId);const feedback=article?.querySelector<HTMLElement>(".turn-feedback");dialog.close();message("Accepted narration corrected; dependent Chronicle context was rebuilt.");if(feedback){feedback.textContent="Narration saved. Chronicle context was rebuilt.";delete feedback.dataset.state;}return;}
       if(form.id==="overview-form"){const v=formObject(form);await campaignApi.patch(campaign.id,"",{...v,textProviderProfileId:v.textProviderProfileId||null,storyContextBudgetTokens:Number(v.storyContextBudgetTokens)});message("Campaign settings saved.");}
       if(form.id==="character-form"){const v=formObject(form);await campaignApi.put(campaign.id,"/character-profile",{expectedRevision:Number(v.revision),name:v.name,profile:parseJsonField(form,"profile","Profile"),editSource:"manual"});message("Campaign character profile saved.");}
-      if(form.id==="state-form"){const v=formObject(form);const trackers=parseJsonField(form,"trackers","Trackers");const current=record(await campaignApi.get(campaign.id,"/state"));await campaignApi.patch(campaign.id,"/state",{...current,continuitySummary:v.continuitySummary,openThreads:v.openThreads.split("\n").map(x=>x.trim()).filter(Boolean),canonicalFacts:v.canonicalFacts.split("\n").map(x=>x.trim()).filter(Boolean).map(content=>({id:null,content})),scratchpad:v.scratchpad,trackers,expectedTurnNumber:Number(v.turn),expectedRevision:Number(v.revision)});message("Current campaign state saved.");}
+      if(form.id==="state-form"){if(stateSaveInFlight||stateReloadInFlight)return;if(stateGenerationLocked)throw new Error("Current-state editing is unavailable while a story generation needs attention.");if(stateConflictLocked)throw new Error("Current state changed while you were editing. Reload before saving; your draft is still available.");const base=stateBase;const editor=continuityEditor;if(!base||!editor)throw new Error("Current campaign state is unavailable. Reload before saving.");const sessionId=stateSessionId;const trackers=parseJsonField(form,"trackers","Trackers") as CampaignRuntimeStateUpdate["trackers"];const request=buildCurrentStateUpdate(base,editor.readDraft(),{trackers});stateSaveInFlight=true;setStateFormBusy(form,true);editor.setDisabled(true);try{const saved=await campaignApi.patch<CampaignRuntimeStateResponse>(campaign.id,"/state",request);if(disposed||sessionId!==stateSessionId||stateBase!==base||continuityEditor!==editor)return;stateBase=saved;editor.dispose();continuityEditor=createCampaignContinuityEditor(root.ownerDocument,createCampaignContinuityDraft(saved),{idPrefix:"campaign-current-state",onChange:()=>undefined});target.querySelector("[data-campaign-continuity-editor]")?.replaceChildren(continuityEditor.element);message("Current campaign state saved.");}catch(error){if(error instanceof CampaignEditorApiError&&error.status===409)stateConflictLocked=true;throw error;}finally{if(!disposed&&sessionId===stateSessionId){stateSaveInFlight=false;setStateFormBusy(form,false);if(continuityEditor===editor)editor.setDisabled(stateGenerationLocked||stateConflictLocked);}}}
       if(form.id==="chronicle-form"){await runChronicleOperation(target,async()=>{const v=formObject(form);const payload=chronicleEmbeddingConfigPayload(v);if(payload.enabled===true&&!payload.providerProfileId)throw new Error("Choose an eligible embedding provider before enabling Semantic Retrieval.");const saved=record(await campaignApi.put(campaign!.id,"/memory/embedding-config",payload));chronicleConfig=saved;if(saved.enabled===true&&!saved.jobId)throw new Error("Semantic Retrieval was enabled, but indexing did not return a job identifier.");if(saved.jobId)await monitorAndRefreshChronicle(saved.jobId, "Semantic Retrieval indexing");else{await refreshChronicleMetrics(target);message("Semantic Retrieval disabled. Chronicle local lexical retrieval and retained rollback embeddings remain available.");}});}
       if(form.id==="illustrations-form"){const v=formObject(form);await campaignApi.put(campaign.id,"/illustration-config",{...v,providerProfileId:v.providerProfileId||null,repetitionWindow:Number(v.repetitionWindow),maxAttempts:Number(v.maxAttempts),segmentWordCount:Number(v.segmentWordCount),imagesPerSegment:Number(v.imagesPerSegment)});message("Illustration settings saved.");}
       if(form.id==="migration-form"){if(!confirmAction("Migrate this campaign to the selected published world version?"))return;await campaignApi.post(campaign.id,"/migrate-world",formObject(form));message("Campaign world version migrated.");}
       if(form.id==="transfer-form"){if(!transferPreview)throw new Error("Preview compatibility before transferring this campaign.");if(!confirmAction("Transfer this campaign while preserving its character, state, and accepted history?"))return;await campaignApi.post(campaign.id,"/transfer-world",{...formObject(form),idempotencyKey:crypto.randomUUID(),expectedActiveTurnNumber:transferPreview.expectedActiveTurnNumber,expectedStateRevision:transferPreview.expectedStateRevision,sourceFingerprint:transferPreview.sourceFingerprint,note:"Explicit cross-world transfer from the Complete Campaign Editor."});message("Campaign transferred.");}
-    }catch(error){const copy=error instanceof Error?error.message:String(error);message(copy,true);if(form.id==="narration-correction-form"){const modalError=form.querySelector<HTMLElement>(".narration-correction-error");if(modalError){modalError.textContent=copy;modalError.hidden=false;}(form.elements.namedItem("narration") as HTMLTextAreaElement | null)?.focus();}}});
+    }catch(error){const copy=form.id==="state-form"&&error instanceof CampaignEditorApiError&&error.status===409?"Current state changed while you were editing. Reload before saving; your draft is still available.":error instanceof Error?error.message:String(error);message(copy,true);if(form.id==="narration-correction-form"){const modalError=form.querySelector<HTMLElement>(".narration-correction-error");if(modalError){modalError.textContent=copy;modalError.hidden=false;}(form.elements.namedItem("narration") as HTMLTextAreaElement | null)?.focus();}}});
     target.addEventListener("click",async(event)=>{const clicked=(event.target as Element).closest<HTMLButtonElement>("button");if(!clicked)return;const dialogId=clicked.dataset.dialogClose;if(dialogId){target.querySelector<HTMLDialogElement>(`#${dialogId}`)?.close();return;}const button=clicked.matches("button[data-action]")?clicked:null;if(!button||!campaign)return;const activeCampaign=campaign;const action=button.dataset.action??"";const article=button.closest<HTMLElement>("article");const feedback=article?.querySelector<HTMLElement>(".turn-feedback");try{await withCampaignActionState(button,actionWorkingLabels[action]??"Working…",async()=>{const campaign=activeCampaign;
+      if(action==="reload-current-state"){const form=button.closest<HTMLFormElement>("#state-form");if(stateSaveInFlight||stateReloadInFlight||stateGenerationLocked||!form)return;if(hasCurrentStateDraftChanges(form)&&!confirmAction("Discard unsaved current state changes and reload?"))return;const sessionId=stateSessionId;const base=stateBase;const editor=continuityEditor;if(!base||!editor)return;stateReloadInFlight=true;setStateFormBusy(form,true);editor.setDisabled(true);try{const [loadedState,sync]=await loadCurrentState();if(disposed||sessionId!==stateSessionId||stateBase!==base||continuityEditor!==editor)return;replaceCurrentStateEditor(target,loadedState,sync);message("Current campaign state reloaded.");}finally{if(!disposed&&sessionId===stateSessionId&&stateBase===base&&continuityEditor===editor){stateReloadInFlight=false;setStateFormBusy(form,false);editor.setDisabled(stateGenerationLocked||stateConflictLocked);}}return;}
       if(action==="preview-context"){const form=button.closest("form") as HTMLFormElement;const v=formObject(form);const q=new URLSearchParams({budgetTokens:v.budgetTokens,compression:v.compression,query:v.query,recentTurns:"8"});const result=await campaignApi.get(campaign.id,`/memory/context-preview?${q}`);root.querySelector("#context-preview")!.textContent=JSON.stringify(result,null,2);}
       if(action==="rebuild-memory"){await runChronicleOperation(target,async()=>{const queued=record(await campaignApi.post(campaign.id,"/memory/reindex"));await monitorAndRefreshChronicle(queued.jobId, "Chronicle rebuild");});}
       if(action==="reindex-embeddings"){await runChronicleOperation(target,async()=>{const queued=record(await campaignApi.post(campaign.id,"/memory/embeddings/reindex"));await monitorAndRefreshChronicle(queued.jobId, "Semantic Retrieval reindex");});}

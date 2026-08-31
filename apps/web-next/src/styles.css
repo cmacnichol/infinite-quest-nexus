@@ -2607,6 +2607,37 @@ footer p:first-child {
   }
 }
 
+.campaign-section .campaign-continuity-editor {
+  margin-block: 18px;
+}
+
+.campaign-continuity-editor {
+  display: grid;
+  gap: 16px;
+}
+
+.campaign-continuity-field,
+.campaign-continuity-rows {
+  display: grid;
+  gap: 8px;
+}
+
+.campaign-continuity-field > span,
+.campaign-continuity-rows > h4 { margin: 0; }
+
+.campaign-continuity-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+}
+
+.campaign-continuity-editor textarea { width: 100%; resize: vertical; }
+
+@media (max-width: 540px) {
+  .campaign-continuity-row { grid-template-columns: minmax(0, 1fr); }
+}
+
 /* Data Transfer keeps format choice visible while the server owns archive inspection. */
 .data-transfer-page {
   width: min(1440px, 100%);
