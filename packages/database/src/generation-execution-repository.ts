@@ -35,6 +35,7 @@ import {
   resolveEntityMetadata
 } from "../../domain/src/index.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
+import { normalizeCampaignEventTriggers } from "../../domain/src/campaign-event-triggers.js";
 import { withTransaction } from "./pool.js";
 
 async function enqueueChunkIndexBestEffort(
@@ -250,7 +251,7 @@ function orchestrationInputs(row: ExecutionPayloadRow): GenerationOrchestrationI
     const parsed = playerRpgStatSchema.safeParse(entry);
     return parsed.success ? [parsed.data] : [];
   });
-  const eventTriggers = (Array.isArray(eventSource) ? eventSource : []).flatMap((entry) => {
+  const eventTriggers = normalizeCampaignEventTriggers(Array.isArray(eventSource) ? eventSource : []).flatMap((entry) => {
     const parsed = playerEventTriggerSchema.safeParse(entry);
     return parsed.success ? [parsed.data] : [];
   });

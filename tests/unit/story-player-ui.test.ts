@@ -175,6 +175,58 @@ function deferred<T>() {
 }
 
 describe("story-player: new Story Player UI contracts & gameplay logic", () => {
+  it.each(["sync", "state"])("does not generate or enable input when initial %s loading fails", async (failure) => {
+    const workflow = { resume: vi.fn(async () => null), submit: vi.fn().mockRejectedValue(new Error("Unexpected generation")) };
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: [], workflow,
+        ...(failure === "sync"
+          ? { syncStatus: vi.fn().mockRejectedValue(new Error("Campaign unavailable")) }
+          : { fetchCampaignState: vi.fn().mockRejectedValue(new Error("State unavailable")) })
+      });
+      expect(workflow.submit).not.toHaveBeenCalled();
+      expect(workflow.resume).not.toHaveBeenCalled();
+      expect((document.getElementById("freeAction") as HTMLTextAreaElement).disabled).toBe(true);
+      expect((document.getElementById("btnTakeAction") as HTMLButtonElement).disabled).toBe(true);
+      document.getElementById("btnTakeAction")!.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(workflow.submit).not.toHaveBeenCalled();
+      expect(document.getElementById("toast")?.textContent).toContain("Error loading campaign");
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("submits the authored opening action once and keeps it complete in escaped history", async () => {
+    const openingAction = 'Open the old gate and ask the keeper which road leads to the observatory.\nRead the sign: <img src=x onerror=alert(1)> & wait.';
+    const turn = { id: "turn-1", turnNumber: 1, action: openingAction, narration: "The keeper raises the lantern." };
+    const submitted: unknown[] = [];
+    const workflow = { resume: async () => null, submit: async (_campaignId: string, request: unknown) => {
+      submitted.push(request);
+      return { jobId: "opening-job", async *watch() {
+        yield { type: "settled", outcome: "completed", result: { ...turn, resultTurnId: turn.id } };
+      } };
+    } };
+    const sync = (activeTurnNumber: number) => ({
+      campaign: { id: "campaign-1", title: "Opening campaign", activeTurnNumber, storyLengthProfile: "standard" },
+      world: { firstAction: openingAction },
+      turns: { campaignId: "campaign-1", turns: activeTurnNumber ? [turn] : [], nextCursor: null }
+    });
+    try {
+      const { document, window } = await bootLegacyStory({ turns: [], workflow,
+        syncStatus: vi.fn().mockResolvedValueOnce(sync(0)).mockResolvedValue(sync(1)),
+        fetchCampaignState: vi.fn().mockResolvedValue({ activeTurnNumber: 0 })
+      });
+      await vi.waitFor(() => expect(document.querySelector("#scene-1")?.textContent).toContain(turn.narration));
+      expect(submitted).toEqual([expect.objectContaining({ expectedTurnNumber: 1, operationKind: "append", request: expect.objectContaining({ action: openingAction, inputModeSource: "opening_action" }) })]);
+      document.getElementById("btnOpenActivityLog")!.dispatchEvent(new window.Event("click", { bubbles: true }));
+      expect(document.getElementById("activityLogList")?.textContent).not.toContain("Campaign load failed");
+      document.getElementById("turnPill")!.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await vi.waitFor(() => expect(document.querySelectorAll("#turnHistoryModalList .history-card")).toHaveLength(1));
+      const prompt = document.querySelector("#turnHistoryModalList .history-card .turn-history-prompt");
+      expect(prompt?.textContent).toBe(openingAction);
+      expect(prompt?.querySelector("img")).toBeNull();
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it("keeps Story context controls out of the legacy Story player and leaves the server authoritative", async () => {
     const submissions: unknown[] = [];
     const workflow = {
@@ -306,7 +358,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
 
   it("supports choice selection and free action submission with input validation and busy indicator", () => {
     expect(storyScript).toContain('async function submitAction(actionText, options = {})');
-    expect(storyScript).toContain('if (state.busy) return;');
+    expect(storyScript).toContain('if (state.busy || !state.campaignLoaded) return;');
     expect(storyScript).toContain('if (!action) { toast("Enter an action first."); return; }');
     expect(storyScript).toContain('function renderChoices(choices, customSuggestion, ownerKey)');
     expect(storyScript).toContain('submitAction(text)');
@@ -2497,7 +2549,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyHtml).toContain('id="btnOpenEditState" type="button"');
     expect(storyHtml).not.toContain('nav-menu-item-flush');
     expect(navigationCss).toContain('.nav-profile-button {');
-    expect(storyScript).toContain('const generationLocked = state.busy || Boolean(state.pendingGeneration);');
+    expect(storyScript).toContain('const generationLocked = state.busy || !state.campaignLoaded || Boolean(state.pendingGeneration);');
     expect(storyScript).toContain('const storyInputLocked = generationLocked || !isLatest;');
     expect(storyScript).toContain('if (btnAction) btnAction.disabled = storyInputLocked;');
     expect(storyScript).not.toContain('inputAction.style.pointerEvents = "none";');

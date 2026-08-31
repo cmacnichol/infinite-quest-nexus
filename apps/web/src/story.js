@@ -97,6 +97,7 @@ const TOAST_DURATION = 3500;
 const state = {
   campaignId: null,
   campaign: null,
+  campaignLoaded: false,
   world: null,
   playerConfig: null,
   runtimeState: null,
@@ -314,7 +315,7 @@ function hideBusy() {
 function syncInputState() {
   const btnAction = $("btnTakeAction");
   const freeAction = $("freeAction");
-  const generationLocked = state.busy || Boolean(state.pendingGeneration);
+  const generationLocked = state.busy || !state.campaignLoaded || Boolean(state.pendingGeneration);
   const recoveryPanel = $("generationRecoveryPanel");
   const recoveryVisible = Boolean(recoveryPanel && !recoveryPanel.classList.contains("hidden"));
   const editStateLocked = generationLocked || recoveryVisible || Boolean(state.editStateSession?.saving);
@@ -415,6 +416,7 @@ async function loadCampaign(campaignId, options = {}) {
   const loadEpoch = ++storyTurnWindowEpoch;
   clearResponseEditSession();
   state.campaignId = campaignId;
+  state.campaignLoaded = false;
   completeHistoryLoad = null;
   setTurnHistoryLoadStatus("");
   showBusy("Loading campaign…");
@@ -464,9 +466,12 @@ async function loadCampaign(campaignId, options = {}) {
     renderTurnInput();
 
     recordActivity("system", "Campaign loaded", `${state.turns.length} turns loaded for "${name}".`);
+    state.campaignLoaded = true;
+    return true;
   } catch (err) {
     toast(`Error loading campaign: ${err.message}`);
     recordActivity("error", "Campaign load failed", err.message);
+    return false;
   } finally {
     hideBusy();
   }
@@ -506,7 +511,7 @@ async function showBackgroundStoryBeforeStart() {
 }
 
 async function startAdventure(options = {}) {
-  if (state.busy) return;
+  if (state.busy || !state.campaignLoaded) return;
   await showBackgroundStoryBeforeStart();
   await runGeneration(firstActionForNewAdventure(), {
     requestedInputMode: "action",
@@ -1254,7 +1259,7 @@ async function submitResolvedTurn(action, details) {
 }
 
 async function submitAction(actionText, options = {}) {
-  if (state.busy) return;
+  if (state.busy || !state.campaignLoaded) return;
   let action = (actionText || "").trim();
   if (!action && state.turns.length === 0) {
     action = firstActionForNewAdventure();
@@ -1298,6 +1303,7 @@ function clearPendingSubmission() {
 }
 
 async function runGeneration(action, options = {}) {
+  if (!state.campaignLoaded) return;
   showBusy("Queueing turn with the Story Engine…");
   state.abortController = new AbortController();
   const progressEl = $("generationProgress");
@@ -2620,6 +2626,7 @@ function populateHistoryContainer(container) {
         <h4>${t.turnNumber === currentTurnNumber ? "◆ " : ""}Turn ${t.turnNumber}${t.action ? `: ${escapeHtml(t.action.slice(0, 60))}` : (t.turnNumber === 1 ? ": Adventure Begin" : "")}</h4>
         <span class="turn-input-mode-pill ${inputMode}" title="Story Engine interpreted this prompt as ${inputModeLabel}" aria-label="Prompt interpretation: ${inputModeLabel}">${inputModeLabel}</span>
       </div>
+      ${t.action ? `<div><strong class="turn-history-prompt-label">Prompt</strong><p class="turn-history-prompt">${escapeHtml(t.action)}</p></div>` : ""}
       <p>${escapeHtml(preview)}</p>
       ${chronicleRetrievalHistoryMarkup(t.chronicleRetrieval)}
     `;
@@ -2935,7 +2942,7 @@ async function init() {
     return;
   }
   await checkOnboarding();
-  await loadCampaign(state.campaignId);
+  if (!await loadCampaign(state.campaignId)) return;
   await pollImageJobs();
   const resumed = await resumePendingGeneration();
   if (!resumed && state.turns.length === 0 && !state.busy) {
