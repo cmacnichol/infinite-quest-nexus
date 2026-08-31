@@ -45,9 +45,10 @@ function copyBooleanMap(value: unknown, turnKeys = false): Record<string, boolea
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const map: Record<string, boolean> = {};
   for (const key of Object.keys(value)) {
-    if (UNSAFE_KEYS.has(key) || typeof (value as Record<string, unknown>)[key] !== "boolean") return null;
+    const entry = (value as Record<string, unknown>)[key];
+    if (UNSAFE_KEYS.has(key) || typeof entry !== "boolean") return null;
     if (turnKeys && !isTurnKey(key)) return null;
-    map[key] = (value as Record<string, boolean>)[key];
+    map[key] = entry;
   }
   return map;
 }
@@ -162,8 +163,10 @@ export function createDisplayPreferences(
     artworkVisible(campaignId, turnId) {
       if (!isSafeIdentifier(campaignId) || !isSafeIdentifier(turnId)) return true;
       const key = turnKey(campaignId, turnId);
-      if (hasOwn(state.artworkByTurn, key)) return state.artworkByTurn[key];
-      if (hasOwn(state.artworkByCampaign, campaignId)) return state.artworkByCampaign[campaignId];
+      const turnVisible = state.artworkByTurn[key];
+      if (hasOwn(state.artworkByTurn, key)) return typeof turnVisible === "boolean" ? turnVisible : true;
+      const campaignVisible = state.artworkByCampaign[campaignId];
+      if (hasOwn(state.artworkByCampaign, campaignId)) return typeof campaignVisible === "boolean" ? campaignVisible : true;
       return true;
     },
     subscribe(listener) {
