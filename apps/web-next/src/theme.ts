@@ -16,7 +16,9 @@ export interface ThemeEnvironment {
 
 export interface ThemeController {
   current(): Theme;
+  set(theme: Theme): Theme;
   toggle(): Theme;
+  subscribe(listener: (theme: Theme) => void): () => void;
   dispose(): void;
 }
 
@@ -35,6 +37,8 @@ export function nextTheme(theme: Theme): Theme {
 export function applyTheme(root: HTMLElement, theme: Theme): void {
   root.dataset.theme = theme;
   root.style.colorScheme = theme;
+  root.classList.toggle("wa-dark", theme === "dark");
+  root.classList.toggle("wa-light", theme === "light");
 }
 
 function readStoredTheme(storage: ThemeEnvironment["storage"]): Theme | null {
@@ -69,17 +73,21 @@ export function createThemeController(
   let hasManualPreference = storedTheme !== null;
   let theme = resolveTheme(storedTheme, systemPrefersDark(environment.mediaQuery));
   let listenerRegistered = false;
+  const listeners = new Set<(theme: Theme) => void>();
 
   const commit = (next: Theme) => {
+    if (next === theme) return;
     theme = next;
     applyTheme(environment.root, theme);
     onChange(theme);
+    listeners.forEach((listener) => listener(theme));
   };
   const onSystemChange = (event: { matches: boolean }) => {
     if (!hasManualPreference) commit(event.matches ? "dark" : "light");
   };
 
-  commit(theme);
+  applyTheme(environment.root, theme);
+  onChange(theme);
   try {
     environment.mediaQuery?.addEventListener("change", onSystemChange);
     listenerRegistered = environment.mediaQuery !== null;
@@ -87,23 +95,34 @@ export function createThemeController(
     // Theme controls remain available when media query listeners are blocked.
   }
 
-  return {
+  const controller: ThemeController = {
     current: () => theme,
-    toggle: () => {
+    set: (selected: Theme) => {
       hasManualPreference = true;
-      const selected = nextTheme(theme);
       writeStoredTheme(environment.storage, selected);
       commit(selected);
       return selected;
     },
+    toggle: () => {
+      const selected = nextTheme(theme);
+      return controller.set(selected);
+    },
+    subscribe: (listener: (theme: Theme) => void) => {
+      listeners.add(listener);
+      listener(theme);
+      return () => listeners.delete(listener);
+    },
     dispose: () => {
-      if (!listenerRegistered) return;
-      listenerRegistered = false;
-      try {
-        environment.mediaQuery?.removeEventListener("change", onSystemChange);
-      } catch {
-        // Disposal remains safe when media query listener removal is blocked.
+      listeners.clear();
+      if (listenerRegistered) {
+        listenerRegistered = false;
+        try {
+          environment.mediaQuery?.removeEventListener("change", onSystemChange);
+        } catch {
+          // Disposal remains safe when media query listener removal is blocked.
+        }
       }
     }
   };
+  return controller;
 }

@@ -1,0 +1,29 @@
+#fixture[data-catalogue="quiet-leaf"] {
+  display: grid;
+  gap: 2rem;
+  padding: clamp(1rem, 3vw, 3rem);
+  background: var(--surface-page);
+}
+
+.quiet-leaf-catalogue__themes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.quiet-leaf-catalogue__panel {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.quiet-leaf-catalogue__panel > h2 {
+  margin: 0;
+  color: var(--text-secondary);
+  font: 600 0.8rem/1.2 var(--font-ui, sans-serif);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.quiet-leaf-catalogue__story {
+  min-width: 0;
+}

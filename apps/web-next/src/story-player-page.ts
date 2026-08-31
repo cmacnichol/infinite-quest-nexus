@@ -15,14 +15,19 @@ import type {
   TurnInputClassificationResponse,
   TurnInputModeSource
 } from "@infinite-quest/contracts";
-import { initializeAppTheme, renderAppShell } from "./app-shell";
+import { mountAppShell } from "./app-shell-lifecycle";
 import { createStoryPlayerComposition, type StoryPlayerComposition } from "./story-player-composition";
 import { createStoryGenerationController } from "./story-player-generation";
 import { createStoryUiModel, type StoryUiPhase } from "./story-player-model";
 import { createStoryHistoryController } from "./story-player-history";
-import { renderStoryPlayerView } from "./story-player-view";
+import { renderStoryDialogs, renderStoryPlayerView, type StoryPlayerViewState } from "./story-player-view";
 import { createStoryIllustrationController } from "./story-player-illustrations";
 import { createStoryToolsController, installStoryToolsDisclosure, storyCampaignToolsMarkup } from "./story-player-tools";
+import type { DisplayPreferencesStore } from "./preferences/display-preferences";
+import { createStoryResumeStore, type StoryResumeStore } from "./navigation/story-resume";
+import { uiImplementation, type UiImplementation } from "./ui/feature-policy";
+import { mountQuietLeafPresenter, type QuietLeafPresenter } from "./story/quiet-leaf-presenter";
+import type { ComposerActions } from "./story/ui/composer";
 import { createCampaignContinuityEditor, type CampaignContinuityEditor } from "./campaign-continuity-editor";
 import type { StoryRoute } from "./story-route";
 import type { MountedPage } from "./world-library-page";
@@ -40,7 +45,7 @@ const storyPlayerMarkup = `
   </main>
 `;
 
-function browserStorage(root: HTMLElement): Pick<Storage, "getItem" | "setItem"> | null {
+function browserStorage(root: HTMLElement): Pick<Storage, "getItem" | "setItem" | "removeItem"> | null {
   try {
     return root.ownerDocument.defaultView?.localStorage ?? null;
   } catch {
@@ -85,6 +90,10 @@ export interface PreparedStoryTurnSubmission {
 export interface StoryPlayerPageOptions {
   /** Test observer; production submission always uses the durable controller. */
   readonly onSubmit?: (submission: PreparedStoryTurnSubmission) => void | Promise<void>;
+  readonly uiImplementation?: UiImplementation;
+  readonly displayPreferences?: DisplayPreferencesStore;
+  /** Browser navigation preference, kept separate from campaign state. */
+  readonly storyResumeStore?: StoryResumeStore;
 }
 
 export type TurnInputClassifier = (request: Readonly<{
@@ -144,16 +153,25 @@ export function mountStoryPlayerPage(
   composition: StoryPlayerComposition = createStoryPlayerComposition(),
   options: StoryPlayerPageOptions = {}
 ): MountedPage {
-  renderAppShell(root, storyPlayerMarkup, "story", { headerToolsMarkup: storyCampaignToolsMarkup() });
-  const theme = initializeAppTheme(root);
+  const selectedUiImplementation = options.uiImplementation ?? uiImplementation();
+  const shell = mountAppShell(root, storyPlayerMarkup, "story", {
+    uiImplementation: selectedUiImplementation,
+    displayPreferences: options.displayPreferences,
+    ...(selectedUiImplementation === "native" ? { headerToolsMarkup: storyCampaignToolsMarkup() } : {})
+  });
+  const theme = shell.theme;
+  const displayPreferences = shell.display;
+  root.querySelector<HTMLElement>('main[data-page="story-player"]')?.setAttribute("data-ui-implementation", selectedUiImplementation);
   const ui = createStoryUiModel({ viewTurnNumber: route.turnNumber }, browserStorage(root));
+  const storyResumeStore = options.storyResumeStore ?? createStoryResumeStore(browserStorage(root));
   let campaigns: readonly CampaignSummary[] = [];
   let selectedCampaign: CampaignSummary | null = null;
   let disposed = false;
   let controller: AbortController | null = null;
   let projection: Readonly<CampaignProjection> = composition.campaignStore.store.get();
   let retryControl: HTMLButtonElement | null = null;
-  let historyDialogOpener: "history" | "inspect" | null = null;
+  let historyDialogOpener: Readonly<{ element: HTMLElement; selector: string }> | null = null;
+  let toolDialogOpener: HTMLElement | null = null;
   let focusHistoryDialog = false;
   let inspectedState: CampaignRuntimeStateResponse | null = null;
   let currentState: CampaignRuntimeStateResponse | null = null;
@@ -173,7 +191,10 @@ export function mountStoryPlayerPage(
   let submittedDraft: string | null = null;
   let programmaticFollowTarget: ViewportPosition | null = null;
   let illustrationRequestKey: string | null = null;
-  const toolsDisclosure = root.querySelector<HTMLDetailsElement>("[data-campaign-tools]");
+  let quietLeaf: QuietLeafPresenter | null = null;
+  const toolsDisclosure = selectedUiImplementation === "native"
+    ? root.querySelector<HTMLDetailsElement>("[data-campaign-tools]")
+    : null;
   const disposeToolsDisclosure = toolsDisclosure ? installStoryToolsDisclosure(toolsDisclosure) : () => undefined;
   const illustrations = createStoryIllustrationController({
     illustrations: composition.illustrations,
@@ -336,14 +357,29 @@ export function mountStoryPlayerPage(
   const unsubscribeIllustrations = illustrations.subscribe(() => render());
 
   const onRetry = () => { void load(); };
+  const historyOpener = (element: HTMLElement | null): Readonly<{ element: HTMLElement; selector: string }> | null => {
+    if (element === null) return null;
+    const selector = element.matches("[data-action='open-complete-history']")
+      ? "[data-action='open-complete-history']"
+      : element.matches("[data-action='inspect-state']")
+        ? "[data-story-reader] [data-action='inspect-state']"
+        : element.closest(".app-shell-campaign-menu")
+          ? ".app-shell-campaign-menu wa-button"
+        : element.matches("summary")
+          ? "[data-campaign-tools] summary"
+          : "[data-history]";
+    return { element, selector };
+  };
   const restoreHistoryFocus = () => {
     const opener = historyDialogOpener;
     if (opener === null) return;
     historyDialogOpener = null;
-    const selector = opener === "history"
-      ? "[data-action='open-complete-history']"
-      : "[data-story-reader] [data-action='inspect-state']";
-    root.querySelector<HTMLButtonElement>(selector)?.focus();
+    if (!disposed) root.querySelector<HTMLElement>(opener.selector)?.focus();
+  };
+  const restoreToolDialogFocus = () => {
+    const opener = toolDialogOpener;
+    toolDialogOpener = null;
+    if (opener?.isConnected) opener.focus();
   };
   const invalidateInspection = () => {
     inspectionRequestToken += 1;
@@ -409,6 +445,7 @@ export function mountStoryPlayerPage(
       }
       tools.closeActiveDialog();
       toolsDisclosure?.querySelector<HTMLElement>("summary")?.focus();
+      restoreToolDialogFocus();
     });
     for (const control of dialog.querySelectorAll<HTMLButtonElement>("[data-action='copy-activity-diagnostics']")) {
       control.addEventListener("click", () => {
@@ -427,10 +464,20 @@ export function mountStoryPlayerPage(
     else dialog.querySelector<HTMLElement>("textarea, button:not([disabled])")?.focus();
     continuityFocus = null;
   };
-  const focusDraft = () => root.querySelector<HTMLTextAreaElement>("[data-story-draft]")?.focus();
+  const focusDraft = () => {
+    if (quietLeaf) quietLeaf.focusDraft();
+    else root.querySelector<HTMLTextAreaElement>("[data-story-draft]")?.focus();
+  };
   const composerCampaign = () => projection.campaign !== null && selectedCampaign?.id === projection.campaign.id
     ? selectedCampaign : null;
   const campaignFallback = () => composerCampaign()?.turnControlStyle === "flexible_scene" ? "scene" as const : "action" as const;
+  const canEditCurrentState = (): boolean => projection.campaign !== null && projection.generation === null;
+  const canWriteCurrentCampaign = (): boolean => {
+    const campaign = projection.campaign;
+    return campaign !== null
+      && projection.generation === null
+      && ui.get().viewTurnNumber === campaign.activeTurnNumber;
+  };
   const submitPreparedTurn = async (submission: PreparedStoryTurnSubmission) => {
     submittedDraft = submission.action;
     const pinnedReplacementTurnId = replacementTurnId;
@@ -451,7 +498,7 @@ export function mountStoryPlayerPage(
     const current = ui.get();
     const draft = current.draft;
     const storyLengthProfileOverride = current.storyLengthProfileOverride;
-    if (!campaign || !draft.trim()) {
+    if (!campaign || !canWriteCurrentCampaign() || !draft.trim()) {
       focusDraft();
       return;
     }
@@ -478,7 +525,7 @@ export function mountStoryPlayerPage(
           requestedInputMode: "auto",
           storyLengthProfileOverride: preparation.storyLengthProfileOverride ?? null
         });
-        root.querySelector<HTMLButtonElement>("[data-action='confirm-intent-action']")?.focus();
+        root.querySelector<HTMLButtonElement>("[data-action='confirm-intent-action'], [data-confirm-intent-action]")?.focus();
         return;
       }
       await submitPreparedTurn(preparation.submission);
@@ -489,6 +536,11 @@ export function mountStoryPlayerPage(
   const confirmComposerIntent = async (resolvedInputMode: "action" | "scene"): Promise<void> => {
     const intent = ui.get().intentConfirmation;
     if (intent === null) return;
+    if (!canWriteCurrentCampaign()) {
+      ui.setIntentConfirmation(null);
+      focusDraft();
+      return;
+    }
     ui.setIntentConfirmation(null);
     await submitPreparedTurn({
       action: intent.action,
@@ -517,6 +569,70 @@ export function mountStoryPlayerPage(
     ui.setRequestedInputMode(mode);
     root.querySelector<HTMLButtonElement>(`[data-input-mode="${mode}"]`)?.focus();
   };
+  const chooseStoryChoice = (index: number): void => {
+    const turn = projection.turns.find((candidate) => candidate.turnNumber === projection.campaign?.activeTurnNumber);
+    if (!Number.isSafeInteger(index) || index < 0 || !turn) return;
+    const current = ui.get();
+    const result = toggleChoiceDraftSelection(
+      { baseText: current.choiceBaseText, selectedIndexes: [...current.choiceSelection] },
+      turn.choices,
+      index,
+      current.draft,
+      12_000
+    );
+    if (result.overLimit) {
+      ui.setMessage("That suggestion would exceed the 12,000-character prompt limit.");
+      return;
+    }
+    ui.setChoiceDraft(result.selection, result.text);
+    if (result.selected && autoSubmitTurnChoices) void submitComposer();
+  };
+  const prepareRetryTurn = (): void => {
+    if (projection.generation !== null) return;
+    const campaign = projection.campaign;
+    const latest = campaign === null ? null : projection.turns.find((turn) => turn.turnNumber === campaign.activeTurnNumber) ?? null;
+    if (!latest) return;
+    replacementTurnId = latest.id;
+    ui.restoreComposerDraft(latest.action);
+    focusDraft();
+  };
+  const openStoryHistory = (opener: HTMLElement | null = null): void => {
+    invalidateInspection();
+    historyDialogOpener = historyOpener(opener ?? root.querySelector<HTMLElement>("[data-history]")
+      ?? toolsDisclosure?.querySelector<HTMLElement>("summary") ?? null);
+    focusHistoryDialog = true;
+    ui.setActiveDialog("history");
+    void history.openCompleteHistory().catch(() => undefined);
+  };
+  const confirmStoryIntent = (mode: "action" | "scene"): void => {
+    void confirmComposerIntent(mode);
+  };
+  const returnToStoryEditor = (): void => {
+    ui.setIntentConfirmation(null);
+    focusDraft();
+  };
+  const composerActions: ComposerActions = {
+    draft: (text) => {
+      ui.setComposerDraft(text);
+      if (quietLeaf) render();
+    },
+    clearDraft: () => { ui.clearComposerDraft(); focusDraft(); },
+    mode: (mode) => selectInputMode(mode),
+    choose: (index) => chooseStoryChoice(index),
+    length: (profile) => ui.setStoryLengthProfileOverride(profile),
+    continueStory: () => { void submitComposer(); },
+    retryTurn: () => prepareRetryTurn(),
+    history: () => openStoryHistory(root.querySelector<HTMLElement>("[data-history]")),
+    confirm: (mode) => confirmStoryIntent(mode),
+    returnToEditor: () => returnToStoryEditor()
+  };
+  if (selectedUiImplementation === "web-awesome") {
+    const presenterRoot = root.querySelector<HTMLElement>(".story-reader");
+    if (!presenterRoot) throw new Error("The Quiet Leaf Story root is missing.");
+    quietLeaf = mountQuietLeafPresenter(presenterRoot, displayPreferences, composerActions, () => {
+      if (quietLeaf) render();
+    });
+  }
   function render(): void {
     const activeElement = root.ownerDocument.activeElement as HTMLElement | null;
     continuityFocus = continuityEditor?.element.contains(activeElement) ? activeElement : null;
@@ -525,7 +641,7 @@ export function mountStoryPlayerPage(
     const currentStateLocked = currentStateReloadLocked || currentStateStale;
     continuityEditor?.setDisabled(currentStateLocked);
     retryControl?.removeEventListener("click", onRetry);
-    renderStoryPlayerView(root, {
+    const state: StoryPlayerViewState = {
       route,
       ui: ui.get(),
       campaigns,
@@ -543,14 +659,57 @@ export function mountStoryPlayerPage(
       about,
       activityRecords: tools.activity(),
       illustrations: illustrations.get()
-    });
+    };
     const activeCampaign = projection.campaign;
-    const canWriteCampaign = activeCampaign !== null
-      && projection.generation === null;
+    const canWriteCampaign = canWriteCurrentCampaign();
+    shell.setStoryContext(activeCampaign?.id ?? null);
+    if (selectedUiImplementation === "web-awesome" && quietLeaf) {
+      const main = root.querySelector<HTMLElement>('main[data-page="story-player"]');
+      const commandRow = root.querySelector<HTMLElement>(".story-command-row");
+      const spine = root.querySelector<HTMLElement>(".story-campaign-spine");
+      const illustration = root.querySelector<HTMLElement>(".story-illustration-wing");
+      if (!main || !commandRow || !spine || !illustration) throw new Error("The Quiet Leaf Story interface could not be initialized.");
+      let dialogSlot = root.querySelector<HTMLElement>("[data-story-dialog-slot]");
+      if (!dialogSlot) {
+        dialogSlot = root.ownerDocument.createElement("section");
+        dialogSlot.dataset.storyDialogSlot = "";
+        main.append(dialogSlot);
+      }
+      main.setAttribute("aria-busy", String(state.ui.phase === "loading"));
+      commandRow.hidden = true;
+      commandRow.replaceChildren();
+      spine.replaceChildren();
+      illustration.replaceChildren();
+      dialogSlot.replaceChildren(...renderStoryDialogs(root.ownerDocument, state));
+      quietLeaf.render(state, {
+        canContinue: canWriteCampaign,
+        canRetry: canWriteCampaign && projection.turns.some((turn) => turn.turnNumber === activeCampaign?.activeTurnNumber)
+      });
+    } else {
+      renderStoryPlayerView(root, state);
+    }
     const editState = toolsDisclosure?.querySelector<HTMLButtonElement>("[data-tool-action='edit-campaign-state']");
-    if (editState) editState.disabled = !canWriteCampaign;
+    if (editState) editState.disabled = !canEditCurrentState();
     const selectedTurnNumber = ui.get().viewTurnNumber ?? projection.campaign?.activeTurnNumber ?? null;
     const selectedTurn = selectedTurnNumber === null ? null : projection.turns.find((turn) => turn.turnNumber === selectedTurnNumber) ?? null;
+    if (selectedUiImplementation === "web-awesome") {
+      shell.setCampaignCommands([
+        { id: "open-world-setup", label: "Current World Setup", disabled: activeCampaign === null },
+        { id: "edit-campaign-state", label: "Edit Campaign State", disabled: !canEditCurrentState() },
+        { id: "open-campaign-history", label: "Turn History & State", disabled: activeCampaign === null },
+        { id: "open-activity", label: "Activity Log", disabled: activeCampaign === null },
+        { id: "open-about", label: "About", disabled: activeCampaign === null },
+        { id: "export-markdown", label: "Export Markdown", disabled: activeCampaign === null },
+        { id: "export-html", label: "Export HTML", disabled: activeCampaign === null },
+        { id: "export-pdf", label: "Print PDF + images", disabled: activeCampaign === null },
+        { id: "show-turn-artwork", label: "Show turn artwork", disabled: !activeCampaign || !selectedTurn },
+        { id: "hide-turn-artwork", label: "Hide turn artwork", disabled: !activeCampaign || !selectedTurn },
+        { id: "reset-turn-artwork", label: "Reset turn artwork", disabled: !activeCampaign || !selectedTurn }
+      ], (id) => {
+        runCampaignCommand(id);
+        root.querySelector<HTMLElement>(".app-shell-campaign-menu wa-button")?.focus();
+      });
+    }
     if (typeof composition.illustrations.config === "function" && projection.campaign && selectedTurn) {
       const requestKey = `${projection.campaign.id}:${selectedTurn.id}`;
       if (requestKey !== illustrationRequestKey) {
@@ -577,11 +736,7 @@ export function mountStoryPlayerPage(
     for (const control of root.querySelectorAll<HTMLElement>("[data-action='open-complete-history']")) {
       control.addEventListener("click", (event) => {
         event.stopPropagation();
-        invalidateInspection();
-        historyDialogOpener = "history";
-        focusHistoryDialog = true;
-        ui.setActiveDialog("history");
-        void history.openCompleteHistory().catch(() => undefined);
+        openStoryHistory(control);
       });
     }
     for (const control of root.querySelectorAll<HTMLElement>("[data-action='retry-complete-history']")) {
@@ -619,7 +774,7 @@ export function mountStoryPlayerPage(
           const requestedCampaignId = projection.campaign?.id;
           const requestToken = ++inspectionRequestToken;
           if (control.closest("[data-story-reader]")) {
-            historyDialogOpener = "inspect";
+            historyDialogOpener = historyOpener(control);
             focusHistoryDialog = true;
             ui.setActiveDialog("history");
           }
@@ -669,13 +824,7 @@ export function mountStoryPlayerPage(
     }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='retry-latest-generation']")) {
       control.addEventListener("click", () => {
-        if (projection.generation !== null) return;
-        const campaign = projection.campaign;
-        const latest = campaign === null ? null : projection.turns.find((turn) => turn.turnNumber === campaign.activeTurnNumber) ?? null;
-        if (!latest) return;
-        replacementTurnId = latest.id;
-        ui.restoreComposerDraft(latest.action);
-        focusDraft();
+        prepareRetryTurn();
       });
     }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='undo-latest']")) {
@@ -793,6 +942,7 @@ export function mountStoryPlayerPage(
         }
         tools.closeActiveDialog();
         toolsDisclosure?.querySelector<HTMLElement>("summary")?.focus();
+        restoreToolDialogFocus();
       });
     }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-input-mode]")) {
@@ -832,22 +982,7 @@ export function mountStoryPlayerPage(
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-story-choice]")) {
       control.addEventListener("click", () => {
         const index = Number(control.dataset.choiceIndex);
-        const turn = projection.turns.find((candidate) => candidate.turnNumber === projection.campaign?.activeTurnNumber);
-        if (!Number.isSafeInteger(index) || index < 0 || !turn) return;
-        const current = ui.get();
-        const result = toggleChoiceDraftSelection(
-          { baseText: current.choiceBaseText, selectedIndexes: [...current.choiceSelection] },
-          turn.choices,
-          index,
-          current.draft,
-          12_000
-        );
-        if (result.overLimit) {
-          ui.setMessage("That suggestion would exceed the 12,000-character prompt limit.");
-          return;
-        }
-        ui.setChoiceDraft(result.selection, result.text);
-        if (result.selected && autoSubmitTurnChoices) void submitComposer();
+        chooseStoryChoice(index);
       });
     }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='clear-story-draft']")) {
@@ -891,16 +1026,13 @@ export function mountStoryPlayerPage(
       control.addEventListener("click", () => { void generation.discard(); });
     }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='confirm-intent-action']")) {
-      control.addEventListener("click", () => { void confirmComposerIntent("action"); });
+      control.addEventListener("click", () => { confirmStoryIntent("action"); });
     }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='confirm-intent-scene']")) {
-      control.addEventListener("click", () => { void confirmComposerIntent("scene"); });
+      control.addEventListener("click", () => { confirmStoryIntent("scene"); });
     }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='return-to-story-editor']")) {
-      control.addEventListener("click", () => {
-        ui.setIntentConfirmation(null);
-        focusDraft();
-      });
+      control.addEventListener("click", () => { returnToStoryEditor(); });
     }
     for (const textarea of root.querySelectorAll<HTMLTextAreaElement>("[data-story-illustration-prompt]")) {
       textarea.addEventListener("input", () => { void illustrations.editPrompt(textarea.value); });
@@ -984,6 +1116,9 @@ export function mountStoryPlayerPage(
         if (disposed || nextController.signal.aborted) return;
       }
       ui.setPhase("loaded");
+      if (selectedCampaign?.status === "active" && selectedCampaign.id === sync.campaign.id) {
+        storyResumeStore.remember(selectedCampaign.id);
+      }
     } catch (error) {
       if (disposed || nextController.signal.aborted) return;
       ui.setMessage(errorMessage(error));
@@ -1015,18 +1150,20 @@ export function mountStoryPlayerPage(
     const turnNumber = Number(actionTarget.closest<HTMLElement>("[data-turn-number]")?.dataset.turnNumber);
     if (Number.isSafeInteger(turnNumber) && turnNumber > 0) history.jump(turnNumber);
   };
-  const onToolsClick = (event: Event) => {
-    const target = event.target;
-    if (!target || typeof (target as Element).closest !== "function") return;
-    const action = (target as Element).closest<HTMLElement>("[data-tool-action]")?.dataset.toolAction;
-    if (!action) return;
-    event.preventDefault();
-    if (toolsDisclosure) {
-      toolsDisclosure.open = false;
-      if (action === "export-markdown" || action === "export-html" || action === "export-pdf") {
-        toolsDisclosure.querySelector<HTMLElement>("summary")?.focus();
-      }
+  const runCampaignCommand = (action: string): void => {
+    if (disposed) return;
+    const campaign = projection.campaign;
+    const turnNumber = ui.get().viewTurnNumber ?? campaign?.activeTurnNumber ?? null;
+    const turn = turnNumber === null ? null : projection.turns.find((candidate) => candidate.turnNumber === turnNumber) ?? null;
+    if (selectedUiImplementation === "web-awesome") {
+      toolDialogOpener = root.querySelector<HTMLElement>(".app-shell-campaign-menu wa-button");
     }
+    if (action === "show-turn-artwork" || action === "hide-turn-artwork" || action === "reset-turn-artwork") {
+      if (!campaign || !turn) return;
+      displayPreferences.setTurnArtwork(campaign.id, turn.id, action === "show-turn-artwork" ? true : action === "hide-turn-artwork" ? false : null);
+      return;
+    }
+    if (action === "edit-campaign-state" && !canEditCurrentState()) return;
     if (action === "open-world-setup") {
       tools.openWorldSetup();
       return;
@@ -1055,10 +1192,7 @@ export function mountStoryPlayerPage(
       return;
     }
     if (action === "open-campaign-history") {
-      historyDialogOpener = "history";
-      focusHistoryDialog = true;
-      ui.setActiveDialog("history");
-      void history.openCompleteHistory().catch(() => undefined);
+      openStoryHistory(root.querySelector<HTMLElement>(".app-shell-campaign-menu wa-button"));
       return;
     }
     if (action === "open-activity") {
@@ -1099,6 +1233,18 @@ export function mountStoryPlayerPage(
       });
     }
   };
+  const onToolsClick = (event: Event) => {
+    const target = event.target;
+    if (!target || typeof (target as Element).closest !== "function") return;
+    const action = (target as Element).closest<HTMLElement>("[data-tool-action]")?.dataset.toolAction;
+    if (!action) return;
+    event.preventDefault();
+    toolsDisclosure!.open = false;
+    if (action === "export-markdown" || action === "export-html" || action === "export-pdf") {
+      toolsDisclosure!.querySelector<HTMLElement>("summary")?.focus();
+    }
+    runCampaignCommand(action);
+  };
   root.addEventListener("click", onClick);
   toolsDisclosure?.addEventListener("click", onToolsClick);
   render();
@@ -1120,10 +1266,11 @@ export function mountStoryPlayerPage(
       history.dispose();
       unsubscribeIllustrations();
       illustrations.dispose();
+      quietLeaf?.dispose();
       disposeToolsDisclosure();
       tools.dispose();
       ui.dispose();
-      theme.dispose();
+      shell.dispose();
     }
   };
 }

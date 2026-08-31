@@ -425,7 +425,7 @@ main[data-page="story-player"] :is(button, a, input, select, textarea, summary):
 }
 
 @media (max-width: 1080px) {
-  .app-shell:has(main[data-page="story-player"]) .site-header {
+  .app-shell[data-ui-implementation="native"]:has(main[data-page="story-player"]) .site-header {
     grid-template-columns: minmax(0, 1fr) auto 48px 48px;
     grid-template-rows: minmax(64px, auto) 44px;
     grid-template-areas:
@@ -433,17 +433,17 @@ main[data-page="story-player"] :is(button, a, input, select, textarea, summary):
       "nav nav nav nav";
   }
 
-  .app-shell:has(main[data-page="story-player"]) .brand { grid-area: brand; }
-  .app-shell:has(main[data-page="story-player"]) .site-nav {
+  .app-shell[data-ui-implementation="native"]:has(main[data-page="story-player"]) .brand { grid-area: brand; }
+  .app-shell[data-ui-implementation="native"]:has(main[data-page="story-player"]) .site-nav {
     grid-area: nav;
     display: flex;
     min-width: 0;
     overflow-x: auto;
   }
-  .app-shell:has(main[data-page="story-player"]) .story-link { display: none; }
-  .app-shell:has(main[data-page="story-player"]) .story-campaign-tools { grid-area: tools; }
-  .app-shell:has(main[data-page="story-player"]) .theme-toggle { grid-area: theme; }
-  .app-shell:has(main[data-page="story-player"]) .user-profile-toggle { grid-area: profile; }
+  .app-shell[data-ui-implementation="native"]:has(main[data-page="story-player"]) .story-link { display: none; }
+  .app-shell[data-ui-implementation="native"]:has(main[data-page="story-player"]) .story-campaign-tools { grid-area: tools; }
+  .app-shell[data-ui-implementation="native"]:has(main[data-page="story-player"]) .theme-toggle { grid-area: theme; }
+  .app-shell[data-ui-implementation="native"]:has(main[data-page="story-player"]) .user-profile-toggle { grid-area: profile; }
 }
 
 @media (max-width: 1040px) {
@@ -542,4 +542,43 @@ main[data-page="story-player"] :is(button, a, input, select, textarea, summary):
     animation-duration: 1ms;
     animation-iteration-count: 1;
   }
+}
+
+/* The Core Story presenter owns its leaf, recent-turn rail, and inset art. */
+main[data-ui-implementation="web-awesome"] {
+  gap: 0;
+}
+
+main[data-ui-implementation="web-awesome"] .story-foldout {
+  display: block;
+}
+
+main[data-ui-implementation="web-awesome"] .story-reader {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: clamp(1.25rem, 2vw, 1.5rem);
+  border: 0;
+  background: transparent;
+}
+
+main[data-ui-implementation="web-awesome"] .story-campaign-spine,
+main[data-ui-implementation="web-awesome"] .story-illustration-wing {
+  display: none;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf .story-leaf {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf[data-story-width="full"] :is(
+  .story-narration,
+  .story-background,
+  .story-first-action,
+  .story-state p,
+  .story-recovery p
+) {
+  max-width: none;
 }

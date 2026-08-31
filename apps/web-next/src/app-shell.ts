@@ -1,6 +1,7 @@
 import { initializeThemeControl, resolveThemeMediaQuery } from "./theme-control";
 import type { ThemeController } from "./theme";
-import { initializeUserProfileMenu } from "./user-profile-menu";
+import type { DisplayPreferencesStore } from "./preferences/display-preferences";
+import type { UiImplementation } from "./ui/feature-policy";
 
 export type AppNavigation = "world-library" | "world-editor" | "campaigns" | "story" | "data-transfer" | "setup";
 
@@ -8,6 +9,9 @@ export type AppNavigation = "world-library" | "world-editor" | "campaigns" | "st
 export interface AppShellOptions {
   readonly headerToolsMarkup?: string;
   readonly storyHref?: string;
+  readonly uiImplementation?: UiImplementation;
+  /** A caller-owned store shared across a remount. The shell never disposes it. */
+  readonly displayPreferences?: DisplayPreferencesStore;
 }
 
 function currentAttribute(current: AppNavigation, item: AppNavigation): string {
@@ -30,7 +34,7 @@ export function renderAppShell(
           <span>Infinite Quest <b>Nexus</b></span>
         </a>
         <nav class="site-nav" aria-label="Primary navigation">
-          <a href="/app/"${currentAttribute(currentNavigation, "world-library")}>World Library</a>
+          <a href="/app/worlds"${currentAttribute(currentNavigation, "world-library")}>World Library</a>
           <a href="/app/campaigns"${currentAttribute(currentNavigation, "campaigns")}>Campaigns</a>
           <a href="${storyHref}"${currentAttribute(currentNavigation, "story")}>Story</a>
           <a href="/app/data-transfer"${currentAttribute(currentNavigation, "data-transfer")}>Data Transfer</a>
@@ -41,6 +45,7 @@ export function renderAppShell(
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9" /></svg>
         </a>
         ${options.headerToolsMarkup ?? ""}
+        <span class="app-shell-campaign-menu" data-shell-campaign-menu hidden></span>
         <button class="theme-toggle" type="button" aria-label="Use dark theme" title="Use dark theme">
           <svg class="theme-icon theme-icon-sun" viewBox="0 0 24 24" aria-hidden="true">
             <circle cx="12" cy="12" r="3.5" />
@@ -53,6 +58,7 @@ export function renderAppShell(
         <button class="user-profile-toggle" type="button" aria-label="User profile and settings" title="User profile and settings">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm-7 8a7 7 0 0 1 14 0" /></svg>
         </button>
+        <span class="app-shell-profile-menu" data-shell-profile-menu hidden></span>
       </header>
       <dialog class="user-profile-dialog" aria-labelledby="user-profile-title">
         <form method="dialog">
@@ -88,7 +94,6 @@ export function renderAppShell(
       </footer>
     </div>
   `;
-  initializeUserProfileMenu(root);
 }
 
 export function initializeAppTheme(root: HTMLElement): ThemeController {

@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@awesome.me/webawesome": "3.12.0",
     "@infinite-quest/client-core": "workspace:*",
     "@infinite-quest/client-web": "workspace:*"
   },

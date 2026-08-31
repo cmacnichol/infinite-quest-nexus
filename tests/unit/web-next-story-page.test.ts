@@ -204,6 +204,45 @@ afterEach(() => {
 });
 
 describe("Story Player page shell", () => {
+  it.each(["native", "web-awesome"] as const)("edits current state from a historical reader in %s without enabling story submission", async (uiImplementation) => {
+    const page = fixture();
+    const base = historicalState(7, "The observatory waits.");
+    const loaded = sync({ campaign: { ...sync().campaign, activeTurnNumber: 7 }, activeTurnNumber: 7, turns: turnWindow([6, 7]) });
+    const state = vi.fn().mockResolvedValue(base);
+    const updateState = vi.fn().mockResolvedValue({ ...base, revision: 5, scratchpad: "Current correction from an older view." });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 6 }, composition({
+      syncStatus: vi.fn().mockResolvedValue(loaded), state, updateState
+    }), { uiImplementation });
+    await settle();
+
+    if (uiImplementation === "web-awesome") {
+      const command = page.root.querySelector<HTMLElement>("wa-dropdown-item[value='edit-campaign-state']");
+      expect(command).not.toBeNull();
+      expect(command?.hasAttribute("disabled")).toBe(false);
+      expect(page.root.querySelector("[data-continue-story]")?.hasAttribute("disabled")).toBe(true);
+      command?.closest("wa-dropdown")?.dispatchEvent(new page.window.CustomEvent("wa-select", {
+        detail: { item: { value: "edit-campaign-state" } }
+      }));
+    } else {
+      const command = page.root.querySelector<HTMLButtonElement>("[data-tool-action='edit-campaign-state']");
+      expect(command).not.toBeNull();
+      expect(command?.disabled).toBe(false);
+      command?.click();
+    }
+    await vi.waitFor(() => expect(page.root.querySelector("[data-scratchpad]")).not.toBeNull());
+    const scratchpad = page.root.querySelector<HTMLTextAreaElement>("[data-scratchpad]")!;
+    scratchpad.value = "Current correction from an older view.";
+    scratchpad.dispatchEvent(new page.window.Event("input", { bubbles: true }));
+    page.root.querySelector<HTMLButtonElement>("[data-action='save-current-state']")?.click();
+    await vi.waitFor(() => expect(updateState).toHaveBeenCalledOnce());
+    expect(state).toHaveBeenCalledWith(campaignId, undefined, undefined);
+    expect(updateState).toHaveBeenCalledWith(campaignId, expect.objectContaining({
+      expectedTurnNumber: 7, effectiveTurnNumber: 7, expectedRevision: 4,
+      scratchpad: "Current correction from an older view."
+    }), undefined);
+    mounted.dispose();
+  });
+
   it("requires a successful reload after a state conflict and preserves the draft on cancelled or failed reloads", async () => {
     const page = fixture();
     const base = historicalState(7, "The observatory waits.");
@@ -518,6 +557,48 @@ describe("Story Player page shell", () => {
     expect(styles).toMatch(/\.story-foldout\s*\{[\s\S]*grid-template-areas: "spine reader illustration";/u);
     expect(styles).toMatch(/:focus-visible/u);
     expect(styles).toMatch(/var\(--accent\)/u);
+    mounted.dispose();
+  });
+
+  it("remembers an active campaign only after its current Story turn loads", async () => {
+    const page = fixture();
+    const resume = { read: vi.fn(() => null), remember: vi.fn(), forget: vi.fn() };
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 1 }, activeTurnNumber: 1, turns: turnWindow([1])
+    });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: null }, composition({
+      syncStatus: vi.fn().mockResolvedValue(loaded)
+    }), { storyResumeStore: resume });
+    await settle();
+
+    expect(resume.remember).toHaveBeenCalledWith(campaignId);
+    mounted.dispose();
+  });
+
+  it("does not remember a Story route when its requested historical turn is unavailable", async () => {
+    const page = fixture();
+    const resume = { read: vi.fn(() => null), remember: vi.fn(), forget: vi.fn() };
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 1 }, activeTurnNumber: 1, turns: turnWindow([])
+    });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({
+      syncStatus: vi.fn().mockResolvedValue(loaded)
+    }), { storyResumeStore: resume });
+    await settle();
+
+    expect(resume.remember).not.toHaveBeenCalled();
+    mounted.dispose();
+  });
+
+  it("does not remember an archived selected campaign", async () => {
+    const page = fixture();
+    const resume = { read: vi.fn(() => null), remember: vi.fn(), forget: vi.fn() };
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: null }, composition({
+      list: vi.fn().mockResolvedValue({ campaigns: [campaignSummary({ status: "archived" })] })
+    }), { storyResumeStore: resume });
+    await settle();
+
+    expect(resume.remember).not.toHaveBeenCalled();
     mounted.dispose();
   });
 

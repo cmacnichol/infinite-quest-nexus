@@ -13,6 +13,7 @@ COPY vitest.integration.config.ts ./vitest.integration.config.ts
 COPY vitest.system-archive-e2e.config.ts ./vitest.system-archive-e2e.config.ts
 COPY pnpm-lock.yaml ./pnpm-lock.yaml
 RUN pnpm install --frozen-lockfile
+ARG VITE_UI_COMPONENTS
 RUN pnpm build
 
 FROM build AS production-dependencies

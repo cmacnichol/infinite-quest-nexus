@@ -1,0 +1,161 @@
+.story-artwork-plate {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--rule-strong);
+  background: var(--surface-entry);
+}
+
+.story-artwork-plate > * {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+}
+
+.story-artwork-plate img {
+  display: block;
+  width: 100%;
+  height: auto;
+  object-fit: cover;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-artwork .story-artwork-plate {
+  overflow: visible;
+  background: var(--surface-inverse);
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-artwork .story-artwork-plate :is(
+  .story-illustration-caption,
+  .story-illustration-status,
+  .story-illustration-provenance,
+  .story-illustration-prompt-label
+) {
+  color: var(--text-inverse);
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-artwork .story-artwork-plate .story-illustration-content {
+  gap: 0.875rem;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-artwork .story-artwork-plate :is(
+  .story-illustration-status,
+  .story-illustration-provenance,
+  .story-illustration-prompt-label
+) {
+  margin-inline: 0.875rem;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-artwork .story-artwork-plate .story-illustration-caption {
+  margin: 0;
+  padding: 0 0.875rem 0.875rem;
+  font: 400 0.82rem / 1.5 "Geologica", sans-serif;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-artwork .story-artwork-plate .story-artwork-visible {
+  aspect-ratio: 29 / 27;
+  overflow: hidden;
+  background: var(--surface-muted);
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-artwork .story-artwork-plate .story-artwork-visible img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-artwork .story-artwork-plate .story-artwork-details {
+  border-top: 1px solid var(--rule-strong);
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-artwork .story-artwork-plate .story-artwork-details > summary {
+  min-height: var(--control-min-height);
+  display: flex;
+  align-items: center;
+  padding: 0 0.875rem;
+  color: var(--text-inverse);
+  cursor: pointer;
+  font: 600 0.72rem / 1 "Chakra Petch", sans-serif;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-artwork .story-artwork-plate .story-artwork-details > summary:hover {
+  color: var(--accent);
+  background: var(--surface-inverse);
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-artwork .story-artwork-plate .story-artwork-details > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -3px;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-artwork .story-artwork-plate .story-illustration-navigation,
+main[data-ui-implementation="web-awesome"] .quiet-leaf-artwork .story-artwork-plate .story-artwork-details > button {
+  margin-inline: 0.875rem;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-artwork .story-artwork-plate .story-illustration-navigation {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.375rem;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-artwork .story-artwork-plate :is(
+  .story-illustration-navigation button,
+  .story-artwork-details > button
+) {
+  min-height: var(--control-min-height);
+  border: 1px solid var(--rule-strong);
+  border-radius: 0;
+  color: var(--text-inverse);
+  background: transparent;
+  font: 600 0.72rem / 1.2 "Chakra Petch", sans-serif;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-artwork .story-artwork-plate :is(
+  .story-illustration-navigation button,
+  .story-artwork-details > button
+):hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--surface-inverse);
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-artwork .story-artwork-plate :is(
+  .story-illustration-navigation button,
+  .story-artwork-details > button
+):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-artwork .story-artwork-plate :is(
+  .story-illustration-navigation button,
+  .story-artwork-details > button
+):disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-artwork .story-artwork-plate .story-illustration-prompt {
+  width: calc(100% - 1.75rem);
+  min-height: 6rem;
+  margin: 0 0.875rem;
+  padding: 0.625rem 0.75rem;
+  border-color: var(--rule-strong);
+  border-radius: 0;
+  color: var(--text-inverse);
+  background: transparent;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-artwork .story-artwork-plate .story-illustration-prompt:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-artwork .story-artwork-plate .story-illustration-figure img {
+  aspect-ratio: auto;
+  max-height: none;
+  object-fit: contain;
+}

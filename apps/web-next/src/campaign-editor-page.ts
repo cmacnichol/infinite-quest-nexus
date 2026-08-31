@@ -1,4 +1,4 @@
-import { initializeAppTheme, renderAppShell } from "./app-shell";
+import { mountAppShell } from "./app-shell-lifecycle";
 import { buildCurrentStateUpdate, createCampaignContinuityDraft, formatChronicleRetrievalAudit, hasCampaignContinuityChanges } from "@infinite-quest/client-core";
 import type { CampaignRuntimeStateResponse, CampaignRuntimeStateUpdate, CampaignSyncStatus } from "@infinite-quest/contracts";
 import { campaignApi, CampaignEditorApiError, loadCampaign, loadCampaigns, type CampaignSummary } from "./campaign-editor-api";
@@ -301,8 +301,7 @@ function parseJsonField(form: HTMLFormElement, name: string, label: string): unk
 }
 
 export function mountCampaignEditorPage(root: HTMLElement, route: CampaignRoute): MountedPage {
-  renderAppShell(root, route.campaignId ? `<main id="main-content"><p class="campaign-loading">Loading campaign…</p></main>` : campaignListMarkup(), "campaigns");
-  let theme = initializeAppTheme(root); const controller = new AbortController(); let disposed = false; let campaign: CampaignSummary | null = null; let transferPreview: JsonRecord | null = null; let chronicleConfig: JsonRecord = {}; let chronicleProviders: ProviderSummary[] = []; let chronicleOperationActive = false; let stateBase: CampaignRuntimeStateResponse | null = null; let continuityEditor: CampaignContinuityEditor | null = null; let stateGenerationLocked = false; let stateConflictLocked = false; let stateReloadInFlight = false; let stateSaveInFlight = false; let stateSessionId = 0;
+  let shell = mountAppShell(root, route.campaignId ? `<main id="main-content"><p class="campaign-loading">Loading campaign…</p></main>` : campaignListMarkup(), "campaigns"); const controller = new AbortController(); let disposed = false; let campaign: CampaignSummary | null = null; let transferPreview: JsonRecord | null = null; let chronicleConfig: JsonRecord = {}; let chronicleProviders: ProviderSummary[] = []; let chronicleOperationActive = false; let stateBase: CampaignRuntimeStateResponse | null = null; let continuityEditor: CampaignContinuityEditor | null = null; let stateGenerationLocked = false; let stateConflictLocked = false; let stateReloadInFlight = false; let stateSaveInFlight = false; let stateSessionId = 0;
   const setStateFormBusy = (form: HTMLFormElement, busy: boolean) => {
     form.setAttribute("aria-busy", String(busy));
     form.querySelectorAll<HTMLButtonElement | HTMLTextAreaElement | HTMLInputElement | HTMLSelectElement>("button, textarea, input, select")
@@ -395,7 +394,7 @@ export function mountCampaignEditorPage(root: HTMLElement, route: CampaignRoute)
     message(`${label} completed. Current compatible coverage is shown below.`);
   }
   async function showSection(): Promise<void> {
-    if (!route.campaignId) return; campaign=await loadCampaign(route.campaignId,controller.signal); if(disposed)return; theme.dispose(); renderAppShell(root,shellMarkup(campaign,route.section),"campaigns"); theme=initializeAppTheme(root); const target=root.querySelector<HTMLElement>("#campaign-section")!;
+    if (!route.campaignId) return; campaign=await loadCampaign(route.campaignId,controller.signal); if(disposed)return; shell.dispose(); shell=mountAppShell(root,shellMarkup(campaign,route.section),"campaigns"); const target=root.querySelector<HTMLElement>("#campaign-section")!;
     const loadProviders = async () => { const response=record(await campaignApi.general("/api/v1/providers",controller.signal)); return (Array.isArray(response.providers)?response.providers:[]).map(record).filter((value)=>typeof value.id==="string"&&typeof value.name==="string"&&typeof value.providerRole==="string"&&typeof value.providerType==="string") as ProviderSummary[]; };
     if(route.section==="overview") target.innerHTML=overviewMarkup(campaign,await loadProviders());
     else if(route.section==="character") target.innerHTML=characterMarkup(record(await campaignApi.get(campaign.id,"/character-profile",controller.signal)));
@@ -437,5 +436,5 @@ export function mountCampaignEditorPage(root: HTMLElement, route: CampaignRoute)
     });}catch(error){const copy=error instanceof Error?error.message:String(error);message(copy,true);if(feedback){feedback.textContent=copy;feedback.dataset.state="error";}}});
   }
   (route.campaignId?showSection():showList()).catch((error)=>{const main=root.querySelector("#main-content");if(main)main.innerHTML=`<section class="campaign-failure"><h1>Campaign editor unavailable</h1><p>${text(error instanceof Error?error.message:error)}</p><a href="/nexus/#campaigns">Open legacy campaign management</a></section>`;});
-  return {dispose(){disposed=true;controller.abort();theme.dispose();}};
+  return {dispose(){disposed=true;controller.abort();shell.dispose();}};
 }

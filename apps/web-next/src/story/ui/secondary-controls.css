@@ -1,0 +1,54 @@
+/* Quiet Leaf's native secondary controls stay project-owned beside Core elements. */
+main[data-ui-implementation="web-awesome"] :is(
+  .quiet-leaf-intent-confirmation__actions button,
+  .quiet-leaf-composer-footer button,
+  .quiet-leaf-history button,
+  .quiet-leaf .story-reader-toolbar button,
+  .quiet-leaf .story-turn-record-actions button
+) {
+  min-width: var(--control-min-height);
+  min-height: var(--control-min-height);
+  border: 1px solid var(--rule-strong);
+  border-radius: 0;
+  color: var(--text-primary);
+  background: var(--surface-entry);
+  font: 600 0.75rem / 1.1 "Chakra Petch", sans-serif;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+main[data-ui-implementation="web-awesome"] :is(
+  .quiet-leaf-intent-confirmation__actions button,
+  .quiet-leaf-composer-footer button,
+  .quiet-leaf-history button,
+  .quiet-leaf .story-reader-toolbar button,
+  .quiet-leaf .story-turn-record-actions button
+):hover:not(:disabled) {
+  background: var(--surface-entry-hover);
+}
+
+main[data-ui-implementation="web-awesome"] :is(
+  .quiet-leaf-intent-confirmation__actions button,
+  .quiet-leaf-composer-footer button,
+  .quiet-leaf-history button,
+  .quiet-leaf .story-reader-toolbar button,
+  .quiet-leaf .story-turn-record-actions button
+):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+main[data-ui-implementation="web-awesome"] :is(
+  .quiet-leaf-intent-confirmation__actions button,
+  .quiet-leaf-composer-footer button,
+  .quiet-leaf-history button,
+  .quiet-leaf .story-reader-toolbar button,
+  .quiet-leaf .story-turn-record-actions button
+):disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-composer-history {
+  color: var(--text-primary) !important;
+}

@@ -41,6 +41,24 @@ Swarm services must define health checks, resource expectations, restart behavio
 
 Compose and Swarm must use the same schema migrations, initial-user bootstrap, provider configuration, job semantics, and API contracts. Add deployment smoke tests that start the two-container Compose environment, wait for PostgreSQL and application readiness, verify migrations and initial-user ownership, and exercise one database-backed API operation. Validate the Swarm stack configuration separately even when CI cannot launch a full multi-node swarm.
 
+### Replacement Story UI build selection and rollback
+
+`VITE_UI_COMPONENTS` is a Docker **build argument** consumed while Vite compiles the replacement Story static bundle. It is not a runtime service setting: changing a container or server environment after image creation cannot switch the already-built bundle. The current application default remains native until separately approved release gates are complete.
+
+Build a native rollback image without starting a service, changing a database, or removing browser preference keys:
+
+```powershell
+docker build --build-arg VITE_UI_COMPONENTS=native -t infinitequest-nexus:ui-native .
+```
+
+For Compose image creation only:
+
+```powershell
+docker compose build --build-arg VITE_UI_COMPONENTS=native infinitequest-app
+```
+
+Both commands create images only. Deploying either image requires separate approval. A Swarm update must use a prebuilt, tested image; do not rely on a runtime environment value to choose the renderer.
+
 Use structured logs with correlation IDs for campaign, generation job, model request, and accepted turn. Record prompt size, retrieved-memory identifiers, context utilization, model and endpoint identity, recovery attempts, validation results, and latency without logging credentials, private reasoning, or unnecessary sensitive story content.
 
 Database migrations must be ordered, repeatable, reviewed, and safe for the deployed application version. Prefer backward-compatible expand/contract changes so rolling API replicas can coexist. Applied online migrations are automatic; destructive or downtime-requiring `.maintenance.sql` migrations must remain exceptional and require an explicit operator opt-in on an existing database. Back up authoritative database data and test restoration. Treat embeddings and summaries as rebuildable unless operational requirements later make their backup worthwhile.

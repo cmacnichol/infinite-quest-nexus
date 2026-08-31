@@ -1,0 +1,65 @@
+main[data-ui-implementation="web-awesome"] .story-draft-field {
+  display: grid;
+  grid-template-areas:
+    "field clear"
+    "help help"
+    "count count";
+  grid-template-columns: minmax(0, 1fr) max-content;
+  gap: 0.5rem 0.75rem;
+  min-width: 0;
+}
+
+main[data-ui-implementation="web-awesome"] .story-draft-field wa-textarea {
+  display: block;
+  grid-area: field;
+  width: 100%;
+}
+
+main[data-ui-implementation="web-awesome"] .story-draft-field wa-textarea::part(textarea) {
+  min-height: var(--story-draft-min-height, 132px);
+  max-height: none;
+}
+
+main[data-ui-implementation="web-awesome"] .story-draft-field wa-textarea::part(textarea-wrapper) {
+  min-height: var(--story-draft-min-height, 132px);
+}
+
+main[data-ui-implementation="web-awesome"] .story-draft-field .story-clear-draft {
+  position: static;
+  grid-area: clear;
+  align-self: end;
+  min-width: 4.75rem;
+  min-height: var(--control-min-height, 44px);
+  padding: 0 0.75rem;
+  border: 1px solid var(--rule-strong);
+  border-radius: 0;
+  color: var(--text-primary);
+  background: var(--surface-entry);
+  font: 600 0.75rem / 1 "Chakra Petch", sans-serif;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+main[data-ui-implementation="web-awesome"] .story-draft-field .story-clear-draft:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--surface-entry-hover);
+}
+
+main[data-ui-implementation="web-awesome"] .story-draft-field .story-clear-draft:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+main[data-ui-implementation="web-awesome"] .story-draft-field .story-clear-draft:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+main[data-ui-implementation="web-awesome"] .story-draft-field .story-draft-help {
+  grid-area: help;
+}
+
+main[data-ui-implementation="web-awesome"] .story-draft-field .story-draft-count {
+  grid-area: count;
+}
