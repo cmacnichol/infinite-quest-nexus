@@ -1,0 +1,45 @@
+.story-choice-controls {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.story-choice-controls .story-choices__inline,
+.story-choice-controls .story-choices__dialog-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+  gap: 0.5rem;
+}
+
+.story-choice-controls wa-button {
+  min-width: 0;
+}
+
+.story-choice-controls wa-button::part(button) {
+  width: 100%;
+  min-height: var(--control-min-height);
+  border-radius: 0;
+  white-space: normal;
+  text-align: left;
+}
+
+.story-choice-controls wa-button[aria-pressed="true"]::part(button) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.story-choices__expand::part(button) {
+  justify-content: center;
+  text-align: center;
+}
+
+.story-choices__dialog-body {
+  display: grid;
+  gap: 0.75rem;
+}
+
+@media (max-width: 720px) {
+  .story-choice-controls .story-choices__inline,
+  .story-choice-controls .story-choices__dialog-grid {
+    grid-template-columns: 1fr;
+  }
+}
