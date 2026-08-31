@@ -1,0 +1,20 @@
+.story-artwork-plate {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--rule-strong);
+  background: var(--surface-entry);
+}
+
+.story-artwork-plate > * {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+}
+
+.story-artwork-plate img {
+  display: block;
+  width: 100%;
+  height: auto;
+  object-fit: cover;
+}
