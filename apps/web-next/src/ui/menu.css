@@ -1,0 +1,12 @@
+.command-menu::part(menu) {
+  border: 1px solid var(--rule-strong);
+  border-radius: 0;
+}
+
+.command-menu__trigger {
+  white-space: nowrap;
+}
+
+.command-menu__item {
+  min-inline-size: 12rem;
+}
