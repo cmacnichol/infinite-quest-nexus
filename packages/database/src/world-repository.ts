@@ -1326,11 +1326,21 @@ function createPostgresCampaignRepository(
            UNION ALL
            SELECT 'memory' AS kind FROM chronicle_jobs
             WHERE campaign_id = $1 AND owner_user_id = $2 AND status IN ('queued','running')
+           UNION ALL
+           SELECT 'export' AS kind FROM portable_export_artifacts
+            WHERE campaign_id = $1 AND owner_user_id = $2 AND status <> 'cleaned'
          ) work GROUP BY kind ORDER BY kind`,
         [scope.campaignId, scope.ownerUserId]
       );
       const blockers = active.rows.map(({ kind, count }) => `${kind}:${Number(count)}`);
       if (blockers.length > 0) return failure("deletion_blocked", { campaignId: scope.campaignId, blockers });
+      // Completed export delivery metadata must not retain the campaign forever.
+      // The database guard also requires its filesystem journal to be cleaned.
+      await client.query(
+        `DELETE FROM portable_export_artifacts
+          WHERE campaign_id = $1 AND owner_user_id = $2 AND status = 'cleaned'`,
+        [scope.campaignId, scope.ownerUserId]
+      );
       await client.query(
         "DELETE FROM imports WHERE campaign_id = $1 AND owner_user_id = $2",
         [scope.campaignId, scope.ownerUserId]

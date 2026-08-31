@@ -1669,7 +1669,9 @@ END;
         "0078_system_archive_jobs",
         "0079_resumable_system_archive_uploads",
         "0080_published_asset_derivative_reservations",
-        "0081_campaign_story_context_budget"
+        "0081_campaign_story_context_budget",
+        "0082_turn_zero_state_correction_facts",
+        "0083_cleaned_campaign_export_deletion"
       ]);
 
       const scrubbed = await isolatedPool.query<{ technical_metadata: Record<string, unknown> }>(
@@ -2657,7 +2659,9 @@ END;
         "0078_system_archive_jobs",
         "0079_resumable_system_archive_uploads",
         "0080_published_asset_derivative_reservations",
-        "0081_campaign_story_context_budget"
+        "0081_campaign_story_context_budget",
+        "0082_turn_zero_state_correction_facts",
+        "0083_cleaned_campaign_export_deletion"
       ]);
 
       // Accepted turns and every derived vector survive the upgrade untouched.
