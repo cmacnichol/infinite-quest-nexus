@@ -21,6 +21,13 @@ async function main(): Promise<void> {
 
   const root = document.querySelector<HTMLElement>("#fixture");
   if (!root) throw new Error("Fixture root is missing.");
+  root.dataset.uiImplementation = "web-awesome";
+
+  if (new URLSearchParams(window.location.search).get("catalogue") === "1") {
+    const { mountCatalogue } = await import("./catalogue.js");
+    mountCatalogue(root, new URLSearchParams(window.location.search).get("panel"));
+    return;
+  }
 
   const output = document.createElement("output");
   output.textContent = "ready";

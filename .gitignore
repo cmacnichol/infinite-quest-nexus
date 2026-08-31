@@ -16,6 +16,8 @@ next-env.d.ts
 docs/.vitepress/cache/
 bench/results/
 tmp/
+/.tmp/web-awesome-fixture/
+/test-results/
 
 # Environment files and local secrets
 .env

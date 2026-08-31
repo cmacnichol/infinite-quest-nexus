@@ -8,14 +8,24 @@ export default defineConfig({
   reporter: process.env.CI ? "github" : "line",
   timeout: 30_000,
   expect: { timeout: 8_000 },
+  testMatch: [
+    "web-awesome-core.e2e.test.ts",
+    "quiet-leaf-story.e2e.test.ts",
+    "quiet-leaf-navigation.e2e.test.ts",
+    "quiet-leaf-preferences.e2e.test.ts"
+  ],
   use: {
-    ...devices["Desktop Chrome"],
     baseURL: "http://127.0.0.1:43175",
     headless: true,
     trace: "retain-on-failure"
   },
+  projects: [
+    { name: "chromium", use: { ...devices["Desktop Chrome"] } },
+    { name: "firefox", use: { ...devices["Desktop Firefox"] } },
+    { name: "webkit", use: { ...devices["Desktop Safari"] } }
+  ],
   webServer: {
-    command: "pnpm exec tsx scripts/serve-ui-test-build.ts",
+    command: "node node_modules/tsx/dist/cli.mjs scripts/serve-ui-test-build.ts",
     url: "http://127.0.0.1:43175/health",
     reuseExistingServer: false,
     timeout: 30_000

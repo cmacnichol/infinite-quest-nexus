@@ -1,0 +1,4 @@
+Synthetic artwork for the Quiet Leaf UI test catalogue only. Generated with the built-in image generation tool on 2026-08-30. Not runtime world/campaign content.
+
+Prompt:
+Use case: illustration-story. Asset type: synthetic test-only artwork for a dark navy literary interactive-fiction interface; not a UI mockup. A weathered circular doorway set into a quiet stone wall, a thin warm amber light glowing from the doorway into cool blue-grey evening mist. Atmospheric painterly realism, rich stone texture, restrained cinematic illumination, mysterious but welcoming. Portrait 2:3 composition, doorway centrally framed with a little surrounding masonry, strong visual detail at thumbnail sizes. No people, no words, no text, no symbols, no logo, no border, no watermark. A single original image.

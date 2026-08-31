@@ -1,6 +1,6 @@
 import { parseHTML } from "linkedom";
 import { createCampaignStore } from "../../packages/client-core/src/index.js";
-import type { CampaignSyncStatus } from "../../packages/contracts/src/index.js";
+import { campaignSyncStatusSchema, type CampaignSummary, type CampaignSyncStatus } from "../../packages/contracts/src/index.js";
 import { vi } from "vitest";
 import type { StoryPlayerComposition } from "../../apps/web-next/src/story-player-composition.js";
 
@@ -14,7 +14,9 @@ export function createStoryTestDom(): { document: Document; window: Window & typ
   return { document, window: window as unknown as Window & typeof globalThis, root };
 }
 
-function campaignSummary(turnControlStyle = "action_only") {
+type TurnControlStyle = CampaignSummary["turnControlStyle"];
+
+function campaignSummary(turnControlStyle: TurnControlStyle = "action_only"): CampaignSummary {
   return {
     id: campaignId,
     title: "Campaign under test",
@@ -23,6 +25,7 @@ function campaignSummary(turnControlStyle = "action_only") {
     createdAt: "2026-08-18T00:00:00.000Z",
     updatedAt: "2026-08-18T00:00:00.000Z",
     storyLengthProfile: "standard",
+    storyContextBudgetTokens: 32_000,
     turnControlStyle,
     selectedCharacterId: null,
     selectedCharacterName: null,
@@ -38,13 +41,18 @@ function campaignSummary(turnControlStyle = "action_only") {
   };
 }
 
-function sync(choices: readonly string[] = ["Open the door", "Open the door"]): CampaignSyncStatus {
+function sync(
+  choices: readonly string[] = ["Open the door", "Open the door"],
+  turnControlStyle: TurnControlStyle = "action_only"
+): CampaignSyncStatus {
   const campaign = {
     id: campaignId,
     title: "Campaign under test",
     activeTurnNumber: 1,
     worldVersionId,
     storyLengthProfile: "standard",
+    storyContextBudgetTokens: 32_000,
+    turnControlStyle,
     updatedAt: "2026-08-18T00:00:00.000Z",
     selectedCharacterId: null,
     selectedCharacterName: "",
@@ -53,7 +61,7 @@ function sync(choices: readonly string[] = ["Open the door", "Open the door"]): 
     characterProfileRevision: 0,
     status: "active"
   };
-  return {
+  return campaignSyncStatusSchema.parse({
     ...campaign,
     campaign,
     world: {
@@ -88,15 +96,15 @@ function sync(choices: readonly string[] = ["Open the door", "Open the door"]): 
         id: "66666666-6666-4666-8666-666666666666",
         turnNumber: 1,
         action: "Proceed.", inputMode: "action", inputModeSource: "explicit",
-        narration: "The story continues.", choices, customActionSuggestion: "", imagePrompt: "", imageUrl: null,
+        narration: "The story continues.", choices: [...choices], customActionSuggestion: "", imagePrompt: "", imageUrl: null,
         acceptedAt: "2026-08-18T00:00:00.000Z", chronicleRetrieval: null, reportedCost: null
       }]
     }
-  } as CampaignSyncStatus;
+  });
 }
 
 export function createStoryTestComposition(options: {
-  turnControlStyle?: string;
+  turnControlStyle?: TurnControlStyle;
   autoSubmitTurnChoices?: boolean;
   classifyTurnInput?: ReturnType<typeof vi.fn>;
 } = {}): StoryPlayerComposition {
@@ -107,7 +115,7 @@ export function createStoryTestComposition(options: {
         classifyTurnInput: options.classifyTurnInput ?? vi.fn(),
         turns: vi.fn(), state: vi.fn()
       },
-      generation: { syncStatus: vi.fn().mockResolvedValue(sync()) },
+      generation: { syncStatus: vi.fn().mockResolvedValue(sync(undefined, options.turnControlStyle)) },
       session: { get: vi.fn().mockResolvedValue({ user: { settings: { autoSubmitTurnChoices: options.autoSubmitTurnChoices === true } } }) }
     },
     campaignStore: createCampaignStore(),
