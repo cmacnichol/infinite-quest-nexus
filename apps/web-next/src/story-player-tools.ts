@@ -152,7 +152,8 @@ export function installStoryToolsDisclosure(details: HTMLDetailsElement): () => 
     const target = event.target;
     if (target !== null && !details.contains(target as Node)) close(false);
   };
-  const onFocusOut = () => {
+  const onFocusOut = (event: FocusEvent) => {
+    if (event.relatedTarget !== null && details.contains(event.relatedTarget as Node)) return;
     queueMicrotask(() => {
       if (!disposed && details.open && !details.contains(document.activeElement)) close(false);
     });
@@ -377,7 +378,8 @@ export function createStoryToolsController(options: StoryToolsControllerOptions)
     },
     async saveCurrentState(request) {
       const current = scope();
-      if (!current || !canMutate(current) || !beginMutation()) return null;
+      if (!current || current.generationActive || request.expectedTurnNumber !== current.activeTurnNumber
+        || !beginMutation()) return null;
       try {
         const result = await options.campaigns.updateState(current.campaignId, request, undefined);
         if (disposed || scope()?.campaignId !== current.campaignId) return null;

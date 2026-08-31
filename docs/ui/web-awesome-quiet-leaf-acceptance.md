@@ -4,6 +4,35 @@ Status: opt-in module code implemented, with scoped review limitations below; **
 
 ## Implementation checkpoint
 
+### Main integration — 2026-08-31
+
+PR #140's published checkpoint `7e2c26c` conflicted with the current-state
+editor changes on main. Main through `ffd2e0d` is integrated with a merge
+commit, preserving the published history. The two textual conflicts were
+`campaign-editor-page.ts` and `story-player-page.ts`: the resolution retains
+the shared Core shell lifecycle and the current-state editor's captured
+revision, draft, save/reload, and generation guards.
+
+Current-state editing remains available while reading an older turn, without
+enabling Story submission from that historical view. A two-renderer regression
+failed for that incorrect guard before its repair, then passed for native and
+Core. The catalogue fixture now includes the expanded current-state view fields.
+
+Fresh merged-tree evidence: 160 focused unit tests across 11 suites;
+`pnpm check`; strict browser-fixture TypeScript; Core app and catalogue builds;
+48 Core browser tests passed with 3 intentional native-only skips; and 12
+native navigation/composer browser tests passed. A scoped Terra review found
+no issues in the resolution. The browser plugin independently verified the
+rebuilt compatibility page's named dialog open/close behavior and clean error
+logs. These checks do not replace the live runtime or visual acceptance gates.
+
+The first Core build attempt was blocked by sandbox filesystem permissions;
+the same build passed with repository access. Existing runtime-font and chunk
+size warnings remain. PostgreSQL/provider parity and final container parity
+were not rerun; no database or deployment changed. The opt-in default and
+deferred design remain unchanged. Earlier candidate evidence below is retained
+as historical evidence, not silently attributed to the merged tree.
+
 Code candidate: `839a994f585b6e17f12b7fb09ff186069db8e530` (linked worktree823c).
 Final browser-test correction: `7737e17` (production code unchanged).
 The frozen layout is checkpointed at `a961723`; subsequent changes repair

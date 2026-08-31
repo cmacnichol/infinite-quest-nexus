@@ -565,7 +565,34 @@ integration("PostgreSQL world campaign repository adapters", () => {
     expect((await pool.query("SELECT id FROM campaigns WHERE id = $1", [ownCampaign.created.id])).rowCount).toBe(0);
   });
 
-  it("auto-enables eligible campaign embedding inside the caller-owned creation transaction", async () => {
+  it("defaults new world campaigns to chunked retrieval and shadow comparison without an embedding provider", async () => {
+    const adapters = createAdapters();
+    const world = await createFixtureWorld(adapters, "Retrieval defaults world");
+    const version = await publishFixtureWorld(adapters, world.created.id, world.created.draftRevision, "Retrieval defaults");
+    const existing = await createFixtureCampaign(adapters, version.worldVersionId, "Existing campaign");
+    await pool.query(
+      `INSERT INTO campaign_memory_configs (campaign_id, owner_user_id, retrieval_implementation, retrieval_shadow_enabled)
+       VALUES ($1,$2,'legacy_hybrid',false)
+       ON CONFLICT (campaign_id) DO UPDATE SET retrieval_implementation = 'legacy_hybrid', retrieval_shadow_enabled = false`,
+      [existing.created.id, ownerUserId]
+    );
+
+    const campaign = await createFixtureCampaign(adapters, version.worldVersionId, "New campaign");
+    const configs = await pool.query(
+      `SELECT campaign_id, embedding_enabled, retrieval_implementation, retrieval_shadow_enabled
+         FROM campaign_memory_configs WHERE owner_user_id = $1 ORDER BY campaign_id`,
+      [ownerUserId]
+    );
+    expect(configs.rows).toHaveLength(2);
+    expect(configs.rows).toEqual(expect.arrayContaining([
+      { campaign_id: existing.created.id, embedding_enabled: false, retrieval_implementation: "legacy_hybrid", retrieval_shadow_enabled: false },
+      { campaign_id: campaign.created.id, embedding_enabled: false, retrieval_implementation: "chunked_hybrid", retrieval_shadow_enabled: true }
+    ]));
+    expect((await pool.query("SELECT id FROM chronicle_jobs WHERE campaign_id = $1", [campaign.created.id])).rows).toEqual([]);
+    expect((await pool.query("SELECT id FROM chronicle_chunk_jobs WHERE campaign_id = $1", [campaign.created.id])).rows).toEqual([]);
+  });
+
+  it("auto-enables eligible campaign embedding and queues chunk indexing inside the caller-owned creation transaction", async () => {
     const adapters = createAdapters();
     const provider = await pool.query<{ id: string }>(
       `INSERT INTO provider_profiles (
@@ -588,10 +615,13 @@ integration("PostgreSQL world campaign repository adapters", () => {
       embedding_enabled: boolean;
       embedding_provider_profile_id: string;
       embedding_model: string;
+      retrieval_implementation: string;
+      retrieval_shadow_enabled: boolean;
       job_type: string;
       status: string;
     }>(
       `SELECT config.embedding_enabled, config.embedding_provider_profile_id, config.embedding_model,
+              config.retrieval_implementation, config.retrieval_shadow_enabled,
               job.job_type, job.status
          FROM campaign_memory_configs config
          JOIN chronicle_jobs job
@@ -603,9 +633,21 @@ integration("PostgreSQL world campaign repository adapters", () => {
       embedding_enabled: true,
       embedding_provider_profile_id: providerProfileId,
       embedding_model: "campaign-embedding-model",
+      retrieval_implementation: "chunked_hybrid",
+      retrieval_shadow_enabled: true,
       job_type: "embed_campaign",
       status: "queued"
     });
+    const chunkJobs = await pool.query(
+      `SELECT owner_user_id, campaign_id, job_type, status FROM chronicle_chunk_jobs WHERE campaign_id = $1`,
+      [campaign.created.id]
+    );
+    expect(chunkJobs.rows).toEqual([{
+      owner_user_id: ownerUserId,
+      campaign_id: campaign.created.id,
+      job_type: "index_memory_chunks_v2",
+      status: "queued"
+    }]);
 
     let rolledBackCampaignId = "";
     await expect(adapters.transaction.command(async (transaction) => {
@@ -624,14 +666,15 @@ integration("PostgreSQL world campaign repository adapters", () => {
       throw new Error("synthetic campaign creation rollback");
     })).rejects.toThrow("synthetic campaign creation rollback");
     expect(rolledBackCampaignId).not.toBe("");
-    const rolledBack = await pool.query<{ campaigns: string; configs: string; jobs: string }>(
+    const rolledBack = await pool.query<{ campaigns: string; configs: string; jobs: string; chunk_jobs: string }>(
       `SELECT
          (SELECT count(*)::text FROM campaigns WHERE id = $1) AS campaigns,
          (SELECT count(*)::text FROM campaign_memory_configs WHERE campaign_id = $1) AS configs,
-         (SELECT count(*)::text FROM chronicle_jobs WHERE campaign_id = $1) AS jobs`,
+         (SELECT count(*)::text FROM chronicle_jobs WHERE campaign_id = $1) AS jobs,
+         (SELECT count(*)::text FROM chronicle_chunk_jobs WHERE campaign_id = $1) AS chunk_jobs`,
       [rolledBackCampaignId]
     );
-    expect(rolledBack.rows[0]).toEqual({ campaigns: "0", configs: "0", jobs: "0" });
+    expect(rolledBack.rows[0]).toEqual({ campaigns: "0", configs: "0", jobs: "0", chunk_jobs: "0" });
   });
 
   it("blocks campaign deletion while durable work remains active", async () => {

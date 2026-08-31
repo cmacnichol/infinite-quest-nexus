@@ -40,6 +40,11 @@ import {
 import { characterLegacyText, effectiveCampaignCharacter } from "../../domain/src/world-characters.js";
 import { containsMechanicsLanguage, sha256, stableStringify } from "../../domain/src/text.js";
 import { formatNarrationParagraphs } from "../../story-engine/src/narration-formatting.js";
+import {
+  preseedAcceptedTurnSnapshotFactIds,
+  remapAcceptedTurnSnapshotFactReferences,
+  remapCorrectionSnapshotFactIds
+} from "./canonical-fact-reference-remapping.js";
 import { readTurnPage } from "./play-loop-read-repository.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import {
@@ -51,7 +56,7 @@ export type CampaignSyncAdapterCollaborators = Readonly<{
   turnPages: BoundedCampaignTurnPagePort;
   memory: Pick<
     MemoryGenerationTransactionPort,
-    "autoEnableCampaignEmbedding" | "enqueueEmbeddingReindex" | "enqueueChunkIndex" | "rebuildCampaignMemories"
+    "autoEnableCampaignEmbedding" | "enqueueEmbeddingReindex" | "enqueueChunkIndex" | "rebuildCampaignMemories" | "applyCampaignStateCorrection"
   >;
 }>;
 
@@ -115,6 +120,7 @@ const branchTurnRowSchema = z.object({
 });
 
 const branchStateEditRowSchema = z.object({
+  id: z.uuid(),
   effectiveTurnNumber: z.number().int().min(0),
   revision: z.number().int().positive(),
   stateSnapshotPrivate: z.record(z.string(), z.unknown())
@@ -235,7 +241,7 @@ function runtimeStateContent(
   const candidate = {
     continuitySummary: source.continuitySummary ?? "",
     openThreads: source.openThreads ?? [],
-    canonicalFacts: canonicalFacts?.length
+    canonicalFacts: canonicalFacts !== undefined
       ? canonicalFacts
       : persistedCanonicalFacts(source.canonicalFacts ?? []),
     scratchpad: source.scratchpad ?? "",
@@ -441,7 +447,7 @@ function createPostgresCampaignStateRepository(
         });
       }
       const effectiveTurnNumber = parsed.effectiveTurnNumber ?? parsed.expectedTurnNumber;
-      if (effectiveTurnNumber > current.activeTurnNumber) {
+      if (effectiveTurnNumber !== current.activeTurnNumber) {
         return failure("active_turn_changed", {
           campaignId: scope.campaignId,
           expectedTurnNumber: effectiveTurnNumber,
@@ -457,37 +463,26 @@ function createPostgresCampaignStateRepository(
       );
       if (activeJob.rowCount) return failure("invalid_transition", { campaignId: scope.campaignId });
 
-      const accepted = effectiveTurnNumber === 0
+      const accepted = current.activeTurnNumber === 0
         ? null
         : await client.query<{ stateSnapshotPrivate: Record<string, unknown> }>(
           `SELECT state_snapshot_private AS "stateSnapshotPrivate"
              FROM turns
             WHERE owner_user_id = $1 AND campaign_id = $2 AND turn_number = $3`,
-          [scope.ownerUserId, scope.campaignId, effectiveTurnNumber]
+          [scope.ownerUserId, scope.campaignId, current.activeTurnNumber]
         );
-      const acceptedSnapshot = effectiveTurnNumber === 0
+      const acceptedSnapshot = current.activeTurnNumber === 0
         ? current.initialStateSnapshot
         : accepted?.rows[0]?.stateSnapshotPrivate;
       if (!acceptedSnapshot || typeof acceptedSnapshot !== "object" || Array.isArray(acceptedSnapshot)) {
         invalidBoundaryData("unavailable", scope);
       }
-      const priorEdit = await loadEffectiveStateEdit(client, scope, effectiveTurnNumber);
-      const exactPriorEdit = priorEdit?.effectiveTurnNumber === effectiveTurnNumber ? priorEdit : null;
+      const priorEdit = await loadEffectiveStateEdit(client, scope, current.activeTurnNumber);
+      const exactPriorEdit = priorEdit?.effectiveTurnNumber === current.activeTurnNumber ? priorEdit : null;
       const targetSnapshot = exactPriorEdit?.stateSnapshotPrivate ?? acceptedSnapshot;
 
-      const persistedFacts = await activeCanonicalFacts(client, scope, effectiveTurnNumber);
-      const priorContent = runtimeStateContent(
-        targetSnapshot,
-        exactPriorEdit && effectiveTurnNumber < current.activeTurnNumber
-          ? undefined
-          : persistedFacts.map((fact) => ({ id: fact.id, content: fact.content })),
-        scope
-      );
-      const existingFacts = exactPriorEdit && effectiveTurnNumber < current.activeTurnNumber
-        ? priorContent.canonicalFacts.flatMap((fact) => fact.id
-          ? [{ id: fact.id, content: fact.content, sourceTurnNumber: effectiveTurnNumber }]
-          : [])
-        : persistedFacts;
+      const persistedFacts = await activeCanonicalFacts(client, scope, current.activeTurnNumber);
+      const existingFacts = persistedFacts;
       const existingById = new Map(existingFacts.map((fact) => [fact.id, fact]));
       const usedIds = new Set<string>();
       const correctedFacts: Array<{ id: string; content: string }> = [];
@@ -508,55 +503,45 @@ function createPostgresCampaignStateRepository(
         correctedFacts.push({ id, content: fact.content });
       }
       const correctedContent = { ...content, canonicalFacts: correctedFacts };
-      const currentContent = effectiveTurnNumber === current.activeTurnNumber
-        ? runtimeStateContent({
-          ...objectValue(targetSnapshot),
-          scratchpad: current.scratchpadPrivate,
-          trackers: current.trackers,
-          rpgStats: current.rpgStats,
-          eventTriggers: current.eventTriggers,
-          pendingEventTriggers: current.pendingEventTriggers
-        }, existingFacts.map((fact) => ({ id: fact.id, content: fact.content })), scope)
-        : priorContent;
+      const currentContent = runtimeStateContent({
+        ...objectValue(targetSnapshot),
+        scratchpad: current.scratchpadPrivate,
+        trackers: current.trackers,
+        rpgStats: current.rpgStats,
+        eventTriggers: current.eventTriggers,
+        pendingEventTriggers: current.pendingEventTriggers
+      }, exactPriorEdit ? undefined : existingFacts.map((fact) => ({ id: fact.id, content: fact.content })), scope);
       const changedFields = (Object.keys(correctedContent) as Array<keyof CampaignRuntimeStateContent>)
         .filter((field) => json(correctedContent[field]) !== json(currentContent[field]));
       if (!changedFields.length) {
-        return success(await loadRuntimeState(client, scope, effectiveTurnNumber));
+        return success(await loadRuntimeState(client, scope));
       }
 
       const nextRevision = current.revision + 1;
       const snapshot = { ...objectValue(targetSnapshot), ...correctedContent };
       const editId = crypto.randomUUID();
-      if (effectiveTurnNumber === current.activeTurnNumber) {
       await client.query(
-          `UPDATE campaign_state
-            SET scratchpad_private = $3, scratchpad_safe_for_prompt = true,
-                trackers = $4, rpg_stats = $5, event_triggers = $6,
-                pending_event_triggers = $7, revision = $8, updated_at = now()
-           WHERE campaign_id = $1 AND owner_user_id = $2`,
-          [
-            scope.campaignId,
-            scope.ownerUserId,
-            correctedContent.scratchpad,
-            json(correctedContent.trackers),
-            json(correctedContent.rpgStats),
-            json(correctedContent.eventTriggers),
-            json(correctedContent.pendingEventTriggers),
-            nextRevision
-          ]
-        );
-        if (current.activeTurnNumber === 0) {
-          await client.query(
-            `UPDATE campaign_state SET initial_state_snapshot = $3
-              WHERE campaign_id = $1 AND owner_user_id = $2`,
-            [scope.campaignId, scope.ownerUserId, json(snapshot)]
-          );
-        }
-      } else {
+        `UPDATE campaign_state
+          SET scratchpad_private = $3, scratchpad_safe_for_prompt = true,
+              trackers = $4, rpg_stats = $5, event_triggers = $6,
+              pending_event_triggers = $7, revision = $8, updated_at = now()
+         WHERE campaign_id = $1 AND owner_user_id = $2`,
+        [
+          scope.campaignId,
+          scope.ownerUserId,
+          correctedContent.scratchpad,
+          json(correctedContent.trackers),
+          json(correctedContent.rpgStats),
+          json(correctedContent.eventTriggers),
+          json(correctedContent.pendingEventTriggers),
+          nextRevision
+        ]
+      );
+      if (current.activeTurnNumber === 0) {
         await client.query(
-          `UPDATE campaign_state SET revision = $3, updated_at = now()
+          `UPDATE campaign_state SET initial_state_snapshot = $3
             WHERE campaign_id = $1 AND owner_user_id = $2`,
-          [scope.campaignId, scope.ownerUserId, nextRevision]
+          [scope.campaignId, scope.ownerUserId, json(snapshot)]
         );
       }
       await client.query(
@@ -580,8 +565,11 @@ function createPostgresCampaignStateRepository(
           campaignId: scope.campaignId,
           worldVersionId: current.worldVersionId
         };
-        await collaborators.memory.rebuildCampaignMemories(client, memoryScope);
-        await enqueueChunkIndexBestEffort(client, collaborators.memory, memoryScope);
+        const memoryChanges = await collaborators.memory.applyCampaignStateCorrection(client, { ...memoryScope, stateEditId: editId });
+        if (memoryChanges.changedMemoryIds.length || memoryChanges.removedMemoryIds.length) {
+          await collaborators.memory.enqueueEmbeddingReindex(client, memoryScope);
+          await collaborators.memory.enqueueChunkIndex(client, memoryScope);
+        }
         await client.query(
           "DELETE FROM model_chains WHERE campaign_id = $1 AND owner_user_id = $2",
           [scope.campaignId, scope.ownerUserId]
@@ -597,7 +585,7 @@ function createPostgresCampaignStateRepository(
           changedFields
         })]
       );
-      return success(await loadRuntimeState(client, scope, effectiveTurnNumber));
+      return success(await loadRuntimeState(client, scope));
     }
   };
 }
@@ -684,7 +672,7 @@ function createPostgresCampaignAuthorityRepository(
       }
 
       const sourceEditsResult = await client.query<Record<string, unknown>>(
-        `SELECT effective_turn_number AS "effectiveTurnNumber", revision,
+        `SELECT id, effective_turn_number AS "effectiveTurnNumber", revision,
                 state_snapshot_private AS "stateSnapshotPrivate"
            FROM campaign_state_edits
           WHERE campaign_id = $1 AND owner_user_id = $2 AND effective_turn_number <= $3
@@ -698,10 +686,7 @@ function createPostgresCampaignAuthorityRepository(
         "unavailable",
         scope
       ));
-      const normalizedStateEdits = sourceEdits.map((edit) => ({
-        revision: edit.revision,
-        stateSnapshotPrivate: normalizeCampaignStateSnapshot(edit.stateSnapshotPrivate)
-      }));
+      const destinationFactIds = new Map<string, string>();
       const targetTurn = sourceTurns.at(-1);
       const targetEdit = [...sourceEdits]
         .reverse()
@@ -756,6 +741,41 @@ function createPostgresCampaignAuthorityRepository(
       );
       const branchCampaignId = branchCampaign.rows[0]?.id;
       if (!branchCampaignId) invalidBoundaryData("unavailable", scope);
+      const copiedTurns = sourceTurns.map((turn) => {
+        const id = crypto.randomUUID();
+        preseedAcceptedTurnSnapshotFactIds(turn.stateSnapshotPrivate, {
+          sourceCampaignId: scope.campaignId,
+          sourceTurnId: turn.id,
+          destinationCampaignId: branchCampaignId,
+          destinationTurnId: id,
+          factIds: destinationFactIds
+        });
+        return {
+          sourceId: turn.id,
+          id,
+          stateSnapshotPrivate: turn.stateSnapshotPrivate
+        };
+      });
+      const normalizedStateEdits = sourceEdits.map((edit) => ({
+        sourceId: edit.id,
+        id: crypto.randomUUID(),
+        revision: edit.revision,
+        stateSnapshotPrivate: remapCorrectionSnapshotFactIds(
+          normalizeCampaignStateSnapshot(edit.stateSnapshotPrivate),
+          destinationFactIds,
+          () => crypto.randomUUID()
+        )
+      }));
+      const normalizedTurns = copiedTurns.map((turn) => ({
+        ...turn,
+        stateSnapshotPrivate: remapAcceptedTurnSnapshotFactReferences(turn.stateSnapshotPrivate, {
+          sourceCampaignId: scope.campaignId,
+          sourceTurnId: turn.sourceId,
+          destinationCampaignId: branchCampaignId,
+          destinationTurnId: turn.id,
+          factIds: destinationFactIds
+        })
+      }));
 
       if (source.characterProfile !== null) {
         await client.query(
@@ -795,16 +815,18 @@ function createPostgresCampaignAuthorityRepository(
       if (sourceEdits.length) {
         await client.query(
           `INSERT INTO campaign_state_edits (
-             owner_user_id, campaign_id, effective_turn_number, revision,
+             id, owner_user_id, campaign_id, effective_turn_number, revision,
              state_snapshot_private, changed_fields, created_at
            )
-           SELECT source.owner_user_id, $1, source.effective_turn_number, source.revision,
-                  normalized."stateSnapshotPrivate", source.changed_fields, source.created_at
+            SELECT normalized.id, source.owner_user_id, $1, source.effective_turn_number, source.revision,
+                   normalized."stateSnapshotPrivate", source.changed_fields, source.created_at
              FROM campaign_state_edits source
              JOIN jsonb_to_recordset($5::jsonb) AS normalized(
+               "sourceId" uuid,
+               id uuid,
                revision integer,
                "stateSnapshotPrivate" jsonb
-             ) ON normalized.revision = source.revision
+             ) ON normalized."sourceId" = source.id
             WHERE source.campaign_id = $2
               AND source.owner_user_id = $3
               AND source.effective_turn_number <= $4
@@ -857,15 +879,15 @@ function createPostgresCampaignAuthorityRepository(
       if (parsed.targetTurnNumber > 0) {
         await client.query(
           `INSERT INTO turns (
-             campaign_id, owner_user_id, turn_number, source_turn_id, action,
+             id, campaign_id, owner_user_id, turn_number, source_turn_id, action,
              input_mode, input_mode_source, narration, choices, custom_action_suggestion,
              image_prompt, image_url, mechanics_private, state_snapshot_private,
              model_metadata, import_metadata, accepted_at, created_at
            )
-           SELECT $1, turn.owner_user_id, turn.turn_number, turn.source_turn_id, turn.action,
+           SELECT normalized.id, $1, turn.owner_user_id, turn.turn_number, turn.source_turn_id, turn.action,
                   turn.input_mode, turn.input_mode_source, turn.narration, turn.choices,
                   turn.custom_action_suggestion, turn.image_prompt, turn.image_url,
-                  turn.mechanics_private, turn.state_snapshot_private, turn.model_metadata,
+                 turn.mechanics_private, normalized."stateSnapshotPrivate", turn.model_metadata,
                   turn.import_metadata || jsonb_build_object(
                     'branch',
                     jsonb_build_object(
@@ -882,6 +904,11 @@ function createPostgresCampaignAuthorityRepository(
                   ),
                   turn.accepted_at, turn.created_at
              FROM turns turn
+             JOIN jsonb_to_recordset($6::jsonb) AS normalized(
+               "sourceId" uuid,
+               id uuid,
+               "stateSnapshotPrivate" jsonb
+             ) ON normalized."sourceId" = turn.id
              LEFT JOIN LATERAL (
                SELECT job.operation_kind, job.replacement_turn_id
                  FROM generation_jobs job
@@ -895,7 +922,7 @@ function createPostgresCampaignAuthorityRepository(
             WHERE turn.campaign_id = $2::uuid AND turn.owner_user_id = $3
               AND turn.turn_number <= $4
             ORDER BY turn.turn_number`,
-          [branchCampaignId, scope.campaignId, scope.ownerUserId, parsed.targetTurnNumber, branchId]
+          [branchCampaignId, scope.campaignId, scope.ownerUserId, parsed.targetTurnNumber, branchId, json(normalizedTurns)]
         );
         const correctionCopy = await client.query<{
           sourceCount: number;

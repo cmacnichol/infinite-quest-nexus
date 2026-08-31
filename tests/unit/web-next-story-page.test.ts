@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { parseHTML } from "linkedom";
-import { createCampaignStore, type CampaignStoreController } from "../../packages/client-core/src/index.js";
+import { createCampaignStore, NexusApiError, type CampaignStoreController } from "../../packages/client-core/src/index.js";
 import type { CampaignRuntimeStateResponse, CampaignSyncStatus } from "../../packages/contracts/src/index.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { StoryPlayerComposition } from "../../apps/web-next/src/story-player-composition.js";
@@ -168,6 +168,7 @@ function composition(options: {
   readonly turns?: ReturnType<typeof vi.fn>;
   readonly readableExport?: ReturnType<typeof vi.fn>;
   readonly state?: ReturnType<typeof vi.fn>;
+  readonly updateState?: ReturnType<typeof vi.fn>;
   readonly inspectState?: ReturnType<typeof vi.fn>;
   readonly session?: ReturnType<typeof vi.fn>;
   readonly meta?: ReturnType<typeof vi.fn>;
@@ -181,6 +182,7 @@ function composition(options: {
         readableExport: options.readableExport ?? vi.fn().mockResolvedValue(new Blob(["# Accepted story"])),
         turns: options.turns ?? vi.fn(),
         state: options.state ?? vi.fn(),
+        updateState: options.updateState ?? vi.fn(),
         inspectState: options.inspectState ?? options.state ?? vi.fn()
       },
       generation: { syncStatus: options.syncStatus ?? vi.fn().mockResolvedValue(sync()) },
@@ -202,6 +204,224 @@ afterEach(() => {
 });
 
 describe("Story Player page shell", () => {
+  it.each(["native", "web-awesome"] as const)("edits current state from a historical reader in %s without enabling story submission", async (uiImplementation) => {
+    const page = fixture();
+    const base = historicalState(7, "The observatory waits.");
+    const loaded = sync({ campaign: { ...sync().campaign, activeTurnNumber: 7 }, activeTurnNumber: 7, turns: turnWindow([6, 7]) });
+    const state = vi.fn().mockResolvedValue(base);
+    const updateState = vi.fn().mockResolvedValue({ ...base, revision: 5, scratchpad: "Current correction from an older view." });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 6 }, composition({
+      syncStatus: vi.fn().mockResolvedValue(loaded), state, updateState
+    }), { uiImplementation });
+    await settle();
+
+    if (uiImplementation === "web-awesome") {
+      const command = page.root.querySelector<HTMLElement>("wa-dropdown-item[value='edit-campaign-state']");
+      expect(command).not.toBeNull();
+      expect(command?.hasAttribute("disabled")).toBe(false);
+      expect(page.root.querySelector("[data-continue-story]")?.hasAttribute("disabled")).toBe(true);
+      command?.closest("wa-dropdown")?.dispatchEvent(new page.window.CustomEvent("wa-select", {
+        detail: { item: { value: "edit-campaign-state" } }
+      }));
+    } else {
+      const command = page.root.querySelector<HTMLButtonElement>("[data-tool-action='edit-campaign-state']");
+      expect(command).not.toBeNull();
+      expect(command?.disabled).toBe(false);
+      command?.click();
+    }
+    await vi.waitFor(() => expect(page.root.querySelector("[data-scratchpad]")).not.toBeNull());
+    const scratchpad = page.root.querySelector<HTMLTextAreaElement>("[data-scratchpad]")!;
+    scratchpad.value = "Current correction from an older view.";
+    scratchpad.dispatchEvent(new page.window.Event("input", { bubbles: true }));
+    page.root.querySelector<HTMLButtonElement>("[data-action='save-current-state']")?.click();
+    await vi.waitFor(() => expect(updateState).toHaveBeenCalledOnce());
+    expect(state).toHaveBeenCalledWith(campaignId, undefined, undefined);
+    expect(updateState).toHaveBeenCalledWith(campaignId, expect.objectContaining({
+      expectedTurnNumber: 7, effectiveTurnNumber: 7, expectedRevision: 4,
+      scratchpad: "Current correction from an older view."
+    }), undefined);
+    mounted.dispose();
+  });
+
+  it("requires a successful reload after a state conflict and preserves the draft on cancelled or failed reloads", async () => {
+    const page = fixture();
+    const base = historicalState(7, "The observatory waits.");
+    const refreshed = { ...base, activeTurnNumber: 8, viewedTurnNumber: 8, revision: 5, scratchpad: "The latest saved notes." };
+    const loaded = sync({ campaign: { ...sync().campaign, activeTurnNumber: 7 }, activeTurnNumber: 7, turns: turnWindow([7]) });
+    const state = vi.fn().mockResolvedValueOnce(base).mockRejectedValueOnce(new Error("Offline")).mockResolvedValue(refreshed);
+    const updateState = vi.fn().mockRejectedValueOnce(new NexusApiError("Revision conflict", { statusCode: 409 }))
+      .mockResolvedValue({ ...refreshed, revision: 6 });
+    const confirm = vi.fn(() => false);
+    Object.defineProperty(page.window, "confirm", { configurable: true, value: confirm });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: null }, composition({
+      syncStatus: vi.fn().mockResolvedValueOnce(loaded).mockResolvedValue({ ...loaded,
+        campaign: { ...loaded.campaign, activeTurnNumber: 8 }, activeTurnNumber: 8, turns: turnWindow([7, 8]) }), state, updateState
+    }));
+    await settle();
+    page.document.querySelector<HTMLButtonElement>("[data-tool-action='edit-campaign-state']")!.click();
+    await vi.waitFor(() => expect(page.document.querySelector("[data-scratchpad]")).toBeTruthy());
+    const draft = page.document.querySelector<HTMLTextAreaElement>("[data-scratchpad]")!;
+    draft.value = "Keep this unsaved correction.";
+    draft.dispatchEvent(new page.window.Event("input", { bubbles: true }));
+    const save = () => page.document.querySelector<HTMLButtonElement>("[data-action='save-current-state']")!;
+    const reload = () => page.document.querySelector<HTMLButtonElement>("[data-action='reload-current-state']")!;
+    save().click();
+    await vi.waitFor(() => expect(updateState).toHaveBeenCalledTimes(1));
+    await settle();
+    expect(save().disabled).toBe(true);
+    expect(page.root.textContent).toContain("Reload before saving");
+    save().click();
+    expect(updateState).toHaveBeenCalledTimes(1);
+    reload().click();
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(state).toHaveBeenCalledTimes(1);
+    expect(draft.value).toBe("Keep this unsaved correction.");
+    confirm.mockReturnValue(true);
+    reload().click();
+    await vi.waitFor(() => expect(state).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(reload().disabled).toBe(false));
+    expect(page.document.querySelector("[data-scratchpad]")).toBe(draft);
+    expect(draft.value).toBe("Keep this unsaved correction.");
+    expect(save().disabled).toBe(true);
+    reload().click();
+    await vi.waitFor(() => expect(save().disabled).toBe(false));
+    expect(page.document.querySelector<HTMLTextAreaElement>("[data-scratchpad]")!.value).toBe(refreshed.scratchpad);
+    save().click();
+    await vi.waitFor(() => expect(updateState).toHaveBeenCalledTimes(2));
+    expect(updateState.mock.calls[1]?.[1]).toMatchObject({ expectedRevision: 5, expectedTurnNumber: 8, effectiveTurnNumber: 8 });
+    mounted.dispose();
+  });
+
+  it("saves the Story continuity editor against its captured current state without JSON list fields", async () => {
+    const page = fixture();
+    const base = historicalState(7, "The observatory waits.");
+    const loaded = sync({ campaign: { ...sync().campaign, activeTurnNumber: 7 }, activeTurnNumber: 7, turns: turnWindow([7]) });
+    const state = vi.fn().mockResolvedValue(base);
+    const updateState = vi.fn().mockResolvedValue({ ...base, revision: 5, scratchpad: "Private correction." });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: null }, composition({
+      syncStatus: vi.fn().mockResolvedValue(loaded), state, updateState
+    }));
+    await settle();
+
+    page.document.querySelector<HTMLButtonElement>("[data-tool-action='edit-campaign-state']")?.click();
+    await vi.waitFor(() => expect(page.document.querySelector("[data-fact-content]")).toBeTruthy());
+    expect(page.document.querySelector("[data-state-field='canonicalFacts']")).toBeNull();
+    const scratchpad = page.document.querySelector<HTMLTextAreaElement>("[data-scratchpad]")!;
+    scratchpad.value = "Private correction.";
+    scratchpad.dispatchEvent(new page.window.Event("input", { bubbles: true }));
+    page.document.querySelector<HTMLButtonElement>("[data-action='save-current-state']")?.click();
+    await vi.waitFor(() => expect(updateState).toHaveBeenCalledTimes(1));
+
+    expect(state).toHaveBeenCalledTimes(1);
+    expect(updateState).toHaveBeenCalledWith(campaignId, expect.objectContaining({
+      scratchpad: "Private correction.",
+      canonicalFacts: base.canonicalFacts,
+      rpgStats: base.rpgStats,
+      expectedTurnNumber: 7,
+      effectiveTurnNumber: 7,
+      expectedRevision: 4
+    }), undefined);
+    mounted.dispose();
+  });
+
+  it("keeps a reopened state editor when an earlier session finishes saving", async () => {
+    const page = fixture();
+    const base = historicalState(7, "The observatory waits.");
+    const loaded = sync({ campaign: { ...sync().campaign, activeTurnNumber: 7 }, activeTurnNumber: 7, turns: turnWindow([7]) });
+    const pendingSave = deferred<CampaignRuntimeStateResponse>();
+    const updateState = vi.fn().mockReturnValue(pendingSave.promise);
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: null }, composition({
+      syncStatus: vi.fn().mockResolvedValue(loaded), state: vi.fn().mockResolvedValue(base), updateState
+    }));
+    Object.defineProperty(page.window, "confirm", { configurable: true, value: vi.fn(() => true) });
+    await settle();
+    page.document.querySelector<HTMLButtonElement>("[data-tool-action='edit-campaign-state']")!.click();
+    await vi.waitFor(() => expect(page.document.querySelector("[data-scratchpad]")).toBeTruthy());
+    const firstDraft = page.document.querySelector<HTMLTextAreaElement>("[data-scratchpad]")!;
+    firstDraft.value = "The first session's correction.";
+    firstDraft.dispatchEvent(new page.window.Event("input", { bubbles: true }));
+    page.document.querySelector<HTMLButtonElement>("[data-action='save-current-state']")!.click();
+    await vi.waitFor(() => expect(updateState).toHaveBeenCalledTimes(1));
+    page.document.querySelector<HTMLButtonElement>("[data-action='close-story-tool-dialog']")!.click();
+    page.document.querySelector<HTMLButtonElement>("[data-tool-action='edit-campaign-state']")!.click();
+    await vi.waitFor(() => expect(page.document.querySelector("[data-scratchpad]")).toBeTruthy());
+    const reopenedDraft = page.document.querySelector<HTMLTextAreaElement>("[data-scratchpad]")!;
+    expect(reopenedDraft).not.toBe(firstDraft);
+    expect(reopenedDraft.disabled).toBe(true);
+
+    pendingSave.resolve({ ...base, revision: 5, scratchpad: firstDraft.value });
+    await vi.waitFor(() => expect(reopenedDraft.disabled).toBe(false));
+    expect(page.document.querySelector("[data-scratchpad]")).toBe(reopenedDraft);
+    expect(reopenedDraft.value).toBe(base.scratchpad);
+    expect(page.document.querySelector("[data-story-tool-dialog]")?.textContent).toContain("revision 4");
+    mounted.dispose();
+  });
+
+  it.each([
+    ["active", (base: CampaignSyncStatus) => ({
+      ...base,
+      pendingGeneration: {
+        id: "55555555-5555-4555-8555-555555555555",
+        status: "generating",
+        action: "Continue",
+        expectedTurnNumber: 8,
+        createdAt: "2026-08-18T00:00:00.000Z",
+        updatedAt: "2026-08-18T00:00:00.000Z",
+        operationKind: "append" as const,
+        replacementTurnId: null
+      }
+    })],
+    ["recoverable", (base: CampaignSyncStatus) => ({
+      ...base,
+      generationRecovery: {
+        id: "55555555-5555-4555-8555-555555555555",
+        status: "recoverable" as const,
+        expectedTurnNumber: 8,
+        attempts: 1,
+        errorCode: "generation_failed",
+        errorMessage: "Story generation could not be completed.",
+        resultTurnId: null,
+        operationKind: "append" as const,
+        replacementTurnId: null
+      }
+    })]
+  ])("locks an open Story state editor for a %s generation update without discarding its draft", async (_, generationUpdate) => {
+    const page = fixture();
+    const campaignStore = createCampaignStore();
+    const base = historicalState(7, "The observatory waits.");
+    const unlocked = sync({ campaign: { ...sync().campaign, activeTurnNumber: 7 }, activeTurnNumber: 7, turns: turnWindow([7]) });
+    const updateState = vi.fn();
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: null }, composition({
+      campaignStore,
+      syncStatus: vi.fn().mockResolvedValue(unlocked),
+      state: vi.fn().mockResolvedValue(base),
+      updateState
+    }));
+    await settle();
+
+    page.document.querySelector<HTMLButtonElement>("[data-tool-action='edit-campaign-state']")?.click();
+    await vi.waitFor(() => expect(page.document.querySelector("[data-scratchpad]")).toBeTruthy());
+    const scratchpad = page.document.querySelector<HTMLTextAreaElement>("[data-scratchpad]")!;
+    scratchpad.value = "Keep this unsaved correction.";
+    scratchpad.dispatchEvent(new page.window.Event("input", { bubbles: true }));
+
+    campaignStore.load(generationUpdate(unlocked));
+    await vi.waitFor(() => expect(page.document.querySelector<HTMLTextAreaElement>("[data-scratchpad]")?.disabled).toBe(true));
+    const lockedSave = page.document.querySelector<HTMLButtonElement>("[data-action='save-current-state']")!;
+    expect(lockedSave.disabled).toBe(true);
+    expect(page.document.querySelector("[data-story-tool-dialog]")?.textContent).toContain("Story generation");
+    expect(page.document.querySelector<HTMLTextAreaElement>("[data-scratchpad]")?.value).toBe("Keep this unsaved correction.");
+    lockedSave.click();
+    await settle();
+    expect(updateState).not.toHaveBeenCalled();
+
+    campaignStore.load(unlocked);
+    await vi.waitFor(() => expect(page.document.querySelector<HTMLTextAreaElement>("[data-scratchpad]")?.disabled).toBe(false));
+    expect(page.document.querySelector<HTMLButtonElement>("[data-action='save-current-state']")?.disabled).toBe(false);
+    expect(page.document.querySelector<HTMLTextAreaElement>("[data-scratchpad]")?.value).toBe("Keep this unsaved correction.");
+    mounted.dispose();
+  });
+
   it("enables Campaign Tools About and renders only shared meta data", async () => {
     const page = fixture();
     const meta = vi.fn().mockResolvedValue({ application: { name: "Infinite Quest Nexus", version: "2026.08", commit: null, builtAt: null } });

@@ -3,6 +3,7 @@ import { parseHTML } from "linkedom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { campaignApi, CampaignEditorApiError, loadCampaign } from "../../apps/web-next/src/campaign-editor-api.js";
 import * as campaignEditorPageModule from "../../apps/web-next/src/campaign-editor-page.js";
+import { mountCampaignEditorPage } from "../../apps/web-next/src/campaign-editor-page.js";
 import { CAMPAIGN_SECTIONS, campaignEditorPath, campaignRouteFromPath, campaignStateInspectorMarkup, escapeCampaignText, firstNarrationSentence, narrationCorrectionDialogMarkup, withCampaignActionState } from "../../apps/web-next/src/campaign-editor-model.js";
 import { storyPlayerPath } from "../../apps/web-next/src/story-route.js";
 import { DEDICATED_CHUNKED_AUDIT, TEXT_FALLBACK_LEGACY_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
@@ -80,6 +81,264 @@ describe("web-next campaign editor routing", () => {
     expect(audits[2]?.textContent).toContain('<img data-hostile="provider">');
     expect(audits[2]?.textContent).toContain('<script data-hostile="model"></script>');
     expect(audits[2]?.querySelector("img, script")).toBeNull();
+  });
+});
+
+describe("web-next Campaign State editor", () => {
+  it("saves a scratchpad-only edit from the loaded current state without refetching or losing fact IDs", async () => {
+    const { document } = parseHTML("<body><div id=app></div></body>");
+    const root = document.querySelector<HTMLElement>("#app")!;
+    const campaign = {
+      id: "campaign-1", title: "Glass Harbor", status: "active", activeTurnNumber: 4,
+      worldId: "world-1", worldTitle: "World", worldVersionId: "version-1", worldVersionNumber: 1,
+      latestWorldVersionNumber: 1, worldUpdateAvailable: false, selectedCharacterName: null,
+      textProviderProfileId: null, imageProviderProfileId: null, turnControlStyle: "action_only",
+      storyLengthProfile: "standard", storyContextBudgetTokens: 32000, costInformation: []
+    };
+    const state = {
+      campaignId: campaign.id, activeTurnNumber: 4, viewedTurnNumber: 4, isCurrent: true, revision: 8,
+      updatedAt: "2026-08-30T00:00:00.000Z", continuitySummary: "The harbor is quiet.",
+      openThreads: ["Find the keeper."], canonicalFacts: [{ id: "11111111-1111-4111-8111-111111111111", content: "The lens is moon glass." }],
+      scratchpad: "Private continuity.", trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: []
+    };
+    const fetchMock = vi.fn(async (url: string, init: RequestInit = {}) => {
+      if (url === "/api/v1/campaigns") return new Response(JSON.stringify({ campaigns: [campaign] }), { status: 200 });
+      if (url === "/api/v1/campaigns/campaign-1/sync-status") return new Response(JSON.stringify({ pendingGeneration: null, generationRecovery: null }), { status: 200 });
+      if (url === "/api/v1/campaigns/campaign-1/state" && init.method === "PATCH") return new Response(JSON.stringify({ ...state, scratchpad: "Private correction.", revision: 9 }), { status: 200 });
+      if (url === "/api/v1/campaigns/campaign-1/state") return new Response(JSON.stringify(state), { status: 200 });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const mounted = mountCampaignEditorPage(root, { campaignId: campaign.id, section: "state" });
+    await vi.waitFor(() => expect(root.querySelector("#state-form")).toBeTruthy());
+
+    expect(root.querySelector("textarea[name='canonicalFacts']")).toBeNull();
+    const scratchpad = root.querySelector<HTMLTextAreaElement>("[data-scratchpad]")!;
+    scratchpad.value = "Private correction.";
+    scratchpad.dispatchEvent(new document.defaultView!.Event("input", { bubbles: true }));
+    root.querySelector<HTMLFormElement>("#state-form")!.dispatchEvent(new document.defaultView!.Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/v1/campaigns/campaign-1/state", expect.objectContaining({ method: "PATCH" })));
+
+    const request = JSON.parse(String((fetchMock.mock.calls.find(([url, init]) => url === "/api/v1/campaigns/campaign-1/state" && (init as RequestInit).method === "PATCH")?.[1] as RequestInit).body));
+    expect(request).toMatchObject({ scratchpad: "Private correction.", canonicalFacts: state.canonicalFacts, rpgStats: state.rpgStats, expectedTurnNumber: 4, effectiveTurnNumber: 4, expectedRevision: 8 });
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/v1/campaigns/campaign-1/state")).toHaveLength(2);
+    mounted.dispose();
+  });
+
+  it("keeps a dirty current-state draft when reload is cancelled or fails, and replaces it only after success", async () => {
+    const { document } = parseHTML("<body><div id=app></div></body>");
+    const root = document.querySelector<HTMLElement>("#app")!;
+    const campaign = {
+      id: "campaign-1", title: "Glass Harbor", status: "active", activeTurnNumber: 4,
+      worldId: "world-1", worldTitle: "World", worldVersionId: "version-1", worldVersionNumber: 1,
+      latestWorldVersionNumber: 1, worldUpdateAvailable: false, selectedCharacterName: null,
+      textProviderProfileId: null, imageProviderProfileId: null, turnControlStyle: "action_only",
+      storyLengthProfile: "standard", storyContextBudgetTokens: 32000, costInformation: []
+    };
+    const state = {
+      campaignId: campaign.id, activeTurnNumber: 4, viewedTurnNumber: 4, isCurrent: true, revision: 8,
+      updatedAt: "2026-08-30T00:00:00.000Z", continuitySummary: "The harbor is quiet.",
+      openThreads: [], canonicalFacts: [], scratchpad: "Private continuity.", trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: []
+    };
+    let stateReads = 0;
+    let patchCalls = 0;
+    let resolveReload: ((response: Response) => void) | null = null;
+    const fetchMock = vi.fn(async (url: string, init: RequestInit = {}) => {
+      if (url === "/api/v1/campaigns") return new Response(JSON.stringify({ campaigns: [campaign] }), { status: 200 });
+      if (url === "/api/v1/campaigns/campaign-1/sync-status") return new Response(JSON.stringify({ pendingGeneration: null, generationRecovery: null }), { status: 200 });
+      if (url === "/api/v1/campaigns/campaign-1/state" && init.method === "PATCH") {
+        patchCalls += 1;
+        return new Response(JSON.stringify(state), { status: 200 });
+      }
+      if (url === "/api/v1/campaigns/campaign-1/state") {
+        stateReads += 1;
+        if (stateReads === 2) return new Promise<Response>((resolve) => { resolveReload = resolve; });
+        return new Response(JSON.stringify({ ...state, revision: 9, scratchpad: "Fresh server state." }), { status: 200 });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const confirm = vi.fn(() => false);
+    Object.defineProperty(document.defaultView!, "confirm", { value: confirm, configurable: true });
+    const mounted = mountCampaignEditorPage(root, { campaignId: campaign.id, section: "state" });
+    await vi.waitFor(() => expect(root.querySelector("#state-form")).toBeTruthy());
+
+    const scratchpad = root.querySelector<HTMLTextAreaElement>("[data-scratchpad]")!;
+    const trackers = root.querySelector<HTMLTextAreaElement>("textarea[name='trackers']")!;
+    scratchpad.value = "Unsaved private correction.";
+    scratchpad.dispatchEvent(new document.defaultView!.Event("input", { bubbles: true }));
+    trackers.value = '[{"id":"trust","name":"Trust","value":"wary","rules":""}]';
+    root.querySelector<HTMLButtonElement>("[data-action='reload-current-state']")!.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(scratchpad.value).toBe("Unsaved private correction.");
+    expect(trackers.value).toContain('"Trust"');
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/v1/campaigns/campaign-1/state")).toHaveLength(1);
+
+    confirm.mockReturnValue(true);
+    root.querySelector<HTMLButtonElement>("[data-action='reload-current-state']")!.click();
+    await vi.waitFor(() => expect(resolveReload).not.toBeNull());
+    expect(scratchpad.disabled).toBe(true);
+    expect(root.querySelector<HTMLButtonElement>("#state-form button[type='submit']")?.disabled).toBe(true);
+    expect(root.querySelector<HTMLButtonElement>("[data-action='reload-current-state']")?.disabled).toBe(true);
+    root.querySelector<HTMLFormElement>("#state-form")!.dispatchEvent(new document.defaultView!.Event("submit", { bubbles: true, cancelable: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(patchCalls).toBe(0);
+
+    resolveReload!(new Response(JSON.stringify({ error: "Reload failed." }), { status: 500 }));
+    await vi.waitFor(() => expect(root.textContent).toContain("Reload failed."));
+    expect(root.querySelector<HTMLTextAreaElement>("[data-scratchpad]")?.value).toBe("Unsaved private correction.");
+    expect(root.querySelector<HTMLButtonElement>("#state-form button[type='submit']")?.disabled).toBe(false);
+    expect(root.querySelector<HTMLButtonElement>("[data-action='reload-current-state']")?.disabled).toBe(false);
+
+    root.querySelector<HTMLButtonElement>("[data-action='reload-current-state']")!.click();
+    await vi.waitFor(() => expect(root.querySelector<HTMLTextAreaElement>("[data-scratchpad]")?.value).toBe("Fresh server state."));
+    expect(root.querySelector<HTMLButtonElement>("#state-form button[type='submit']")?.disabled).toBe(false);
+    mounted.dispose();
+  });
+
+  it("keeps a conflicted Current State draft locked until a successful reload supplies a fresh revision", async () => {
+    const { document } = parseHTML("<body><div id=app></div></body>");
+    const root = document.querySelector<HTMLElement>("#app")!;
+    const campaign = {
+      id: "campaign-1", title: "Glass Harbor", status: "active", activeTurnNumber: 4,
+      worldId: "world-1", worldTitle: "World", worldVersionId: "version-1", worldVersionNumber: 1,
+      latestWorldVersionNumber: 1, worldUpdateAvailable: false, selectedCharacterName: null,
+      textProviderProfileId: null, imageProviderProfileId: null, turnControlStyle: "action_only",
+      storyLengthProfile: "standard", storyContextBudgetTokens: 32000, costInformation: []
+    };
+    const state = {
+      campaignId: campaign.id, activeTurnNumber: 4, viewedTurnNumber: 4, isCurrent: true, revision: 8,
+      updatedAt: "2026-08-30T00:00:00.000Z", continuitySummary: "The harbor is quiet.",
+      openThreads: [], canonicalFacts: [], scratchpad: "Private continuity.", trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: []
+    };
+    let stateReads = 0;
+    const fetchMock = vi.fn(async (url: string, init: RequestInit = {}) => {
+      if (url === "/api/v1/campaigns") return new Response(JSON.stringify({ campaigns: [campaign] }), { status: 200 });
+      if (url === "/api/v1/campaigns/campaign-1/sync-status") return new Response(JSON.stringify({ pendingGeneration: null, generationRecovery: null }), { status: 200 });
+      if (url === "/api/v1/campaigns/campaign-1/state" && init.method === "PATCH") {
+        return new Response(JSON.stringify({ error: "Current state changed." }), { status: 409 });
+      }
+      if (url === "/api/v1/campaigns/campaign-1/state") {
+        stateReads += 1;
+        if (stateReads === 2) return new Response(JSON.stringify({ error: "Reload failed." }), { status: 500 });
+        return new Response(JSON.stringify(stateReads === 3 ? { ...state, revision: 9, scratchpad: "Remote current state." } : state), { status: 200 });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    Object.defineProperty(document.defaultView!, "confirm", { value: vi.fn(() => true), configurable: true });
+    const mounted = mountCampaignEditorPage(root, { campaignId: campaign.id, section: "state" });
+    await vi.waitFor(() => expect(root.querySelector("#state-form")).toBeTruthy());
+
+    const form = root.querySelector<HTMLFormElement>("#state-form")!;
+    const scratchpad = root.querySelector<HTMLTextAreaElement>("[data-scratchpad]")!;
+    scratchpad.value = "Local correction.";
+    scratchpad.dispatchEvent(new document.defaultView!.Event("input", { bubbles: true }));
+    form.dispatchEvent(new document.defaultView!.Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(fetchMock.mock.calls.filter(([url, init]) => url === "/api/v1/campaigns/campaign-1/state" && (init as RequestInit).method === "PATCH")).toHaveLength(1));
+    await vi.waitFor(() => expect(root.textContent).toContain("Reload before saving"));
+
+    expect(scratchpad.value).toBe("Local correction.");
+    expect(root.querySelector<HTMLButtonElement>("#state-form button[type='submit']")?.disabled).toBe(true);
+    expect(root.querySelector<HTMLButtonElement>("[data-action='reload-current-state']")?.disabled).toBe(false);
+
+    form.dispatchEvent(new document.defaultView!.Event("submit", { bubbles: true, cancelable: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fetchMock.mock.calls.filter(([url, init]) => url === "/api/v1/campaigns/campaign-1/state" && (init as RequestInit).method === "PATCH")).toHaveLength(1);
+
+    root.querySelector<HTMLButtonElement>("[data-action='reload-current-state']")!.click();
+    await vi.waitFor(() => expect(root.textContent).toContain("Reload failed."));
+    expect(root.querySelector<HTMLTextAreaElement>("[data-scratchpad]")?.value).toBe("Local correction.");
+    expect(root.querySelector<HTMLButtonElement>("#state-form button[type='submit']")?.disabled).toBe(true);
+
+    root.querySelector<HTMLButtonElement>("[data-action='reload-current-state']")!.click();
+    await vi.waitFor(() => expect(root.querySelector<HTMLTextAreaElement>("[data-scratchpad]")?.value).toBe("Remote current state."));
+    expect(root.querySelector<HTMLButtonElement>("#state-form button[type='submit']")?.disabled).toBe(false);
+    root.querySelector<HTMLFormElement>("#state-form")!.dispatchEvent(new document.defaultView!.Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(fetchMock.mock.calls.filter(([url, init]) => url === "/api/v1/campaigns/campaign-1/state" && (init as RequestInit).method === "PATCH")).toHaveLength(2));
+    const patchCalls = fetchMock.mock.calls.filter(([url, init]) => url === "/api/v1/campaigns/campaign-1/state" && (init as RequestInit).method === "PATCH");
+    const secondRequest = JSON.parse(String((patchCalls[1]![1] as RequestInit).body));
+    expect(secondRequest.expectedRevision).toBe(9);
+    mounted.dispose();
+  });
+
+  it("locks the Campaign State form until its current-state save settles", async () => {
+    const { document } = parseHTML("<body><div id=app></div></body>");
+    const root = document.querySelector<HTMLElement>("#app")!;
+    const campaign = {
+      id: "campaign-1", title: "Glass Harbor", status: "active", activeTurnNumber: 4,
+      worldId: "world-1", worldTitle: "World", worldVersionId: "version-1", worldVersionNumber: 1,
+      latestWorldVersionNumber: 1, worldUpdateAvailable: false, selectedCharacterName: null,
+      textProviderProfileId: null, imageProviderProfileId: null, turnControlStyle: "action_only",
+      storyLengthProfile: "standard", storyContextBudgetTokens: 32000, costInformation: []
+    };
+    const state = {
+      campaignId: campaign.id, activeTurnNumber: 4, viewedTurnNumber: 4, isCurrent: true, revision: 8,
+      updatedAt: "2026-08-30T00:00:00.000Z", continuitySummary: "The harbor is quiet.",
+      openThreads: [], canonicalFacts: [], scratchpad: "Private continuity.", trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: []
+    };
+    let resolveSave: ((response: Response) => void) | null = null;
+    const fetchMock = vi.fn((url: string, init: RequestInit = {}) => {
+      if (url === "/api/v1/campaigns") return Promise.resolve(new Response(JSON.stringify({ campaigns: [campaign] }), { status: 200 }));
+      if (url === "/api/v1/campaigns/campaign-1/sync-status") return Promise.resolve(new Response(JSON.stringify({ pendingGeneration: null, generationRecovery: null }), { status: 200 }));
+      if (url === "/api/v1/campaigns/campaign-1/state" && init.method === "PATCH") {
+        return new Promise<Response>((resolve) => { resolveSave = resolve; });
+      }
+      if (url === "/api/v1/campaigns/campaign-1/state") return Promise.resolve(new Response(JSON.stringify(state), { status: 200 }));
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const mounted = mountCampaignEditorPage(root, { campaignId: campaign.id, section: "state" });
+    await vi.waitFor(() => expect(root.querySelector("#state-form")).toBeTruthy());
+
+    root.querySelector<HTMLFormElement>("#state-form")!.dispatchEvent(new document.defaultView!.Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(resolveSave).not.toBeNull());
+
+    expect(root.querySelector<HTMLButtonElement>("#state-form button[type='submit']")?.disabled).toBe(true);
+    expect(root.querySelector<HTMLTextAreaElement>("[data-scratchpad]")?.disabled).toBe(true);
+
+    resolveSave!(new Response(JSON.stringify({ ...state, revision: 9 }), { status: 200 }));
+    await vi.waitFor(() => expect(root.querySelector<HTMLButtonElement>("#state-form button[type='submit']")?.disabled).toBe(false));
+    mounted.dispose();
+  });
+
+  it("blocks Campaign State edits while sync reports a recoverable generation", async () => {
+    const { document } = parseHTML("<body><div id=app></div></body>");
+    const root = document.querySelector<HTMLElement>("#app")!;
+    const campaign = {
+      id: "campaign-1", title: "Glass Harbor", status: "active", activeTurnNumber: 4,
+      worldId: "world-1", worldTitle: "World", worldVersionId: "version-1", worldVersionNumber: 1,
+      latestWorldVersionNumber: 1, worldUpdateAvailable: false, selectedCharacterName: null,
+      textProviderProfileId: null, imageProviderProfileId: null, turnControlStyle: "action_only",
+      storyLengthProfile: "standard", storyContextBudgetTokens: 32000, costInformation: []
+    };
+    const state = {
+      campaignId: campaign.id, activeTurnNumber: 4, viewedTurnNumber: 4, isCurrent: true, revision: 8,
+      updatedAt: "2026-08-30T00:00:00.000Z", continuitySummary: "The harbor is quiet.",
+      openThreads: [], canonicalFacts: [], scratchpad: "Private continuity.", trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: []
+    };
+    const fetchMock = vi.fn(async (url: string, init: RequestInit = {}) => {
+      if (url === "/api/v1/campaigns") return new Response(JSON.stringify({ campaigns: [campaign] }), { status: 200 });
+      if (url === "/api/v1/campaigns/campaign-1/sync-status") return new Response(JSON.stringify({
+        pendingGeneration: null,
+        generationRecovery: { id: "recovery-1", status: "recoverable" }
+      }), { status: 200 });
+      if (url === "/api/v1/campaigns/campaign-1/state") return new Response(JSON.stringify(state), { status: 200 });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const mounted = mountCampaignEditorPage(root, { campaignId: campaign.id, section: "state" });
+    await vi.waitFor(() => expect(root.querySelector("#state-form")).toBeTruthy());
+
+    expect(root.querySelector<HTMLTextAreaElement>("[data-scratchpad]")?.disabled).toBe(true);
+    expect(root.querySelector<HTMLButtonElement>("#state-form button[type='submit']")?.disabled).toBe(true);
+    expect(root.textContent).toContain("generation needs attention");
+    root.querySelector<HTMLFormElement>("#state-form")!.dispatchEvent(new document.defaultView!.Event("submit", { bubbles: true, cancelable: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fetchMock.mock.calls.some(([url, init]) => url === "/api/v1/campaigns/campaign-1/state" && (init as RequestInit).method === "PATCH")).toBe(false);
+    mounted.dispose();
   });
 });
 

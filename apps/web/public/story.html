@@ -34,6 +34,7 @@
           <p class="nav-menu-label">Current campaign</p>
           <button id="btnOpenWorldSetup" type="button"><strong>Current World Setup</strong><span>Review the pinned world and character</span></button>
           <button id="btnOpenEditState" type="button"><strong>Edit State</strong><span>Update current campaign state</span></button>
+          <button id="btnOpenEditResponse" type="button" disabled><strong>Edit Current Response</strong><span>Correct the latest completed narration</span></button>
         </div>
       </div>
 
@@ -132,7 +133,6 @@
             <button id="btnNext">Next turn →</button>
             <button id="btnUndo">Undo latest</button>
             <button id="btnRetry">Retry latest generation</button>
-            <button id="btnEditResponse" class="accent hidden" type="button">Edit Response</button>
           </div>
 
           <div id="generationProgress" class="generation-progress hidden" role="status" aria-live="polite">
@@ -309,7 +309,7 @@
         </div>
         <div class="panel-body">
           <section id="tab-overview" class="stack">
-            <p id="editStateMeta" class="mini"></p>
+            <p id="editStateMeta" class="mini" role="status" aria-live="polite"></p>
             <div class="track-card">
               <label for="editStateContinuitySummary"><strong>Continuity summary</strong></label>
               <textarea id="editStateContinuitySummary" rows="6" placeholder="Living summary used to continue the campaign."></textarea>
@@ -361,6 +361,7 @@
       </div>
       <div class="row wrap dialog-actions">
         <button id="btnEditStateViewHistory" type="button">View Turn History</button>
+        <button id="btnReloadEditState" type="button">Reload current state</button>
         <button id="btnCancelEditState" type="button">Cancel</button>
         <button id="btnSaveEditState" class="primary" type="button">Save current state</button>
       </div>
@@ -438,7 +439,7 @@
       <div class="dialog-header">
         <div>
           <h3>Edit Response</h3>
-          <p class="mini">Edit the narration for the turn you are currently viewing. Saving replaces the text for that turn.</p>
+          <p class="mini">Correct the latest completed narration. This does not update Current State facts, choices, or existing illustrations.</p>
         </div>
         <button id="btnEditResponseClose" class="small ghost" type="button" aria-label="Close edit response">✕</button>
       </div>

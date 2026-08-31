@@ -93,6 +93,10 @@ share/python-wheels/
 venv/
 env/
 
+# Local browser verification artifacts
+/test-results/
+/playwright-report/
+
 # Editors and local agent configuration
 .mcp.json
 .projectmem/

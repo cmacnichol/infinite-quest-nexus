@@ -261,7 +261,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .state-editor-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .state-editor-heading h4 { margin: 0; }
 .state-editor-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: start; }
-.state-editor-row textarea { min-height: 72px; }
+.state-editor-row textarea { min-width: 0; min-height: 72px; max-width: 100%; }
 button.history-card, .history-card[role="button"] { text-align: left; width: 100%; cursor: pointer; transition: border-color 0.18s ease, background 0.18s ease; font-family: inherit; }
 button.history-card:hover, button.history-card:focus-visible, .history-card[role="button"]:hover, .history-card[role="button"]:focus-visible { border-color: var(--gold); background: rgba(255,255,255,.085); outline: none; }
 .history-card.selected, .history-card[aria-pressed="true"] { border-color: var(--gold); background: rgba(241,194,50,.1); box-shadow: 0 0 0 1px rgba(241,194,50,.18); }

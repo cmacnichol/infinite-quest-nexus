@@ -39,6 +39,7 @@ describe("MemoryApplication", () => {
         getJob: vi.fn().mockResolvedValue({ id: "chronicle-1", status: "failed", failure: publicFailure })
       },
       transaction: {
+        applyCampaignStateCorrection: vi.fn().mockResolvedValue({ changedMemoryIds: [], removedMemoryIds: [] }),
         autoEnableCampaignEmbedding: vi.fn().mockResolvedValue({ enabled: true }),
         buildContextPreview: vi.fn().mockResolvedValue({ scopes: { campaignCanon: [] } }),
         enqueueEmbeddingReindex: vi.fn().mockResolvedValue("embedding-1"),
@@ -68,9 +69,10 @@ describe("MemoryApplication", () => {
     expect(dependencies.jobs.getJob).toHaveBeenCalledWith({ ownerUserId: scope.ownerUserId, jobId: "chronicle-1" });
   });
 
-  it("keeps all seven generation memory operations on the caller-owned transaction", async () => {
+  it("keeps all generation memory operations on the caller-owned transaction", async () => {
     const transaction = { transactionId: "outer-transaction" };
     const callbacks = {
+      applyCampaignStateCorrection: vi.fn().mockResolvedValue({ changedMemoryIds: [], removedMemoryIds: [] }),
       autoEnableCampaignEmbedding: vi.fn().mockResolvedValue({ enabled: true }),
       buildContextPreview: vi.fn().mockResolvedValue({ scopes: { campaignCanon: [] } }),
       enqueueEmbeddingReindex: vi.fn().mockResolvedValue("embedding-1"),
@@ -87,6 +89,7 @@ describe("MemoryApplication", () => {
     });
 
     await application.generation.autoEnableCampaignEmbedding(transaction, scope);
+    await application.generation.applyCampaignStateCorrection(transaction, { ...scope, stateEditId: "edit-1" });
     await application.generation.buildContextPreview(transaction, {
       ...scope,
       request: {

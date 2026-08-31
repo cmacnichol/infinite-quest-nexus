@@ -72,6 +72,7 @@ const tinyPng = Buffer.from(
 // memories are written directly by the legacy importer, while derived indexing
 // belongs to the later Chronicle schema and is covered by focused suites.
 const preChunkChronicleMemory: MemoryGenerationTransactionPort = {
+  async applyCampaignStateCorrection() { throw new Error("Pre-correction schema cannot edit current state."); },
   async autoEnableCampaignEmbedding() {
     return { enabled: false };
   },
