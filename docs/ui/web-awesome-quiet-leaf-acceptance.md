@@ -36,7 +36,7 @@ complete. This is separate from the remaining accessibility failure.
 | --- | --- | --- |
 | G1 Core/CSP | **Blocked** | Production fixture builds; controls render and text input works in the in-app browser. Named-dialog assertion fails in Chromium. Full Core/CSP interaction suite is not passed. |
 | G2 theme/preferences | Partial | Theme suite:43 passed. Display preferences:14 passed. Token adapter browser state/contrast verification remains pending. |
-| G3 component behavior | Partial | Draft-field suite:8 passed; reviewed unique description IDs and composition conflict policy. Real sizing/caret/IME checks remain pending. |
+| G3 component behavior | Partial | Draft-field suite:8 passed; input-mode suite:5 passed. Both leaf components reviewed. Real sizing/caret/IME and radio keyboard checks remain pending. |
 | G4 Story regression | Baseline only | Existing composer and route suites:28 passed before Story integration. No Core Story integration has been performed. |
 | G5 runtime/visual approval | Not run | No disposable runtime parity run or implemented-design approval yet. Existing smoke rows remain unchanged. |
 | G6 bundle/rollback | Not run | Native default retained; no default-on change or deployment. Comparative bundle and container rollback verification pending. |
@@ -47,12 +47,11 @@ has passed. Final candidate SHA, browser/package versions, exact commands,
 screenshots, full smoke evidence, and bundle deltas must be recorded after the
 compatibility decision and remaining implementation tasks.
 
-Latest coordinator verification: the six focused suites (theme, display
-preferences, draft field, feature policy, existing Story composer, existing
-Story route) passed **94 tests** together. The web-next package's documented
+Latest coordinator verification: the seven focused suites (theme, display
+preferences, draft field, input mode, feature policy, existing Story composer,
+existing Story route) passed **99 tests** together. The web-next package's documented
 TypeScript check also passed after workspace dependency links were repaired.
-`git diff --check` was clean. These checks do not include the incomplete input
-mode component or resolve the failing browser gate.
+`git diff --check` was clean. These checks do not resolve the failing browser gate.
 
 ## Scope and safety
 
