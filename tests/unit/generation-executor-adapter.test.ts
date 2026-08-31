@@ -171,7 +171,18 @@ describe("generation executor adapter", () => {
           selectedCompression: null,
           retrieval: retrievalDiagnostics,
           chronicleRetrieval: DEDICATED_CHUNKED_AUDIT,
-          scopes: { worldCanon: {}, campaignCanon: {}, chronicle: [], currentScene: null }
+          scopes: {
+            worldCanon: {},
+            campaignCanon: {},
+            chronicle: [],
+            currentScene: null,
+            currentContinuity: {
+              continuitySummary: "The keeper is alive.",
+              openThreads: [],
+              canonicalFacts: [],
+              scratchpad: "Private harbor details."
+            }
+          }
         }))
       } as never,
       illustration: {
@@ -188,7 +199,7 @@ describe("generation executor adapter", () => {
         temperature: 0,
         requestTimeoutMs: 1_000,
         configuration: {},
-        execute: async () => ({
+        execute: vi.fn(async () => ({
           content: JSON.stringify({
             narration: "The observatory door opens onto a quiet moonlit hall.",
             choices: ["Enter the hall.", "Wait outside.", "Inspect the lock.", "Call for the keeper."],
@@ -209,7 +220,7 @@ describe("generation executor adapter", () => {
           usage: { inputTokens: 10, outputTokens: 20, totalTokens: 30 },
           reportedCost: null,
           rawMetadata: {}
-        })
+        }))
       })),
       promptFromSnapshot: vi.fn(() => "Write a concise fictional scene."),
       recordProfileCost: vi.fn(async () => undefined),
@@ -230,5 +241,14 @@ describe("generation executor adapter", () => {
     };
     expect(accepted.chronicleRetrieval).toStrictEqual(DEDICATED_CHUNKED_AUDIT);
     expect(accepted.contextDiagnostics.retrieval).toBe(retrievalDiagnostics);
+    const providerRequest = (collaborators.loadTextExecution as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+    const provider = await providerRequest;
+    const input = JSON.parse((provider.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0].input);
+    expect(input.authoritative_context.currentContinuity).toEqual({
+      continuitySummary: "The keeper is alive.",
+      openThreads: [],
+      canonicalFacts: [],
+      scratchpad: "Private harbor details."
+    });
   });
 });

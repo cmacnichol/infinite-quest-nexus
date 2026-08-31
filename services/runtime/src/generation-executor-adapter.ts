@@ -12,6 +12,7 @@ import {
 } from "../../../packages/contracts/src/generation.js";
 import {
   chronicleRetrievalAuditSchema,
+  type CurrentContinuity,
   type ChronicleRetrievalAudit,
   type MemoryContextQuery
 } from "../../../packages/contracts/src/memory.js";
@@ -86,6 +87,7 @@ type GenerationContextPreview = {
   retrieval: unknown;
   chronicleRetrieval: ChronicleRetrievalAudit;
   scopes: Record<string, unknown> & {
+    currentContinuity?: CurrentContinuity;
     chronicle: Array<{
       id: string;
       content: string;
