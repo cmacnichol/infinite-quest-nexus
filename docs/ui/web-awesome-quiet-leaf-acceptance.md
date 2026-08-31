@@ -192,6 +192,19 @@ for fonts and have dimensions1635×1650 desktop/light,390×2169 mobile, and
 The changed-target CSS detector returned an empty finding list;
 that static result does not override the visual review.
 
+Published synthetic review captures are retained with this implementation:
+
+- [Desktop viewport, 1635 x 962](../review/assets/web-awesome-core/desktop-viewport.png)
+- [Mobile full page, 390 x 2169](../review/assets/web-awesome-core/mobile.png)
+- [Light desktop full page, 1635 x 1650](../review/assets/web-awesome-core/light-desktop.png)
+- [Ultrawide Auto width, 2560 x 1650](../review/assets/web-awesome-core/ultrawide-auto.png)
+
+These document the frozen layout, including known footer and Turn Length
+defects. They predate the final functional-only fixes and are not final-candidate
+visual approval, accepted baselines, or Wide/Full ultrawide evidence. The captures
+contain only the synthetic Story fixture and generated test artwork; no private
+campaign or Atlas reference capture is included.
+
 The radio-keyboard test initially used unsupported Home/End keys and confused
 internal accessibility nodes with public control hosts. Pinned Core3.12 handles
 arrows/Space and uses roving focus. The corrected test focuses the current Auto
