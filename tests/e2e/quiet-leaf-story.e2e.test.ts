@@ -154,13 +154,18 @@ test("Core restores campaign-menu and footer-History focus after retained dialog
 });
 
 test("Core keeps a focused campaign command through an unrelated Story update", async ({ page }) => {
-  const { api, field } = await openStory(page);
+  const { api } = await openStory(page);
   try {
     await page.getByRole("button", { name: "Campaign settings", exact: true }).click();
     const command = page.getByRole("menuitem", { name: "Current World Setup", exact: true });
     await command.focus();
     await expect(command).toBeFocused();
-    await field.fill("Keep the command focused");
+    const turnLength = page.locator("wa-select[data-turn-length-select]");
+    await turnLength.evaluate(element => {
+      (element as HTMLElement & { value: string }).value = "long";
+      element.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await expect(turnLength).toHaveJSProperty("value", "long");
     await expect(command).toBeFocused();
   } finally {
     api.assertNoUnexpectedRequests();
