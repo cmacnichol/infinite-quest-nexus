@@ -55,6 +55,9 @@ export function mountProfileEditor(document: Document, port: ProfilePort): Profi
   const continuousReading = document.createElement("wa-checkbox") as ValueControl;
   continuousReading.dataset.profile = "continuous-reading";
   continuousReading.textContent = "Continue reading through accepted turns";
+  const appliesOnNextLoad = document.createElement("p");
+  appliesOnNextLoad.dataset.profileLoadNote = "";
+  appliesOnNextLoad.textContent = "Applies when Story next loads.";
 
   const turnStyle = document.createElement("wa-select") as ValueControl;
   turnStyle.setAttribute("label", "Default turn controls");
@@ -70,7 +73,7 @@ export function mountProfileEditor(document: Document, port: ProfilePort): Profi
     option.textContent = label;
     turnStyle.append(option);
   }
-  fields.append(displayName, autoSubmit, continuousReading, turnStyle);
+  fields.append(displayName, autoSubmit, continuousReading, appliesOnNextLoad, turnStyle);
 
   const status = document.createElement("p");
   status.dataset.profileStatus = "";

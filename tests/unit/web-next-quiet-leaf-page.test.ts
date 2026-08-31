@@ -19,6 +19,36 @@ it("prepares Retry without immediately appending a turn", async () => {
   mounted.dispose();
 });
 
+it("uses the mounted Core shell for the validated campaign context", async () => {
+  const page = createStoryTestDom();
+  const composition = createStoryTestComposition({ turnControlStyle: "flexible_auto" });
+  const mounted = mountStoryPlayerPage(page.root, { campaignId: "11111111-1111-4111-8111-111111111111", turnNumber: null }, composition, { uiImplementation: "web-awesome" });
+  await settleStoryTest();
+
+  expect(page.root.dataset.storyCampaignId).toBe("11111111-1111-4111-8111-111111111111");
+  expect(page.root.querySelector("[data-campaign-tools]")).toBeNull();
+  mounted.dispose();
+});
+
+it("routes a Core artwork command through display preferences", async () => {
+  const page = createStoryTestDom();
+  const display = createDisplayPreferences(null);
+  const composition = createStoryTestComposition({ turnControlStyle: "flexible_auto" });
+  const mounted = mountStoryPlayerPage(page.root, { campaignId: "11111111-1111-4111-8111-111111111111", turnNumber: null }, composition, {
+    uiImplementation: "web-awesome",
+    displayPreferences: display
+  });
+  await settleStoryTest();
+
+  const menu = page.root.querySelector<HTMLElement>("[data-shell-campaign-menu] wa-dropdown");
+  if (!menu) throw new Error("Core campaign settings menu is missing.");
+  menu.dispatchEvent(new page.window.CustomEvent("wa-select", { detail: { item: { value: "hide-turn-artwork" } } }));
+
+  expect(display.artworkVisible("11111111-1111-4111-8111-111111111111", "66666666-6666-4666-8666-666666666666")).toBe(false);
+  mounted.dispose();
+  display.dispose();
+});
+
 it("submits the captured ambiguous action without rereading the editor", async () => {
   const page = createStoryTestDom();
   const classifyTurnInput = vi.fn().mockResolvedValue({

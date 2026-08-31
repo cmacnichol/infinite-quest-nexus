@@ -18,7 +18,7 @@ export interface DisplayPreferencesStore {
   dispose(): void;
 }
 
-const DISPLAY_PREFERENCES_KEY = "infinite-quest.display-preferences.v1";
+export const DISPLAY_PREFERENCES_STORAGE_KEY = "infinite-quest.display-preferences.v1";
 const LEGACY_READING_WIDTH_KEY = "infinite-quest.story.reading-width";
 const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
@@ -100,7 +100,7 @@ function legacyPreferences(value: string | null): DisplayPreferences {
 
 function readPreferences(storage: Pick<Storage, "getItem"> | null): DisplayPreferences {
   try {
-    const current = parsePreferences(storage?.getItem(DISPLAY_PREFERENCES_KEY) ?? null);
+    const current = parsePreferences(storage?.getItem(DISPLAY_PREFERENCES_STORAGE_KEY) ?? null);
     return current ?? legacyPreferences(storage?.getItem(LEGACY_READING_WIDTH_KEY) ?? null);
   } catch {
     return snapshot(DEFAULT_PREFERENCES);
@@ -128,7 +128,7 @@ export function createDisplayPreferences(
 
   const persist = (): void => {
     try {
-      storage?.setItem(DISPLAY_PREFERENCES_KEY, JSON.stringify(state));
+      storage?.setItem(DISPLAY_PREFERENCES_STORAGE_KEY, JSON.stringify(state));
     } catch {
       // Display preferences remain usable when browser storage is unavailable.
     }

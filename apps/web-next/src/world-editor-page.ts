@@ -1,4 +1,4 @@
-import { initializeAppTheme, renderAppShell } from "./app-shell";
+import { mountAppShell } from "./app-shell-lifecycle";
 import {
   loadWorld as loadWorldRequest,
   saveWorldDraft as saveWorldDraftRequest,
@@ -306,12 +306,11 @@ export function mountWorldEditorPage(
   worldId: string,
   dependencies: WorldEditorPageDependencies = {}
 ): MountedPage {
-  renderAppShell(root, editorMarkup, "world-editor");
-  const theme = initializeAppTheme(root);
+  const shell = mountAppShell(root, editorMarkup, "world-editor");
   const document = root.ownerDocument;
   const view = document.defaultView;
   if (!view) {
-    theme.dispose();
+    shell.dispose();
     throw new Error("The World Editor interface could not be initialized.");
   }
   const pageView = view;
@@ -1704,7 +1703,7 @@ export function mountWorldEditorPage(
       root.removeEventListener("change", onChange);
       root.removeEventListener("click", onClick);
       pageView.removeEventListener("pageshow", onPageShow);
-      theme.dispose();
+      shell.dispose();
     }
   };
 }

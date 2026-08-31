@@ -13,7 +13,7 @@ import type {
   TurnInputClassificationResponse,
   TurnInputModeSource
 } from "@infinite-quest/contracts";
-import { initializeAppTheme, renderAppShell } from "./app-shell";
+import { mountAppShell } from "./app-shell-lifecycle";
 import { createStoryPlayerComposition, type StoryPlayerComposition } from "./story-player-composition";
 import { createStoryGenerationController } from "./story-player-generation";
 import { createStoryUiModel, type StoryUiPhase } from "./story-player-model";
@@ -21,7 +21,7 @@ import { createStoryHistoryController } from "./story-player-history";
 import { renderStoryCommandRow, renderStoryDialogs, renderStoryPlayerView, type StoryPlayerViewState } from "./story-player-view";
 import { createStoryIllustrationController } from "./story-player-illustrations";
 import { createStoryToolsController, installStoryToolsDisclosure, storyCampaignToolsMarkup } from "./story-player-tools";
-import { createDisplayPreferences, type DisplayPreferencesStore } from "./preferences/display-preferences";
+import type { DisplayPreferencesStore } from "./preferences/display-preferences";
 import { uiImplementation, type UiImplementation } from "./ui/feature-policy";
 import { mountQuietLeafPresenter, type QuietLeafPresenter } from "./story/quiet-leaf-presenter";
 import type { ComposerActions } from "./story/ui/composer";
@@ -147,11 +147,14 @@ export function mountStoryPlayerPage(
   composition: StoryPlayerComposition = createStoryPlayerComposition(),
   options: StoryPlayerPageOptions = {}
 ): MountedPage {
-  renderAppShell(root, storyPlayerMarkup, "story", { headerToolsMarkup: storyCampaignToolsMarkup() });
-  const theme = initializeAppTheme(root);
   const selectedUiImplementation = options.uiImplementation ?? uiImplementation();
-  const displayPreferences = options.displayPreferences ?? createDisplayPreferences(browserStorage(root));
-  const ownsDisplayPreferences = options.displayPreferences === undefined;
+  const shell = mountAppShell(root, storyPlayerMarkup, "story", {
+    uiImplementation: selectedUiImplementation,
+    displayPreferences: options.displayPreferences,
+    ...(selectedUiImplementation === "native" ? { headerToolsMarkup: storyCampaignToolsMarkup() } : {})
+  });
+  const theme = shell.theme;
+  const displayPreferences = shell.display;
   root.querySelector<HTMLElement>('main[data-page="story-player"]')?.setAttribute("data-ui-implementation", selectedUiImplementation);
   const ui = createStoryUiModel({ viewTurnNumber: route.turnNumber }, browserStorage(root));
   let campaigns: readonly CampaignSummary[] = [];
@@ -173,7 +176,9 @@ export function mountStoryPlayerPage(
   let programmaticFollowTarget: ViewportPosition | null = null;
   let illustrationRequestKey: string | null = null;
   let quietLeaf: QuietLeafPresenter | null = null;
-  const toolsDisclosure = root.querySelector<HTMLDetailsElement>("[data-campaign-tools]");
+  const toolsDisclosure = selectedUiImplementation === "native"
+    ? root.querySelector<HTMLDetailsElement>("[data-campaign-tools]")
+    : null;
   const disposeToolsDisclosure = toolsDisclosure ? installStoryToolsDisclosure(toolsDisclosure) : () => undefined;
   const illustrations = createStoryIllustrationController({
     illustrations: composition.illustrations,
@@ -600,6 +605,7 @@ export function mountStoryPlayerPage(
     };
     const activeCampaign = projection.campaign;
     const canWriteCampaign = canWriteCurrentCampaign();
+    shell.setStoryContext(activeCampaign?.id ?? null);
     if (selectedUiImplementation === "web-awesome" && quietLeaf) {
       const main = root.querySelector<HTMLElement>('main[data-page="story-player"]');
       const commandRow = root.querySelector<HTMLElement>(".story-command-row");
@@ -628,6 +634,24 @@ export function mountStoryPlayerPage(
     if (editState) editState.disabled = !canWriteCampaign;
     const selectedTurnNumber = ui.get().viewTurnNumber ?? projection.campaign?.activeTurnNumber ?? null;
     const selectedTurn = selectedTurnNumber === null ? null : projection.turns.find((turn) => turn.turnNumber === selectedTurnNumber) ?? null;
+    if (selectedUiImplementation === "web-awesome") {
+      shell.setCampaignCommands([
+        { id: "open-world-setup", label: "Current World Setup", disabled: activeCampaign === null },
+        { id: "edit-campaign-state", label: "Edit Campaign State", disabled: !canWriteCampaign },
+        { id: "open-campaign-history", label: "Turn History & State", disabled: activeCampaign === null },
+        { id: "open-activity", label: "Activity Log", disabled: activeCampaign === null },
+        { id: "open-about", label: "About", disabled: activeCampaign === null },
+        { id: "export-markdown", label: "Export Markdown", disabled: activeCampaign === null },
+        { id: "export-html", label: "Export HTML", disabled: activeCampaign === null },
+        { id: "export-pdf", label: "Print PDF + images", disabled: activeCampaign === null },
+        { id: "show-turn-artwork", label: "Show turn artwork", disabled: !activeCampaign || !selectedTurn },
+        { id: "hide-turn-artwork", label: "Hide turn artwork", disabled: !activeCampaign || !selectedTurn },
+        { id: "reset-turn-artwork", label: "Reset turn artwork", disabled: !activeCampaign || !selectedTurn }
+      ], (id) => {
+        runCampaignCommand(id);
+        root.querySelector<HTMLElement>(".app-shell-campaign-menu wa-button")?.focus();
+      });
+    }
     if (typeof composition.illustrations.config === "function" && projection.campaign && selectedTurn) {
       const requestKey = `${projection.campaign.id}:${selectedTurn.id}`;
       if (requestKey !== illustrationRequestKey) {
@@ -1022,18 +1046,17 @@ export function mountStoryPlayerPage(
     const turnNumber = Number(actionTarget.closest<HTMLElement>("[data-turn-number]")?.dataset.turnNumber);
     if (Number.isSafeInteger(turnNumber) && turnNumber > 0) history.jump(turnNumber);
   };
-  const onToolsClick = (event: Event) => {
-    const target = event.target;
-    if (!target || typeof (target as Element).closest !== "function") return;
-    const action = (target as Element).closest<HTMLElement>("[data-tool-action]")?.dataset.toolAction;
-    if (!action) return;
-    event.preventDefault();
-    if (toolsDisclosure) {
-      toolsDisclosure.open = false;
-      if (action === "export-markdown" || action === "export-html" || action === "export-pdf") {
-        toolsDisclosure.querySelector<HTMLElement>("summary")?.focus();
-      }
+  const runCampaignCommand = (action: string): void => {
+    if (disposed) return;
+    const campaign = projection.campaign;
+    const turnNumber = ui.get().viewTurnNumber ?? campaign?.activeTurnNumber ?? null;
+    const turn = turnNumber === null ? null : projection.turns.find((candidate) => candidate.turnNumber === turnNumber) ?? null;
+    if (action === "show-turn-artwork" || action === "hide-turn-artwork" || action === "reset-turn-artwork") {
+      if (!campaign || !turn) return;
+      displayPreferences.setTurnArtwork(campaign.id, turn.id, action === "show-turn-artwork" ? true : action === "hide-turn-artwork" ? false : null);
+      return;
     }
+    if (action === "edit-campaign-state" && !canWriteCurrentCampaign()) return;
     if (action === "open-world-setup") {
       tools.openWorldSetup();
       return;
@@ -1091,6 +1114,18 @@ export function mountStoryPlayerPage(
       });
     }
   };
+  const onToolsClick = (event: Event) => {
+    const target = event.target;
+    if (!target || typeof (target as Element).closest !== "function") return;
+    const action = (target as Element).closest<HTMLElement>("[data-tool-action]")?.dataset.toolAction;
+    if (!action) return;
+    event.preventDefault();
+    toolsDisclosure!.open = false;
+    if (action === "export-markdown" || action === "export-html" || action === "export-pdf") {
+      toolsDisclosure!.querySelector<HTMLElement>("summary")?.focus();
+    }
+    runCampaignCommand(action);
+  };
   root.addEventListener("click", onClick);
   toolsDisclosure?.addEventListener("click", onToolsClick);
   render();
@@ -1113,11 +1148,10 @@ export function mountStoryPlayerPage(
       unsubscribeIllustrations();
       illustrations.dispose();
       quietLeaf?.dispose();
-      if (ownsDisplayPreferences) displayPreferences.dispose();
       disposeToolsDisclosure();
       tools.dispose();
       ui.dispose();
-      theme.dispose();
+      shell.dispose();
     }
   };
 }

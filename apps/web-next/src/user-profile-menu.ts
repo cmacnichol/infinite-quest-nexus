@@ -75,7 +75,7 @@ function controlValue(control: HTMLInputElement | HTMLSelectElement): string {
   return value || control.getAttribute("value") || "";
 }
 
-export function initializeUserProfileMenu(root: HTMLElement): void {
+export function initializeUserProfileMenu(root: HTMLElement): () => void {
   const button = root.querySelector<HTMLButtonElement>(".user-profile-toggle");
   const dialog = root.querySelector<HTMLDialogElement>(".user-profile-dialog");
   const displayName = root.querySelector<HTMLInputElement>("#user-profile-display-name");
@@ -96,7 +96,9 @@ export function initializeUserProfileMenu(root: HTMLElement): void {
     status.textContent = message;
     status.dataset.state = state;
   };
+  let disposed = false;
   const applyProfile = (nextProfile: UserProfile) => {
+    if (disposed) return;
     profile = nextProfile;
     setControlValue(displayName, nextProfile.displayName);
     autoSubmit.checked = nextProfile.settings.autoSubmitTurnChoices;
@@ -122,33 +124,52 @@ export function initializeUserProfileMenu(root: HTMLElement): void {
   };
   const save = () => {
     const nextDraft = draft();
-    if (!nextDraft || !profile) return;
+    if (disposed || !nextDraft || !profile) return;
     saveQueue = saveQueue.catch(() => undefined).then(async () => {
       try {
-        applyProfile(await updateUserProfile(nextDraft));
+        const saved = await updateUserProfile(nextDraft);
+        if (!disposed) applyProfile(saved);
       } catch (error) {
-        setStatus(error instanceof Error ? error.message : "Profile settings could not be saved. Try again.", "error");
+        if (!disposed) setStatus(error instanceof Error ? error.message : "Profile settings could not be saved. Try again.", "error");
       }
     });
   };
   const open = async () => {
+    if (disposed) return;
     openDialog(dialog);
     fields.disabled = true;
     setStatus("Loading profile…", "saving");
     try {
-      applyProfile(await loadUserProfile());
-      setStatus("", "idle");
+      const loaded = await loadUserProfile();
+      if (!disposed) {
+        applyProfile(loaded);
+        setStatus("", "idle");
+      }
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Profile settings could not be loaded. Try again.", "error");
+      if (!disposed) setStatus(error instanceof Error ? error.message : "Profile settings could not be loaded. Try again.", "error");
     } finally {
-      fields.disabled = false;
+      if (!disposed) fields.disabled = false;
     }
   };
 
-  button.addEventListener("click", () => { void open(); });
-  closeButton.addEventListener("click", () => closeDialog(dialog));
+  const onOpen = () => { void open(); };
+  const onClose = () => closeDialog(dialog);
+  button.addEventListener("click", onOpen);
+  closeButton.addEventListener("click", onClose);
   displayName.addEventListener("input", save);
   autoSubmit.addEventListener("change", save);
   continuousReading.addEventListener("change", save);
   turnStyle.addEventListener("change", save);
+
+  return () => {
+    if (disposed) return;
+    disposed = true;
+    button.removeEventListener("click", onOpen);
+    closeButton.removeEventListener("click", onClose);
+    displayName.removeEventListener("input", save);
+    autoSubmit.removeEventListener("change", save);
+    continuousReading.removeEventListener("change", save);
+    turnStyle.removeEventListener("change", save);
+    fields.disabled = true;
+  };
 }

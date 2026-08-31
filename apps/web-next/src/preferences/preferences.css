@@ -43,6 +43,12 @@
   color: var(--text-secondary);
 }
 
+.preferences-profile [data-profile-load-note] {
+  margin: -6px 0 0;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+}
+
 .preferences-profile [data-profile-status][data-state="error"] {
   color: var(--status-error);
 }

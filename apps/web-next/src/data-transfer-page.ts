@@ -1,4 +1,4 @@
-import { initializeAppTheme, renderAppShell } from "./app-shell";
+import { mountAppShell } from "./app-shell-lifecycle";
 import {
   createDataTransferApi,
   type DataTransferApi,
@@ -262,12 +262,11 @@ export function mountDataTransferPage(
   root: HTMLElement,
   dependencies: DataTransferPageDependencies = {}
 ): MountedDataTransferPage {
-  renderAppShell(root, pageMarkup, "data-transfer");
-  const theme = initializeAppTheme(root);
+  const shell = mountAppShell(root, pageMarkup, "data-transfer");
   const document = root.ownerDocument;
   const view = document.defaultView;
   if (!view) {
-    theme.dispose();
+    shell.dispose();
     throw new Error("The Data Transfer interface could not be initialized.");
   }
   const api = dependencies.api ?? createDataTransferApi({ storage: dependencies.storage });
@@ -907,7 +906,7 @@ export function mountDataTransferPage(
       exportButton.removeEventListener("click", onExport);
       cancelButton.removeEventListener("click", onCancel);
       commitButton.removeEventListener("click", onCommit);
-      theme.dispose();
+      shell.dispose();
     }
   };
 }

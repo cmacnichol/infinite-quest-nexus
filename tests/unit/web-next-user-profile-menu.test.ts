@@ -1,6 +1,7 @@
 import { parseHTML } from "linkedom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderAppShell } from "../../apps/web-next/src/app-shell.js";
+import { initializeUserProfileMenu } from "../../apps/web-next/src/user-profile-menu.js";
 
 const profile = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -37,6 +38,28 @@ function controlValue(control: HTMLInputElement | HTMLSelectElement): string {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("web-next user profile menu", () => {
+  it("ignores a profile response that arrives after disposal", async () => {
+    const { document, Event } = parseHTML('<html><body><div id="app"></div></body></html>').window;
+    const root = document.querySelector<HTMLElement>("#app");
+    if (!root) throw new Error("Shell fixture is missing.");
+    let resolveProfile: ((response: Response) => void) | undefined;
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => { resolveProfile = resolve; })));
+
+    renderAppShell(root, '<main id="main-content">Page</main>', "world-library");
+    const dispose = initializeUserProfileMenu(root);
+    const menuButton = document.querySelector<HTMLButtonElement>(".user-profile-toggle");
+    const fields = document.querySelector<HTMLFieldSetElement>("[data-user-profile-fields]");
+    if (!menuButton || !fields) throw new Error("Profile controls are missing.");
+
+    menuButton.dispatchEvent(new Event("click"));
+    if (!resolveProfile) throw new Error("Profile request did not start.");
+    dispose();
+    resolveProfile(new Response(JSON.stringify({ user: profile }), { status: 200 }));
+    await settle();
+
+    expect(fields.disabled).toBe(true);
+  });
+
   it("opens the legacy-profile-icon modal and persists each setting immediately", async () => {
     const { document, Event } = parseHTML('<html><body><div id="app"></div></body></html>').window;
     const root = document.querySelector<HTMLElement>("#app");
@@ -60,6 +83,7 @@ describe("web-next user profile menu", () => {
     }));
 
     renderAppShell(root, '<main id="main-content">Page</main>', "world-library");
+    initializeUserProfileMenu(root);
     const menuButton = document.querySelector<HTMLButtonElement>(".user-profile-toggle");
     const dialog = document.querySelector<HTMLDialogElement>(".user-profile-dialog");
     const name = document.querySelector<HTMLInputElement>("#user-profile-display-name");
@@ -111,6 +135,7 @@ describe("web-next user profile menu", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     renderAppShell(root, '<main id="main-content">Page</main>', "world-library");
+    initializeUserProfileMenu(root);
     const menuButton = document.querySelector<HTMLButtonElement>(".user-profile-toggle");
     const name = document.querySelector<HTMLInputElement>("#user-profile-display-name");
     const status = document.querySelector<HTMLElement>("[data-user-profile-status]");

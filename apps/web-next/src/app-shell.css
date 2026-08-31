@@ -1,0 +1,3 @@
+.app-shell [data-shell-campaign-menu][hidden] {
+  display: none;
+}
