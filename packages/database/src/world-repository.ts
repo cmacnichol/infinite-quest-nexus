@@ -1207,6 +1207,13 @@ function createPostgresCampaignRepository(
           })
         ]
       );
+      // Only new world campaigns opt in; existing campaigns and imports retain their settings.
+      await client.query(
+        `INSERT INTO campaign_memory_configs (
+           campaign_id, owner_user_id, retrieval_implementation, retrieval_shadow_enabled
+         ) VALUES ($1,$2,'chunked_hybrid',true)`,
+        [campaignId, scope.ownerUserId]
+      );
       await collaborators.memory.autoEnableCampaignEmbedding(client, {
         ownerUserId: scope.ownerUserId,
         campaignId,

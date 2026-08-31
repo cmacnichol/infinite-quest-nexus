@@ -784,7 +784,11 @@ export function createPostgresChronicleGenerationTransactionPort(
          DO UPDATE SET work_version = chronicle_jobs.work_version + 1, updated_at = now()`,
         [scope.ownerUserId, scope.campaignId]
       );
-      return configView(saved.rows[0]);
+      const config = configView(saved.rows[0]);
+      if (config.retrievalImplementation === "chunked_hybrid" || config.retrievalShadowEnabled) {
+        await enqueuePostgresChronicleChunkIndex(client, scope);
+      }
+      return config;
     },
     async enqueueEmbeddingReindex(database, scope) {
       const client = transactionClient(database);

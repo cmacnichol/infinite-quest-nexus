@@ -1441,8 +1441,10 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
   });
 
   it("shows corrected narration and retains existing illustration controls when segment prose is stale", async () => {
-    const turns = makeTurns(1, 1);
-    turns[0].narration = "Silver rain patters across the observatory dome.";
+    const turns = makeTurns(1, 1).map((turn) => ({
+      ...turn,
+      narration: "Silver rain patters across the observatory dome."
+    }));
     const syncStatus = vi.fn().mockResolvedValue({
       campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 1, storyLengthProfile: "standard" },
       world: {},
