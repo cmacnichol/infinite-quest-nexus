@@ -6,6 +6,8 @@ The user has deferred further visual changes until after module integration. The
 
 ## Change map
 
+The module foundation consists of the pinned loader and same-origin icon adapter in `src/ui/`, the semantic token/vendor-theme boundary in `src/theme/` and `src/ui/web-awesome-theme.css`, small typed Story controls in `src/story/ui/`, and browser/profile preference modules in `src/preferences/`. Story orchestration stays in the existing page/model. A future design pass can change tokens and component/layout styles without replacing generation workflows or adopting another framework.
+
 | Future change | Primary edit | Required proof |
 | --- | --- | --- |
 | Palette, typography, spacing, shape | `apps/web-next/src/theme/tokens.css` | Contrast plus light/dark catalogue |
@@ -32,7 +34,7 @@ $env:VITE_UI_COMPONENTS = "web-awesome"
 pnpm build:web:next
 ```
 
-For native comparison or rollback, select native before rebuilding:
+For native comparison or rollback, select native before rebuilding. This is an alternative build, not a prerequisite for the Core test run below:
 
 ```powershell
 $env:VITE_UI_COMPONENTS = "native"
@@ -52,12 +54,14 @@ try {
 }
 ```
 
-Run the focused Core/CSP fixture or the complete mocked browser set after both builds:
+For Core verification, keep `VITE_UI_COMPONENTS=web-awesome` and build both the Core app and fixture before running the focused Core/CSP fixture or complete mocked browser set:
 
 ```powershell
 pnpm exec playwright test --config playwright.web-awesome.config.ts tests/e2e/web-awesome-core.e2e.test.ts
 pnpm exec playwright test --config playwright.web-awesome.config.ts
 ```
+
+For a native-built app with `VITE_UI_COMPONENTS=native`, run only `pnpm exec playwright test --config playwright.web-awesome.config.ts tests/e2e/quiet-leaf-navigation.e2e.test.ts`. That file includes native composer geometry. Its native-only case is intentionally skipped in the full Core run. Rebuild Core plus the fixture when returning to the Core preview; do not run Core-only Story selectors against native markup.
 
 The test configuration starts and stops its own loopback-only helper at port 43175. For interactive catalogue inspection, run `pnpm exec tsx scripts/serve-ui-test-build.ts` in a dedicated terminal and open [the catalogue](http://127.0.0.1:43175/ui-test/?catalogue=1). Add `&panel=automatic`, `comfortable`, `wide`, or `full` to inspect one panel. Stop that helper before running Playwright; the configuration deliberately refuses to reuse an unknown server. Do not start another helper or rebuild bundles while tests are running. Restore any previous `VITE_UI_COMPONENTS` value when finished.
 

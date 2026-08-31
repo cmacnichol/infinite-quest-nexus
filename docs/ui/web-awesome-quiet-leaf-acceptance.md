@@ -1,13 +1,36 @@
 # Quiet Leaf implementation acceptance
 
-Status: opt-in module implementation under final code review; **not released or default-enabled**. The user explicitly deferred further visual work, keeping the current layout unchanged until after module implementation. This is not approval of the rendered design.
+Status: opt-in module code implemented, with scoped review limitations below; **not released or default-enabled**. The user explicitly deferred further visual work, keeping the current layout unchanged until after module implementation. This is not approval of the rendered design.
 
 ## Implementation checkpoint
 
-Code candidate: `a9617230a84aec55d4683f8e2f91240239efedce` (linked worktree823c).
-This checkpoint preserves the existing preview without another visual change.
-Final whole-branch code review is pending; release/runtime gates below remain
-separate from completing the opt-in module handoff.
+Code candidate: `839a994f585b6e17f12b7fb09ff186069db8e530` (linked worktree823c).
+Final browser-test correction: `7737e17` (production code unchanged).
+The frozen layout is checkpointed at `a961723`; subsequent changes repair
+functional integration/native isolation, not the deferred design.
+The independent Sol whole-branch review covered103 files. It found no critical
+issue, but requested functional fixes before the opt-in module handoff:
+preference-refresh command binding, native composer CSS isolation, menu focus
+retention, retained-dialog opener restoration, and empty-choice visibility.
+A smaller profile typing/acknowledgment defect was included in the same bounded
+fix wave. One scoped re-review confirmed five findings addressed and verified
+that preference refreshes now use the existing page render/binding lifecycle.
+It kept that finding open for additional test breadth, not a remaining
+identified command-binding defect. Final focused verification passes85 tests
+across7 suites, plus `pnpm check`, strict browser-fixture TypeScript, and diff
+checks. Release/runtime gates remain separate.
+
+### Explicit review follow-ups
+
+- Additional post-preference tests for narration, beginning/recovery, and
+  illustration commands remain deferred. The new post-refresh test covers
+  History; existing handler tests and centralized rebinding are not claimed
+  as dedicated proof of every interaction combination.
+- A minor focus issue remains: a prior Campaign Settings command can leave a
+  stored tool-dialog opener; a later reader-opened tool such as Edit Response
+  may return focus to Campaign Settings rather than its reader opener.
+- The coordinator retained these as non-release follow-ups after the bounded
+  fix wave. This is not an all-findings-resolved or ready-to-merge verdict.
 
 ## Retired vendor-dialog compatibility finding — 2026-08-30
 
@@ -48,11 +71,11 @@ complete. This is separate from the retired vendor-dialog accessibility path.
 | Gate | Status | Evidence |
 | --- | --- | --- |
 | G1 Core/CSP | **Pass (scoped compatibility gate)** | Built production fixture passes in Chromium, Firefox, and WebKit (3/3): named native dialog, Close focus, Escape/opener restoration, unchanged CSP, no console/CSP errors or external requests, same-origin `regular/circle-question.svg`, input value, disabled behavior, and dropdown callback. |
-| G2 theme/preferences | Partial | Theme suite:43 passed; display preferences:14 passed. Rebuilt Core browser set39/39 passes across three engines, including local/server preference separation and390–3440px width checks. Fresh visual review remains separate; screenshots still show footer layout defects. |
-| G3 component behavior | Pass for scoped browser set; wider matrix partial | Rebuilt39/39 Core browser instances cover draft height/growth/shrink/clear, stable caret, valid radio keyboard sequence, choice identity, retry preparation, length dialog, preferences, and navigation. Full IME/200% zoom/state matrix is not claimed. Passing interaction checks do not certify layout quality. |
+| G2 theme/preferences | Partial | Theme suite:43 passed; display preferences:14 passed. Final Core matrix48 passed/3 intentional native-only skips across three engines, including local/server preference separation and390–3440px width checks. Visual approval remains deferred; screenshots still show footer layout defects. |
+| G3 component behavior | Pass for scoped browser set; wider matrix partial | Final48 Core browser instances cover draft height/growth/shrink/clear, stable caret, radio keyboard sequence, choice identity, retry preparation, length dialog, preferences, navigation, retained-dialog focus, menu-update focus, and empty-choice CSS visibility. Full IME/200% zoom/state matrix and extra post-preference command combinations are not claimed. |
 | G4 Story regression | Pass for unit/source checks; runtime pending | Full unit run:228 suites/2,687 tests passed,48 skipped; one sandbox-blocked build-contract suite then passed4/4 on an elevated focused rerun. `pnpm check`, client boundaries, root strict TypeScript, and strict browser-fixture TypeScript pass. Runtime/provider behavior remains a separate gate. |
 | G5 runtime/visual approval | Runtime blocked; visual work deferred by user | No disposable runtime parity run or visual approval. Two independent full visual reviews returned rebuild; footer composition and mobile Turn Length findings are deferred by explicit user direction. All15 runtime smoke rows remain Blocked. |
-| G6 bundle/rollback | Pass for local build/comparison scope; release pending | Native navigation9/9 passes across three engines on the current source. Native entry163,612bytes (159.77734375KiB) versus Core176,924bytes (172.77734375KiB), a13KiB increase. Core app/fixture restored. Earlier native image build succeeded; no deployment or final-candidate container parity claim. |
+| G6 bundle/rollback | Pass for local build/comparison scope; release pending | Native navigation/composer geometry12/12 passes across three engines on the current source. Native entry164,018bytes (160.174KiB) versus Core177,323bytes (173.167KiB), a12.993KiB increase. Core app/fixture restored. Earlier native image build succeeded; no deployment or final-candidate container parity claim. |
 
 The scoped G1 evidence is the local Playwright executable running `test --config
 playwright.web-awesome.config.ts tests/e2e/web-awesome-core.e2e.test.ts`, after
@@ -66,23 +89,34 @@ remain required for later gates.
 Reviewed local checkpoints include Core Story `21712a8`, shared shell
 `8139ec5`, the first visual correction batch `d941faf`, responsive shell
 `1226393`, Core legacy-status removal `fa55509`, and Task17 test slice
-`2346498`, and the current frozen preview `a961723`. The latest39 Core cases
-use the production/test source now checkpointed in `a961723`;9 native cases
-were rerun on that same source and pass. These are not a release candidate.
+`2346498`, frozen preview `a961723`, functional fixes `839a994`, and the
+test-only correction `7737e17`. These are not a release candidate.
 
 The rebuilt Core app (312 modules) and fixture (259 modules) both build
-successfully. `playwright test --config playwright.web-awesome.config.ts`
-passes39/39. Live engine probes report Chromium151.0.7922.34, Firefox153.0,
-and WebKit26.5; Playwright is1.62.1. The post-rebuild focused unit run passes
-12 suites/105 tests, without counting those overlapping cases again in the
-earlier full-suite total. Post-rebuild `pnpm check`, strict browser-fixture
-TypeScript, and `git diff --check` also pass.
+successfully. On2026-08-31, the final command
+`playwright test --config playwright.web-awesome.config.ts --reporter=json`
+reports48 passed,3 skipped,0 unexpected failures,0 flaky tests. The skips are
+exactly the native-only composer geometry case in Chromium, Firefox, and
+WebKit. With a native build, the navigation file passes12/12, including that
+geometry case. Live engine probes report Chromium151.0.7922.34, Firefox153.0,
+and WebKit26.5; Playwright is1.62.1. Final focused unit verification passes
+7 suites/85 tests; it is not added to the overlapping earlier full-suite
+total. `pnpm check`, strict browser-fixture TypeScript, and `git diff --check`
+also pass on the functional candidate.
+
+An earlier new menu-focus test called textbox `fill()` after focusing a menu
+item, then incorrectly expected the menu to retain focus; draft typing also
+does not publish a Story update. WebKit exposed that test error. The corrected
+case uses a programmatic turn-length change, asserts its value and retained
+menu focus, and passes in all three engines. This did not require another
+production change. JSON reporter output establishes the final skip counts;
+scheduled test names in the line reporter were not treated as executed passes.
 
 Toolchain: Node24.18.0, installed pnpm11.19.0 (repository/Docker pin11.24.0),
 Vite7.3.6, Core3.12.0. Browser fixtures run under the application CSP with
 synthetic data. The bundle reporter measures each manifest JavaScript chunk
 individually, not total transferred application assets; its entry delta is
-13,312bytes (about8.14%). Its budget remains report-only.
+13,305bytes (about8.11%). Its budget remains report-only.
 
 `pnpm check` passes, including both web package checks, root strict TypeScript,
 repository/data safety and JavaScript syntax checks. The separate strict
@@ -140,7 +174,14 @@ Auto-width screenshot. The width behavior assertions pass, but are not visual
 approval. After the second rebuild verdict, the user directed that the layout
 remain unchanged while the module is finished. Those visual findings and the
 durable Story DESIGN/sidecar update are therefore deferred, not resolved.
-Native comparison has since passed; whole-branch code review is in progress.
+Native comparison has since passed. Whole-branch code review, the bounded
+functional fix wave and its scoped re-review have completed, with the explicit
+follow-ups listed above retained. No additional visual correction was made.
+
+The code review also recorded presentation omissions: the Profile menu does
+not yet show the display name, and the Story heading lacks explicit
+world/version and historical-view context. These are deferred with the visual
+work under the user's freeze, not silently considered implemented.
 
 Current local evidence is under `.impeccable/review/`: `desktop.png`,
 `mobile.png`, `user-2560.png`, and `light-desktop.png` are full-page captures
