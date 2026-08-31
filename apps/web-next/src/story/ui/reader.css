@@ -19,6 +19,7 @@
   grid-area: leaf;
   width: 100%;
   min-width: 0;
+  box-sizing: border-box;
   max-width: var(--story-leaf-max);
   display: grid;
   grid-template-areas:

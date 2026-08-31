@@ -19,4 +19,18 @@ it("does not dispose borrowed preferences on shell remount", () => {
 
   expect(dispose).not.toHaveBeenCalled();
   expect(root.querySelector("main")?.textContent).toBe("Page body");
+  expect(root.querySelector<HTMLElement>(".app-shell")?.dataset.uiImplementation).toBe("native");
+});
+
+it("marks the mounted Core shell without changing the native shell marker", () => {
+  const { document } = parseHTML("<body><div id=app></div></body>");
+  const root = document.querySelector<HTMLElement>("#app")!;
+
+  const shell = mountAppShell(root, "<main>Page body</main>", "world-library", {
+    uiImplementation: "web-awesome",
+    displayPreferences: createDisplayPreferences(null)
+  });
+
+  expect(root.querySelector<HTMLElement>(".app-shell")?.dataset.uiImplementation).toBe("web-awesome");
+  shell.dispose();
 });

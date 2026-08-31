@@ -32,11 +32,12 @@ export function mountAppShell(
   navigation: AppNavigation,
   options: AppShellOptions = {}
 ): MountedAppShell {
+  const implementation = options.uiImplementation ?? uiImplementation();
   renderAppShell(root, pageMarkup, navigation, options);
+  root.querySelector<HTMLElement>(".app-shell")?.setAttribute("data-ui-implementation", implementation);
   const theme = initializeAppTheme(root);
   const borrowedDisplay = options.displayPreferences !== undefined;
   const display = options.displayPreferences ?? createDisplayPreferences(browserStorage(root));
-  const implementation = options.uiImplementation ?? uiImplementation();
   const disposeProfile = implementation === "native" ? initializeUserProfileMenu(root) : () => undefined;
   const coreMenus = implementation === "web-awesome" ? mountShellMenus(root, { theme, display }) : null;
   const profileToggle = root.querySelector<HTMLButtonElement>(".user-profile-toggle");

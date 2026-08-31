@@ -1,3 +1,95 @@
 .app-shell [data-shell-campaign-menu][hidden] {
   display: none;
 }
+
+/* Core replaces the legacy profile control with its own menu trigger. */
+.app-shell[data-ui-implementation="web-awesome"] .user-profile-toggle[hidden] {
+  display: none;
+}
+
+.app-shell[data-ui-implementation="web-awesome"]:has(main[data-page="story-player"]) .story-link {
+  display: none;
+}
+
+@media (min-width: 681px) {
+  .app-shell[data-ui-implementation="web-awesome"] .site-header {
+    grid-template-columns: minmax(0, 1fr) auto auto auto 48px auto;
+    grid-template-areas: "brand nav story tools theme profile";
+  }
+
+  .app-shell[data-ui-implementation="web-awesome"] .brand { grid-area: brand; }
+  .app-shell[data-ui-implementation="web-awesome"] .site-nav { grid-area: nav; }
+  .app-shell[data-ui-implementation="web-awesome"] .story-link { grid-area: story; }
+  .app-shell[data-ui-implementation="web-awesome"] [data-shell-campaign-menu] { grid-area: tools; }
+  .app-shell[data-ui-implementation="web-awesome"] .theme-toggle { grid-area: theme; }
+  .app-shell[data-ui-implementation="web-awesome"] [data-shell-profile-menu] { grid-area: profile; }
+
+  .app-shell[data-ui-implementation="web-awesome"] :is(
+    [data-shell-campaign-menu],
+    [data-shell-profile-menu]
+  ) {
+    min-width: 0;
+  }
+
+}
+
+@media (min-width: 681px) and (max-width: 1080px) {
+  .app-shell[data-ui-implementation="web-awesome"] .site-header {
+    min-height: 108px;
+    grid-template-columns: minmax(0, 1fr) auto 48px auto;
+    grid-template-rows: 64px 44px;
+    grid-template-areas:
+      "brand story theme profile"
+      "nav nav nav nav";
+  }
+
+  .app-shell[data-ui-implementation="web-awesome"] .site-nav {
+    display: flex;
+    min-width: 0;
+    overflow-x: auto;
+  }
+
+  .app-shell[data-ui-implementation="web-awesome"]:has(main[data-page="story-player"]) .site-header,
+  .app-shell[data-ui-implementation="web-awesome"]:has([data-shell-campaign-menu]:not([hidden])) .site-header {
+    min-height: 152px;
+    grid-template-rows: 64px 44px 44px;
+    grid-template-areas:
+      "brand story theme profile"
+      "tools tools tools tools"
+      "nav nav nav nav";
+  }
+}
+
+@media (max-width: 680px) {
+  .app-shell[data-ui-implementation="web-awesome"] .site-header {
+    min-height: 108px;
+    grid-template-columns: minmax(0, 1fr) auto 48px auto;
+    grid-template-rows: 64px 44px;
+    grid-template-areas:
+      "brand story theme profile"
+      "nav nav nav nav";
+  }
+
+  .app-shell[data-ui-implementation="web-awesome"] .brand { grid-area: brand; }
+  .app-shell[data-ui-implementation="web-awesome"] .story-link { grid-area: story; }
+  .app-shell[data-ui-implementation="web-awesome"] .theme-toggle { grid-area: theme; }
+  .app-shell[data-ui-implementation="web-awesome"] [data-shell-profile-menu] {
+    grid-area: profile;
+    min-width: 0;
+  }
+  .app-shell[data-ui-implementation="web-awesome"] [data-shell-campaign-menu] {
+    grid-area: tools;
+    min-width: 0;
+  }
+  .app-shell[data-ui-implementation="web-awesome"] .site-nav { grid-area: nav; }
+
+  .app-shell[data-ui-implementation="web-awesome"]:has(main[data-page="story-player"]) .site-header,
+  .app-shell[data-ui-implementation="web-awesome"]:has([data-shell-campaign-menu]:not([hidden])) .site-header {
+    min-height: 152px;
+    grid-template-rows: 64px 44px 44px;
+    grid-template-areas:
+      "brand story theme profile"
+      "tools tools tools tools"
+      "nav nav nav nav";
+  }
+}
