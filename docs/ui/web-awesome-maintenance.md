@@ -47,9 +47,19 @@ Run the broader Story/browser catalogue only through the project’s configured 
 
 ## Docker and release boundary
 
-Container selection is intended to be a build argument, never a runtime service setting: a future Docker build stage must wire `ARG VITE_UI_COMPONENTS` before `RUN pnpm build`, without exporting it as runtime `ENV`. Until that `ARG` is actually present and a native rollback image is built and verified, `docker build --build-arg VITE_UI_COMPONENTS=native ...` and the equivalent Compose build are **not currently supported or verified**. Do not present them as an operator rollback procedure yet.
+Container selection is a Docker build argument, never a runtime service setting: the build stage declares `ARG VITE_UI_COMPONENTS` before `RUN pnpm build` and does not export it as runtime `ENV`. Build a native rollback image without starting a service:
 
-When the build-argument contract is implemented and independently verified, a rollback builds a new native image only; it does not alter a database or remove existing preference keys. Deploying any image, including a Swarm prebuilt image, remains separate authorization.
+```powershell
+docker build --build-arg VITE_UI_COMPONENTS=native -t infinitequest-nexus:ui-native .
+```
+
+Or create the Compose image only:
+
+```powershell
+docker compose build --build-arg VITE_UI_COMPONENTS=native infinitequest-app
+```
+
+A rollback builds a new native image only; it does not alter a database or remove existing preference keys. Deploying any image, including a Swarm prebuilt image, remains separate authorization. The build-argument contract is not a substitute for the outstanding browser, runtime, visual, bundle, and release gates.
 
 ## Core upgrades
 
