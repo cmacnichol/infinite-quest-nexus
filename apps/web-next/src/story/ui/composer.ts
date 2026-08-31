@@ -112,10 +112,10 @@ export function mountComposer(document: Document, actions: ComposerActions): Com
 
   let disposed = false;
   const confirmAsAction = () => {
-    if (!disposed) actions.confirm("action");
+    if (!disposed && !confirmAction.disabled) actions.confirm("action");
   };
   const confirmAsScene = () => {
-    if (!disposed) actions.confirm("scene");
+    if (!disposed && !confirmScene.disabled) actions.confirm("scene");
   };
   const returnToDraft = () => {
     if (disposed) return;
@@ -150,6 +150,9 @@ export function mountComposer(document: Document, actions: ComposerActions): Com
       length.update(state.length);
       retry.disabled = !state.canRetry;
       continueStory.disabled = !state.canContinue;
+      const confirmationDisabled = state.confirmation === null || !state.canContinue;
+      confirmAction.disabled = confirmationDisabled;
+      confirmScene.disabled = confirmationDisabled;
       status.textContent = state.status ?? "";
       confirmation.hidden = state.confirmation === null;
       confirmationText.textContent = state.confirmation === null

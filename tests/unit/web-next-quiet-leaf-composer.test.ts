@@ -114,6 +114,22 @@ it("returns focus to the existing draft after leaving confirmation", () => {
   composer.dispose();
 });
 
+it("disables unavailable confirmation actions", () => {
+  const { document, window, actions, composer } = fixture();
+  composer.update({ ...state, canContinue: false, confirmation: { action: "Wait for the active turn" } });
+  const action = composer.element.querySelector<HTMLButtonElement>("[data-confirm-intent-action]");
+  const scene = composer.element.querySelector<HTMLButtonElement>("[data-confirm-intent-scene]");
+  if (!action || !scene) throw new Error("Composer confirmation controls are missing.");
+
+  expect(action.disabled).toBe(true);
+  expect(scene.disabled).toBe(true);
+  action.dispatchEvent(new window.Event("click", { bubbles: true }));
+  scene.dispatchEvent(new window.Event("click", { bubbles: true }));
+  expect(actions.confirm).not.toHaveBeenCalled();
+  expect(document.querySelector("[data-story-intent-confirmation]")).toBeTruthy();
+  composer.dispose();
+});
+
 it("keeps hidden confirmations out of the accessibility tree and labels each composer uniquely", () => {
   const { document, composer } = fixture();
   const second = mountComposer(document, {

@@ -486,6 +486,71 @@ function campaignReader(document: Document, state: StoryPlayerViewState): HTMLEl
   return reader;
 }
 
+/**
+ * Provides the safe, read-only projection used by the Core Story presenter.
+ * The native reader retains its composer and compact illustration preview.
+ */
+export function renderStoryContent(document: Document, state: StoryPlayerViewState): readonly HTMLElement[] {
+  if (state.ui.phase === "loading") return [status(document, "Loading Story…")];
+  if (state.ui.phase === "error" || state.ui.phase === "not_found") {
+    return [errorState(document, state.ui.phase === "not_found", state.ui.message)];
+  }
+  if (state.ui.phase === "chooser") return [chooser(document, state.campaigns)];
+
+  const campaign = state.projection.campaign;
+  const world = state.projection.world;
+  if (!campaign || !world) return [status(document, "Loading Story…")];
+
+  const content: HTMLElement[] = [];
+  const selectedTurn = resolvedRenderedTurn(state);
+  if (selectedTurn) {
+    if (state.ui.continuousReading) {
+      for (const turn of state.projection.turns) {
+        content.push(renderStoryTurn(document, turn, state.projection.turns, state.projection.generation !== null, state.projection.nextTurnsCursor !== null, turn.turnNumber === selectedTurn.turnNumber));
+      }
+    } else {
+      content.push(renderStoryTurn(document, selectedTurn, state.projection.turns, state.projection.generation !== null, state.projection.nextTurnsCursor !== null));
+    }
+    if (state.projection.generation !== null) {
+      const preview = element(document, "article", "story-leaf story-generation-preview");
+      preview.dataset.storyGenerationPreview = "";
+      preview.dataset.generationFollowing = String(state.ui.generationFollowing);
+      preview.append(element(document, "p", "story-generation-status", generationLabel(state.projection)));
+      if (state.projection.generation.narration) preview.append(...narrationParagraphs(document, state.projection.generation.narration));
+      if (state.projection.generation.transport.state === "degraded") {
+        preview.append(element(document, "p", "story-generation-degraded", "Connection is degraded; recovery monitoring remains active."));
+      }
+      if (!state.ui.generationFollowing) {
+        const resumeFollowing = element(document, "button", undefined, "Resume following");
+        resumeFollowing.type = "button";
+        resumeFollowing.dataset.action = "resume-generation-following";
+        preview.append(resumeFollowing);
+      }
+      content.push(preview);
+    }
+  } else {
+    const background = element(document, "p", "story-background", world.backgroundStory);
+    background.dataset.storyBackground = "";
+    const firstAction = element(document, "p", "story-first-action", world.firstAction);
+    firstAction.dataset.firstAction = "";
+    const begin = element(document, "button", "story-begin", "Begin Story");
+    begin.type = "button";
+    begin.dataset.action = "begin-story";
+    const hasTextProvider = state.selectedCampaign?.textProviderProfileId !== null && state.selectedCampaign !== null;
+    begin.disabled = state.projection.generation !== null || !hasTextProvider;
+    content.push(background, firstAction, begin);
+    if (!hasTextProvider) {
+      const setup = element(document, "a", "story-setup", "Set up a text provider");
+      setup.href = "/nexus/#providers";
+      setup.dataset.storySetup = "";
+      content.push(setup);
+    }
+  }
+  const recoveryView = recovery(document, state.projection);
+  if (recoveryView) content.push(recoveryView);
+  return content;
+}
+
 export function renderIllustrationWing(document: Document, illustration: Readonly<StoryIllustrationState>): HTMLElement {
   const wing = element(document, "section", "story-illustration-content");
   const capabilities = storyIllustrationCapabilities(illustration);
@@ -600,6 +665,19 @@ function campaignSpine(document: Document, state: StoryPlayerViewState): HTMLEle
     spine.append(button);
   }
   return spine;
+}
+
+export function renderStoryNavigation(document: Document, state: StoryPlayerViewState): HTMLElement | null {
+  if (!state.projection.campaign) return null;
+  const navigation = element(document, "section", "story-quiet-leaf-navigation");
+  navigation.dataset.storyNavigation = "";
+  const openHistory = element(document, "button", "story-open-history", "Turn History");
+  openHistory.type = "button";
+  openHistory.dataset.action = "open-complete-history";
+  const spineContent = campaignSpine(document, state);
+  navigation.append(element(document, "p", "story-campaign-name", state.projection.campaign.title), openHistory, spineContent);
+  alignLatestSpine(spineContent);
+  return navigation;
 }
 
 function completeHistoryDialog(document: Document, state: StoryPlayerViewState): HTMLDialogElement | null {
@@ -806,6 +884,11 @@ function toolDialog(document: Document, state: StoryPlayerViewState): HTMLDialog
   return dialog;
 }
 
+export function renderStoryDialogs(document: Document, state: StoryPlayerViewState): readonly HTMLElement[] {
+  return [completeHistoryDialog(document, state), toolDialog(document, state)]
+    .filter((dialog): dialog is HTMLDialogElement => dialog !== null) as unknown as readonly HTMLElement[];
+}
+
 export function applyReadingWidth(foldout: HTMLElement, width: ReadingWidth): void {
   foldout.dataset.readingWidth = width;
 }
@@ -844,16 +927,7 @@ export function renderStoryPlayerView(root: HTMLElement, state: StoryPlayerViewS
   }
 
   reader.replaceChildren(campaignReader(document, state));
-  if (state.projection.campaign) {
-    const openHistory = element(document, "button", "story-open-history", "Turn History");
-    openHistory.type = "button";
-    openHistory.dataset.action = "open-complete-history";
-    const spineContent = campaignSpine(document, state);
-    spine.append(element(document, "p", "story-campaign-name", state.projection.campaign.title), openHistory, spineContent);
-    alignLatestSpine(spineContent);
-  }
-  const dialog = completeHistoryDialog(document, state);
-  if (dialog) main.append(dialog);
-  const tools = toolDialog(document, state);
-  if (tools) main.append(tools);
+  const navigation = renderStoryNavigation(document, state);
+  if (navigation) spine.append(navigation);
+  main.append(...renderStoryDialogs(document, state));
 }
