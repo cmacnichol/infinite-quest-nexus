@@ -1,0 +1,173 @@
+.quiet-leaf-layout {
+  width: 100%;
+  max-width: var(--story-layout-max);
+  display: grid;
+  grid-template-areas: "history leaf";
+  grid-template-columns: minmax(150px, 180px) minmax(0, 1fr);
+  align-items: start;
+  gap: clamp(1rem, 2vw, 2rem);
+  margin-inline: auto;
+}
+
+.quiet-leaf-layout[data-has-history="false"] {
+  max-width: var(--story-leaf-max);
+  grid-template-areas: "leaf";
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.quiet-leaf {
+  grid-area: leaf;
+  width: 100%;
+  min-width: 0;
+  max-width: var(--story-leaf-max);
+  display: grid;
+  grid-template-areas:
+    "prose"
+    "composer"
+    "footer";
+  grid-template-columns: minmax(0, 1fr);
+  margin-inline: auto;
+  border: 1px solid var(--rule-strong);
+  background: var(--surface-paper);
+}
+
+.quiet-leaf-prose {
+  grid-area: prose;
+  min-width: 0;
+  max-width: var(--story-prose-max);
+  padding: clamp(1.25rem, 3vw, 2.5rem);
+  font-family: var(--font-prose, "Literata", Georgia, serif);
+}
+
+.quiet-leaf-heading {
+  padding-bottom: 1.25rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.quiet-leaf-heading h1 {
+  max-width: none;
+  margin: 0;
+  font-family: var(--font-prose, "Literata", Georgia, serif);
+  font-size: clamp(1.6rem, 3vw, 2.6rem);
+  font-weight: 600;
+  line-height: 1.02;
+  letter-spacing: -0.025em;
+}
+
+.quiet-leaf-context {
+  margin: 0.7rem 0 0;
+  color: var(--text-secondary);
+  font-family: var(--font-ui, "Chakra Petch", sans-serif);
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.quiet-leaf-narration {
+  display: grid;
+  gap: 1rem;
+  padding-top: 1.5rem;
+  font-size: 1rem;
+  line-height: 1.65;
+}
+
+.quiet-leaf-narration > :first-child {
+  margin-top: 0;
+}
+
+.quiet-leaf-narration > :last-child {
+  margin-bottom: 0;
+}
+
+.quiet-leaf-history {
+  grid-area: history;
+  display: grid;
+  align-content: start;
+  gap: 1rem;
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid var(--rule-strong);
+  background: var(--surface-paper);
+  font-family: var(--font-ui, "Chakra Petch", sans-serif);
+}
+
+.quiet-leaf-composer {
+  grid-area: composer;
+  min-width: 0;
+  max-width: var(--story-prose-max);
+  padding: 0 clamp(1.25rem, 3vw, 2.5rem) clamp(1.25rem, 3vw, 2.5rem);
+}
+
+.quiet-leaf-footer {
+  grid-area: footer;
+  min-width: 0;
+  min-height: 0;
+  display: block;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border-top: 1px solid var(--rule-strong);
+  font-size: inherit;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.quiet-leaf[data-has-artwork="true"] {
+  grid-template-areas:
+    "prose artwork"
+    "composer artwork"
+    "footer footer";
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 30%);
+  gap: 0 2rem;
+}
+
+.quiet-leaf-artwork {
+  grid-area: artwork;
+  min-width: 0;
+  align-self: start;
+  margin: clamp(1.25rem, 3vw, 2.5rem) clamp(1.25rem, 3vw, 2.5rem) 0 0;
+}
+
+.quiet-leaf-artwork > * {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+}
+
+.quiet-leaf-artwork img {
+  display: block;
+  width: 100%;
+  height: auto;
+  object-fit: cover;
+}
+
+@media (max-width: 1023px) {
+  .quiet-leaf-layout {
+    grid-template-areas:
+      "leaf"
+      "history";
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .quiet-leaf-history {
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(16rem, 82%);
+    overflow-x: auto;
+  }
+
+  .quiet-leaf[data-has-artwork="true"] {
+    grid-template-areas:
+      "artwork"
+      "prose"
+      "composer"
+      "footer";
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
+
+  .quiet-leaf-artwork {
+    margin: clamp(1.25rem, 3vw, 2rem) clamp(1.25rem, 3vw, 2rem) 0;
+  }
+}
