@@ -159,8 +159,8 @@
 
   .quiet-leaf[data-has-artwork="true"] {
     grid-template-areas:
-      "artwork"
       "prose"
+      "artwork"
       "composer"
       "footer";
     grid-template-columns: minmax(0, 1fr);

@@ -383,16 +383,21 @@ export function renderStoryTurn(
   turns: readonly ReaderTurn[],
   generationActive: boolean,
   canLoadPrevious = false,
-  contextual = true
+  contextual = true,
+  presentation: "native" | "quiet-leaf" = "native"
 ): HTMLElement {
   const leaf = element(document, "article", "story-leaf");
   leaf.dataset.storyLeaf = "";
   if (contextual && !generationActive) leaf.append(renderReaderToolbar(document, turns, turn.turnNumber, generationActive, canLoadPrevious));
-  leaf.append(
-    element(document, "p", "story-turn-coordinate", `Turn ${turn.turnNumber}`),
-    element(document, "h1", "story-title", `Turn ${turn.turnNumber}`),
-    element(document, "p", "story-action", turn.action)
-  );
+  if (presentation === "native") {
+    leaf.append(
+      element(document, "p", "story-turn-coordinate", `Turn ${turn.turnNumber}`),
+      element(document, "h1", "story-title", `Turn ${turn.turnNumber}`),
+      element(document, "p", "story-action", turn.action)
+    );
+  } else if (!contextual) {
+    leaf.append(element(document, "h2", "story-continuous-turn-title", `Turn ${turn.turnNumber}`));
+  }
   const cost = formatReportedCost(turn);
   if (cost !== null) leaf.append(element(document, "p", "story-reported-cost", cost));
   leaf.append(...narrationParagraphs(document, turn.narration));
@@ -403,10 +408,8 @@ export function renderStoryTurn(
     edit.disabled = generationActive || latest?.turnNumber !== turn.turnNumber;
     actions.append(edit, recordAction(document, "inspect-state", "Inspect State"));
     if (!generationActive && latest?.turnNumber === turn.turnNumber) {
-      actions.append(
-        recordAction(document, "retry-latest-generation", "Retry Latest Generation"),
-        recordAction(document, "undo-latest", "Undo Latest")
-      );
+      if (presentation === "native") actions.append(recordAction(document, "retry-latest-generation", "Retry Latest Generation"));
+      actions.append(recordAction(document, "undo-latest", "Undo Latest"));
     }
     leaf.append(actions);
   }
@@ -506,10 +509,10 @@ export function renderStoryContent(document: Document, state: StoryPlayerViewSta
   if (selectedTurn) {
     if (state.ui.continuousReading) {
       for (const turn of state.projection.turns) {
-        content.push(renderStoryTurn(document, turn, state.projection.turns, state.projection.generation !== null, state.projection.nextTurnsCursor !== null, turn.turnNumber === selectedTurn.turnNumber));
+        content.push(renderStoryTurn(document, turn, state.projection.turns, state.projection.generation !== null, state.projection.nextTurnsCursor !== null, turn.turnNumber === selectedTurn.turnNumber, "quiet-leaf"));
       }
     } else {
-      content.push(renderStoryTurn(document, selectedTurn, state.projection.turns, state.projection.generation !== null, state.projection.nextTurnsCursor !== null));
+      content.push(renderStoryTurn(document, selectedTurn, state.projection.turns, state.projection.generation !== null, state.projection.nextTurnsCursor !== null, true, "quiet-leaf"));
     }
     if (state.projection.generation !== null) {
       const preview = element(document, "article", "story-leaf story-generation-preview");

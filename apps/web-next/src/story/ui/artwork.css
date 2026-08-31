@@ -18,3 +18,13 @@
   height: auto;
   object-fit: cover;
 }
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-artwork .story-artwork-plate {
+  background: var(--surface-inverse);
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-artwork .story-artwork-plate .story-illustration-figure img {
+  aspect-ratio: auto;
+  max-height: min(72dvh, 58rem);
+  object-fit: contain;
+}
