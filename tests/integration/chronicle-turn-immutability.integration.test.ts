@@ -58,6 +58,37 @@ integration("Chronicle accepted-turn immutability", () => {
     throw new Error(`Chronicle job ${jobId} did not complete after six worker claims.`);
   }
 
+  it("uses the saved latest narration in the next turn context without changing accepted rows", async () => {
+    const story = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+    story.turns.at(-1).narration = "The harbor bell is brass.";
+    const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({
+      sourceName: `latest-narration-context-${crypto.randomUUID()}.story`,
+      story
+    }));
+    const originalRows = await snapshotTurnRows(pool, ownerUserId, imported.campaignId);
+    const latestTurn = await pool.query<{ id: string; turn_number: number }>(
+      "SELECT id, turn_number FROM turns WHERE campaign_id = $1 AND owner_user_id = $2 ORDER BY turn_number DESC LIMIT 1",
+      [imported.campaignId, ownerUserId]
+    );
+    const corrections = createTurnCorrectionApplication({
+      corrections: createPostgresTurnCorrectionRepository(pool, { memory: memoryGeneration(pool) })
+    });
+    await corrections.correctNarration({ ownerUserId, campaignId: imported.campaignId }, {
+      turnId: latestTurn.rows[0]!.id,
+      narration: "The harbor bell is silver.",
+      expectedCorrectionRevision: 0,
+      expectedActiveTurnNumber: latestTurn.rows[0]!.turn_number,
+      source: "user_edit"
+    });
+
+    const context = await buildContextPreview(pool, imported.campaignId, {
+      budgetTokens: 4_096, compression: "full", query: "Inspect the harbor bell.", recentTurns: 8
+    });
+    expect(context.scopes.currentScene.content).toContain("The harbor bell is silver.");
+    expect(context.scopes.currentScene.content).not.toContain("The harbor bell is brass.");
+    await expect(snapshotTurnRows(pool, ownerUserId, imported.campaignId)).resolves.toEqual(originalRows);
+  });
+
   it("keeps corrected source turn rows unchanged by derived Chronicle work", async () => {
     const story = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
     story.world.title = `Chronicle turn snapshot ${crypto.randomUUID()}`;

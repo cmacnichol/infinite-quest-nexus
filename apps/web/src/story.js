@@ -101,6 +101,7 @@ const state = {
   playerConfig: null,
   runtimeState: null,
   editStateSession: null,
+  responseEditSession: null,
   turns: [],
   historyNextCursor: null,
   viewTurnNumber: null,
@@ -150,6 +151,7 @@ let discardModalAction = null;
 let completeHistoryLoad = null;
 let storyTurnWindowEpoch = 0;
 let nextEditStateSessionId = 0;
+let nextResponseEditSessionId = 0;
 const COMPLETE_HISTORY_SUPERSEDED = "complete_history_superseded";
 
 function completeHistorySupersededError() {
@@ -318,6 +320,12 @@ function syncInputState() {
   const editStateLocked = generationLocked || recoveryVisible || Boolean(state.editStateSession?.saving);
   const editStateButton = $("btnOpenEditState");
   if (editStateButton) editStateButton.disabled = editStateLocked;
+  const editResponseButton = $("btnOpenEditResponse");
+  if (editResponseButton) {
+    editResponseButton.disabled = !canEditCurrentResponse()
+      || Boolean(state.responseEditSession?.loading)
+      || Boolean(state.responseEditSession?.saving);
+  }
   if (state.editStateSession) {
     document.querySelectorAll("#editStateDialog textarea, #editStateDialog button").forEach(control => {
       control.disabled = editStateLocked;
@@ -348,6 +356,7 @@ function syncInputState() {
   if (btnNext) btnNext.disabled = generationLocked || turnCount === 0 || isLatest;
   if (btnUndo) btnUndo.disabled = generationLocked || turnCount === 0 || !isLatest;
   if (btnRetry) btnRetry.disabled = generationLocked || turnCount === 0 || !isLatest || !lastTurnHasAction;
+  syncResponseEditorControls();
 }
 
 // ── Activity Log ──────────────────────────────────────────────
@@ -404,6 +413,7 @@ async function checkOnboarding() {
 // ── Campaign Loading ──────────────────────────────────────────
 async function loadCampaign(campaignId, options = {}) {
   const loadEpoch = ++storyTurnWindowEpoch;
+  clearResponseEditSession();
   state.campaignId = campaignId;
   completeHistoryLoad = null;
   setTurnHistoryLoadStatus("");
@@ -591,7 +601,8 @@ function renderScene(turn, index) {
     const segments = state.illustrationSegments
       .filter((segment) => segment.turnId === turnId)
       .sort((left, right) => left.ordinal - right.ordinal);
-    narrationHtml += segments.length && illustrationsEnabled()
+    const segmentsMatchNarration = segmentProseMatchesNarration(segments, turn.narration);
+    narrationHtml += segments.length && illustrationsEnabled() && segmentsMatchNarration
       ? `<div class="narration segmented-narration">${segments.map((segment) => `
           <section class="narration-segment" data-illustration-segment-id="${escapeHtml(segment.id)}"
             data-turn-id="${escapeHtml(turnId)}" aria-label="Illustration segment ${segment.ordinal + 1}">
@@ -633,6 +644,164 @@ function viewedTurnIndex() {
 
 function isViewingLatestTurn() {
   return currentViewTurnNumber() === latestTurnNumber(state.turns);
+}
+
+function normalizeNarrationWhitespace(text) {
+  return String(text || "").replace(/\s+/gu, " ").trim();
+}
+
+function segmentProseMatchesNarration(segments, narration) {
+  return segments.length > 0
+    && normalizeNarrationWhitespace(segments.map((segment) => segment.text).join(" "))
+      === normalizeNarrationWhitespace(narration);
+}
+
+function latestCompletedResponseTurn() {
+  const turnNumber = latestTurnNumber(state.turns);
+  const turnIndex = turnIndexForNumber(state.turns, turnNumber);
+  const turn = state.turns[turnIndex];
+  if (!turn?.id || !Number.isInteger(Number(turn.turnNumber))) return null;
+  if (Number(turn.turnNumber) !== Number(state.campaign?.activeTurnNumber)) return null;
+  return turn;
+}
+
+function responseGenerationIsActive() {
+  const recoveryPanel = $("generationRecoveryPanel");
+  return state.busy
+    || Boolean(state.pendingGeneration)
+    || state.generationDisplayActive
+    || Boolean(state.generationRecoveryKind)
+    || Boolean(recoveryPanel && !recoveryPanel.classList.contains("hidden"));
+}
+
+function canEditCurrentResponse() {
+  return Boolean(state.campaignId)
+    && isViewingLatestTurn()
+    && Boolean(latestCompletedResponseTurn())
+    && !responseGenerationIsActive();
+}
+
+function responseEditSessionIsCurrent(session) {
+  const turn = latestCompletedResponseTurn();
+  return state.responseEditSession === session
+    && state.campaignId === session.campaignId
+    && currentViewTurnNumber() === session.viewTurnNumber
+    && Number(state.campaign?.activeTurnNumber) === session.expectedActiveTurnNumber
+    && turn?.id === session.turnId
+    && Number(turn?.turnNumber) === session.turnNumber;
+}
+
+function clearResponseEditSession(session = null) {
+  if (session && state.responseEditSession !== session) return;
+  state.responseEditSession = null;
+  syncInputState();
+}
+
+function syncResponseEditorControls() {
+  const session = state.responseEditSession;
+  const editor = $("responseEditor");
+  const saveButton = $("btnEditResponseSave");
+  if (!saveButton) return;
+  const draft = String(editor?.value || "").trim();
+  const original = String(session?.effectiveNarration || "").trim();
+  saveButton.disabled = !session
+    || Boolean(session.loading)
+    || Boolean(session.saving)
+    || !draft
+    || draft === original;
+}
+
+async function openCurrentResponseEditor() {
+  const dialog = $("editResponseDialog");
+  const editor = $("responseEditor");
+  const turn = latestCompletedResponseTurn();
+  if (!dialog || !editor || !canEditCurrentResponse() || !turn) return;
+
+  const session = {
+    id: ++nextResponseEditSessionId,
+    campaignId: state.campaignId,
+    turnId: turn.id,
+    turnNumber: Number(turn.turnNumber),
+    viewTurnNumber: currentViewTurnNumber(),
+    expectedActiveTurnNumber: Number(state.campaign?.activeTurnNumber),
+    correctionRevision: null,
+    effectiveNarration: "",
+    loading: true,
+    saving: false
+  };
+  state.responseEditSession = session;
+  syncInputState();
+  try {
+    const correction = await apiClient.campaigns.getTurnCorrection(session.campaignId, session.turnId);
+    if (!responseEditSessionIsCurrent(session) || responseGenerationIsActive()) {
+      clearResponseEditSession(session);
+      return;
+    }
+    session.correctionRevision = Number(correction.correctionRevision || 0);
+    session.effectiveNarration = String(correction.effectiveNarration || "");
+    session.loading = false;
+    editor.value = session.effectiveNarration;
+    openManagedModal(dialog);
+  } catch (error) {
+    if (state.responseEditSession === session) {
+      toast(`Response could not be loaded: ${error.message}`);
+      clearResponseEditSession();
+    }
+    return;
+  }
+  syncInputState();
+}
+
+async function saveCurrentResponseCorrection() {
+  const dialog = $("editResponseDialog");
+  const editor = $("responseEditor");
+  const session = state.responseEditSession;
+  if (!dialog || !editor || !session || session.loading || session.saving) return;
+  const narration = editor.value.trim();
+  if (!narration) {
+    toast("Enter narration before saving a correction.");
+    syncResponseEditorControls();
+    return;
+  }
+  if (narration === session.effectiveNarration.trim()) {
+    toast("Change the narration before saving a correction.");
+    syncResponseEditorControls();
+    return;
+  }
+  if (!responseEditSessionIsCurrent(session) || responseGenerationIsActive()) {
+    toast("The current response changed. Reopen the editor before saving.");
+    return;
+  }
+
+  session.saving = true;
+  syncInputState();
+  showBusy("Saving corrected narration…");
+  try {
+    const correction = await apiClient.campaigns.correctTurnNarration(session.campaignId, session.turnId, {
+      narration,
+      expectedCorrectionRevision: session.correctionRevision,
+      expectedActiveTurnNumber: session.expectedActiveTurnNumber,
+      source: "user_edit"
+    });
+    if (!responseEditSessionIsCurrent(session)) return;
+    const turn = latestCompletedResponseTurn();
+    if (!turn) return;
+    turn.narration = correction.effectiveNarration;
+    renderAllScenes();
+    if (dialog.close) dialog.close();
+    clearResponseEditSession();
+    toast(correction.illustrationsMayBeStale
+      ? "Narration corrected. Existing illustrations may no longer match."
+      : "Narration corrected and Chronicle memory rebuilt.");
+  } catch (error) {
+    if (state.responseEditSession === session) {
+      toast(`Correction failed: ${error.message}`);
+    }
+  } finally {
+    session.saving = false;
+    hideBusy();
+    if (state.responseEditSession === session) syncInputState();
+  }
 }
 
 function illustrationsEnabled() {
@@ -745,6 +914,14 @@ function renderStoryIllustration() {
 
   if (turnLabel) turnLabel.textContent = `Turn ${turn.turnNumber}`;
   const turnId = turn.id || turn.turnId || "";
+  const segments = illustrationSegmentsForTurn(turnId);
+  if (segments.length) {
+    const narrationIsStale = !segmentProseMatchesNarration(segments, turn.narration);
+    content.innerHTML = `${narrationIsStale
+      ? `<p class="mini dim">The narration was corrected; existing illustrations may no longer match.</p>`
+      : ""}${segments.map((segment) => segmentIllustrationMarkup(turn, turnIndex, segment, segments.length)).join("")}`;
+    return;
+  }
   content.innerHTML = `<div class="image-wrap image-job-placeholder">
     <div class="image-placeholder">This accepted turn has no illustration segments yet.</div>
     <button class="small primary" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="generate-turn-segments">Generate illustrations for this turn</button>
@@ -1283,6 +1460,7 @@ function clearStreamingPreview() {
 }
 
 function beginGenerationDisplay(action) {
+  clearResponseEditSession();
   state.cancellationConfirmed = false;
   state.generationDisplayActive = true;
   state.generationDisplayAction = action || "";
@@ -1640,6 +1818,7 @@ function navigateToTurn(turnNumber) {
   const latest = latestTurnNumber(state.turns);
   const target = turnNumber === null ? latest : Number(turnNumber);
   if (!target || turnIndexForNumber(state.turns, target) < 0) return;
+  clearResponseEditSession();
   state.viewTurnNumber = target === latest ? null : target;
   const isContinuous = Boolean(state.user?.settings?.continuousReading);
   if (!isContinuous) {
@@ -2856,6 +3035,11 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnExportPdf) btnExportPdf.addEventListener("click", () => { closeNavigationMenus(); printStory(); });
   const btnOpenEditState = $("btnOpenEditState");
   if (btnOpenEditState) btnOpenEditState.addEventListener("click", () => { closeNavigationMenus(); openEditState(); });
+  const btnOpenEditResponse = $("btnOpenEditResponse");
+  if (btnOpenEditResponse) btnOpenEditResponse.addEventListener("click", () => {
+    closeNavigationMenus();
+    void openCurrentResponseEditor();
+  });
   const btnOpenActivityLog = $("btnOpenActivityLog");
   if (btnOpenActivityLog) btnOpenActivityLog.addEventListener("click", () => { closeNavigationMenus(); openActivityLog(); });
   const btnAboutNexus = $("btnAboutNexus");
@@ -3113,53 +3297,10 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   // Edit Response dialog
-  const btnEditResponse = $("btnEditResponse");
-  if (btnEditResponse) btnEditResponse.addEventListener("click", async () => {
-    const dlg = $("editResponseDialog");
-    const editor = $("responseEditor");
-    if (!dlg || !editor) return;
-    const turnIdx = viewedTurnIndex();
-    if (turnIdx < 0) return;
-    const turn = state.turns[turnIdx];
-    try {
-      const correction = await apiClient.campaigns.getTurnCorrection(state.campaignId, turn.id);
-      editor.value = correction.effectiveNarration;
-      dlg._correctionRevision = correction.correctionRevision;
-    } catch (error) {
-      toast(`Response could not be loaded: ${error.message}`);
-      return;
-    }
-    dlg._turnNumber = turn.turnNumber;
-    openManagedModal(dlg);
-  });
   const btnEditResponseSave = $("btnEditResponseSave");
-  if (btnEditResponseSave) btnEditResponseSave.addEventListener("click", async () => {
-    const dlg = $("editResponseDialog");
-    const editor = $("responseEditor");
-    if (!dlg || !editor || dlg._turnNumber === undefined) return;
-    const turnIndex = turnIndexForNumber(state.turns, dlg._turnNumber);
-    const turn = state.turns[turnIndex];
-    if (!turn) return;
-    try {
-      showBusy("Saving corrected narration…");
-      const correction = await apiClient.campaigns.correctTurnNarration(state.campaignId, turn.id, {
-        narration: editor.value,
-        expectedCorrectionRevision: Number(dlg._correctionRevision || 0),
-        expectedActiveTurnNumber: Number(state.campaign?.activeTurnNumber || 0),
-        source: "user_edit"
-      });
-      turn.narration = correction.effectiveNarration;
-      renderAllScenes();
-      if (dlg.close) dlg.close();
-      toast(correction.illustrationsMayBeStale
-        ? "Narration corrected. Existing illustrations may no longer match."
-        : "Narration corrected and Chronicle memory rebuilt.");
-    } catch (error) {
-      toast(`Correction failed: ${error.message}`);
-    } finally {
-      hideBusy();
-    }
-  });
+  if (btnEditResponseSave) btnEditResponseSave.addEventListener("click", () => { void saveCurrentResponseCorrection(); });
+  const responseEditor = $("responseEditor");
+  if (responseEditor) responseEditor.addEventListener("input", syncResponseEditorControls);
   const btnEditResponseCancel = $("btnEditResponseCancel");
   if (btnEditResponseCancel) btnEditResponseCancel.addEventListener("click", () => { const d = $("editResponseDialog"); if (d && d.close) d.close(); });
   const btnEditResponseClose = $("btnEditResponseClose");
