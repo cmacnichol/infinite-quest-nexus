@@ -2,6 +2,8 @@
 
 Quiet Leaf applies only to the replacement `/app/` Story interface and shared shell/preferences. It does not replace `/nexus/`, legacy `/story/:campaignId`, explicit replacement Story URLs, or `/app/story` campaign selection. Core is currently opt-in: an explicit `VITE_UI_COMPONENTS=web-awesome` is required by the present feature policy, while native remains the default and rollback renderer. Do not describe a build, browser, PostgreSQL, provider, visual, or release gate as passed unless its actual evidence is recorded in [the acceptance record](web-awesome-quiet-leaf-acceptance.md).
 
+The user has deferred further visual changes until after module integration. The present Story layout is frozen, not visually approved; footer/mobile layout findings remain in the acceptance record. Do not treat the provisional layout as new durable design guidance or enable Core by default. The token/control architecture below can be maintained independently of that later design pass.
+
 ## Change map
 
 | Future change | Primary edit | Required proof |
@@ -37,13 +39,29 @@ $env:VITE_UI_COMPONENTS = "native"
 pnpm build:web:next
 ```
 
-Changing a server runtime environment after a Vite build does not change the already-built static bundle. Run the focused Core/CSP catalogue fixture with:
+Changing a server runtime environment after a Vite build does not change the already-built static bundle. From the repository root, strictly check and build the separate browser fixture (Vite is installed in the replacement app package):
+
+```powershell
+pnpm exec tsc -p tsconfig.browser-fixtures.json --noEmit
+Push-Location apps/web-next
+try {
+  pnpm exec vite build --config ../../tests/ui/vite.config.ts
+  if ($LASTEXITCODE -ne 0) { throw "UI fixture build failed" }
+} finally {
+  Pop-Location
+}
+```
+
+Run the focused Core/CSP fixture or the complete mocked browser set after both builds:
 
 ```powershell
 pnpm exec playwright test --config playwright.web-awesome.config.ts tests/e2e/web-awesome-core.e2e.test.ts
+pnpm exec playwright test --config playwright.web-awesome.config.ts
 ```
 
-Run the broader Story/browser catalogue only through the project’s configured test commands and record its exact command, candidate SHA, browser, and result in the acceptance record. These commands are evidence collection, not release approval.
+The test configuration starts and stops its own loopback-only helper at port 43175. For interactive catalogue inspection, run `pnpm exec tsx scripts/serve-ui-test-build.ts` in a dedicated terminal and open [the catalogue](http://127.0.0.1:43175/ui-test/?catalogue=1). Add `&panel=automatic`, `comfortable`, `wide`, or `full` to inspect one panel. Stop that helper before running Playwright; the configuration deliberately refuses to reuse an unknown server. Do not start another helper or rebuild bundles while tests are running. Restore any previous `VITE_UI_COMPONENTS` value when finished.
+
+The catalogue uses fictional test-only content. It is not a live campaign, and its mocked API tests do not prove durable generation or provider parity. Record exact commands, candidate SHA, browser versions, and results in the acceptance record; these commands collect evidence, not release approval. The separate runtime configuration and [Story smoke checklist](../workflows/story-interface-smoke-test.md) remain required before default-on.
 
 ## Docker and release boundary
 
