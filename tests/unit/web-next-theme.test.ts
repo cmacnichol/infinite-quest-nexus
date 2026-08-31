@@ -20,6 +20,10 @@ import {
 
 const webNextRoot = path.resolve(import.meta.dirname, "../../apps/web-next");
 
+function readThemeTokens(): string {
+  return fs.readFileSync(path.join(webNextRoot, "src/theme/tokens.css"), "utf8");
+}
+
 function runPreRenderThemeBootstrap(options: {
   stored?: string | null;
   matchMedia?: PropertyDescriptor;
@@ -246,7 +250,7 @@ describe("web theme integration", () => {
   });
 
   it("defines the complete semantic contract independently in both theme blocks", () => {
-    const css = fs.readFileSync(path.join(webNextRoot, "src/styles.css"), "utf8");
+    const css = readThemeTokens();
     const light = cssDeclarations(css, ":root");
     const dark = cssDeclarations(css, ':root[data-theme="dark"]');
     const requiredTokens = [
@@ -267,7 +271,7 @@ describe("web theme integration", () => {
   });
 
   it("keeps literal theme colors inside the light and dark palette declarations", () => {
-    const css = fs.readFileSync(path.join(webNextRoot, "src/styles.css"), "utf8");
+    const css = readThemeTokens();
     const selectors = cssWithoutThemePalettes(css);
     const themeInvariantMediaAllowlist = new Set<string>([]);
     const prohibitedColorLiteral = /#[\da-f]{3,8}\b|\brgba?\s*\(|\bcolor-mix\s*\(/i;
@@ -355,9 +359,10 @@ describe("web theme integration", () => {
 
   it("keeps the footer identity readable on the inverse surface in every theme", () => {
     const css = fs.readFileSync(path.join(webNextRoot, "src/styles.css"), "utf8");
+    const tokens = readThemeTokens();
     const themes = [
-      cssDeclarations(css, ":root"),
-      cssDeclarations(css, ':root[data-theme="dark"]')
+      cssDeclarations(tokens, ":root"),
+      cssDeclarations(tokens, ':root[data-theme="dark"]')
     ];
 
     for (const theme of themes) {
@@ -371,9 +376,10 @@ describe("web theme integration", () => {
 
   it("keeps filled accent text readable in every theme and interaction state", () => {
     const css = fs.readFileSync(path.join(webNextRoot, "src/styles.css"), "utf8");
+    const tokens = readThemeTokens();
     const themes = [
-      cssDeclarations(css, ":root"),
-      cssDeclarations(css, ':root[data-theme="dark"]')
+      cssDeclarations(tokens, ":root"),
+      cssDeclarations(tokens, ':root[data-theme="dark"]')
     ];
 
     for (const theme of themes) {
@@ -414,8 +420,9 @@ describe("web theme integration", () => {
 
   it("keeps artwork interaction treatment theme-invariant while preserving keyboard focus", () => {
     const css = fs.readFileSync(path.join(webNextRoot, "src/styles.css"), "utf8");
-    const light = cssDeclarations(css, ":root");
-    const dark = cssDeclarations(css, ':root[data-theme="dark"]');
+    const tokens = readThemeTokens();
+    const light = cssDeclarations(tokens, ":root");
+    const dark = cssDeclarations(tokens, ':root[data-theme="dark"]');
     const overlayRule = cssRule(css, ".world-cover::after");
 
     expect(dark.get("--artwork-overlay")).toBe(light.get("--artwork-overlay"));
