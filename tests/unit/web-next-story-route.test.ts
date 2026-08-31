@@ -23,6 +23,8 @@ describe("replacement Story routes", () => {
 
     expect([...root.querySelectorAll<HTMLAnchorElement>('a[href="/app/story"]')]).toHaveLength(2);
     expect(root.querySelector('a[href="/app/story"]')?.getAttribute("aria-current")).toBe("page");
+    expect(root.querySelector('nav a[href="/app/worlds"]')?.textContent).toContain("World Library");
+    expect(root.querySelector('a.brand')?.getAttribute("href")).toBe("/app/");
   });
 
   it.each([

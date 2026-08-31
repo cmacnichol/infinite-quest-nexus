@@ -34,7 +34,7 @@ export function renderAppShell(
           <span>Infinite Quest <b>Nexus</b></span>
         </a>
         <nav class="site-nav" aria-label="Primary navigation">
-          <a href="/app/"${currentAttribute(currentNavigation, "world-library")}>World Library</a>
+          <a href="/app/worlds"${currentAttribute(currentNavigation, "world-library")}>World Library</a>
           <a href="/app/campaigns"${currentAttribute(currentNavigation, "campaigns")}>Campaigns</a>
           <a href="${storyHref}"${currentAttribute(currentNavigation, "story")}>Story</a>
           <a href="/app/data-transfer"${currentAttribute(currentNavigation, "data-transfer")}>Data Transfer</a>

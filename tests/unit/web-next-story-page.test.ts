@@ -340,6 +340,48 @@ describe("Story Player page shell", () => {
     mounted.dispose();
   });
 
+  it("remembers an active campaign only after its current Story turn loads", async () => {
+    const page = fixture();
+    const resume = { read: vi.fn(() => null), remember: vi.fn(), forget: vi.fn() };
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 1 }, activeTurnNumber: 1, turns: turnWindow([1])
+    });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: null }, composition({
+      syncStatus: vi.fn().mockResolvedValue(loaded)
+    }), { storyResumeStore: resume });
+    await settle();
+
+    expect(resume.remember).toHaveBeenCalledWith(campaignId);
+    mounted.dispose();
+  });
+
+  it("does not remember a Story route when its requested historical turn is unavailable", async () => {
+    const page = fixture();
+    const resume = { read: vi.fn(() => null), remember: vi.fn(), forget: vi.fn() };
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 1 }, activeTurnNumber: 1, turns: turnWindow([])
+    });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({
+      syncStatus: vi.fn().mockResolvedValue(loaded)
+    }), { storyResumeStore: resume });
+    await settle();
+
+    expect(resume.remember).not.toHaveBeenCalled();
+    mounted.dispose();
+  });
+
+  it("does not remember an archived selected campaign", async () => {
+    const page = fixture();
+    const resume = { read: vi.fn(() => null), remember: vi.fn(), forget: vi.fn() };
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: null }, composition({
+      list: vi.fn().mockResolvedValue({ campaigns: [campaignSummary({ status: "archived" })] })
+    }), { storyResumeStore: resume });
+    await settle();
+
+    expect(resume.remember).not.toHaveBeenCalled();
+    mounted.dispose();
+  });
+
   it("enforces the Fold-out responsive design contract without horizontal overflow", () => {
     const styles = readFileSync(new URL("../../apps/web-next/src/story-player.css", import.meta.url), "utf8");
 

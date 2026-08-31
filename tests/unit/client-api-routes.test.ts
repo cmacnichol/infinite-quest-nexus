@@ -1501,11 +1501,14 @@ describe("Story route coexistence", () => {
     const storyStorageRoot = await mkdtemp(join(tmpdir(), "infinitequest-story-route-"));
     const app = await buildServer(serverOptions({ config: config(storyStorageRoot), pool: mockPool() }));
     try {
-      const [legacyRoot, legacyCampaign, replacementRoot, replacementCampaign] = await Promise.all([
+      const [legacyRoot, legacyCampaign, replacementRoot, replacementCampaign, worldLibrary, worldEditor, missingAsset] = await Promise.all([
         app.inject({ method: "GET", url: "/story" }),
         app.inject({ method: "GET", url: "/story/campaign-1" }),
         app.inject({ method: "GET", url: "/app/story" }),
-        app.inject({ method: "GET", url: "/app/story/campaign-1" })
+        app.inject({ method: "GET", url: "/app/story/campaign-1" }),
+        app.inject({ method: "GET", url: "/app/worlds" }),
+        app.inject({ method: "GET", url: "/app/worlds/world-1/editor" }),
+        app.inject({ method: "GET", url: "/app/assets/missing.js" })
       ]);
 
       for (const response of [legacyRoot, legacyCampaign, replacementRoot, replacementCampaign]) {
@@ -1519,6 +1522,13 @@ describe("Story route coexistence", () => {
       expect(replacementCampaign.body).toContain('<div id="app"></div>');
       expect(replacementRoot.body).not.toContain("legacy-client.js");
       expect(replacementCampaign.body).not.toContain("legacy-client.js");
+      for (const response of [worldLibrary, worldEditor]) {
+        expect(response.statusCode).toBe(200);
+        expect(response.headers["content-type"]).toContain("text/html");
+        expect(response.body).toContain('<div id="app"></div>');
+      }
+      expect(missingAsset.statusCode).toBe(404);
+      expect(missingAsset.headers["content-type"]).toContain("application/json");
     } finally {
       await app.close();
       await rm(storyStorageRoot, { recursive: true, force: true });

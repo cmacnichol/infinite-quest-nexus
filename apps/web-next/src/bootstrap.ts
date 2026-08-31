@@ -10,7 +10,9 @@ import { worldIdFromPath } from "./world-editor-model";
 import { mountWorldEditorPage } from "./world-editor-page";
 import { mountWorldLibraryPage, type MountedPage } from "./world-library-page";
 import { mountStoryPlayerPage } from "./story-player-page";
+import { createStoryPlayerComposition } from "./story-player-composition";
 import { storyRouteFromLocation } from "./story-route";
+import { createStoryResumeStore, isAppEntryPath, resumeStoredStoryCampaign } from "./navigation/story-resume";
 import { mountDataTransferPage } from "./data-transfer-page";
 import { uiImplementation } from "./ui/feature-policy";
 import { ensureWebAwesome } from "./ui/web-awesome";
@@ -21,9 +23,38 @@ const appRoot: HTMLElement = root;
 
 let mountedPage: MountedPage | null = null;
 let pageDisposed = false;
+const startupController = new AbortController();
+
+function browserResumeStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
 async function start(): Promise<MountedPage | null> {
   if (uiImplementation() === "web-awesome") await ensureWebAwesome();
   if (pageDisposed) return null;
+  if (isAppEntryPath(window.location.pathname)) {
+    const result = await resumeStoredStoryCampaign({
+      store: createStoryResumeStore(browserResumeStorage()),
+      list(signal) {
+        try {
+          return createStoryPlayerComposition().api.campaigns.list(signal);
+        } catch (error) {
+          return Promise.reject(error);
+        }
+      },
+      replace(path) {
+        if (pageDisposed || startupController.signal.aborted) return;
+        window.location.replace(path);
+      },
+      signal: startupController.signal
+    });
+    if (result === "resumed") return null;
+    if (pageDisposed) return null;
+  }
   const characterSessionKey = characterSessionKeyFromPath(window.location.pathname);
   const storyRoute = storyRouteFromLocation(window.location.pathname, window.location.search);
   const campaignRoute = campaignRouteFromPath(window.location.pathname);
@@ -38,7 +69,9 @@ async function start(): Promise<MountedPage | null> {
           ? mountDataTransferPage(appRoot)
           : isWorldCreationPath(window.location.pathname)
             ? mountWorldCreationPage(appRoot, { generateWorldPreview })
-            : worldId === null
+            : window.location.pathname === "/app/worlds" || window.location.pathname === "/app/worlds/"
+              ? mountWorldLibraryPage(appRoot)
+              : worldId === null
               ? mountWorldLibraryPage(appRoot)
               : mountWorldEditorPage(appRoot, worldId);
 }
@@ -89,6 +122,7 @@ function onPageHide(event: PageTransitionEvent): void {
   if (event.persisted) return;
   window.removeEventListener("pagehide", onPageHide);
   pageDisposed = true;
+  startupController.abort();
   mountedPage?.dispose();
   mountedPage = null;
 }

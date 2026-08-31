@@ -52,7 +52,7 @@ function widthControl(document: Document, current: ReadingWidth): HTMLElement {
   control.setAttribute("role", "group");
   control.setAttribute("aria-label", "Reading width");
   for (const width of ["narrow", "standard", "wide"] as const) {
-    const button = element(document, "button", undefined, width[0].toUpperCase() + width.slice(1));
+    const button = element(document, "button", undefined, width.charAt(0).toUpperCase() + width.slice(1));
     button.type = "button";
     button.dataset.readingWidth = width;
     button.setAttribute("aria-pressed", String(current === width));

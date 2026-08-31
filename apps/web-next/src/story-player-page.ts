@@ -22,6 +22,7 @@ import { renderStoryCommandRow, renderStoryDialogs, renderStoryPlayerView, type 
 import { createStoryIllustrationController } from "./story-player-illustrations";
 import { createStoryToolsController, installStoryToolsDisclosure, storyCampaignToolsMarkup } from "./story-player-tools";
 import type { DisplayPreferencesStore } from "./preferences/display-preferences";
+import { createStoryResumeStore, type StoryResumeStore } from "./navigation/story-resume";
 import { uiImplementation, type UiImplementation } from "./ui/feature-policy";
 import { mountQuietLeafPresenter, type QuietLeafPresenter } from "./story/quiet-leaf-presenter";
 import type { ComposerActions } from "./story/ui/composer";
@@ -41,7 +42,7 @@ const storyPlayerMarkup = `
   </main>
 `;
 
-function browserStorage(root: HTMLElement): Pick<Storage, "getItem" | "setItem"> | null {
+function browserStorage(root: HTMLElement): Pick<Storage, "getItem" | "setItem" | "removeItem"> | null {
   try {
     return root.ownerDocument.defaultView?.localStorage ?? null;
   } catch {
@@ -88,6 +89,8 @@ export interface StoryPlayerPageOptions {
   readonly onSubmit?: (submission: PreparedStoryTurnSubmission) => void | Promise<void>;
   readonly uiImplementation?: UiImplementation;
   readonly displayPreferences?: DisplayPreferencesStore;
+  /** Browser navigation preference, kept separate from campaign state. */
+  readonly storyResumeStore?: StoryResumeStore;
 }
 
 export type TurnInputClassifier = (request: Readonly<{
@@ -157,6 +160,7 @@ export function mountStoryPlayerPage(
   const displayPreferences = shell.display;
   root.querySelector<HTMLElement>('main[data-page="story-player"]')?.setAttribute("data-ui-implementation", selectedUiImplementation);
   const ui = createStoryUiModel({ viewTurnNumber: route.turnNumber }, browserStorage(root));
+  const storyResumeStore = options.storyResumeStore ?? createStoryResumeStore(browserStorage(root));
   let campaigns: readonly CampaignSummary[] = [];
   let selectedCampaign: CampaignSummary | null = null;
   let disposed = false;
@@ -1015,6 +1019,9 @@ export function mountStoryPlayerPage(
         if (disposed || nextController.signal.aborted) return;
       }
       ui.setPhase("loaded");
+      if (selectedCampaign?.status === "active" && selectedCampaign.id === sync.campaign.id) {
+        storyResumeStore.remember(selectedCampaign.id);
+      }
     } catch (error) {
       if (disposed || nextController.signal.aborted) return;
       ui.setMessage(errorMessage(error));
