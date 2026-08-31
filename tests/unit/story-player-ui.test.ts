@@ -32,7 +32,8 @@ async function bootLegacyStory({
   rewindCampaign = vi.fn().mockResolvedValue({}),
   fetchCampaignState = vi.fn().mockResolvedValue({ activeTurnNumber: 100 }),
   classifyTurnInput,
-  workflow = { resume: async () => null }
+  workflow = { resume: async () => null },
+  updateCampaignState = vi.fn().mockResolvedValue({})
 }: {
   turns: Array<Record<string, unknown>>;
   nextCursor?: string | null;
@@ -44,10 +45,15 @@ async function bootLegacyStory({
   fetchCampaignState?: ReturnType<typeof vi.fn>;
   classifyTurnInput?: ReturnType<typeof vi.fn>;
   workflow?: Record<string, unknown>;
+  updateCampaignState?: ReturnType<typeof vi.fn>;
 }) {
   const { document, window } = parseHTML(storyHtml);
   Object.defineProperty(window, "location", { value: { pathname: "/story/campaign-1" }, configurable: true });
   for (const dialog of document.querySelectorAll("dialog")) {
+    Object.defineProperty(dialog, "open", {
+      get: () => dialog.hasAttribute("open"),
+      configurable: true
+    });
     (dialog as unknown as { showModal: () => void }).showModal = () => dialog.setAttribute("open", "");
     (dialog as unknown as { close: () => void }).close = () => dialog.removeAttribute("open");
   }
@@ -82,6 +88,7 @@ async function bootLegacyStory({
       generation: { syncStatus: syncCampaign },
       campaigns: {
         state: fetchCampaignState,
+        updateState: updateCampaignState,
         turns: fetchTurns,
         rewind: rewindCampaign,
         ...(classifyTurnInput ? { classifyTurnInput } : {})
@@ -97,7 +104,7 @@ async function bootLegacyStory({
   document.dispatchEvent(new window.Event("DOMContentLoaded"));
   await new Promise((resolve) => setTimeout(resolve, 0));
   await new Promise((resolve) => setTimeout(resolve, 0));
-  return { document, window, fetchTurns, fetchCampaignState, rewindCampaign };
+  return { document, window, fetchTurns, fetchCampaignState, rewindCampaign, updateCampaignState };
 }
 
 function controlledPrintWindow() {
@@ -1073,6 +1080,186 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('const btnSaveEditState = $("btnSaveEditState") || $("btnSaveScratch");');
   });
 
+  it("loads current continuity without a viewed-turn argument while reading an older turn", async () => {
+    const currentState = {
+      campaignId: "campaign-1",
+      activeTurnNumber: 2,
+      viewedTurnNumber: 2,
+      isCurrent: true,
+      revision: 4,
+      continuitySummary: "Current summary.",
+      scratchpad: "Current scratchpad.",
+      openThreads: ["Find the keeper."],
+      canonicalFacts: [{ id: "00000000-0000-4000-8000-000000000001", content: "The keeper is alive." }],
+      trackers: [],
+      rpgStats: [],
+      eventTriggers: [],
+      pendingEventTriggers: []
+    };
+    const fetchCampaignState = vi.fn().mockResolvedValue(currentState);
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeTurns(1, 2),
+        fetchCampaignState
+      });
+
+      document.getElementById("btnPrev")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      document.getElementById("btnOpenEditState")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(fetchCampaignState).toHaveBeenLastCalledWith("campaign-1");
+      expect((document.getElementById("editStateContinuitySummary") as HTMLTextAreaElement).value)
+        .toBe("Current summary.");
+      expect(document.getElementById("editStateMeta")?.textContent).toContain("turn 2");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps a dirty Current State editor open when a tab click lands outside its post-layout bounds", async () => {
+    const currentState = {
+      campaignId: "campaign-1",
+      activeTurnNumber: 2,
+      viewedTurnNumber: 2,
+      isCurrent: true,
+      revision: 4,
+      continuitySummary: "Current summary.",
+      scratchpad: "Current scratchpad.",
+      openThreads: [],
+      canonicalFacts: [],
+      trackers: [],
+      rpgStats: [],
+      eventTriggers: [],
+      pendingEventTriggers: []
+    };
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeTurns(1, 2),
+        fetchCampaignState: vi.fn().mockResolvedValue(currentState)
+      });
+      const editStateDialog = document.getElementById("editStateDialog") as HTMLDialogElement | null;
+      const summary = document.getElementById("editStateContinuitySummary") as HTMLTextAreaElement | null;
+      const scratchpadTab = document.querySelector('#editStateDialog [data-tab="scratch"]');
+      const discardChangesDialog = document.getElementById("discardChangesDialog") as HTMLDialogElement | null;
+      if (!editStateDialog || !summary || !scratchpadTab || !discardChangesDialog) {
+        throw new Error("Current State modal controls are required.");
+      }
+
+      document.getElementById("btnOpenEditState")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      summary.value = "Changed summary.";
+      editStateDialog.getBoundingClientRect = () => ({
+        left: 600,
+        right: 800,
+        top: 300,
+        bottom: 700
+      }) as DOMRect;
+
+      const click = new window.Event("click", { bubbles: true });
+      Object.defineProperties(click, {
+        clientX: { value: 20 },
+        clientY: { value: 20 }
+      });
+      scratchpadTab.dispatchEvent(click);
+
+      expect(editStateDialog.hasAttribute("open")).toBe(true);
+      expect(discardChangesDialog.hasAttribute("open")).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("opens the discard confirmation for a dirty Current State modal backdrop click", async () => {
+    const currentState = {
+      campaignId: "campaign-1",
+      activeTurnNumber: 2,
+      viewedTurnNumber: 2,
+      isCurrent: true,
+      revision: 4,
+      continuitySummary: "Current summary.",
+      scratchpad: "Current scratchpad.",
+      openThreads: [],
+      canonicalFacts: [],
+      trackers: [],
+      rpgStats: [],
+      eventTriggers: [],
+      pendingEventTriggers: []
+    };
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeTurns(1, 2),
+        fetchCampaignState: vi.fn().mockResolvedValue(currentState)
+      });
+      const editStateDialog = document.getElementById("editStateDialog") as HTMLDialogElement | null;
+      const summary = document.getElementById("editStateContinuitySummary") as HTMLTextAreaElement | null;
+      const discardChangesDialog = document.getElementById("discardChangesDialog") as HTMLDialogElement | null;
+      if (!editStateDialog || !summary || !discardChangesDialog) {
+        throw new Error("Current State modal controls are required.");
+      }
+
+      document.getElementById("btnOpenEditState")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      summary.value = "Changed summary.";
+      editStateDialog.getBoundingClientRect = () => ({
+        left: 600,
+        right: 800,
+        top: 300,
+        bottom: 700
+      }) as DOMRect;
+
+      const click = new window.Event("click", { bubbles: true });
+      Object.defineProperties(click, {
+        clientX: { value: 20 },
+        clientY: { value: 20 }
+      });
+      editStateDialog.dispatchEvent(click);
+
+      expect(discardChangesDialog.hasAttribute("open")).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("disables legacy current-state editing while a durable generation is pending", async () => {
+    const currentState = {
+      campaignId: "campaign-1",
+      activeTurnNumber: 2,
+      viewedTurnNumber: 2,
+      isCurrent: true,
+      revision: 4,
+      continuitySummary: "Current summary.",
+      scratchpad: "Current scratchpad.",
+      openThreads: [],
+      canonicalFacts: [],
+      trackers: [],
+      rpgStats: [],
+      eventTriggers: [],
+      pendingEventTriggers: []
+    };
+    const fetchCampaignState = vi.fn().mockResolvedValue(currentState);
+    try {
+      const { document } = await bootLegacyStory({
+        turns: makeTurns(1, 2),
+        fetchCampaignState,
+        syncStatus: vi.fn().mockResolvedValue({
+          campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 2, storyLengthProfile: "standard" },
+          world: {},
+          turns: { campaignId: "campaign-1", turns: makeTurns(1, 2), nextCursor: null },
+          pendingGeneration: { id: "generation-1" }
+        })
+      });
+
+      const edit = document.getElementById("btnOpenEditState") as HTMLButtonElement;
+      const initialStateLoads = fetchCampaignState.mock.calls.length;
+      expect(edit.disabled).toBe(true);
+      edit.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(fetchCampaignState).toHaveBeenCalledTimes(initialStateLoads);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("saves editor DOM values through the campaign-state API before applying the response", async () => {
     const { document } = parseHTML(`
       <dialog open id="editStateDialog"></dialog>
@@ -1193,8 +1380,8 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       activeTurnNumber: 4,
       revision: 7,
       rpgStats: [{ id: "resolve", name: "Resolve", value: 61, note: "" }],
-      eventTriggers: [{ id: "lens-lit", label: "Lens lit" }],
-      pendingEventTriggers: [{ id: "sea-road", name: "Sea road" }]
+      eventTriggers: [],
+      pendingEventTriggers: []
     };
     const editSession = captureCampaignStateEditSession(runtimeState);
     runtimeState.rpgStats[0]!.value = 62;
@@ -1203,7 +1390,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       activeTurnNumber: 5,
       revision: 8,
       rpgStats: [{ id: "resolve", name: "Resolve", value: 75, note: "Refreshed" }],
-      eventTriggers: [{ id: "gate-open", label: "Gate open" }],
+      eventTriggers: [],
       pendingEventTriggers: []
     };
     const requests: Array<{ campaignId: string; value: unknown }> = [];
@@ -1229,8 +1416,8 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       scratchpad: "Private continuity.",
       trackers: [],
       rpgStats: [{ id: "resolve", name: "Resolve", value: 61, note: "" }],
-      eventTriggers: [{ id: "lens-lit", label: "Lens lit" }],
-      pendingEventTriggers: [{ id: "sea-road", name: "Sea road" }]
+      eventTriggers: [],
+      pendingEventTriggers: []
     });
   });
 

@@ -309,7 +309,7 @@
         </div>
         <div class="panel-body">
           <section id="tab-overview" class="stack">
-            <p id="editStateMeta" class="mini"></p>
+            <p id="editStateMeta" class="mini" role="status" aria-live="polite"></p>
             <div class="track-card">
               <label for="editStateContinuitySummary"><strong>Continuity summary</strong></label>
               <textarea id="editStateContinuitySummary" rows="6" placeholder="Living summary used to continue the campaign."></textarea>
@@ -361,6 +361,7 @@
       </div>
       <div class="row wrap dialog-actions">
         <button id="btnEditStateViewHistory" type="button">View Turn History</button>
+        <button id="btnReloadEditState" type="button">Reload current state</button>
         <button id="btnCancelEditState" type="button">Cancel</button>
         <button id="btnSaveEditState" class="primary" type="button">Save current state</button>
       </div>

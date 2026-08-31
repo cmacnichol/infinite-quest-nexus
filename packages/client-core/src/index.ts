@@ -71,6 +71,12 @@ export {
   undoTargetTurnNumber
 } from "./story-turn-window.js";
 export type { StoryCampaignWindow, StoryTurn } from "./story-turn-window.js";
+export {
+  buildCurrentStateUpdate,
+  createCampaignContinuityDraft,
+  hasCampaignContinuityChanges
+} from "./campaign-state-editor.js";
+export type { CampaignContinuityDraft } from "./campaign-state-editor.js";
 export type {
   GenerationEvent,
   GenerationRun,
