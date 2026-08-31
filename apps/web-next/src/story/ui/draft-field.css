@@ -1,0 +1,15 @@
+.story-draft-field { min-width: 0; }
+
+.story-draft-field wa-textarea {
+  display: block;
+  width: 100%;
+}
+
+.story-draft-field wa-textarea::part(textarea) {
+  min-height: var(--story-draft-min-height, 132px);
+  max-height: none;
+}
+
+.story-draft-field wa-textarea::part(textarea-wrapper) {
+  min-height: var(--story-draft-min-height, 132px);
+}
