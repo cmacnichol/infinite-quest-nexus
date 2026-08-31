@@ -9,6 +9,7 @@ import {
 import { mountStoryArtwork } from "./ui/artwork.js";
 import { mountComposer, type ComposerActions } from "./ui/composer.js";
 import { mountStoryReader } from "./ui/reader.js";
+import "./ui/secondary-controls.css";
 
 export interface StoryAvailability {
   readonly canContinue: boolean;

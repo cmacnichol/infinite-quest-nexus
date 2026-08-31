@@ -98,6 +98,7 @@ test("Story width stays local and avoids horizontal overflow across the represen
       };
     });
     const comfortable = await measure();
+    expect(comfortable.narrationWidth).toBeGreaterThan(500);
 
     await page.getByRole("button", { name: "Profile", exact: true }).click();
     await page.getByRole("menuitem", { name: "Preferences", exact: true }).click();

@@ -545,6 +545,10 @@ main[data-page="story-player"] :is(button, a, input, select, textarea, summary):
 }
 
 /* The Core Story presenter owns its leaf, recent-turn rail, and inset art. */
+main[data-ui-implementation="web-awesome"] {
+  gap: 0;
+}
+
 main[data-ui-implementation="web-awesome"] .story-foldout {
   display: block;
 }
@@ -553,7 +557,9 @@ main[data-ui-implementation="web-awesome"] .story-reader {
   width: 100%;
   min-width: 0;
   box-sizing: border-box;
-  padding: var(--cell);
+  padding: clamp(1.25rem, 2vw, 1.5rem);
+  border: 0;
+  background: transparent;
 }
 
 main[data-ui-implementation="web-awesome"] .story-campaign-spine,

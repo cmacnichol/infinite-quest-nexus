@@ -42,8 +42,10 @@ describe("Quiet Leaf reader", () => {
     reader.update({ title: "Campaign", context: "Turn 2", width, narration: [], history: null, artwork: null });
 
     const leaf = root.querySelector<HTMLElement>("[data-reading-leaf]");
+    const layout = root.querySelector<HTMLElement>("[data-reading-layout]");
     expect(leaf?.style.getPropertyValue("--story-leaf-max")).toBe(leafLimit);
     expect(leaf?.style.getPropertyValue("--story-prose-max")).toBe(proseLimit);
+    expect(layout?.style.getPropertyValue("--story-layout-max")).toBe(leafLimit);
     expect(reader.composerRoot.style.getPropertyValue("--story-leaf-max")).toBe(leafLimit);
     expect(reader.composerRoot.style.getPropertyValue("--story-prose-max")).toBe(proseLimit);
   });
@@ -60,13 +62,16 @@ describe("Quiet Leaf reader", () => {
     const historyRail = root.querySelector<HTMLElement>("[data-recent-history]");
     expect(layout?.dataset.hasHistory).toBe("false");
     expect(historyRail?.hidden).toBe(true);
+    expect(historyRail?.tagName).toBe("DETAILS");
+    expect(historyRail?.querySelector("summary")?.textContent).toBe("Recent turns");
 
     reader.update({ title: "Campaign", context: "Turn 4", width: "full", narration: [], history, artwork: null });
 
     expect(root.querySelector("[data-recent-history]")).toBe(historyRail);
     expect(layout?.dataset.hasHistory).toBe("true");
     expect(historyRail?.hidden).toBe(false);
-    expect(historyRail?.firstElementChild).toBe(history);
+    expect(historyRail?.hasAttribute("open")).toBe(false);
+    expect(historyRail?.lastElementChild).toBe(history);
   });
 
   it("moves supplied artwork into an inset slot and preserves selected history nodes across updates", () => {
@@ -83,15 +88,15 @@ describe("Quiet Leaf reader", () => {
     const artSlot = root.querySelector<HTMLElement>("[data-artwork-slot]");
     const historySlot = root.querySelector<HTMLElement>("[data-recent-history]");
     expect(artSlot?.firstElementChild).toBe(artwork);
-    expect(historySlot?.firstElementChild).toBe(history);
-    expect(historySlot?.getAttribute("aria-label")).toBe("Recent history");
+    expect(historySlot?.lastElementChild).toBe(history);
+    expect(historySlot?.querySelector("summary")?.getAttribute("aria-label")).toBe("Show recent turns");
     expect(historySlot?.dataset.readingHistoryRail).toBe("");
     expect(historySlot?.parentElement?.dataset.readingLayout).toBe("");
 
     reader.update({ title: "Campaign", context: "Turn 8", width: "wide", narration: [], history, artwork: null });
 
     expect(root.querySelector("[data-artwork-slot]")).toBeNull();
-    expect(root.querySelector("[data-recent-history]")?.firstElementChild).toBe(history);
+    expect(root.querySelector("[data-recent-history]")?.lastElementChild).toBe(history);
     expect(history.dataset.selected).toBe("true");
   });
 

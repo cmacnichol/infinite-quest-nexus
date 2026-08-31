@@ -1,6 +1,6 @@
 .story-turn-length {
   display: grid;
-  grid-template-columns: minmax(12rem, 1fr) auto;
+  grid-template-columns: minmax(min(100%, 22rem), 1fr) auto;
   align-items: end;
   gap: 0.5rem;
 }
@@ -8,6 +8,16 @@
 .story-turn-length__select,
 .story-turn-length__staged {
   min-width: 0;
+}
+
+main[data-ui-implementation="web-awesome"] .story-turn-length :is(
+  .story-turn-length__select,
+  .story-turn-length__staged
+)::part(combobox) {
+  min-height: var(--control-min-height);
+  border-radius: 0;
+  font: 600 0.75rem / 1.2 "Chakra Petch", sans-serif;
+  letter-spacing: 0.035em;
 }
 
 .story-turn-length__details,
@@ -19,6 +29,7 @@
   border-radius: 0;
   font: 600 0.78rem / 1.2 "Chakra Petch", sans-serif;
   letter-spacing: 0.06em;
+  text-transform: uppercase;
   cursor: pointer;
 }
 
@@ -70,11 +81,18 @@
 
 @media (max-width: 720px) {
   .story-turn-length {
-    grid-template-columns: 1fr;
-    align-items: stretch;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
   }
 
   .story-turn-length__details {
-    width: 100%;
+    min-width: var(--control-min-height);
+    padding-inline: 0.75rem;
+    font-size: 0;
+  }
+
+  .story-turn-length__details::after {
+    content: "Details";
+    font-size: 0.72rem;
   }
 }

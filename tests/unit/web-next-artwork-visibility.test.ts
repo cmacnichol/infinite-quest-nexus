@@ -55,6 +55,61 @@ describe("story artwork visibility", () => {
     expect(panel.isConnected).toBe(false);
   });
 
+  it("keeps full illustration details and controls behind a native disclosure while the plate uses a decorative crop", () => {
+    const { document, plate } = fixture();
+    const panel = document.createElement("section");
+    const figure = document.createElement("figure");
+    figure.className = "story-illustration-figure";
+    const image = document.createElement("img");
+    image.src = "https://example.test/portrait.png";
+    image.alt = "A lantern bearer at the gate.";
+    const caption = document.createElement("figcaption");
+    caption.textContent = "The gate at midnight.";
+    const retry = document.createElement("button");
+    retry.dataset.action = "retry-artwork";
+    retry.textContent = "Retry illustration";
+    figure.append(image, caption);
+    panel.append(figure, retry);
+
+    plate.update({ campaignId: "campaign-a", turnId: "turn-1" }, panel);
+
+    const mounted = plate.element();
+    const crop = mounted?.querySelector<HTMLElement>("[data-story-artwork-visible]");
+    const details = mounted?.querySelector<HTMLDetailsElement>("details[data-story-artwork-details]");
+    const fullImage = details?.querySelector<HTMLImageElement>("img");
+
+    expect(crop?.getAttribute("aria-hidden")).toBeNull();
+    expect(crop?.querySelector("img")?.getAttribute("alt")).toBe("A lantern bearer at the gate.");
+    expect(details?.querySelector("summary")?.textContent).toBe("Artwork details");
+    expect(fullImage).toBe(image);
+    expect(fullImage?.alt).toBe("A lantern bearer at the gate.");
+    expect(details?.querySelector("figcaption")?.textContent).toBe("The gate at midnight.");
+    expect(details?.querySelector("button[data-action=retry-artwork]")).toBe(retry);
+  });
+
+  it("preserves an open artwork disclosure across a same-turn refresh only", () => {
+    const { document, plate } = fixture();
+    const createPanel = () => {
+      const panel = document.createElement("section");
+      const figure = document.createElement("figure");
+      figure.className = "story-illustration-figure";
+      const image = document.createElement("img");
+      image.alt = "A refreshed illustration.";
+      figure.append(image);
+      panel.append(figure);
+      return panel;
+    };
+
+    plate.update({ campaignId: "campaign-a", turnId: "turn-1" }, createPanel());
+    plate.element()?.querySelector("details[data-story-artwork-details]")?.setAttribute("open", "");
+
+    plate.update({ campaignId: "campaign-a", turnId: "turn-1" }, createPanel());
+    expect(plate.element()?.querySelector("details[data-story-artwork-details]")?.hasAttribute("open")).toBe(true);
+
+    plate.update({ campaignId: "campaign-a", turnId: "turn-2" }, createPanel());
+    expect(plate.element()?.querySelector("details[data-story-artwork-details]")?.hasAttribute("open")).toBe(false);
+  });
+
   it("does not notify layout repeatedly for unchanged visibility", () => {
     const { document, display, onLayoutChange, plate } = fixture();
     const panel = document.createElement("figure");

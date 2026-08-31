@@ -47,11 +47,14 @@ export function mountStoryReader(root: HTMLElement): StoryReader {
   narration.className = "quiet-leaf-narration";
   narration.dataset.narration = "";
 
-  const history = document.createElement("section");
+  const history = document.createElement("details");
   history.className = "quiet-leaf-history";
   history.dataset.recentHistory = "";
   history.dataset.readingHistoryRail = "";
-  history.setAttribute("aria-label", "Recent history");
+  const historySummary = document.createElement("summary");
+  historySummary.textContent = "Recent turns";
+  historySummary.setAttribute("aria-label", "Show recent turns");
+  history.append(historySummary);
   history.hidden = true;
 
   prose.append(heading, narration);
@@ -79,9 +82,7 @@ export function mountStoryReader(root: HTMLElement): StoryReader {
     leaf.style.setProperty("--story-leaf-max", limits.leaf);
     leaf.style.setProperty("--story-prose-max", limits.prose);
     layout.style.setProperty("--story-leaf-max", limits.leaf);
-    layout.style.setProperty("--story-layout-max", limits.leaf === "none"
-      ? "none"
-      : `calc(${limits.leaf} + 180px + 2rem)`);
+    layout.style.setProperty("--story-layout-max", limits.leaf);
     composerRoot.style.setProperty("--story-leaf-max", limits.leaf);
     composerRoot.style.setProperty("--story-prose-max", limits.prose);
   };
@@ -116,7 +117,7 @@ export function mountStoryReader(root: HTMLElement): StoryReader {
       const hasHistory = state.history !== null;
       layout.dataset.hasHistory = String(hasHistory);
       history.hidden = !hasHistory;
-      history.replaceChildren(...(hasHistory ? [state.history] : []));
+      history.replaceChildren(historySummary, ...(hasHistory ? [state.history] : []));
       applyWidth(state.width);
       updateArtwork(state.artwork);
     },

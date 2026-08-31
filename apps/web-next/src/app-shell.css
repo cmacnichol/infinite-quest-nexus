@@ -33,6 +33,12 @@
 
 }
 
+@media (min-width: 1081px) {
+  .app-shell[data-ui-implementation="web-awesome"] .site-header {
+    min-height: 64px;
+  }
+}
+
 @media (min-width: 681px) and (max-width: 1080px) {
   .app-shell[data-ui-implementation="web-awesome"] .site-header {
     min-height: 108px;

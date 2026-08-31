@@ -1,12 +1,36 @@
 .command-menu::part(menu) {
   border: 1px solid var(--rule-strong);
   border-radius: 0;
+  background: var(--surface-paper);
 }
 
-.command-menu__trigger {
+.app-shell[data-ui-implementation="web-awesome"] .command-menu__trigger::part(button) {
+  min-height: var(--control-min-height);
+  padding-inline: 0.75rem;
+  border: 1px solid var(--rule-strong);
+  border-radius: 0;
+  color: var(--text-primary);
+  background: var(--surface-entry);
+  font: 600 0.75rem / 1 "Chakra Petch", sans-serif;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   white-space: nowrap;
 }
 
-.command-menu__item {
+.app-shell[data-ui-implementation="web-awesome"] .command-menu__trigger::part(button):hover {
+  background: var(--surface-entry-hover);
+}
+
+.app-shell[data-ui-implementation="web-awesome"] .command-menu__trigger::part(button):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -3px;
+}
+
+.app-shell[data-ui-implementation="web-awesome"] .command-menu__item::part(base) {
   min-inline-size: 12rem;
+  min-height: var(--control-min-height);
+  border-radius: 0;
+  font: 600 0.75rem / 1.2 "Chakra Petch", sans-serif;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
 }

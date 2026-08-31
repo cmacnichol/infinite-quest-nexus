@@ -18,6 +18,38 @@ interface ArtworkState {
   readonly content: HTMLElement;
 }
 
+function prepareCoreArtwork(document: Document, content: HTMLElement): HTMLElement {
+  if (
+    content.querySelector("[data-story-artwork-visible]") !== null
+    || content.querySelector("details[data-story-artwork-details]") !== null
+  ) return content;
+
+  const figure = content.querySelector<HTMLElement>(".story-illustration-figure");
+  const image = figure?.querySelector<HTMLImageElement>("img");
+  if (figure === undefined || figure === null || image === undefined || image === null || figure.parentElement !== content) {
+    return content;
+  }
+
+  const crop = document.createElement("figure");
+  crop.className = "story-artwork-visible";
+  crop.dataset.storyArtworkVisible = "";
+  const cropImage = image.cloneNode(true) as HTMLImageElement;
+  crop.append(cropImage);
+
+  const details = document.createElement("details");
+  details.className = "story-artwork-details";
+  details.dataset.storyArtworkDetails = "";
+  const summary = document.createElement("summary");
+  summary.textContent = "Artwork details";
+  const contentChildren = Array.from(content.children);
+  const figureIndex = contentChildren.indexOf(figure);
+  const leadingContent = contentChildren.slice(0, figureIndex);
+  const detailContent = contentChildren.slice(figureIndex);
+  details.append(summary, ...detailContent);
+  content.replaceChildren(...leadingContent, crop, details);
+  return content;
+}
+
 export function mountStoryArtwork(
   document: Document,
   display: DisplayPreferencesStore,
@@ -51,9 +83,14 @@ export function mountStoryArtwork(
     },
     update(identity, content) {
       if (disposed) return;
-      current = { identity, content };
+      const preserveOpenDetails = current?.identity.campaignId === identity.campaignId
+        && current.identity.turnId === identity.turnId
+        && current.content.querySelector("details[data-story-artwork-details]")?.hasAttribute("open") === true;
+      const preparedContent = prepareCoreArtwork(document, content);
+      if (preserveOpenDetails) preparedContent.querySelector("details[data-story-artwork-details]")?.setAttribute("open", "");
+      current = { identity, content: preparedContent };
       applyVisibility();
-      if (visible) plate.replaceChildren(content);
+      if (visible) plate.replaceChildren(current.content);
     },
     setTurnVisible(nextVisible) {
       if (disposed || current === null) return;
