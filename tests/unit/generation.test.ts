@@ -396,6 +396,18 @@ describe("generation contracts", () => {
       expect(safeGenerationDiagnosticSchema.safeParse({ code: "unknown", operation: "story_generation", action: "adjust_context" }).success).toBe(false);
       expect(safeGenerationDiagnosticSchema.safeParse({ code: "context_budget_exceeded", operation: "story_generation", action: "adjust_context", requiredTokens: -1 }).success).toBe(false);
       expect(safeGenerationDiagnosticSchema.safeParse({ code: "context_budget_exceeded", operation: "story_generation", action: "adjust_context", message: "private scratchpad canary" }).success).toBe(false);
+      expect(safeGenerationDiagnosticSchema.safeParse({
+        code: "continuity_output_budget_exceeded",
+        operation: "story_generation",
+        action: "adjust_output_or_state",
+        scope: "output_skeleton"
+      }).success).toBe(true);
+      expect(safeGenerationDiagnosticSchema.safeParse({
+        code: "extension_narration_limit_exceeded",
+        operation: "event_extension",
+        action: "shorten_or_replace_turn",
+        scope: "extension_narration"
+      }).success).toBe(true);
     });
 
     it("identifies a resolved prompt snapshot with protocol, schema, policy, and template hashes", () => {

@@ -97,6 +97,7 @@ export const safeGenerationDiagnosticSchema = z.object({
   operation: generationDiagnosticOperationSchema,
   action: z.enum(["adjust_context", "adjust_output_or_state", "check_provider_window", "repair_authority", "update_prompt", "discard_and_reenqueue", "retry_event", "shorten_or_replace_turn"]),
   field: z.enum(["rules", "scratchpad", "continuity_summary", "open_threads", "canonical_facts", "narration", "context_settings"]).optional(),
+  scope: z.enum(["campaign_context", "provider_request", "output_skeleton", "extension_narration"]).optional(),
   requiredTokens: z.number().int().nonnegative().optional(),
   availableTokens: z.number().int().nonnegative().optional(),
   requiredCharacters: z.number().int().nonnegative().optional(),

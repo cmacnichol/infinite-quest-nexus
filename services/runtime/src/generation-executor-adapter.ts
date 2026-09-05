@@ -175,6 +175,8 @@ const SAFE_DIAGNOSTIC_ERROR_CODES = new Set([
   "active_generation_exists",
   "context_budget_exceeded",
   "context_budget_invalid",
+  "continuity_output_budget_exceeded",
+  "extension_narration_limit_exceeded",
   "generation_cancelled",
   "invalid_json",
   "invalid_schema",
@@ -216,6 +218,19 @@ function diagnosticErrorName(error: unknown): string {
     // A proxy can throw during instanceof checks.
   }
   return "Error";
+}
+
+function diagnosticBudgetScope(error: unknown): "campaign_context" | "provider_request" | "output_skeleton" | "extension_narration" | null {
+  try {
+    const scope = typeof error === "object" && error !== null
+      ? (error as { scope?: unknown }).scope
+      : undefined;
+    return scope === "campaign_context" || scope === "provider_request" || scope === "output_skeleton" || scope === "extension_narration"
+      ? scope
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function emitDiagnostic(emit: () => void): void {
@@ -263,11 +278,13 @@ async function runTurnGenerationPhase<T>(
     return result;
   } catch (error) {
     const failedAt = Date.now();
+    const budgetScope = diagnosticBudgetScope(error);
     emitDiagnostic(() => logger.error({
       event: "turn_generation_phase_failed",
       ...base,
       errorName: diagnosticErrorName(error),
       errorCode: diagnosticErrorCode(error),
+      ...(budgetScope ? { budgetScope } : {}),
       durationMs: failedAt - phaseStartedAt,
       totalDurationMs: failedAt - generationStartedAt
     }));
@@ -444,7 +461,7 @@ async function callCampaignTextProvider(
   try {
     const result = await provider.execute({
       ...request,
-      ...(operation === "story_generation" || operation === "story_recovery" || operation === "event_extension"
+      ...(operation === "story_generation" || operation === "story_recovery" || operation === "scene_coverage_rewrite" || operation === "event_extension"
         ? { canonicalBudgeting: true }
         : {})
     });
@@ -490,6 +507,7 @@ async function callCampaignTextProvider(
       ? (transportError.timedOut ? "provider_request_timeout" : "provider_transport_error")
       : errorCodeFrom(error);
     const errorCode = rawErrorCode ? safeLogErrorCode(rawErrorCode) : null;
+    const budgetScope = diagnosticBudgetScope(error);
     logger.warn({
       event: "turn_generation_provider_failed",
       ...generationLogContext(job),
@@ -498,6 +516,7 @@ async function callCampaignTextProvider(
       recovery: Boolean(request.recoveryInput),
       errorName: error instanceof Error ? error.name : "Error",
       ...(errorCode ? { errorCode } : {}),
+      ...(budgetScope ? { budgetScope } : {}),
       ...(transportError ? { providerCategory: transportError.causeCategory } : {}),
       transportTimedOut: Boolean(transportError?.timedOut),
       durationMs: Date.now() - startedAt

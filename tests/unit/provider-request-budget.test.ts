@@ -254,4 +254,23 @@ describe("provider request serialization", () => {
     });
     expect(fetcher).not.toHaveBeenCalled();
   });
+
+  it("rejects a full recovery payload before transport, including its rejected draft", async () => {
+    const fetcher = vi.fn();
+    await expect(callTextProvider({
+      ...profile,
+      contextWindowTokens: 3_000,
+      maxOutputTokens: 1_024
+    }, {
+      systemPrompt: "scene rewrite rules",
+      input: "x".repeat(2_000),
+      recoveryInput: "rewrite every uncovered beat",
+      rejectedResponse: JSON.stringify({ narration: "y".repeat(2_000) }),
+      canonicalBudgeting: true
+    }, createTestProviderTransport(fetcher as typeof fetch))).rejects.toMatchObject({
+      code: "context_budget_exceeded",
+      scope: "provider_request"
+    });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
 });
