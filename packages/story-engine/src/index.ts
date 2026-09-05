@@ -1,4 +1,5 @@
 export * from "./chronicle.js";
+export * from "./context-budget.js";
 export * from "./credentials.js";
 export * from "./mechanics.js";
 export * from "./narration-formatting.js";

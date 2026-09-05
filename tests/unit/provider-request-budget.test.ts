@@ -10,6 +10,7 @@ import {
   serializeProviderRequest,
   validateCompleteRejectedDraft
 } from "../../packages/story-engine/src/provider-request.js";
+import { planContext } from "../../packages/story-engine/src/context-budget.js";
 
 const profile: TextProviderProfile = {
   providerType: "lmstudio",
@@ -175,5 +176,31 @@ describe("provider request serialization", () => {
       safetyAllowanceTokens: 256
     });
     expect(Object.isFrozen(prepared.budgetAudit)).toBe(true);
+  });
+
+  it("preserves a planner-produced request measurement without serializing its audit", () => {
+    const plan = planContext({
+      blocks: [{ id: "latest", revision: "1", content: "authoritative state", protected: true, priority: 0, ordinal: 1 }],
+      contextLimit: 500,
+      inputLimit: 1_000,
+      count: (value) => value.length,
+      serializeContext: (blocks) => JSON.stringify(blocks),
+      serializeRequest: (blocks) => JSON.stringify({ context: blocks, system: "story rules" })
+    });
+    const prepared = serializeProviderRequest(profile, {
+      systemPrompt: "story rules",
+      input: plan.serializedContext
+    }, {
+      budgetAudit: {
+        countMode: "exact",
+        requestTokens: plan.requestTokens,
+        inputLimit: 1_000,
+        outputReserveTokens: profile.maxOutputTokens,
+        safetyAllowanceTokens: plan.safetyAllowanceTokens
+      }
+    });
+
+    expect(prepared.budgetAudit?.requestTokens).toBe(plan.requestTokens);
+    expect(prepared.body).not.toContain("budgetAudit");
   });
 });
