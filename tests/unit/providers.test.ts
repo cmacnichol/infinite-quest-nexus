@@ -28,6 +28,7 @@ import {
   type TextProviderProfile
 } from "../../packages/story-engine/src/providers.js";
 import { logger } from "../../packages/logger/src/index.js";
+import { serializeLegacyProviderRequest } from "../../packages/story-engine/src/provider-request.js";
 import { setSogniSdkClientFactoryForTests } from "../../packages/story-engine/src/providers/illustration/sogni-sdk/index.js";
 
 const profile: TextProviderProfile = {
@@ -66,6 +67,26 @@ function createTestProviderTransport(fetcher: typeof fetch): ProviderTransport {
 afterEach(() => vi.restoreAllMocks());
 
 describe("text provider adapters", () => {
+  it("keeps response-chain recovery in the explicitly named legacy serializer", () => {
+    const prepared = serializeLegacyProviderRequest(profile, {
+      systemPrompt: "system prompt",
+      input: "authoritative snapshot",
+      previousResponseId: "legacy-response-id",
+      recoveryInput: "return replacement JSON",
+      rejectedResponse: "rejected draft"
+    });
+
+    expect(JSON.parse(prepared.body)).toEqual({
+      model: "loaded-instance-id",
+      input: "return replacement JSON",
+      store: true,
+      stream: false,
+      temperature: 0.2,
+      max_output_tokens: 4096,
+      previous_response_id: "legacy-response-id"
+    });
+  });
+
   it("defaults provider request deadlines to five minutes", () => {
     const parsed = providerProfileInputSchema.parse({
       name: "Synthetic provider",

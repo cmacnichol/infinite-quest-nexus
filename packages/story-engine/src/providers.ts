@@ -1,6 +1,8 @@
 import type { ProviderType } from "../../contracts/src/generation.js";
 import { logger } from "../../logger/src/index.js";
 import { ProviderDestinationNotAllowedError } from "../../security/src/provider-network-policy.js";
+import { serializeLegacyProviderRequest } from "./provider-request.js";
+import type { PreparedProviderRequest } from "./provider-request.js";
 import {
   MAX_IMAGE_PROVIDER_RESPONSE_BYTES,
   MAX_PROVIDER_JSON_RESPONSE_BYTES,
@@ -681,6 +683,24 @@ function openAiRoot(baseUrl: string): string {
   return /\/v1$/i.test(root) ? root : `${root}/v1`;
 }
 
+/** Sends an already measured payload exactly as prepared, without rebuilding it. */
+export async function sendPreparedProviderRequest(
+  profile: TextProviderProfile,
+  prepared: PreparedProviderRequest,
+  transport: ProviderTransport = defaultProviderTransport()
+): Promise<Response> {
+  const url = profile.providerType === "lmstudio"
+    ? `${lmStudioRoot(profile.baseUrl)}/api/v1/chat`
+    : `${openAiRoot(profile.baseUrl)}/chat/completions`;
+  return providerFetch(
+    profile,
+    prepared.operation,
+    url,
+    { method: "POST", headers: headers(profile, url), body: prepared.body },
+    transport
+  );
+}
+
 function headers(profile: TextProviderProfile, endpoint?: string): Record<string, string> {
   let forwardAuthorization = Boolean(profile.apiKey);
   if (endpoint) {
@@ -866,24 +886,9 @@ async function readSseStream(
 
 async function callLmStudio(profile: TextProviderProfile, request: ProviderRequest, transport: ProviderTransport): Promise<ProviderResult> {
   await ensureLmStudioModelLoaded(profile, "story generation model loading", transport);
-  const rejectedResponse = String(request.rejectedResponse || "").trim()
-    .slice(0, Math.max(4000, Math.min(80_000, profile.maxOutputTokens * 4)));
-  const payload: Record<string, unknown> = {
-    model: profile.model,
-    input: request.previousResponseId && request.recoveryInput
-      ? request.recoveryInput
-      : request.recoveryInput
-        ? `${request.input}${rejectedResponse ? `\n\nREJECTED RESPONSE TO REWRITE:\n${rejectedResponse}` : ""}\n\nRECOVERY REQUIREMENT:\n${request.recoveryInput}`
-        : request.input,
-    store: true,
-    stream: Boolean(request.onChunk),
-    temperature: request.recoveryInput ? 0.2 : profile.temperature,
-    max_output_tokens: profile.maxOutputTokens
-  };
-  if (request.previousResponseId) payload.previous_response_id = request.previousResponseId;
-  else payload.system_prompt = request.systemPrompt;
+  const prepared = serializeLegacyProviderRequest(profile, request);
   const url = `${lmStudioRoot(profile.baseUrl)}/api/v1/chat`;
-  const response = await providerFetch(profile, "story generation", url, { method: "POST", headers: headers(profile, url), body: JSON.stringify(payload) }, transport);
+  const response = await sendPreparedProviderRequest(profile, prepared, transport);
   if (response.ok && request.onChunk && response.headers.get("content-type")?.includes("event-stream")) {
     const { content, finalData, allData } = await readSseStream(response, request.onChunk, profile, "story generation", url);
     const stats = allData.findLast((item) => item.stats)?.stats || finalData.stats || {};
@@ -926,30 +931,10 @@ async function callLmStudio(profile: TextProviderProfile, request: ProviderReque
 }
 
 async function callOpenAiCompatible(profile: TextProviderProfile, request: ProviderRequest, transport: ProviderTransport): Promise<ProviderResult> {
-  const rejectedResponse = String(request.rejectedResponse || "").trim()
-    .slice(0, Math.max(4000, Math.min(80_000, profile.maxOutputTokens * 4)));
-  const messages = [
-    { role: "system", content: request.systemPrompt },
-    { role: "user", content: request.input },
-    ...(request.recoveryInput ? [
-      { role: "assistant", content: rejectedResponse || "The previous response was incomplete or invalid." },
-      { role: "user", content: request.recoveryInput }
-    ] : [])
-  ];
-  const payload: Record<string, unknown> = {
-    model: profile.model,
-    messages,
-    temperature: request.recoveryInput ? 0.2 : profile.temperature,
-    max_tokens: profile.maxOutputTokens,
-    response_format: { type: "json_object" }
-  };
-  if (request.onChunk) {
-    payload.stream = true;
-    payload.stream_options = { include_usage: true };
-  }
+  let prepared = serializeLegacyProviderRequest(profile, request);
   const url = `${openAiRoot(profile.baseUrl)}/chat/completions`;
-  const send = () => providerFetch(profile, "story generation", url, { method: "POST", headers: headers(profile, url), body: JSON.stringify(payload) }, transport);
-  let response = await send();
+  const send = (preparedRequest: PreparedProviderRequest) => sendPreparedProviderRequest(profile, preparedRequest, transport);
+  let response = await send(prepared);
   if (!response.ok) {
     const clone = response.clone();
     const originalCancellation = response.body?.cancel();
@@ -962,8 +947,8 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
       await originalCancellation?.catch(() => undefined);
     }
     if (/response_format|json.?mode|structured.?output|grammar/i.test(text)) {
-      delete payload.response_format;
-      response = await send();
+      prepared = serializeLegacyProviderRequest(profile, request, { responseFormat: false });
+      response = await send(prepared);
     } else {
       let data: Record<string, any> = {};
       try { data = text ? JSON.parse(text) as Record<string, any> : {}; } catch { /* response error below includes preview */ }
