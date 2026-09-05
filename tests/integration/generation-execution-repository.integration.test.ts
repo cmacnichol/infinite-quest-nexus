@@ -228,6 +228,27 @@ integration("PostgreSQL generation execution repository", () => {
     })).resolves.toBeNull();
   });
 
+  it("does not load a claimed job after its snapshotted authority base changes", async () => {
+    const imported = await campaign();
+    const queued = await queue(imported.campaignId, "Fence a changed authority base.");
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const claim = await repository.claimNext({ workerId: "authority-fence-worker", leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(queued.id);
+
+    await pool.query(
+      `UPDATE campaign_state
+          SET scratchpad_private = 'A correction changed the generation base.', revision = revision + 1
+        WHERE campaign_id = $1 AND owner_user_id = $2`,
+      [imported.campaignId, ownerUserId]
+    );
+
+    await expect(repository.loadExecutionPayload({
+      workerId: "authority-fence-worker",
+      leaseSeconds: 30,
+      claim: claim!
+    })).resolves.toBeNull();
+  });
+
   it("applies lease and phase mutations only to the claimed owner, worker, and source state", async () => {
     const imported = await campaign();
     const queued = await queue(imported.campaignId, "Trace the durable phase corridor.");
@@ -530,7 +551,7 @@ integration("PostgreSQL generation execution repository", () => {
     )).resolves.toMatchObject({ rows: [{ raw_output: "A safe fictional response." }] });
   });
 
-  it("rejects a stale attempt recorder after expired-lease reclaim wins the row-lock race", async () => {
+  it("rejects an expired attempt recorder before it writes private attempt data", async () => {
     const imported = await campaign();
     const queued = await queue(imported.campaignId, "Reclaim the stale attempt recorder.");
     const repository = createPostgresGenerationExecutionRepository(pool);
@@ -571,7 +592,7 @@ integration("PostgreSQL generation execution repository", () => {
         (error: unknown) => ({ status: "rejected" as const, error })
       ).finally(() => { settled = true; });
 
-      expect(await recordAttemptRaceState(() => settled, blockerPid)).toBe("blocked");
+      expect(await recordAttemptRaceState(() => settled, blockerPid)).toBe("settled");
       await reclaim.query("COMMIT");
     } finally {
       await reclaim.query("ROLLBACK").catch(() => undefined);

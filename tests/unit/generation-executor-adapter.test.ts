@@ -131,6 +131,18 @@ describe("generation executor adapter", () => {
       },
       prompt_protocol_version: "test-protocol",
       prompt_snapshot: {} as GenerationExecutionPayload["prompt_snapshot"],
+      generation_base_identity: {
+        operationKind: "append",
+        expectedTurnNumber: claim.expectedTurnNumber,
+        baseTurnNumber: claim.expectedTurnNumber - 1,
+        campaignActiveTurnNumber: claim.expectedTurnNumber - 1,
+        campaignStateRevision: 1,
+        stateEditRevision: null,
+        narrationCorrectionRevision: null,
+        baseTurnId: null,
+        stateFingerprint: "state-fingerprint",
+        narrationFingerprint: null
+      },
       attempts: 1,
       orchestration_private: {},
       streaming_segments_state: {},
