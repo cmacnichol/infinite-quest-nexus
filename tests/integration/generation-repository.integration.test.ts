@@ -619,6 +619,31 @@ integration("PostgreSQL generation command repository", () => {
     expect(after.prompt_protocol_version).toBe(before.prompt_protocol_version);
   });
 
+  it("rejects a malformed retry snapshot even when its stored protocol hash matches", async () => {
+    const imported = await campaign();
+    const jobId = await directGenerationJob(imported.campaignId, "recoverable");
+    const emptySnapshot = {};
+    const before = (await pool.query<{
+      status: string;
+      prompt_snapshot: Record<string, unknown>;
+      prompt_protocol_version: string;
+    }>(
+      `UPDATE generation_jobs
+          SET prompt_snapshot = $2::jsonb, prompt_protocol_version = $3
+        WHERE id = $1
+        RETURNING status, prompt_snapshot, prompt_protocol_version`,
+      [jobId, JSON.stringify(emptySnapshot), providerPromptProtocolVersion(emptySnapshot as never)]
+    )).rows[0]!;
+
+    await expect(repository().retry({ ownerUserId, jobId }))
+      .rejects.toMatchObject({ kind: "conflict", details: { reason: "retry_protocol_incompatible" } });
+
+    await expect(pool.query(
+      "SELECT status, prompt_snapshot, prompt_protocol_version FROM generation_jobs WHERE id = $1",
+      [jobId]
+    )).resolves.toMatchObject({ rows: [before] });
+  });
+
   it("leaves completed result data and authoritative campaign records intact on invalid mutations", async () => {
     const imported = await campaign();
     const turnId = await latestTurnId(imported.campaignId);

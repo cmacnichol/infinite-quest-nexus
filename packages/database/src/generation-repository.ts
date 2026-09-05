@@ -9,7 +9,7 @@ import {
   type GenerationJob,
   type GenerationMutationResult
 } from "../../application/src/index.js";
-import type { PromptSnapshot } from "../../contracts/src/prompt-library.js";
+import { promptSnapshotSchema, type PromptSnapshot } from "../../contracts/src/prompt-library.js";
 import { storyLengthProfileFromUnknown, storyLengthWordRange } from "../../contracts/src/story-settings.js";
 import { parseStoredChronicleRetrievalAudit } from "../../contracts/src/memory.js";
 import { sha256, stableStringify } from "../../domain/src/index.js";
@@ -618,7 +618,8 @@ export function createPostgresGenerationCommandRepository(
         if (job.generationStatus !== "recoverable" && job.generationStatus !== "failed") {
           throw new GenerationApplicationError("invalid_state", { reason: "retry_source_state", generationStatus: job.generationStatus });
         }
-        if (dependencies.promptProtocolVersion(job.promptSnapshot) !== job.promptProtocolVersion) {
+        const promptSnapshot = promptSnapshotSchema.safeParse(job.promptSnapshot);
+        if (!promptSnapshot.success || dependencies.promptProtocolVersion(promptSnapshot.data) !== job.promptProtocolVersion) {
           throw new GenerationApplicationError("conflict", { reason: "retry_protocol_incompatible" });
         }
         const updated = await client.query<MutationRow>(

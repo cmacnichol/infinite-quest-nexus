@@ -16,6 +16,19 @@ export type PromptSnapshot = Record<PromptTemplateKey, {
   source: "shipped" | "application" | "campaign";
 }>;
 
+const promptSnapshotEntrySchema = z.object({
+  content: z.string(),
+  hash: z.string(),
+  source: z.enum(["shipped", "application", "campaign"])
+}).strict();
+
+export const promptSnapshotSchema = z.object(
+  Object.fromEntries(promptTemplateKeySchema.options.map((key) => [key, promptSnapshotEntrySchema])) as Record<
+    PromptTemplateKey,
+    typeof promptSnapshotEntrySchema
+  >
+).strict();
+
 export type PromptTemplateDefinition = {
   key: PromptTemplateKey;
   title: string;

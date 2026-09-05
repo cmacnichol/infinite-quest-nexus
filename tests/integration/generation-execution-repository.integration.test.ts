@@ -234,6 +234,13 @@ integration("PostgreSQL generation execution repository", () => {
     const repository = createPostgresGenerationExecutionRepository(pool);
     const claim = await repository.claimNext({ workerId: "authority-fence-worker", leaseSeconds: 30 });
     expect(claim?.jobId).toBe(queued.id);
+    const promptBefore = (await pool.query<{
+      prompt_snapshot: Record<string, unknown>;
+      prompt_protocol_version: string;
+    }>(
+      "SELECT prompt_snapshot, prompt_protocol_version FROM generation_jobs WHERE id = $1",
+      [queued.id]
+    )).rows[0]!;
 
     await pool.query(
       `UPDATE campaign_state
@@ -247,6 +254,25 @@ integration("PostgreSQL generation execution repository", () => {
       leaseSeconds: 30,
       claim: claim!
     })).resolves.toBeNull();
+    await expect(pool.query<{
+      status: string;
+      error_code: string | null;
+      error_message: string | null;
+      recovery_metadata: Record<string, unknown>;
+      prompt_snapshot: Record<string, unknown>;
+      prompt_protocol_version: string;
+    }>(
+      `SELECT status, error_code, error_message, recovery_metadata, prompt_snapshot, prompt_protocol_version
+         FROM generation_jobs WHERE id = $1`,
+      [queued.id]
+    )).resolves.toMatchObject({ rows: [{
+      status: "recoverable",
+      error_code: "generation_authority_stale",
+      error_message: "Campaign changed before generation could start.",
+      recovery_metadata: { reason: "generation_authority_stale" },
+      prompt_snapshot: promptBefore.prompt_snapshot,
+      prompt_protocol_version: promptBefore.prompt_protocol_version
+    }] });
   });
 
   it("applies lease and phase mutations only to the claimed owner, worker, and source state", async () => {

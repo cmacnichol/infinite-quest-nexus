@@ -674,6 +674,16 @@ export function createPostgresGenerationExecutionRepository(
         expectedTurnNumber: row.expected_turn_number
       });
       if (!matchesGenerationBaseIdentity(row.generation_base_identity, authority.baseIdentity)) {
+        await client.query(
+          `UPDATE generation_jobs
+              SET status = 'recoverable', error_code = 'generation_authority_stale',
+                  error_message = 'Campaign changed before generation could start.',
+                  recovery_metadata = recovery_metadata || $4::jsonb,
+                  lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+            WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
+              AND status = 'assessing' AND lease_expires_at > now()`,
+          [row.id, row.owner_user_id, request.workerId, json({ reason: "generation_authority_stale" })]
+        );
         return null;
       }
       const {
