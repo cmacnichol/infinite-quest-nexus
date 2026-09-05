@@ -414,6 +414,22 @@ function storyMemoryDefaultsFromContext(context: unknown) {
   };
 }
 
+function sentCanonicalFactIds(context: unknown): string[] {
+  if (!context || typeof context !== "object") return [];
+  const campaignCanon = (context as { campaignCanon?: unknown }).campaignCanon;
+  const continuity = (campaignCanon && typeof campaignCanon === "object"
+    ? (campaignCanon as { currentContinuity?: unknown }).currentContinuity
+    : undefined) ?? (context as { currentContinuity?: unknown }).currentContinuity;
+  if (!continuity || typeof continuity !== "object") return [];
+  const facts = (continuity as { canonicalFacts?: unknown }).canonicalFacts;
+  if (!Array.isArray(facts)) return [];
+  return [...new Set(facts.flatMap((fact) => {
+    if (!fact || typeof fact !== "object") return [];
+    const id = (fact as { id?: unknown }).id;
+    return typeof id === "string" ? [id] : [];
+  }))];
+}
+
 function snapshottedStoryLength(context: GenerationExecutionPayload["context_options"]): StoryLengthWordRange {
   const profile = storyLengthProfileFromUnknown(context.storyLengthProfile);
   const fallback = storyLengthWordRange(profile);
@@ -821,6 +837,7 @@ async function executeLoadedGeneration(
       return { storyInput, contextFingerprint, contextDiagnostics, storyMemoryDefaults };
     });
     const { storyInput, contextFingerprint, contextDiagnostics, storyMemoryDefaults } = promptPreparation;
+    const sentFactIds = sentCanonicalFactIds(promptContext);
 
     const streamingIllustration = await phase("streaming_illustration_setup", async () => {
       const illustrationConfig = await collaborators.illustration.loadStreamingIllustrationConfig(
@@ -1360,6 +1377,7 @@ async function executeLoadedGeneration(
       response: result,
       contextFingerprint,
       contextDiagnostics,
+      sentFactIds,
       chronicleRetrieval,
       inputs,
       orchestration,

@@ -10,6 +10,7 @@ import {
   pendingEventTriggerSchema,
   playerEventTriggerSchema,
   playerRpgStatSchema,
+  storyTurnOutputSchema,
   type CampaignTracker,
   type PlayerEventTrigger,
   type PlayerRpgStat,
@@ -188,6 +189,8 @@ export type AcceptedGenerationCommit = Readonly<{
   response: ProviderResult;
   contextFingerprint: string;
   contextDiagnostics: Record<string, unknown>;
+  /** Exact canonical-fact IDs rendered into the producing story request. */
+  sentFactIds?: readonly string[];
   chronicleRetrieval: ChronicleRetrievalAudit;
   inputs: GenerationOrchestrationInputs;
   orchestration: GenerationOrchestrationState;
@@ -308,7 +311,10 @@ async function commitAcceptedTurn(
   input: AcceptedGenerationCommit
 ): Promise<{ turnId: string }> {
   const chronicleRetrieval = chronicleRetrievalAuditSchema.parse(input.chronicleRetrieval);
-  const { job, scope, story, provider, response, inputs, orchestration, collaborators } = input;
+  const { job, scope, provider, response, inputs, orchestration, collaborators } = input;
+  // The commit boundary accepts only the current protocol. Historical/import
+  // replay goes through the explicitly named Chronicle compatibility path.
+  const story = storyTurnOutputSchema.parse(input.story);
   const lease = await client.query<{ id: string }>(
     `SELECT id FROM generation_jobs
       WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status = 'committing'
@@ -320,6 +326,28 @@ async function commitAcceptedTurn(
     throw Object.assign(new Error("Generation lease was lost or cancelled before commit."), {
       code: "lease_lost"
     });
+  }
+  const requestedSupersessionIds = [...new Set(story.canonical_fact_updates.flatMap((update) => update.supersedes_fact_ids))];
+  if (requestedSupersessionIds.length) {
+    const sentFactIds = new Set(input.sentFactIds ?? []);
+    if (!input.sentFactIds || requestedSupersessionIds.some((id) => !sentFactIds.has(id))) {
+      throw Object.assign(new Error("A canonical fact update referenced an ID that was not sent to the provider."), {
+        code: "invalid_fact_supersession"
+      });
+    }
+    const activeFacts = await client.query<{ id: string }>(
+      `SELECT id FROM campaign_canonical_facts
+        WHERE owner_user_id=$1 AND campaign_id=$2 AND world_version_id=$3 AND id=ANY($4::uuid[])
+          AND valid_from_turn <= $5 AND (valid_until_turn IS NULL OR valid_until_turn > $5)
+        FOR UPDATE`,
+      [job.owner_user_id, job.campaign_id, job.world_version_id, requestedSupersessionIds, job.expected_turn_number - 1]
+    );
+    const activeIds = new Set(activeFacts.rows.map((fact) => fact.id));
+    if (requestedSupersessionIds.some((id) => !activeIds.has(id))) {
+      throw Object.assign(new Error("A canonical fact update referenced an inactive or out-of-scope fact."), {
+        code: "invalid_fact_supersession"
+      });
+    }
   }
   const authority = await resolveGenerationAuthoritySnapshot(client, {
     ownerUserId: job.owner_user_id,

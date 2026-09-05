@@ -320,7 +320,7 @@ describe("generation executor adapter", () => {
             currentContinuity: {
               continuitySummary: "The keeper is alive.",
               openThreads: [],
-              canonicalFacts: [],
+              canonicalFacts: [{ id: "11111111-1111-4111-8111-111111111111", content: "The keeper is alive." }],
               scratchpad: "Private harbor details."
             }
           }
@@ -379,9 +379,11 @@ describe("generation executor adapter", () => {
     const accepted = (repository.commitAcceptedTurn as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as {
       chronicleRetrieval?: unknown;
       contextDiagnostics: { retrieval?: unknown };
+      sentFactIds?: unknown;
     };
     expect(accepted.chronicleRetrieval).toStrictEqual(DEDICATED_CHUNKED_AUDIT);
     expect(accepted.contextDiagnostics.retrieval).toBe(retrievalDiagnostics);
+    expect(accepted.sentFactIds).toEqual(["11111111-1111-4111-8111-111111111111"]);
     const providerRequest = (collaborators.loadTextExecution as ReturnType<typeof vi.fn>).mock.results[0]?.value;
     const provider = await providerRequest;
     expect((provider.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0]).toMatchObject({
@@ -391,7 +393,7 @@ describe("generation executor adapter", () => {
     expect(input.authoritative_context.currentContinuity).toEqual({
       continuitySummary: "The keeper is alive.",
       openThreads: [],
-      canonicalFacts: [],
+      canonicalFacts: [{ id: "11111111-1111-4111-8111-111111111111", content: "The keeper is alive." }],
       scratchpad: "Private harbor details."
     });
   });
