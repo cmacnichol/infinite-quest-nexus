@@ -156,9 +156,18 @@ describe("generation executor adapter", () => {
     const providerCalls: unknown[] = [];
     const malformedJob = { ...completeGenerationExecutionPayload(), prompt_snapshot: {} as never };
     const repository = {
-      ...guardedRepository(),
       loadExecutionPayload: vi.fn(async () => malformedJob),
-      markRecoverable: vi.fn(async () => true)
+      renewLease: vi.fn(async () => true),
+      markGenerating: vi.fn(async () => true),
+      saveOrchestration: vi.fn(async () => true),
+      savePartialNarration: vi.fn(async () => true),
+      saveStreamingSegments: vi.fn(async () => true),
+      recordAttempt: vi.fn(async () => undefined),
+      markRecoverable: vi.fn(async () => true),
+      markValidating: vi.fn(async () => true),
+      markCommitting: vi.fn(async () => true),
+      commitAcceptedTurn: vi.fn(async () => ({ turnId: "00000000-0000-4000-8000-000000000006" })),
+      markFailed: vi.fn(async () => true)
     } as GenerationExecutionRepository;
     const provider = {
       id: claim.providerProfileId, name: "Captured provider", providerRole: "text" as const,
@@ -170,18 +179,38 @@ describe("generation executor adapter", () => {
       })
     };
     const collaborators = {
-      ...rejectedCollaborators(),
-      loadTextExecution: vi.fn(async () => provider)
-    } as GenerationExecutionCollaborators;
+      memory: {
+        autoEnableCampaignEmbedding: vi.fn(async () => undefined),
+        buildContextPreview: vi.fn(async () => ({
+          campaign: { id: claim.campaignId, worldVersionId: malformedJob.world_version_id, selectedCharacterId: null, characterProfileRevision: 0 },
+          selectedCompression: null,
+          retrieval: {},
+          chronicleRetrieval: DEDICATED_CHUNKED_AUDIT,
+          scopes: {
+            worldCanon: {}, campaignCanon: {}, chronicle: [], currentScene: null,
+            currentContinuity: { continuitySummary: "", openThreads: [], canonicalFacts: [], scratchpad: "" }
+          }
+        })),
+        enqueueEmbeddingReindex: vi.fn(async () => undefined),
+        rebuildCampaignMemories: vi.fn(async () => undefined),
+        storeDerivedTurnMemories: vi.fn(async () => undefined),
+        writeAcceptedTurnFiction: vi.fn(async () => undefined)
+      },
+      illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) },
+      loadTextExecution: vi.fn(async () => provider),
+      promptFromSnapshot: vi.fn(() => "Write a concise fictional scene."),
+      recordProfileCost: vi.fn(async () => undefined),
+      attributeGenerationCostsToTurn: vi.fn(async () => undefined)
+    } as unknown as GenerationExecutionCollaborators;
     const executor = createGenerationExecutor({
       pool: {} as DatabasePool,
       repository,
       collaborators
     });
 
-    await expect(executor.execute({ workerId: "worker-a", leaseSeconds: 30, claim })).resolves.toBe(false);
-
+    const executed = await executor.execute({ workerId: "worker-a", leaseSeconds: 30, claim });
     expect(providerCalls).toEqual([]);
+    expect(executed).toBe(false);
     expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({
       errorCode: "generation_prompt_snapshot_invalid"
     }));

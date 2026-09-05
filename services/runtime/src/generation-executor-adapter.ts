@@ -539,19 +539,6 @@ export function createGenerationExecutor(
     async execute(request) {
       const job = await dependencies.repository.loadExecutionPayload(request);
       if (!job) return false;
-      if (!promptSnapshotSchema.safeParse(job.prompt_snapshot).success) {
-        assertActiveGenerationUpdate(await dependencies.repository.markRecoverable({
-          jobId: job.id,
-          ownerUserId: job.owner_user_id,
-          workerId: request.workerId,
-          providerResponseId: null,
-          providerFinishReason: null,
-          errorCode: "generation_prompt_snapshot_invalid",
-          errorMessage: "Saved generation instructions are invalid.",
-          recoveryMetadata: { reason: "generation_prompt_snapshot_invalid" }
-        }), "saving invalid prompt snapshot recovery state");
-        return false;
-      }
       return executeLoadedGeneration(dependencies, request.workerId, request.leaseSeconds, job);
     }
   };
@@ -577,6 +564,19 @@ async function executeLoadedGeneration(
   };
   const phase = <T>(phaseName: TurnGenerationPhase, operation: () => Promise<T>) =>
     runTurnGenerationPhase(diagnosticContext, phaseName, generationStartedAt, operation);
+  if (!promptSnapshotSchema.safeParse(job.prompt_snapshot).success) {
+    assertActiveGenerationUpdate(await repository.markRecoverable({
+      jobId: job.id,
+      ownerUserId: job.owner_user_id,
+      workerId,
+      providerResponseId: null,
+      providerFinishReason: null,
+      errorCode: "generation_prompt_snapshot_invalid",
+      errorMessage: "Saved generation instructions are invalid.",
+      recoveryMetadata: { reason: "generation_prompt_snapshot_invalid" }
+    }), "saving invalid prompt snapshot recovery state");
+    return false;
+  }
   logger.info({
     event: "turn_generation_started",
     ...generationLogContext(job, workerId)
