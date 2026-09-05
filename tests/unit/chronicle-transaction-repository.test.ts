@@ -7,7 +7,9 @@ import {
   createPostgresChronicleWorkerStatePort,
   type ChronicleTransactionEmbeddingPort
 } from "../../packages/database/src/chronicle-repository.js";
+import { MAX_CONTINUITY_OPEN_THREADS } from "../../packages/contracts/src/story-prompt.js";
 import { loadPostgresChronicleGenerationContext } from "../../packages/database/src/chronicle-generation-context.js";
+import { projectStateCorrection } from "../../packages/database/src/chronicle-state-correction-repository.js";
 import type { DatabaseClient, DatabasePool } from "../../packages/database/src/pool.js";
 
 type QueryResult = Readonly<{
@@ -386,6 +388,65 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     expect(serializedValues).toContain("Moon Warden");
     expect(serializedValues).toContain("silver key");
     expect(serializedValues).not.toMatch(/ROLL|CHECK|Difficulty|1d20|dexterity/i);
+  });
+
+  it("keeps every editor-valid open thread in an accepted-turn projection", async () => {
+    const memoryWrites: Array<{ sql: string; values: readonly unknown[] }> = [];
+    const threads = Array.from({ length: MAX_CONTINUITY_OPEN_THREADS }, (_, index) => `Find the lost letter ${index + 1}.`);
+    const client = databaseClient((sql, values) => {
+      if (sql.includes("FROM campaigns") && sql.includes("world_versions")) {
+        return { rows: [{
+          id: scope.campaignId,
+          world_version_id: scope.worldVersionId,
+          world_content: {},
+          character_snapshot: null,
+          character_profile: null
+        }] };
+      }
+      if (sql.includes("SELECT id, source_turn_id") && sql.includes("campaign_canonical_facts")) return { rows: [] };
+      if (sql.includes("DELETE FROM chronicle_memories")) return { rows: [], rowCount: 1 };
+      if (sql.includes("INSERT INTO chronicle_memories")) {
+        memoryWrites.push({ sql, values });
+        return { rows: [{ id: "correction-memory" }], rowCount: 1 };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+    const transaction = createPostgresChronicleGenerationTransactionPort({ embeddings: embeddingPort() });
+
+    await transaction.storeDerivedTurnMemories(client, {
+      ...scope,
+      turnId: "turn-500-threads",
+      ordinal: 4,
+      derived: { continuitySummary: "", canonicalFacts: [], openThreads: threads }
+    });
+
+    const openThreadWrite = memoryWrites[0];
+    expect(openThreadWrite).toBeDefined();
+    expect(String(openThreadWrite?.values[4])).toContain("Find the lost letter 500.");
+  });
+
+  it("keeps every editor-valid open thread in a direct correction projection", async () => {
+    const memoryWrites: Array<{ sql: string; values: readonly unknown[] }> = [];
+    const threads = Array.from({ length: MAX_CONTINUITY_OPEN_THREADS }, (_, index) => `Follow the correction thread ${index + 1}.`);
+    const client = databaseClient((sql, values) => {
+      if (sql.includes("SELECT id,memory_kind") && sql.includes("FROM chronicle_memories")) return { rows: [] };
+      if (sql.includes("DELETE FROM chronicle_memories")) return { rows: [], rowCount: 1 };
+      if (sql.includes("INSERT INTO chronicle_memories")) {
+        memoryWrites.push({ sql, values });
+        return { rows: [{ id: "correction-memory" }], rowCount: 1 };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+
+    await projectStateCorrection(client, scope, [], {
+      id: "correction-500-threads",
+      effectiveTurnNumber: 4,
+      snapshot: { continuitySummary: "", openThreads: threads, canonicalFacts: [] }
+    }, new Set(["openThreads"]));
+
+    const openThreadWrite = memoryWrites[0];
+    expect(openThreadWrite).toBeDefined();
+    expect(String(openThreadWrite?.values[3])).toContain("Follow the correction thread 500.");
   });
 
   it("rebuilds Chronicle rows from accepted turns without opening a nested transaction", async () => {

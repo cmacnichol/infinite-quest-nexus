@@ -1,5 +1,6 @@
 import type { CampaignStateCorrectionProjectionScope, CampaignWorldVersionMemoryScope, CorrectionMemoryChanges } from "../../application/src/memory/index.js";
 import { campaignRuntimeStateContentSchema } from "../../contracts/src/generation.js";
+import { MAX_CONTINUITY_OPEN_THREADS } from "../../contracts/src/story-prompt.js";
 import { buildChronicleEntityCatalog, chronicleContentHash, sanitizeChronicleFictionString, sanitizeChronicleMemoryLines } from "../../domain/src/chronicle-memory-helpers.js";
 import { canonicalFactDeduplicationKey } from "../../domain/src/canonical-facts.js";
 import { resolveEntityMetadata, type EntityReference } from "../../domain/src/entity-references.js";
@@ -114,7 +115,7 @@ export async function projectStateCorrection(
   }
   if (changedFields.has("openThreads")) {
     kinds.push("open_thread");
-    const threads = sanitizeChronicleMemoryLines(edit.snapshot.openThreads);
+    const threads = sanitizeChronicleMemoryLines(edit.snapshot.openThreads, MAX_CONTINUITY_OPEN_THREADS);
     if (threads.length) {
       const content = [`Open story threads after turn ${edit.effectiveTurnNumber}`, ...threads.map((thread) => `- ${thread}`)].join("\n");
       desired.push({ kind: "open_thread", turnId: null, ordinal: edit.effectiveTurnNumber, content, importance: 0.95,

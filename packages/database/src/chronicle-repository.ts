@@ -18,6 +18,7 @@ import type {
 import { MEMORY_PUBLIC_FAILURE_MESSAGE } from "../../application/src/memory/index.js";
 import { requireCampaignWorldVersionScope } from "../../application/src/memory/helpers.js";
 import { toSafeProviderConfiguration } from "../../application/src/providers/index.js";
+import { MAX_CONTINUITY_OPEN_THREADS } from "../../contracts/src/story-prompt.js";
 import {
   CHRONICLE_RETRIEVAL_VERSION,
   chronicleHealthSchema,
@@ -420,7 +421,7 @@ async function storeDerivedMemories(
       characterProfile: campaign.character_profile
     });
   const summary = sanitizeChronicleFictionString(scope.derived.continuitySummary, 20_000);
-  const threads = sanitizeChronicleMemoryLines(scope.derived.openThreads);
+  const threads = sanitizeChronicleMemoryLines(scope.derived.openThreads, MAX_CONTINUITY_OPEN_THREADS);
   await projectCanonicalFacts(client, {
     ...scope,
     derived: { ...scope.derived, entityCatalog }
