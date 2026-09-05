@@ -6,7 +6,10 @@ import {
   type ProviderTransport,
   type TextProviderProfile
 } from "../../packages/story-engine/src/providers.js";
-import { serializeProviderRequest } from "../../packages/story-engine/src/provider-request.js";
+import {
+  serializeProviderRequest,
+  validateCompleteRejectedDraft
+} from "../../packages/story-engine/src/provider-request.js";
 
 const profile: TextProviderProfile = {
   providerType: "lmstudio",
@@ -37,17 +40,20 @@ function createTestProviderTransport(fetcher: typeof fetch): ProviderTransport {
 
 describe("provider request serialization", () => {
   it("prepares the complete self-contained LM Studio recovery body before transport", async () => {
+    const rejectedContent = JSON.stringify({ narration: "A complete rejected draft\nwith \\slashes and 雪." });
+    const completeRejectedDraft = validateCompleteRejectedDraft(rejectedContent);
+    expect(completeRejectedDraft).not.toBeNull();
     const request = {
       systemPrompt: "Rules: use \"quotes\" and \\slashes.\nUnicode: \u96ea",
       input: "Authoritative state\nwith a newline.",
       previousResponseId: "remote-history-must-not-be-sent",
       recoveryInput: "Return complete JSON.",
-      rejectedResponse: "{\"narration\":\"A complete rejected draft\\nwith \\slashes and \u96ea.\"}",
+      completeRejectedDraft: completeRejectedDraft!,
       onChunk: vi.fn()
     };
     const expectedPayload = {
       model: "loaded-instance-id",
-      input: "Authoritative state\nwith a newline.\n\nREJECTED RESPONSE TO REWRITE:\n{\"narration\":\"A complete rejected draft\\nwith \\slashes and \u96ea.\"}\n\nRECOVERY REQUIREMENT:\nReturn complete JSON.",
+      input: `Authoritative state\nwith a newline.\n\nREJECTED RESPONSE TO REWRITE:\n${rejectedContent}\n\nRECOVERY REQUIREMENT:\nReturn complete JSON.`,
       store: true,
       stream: true,
       temperature: 0.2,
@@ -74,19 +80,33 @@ describe("provider request serialization", () => {
     expect(JSON.parse(capturedBody)).toEqual(expectedPayload);
   });
 
-  it("prepares OpenAI-compatible framing and reserve fields without serializing callbacks", () => {
+  it("sends OpenAI-compatible prepared bodies verbatim, including response-format retry", async () => {
     const openAiProfile: TextProviderProfile = {
       ...profile,
       providerType: "openai_compatible",
       baseUrl: "https://api.openai.com/v1"
     };
     const onChunk = vi.fn();
+    const completeRejectedDraft = validateCompleteRejectedDraft("{\"narration\":\"complete draft\"}");
+    expect(completeRejectedDraft).not.toBeNull();
     const prepared = serializeProviderRequest(openAiProfile, {
       systemPrompt: "system\n\"quoted\"",
       input: "input \\ \u96ea",
       recoveryInput: "repair",
-      rejectedResponse: "complete draft",
+      completeRejectedDraft: completeRejectedDraft!,
       onChunk
+    });
+    const retryPrepared = serializeProviderRequest(openAiProfile, {
+      systemPrompt: "system\n\"quoted\"",
+      input: "input \\ \u96ea",
+      recoveryInput: "repair",
+      completeRejectedDraft: completeRejectedDraft!,
+      onChunk
+    }, { responseFormat: false });
+    const capturedBodies: string[] = [];
+    const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      capturedBodies.push(String(init?.body));
+      return new Response(JSON.stringify({ choices: [{ message: { content: "{}" } }], usage: {} }), { status: 200 });
     });
 
     expect(JSON.parse(prepared.body)).toEqual({
@@ -94,7 +114,7 @@ describe("provider request serialization", () => {
       messages: [
         { role: "system", content: "system\n\"quoted\"" },
         { role: "user", content: "input \\ \u96ea" },
-        { role: "assistant", content: "complete draft" },
+        { role: "assistant", content: "{\"narration\":\"complete draft\"}" },
         { role: "user", content: "repair" }
       ],
       temperature: 0.2,
@@ -104,5 +124,56 @@ describe("provider request serialization", () => {
       stream_options: { include_usage: true }
     });
     expect(prepared.body).not.toContain("onChunk");
+    expect(JSON.parse(retryPrepared.body).response_format).toBeUndefined();
+
+    const transport = createTestProviderTransport(fetcher as typeof fetch);
+    await sendPreparedProviderRequest(openAiProfile, prepared, transport);
+    await sendPreparedProviderRequest(openAiProfile, retryPrepared, transport);
+    expect(capturedBodies).toEqual([prepared.body, retryPrepared.body]);
+  });
+
+  it("omits partial or forged rejected drafts from both canonical recovery payloads", () => {
+    expect(validateCompleteRejectedDraft("{\"narration\":\"truncated")).toBeNull();
+    const forgedPartialDraft = { content: "{\"narration\":\"truncated", complete: true } as never;
+    const request = {
+      systemPrompt: "system",
+      input: "authoritative input",
+      recoveryInput: "repair",
+      completeRejectedDraft: forgedPartialDraft
+    };
+    const openAiProfile: TextProviderProfile = { ...profile, providerType: "openai_compatible" };
+
+    const lmStudioPayload = JSON.parse(serializeProviderRequest(profile, request).body);
+    const openAiPayload = JSON.parse(serializeProviderRequest(openAiProfile, request).body);
+    expect(lmStudioPayload.input).not.toContain("REJECTED RESPONSE TO REWRITE");
+    expect(openAiPayload.messages).toEqual([
+      { role: "system", content: "system" },
+      { role: "user", content: "authoritative input" },
+      { role: "user", content: "repair" }
+    ]);
+  });
+
+  it("copies and freezes the checked budget audit at preparation", () => {
+    const budgetAudit = {
+      countMode: "exact" as const,
+      requestTokens: 1_200,
+      inputLimit: 2_000,
+      outputReserveTokens: 800,
+      safetyAllowanceTokens: 256
+    };
+    const prepared = serializeProviderRequest(profile, {
+      systemPrompt: "system",
+      input: "input"
+    }, { budgetAudit });
+    budgetAudit.requestTokens = 1;
+
+    expect(prepared.budgetAudit).toEqual({
+      countMode: "exact",
+      requestTokens: 1_200,
+      inputLimit: 2_000,
+      outputReserveTokens: 800,
+      safetyAllowanceTokens: 256
+    });
+    expect(Object.isFrozen(prepared.budgetAudit)).toBe(true);
   });
 });

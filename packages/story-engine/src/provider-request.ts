@@ -3,6 +3,17 @@ import type { ProviderRequest, TextProviderProfile } from "./providers.js";
 
 export type ProviderRequestOperation = "story generation";
 
+export type CompleteRejectedDraft = Readonly<{
+  content: string;
+  complete: true;
+}>;
+
+export type CanonicalProviderRequest = Readonly<
+  Omit<ProviderRequest, "previousResponseId" | "rejectedResponse"> & {
+    completeRejectedDraft?: CompleteRejectedDraft;
+  }
+>;
+
 /** Task 5 supplies this text-free audit after measuring the serialized request. */
 export type ProviderRequestBudgetAudit = Readonly<{
   countMode: "estimated" | "exact";
@@ -30,17 +41,37 @@ function prepare(
   options: ProviderRequestSerializationOptions
 ): PreparedProviderRequest {
   const body = JSON.stringify(payload);
+  const budgetAudit = options.budgetAudit ? Object.freeze({ ...options.budgetAudit }) : null;
   return Object.freeze({
     body,
     payloadHash: createHash("sha256").update(body).digest("hex"),
     operation: options.operation ?? "story generation",
-    budgetAudit: options.budgetAudit ?? null
+    budgetAudit
   });
 }
 
-function recoveryInput(request: ProviderRequest): string {
+/** Returns a typed complete JSON draft, or null when the draft is partial. */
+export function validateCompleteRejectedDraft(value: unknown): CompleteRejectedDraft | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const content = value.trim();
+  try {
+    const parsed = JSON.parse(content) as unknown;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  } catch {
+    return null;
+  }
+  return Object.freeze({ content, complete: true });
+}
+
+function completeRejectedDraftContent(request: CanonicalProviderRequest): string | null {
+  const draft = request.completeRejectedDraft;
+  if (!draft || draft.complete !== true) return null;
+  return validateCompleteRejectedDraft(draft.content)?.content ?? null;
+}
+
+function recoveryInput(request: CanonicalProviderRequest): string {
   if (!request.recoveryInput) return request.input;
-  const rejectedResponse = request.rejectedResponse?.trim();
+  const rejectedResponse = completeRejectedDraftContent(request);
   return `${request.input}${rejectedResponse ? `\n\nREJECTED RESPONSE TO REWRITE:\n${rejectedResponse}` : ""}\n\nRECOVERY REQUIREMENT:\n${request.recoveryInput}`;
 }
 
@@ -50,10 +81,11 @@ function recoveryInput(request: ProviderRequest): string {
  */
 export function serializeProviderRequest(
   profile: TextProviderProfile,
-  request: ProviderRequest,
+  request: CanonicalProviderRequest,
   options: ProviderRequestSerializationOptions = {}
 ): PreparedProviderRequest {
   const isRecovery = Boolean(request.recoveryInput);
+  const rejectedResponse = completeRejectedDraftContent(request);
   const payload = profile.providerType === "lmstudio"
     ? {
         model: profile.model,
@@ -69,8 +101,8 @@ export function serializeProviderRequest(
         messages: [
           { role: "system", content: request.systemPrompt },
           { role: "user", content: request.input },
-          ...(isRecovery && request.rejectedResponse?.trim()
-            ? [{ role: "assistant", content: request.rejectedResponse.trim() }]
+          ...(isRecovery && rejectedResponse
+            ? [{ role: "assistant", content: rejectedResponse }]
             : []),
           ...(isRecovery ? [{ role: "user", content: request.recoveryInput! }] : [])
         ],
