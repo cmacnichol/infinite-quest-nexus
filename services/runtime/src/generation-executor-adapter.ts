@@ -540,7 +540,7 @@ export function createGenerationExecutor(
       const job = await dependencies.repository.loadExecutionPayload(request);
       if (!job) return false;
       if (!promptSnapshotSchema.safeParse(job.prompt_snapshot).success) {
-        await dependencies.repository.markRecoverable({
+        assertActiveGenerationUpdate(await dependencies.repository.markRecoverable({
           jobId: job.id,
           ownerUserId: job.owner_user_id,
           workerId: request.workerId,
@@ -549,7 +549,7 @@ export function createGenerationExecutor(
           errorCode: "generation_prompt_snapshot_invalid",
           errorMessage: "Saved generation instructions are invalid.",
           recoveryMetadata: { reason: "generation_prompt_snapshot_invalid" }
-        });
+        }), "saving invalid prompt snapshot recovery state");
         return false;
       }
       return executeLoadedGeneration(dependencies, request.workerId, request.leaseSeconds, job);

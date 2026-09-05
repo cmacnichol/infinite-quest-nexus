@@ -88,6 +88,44 @@ function validPromptSnapshot(): GenerationExecutionPayload["prompt_snapshot"] {
   }])) as GenerationExecutionPayload["prompt_snapshot"];
 }
 
+function completeGenerationExecutionPayload(): GenerationExecutionPayload {
+  return {
+    id: claim.jobId,
+    owner_user_id: claim.ownerUserId,
+    campaign_id: claim.campaignId,
+    world_version_id: "00000000-0000-4000-8000-000000000005",
+    provider_profile_id: claim.providerProfileId,
+    expected_turn_number: claim.expectedTurnNumber,
+    operation_kind: "append",
+    replacement_turn_id: null,
+    base_turn_number: null,
+    base_state_private: {},
+    base_scratchpad_safe_for_prompt: false,
+    action: "Open the observatory door.",
+    requested_input_mode: "action",
+    resolved_input_mode: "action",
+    input_mode_source: "explicit",
+    requested_model: "test-model",
+    context_options: { budgetTokens: 8_000, compression: "auto", query: "Open the observatory door.", recentTurns: 4 },
+    prompt_protocol_version: "test-protocol",
+    prompt_snapshot: validPromptSnapshot(),
+    generation_base_identity: {
+      operationKind: "append", expectedTurnNumber: claim.expectedTurnNumber,
+      baseTurnNumber: claim.expectedTurnNumber - 1, campaignActiveTurnNumber: claim.expectedTurnNumber - 1,
+      campaignStateRevision: 1, stateEditRevision: null, narrationCorrectionRevision: null,
+      baseTurnId: null, stateFingerprint: "state-fingerprint", narrationFingerprint: null
+    },
+    attempts: 1,
+    orchestration_private: {},
+    streaming_segments_state: {},
+    orchestration_inputs: {
+      useRpgStats: false, rpgStats: [], eventTriggers: [], pendingEventTriggers: [],
+      storyMemoryDefaults: { canonicalFacts: [], supersededFacts: [] }, suppressEventTriggers: true,
+      characterProfile: null, characterSnapshot: null
+    }
+  };
+}
+
 describe("generation executor adapter", () => {
   it("treats a missing guarded payload as cancellation before provider work or mutation", async () => {
     const repository = guardedRepository();
@@ -115,22 +153,25 @@ describe("generation executor adapter", () => {
   });
 
   it("does not call a provider for a malformed loaded prompt snapshot", async () => {
-    const providerCalls = vi.fn();
-    const malformedJob = {
-      id: claim.jobId,
-      owner_user_id: claim.ownerUserId,
-      campaign_id: claim.campaignId,
-      provider_profile_id: claim.providerProfileId,
-      prompt_snapshot: {}
-    } as GenerationExecutionPayload;
+    const providerCalls: unknown[] = [];
+    const malformedJob = { ...completeGenerationExecutionPayload(), prompt_snapshot: {} as never };
     const repository = {
       ...guardedRepository(),
       loadExecutionPayload: vi.fn(async () => malformedJob),
       markRecoverable: vi.fn(async () => true)
     } as GenerationExecutionRepository;
+    const provider = {
+      id: claim.providerProfileId, name: "Captured provider", providerRole: "text" as const,
+      providerType: "openai_compatible" as const, model: "test-model", contextWindowTokens: 16_000,
+      maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {},
+      execute: vi.fn(async (request: unknown) => {
+        providerCalls.push(request);
+        throw new Error("The malformed snapshot must not reach provider execution.");
+      })
+    };
     const collaborators = {
       ...rejectedCollaborators(),
-      loadTextExecution: providerCalls
+      loadTextExecution: vi.fn(async () => provider)
     } as GenerationExecutionCollaborators;
     const executor = createGenerationExecutor({
       pool: {} as DatabasePool,
@@ -140,10 +181,27 @@ describe("generation executor adapter", () => {
 
     await expect(executor.execute({ workerId: "worker-a", leaseSeconds: 30, claim })).resolves.toBe(false);
 
-    expect(providerCalls).not.toHaveBeenCalled();
+    expect(providerCalls).toEqual([]);
     expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({
       errorCode: "generation_prompt_snapshot_invalid"
     }));
+  });
+
+  it("raises generation_cancelled when malformed snapshot recovery loses its lease", async () => {
+    const malformedJob = { ...completeGenerationExecutionPayload(), prompt_snapshot: {} as never };
+    const repository = {
+      ...guardedRepository(),
+      loadExecutionPayload: vi.fn(async () => malformedJob),
+      markRecoverable: vi.fn(async () => false)
+    } as GenerationExecutionRepository;
+    const executor = createGenerationExecutor({
+      pool: {} as DatabasePool,
+      repository,
+      collaborators: rejectedCollaborators()
+    });
+
+    await expect(executor.execute({ workerId: "worker-a", leaseSeconds: 30, claim }))
+      .rejects.toMatchObject({ code: "generation_cancelled" });
   });
 
   it("passes the validated Chronicle retrieval audit unchanged into the accepted-turn commit", async () => {
