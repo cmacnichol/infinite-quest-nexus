@@ -110,7 +110,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       if (sql.includes("ORDER BY edit.revision DESC")) return { rows: [{ state_snapshot_private: { continuitySummary: "The warden is dead.", scratchpad: "password: moonfall", canonicalFacts: [], openThreads: [] } }] };
       if (sql.includes("FROM turns") && sql.includes("state_snapshot_private")) return { rows: [{ state_snapshot_private: {
         continuitySummary: "The warden lives.", scratchpad: "old", canonicalFacts: [], openThreads: ["Old thread."],
-        trackers: [{ id: "ward", name: "Ward", value: "thin", rules: "fiction" }], rpgStats: [], eventTriggers: [], pendingEventTriggers: []
+        trackers: [{ id: "ward", name: "Ward", value: "thin", rules: "fiction" }], rpgStats: [{ id: "courage", name: "Courage", value: 50, note: "steady" }], eventTriggers: [{ id: "bell", label: "Bell", timing: "after", condition: "The gate opens.", effect: "The bell rings." }], pendingEventTriggers: [{ id: "pending-bell", sourceTriggerId: "bell", name: "Bell", timing: "after", instructions: "Ring once." }]
       } }] };
       if (sql.includes("effective_turn_narrations effective") && sql.includes("turn_row.action")) return { rows: [{ action: "Open the gate.", narration: "The warden dies at dawn." }] };
       if (sql.includes("FROM campaign_canonical_facts") || sql.includes("FROM chronicle_memories")) return { rows: [] };
@@ -124,7 +124,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     expect(actual.authority.scratchpad).toBe("password: moonfall");
     expect(actual.authority.rules).toEqual(["Never resurrect the warden."]);
     expect(actual.authority.openThreads).toEqual([]);
-    expect(actual.authority.currentContinuity).toEqual({ continuitySummary: "The warden is dead.", scratchpad: "password: moonfall", canonicalFacts: [], openThreads: [], trackers: [{ id: "ward", name: "Ward", value: "thin", rules: "fiction" }], rpgStats: [], eventTriggers: [], pendingEventTriggers: [] });
+    expect(actual.authority.currentContinuity).toEqual({ continuitySummary: "The warden is dead.", scratchpad: "password: moonfall", canonicalFacts: [], openThreads: [], trackers: [{ id: "ward", name: "Ward", value: "thin", rules: "fiction" }], rpgStats: [{ id: "courage", name: "Courage", value: 50, note: "steady" }], eventTriggers: [{ id: "bell", label: "Bell", timing: "after", condition: "The gate opens.", effect: "The bell rings.", addTextAfter: false, triggeredCount: 0, lastTriggeredTurn: null, lastTriggeredAt: null }], pendingEventTriggers: [{ id: "pending-bell", sourceTriggerId: "bell", name: "Bell", timing: "after", condition: "", effect: "", instructions: "Ring once.", reason: "", sourceTurn: null }] });
     expect(actual.candidates).toEqual([]);
     expect(actual.baseIdentity.baseTurnNumber).toBe(1);
     expect(vi.mocked(client.query).mock.calls.some(([sql]) => (
@@ -161,7 +161,8 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     expect(actual.authority.openThreads).toEqual(["Bury the warden."]);
   });
   it("keeps private generation authority off the public preview port", () => {
-    const transaction = createPostgresChronicleGenerationTransactionPort({ embeddings: embeddingPort() });
+    const embeddings = embeddingPort({ resolve: vi.fn() });
+    const transaction = createPostgresChronicleGenerationTransactionPort({ embeddings });
     expect(transaction).toHaveProperty("loadGenerationContext");
     expect(transaction).not.toHaveProperty("previewGenerationContext");
   });
@@ -182,15 +183,18 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
         throw new Error(`Unexpected query: ${sql}`);
       })
     } as unknown as DatabaseClient;
-    const transaction = createPostgresChronicleGenerationTransactionPort({ embeddings: embeddingPort() });
+    const embeddings = embeddingPort({ resolve: vi.fn() });
+    const transaction = createPostgresChronicleGenerationTransactionPort({ embeddings });
 
     const result = await transaction.loadGenerationContext(client, {
       ...scope, operationKind: "append", expectedTurnNumber: 1, query: "lantern password"
     });
 
     expect(retrievalCalls).toHaveLength(1);
+    expect(retrievalCalls[0]?.slice(0, 3)).toEqual([scope.ownerUserId, scope.campaignId, scope.worldVersionId]);
     expect(retrievalCalls[0]?.[3]).toBe("lantern password");
     expect(retrievalCalls[0]?.[5]).toBe(0);
+    expect(embeddings.resolve).not.toHaveBeenCalled();
     expect(result.candidates).toEqual([]);
   });
   it("auto-enables semantic memory and queues embedding work on the exact caller client", async () => {
