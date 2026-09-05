@@ -442,7 +442,12 @@ async function callCampaignTextProvider(
     recovery: Boolean(request.recoveryInput)
   });
   try {
-    const result = await provider.execute(request);
+    const result = await provider.execute({
+      ...request,
+      ...(operation === "story_generation" || operation === "story_recovery" || operation === "event_extension"
+        ? { canonicalBudgeting: true }
+        : {})
+    });
     await dependencies.collaborators.recordProfileCost(
       dependencies.pool,
       provider,
@@ -1038,10 +1043,6 @@ async function executeLoadedGeneration(
         "story_recovery",
         {
           ...baseRequest,
-          ...(provider.providerType === "lmstudio" && result.responseId
-              && recoveryReason !== "mechanics_leak"
-            ? { previousResponseId: result.responseId }
-            : {}),
           recoveryInput: recoveryPromptFromSnapshot(
             collaborators,
             job,
@@ -1282,7 +1283,12 @@ async function executeLoadedGeneration(
             "event_extension",
             {
               systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "event_extension"),
-              input: buildEventExtensionPrompt(parsed.story.narration, guidance)
+              input: buildEventExtensionPrompt(parsed.story.narration, guidance),
+              budgetOutput: {
+                kind: "event_extension",
+                preservedNarration: parsed.story.narration,
+                narrationCharacterLimit: 200_000
+              }
             }
           );
           if (extensionResponse.outputLimited) {

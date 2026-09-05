@@ -22,12 +22,15 @@ export class ContextBudgetError extends Error {
   readonly availableTokens: number;
   readonly requiredCharacters?: number;
   readonly availableCharacters?: number;
+  readonly scope?: "campaign_context" | "provider_request" | "output_skeleton" | "extension_narration";
+  readonly protectedBlockIds: readonly string[];
 
   constructor(
     code: ContextBudgetErrorCode,
     requiredTokens: number,
     availableTokens: number,
-    characters?: Readonly<{ required: number; available: number }>
+    characters?: Readonly<{ required: number; available: number }>,
+    details?: Readonly<{ scope?: "campaign_context" | "provider_request" | "output_skeleton" | "extension_narration"; protectedBlockIds?: readonly string[] }>
   ) {
     super(`${code}: requires ${requiredTokens} tokens but only ${availableTokens} are available.`);
     this.name = "ContextBudgetError";
@@ -38,6 +41,8 @@ export class ContextBudgetError extends Error {
       this.requiredCharacters = characters.required;
       this.availableCharacters = characters.available;
     }
+    if (details?.scope) this.scope = details.scope;
+    this.protectedBlockIds = Object.freeze([...(details?.protectedBlockIds ?? [])]);
   }
 }
 
@@ -50,6 +55,7 @@ export type ContextPlanOptions<TContext = readonly ContextBudgetBlock[]> = Reado
   serializeRequest: (context: TContext) => string;
   safetyAllowanceTokens?: number;
   contextValue?: (blocks: readonly ContextBudgetBlock[]) => TContext;
+  protectedScope?: "campaign_context" | "provider_request";
 }>;
 
 export type ContextPlan = Readonly<{
@@ -88,7 +94,11 @@ function uniqueBlocks(blocks: readonly ContextBudgetBlock[]): ContextBudgetBlock
     const existing = unique.get(key);
     if (!existing) {
       unique.set(key, block);
-    } else if (existing.content !== block.content) {
+    } else if (existing.content !== block.content
+      || existing.protected !== block.protected
+      || existing.priority !== block.priority
+      || existing.ordinal !== block.ordinal
+      || existing.scope !== block.scope) {
       throw new ContextBudgetError("context_budget_invalid", 0, 0);
     }
   }
@@ -122,10 +132,16 @@ export function planContext<TContext = readonly ContextBudgetBlock[]>(options: C
   let selected = protectedBlocks;
   let current = measured(selected, options);
   if (current.contextTokens + safetyAllowanceTokens > options.contextLimit) {
-    throw new ContextBudgetError("context_budget_exceeded", current.contextTokens + safetyAllowanceTokens, options.contextLimit);
+    throw new ContextBudgetError("context_budget_exceeded", current.contextTokens + safetyAllowanceTokens, options.contextLimit, undefined, {
+      scope: options.protectedScope ?? "campaign_context",
+      protectedBlockIds: protectedBlocks.map((block) => block.id)
+    });
   }
   if (current.requestTokens + safetyAllowanceTokens > options.inputLimit) {
-    throw new ContextBudgetError("context_budget_exceeded", current.requestTokens + safetyAllowanceTokens, options.inputLimit);
+    throw new ContextBudgetError("context_budget_exceeded", current.requestTokens + safetyAllowanceTokens, options.inputLimit, undefined, {
+      scope: "provider_request",
+      protectedBlockIds: protectedBlocks.map((block) => block.id)
+    });
   }
 
   const omitted: ContextBudgetOmission[] = [];
@@ -182,10 +198,10 @@ export function assertOutputFeasible(options: OutputFeasibilityOptions): OutputF
   if (!Number.isFinite(outputTokens) || outputTokens < 0) throw new ContextBudgetError("context_budget_invalid", 0, 0);
   const totalTokens = options.inputTokens + options.outputReserveTokens + safetyAllowanceTokens;
   if (totalTokens > options.contextWindowTokens) {
-    throw new ContextBudgetError("context_budget_exceeded", totalTokens, options.contextWindowTokens);
+    throw new ContextBudgetError("context_budget_exceeded", totalTokens, options.contextWindowTokens, undefined, { scope: "provider_request" });
   }
   if (outputTokens + safetyAllowanceTokens > options.outputReserveTokens) {
-    throw new ContextBudgetError("continuity_output_budget_exceeded", outputTokens + safetyAllowanceTokens, options.outputReserveTokens);
+    throw new ContextBudgetError("continuity_output_budget_exceeded", outputTokens + safetyAllowanceTokens, options.outputReserveTokens, undefined, { scope: "output_skeleton" });
   }
   if (options.extension) {
     assertLimit(options.extension.narrationCharacterLimit, "narrationCharacterLimit");
@@ -195,7 +211,8 @@ export function assertOutputFeasible(options: OutputFeasibilityOptions): OutputF
         "extension_narration_limit_exceeded",
         totalTokens,
         options.contextWindowTokens,
-        { required: narrationCharacters, available: options.extension.narrationCharacterLimit }
+        { required: narrationCharacters, available: options.extension.narrationCharacterLimit },
+        { scope: "extension_narration" }
       );
     }
     return Object.freeze({ outputTokens, totalTokens, narrationCharacters });

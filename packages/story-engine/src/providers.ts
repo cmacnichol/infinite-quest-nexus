@@ -1,8 +1,8 @@
 import type { ProviderType } from "../../contracts/src/generation.js";
 import { logger } from "../../logger/src/index.js";
 import { ProviderDestinationNotAllowedError } from "../../security/src/provider-network-policy.js";
-import { serializeLegacyProviderRequest } from "./provider-request.js";
-import type { PreparedProviderRequest } from "./provider-request.js";
+import { serializeCheckedProviderRequest, serializeLegacyProviderRequest, validateCompleteRejectedDraft } from "./provider-request.js";
+import type { CanonicalProviderRequest, PreparedProviderRequest, ProviderOutputBudget } from "./provider-request.js";
 import {
   MAX_IMAGE_PROVIDER_RESPONSE_BYTES,
   MAX_PROVIDER_JSON_RESPONSE_BYTES,
@@ -54,6 +54,8 @@ export type ProviderRequest = {
   recoveryInput?: string;
   rejectedResponse?: string;
   onChunk?: (delta: string, accumulated: string) => void | Promise<void>;
+  canonicalBudgeting?: boolean;
+  budgetOutput?: ProviderOutputBudget;
 };
 
 export type ProviderResult = {
@@ -884,9 +886,29 @@ async function readSseStream(
   return { content: accumulated, finalData, allData };
 }
 
+function canonicalRequest(request: ProviderRequest): CanonicalProviderRequest {
+  const completeRejectedDraft = validateCompleteRejectedDraft(request.rejectedResponse);
+  return {
+    systemPrompt: request.systemPrompt,
+    input: request.input,
+    ...(request.recoveryInput ? { recoveryInput: request.recoveryInput } : {}),
+    ...(completeRejectedDraft ? { completeRejectedDraft } : {}),
+    ...(request.onChunk ? { onChunk: request.onChunk } : {})
+  };
+}
+
+function checkedStoryRequest(profile: TextProviderProfile, request: ProviderRequest, responseFormat?: boolean): PreparedProviderRequest {
+  return serializeCheckedProviderRequest(profile, canonicalRequest(request), {
+    inputLimit: profile.contextWindowTokens - profile.maxOutputTokens,
+    count: (body) => body.length,
+    output: request.budgetOutput ?? { kind: "story_append" },
+    ...(responseFormat === undefined ? {} : { responseFormat })
+  });
+}
+
 async function callLmStudio(profile: TextProviderProfile, request: ProviderRequest, transport: ProviderTransport): Promise<ProviderResult> {
+  const prepared = request.canonicalBudgeting ? checkedStoryRequest(profile, request) : serializeLegacyProviderRequest(profile, request);
   await ensureLmStudioModelLoaded(profile, "story generation model loading", transport);
-  const prepared = serializeLegacyProviderRequest(profile, request);
   const url = `${lmStudioRoot(profile.baseUrl)}/api/v1/chat`;
   const response = await sendPreparedProviderRequest(profile, prepared, transport);
   if (response.ok && request.onChunk && response.headers.get("content-type")?.includes("event-stream")) {
@@ -931,7 +953,7 @@ async function callLmStudio(profile: TextProviderProfile, request: ProviderReque
 }
 
 async function callOpenAiCompatible(profile: TextProviderProfile, request: ProviderRequest, transport: ProviderTransport): Promise<ProviderResult> {
-  let prepared = serializeLegacyProviderRequest(profile, request);
+  let prepared = request.canonicalBudgeting ? checkedStoryRequest(profile, request) : serializeLegacyProviderRequest(profile, request);
   const url = `${openAiRoot(profile.baseUrl)}/chat/completions`;
   const send = (preparedRequest: PreparedProviderRequest) => sendPreparedProviderRequest(profile, preparedRequest, transport);
   let response = await send(prepared);
@@ -947,7 +969,9 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
       await originalCancellation?.catch(() => undefined);
     }
     if (/response_format|json.?mode|structured.?output|grammar/i.test(text)) {
-      prepared = serializeLegacyProviderRequest(profile, request, { responseFormat: false });
+      prepared = request.canonicalBudgeting
+        ? checkedStoryRequest(profile, request, false)
+        : serializeLegacyProviderRequest(profile, request, { responseFormat: false });
       response = await send(prepared);
     } else {
       let data: Record<string, any> = {};

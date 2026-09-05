@@ -2,11 +2,13 @@ import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
   createProviderTransport,
+  callTextProvider,
   sendPreparedProviderRequest,
   type ProviderTransport,
   type TextProviderProfile
 } from "../../packages/story-engine/src/providers.js";
 import {
+  serializeCheckedProviderRequest,
   serializeProviderRequest,
   validateCompleteRejectedDraft
 } from "../../packages/story-engine/src/provider-request.js";
@@ -202,5 +204,54 @@ describe("provider request serialization", () => {
 
     expect(prepared.budgetAudit?.requestTokens).toBe(plan.requestTokens);
     expect(prepared.body).not.toContain("budgetAudit");
+  });
+
+  it("measures the exact escaped canonical body before transport and rejects an oversized request", async () => {
+    const request = {
+      systemPrompt: "rules with \\\\ and \"quotes\"",
+      input: "action with 雪 and a newline\n",
+      recoveryInput: "return every replacement field",
+      completeRejectedDraft: validateCompleteRejectedDraft('{"narration":"draft"}')!,
+      onChunk: vi.fn()
+    };
+    const checked = serializeCheckedProviderRequest(profile, request, {
+      inputLimit: 10_000,
+      count: (value) => value.length,
+      output: { kind: "story_append" }
+    });
+    const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) =>
+      new Response(JSON.stringify({ output: [{ type: "message", content: "{}" }], stats: {} }), { status: 200 })
+    );
+
+    await sendPreparedProviderRequest(profile, checked, createTestProviderTransport(fetcher as typeof fetch));
+    expect(checked.budgetAudit?.requestTokens).toBe(checked.body.length);
+    expect(String((fetcher.mock.calls[0]?.[1] as RequestInit).body)).toBe(checked.body);
+    try {
+      serializeCheckedProviderRequest(profile, request, {
+        inputLimit: 10,
+        count: (value) => value.length,
+        output: { kind: "story_append" }
+      });
+      throw new Error("Expected the provider request budget to fail.");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "context_budget_exceeded", scope: "provider_request" });
+    }
+  });
+
+  it("rejects an oversized canonical request before it calls provider transport", async () => {
+    const fetcher = vi.fn();
+    await expect(callTextProvider({
+      ...profile,
+      contextWindowTokens: 3_000,
+      maxOutputTokens: 1_024
+    }, {
+      systemPrompt: "rules",
+      input: "x".repeat(3_000),
+      canonicalBudgeting: true
+    }, createTestProviderTransport(fetcher as typeof fetch))).rejects.toMatchObject({
+      code: "context_budget_exceeded",
+      scope: "provider_request"
+    });
+    expect(fetcher).not.toHaveBeenCalled();
   });
 });

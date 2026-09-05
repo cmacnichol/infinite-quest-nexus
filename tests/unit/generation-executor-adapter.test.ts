@@ -384,6 +384,9 @@ describe("generation executor adapter", () => {
     expect(accepted.contextDiagnostics.retrieval).toBe(retrievalDiagnostics);
     const providerRequest = (collaborators.loadTextExecution as ReturnType<typeof vi.fn>).mock.results[0]?.value;
     const provider = await providerRequest;
+    expect((provider.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0]).toMatchObject({
+      canonicalBudgeting: true
+    });
     const input = JSON.parse((provider.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0].input);
     expect(input.authoritative_context.currentContinuity).toEqual({
       continuitySummary: "The keeper is alive.",

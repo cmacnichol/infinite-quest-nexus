@@ -64,6 +64,29 @@ describe("context budget planning", () => {
     })).toThrowError(/context_budget_exceeded/);
   });
 
+  it("is order-independent for identical records and rejects conflicting duplicate metadata", () => {
+    const shared = [
+      { id: "b", revision: "1", content: "same", protected: false, priority: 1, ordinal: 2 },
+      { id: "a", revision: "1", content: "same", protected: false, priority: 1, ordinal: 2 },
+      { id: "a", revision: "1", content: "same", protected: false, priority: 1, ordinal: 2 }
+    ] as const;
+    const options = {
+      contextLimit: 1_000,
+      inputLimit: 1_000,
+      count,
+      serializeContext: stringify,
+      serializeRequest: (context: unknown) => JSON.stringify({ context })
+    };
+    expect(planContext({ ...options, blocks: shared }).selected.map((block) => block.id)).toEqual(["a", "b"]);
+    expect(planContext({ ...options, blocks: [...shared].reverse() }).selected.map((block) => block.id)).toEqual(["a", "b"]);
+    for (const blocks of [
+      [{ id: "same", revision: "1", content: "state", protected: true, priority: 0, ordinal: 1 }, { id: "same", revision: "1", content: "state", protected: false, priority: 0, ordinal: 1 }],
+      [{ id: "same", revision: "1", content: "state", protected: true, priority: 0, ordinal: 1 }, { id: "same", revision: "1", content: "state", protected: true, priority: 1, ordinal: 1 }]
+    ]) {
+      expect(() => planContext({ ...options, blocks })).toThrow(ContextBudgetError);
+    }
+  });
+
   it("keeps a small request small under a large configured ceiling", () => {
     const plan = planContext({
       blocks: [{ id: "latest", revision: "1", content: "small", protected: true, priority: 0, ordinal: 1 }],
