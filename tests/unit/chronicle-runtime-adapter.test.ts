@@ -276,6 +276,7 @@ describe("Chronicle runtime adapters", () => {
           applyCampaignStateCorrection: vi.fn(),
           autoEnableCampaignEmbedding: vi.fn(),
           buildContextPreview: vi.fn(),
+          loadGenerationContext: vi.fn(),
           storeDerivedTurnMemories: vi.fn(),
           writeAcceptedTurnFiction: vi.fn(),
           rebuildCampaignMemories: vi.fn(),

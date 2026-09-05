@@ -10,7 +10,6 @@ import {
   type ChronicleRetrievalAudit,
   type CompressionLevel
 } from "../../contracts/src/memory.js";
-import { loadCurrentContinuityCorrection } from "./campaign-continuity-repository.js";
 type RetrievalDiagnosticMode = "production" | "shadow";
 const CHRONICLE_TELEMETRY_CANDIDATE_LIMIT = 1_000;
 import {
@@ -1859,15 +1858,9 @@ export async function buildPostgresChronicleContextPreview(
   dependencies: ChronicleGenerationTransactionDependencies,
 ): Promise<ChronicleContextPreview> {
   const campaign = await loadContextCampaign(client, scope);
-  // Only internal story generation requests the complete private correction.
-  // Public previews can attribute embedding costs without opting into this scope.
-  const currentContinuity = scope.costAttribution?.operation === "retrieval_embedding"
-    ? await loadCurrentContinuityCorrection(
-      client,
-      scope,
-      scope.request.throughTurnNumber ?? campaign.active_turn_number
-    )
-    : null;
+  // Preview is always a sanitized retrieval projection. Complete corrected
+  // authority belongs exclusively to loadPostgresChronicleGenerationContext.
+  const currentContinuity: CurrentContinuity | null = null;
   const completeEntityCatalog = buildChronicleEntityCatalog({
     worldContent: campaign.world_content,
     characterSnapshot: campaign.character_snapshot,

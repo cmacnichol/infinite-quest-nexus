@@ -144,6 +144,19 @@ export type MemoryGenerationContextPreviewScope = CampaignWorldVersionMemoryScop
   }>;
 }>;
 
+/** Private authority read for provider work; no HTTP/API adapter may expose it. */
+export type MemoryGenerationAuthorityScope = CampaignWorldVersionMemoryScope & Readonly<{
+  operationKind: "append" | "replace_latest";
+  expectedTurnNumber: number;
+  query: string;
+}>;
+
+export type MemoryGenerationAuthorityContext = Readonly<{
+  authority: Readonly<Record<string, unknown>>;
+  candidates: readonly Readonly<Record<string, unknown>>[];
+  baseIdentity: Readonly<Record<string, unknown>>;
+}>;
+
 export type MemoryWorkerClaimRequest = Readonly<{
   workerId: string;
   leaseSeconds: number;

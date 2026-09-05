@@ -7,6 +7,7 @@ import {
   createPostgresChronicleWorkerStatePort,
   type ChronicleTransactionEmbeddingPort
 } from "../../packages/database/src/chronicle-repository.js";
+import { loadPostgresChronicleGenerationContext } from "../../packages/database/src/chronicle-generation-context.js";
 import type { DatabaseClient, DatabasePool } from "../../packages/database/src/pool.js";
 
 type QueryResult = Readonly<{
@@ -88,6 +89,43 @@ const scope = {
 } as const;
 
 describe("PostgreSQL Chronicle generation transaction port", () => {
+  it("loads complete private authority from accepted rows when Chronicle has no derived memory", async () => {
+    const contextScope = {
+      ownerUserId: "owner",
+      campaignId: "campaign",
+      worldVersionId: "world-version",
+      operationKind: "append" as const,
+      expectedTurnNumber: 2,
+      query: "moon gate"
+    };
+    const client = {
+      query: vi.fn(async (sql: string) => {
+      if (sql.includes("FOR UPDATE OF campaign, state")) return { rows: [{ active_turn_number: 1, world_version_id: "world-version", revision: 3 }] };
+      if (sql.includes("FROM campaign_state_edits") && sql.includes("state_snapshot_private, revision")) return { rows: [{ state_snapshot_private: { continuitySummary: "The warden is dead.", scratchpad: "password: moonfall", canonicalFacts: [], openThreads: [] }, revision: 5 }] };
+      if (sql.includes("FROM effective_turn_narrations") && sql.includes("correction_revision")) return { rows: [{ id: "turn-1", effective_narration: "The warden dies at dawn.", correction_revision: 2 }] };
+      if (sql.includes("JOIN world_versions") && sql.includes("mandatory_rules")) return { rows: [{ mandatory_rules: "Never resurrect the warden.", selected_character_id: "hero" }] };
+      if (sql.includes("ORDER BY edit.revision DESC")) return { rows: [{ state_snapshot_private: { continuitySummary: "The warden is dead.", scratchpad: "password: moonfall", canonicalFacts: [], openThreads: [] } }] };
+      if (sql.includes("effective_turn_narrations effective") && sql.includes("turn_row.action")) return { rows: [{ action: "Open the gate.", narration: "The warden dies at dawn." }] };
+      if (sql.includes("FROM campaign_canonical_facts") || sql.includes("FROM chronicle_memories")) return { rows: [] };
+      throw new Error(`Unexpected query: ${sql}`);
+      })
+    } as unknown as DatabaseClient;
+
+    const actual = await loadPostgresChronicleGenerationContext(client, contextScope);
+
+    expect(actual.authority.latestTurn).toEqual({ action: "Open the gate.", narration: "The warden dies at dawn." });
+    expect(actual.authority.scratchpad).toBe("password: moonfall");
+    expect(actual.authority.rules).toEqual(["Never resurrect the warden."]);
+    expect(actual.authority.openThreads).toEqual([]);
+    expect(actual.authority.currentContinuity).toEqual({ continuitySummary: "The warden is dead.", scratchpad: "password: moonfall", canonicalFacts: [], openThreads: [] });
+    expect(actual.candidates).toEqual([]);
+    expect(actual.baseIdentity.baseTurnNumber).toBe(1);
+  });
+  it("keeps private generation authority off the public preview port", () => {
+    const transaction = createPostgresChronicleGenerationTransactionPort({ embeddings: embeddingPort() });
+    expect(transaction).toHaveProperty("loadGenerationContext");
+    expect(transaction).not.toHaveProperty("previewGenerationContext");
+  });
   it("auto-enables semantic memory and queues embedding work on the exact caller client", async () => {
     let callerClient: DatabaseClient;
     const queries: string[] = [];
@@ -530,6 +568,9 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
         currentScene: { memoryId: "memory-1" }
       }
     });
+    expect(vi.mocked(client.query).mock.calls.some(([sql]) => (
+      typeof sql === "string" && sql.includes("JOIN campaign_state_edits edit")
+    ))).toBe(false);
 
     const originalQuery = vi.mocked(client.query).getMockImplementation()!;
     let failProductionRelease = true;

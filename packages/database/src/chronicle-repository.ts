@@ -57,6 +57,7 @@ import {
   buildPostgresChronicleContextPreview,
   loadPostgresChronicleContextMetrics
 } from "./chronicle-context-repository.js";
+import { loadPostgresChronicleGenerationContext } from "./chronicle-generation-context.js";
 
 type ChronicleJobRow = Readonly<{
   id: string;
@@ -834,6 +835,11 @@ export function createPostgresChronicleGenerationTransactionPort(
         return withTransaction(pool, (client) => buildPostgresChronicleContextPreview(client, scope, dependencies));
       }
       return buildPostgresChronicleContextPreview(transactionClient(database), scope, dependencies);
+    },
+    async loadGenerationContext(database, scope) {
+      const pool = transactionPool(database);
+      if (pool) return withTransaction(pool, (client) => loadPostgresChronicleGenerationContext(client, scope));
+      return loadPostgresChronicleGenerationContext(transactionClient(database), scope);
     }
   } as MemoryGenerationTransactionPort;
 }

@@ -1,6 +1,7 @@
 export * from "./config.js";
 export * from "./campaign-state-repository.js";
 export * from "./campaign-continuity-repository.js";
+export * from "./chronicle-generation-context.js";
 export * from "./chronicle-repository.js";
 export * from "./generation-repository.js";
 export * from "./generation-execution-repository.js";

@@ -26,6 +26,8 @@ import type {
   MemoryContextPreviewRequest,
   MemoryEmbeddingConfigInput,
   MemoryGenerationContextPreviewScope,
+  MemoryGenerationAuthorityContext,
+  MemoryGenerationAuthorityScope,
   MemoryPublicResult,
   MemoryTransactionContext,
   MemoryWorkerClaimRequest,
@@ -67,6 +69,10 @@ export interface MemoryGenerationTransactionPort {
     database: MemoryTransactionContext,
     scope: MemoryGenerationContextPreviewScope,
   ): Promise<ChronicleContextPreview>;
+  loadGenerationContext(
+    database: MemoryTransactionContext,
+    scope: MemoryGenerationAuthorityScope,
+  ): Promise<MemoryGenerationAuthorityContext>;
   enqueueEmbeddingReindex(
     database: MemoryTransactionContext,
     scope: CampaignWorldVersionMemoryScope,

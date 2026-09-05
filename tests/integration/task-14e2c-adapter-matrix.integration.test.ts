@@ -79,6 +79,9 @@ const preChunkChronicleMemory: MemoryGenerationTransactionPort = {
   async buildContextPreview() {
     throw new Error("Task 14e2c does not build Chronicle context previews.");
   },
+  async loadGenerationContext() {
+    throw new Error("Task 14e2c does not load private generation authority.");
+  },
   async enqueueEmbeddingReindex() {
     return null;
   },
