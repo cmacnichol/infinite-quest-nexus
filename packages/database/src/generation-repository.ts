@@ -13,9 +13,10 @@ import type { PromptSnapshot } from "../../contracts/src/prompt-library.js";
 import { storyLengthProfileFromUnknown, storyLengthWordRange } from "../../contracts/src/story-settings.js";
 import { parseStoredChronicleRetrievalAudit } from "../../contracts/src/memory.js";
 import { sha256, stableStringify } from "../../domain/src/index.js";
-import { extractPartialNarration, formatNarrationParagraphs, STORY_PROMPT_PROTOCOL_VERSION } from "../../story-engine/src/index.js";
+import { extractPartialNarration, formatNarrationParagraphs } from "../../story-engine/src/index.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
+import { resolveGenerationAuthoritySnapshot } from "./generation-authority.js";
 
 type OperationKind = "append" | "replace_latest";
 type JobStatus = GenerationJob["status"];
@@ -324,6 +325,12 @@ export function createPostgresGenerationCommandRepository(
         const storyLengthProfile = request.storyLengthProfileOverride
           ?? storyLengthProfileFromUnknown(campaign.story_length_profile);
         const storyLength = storyLengthWordRange(storyLengthProfile);
+        const authority = await resolveGenerationAuthoritySnapshot(client, {
+          ownerUserId: scope.ownerUserId,
+          campaignId: scope.campaignId,
+          operationKind: "append",
+          expectedTurnNumber: campaign.active_turn_number + 1
+        });
         const promptSnapshot = await dependencies.resolvePromptSnapshot(client, scope.ownerUserId, scope.campaignId);
         const contextSnapshot = {
           ...request.context,
@@ -338,14 +345,15 @@ export function createPostgresGenerationCommandRepository(
             `INSERT INTO generation_jobs (
                owner_user_id, campaign_id, provider_profile_id, idempotency_key, expected_turn_number,
                action, requested_input_mode, resolved_input_mode, input_mode_source, turn_input_classification_id,
-               requested_model, context_options, prompt_protocol_version, recovery_metadata, prompt_snapshot
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+               requested_model, context_options, prompt_protocol_version, recovery_metadata, prompt_snapshot,
+               generation_base_identity
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
              RETURNING id, status, action, operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId",
                        expected_turn_number AS "expectedTurnNumber", created_at AS "createdAt"`,
             [scope.ownerUserId, scope.campaignId, providerProfileId, request.idempotencyKey, campaign.active_turn_number + 1,
               request.action, request.requestedInputMode, request.resolvedInputMode, request.inputModeSource, classificationId,
               request.model || "", json(contextSnapshot), dependencies.promptProtocolVersion(promptSnapshot),
-              json({ requestFingerprint }), json(promptSnapshot)]
+              json({ requestFingerprint }), json(promptSnapshot), json(authority.baseIdentity)]
           );
           return enqueueResult(inserted.rows[0]!, false);
         } catch (error) {
@@ -454,6 +462,12 @@ export function createPostgresGenerationCommandRepository(
         const storyLengthProfile = request.storyLengthProfileOverride
           ?? storyLengthProfileFromUnknown(campaign.story_length_profile);
         const storyLength = storyLengthWordRange(storyLengthProfile);
+        const authority = await resolveGenerationAuthoritySnapshot(client, {
+          ownerUserId: scope.ownerUserId,
+          campaignId: scope.campaignId,
+          operationKind: "replace_latest",
+          expectedTurnNumber: campaign.active_turn_number
+        });
         const promptSnapshot = await dependencies.resolvePromptSnapshot(client, scope.ownerUserId, scope.campaignId);
         const contextSnapshot = {
           ...request.context,
@@ -469,15 +483,16 @@ export function createPostgresGenerationCommandRepository(
                owner_user_id, campaign_id, provider_profile_id, idempotency_key, expected_turn_number,
                action, requested_input_mode, resolved_input_mode, input_mode_source, turn_input_classification_id,
                requested_model, context_options, prompt_protocol_version, recovery_metadata, prompt_snapshot,
-               operation_kind, replacement_turn_id, base_turn_number, base_state_private, base_scratchpad_safe_for_prompt, status
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'replace_latest',$16,$17,$18,$19,'replacement_queued')
+               operation_kind, replacement_turn_id, base_turn_number, base_state_private, base_scratchpad_safe_for_prompt,
+               generation_base_identity, status
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'replace_latest',$16,$17,$18,$19,$20,'replacement_queued')
             RETURNING id, status, action, expected_turn_number AS "expectedTurnNumber",
                       operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId", created_at AS "createdAt"`,
             [scope.ownerUserId, scope.campaignId, providerProfileId, request.idempotencyKey, campaign.active_turn_number,
               request.action, request.requestedInputMode, request.resolvedInputMode, request.inputModeSource, classificationId,
               request.model || "", json(contextSnapshot), dependencies.promptProtocolVersion(promptSnapshot),
               json({ requestFingerprint }), json(promptSnapshot), replacementTurnId,
-              baseTurnNumber, json(baseState), baseScratchpadSafeForPrompt]
+              baseTurnNumber, json(baseState), baseScratchpadSafeForPrompt, json(authority.baseIdentity)]
           );
           await client.query("RELEASE SAVEPOINT enqueue_replacement_insert");
           return enqueueResult(inserted.rows[0]!, false);
@@ -585,32 +600,44 @@ export function createPostgresGenerationCommandRepository(
     },
 
     async retry(scope) {
-      const result = await pool.query<MutationRow & { generationStatus: JobStatus }>(
-        `WITH source AS (
-           SELECT id, status, campaign_id AS "campaignId", provider_profile_id AS "providerProfileId",
-                  expected_turn_number AS "expectedTurnNumber", attempts
-             FROM generation_jobs WHERE id = $1 AND owner_user_id = $2
-         ), updated AS (
-           UPDATE generation_jobs SET status = CASE WHEN operation_kind = 'replace_latest' THEN 'replacement_queued' ELSE 'queued' END,
-               lease_owner = NULL, lease_expires_at = NULL, error_code = NULL, error_message = NULL,
-               prompt_protocol_version = $3, updated_at = now()
-             WHERE id IN (SELECT id FROM source) AND status IN ('recoverable', 'failed')
-             RETURNING id, status, operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId"
-         ) SELECT updated.id, updated.status, updated."operationKind", updated."replacementTurnId", source.status AS "generationStatus",
-                  source."campaignId", source."providerProfileId", source."expectedTurnNumber", source.attempts
-             FROM source LEFT JOIN updated ON updated.id = source.id`,
-        [scope.jobId, scope.ownerUserId, STORY_PROMPT_PROTOCOL_VERSION]
-      );
-      const row = result.rows[0];
-      if (!row) throw notFound({ jobId: scope.jobId });
-      if (!row.id) throw new GenerationApplicationError("invalid_state", { reason: "retry_source_state", generationStatus: row.generationStatus });
-      return {
-        ...mutationResult(row),
-        campaignId: row.campaignId!,
-        providerProfileId: row.providerProfileId!,
-        expectedTurnNumber: row.expectedTurnNumber!,
-        attempts: row.attempts!
-      };
+      return withTransaction(pool, async (client) => {
+        const source = await client.query<MutationRow & {
+          generationStatus: JobStatus;
+          promptSnapshot: PromptSnapshot;
+          promptProtocolVersion: string;
+        }>(
+          `SELECT id, status AS "generationStatus", campaign_id AS "campaignId", provider_profile_id AS "providerProfileId",
+                  expected_turn_number AS "expectedTurnNumber", attempts, operation_kind AS "operationKind",
+                  replacement_turn_id AS "replacementTurnId", prompt_snapshot AS "promptSnapshot",
+                  prompt_protocol_version AS "promptProtocolVersion"
+             FROM generation_jobs WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
+          [scope.jobId, scope.ownerUserId]
+        );
+        const job = source.rows[0];
+        if (!job) throw notFound({ jobId: scope.jobId });
+        if (job.generationStatus !== "recoverable" && job.generationStatus !== "failed") {
+          throw new GenerationApplicationError("invalid_state", { reason: "retry_source_state", generationStatus: job.generationStatus });
+        }
+        if (dependencies.promptProtocolVersion(job.promptSnapshot) !== job.promptProtocolVersion) {
+          throw new GenerationApplicationError("conflict", { reason: "retry_protocol_incompatible" });
+        }
+        const updated = await client.query<MutationRow>(
+          `UPDATE generation_jobs
+              SET status = CASE WHEN operation_kind = 'replace_latest' THEN 'replacement_queued' ELSE 'queued' END,
+                  lease_owner = NULL, lease_expires_at = NULL, error_code = NULL, error_message = NULL, updated_at = now()
+            WHERE id = $1 AND owner_user_id = $2
+            RETURNING id, status, operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId"`,
+          [scope.jobId, scope.ownerUserId]
+        );
+        const row = updated.rows[0]!;
+        return {
+          ...mutationResult(row),
+          campaignId: job.campaignId!,
+          providerProfileId: job.providerProfileId!,
+          expectedTurnNumber: job.expectedTurnNumber!,
+          attempts: job.attempts!
+        };
+      });
     },
 
     async cancel(scope) {

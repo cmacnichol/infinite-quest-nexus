@@ -75,6 +75,8 @@ export function mapGenerationApplicationError(error: GenerationApplicationError)
       );
     case "retry_source_state":
       return generationHttpError("Only recoverable or failed generation jobs can be retried.", 409);
+    case "retry_protocol_incompatible":
+      return generationHttpError("This generation uses an incompatible prompt protocol. Discard it and enqueue a new generation.", 409);
     case "cancel_source_state":
       return generationHttpError("Only active generation jobs can be cancelled.", 409);
     case "discard_source_state":

@@ -22,6 +22,7 @@ export type GenerationApplicationErrorReason =
   | "active_generation"
   | "active_illustration"
   | "result_not_completed"
+  | "retry_protocol_incompatible"
   | "retry_source_state"
   | "cancel_source_state"
   | "discard_source_state";
