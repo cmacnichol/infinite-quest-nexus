@@ -16,7 +16,9 @@ import {
   type ChronicleRetrievalAudit,
   type MemoryContextQuery
 } from "../../../packages/contracts/src/memory.js";
-import type {
+import {
+  promptSnapshotSchema,
+  type
   PromptSnapshot,
   PromptTemplateKey
 } from "../../../packages/contracts/src/prompt-library.js";
@@ -537,6 +539,19 @@ export function createGenerationExecutor(
     async execute(request) {
       const job = await dependencies.repository.loadExecutionPayload(request);
       if (!job) return false;
+      if (!promptSnapshotSchema.safeParse(job.prompt_snapshot).success) {
+        await dependencies.repository.markRecoverable({
+          jobId: job.id,
+          ownerUserId: job.owner_user_id,
+          workerId: request.workerId,
+          providerResponseId: null,
+          providerFinishReason: null,
+          errorCode: "generation_prompt_snapshot_invalid",
+          errorMessage: "Saved generation instructions are invalid.",
+          recoveryMetadata: { reason: "generation_prompt_snapshot_invalid" }
+        });
+        return false;
+      }
       return executeLoadedGeneration(dependencies, request.workerId, request.leaseSeconds, job);
     }
   };

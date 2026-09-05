@@ -6,6 +6,8 @@ import type {
 import type { GenerationExecutionRepository } from "../../packages/database/src/generation-execution-repository.js";
 import type { GenerationExecutionPayload } from "../../packages/database/src/generation-execution-repository.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
+import { PROMPT_TEMPLATE_CATALOG } from "../../packages/contracts/src/prompt-library.js";
+import { sha256 } from "../../packages/domain/src/index.js";
 import {
   createGenerationExecutor,
   type GenerationExecutionCollaborators
@@ -78,6 +80,14 @@ function guardedRepository(): GenerationExecutionRepository {
   };
 }
 
+function validPromptSnapshot(): GenerationExecutionPayload["prompt_snapshot"] {
+  return Object.fromEntries(Object.values(PROMPT_TEMPLATE_CATALOG).map((template) => [template.key, {
+    content: template.defaultContent,
+    hash: sha256(template.defaultContent),
+    source: "shipped"
+  }])) as GenerationExecutionPayload["prompt_snapshot"];
+}
+
 describe("generation executor adapter", () => {
   it("treats a missing guarded payload as cancellation before provider work or mutation", async () => {
     const repository = guardedRepository();
@@ -102,6 +112,38 @@ describe("generation executor adapter", () => {
     expect(repository.markGenerating).not.toHaveBeenCalled();
     expect(repository.markFailed).not.toHaveBeenCalled();
     expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
+  });
+
+  it("does not call a provider for a malformed loaded prompt snapshot", async () => {
+    const providerCalls = vi.fn();
+    const malformedJob = {
+      id: claim.jobId,
+      owner_user_id: claim.ownerUserId,
+      campaign_id: claim.campaignId,
+      provider_profile_id: claim.providerProfileId,
+      prompt_snapshot: {}
+    } as GenerationExecutionPayload;
+    const repository = {
+      ...guardedRepository(),
+      loadExecutionPayload: vi.fn(async () => malformedJob),
+      markRecoverable: vi.fn(async () => true)
+    } as GenerationExecutionRepository;
+    const collaborators = {
+      ...rejectedCollaborators(),
+      loadTextExecution: providerCalls
+    } as GenerationExecutionCollaborators;
+    const executor = createGenerationExecutor({
+      pool: {} as DatabasePool,
+      repository,
+      collaborators
+    });
+
+    await expect(executor.execute({ workerId: "worker-a", leaseSeconds: 30, claim })).resolves.toBe(false);
+
+    expect(providerCalls).not.toHaveBeenCalled();
+    expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({
+      errorCode: "generation_prompt_snapshot_invalid"
+    }));
   });
 
   it("passes the validated Chronicle retrieval audit unchanged into the accepted-turn commit", async () => {
@@ -130,7 +172,7 @@ describe("generation executor adapter", () => {
         recentTurns: 4
       },
       prompt_protocol_version: "test-protocol",
-      prompt_snapshot: {} as GenerationExecutionPayload["prompt_snapshot"],
+      prompt_snapshot: validPromptSnapshot(),
       generation_base_identity: {
         operationKind: "append",
         expectedTurnNumber: claim.expectedTurnNumber,
