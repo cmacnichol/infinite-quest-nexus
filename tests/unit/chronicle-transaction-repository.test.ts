@@ -195,6 +195,12 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     expect(retrievalCalls[0]?.[3]).toBe("lantern password");
     expect(retrievalCalls[0]?.[5]).toBe(0);
     expect(embeddings.resolve).toHaveBeenCalledOnce();
+    expect(embeddings.resolve).toHaveBeenCalledWith(client, {
+      ownerUserId: scope.ownerUserId,
+      campaignId: scope.campaignId,
+      selectedProviderProfileId: "missing-provider",
+      model: "embed-v1"
+    });
     expect(result.candidates).toEqual([expect.objectContaining({ id: "lexical-memory", content: "The lantern password remains hidden." })]);
   });
   it("auto-enables semantic memory and queues embedding work on the exact caller client", async () => {
