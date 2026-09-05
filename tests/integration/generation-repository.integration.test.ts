@@ -607,7 +607,6 @@ integration("PostgreSQL generation command repository", () => {
         RETURNING prompt_snapshot, prompt_protocol_version`,
       [jobId]
     )).rows[0]!;
-
     await expect(repository().retry({ ownerUserId, jobId }))
       .rejects.toMatchObject({ kind: "conflict", details: { reason: "retry_protocol_incompatible" } });
 
@@ -634,6 +633,10 @@ integration("PostgreSQL generation command repository", () => {
         RETURNING status, prompt_snapshot, prompt_protocol_version`,
       [jobId, JSON.stringify(emptySnapshot), providerPromptProtocolVersion(emptySnapshot as never)]
     )).rows[0]!;
+    const providerCallsBefore = await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM generation_attempts WHERE generation_job_id = $1",
+      [jobId]
+    );
 
     await expect(repository().retry({ ownerUserId, jobId }))
       .rejects.toMatchObject({ kind: "conflict", details: { reason: "retry_protocol_incompatible" } });
@@ -642,6 +645,10 @@ integration("PostgreSQL generation command repository", () => {
       "SELECT status, prompt_snapshot, prompt_protocol_version FROM generation_jobs WHERE id = $1",
       [jobId]
     )).resolves.toMatchObject({ rows: [before] });
+    await expect(pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM generation_attempts WHERE generation_job_id = $1",
+      [jobId]
+    )).resolves.toEqual(providerCallsBefore);
   });
 
   it("leaves completed result data and authoritative campaign records intact on invalid mutations", async () => {

@@ -261,8 +261,11 @@ integration("PostgreSQL generation execution repository", () => {
       recovery_metadata: Record<string, unknown>;
       prompt_snapshot: Record<string, unknown>;
       prompt_protocol_version: string;
+      lease_owner: string | null;
+      lease_expires_at: string | null;
     }>(
-      `SELECT status, error_code, error_message, recovery_metadata, prompt_snapshot, prompt_protocol_version
+      `SELECT status, error_code, error_message, recovery_metadata, prompt_snapshot, prompt_protocol_version,
+              lease_owner, lease_expires_at
          FROM generation_jobs WHERE id = $1`,
       [queued.id]
     )).resolves.toMatchObject({ rows: [{
@@ -271,7 +274,9 @@ integration("PostgreSQL generation execution repository", () => {
       error_message: "Campaign changed before generation could start.",
       recovery_metadata: { reason: "generation_authority_stale" },
       prompt_snapshot: promptBefore.prompt_snapshot,
-      prompt_protocol_version: promptBefore.prompt_protocol_version
+      prompt_protocol_version: promptBefore.prompt_protocol_version,
+      lease_owner: null,
+      lease_expires_at: null
     }] });
   });
 
