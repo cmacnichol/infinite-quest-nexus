@@ -175,15 +175,15 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
         if (sql.includes("generation_context_state")) return { rows: [{ world_content: { world: { rules: "Stay in the lantern city." } }, selected_character_id: null, initial_state_snapshot: { continuitySummary: "", scratchpad: "", openThreads: [], canonicalFacts: [], trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: [] }, scratchpad_private: "" }] };
         if (sql.includes("ORDER BY edit.revision DESC")) return { rows: [] };
         if (sql.includes("FROM campaigns c") && sql.includes("campaign_state")) return { rows: [{ id: scope.campaignId, title: "Lantern City", active_turn_number: 0, world_version_id: scope.worldVersionId, selected_character_id: null, character_profile_revision: 0, world_content: { world: { rules: "Stay in the lantern city." } }, character_snapshot: null, character_profile: null, scratchpad_private: "", scratchpad_safe_for_prompt: false, trackers: [] }] };
-        if (sql.includes("WITH base AS") && sql.includes("chronicle_memories")) { retrievalCalls.push(values); return { rows: [] }; }
+        if (sql.includes("WITH base AS") && sql.includes("chronicle_memories")) { retrievalCalls.push(values); return { rows: [{ id: "lexical-memory", turn_id: null, memory_kind: "open_thread", ordinal: 0, content: "The lantern password remains hidden.", token_estimate: 8, importance: 0.8, entities: [], entity_ids: [], metadata: {}, relevance: 1 }] }; }
         if (sql.includes("FROM campaign_canonical_facts")) return { rows: [] };
-        if (sql.includes("FROM campaign_memory_configs")) return { rows: [] };
+        if (sql.includes("FROM campaign_memory_configs")) return { rows: [{ embedding_enabled: true, embedding_provider_profile_id: "missing-provider", embedding_model: "embed-v1", embedding_batch_size: 8, embedding_document_prefix: null, embedding_query_prefix: null, retrieval_implementation: "legacy_hybrid", retrieval_shadow_enabled: false }] };
         if (/^(?:SAVEPOINT|RELEASE SAVEPOINT|ROLLBACK TO SAVEPOINT) chronicle_retrieval_/.test(sql)) return { rows: [] };
         if (sql.includes("estimated_tokens") && sql.includes("memory_count")) return { rows: [{ turns: "0", characters: "0", estimated_tokens: "0", memory_count: "0", memory_tokens: "0", embedded_memories: "0", turn_memory_tokens: "0", recent_turn_tokens: "0", summary_tokens: "0" }] };
         throw new Error(`Unexpected query: ${sql}`);
       })
     } as unknown as DatabaseClient;
-    const embeddings = embeddingPort({ resolve: vi.fn() });
+    const embeddings = embeddingPort({ resolve: vi.fn(async () => ({ status: "unconfigured" as const, resolutionSource: "none" as const, resolvedRole: null })) });
     const transaction = createPostgresChronicleGenerationTransactionPort({ embeddings });
 
     const result = await transaction.loadGenerationContext(client, {
@@ -194,8 +194,8 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     expect(retrievalCalls[0]?.slice(0, 3)).toEqual([scope.ownerUserId, scope.campaignId, scope.worldVersionId]);
     expect(retrievalCalls[0]?.[3]).toBe("lantern password");
     expect(retrievalCalls[0]?.[5]).toBe(0);
-    expect(embeddings.resolve).not.toHaveBeenCalled();
-    expect(result.candidates).toEqual([]);
+    expect(embeddings.resolve).toHaveBeenCalledOnce();
+    expect(result.candidates).toEqual([expect.objectContaining({ id: "lexical-memory", content: "The lantern password remains hidden." })]);
   });
   it("auto-enables semantic memory and queues embedding work on the exact caller client", async () => {
     let callerClient: DatabaseClient;
