@@ -24,11 +24,12 @@ describe("loadCurrentContinuityCorrection", () => {
       scratchpad: "late password: moonfall",
       openThreads: ["Bury the keeper."],
       canonicalFacts: []
-    }, [{ id: "11111111-1111-4111-8111-111111111111", content: "The keeper died." }])).toEqual({
+    })).toEqual({
       continuitySummary: "The keeper is dead.",
       scratchpad: "late password: moonfall",
       openThreads: ["Bury the keeper."],
-      canonicalFacts: [{ id: "11111111-1111-4111-8111-111111111111", content: "The keeper died." }]
+      canonicalFacts: [],
+      trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: []
     });
   });
   it("returns the highest revision at the exact requested base turn, preserving intentional empties", async () => {

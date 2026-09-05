@@ -120,9 +120,12 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     expect(actual.authority.scratchpad).toBe("password: moonfall");
     expect(actual.authority.rules).toEqual(["Never resurrect the warden."]);
     expect(actual.authority.openThreads).toEqual([]);
-    expect(actual.authority.currentContinuity).toEqual({ continuitySummary: "The warden is dead.", scratchpad: "password: moonfall", canonicalFacts: [], openThreads: [] });
+    expect(actual.authority.currentContinuity).toEqual({ continuitySummary: "The warden is dead.", scratchpad: "password: moonfall", canonicalFacts: [], openThreads: [], trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: [] });
     expect(actual.candidates).toEqual([]);
     expect(actual.baseIdentity.baseTurnNumber).toBe(1);
+    expect(vi.mocked(client.query).mock.calls.some(([sql]) => (
+      typeof sql === "string" && sql.includes("FROM campaign_canonical_facts")
+    ))).toBe(false);
   });
   it("uses the accepted state snapshot when no exact correction exists", async () => {
     const client = {

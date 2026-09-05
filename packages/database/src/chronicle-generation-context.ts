@@ -1,4 +1,4 @@
-import type { CurrentContinuity } from "../../contracts/src/memory.js";
+import type { CampaignRuntimeStateContent } from "../../contracts/src/generation.js";
 import { currentContinuitySchema } from "../../contracts/src/memory.js";
 import type { DatabaseClient } from "./pool.js";
 import {
@@ -6,6 +6,8 @@ import {
   type GenerationBaseIdentity
 } from "./generation-authority.js";
 import { stableStringify } from "../../domain/src/index.js";
+import { buildPostgresChronicleContextPreview } from "./chronicle-context-repository.js";
+import type { ChronicleGenerationTransactionDependencies } from "./chronicle-repository.js";
 import {
   loadCurrentContinuityCorrection,
   materializeGenerationContinuity
@@ -35,10 +37,14 @@ export type GenerationContextAuthority = Readonly<{
   rules: readonly string[];
   worldCanon: Readonly<Record<string, unknown>>;
   selectedCharacterId: string | null;
-  currentContinuity: CurrentContinuity | null;
+  currentContinuity: CampaignRuntimeStateContent;
   scratchpad: string;
   openThreads: readonly string[];
-  canonicalFacts: readonly Readonly<{ id: string; content: string }>[];
+  canonicalFacts: readonly Readonly<{ id: string | null; content: string }>[];
+  trackers: CampaignRuntimeStateContent["trackers"];
+  rpgStats: CampaignRuntimeStateContent["rpgStats"];
+  eventTriggers: CampaignRuntimeStateContent["eventTriggers"];
+  pendingEventTriggers: CampaignRuntimeStateContent["pendingEventTriggers"];
   latestTurn: Readonly<{ action: string; narration: string }> | null;
 }>;
 
@@ -69,6 +75,7 @@ function completeRules(value: unknown): readonly string[] {
 export async function loadPostgresChronicleGenerationContext(
   client: DatabaseClient,
   scope: GenerationContextScope,
+  dependencies?: ChronicleGenerationTransactionDependencies,
 ): Promise<GenerationContext> {
   const resolved = await resolveGenerationAuthoritySnapshot(client, scope);
   if (scope.expectedBaseIdentity
@@ -110,35 +117,43 @@ export async function loadPostgresChronicleGenerationContext(
       WHERE effective.owner_user_id = $1 AND effective.campaign_id = $2 AND effective.turn_number = $3`,
     [scope.ownerUserId, scope.campaignId, baseTurnNumber]
   );
-  const facts = await client.query<{ id: string; content: string }>(
-    `SELECT id, content FROM campaign_canonical_facts
-      WHERE owner_user_id = $1 AND campaign_id = $2 AND world_version_id = $3
-        AND valid_from_turn <= $4 AND (valid_until_turn IS NULL OR valid_until_turn > $4)
-      ORDER BY source_turn_number, source_fact_index, id`,
-    [scope.ownerUserId, scope.campaignId, scope.worldVersionId, baseTurnNumber]
-  );
-  const candidates = await client.query<{
-    id: string; turn_id: string | null; ordinal: number; memory_kind: GenerationContextCandidate["kind"]; content: string; token_estimate: number;
-  }>(
-    `SELECT id, turn_id, ordinal, memory_kind, content, token_estimate
-       FROM chronicle_memories
-      WHERE owner_user_id = $1 AND campaign_id = $2 AND world_version_id = $3
-        AND ordinal <= $4
-      ORDER BY CASE WHEN $5 = '' THEN 0
-                    ELSE ts_rank_cd(search_document, websearch_to_tsquery('english', $5)) END DESC,
-               ordinal DESC, importance DESC, id
-      LIMIT 512`,
-    [scope.ownerUserId, scope.campaignId, scope.worldVersionId, baseTurnNumber, scope.query.trim()]
-  );
   const worldCanon = typeof campaignRow.world_content.world === "object" && campaignRow.world_content.world !== null
     ? campaignRow.world_content.world as Record<string, unknown>
     : campaignRow.world_content;
-  const continuity = currentContinuity === null
-    ? materializeGenerationContinuity(
-      baseTurnNumber === 0 ? campaignRow.initial_state_snapshot : acceptedState?.rows[0]?.state_snapshot_private,
-      facts.rows
-    )
-    : currentContinuitySchema.parse(currentContinuity);
+  const acceptedContinuity = materializeGenerationContinuity(
+    baseTurnNumber === 0 ? campaignRow.initial_state_snapshot : acceptedState?.rows[0]?.state_snapshot_private ?? currentContinuity
+  );
+  const correction = currentContinuity === null ? null : currentContinuitySchema.parse(currentContinuity);
+  const continuity = correction === null ? acceptedContinuity : {
+    ...acceptedContinuity,
+    continuitySummary: correction.continuitySummary,
+    scratchpad: correction.scratchpad,
+    openThreads: correction.openThreads,
+    canonicalFacts: correction.canonicalFacts
+  };
+  const preview = dependencies ? await buildPostgresChronicleContextPreview(client, {
+    ownerUserId: scope.ownerUserId,
+    campaignId: scope.campaignId,
+    worldVersionId: scope.worldVersionId,
+    request: {
+      budgetTokens: 32_000,
+      compression: "auto",
+      query: scope.query,
+      recentTurns: 8,
+      throughTurnNumber: baseTurnNumber
+    }
+  }, dependencies) : null;
+  const retrieved = (preview?.scopes as { chronicle?: unknown[] } | undefined)?.chronicle ?? [];
+  const candidates = retrieved.flatMap((candidate, index): GenerationContextCandidate[] => {
+    if (!candidate || typeof candidate !== "object") return [];
+    const value = candidate as Record<string, unknown>;
+    if (typeof value.id !== "string" || typeof value.ordinal !== "number" || typeof value.content !== "string") return [];
+    const kind = value.kind;
+    if (!(["turn_fiction", "legacy_summary", "campaign_summary", "canonical_fact", "open_thread"] as const).includes(kind as GenerationContextCandidate["kind"])) return [];
+    return [{ id: value.id, turnId: typeof value.turnId === "string" ? value.turnId : null,
+      ordinal: value.ordinal, kind: kind as GenerationContextCandidate["kind"], content: value.content,
+      tokenEstimate: typeof value.estimatedTokens === "number" ? value.estimatedTokens : 0, rank: index + 1 }];
+  });
   return {
     authority: {
       rules: completeRules(worldCanon.rules ?? worldCanon.story_rules ?? ""),
@@ -147,18 +162,14 @@ export async function loadPostgresChronicleGenerationContext(
       currentContinuity: continuity,
       scratchpad: continuity?.scratchpad ?? "",
       openThreads: continuity?.openThreads ?? [],
-      canonicalFacts: facts.rows,
+      canonicalFacts: continuity.canonicalFacts,
+      trackers: continuity.trackers,
+      rpgStats: continuity.rpgStats,
+      eventTriggers: continuity.eventTriggers,
+      pendingEventTriggers: continuity.pendingEventTriggers,
       latestTurn: latest?.rows[0] ?? null
     },
-    candidates: candidates.rows.map((candidate, index) => ({
-      id: candidate.id,
-      turnId: candidate.turn_id,
-      ordinal: candidate.ordinal,
-      kind: candidate.memory_kind,
-      content: candidate.content,
-      tokenEstimate: candidate.token_estimate,
-      rank: index + 1
-    })),
+    candidates,
     baseIdentity: resolved.baseIdentity
   };
 }

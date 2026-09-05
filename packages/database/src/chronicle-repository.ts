@@ -838,8 +838,8 @@ export function createPostgresChronicleGenerationTransactionPort(
     },
     async loadGenerationContext(database, scope) {
       const pool = transactionPool(database);
-      if (pool) return withTransaction(pool, (client) => loadPostgresChronicleGenerationContext(client, scope));
-      return loadPostgresChronicleGenerationContext(transactionClient(database), scope);
+      if (pool) return withTransaction(pool, (client) => loadPostgresChronicleGenerationContext(client, scope, dependencies));
+      return loadPostgresChronicleGenerationContext(transactionClient(database), scope, dependencies);
     }
   } as MemoryGenerationTransactionPort;
 }

@@ -1,5 +1,6 @@
 import type { CampaignWorldVersionMemoryScope } from "../../application/src/memory/index.js";
 import { currentContinuitySchema, type CurrentContinuity } from "../../contracts/src/memory.js";
+import { campaignRuntimeStateContentSchema, type CampaignRuntimeStateContent } from "../../contracts/src/generation.js";
 import type { DatabaseClient } from "./pool.js";
 
 /**
@@ -36,16 +37,19 @@ export async function loadCurrentContinuityCorrection(
  */
 export function materializeGenerationContinuity(
   snapshot: unknown,
-  canonicalFacts: readonly Readonly<{ id: string; content: string }>[],
-): CurrentContinuity {
+): CampaignRuntimeStateContent {
   if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
     throw new Error("Generation authority state snapshot is invalid.");
   }
   const source = snapshot as Record<string, unknown>;
-  return currentContinuitySchema.parse({
+  return campaignRuntimeStateContentSchema.parse({
     continuitySummary: source.continuitySummary ?? "",
     scratchpad: source.scratchpad ?? "",
     openThreads: source.openThreads ?? [],
-    canonicalFacts: canonicalFacts.length ? canonicalFacts : source.canonicalFacts ?? []
+    canonicalFacts: source.canonicalFacts ?? [],
+    trackers: source.trackers ?? [],
+    rpgStats: source.rpgStats ?? [],
+    eventTriggers: source.eventTriggers ?? [],
+    pendingEventTriggers: source.pendingEventTriggers ?? []
   });
 }
