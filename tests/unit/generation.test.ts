@@ -12,9 +12,14 @@ import {
   illustrationSegmentRequestSchema,
   sogniIllustrationProviderConfigSchema,
   sogniSdkIllustrationProviderConfigSchema,
-  storyTurnOutputSchema,
   worldCoverRequestSchema
 } from "../../packages/contracts/src/generation.js";
+import {
+  safeGenerationDiagnosticSchema,
+  storyPromptProtocolIdentity,
+  storyTurnOutputHistoricalSchema,
+  storyTurnOutputSchema
+} from "../../packages/contracts/src/story-prompt.js";
 
 describe("generation contracts", () => {
   it("requires operation-matched replacement provenance in stream snapshots", () => {
@@ -340,6 +345,61 @@ describe("generation contracts", () => {
   });
 
   describe("storyTurnOutputSchema", () => {
+    const completeStory = (overrides: Record<string, unknown> = {}) => ({
+      narration: "The story continues...",
+      choices: ["Choice 1", "Choice 2", "Choice 3", "Choice 4"],
+      custom_action_suggestion: "Do something else",
+      scratchpad: "",
+      tracker_updates: [],
+      image_prompt: "",
+      continuity_summary: "",
+      canonical_facts: [],
+      superseded_facts: [],
+      canonical_fact_updates: [],
+      open_threads: [],
+      ...overrides
+    });
+
+    it("requires complete replacement continuity while allowing explicitly empty fields", () => {
+      expect(storyTurnOutputSchema.safeParse(completeStory()).success).toBe(true);
+      for (const field of ["scratchpad", "continuity_summary", "open_threads"] as const) {
+        const missing = completeStory() as Record<string, unknown>;
+        delete missing[field];
+        expect(storyTurnOutputSchema.safeParse(missing).success).toBe(false);
+      }
+      expect(storyTurnOutputSchema.safeParse(completeStory({ open_threads: Array.from({ length: 150 }, (_, index) => `Thread ${index}`) })).success).toBe(true);
+      expect(storyTurnOutputSchema.safeParse(completeStory({ open_threads: Array.from({ length: 500 }, (_, index) => `Thread ${index}`) })).success).toBe(true);
+      expect(storyTurnOutputSchema.safeParse(completeStory({ open_threads: Array.from({ length: 501 }, (_, index) => `Thread ${index}`) })).success).toBe(false);
+    });
+
+    it("keeps historical incomplete output behind an explicit compatibility parser", () => {
+      const historical = completeStory() as Record<string, unknown>;
+      delete historical.scratchpad;
+      delete historical.continuity_summary;
+      delete historical.canonical_fact_updates;
+      expect(storyTurnOutputSchema.safeParse(historical).success).toBe(false);
+      expect(storyTurnOutputHistoricalSchema.safeParse(historical).success).toBe(true);
+    });
+
+    it("allows only safe actionable generation diagnostics", () => {
+      expect(safeGenerationDiagnosticSchema.safeParse({
+        code: "context_budget_exceeded",
+        operation: "story_generation",
+        action: "adjust_context",
+        field: "open_threads",
+        requiredTokens: 1,
+        availableTokens: 0
+      }).success).toBe(true);
+      expect(safeGenerationDiagnosticSchema.safeParse({ code: "unknown", operation: "story_generation", action: "adjust_context" }).success).toBe(false);
+      expect(safeGenerationDiagnosticSchema.safeParse({ code: "context_budget_exceeded", operation: "story_generation", action: "adjust_context", requiredTokens: -1 }).success).toBe(false);
+      expect(safeGenerationDiagnosticSchema.safeParse({ code: "context_budget_exceeded", operation: "story_generation", action: "adjust_context", message: "private scratchpad canary" }).success).toBe(false);
+    });
+
+    it("identifies a resolved prompt snapshot with protocol, schema, policy, and template hashes", () => {
+      expect(storyPromptProtocolIdentity({ story_system: "abc", event_trigger: "def" }))
+        .toBe("story-v13-current-state-corrections|story-output-v2|current-continuity-v2|event_trigger:def|story_system:abc");
+    });
+
     it("requires exactly 4 choices", () => {
       const input = {
         narration: "The story continues...",
@@ -348,6 +408,7 @@ describe("generation contracts", () => {
         continuity_summary: "Summary",
         canonical_facts: [],
         superseded_facts: [],
+        canonical_fact_updates: [],
         open_threads: []
       };
 
@@ -364,6 +425,7 @@ describe("generation contracts", () => {
         continuity_summary: "Summary",
         canonical_facts: [],
         superseded_facts: [],
+        canonical_fact_updates: [],
         open_threads: []
       };
 

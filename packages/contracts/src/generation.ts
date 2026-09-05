@@ -1,4 +1,11 @@
 import { z } from "zod";
+export {
+  canonicalFactUpdateSchema,
+  storyTurnOutputHistoricalSchema,
+  storyTurnOutputSchema,
+  type StoryTurnOutput
+} from "./story-prompt.js";
+import { MAX_CONTINUITY_OPEN_THREADS } from "./story-prompt.js";
 import { apiTimestampSchema } from "./http.js";
 import { storyLengthProfileSchema } from "./story-settings.js";
 
@@ -329,7 +336,7 @@ export const campaignCanonicalFactEditorSchema = z.object({
 
 export const campaignRuntimeStateContentSchema = z.object({
   continuitySummary: z.string().max(20_000),
-  openThreads: z.array(z.string().trim().min(1).max(4000)).max(500),
+  openThreads: z.array(z.string().trim().min(1).max(4000)).max(MAX_CONTINUITY_OPEN_THREADS),
   canonicalFacts: z.array(campaignCanonicalFactEditorSchema).max(2000),
   scratchpad: z.string().max(100_000),
   trackers: z.array(campaignTrackerSchema).max(200),
@@ -386,25 +393,6 @@ export const eventExtensionOutputSchema = z.object({
   additional_text: z.string().trim().min(1).max(20_000),
   scratchpad: z.string().max(100_000).optional(),
   tracker_updates: z.array(z.record(z.string(), z.unknown())).max(200).default([])
-});
-
-export const canonicalFactUpdateSchema = z.object({
-  content: z.string().trim().min(1).max(4000),
-  supersedes_fact_ids: z.array(z.uuid()).max(100).default([])
-});
-
-export const storyTurnOutputSchema = z.object({
-  narration: z.string().trim().min(1).max(200_000),
-  choices: z.array(z.string().trim().min(1).max(2000)).length(4),
-  custom_action_suggestion: z.string().trim().min(1).max(2000),
-  scratchpad: z.string().max(100_000),
-  tracker_updates: z.array(z.record(z.string(), z.unknown())).max(200).default([]),
-  image_prompt: z.string().max(20_000).default(""),
-  continuity_summary: z.string().trim().min(1).max(20_000),
-  canonical_facts: z.array(z.string().trim().min(1).max(4000)).max(100),
-  superseded_facts: z.array(z.string().trim().min(1).max(4000)).max(100),
-  canonical_fact_updates: z.array(canonicalFactUpdateSchema).max(100).default([]),
-  open_threads: z.array(z.string().trim().min(1).max(4000)).max(100)
 });
 
 export const generationJobStatusSchema = z.object({
@@ -509,7 +497,6 @@ export type WorldCoverRequest = z.infer<typeof worldCoverRequestSchema>;
 export type SogniIllustrationProviderConfig = z.infer<typeof sogniIllustrationProviderConfigSchema>;
 export type SogniSdkIllustrationProviderConfig = z.infer<typeof sogniSdkIllustrationProviderConfigSchema>;
 export type IllustrationGenerationRequest = z.infer<typeof illustrationGenerationRequestSchema>;
-export type StoryTurnOutput = z.infer<typeof storyTurnOutputSchema>;
 export type PlayerCampaignConfig = z.infer<typeof playerCampaignConfigSchema>;
 export type CampaignRuntimeStateContent = z.infer<typeof campaignRuntimeStateContentSchema>;
 export type CampaignRuntimeStateUpdate = z.infer<typeof campaignRuntimeStateUpdateSchema>;

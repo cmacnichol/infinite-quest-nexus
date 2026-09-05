@@ -7,6 +7,7 @@ import {
   renderPromptTemplate,
   sampleValuesForPrompt
 } from "../../packages/contracts/src/prompt-library.js";
+import { STORY_SYSTEM_PROMPT } from "../../packages/contracts/src/story-prompt.js";
 import { composeIllustrationProviderPrompt, directIllustrationPrompt } from "../../packages/domain/src/illustrations.js";
 import { buildTemplateWorldPrompt } from "../../packages/domain/src/world-template.js";
 import { providerPromptProtocolVersion } from "../helpers/provider-application-fixtures.js";
@@ -14,6 +15,11 @@ import type { PromptSnapshot } from "../../packages/contracts/src/index.js";
 import { infiniteWorldsPromptSet } from "../legacy-api/src/infinite-worlds-import-service.js";
 
 describe("Prompt Library catalog", () => {
+  it("uses the shared shipped story-system definition", () => {
+    expect(PROMPT_TEMPLATE_CATALOG.story_system.defaultContent).toBe(STORY_SYSTEM_PROMPT);
+    expect(STORY_SYSTEM_PROMPT).toContain("currentContinuity");
+  });
+
   it("separates world seeds from complete generated character profiles", () => {
     const generation = PROMPT_TEMPLATE_CATALOG.world_generation.defaultContent;
     const recovery = PROMPT_TEMPLATE_CATALOG.world_generation_recovery.defaultContent;

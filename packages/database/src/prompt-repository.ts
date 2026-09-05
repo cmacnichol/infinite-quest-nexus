@@ -7,6 +7,10 @@ import {
   type PromptSnapshot,
   type PromptTemplateKey
 } from "../../contracts/src/prompt-library.js";
+import {
+  STORY_PROMPT_PROTOCOL_VERSION,
+  storyPromptProtocolIdentity
+} from "../../contracts/src/story-prompt.js";
 import type {
   PromptLibraryPort,
   PromptScope,
@@ -77,8 +81,8 @@ async function resolveSnapshot(database: DatabaseClient, scope: PromptScope): Pr
 }
 
 function protocolVersion(snapshot: PromptSnapshot): string {
-  const identity = RUNTIME_KEYS.map((key) => `${key}:${snapshot[key].hash}`).join("\n");
-  return `${CATALOG_VERSION}-${hash(identity).slice(0, 16)}`;
+  const templateHashes = Object.fromEntries(RUNTIME_KEYS.map((key) => [key, snapshot[key].hash]));
+  return `${STORY_PROMPT_PROTOCOL_VERSION}-${hash(storyPromptProtocolIdentity(templateHashes)).slice(0, 16)}`;
 }
 
 function establishedPromptPreview(key: PromptTemplateKey, content: string) {
