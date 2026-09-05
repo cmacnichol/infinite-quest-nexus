@@ -80,6 +80,15 @@ describe("story output integrity", () => {
       ok: true,
       story: { canonical_fact_updates: [] }
     });
+
+    const legacyNestedUpdate = JSON.parse(story({
+      canonical_fact_updates: [{ content: "Marker One is now dark." }]
+    }));
+    expect(parseStoryOutput(JSON.stringify(legacyNestedUpdate))).toMatchObject({ ok: false, code: "invalid_schema" });
+    expect(parseHistoricalStoryOutput(JSON.stringify(legacyNestedUpdate))).toMatchObject({
+      ok: true,
+      story: { canonical_fact_updates: [{ content: "Marker One is now dark.", supersedes_fact_ids: [] }] }
+    });
   });
 
   it("validates structured canonical fact updates and their fiction boundary", () => {

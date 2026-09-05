@@ -37,6 +37,10 @@ export const canonicalFactUpdateSchema = z.object({
   supersedes_fact_ids: z.array(z.uuid()).max(100)
 });
 
+const historicalCanonicalFactUpdateSchema = canonicalFactUpdateSchema.extend({
+  supersedes_fact_ids: z.array(z.uuid()).max(100).default([])
+});
+
 const storyTurnOutputFields = {
   narration: z.string().trim().min(1).max(200_000),
   choices: z.array(z.string().trim().min(1).max(2000)).length(4),
@@ -67,6 +71,8 @@ export const storyTurnOutputHistoricalSchema = z.object(storyTurnOutputFields).p
   superseded_facts: true,
   canonical_fact_updates: true,
   open_threads: true
+}).extend({
+  canonical_fact_updates: z.array(historicalCanonicalFactUpdateSchema).max(100).optional()
 });
 
 export const generationDiagnosticOperationSchema = z.enum([
