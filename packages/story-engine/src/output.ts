@@ -1,4 +1,8 @@
-import { storyTurnOutputSchema, type StoryTurnOutput } from "../../contracts/src/generation.js";
+import {
+  storyTurnOutputHistoricalSchema,
+  storyTurnOutputSchema,
+  type StoryTurnOutput
+} from "../../contracts/src/generation.js";
 import { containsMechanicsLanguage, mechanicsLanguageMatches } from "../../domain/src/text.js";
 import { formatNarrationParagraphs } from "./narration-formatting.js";
 
@@ -135,7 +139,7 @@ export function mechanicsLeakErrors(story: StoryTurnOutput): string[] {
   });
 }
 
-function withRecoverableMemoryFields(parsed: unknown, defaults: StoryMemoryDefaults): unknown {
+function normalizeHistoricalStoryOutput(parsed: unknown, defaults: StoryMemoryDefaults): unknown {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return parsed;
   const story = parsed as Record<string, unknown>;
   const narration = typeof story.narration === "string" ? story.narration.trim() : "";
@@ -153,7 +157,7 @@ function withRecoverableMemoryFields(parsed: unknown, defaults: StoryMemoryDefau
 export function parseStoryOutput(content: string, memoryDefaults: StoryMemoryDefaults = {}): StoryParseResult {
   let parsed: unknown;
   try {
-    parsed = withRecoverableMemoryFields(extractJsonObject(content), memoryDefaults);
+    parsed = extractJsonObject(content);
   } catch (error) {
     return { ok: false, code: "invalid_json", errors: [error instanceof Error ? error.message : String(error)] };
   }
@@ -163,6 +167,36 @@ export function parseStoryOutput(content: string, memoryDefaults: StoryMemoryDef
   }
   const story = {
     ...validated.data,
+    narration: formatNarrationParagraphs(validated.data.narration)
+  };
+  const leakErrors = mechanicsLeakErrors(story);
+  if (leakErrors.length) return { ok: false, code: "mechanics_leak", errors: leakErrors };
+  return { ok: true, story };
+}
+
+/**
+ * Compatibility boundary for accepted/imported pre-v14 output only. Current
+ * provider responses must use parseStoryOutput so missing replacements fail.
+ */
+export function parseHistoricalStoryOutput(content: string, memoryDefaults: StoryMemoryDefaults = {}): StoryParseResult {
+  let parsed: unknown;
+  try {
+    parsed = normalizeHistoricalStoryOutput(extractJsonObject(content), memoryDefaults);
+  } catch (error) {
+    return { ok: false, code: "invalid_json", errors: [error instanceof Error ? error.message : String(error)] };
+  }
+  const validated = storyTurnOutputHistoricalSchema.safeParse(parsed);
+  if (!validated.success) {
+    return { ok: false, code: "invalid_schema", errors: validated.error.issues.map((issue) => `${issue.path.join(".") || "response"}: ${issue.message}`) };
+  }
+  const story: StoryTurnOutput = {
+    ...validated.data,
+    scratchpad: validated.data.scratchpad ?? "",
+    continuity_summary: validated.data.continuity_summary ?? "",
+    canonical_facts: validated.data.canonical_facts ?? [],
+    superseded_facts: validated.data.superseded_facts ?? [],
+    canonical_fact_updates: validated.data.canonical_fact_updates ?? [],
+    open_threads: validated.data.open_threads ?? [],
     narration: formatNarrationParagraphs(validated.data.narration)
   };
   const leakErrors = mechanicsLeakErrors(story);

@@ -362,7 +362,10 @@ describe("generation contracts", () => {
 
     it("requires complete replacement continuity while allowing explicitly empty fields", () => {
       expect(storyTurnOutputSchema.safeParse(completeStory()).success).toBe(true);
-      for (const field of ["scratchpad", "continuity_summary", "open_threads"] as const) {
+      for (const field of [
+        "scratchpad", "continuity_summary", "canonical_facts", "superseded_facts",
+        "canonical_fact_updates", "open_threads"
+      ] as const) {
         const missing = completeStory() as Record<string, unknown>;
         delete missing[field];
         expect(storyTurnOutputSchema.safeParse(missing).success).toBe(false);

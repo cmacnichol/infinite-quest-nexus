@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import {
   buildPromptPreview,
   PROMPT_TEMPLATE_CATALOG,
@@ -95,6 +96,24 @@ describe("Prompt Library catalog", () => {
     expect(promptTemplateOverrideSchema.safeParse({ key: "story_system", scope: "campaign", campaignId: crypto.randomUUID(), content: "Write safely." }).success).toBe(true);
     expect(promptTemplateOverrideSchema.safeParse({ key: "world_generation", scope: "campaign", campaignId: crypto.randomUUID(), content: "Write safely." }).success).toBe(false);
     expect(promptTemplateOverrideSchema.safeParse({ key: "story_system", scope: "application", campaignId: crypto.randomUUID(), content: "Write safely." }).success).toBe(false);
+  });
+
+  it("preserves override content byte-for-byte while validating its length and presence", () => {
+    const content = "  Keep this exact prompt.  ";
+    const parsed = promptTemplateOverrideSchema.parse({
+      key: "story_system",
+      scope: "campaign",
+      campaignId: crypto.randomUUID(),
+      content
+    });
+    expect(parsed.content).toBe(content);
+    expect(createHash("sha256").update(parsed.content).digest("hex"))
+      .toBe(createHash("sha256").update(content).digest("hex"));
+    expect(promptTemplateOverrideSchema.safeParse({
+      key: "story_system",
+      scope: "application",
+      content: ""
+    }).success).toBe(false);
   });
 
   it("renders only engine-supplied placeholder values", () => {

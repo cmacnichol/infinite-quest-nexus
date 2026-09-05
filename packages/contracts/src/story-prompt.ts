@@ -34,7 +34,7 @@ export const STORY_PROMPT_REQUIRED_SHAPE_PREVIEW = `Required shape:\n${STORY_SYS
 
 export const canonicalFactUpdateSchema = z.object({
   content: z.string().trim().min(1).max(4000),
-  supersedes_fact_ids: z.array(z.uuid()).max(100).default([])
+  supersedes_fact_ids: z.array(z.uuid()).max(100)
 });
 
 const storyTurnOutputFields = {
@@ -47,7 +47,7 @@ const storyTurnOutputFields = {
   continuity_summary: z.string().max(20_000),
   canonical_facts: z.array(z.string().trim().min(1).max(4000)).max(100),
   superseded_facts: z.array(z.string().trim().min(1).max(4000)).max(100),
-  canonical_fact_updates: z.array(canonicalFactUpdateSchema).max(100).default([]),
+  canonical_fact_updates: z.array(canonicalFactUpdateSchema).max(100),
   open_threads: z.array(z.string().trim().min(1).max(4000)).max(MAX_CONTINUITY_OPEN_THREADS)
 };
 

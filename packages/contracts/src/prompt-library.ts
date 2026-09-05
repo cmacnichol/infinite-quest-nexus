@@ -124,7 +124,9 @@ export const promptTemplateOverrideSchema = z.object({
   key: promptTemplateKeySchema,
   scope: z.enum(["application", "campaign"]),
   campaignId: z.uuid().optional(),
-  content: z.string().trim().min(1).max(16_000)
+  content: z.string().min(1).max(16_000).refine((content) => content.trim().length > 0, {
+    message: "Prompt content cannot be blank."
+  })
 }).superRefine((value, ctx) => {
   const definition = PROMPT_TEMPLATE_CATALOG[value.key];
   const suppliedVariables = new Set(promptTemplateVariables(value.content));

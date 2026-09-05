@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { decryptCredential, encryptCredential } from "../../packages/story-engine/src/credentials.js";
-import { extractPartialNarration, parseStoryOutput } from "../../packages/story-engine/src/output.js";
+import {
+  extractPartialNarration,
+  parseHistoricalStoryOutput,
+  parseStoryOutput
+} from "../../packages/story-engine/src/output.js";
 import { buildStoryUserPrompt, STORY_PROMPT_PROTOCOL_VERSION, STORY_SYSTEM_PROMPT, recoveryInstruction } from "../../packages/story-engine/src/prompt.js";
 
 function story(overrides: Record<string, unknown> = {}) {
@@ -33,13 +37,14 @@ describe("story output integrity", () => {
     expect(result).toMatchObject({ ok: false, code: "invalid_schema" });
   });
 
-  it("recovers omitted Chronicle metadata without discarding a valid story turn", () => {
+  it("accepts omitted Chronicle metadata only through the named historical parser", () => {
     const incomplete = JSON.parse(story());
     delete incomplete.continuity_summary;
     delete incomplete.canonical_facts;
     delete incomplete.superseded_facts;
     delete incomplete.open_threads;
-    const result = parseStoryOutput(JSON.stringify(incomplete), {
+    expect(parseStoryOutput(JSON.stringify(incomplete))).toMatchObject({ ok: false, code: "invalid_schema" });
+    const result = parseHistoricalStoryOutput(JSON.stringify(incomplete), {
       continuitySummary: "Earlier campaign continuity remains authoritative.",
       openThreads: ["Resolve the existing mystery."]
     });
@@ -58,7 +63,7 @@ describe("story output integrity", () => {
     expect(parseStoryOutput(story({ canonical_facts: "not an array" }))).toMatchObject({ ok: false, code: "invalid_schema" });
   });
 
-  it("accepts structured canonical fact updates and defaults the optional field", () => {
+  it("accepts structured canonical fact updates and requires them from current responses", () => {
     const factId = "11111111-1111-4111-8111-111111111111";
     const structured = parseStoryOutput(story({
       canonical_fact_updates: [{ content: "Marker One is now dark.", supersedes_fact_ids: [factId] }]
@@ -70,7 +75,8 @@ describe("story output integrity", () => {
 
     const legacy = JSON.parse(story());
     delete legacy.canonical_fact_updates;
-    expect(parseStoryOutput(JSON.stringify(legacy))).toMatchObject({
+    expect(parseStoryOutput(JSON.stringify(legacy))).toMatchObject({ ok: false, code: "invalid_schema" });
+    expect(parseHistoricalStoryOutput(JSON.stringify(legacy))).toMatchObject({
       ok: true,
       story: { canonical_fact_updates: [] }
     });
