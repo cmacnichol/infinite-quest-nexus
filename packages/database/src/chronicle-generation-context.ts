@@ -104,7 +104,7 @@ export async function loadPostgresChronicleGenerationContext(
   const campaignRow = campaign.rows[0];
   if (!campaignRow) throw new Error("Generation authority campaign was not found.");
   const currentContinuity = await loadCurrentContinuityCorrection(client, scope, baseTurnNumber);
-  const acceptedState = currentContinuity === null && baseTurnNumber > 0 ? await client.query<{ state_snapshot_private: unknown }>(
+  const acceptedState = baseTurnNumber > 0 ? await client.query<{ state_snapshot_private: unknown }>(
     `SELECT state_snapshot_private FROM turns
       WHERE owner_user_id = $1 AND campaign_id = $2 AND turn_number = $3`,
     [scope.ownerUserId, scope.campaignId, baseTurnNumber]

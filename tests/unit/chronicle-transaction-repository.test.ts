@@ -108,6 +108,10 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
         initial_state_snapshot: { continuitySummary: "", scratchpad: "", openThreads: [], canonicalFacts: [] }, scratchpad_private: ""
       }] };
       if (sql.includes("ORDER BY edit.revision DESC")) return { rows: [{ state_snapshot_private: { continuitySummary: "The warden is dead.", scratchpad: "password: moonfall", canonicalFacts: [], openThreads: [] } }] };
+      if (sql.includes("FROM turns") && sql.includes("state_snapshot_private")) return { rows: [{ state_snapshot_private: {
+        continuitySummary: "The warden lives.", scratchpad: "old", canonicalFacts: [], openThreads: ["Old thread."],
+        trackers: [{ id: "ward", name: "Ward", value: "thin", rules: "fiction" }], rpgStats: [], eventTriggers: [], pendingEventTriggers: []
+      } }] };
       if (sql.includes("effective_turn_narrations effective") && sql.includes("turn_row.action")) return { rows: [{ action: "Open the gate.", narration: "The warden dies at dawn." }] };
       if (sql.includes("FROM campaign_canonical_facts") || sql.includes("FROM chronicle_memories")) return { rows: [] };
       throw new Error(`Unexpected query: ${sql}`);
@@ -120,7 +124,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     expect(actual.authority.scratchpad).toBe("password: moonfall");
     expect(actual.authority.rules).toEqual(["Never resurrect the warden."]);
     expect(actual.authority.openThreads).toEqual([]);
-    expect(actual.authority.currentContinuity).toEqual({ continuitySummary: "The warden is dead.", scratchpad: "password: moonfall", canonicalFacts: [], openThreads: [], trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: [] });
+    expect(actual.authority.currentContinuity).toEqual({ continuitySummary: "The warden is dead.", scratchpad: "password: moonfall", canonicalFacts: [], openThreads: [], trackers: [{ id: "ward", name: "Ward", value: "thin", rules: "fiction" }], rpgStats: [], eventTriggers: [], pendingEventTriggers: [] });
     expect(actual.candidates).toEqual([]);
     expect(actual.baseIdentity.baseTurnNumber).toBe(1);
     expect(vi.mocked(client.query).mock.calls.some(([sql]) => (
