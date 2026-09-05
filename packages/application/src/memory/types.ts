@@ -149,6 +149,18 @@ export type MemoryGenerationAuthorityScope = CampaignWorldVersionMemoryScope & R
   operationKind: "append" | "replace_latest";
   expectedTurnNumber: number;
   query: string;
+  expectedBaseIdentity?: Readonly<{
+    operationKind: "append" | "replace_latest";
+    expectedTurnNumber: number;
+    baseTurnNumber: number;
+    campaignActiveTurnNumber: number;
+    campaignStateRevision: number;
+    stateEditRevision: number | null;
+    narrationCorrectionRevision: number | null;
+    baseTurnId: string | null;
+    stateFingerprint: string;
+    narrationFingerprint: string | null;
+  }>;
 }>;
 
 export type MemoryGenerationAuthorityContext = Readonly<{

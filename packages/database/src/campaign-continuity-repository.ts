@@ -28,3 +28,24 @@ export async function loadCurrentContinuityCorrection(
   const row = result.rows[0];
   return row ? currentContinuitySchema.parse(row.state_snapshot_private) : null;
 }
+
+/**
+ * Normalizes an accepted or initial state snapshot for private generation.
+ * This is intentionally separate from an exact correction: a saved empty
+ * correction is already complete authority and must never be merged here.
+ */
+export function materializeGenerationContinuity(
+  snapshot: unknown,
+  canonicalFacts: readonly Readonly<{ id: string; content: string }>[],
+): CurrentContinuity {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    throw new Error("Generation authority state snapshot is invalid.");
+  }
+  const source = snapshot as Record<string, unknown>;
+  return currentContinuitySchema.parse({
+    continuitySummary: source.continuitySummary ?? "",
+    scratchpad: source.scratchpad ?? "",
+    openThreads: source.openThreads ?? [],
+    canonicalFacts: canonicalFacts.length ? canonicalFacts : source.canonicalFacts ?? []
+  });
+}

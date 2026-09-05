@@ -103,7 +103,10 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       if (sql.includes("FOR UPDATE OF campaign, state")) return { rows: [{ active_turn_number: 1, world_version_id: "world-version", revision: 3 }] };
       if (sql.includes("FROM campaign_state_edits") && sql.includes("state_snapshot_private, revision")) return { rows: [{ state_snapshot_private: { continuitySummary: "The warden is dead.", scratchpad: "password: moonfall", canonicalFacts: [], openThreads: [] }, revision: 5 }] };
       if (sql.includes("FROM effective_turn_narrations") && sql.includes("correction_revision")) return { rows: [{ id: "turn-1", effective_narration: "The warden dies at dawn.", correction_revision: 2 }] };
-      if (sql.includes("JOIN world_versions") && sql.includes("mandatory_rules")) return { rows: [{ mandatory_rules: "Never resurrect the warden.", selected_character_id: "hero" }] };
+      if (sql.includes("generation_context_state")) return { rows: [{
+        world_content: { world: { rules: "Never resurrect the warden." } }, selected_character_id: "hero",
+        initial_state_snapshot: { continuitySummary: "", scratchpad: "", openThreads: [], canonicalFacts: [] }, scratchpad_private: ""
+      }] };
       if (sql.includes("ORDER BY edit.revision DESC")) return { rows: [{ state_snapshot_private: { continuitySummary: "The warden is dead.", scratchpad: "password: moonfall", canonicalFacts: [], openThreads: [] } }] };
       if (sql.includes("effective_turn_narrations effective") && sql.includes("turn_row.action")) return { rows: [{ action: "Open the gate.", narration: "The warden dies at dawn." }] };
       if (sql.includes("FROM campaign_canonical_facts") || sql.includes("FROM chronicle_memories")) return { rows: [] };
@@ -120,6 +123,35 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     expect(actual.authority.currentContinuity).toEqual({ continuitySummary: "The warden is dead.", scratchpad: "password: moonfall", canonicalFacts: [], openThreads: [] });
     expect(actual.candidates).toEqual([]);
     expect(actual.baseIdentity.baseTurnNumber).toBe(1);
+  });
+  it("uses the accepted state snapshot when no exact correction exists", async () => {
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes("FOR UPDATE OF campaign, state")) return { rows: [{ active_turn_number: 1, world_version_id: "world-version", revision: 3 }] };
+        if (sql.includes("FROM campaign_state_edits") && sql.includes("state_snapshot_private, revision")) return { rows: [] };
+        if (sql.includes("FROM effective_turn_narrations") && sql.includes("correction_revision")) return { rows: [{ id: "turn-1", effective_narration: "The warden dies at dawn.", correction_revision: 2 }] };
+        if (sql.includes("generation_context_state")) return { rows: [{
+          world_content: { world: { rules: "First rule.\nSecond rule.", glossary: { warden: "keeper" }, conditions: ["dawn"] } },
+          selected_character_id: "hero",
+          initial_state_snapshot: { continuitySummary: "At the gate.", scratchpad: "initial", openThreads: ["Find the key."], canonicalFacts: [] },
+          scratchpad_private: "late ".repeat(20_000), trackers: [], rpg_stats: [], event_triggers: [], pending_event_triggers: []
+        }] };
+        if (sql.includes("ORDER BY edit.revision DESC")) return { rows: [] };
+        if (sql.includes("FROM turns") && sql.includes("state_snapshot_private")) return { rows: [{ state_snapshot_private: { continuitySummary: "The warden is dead.", scratchpad: "late password: moonfall", openThreads: ["Bury the warden."], canonicalFacts: [] } }] };
+        if (sql.includes("effective_turn_narrations effective") && sql.includes("turn_row.action")) return { rows: [{ action: "Open the gate.", narration: "The warden dies at dawn." }] };
+        if (sql.includes("FROM campaign_canonical_facts") || sql.includes("FROM chronicle_memories")) return { rows: [] };
+        throw new Error(`Unexpected query: ${sql}`);
+      })
+    } as unknown as DatabaseClient;
+
+    const actual = await loadPostgresChronicleGenerationContext(client, {
+      ownerUserId: "owner", campaignId: "campaign", worldVersionId: "world-version",
+      operationKind: "append", expectedTurnNumber: 2, query: "warden password"
+    });
+
+    expect(actual.authority.worldCanon).toEqual({ rules: "First rule.\nSecond rule.", glossary: { warden: "keeper" }, conditions: ["dawn"] });
+    expect(actual.authority.scratchpad).toBe("late password: moonfall");
+    expect(actual.authority.openThreads).toEqual(["Bury the warden."]);
   });
   it("keeps private generation authority off the public preview port", () => {
     const transaction = createPostgresChronicleGenerationTransactionPort({ embeddings: embeddingPort() });

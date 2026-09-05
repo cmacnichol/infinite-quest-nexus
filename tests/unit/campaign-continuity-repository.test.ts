@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { loadCurrentContinuityCorrection } from "../../packages/database/src/campaign-continuity-repository.js";
+import {
+  loadCurrentContinuityCorrection,
+  materializeGenerationContinuity
+} from "../../packages/database/src/campaign-continuity-repository.js";
 import type { DatabaseClient } from "../../packages/database/src/pool.js";
 
 const scope = {
@@ -15,6 +18,19 @@ function clientReturning(rows: readonly Record<string, unknown>[]): DatabaseClie
 }
 
 describe("loadCurrentContinuityCorrection", () => {
+  it("materializes accepted state when no exact correction replaces it", () => {
+    expect(materializeGenerationContinuity({
+      continuitySummary: "The keeper is dead.",
+      scratchpad: "late password: moonfall",
+      openThreads: ["Bury the keeper."],
+      canonicalFacts: []
+    }, [{ id: "11111111-1111-4111-8111-111111111111", content: "The keeper died." }])).toEqual({
+      continuitySummary: "The keeper is dead.",
+      scratchpad: "late password: moonfall",
+      openThreads: ["Bury the keeper."],
+      canonicalFacts: [{ id: "11111111-1111-4111-8111-111111111111", content: "The keeper died." }]
+    });
+  });
   it("returns the highest revision at the exact requested base turn, preserving intentional empties", async () => {
     const client = clientReturning([{
       state_snapshot_private: {
