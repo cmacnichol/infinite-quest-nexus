@@ -8,6 +8,7 @@ import type { GenerationExecutionPayload } from "../../packages/database/src/gen
 import type { DatabasePool } from "../../packages/database/src/pool.js";
 import { PROMPT_TEMPLATE_CATALOG } from "../../packages/contracts/src/prompt-library.js";
 import { sha256 } from "../../packages/domain/src/index.js";
+import { ContextBudgetError } from "../../packages/story-engine/src/context-budget.js";
 import {
   createGenerationExecutor,
   type GenerationExecutionCollaborators
@@ -36,6 +37,7 @@ function rejectedCollaborators(): GenerationExecutionCollaborators {
     memory: {
       autoEnableCampaignEmbedding: unexpected,
       buildContextPreview: unexpected,
+      loadGenerationContext: unexpected,
       enqueueEmbeddingReindex: unexpected,
       rebuildCampaignMemories: unexpected,
       storeDerivedTurnMemories: unexpected,
@@ -127,6 +129,76 @@ function completeGenerationExecutionPayload(): GenerationExecutionPayload {
 }
 
 describe("generation executor adapter", () => {
+  it("makes a provider-request budget overflow recoverable before an RPG fallback can commit a turn", async () => {
+    const job = completeGenerationExecutionPayload();
+    job.orchestration_inputs = {
+      ...job.orchestration_inputs,
+      useRpgStats: true,
+      rpgStats: [{ id: "courage", name: "Courage", value: 3, note: "Steady under pressure." }]
+    };
+    const repository = {
+      loadExecutionPayload: vi.fn(async () => job),
+      renewLease: vi.fn(async () => true),
+      markGenerating: vi.fn(async () => true),
+      saveOrchestration: vi.fn(async () => true),
+      savePartialNarration: vi.fn(async () => true),
+      saveStreamingSegments: vi.fn(async () => true),
+      recordAttempt: vi.fn(async () => undefined),
+      markRecoverable: vi.fn(async () => true),
+      markValidating: vi.fn(async () => true),
+      markCommitting: vi.fn(async () => true),
+      commitAcceptedTurn: vi.fn(async () => ({ turnId: "00000000-0000-4000-8000-000000000006" })),
+      markFailed: vi.fn(async () => true)
+    } as unknown as GenerationExecutionRepository;
+    const provider = {
+      id: claim.providerProfileId, name: "Captured provider", providerRole: "text" as const,
+      providerType: "openai_compatible" as const, model: "test-model", contextWindowTokens: 16_000,
+      maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {},
+      execute: vi.fn()
+        .mockRejectedValueOnce(new ContextBudgetError("context_budget_exceeded", 100, 10, undefined, { scope: "provider_request" }))
+        .mockResolvedValueOnce({
+          content: JSON.stringify({
+            narration: "The observatory door opens onto a quiet moonlit hall.",
+            choices: ["Enter the hall.", "Wait outside.", "Inspect the lock.", "Call for the keeper."],
+            custom_action_suggestion: "Study the observatory lens.", scratchpad: "The door is now open.",
+            tracker_updates: [], image_prompt: "A quiet moonlit observatory hall.",
+            continuity_summary: "The observatory door is open.", canonical_facts: [],
+            superseded_facts: [], canonical_fact_updates: [], open_threads: []
+          }), responseId: "test-response", finishReason: "stop", outputLimited: false,
+          modelInstanceId: "test-instance", usage: { inputTokens: 10, outputTokens: 20, totalTokens: 30 },
+          reportedCost: null, rawMetadata: {}
+        })
+    };
+    const collaborators = {
+      memory: {
+        loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [], baseIdentity: job.generation_base_identity })),
+        buildContextPreview: vi.fn(async () => ({
+          campaign: { id: claim.campaignId, worldVersionId: job.world_version_id, selectedCharacterId: null, characterProfileRevision: 0 },
+          selectedCompression: null, retrieval: {}, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT,
+          scopes: { worldCanon: {}, campaignCanon: {}, chronicle: [], currentScene: null,
+            currentContinuity: { continuitySummary: "", openThreads: [], canonicalFacts: [], scratchpad: "" } }
+        }))
+      },
+      illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) },
+      loadTextExecution: vi.fn(async () => provider), promptFromSnapshot: vi.fn(() => "Write a concise fictional scene."),
+      recordProfileCost: vi.fn(async () => undefined), attributeGenerationCostsToTurn: vi.fn(async () => undefined)
+    } as unknown as GenerationExecutionCollaborators;
+
+    const executor = createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators });
+    await expect(executor.execute({ workerId: "worker-a", leaseSeconds: 30, claim })).resolves.toBe(true);
+
+    expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({
+      errorCode: "context_budget_exceeded",
+      errorMessage: "Generation context could not be safely prepared."
+    }));
+    expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
+    expect(repository.markFailed).not.toHaveBeenCalled();
+    expect(provider.execute).toHaveBeenCalledOnce();
+    expect(collaborators.memory.loadGenerationContext).toHaveBeenCalledWith({}, expect.objectContaining({
+      expectedBaseIdentity: job.generation_base_identity
+    }));
+  });
+
   it("treats a missing guarded payload as cancellation before provider work or mutation", async () => {
     const repository = guardedRepository();
     const collaborators = rejectedCollaborators();
@@ -181,6 +253,7 @@ describe("generation executor adapter", () => {
     const collaborators = {
       memory: {
         autoEnableCampaignEmbedding: vi.fn(async () => undefined),
+        loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [], baseIdentity: malformedJob.generation_base_identity })),
         buildContextPreview: vi.fn(async () => ({
           campaign: { id: claim.campaignId, worldVersionId: malformedJob.world_version_id, selectedCharacterId: null, characterProfileRevision: 0 },
           selectedCompression: null,
@@ -302,6 +375,7 @@ describe("generation executor adapter", () => {
     } as unknown as GenerationExecutionRepository;
     const collaborators = {
       memory: {
+        loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [], baseIdentity: job.generation_base_identity })),
         buildContextPreview: vi.fn(async () => ({
           campaign: {
             id: claim.campaignId,

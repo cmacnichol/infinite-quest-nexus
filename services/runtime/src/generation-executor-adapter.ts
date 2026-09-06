@@ -47,6 +47,7 @@ import {
   compactStoryLengthWordRange,
   containsMechanicsLanguage,
   extractPartialNarration,
+  ContextBudgetError,
   fictionGuidanceForEvents,
   fictionGuidanceForRoll,
   formatNarrationParagraphs,
@@ -320,6 +321,38 @@ function errorCodeFrom(error: unknown): string | null {
     : null;
 }
 
+const RECOVERABLE_INTEGRITY_ERROR_CODES = new Set([
+  "context_budget_exceeded",
+  "context_budget_invalid",
+  "continuity_output_budget_exceeded",
+  "extension_narration_limit_exceeded"
+]);
+
+function isRecoverableIntegrityError(error: unknown): error is ContextBudgetError {
+  return error instanceof ContextBudgetError
+    || (typeof error === "object" && error !== null
+      && RECOVERABLE_INTEGRITY_ERROR_CODES.has(errorCodeFrom(error) || ""));
+}
+
+function recoverableIntegrityDiagnostic(error: unknown): Readonly<{
+  errorCode: string;
+  errorMessage: string;
+  recoveryMetadata: Record<string, unknown>;
+}> {
+  const errorCode = errorCodeFrom(error);
+  const scope = diagnosticBudgetScope(error);
+  return {
+    errorCode: RECOVERABLE_INTEGRITY_ERROR_CODES.has(errorCode || "")
+      ? errorCode!
+      : "context_budget_exceeded",
+    errorMessage: "Generation context could not be safely prepared.",
+    recoveryMetadata: {
+      retryable: true,
+      ...(scope ? { budgetScope: scope } : {})
+    }
+  };
+}
+
 function safeLogErrorCode(value: unknown, fallback = "unclassified_error"): string {
   if (typeof value !== "string") return fallback;
   const normalized = value.trim().toLowerCase();
@@ -482,9 +515,9 @@ async function callCampaignTextProvider(
   try {
     const result = await provider.execute({
       ...request,
-      ...(operation === "story_generation" || operation === "story_recovery" || operation === "scene_coverage_rewrite" || operation === "event_extension"
-        ? { canonicalBudgeting: true }
-        : {})
+      // Every generation operation is serialized and checked before transport.
+      // The transport adapter sends these prepared bytes without rebuilding them.
+      canonicalBudgeting: true
     });
     await dependencies.collaborators.recordProfileCost(
       dependencies.pool,
@@ -684,6 +717,20 @@ async function executeLoadedGeneration(
       safeContextBudget
     } = preparedInput;
 
+    // Read the private generation authority before selecting any provider context.
+    // The memory port verifies the queued base identity under its own transaction.
+    await phase("context_retrieval", () => collaborators.memory.loadGenerationContext(
+      pool,
+      {
+        ownerUserId: job.owner_user_id,
+        campaignId: job.campaign_id,
+        worldVersionId: job.world_version_id ?? "",
+        operationKind: job.operation_kind,
+        expectedTurnNumber: job.expected_turn_number,
+        query: safeAction,
+        expectedBaseIdentity: job.generation_base_identity
+      }
+    ));
     const context = (await phase("context_retrieval", () => collaborators.memory.buildContextPreview(
       pool,
       {
@@ -732,6 +779,7 @@ async function executeLoadedGeneration(
             if (response.outputLimited) throw new Error("The private RPG assessment reached its output limit.");
             assessment = parseRpgAssessment(response.content);
           } catch (error) {
+            if (isRecoverableIntegrityError(error)) throw error;
             assessmentError = error instanceof Error ? error.message : String(error);
             assessment = localRpgAssessment(job.action, inputs.rpgStats);
           }
@@ -760,6 +808,7 @@ async function executeLoadedGeneration(
               triggers
             );
           } catch (error) {
+            if (isRecoverableIntegrityError(error)) throw error;
             triggerError = error instanceof Error ? error.message : String(error);
           }
         }
@@ -1181,7 +1230,8 @@ async function executeLoadedGeneration(
         coverage = coverageResponse.outputLimited
           ? null
           : parseSceneCoverageOutput(coverageResponse.content);
-      } catch {
+      } catch (error) {
+        if (isRecoverableIntegrityError(error)) throw error;
         coverage = null;
       }
       logger.info({
@@ -1245,7 +1295,8 @@ async function executeLoadedGeneration(
             repairedCoverage = coverageResponse.outputLimited
               ? null
               : parseSceneCoverageOutput(coverageResponse.content);
-          } catch {
+          } catch (error) {
+            if (isRecoverableIntegrityError(error)) throw error;
             repairedCoverage = null;
           }
         }
@@ -1346,6 +1397,7 @@ async function executeLoadedGeneration(
             }
           });
         } catch (error) {
+          if (isRecoverableIntegrityError(error)) throw error;
           orchestration = await persistOrchestration(repository, scope, job, {
             extensionError: (error instanceof Error ? error.message : String(error)).slice(0, 2000)
           });
@@ -1421,6 +1473,24 @@ async function executeLoadedGeneration(
       durationMs: Date.now() - generationStartedAt
     });
   } catch (error) {
+    if (isRecoverableIntegrityError(error)) {
+      const diagnostic = recoverableIntegrityDiagnostic(error);
+      const recovered = await repository.markRecoverable({
+        ...scope,
+        providerResponseId: null,
+        providerFinishReason: null,
+        ...diagnostic
+      });
+      if (recovered) {
+        logger.warn({
+          event: "turn_generation_recoverable",
+          ...generationLogContext(job, workerId),
+          errorCode: diagnostic.errorCode,
+          durationMs: Date.now() - generationStartedAt
+        });
+      }
+      return true;
+    }
     const transportError = providerTransportErrorDetails(error);
     const rawCode = transportError
       ? (transportError.timedOut ? "provider_request_timeout" : "provider_transport_error")
