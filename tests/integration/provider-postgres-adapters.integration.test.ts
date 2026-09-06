@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   toSafeProviderConfiguration,
@@ -13,6 +14,7 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, type DatabaseClient, type DatabasePool } from "../../packages/database/src/pool.js";
 import { createPostgresProviderRepositories, writeEncryptedProviderCredential } from "../../packages/database/src/provider-repository.js";
 import { createPromptRepository } from "../../packages/database/src/prompt-repository.js";
+import { promptCompatibilityRequirement } from "../../packages/contracts/src/prompt-library.js";
 import { encryptCredential } from "../../packages/story-engine/src/credentials.js";
 import { createRuntimeProviderAdapter } from "../../services/runtime/src/provider-credential-transport-adapter.js";
 
@@ -565,6 +567,8 @@ integration("provider PostgreSQL adapters", () => {
   });
 
   it("changes prompt protocol versions deterministically while preserving owner and campaign scope", async () => {
+    const storyContent = "Owner-scoped changed story protocol.";
+    const requiredCompatibility = promptCompatibilityRequirement("story_system")!;
     const [ownedProfile, foreignProfile] = await inTransaction(async (client) => {
       const profiles = createPostgresProviderRepositories(client).profiles;
       return Promise.all([
@@ -615,7 +619,12 @@ integration("provider PostgreSQL adapters", () => {
         scope: "campaign",
         campaignId: first.campaignId,
         key: "story_system",
-        content: "Owner-scoped changed story protocol."
+        content: storyContent,
+        compatibilityAcknowledgement: {
+          requiredShapeVersion: requiredCompatibility.requiredShapeVersion,
+          protocolIdentity: requiredCompatibility.protocolIdentity,
+          contentHash: createHash("sha256").update(storyContent).digest("hex")
+        }
       });
       return prompts.loadPromptSnapshot({ ownerUserId: first.ownerUserId, scope: "campaign", campaignId: first.campaignId });
     });
