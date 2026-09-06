@@ -856,6 +856,8 @@ integration("durable Story Engine integration", () => {
         [job.id]
       );
       expect(retryReset.rows[0]?.orchestration_private.automaticRepair).toBeUndefined();
+      expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "queued" });
+      expect(await cancelGeneration(pool, job.id)).toMatchObject({ status: "cancelled" });
     } finally {
       querySpy.mockRestore();
     }
