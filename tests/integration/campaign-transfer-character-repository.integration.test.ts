@@ -603,9 +603,11 @@ integration("campaign transfer and character PostgreSQL adapters", () => {
       [ownerUserId, source.campaign.id, JSON.stringify({ summary: "Transferred summary." })],
     );
     await pool.query(
-      `INSERT INTO campaign_memory_configs (
-         campaign_id, owner_user_id, embedding_enabled, retrieval_implementation, retrieval_shadow_enabled
-       ) VALUES ($1, $2, false, 'chunked_hybrid', true)`,
+      `UPDATE campaign_memory_configs
+          SET embedding_enabled = false,
+              retrieval_implementation = 'chunked_hybrid',
+              retrieval_shadow_enabled = true
+        WHERE campaign_id = $1 AND owner_user_id = $2`,
       [source.campaign.id, ownerUserId],
     );
     const asset = await pool.query<{ id: string }>(

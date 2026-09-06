@@ -42,6 +42,7 @@ export async function applyPostgresStateCorrection(client: DatabaseClient, scope
 export async function projectStateCorrection(
   client: DatabaseClient, scope: CampaignWorldVersionMemoryScope, catalog: readonly EntityReference[], edit: StateCorrection,
   changedFields: ReadonlySet<string> = new Set(["continuitySummary", "openThreads", "canonicalFacts"]),
+  replayingAcceptedState = false,
 ): Promise<CorrectionMemoryChanges> {
   const changedMemoryIds: string[] = [];
   const removedMemoryIds: string[] = [];
@@ -127,8 +128,11 @@ export async function projectStateCorrection(
             (metadata->>'generatedFromAcceptedTurn' = 'true' OR metadata->>'manualCorrection' = 'true') AS managed
       FROM chronicle_memories
       WHERE owner_user_id=$1 AND campaign_id=$2 AND world_version_id=$3 AND memory_kind=ANY($4::text[])
-        AND (memory_kind='canonical_fact' OR (turn_id IS NULL AND metadata->>'manualCorrection' = 'true'))
-      ORDER BY created_at,id`, [...scopeValues, kinds]);
+        AND (memory_kind='canonical_fact' OR (turn_id IS NULL AND (
+          metadata->>'manualCorrection' = 'true'
+          OR ($5::boolean AND metadata->>'generatedFromAcceptedTurn' = 'true')
+        )))
+      ORDER BY created_at,id`, [...scopeValues, kinds, replayingAcceptedState]);
   const consumed = new Set<string>();
   for (const projection of desired) {
     const parent = existing.rows.find((row) => !consumed.has(row.id) && row.memory_kind === projection.kind && row.turn_id === projection.turnId);

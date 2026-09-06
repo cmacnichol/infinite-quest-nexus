@@ -700,7 +700,7 @@ async function rebuildMemories(
         id: edit.id,
         effectiveTurnNumber: edit.effective_turn_number,
         snapshot: stateCorrectionSnapshot(edit.state_snapshot_private)
-      });
+      }, undefined, true);
     }
   }
   await applyEditsAt(0);

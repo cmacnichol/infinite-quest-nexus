@@ -579,7 +579,7 @@ describe("API server security and CORS headers", () => {
     await app.close();
   });
 
-  it("sends HSTS only for direct or explicitly trusted HTTPS", async () => {
+  it("does not accept forwarded HTTPS from a hop-count-only proxy configuration", async () => {
     const directHttp = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool }));
     expect((await directHttp.inject({ method: "GET", url: "/health/live" })).headers["strict-transport-security"]).toBeUndefined();
     await directHttp.close();
@@ -593,7 +593,7 @@ describe("API server security and CORS headers", () => {
       url: "/health/live",
       headers: { "x-forwarded-proto": "https", host: "localhost:8080" }
     });
-    expect(response.headers["strict-transport-security"]).toContain("max-age=31536000");
+    expect(response.headers["strict-transport-security"]).toBeUndefined();
     await proxied.close();
   });
 
