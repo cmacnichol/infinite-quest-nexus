@@ -28,10 +28,10 @@ and world rule.  The test also checks one final accepted turn and one attempt.
 | F5 exact guarded provider payload | `provider-request-budget.test.ts`; `generation-executor-adapter.test.ts`; `generation.integration.test.ts` | The checked serialized body is the transported body; recovery and every workflow operation reject over-budget inputs before provider calls and persist private request metadata. |
 | F6 strict new protocol and historical compatibility | `story-output.test.ts`; `generation.test.ts`; `prompt-library.integration.test.ts`; `import-memory.integration.test.ts` | New output rejects missing fields and text supersession; historic/import parsing remains a named compatibility path. |
 | A1 operation-specific budgeting | `context-budget.test.ts`; `provider-request-budget.test.ts`; `generation-executor-adapter.test.ts` | Context and full-request ceilings are measured separately, output feasibility is checked before transport, and large ceilings do not pad small requests. |
-| C1 safe public recovery contract | `generation-diagnostics.test.ts`; `client-api-routes.test.ts`; `generation-events.integration.test.ts` | Polling, SSE, recovery, and prompt previews expose only allowlisted diagnostics and reject private canaries. |
+| C1 safe public recovery contract | `generation-diagnostics.test.ts`; `client-api-routes.test.ts`; `generation-events.integration.test.ts`; `generation-integrity-diagnostics.e2e.test.ts` | Polling, SSE, recovery, and prompt previews expose only allowlisted diagnostics and reject private canaries; both rendered Story surfaces show only application-owned recovery guidance. |
 | R1 500-thread projections | `generation.test.ts`; `chronicle-repository.integration.test.ts`; `campaign-state-corrections.integration.test.ts` | 0/100/150/500 distinct threads survive accepted state, correction, authority load, and rebuild; 501 is rejected. |
 | R2 exact draft checkpoint/resume | `generation-executor-adapter.test.ts`; `generation.integration.test.ts`; `generation-execution-repository.integration.test.ts` | Main-draft hash, producing payload hash, and sent-fact allowlist survive interruption, reclaim, stale-write fencing, and exactly-once commit. |
-| R3 safe diagnostics | `generation-executor-adapter.test.ts`; `generation-diagnostics.test.ts`; `client-api-routes.test.ts`; `generation-events.integration.test.ts` | Each integrity error is recoverable without commit or fallback; public projections omit provider text, scratchpad, request payload, and rejected narration. |
+| R3 safe diagnostics | `generation-executor-adapter.test.ts`; `generation-diagnostics.test.ts`; `client-api-routes.test.ts`; `generation-events.integration.test.ts`; `generation-integrity-diagnostics.e2e.test.ts` | Each integrity error is recoverable without commit or fallback; public projections omit provider text, scratchpad, request payload, and rejected narration, including rendered recovery panels. |
 | R4 fact authority | `generation-execution-repository.integration.test.ts`; `generation.integration.test.ts`; `import-memory.integration.test.ts` | Supersession requires an active fact that was sent in the producing request; omitted, foreign, future, expired, and same-text/different-ID facts fail. |
 | R5 event coverage and occurrence accounting | `event-finalization.test.ts`; `generation.integration.test.ts` | Omission, contradiction, timeout, and exhausted repair do not commit; deferred and immediate events each require the final fiction they own. |
 | R6 immutable protocol identity | `generation-authority.test.ts`; `generation-repository.integration.test.ts`; `generation-execution-repository.integration.test.ts` | Append, replace-latest, turn zero, duplicate idempotency, compatible reclaim, and old-protocol retry retain or reject the original snapshot without a hidden provider call. |
@@ -51,7 +51,7 @@ transaction that a three-turn workflow cannot safely force.
 | append/replace/turn zero, duplicate submission, cancellation, two workers, lease takeover, interruptions, old protocol | `generation-authority.test.ts`, `generation-repository.integration.test.ts`, `generation-execution-repository.integration.test.ts`, `generation.integration.test.ts`, `generation-executor-adapter.test.ts` |
 | owner/campaign/world, future/superseded aliases and facts, sent-source IDs, audit hash | `chronicle-contract-matrix.integration.test.ts`, `generation-execution-repository.integration.test.ts`, `generation.integration.test.ts`, `import-memory.integration.test.ts` |
 | embeddings disabled/removed/rebuilt; lexical and comparison retrieval | `chronicle-contract-matrix.integration.test.ts`, `import-memory.integration.test.ts`, `generation.integration.test.ts` |
-| safe private-data boundaries in logs, polling, SSE, recovery, and previews | `generation-executor-adapter.test.ts`, `generation-diagnostics.test.ts`, `client-api-routes.test.ts`, `generation-events.integration.test.ts` |
+| safe private-data boundaries in logs, polling, SSE, recovery, and previews | `generation-executor-adapter.test.ts`, `generation-diagnostics.test.ts`, `client-api-routes.test.ts`, `generation-events.integration.test.ts`, `generation-integrity-diagnostics.e2e.test.ts` |
 | event omission, contradiction, timeout, extension repair and text supersession | `event-finalization.test.ts`, `generation.integration.test.ts`, `generation-execution-repository.integration.test.ts` |
 
 ## Execution record
@@ -65,6 +65,21 @@ transaction that a three-turn workflow cannot safely force.
 | `pnpm build` | Passed | 2026-09-06 final exact-head release run; legacy and replacement web bundles completed. |
 | `git diff --check` | Passed | 2026-09-06. |
 | `pnpm test:e2e:data-transfer` | Passed: 27 tests | 2026-09-06 final exact-head release run; replacement and legacy Data Transfer flows rendered in Playwright. |
+| `playwright test tests/e2e/generation-integrity-diagnostics.e2e.test.ts` | Passed: 3 tests | 2026-09-06; rendered legacy and web-next recovery panels plus Prompt Library acknowledgement. The browser fixture supplies only sanitized API responses and does not contact a live provider. |
+
+### Browser evidence: recovery diagnostics
+
+The focused Playwright run retained synthetic captures of the recoverable
+prompt-override flow in both Story clients. The assertions confirm the
+application-owned guidance and available recovery controls while checking that
+the injected private marker is not rendered. The Prompt Library case confirms
+that a protected override has no write request until the required-shape
+acknowledgement is checked.
+
+| Surface | Desktop | Mobile |
+| --- | --- | --- |
+| Legacy Story recovery | [Screenshot](assets/generation-integrity-diagnostics/legacy-recovery-desktop.png) | [Screenshot](assets/generation-integrity-diagnostics/legacy-recovery-mobile.png) |
+| Replacement Story recovery | [Screenshot](assets/generation-integrity-diagnostics/web-next-recovery-desktop.png) | [Screenshot](assets/generation-integrity-diagnostics/web-next-recovery-mobile.png) |
 
 ### Planner measurement
 
