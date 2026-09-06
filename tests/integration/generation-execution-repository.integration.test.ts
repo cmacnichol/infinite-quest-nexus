@@ -120,17 +120,19 @@ integration("PostgreSQL generation execution repository", () => {
   }
 
   async function insertCanonicalFact(input: Readonly<{
+    ownerUserId?: string;
     campaignId: string;
     worldVersionId: string;
     content: string;
     validFromTurn: number;
     validUntilTurn?: number | null;
   }>) {
+    const factOwnerUserId = input.ownerUserId ?? ownerUserId;
     const source = await pool.query<{ id: string; turn_number: number }>(
       `SELECT id,turn_number FROM turns
         WHERE owner_user_id=$1 AND campaign_id=$2
         ORDER BY turn_number,id LIMIT 1`,
-      [ownerUserId, input.campaignId]
+      [factOwnerUserId, input.campaignId]
     );
     const sourceTurn = source.rows[0];
     if (!sourceTurn) throw new Error("Expected a source turn for the canonical-fact fixture.");
@@ -140,11 +142,77 @@ integration("PostgreSQL generation execution repository", () => {
          id,owner_user_id,campaign_id,world_version_id,source_turn_id,source_turn_number,
          source_fact_index,content,normalized_content,valid_from_turn,valid_until_turn
        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-      [id, ownerUserId, input.campaignId, input.worldVersionId, sourceTurn.id, sourceTurn.turn_number,
+      [id, factOwnerUserId, input.campaignId, input.worldVersionId, sourceTurn.id, sourceTurn.turn_number,
         10_000 + Math.floor(Math.random() * 1_000_000), input.content, input.content.toLowerCase(),
         input.validFromTurn, input.validUntilTurn ?? null]
     );
     return id;
+  }
+
+  async function insertCampaignWithSourceTurn(input: Readonly<{
+    ownerUserId: string;
+    worldVersionId: string;
+    title: string;
+  }>) {
+    const campaignResult = await pool.query<{ id: string }>(
+      "INSERT INTO campaigns (owner_user_id,world_version_id,title) VALUES ($1,$2,$3) RETURNING id",
+      [input.ownerUserId, input.worldVersionId, input.title]
+    );
+    const campaignId = campaignResult.rows[0]?.id;
+    if (!campaignId) throw new Error("Expected a scoped campaign fixture.");
+    await pool.query("INSERT INTO campaign_state (campaign_id,owner_user_id) VALUES ($1,$2)", [campaignId, input.ownerUserId]);
+    await pool.query(
+      `INSERT INTO turns (owner_user_id,campaign_id,turn_number,action,narration,state_snapshot_private)
+       VALUES ($1,$2,1,'Scope fixture action.','Scope fixture narration.','{}'::jsonb)`,
+      [input.ownerUserId, campaignId]
+    );
+    return campaignId;
+  }
+
+  async function foreignScopeFact() {
+    const foreignOwner = await pool.query<{ id: string }>(
+      "INSERT INTO users (display_name) VALUES ('Canonical fact foreign owner') RETURNING id"
+    );
+    const foreignOwnerUserId = foreignOwner.rows[0]?.id;
+    if (!foreignOwnerUserId) throw new Error("Expected a foreign owner fixture.");
+    const world = await pool.query<{ id: string }>(
+      "INSERT INTO worlds (owner_user_id,title) VALUES ($1,'Canonical fact foreign world') RETURNING id",
+      [foreignOwnerUserId]
+    );
+    const worldId = world.rows[0]?.id;
+    if (!worldId) throw new Error("Expected a foreign world fixture.");
+    const version = await pool.query<{ id: string }>(
+      `INSERT INTO world_versions (world_id,owner_user_id,version_number,content)
+       VALUES ($1,$2,1,$3::jsonb) RETURNING id`,
+      [worldId, foreignOwnerUserId, JSON.stringify({ world: { title: "Canonical fact foreign world" }, entities: [] })]
+    );
+    const worldVersionId = version.rows[0]?.id;
+    if (!worldVersionId) throw new Error("Expected a foreign world-version fixture.");
+    const campaignId = await insertCampaignWithSourceTurn({
+      ownerUserId: foreignOwnerUserId,
+      worldVersionId,
+      title: "Canonical fact foreign campaign"
+    });
+    return insertCanonicalFact({
+      ownerUserId: foreignOwnerUserId,
+      campaignId,
+      worldVersionId,
+      content: "The foreign observatory is a lighthouse.",
+      validFromTurn: 1
+    });
+  }
+
+  async function alternateWorldVersion(worldVersionId: string) {
+    const version = await pool.query<{ id: string }>(
+      `INSERT INTO world_versions (world_id,owner_user_id,version_number,content)
+       SELECT world_id,owner_user_id,version_number + 1,$2::jsonb
+         FROM world_versions WHERE id=$1 AND owner_user_id=$3
+       RETURNING id`,
+      [worldVersionId, JSON.stringify({ world: { title: "Canonical fact alternate world version" }, entities: [] }), ownerUserId]
+    );
+    const alternate = version.rows[0]?.id;
+    if (!alternate) throw new Error("Expected an alternate world-version fixture.");
+    return alternate;
   }
 
   function acceptedCommitInput(input: Readonly<{
@@ -807,7 +875,9 @@ integration("PostgreSQL generation execution repository", () => {
 
   it.each([
     "omitted same-campaign fact",
-    "cross-scope fact",
+    "foreign-owner fact",
+    "other-campaign same-owner same-world fact",
+    "other-world-version same-owner same-campaign fact",
     "future fact",
     "expired fact",
     "duplicate-content different-ID fact",
@@ -829,12 +899,30 @@ integration("PostgreSQL generation execution repository", () => {
 
     if (caseName === "omitted same-campaign fact") {
       sentFactIds = undefined;
-    } else if (caseName === "cross-scope fact") {
-      const other = await campaign();
+    } else if (caseName === "foreign-owner fact") {
+      // The campaign/world-version composite foreign keys prohibit a foreign
+      // owner on this campaign. Use a fully valid foreign-owned graph instead.
+      supersededFactId = await foreignScopeFact();
+      sentFactIds = [supersededFactId];
+    } else if (caseName === "other-campaign same-owner same-world fact") {
+      const otherCampaignId = await insertCampaignWithSourceTurn({
+        ownerUserId,
+        worldVersionId: imported.worldVersionId,
+        title: "Canonical fact same-world campaign decoy"
+      });
       supersededFactId = await insertCanonicalFact({
-        campaignId: other.campaignId,
-        worldVersionId: other.worldVersionId,
+        campaignId: otherCampaignId,
+        worldVersionId: imported.worldVersionId,
         content: "The other observatory is a lighthouse.",
+        validFromTurn: 1
+      });
+      sentFactIds = [supersededFactId];
+    } else if (caseName === "other-world-version same-owner same-campaign fact") {
+      const otherWorldVersionId = await alternateWorldVersion(imported.worldVersionId);
+      supersededFactId = await insertCanonicalFact({
+        campaignId: imported.campaignId,
+        worldVersionId: otherWorldVersionId,
+        content: "The alternate observatory is a lighthouse.",
         validFromTurn: 1
       });
       sentFactIds = [supersededFactId];
