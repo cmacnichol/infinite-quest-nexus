@@ -440,6 +440,7 @@ describe("generation executor adapter", () => {
     expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({
       errorCode: "generation_prompt_snapshot_invalid"
     }));
+    expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
   });
 
   it("raises generation_cancelled when malformed snapshot recovery loses its lease", async () => {

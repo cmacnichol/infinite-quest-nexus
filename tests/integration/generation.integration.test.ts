@@ -693,10 +693,20 @@ integration("durable Story Engine integration", () => {
       expect(checkpoint.rows[0]?.orchestration_private.validatedMainDraft).toMatchObject({
         draftHash: expect.any(String), requestPayloadHash: expect.any(String)
       });
+      const interrupted = await pool.query<{ attempts: number; status: string; lease_expired: boolean }>(
+        "SELECT attempts, status, lease_expires_at <= now() AS lease_expired FROM generation_jobs WHERE id = $1",
+        [job.id]
+      );
+      expect(interrupted.rows).toEqual([{ attempts: 1, status: "generating", lease_expired: true }]);
 
       expect(await runGenerationJob(pool, "checkpoint-worker-b", 30, credentialSecret)).toBe(true);
       expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed", attempts: 2 });
       expect(requests.slice(requestOffset).filter((request) => Array.isArray(request.messages))).toHaveLength(1);
+      const audit = await pool.query<{ attempt_number: number; recovery_kind: string }>(
+        "SELECT attempt_number, recovery_kind FROM generation_attempts WHERE generation_job_id = $1 ORDER BY attempt_number",
+        [job.id]
+      );
+      expect(audit.rows).toEqual([{ attempt_number: 1, recovery_kind: "initial" }]);
       const accepted = await pool.query<{ n: number }>(
         "SELECT count(*)::int AS n FROM turns WHERE campaign_id=$1 AND owner_user_id=$2 AND turn_number=$3",
         [imported.campaignId, await initialOwnerId(pool), 3]
@@ -707,6 +717,14 @@ integration("durable Story Engine integration", () => {
         [imported.campaignId, 3]
       );
       expect(turn.rows[0]?.narration).toBe(narration);
+      const artifacts = await pool.query<{ count: number; distinct_turns: number }>(
+        `SELECT count(*)::int AS count, count(DISTINCT memory.turn_id)::int AS distinct_turns
+           FROM chronicle_memories memory
+           JOIN turns turn_row ON turn_row.id = memory.turn_id
+          WHERE memory.campaign_id = $1 AND turn_row.turn_number = 3`,
+        [imported.campaignId]
+      );
+      expect(artifacts.rows).toEqual([{ count: 2, distinct_turns: 1 }]);
     } finally {
       querySpy.mockRestore();
     }
@@ -763,10 +781,32 @@ integration("durable Story Engine integration", () => {
       );
       await runGenerationJob(pool, "extension-worker-a", 30, credentialSecret);
       expect(extensionFailurePersisted).toBe(true);
+      const interrupted = await pool.query<{
+        attempts: number; status: string; lease_expired: boolean;
+        orchestration_private: { validatedMainDraft?: unknown; afterEvents?: unknown[]; extensionError?: string };
+      }>(
+        "SELECT attempts, status, lease_expires_at <= now() AS lease_expired, orchestration_private FROM generation_jobs WHERE id = $1",
+        [job.id]
+      );
+      expect(interrupted.rows[0]).toMatchObject({
+        attempts: 1,
+        status: "validating",
+        lease_expired: true,
+        orchestration_private: {
+          validatedMainDraft: expect.any(Object),
+          afterEvents: [expect.objectContaining({ sourceTriggerId: "checkpoint-after-extension" })],
+          extensionError: expect.any(String)
+        }
+      });
       expect(await runGenerationJob(pool, "extension-worker-b", 30, credentialSecret)).toBe(true);
 
       expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed", attempts: 2 });
       expect(requests.slice(requestOffset).filter((request) => Array.isArray(request.messages))).toHaveLength(4);
+      const audit = await pool.query<{ attempt_number: number; recovery_kind: string }>(
+        "SELECT attempt_number, recovery_kind FROM generation_attempts WHERE generation_job_id = $1 ORDER BY attempt_number",
+        [job.id]
+      );
+      expect(audit.rows).toEqual([{ attempt_number: 1, recovery_kind: "initial" }]);
       const turn = await pool.query<{ narration: string }>(
         "SELECT narration FROM turns WHERE campaign_id=$1 AND turn_number=$2",
         [imported.campaignId, 3]
@@ -778,6 +818,21 @@ integration("durable Story Engine integration", () => {
         [imported.campaignId, await initialOwnerId(pool), 3]
       );
       expect(accepted.rows[0]?.n).toBe(1);
+      const afterState = await pool.query<{ event_triggers: Array<{ id: string; triggeredCount: number }> }>(
+        "SELECT event_triggers FROM campaign_state WHERE campaign_id = $1",
+        [imported.campaignId]
+      );
+      expect(afterState.rows[0]?.event_triggers).toContainEqual(
+        expect.objectContaining({ id: "checkpoint-after-extension", triggeredCount: 1 })
+      );
+      const artifacts = await pool.query<{ count: number; distinct_turns: number }>(
+        `SELECT count(*)::int AS count, count(DISTINCT memory.turn_id)::int AS distinct_turns
+           FROM chronicle_memories memory
+           JOIN turns turn_row ON turn_row.id = memory.turn_id
+          WHERE memory.campaign_id = $1 AND turn_row.turn_number = 3`,
+        [imported.campaignId]
+      );
+      expect(artifacts.rows).toEqual([{ count: 2, distinct_turns: 1 }]);
     } finally {
       querySpy.mockRestore();
     }
