@@ -1641,8 +1641,8 @@ async function executeLoadedGeneration(
             }
           ));
           if (!repairResponse.outputLimited) {
-            const repaired = parseStoryOutput(repairResponse.content, storyMemoryDefaults);
-            if (repaired.ok && !mechanicsLeakFields(repaired.story).length) repairedStory = repaired.story;
+            const repaired = parseEventExtension(repairResponse.content, parsed.story.narration);
+            if (!mechanicsLeakFields(repaired).length) repairedStory = repaired;
           }
         } catch (error) {
           if (isRecoverableIntegrityError(error)) throw error;

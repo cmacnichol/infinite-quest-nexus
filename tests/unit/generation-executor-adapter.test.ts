@@ -298,7 +298,7 @@ describe("generation executor adapter", () => {
         .mockResolvedValueOnce({ content: story("The observatory door opens."), responseId: "main", finishReason: "stop", outputLimited: false, modelInstanceId: "test-instance", usage: {}, reportedCost: null, rawMetadata: {} })
         .mockResolvedValueOnce({ content: story("The observatory door opens.\n\nThe chamber stays silent."), responseId: "extension", finishReason: "stop", outputLimited: false, modelInstanceId: "test-instance", usage: {}, reportedCost: null, rawMetadata: {} })
         .mockResolvedValueOnce({ content: JSON.stringify({ covered: false, missing_required_beats: ["bell"], contradictions: [] }), responseId: "coverage-1", finishReason: "stop", outputLimited: false, modelInstanceId: "test-instance", usage: {}, reportedCost: null, rawMetadata: {} })
-        .mockResolvedValueOnce({ content: story("The observatory door opens and a silver bell rings."), responseId: "repair", finishReason: "stop", outputLimited: false, modelInstanceId: "test-instance", usage: {}, reportedCost: null, rawMetadata: {} })
+        .mockResolvedValueOnce({ content: story("The observatory door opens.\n\nA silver bell rings."), responseId: "repair", finishReason: "stop", outputLimited: false, modelInstanceId: "test-instance", usage: {}, reportedCost: null, rawMetadata: {} })
         .mockResolvedValueOnce({ content: JSON.stringify({ covered: true, missing_required_beats: [], contradictions: [] }), responseId: "coverage-2", finishReason: "stop", outputLimited: false, modelInstanceId: "test-instance", usage: {}, reportedCost: null, rawMetadata: {} })
     };
     const collaborators = {
@@ -313,7 +313,7 @@ describe("generation executor adapter", () => {
 
     expect(job.orchestration_private.eventCoverageRepair).toEqual(expect.objectContaining({ consumedAttempt: 1 }));
     expect(repository.commitAcceptedTurn).toHaveBeenCalledWith(expect.objectContaining({
-      story: expect.objectContaining({ narration: "The observatory door opens and a silver bell rings." })
+      story: expect.objectContaining({ narration: "The observatory door opens.\n\nA silver bell rings." })
     }));
     job.attempts = 2;
     job.orchestration_private.eventCoverageRepair = {
