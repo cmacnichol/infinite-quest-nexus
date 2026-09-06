@@ -659,6 +659,59 @@ integration("durable Story Engine integration", () => {
     expect(committed.rows).toEqual([{ count: 1, distinct_turns: 1 }]);
   });
 
+  it("reclaims the persisted validated draft without generating a second narration", async () => {
+    const imported = await campaign();
+    const narration = "The checkpointed draft reaches Location Gamma exactly once.";
+    const requestOffset = requests.length;
+    const job = await queue(imported.campaignId, "Resume the checkpointed draft.");
+    const originalQuery = pool.query.bind(pool) as (...args: any[]) => Promise<any>;
+    const querySpy = vi.spyOn(pool, "query");
+    let checkpointed = false;
+    querySpy.mockImplementation((async (...args: any[]) => {
+      const statement = String(args[0]);
+      const parameters = Array.isArray(args[1]) ? args[1] : [];
+      const result = await originalQuery(...args);
+      if (!checkpointed && statement.includes("SET orchestration_private")
+          && String(parameters[3]).includes("validatedMainDraft")) {
+        checkpointed = true;
+        await originalQuery(
+          "UPDATE generation_jobs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
+          [job.id]
+        );
+      }
+      return result;
+    }) as any);
+    try {
+      const checkpointStory = JSON.parse(validStory(narration));
+      checkpointStory.canonical_fact_updates = [];
+      replies.push({ content: JSON.stringify(checkpointStory) });
+      await runGenerationJob(pool, "checkpoint-worker-a", 30, credentialSecret);
+      expect(checkpointed).toBe(true);
+      const checkpoint = await pool.query<{
+        orchestration_private: { validatedMainDraft?: { draftHash?: string; requestPayloadHash?: string } };
+      }>("SELECT orchestration_private FROM generation_jobs WHERE id = $1", [job.id]);
+      expect(checkpoint.rows[0]?.orchestration_private.validatedMainDraft).toMatchObject({
+        draftHash: expect.any(String), requestPayloadHash: expect.any(String)
+      });
+
+      expect(await runGenerationJob(pool, "checkpoint-worker-b", 30, credentialSecret)).toBe(true);
+      expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed", attempts: 2 });
+      expect(requests.slice(requestOffset).filter((request) => Array.isArray(request.messages))).toHaveLength(1);
+      const accepted = await pool.query<{ n: number }>(
+        "SELECT count(*)::int AS n FROM turns WHERE campaign_id=$1 AND owner_user_id=$2 AND turn_number=$3",
+        [imported.campaignId, await initialOwnerId(pool), 3]
+      );
+      expect(accepted.rows[0]?.n).toBe(1);
+      const turn = await pool.query<{ narration: string }>(
+        "SELECT narration FROM turns WHERE campaign_id=$1 AND turn_number=$2",
+        [imported.campaignId, 3]
+      );
+      expect(turn.rows[0]?.narration).toBe(narration);
+    } finally {
+      querySpy.mockRestore();
+    }
+  });
+
   it("commits the accepted turn when illustration enqueue hits a database error", async () => {
     const imported = await campaign();
     await setIllustrationConfig(pool, imported.campaignId, illustrationConfigSchema.parse({
