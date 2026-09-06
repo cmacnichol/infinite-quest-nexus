@@ -149,7 +149,13 @@ export async function projectStateCorrection(
       changedMemoryIds.push(parent.id);
     } else {
       const inserted = await client.query<{ id: string }>(`INSERT INTO chronicle_memories (owner_user_id,campaign_id,world_version_id,content,token_estimate,
-        entities,entity_ids,metadata,ordinal,importance,memory_kind,turn_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
+        entities,entity_ids,metadata,ordinal,importance,memory_kind,turn_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        ON CONFLICT (campaign_id,turn_id,memory_kind) DO UPDATE SET
+          world_version_id=EXCLUDED.world_version_id,content=EXCLUDED.content,token_estimate=EXCLUDED.token_estimate,
+          entities=EXCLUDED.entities,entity_ids=EXCLUDED.entity_ids,metadata=EXCLUDED.metadata,ordinal=EXCLUDED.ordinal,
+          importance=EXCLUDED.importance,embedding=NULL,embedding_provider_profile_id=NULL,embedding_model=NULL,
+          embedding_dimensions=NULL,embedding_content_hash=NULL,embedding_updated_at=NULL,embedding_provider_fingerprint=NULL,updated_at=now()
+        RETURNING id`,
       [...values, projection.kind, projection.turnId]);
       changedMemoryIds.push(inserted.rows[0]!.id);
     }
