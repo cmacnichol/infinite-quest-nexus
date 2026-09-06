@@ -129,6 +129,62 @@ function completeGenerationExecutionPayload(): GenerationExecutionPayload {
 }
 
 describe("generation executor adapter", () => {
+  it("sends planner-selected private authority candidates and records omitted candidates without reading the legacy preview", async () => {
+    const job = completeGenerationExecutionPayload();
+    job.context_options = { ...job.context_options, budgetTokens: 1_000 };
+    const repository = {
+      loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true),
+      markGenerating: vi.fn(async () => true), saveOrchestration: vi.fn(async () => true),
+      savePartialNarration: vi.fn(async () => true), saveStreamingSegments: vi.fn(async () => true),
+      recordAttempt: vi.fn(async () => undefined), markRecoverable: vi.fn(async () => true),
+      markValidating: vi.fn(async () => true), markCommitting: vi.fn(async () => true),
+      commitAcceptedTurn: vi.fn(async () => ({ turnId: "00000000-0000-4000-8000-000000000006" })),
+      markFailed: vi.fn(async () => true)
+    } as unknown as GenerationExecutionRepository;
+    const provider = {
+      id: claim.providerProfileId, name: "Captured provider", providerRole: "text" as const,
+      providerType: "openai_compatible" as const, model: "test-model", contextWindowTokens: 16_000,
+      maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {},
+      execute: vi.fn(async () => ({
+        content: JSON.stringify({ narration: "The observatory door opens onto a quiet moonlit hall.",
+          choices: ["Enter.", "Wait.", "Study.", "Call."], custom_action_suggestion: "Study the lens.",
+          scratchpad: "The door is open.", tracker_updates: [], image_prompt: "A moonlit observatory hall.",
+          continuity_summary: "The observatory door is open.", canonical_facts: [], superseded_facts: [],
+          canonical_fact_updates: [], open_threads: [] }), responseId: "test-response", finishReason: "stop",
+        outputLimited: false, modelInstanceId: "test-instance", usage: { inputTokens: 10, outputTokens: 20, totalTokens: 30 },
+        reportedCost: null, rawMetadata: {}
+      }))
+    };
+    const collaborators = {
+      memory: {
+        loadGenerationContext: vi.fn(async () => ({
+          authority: { rules: ["Never abandon the observatory."], worldCanon: { title: "Moon Archive" },
+            selectedCharacterId: null, currentContinuity: { continuitySummary: "The keeper waits.", scratchpad: "Private note.", openThreads: [], canonicalFacts: [], trackers: {}, rpgStats: [], eventTriggers: [], pendingEventTriggers: [] },
+            scratchpad: "Private note.", openThreads: [], canonicalFacts: [], trackers: {}, rpgStats: [], eventTriggers: [], pendingEventTriggers: [], latestTurn: null },
+          candidates: [
+            { id: "selected-memory", turnId: null, ordinal: 1, kind: "turn_fiction", content: "The keeper lit the lantern.", tokenEstimate: 10, rank: 1 },
+            { id: "omitted-memory", turnId: null, ordinal: 2, kind: "turn_fiction", content: "x".repeat(10_000), tokenEstimate: 10_000, rank: 2 }
+          ], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT
+        })),
+        buildContextPreview: vi.fn(async () => { throw new Error("legacy preview must not be read"); })
+      },
+      illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) },
+      loadTextExecution: vi.fn(async () => provider), promptFromSnapshot: vi.fn(() => "Write a concise fictional scene."),
+      recordProfileCost: vi.fn(async () => undefined), attributeGenerationCostsToTurn: vi.fn(async () => undefined)
+    } as unknown as GenerationExecutionCollaborators;
+    const executor = createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators });
+
+    await expect(executor.execute({ workerId: "worker-a", leaseSeconds: 30, claim })).resolves.toBe(true);
+
+    expect(collaborators.memory.buildContextPreview).not.toHaveBeenCalled();
+    const input = JSON.parse((provider.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0].input);
+    expect(input.authoritative_context.authoritativeRules).toEqual(["Never abandon the observatory."]);
+    expect(input.authoritative_context.chronicle.map((entry: { id: string }) => entry.id)).toEqual(["selected-memory"]);
+    const accepted = (repository.commitAcceptedTurn as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    expect(accepted.contextDiagnostics.selectedContext).toEqual([{ id: "authority", revision: expect.any(String) }, { id: "selected-memory", revision: expect.any(String) }]);
+    expect(accepted.contextDiagnostics.omittedContext).toEqual([{ id: "omitted-memory", revision: expect.any(String), reason: "context_limit" }]);
+  });
+
   it("makes a provider-request budget overflow recoverable before an RPG fallback can commit a turn", async () => {
     const job = completeGenerationExecutionPayload();
     job.orchestration_inputs = {
@@ -171,7 +227,7 @@ describe("generation executor adapter", () => {
     };
     const collaborators = {
       memory: {
-        loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [], baseIdentity: job.generation_base_identity })),
+        loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT })),
         buildContextPreview: vi.fn(async () => ({
           campaign: { id: claim.campaignId, worldVersionId: job.world_version_id, selectedCharacterId: null, characterProfileRevision: 0 },
           selectedCompression: null, retrieval: {}, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT,
@@ -375,7 +431,12 @@ describe("generation executor adapter", () => {
     } as unknown as GenerationExecutionRepository;
     const collaborators = {
       memory: {
-        loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [], baseIdentity: job.generation_base_identity })),
+        loadGenerationContext: vi.fn(async () => ({
+          authority: { currentContinuity: { continuitySummary: "The keeper is alive.", openThreads: [],
+            canonicalFacts: [{ id: "11111111-1111-4111-8111-111111111111", content: "The keeper is alive." }],
+            scratchpad: "Private harbor details." } },
+          candidates: [], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT
+        })),
         buildContextPreview: vi.fn(async () => ({
           campaign: {
             id: claim.campaignId,
@@ -452,11 +513,11 @@ describe("generation executor adapter", () => {
     expect(repository.commitAcceptedTurn).toHaveBeenCalledOnce();
     const accepted = (repository.commitAcceptedTurn as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as {
       chronicleRetrieval?: unknown;
-      contextDiagnostics: { retrieval?: unknown };
+      contextDiagnostics: { retrieval?: unknown; selectedContext?: unknown };
       sentFactIds?: unknown;
     };
     expect(accepted.chronicleRetrieval).toStrictEqual(DEDICATED_CHUNKED_AUDIT);
-    expect(accepted.contextDiagnostics.retrieval).toBe(retrievalDiagnostics);
+    expect(accepted.contextDiagnostics.selectedContext).toEqual([{ id: "authority", revision: expect.any(String) }]);
     expect(accepted.sentFactIds).toEqual(["11111111-1111-4111-8111-111111111111"]);
     const providerRequest = (collaborators.loadTextExecution as ReturnType<typeof vi.fn>).mock.results[0]?.value;
     const provider = await providerRequest;
@@ -464,11 +525,8 @@ describe("generation executor adapter", () => {
       canonicalBudgeting: true
     });
     const input = JSON.parse((provider.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0].input);
-    expect(input.authoritative_context.currentContinuity).toEqual({
-      continuitySummary: "The keeper is alive.",
-      openThreads: [],
-      canonicalFacts: [{ id: "11111111-1111-4111-8111-111111111111", content: "The keeper is alive." }],
-      scratchpad: "Private harbor details."
-    });
+    expect(input.authoritative_context.currentContinuity.canonicalFacts).toEqual([
+      { id: "11111111-1111-4111-8111-111111111111", content: "The keeper is alive." }
+    ]);
   });
 });

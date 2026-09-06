@@ -170,6 +170,7 @@ export async function loadPostgresChronicleGenerationContext(
       latestTurn: latest?.rows[0] ?? null
     },
     candidates,
-    baseIdentity: resolved.baseIdentity
+    baseIdentity: resolved.baseIdentity,
+    ...(preview?.chronicleRetrieval ? { chronicleRetrieval: preview.chronicleRetrieval } : {})
   };
 }

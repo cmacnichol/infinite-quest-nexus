@@ -167,6 +167,8 @@ export type MemoryGenerationAuthorityContext = Readonly<{
   authority: Readonly<Record<string, unknown>>;
   candidates: readonly Readonly<Record<string, unknown>>[];
   baseIdentity: Readonly<Record<string, unknown>>;
+  /** Retrieval provenance belongs to the private authority read, never a separate preview switch. */
+  chronicleRetrieval?: ChronicleRetrievalAudit;
 }>;
 
 export type MemoryWorkerClaimRequest = Readonly<{

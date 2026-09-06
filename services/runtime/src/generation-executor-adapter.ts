@@ -12,7 +12,6 @@ import {
 } from "../../../packages/contracts/src/generation.js";
 import {
   chronicleRetrievalAuditSchema,
-  type CurrentContinuity,
   type ChronicleRetrievalAudit,
   type MemoryContextQuery
 } from "../../../packages/contracts/src/memory.js";
@@ -48,6 +47,8 @@ import {
   containsMechanicsLanguage,
   extractPartialNarration,
   ContextBudgetError,
+  planContext,
+  serializeProviderRequest,
   fictionGuidanceForEvents,
   fictionGuidanceForRoll,
   formatNarrationParagraphs,
@@ -79,25 +80,12 @@ import { logger } from "../../../packages/logger/src/index.js";
 
 type GenerationTextProvider = RuntimeTextExecution;
 
-type GenerationContextPreview = {
-  campaign: {
-    id: string;
-    worldVersionId: string;
-    selectedCharacterId: string | null;
-    characterProfileRevision: number;
-  };
-  selectedCompression: unknown;
-  retrieval: unknown;
-  chronicleRetrieval: ChronicleRetrievalAudit;
-  scopes: Record<string, unknown> & {
-    currentContinuity?: CurrentContinuity;
-    chronicle: Array<{
-      id: string;
-      content: string;
-      reason: string;
-    }>;
-  };
-};
+type PrivateGenerationContext = Readonly<{
+  authority: Readonly<Record<string, unknown>>;
+  candidates: readonly Readonly<Record<string, unknown>>[];
+  baseIdentity: Readonly<Record<string, unknown>>;
+  chronicleRetrieval?: ChronicleRetrievalAudit;
+}>;
 
 type GenerationCostAttribution = Readonly<{
   ownerUserId: string;
@@ -468,6 +456,96 @@ function sentCanonicalFactIds(storyInput: string): string[] {
   }))];
 }
 
+const NO_RETRIEVAL_AUDIT: ChronicleRetrievalAudit = {
+  auditVersion: "chronicle-retrieval-audit-v1",
+  configuredImplementation: "legacy_hybrid",
+  effectiveImplementation: "legacy_hybrid",
+  effectiveMode: "lexical_only",
+  fallbackCode: "empty_query",
+  provider: { resolutionSource: "none", resolvedRole: null, providerType: null, model: null },
+  queryVectorPath: "none",
+  providerCallOutcome: "not_attempted",
+  queryEmbeddingRequests: 0,
+  queryCacheHits: 0,
+  queryCacheMisses: 0
+};
+
+type PromptCandidate = Readonly<{ id: string; turnId: string | null; ordinal: number; kind: string; content: string; estimatedTokens: number; rank: number }>;
+
+function candidateRecord(candidate: Readonly<Record<string, unknown>>): PromptCandidate {
+  return {
+    id: String(candidate.id || ""),
+    turnId: typeof candidate.turnId === "string" ? candidate.turnId : null,
+    ordinal: Number(candidate.ordinal || 0),
+    kind: String(candidate.kind || "turn_fiction"),
+    content: String(candidate.content || ""),
+    estimatedTokens: Number(candidate.tokenEstimate || 0),
+    rank: Number(candidate.rank || 0)
+  };
+}
+
+/** Builds the one private context representation used for selection and the sent story body. */
+function planGenerationPromptContext(
+  context: PrivateGenerationContext,
+  provider: GenerationTextProvider,
+  systemPrompt: string,
+  action: string,
+  guidance: string[],
+  storyLength: StoryLengthWordRange,
+  inputMode: "action" | "scene",
+  contextLimit: number,
+  inputLimit: number
+) {
+  const authority = context.authority;
+  const authorityContext = {
+    authoritativeRules: Array.isArray(authority.rules) ? authority.rules : [],
+    worldCanon: authority.worldCanon ?? {},
+    selectedCharacterId: authority.selectedCharacterId ?? null,
+    currentContinuity: authority.currentContinuity ?? {},
+    currentScene: authority.latestTurn ?? null,
+    chronicle: [] as readonly PromptCandidate[]
+  };
+  const candidates = context.candidates.map(candidateRecord).filter((candidate) => candidate.id && candidate.content);
+  const authorityRevision = sha256(stableStringify({ baseIdentity: context.baseIdentity, authority }));
+  const blocks = [
+    { id: "authority", revision: authorityRevision, content: stableStringify(authorityContext), protected: true, priority: 0, ordinal: 0, scope: "authority" },
+    ...candidates.map((candidate) => ({
+      id: candidate.id,
+      revision: sha256(stableStringify(candidate)),
+      content: candidate.content,
+      protected: false,
+      priority: Number.isFinite(Number(candidate.rank)) ? Number(candidate.rank) : Number.MAX_SAFE_INTEGER,
+      ordinal: Number(candidate.ordinal || 0),
+      scope: "chronicle"
+    }))
+  ];
+  const promptContext = (selected: readonly Readonly<{ id: string }>[]) => ({
+    ...authorityContext,
+    chronicle: selected.filter((block) => block.id !== "authority")
+      .map((block) => candidates.find((candidate) => candidate.id === block.id))
+      .filter((candidate): candidate is PromptCandidate => Boolean(candidate))
+  });
+  const plan = planContext({
+    blocks,
+    contextLimit: Math.min(contextLimit, inputLimit),
+    inputLimit,
+    count: (value) => value.length,
+    serializeContext: (selected) => stableStringify(promptContext(selected)),
+    contextValue: promptContext,
+    serializeRequest: (selected) => serializeProviderRequest(provider as never, {
+      systemPrompt,
+      input: buildStoryUserPrompt(selected, action, false, guidance, storyLength, inputMode)
+    }).body,
+    protectedScope: "campaign_context"
+  });
+  const selectedContext = promptContext(plan.selected);
+  return {
+    promptContext: selectedContext,
+    storyInput: buildStoryUserPrompt(selectedContext, action, false, guidance, storyLength, inputMode),
+    contextPlan: plan
+  };
+}
+
 function snapshottedStoryLength(context: GenerationExecutionPayload["context_options"]): StoryLengthWordRange {
   const profile = storyLengthProfileFromUnknown(context.storyLengthProfile);
   const fallback = storyLengthWordRange(profile);
@@ -717,9 +795,9 @@ async function executeLoadedGeneration(
       safeContextBudget
     } = preparedInput;
 
-    // Read the private generation authority before selecting any provider context.
-    // The memory port verifies the queued base identity under its own transaction.
-    await phase("context_retrieval", () => collaborators.memory.loadGenerationContext(
+    // The authority read owns both scope verification and ranked candidates.
+    // Do not select or mutate a public preview for provider work.
+    const generationContext = (await phase("context_retrieval", () => collaborators.memory.loadGenerationContext(
       pool,
       {
         ownerUserId: job.owner_user_id,
@@ -730,32 +808,18 @@ async function executeLoadedGeneration(
         query: safeAction,
         expectedBaseIdentity: job.generation_base_identity
       }
-    ));
-    const context = (await phase("context_retrieval", () => collaborators.memory.buildContextPreview(
-      pool,
-      {
-        ownerUserId: job.owner_user_id,
-        campaignId: job.campaign_id,
-        worldVersionId: job.world_version_id ?? "",
-        request: {
-          ...job.context_options,
-          budgetTokens: safeContextBudget,
-          query: safeAction,
-          ...(job.operation_kind === "replace_latest"
-            ? { throughTurnNumber: job.base_turn_number ?? 0 }
-            : {})
-        },
-        costAttribution: { generationJobId: job.id, operation: "retrieval_embedding" },
-        ...(job.operation_kind === "replace_latest"
-          ? {
-              stateOverride: job.base_state_private,
-              scratchpadSafeForPrompt: job.base_scratchpad_safe_for_prompt
-            }
-          : {})
-      }
-    ))) as unknown as GenerationContextPreview;
-    const chronicleRetrieval = chronicleRetrievalAuditSchema.parse(context.chronicleRetrieval);
-    const promptContext = context.scopes;
+    ))) as unknown as PrivateGenerationContext;
+    const chronicleRetrieval = chronicleRetrievalAuditSchema.parse(
+      generationContext.chronicleRetrieval ?? NO_RETRIEVAL_AUDIT
+    );
+    let promptContext: Record<string, unknown> & { chronicle: readonly PromptCandidate[] } = {
+      authoritativeRules: Array.isArray(generationContext.authority.rules) ? generationContext.authority.rules : [],
+      worldCanon: generationContext.authority.worldCanon ?? {},
+      selectedCharacterId: generationContext.authority.selectedCharacterId ?? null,
+      currentContinuity: generationContext.authority.currentContinuity ?? {},
+      currentScene: generationContext.authority.latestTurn ?? null,
+      chronicle: []
+    };
     const inputs = await phase("orchestration_loading", async () => job.orchestration_inputs);
     let orchestration = job.orchestration_private || {};
 
@@ -825,39 +889,12 @@ async function executeLoadedGeneration(
         ...fictionGuidanceForEvents(orchestration.beforeEvents || [])
       ].filter((entry) => entry && !containsMechanicsLanguage(entry));
       assertActiveGenerationUpdate(await repository.markGenerating(scope), "entering generation");
-      let storyInput = buildStoryUserPrompt(
-        promptContext,
-        safeAction,
-        false,
-        safeGuidance,
-        storyLength,
-        job.resolved_input_mode
+      const planned = planGenerationPromptContext(
+        generationContext, provider, storySystemPrompt, safeAction, safeGuidance,
+        storyLength, job.resolved_input_mode, safeContextBudget, inputTokenLimit
       );
-      const removalPriority = ["chronological", "relevant", "summary_checkpoint", "recent", "open_threads"];
-      while (budgetTokenEstimate(storySystemPrompt) + budgetTokenEstimate(storyInput) > inputTokenLimit
-          && promptContext.chronicle.length) {
-        let removalIndex = -1;
-        for (const reason of removalPriority) {
-          removalIndex = promptContext.chronicle.findIndex((memory) => memory.reason === reason);
-          if (removalIndex >= 0) break;
-        }
-        promptContext.chronicle.splice(removalIndex >= 0 ? removalIndex : 0, 1);
-        storyInput = buildStoryUserPrompt(
-          promptContext,
-          safeAction,
-          false,
-          safeGuidance,
-          storyLength,
-          job.resolved_input_mode
-        );
-      }
-      const estimatedPromptTokens = budgetTokenEstimate(storySystemPrompt)
-        + budgetTokenEstimate(storyInput);
-      if (estimatedPromptTokens > inputTokenLimit) {
-        throw Object.assign(new Error(
-          `The fixed authoritative story context requires about ${estimatedPromptTokens} input tokens but only ${inputTokenLimit} are available.`
-        ), { code: "context_budget_exceeded" });
-      }
+      promptContext = planned.promptContext;
+      const { storyInput, contextPlan } = planned;
       const contextFingerprint = sha256(stableStringify({
         provider: provider.id,
         model: provider.model,
@@ -872,17 +909,18 @@ async function executeLoadedGeneration(
         effectiveContextWindow,
         inputTokenLimit,
         reservedOutputTokens: provider.maxOutputTokens,
-        estimatedPromptTokens,
-        campaignId: context.campaign.id,
-        worldVersionId: context.campaign.worldVersionId,
-        selectedCharacterId: context.campaign.selectedCharacterId,
-        characterProfileRevision: context.campaign.characterProfileRevision,
+        estimatedPromptTokens: contextPlan.requestTokens,
+        campaignId: job.campaign_id,
+        worldVersionId: job.world_version_id ?? "",
+        selectedCharacterId: generationContext.authority.selectedCharacterId ?? null,
         promptProtocolVersion: job.prompt_protocol_version,
         storyLength,
-        selectedMemoryIds: promptContext.chronicle.map((memory) => memory.id),
-        selectedMemoryHashes: promptContext.chronicle.map((memory) => sha256(memory.content)),
-        selectedCompression: context.selectedCompression,
-        retrieval: context.retrieval
+        selectedMemoryIds: promptContext.chronicle.map((memory) => String(memory.id)),
+        selectedMemoryHashes: promptContext.chronicle.map((memory) => sha256(String(memory.content))),
+        selectedContext: contextPlan.selected.map((block) => ({ id: block.id, revision: block.revision })),
+        omittedContext: contextPlan.omitted.map((block) => ({ id: block.id, revision: block.revision, reason: block.reason })),
+        contextTokens: contextPlan.contextTokens,
+        requestTokens: contextPlan.requestTokens
       };
       const storyMemoryDefaults = {
         ...storyMemoryDefaultsFromContext(promptContext),
@@ -1351,6 +1389,7 @@ async function executeLoadedGeneration(
               parsed.story.narration
             );
           } catch (error) {
+            if (isRecoverableIntegrityError(error)) throw error;
             triggerError = error instanceof Error ? error.message : String(error);
           }
         }
