@@ -316,11 +316,15 @@ describe("generation executor adapter", () => {
       story: expect.objectContaining({ narration: "The observatory door opens and a silver bell rings." })
     }));
     job.attempts = 2;
+    job.orchestration_private.eventCoverageRepair = {
+      ...job.orchestration_private.eventCoverageRepair!,
+      validatedMainDraftHash: "tampered-main-draft-hash"
+    };
     await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
       .execute({ workerId: "event-repair-reclaim", leaseSeconds: 30, claim: { ...claim, attempts: 2 } })).resolves.toBe(true);
-    expect(provider.execute).toHaveBeenCalledTimes(6);
+    expect(provider.execute).toHaveBeenCalledTimes(5);
     expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({
-      errorCode: "event_coverage_repair_consumed"
+      errorCode: "generation_checkpoint_incompatible"
     }));
   });
 

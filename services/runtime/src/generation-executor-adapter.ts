@@ -486,6 +486,19 @@ function compatibleValidatedMainDraft(
   return { ...value, story: parsedStory.data };
 }
 
+function compatibleEventCoverageRepair(
+  repair: GenerationOrchestrationState["eventCoverageRepair"] | undefined,
+  validatedDraft: ReturnType<typeof compatibleValidatedMainDraft>,
+  extension: GenerationOrchestrationState["extension"] | undefined,
+): boolean {
+  if (!repair) return true;
+  return validatedDraft !== null
+    && repair.validatedMainDraftHash === validatedDraft.draftHash
+    && repair.extensionFinalStoryHash === (extension?.finalStoryHash || null)
+    && repair.extensionProducingAttempt === (extension?.producingAttempt || null)
+    && (!extension || extension.finalStoryHash === stableStringify(extension.story));
+}
+
 const NO_RETRIEVAL_AUDIT: ChronicleRetrievalAudit = {
   auditVersion: "chronicle-retrieval-audit-v1",
   configuredImplementation: "legacy_hybrid",
@@ -972,6 +985,21 @@ async function executeLoadedGeneration(
       provider,
       storyInput
     );
+    if (!compatibleEventCoverageRepair(
+      orchestration.eventCoverageRepair,
+      validatedDraft,
+      orchestration.extension,
+    )) {
+      assertActiveGenerationUpdate(await repository.markRecoverable({
+        ...scope,
+        providerResponseId: null,
+        providerFinishReason: null,
+        errorCode: "generation_checkpoint_incompatible",
+        errorMessage: "The saved event-coverage repair no longer matches its final-story provenance.",
+        recoveryMetadata: { retryable: true, stage: "event_coverage", reason: "event_coverage_repair_incompatible" }
+      }), "saving incompatible event coverage repair state");
+      return true;
+    }
     const sentFactIds = validatedDraft?.sentFactIds || plannedSentFactIds;
 
     const streamingIllustration = await phase("streaming_illustration_setup", async () => {
@@ -1627,7 +1655,12 @@ async function executeLoadedGeneration(
               finalStoryHash: repairedFinalStoryHash,
               producingAttempt: job.attempts
             },
-            eventCoverageRepair: { ...repair, repairedFinalStoryHash },
+            eventCoverageRepair: {
+              ...repair,
+              extensionFinalStoryHash: repairedFinalStoryHash,
+              extensionProducingAttempt: job.attempts,
+              repairedFinalStoryHash
+            },
             extensionError: undefined
           });
           committedStory = repairedStory;
