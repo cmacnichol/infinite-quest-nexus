@@ -730,6 +730,82 @@ integration("durable Story Engine integration", () => {
     }
   });
 
+  it("commits checkpoint-authorized fact updates despite later audit visibility", async () => {
+    const imported = await campaign();
+    const before = await getCampaignRuntimeState(pool, imported.campaignId);
+    const state = await updateCampaignRuntimeState(pool, imported.campaignId, {
+      expectedTurnNumber: before.activeTurnNumber,
+      expectedRevision: before.revision,
+      continuitySummary: "The original beacon is still lit.",
+      openThreads: [],
+      canonicalFacts: [{ id: null, content: "The original beacon is lit." }],
+      scratchpad: "The beacon is visible from the harbor.",
+      trackers: before.trackers,
+      rpgStats: before.rpgStats,
+      eventTriggers: before.eventTriggers,
+      pendingEventTriggers: before.pendingEventTriggers
+    });
+    const sourceFactId = state.canonicalFacts[0]!.id;
+    const job = await queue(imported.campaignId, "Change the beacon.");
+    const originalQuery = pool.query.bind(pool) as (...args: any[]) => Promise<any>;
+    const querySpy = vi.spyOn(pool, "query");
+    let checkpointed = false;
+    querySpy.mockImplementation((async (...args: any[]) => {
+      const statement = String(args[0]);
+      const parameters = Array.isArray(args[1]) ? args[1] : [];
+      const result = await originalQuery(...args);
+      if (!checkpointed && statement.includes("SET orchestration_private")
+          && String(parameters[3]).includes("validatedMainDraft")) {
+        checkpointed = true;
+        await originalQuery(
+          "UPDATE generation_attempts SET request_metadata = '{\"sentFactIds\":[]}'::jsonb WHERE generation_job_id = $1",
+          [job.id]
+        );
+        await originalQuery(
+          "UPDATE generation_jobs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
+          [job.id]
+        );
+      }
+      return result;
+    }) as any);
+    try {
+      const story = JSON.parse(validStory("The beacon goes dark over the harbor."));
+      story.canonical_facts = ["The original beacon is dark."];
+      story.canonical_fact_updates = [{
+        content: "The original beacon is dark.", supersedes_fact_ids: [sourceFactId]
+      }];
+      replies.push({ content: JSON.stringify(story) });
+      await runGenerationJob(pool, "fact-checkpoint-worker-a", 30, credentialSecret);
+      expect(checkpointed).toBe(true);
+      const persisted = await pool.query<{
+        orchestration_private: { validatedMainDraft: { sentFactIds: string[] } };
+        request_metadata: { sentFactIds: string[] };
+      }>(
+        `SELECT job.orchestration_private, attempt.request_metadata
+           FROM generation_jobs job JOIN generation_attempts attempt ON attempt.generation_job_id = job.id
+          WHERE job.id = $1 AND attempt.attempt_number = 1`,
+        [job.id]
+      );
+      expect(persisted.rows[0]).toMatchObject({
+        orchestration_private: { validatedMainDraft: { sentFactIds: [sourceFactId] } },
+        request_metadata: { sentFactIds: [] }
+      });
+      expect(await runGenerationJob(pool, "fact-checkpoint-worker-b", 30, credentialSecret)).toBe(true);
+      expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed", attempts: 2 });
+      const facts = await pool.query<{ content: string; valid_until_turn: number | null }>(
+        `SELECT content, valid_until_turn FROM campaign_canonical_facts
+          WHERE campaign_id = $1 AND id = ANY($2::uuid[]) ORDER BY content`,
+        [imported.campaignId, [sourceFactId]]
+      );
+      expect(facts.rows).toEqual([{ content: "The original beacon is lit.", valid_until_turn: 3 }]);
+      expect((await getCampaignRuntimeState(pool, imported.campaignId)).canonicalFacts).toEqual([
+        { id: expect.any(String), content: "The original beacon is dark." }
+      ]);
+    } finally {
+      querySpy.mockRestore();
+    }
+  });
+
   it("does not repeat a consumed automatic repair after a lease reclaim", async () => {
     const imported = await campaign();
     const requestOffset = requests.length;
