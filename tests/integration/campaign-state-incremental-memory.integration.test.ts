@@ -82,7 +82,7 @@ describe("incremental current state memory", () => {
     expect(await snapshotCorrectionEvidence(pool, campaignId)).toEqual(evidence);
   });
 
-  it("retains complete corrected authority and fails explicitly when it cannot fit the context budget", async () => {
+  it("keeps complete corrected authority on the generation port while the preview remains sanitized", async () => {
     const { campaignId, ownerUserId, before } = await createCorrectionFixture(pool);
     const current = await updateCampaignRuntimeState(pool, campaignId, {
       ...before, expectedTurnNumber: before.activeTurnNumber, expectedRevision: before.revision,
@@ -92,14 +92,17 @@ describe("incremental current state memory", () => {
     const scope = { ownerUserId, campaignId, worldVersionId: world.rows[0]!.world_version_id,
       request: { query: "The keeper", budgetTokens: 512, compression: "full" as const, recentTurns: 1 },
       costAttribution: { operation: "retrieval_embedding" as const } };
-    await expect(withTransaction(pool, (client) => memoryGeneration(pool).buildContextPreview(client, scope)))
-      .rejects.toMatchObject({ code: "context_budget_exceeded" });
+    const generation = await withTransaction(pool, (client) => memoryGeneration(pool).loadGenerationContext(client, {
+      ownerUserId, campaignId, worldVersionId: world.rows[0]!.world_version_id,
+      operationKind: "append", expectedTurnNumber: current.activeTurnNumber + 1, query: "The keeper"
+    }));
+    expect(generation.authority).toMatchObject({ currentContinuity: {
+      continuitySummary: current.continuitySummary, canonicalFacts: [], openThreads: [], scratchpad: current.scratchpad
+    } });
     const context = await withTransaction(pool, (client) => memoryGeneration(pool).buildContextPreview(client, {
       ...scope, request: { ...scope.request, budgetTokens: 12_000 }
     }));
-    expect(context.scopes).toMatchObject({ currentContinuity: {
-      continuitySummary: current.continuitySummary, canonicalFacts: [], openThreads: [], scratchpad: current.scratchpad
-    } });
+    expect(context.scopes).not.toHaveProperty("currentContinuity");
   });
 
   it("rolls back authority and projections when required indexing cannot be recorded", async () => {

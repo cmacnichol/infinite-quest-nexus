@@ -60,11 +60,11 @@ transaction that a three-turn workflow cannot safely force.
 | --- | --- | --- |
 | Focused composed workflow | Passed: 1 file, 1 test | 2026-09-05, isolated PostgreSQL plus deterministic provider; 4.37 s total. |
 | `pnpm test:unit` | Failed: 2 of 2,837 tests | 2026-09-05: `client-api-routes.test.ts` expects 202 but received 500 for a generation mutation route; `prompt-library.test.ts` expects the missing `Stop once the event is integrated.` instruction. |
-| `pnpm test:integration` | Failed at 2 of 72 files | 2026-09-05: `campaign-authority-repository.integration.test.ts` failed 6 cases because `campaign-state-repository.ts` selects nonexistent `recovery.recovery_metadata`. The harness stopped before this composed file. |
+| `pnpm test:integration` | Passed: 72 isolated files | 2026-09-05: real PostgreSQL integration runner completed after the release-gate corrections; the corrected-authority regression in `campaign-state-incremental-memory.integration.test.ts` passed 5/5. |
 | `pnpm check` | Passed | 2026-09-05, repository/data checks and all TypeScript checks passed. |
 | `pnpm build` | Passed with existing Vite warnings | 2026-09-05; unresolved runtime font references and the 598.82 kB web-next chunk warning were reported. |
 | `git diff --check` | Passed | 2026-09-05. |
-| Browser diagnostics review | Not rerun | Task 10 owns rendered-browser screenshots; no Task 10 diagnostic E2E file is present in this checkout. |
+| Browser diagnostics review | Passed: 3 tests | 2026-09-05: `current-state-corrections.e2e.test.ts` exercised the new Campaign State, new Story editor, and legacy Story flows with desktop and mobile screenshot capture. |
 
 ### Planner measurement
 
