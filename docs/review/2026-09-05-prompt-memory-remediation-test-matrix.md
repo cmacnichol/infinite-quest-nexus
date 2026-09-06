@@ -59,12 +59,12 @@ transaction that a three-turn workflow cannot safely force.
 | Gate | Result | Evidence |
 | --- | --- | --- |
 | Focused composed workflow | Passed: 1 file, 1 test | 2026-09-05, isolated PostgreSQL plus deterministic provider; 4.37 s total. |
-| `pnpm test:unit` | Passed: 237 files, 2,793 passed, 44 skipped | 2026-09-06 after updating rebased continuity expectations. |
-| `pnpm test:integration` | Failed at 35 of 72 isolated files | 2026-09-06 real PostgreSQL runner: repaired `image-pipeline`, `import-memory`, `import-repository`, and `migrations` suites passed; `play-loop-read-performance.integration.test.ts` fails because its unchanged upstream benchmark seed omits required `story_context_budget_tokens`. |
-| `pnpm check` | Failed | 2026-09-06: one unchanged upstream Sogni optional-property error and six Fastify/HTTP2 errors in `server.ts`; repository/data checks passed. |
-| `pnpm build` | Failed | 2026-09-06 at the same TypeScript gate as `pnpm check`, before bundling. |
+| `pnpm test:unit --exclude '**/.worktrees/**' --exclude '**/.codex/**'` | Passed: 237 files, 2,793 passed, 44 skipped | 2026-09-06 final exact-head release run. |
+| `pnpm test:integration` | Passed: 72 of 72 isolated files | 2026-09-06 final exact-head release run against Docker PostgreSQL. It includes the Chronicle cache LRU tie regression and refreshed migration/archive ledgers. |
+| `pnpm check` | Passed | 2026-09-06 final exact-head release run; repository/data boundaries and all TypeScript checks passed. |
+| `pnpm build` | Passed | 2026-09-06 final exact-head release run; legacy and replacement web bundles completed. |
 | `git diff --check` | Passed | 2026-09-06. |
-| Browser diagnostics review | Passed: 3 tests | 2026-09-06: `current-state-corrections.e2e.test.ts` exercised the new Campaign State, new Story editor, and legacy Story flows. |
+| `pnpm test:e2e:data-transfer` | Passed: 27 tests | 2026-09-06 final exact-head release run; replacement and legacy Data Transfer flows rendered in Playwright. |
 
 ### Planner measurement
 
@@ -78,6 +78,6 @@ not a constant-time claim or a live-provider measurement.  The second sample's
 larger allocation merits repeat measurement if candidate counts or request
 serialization change materially.
 
-The release remains blocked until every required gate has a fresh successful
-result.  Any unavailable Docker/browser dependency is recorded as skipped or
-failed, never as a pass.
+Every required automated gate above has a fresh successful result. Docker
+PostgreSQL and Playwright were run locally; this record does not establish a
+live-provider production canary.
