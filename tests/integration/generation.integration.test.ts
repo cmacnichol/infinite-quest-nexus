@@ -147,6 +147,7 @@ function validStory(narration = "Location Gamma opens and Marker Three becomes v
     continuity_summary: "Test Character has reached Location Gamma after discovering Marker Three.",
     canonical_facts: ["Location Gamma is open."],
     superseded_facts: [],
+    canonical_fact_updates: [],
     open_threads: ["Determine what Marker Three unlocks."]
   });
 }
@@ -2157,9 +2158,9 @@ integration("durable Story Engine integration", () => {
     expect(beforeEvents).toHaveLength(1);
     expect(afterEvents).toHaveLength(1);
     expect(pendingEventTriggers).toHaveLength(1);
-    expect(eventTriggers.every((trigger) => (
-      typeof trigger === "object" && trigger !== null && "triggeredCount" in trigger && trigger.triggeredCount === 1
-    ))).toBe(true);
+    expect(eventTriggers).toContainEqual(expect.objectContaining({ id: "before-location", triggeredCount: 1 }));
+    // A deferred after-event is pending fiction, not a fulfilled occurrence.
+    expect(eventTriggers).toContainEqual(expect.objectContaining({ id: "after-object", triggeredCount: 0 }));
     const storyRequest = requests.slice(requestOffset).find((request) => JSON.stringify(request).includes("fiction writer for Infinite Quest"));
     expect(JSON.stringify(storyRequest)).toContain("Marker Four becomes active");
     expect(JSON.stringify(storyRequest)).not.toContain("activation_reason");

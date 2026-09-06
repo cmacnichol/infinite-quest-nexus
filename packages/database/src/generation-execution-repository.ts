@@ -97,6 +97,9 @@ export type GenerationOrchestrationState = {
   afterTriggerError?: string;
   extension?: {
     story: StoryTurnOutput;
+    /** Fences the exact validated extension object across lease reclaim. */
+    finalStoryHash: string;
+    producingAttempt: number;
   };
   extensionError?: string | undefined;
   /** A durable fence for one automatic repair of a particular rejected draft. */
@@ -457,8 +460,17 @@ async function commitAcceptedTurn(
     ? job.base_state_private.trackers
     : stateResult.rows[0]?.trackers;
   const trackers = mergedTrackers(trackerBase, story.tracker_updates);
-  const allEvents = [...(orchestration.beforeEvents || []), ...(orchestration.afterEvents || [])];
-  const newlyActivated = allEvents.filter((event) => event.sourceTurn === job.expected_turn_number);
+  if (orchestration.extension
+      && orchestration.extension.finalStoryHash !== stableStringify(orchestration.extension.story)) {
+    throw Object.assign(new Error("The persisted final event story no longer matches its validated object."), {
+      code: "generation_checkpoint_incompatible"
+    });
+  }
+  const newlyActivated = [
+    ...(orchestration.beforeEvents || []),
+    // An after-event is fulfilled only when its immediate fiction was accepted.
+    ...((orchestration.extension ? orchestration.afterEvents || [] : []).filter((event) => event.addTextAfter))
+  ].filter((event) => event.sourceTurn === job.expected_turn_number);
   const eventTriggers = applyTriggerHits(inputs.eventTriggers, newlyActivated, new Date().toISOString());
   const pendingEventTriggers = (orchestration.afterEvents || [])
     .filter((event) => !event.addTextAfter || Boolean(orchestration.extensionError))

@@ -1519,7 +1519,9 @@ async function executeLoadedGeneration(
           const extension = parseEventExtension(extensionResponse.content, parsed.story.narration);
           orchestration = await persistOrchestration(repository, scope, job, {
             extension: {
-              story: extension
+              story: extension,
+              finalStoryHash: stableStringify(extension),
+              producingAttempt: job.attempts
             },
             // A previous lease may have recorded a transient extension failure.
             // Successful completion on this lease supersedes that stage outcome.
