@@ -18,17 +18,17 @@ function clientReturning(rows: readonly Record<string, unknown>[]): DatabaseClie
 }
 
 describe("loadCurrentContinuityCorrection", () => {
-  it("materializes accepted state when no exact correction replaces it", () => {
+  it("materializes persisted turn facts as editable canonical facts", () => {
     expect(materializeGenerationContinuity({
       continuitySummary: "The keeper is dead.",
       scratchpad: "late password: moonfall",
       openThreads: ["Bury the keeper."],
-      canonicalFacts: []
+      canonicalFacts: ["The keeper died defending the gate."]
     })).toEqual({
       continuitySummary: "The keeper is dead.",
       scratchpad: "late password: moonfall",
       openThreads: ["Bury the keeper."],
-      canonicalFacts: [],
+      canonicalFacts: [{ id: null, content: "The keeper died defending the gate." }],
       trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: []
     });
   });

@@ -42,11 +42,14 @@ export function materializeGenerationContinuity(
     throw new Error("Generation authority state snapshot is invalid.");
   }
   const source = snapshot as Record<string, unknown>;
+  const canonicalFacts = Array.isArray(source.canonicalFacts)
+    ? source.canonicalFacts.map((fact) => typeof fact === "string" ? { id: null, content: fact } : fact)
+    : source.canonicalFacts ?? [];
   return campaignRuntimeStateContentSchema.parse({
     continuitySummary: source.continuitySummary ?? "",
     scratchpad: source.scratchpad ?? "",
     openThreads: source.openThreads ?? [],
-    canonicalFacts: source.canonicalFacts ?? [],
+    canonicalFacts,
     trackers: source.trackers ?? [],
     rpgStats: source.rpgStats ?? [],
     eventTriggers: source.eventTriggers ?? [],
