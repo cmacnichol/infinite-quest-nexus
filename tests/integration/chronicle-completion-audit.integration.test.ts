@@ -815,7 +815,7 @@ integration("Task 14b4 Chronicle HTTP completion audit", () => {
     await pool.query(`
       CREATE OR REPLACE FUNCTION chronicle_audit_slow_rebuild() RETURNS trigger AS $$
       BEGIN
-        PERFORM pg_sleep(0.4);
+        PERFORM pg_sleep(1.2);
         RETURN NEW;
       END;
       $$ LANGUAGE plpgsql;
