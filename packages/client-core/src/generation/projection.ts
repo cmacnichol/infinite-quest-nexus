@@ -1,4 +1,10 @@
-import type { GenerationResult, GenerationStreamSnapshot, TurnSummary } from "@infinite-quest/contracts";
+import {
+  projectSafeGenerationDiagnostic,
+  type GenerationResult,
+  type GenerationStreamSnapshot,
+  type SafeGenerationDiagnostic,
+  type TurnSummary
+} from "@infinite-quest/contracts";
 import { ApiContractError, NexusApiError } from "../errors.js";
 
 export type GenerationOperation =
@@ -12,6 +18,28 @@ export interface SafeUnavailableError {
 
 export const GENERIC_FAILURE_MESSAGE = "Generation could not complete.";
 export const GENERIC_UNAVAILABLE_MESSAGE = "Accepted result is temporarily unavailable. Try loading it again.";
+
+export type GenerationRecoveryGuidance = Readonly<{
+  message: string;
+  retryable: boolean;
+}>;
+
+const recoveryGuidanceByAction: Readonly<Record<SafeGenerationDiagnostic["action"], GenerationRecoveryGuidance>> = {
+  adjust_context: { message: "Review the campaign context settings, then retry the generation.", retryable: true },
+  adjust_output_or_state: { message: "Review the current campaign state or output settings, then retry the generation.", retryable: true },
+  check_provider_window: { message: "Review the selected provider context window, then retry the generation.", retryable: true },
+  repair_authority: { message: "Review the current campaign state before retrying the generation.", retryable: true },
+  update_prompt: { message: "Review the active prompt override, then retry the generation.", retryable: true },
+  discard_and_reenqueue: { message: "Discard this generation and submit the turn again.", retryable: false },
+  retry_event: { message: "Retry the generation to re-evaluate the event.", retryable: true },
+  shorten_or_replace_turn: { message: "Shorten or replace the current turn context, then retry the generation.", retryable: true }
+};
+
+/** Converts only a validated public diagnostic into a legacy-player recovery instruction. */
+export function generationRecoveryGuidance(value: unknown): GenerationRecoveryGuidance | null {
+  const diagnostic = projectSafeGenerationDiagnostic(value);
+  return diagnostic ? recoveryGuidanceByAction[diagnostic.action] : null;
+}
 
 export function copyOperation(value: GenerationOperation): GenerationOperation {
   return value.operationKind === "append"

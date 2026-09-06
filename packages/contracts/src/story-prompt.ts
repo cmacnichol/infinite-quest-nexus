@@ -115,7 +115,11 @@ export function projectSafeGenerationDiagnostic(value: unknown): SafeGenerationD
 }
 export type StoryTurnOutput = z.infer<typeof storyTurnOutputSchema>;
 
+export function storyPromptCompatibilityIdentity(): string {
+  return `${STORY_PROMPT_PROTOCOL_VERSION}|${STORY_PROMPT_SCHEMA_VERSION}|${STORY_CONTEXT_POLICY_VERSION}`;
+}
+
 export function storyPromptProtocolIdentity(templateHashes: Readonly<Record<string, string>>): string {
   const templates = Object.keys(templateHashes).sort().map((key) => `${key}:${templateHashes[key]}`).join("|");
-  return `${STORY_PROMPT_PROTOCOL_VERSION}|${STORY_PROMPT_SCHEMA_VERSION}|${STORY_CONTEXT_POLICY_VERSION}|${templates}`;
+  return `${storyPromptCompatibilityIdentity()}|${templates}`;
 }

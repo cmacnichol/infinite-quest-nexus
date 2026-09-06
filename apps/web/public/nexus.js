@@ -1382,6 +1382,7 @@ async function savePromptLibraryTemplate(event) {
         if (!elements.promptLibraryCompatibilityAcknowledgement.checked) throw new Error("Acknowledge the required output shape before saving this prompt.");
         return promptContentHash(content).then((contentHash) => ({
           requiredShapeVersion: template.compatibility.requiredShapeVersion,
+          protocolIdentity: template.compatibility.protocolIdentity,
           contentHash
         }));
       })()

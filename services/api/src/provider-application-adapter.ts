@@ -255,7 +255,7 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
       content: string;
       scope: "application" | "campaign";
       campaignId?: string;
-      compatibilityAcknowledgement?: Readonly<{ requiredShapeVersion: string; contentHash: string }>;
+      compatibilityAcknowledgement?: Readonly<{ requiredShapeVersion: string; protocolIdentity: string; contentHash: string }>;
     }>) {
       const scope = input.scope === "campaign"
         ? { ownerUserId, scope: "campaign" as const, campaignId: input.campaignId! }

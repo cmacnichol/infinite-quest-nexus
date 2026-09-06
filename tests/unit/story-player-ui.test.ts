@@ -175,6 +175,45 @@ function deferred<T>() {
 }
 
 describe("story-player: new Story Player UI contracts & gameplay logic", () => {
+  it("renders only allowlisted recovery guidance from the durable recovery snapshot", async () => {
+    const privateMarker = "PRIVATE_PROVIDER_PROMPT_AND_RESPONSE";
+    try {
+      const { document } = await bootLegacyStory({
+        turns: makeTurns(1, 1),
+        syncStatus: vi.fn().mockResolvedValue({
+          campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 1, storyLengthProfile: "standard" },
+          world: {},
+          turns: { campaignId: "campaign-1", turns: makeTurns(1, 1), nextCursor: null },
+          pendingGeneration: null,
+          generationRecovery: {
+            id: "generation-1",
+            status: "recoverable",
+            expectedTurnNumber: 2,
+            attempts: 1,
+            operationKind: "append",
+            replacementTurnId: null,
+            resultTurnId: null,
+            errorCode: privateMarker,
+            errorMessage: privateMarker,
+            recoveryMetadata: { providerResponse: privateMarker },
+            diagnostic: {
+              code: "prompt_override_incompatible",
+              operation: "story_generation",
+              action: "update_prompt"
+            }
+          }
+        })
+      });
+
+      expect(document.getElementById("generationRecoveryPanel")?.classList.contains("hidden")).toBe(false);
+      expect(document.getElementById("generationRecoveryMessage")?.textContent).toContain("prompt override");
+      expect(document.getElementById("btnRetryGeneration")?.classList.contains("hidden")).toBe(false);
+      expect(document.body.textContent).not.toContain(privateMarker);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it.each(["sync", "state"])("does not generate or enable input when initial %s loading fails", async (failure) => {
     const workflow = { resume: vi.fn(async () => null), submit: vi.fn().mockRejectedValue(new Error("Unexpected generation")) };
     try {

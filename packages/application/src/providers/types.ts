@@ -313,6 +313,7 @@ export type PromptTemplateView = Readonly<{
   contentHash: string;
   compatibility: Readonly<{
     requiredShapeVersion: string;
+    protocolIdentity: string;
     requiredShapePreview: string;
     acknowledged: boolean;
   }> | null;
@@ -344,6 +345,7 @@ export type SavePromptOverrideCommand = PromptScope & Readonly<{
   content: string;
   compatibilityAcknowledgement?: Readonly<{
     requiredShapeVersion: string;
+    protocolIdentity: string;
     contentHash: string;
   }>;
 }>;

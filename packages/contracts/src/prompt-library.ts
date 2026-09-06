@@ -2,7 +2,8 @@ import { z } from "zod";
 import {
   STORY_PROMPT_SCHEMA_VERSION,
   STORY_PROMPT_REQUIRED_SHAPE_PREVIEW,
-  STORY_SYSTEM_PROMPT
+  STORY_SYSTEM_PROMPT,
+  storyPromptCompatibilityIdentity
 } from "./story-prompt.js";
 
 export const promptTemplateKeySchema = z.enum([
@@ -16,6 +17,7 @@ export type PromptTemplateKey = z.infer<typeof promptTemplateKeySchema>;
 
 export type PromptCompatibilityRequirement = Readonly<{
   requiredShapeVersion: string;
+  protocolIdentity: string;
   requiredShapePreview: string;
 }>;
 
@@ -28,12 +30,14 @@ export function promptCompatibilityRequirement(key: PromptTemplateKey): PromptCo
   if (key !== "story_system" && key !== "event_extension") return null;
   return {
     requiredShapeVersion: STORY_PROMPT_SCHEMA_VERSION,
+    protocolIdentity: storyPromptCompatibilityIdentity(),
     requiredShapePreview: STORY_PROMPT_REQUIRED_SHAPE_PREVIEW
   };
 }
 
 export const promptCompatibilityAcknowledgementSchema = z.object({
   requiredShapeVersion: z.string().trim().min(1).max(200),
+  protocolIdentity: z.string().trim().min(1).max(500),
   contentHash: z.string().regex(/^[a-f0-9]{64}$/)
 }).strict();
 

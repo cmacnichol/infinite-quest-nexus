@@ -38,6 +38,7 @@ type OverrideRow = {
   content: string;
   campaign_id: string | null;
   compatibility_required_shape_version: string | null;
+  compatibility_protocol_identity: string | null;
   compatibility_content_hash: string | null;
 };
 
@@ -68,7 +69,7 @@ async function resolveSnapshot(database: DatabaseClient, scope: PromptScope, enf
   const campaignId = scope.scope === "campaign" ? scope.campaignId : null;
   if (campaignId) await assertCampaignOwner(database, scope.ownerUserId, campaignId);
   const result = await database.query<OverrideRow>(
-    `SELECT prompt_key,content,campaign_id,compatibility_required_shape_version,compatibility_content_hash FROM prompt_template_overrides
+    `SELECT prompt_key,content,campaign_id,compatibility_required_shape_version,compatibility_protocol_identity,compatibility_content_hash FROM prompt_template_overrides
       WHERE owner_user_id=$1 AND (campaign_id IS NULL OR campaign_id=$2)
       ORDER BY campaign_id NULLS FIRST,prompt_key`,
     [scope.ownerUserId, campaignId]
@@ -78,6 +79,7 @@ async function resolveSnapshot(database: DatabaseClient, scope: PromptScope, enf
   for (const row of result.rows) {
     const requirement = promptCompatibilityRequirement(row.prompt_key);
     if (enforceCompatibility && requirement && (row.compatibility_required_shape_version !== requirement.requiredShapeVersion
+      || row.compatibility_protocol_identity !== requirement.protocolIdentity
       || row.compatibility_content_hash !== hash(row.content))) {
       throw Object.assign(new Error("A saved prompt override must be acknowledged for the current required output shape before generation can run."), {
         statusCode: 409,
@@ -133,7 +135,7 @@ export function createPromptRepository(database: DatabaseClient): PromptLibraryP
     const snapshot = await resolveSnapshot(database, scope, false);
     const campaignId = scope.scope === "campaign" ? scope.campaignId : null;
     const overrides = await database.query<OverrideRow>(
-      `SELECT prompt_key,content,campaign_id,compatibility_required_shape_version,compatibility_content_hash FROM prompt_template_overrides
+      `SELECT prompt_key,content,campaign_id,compatibility_required_shape_version,compatibility_protocol_identity,compatibility_content_hash FROM prompt_template_overrides
         WHERE owner_user_id=$1 AND (campaign_id IS NULL OR campaign_id=$2)
         ORDER BY campaign_id NULLS FIRST,prompt_key`,
       [scope.ownerUserId, campaignId]
@@ -164,6 +166,7 @@ export function createPromptRepository(database: DatabaseClient): PromptLibraryP
             acknowledged: snapshot[definition.key].source === "shipped" || (() => {
               const override = acknowledgement.get(definition.key);
               return override?.compatibility_required_shape_version === requirement.requiredShapeVersion
+                && override.compatibility_protocol_identity === requirement.protocolIdentity
                 && override.compatibility_content_hash === snapshot[definition.key].hash;
             })()
           };
@@ -188,10 +191,12 @@ export function createPromptRepository(database: DatabaseClient): PromptLibraryP
         key: command.key,
         content: command.content,
         scope: command.scope,
-        ...(campaignId ? { campaignId } : {})
+        ...(campaignId ? { campaignId } : {}),
+        ...(command.compatibilityAcknowledgement === undefined ? {} : { compatibilityAcknowledgement: command.compatibilityAcknowledgement })
       });
       const requirement = promptCompatibilityRequirement(value.key);
       if (requirement && (value.compatibilityAcknowledgement?.requiredShapeVersion !== requirement.requiredShapeVersion
+        || value.compatibilityAcknowledgement.protocolIdentity !== requirement.protocolIdentity
         || value.compatibilityAcknowledgement.contentHash !== hash(value.content))) {
         throw Object.assign(new Error("Acknowledge the current required output shape for this exact prompt text before saving."), {
           statusCode: 409,
@@ -200,12 +205,12 @@ export function createPromptRepository(database: DatabaseClient): PromptLibraryP
       }
       if (campaignId) await assertCampaignOwner(database, command.ownerUserId, campaignId);
       await database.query(
-        `INSERT INTO prompt_template_overrides(owner_user_id,campaign_id,prompt_key,content,compatibility_required_shape_version,compatibility_content_hash,compatibility_acknowledged_at,updated_at)
-         VALUES($1,$2,$3,$4,$5,$6,CASE WHEN $5 IS NULL THEN NULL ELSE now() END,now())
+        `INSERT INTO prompt_template_overrides(owner_user_id,campaign_id,prompt_key,content,compatibility_required_shape_version,compatibility_protocol_identity,compatibility_content_hash,compatibility_acknowledged_at,updated_at)
+         VALUES($1,$2,$3,$4,$5,$6,$7,CASE WHEN $5 IS NULL THEN NULL ELSE now() END,now())
          ON CONFLICT(owner_user_id,campaign_id,prompt_key)
-         DO UPDATE SET content=excluded.content,compatibility_required_shape_version=excluded.compatibility_required_shape_version,compatibility_content_hash=excluded.compatibility_content_hash,compatibility_acknowledged_at=excluded.compatibility_acknowledged_at,updated_at=now()`,
+         DO UPDATE SET content=excluded.content,compatibility_required_shape_version=excluded.compatibility_required_shape_version,compatibility_protocol_identity=excluded.compatibility_protocol_identity,compatibility_content_hash=excluded.compatibility_content_hash,compatibility_acknowledged_at=excluded.compatibility_acknowledged_at,updated_at=now()`,
         [command.ownerUserId, campaignId, value.key, value.content,
-          requirement?.requiredShapeVersion ?? null, value.compatibilityAcknowledgement?.contentHash ?? null]
+          requirement?.requiredShapeVersion ?? null, value.compatibilityAcknowledgement?.protocolIdentity ?? null, value.compatibilityAcknowledgement?.contentHash ?? null]
       );
       await invalidateModelChains(database, command, value.key);
       return listPromptLibrary(command);
