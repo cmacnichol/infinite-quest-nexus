@@ -108,6 +108,15 @@ export type GenerationOrchestrationState = {
     rejectedDraftHash: string;
     consumedAttempt: number;
   } | undefined;
+  /** One durable, provenance-fenced rewrite allowance for rejected event fiction. */
+  eventCoverageRepair?: {
+    rejectedFinalStoryHash: string;
+    validatedMainDraftHash: string;
+    extensionFinalStoryHash: string | null;
+    extensionProducingAttempt: number | null;
+    consumedAttempt: number;
+    repairedFinalStoryHash?: string;
+  } | undefined;
   validatedMainDraft?: GenerationValidatedMainDraftCheckpoint;
 };
 
@@ -119,6 +128,24 @@ function hasValidAutomaticRepair(value: unknown): boolean {
     && typeof repair.rejectedDraftHash === "string" && repair.rejectedDraftHash.length > 0
     && typeof repair.consumedAttempt === "number" && Number.isSafeInteger(repair.consumedAttempt)
     && repair.consumedAttempt > 0;
+}
+
+function hasValidEventCoverageRepair(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const repair = value as Record<string, unknown>;
+  return typeof repair.rejectedFinalStoryHash === "string" && repair.rejectedFinalStoryHash.length > 0
+    && typeof repair.validatedMainDraftHash === "string" && repair.validatedMainDraftHash.length > 0
+    && (repair.extensionFinalStoryHash === null
+      || (typeof repair.extensionFinalStoryHash === "string" && repair.extensionFinalStoryHash.length > 0))
+    && (repair.extensionProducingAttempt === null
+      || (typeof repair.extensionProducingAttempt === "number"
+        && Number.isSafeInteger(repair.extensionProducingAttempt)
+        && repair.extensionProducingAttempt > 0))
+    && typeof repair.consumedAttempt === "number" && Number.isSafeInteger(repair.consumedAttempt)
+    && repair.consumedAttempt > 0
+    && (repair.repairedFinalStoryHash === undefined
+      || (typeof repair.repairedFinalStoryHash === "string" && repair.repairedFinalStoryHash.length > 0));
 }
 
 export type GenerationStreamingState = Record<string, unknown> & {
@@ -741,7 +768,8 @@ export function createPostgresGenerationExecutionRepository(
       );
       const row = result.rows[0];
       if (!row) return null;
-      if (!hasValidAutomaticRepair(row.orchestration_private?.automaticRepair)) {
+      if (!hasValidAutomaticRepair(row.orchestration_private?.automaticRepair)
+          || !hasValidEventCoverageRepair(row.orchestration_private?.eventCoverageRepair)) {
         await client.query(
           `UPDATE generation_jobs
               SET status = 'recoverable', error_code = 'generation_checkpoint_incompatible',
@@ -750,7 +778,7 @@ export function createPostgresGenerationExecutionRepository(
                   lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
             WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
               AND status = 'assessing' AND lease_expires_at > now()`,
-          [row.id, row.owner_user_id, request.workerId, json({ reason: "automatic_repair_invalid" })]
+          [row.id, row.owner_user_id, request.workerId, json({ reason: "orchestration_repair_invalid" })]
         );
         return null;
       }

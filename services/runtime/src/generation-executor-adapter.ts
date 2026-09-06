@@ -1547,12 +1547,12 @@ async function executeLoadedGeneration(
       }), "saving event extension recovery state");
       return true;
     }
-    const committedStory: StoryTurnOutput = orchestration.extension?.story || parsed.story;
+    let committedStory: StoryTurnOutput = orchestration.extension?.story || parsed.story;
     if (mechanicsLeakFields(committedStory).length) {
       throw new Error("Mechanics validation invariant failed after event extension.");
     }
     if (immediateEvents.length) {
-      let eventCoverage = null;
+      let eventCoverage: ReturnType<typeof parseSceneCoverageOutput> | null = null;
       try {
         const coverageResponse = await phase("scene_coverage_validation", () =>
           callCampaignTextProvider(dependencies, provider, job, "scene_coverage_validation", {
@@ -1568,15 +1568,98 @@ async function executeLoadedGeneration(
         if (isRecoverableIntegrityError(error)) throw error;
       }
       if (!eventCoverage?.covered) {
-        assertActiveGenerationUpdate(await repository.markRecoverable({
-          ...scope,
-          providerResponseId: result.responseId || null,
-          providerFinishReason: result.finishReason || null,
-          errorCode: "event_coverage_failed",
-          errorMessage: "The immediate event fiction could not be verified against the final narration.",
-          recoveryMetadata: { retryable: true, stage: "event_coverage" }
-        }), "saving event coverage recovery state");
-        return true;
+        const rejectedFinalStoryHash = stableStringify(committedStory);
+        const existingRepair = orchestration.eventCoverageRepair;
+        if (existingRepair
+          && (existingRepair.rejectedFinalStoryHash === rejectedFinalStoryHash
+            || existingRepair.repairedFinalStoryHash === rejectedFinalStoryHash)) {
+          assertActiveGenerationUpdate(await repository.markRecoverable({
+            ...scope,
+            providerResponseId: result.responseId || null,
+            providerFinishReason: result.finishReason || null,
+            errorCode: "event_coverage_repair_consumed",
+            errorMessage: "The final event fiction still failed verification after its one permitted rewrite.",
+            recoveryMetadata: { retryable: true, stage: "event_coverage", repairConsumed: true }
+          }), "saving consumed event coverage repair state");
+          return true;
+        }
+        const repair = {
+          rejectedFinalStoryHash,
+          validatedMainDraftHash: orchestration.validatedMainDraft?.draftHash || sha256(stableStringify(parsed.story)),
+          extensionFinalStoryHash: orchestration.extension?.finalStoryHash || null,
+          extensionProducingAttempt: orchestration.extension?.producingAttempt || null,
+          consumedAttempt: job.attempts
+        };
+        orchestration = await persistOrchestration(repository, scope, job, { eventCoverageRepair: repair });
+        let repairedStory: StoryTurnOutput | null = null;
+        try {
+          const repairResponse = await phase("scene_coverage_rewrite", () => callCampaignTextProvider(
+            dependencies,
+            provider,
+            job,
+            "scene_coverage_rewrite",
+            {
+              ...baseRequest,
+              recoveryInput: renderPromptTemplate(
+                collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage_rewrite"),
+                {
+                  validation: stableStringify({
+                    missing_required_beats: eventCoverage?.missing_required_beats || ["Immediate event coverage could not be verified."],
+                    contradictions: eventCoverage?.contradictions || []
+                  })
+                }
+              ),
+              rejectedResponse: stableStringify(committedStory)
+            }
+          ));
+          if (!repairResponse.outputLimited) {
+            const repaired = parseStoryOutput(repairResponse.content, storyMemoryDefaults);
+            if (repaired.ok && !mechanicsLeakFields(repaired.story).length) repairedStory = repaired.story;
+          }
+        } catch (error) {
+          if (isRecoverableIntegrityError(error)) throw error;
+        }
+        if (repairedStory) {
+          const repairedFinalStoryHash = stableStringify(repairedStory);
+          orchestration = await persistOrchestration(repository, scope, job, {
+            extension: {
+              story: repairedStory,
+              finalStoryHash: repairedFinalStoryHash,
+              producingAttempt: job.attempts
+            },
+            eventCoverageRepair: { ...repair, repairedFinalStoryHash },
+            extensionError: undefined
+          });
+          committedStory = repairedStory;
+          try {
+            const coverageResponse = await phase("scene_coverage_validation", () =>
+              callCampaignTextProvider(dependencies, provider, job, "scene_coverage_validation", {
+                systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
+                input: buildSceneCoveragePrompt(
+                  fictionGuidanceForEvents(immediateEvents).join("\n"),
+                  repairedStory.narration
+                )
+              })
+            );
+            eventCoverage = coverageResponse.outputLimited ? null : parseSceneCoverageOutput(coverageResponse.content);
+          } catch (error) {
+            if (isRecoverableIntegrityError(error)) throw error;
+            eventCoverage = null;
+          }
+        }
+        if (repairedStory && eventCoverage?.covered) {
+          // The full replacement was revalidated; commit the durable final story below.
+        } else {
+          assertActiveGenerationUpdate(await repository.markRecoverable({
+            ...scope,
+            providerResponseId: result.responseId || null,
+            providerFinishReason: result.finishReason || null,
+            errorCode: "event_coverage_failed",
+            errorMessage: "The immediate event fiction could not be verified against the final narration.",
+            recoveryMetadata: { retryable: true, stage: "event_coverage", repairAttempted: true }
+          }), "saving event coverage recovery state");
+          return true;
+        }
       }
     }
     assertActiveGenerationUpdate(await repository.markCommitting(scope), "entering commit");

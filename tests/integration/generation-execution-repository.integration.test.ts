@@ -23,6 +23,7 @@ import { providerPromptProtocolVersion, loadPromptSnapshotForTest } from "../hel
 import { createProvider } from "../helpers/provider-application-fixtures.js";
 import { memoryGeneration } from "../helpers/memory-applications.js";
 import { DEDICATED_CHUNKED_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
+import { stableStringify } from "../../packages/domain/src/index.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -667,6 +668,49 @@ integration("PostgreSQL generation execution repository", () => {
       ...earlierTurns,
       expect.objectContaining({ id: committed.turnId })
     ]);
+  });
+
+  it("keeps a final event story accepted when its illustration finalization enqueue fails", async () => {
+    const imported = await campaign();
+    const { repository, scope, job } = await readyAcceptedCommit(imported.campaignId, "event-finalization-worker");
+    const finalStory = supersedingStory([]);
+    finalStory.narration = "The observatory bell rings after the keeper's final warning.";
+    const acceptedDuringIllustration = vi.fn(async (database: DatabaseClient) => {
+      const result = await database.query<{ narration: string }>(
+        "SELECT narration FROM turns WHERE campaign_id=$1 AND owner_user_id=$2 ORDER BY turn_number DESC LIMIT 1",
+        [imported.campaignId, ownerUserId]
+      );
+      expect(result.rows[0]?.narration).toBe(finalStory.narration);
+      throw new Error("synthetic illustration finalization fault");
+    });
+    const onIllustrationEnqueueError = vi.fn();
+
+    const committed = await repository.commitAcceptedTurn({
+      ...acceptedCommitInput({ scope, job, story: finalStory }),
+      orchestration: {
+        afterEvents: [],
+        extension: {
+          story: finalStory,
+          finalStoryHash: stableStringify(finalStory),
+          producingAttempt: job.attempts
+        }
+      },
+      collaborators: {
+        memory: memoryGeneration(pool),
+        illustration: {
+          enqueueAcceptedTurnIllustrationSegments: acceptedDuringIllustration
+        } as unknown as AcceptedGenerationCommitCollaborators["illustration"],
+        attributeGenerationCostsToTurn: async () => undefined
+      },
+      onIllustrationEnqueueError
+    });
+
+    expect(acceptedDuringIllustration).toHaveBeenCalledOnce();
+    expect(onIllustrationEnqueueError).toHaveBeenCalledOnce();
+    await expect(pool.query("SELECT narration FROM turns WHERE id=$1", [committed.turnId]))
+      .resolves.toMatchObject({ rows: [{ narration: finalStory.narration }] });
+    await expect(pool.query("SELECT status FROM generation_jobs WHERE id=$1", [job.id]))
+      .resolves.toMatchObject({ rows: [{ status: "completed" }] });
   });
 
   it("rejects malformed retrieval audit before inserting a turn or touching earlier accepted rows", async () => {

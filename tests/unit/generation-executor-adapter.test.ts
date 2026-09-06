@@ -262,6 +262,68 @@ describe("generation executor adapter", () => {
     }));
   });
 
+  it("persists one event-coverage repair and commits only its revalidated full story", async () => {
+    const job = completeGenerationExecutionPayload();
+    job.orchestration_inputs.suppressEventTriggers = false;
+    job.orchestration_private.afterEvents = [{
+      triggerId: "00000000-0000-4000-8000-000000000010",
+      sourceTurn: claim.expectedTurnNumber,
+      addTextAfter: true,
+      instructions: "A silver bell rings in the observatory.",
+      summary: "The bell must ring."
+    }] as never;
+    const repository = {
+      loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true),
+      markGenerating: vi.fn(async () => true),
+      saveOrchestration: vi.fn(async (_scope, value) => {
+        job.orchestration_private = value;
+        return true;
+      }),
+      savePartialNarration: vi.fn(async () => true), saveStreamingSegments: vi.fn(async () => true),
+      recordAttempt: vi.fn(async () => undefined), markRecoverable: vi.fn(async () => true),
+      markValidating: vi.fn(async () => true), markCommitting: vi.fn(async () => true),
+      commitAcceptedTurn: vi.fn(async () => ({ turnId: "00000000-0000-4000-8000-000000000006" })),
+      markFailed: vi.fn(async () => true)
+    } as unknown as GenerationExecutionRepository;
+    const story = (narration: string) => JSON.stringify({
+      narration, choices: ["Enter.", "Wait.", "Study.", "Call."], custom_action_suggestion: "Study the lens.",
+      scratchpad: "The door is open.", tracker_updates: [], image_prompt: "A moonlit observatory hall.",
+      continuity_summary: "The observatory door is open.", canonical_facts: [], superseded_facts: [],
+      canonical_fact_updates: [], open_threads: []
+    });
+    const provider = {
+      id: claim.providerProfileId, name: "Captured provider", providerRole: "text" as const,
+      providerType: "openai_compatible" as const, model: "test-model", contextWindowTokens: 16_000,
+      maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {}, execute: vi.fn()
+        .mockResolvedValueOnce({ content: story("The observatory door opens."), responseId: "main", finishReason: "stop", outputLimited: false, modelInstanceId: "test-instance", usage: {}, reportedCost: null, rawMetadata: {} })
+        .mockResolvedValueOnce({ content: story("The observatory door opens.\n\nThe chamber stays silent."), responseId: "extension", finishReason: "stop", outputLimited: false, modelInstanceId: "test-instance", usage: {}, reportedCost: null, rawMetadata: {} })
+        .mockResolvedValueOnce({ content: JSON.stringify({ covered: false, missing_required_beats: ["bell"], contradictions: [] }), responseId: "coverage-1", finishReason: "stop", outputLimited: false, modelInstanceId: "test-instance", usage: {}, reportedCost: null, rawMetadata: {} })
+        .mockResolvedValueOnce({ content: story("The observatory door opens and a silver bell rings."), responseId: "repair", finishReason: "stop", outputLimited: false, modelInstanceId: "test-instance", usage: {}, reportedCost: null, rawMetadata: {} })
+        .mockResolvedValueOnce({ content: JSON.stringify({ covered: true, missing_required_beats: [], contradictions: [] }), responseId: "coverage-2", finishReason: "stop", outputLimited: false, modelInstanceId: "test-instance", usage: {}, reportedCost: null, rawMetadata: {} })
+    };
+    const collaborators = {
+      memory: { loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT })) },
+      illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) },
+      loadTextExecution: vi.fn(async () => provider), promptFromSnapshot: vi.fn(() => "Write a concise fictional scene."),
+      recordProfileCost: vi.fn(async () => undefined), attributeGenerationCostsToTurn: vi.fn(async () => undefined)
+    } as unknown as GenerationExecutionCollaborators;
+
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: "event-repair-worker", leaseSeconds: 30, claim })).resolves.toBe(true);
+
+    expect(job.orchestration_private.eventCoverageRepair).toEqual(expect.objectContaining({ consumedAttempt: 1 }));
+    expect(repository.commitAcceptedTurn).toHaveBeenCalledWith(expect.objectContaining({
+      story: expect.objectContaining({ narration: "The observatory door opens and a silver bell rings." })
+    }));
+    job.attempts = 2;
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: "event-repair-reclaim", leaseSeconds: 30, claim: { ...claim, attempts: 2 } })).resolves.toBe(true);
+    expect(provider.execute).toHaveBeenCalledTimes(6);
+    expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({
+      errorCode: "event_coverage_repair_consumed"
+    }));
+  });
+
   it("sends planner-selected private authority candidates and records omitted candidates without reading the legacy preview", async () => {
     const job = completeGenerationExecutionPayload();
     job.context_options = { ...job.context_options, budgetTokens: 1_000 };
