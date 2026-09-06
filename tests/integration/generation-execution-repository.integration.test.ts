@@ -193,13 +193,14 @@ integration("PostgreSQL generation execution repository", () => {
       worldVersionId,
       title: "Canonical fact foreign campaign"
     });
-    return insertCanonicalFact({
+    const id = await insertCanonicalFact({
       ownerUserId: foreignOwnerUserId,
       campaignId,
       worldVersionId,
       content: "The foreign observatory is a lighthouse.",
       validFromTurn: 1
     });
+    return { id, ownerUserId: foreignOwnerUserId, campaignId };
   }
 
   async function alternateWorldVersion(worldVersionId: string) {
@@ -259,8 +260,11 @@ integration("PostgreSQL generation execution repository", () => {
     };
   }
 
-  async function acceptedAndChronicleSnapshot(campaignId: string) {
-    const [turns, memories] = await Promise.all([
+  async function acceptedAndChronicleSnapshot(
+    campaignId: string,
+    factScopes: readonly Readonly<{ ownerUserId: string; campaignId: string }>[] = [{ ownerUserId, campaignId }]
+  ) {
+    const [turns, memories, factResults] = await Promise.all([
       pool.query<{ id: string; turn_number: number; narration: string }>(
         `SELECT id,turn_number,narration FROM turns
           WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY turn_number,id`,
@@ -270,9 +274,28 @@ integration("PostgreSQL generation execution repository", () => {
         `SELECT id,turn_id,memory_kind,content FROM chronicle_memories
           WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY id`,
         [ownerUserId, campaignId]
-      )
+      ),
+      Promise.all(factScopes.map((scope) => pool.query<{
+        id: string;
+        owner_user_id: string;
+        campaign_id: string;
+        content: string;
+        valid_from_turn: number;
+        valid_until_turn: number | null;
+        superseded_by_fact_id: string | null;
+      }>(
+        `SELECT id,owner_user_id,campaign_id,content,valid_from_turn,valid_until_turn,superseded_by_fact_id
+           FROM campaign_canonical_facts
+          WHERE owner_user_id=$1 AND campaign_id=$2
+          ORDER BY id`,
+        [scope.ownerUserId, scope.campaignId]
+      )))
     ]);
-    return { turns: turns.rows, memories: memories.rows };
+    return {
+      turns: turns.rows,
+      memories: memories.rows,
+      facts: factResults.flatMap((result) => result.rows)
+    };
   }
 
   async function turnVersionSnapshot(campaignId: string) {
@@ -896,13 +919,22 @@ integration("PostgreSQL generation execution repository", () => {
     });
     let supersededFactId = activeFactId;
     let sentFactIds: readonly string[] | undefined = [activeFactId];
+    const factScopes: Array<{ ownerUserId: string; campaignId: string }> = [{
+      ownerUserId,
+      campaignId: imported.campaignId
+    }];
 
     if (caseName === "omitted same-campaign fact") {
       sentFactIds = undefined;
     } else if (caseName === "foreign-owner fact") {
       // The campaign/world-version composite foreign keys prohibit a foreign
       // owner on this campaign. Use a fully valid foreign-owned graph instead.
-      supersededFactId = await foreignScopeFact();
+      const foreignFact = await foreignScopeFact();
+      supersededFactId = foreignFact.id;
+      factScopes.push({
+        ownerUserId: foreignFact.ownerUserId,
+        campaignId: foreignFact.campaignId
+      });
       sentFactIds = [supersededFactId];
     } else if (caseName === "other-campaign same-owner same-world fact") {
       const otherCampaignId = await insertCampaignWithSourceTurn({
@@ -916,6 +948,7 @@ integration("PostgreSQL generation execution repository", () => {
         content: "The other observatory is a lighthouse.",
         validFromTurn: 1
       });
+      factScopes.push({ ownerUserId, campaignId: otherCampaignId });
       sentFactIds = [supersededFactId];
     } else if (caseName === "other-world-version same-owner same-campaign fact") {
       const otherWorldVersionId = await alternateWorldVersion(imported.worldVersionId);
@@ -954,13 +987,13 @@ integration("PostgreSQL generation execution repository", () => {
       supersededFactId = crypto.randomUUID();
     }
 
-    const before = await acceptedAndChronicleSnapshot(imported.campaignId);
+    const before = await acceptedAndChronicleSnapshot(imported.campaignId, factScopes);
     await expect(repository.commitAcceptedTurn(acceptedCommitInput({
       scope,
       job,
       story: supersedingStory([supersededFactId]),
       ...(sentFactIds ? { sentFactIds } : {})
     }))).rejects.toMatchObject({ code: "invalid_fact_supersession" });
-    expect(await acceptedAndChronicleSnapshot(imported.campaignId)).toEqual(before);
+    expect(await acceptedAndChronicleSnapshot(imported.campaignId, factScopes)).toEqual(before);
   });
 });
