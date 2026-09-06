@@ -1223,6 +1223,7 @@ The durable record is verified.`;
       zipBytes.byteLength,
       { simulateCrashAfterAttach: true },
     );
+    await adapters.filesystem.close();
     const crashed = await pool.query<{ id: string }>(
       `SELECT operation.id
          FROM durable_filesystem_operations operation

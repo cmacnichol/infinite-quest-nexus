@@ -638,13 +638,6 @@ export function createTask14e2cAdapters(options: Task14e2cAdapterOptions): Task1
             const result = await durable.journal.attach(client, reserved.operation, candidate);
             if (result.outcome !== "attached") return result;
             if (input.simulateCrashAfterAttach) return result;
-            const updated = await client.query(
-              `UPDATE assets
-                  SET storage_path=$3,content_hash=$4,byte_length=$5
-                WHERE id=$1 AND owner_user_id=$2`,
-              [input.assetId, input.ownerUserId, descriptor.relativePath, descriptor.contentHash, descriptor.byteLength]
-            );
-            if (!updated.rowCount) throw new Error("task_14e2c_asset_not_found");
             return result;
           }));
           if (input.failBeforeDomainCommit) {
@@ -653,6 +646,15 @@ export function createTask14e2cAdapters(options: Task14e2cAdapterOptions): Task1
           if (input.simulateCrashAfterAttach) {
             throw new Task14e2cSimulatedCrash("task_14e2c_simulated_image_crash");
           }
+          await withTransaction(options.pool, async (client) => {
+            const updated = await client.query(
+              `UPDATE assets
+                  SET storage_path=$3,content_hash=$4,byte_length=$5
+                WHERE id=$1 AND owner_user_id=$2`,
+              [input.assetId, input.ownerUserId, descriptor.relativePath, descriptor.contentHash, descriptor.byteLength]
+            );
+            if (!updated.rowCount) throw new Error("task_14e2c_asset_not_found");
+          });
           domainCommitted = true;
           const legacyLocator = attached.operation.operationId as unknown as DatabaseIssuedStorageLocator;
           input.captureAttachedLocator?.(legacyLocator);
