@@ -742,7 +742,7 @@ integration("Task 14e3b2c private portable repository", () => {
       );
       await contender.query("BEGIN");
       const resultPromise = imports.prepareStagedCleanup(contender, rehydrated);
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_200));
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 2_000));
       await blocker.query("COMMIT");
       expect(await resultPromise).toEqual({ outcome: "lease_lost" });
       await contender.query("COMMIT");
