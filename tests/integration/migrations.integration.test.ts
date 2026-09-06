@@ -1628,16 +1628,22 @@ END;
     databaseUrlValue.pathname = `/${databaseName}`;
     const migrationDirectory = await mkdtemp(join(tmpdir(), "infinitequest-asset-portable-migrations-"));
     const failingMigrationDirectory = await mkdtemp(join(tmpdir(), "infinitequest-asset-portable-rollback-"));
+    const predecessorMigrations: string[] = [];
     let isolatedPool: DatabasePool | null = null;
     try {
       await pool.query(`CREATE DATABASE ${databaseName}`);
       for (const file of await readdir(resolve("database/migrations"))) {
         if (file.endsWith(".sql") && file < `${migrationName}.sql`) {
           await copyFile(join(resolve("database/migrations"), file), join(migrationDirectory, file));
+          predecessorMigrations.push(file.slice(0, -4));
         }
       }
       isolatedPool = createDatabasePool(databaseUrlValue.toString(), 2);
       await migrateDatabase(isolatedPool, migrationDirectory);
+      await isolatedPool.query("DELETE FROM schema_migrations");
+      for (const migration of predecessorMigrations) {
+        await isolatedPool.query("INSERT INTO schema_migrations (name,run_on) VALUES ($1,now())", [migration]);
+      }
 
       const owner = await isolatedPool.query<{ id: string }>("SELECT id FROM users WHERE system_key = 'initial-owner'");
       const ownerUserId = owner.rows[0]!.id;
