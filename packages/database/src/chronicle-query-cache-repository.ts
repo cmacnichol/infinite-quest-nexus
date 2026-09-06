@@ -132,6 +132,7 @@ async function recoverSavepoint(client: DatabaseClient, savepoint: string): Prom
 export function createPostgresChronicleQueryCacheRepository(
   client: DatabaseClient,
   dependencies: ChronicleQueryCacheDependencies = {},
+  useSavepoints = true,
 ): ChronicleQueryEmbeddingCacheRepository {
   return {
     async getQueryEmbedding(scope, key) {
@@ -141,7 +142,7 @@ export function createPostgresChronicleQueryCacheRepository(
       }
       const savepoint = "chronicle_query_embedding_cache_get";
       try {
-        await client.query(`SAVEPOINT ${savepoint}`);
+        if (useSavepoints) await client.query(`SAVEPOINT ${savepoint}`);
         const result = await client.query<CacheRow>(
           `UPDATE chronicle_query_embedding_cache
               SET last_accessed_at=clock_timestamp(),
@@ -154,7 +155,7 @@ export function createPostgresChronicleQueryCacheRepository(
           RETURNING embedding::text,embedding_dimensions`,
           keyValues(scope, key)
         );
-        await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+        if (useSavepoints) await client.query(`RELEASE SAVEPOINT ${savepoint}`);
         const row = result.rows[0];
         if (!row) return null;
         const vector = parseVector(row.embedding, row.embedding_dimensions);
@@ -164,7 +165,7 @@ export function createPostgresChronicleQueryCacheRepository(
         }
         return vector;
       } catch {
-        await recoverSavepoint(client, savepoint);
+        if (useSavepoints) await recoverSavepoint(client, savepoint);
         diagnostic(dependencies, scope, "get");
         return null;
       }
@@ -177,11 +178,21 @@ export function createPostgresChronicleQueryCacheRepository(
       }
       const savepoint = "chronicle_query_embedding_cache_put";
       try {
-        await client.query(`SAVEPOINT ${savepoint}`);
-        await client.query(
-          "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-          [`chronicle-query-cache:${scope.ownerUserId}:${scope.campaignId}`]
-        );
+        if (useSavepoints) {
+          await client.query(`SAVEPOINT ${savepoint}`);
+          await client.query(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            [`chronicle-query-cache:${scope.ownerUserId}:${scope.campaignId}`]
+          );
+        } else {
+          // Provider I/O has already completed. Keep only this bounded cache
+          // update atomic so concurrent writes retain the campaign entry cap.
+          await client.query("BEGIN");
+          await client.query(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            [`chronicle-query-cache:${scope.ownerUserId}:${scope.campaignId}`]
+          );
+        }
         await client.query(
           `INSERT INTO chronicle_query_embedding_cache
              (owner_user_id,campaign_id,normalized_query_hash,provider_profile_id,
@@ -212,9 +223,13 @@ export function createPostgresChronicleQueryCacheRepository(
             )`,
           [scope.ownerUserId, scope.campaignId, CACHE_ENTRY_LIMIT]
         );
-        await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+        if (useSavepoints) await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+        else await client.query("COMMIT");
       } catch {
-        await recoverSavepoint(client, savepoint);
+        if (useSavepoints) await recoverSavepoint(client, savepoint);
+        else {
+          try { await client.query("ROLLBACK"); } catch { /* cache is best-effort */ }
+        }
         diagnostic(dependencies, scope, "put");
       }
     }

@@ -42,6 +42,7 @@ import type { DatabaseClient, DatabasePool } from "../../../packages/database/sr
 import {
   activatedEventsFromResponse,
   buildEventExtensionPrompt,
+  buildEventCoveragePrompt,
   buildEventTriggerPrompt,
   buildRpgAssessmentPrompt,
   buildSceneCoveragePrompt,
@@ -50,6 +51,8 @@ import {
   containsMechanicsLanguage,
   extractPartialNarration,
   ContextBudgetError,
+  resolveEffectiveContextWindowTokens,
+  estimatedInputSafetyAllowanceTokens,
   planContext,
   serializeProviderRequest,
   fictionGuidanceForEvents,
@@ -61,6 +64,7 @@ import {
   mechanicsLanguageMatches,
   mechanicsLeakFields,
   parseEventExtension,
+  parseEventCoverageOutput,
   parseRpgAssessment,
   parseSceneCoverageOutput,
   parseStoryOutput,
@@ -450,7 +454,7 @@ function storyMemoryDefaultsFromContext(context: unknown) {
   };
 }
 
-function sentCanonicalFactIds(storyInput: string): string[] {
+export function sentCanonicalFactIds(storyInput: string): string[] {
   let rendered: unknown;
   try {
     rendered = JSON.parse(storyInput);
@@ -458,17 +462,135 @@ function sentCanonicalFactIds(storyInput: string): string[] {
     return [];
   }
   if (!rendered || typeof rendered !== "object") return [];
-  const authority = (rendered as { authoritative_context?: unknown }).authoritative_context;
+  const authorityFromTrustedInput = (input: unknown): unknown => {
+    if (typeof input !== "string") return undefined;
+    // LM Studio recovery appends these exact separators. Parse only the original
+    // request prefix: a rejected provider draft must never establish authority.
+    const original = input.split("\n\nREJECTED RESPONSE TO REWRITE:\n", 1)[0]!
+      .split("\n\nRECOVERY REQUIREMENT:\n", 1)[0]!;
+    try {
+      const parsed = JSON.parse(original) as Record<string, unknown>;
+      return parsed.authoritative_context ?? parsed.protected_fiction_safe_base_authority;
+    } catch {
+      return undefined;
+    }
+  };
+  const directAuthority = (rendered as Record<string, unknown>).authoritative_context
+    ?? (rendered as Record<string, unknown>).protected_fiction_safe_base_authority;
+  const lmStudioAuthority = authorityFromTrustedInput((rendered as Record<string, unknown>).input);
+  const messageAuthority = Array.isArray((rendered as { messages?: unknown }).messages)
+    ? (rendered as { messages: unknown[] }).messages.flatMap((message) => {
+      if (!message || typeof message !== "object" || (message as { role?: unknown }).role !== "user") return [];
+      const authority = authorityFromTrustedInput((message as { content?: unknown }).content);
+      return authority ? [authority] : [];
+    })[0]
+    : undefined;
+  const authority = directAuthority || lmStudioAuthority || messageAuthority;
   if (!authority || typeof authority !== "object") return [];
   const continuity = (authority as { currentContinuity?: unknown }).currentContinuity;
-  if (!continuity || typeof continuity !== "object") return [];
-  const facts = (continuity as { canonicalFacts?: unknown }).canonicalFacts;
-  if (!Array.isArray(facts)) return [];
-  return [...new Set(facts.flatMap((fact) => {
+  const continuityFacts = continuity && typeof continuity === "object"
+    ? (continuity as { canonicalFacts?: unknown }).canonicalFacts
+    : [];
+  const continuityFactIds = Array.isArray(continuityFacts) ? continuityFacts.flatMap((fact) => {
     if (!fact || typeof fact !== "object") return [];
     const id = (fact as { id?: unknown }).id;
     return typeof id === "string" ? [id] : [];
-  }))];
+  }) : [];
+  const chronicle = (authority as { chronicle?: unknown }).chronicle;
+  // Cutoff generation retrieves individual canonical-fact table rows, so a
+  // selected canonical candidate ID is that scoped fact UUID; grouped-memory
+  // IDs are excluded. Never derive authority by parsing candidate content.
+  const selectedHistoricalFactIds = Array.isArray(chronicle) ? chronicle.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const candidate = entry as { id?: unknown; kind?: unknown };
+    return candidate.kind === "canonical_fact" && typeof candidate.id === "string"
+      ? [candidate.id]
+      : [];
+  }) : [];
+  return [...new Set([...continuityFactIds, ...selectedHistoricalFactIds])];
+}
+
+const PRIVATE_MECHANICS_AUTHORITY_KEYS = new Set([
+  "rpgStats", "eventTriggers", "pendingEventTriggers", "defaultTriggers", "mechanicsPrivate", "roll"
+]);
+
+/** Removes private mechanics/trigger state before any fiction-authority payload is rendered. */
+function fictionSafeAuthority<T>(value: T): T {
+  if (Array.isArray(value)) return value.map((entry) => fictionSafeAuthority(entry)) as T;
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .filter(([key]) => !PRIVATE_MECHANICS_AUTHORITY_KEYS.has(key))
+    .flatMap(([key, entry]) => {
+      if (key === "trackers" && Array.isArray(entry)) {
+        const fictionSafeTrackers = entry.filter((tracker) => {
+          if (!tracker || typeof tracker !== "object") return false;
+          const record = tracker as Record<string, unknown>;
+          return typeof record.value !== "number" && !containsMechanicsLanguage(stableStringify(record));
+        }).map((tracker) => fictionSafeAuthority(tracker));
+        return [[key, fictionSafeTrackers]];
+      }
+      return [[key, fictionSafeAuthority(entry)]];
+    })) as T;
+}
+
+function preparedRequestForResult(
+  result: ProviderResult,
+  provider: GenerationTextProvider,
+  request: Pick<ProviderRequest, "systemPrompt" | "input" | "recoveryInput" | "rejectedResponse">
+): Readonly<{ body: string; payloadHash: string }> {
+  const prepared = result.preparedRequest;
+  if (prepared && typeof prepared.body === "string" && typeof prepared.payloadHash === "string"
+      && prepared.payloadHash === sha256(prepared.body)) return prepared;
+  const body = serializeProviderRequest({ ...provider, baseUrl: "" }, {
+    systemPrompt: request.systemPrompt,
+    input: request.input,
+    ...(request.recoveryInput ? { recoveryInput: request.recoveryInput } : {}),
+    ...(request.rejectedResponse ? { completeRejectedDraft: { content: request.rejectedResponse, complete: true as const } } : {})
+  }).body;
+  return { body, payloadHash: sha256(body) };
+}
+
+function effectiveContextWindowTokens(provider: GenerationTextProvider, job: GenerationExecutionPayload): number {
+  return resolveEffectiveContextWindowTokens(provider.contextWindowTokens, job.context_options.modelContextWindowTokens);
+}
+
+function effectiveProviderConfigurationHash(provider: GenerationTextProvider, job: GenerationExecutionPayload): string {
+  return sha256(stableStringify({
+    id: provider.id, providerType: provider.providerType, model: provider.model,
+    endpointIdentity: provider.endpointIdentity ?? "",
+    contextWindowTokens: provider.contextWindowTokens, maxOutputTokens: provider.maxOutputTokens,
+    temperature: provider.temperature, requestTimeoutMs: provider.requestTimeoutMs,
+    configuration: provider.configuration,
+    effectiveContextWindowTokens: effectiveContextWindowTokens(provider, job),
+    inputSafetyPolicy: "estimated_20_percent_plus_1024"
+  }));
+}
+
+function sameFactIds(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === new Set(left).size
+    && right.length === new Set(right).size
+    && left.every((id) => typeof id === "string" && id.length > 0)
+    && stableStringify([...left].sort()) === stableStringify([...right].sort());
+}
+
+function isStringList(value: unknown): value is readonly string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string" && entry.length > 0)
+    && value.length === new Set(value).size;
+}
+
+function coveragePassed(coverage: ReturnType<typeof parseSceneCoverageOutput> | null): boolean {
+  return Boolean(coverage?.covered
+    && coverage.missing_required_beats.length === 0
+    && coverage.contradictions.length === 0);
+}
+
+function eventCoverageRequirement(events: readonly ActivatedEvent[]) {
+  return [...new Map(events.map((event) => [event.id, event])).values()]
+    .map((event) => ({ id: event.id, fiction: fictionGuidanceForEvents([event]).join(" ") }));
+}
+
+function parseRequiredEventCoverage(content: string, events: readonly ActivatedEvent[]) {
+  return parseEventCoverageOutput(content, [...new Set(events.map((event) => event.id))]);
 }
 
 function compatibleValidatedMainDraft(
@@ -481,23 +603,37 @@ function compatibleValidatedMainDraft(
   const validResponse = value.response && typeof value.response.content === "string"
     && typeof value.response.outputLimited === "boolean";
   const parsedStory = storyTurnOutputSchema.safeParse(value.story);
-  if (!validResponse || !parsedStory.success) {
+  const validProvenance = value.version === 2
+    && typeof value.providerConfigurationHash === "string" && value.providerConfigurationHash.length > 0
+    && typeof value.originalInputHash === "string" && value.originalInputHash.length > 0
+    && typeof value.requestBody === "string"
+    && typeof value.requestPayloadHash === "string" && value.requestPayloadHash.length > 0
+    && typeof value.draftHash === "string" && value.draftHash.length > 0
+    && Number.isSafeInteger(value.producingAttempt) && value.producingAttempt > 0
+    && isStringList(value.sentFactIds);
+  if (!validResponse || !parsedStory.success || !validProvenance) {
     throw Object.assign(new Error("The persisted validated draft checkpoint is malformed."), {
       code: "generation_checkpoint_incompatible"
     });
   }
-  if (value.version !== 1
-      || value.ownerUserId !== job.owner_user_id
+  if (value.ownerUserId !== job.owner_user_id
       || value.campaignId !== job.campaign_id
       || value.worldVersionId !== (job.world_version_id || null)
       || stableStringify(value.baseIdentity) !== stableStringify(job.generation_base_identity)
       || value.promptProtocolVersion !== job.prompt_protocol_version
       || value.providerId !== provider.id
       || value.providerModel !== provider.model
+      || value.providerConfigurationHash !== effectiveProviderConfigurationHash(provider, job)
       || value.action !== job.action
-      || value.requestPayloadHash !== sha256(storyInput)
+      || value.originalInputHash !== sha256(storyInput)
+      || value.requestPayloadHash !== sha256(value.requestBody)
       || value.draftHash !== sha256(stableStringify(parsedStory.data))) {
     throw Object.assign(new Error("The persisted validated draft does not match this generation input."), {
+      code: "generation_checkpoint_incompatible"
+    });
+  }
+  if (!sameFactIds(value.sentFactIds, sentCanonicalFactIds(value.requestBody))) {
+    throw Object.assign(new Error("The persisted validated draft fact visibility does not match its producing request."), {
       code: "generation_checkpoint_incompatible"
     });
   }
@@ -511,10 +647,18 @@ function compatibleEventCoverageRepair(
 ): boolean {
   if (!repair) return true;
   return validatedDraft !== null
-    && repair.validatedMainDraftHash === validatedDraft.draftHash
+    && (repair.validatedMainDraftHash === validatedDraft.draftHash
+      || repair.repairedFinalStoryHash === validatedDraft.draftHash)
     && repair.extensionFinalStoryHash === (extension?.finalStoryHash || null)
     && repair.extensionProducingAttempt === (extension?.producingAttempt || null)
-    && (!extension || extension.finalStoryHash === stableStringify(extension.story));
+    && (!extension || (extension.finalStoryHash === stableStringify(extension.story)
+      && extension.validatedMainDraftHash === validatedDraft.draftHash
+      && typeof extension.producingRequestPayloadHash === "string"
+      && extension.producingRequestPayloadHash.length > 0
+      && typeof extension.producingRequestBody === "string"
+      && extension.producingRequestPayloadHash === sha256(extension.producingRequestBody)
+      && isStringList(extension.sentFactIds)
+      && sameFactIds(extension.sentFactIds, sentCanonicalFactIds(extension.producingRequestBody))));
 }
 
 const NO_RETRIEVAL_AUDIT: ChronicleRetrievalAudit = {
@@ -560,10 +704,10 @@ function planGenerationPromptContext(
   const authority = context.authority;
   const authorityContext = {
     authoritativeRules: Array.isArray(authority.rules) ? authority.rules : [],
-    worldCanon: authority.worldCanon ?? {},
+    worldCanon: fictionSafeAuthority(authority.worldCanon ?? {}),
     selectedCharacterId: authority.selectedCharacterId ?? null,
-    currentContinuity: authority.currentContinuity ?? {},
-    currentScene: authority.latestTurn ?? null,
+    currentContinuity: fictionSafeAuthority(authority.currentContinuity ?? {}),
+    currentScene: fictionSafeAuthority(authority.latestTurn ?? null),
     chronicle: [] as readonly PromptCandidate[]
   };
   const candidates = context.candidates.map(candidateRecord).filter((candidate) => candidate.id && candidate.content);
@@ -597,6 +741,8 @@ function planGenerationPromptContext(
     contextLimit: Math.min(contextLimit, inputLimit),
     inputLimit,
     count: (value) => value.length,
+    safetyAllowanceTokens: estimatedInputSafetyAllowanceTokens,
+    contextSafetyAllowanceTokens: 0,
     serializeContext: (selected) => stableStringify(promptContext(selected)),
     contextValue: promptContext,
     serializeRequest: (selected) => serializeProviderRequest(serializationProfile, {
@@ -662,7 +808,8 @@ async function callCampaignTextProvider(
       ...request,
       // Every generation operation is serialized and checked before transport.
       // The transport adapter sends these prepared bytes without rebuilding them.
-      canonicalBudgeting: true
+      canonicalBudgeting: true,
+      effectiveContextWindowTokens: effectiveContextWindowTokens(provider, job)
     });
     await dependencies.collaborators.recordProfileCost(
       dependencies.pool,
@@ -818,10 +965,7 @@ async function executeLoadedGeneration(
     const preparedInput = await phase("input_preparation", async () => {
       const safeAction = safeTurnInput(job.action);
       const storyLength = snapshottedStoryLength(job.context_options);
-      const requestedContextWindow = Number(
-        job.context_options.modelContextWindowTokens || provider.contextWindowTokens
-      );
-      const effectiveContextWindow = Math.min(provider.contextWindowTokens, requestedContextWindow);
+      const effectiveContextWindow = effectiveContextWindowTokens(provider, job);
       const inputTokenLimit = effectiveContextWindow - provider.maxOutputTokens;
       const emptyPromptContext = { worldCanon: {}, campaignCanon: {}, chronicle: [], currentScene: null };
       const storySystemPrompt = collaborators.promptFromSnapshot(job.prompt_snapshot, "story_system");
@@ -873,6 +1017,7 @@ async function executeLoadedGeneration(
         operationKind: job.operation_kind,
         expectedTurnNumber: job.expected_turn_number,
         query: safeAction,
+        retrievalBudgetTokens: safeContextBudget,
         expectedBaseIdentity: job.generation_base_identity
       }
     ));
@@ -928,7 +1073,8 @@ async function executeLoadedGeneration(
         let activated: ActivatedEvent[] = [];
         let triggerError = "";
         if (!inputs.suppressEventTriggers) {
-          const triggers = inputs.eventTriggers.filter((trigger) => trigger.timing === "before");
+          const pendingTriggerIds = new Set(inputs.pendingEventTriggers.map((event) => event.sourceTriggerId));
+          const triggers = inputs.eventTriggers.filter((trigger) => trigger.timing === "before" && !pendingTriggerIds.has(trigger.id));
           try {
             activated = await evaluateTriggers(
               dependencies,
@@ -1488,7 +1634,7 @@ async function executeLoadedGeneration(
     if (!validatedDraft) {
       orchestration = await persistOrchestration(repository, scope, job, {
         validatedMainDraft: {
-          version: 1,
+          version: 2,
           ownerUserId: job.owner_user_id,
           campaignId: job.campaign_id,
           worldVersionId: job.world_version_id || null,
@@ -1496,24 +1642,30 @@ async function executeLoadedGeneration(
           promptProtocolVersion: job.prompt_protocol_version,
           providerId: provider.id,
           providerModel: provider.model,
+          providerConfigurationHash: effectiveProviderConfigurationHash(provider, job),
           action: job.action,
-          requestPayloadHash: sha256(storyInput),
+          originalInputHash: sha256(storyInput),
+          requestBody: preparedRequestForResult(result, provider, baseRequest).body,
+          requestPayloadHash: preparedRequestForResult(result, provider, baseRequest).payloadHash,
           draftHash: sha256(stableStringify(parsed.story)),
           producingAttempt: job.attempts,
           story: parsed.story,
           response: result,
-          sentFactIds: plannedSentFactIds
+          sentFactIds: sentCanonicalFactIds(preparedRequestForResult(result, provider, baseRequest).body)
         },
         automaticRepair: undefined
       });
     }
     assertActiveGenerationUpdate(await repository.markValidating(scope), "entering validation");
+    const currentMainStory = parsed.ok ? parsed.story : null;
+    if (!currentMainStory) throw new Error("Validated main draft was unexpectedly unavailable.");
     if (orchestration.afterEvents === undefined) {
       await phase("after_event_evaluation", async () => {
         let activated: ActivatedEvent[] = [];
         let triggerError = "";
         if (!inputs.suppressEventTriggers) {
-          const triggers = inputs.eventTriggers.filter((trigger) => trigger.timing === "after");
+          const pendingTriggerIds = new Set(inputs.pendingEventTriggers.map((event) => event.sourceTriggerId));
+          const triggers = inputs.eventTriggers.filter((trigger) => trigger.timing === "after" && !pendingTriggerIds.has(trigger.id));
           try {
             activated = await evaluateTriggers(
               dependencies,
@@ -1522,7 +1674,7 @@ async function executeLoadedGeneration(
               promptContext,
               job,
               triggers,
-              parsed.story.narration
+              currentMainStory.narration
             );
           } catch (error) {
             if (isRecoverableIntegrityError(error)) throw error;
@@ -1535,7 +1687,131 @@ async function executeLoadedGeneration(
         });
       });
     }
+    const dueBeforeOrPendingEvents = orchestration.beforeEvents || [];
+    if (dueBeforeOrPendingEvents.length) {
+      let mainEventCoverage: ReturnType<typeof parseSceneCoverageOutput> | null = null;
+      try {
+        const coverageResponse = await phase("scene_coverage_validation", () =>
+          callCampaignTextProvider(dependencies, provider, job, "scene_coverage_validation", {
+            systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
+            input: buildEventCoveragePrompt(eventCoverageRequirement(dueBeforeOrPendingEvents), currentMainStory.narration)
+          })
+        );
+        mainEventCoverage = coverageResponse.outputLimited ? null : parseRequiredEventCoverage(coverageResponse.content, dueBeforeOrPendingEvents);
+      } catch (error) {
+        if (isRecoverableIntegrityError(error)) throw error;
+      }
+      if (!coveragePassed(mainEventCoverage)) {
+        const rejectedMainHash = sha256(stableStringify(currentMainStory));
+        if (orchestration.eventCoverageRepair?.mainRepairConsumed
+          || orchestration.eventCoverageRepair?.extensionFinalStoryHash === null) {
+          assertActiveGenerationUpdate(await repository.markRecoverable({
+            ...scope,
+            providerResponseId: result.responseId || null,
+            providerFinishReason: result.finishReason || null,
+            errorCode: "event_coverage_failed",
+            errorMessage: "The before or pending event fiction failed verification after its one permitted rewrite.",
+            recoveryMetadata: { retryable: true, stage: "event_coverage", repairAttempted: true }
+          }), "saving exhausted main event coverage recovery state");
+          return true;
+        }
+        const repairRequest = {
+          ...baseRequest,
+          budgetOutput: { kind: "story_replace" as const },
+          recoveryInput: renderPromptTemplate(
+            collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage_rewrite"),
+            { validation: stableStringify({
+              missing_required_beats: mainEventCoverage?.missing_required_beats || ["Required event fiction could not be verified."],
+              contradictions: mainEventCoverage?.contradictions || []
+            }) }
+          ),
+          rejectedResponse: result.content
+        };
+        const repairFence = {
+          rejectedFinalStoryHash: rejectedMainHash,
+          validatedMainDraftHash: orchestration.validatedMainDraft?.draftHash || rejectedMainHash,
+          extensionFinalStoryHash: null,
+          extensionProducingAttempt: null,
+          consumedAttempt: job.attempts,
+          mainRepairConsumed: true
+        };
+        orchestration = await persistOrchestration(repository, scope, job, { eventCoverageRepair: repairFence });
+        let repairResult: ProviderResult;
+        let repairedMain: ReturnType<typeof parseStoryOutput>;
+        try {
+          repairResult = await phase("scene_coverage_rewrite", () => callCampaignTextProvider(
+            dependencies, provider, job, "scene_coverage_rewrite", repairRequest
+          ));
+          repairedMain = (repairResult.outputLimited
+            ? { ok: false as const, code: "output_limit", errors: ["The event-coverage rewrite reached its output limit."] }
+            : parseStoryOutput(repairResult.content, storyMemoryDefaults)) as ReturnType<typeof parseStoryOutput>;
+        } catch (error) {
+          if (isRecoverableIntegrityError(error)) throw error;
+          repairedMain = { ok: false as const, code: "invalid_schema", errors: ["The event-coverage rewrite could not be validated."] };
+        }
+        if (!repairedMain.ok) {
+          assertActiveGenerationUpdate(await repository.markRecoverable({
+            ...scope,
+            providerResponseId: null,
+            providerFinishReason: null,
+            errorCode: "event_coverage_failed",
+            errorMessage: "The before or pending event fiction rewrite could not be validated.",
+            recoveryMetadata: { retryable: true, stage: "event_coverage", repairAttempted: true }
+          }), "saving invalid main event rewrite recovery state");
+          return true;
+        }
+        const repairedStory = repairedMain.story;
+        result = repairResult!;
+        parsed = repairedMain;
+        orchestration = await persistOrchestration(repository, scope, job, {
+          validatedMainDraft: {
+            version: 2, ownerUserId: job.owner_user_id, campaignId: job.campaign_id,
+            worldVersionId: job.world_version_id || null, baseIdentity: job.generation_base_identity,
+            promptProtocolVersion: job.prompt_protocol_version, providerId: provider.id, providerModel: provider.model,
+            providerConfigurationHash: effectiveProviderConfigurationHash(provider, job),
+            action: job.action, originalInputHash: sha256(storyInput),
+            requestBody: preparedRequestForResult(repairResult!, provider, repairRequest).body,
+            requestPayloadHash: preparedRequestForResult(repairResult!, provider, repairRequest).payloadHash,
+            draftHash: sha256(stableStringify(repairedStory)), producingAttempt: job.attempts,
+            story: repairedStory, response: repairResult!, sentFactIds: sentCanonicalFactIds(preparedRequestForResult(repairResult!, provider, repairRequest).body)
+          },
+          afterEvents: undefined, extension: undefined, extensionError: undefined,
+          eventCoverageRepair: {
+            ...repairFence,
+            repairedFinalStoryHash: sha256(stableStringify(repairedStory)),
+            repairedMainRequestPayloadHash: preparedRequestForResult(repairResult!, provider, repairRequest).payloadHash
+          }
+        });
+        return executeLoadedGeneration(dependencies, workerId, leaseSeconds, job);
+      }
+    }
     const immediateEvents = (orchestration.afterEvents || []).filter((event) => event.addTextAfter);
+    if (orchestration.extension) {
+      const expectedExtensionInput = immediateEvents.length
+        ? buildEventExtensionPrompt(parsed.story, fictionGuidanceForEvents(immediateEvents), promptContext, safeAction)
+        : null;
+      const extensionMatchesDraft = Boolean(orchestration.validatedMainDraft
+        && orchestration.extension.validatedMainDraftHash === orchestration.validatedMainDraft.draftHash
+        && orchestration.extension.finalStoryHash === stableStringify(orchestration.extension.story)
+        && isStringList(orchestration.extension.sentFactIds)
+        && typeof orchestration.extension.producingRequestBody === "string"
+        && orchestration.extension.producingRequestPayloadHash === sha256(orchestration.extension.producingRequestBody)
+        && sameFactIds(orchestration.extension.sentFactIds, sentCanonicalFactIds(orchestration.extension.producingRequestBody))
+        && orchestration.extension.providerConfigurationHash === effectiveProviderConfigurationHash(provider, job)
+        && (orchestration.extension.producingOperation === "scene_coverage_rewrite"
+          || (orchestration.extension.producingOperation === "event_extension" && expectedExtensionInput)));
+      if (!extensionMatchesDraft) {
+        assertActiveGenerationUpdate(await repository.markRecoverable({
+          ...scope,
+          providerResponseId: null,
+          providerFinishReason: null,
+          errorCode: "generation_checkpoint_incompatible",
+          errorMessage: "The saved event extension does not match its validated main draft or producing request.",
+          recoveryMetadata: { retryable: true, stage: "event_extension" }
+        }), "saving incompatible event extension recovery state");
+        return true;
+      }
+    }
     let extensionFailure: string | null = null;
     if (immediateEvents.length && !orchestration.extension) {
       await phase("event_extension", async () => {
@@ -1544,6 +1820,15 @@ async function executeLoadedGeneration(
           if (!guidance.length) {
             throw new Error("Activated extension instructions were not safe for a fiction prompt.");
           }
+          const extensionInput = buildEventExtensionPrompt(
+            parsed.story,
+            guidance,
+            promptContext,
+            safeAction
+          );
+          const extensionSentFactIds = sentCanonicalFactIds(stableStringify({
+            authoritative_context: promptContext
+          }));
           const extensionResponse = await callCampaignTextProvider(
             dependencies,
             provider,
@@ -1551,10 +1836,15 @@ async function executeLoadedGeneration(
             "event_extension",
             {
               systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "event_extension"),
-              input: buildEventExtensionPrompt(parsed.story, guidance),
+              input: extensionInput,
               budgetOutput: {
                 kind: "event_extension",
-                preservedNarration: parsed.story.narration,
+                protectedStory: {
+                  narration: parsed.story.narration,
+                  scratchpad: parsed.story.scratchpad,
+                  continuitySummary: parsed.story.continuity_summary,
+                  openThreads: parsed.story.open_threads
+                },
                 narrationCharacterLimit: 200_000
               }
             }
@@ -1567,7 +1857,19 @@ async function executeLoadedGeneration(
             extension: {
               story: extension,
               finalStoryHash: stableStringify(extension),
-              producingAttempt: job.attempts
+              producingAttempt: job.attempts,
+              producingOperation: "event_extension",
+              validatedMainDraftHash: orchestration.validatedMainDraft?.draftHash || sha256(stableStringify(parsed.story)),
+              producingRequestPayloadHash: preparedRequestForResult(extensionResponse, provider, {
+                systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "event_extension"), input: extensionInput
+              }).payloadHash,
+              producingRequestBody: preparedRequestForResult(extensionResponse, provider, {
+                systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "event_extension"), input: extensionInput
+              }).body,
+              providerConfigurationHash: effectiveProviderConfigurationHash(provider, job),
+              sentFactIds: sentCanonicalFactIds(preparedRequestForResult(extensionResponse, provider, {
+                systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "event_extension"), input: extensionInput
+              }).body)
             },
             // A previous lease may have recorded a transient extension failure.
             // Successful completion on this lease supersedes that stage outcome.
@@ -1594,6 +1896,7 @@ async function executeLoadedGeneration(
       return true;
     }
     let committedStory: StoryTurnOutput = orchestration.extension?.story || parsed.story;
+    let finalSentFactIds = orchestration.extension?.sentFactIds || sentFactIds;
     if (mechanicsLeakFields(committedStory).length) {
       throw new Error("Mechanics validation invariant failed after event extension.");
     }
@@ -1603,17 +1906,30 @@ async function executeLoadedGeneration(
         const coverageResponse = await phase("scene_coverage_validation", () =>
           callCampaignTextProvider(dependencies, provider, job, "scene_coverage_validation", {
             systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
-            input: buildSceneCoveragePrompt(
-              fictionGuidanceForEvents(immediateEvents).join("\n"),
-              committedStory.narration
-            )
+            input: buildEventCoveragePrompt(eventCoverageRequirement(immediateEvents), committedStory.narration)
           })
         );
-        eventCoverage = coverageResponse.outputLimited ? null : parseSceneCoverageOutput(coverageResponse.content);
+        eventCoverage = coverageResponse.outputLimited ? null : parseRequiredEventCoverage(coverageResponse.content, immediateEvents);
       } catch (error) {
         if (isRecoverableIntegrityError(error)) throw error;
       }
-      if (!eventCoverage?.covered) {
+      if (coveragePassed(eventCoverage) && orchestration.extension) {
+        const appendedNarration = formatNarrationParagraphs(committedStory.narration)
+          .slice(formatNarrationParagraphs(parsed.story.narration).length).trim();
+        try {
+          const coverageResponse = await phase("scene_coverage_validation", () =>
+            callCampaignTextProvider(dependencies, provider, job, "scene_coverage_validation", {
+              systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
+              input: buildEventCoveragePrompt(eventCoverageRequirement(immediateEvents), appendedNarration)
+            })
+          );
+          eventCoverage = coverageResponse.outputLimited ? null : parseRequiredEventCoverage(coverageResponse.content, immediateEvents);
+        } catch (error) {
+          if (isRecoverableIntegrityError(error)) throw error;
+          eventCoverage = null;
+        }
+      }
+      if (!coveragePassed(eventCoverage)) {
         const rejectedFinalStoryHash = stableStringify(committedStory);
         const existingRepair = orchestration.eventCoverageRepair;
         if (existingRepair
@@ -1623,7 +1939,7 @@ async function executeLoadedGeneration(
             ...scope,
             providerResponseId: result.responseId || null,
             providerFinishReason: result.finishReason || null,
-            errorCode: "event_coverage_repair_consumed",
+            errorCode: "event_coverage_failed",
             errorMessage: "The final event fiction still failed verification after its one permitted rewrite.",
             recoveryMetadata: { retryable: true, stage: "event_coverage", repairConsumed: true }
           }), "saving consumed event coverage repair state");
@@ -1634,32 +1950,58 @@ async function executeLoadedGeneration(
           validatedMainDraftHash: orchestration.validatedMainDraft?.draftHash || sha256(stableStringify(parsed.story)),
           extensionFinalStoryHash: orchestration.extension?.finalStoryHash || null,
           extensionProducingAttempt: orchestration.extension?.producingAttempt || null,
-          consumedAttempt: job.attempts
+          consumedAttempt: job.attempts,
+          mainRepairConsumed: orchestration.eventCoverageRepair?.mainRepairConsumed === true
+            || orchestration.eventCoverageRepair?.extensionFinalStoryHash === null
         };
         orchestration = await persistOrchestration(repository, scope, job, { eventCoverageRepair: repair });
         let repairedStory: StoryTurnOutput | null = null;
+        let repairResponse: ProviderResult | null = null;
+        const validatedMainStory = orchestration.validatedMainDraft?.story ?? parsed.story;
+        const repairRequest = {
+          ...baseRequest,
+          input: buildEventExtensionPrompt(
+            validatedMainStory,
+            fictionGuidanceForEvents(immediateEvents),
+            promptContext,
+            safeAction
+          ),
+          budgetOutput: {
+            kind: "event_extension" as const,
+            protectedStory: {
+              narration: validatedMainStory.narration,
+              scratchpad: validatedMainStory.scratchpad,
+              continuitySummary: validatedMainStory.continuity_summary,
+              openThreads: validatedMainStory.open_threads
+            },
+            narrationCharacterLimit: 200_000
+          },
+          recoveryInput: renderPromptTemplate(
+            collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage_rewrite"),
+            {
+              validation: stableStringify({
+                missing_required_beats: eventCoverage?.missing_required_beats || ["Immediate event coverage could not be verified."],
+                contradictions: eventCoverage?.contradictions || []
+              })
+            }
+          ),
+          rejectedResponse: stableStringify(committedStory)
+        };
         try {
-          const repairResponse = await phase("scene_coverage_rewrite", () => callCampaignTextProvider(
+          repairResponse = await phase("scene_coverage_rewrite", () => callCampaignTextProvider(
             dependencies,
             provider,
             job,
             "scene_coverage_rewrite",
-            {
-              ...baseRequest,
-              recoveryInput: renderPromptTemplate(
-                collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage_rewrite"),
-                {
-                  validation: stableStringify({
-                    missing_required_beats: eventCoverage?.missing_required_beats || ["Immediate event coverage could not be verified."],
-                    contradictions: eventCoverage?.contradictions || []
-                  })
-                }
-              ),
-              rejectedResponse: stableStringify(committedStory)
-            }
+            repairRequest
           ));
           if (!repairResponse.outputLimited) {
-            const repaired = parseEventExtension(repairResponse.content, committedStory.narration);
+            // A coverage rewrite may replace a rejected extension suffix.  Only the
+            // independently validated main draft is immutable across this boundary.
+            const repaired = parseEventExtension(
+              repairResponse.content,
+              validatedMainStory.narration
+            );
             if (!mechanicsLeakFields(repaired).length) repairedStory = repaired;
           }
         } catch (error) {
@@ -1667,11 +2009,19 @@ async function executeLoadedGeneration(
         }
         if (repairedStory) {
           const repairedFinalStoryHash = stableStringify(repairedStory);
+          const preparedRepair = preparedRequestForResult(repairResponse!, provider, repairRequest);
+          const repairSentFactIds = sentCanonicalFactIds(preparedRepair.body);
           orchestration = await persistOrchestration(repository, scope, job, {
             extension: {
               story: repairedStory,
               finalStoryHash: repairedFinalStoryHash,
-              producingAttempt: job.attempts
+              producingAttempt: job.attempts,
+              producingOperation: "scene_coverage_rewrite",
+              validatedMainDraftHash: orchestration.validatedMainDraft?.draftHash || sha256(stableStringify(parsed.story)),
+              producingRequestPayloadHash: preparedRepair.payloadHash,
+              producingRequestBody: preparedRepair.body,
+              providerConfigurationHash: effectiveProviderConfigurationHash(provider, job),
+              sentFactIds: repairSentFactIds
             },
             eventCoverageRepair: {
               ...repair,
@@ -1682,23 +2032,34 @@ async function executeLoadedGeneration(
             extensionError: undefined
           });
           committedStory = repairedStory;
+          finalSentFactIds = repairSentFactIds;
           try {
             const coverageResponse = await phase("scene_coverage_validation", () =>
               callCampaignTextProvider(dependencies, provider, job, "scene_coverage_validation", {
                 systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
-                input: buildSceneCoveragePrompt(
-                  fictionGuidanceForEvents(immediateEvents).join("\n"),
-                  repairedStory.narration
-                )
+                input: buildEventCoveragePrompt(eventCoverageRequirement(immediateEvents), repairedStory.narration)
               })
             );
-            eventCoverage = coverageResponse.outputLimited ? null : parseSceneCoverageOutput(coverageResponse.content);
+            eventCoverage = coverageResponse.outputLimited ? null : parseRequiredEventCoverage(coverageResponse.content, immediateEvents);
+            if (coveragePassed(eventCoverage)) {
+              const appendedNarration = formatNarrationParagraphs(repairedStory.narration)
+                .slice(formatNarrationParagraphs(parsed.story.narration).length).trim();
+              const appendedCoverageResponse = await phase("scene_coverage_validation", () =>
+                callCampaignTextProvider(dependencies, provider, job, "scene_coverage_validation", {
+                  systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
+                  input: buildEventCoveragePrompt(eventCoverageRequirement(immediateEvents), appendedNarration)
+                })
+              );
+              eventCoverage = appendedCoverageResponse.outputLimited
+                ? null
+                : parseRequiredEventCoverage(appendedCoverageResponse.content, immediateEvents);
+            }
           } catch (error) {
             if (isRecoverableIntegrityError(error)) throw error;
             eventCoverage = null;
           }
         }
-        if (repairedStory && eventCoverage?.covered) {
+        if (repairedStory && coveragePassed(eventCoverage)) {
           // The full replacement was revalidated; commit the durable final story below.
         } else {
           assertActiveGenerationUpdate(await repository.markRecoverable({
@@ -1727,7 +2088,7 @@ async function executeLoadedGeneration(
       response: result,
       contextFingerprint,
       contextDiagnostics,
-      sentFactIds,
+      sentFactIds: finalSentFactIds,
       chronicleRetrieval,
       inputs,
       orchestration,

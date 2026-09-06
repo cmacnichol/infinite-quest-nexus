@@ -6,7 +6,7 @@ import type { CampaignRuntimeStateContent } from "../../contracts/src/generation
 import type { DatabaseClient } from "./pool.js";
 import { resolveGenerationAuthoritySnapshot } from "./generation-authority.js";
 import { stableStringify, stripMechanicsLeakage } from "../../domain/src/index.js";
-import { buildPostgresChronicleContextPreview } from "./chronicle-context-repository.js";
+import { loadPostgresChronicleGenerationCandidates } from "./chronicle-context-repository.js";
 import type { ChronicleGenerationTransactionDependencies } from "./chronicle-repository.js";
 import {
   loadCurrentContinuityCorrection,
@@ -56,10 +56,14 @@ function completeRules(value: unknown): readonly string[] {
  * Reads generation authority before retrieval. This deliberately shares Task
  * 2's transaction-owned resolver and exposes no public projection.
  */
-export async function loadPostgresChronicleGenerationContext(
+/**
+ * Captures only immutable generation authority while the caller holds its
+ * transaction. Optional Chronicle retrieval is deliberately separate because
+ * a query embedding can wait on an external provider.
+ */
+export async function loadPostgresChronicleGenerationAuthorityContext(
   client: DatabaseClient,
   scope: MemoryGenerationAuthorityScope,
-  dependencies?: ChronicleGenerationTransactionDependencies,
 ): Promise<MemoryGenerationAuthorityContext> {
   const resolved = await resolveGenerationAuthoritySnapshot(client, scope);
   if (scope.expectedBaseIdentity
@@ -120,29 +124,6 @@ export async function loadPostgresChronicleGenerationContext(
   const continuity = currentContinuity === null
     ? promptSafeContinuity
     : currentContinuity;
-  const preview = dependencies ? await buildPostgresChronicleContextPreview(client, {
-    ownerUserId: scope.ownerUserId,
-    campaignId: scope.campaignId,
-    worldVersionId: scope.worldVersionId,
-    request: {
-      budgetTokens: 32_000,
-      compression: "auto",
-      query: scope.query,
-      recentTurns: 8,
-      throughTurnNumber: baseTurnNumber
-    }
-  }, dependencies) : null;
-  const retrieved = (preview?.scopes as { chronicle?: unknown[] } | undefined)?.chronicle ?? [];
-  const candidates = retrieved.flatMap((candidate, index): GenerationContextCandidate[] => {
-    if (!candidate || typeof candidate !== "object") return [];
-    const value = candidate as Record<string, unknown>;
-    if (typeof value.id !== "string" || typeof value.ordinal !== "number" || typeof value.content !== "string") return [];
-    const kind = value.kind;
-    if (!(["turn_fiction", "legacy_summary", "campaign_summary", "canonical_fact", "open_thread"] as const).includes(kind as GenerationContextCandidate["kind"])) return [];
-    return [{ id: value.id, turnId: typeof value.turnId === "string" ? value.turnId : null,
-      ordinal: value.ordinal, kind: kind as GenerationContextCandidate["kind"], content: value.content,
-      tokenEstimate: typeof value.estimatedTokens === "number" ? value.estimatedTokens : 0, rank: index + 1 }];
-  });
   return {
     authority: {
       rules: completeRules(worldCanon.rules ?? worldCanon.story_rules ?? ""),
@@ -161,8 +142,48 @@ export async function loadPostgresChronicleGenerationContext(
         narration: stripMechanicsLeakage(latest.rows[0].narration).text
       } : null
     },
-    candidates,
-    baseIdentity: resolved.baseIdentity,
-    ...(preview?.chronicleRetrieval ? { chronicleRetrieval: preview.chronicleRetrieval } : {})
+    candidates: [],
+    baseIdentity: resolved.baseIdentity
   };
+}
+
+/**
+ * Reads optional, derived Chronicle candidates after authority has already
+ * been captured. The cutoff comes from that immutable snapshot, so retrieval
+ * remains campaign/world/base-turn isolated without holding authority locks
+ * across provider I/O.
+ */
+export async function loadPostgresChronicleGenerationCandidatesContext(
+  client: DatabaseClient,
+  scope: MemoryGenerationAuthorityScope,
+  authorityContext: MemoryGenerationAuthorityContext,
+  dependencies: ChronicleGenerationTransactionDependencies,
+  options: Readonly<{ useSavepoints?: boolean }> = {},
+): Promise<MemoryGenerationAuthorityContext> {
+  const baseTurnNumber = Number(authorityContext.baseIdentity.baseTurnNumber);
+  const retrieval = await loadPostgresChronicleGenerationCandidates(client, {
+    ownerUserId: scope.ownerUserId,
+    campaignId: scope.campaignId,
+    worldVersionId: scope.worldVersionId,
+    query: scope.query,
+    throughTurnNumber: baseTurnNumber,
+    ...(scope.retrievalBudgetTokens === undefined ? {} : { retrievalBudgetTokens: scope.retrievalBudgetTokens })
+  }, dependencies, options);
+  const candidates: readonly GenerationContextCandidate[] = retrieval.candidates;
+  return {
+    ...authorityContext,
+    candidates,
+    chronicleRetrieval: retrieval.chronicleRetrieval
+  };
+}
+
+/**
+ * Direct callers own their transaction, so they receive authority only. A
+ * pool-backed caller can explicitly create the independent retrieval phase.
+ */
+export async function loadPostgresChronicleGenerationContext(
+  client: DatabaseClient,
+  scope: MemoryGenerationAuthorityScope,
+): Promise<MemoryGenerationAuthorityContext> {
+  return loadPostgresChronicleGenerationAuthorityContext(client, scope);
 }

@@ -421,7 +421,9 @@ export async function buildServer({
   const app = Fastify({
     logger: createLoggerOptions(),
     bodyLimit: config.security.apiDefaultBodyLimitBytes,
-    trustProxy: false,
+    trustProxy: config.security.trustProxyHops > 0
+      ? (_address, hop) => hop < config.security.trustProxyHops
+      : false,
     requestIdHeader: "x-correlation-id",
     genReqId: () => crypto.randomUUID()
   });

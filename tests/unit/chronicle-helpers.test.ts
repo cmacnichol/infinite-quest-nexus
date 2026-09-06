@@ -79,6 +79,34 @@ describe("Chronicle helper parity", () => {
     });
   });
 
+  it("retains distinct plain additions beside structured canonical fact updates", () => {
+    const facts = buildCanonicalChronicleFacts({
+      campaignId: scope.campaignId,
+      turnId: "turn-mixed-facts",
+      canonicalFacts: ["The brass key rests beneath the bridge.", "The harbor gate is open."],
+      canonicalFactUpdates: [
+        { content: "The harbor gate is open.", supersedesFactIds: ["fact-gate-closed"] },
+        { content: "  THE HARBOR GATE IS OPEN.  ", supersedesFactIds: ["fact-gate-locked", "fact-gate-closed"] }
+      ],
+      entityCatalog: []
+    });
+
+    expect(facts).toHaveLength(2);
+    expect(facts.map((fact) => ({ content: fact.content, factIndex: fact.factIndex, supersedesFactIds: fact.supersedesFactIds })))
+      .toEqual([
+        {
+          content: "The harbor gate is open.",
+          factIndex: 0,
+          supersedesFactIds: ["fact-gate-closed", "fact-gate-locked"]
+        },
+        {
+          content: "The brass key rests beneath the bridge.",
+          factIndex: 1,
+          supersedesFactIds: []
+        }
+      ]);
+  });
+
   it("removes bracketed roll and check directives from derived fiction strings", () => {
     expect(sanitizeChronicleMemoryLines([
       "The Moon Warden wakes. [[ROLL 1d20=20]]",

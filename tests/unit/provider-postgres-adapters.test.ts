@@ -171,6 +171,15 @@ describe("provider PostgreSQL adapter boundaries", () => {
       name: row.name,
       model: "alternate-model"
     });
+    row.base_url = "https://changed-provider.example/v1";
+    const changedEndpointExecution = await adapter.execution.text(
+      { ownerUserId: "00000000-0000-4000-8000-000000000012" },
+      row.id,
+      "text",
+      "alternate-model"
+    );
+    expect(changedEndpointExecution.endpointIdentity).not.toBe(execution.endpointIdentity);
+    expect(JSON.stringify(changedEndpointExecution)).not.toContain(row.base_url);
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(health.recordHealth).toHaveBeenCalledWith(expect.objectContaining({ outcome: "healthy" }));
     const publicValues = JSON.stringify({ lease, inventory, execution });

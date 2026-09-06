@@ -131,4 +131,35 @@ describe("context budget planning", () => {
       expect(error).toMatchObject({ code: "extension_narration_limit_exceeded" });
     }
   });
+
+  it("does not spend an input safety allowance from the configured output reserve", () => {
+    expect(() => assertOutputFeasible({
+      inputTokens: 10_000,
+      contextWindowTokens: 12_000,
+      outputReserveTokens: 1_000,
+      safetyAllowanceTokens: 1_000,
+      count,
+      serializeOutput: JSON.stringify,
+      output: { narration: "x" }
+    })).not.toThrow();
+  });
+
+  it("omits optional context when its serialized request needs the estimated-input allowance", () => {
+    const plan = planContext({
+      blocks: [
+        { id: "authority", revision: "1", content: "abc", protected: true, priority: 0, ordinal: 0 },
+        { id: "history", revision: "1", content: "x".repeat(50), protected: false, priority: 1, ordinal: 1 }
+      ],
+      contextLimit: 100,
+      inputLimit: 70,
+      safetyAllowanceTokens: (requestTokens) => Math.ceil(requestTokens * 0.2) + 10,
+      contextSafetyAllowanceTokens: 0,
+      count,
+      serializeContext: (blocks) => blocks.map((block) => block.content).join(""),
+      serializeRequest: (blocks) => blocks.map((block) => block.content).join("")
+    });
+
+    expect(plan.selected.map((block) => block.id)).toEqual(["authority"]);
+    expect(plan.omitted).toEqual([{ id: "history", revision: "1", reason: "request_limit" }]);
+  });
 });

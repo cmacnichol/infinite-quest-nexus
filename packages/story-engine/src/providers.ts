@@ -1,7 +1,8 @@
 import type { ProviderType } from "../../contracts/src/generation.js";
 import { logger } from "../../logger/src/index.js";
 import { ProviderDestinationNotAllowedError } from "../../security/src/provider-network-policy.js";
-import { serializeCheckedProviderRequest, serializeLegacyProviderRequest, validateCompleteRejectedDraft } from "./provider-request.js";
+import { estimatedInputSafetyAllowanceTokens, serializeCheckedProviderRequest, serializeLegacyProviderRequest, validateCompleteRejectedDraft } from "./provider-request.js";
+import { resolveEffectiveContextWindowTokens } from "./context-budget.js";
 import type { CanonicalProviderRequest, PreparedProviderRequest, ProviderOutputBudget } from "./provider-request.js";
 import {
   MAX_IMAGE_PROVIDER_RESPONSE_BYTES,
@@ -55,6 +56,8 @@ export type ProviderRequest = {
   rejectedResponse?: string;
   onChunk?: (delta: string, accumulated: string) => void | Promise<void>;
   canonicalBudgeting?: boolean;
+  /** Snapshotted job/provider ceiling; canonical generation must not exceed it. */
+  effectiveContextWindowTokens?: number;
   budgetOutput?: ProviderOutputBudget;
 };
 
@@ -67,6 +70,11 @@ export type ProviderResult = {
   usage: { inputTokens: number; outputTokens: number; totalTokens: number };
   reportedCost: ReportedProviderCost | null;
   rawMetadata: Record<string, unknown>;
+  /** Private immutable wire evidence for the request that produced this result. */
+  preparedRequest?: Readonly<{
+    body: string;
+    payloadHash: string;
+  }>;
 };
 
 export type ReportedProviderCost = {
@@ -898,9 +906,16 @@ function canonicalRequest(request: ProviderRequest): CanonicalProviderRequest {
 }
 
 function checkedStoryRequest(profile: TextProviderProfile, request: ProviderRequest, responseFormat?: boolean): PreparedProviderRequest {
+  const effectiveContextWindowTokens = resolveEffectiveContextWindowTokens(
+    profile.contextWindowTokens,
+    request.effectiveContextWindowTokens
+  );
   return serializeCheckedProviderRequest(profile, canonicalRequest(request), {
-    inputLimit: profile.contextWindowTokens - profile.maxOutputTokens,
+    inputLimit: effectiveContextWindowTokens - profile.maxOutputTokens,
     count: (body) => body.length,
+    countMode: "estimated",
+    safetyAllowanceTokens: estimatedInputSafetyAllowanceTokens,
+    contextWindowTokens: effectiveContextWindowTokens,
     output: request.budgetOutput ?? { kind: "story_append" },
     ...(responseFormat === undefined ? {} : { responseFormat })
   });
@@ -931,7 +946,8 @@ async function callLmStudio(profile: TextProviderProfile, request: ProviderReque
       modelInstanceId: String(finalData.model_instance_id || profile.model),
       usage: { inputTokens: Number(stats.input_tokens || 0), outputTokens, totalTokens: Number(stats.input_tokens || 0) + outputTokens },
       reportedCost: null,
-      rawMetadata: { status: finalData.status || "", modelInstanceId: finalData.model_instance_id || "" }
+      rawMetadata: { status: finalData.status || "", modelInstanceId: finalData.model_instance_id || "" },
+      preparedRequest: { body: prepared.body, payloadHash: prepared.payloadHash }
     };
   }
   const data = await checkedJson(response, profile, "story generation", url);
@@ -948,7 +964,8 @@ async function callLmStudio(profile: TextProviderProfile, request: ProviderReque
     modelInstanceId: String(data.model_instance_id || profile.model),
     usage: { inputTokens: Number(data.stats?.input_tokens || 0), outputTokens, totalTokens: Number(data.stats?.input_tokens || 0) + outputTokens },
     reportedCost: null,
-    rawMetadata: { status: data.status || "", modelInstanceId: data.model_instance_id || "" }
+    rawMetadata: { status: data.status || "", modelInstanceId: data.model_instance_id || "" },
+    preparedRequest: { body: prepared.body, payloadHash: prepared.payloadHash }
   };
 }
 
@@ -1001,7 +1018,8 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
         totalTokens: Number(usageObj.total_tokens || 0)
       },
       reportedCost: reportedProviderCost(usageObj),
-      rawMetadata: { model: modelInstanceId, provider: finalData.provider || "" }
+      rawMetadata: { model: modelInstanceId, provider: finalData.provider || "" },
+      preparedRequest: { body: prepared.body, payloadHash: prepared.payloadHash }
     };
   }
   const data = await checkedJson(response, profile, "story generation", url);
@@ -1022,7 +1040,8 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
       totalTokens: Number(data.usage?.total_tokens || 0)
     },
     reportedCost: reportedProviderCost(data.usage),
-    rawMetadata: { model: data.model || "", provider: data.provider || "" }
+    rawMetadata: { model: data.model || "", provider: data.provider || "" },
+    preparedRequest: { body: prepared.body, payloadHash: prepared.payloadHash }
   };
 }
 

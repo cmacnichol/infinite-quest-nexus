@@ -132,12 +132,27 @@ async function cancelGeneration(pool: DatabasePool, jobId: string) {
 
 type MockReply = {
   content: string;
+  contentForRequest?: (request: Record<string, any>) => string;
   finishReason?: string;
   streamChunks?: string[];
   streamChunkDelayMs?: number;
   onRequest?: () => void;
   waitFor?: Promise<void>;
 };
+
+function eventCoverageReply(request: Record<string, any>): string {
+  const userMessage = request.messages?.find((message: { role?: string }) => message.role === "user");
+  const input = typeof userMessage?.content === "string" ? JSON.parse(userMessage.content) : {};
+  const requiredEvents = Array.isArray(input.required_events) ? input.required_events : [];
+  return JSON.stringify({
+    event_results: requiredEvents.map((event: { event_id?: unknown }) => ({
+      event_id: event.event_id,
+      covered: true,
+      missing_required_beats: [],
+      contradictions: []
+    }))
+  });
+}
 
 function validStory(narration = "Location Gamma opens and Marker Three becomes visible."): string {
   return JSON.stringify({
@@ -208,7 +223,7 @@ integration("durable Story Engine integration", () => {
         response.end(JSON.stringify({
           id: crypto.randomUUID(),
           model: "deterministic-mock",
-          choices: [{ message: { content: reply.content }, finish_reason: reply.finishReason || "stop" }],
+          choices: [{ message: { content: reply.contentForRequest?.(providerRequest) ?? reply.content }, finish_reason: reply.finishReason || "stop" }],
           usage: { prompt_tokens: 700, completion_tokens: 220, total_tokens: 920, cost: 0.00125 }
         }));
       });
@@ -906,7 +921,8 @@ integration("durable Story Engine integration", () => {
         }) },
         { content: "not valid extension JSON" },
         { content: JSON.stringify(finalExtensionStory) },
-        { content: JSON.stringify({ covered: true, missing_required_beats: [], contradictions: [] }) }
+        { content: "", contentForRequest: eventCoverageReply },
+        { content: "", contentForRequest: eventCoverageReply }
       );
       await runGenerationJob(pool, "extension-worker-a", 30, credentialSecret);
       expect(extensionFailurePersisted).toBe(true);
@@ -935,7 +951,7 @@ integration("durable Story Engine integration", () => {
       expect(await runGenerationJob(pool, "extension-worker-b", 30, credentialSecret)).toBe(true);
 
       expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed", attempts: 2 });
-      expect(requests.slice(requestOffset).filter((request) => Array.isArray(request.messages))).toHaveLength(5);
+      expect(requests.slice(requestOffset).filter((request) => Array.isArray(request.messages))).toHaveLength(6);
       const audit = await pool.query<{ attempt_number: number; recovery_kind: string }>(
         "SELECT attempt_number, recovery_kind FROM generation_attempts WHERE generation_job_id = $1 ORDER BY attempt_number",
         [job.id]
@@ -2031,10 +2047,7 @@ integration("durable Story Engine integration", () => {
       openThreads: [],
       canonicalFacts: edited.canonicalFacts,
       scratchpad: edited.scratchpad,
-      trackers: edited.trackers,
-      rpgStats: edited.rpgStats,
-      eventTriggers: edited.eventTriggers,
-      pendingEventTriggers: edited.pendingEventTriggers
+      trackers: edited.trackers
     });
     const advanced = await getCampaignRuntimeState(pool, imported.campaignId);
     expect(advanced).toMatchObject({
@@ -2201,7 +2214,8 @@ integration("durable Story Engine integration", () => {
     replies.push(
       { content: JSON.stringify({ activated_trigger_ids: ["before-location"], reasons: { "before-location": "Location Gamma is being opened." } }) },
       { content: validStory("Marker Four activates as Location Gamma opens.") },
-      { content: JSON.stringify({ activated_trigger_ids: ["after-object"], reasons: { "after-object": "Marker Three is now visible." } }) }
+      { content: JSON.stringify({ activated_trigger_ids: ["after-object"], reasons: { "after-object": "Marker Three is now visible." } }) },
+      { content: "", contentForRequest: eventCoverageReply }
     );
     const requestOffset = requests.length;
     const job = await queue(imported.campaignId);

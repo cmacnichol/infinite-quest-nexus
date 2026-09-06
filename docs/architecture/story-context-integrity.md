@@ -71,8 +71,31 @@ draft. The checkpoint binds owner, campaign, world version, base identity,
 protocol, provider/model, normalized action, request payload hash, draft hash,
 producing attempt, and the sent canonical-fact allowlist. A compatible retry or
 lease reclaim resumes that exact draft. A new draft invalidates every
-draft-dependent stage before reuse. Automatic repair consumption is persisted
-per stage and draft; an explicit retry starts a distinct bounded attempt.
+draft-dependent stage before reuse. Automatic repair consumption is persisted per stage. The main-stage allowance
+survives changed drafts and later immediate-extension repair checkpoints,
+including compatible older checkpoints. An explicit retry starts a distinct
+bounded attempt.
+
+Checkpoint version 2 retains the actual serialized producing request privately,
+including streaming and provider-format fallback, and binds effective provider
+configuration plus an opaque endpoint identity. Fact visibility is derived only
+from that request's protected authority; rejected drafts cannot grant it. Main,
+extension, and repair results retain their own producing request. Malformed or
+incompatible checkpoints fail safely; an older checkpoint must be discarded and
+generation re-enqueued from current authority rather than silently adopted.
+
+Generation and public previews share the hybrid retrieval stage. Generation
+receives whole selected parent records before prompt budgeting; public previews
+apply their own compression afterward. Candidate loading remains bounded and
+prioritizes recent turns before its row limit. The latest protected turn is not
+also returned as optional history.
+
+Event coverage requires an explicit result for every due occurrence ID. Missing,
+duplicate, or unexpected results fail validation. Immediate events are checked
+against both the full narration and the appended passage. Only validated main
+narration is immutable during extension repair; a rejected appended passage can
+be replaced. Fulfillment counts each distinct occurrence once, including older
+pending occurrences, and retains the latest activation source turn.
 
 Immediate events require a complete final `StoryTurnOutput`, including the
 original validated narration and a nonempty extension. Event occurrence
@@ -112,3 +135,59 @@ and any ambiguity. Later explicit corrections take precedence over older
 generated snapshots. Apply only an approved, revision-checked state edit through
 the existing API, then rebuild derived memory. A fact absent from every retained
 authoritative source is unrecoverable; do not ask a model to reconstruct it.
+
+## Follow-up transaction and budget enforcement
+
+Generation captures authority in a short transaction and commits/releases its
+campaign and state locks before embedding calls. Optional Chronicle retrieval
+then runs without an open transaction, using the captured base turn as its
+cutoff. Query-cache writes use a separate short transaction after provider work.
+Caller-owned transaction clients receive authority only; the repository does not
+commit their transaction or perform optional provider retrieval inside it.
+
+Every canonical operation receives the job's effective context window. Both
+optional-history selection and the final serialized-request guard reserve the
+same estimated input allowance. Character-based counts are labeled estimated;
+the input allowance does not consume the configured output reserve. Recovery
+remeasures its final payload after omitting an oversized complete rejected draft.
+Checkpoint configuration identity includes the effective window and safety policy.
+Whole-main rewrites use replacement output feasibility; extension-only prefix
+and suffix constraints apply only to actual extensions.
+
+## Budget-aware history and fact retrieval
+
+Private generation supplies its provider-constrained campaign context allowance
+to Chronicle before candidate collection. Generation scales the candidate pools,
+per-signal ranks, selected parents, historical-fact pool, and per-turn diversity
+allowance in proportion to that budget. The scale is the ceiling of the allowance
+divided by 32,000, with a minimum of one and the supported campaign maximum of
+1,000,000. The calibrated public-preview policy remains unchanged.
+
+At 32k the generation parent allowance is 16; at 128k it is 64; at 1m it is 512.
+These are retrieval allowances, not instructions to fill the prompt or to ignore
+relevance. Whole records still pass through the final campaign/provider budget
+planner. A larger allowance can therefore include more history and facts when
+they are available and fit. Incremental diversity scoring avoids repeatedly
+comparing the same vector pairs as these pools grow.
+
+In cutoff-aware chunk retrieval, valid historical facts participate in lexical,
+entity, recency, importance, kind, and temporal rank fusion before diversity
+selection. They are no longer assigned a rank below every narrative candidate.
+Only actual chunk IDs enter vector queries; historical fact candidates use the
+scoped canonical projection and do not invent semantic embeddings. A smaller
+prompt may prioritize recent history while larger budgets admit more optional
+facts. Current authoritative facts remain protected at every budget.
+
+Accepted canonical fact projection combines distinct plain additions with
+structured updates. Structured updates keep their previous ordering and fact
+identities; distinct plain additions follow them. Normalized duplicate prose is
+stored once with the union of its structured supersession references. Explicit
+replay uses the same projection from retained accepted snapshots. This code
+change does not initiate a rebuild or alter live campaign data.
+
+Supersession validation uses the exact producing request. Its visible-fact
+allowlist includes current continuity facts and selected Chronicle entries of
+kind `canonical_fact`. In the generation cutoff path those entry IDs are the
+scoped canonical fact UUIDs, not grouped memory IDs. Facts omitted by the final
+planner, prose containing a UUID, and rejected drafts do not grant authority.
+Active-fact and generation-base checks still apply at acceptance.

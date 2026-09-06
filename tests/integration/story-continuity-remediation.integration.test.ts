@@ -93,7 +93,7 @@ integration("prompt-memory remediation composed workflow", () => {
       `UPDATE world_versions SET content = jsonb_set(content, '{world,rules}', '"The final harbor rule is never broken."'::jsonb, true)
         WHERE id = (SELECT world_version_id FROM campaigns WHERE id = $1)`, [imported.campaignId]
     );
-    const latePassword = `late-password-${crypto.randomUUID()}`;
+    const latePassword = "late-harbor-password";
     await pool.query(
       "UPDATE campaign_state SET scratchpad_private=$2,scratchpad_safe_for_prompt=true WHERE campaign_id=$1",
       [imported.campaignId, `Earlier private material. ${"x".repeat(10_000)} ${latePassword}`]

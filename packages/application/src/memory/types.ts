@@ -149,6 +149,11 @@ export type MemoryGenerationAuthorityScope = CampaignWorldVersionMemoryScope & R
   operationKind: "append" | "replace_latest";
   expectedTurnNumber: number;
   query: string;
+  /**
+   * Runtime-calculated provider-safe allowance for optional Chronicle
+   * retrieval. Public previews deliberately omit it and retain calibration.
+   */
+  retrievalBudgetTokens?: number;
   expectedBaseIdentity?: Readonly<{
     operationKind: "append" | "replace_latest";
     expectedTurnNumber: number;
@@ -315,6 +320,8 @@ export type ChronicleChunkBatchCommit = Readonly<{
 export type MemoryContextPreviewRequest = MemoryContextQuery & Readonly<{
   /** API preview is pinned to a world-version even when campaign version later changes. */
   throughTurnNumber?: number;
+  /** Private generation-only candidate-pool allowance; public previews omit it. */
+  retrievalBudgetTokens?: number;
 }>;
 
 export type MemoryEmbeddingConfigInput = CampaignEmbeddingConfig;

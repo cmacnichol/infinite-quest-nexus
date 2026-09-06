@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type {
   ProviderHealthDiagnosticCode,
   ProviderHealthPort,
@@ -44,6 +44,8 @@ export type RuntimeProviderDescriptor<R extends ProviderRole = ProviderRole> = R
   maxOutputTokens: number;
   temperature: number;
   requestTimeoutMs: number;
+  /** Opaque hash of the effective non-secret provider destination. */
+  endpointIdentity?: string;
   configuration: Readonly<Record<string, unknown>>;
 }>;
 
@@ -160,6 +162,7 @@ export function createRuntimeProviderAdapter(options: Readonly<{
       maxOutputTokens: row.maxOutputTokens,
       temperature: row.temperature,
       requestTimeoutMs: row.requestTimeoutMs,
+      endpointIdentity: createHash("sha256").update(row.baseUrl.replace(/\/+$/, "")).digest("hex"),
       configuration: Object.freeze({ ...row.configuration })
     });
   }

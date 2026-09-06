@@ -114,7 +114,7 @@ function establishedPromptPreview(key: PromptTemplateKey, content: string) {
     narration: "The gate opens beneath Mira's lantern.", choices: ["Cross", "Wait", "Call", "Return"], custom_action_suggestion: "Study the blue light.",
     scratchpad: "Mira opened the gate.", tracker_updates: [], image_prompt: "A lantern at an open gate", continuity_summary: "Mira stands at the opened gate.",
     canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: []
-  }, ["Blue light floods the rain-swept bridge."]);
+  }, ["Blue light floods the rain-swept bridge."], context, "Mira opens the gate.");
   else if (key === "turn_intent") structuredInput = buildTurnIntentPrompt("Mira opens the gate and calls for the ferryman.");
   else if (key === "scene_coverage" || key === "scene_coverage_rewrite") structuredInput = buildSceneCoveragePrompt("Mira opens the gate.", "Mira presses her palm to the blue glass, and the gate opens.");
   if (structuredInput) {

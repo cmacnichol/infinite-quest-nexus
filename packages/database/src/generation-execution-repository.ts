@@ -71,7 +71,7 @@ export type GenerationLeaseScope = Readonly<{
 
 /** Durable boundary between validated narration and downstream orchestration. */
 export type GenerationValidatedMainDraftCheckpoint = Readonly<{
-  version: 1;
+  version: 2;
   ownerUserId: string;
   campaignId: string;
   worldVersionId: string | null;
@@ -79,7 +79,13 @@ export type GenerationValidatedMainDraftCheckpoint = Readonly<{
   promptProtocolVersion: string;
   providerId: string;
   providerModel: string;
+  /** Hash of the effective non-secret provider configuration used on the wire. */
+  providerConfigurationHash: string;
   action: string;
+  /** Normalized original action sent to the generation workflow. */
+  originalInputHash: string;
+  /** Exact serialized request body that produced the accepted draft. Private only. */
+  requestBody: string;
   requestPayloadHash: string;
   draftHash: string;
   producingAttempt: number;
@@ -93,14 +99,24 @@ export type GenerationOrchestrationState = {
   rpgAssessmentError?: string;
   beforeEvents?: ActivatedEvent[];
   beforeTriggerError?: string;
-  afterEvents?: ActivatedEvent[];
+  afterEvents?: ActivatedEvent[] | undefined;
   afterTriggerError?: string;
   extension?: {
     story: StoryTurnOutput;
     /** Fences the exact validated extension object across lease reclaim. */
     finalStoryHash: string;
     producingAttempt: number;
-  };
+    producingOperation: "event_extension" | "scene_coverage_rewrite";
+    /** The exact validated main draft that this complete replacement extends. */
+    validatedMainDraftHash: string;
+    /** The serialized extension request, including its protected authority. */
+    producingRequestPayloadHash: string;
+    /** Private exact serialized extension request that produced the final story. */
+    producingRequestBody?: string;
+    providerConfigurationHash?: string;
+    /** Exact fact records rendered into that extension request. */
+    sentFactIds: readonly string[];
+  } | undefined;
   extensionError?: string | undefined;
   /** A durable fence for one automatic repair of a particular rejected draft. */
   automaticRepair?: {
@@ -115,7 +131,10 @@ export type GenerationOrchestrationState = {
     extensionFinalStoryHash: string | null;
     extensionProducingAttempt: number | null;
     consumedAttempt: number;
+    /** Retains the consumed before/pending-stage allowance after an immediate repair. */
+    mainRepairConsumed?: boolean;
     repairedFinalStoryHash?: string;
+    repairedMainRequestPayloadHash?: string;
   } | undefined;
   validatedMainDraft?: GenerationValidatedMainDraftCheckpoint;
 };
@@ -144,8 +163,11 @@ function hasValidEventCoverageRepair(value: unknown): boolean {
         && repair.extensionProducingAttempt > 0))
     && typeof repair.consumedAttempt === "number" && Number.isSafeInteger(repair.consumedAttempt)
     && repair.consumedAttempt > 0
+    && (repair.mainRepairConsumed === undefined || typeof repair.mainRepairConsumed === "boolean")
     && (repair.repairedFinalStoryHash === undefined
-      || (typeof repair.repairedFinalStoryHash === "string" && repair.repairedFinalStoryHash.length > 0));
+      || (typeof repair.repairedFinalStoryHash === "string" && repair.repairedFinalStoryHash.length > 0))
+    && (repair.repairedMainRequestPayloadHash === undefined
+      || (typeof repair.repairedMainRequestPayloadHash === "string" && repair.repairedMainRequestPayloadHash.length > 0));
 }
 
 export type GenerationStreamingState = Record<string, unknown> & {
@@ -520,18 +542,25 @@ async function commitAcceptedTurn(
     ? job.base_state_private.trackers
     : stateResult.rows[0]?.trackers;
   const trackers = mergedTrackers(trackerBase, story.tracker_updates);
-  if (orchestration.extension
-      && orchestration.extension.finalStoryHash !== stableStringify(orchestration.extension.story)) {
-    throw Object.assign(new Error("The persisted final event story no longer matches its validated object."), {
+  if (orchestration.extension && (
+      orchestration.extension.finalStoryHash !== stableStringify(orchestration.extension.story)
+      || stableStringify(story) !== orchestration.extension.finalStoryHash
+      || !orchestration.validatedMainDraft
+      || orchestration.extension.validatedMainDraftHash !== orchestration.validatedMainDraft.draftHash
+      || !orchestration.extension.producingRequestPayloadHash
+      || !Array.isArray(orchestration.extension.sentFactIds)
+      || stableStringify([...(input.sentFactIds ?? [])].sort())
+        !== stableStringify([...orchestration.extension.sentFactIds].sort()))) {
+    throw Object.assign(new Error("The persisted final event story no longer matches its validated producing request."), {
       code: "generation_checkpoint_incompatible"
     });
   }
-  const newlyActivated = [
+  const fulfilledEvents = [
     ...(orchestration.beforeEvents || []),
     // An after-event is fulfilled only when its immediate fiction was accepted.
     ...((orchestration.extension ? orchestration.afterEvents || [] : []).filter((event) => event.addTextAfter))
-  ].filter((event) => event.sourceTurn === job.expected_turn_number);
-  const eventTriggers = applyTriggerHits(inputs.eventTriggers, newlyActivated, new Date().toISOString());
+  ];
+  const eventTriggers = applyTriggerHits(inputs.eventTriggers, fulfilledEvents, new Date().toISOString());
   const pendingEventTriggers = (orchestration.afterEvents || [])
     .filter((event) => !event.addTextAfter || Boolean(orchestration.extensionError))
     .map(({ addTextAfter: _addTextAfter, ...event }) => event);

@@ -579,9 +579,13 @@ describe("API server security and CORS headers", () => {
     await app.close();
   });
 
-  it("does not accept forwarded HTTPS from a hop-count-only proxy configuration", async () => {
+  it("accepts forwarded HTTPS only with the configured trusted proxy hops", async () => {
     const directHttp = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool }));
     expect((await directHttp.inject({ method: "GET", url: "/health/live" })).headers["strict-transport-security"]).toBeUndefined();
+    expect((await directHttp.inject({
+      method: "GET", url: "/health/live",
+      headers: { "x-forwarded-proto": "https", host: "localhost:8080" }
+    })).headers["strict-transport-security"]).toBeUndefined();
     await directHttp.close();
 
     const proxied = await buildServer(serverOptions({
@@ -593,7 +597,7 @@ describe("API server security and CORS headers", () => {
       url: "/health/live",
       headers: { "x-forwarded-proto": "https", host: "localhost:8080" }
     });
-    expect(response.headers["strict-transport-security"]).toBeUndefined();
+    expect(response.headers["strict-transport-security"]).toBe("max-age=31536000; includeSubDomains");
     await proxied.close();
   });
 

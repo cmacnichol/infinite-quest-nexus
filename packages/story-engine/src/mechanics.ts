@@ -187,20 +187,33 @@ export function fictionGuidanceForEvents(events: ActivatedEvent[]): string[] {
 }
 
 export function applyTriggerHits(triggers: PlayerEventTrigger[], events: ActivatedEvent[], timestamp: string): PlayerEventTrigger[] {
-  const activated = new Map(events.map((event) => [event.sourceTriggerId, event]));
+  const occurrences = new Map(events.map((event) => [
+    JSON.stringify([event.sourceTriggerId, event.sourceTurn, event.id]), event
+  ]));
   return triggers.map((trigger) => {
-    const event = activated.get(trigger.id);
-    return event ? {
+    const fulfilled = [...occurrences.values()].filter((event) => event.sourceTriggerId === trigger.id);
+    const latestSourceTurn = Math.max(trigger.lastTriggeredTurn ?? 0, ...fulfilled.map((event) => event.sourceTurn ?? 0));
+    return fulfilled.length ? {
       ...trigger,
-      triggeredCount: trigger.triggeredCount + 1,
-      lastTriggeredTurn: event.sourceTurn,
+      triggeredCount: trigger.triggeredCount + fulfilled.length,
+      lastTriggeredTurn: latestSourceTurn || null,
       lastTriggeredAt: timestamp
     } : trigger;
   });
 }
 
-export function buildEventExtensionPrompt(story: StoryTurnOutput, guidance: string[]): string {
-  return stableStringify({ existing_story: story, fictional_event_instructions: guidance });
+export function buildEventExtensionPrompt(
+  story: StoryTurnOutput,
+  guidance: string[],
+  protectedFictionSafeBaseAuthority: unknown,
+  originalAction: string
+): string {
+  return stableStringify({
+    protected_fiction_safe_base_authority: protectedFictionSafeBaseAuthority,
+    original_player_action: originalAction,
+    complete_validated_main_draft: story,
+    fictional_event_instructions: guidance
+  });
 }
 
 export function parseEventExtension(content: string, mainNarration: string) {

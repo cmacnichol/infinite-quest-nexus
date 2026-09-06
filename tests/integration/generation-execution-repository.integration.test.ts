@@ -670,6 +670,36 @@ integration("PostgreSQL generation execution repository", () => {
     ]);
   });
 
+  it("fulfills an older pending occurrence exactly once when its fiction is accepted", async () => {
+    const imported = await campaign();
+    const { repository, scope, job } = await readyAcceptedCommit(imported.campaignId, "pending-fulfillment-worker");
+    const trigger = {
+      id: "observatory-bell", label: "Observatory bell", timing: "after" as const,
+      condition: "The keeper arrives.", effect: "The bell rings.", addTextAfter: false,
+      triggeredCount: 2, lastTriggeredTurn: null, lastTriggeredAt: null
+    };
+    const pending = {
+      id: "observatory-bell-pending", sourceTriggerId: trigger.id, name: trigger.label,
+      timing: "after" as const, condition: trigger.condition, effect: trigger.effect,
+      instructions: "The bell rings.", reason: "", sourceTurn: job.expected_turn_number - 1, addTextAfter: false
+    };
+    const input = acceptedCommitInput({ scope, job, story: supersedingStory([]) });
+    input.story.narration = "The observatory bell rings as the keeper enters.";
+    await repository.commitAcceptedTurn({
+      ...input,
+      inputs: { ...job.orchestration_inputs, eventTriggers: [trigger], pendingEventTriggers: [pending] },
+      orchestration: { beforeEvents: [pending, pending], afterEvents: [] }
+    });
+    const state = await pool.query<{ event_triggers: unknown; pending_event_triggers: unknown }>(
+      "SELECT event_triggers, pending_event_triggers FROM campaign_state WHERE campaign_id=$1 AND owner_user_id=$2",
+      [imported.campaignId, ownerUserId]
+    );
+    expect(state.rows[0]?.event_triggers).toEqual([
+      { ...trigger, triggeredCount: 3, lastTriggeredTurn: pending.sourceTurn, lastTriggeredAt: expect.any(String) }
+    ]);
+    expect(state.rows[0]?.pending_event_triggers).toEqual([]);
+  });
+
   it("keeps a final event story accepted when its illustration finalization enqueue fails", async () => {
     const imported = await campaign();
     const { repository, scope, job } = await readyAcceptedCommit(imported.campaignId, "event-finalization-worker");
@@ -688,11 +718,16 @@ integration("PostgreSQL generation execution repository", () => {
     const committed = await repository.commitAcceptedTurn({
       ...acceptedCommitInput({ scope, job, story: finalStory }),
       orchestration: {
+        validatedMainDraft: { draftHash: "validated-main-draft-fixture" } as never,
         afterEvents: [],
         extension: {
           story: finalStory,
           finalStoryHash: stableStringify(finalStory),
-          producingAttempt: job.attempts
+          producingAttempt: job.attempts,
+          producingOperation: "event_extension",
+          validatedMainDraftHash: "validated-main-draft-fixture",
+          producingRequestPayloadHash: "extension-request-fixture",
+          sentFactIds: []
         }
       },
       collaborators: {

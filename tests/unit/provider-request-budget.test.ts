@@ -13,6 +13,7 @@ import {
   validateCompleteRejectedDraft
 } from "../../packages/story-engine/src/provider-request.js";
 import { planContext } from "../../packages/story-engine/src/context-budget.js";
+import { parseEventExtension } from "../../packages/story-engine/src/mechanics.js";
 
 const profile: TextProviderProfile = {
   providerType: "lmstudio",
@@ -238,6 +239,20 @@ describe("provider request serialization", () => {
     }
   });
 
+  it("records body-length canonical guards as estimated rather than tokenizer-exact", () => {
+    const prepared = serializeCheckedProviderRequest(profile, {
+      systemPrompt: "rules",
+      input: "authoritative state"
+    }, {
+      inputLimit: 10_000,
+      count: (value) => value.length,
+      countMode: "estimated",
+      output: { kind: "story_append" }
+    });
+
+    expect(prepared.budgetAudit?.countMode).toBe("estimated");
+  });
+
   it("rejects an oversized canonical request before it calls provider transport", async () => {
     const fetcher = vi.fn();
     await expect(callTextProvider({
@@ -255,7 +270,85 @@ describe("provider request serialization", () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
-  it("rejects a full recovery payload before transport, including its rejected draft", async () => {
+  it("uses a smaller snapshotted job window instead of the provider window for canonical requests", async () => {
+    const fetcher = vi.fn();
+    await expect(callTextProvider({
+      ...profile,
+      contextWindowTokens: 16_000,
+      maxOutputTokens: 1_000
+    }, {
+      systemPrompt: "rules",
+      input: "x".repeat(1_500),
+      canonicalBudgeting: true,
+      effectiveContextWindowTokens: 2_000
+    }, createTestProviderTransport(fetcher as typeof fetch))).rejects.toMatchObject({
+      code: "context_budget_exceeded",
+      scope: "provider_request"
+    });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it.each([0, 2_000.5, Number.NaN, Number.POSITIVE_INFINITY])("rejects an invalid snapshotted job window (%s) before transport", async (effectiveContextWindowTokens) => {
+    const fetcher = vi.fn();
+    await expect(callTextProvider(profile, {
+      systemPrompt: "rules",
+      input: "authoritative state",
+      canonicalBudgeting: true,
+      effectiveContextWindowTokens
+    }, createTestProviderTransport(fetcher as typeof fetch))).rejects.toMatchObject({
+      code: "context_budget_invalid"
+    });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("reserves the documented estimated-input safety allowance before canonical transport", async () => {
+    const fetcher = vi.fn();
+    await expect(callTextProvider({
+      ...profile,
+      contextWindowTokens: 16_000,
+      maxOutputTokens: 1_000
+    }, {
+      systemPrompt: "rules",
+      input: "x".repeat(1_000),
+      canonicalBudgeting: true,
+      effectiveContextWindowTokens: 2_400
+    }, createTestProviderTransport(fetcher as typeof fetch))).rejects.toMatchObject({
+      code: "context_budget_exceeded",
+      scope: "provider_request"
+    });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("omits an oversized complete rejected draft and sends a clean recovery from protected authority", async () => {
+    const authorityCanary = `AUTHORITATIVE_CANARY ${"a".repeat(1_000)}`;
+    const rejectedCanary = `REJECTED_CANARY ${"r".repeat(12_000)}`;
+    let transportedBody = "";
+    const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith("/api/v1/models")) {
+        return new Response(JSON.stringify({ models: [{ key: "loaded-instance-id", loaded_instances: [{ id: "loaded-instance-id" }] }] }), { status: 200 });
+      }
+      transportedBody = String(init?.body);
+      return new Response(JSON.stringify({ output: [{ type: "message", content: "{}" }], stats: {} }), { status: 200 });
+    });
+
+    await callTextProvider({
+      ...profile,
+      contextWindowTokens: 12_000,
+      maxOutputTokens: 1_024
+    }, {
+      systemPrompt: "scene rewrite rules",
+      input: authorityCanary,
+      recoveryInput: "rewrite every uncovered beat",
+      rejectedResponse: JSON.stringify({ narration: rejectedCanary }),
+      canonicalBudgeting: true
+    }, createTestProviderTransport(fetcher as typeof fetch));
+
+    expect(transportedBody).toContain(authorityCanary);
+    expect(transportedBody).not.toContain(rejectedCanary);
+    expect(transportedBody).toContain("CLEAN REGENERATION REQUIREMENT");
+  });
+
+  it("rejects before transport when protected recovery input still cannot fit without its rejected draft", async () => {
     const fetcher = vi.fn();
     await expect(callTextProvider({
       ...profile,
@@ -272,5 +365,154 @@ describe("provider request serialization", () => {
       scope: "provider_request"
     });
     expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("rejects an event extension whose preserved narration cannot fit the output reserve before transport", async () => {
+    const fetcher = vi.fn();
+    await expect(callTextProvider({
+      ...profile,
+      contextWindowTokens: 100_000,
+      maxOutputTokens: 256
+    }, {
+      systemPrompt: "event extension rules",
+      input: "extend the validated story",
+      canonicalBudgeting: true,
+      budgetOutput: {
+        kind: "event_extension",
+        protectedStory: {
+          narration: "n".repeat(66_000),
+          scratchpad: "unchanged scratchpad",
+          continuitySummary: "unchanged continuity",
+          openThreads: ["unchanged thread"]
+        },
+        narrationCharacterLimit: 200_000
+      }
+    }, createTestProviderTransport(fetcher as typeof fetch))).rejects.toMatchObject({
+      code: "continuity_output_budget_exceeded",
+      scope: "output_skeleton"
+    });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("accepts a one-character event suffix at the 200,000-character narration limit", () => {
+    expect(() => serializeCheckedProviderRequest({
+      ...profile,
+      contextWindowTokens: 1_000_000,
+      maxOutputTokens: 1_000_000
+    }, {
+      systemPrompt: "event extension rules",
+      input: "extend the validated story"
+    }, {
+      inputLimit: 1_000_000,
+      count: () => 0,
+      output: {
+        kind: "event_extension",
+        protectedStory: {
+          narration: "n".repeat(199_999),
+          scratchpad: "",
+          continuitySummary: "",
+          openThreads: []
+        },
+        narrationCharacterLimit: 200_000
+      }
+    })).not.toThrow();
+  });
+
+  it("rejects a one-character event suffix one character over the 200,000-character narration limit", () => {
+    expect(() => serializeCheckedProviderRequest({
+      ...profile,
+      contextWindowTokens: 1_000_000,
+      maxOutputTokens: 1_000_000
+    }, {
+      systemPrompt: "event extension rules",
+      input: "extend the validated story"
+    }, {
+      inputLimit: 1_000_000,
+      count: () => 0,
+      output: {
+        kind: "event_extension",
+        protectedStory: {
+          narration: "n".repeat(200_000),
+          scratchpad: "",
+          continuitySummary: "",
+          openThreads: []
+        },
+        narrationCharacterLimit: 200_000
+      }
+    })).toThrow(expect.objectContaining({ code: "extension_narration_limit_exceeded" }));
+  });
+
+  it("accepts the guard's one-character suffix through the event-extension parser", () => {
+    const mainNarration = "The main narration remains unchanged.";
+    const parsed = parseEventExtension(JSON.stringify({
+      narration: `${mainNarration}x`,
+      choices: ["one", "two", "three", "four"],
+      custom_action_suggestion: "Continue onward.",
+      scratchpad: "complete continuity",
+      tracker_updates: [],
+      image_prompt: "",
+      continuity_summary: "complete summary",
+      canonical_facts: [],
+      superseded_facts: [],
+      canonical_fact_updates: [],
+      open_threads: []
+    }), mainNarration);
+
+    expect(parsed.narration).toBe(`${mainNarration}x`);
+  });
+
+  it("rejects escaped replacement continuity that makes the complete event output exceed its reserve", () => {
+    expect(() => serializeCheckedProviderRequest({
+      ...profile,
+      contextWindowTokens: 100_000,
+      maxOutputTokens: 256
+    }, {
+      systemPrompt: "event extension rules",
+      input: "extend the validated story"
+    }, {
+      inputLimit: 99_744,
+      count: (value) => value.length,
+      output: {
+        kind: "event_extension",
+        protectedStory: {
+          narration: "Brief narration.",
+          scratchpad: "\\\"\n".repeat(2_000),
+          continuitySummary: "",
+          openThreads: []
+        },
+        narrationCharacterLimit: 200_000
+      }
+    })).toThrow(expect.objectContaining({ code: "continuity_output_budget_exceeded", scope: "output_skeleton" }));
+  });
+
+  it("accepts a complete event output exactly at its serialized token reserve and rejects one token over", () => {
+    const protectedStory = {
+      narration: "N",
+      scratchpad: "S",
+      continuitySummary: "C",
+      openThreads: ["T"]
+    };
+    const exactReserve = JSON.stringify({
+      narration: "Nx",
+      choices: ["x", "x", "x", "x"],
+      custom_action_suggestion: "x",
+      scratchpad: "S",
+      tracker_updates: [],
+      image_prompt: "",
+      continuity_summary: "C",
+      canonical_facts: [],
+      superseded_facts: [],
+      canonical_fact_updates: [],
+      open_threads: ["T"]
+    }).length;
+    const request = { systemPrompt: "event extension rules", input: "extend the validated story" };
+    const options = {
+      inputLimit: 1_000_000,
+      count: (value: string) => value.length,
+      output: { kind: "event_extension" as const, protectedStory, narrationCharacterLimit: 200_000 }
+    };
+
+    expect(() => serializeCheckedProviderRequest({ ...profile, contextWindowTokens: 1_000_000, maxOutputTokens: exactReserve }, request, options)).not.toThrow();
+    expect(() => serializeCheckedProviderRequest({ ...profile, contextWindowTokens: 1_000_000, maxOutputTokens: exactReserve - 1 }, request, options)).toThrow(expect.objectContaining({ code: "continuity_output_budget_exceeded" }));
   });
 });

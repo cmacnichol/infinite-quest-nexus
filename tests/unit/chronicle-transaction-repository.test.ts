@@ -9,6 +9,7 @@ import {
 } from "../../packages/database/src/chronicle-repository.js";
 import { MAX_CONTINUITY_OPEN_THREADS } from "../../packages/contracts/src/story-prompt.js";
 import { loadPostgresChronicleGenerationContext } from "../../packages/database/src/chronicle-generation-context.js";
+import { createPostgresChronicleQueryCacheRepository } from "../../packages/database/src/chronicle-query-cache-repository.js";
 import { projectStateCorrection } from "../../packages/database/src/chronicle-state-correction-repository.js";
 import type { DatabaseClient, DatabasePool } from "../../packages/database/src/pool.js";
 
@@ -53,7 +54,8 @@ function databasePool(
   } as unknown as DatabaseClient;
   return {
     connect: vi.fn(async () => client),
-    query: vi.fn(query)
+    query: vi.fn(query),
+    totalCount: 0
   } as unknown as DatabasePool;
 }
 
@@ -168,52 +170,166 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     expect(transaction).toHaveProperty("loadGenerationContext");
     expect(transaction).not.toHaveProperty("previewGenerationContext");
   });
-  it("bridges private authority through scoped lexical retrieval when embeddings are unavailable", async () => {
+  it("keeps hybrid retrieval selection and audit provenance for complete private candidates", async () => {
     const retrievalCalls: Array<readonly unknown[]> = [];
-    const client = {
-      query: vi.fn(async (sql: string, values: readonly unknown[] = []) => {
+    const pool = databasePool((sql: string, values: readonly unknown[] = []) => {
         if (sql.includes("FOR UPDATE OF campaign, state")) return { rows: [{ active_turn_number: 0, world_version_id: scope.worldVersionId, revision: 1 }] };
         if (sql.includes("FROM campaign_state_edits") && sql.includes("state_snapshot_private, revision")) return { rows: [] };
         if (sql.includes("generation_context_state")) return { rows: [{ world_content: { world: { rules: "Stay in the lantern city." } }, selected_character_id: null, initial_state_snapshot: { continuitySummary: "", scratchpad: "", openThreads: [], canonicalFacts: [], trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: [] }, scratchpad_private: "" }] };
         if (sql.includes("ORDER BY edit.revision DESC")) return { rows: [] };
         if (sql.includes("FROM campaigns c") && sql.includes("campaign_state")) return { rows: [{ id: scope.campaignId, title: "Lantern City", active_turn_number: 0, world_version_id: scope.worldVersionId, selected_character_id: null, character_profile_revision: 0, world_content: { world: { rules: "Stay in the lantern city." } }, character_snapshot: null, character_profile: null, scratchpad_private: "", scratchpad_safe_for_prompt: false, trackers: [] }] };
-        if (sql.includes("WITH base AS") && sql.includes("chronicle_memories")) { retrievalCalls.push(values); return { rows: [{ id: "lexical-memory", turn_id: null, memory_kind: "open_thread", ordinal: 0, content: "The lantern password remains hidden.", token_estimate: 8, importance: 0.8, entities: [], entity_ids: [], metadata: {}, relevance: 1 }] }; }
+        if (sql.includes("WITH base AS (") && sql.includes("FROM chronicle_memories")) {
+          retrievalCalls.push(values);
+          return { rows: [{ id: "hybrid-memory", turn_id: null, memory_kind: "open_thread", ordinal: 0, content: "The lantern password remains hidden.", token_estimate: 8, importance: 0.8, entities: [], entity_ids: [], metadata: {}, relevance: 1 }] };
+        }
         if (sql.includes("FROM campaign_canonical_facts")) return { rows: [] };
         if (sql.includes("FROM campaign_memory_configs")) return { rows: [{ embedding_enabled: true, embedding_provider_profile_id: "missing-provider", embedding_model: "embed-v1", embedding_batch_size: 8, embedding_document_prefix: null, embedding_query_prefix: null, retrieval_implementation: "legacy_hybrid", retrieval_shadow_enabled: false }] };
         if (/^(?:SAVEPOINT|RELEASE SAVEPOINT|ROLLBACK TO SAVEPOINT) chronicle_retrieval_/.test(sql)) return { rows: [] };
         if (sql.includes("estimated_tokens") && sql.includes("memory_count")) return { rows: [{ turns: "0", characters: "0", estimated_tokens: "0", memory_count: "0", memory_tokens: "0", embedded_memories: "0", turn_memory_tokens: "0", recent_turn_tokens: "0", summary_tokens: "0" }] };
         throw new Error(`Unexpected query: ${sql}`);
-      })
-    } as unknown as DatabaseClient;
+      });
     const embeddings = embeddingPort({ resolve: vi.fn(async () => ({ status: "unconfigured" as const, resolutionSource: "none" as const, resolvedRole: null })) });
     const transaction = createPostgresChronicleGenerationTransactionPort({ embeddings });
 
-    const result = await transaction.loadGenerationContext(client, {
+    const result = await transaction.loadGenerationContext(pool, {
       ...scope, operationKind: "append", expectedTurnNumber: 1, query: "lantern password"
     });
 
     expect(retrievalCalls).toHaveLength(1);
     expect(retrievalCalls[0]?.slice(0, 3)).toEqual([scope.ownerUserId, scope.campaignId, scope.worldVersionId]);
     expect(retrievalCalls[0]?.[3]).toBe("lantern password");
+    expect(retrievalCalls[0]?.[4]).toBe(8);
     expect(retrievalCalls[0]?.[5]).toBe(0);
-    expect(embeddings.resolve).toHaveBeenCalledOnce();
-    expect(embeddings.resolve).toHaveBeenCalledWith(client, {
-      ownerUserId: scope.ownerUserId,
-      campaignId: scope.campaignId,
-      selectedProviderProfileId: "missing-provider",
-      model: "embed-v1"
-    });
-    expect(result.candidates).toEqual([expect.objectContaining({ id: "lexical-memory", content: "The lantern password remains hidden." })]);
-    expect(result.chronicleRetrieval).toEqual(expect.objectContaining({
-      auditVersion: "chronicle-retrieval-audit-v1",
+    expect(embeddings.resolve).toHaveBeenCalledTimes(1);
+    expect(result.candidates).toEqual([expect.objectContaining({ id: "hybrid-memory", content: "The lantern password remains hidden." })]);
+    expect(result.chronicleRetrieval).toMatchObject({
       configuredImplementation: "legacy_hybrid",
-      effectiveImplementation: "legacy_hybrid",
-      effectiveMode: "lexical_only",
-      fallbackCode: "provider_unavailable",
-      provider: { resolutionSource: "none", resolvedRole: null, providerType: null, model: null },
-      queryVectorPath: "none",
-      providerCallOutcome: "not_attempted"
-    }));
+      effectiveImplementation: "legacy_hybrid"
+    });
+  });
+  it("releases the authority transaction before a query embedding waits on its provider", async () => {
+    const events: string[] = [];
+    let unblockEmbedding!: () => void;
+    const embeddingBlocked = new Promise<void>((resolve) => { unblockEmbedding = resolve; });
+    let signalEmbeddingStarted!: () => void;
+    const embeddingStarted = new Promise<void>((resolve) => { signalEmbeddingStarted = resolve; });
+    const pool = databasePool((sql) => {
+      events.push(sql);
+      if (sql.includes("FOR UPDATE OF campaign, state")) {
+        return { rows: [{ active_turn_number: 0, world_version_id: scope.worldVersionId, revision: 1 }] };
+      }
+      if (sql.includes("FROM campaign_state_edits") && sql.includes("state_snapshot_private, revision")) return { rows: [] };
+      if (sql.includes("generation_context_state")) {
+        return { rows: [{
+          world_content: { world: { rules: "Stay in the lantern city." } },
+          selected_character_id: null,
+          initial_state_snapshot: { continuitySummary: "", scratchpad: "", openThreads: [], canonicalFacts: [] },
+          scratchpad_private: ""
+        }] };
+      }
+      if (sql.includes("ORDER BY edit.revision DESC")) return { rows: [] };
+      if (sql.includes("FROM campaigns c") && sql.includes("campaign_state")) {
+        return { rows: [{
+          id: scope.campaignId, title: "Lantern City", active_turn_number: 0,
+          world_version_id: scope.worldVersionId, selected_character_id: null,
+          character_profile_revision: 0, world_content: { world: { rules: "Stay in the lantern city." } },
+          character_snapshot: null, character_profile: null, scratchpad_private: "", scratchpad_safe_for_prompt: false, trackers: []
+        }] };
+      }
+      if (sql.includes("WITH base AS (") && sql.includes("FROM chronicle_memories")) return { rows: [] };
+      if (sql.includes("FROM campaign_canonical_facts")) return { rows: [] };
+      if (sql.includes("FROM campaign_memory_configs")) {
+        return { rows: [{
+          embedding_enabled: true, embedding_provider_profile_id: "embedding-profile", embedding_model: "embed-v1",
+          embedding_batch_size: 8, embedding_document_prefix: null, embedding_query_prefix: null,
+          retrieval_implementation: "legacy_hybrid", retrieval_shadow_enabled: false
+        }] };
+      }
+      if (sql.includes("embedding <=>")) return { rows: [] };
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+    const transaction = createPostgresChronicleGenerationTransactionPort({
+      embeddings: embeddingPort({
+        resolve: async () => ({ status: "resolved", resolutionSource: "dedicated_embedding", resolvedRole: "embedding", providerProfileId: "embedding-profile", providerType: "openrouter", model: "embed-v1" }),
+        load: async () => ({ id: "embedding-profile", model: "embed-v1", providerType: "openai_compatible", configuration: { embeddingDimensions: 2 }, embed: async () => ({ embeddings: [], responseId: "unused", usage: {}, reportedCost: null }) }),
+        fingerprint: async () => "embedding-fingerprint",
+        embed: async () => {
+          signalEmbeddingStarted();
+          await embeddingBlocked;
+          return { embeddings: [[1, 0]], responseId: "embedding-response", usage: {}, reportedCost: null };
+        },
+        recordCost: async () => null,
+        recordHealth: async () => undefined
+      })
+    });
+
+    const pending = transaction.loadGenerationContext(pool, {
+      ...scope, operationKind: "append", expectedTurnNumber: 1, query: "lantern password"
+    });
+    try {
+      await embeddingStarted;
+      const authorityClient = await pool.connect();
+      expect(vi.mocked(authorityClient.query).mock.calls.map(([sql]) => sql)).toContain("COMMIT");
+      expect(vi.mocked(authorityClient.release)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(authorityClient.query).mock.calls.filter(([sql]) => sql === "BEGIN")).toHaveLength(1);
+    } finally {
+      unblockEmbedding();
+    }
+    await expect(pending).resolves.toMatchObject({ candidates: [] });
+  });
+  it("keeps caller-owned transactions authority-only instead of starting provider retrieval", async () => {
+    const client = databaseClient((sql) => {
+      if (sql.includes("FOR UPDATE OF campaign, state")) {
+        return { rows: [{ active_turn_number: 0, world_version_id: scope.worldVersionId, revision: 1 }] };
+      }
+      if (sql.includes("FROM campaign_state_edits") && sql.includes("state_snapshot_private, revision")) return { rows: [] };
+      if (sql.includes("generation_context_state")) {
+        return { rows: [{
+          world_content: { world: { rules: "Stay in the lantern city." } },
+          selected_character_id: null,
+          initial_state_snapshot: { continuitySummary: "", scratchpad: "", openThreads: [], canonicalFacts: [] },
+          scratchpad_private: ""
+        }] };
+      }
+      if (sql.includes("ORDER BY edit.revision DESC")) return { rows: [] };
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+    const embeddings = embeddingPort({ resolve: vi.fn() });
+    const transaction = createPostgresChronicleGenerationTransactionPort({ embeddings });
+
+    await expect(transaction.loadGenerationContext(client, {
+      ...scope, operationKind: "append", expectedTurnNumber: 1, query: "lantern password"
+    })).resolves.toMatchObject({ candidates: [] });
+
+    expect(embeddings.resolve).not.toHaveBeenCalled();
+  });
+  it("does not run optional retrieval for an authority-only direct reader", async () => {
+    const privateCandidateCalls: Array<readonly unknown[]> = [];
+    const client = {
+      query: vi.fn(async (sql: string, values: readonly unknown[] = []) => {
+        if (sql.includes("FOR UPDATE OF campaign, state")) return { rows: [{ active_turn_number: 0, world_version_id: scope.worldVersionId, revision: 1 }] };
+        if (sql.includes("FROM campaign_state_edits") && sql.includes("state_snapshot_private, revision")) return { rows: [] };
+        if (sql.includes("generation_context_state")) return { rows: [{ world_content: { world: { rules: "Stay in the lantern city." } }, selected_character_id: null, initial_state_snapshot: { continuitySummary: "", scratchpad: "", openThreads: [], canonicalFacts: [], trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: [] }, scratchpad_private: "" }] };
+        if (sql.includes("ORDER BY edit.revision DESC")) return { rows: [] };
+        if (sql.includes("generation_context_candidates")) {
+          privateCandidateCalls.push(values);
+          return { rows: [{ id: "private-memory", turn_id: null, memory_kind: "turn_fiction", ordinal: 0, content: `The entire final sentence remains intact. ${"x".repeat(200_000)}`, token_estimate: 50_000, importance: 0.8, entities: [], entity_ids: [], metadata: {}, relevance: 1 }] };
+        }
+        if (sql.includes("FROM campaigns c") && sql.includes("campaign_state")) {
+          throw new Error("private generation candidates must not use the public preview campaign query");
+        }
+        if (sql.includes("FROM campaign_canonical_facts")) return { rows: [] };
+        throw new Error(`Unexpected query: ${sql}`);
+      })
+    } as unknown as DatabaseClient;
+
+    const result = await loadPostgresChronicleGenerationContext(client, {
+      ...scope, operationKind: "append", expectedTurnNumber: 1, query: "lantern password"
+    });
+
+    expect(privateCandidateCalls).toEqual([]);
+    expect(result.candidates).toEqual([]);
+    expect(result.chronicleRetrieval).toBeUndefined();
   });
   it("auto-enables semantic memory and queues embedding work on the exact caller client", async () => {
     let callerClient: DatabaseClient;
@@ -1419,6 +1535,30 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     });
     expect(nonsemanticRankQueries).toBe(0);
     expect(JSON.stringify(preview.scopes)).not.toContain("Partial semantic content must not survive");
+  });
+});
+
+describe("PostgreSQL Chronicle query cache outside a retrieval transaction", () => {
+  it("rolls back a failed post-provider cache write without savepoints", async () => {
+    const queries: string[] = [];
+    const diagnostic = vi.fn();
+    const client = { query: vi.fn(async (sql: string) => {
+      queries.push(sql);
+      if (sql.includes("INSERT INTO chronicle_query_embedding_cache")) throw new Error("cache write failed");
+      return { rows: [] };
+    }) } as unknown as DatabaseClient;
+    const cache = createPostgresChronicleQueryCacheRepository(client, { logDiagnostic: diagnostic }, false);
+
+    await expect(cache.putQueryEmbedding({ ownerUserId: "owner-1", campaignId: "campaign-1" }, {
+      normalizedQueryHash: createHash("sha256").update("moon key").digest("hex"),
+      providerProfileId: "provider-1", model: "embed-v1", providerFingerprint: "fingerprint",
+      queryPrefixHash: createHash("sha256").update("").digest("hex"), embeddingProtocolVersion: "chronicle-embedding-v1"
+    }, [1, 0])).resolves.toBeUndefined();
+
+    expect(queries).toContain("BEGIN");
+    expect(queries).toContain("ROLLBACK");
+    expect(queries.some((sql) => sql.startsWith("SAVEPOINT"))).toBe(false);
+    expect(diagnostic).toHaveBeenCalledWith(expect.any(Error), { campaignId: "campaign-1", cacheOperation: "put" });
   });
 });
 

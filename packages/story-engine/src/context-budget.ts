@@ -53,7 +53,8 @@ export type ContextPlanOptions<TContext = readonly ContextBudgetBlock[]> = Reado
   count: (serialized: string) => number;
   serializeContext: (blocks: readonly ContextBudgetBlock[]) => string;
   serializeRequest: (context: TContext) => string;
-  safetyAllowanceTokens?: number;
+  safetyAllowanceTokens?: number | ((tokens: number) => number);
+  contextSafetyAllowanceTokens?: number | ((tokens: number) => number);
   contextValue?: (blocks: readonly ContextBudgetBlock[]) => TContext;
   protectedScope?: "campaign_context" | "provider_request";
 }>;
@@ -71,6 +72,18 @@ export type ContextPlan = Readonly<{
 function assertLimit(value: number, name: string): void {
   if (!Number.isInteger(value) || value < 0) throw new ContextBudgetError("context_budget_invalid", 0, 0);
   if (!name) throw new ContextBudgetError("context_budget_invalid", 0, 0);
+}
+
+/** Resolves an optional persisted job cap without treating invalid supplied values as absent. */
+export function resolveEffectiveContextWindowTokens(providerWindowTokens: number, requestedWindowTokens: unknown): number {
+  if (!Number.isSafeInteger(providerWindowTokens) || providerWindowTokens <= 0) {
+    throw new ContextBudgetError("context_budget_invalid", 0, 0);
+  }
+  if (requestedWindowTokens === undefined || requestedWindowTokens === null) return providerWindowTokens;
+  if (typeof requestedWindowTokens !== "number" || !Number.isSafeInteger(requestedWindowTokens) || requestedWindowTokens <= 0) {
+    throw new ContextBudgetError("context_budget_invalid", 0, 0);
+  }
+  return Math.min(providerWindowTokens, requestedWindowTokens);
 }
 
 function contextOrder(left: ContextBudgetBlock, right: ContextBudgetBlock): number {
@@ -125,20 +138,28 @@ function measured<TContext>(
 export function planContext<TContext = readonly ContextBudgetBlock[]>(options: ContextPlanOptions<TContext>): ContextPlan {
   assertLimit(options.contextLimit, "contextLimit");
   assertLimit(options.inputLimit, "inputLimit");
-  const safetyAllowanceTokens = options.safetyAllowanceTokens ?? 0;
-  assertLimit(safetyAllowanceTokens, "safetyAllowanceTokens");
+  const safetyAllowanceFor = (tokens: number) => typeof options.safetyAllowanceTokens === "function"
+    ? options.safetyAllowanceTokens(tokens)
+    : options.safetyAllowanceTokens ?? 0;
+  const contextSafetyAllowanceFor = (tokens: number) => typeof options.contextSafetyAllowanceTokens === "function"
+    ? options.contextSafetyAllowanceTokens(tokens)
+    : options.contextSafetyAllowanceTokens ?? safetyAllowanceFor(tokens);
   const blocks = uniqueBlocks(options.blocks);
   const protectedBlocks = blocks.filter((block) => block.protected).sort(contextOrder);
   let selected = protectedBlocks;
   let current = measured(selected, options);
-  if (current.contextTokens + safetyAllowanceTokens > options.contextLimit) {
-    throw new ContextBudgetError("context_budget_exceeded", current.contextTokens + safetyAllowanceTokens, options.contextLimit, undefined, {
+  const protectedContextSafetyAllowanceTokens = contextSafetyAllowanceFor(current.contextTokens);
+  const protectedRequestSafetyAllowanceTokens = safetyAllowanceFor(current.requestTokens);
+  assertLimit(protectedContextSafetyAllowanceTokens, "contextSafetyAllowanceTokens");
+  assertLimit(protectedRequestSafetyAllowanceTokens, "safetyAllowanceTokens");
+  if (current.contextTokens + protectedContextSafetyAllowanceTokens > options.contextLimit) {
+    throw new ContextBudgetError("context_budget_exceeded", current.contextTokens + protectedContextSafetyAllowanceTokens, options.contextLimit, undefined, {
       scope: options.protectedScope ?? "campaign_context",
       protectedBlockIds: protectedBlocks.map((block) => block.id)
     });
   }
-  if (current.requestTokens + safetyAllowanceTokens > options.inputLimit) {
-    throw new ContextBudgetError("context_budget_exceeded", current.requestTokens + safetyAllowanceTokens, options.inputLimit, undefined, {
+  if (current.requestTokens + protectedRequestSafetyAllowanceTokens > options.inputLimit) {
+    throw new ContextBudgetError("context_budget_exceeded", current.requestTokens + protectedRequestSafetyAllowanceTokens, options.inputLimit, undefined, {
       scope: "provider_request",
       protectedBlockIds: protectedBlocks.map((block) => block.id)
     });
@@ -147,7 +168,11 @@ export function planContext<TContext = readonly ContextBudgetBlock[]>(options: C
   const omitted: ContextBudgetOmission[] = [];
   for (const candidate of blocks.filter((block) => !block.protected).sort(packingOrder)) {
     const trial = measured([...selected, candidate], options);
-    if (trial.contextTokens + safetyAllowanceTokens > options.contextLimit) {
+    const contextSafetyAllowanceTokens = contextSafetyAllowanceFor(trial.contextTokens);
+    const safetyAllowanceTokens = safetyAllowanceFor(trial.requestTokens);
+    assertLimit(contextSafetyAllowanceTokens, "contextSafetyAllowanceTokens");
+    assertLimit(safetyAllowanceTokens, "safetyAllowanceTokens");
+    if (trial.contextTokens + contextSafetyAllowanceTokens > options.contextLimit) {
       omitted.push({ id: candidate.id, revision: candidate.revision, reason: "context_limit" });
       continue;
     }
@@ -162,7 +187,7 @@ export function planContext<TContext = readonly ContextBudgetBlock[]>(options: C
     selected: Object.freeze([...selected]),
     omitted: Object.freeze(omitted.map((item) => Object.freeze(item))),
     ...current,
-    safetyAllowanceTokens
+    safetyAllowanceTokens: safetyAllowanceFor(current.requestTokens)
   });
 }
 
@@ -200,8 +225,8 @@ export function assertOutputFeasible(options: OutputFeasibilityOptions): OutputF
   if (totalTokens > options.contextWindowTokens) {
     throw new ContextBudgetError("context_budget_exceeded", totalTokens, options.contextWindowTokens, undefined, { scope: "provider_request" });
   }
-  if (outputTokens + safetyAllowanceTokens > options.outputReserveTokens) {
-    throw new ContextBudgetError("continuity_output_budget_exceeded", outputTokens + safetyAllowanceTokens, options.outputReserveTokens, undefined, { scope: "output_skeleton" });
+  if (outputTokens > options.outputReserveTokens) {
+    throw new ContextBudgetError("continuity_output_budget_exceeded", outputTokens, options.outputReserveTokens, undefined, { scope: "output_skeleton" });
   }
   if (options.extension) {
     assertLimit(options.extension.narrationCharacterLimit, "narrationCharacterLimit");

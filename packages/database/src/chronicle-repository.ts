@@ -58,7 +58,11 @@ import {
   buildPostgresChronicleContextPreview,
   loadPostgresChronicleContextMetrics
 } from "./chronicle-context-repository.js";
-import { loadPostgresChronicleGenerationContext } from "./chronicle-generation-context.js";
+import {
+  loadPostgresChronicleGenerationAuthorityContext,
+  loadPostgresChronicleGenerationCandidatesContext,
+  loadPostgresChronicleGenerationContext
+} from "./chronicle-generation-context.js";
 
 type ChronicleJobRow = Readonly<{
   id: string;
@@ -840,8 +844,28 @@ export function createPostgresChronicleGenerationTransactionPort(
     },
     async loadGenerationContext(database, scope) {
       const pool = transactionPool(database);
-      if (pool) return withTransaction(pool, (client) => loadPostgresChronicleGenerationContext(client, scope, dependencies));
-      return loadPostgresChronicleGenerationContext(transactionClient(database), scope, dependencies);
+      if (pool) {
+        const authorityContext = await withTransaction(
+          pool,
+          (client) => loadPostgresChronicleGenerationAuthorityContext(client, scope)
+        );
+        const retrievalClient = await pool.connect();
+        try {
+          return await loadPostgresChronicleGenerationCandidatesContext(
+            retrievalClient,
+            scope,
+            authorityContext,
+            dependencies,
+            { useSavepoints: false }
+          );
+        } finally {
+          retrievalClient.release();
+        }
+      }
+      // This client belongs to an enclosing caller transaction. Do not start,
+      // commit, or extend that transaction with provider I/O; the caller gets
+      // its locked authority snapshot and no optional derived retrieval.
+      return loadPostgresChronicleGenerationContext(transactionClient(database), scope);
     }
   } satisfies MemoryGenerationTransactionPort;
 }

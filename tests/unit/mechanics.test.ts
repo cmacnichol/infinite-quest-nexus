@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   activatedEventsFromResponse,
+  applyTriggerHits,
   buildEventTriggerPrompt,
+  buildEventExtensionPrompt,
   buildRpgAssessmentPrompt,
   fictionGuidanceForEvents,
   fictionGuidanceForRoll,
@@ -11,6 +13,15 @@ import {
 } from "../../packages/story-engine/src/mechanics.js";
 
 const stats = [{ id: "test_stat", name: "Test Stat", value: 65, note: "synthetic fixture value" }];
+
+it("counts distinct event occurrences once without moving activation chronology backward", () => {
+  const trigger = { id: "bell", label: "Bell", timing: "after" as const, condition: "The keeper arrives.",
+    effect: "The bell rings.", addTextAfter: false, triggeredCount: 1, lastTriggeredTurn: 5, lastTriggeredAt: null };
+  const occurrence = { id: "bell-occurrence", sourceTriggerId: "bell", name: "Bell", timing: "after" as const,
+    condition: "", effect: "", instructions: "The bell rings.", reason: "", sourceTurn: 2, addTextAfter: false };
+  expect(applyTriggerHits([trigger], [occurrence, occurrence, { ...occurrence, sourceTurn: 3 }], "accepted-now"))
+    .toEqual([{ ...trigger, triggeredCount: 3, lastTriggeredTurn: 5, lastTriggeredAt: "accepted-now" }]);
+});
 
 describe("typed private story orchestration", () => {
   it("produces a reproducible private percentile resolution", () => {
@@ -74,5 +85,28 @@ describe("typed private story orchestration", () => {
       canonical_fact_updates: [],
       open_threads: []
     }), "The party enters the hall.")).toThrow(/Mechanics language/);
+  });
+
+  it("binds an extension to the protected fiction authority, original action, and complete main draft", () => {
+    const main = {
+      narration: "The party enters the hall.", choices: ["One", "Two", "Three", "Four"],
+      custom_action_suggestion: "Wait.", scratchpad: "They entered the hall.", tracker_updates: [],
+      image_prompt: "A hall", continuity_summary: "The party entered the hall.", canonical_facts: [],
+      superseded_facts: [], canonical_fact_updates: [], open_threads: []
+    };
+    const prompt = JSON.parse(buildEventExtensionPrompt(main, ["A bell rings."], {
+      authoritativeRules: ["The bell is ancient."],
+      currentContinuity: { canonicalFacts: [{ id: "bell-fact", content: "The bell hangs above the hall." }] }
+    }, "Open the hall door."));
+
+    expect(prompt).toMatchObject({
+      original_player_action: "Open the hall door.",
+      complete_validated_main_draft: main,
+      protected_fiction_safe_base_authority: {
+        authoritativeRules: ["The bell is ancient."],
+        currentContinuity: { canonicalFacts: [{ id: "bell-fact", content: "The bell hangs above the hall." }] }
+      },
+      fictional_event_instructions: ["A bell rings."]
+    });
   });
 });
