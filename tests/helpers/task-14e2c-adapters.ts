@@ -627,6 +627,8 @@ export function createTask14e2cAdapters(options: Task14e2cAdapterOptions): Task1
           { resourceKind: "asset", ownerUserId: input.ownerUserId, assetId: input.assetId },
           { purpose: "asset_original", leaseOwner: "task-14e2c-image", expiresAt },
         );
+        let cleanupOperation: ReservedFilesystemOperation | AttachedFilesystemOperation = reserved.operation;
+        let cleanupClaim = reserved.claim;
         try {
           const candidate = await filesystem.publishAssetCandidate(reserved.operation, {
             content: input.content,
@@ -640,6 +642,8 @@ export function createTask14e2cAdapters(options: Task14e2cAdapterOptions): Task1
             if (input.simulateCrashAfterAttach) return result;
             return result;
           }));
+          cleanupOperation = attached.operation;
+          cleanupClaim = attached.claim;
           if (input.failBeforeDomainCommit) {
             throw new Error("task_14e2c_forced_image_rollback");
           }
@@ -695,12 +699,12 @@ export function createTask14e2cAdapters(options: Task14e2cAdapterOptions): Task1
         } catch (error) {
           if (error instanceof Task14e2cSimulatedCrash || domainCommitted) throw error;
           const marked = await durable.journal.markCleanup(
-            reserved.operation,
-            reserved.claim,
+            cleanupOperation,
+            cleanupClaim,
             { cause: "rollback", diagnosticCode: "asset_storage_unavailable" },
           ).catch(() => ({ outcome: "stale" as const }));
           if (marked.outcome === "cleanup_pending") {
-            await filesystem.cleanupPublishedAsset(reserved.operation, reserved.claim).catch(() => undefined);
+            await filesystem.cleanupPublishedAsset(cleanupOperation, cleanupClaim).catch(() => undefined);
           }
           throw error;
         }
