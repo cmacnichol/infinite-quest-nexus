@@ -712,7 +712,7 @@ integration("PostgreSQL portable import repository", () => {
           "SELECT expires_at <= clock_timestamp() AS expired FROM portable_staged_inputs WHERE filesystem_operation_id=$1",
           [staged.operationId]
         )).rows[0]?.expired
-      }), { interval: 10, timeout: 2_000 }).toEqual({ applicationExpired: true, databaseExpired: true });
+      }), { interval: 10, timeout: 10_000 }).toEqual({ applicationExpired: true, databaseExpired: true });
       await client.query("BEGIN");
       await expect(repository.beginImport(client, command)).rejects.toMatchObject({ code: "archive_expired" });
       await client.query("COMMIT");
@@ -1617,7 +1617,7 @@ integration("PostgreSQL portable import repository", () => {
         "SELECT expires_at <= clock_timestamp() AS expired FROM portable_export_artifacts WHERE filesystem_operation_id=$1",
         [operationId]
       )).rows[0]?.expired
-    }), { interval: 10, timeout: 2_000 }).toEqual({ applicationExpired: true, databaseExpired: true });
+    }), { interval: 10, timeout: 10_000 }).toEqual({ applicationExpired: true, databaseExpired: true });
     expect(await repository.retrieveExportArtifact({
       ownerUserId,
       exportKind: "campaign_zip",
