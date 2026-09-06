@@ -204,6 +204,16 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       model: "embed-v1"
     });
     expect(result.candidates).toEqual([expect.objectContaining({ id: "lexical-memory", content: "The lantern password remains hidden." })]);
+    expect(result.chronicleRetrieval).toEqual(expect.objectContaining({
+      auditVersion: "chronicle-retrieval-audit-v1",
+      configuredImplementation: "legacy_hybrid",
+      effectiveImplementation: "legacy_hybrid",
+      effectiveMode: "lexical_only",
+      fallbackCode: "provider_unavailable",
+      provider: { resolutionSource: "none", resolvedRole: null, providerType: null, model: null },
+      queryVectorPath: "none",
+      providerCallOutcome: "not_attempted"
+    }));
   });
   it("auto-enables semantic memory and queues embedding work on the exact caller client", async () => {
     let callerClient: DatabaseClient;

@@ -1,6 +1,7 @@
 import type {
   GenerationExecutor,
   IllustrationGenerationTransactionPort,
+  MemoryGenerationAuthorityContext,
   MemoryGenerationTransactionPort,
   StreamingIllustrationConfig
 } from "../../../packages/application/src/index.js";
@@ -65,7 +66,8 @@ import {
   providerTransportErrorDetails,
   type ActivatedEvent,
   type ProviderRequest,
-  type ProviderResult
+  type ProviderResult,
+  type TextProviderProfile
 } from "../../../packages/story-engine/src/index.js";
 import type { RuntimeTextExecution } from "./provider-credential-transport-adapter.js";
 import {
@@ -79,13 +81,6 @@ import {
 import { logger } from "../../../packages/logger/src/index.js";
 
 type GenerationTextProvider = RuntimeTextExecution;
-
-type PrivateGenerationContext = Readonly<{
-  authority: Readonly<Record<string, unknown>>;
-  candidates: readonly Readonly<Record<string, unknown>>[];
-  baseIdentity: Readonly<Record<string, unknown>>;
-  chronicleRetrieval?: ChronicleRetrievalAudit;
-}>;
 
 type GenerationCostAttribution = Readonly<{
   ownerUserId: string;
@@ -385,10 +380,10 @@ function recoveryPromptFromSnapshot(
 ) {
   if (reason === "output_limit") {
     const compact = compactStoryLengthWordRange(storyLength);
-    return renderPromptTemplate(
-      collaborators.promptFromSnapshot(job.prompt_snapshot, "story_recovery_output_limit"),
-      compact
-    );
+      return renderPromptTemplate(
+        collaborators.promptFromSnapshot(job.prompt_snapshot, "story_recovery_output_limit"),
+        compact
+      );
   }
   if (reason === "mechanics_leak") {
     const details = errors.length
@@ -486,7 +481,7 @@ function candidateRecord(candidate: Readonly<Record<string, unknown>>): PromptCa
 
 /** Builds the one private context representation used for selection and the sent story body. */
 function planGenerationPromptContext(
-  context: PrivateGenerationContext,
+  context: MemoryGenerationAuthorityContext,
   provider: GenerationTextProvider,
   systemPrompt: string,
   action: string,
@@ -506,6 +501,12 @@ function planGenerationPromptContext(
     chronicle: [] as readonly PromptCandidate[]
   };
   const candidates = context.candidates.map(candidateRecord).filter((candidate) => candidate.id && candidate.content);
+  const serializationProfile: TextProviderProfile = {
+    ...provider,
+    // Serialization needs the provider wire shape only; the live execution
+    // binding retains its credential and destination outside this planner.
+    baseUrl: ""
+  };
   const authorityRevision = sha256(stableStringify({ baseIdentity: context.baseIdentity, authority }));
   const blocks = [
     { id: "authority", revision: authorityRevision, content: stableStringify(authorityContext), protected: true, priority: 0, ordinal: 0, scope: "authority" },
@@ -532,7 +533,7 @@ function planGenerationPromptContext(
     count: (value) => value.length,
     serializeContext: (selected) => stableStringify(promptContext(selected)),
     contextValue: promptContext,
-    serializeRequest: (selected) => serializeProviderRequest(provider as never, {
+    serializeRequest: (selected) => serializeProviderRequest(serializationProfile, {
       systemPrompt,
       input: buildStoryUserPrompt(selected, action, false, guidance, storyLength, inputMode)
     }).body,
@@ -797,7 +798,7 @@ async function executeLoadedGeneration(
 
     // The authority read owns both scope verification and ranked candidates.
     // Do not select or mutate a public preview for provider work.
-    const generationContext = (await phase("context_retrieval", () => collaborators.memory.loadGenerationContext(
+    const generationContext = await phase("context_retrieval", () => collaborators.memory.loadGenerationContext(
       pool,
       {
         ownerUserId: job.owner_user_id,
@@ -808,7 +809,7 @@ async function executeLoadedGeneration(
         query: safeAction,
         expectedBaseIdentity: job.generation_base_identity
       }
-    ))) as unknown as PrivateGenerationContext;
+    ));
     const chronicleRetrieval = chronicleRetrievalAuditSchema.parse(
       generationContext.chronicleRetrieval ?? NO_RETRIEVAL_AUDIT
     );
