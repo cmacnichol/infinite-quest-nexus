@@ -2030,6 +2030,7 @@ integration("PostgreSQL campaign sync adapters", () => {
       attempts: 0,
       errorCode: null,
       errorMessage: null,
+      diagnostic: null,
       resultTurnId,
       operationKind: "append",
       replacementTurnId: null

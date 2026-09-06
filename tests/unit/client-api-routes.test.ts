@@ -34,11 +34,14 @@ import {
   turnListResponseSchema,
   userProfileResponseSchema,
   worldCreateResponseSchema,
-  worldListResponseSchema
+  worldListResponseSchema,
+  PROMPT_TEMPLATE_CATALOG,
+  type PromptSnapshot
 } from "../../packages/contracts/src/index.js";
 import { buildServer } from "../../services/api/src/server.js";
 import { inertStorageServerOptions as serverOptions, testWorldCampaignApplication } from "../helpers/build-server-options.js";
 import { legacyDashboardRouteContracts, legacyStoryRouteContracts } from "../helpers/legacy-ui-route-contracts.js";
+import { providerPromptProtocolVersion } from "../helpers/provider-application-fixtures.js";
 import { DEDICATED_CHUNKED_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
 
 const OWNER_ID = "00000000-0000-4000-8000-000000000001";
@@ -91,6 +94,10 @@ const WORLD_CONTENT = {
   eventTriggers: [],
   defaults: { trackers: [] }
 };
+const RETRY_PROMPT_SNAPSHOT = Object.fromEntries(Object.values(PROMPT_TEMPLATE_CATALOG).map((template) => [
+  template.key,
+  { content: template.defaultContent, hash: "test-prompt-hash", source: "shipped" }
+])) as PromptSnapshot;
 
 type MockPoolOptions = {
   malformedJob?: boolean;
@@ -523,6 +530,19 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
       jobAttempt: 1
     }] };
 
+    if (sql.startsWith("SELECT id, status AS \"generationStatus\", campaign_id AS \"campaignId\"")) return { rows: [{
+      id: JOB_ID,
+      generationStatus: "recoverable",
+      campaignId: CAMPAIGN_ID,
+      providerProfileId: PROVIDER_ID,
+      expectedTurnNumber: 3,
+      attempts: 1,
+      operationKind: "append",
+      replacementTurnId: null,
+      promptSnapshot: RETRY_PROMPT_SNAPSHOT,
+      promptProtocolVersion: providerPromptProtocolVersion(RETRY_PROMPT_SNAPSHOT)
+    }] };
+
     if (sql.startsWith("WITH source AS ( SELECT id, status, campaign_id AS \"campaignId\"")) return { rows: [{
       id: JOB_ID,
       status: "queued",
@@ -533,6 +553,12 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
       expectedTurnNumber: 3,
       attempts: 1,
       generationStatus: "recoverable"
+    }] };
+    if (sql.startsWith("UPDATE generation_jobs SET status = CASE WHEN operation_kind")) return { rows: [{
+      id: JOB_ID,
+      status: "queued",
+      operationKind: "append",
+      replacementTurnId: null
     }] };
     if (sql.startsWith("WITH source AS ( SELECT id, status FROM generation_jobs")) return { rows: [{
       id: JOB_ID,

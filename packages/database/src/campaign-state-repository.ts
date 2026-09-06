@@ -1592,7 +1592,7 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
            ) pending ON true
            LEFT JOIN LATERAL (
              SELECT id, status, operation_kind, expected_turn_number, attempts,
-                    result_turn_id, replacement_turn_id
+                    result_turn_id, replacement_turn_id, recovery_metadata
                FROM generation_jobs
               WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id
                 AND status IN ('recoverable','failed','completed')
