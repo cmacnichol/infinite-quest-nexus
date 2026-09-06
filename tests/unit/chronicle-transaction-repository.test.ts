@@ -420,7 +420,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       derived: { continuitySummary: "", canonicalFacts: [], openThreads: threads }
     });
 
-    const openThreadWrite = memoryWrites[0];
+    const openThreadWrite = memoryWrites.find(({ sql }) => sql.includes("'open_thread'"));
     expect(openThreadWrite).toBeDefined();
     expect(String(openThreadWrite?.values[4])).toContain("Find the lost letter 500.");
   });
@@ -447,6 +447,32 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     const openThreadWrite = memoryWrites[0];
     expect(openThreadWrite).toBeDefined();
     expect(String(openThreadWrite?.values[3])).toContain("Follow the correction thread 500.");
+  });
+
+  it("persists an explicit empty continuity summary as the newest clear marker", async () => {
+    const memoryWrites: Array<readonly unknown[]> = [];
+    const client = databaseClient((sql, values) => {
+      if (sql.includes("FROM campaigns") && sql.includes("world_versions")) return { rows: [{
+        id: scope.campaignId, world_version_id: scope.worldVersionId, world_content: {}, character_snapshot: null, character_profile: null
+      }] };
+      if (sql.includes("SELECT id, source_turn_id") && sql.includes("campaign_canonical_facts")) return { rows: [] };
+      if (sql.includes("DELETE FROM chronicle_memories")) return { rows: [], rowCount: 1 };
+      if (sql.includes("INSERT INTO chronicle_memories")) {
+        memoryWrites.push(values);
+        return { rows: [], rowCount: 1 };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+    const transaction = createPostgresChronicleGenerationTransactionPort({ embeddings: embeddingPort() });
+
+    await transaction.storeDerivedTurnMemories(client, {
+      ...scope,
+      turnId: "turn-clear-summary",
+      ordinal: 5,
+      derived: { continuitySummary: "", canonicalFacts: [], openThreads: [] }
+    });
+
+    expect(memoryWrites).toContainEqual(expect.arrayContaining(["", expect.any(Number)]));
   });
 
   it("rebuilds Chronicle rows from accepted turns without opening a nested transaction", async () => {

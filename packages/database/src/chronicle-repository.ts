@@ -420,13 +420,14 @@ async function storeDerivedMemories(
       characterSnapshot: campaign.character_snapshot,
       characterProfile: campaign.character_profile
     });
+  const hasContinuitySummary = scope.derived.continuitySummary !== undefined;
   const summary = sanitizeChronicleFictionString(scope.derived.continuitySummary, 20_000);
   const threads = sanitizeChronicleMemoryLines(scope.derived.openThreads, MAX_CONTINUITY_OPEN_THREADS);
   await projectCanonicalFacts(client, {
     ...scope,
     derived: { ...scope.derived, entityCatalog }
   });
-  if (summary) {
+  if (hasContinuitySummary) {
     const entities = resolveEntityMetadata(summary, entityCatalog);
     await client.query(
       `INSERT INTO chronicle_memories (
@@ -442,9 +443,9 @@ async function storeDerivedMemories(
          embedding_updated_at = NULL, embedding_provider_fingerprint = NULL, updated_at = now()`,
       [scope.ownerUserId, scope.campaignId, scope.worldVersionId, scope.ordinal, summary, estimateTokens(summary),
         entities.entities, entities.entityIds,
-        json({ throughTurn: scope.ordinal, generatedFromAcceptedTurn: true })]
+        json({ throughTurn: scope.ordinal, clearsPriorContinuity: !summary, generatedFromAcceptedTurn: true })]
     );
-    if (scope.ordinal % 8 === 0) {
+    if (summary && scope.ordinal % 8 === 0) {
       await client.query(
         `INSERT INTO summary_checkpoints (owner_user_id, campaign_id, through_turn, summary_kind, content, token_estimate)
          VALUES ($1,$2,$3,'campaign_continuity',$4,$5)`,

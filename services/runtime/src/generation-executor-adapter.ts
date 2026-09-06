@@ -414,12 +414,17 @@ function storyMemoryDefaultsFromContext(context: unknown) {
   };
 }
 
-function sentCanonicalFactIds(context: unknown): string[] {
-  if (!context || typeof context !== "object") return [];
-  const campaignCanon = (context as { campaignCanon?: unknown }).campaignCanon;
-  const continuity = (campaignCanon && typeof campaignCanon === "object"
-    ? (campaignCanon as { currentContinuity?: unknown }).currentContinuity
-    : undefined) ?? (context as { currentContinuity?: unknown }).currentContinuity;
+function sentCanonicalFactIds(storyInput: string): string[] {
+  let rendered: unknown;
+  try {
+    rendered = JSON.parse(storyInput);
+  } catch {
+    return [];
+  }
+  if (!rendered || typeof rendered !== "object") return [];
+  const authority = (rendered as { authoritative_context?: unknown }).authoritative_context;
+  if (!authority || typeof authority !== "object") return [];
+  const continuity = (authority as { currentContinuity?: unknown }).currentContinuity;
   if (!continuity || typeof continuity !== "object") return [];
   const facts = (continuity as { canonicalFacts?: unknown }).canonicalFacts;
   if (!Array.isArray(facts)) return [];
@@ -837,7 +842,7 @@ async function executeLoadedGeneration(
       return { storyInput, contextFingerprint, contextDiagnostics, storyMemoryDefaults };
     });
     const { storyInput, contextFingerprint, contextDiagnostics, storyMemoryDefaults } = promptPreparation;
-    const sentFactIds = sentCanonicalFactIds(promptContext);
+    const sentFactIds = sentCanonicalFactIds(storyInput);
 
     const streamingIllustration = await phase("streaming_illustration_setup", async () => {
       const illustrationConfig = await collaborators.illustration.loadStreamingIllustrationConfig(
