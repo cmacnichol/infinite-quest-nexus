@@ -5,7 +5,11 @@ export {
   storyTurnOutputSchema,
   type StoryTurnOutput
 } from "./story-prompt.js";
-import { MAX_CONTINUITY_OPEN_THREADS, storyTurnOutputSchema } from "./story-prompt.js";
+import {
+  MAX_CONTINUITY_OPEN_THREADS,
+  safeGenerationDiagnosticSchema,
+  storyTurnOutputSchema
+} from "./story-prompt.js";
 import { apiTimestampSchema } from "./http.js";
 import { storyLengthProfileSchema } from "./story-settings.js";
 
@@ -442,7 +446,8 @@ export const PUBLIC_GENERATION_FAILURE_MESSAGE = "Generation could not be comple
 
 const publicGenerationFailureFields = {
   errorCode: z.literal(PUBLIC_GENERATION_FAILURE_CODE).nullable(),
-  errorMessage: z.literal(PUBLIC_GENERATION_FAILURE_MESSAGE).nullable()
+  errorMessage: z.literal(PUBLIC_GENERATION_FAILURE_MESSAGE).nullable(),
+  diagnostic: safeGenerationDiagnosticSchema.nullable().optional()
 };
 
 const generationJobSnapshotBaseSchema = generationJobStatusSchema.omit({

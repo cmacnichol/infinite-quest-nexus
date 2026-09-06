@@ -29,6 +29,7 @@ import {
   storyLengthWordRange,
   type StoryLengthWordRange
 } from "../../../packages/contracts/src/story-settings.js";
+import { projectSafeGenerationDiagnostic } from "../../../packages/contracts/src/story-prompt.js";
 import type {
   AcceptedGenerationCommitCollaborators,
   GenerationExecutionPayload,
@@ -326,6 +327,22 @@ function recoverableIntegrityDiagnostic(error: unknown): Readonly<{
 }> {
   const errorCode = errorCodeFrom(error);
   const scope = diagnosticBudgetScope(error);
+  const diagnostic = error instanceof ContextBudgetError
+    ? projectSafeGenerationDiagnostic({
+      code: error.code,
+      operation: "story_generation",
+      action: error.code === "continuity_output_budget_exceeded"
+        ? "adjust_output_or_state"
+        : error.code === "extension_narration_limit_exceeded"
+          ? "shorten_or_replace_turn"
+          : "adjust_context",
+      ...(scope ? { scope } : {}),
+      requiredTokens: error.requiredTokens,
+      availableTokens: error.availableTokens,
+      ...(error.requiredCharacters === undefined ? {} : { requiredCharacters: error.requiredCharacters }),
+      ...(error.availableCharacters === undefined ? {} : { availableCharacters: error.availableCharacters })
+    })
+    : null;
   return {
     errorCode: RECOVERABLE_INTEGRITY_ERROR_CODES.has(errorCode || "")
       ? errorCode!
@@ -333,7 +350,8 @@ function recoverableIntegrityDiagnostic(error: unknown): Readonly<{
     errorMessage: "Generation context could not be safely prepared.",
     recoveryMetadata: {
       retryable: true,
-      ...(scope ? { budgetScope: scope } : {})
+      ...(scope ? { budgetScope: scope } : {}),
+      ...(diagnostic ? { diagnostic } : {})
     }
   };
 }

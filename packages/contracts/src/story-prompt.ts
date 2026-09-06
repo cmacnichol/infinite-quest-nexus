@@ -107,6 +107,12 @@ export const safeGenerationDiagnosticSchema = z.object({
 });
 
 export type SafeGenerationDiagnostic = z.infer<typeof safeGenerationDiagnosticSchema>;
+
+/** Drops private or malformed persisted diagnostics before a public projection. */
+export function projectSafeGenerationDiagnostic(value: unknown): SafeGenerationDiagnostic | null {
+  const parsed = safeGenerationDiagnosticSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
 export type StoryTurnOutput = z.infer<typeof storyTurnOutputSchema>;
 
 export function storyPromptProtocolIdentity(templateHashes: Readonly<Record<string, string>>): string {

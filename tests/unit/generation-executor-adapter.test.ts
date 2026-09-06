@@ -451,7 +451,17 @@ describe("generation executor adapter", () => {
 
     expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({
       errorCode: "context_budget_exceeded",
-      errorMessage: "Generation context could not be safely prepared."
+      errorMessage: "Generation context could not be safely prepared.",
+      recoveryMetadata: expect.objectContaining({
+        diagnostic: {
+          code: "context_budget_exceeded",
+          operation: "story_generation",
+          action: "adjust_context",
+          scope: "provider_request",
+          requiredTokens: 100,
+          availableTokens: 10
+        }
+      })
     }));
     expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
     expect(repository.markFailed).not.toHaveBeenCalled();

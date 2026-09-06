@@ -33,7 +33,8 @@ export function copySnapshot(snapshot: GenerationStreamSnapshot): GenerationStre
         partialNarration: snapshot.partialNarration,
         resultTurnId: snapshot.resultTurnId,
         errorCode: snapshot.errorCode,
-        errorMessage: snapshot.errorMessage
+        errorMessage: snapshot.errorMessage,
+        ...(snapshot.diagnostic === undefined ? {} : { diagnostic: snapshot.diagnostic })
       }
     : {
         id: snapshot.id,
@@ -47,7 +48,8 @@ export function copySnapshot(snapshot: GenerationStreamSnapshot): GenerationStre
         partialNarration: snapshot.partialNarration,
         resultTurnId: snapshot.resultTurnId,
         errorCode: snapshot.errorCode,
-        errorMessage: snapshot.errorMessage
+        errorMessage: snapshot.errorMessage,
+        ...(snapshot.diagnostic === undefined ? {} : { diagnostic: snapshot.diagnostic })
       };
 }
 

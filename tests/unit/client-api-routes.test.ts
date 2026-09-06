@@ -99,6 +99,7 @@ type MockPoolOptions = {
   onInitialOwnerRead?: () => void;
   onQuery?: (sql: string) => void;
   rawGenerationError?: boolean;
+  generationDiagnostic?: Record<string, unknown>;
   onGenerationJobRead?: () => void;
   streamReadFailure?: boolean;
   streamReadFailureAfterReads?: number;
@@ -185,7 +186,7 @@ function jobRow(options: MockPoolOptions) {
     resultTurnId: TURN_ID,
     errorCode: null,
     errorMessage: null,
-    recoveryMetadata: {},
+    recoveryMetadata: options.generationDiagnostic ? { diagnostic: options.generationDiagnostic } : {},
     createdAt: NOW,
     updatedAt: NOW,
     completedAt: NOW,
@@ -747,6 +748,31 @@ describe("client API route contracts without PostgreSQL", () => {
         errorMessage: "Generation could not be completed."
       });
       expect(response.body).not.toContain("MODEL_SECRET=distinctive-raw-provider-detail");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("projects one allowlisted recovery diagnostic identically to polling and SSE", async () => {
+    const diagnostic = {
+      code: "context_budget_exceeded",
+      operation: "story_generation",
+      action: "adjust_context",
+      requiredTokens: 33_000,
+      availableTokens: 32_000
+    };
+    const app = await buildServer(serverOptions({
+      config: config(storageRoot),
+      pool: mockPool({ rawGenerationError: true, generationDiagnostic: diagnostic })
+    }));
+    try {
+      const polling = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}` });
+      const stream = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}/stream` });
+      const frame = JSON.parse(stream.body.trim().replace(/^data: /, ""));
+
+      expect(polling.json().diagnostic).toEqual(diagnostic);
+      expect(frame.diagnostic).toEqual(diagnostic);
+      expect(polling.body).not.toContain("MODEL_SECRET=distinctive-raw-provider-detail");
     } finally {
       await app.close();
     }
