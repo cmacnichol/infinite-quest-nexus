@@ -40,16 +40,22 @@ integration("standard database migration runner", () => {
     const databaseUrlValue = new URL(databaseUrl!);
     databaseUrlValue.pathname = `/${databaseName}`;
     const beforeDirectory = await mkdtemp(join(tmpdir(), "infinitequest-prompt-protocol-before-"));
+    const predecessorMigrations: string[] = [];
     let isolatedPool: DatabasePool | null = null;
     try {
       await pool.query(`CREATE DATABASE ${databaseName}`);
       for (const file of await readdir(resolve("database/migrations"))) {
         if (file.endsWith(".sql") && file <= "0085_prompt_override_compatibility_acknowledgements.sql") {
           await copyFile(join(resolve("database/migrations"), file), join(beforeDirectory, file));
+          predecessorMigrations.push(file.slice(0, -4));
         }
       }
       isolatedPool = createDatabasePool(databaseUrlValue.toString(), 2);
       await migrateDatabase(isolatedPool, beforeDirectory);
+      await isolatedPool.query("DELETE FROM schema_migrations");
+      for (const migration of predecessorMigrations) {
+        await isolatedPool.query("INSERT INTO schema_migrations (name,run_on) VALUES ($1,now())", [migration]);
+      }
       const ownerUserId = (await isolatedPool.query<{ id: string }>(
         "SELECT id FROM users WHERE system_key = 'initial-owner'"
       )).rows[0]!.id;
