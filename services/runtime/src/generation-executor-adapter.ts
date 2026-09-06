@@ -1551,6 +1551,34 @@ async function executeLoadedGeneration(
     if (mechanicsLeakFields(committedStory).length) {
       throw new Error("Mechanics validation invariant failed after event extension.");
     }
+    if (immediateEvents.length) {
+      let eventCoverage = null;
+      try {
+        const coverageResponse = await phase("scene_coverage_validation", () =>
+          callCampaignTextProvider(dependencies, provider, job, "scene_coverage_validation", {
+            systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
+            input: buildSceneCoveragePrompt(
+              fictionGuidanceForEvents(immediateEvents).join("\n"),
+              committedStory.narration
+            )
+          })
+        );
+        eventCoverage = coverageResponse.outputLimited ? null : parseSceneCoverageOutput(coverageResponse.content);
+      } catch (error) {
+        if (isRecoverableIntegrityError(error)) throw error;
+      }
+      if (!eventCoverage?.covered) {
+        assertActiveGenerationUpdate(await repository.markRecoverable({
+          ...scope,
+          providerResponseId: result.responseId || null,
+          providerFinishReason: result.finishReason || null,
+          errorCode: "event_coverage_failed",
+          errorMessage: "The immediate event fiction could not be verified against the final narration.",
+          recoveryMetadata: { retryable: true, stage: "event_coverage" }
+        }), "saving event coverage recovery state");
+        return true;
+      }
+    }
     assertActiveGenerationUpdate(await repository.markCommitting(scope), "entering commit");
     const acceptedCommitCollaborators: AcceptedGenerationCommitCollaborators = {
       memory: collaborators.memory,

@@ -900,7 +900,8 @@ integration("durable Story Engine integration", () => {
           reasons: { "checkpoint-after-extension": "The party reaches the hall." }
         }) },
         { content: "not valid extension JSON" },
-        { content: JSON.stringify(finalExtensionStory) }
+        { content: JSON.stringify(finalExtensionStory) },
+        { content: JSON.stringify({ covered: true, missing_required_beats: [], contradictions: [] }) }
       );
       await runGenerationJob(pool, "extension-worker-a", 30, credentialSecret);
       expect(extensionFailurePersisted).toBe(true);
@@ -929,7 +930,7 @@ integration("durable Story Engine integration", () => {
       expect(await runGenerationJob(pool, "extension-worker-b", 30, credentialSecret)).toBe(true);
 
       expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed", attempts: 2 });
-      expect(requests.slice(requestOffset).filter((request) => Array.isArray(request.messages))).toHaveLength(4);
+      expect(requests.slice(requestOffset).filter((request) => Array.isArray(request.messages))).toHaveLength(5);
       const audit = await pool.query<{ attempt_number: number; recovery_kind: string }>(
         "SELECT attempt_number, recovery_kind FROM generation_attempts WHERE generation_job_id = $1 ORDER BY attempt_number",
         [job.id]
