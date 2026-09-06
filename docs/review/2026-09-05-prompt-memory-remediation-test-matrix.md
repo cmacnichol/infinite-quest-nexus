@@ -59,12 +59,12 @@ transaction that a three-turn workflow cannot safely force.
 | Gate | Result | Evidence |
 | --- | --- | --- |
 | Focused composed workflow | Passed: 1 file, 1 test | 2026-09-05, isolated PostgreSQL plus deterministic provider; 4.37 s total. |
-| `pnpm test:unit` | Failed: 2 of 2,837 tests | 2026-09-05: `client-api-routes.test.ts` expects 202 but received 500 for a generation mutation route; `prompt-library.test.ts` expects the missing `Stop once the event is integrated.` instruction. |
-| `pnpm test:integration` | Passed: 72 isolated files | 2026-09-05: real PostgreSQL integration runner completed after the release-gate corrections; the corrected-authority regression in `campaign-state-incremental-memory.integration.test.ts` passed 5/5. |
-| `pnpm check` | Passed | 2026-09-05, repository/data checks and all TypeScript checks passed. |
-| `pnpm build` | Passed with existing Vite warnings | 2026-09-05; unresolved runtime font references and the 598.82 kB web-next chunk warning were reported. |
-| `git diff --check` | Passed | 2026-09-05. |
-| Browser diagnostics review | Passed: 3 tests | 2026-09-05: `current-state-corrections.e2e.test.ts` exercised the new Campaign State, new Story editor, and legacy Story flows with desktop and mobile screenshot capture. |
+| `pnpm test:unit` | Passed: 237 files, 2,793 passed, 44 skipped | 2026-09-06 after updating rebased continuity expectations. |
+| `pnpm test:integration` | Failed at 35 of 72 isolated files | 2026-09-06 real PostgreSQL runner: repaired `image-pipeline`, `import-memory`, `import-repository`, and `migrations` suites passed; `play-loop-read-performance.integration.test.ts` fails because its unchanged upstream benchmark seed omits required `story_context_budget_tokens`. |
+| `pnpm check` | Failed | 2026-09-06: one unchanged upstream Sogni optional-property error and six Fastify/HTTP2 errors in `server.ts`; repository/data checks passed. |
+| `pnpm build` | Failed | 2026-09-06 at the same TypeScript gate as `pnpm check`, before bundling. |
+| `git diff --check` | Passed | 2026-09-06. |
+| Browser diagnostics review | Passed: 3 tests | 2026-09-06: `current-state-corrections.e2e.test.ts` exercised the new Campaign State, new Story editor, and legacy Story flows. |
 
 ### Planner measurement
 
