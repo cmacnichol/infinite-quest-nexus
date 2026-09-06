@@ -110,6 +110,16 @@ export type GenerationOrchestrationState = {
   validatedMainDraft?: GenerationValidatedMainDraftCheckpoint;
 };
 
+function hasValidAutomaticRepair(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const repair = value as Record<string, unknown>;
+  return (repair.stage === "schema_repair" || repair.stage === "mechanics_cleanup")
+    && typeof repair.rejectedDraftHash === "string" && repair.rejectedDraftHash.length > 0
+    && typeof repair.consumedAttempt === "number" && Number.isSafeInteger(repair.consumedAttempt)
+    && repair.consumedAttempt > 0;
+}
+
 export type GenerationStreamingState = Record<string, unknown> & {
   provisionalSetId?: string | null;
 };
@@ -721,6 +731,19 @@ export function createPostgresGenerationExecutionRepository(
       );
       const row = result.rows[0];
       if (!row) return null;
+      if (!hasValidAutomaticRepair(row.orchestration_private?.automaticRepair)) {
+        await client.query(
+          `UPDATE generation_jobs
+              SET status = 'recoverable', error_code = 'generation_checkpoint_incompatible',
+                  error_message = 'Saved generation recovery state is invalid.',
+                  recovery_metadata = recovery_metadata || $4::jsonb,
+                  lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+            WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
+              AND status = 'assessing' AND lease_expires_at > now()`,
+          [row.id, row.owner_user_id, request.workerId, json({ reason: "automatic_repair_invalid" })]
+        );
+        return null;
+      }
       const authority = await resolveGenerationAuthoritySnapshot(client, {
         ownerUserId: row.owner_user_id,
         campaignId: row.campaign_id,

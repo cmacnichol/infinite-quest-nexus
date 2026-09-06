@@ -792,12 +792,15 @@ integration("durable Story Engine integration", () => {
       });
       expect(await runGenerationJob(pool, "fact-checkpoint-worker-b", 30, credentialSecret)).toBe(true);
       expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed", attempts: 2 });
-      const facts = await pool.query<{ content: string; valid_until_turn: number | null }>(
-        `SELECT content, valid_until_turn FROM campaign_canonical_facts
-          WHERE campaign_id = $1 AND id = ANY($2::uuid[]) ORDER BY content`,
-        [imported.campaignId, [sourceFactId]]
+      const facts = await pool.query<{ content: string; valid_from_turn: number; valid_until_turn: number | null }>(
+        `SELECT content, valid_from_turn, valid_until_turn FROM campaign_canonical_facts
+          WHERE campaign_id = $1 AND content = ANY($2::text[]) ORDER BY content`,
+        [imported.campaignId, ["The original beacon is dark.", "The original beacon is lit."]]
       );
-      expect(facts.rows).toEqual([{ content: "The original beacon is lit.", valid_until_turn: 3 }]);
+      expect(facts.rows).toEqual([
+        { content: "The original beacon is dark.", valid_from_turn: 3, valid_until_turn: null },
+        { content: "The original beacon is lit.", valid_from_turn: 2, valid_until_turn: 3 }
+      ]);
       expect((await getCampaignRuntimeState(pool, imported.campaignId)).canonicalFacts).toEqual([
         { id: expect.any(String), content: "The original beacon is dark." }
       ]);
@@ -843,6 +846,12 @@ integration("durable Story Engine integration", () => {
         [imported.campaignId, 3]
       );
       expect(accepted.rows).toEqual([{ n: 0 }]);
+      await retryGeneration(pool, job.id);
+      const retryReset = await pool.query<{ orchestration_private: { automaticRepair?: unknown } }>(
+        "SELECT orchestration_private FROM generation_jobs WHERE id = $1",
+        [job.id]
+      );
+      expect(retryReset.rows[0]?.orchestration_private.automaticRepair).toBeUndefined();
     } finally {
       querySpy.mockRestore();
     }
