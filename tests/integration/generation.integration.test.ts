@@ -730,7 +730,49 @@ integration("durable Story Engine integration", () => {
     }
   });
 
-  it("retries a failed event extension after reclaim without regenerating its checkpointed narration", async () => {
+  it("does not repeat a consumed automatic repair after a lease reclaim", async () => {
+    const imported = await campaign();
+    const requestOffset = requests.length;
+    const job = await queue(imported.campaignId, "Repair this draft once.");
+    const originalQuery = pool.query.bind(pool) as (...args: any[]) => Promise<any>;
+    const querySpy = vi.spyOn(pool, "query");
+    let repairConsumed = false;
+    querySpy.mockImplementation((async (...args: any[]) => {
+      const statement = String(args[0]);
+      const parameters = Array.isArray(args[1]) ? args[1] : [];
+      const result = await originalQuery(...args);
+      if (!repairConsumed && statement.includes("SET orchestration_private")
+          && String(parameters[3]).includes("automaticRepair")) {
+        repairConsumed = true;
+        await originalQuery(
+          "UPDATE generation_jobs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
+          [job.id]
+        );
+      }
+      return result;
+    }) as any);
+    try {
+      replies.push({ content: "not valid story JSON" }, { content: validStory("The single repair response is never repeated.") });
+      await runGenerationJob(pool, "repair-worker-a", 30, credentialSecret);
+      expect(repairConsumed).toBe(true);
+      expect(await runGenerationJob(pool, "repair-worker-b", 30, credentialSecret)).toBe(true);
+      expect(requests.slice(requestOffset).filter((request) => Array.isArray(request.messages))).toHaveLength(2);
+      expect(await getGenerationJob(pool, job.id)).toMatchObject({
+        status: "recoverable",
+        errorCode: "automatic_repair_consumed",
+        attempts: 2
+      });
+      const accepted = await pool.query<{ n: number }>(
+        "SELECT count(*)::int AS n FROM turns WHERE campaign_id=$1 AND turn_number=$2",
+        [imported.campaignId, 3]
+      );
+      expect(accepted.rows).toEqual([{ n: 0 }]);
+    } finally {
+      querySpy.mockRestore();
+    }
+  });
+
+  it("makes a failed event extension recoverable, then retries only that extension", async () => {
     const imported = await campaign();
     await syncPlayerCampaignConfig(pool, imported.campaignId, {
       expectedTurnNumber: 2,
@@ -757,10 +799,6 @@ integration("durable Story Engine integration", () => {
       if (!extensionFailurePersisted && statement.includes("SET orchestration_private")
           && String(parameters[3]).includes("extensionError")) {
         extensionFailurePersisted = true;
-        await originalQuery(
-          "UPDATE generation_jobs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
-          [job.id]
-        );
       }
       return result;
     }) as any);
@@ -782,22 +820,27 @@ integration("durable Story Engine integration", () => {
       await runGenerationJob(pool, "extension-worker-a", 30, credentialSecret);
       expect(extensionFailurePersisted).toBe(true);
       const interrupted = await pool.query<{
-        attempts: number; status: string; lease_expired: boolean;
+        attempts: number; status: string;
         orchestration_private: { validatedMainDraft?: unknown; afterEvents?: unknown[]; extensionError?: string };
       }>(
-        "SELECT attempts, status, lease_expires_at <= now() AS lease_expired, orchestration_private FROM generation_jobs WHERE id = $1",
+        "SELECT attempts, status, orchestration_private FROM generation_jobs WHERE id = $1",
         [job.id]
       );
       expect(interrupted.rows[0]).toMatchObject({
         attempts: 1,
-        status: "validating",
-        lease_expired: true,
+        status: "recoverable",
         orchestration_private: {
           validatedMainDraft: expect.any(Object),
           afterEvents: [expect.objectContaining({ sourceTriggerId: "checkpoint-after-extension" })],
           extensionError: expect.any(String)
         }
       });
+      const uncommitted = await pool.query<{ n: number }>(
+        "SELECT count(*)::int AS n FROM turns WHERE campaign_id=$1 AND turn_number=$2",
+        [imported.campaignId, 3]
+      );
+      expect(uncommitted.rows).toEqual([{ n: 0 }]);
+      await retryGeneration(pool, job.id);
       expect(await runGenerationJob(pool, "extension-worker-b", 30, credentialSecret)).toBe(true);
 
       expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed", attempts: 2 });

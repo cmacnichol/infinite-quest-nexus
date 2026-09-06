@@ -1142,6 +1142,17 @@ async function executeLoadedGeneration(
     const primaryRequest = supportsStreaming && job.attempts === 1
       ? { ...baseRequest, onChunk }
       : baseRequest;
+    if (!validatedDraft && orchestration.automaticRepair) {
+      assertActiveGenerationUpdate(await repository.markRecoverable({
+        ...scope,
+        providerResponseId: null,
+        providerFinishReason: null,
+        errorCode: "automatic_repair_consumed",
+        errorMessage: "The automatic repair was already consumed for this draft. Retry explicitly to start a new bounded attempt.",
+        recoveryMetadata: { retryable: true, stage: orchestration.automaticRepair.stage }
+      }), "saving automatic repair recovery state");
+      return true;
+    }
     let result = validatedDraft?.response || await phase("story_generation", () =>
       callCampaignTextProvider(dependencies, provider, job, "story_generation", primaryRequest));
     let validation = validatedDraft
@@ -1213,6 +1224,13 @@ async function executeLoadedGeneration(
         recoveryKind,
         initialAttemptNumber,
         validationErrorCount: initialValidationErrors.length
+      });
+      orchestration = await persistOrchestration(repository, scope, job, {
+        automaticRepair: {
+          stage: recoveryKind,
+          rejectedDraftHash: sha256(rejectedResponse),
+          consumedAttempt: job.attempts
+        }
       });
       result = await phase("story_recovery", () => callCampaignTextProvider(
         dependencies,
@@ -1439,7 +1457,8 @@ async function executeLoadedGeneration(
           story: parsed.story,
           response: result,
           sentFactIds: plannedSentFactIds
-        }
+        },
+        automaticRepair: undefined
       });
     }
     assertActiveGenerationUpdate(await repository.markValidating(scope), "entering validation");
@@ -1471,6 +1490,7 @@ async function executeLoadedGeneration(
       });
     }
     const immediateEvents = (orchestration.afterEvents || []).filter((event) => event.addTextAfter);
+    let extensionFailure: string | null = null;
     if (immediateEvents.length && !orchestration.extension) {
       await phase("event_extension", async () => {
         try {
@@ -1511,11 +1531,23 @@ async function executeLoadedGeneration(
           });
         } catch (error) {
           if (isRecoverableIntegrityError(error)) throw error;
+          extensionFailure = (error instanceof Error ? error.message : String(error)).slice(0, 2000);
           orchestration = await persistOrchestration(repository, scope, job, {
-            extensionError: (error instanceof Error ? error.message : String(error)).slice(0, 2000)
+            extensionError: extensionFailure
           });
         }
       });
+    }
+    if (extensionFailure) {
+      assertActiveGenerationUpdate(await repository.markRecoverable({
+        ...scope,
+        providerResponseId: result.responseId || null,
+        providerFinishReason: result.finishReason || null,
+        errorCode: "event_extension",
+        errorMessage: "The event extension could not be validated and can be retried.",
+        recoveryMetadata: { retryable: true, stage: "event_extension" }
+      }), "saving event extension recovery state");
+      return true;
     }
     const committedStory: StoryTurnOutput = orchestration.extension
       ? {

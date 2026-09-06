@@ -626,6 +626,7 @@ export function createPostgresGenerationCommandRepository(
           `UPDATE generation_jobs
               SET status = CASE WHEN operation_kind = 'replace_latest' THEN 'replacement_queued' ELSE 'queued' END,
                   lease_owner = NULL, lease_expires_at = NULL, error_code = NULL, error_message = NULL, updated_at = now()
+                  , orchestration_private = orchestration_private - 'automaticRepair'
             WHERE id = $1 AND owner_user_id = $2
             RETURNING id, status, operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId"`,
           [scope.jobId, scope.ownerUserId]

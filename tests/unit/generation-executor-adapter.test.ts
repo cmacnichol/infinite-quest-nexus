@@ -226,6 +226,42 @@ describe("generation executor adapter", () => {
     }));
   });
 
+  it("does not repeat a consumed automatic repair after a lease reclaim", async () => {
+    const job = completeGenerationExecutionPayload();
+    job.orchestration_private = {
+      automaticRepair: {
+        stage: "schema_repair",
+        rejectedDraftHash: "rejected-draft-hash",
+        consumedAttempt: 1
+      }
+    };
+    const repository = {
+      loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true),
+      markGenerating: vi.fn(async () => true), saveOrchestration: vi.fn(async () => true),
+      markRecoverable: vi.fn(async () => true), markFailed: vi.fn(async () => true)
+    } as unknown as GenerationExecutionRepository;
+    const provider = {
+      id: claim.providerProfileId, name: "Captured provider", providerRole: "text" as const,
+      providerType: "openai_compatible" as const, model: "test-model", contextWindowTokens: 16_000,
+      maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {}, execute: vi.fn()
+    };
+    const collaborators = {
+      memory: { loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT })) },
+      illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) },
+      loadTextExecution: vi.fn(async () => provider), promptFromSnapshot: vi.fn(() => "Write a concise fictional scene."),
+      recordProfileCost: vi.fn(async () => undefined), attributeGenerationCostsToTurn: vi.fn(async () => undefined)
+    } as unknown as GenerationExecutionCollaborators;
+
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: "reclaim-worker", leaseSeconds: 30, claim: { ...claim, attempts: 2 } })).resolves.toBe(true);
+
+    expect(provider.execute).not.toHaveBeenCalled();
+    expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({
+      errorCode: "automatic_repair_consumed",
+      recoveryMetadata: expect.objectContaining({ stage: "schema_repair" })
+    }));
+  });
+
   it("sends planner-selected private authority candidates and records omitted candidates without reading the legacy preview", async () => {
     const job = completeGenerationExecutionPayload();
     job.context_options = { ...job.context_options, budgetTokens: 1_000 };
