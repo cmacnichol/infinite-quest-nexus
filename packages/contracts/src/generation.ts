@@ -5,7 +5,7 @@ export {
   storyTurnOutputSchema,
   type StoryTurnOutput
 } from "./story-prompt.js";
-import { MAX_CONTINUITY_OPEN_THREADS } from "./story-prompt.js";
+import { MAX_CONTINUITY_OPEN_THREADS, storyTurnOutputSchema } from "./story-prompt.js";
 import { apiTimestampSchema } from "./http.js";
 import { storyLengthProfileSchema } from "./story-settings.js";
 
@@ -390,9 +390,23 @@ export const eventTriggerDecisionOutputSchema = z.object({
 });
 
 export const eventExtensionOutputSchema = z.object({
-  additional_text: z.string().trim().min(1).max(20_000),
-  scratchpad: z.string().max(100_000).optional(),
-  tracker_updates: z.array(z.record(z.string(), z.unknown())).max(200).default([])
+  narration: storyTurnOutputSchema.shape.narration,
+  choices: storyTurnOutputSchema.shape.choices,
+  custom_action_suggestion: storyTurnOutputSchema.shape.custom_action_suggestion,
+  scratchpad: storyTurnOutputSchema.shape.scratchpad,
+  tracker_updates: storyTurnOutputSchema.shape.tracker_updates,
+  image_prompt: storyTurnOutputSchema.shape.image_prompt,
+  continuity_summary: storyTurnOutputSchema.shape.continuity_summary,
+  canonical_facts: storyTurnOutputSchema.shape.canonical_facts,
+  superseded_facts: storyTurnOutputSchema.shape.superseded_facts,
+  canonical_fact_updates: storyTurnOutputSchema.shape.canonical_fact_updates,
+  open_threads: storyTurnOutputSchema.shape.open_threads
+}).superRefine((value, context) => {
+  if (value.superseded_facts.length) context.addIssue({
+    code: "custom",
+    path: ["superseded_facts"],
+    message: "New event extension output must use canonical_fact_updates for supersession."
+  });
 });
 
 export const generationJobStatusSchema = z.object({

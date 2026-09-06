@@ -62,8 +62,17 @@ describe("typed private story orchestration", () => {
 
   it("rejects mechanics leakage in an after-response extension", () => {
     expect(() => parseEventExtension(JSON.stringify({
-      additional_text: "The d100 roll succeeds and Marker Four becomes active.",
-      tracker_updates: []
-    }))).toThrow(/Mechanics language/);
+      narration: "The party enters the hall. The d100 roll succeeds and Marker Four becomes active.",
+      choices: ["One", "Two", "Three", "Four"],
+      custom_action_suggestion: "Wait.",
+      scratchpad: "The party reached the hall.",
+      tracker_updates: [],
+      image_prompt: "A hall",
+      continuity_summary: "The party is in the hall.",
+      canonical_facts: [],
+      superseded_facts: [],
+      canonical_fact_updates: [],
+      open_threads: []
+    }), "The party enters the hall.")).toThrow(/Mechanics language/);
   });
 });

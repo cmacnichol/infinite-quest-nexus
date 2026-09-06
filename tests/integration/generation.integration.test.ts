@@ -890,6 +890,8 @@ integration("durable Story Engine integration", () => {
     try {
       const checkpointStory = JSON.parse(validStory(baseNarration));
       checkpointStory.canonical_fact_updates = [];
+      const finalExtensionStory = JSON.parse(validStory(`${baseNarration}\n\nA lantern appears in the hall, guiding the party onward.`));
+      finalExtensionStory.canonical_fact_updates = [];
       replies.push(
         { content: JSON.stringify(checkpointStory) },
         { content: JSON.stringify({
@@ -897,10 +899,7 @@ integration("durable Story Engine integration", () => {
           reasons: { "checkpoint-after-extension": "The party reaches the hall." }
         }) },
         { content: "not valid extension JSON" },
-        { content: JSON.stringify({
-          additional_text: "A lantern appears in the hall, guiding the party onward.",
-          tracker_updates: []
-        }) }
+        { content: JSON.stringify(finalExtensionStory) }
       );
       await runGenerationJob(pool, "extension-worker-a", 30, credentialSecret);
       expect(extensionFailurePersisted).toBe(true);

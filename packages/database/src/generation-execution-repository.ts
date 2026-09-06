@@ -96,9 +96,7 @@ export type GenerationOrchestrationState = {
   afterEvents?: ActivatedEvent[];
   afterTriggerError?: string;
   extension?: {
-    additionalText: string;
-    scratchpad?: string;
-    trackerUpdates: Array<Record<string, unknown>>;
+    story: StoryTurnOutput;
   };
   extensionError?: string | undefined;
   /** A durable fence for one automatic repair of a particular rejected draft. */

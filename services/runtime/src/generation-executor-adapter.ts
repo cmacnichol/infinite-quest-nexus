@@ -1505,7 +1505,7 @@ async function executeLoadedGeneration(
             "event_extension",
             {
               systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "event_extension"),
-              input: buildEventExtensionPrompt(parsed.story.narration, guidance),
+              input: buildEventExtensionPrompt(parsed.story, guidance),
               budgetOutput: {
                 kind: "event_extension",
                 preservedNarration: parsed.story.narration,
@@ -1516,14 +1516,10 @@ async function executeLoadedGeneration(
           if (extensionResponse.outputLimited) {
             throw new Error("The optional event extension reached its output limit.");
           }
-          const extension = parseEventExtension(extensionResponse.content);
+          const extension = parseEventExtension(extensionResponse.content, parsed.story.narration);
           orchestration = await persistOrchestration(repository, scope, job, {
             extension: {
-              additionalText: extension.additional_text,
-              ...(extension.scratchpad !== undefined
-                ? { scratchpad: extension.scratchpad }
-                : {}),
-              trackerUpdates: extension.tracker_updates
+              story: extension
             },
             // A previous lease may have recorded a transient extension failure.
             // Successful completion on this lease supersedes that stage outcome.
@@ -1549,19 +1545,7 @@ async function executeLoadedGeneration(
       }), "saving event extension recovery state");
       return true;
     }
-    const committedStory: StoryTurnOutput = orchestration.extension
-      ? {
-          ...parsed.story,
-          narration: formatNarrationParagraphs(
-            `${parsed.story.narration}\n\n${orchestration.extension.additionalText}`
-          ),
-          scratchpad: orchestration.extension.scratchpad ?? parsed.story.scratchpad,
-          tracker_updates: [
-            ...parsed.story.tracker_updates,
-            ...orchestration.extension.trackerUpdates
-          ]
-        }
-      : parsed.story;
+    const committedStory: StoryTurnOutput = orchestration.extension?.story || parsed.story;
     if (mechanicsLeakFields(committedStory).length) {
       throw new Error("Mechanics validation invariant failed after event extension.");
     }
