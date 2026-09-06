@@ -1243,13 +1243,19 @@ integration("legacy import and Chronicle integration", () => {
 
   it("indexes fresh vectors and uses hybrid retrieval with a safe lexical fallback", async () => {
     const ownerUserId = await initialOwnerId(pool);
+    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+    fixture.world.title = `Embedding fixture campaign ${crypto.randomUUID()}`;
+    const embeddingCampaign = await importLegacyStory(pool, storyImportRequestSchema.parse({
+      sourceName: `embedding-fixture-${crypto.randomUUID()}.story`,
+      story: fixture
+    }));
     const provider = await pool.query<{ id: string }>(
       `INSERT INTO provider_profiles (
          owner_user_id, name, provider_type, provider_role, base_url, default_model
        ) VALUES ($1,$2,'lmstudio','embedding','http://embedding.test','text-embedding-nomic-embed-text-v1.5') RETURNING id`,
       [ownerUserId, `Embedding fixture ${crypto.randomUUID()}`]
     );
-    await setCampaignEmbeddingConfig(pool, campaignId, {
+    await setCampaignEmbeddingConfig(pool, embeddingCampaign.campaignId, {
       enabled: true,
       providerProfileId: provider.rows[0]!.id,
       model: "text-embedding-nomic-embed-text-v1.5",
@@ -1267,7 +1273,7 @@ integration("legacy import and Chronicle integration", () => {
         }))
       }), { status: 200 });
     }));
-    const jobId = await enqueueEmbeddingReindex(pool, campaignId);
+    const jobId = await enqueueEmbeddingReindex(pool, embeddingCampaign.campaignId);
     expect(jobId).toBeTruthy();
     expect(await runNextChronicle(pool, "embedding-worker", 30, "")).toBe(true);
     expect(embeddingInputs.flat().every((input) => input.startsWith("search_document: "))).toBe(true);
@@ -1275,10 +1281,10 @@ integration("legacy import and Chronicle integration", () => {
       `SELECT count(*)::text AS count FROM chronicle_memories
         WHERE owner_user_id = $1 AND campaign_id = $2 AND embedding IS NOT NULL
           AND embedding_content_hash IS NOT NULL`,
-      [ownerUserId, campaignId]
+      [ownerUserId, embeddingCampaign.campaignId]
     );
     expect(Number(indexed.rows[0]?.count)).toBeGreaterThan(0);
-    const health = (await getChronicleMetrics(pool, campaignId)).semanticHealth;
+    const health = (await getChronicleMetrics(pool, embeddingCampaign.campaignId)).semanticHealth;
     expect(health).toMatchObject({
       status: "healthy",
       providerHealth: "healthy",
@@ -1288,7 +1294,7 @@ integration("legacy import and Chronicle integration", () => {
     });
     expect(health.indexedMemories).toBe(health.totalMemories);
 
-    const hybrid = await buildContextPreview(pool, campaignId, {
+    const hybrid = await buildContextPreview(pool, embeddingCampaign.campaignId, {
       budgetTokens: 4096,
       compression: "auto",
       query: "related marker",
@@ -1299,7 +1305,7 @@ integration("legacy import and Chronicle integration", () => {
     expect(hybrid.scopes.chronicle.some((memory: Record<string, unknown>) => Number(memory.semanticRelevance) > 0.9)).toBe(true);
 
     vi.stubGlobal("fetch", vi.fn(async () => new Response("offline", { status: 503 })));
-    const fallback = await buildContextPreview(pool, campaignId, {
+    const fallback = await buildContextPreview(pool, embeddingCampaign.campaignId, {
       budgetTokens: 4096,
       compression: "auto",
       query: "Location Beta",
@@ -1311,13 +1317,19 @@ integration("legacy import and Chronicle integration", () => {
 
   it("requeues a running embedding job when Chronicle content changes concurrently", async () => {
     const ownerUserId = await initialOwnerId(pool);
+    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+    fixture.world.title = `Embedding race campaign ${crypto.randomUUID()}`;
+    const embeddingCampaign = await importLegacyStory(pool, storyImportRequestSchema.parse({
+      sourceName: `embedding-race-${crypto.randomUUID()}.story`,
+      story: fixture
+    }));
     const provider = await pool.query<{ id: string }>(
       `INSERT INTO provider_profiles (
          owner_user_id, name, provider_type, provider_role, base_url, default_model
        ) VALUES ($1,$2,'lmstudio','embedding','http://embedding.test','text-embedding-nomic-embed-text-v1.5') RETURNING id`,
       [ownerUserId, `Embedding race fixture ${crypto.randomUUID()}`]
     );
-    await setCampaignEmbeddingConfig(pool, campaignId, {
+    await setCampaignEmbeddingConfig(pool, embeddingCampaign.campaignId, {
       enabled: true,
       providerProfileId: provider.rows[0]!.id,
       model: "text-embedding-nomic-embed-text-v1.5",
@@ -1326,7 +1338,7 @@ integration("legacy import and Chronicle integration", () => {
     await pool.query(
       `UPDATE chronicle_memories SET content = content || E'\\nRace preparation.'
         WHERE id = (SELECT id FROM chronicle_memories WHERE campaign_id = $1 ORDER BY ordinal LIMIT 1)`,
-      [campaignId]
+      [embeddingCampaign.campaignId]
     );
     let releaseFirstBatch!: () => void;
     let markStarted!: () => void;
@@ -1344,16 +1356,16 @@ integration("legacy import and Chronicle integration", () => {
         data: input.map((_content, index) => ({ index, embedding: [1, 0, 0] }))
       }), { status: 200 });
     }));
-    const jobId = await enqueueEmbeddingReindex(pool, campaignId);
+    const jobId = await enqueueEmbeddingReindex(pool, embeddingCampaign.campaignId);
     expect(jobId).toBeTruthy();
     const firstRun = runNextChronicle(pool, "embedding-race-worker-a", 30, "");
     await firstBatchStarted;
     await pool.query(
       `UPDATE chronicle_memories SET content = content || E'\\nConcurrent accepted fact.'
         WHERE id = (SELECT id FROM chronicle_memories WHERE campaign_id = $1 ORDER BY ordinal LIMIT 1)`,
-      [campaignId]
+      [embeddingCampaign.campaignId]
     );
-    expect(await enqueueEmbeddingReindex(pool, campaignId)).toBe(jobId);
+    expect(await enqueueEmbeddingReindex(pool, embeddingCampaign.campaignId)).toBe(jobId);
     releaseFirstBatch();
     expect(await firstRun).toBe(true);
     const queued = await pool.query<{ status: string; work_version: string }>(
@@ -1376,7 +1388,7 @@ integration("legacy import and Chronicle integration", () => {
     const fresh = await pool.query<{ content: string; embedding_content_hash: string | null; embedded: boolean }>(
       `SELECT content, embedding_content_hash, embedding IS NOT NULL AS embedded
          FROM chronicle_memories WHERE campaign_id = $1`,
-      [campaignId]
+      [embeddingCampaign.campaignId]
     );
     expect(fresh.rows.every((memory) => memory.embedded && memory.embedding_content_hash === sha256(memory.content))).toBe(true);
   });

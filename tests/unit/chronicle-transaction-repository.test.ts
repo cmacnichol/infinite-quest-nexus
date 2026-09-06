@@ -126,14 +126,14 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     expect(actual.authority.scratchpad).toBe("password: moonfall");
     expect(actual.authority.rules).toEqual(["Never resurrect the warden."]);
     expect(actual.authority.openThreads).toEqual([]);
-    expect(actual.authority.currentContinuity).toEqual({ continuitySummary: "The warden is dead.", scratchpad: "password: moonfall", canonicalFacts: [], openThreads: [], trackers: [{ id: "ward", name: "Ward", value: "thin", rules: "fiction" }], rpgStats: [{ id: "courage", name: "Courage", value: 50, note: "steady" }], eventTriggers: [{ id: "bell", label: "Bell", timing: "after", condition: "The gate opens.", effect: "The bell rings.", addTextAfter: false, triggeredCount: 0, lastTriggeredTurn: null, lastTriggeredAt: null }], pendingEventTriggers: [{ id: "pending-bell", sourceTriggerId: "bell", name: "Bell", timing: "after", condition: "", effect: "", instructions: "Ring once.", reason: "", sourceTurn: null }] });
+    expect(actual.authority.currentContinuity).toEqual({ continuitySummary: "The warden is dead.", scratchpad: "password: moonfall", canonicalFacts: [], openThreads: [], trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: [] });
     expect(actual.candidates).toEqual([]);
     expect(actual.baseIdentity.baseTurnNumber).toBe(1);
     expect(vi.mocked(client.query).mock.calls.some(([sql]) => (
       typeof sql === "string" && sql.includes("FROM campaign_canonical_facts")
     ))).toBe(false);
   });
-  it("uses the accepted state snapshot when no exact correction exists", async () => {
+  it("uses accepted state fields but suppresses legacy scratchpad text when no exact correction exists", async () => {
     const client = {
       query: vi.fn(async (sql: string) => {
         if (sql.includes("FOR UPDATE OF campaign, state")) return { rows: [{ active_turn_number: 1, world_version_id: "world-version", revision: 3 }] };
@@ -159,7 +159,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     });
 
     expect(actual.authority.worldCanon).toEqual({ rules: "First rule.\nSecond rule.", glossary: { warden: "keeper" }, conditions: ["dawn"] });
-    expect(actual.authority.scratchpad).toBe("late password: moonfall");
+    expect(actual.authority.scratchpad).toBe("");
     expect(actual.authority.openThreads).toEqual(["Bury the warden."]);
   });
   it("keeps private generation authority off the public preview port", () => {

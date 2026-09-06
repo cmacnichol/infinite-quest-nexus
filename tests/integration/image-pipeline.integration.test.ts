@@ -78,6 +78,7 @@ function storyOutput() {
     continuity_summary: "A luminous stone arch stands open beneath the violet sky.",
     canonical_facts: ["The luminous stone arch is open."],
     superseded_facts: [],
+    canonical_fact_updates: [],
     open_threads: ["Explore beyond the luminous arch."]
   });
 }

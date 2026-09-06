@@ -46,7 +46,11 @@ describe("loadCurrentContinuityCorrection", () => {
       continuitySummary: "The keeper is alive.",
       openThreads: [],
       canonicalFacts: [],
-      scratchpad: ""
+      scratchpad: "",
+      trackers: [],
+      rpgStats: [],
+      eventTriggers: [],
+      pendingEventTriggers: []
     });
 
     expect(client.query).toHaveBeenCalledWith(expect.stringContaining("effective_turn_number = $4"), [
