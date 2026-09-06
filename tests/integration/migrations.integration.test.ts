@@ -72,7 +72,8 @@ integration("standard database migration runner", () => {
       await expect(migrateDatabase(isolatedPool, resolve("database/migrations")))
         .resolves.toEqual([
           "0086_prompt_override_protocol_acknowledgements",
-          "0087_chronicle_query_cache_access_sequence"
+          "0087_chronicle_query_cache_access_sequence",
+          "0088_expand_campaign_story_context_budget"
         ]);
       const acknowledgement = await isolatedPool.query<{ compatibility_protocol_identity: string }>(
         "SELECT compatibility_protocol_identity FROM prompt_template_overrides WHERE owner_user_id=$1 AND prompt_key='story_system'",
@@ -115,6 +116,19 @@ integration("standard database migration runner", () => {
       is_nullable: "NO",
       column_default: "32000"
     }]);
+  });
+
+  it("allows supported large campaign Story context budgets", async () => {
+    const constraint = await pool.query<{ definition: string }>(
+      `SELECT pg_get_constraintdef(oid) AS definition
+         FROM pg_constraint
+        WHERE conname = 'campaigns_story_context_budget_tokens_check'`
+    );
+
+    expect(constraint.rows).toEqual([
+      expect.objectContaining({ definition: expect.stringContaining("2000000") })
+    ]);
+    expect(constraint.rows[0]!.definition).toContain("4000000");
   });
 
   it("adds minimal owner-scoped admission buckets and leases", async () => {
@@ -1742,7 +1756,8 @@ END;
         "0084_generation_authority_identity",
         "0085_prompt_override_compatibility_acknowledgements",
         "0086_prompt_override_protocol_acknowledgements",
-        "0087_chronicle_query_cache_access_sequence"
+        "0087_chronicle_query_cache_access_sequence",
+        "0088_expand_campaign_story_context_budget"
       ]);
 
       const scrubbed = await isolatedPool.query<{ technical_metadata: Record<string, unknown> }>(
@@ -2736,7 +2751,8 @@ END;
         "0084_generation_authority_identity",
         "0085_prompt_override_compatibility_acknowledgements",
         "0086_prompt_override_protocol_acknowledgements",
-        "0087_chronicle_query_cache_access_sequence"
+        "0087_chronicle_query_cache_access_sequence",
+        "0088_expand_campaign_story_context_budget"
       ]);
 
       // Accepted turns and every derived vector survive the upgrade untouched.

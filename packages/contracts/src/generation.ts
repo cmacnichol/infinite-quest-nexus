@@ -93,7 +93,7 @@ export const generationRequestSchema = z.object({
   model: z.string().trim().max(500).optional(),
   idempotencyKey: z.string().trim().min(8).max(200),
   context: z.object({
-    budgetTokens: z.coerce.number().int().min(512).max(1_000_000).default(32000),
+    budgetTokens: z.coerce.number().int().min(512).max(4_000_000).default(32000),
     compression: z.enum(["auto", "full", "balanced", "compact", "summary"]).default("auto"),
     recentTurns: z.coerce.number().int().min(1).max(100).default(8),
     modelContextWindowTokens: z.coerce.number().int().min(1024).max(4_000_000).optional()

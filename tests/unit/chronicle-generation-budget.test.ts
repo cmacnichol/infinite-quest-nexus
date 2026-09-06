@@ -36,8 +36,16 @@ describe("generation Chronicle retrieval budget", () => {
       turnLexicalCandidates: 3_072,
       entityCandidates: 2_048
     });
-    expect(generationChronicleRetrievalLimits(10_000_000)).toEqual(
-      generationChronicleRetrievalLimits(1_000_000)
-    );
+    expect(generationChronicleRetrievalLimits(4_000_000)).toEqual({
+      perSignal: 2_000,
+      maximumParents: 2_000,
+      maximumParentsPerTurn: 250,
+      candidatePool: 64_000,
+      historicalCanonicalFacts: 32_000,
+      canonicalCandidates: 8_000,
+      turnSequenceCoverage: 1_000,
+      turnLexicalCandidates: 12_000,
+      entityCandidates: 8_000
+    });
   });
 });

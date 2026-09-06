@@ -397,7 +397,7 @@ export function testWorldCampaignApplication(
       worldVersionId: string;
       selectedCharacterId?: string;
       storyLengthProfile: "brief" | "standard" | "long" | "extended";
-      storyContextBudgetTokens: 32_000 | 64_000 | 128_000 | 256_000 | 1_000_000;
+      storyContextBudgetTokens: 32_000 | 64_000 | 128_000 | 256_000 | 1_000_000 | 2_000_000 | 4_000_000;
       turnControlStyle: "action_only" | "flexible_auto" | "flexible_action" | "flexible_scene";
     }) => ({
       id: TEST_CAMPAIGN_ID,

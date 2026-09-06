@@ -304,7 +304,8 @@ integration("Task 14e2c additive adapter contract matrix", () => {
         "0084_generation_authority_identity",
         "0085_prompt_override_compatibility_acknowledgements",
         "0086_prompt_override_protocol_acknowledgements",
-        "0087_chronicle_query_cache_access_sequence"
+        "0087_chronicle_query_cache_access_sequence",
+        "0088_expand_campaign_story_context_budget"
       ]);
     } finally {
       await pool.end();
