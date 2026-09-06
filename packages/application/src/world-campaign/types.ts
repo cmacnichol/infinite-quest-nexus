@@ -345,6 +345,7 @@ export type CampaignUpdateView = Readonly<{
   textProviderProfileId: string | null;
   imageProviderProfileId: string | null;
   storyLengthProfile: CampaignCreateResponse["storyLengthProfile"];
+  storyContextBudgetTokens: CampaignCreateResponse["storyContextBudgetTokens"];
   turnControlStyle: NonNullable<CampaignUpdateRequest["turnControlStyle"]>;
   updatedAt: ApiTimestamp;
 }>;

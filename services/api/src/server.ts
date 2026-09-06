@@ -128,9 +128,18 @@ import { createGenerationRouteLifecycle, type GenerationLifecycleLogContext } fr
 import { safeTurnInput } from "./turn-input-safety.js";
 import { applicationMetadata } from "./app-metadata.js";
 import { installRequestSecurity } from "./request-security.js";
+import { registerSystemImportGate } from "./system-import-gate.js";
+import {
+  isSanitizedSystemArchiveServerError,
+  registerSystemArchiveRoutes,
+} from "./system-archive-routes.js";
 import { registerArchiveRoutes } from "./archive-routes.js";
 import { createApiAssetComposition } from "../../runtime/src/api-asset-composition.js";
 import type { ApiAssetComposition } from "../../runtime/src/api-asset-composition.js";
+import {
+  createApiSystemArchiveComposition,
+  type ApiSystemArchiveComposition,
+} from "../../runtime/src/system-archive-composition.js";
 import {
   createApiCampaignArchiveAssetReader,
   createApiPortableImportExportComposition,
@@ -160,6 +169,11 @@ export type BuildServerOptions = {
   infiniteWorldsProviders: InfiniteWorldsImportProviderCollaborators;
   createApiAssets?: (pool: DatabasePool, roots: Readonly<{ archiveRoot: string; assetRoot: string }>) => Promise<ApiAssetComposition>;
   createApiPortable?: (options: ApiPortableImportExportCompositionOptions) => Promise<ApiPortableImportExportComposition>;
+  createApiSystemArchive?: (options: Readonly<{
+    pool: DatabasePool;
+    config: RuntimeConfig;
+    storage: Pick<ApiAssetComposition, "storage">["storage"];
+  }>) => ApiSystemArchiveComposition;
 };
 
 const uuidSchema = z.uuid();
@@ -271,7 +285,9 @@ function safeErrorDetails(value: unknown): Record<string, unknown> {
 }
 
 function exposeError(error: unknown, code: number): boolean {
-  return code < 500 || (typeof error === "object" && error !== null && "expose" in error && (error as { expose?: unknown }).expose === true);
+  return code < 500
+    || isSanitizedSystemArchiveServerError(error)
+    || (typeof error === "object" && error !== null && "expose" in error && (error as { expose?: unknown }).expose === true);
 }
 
 function safeLogErrorCode(value: unknown, fallback = "unclassified_error"): string {
@@ -360,6 +376,7 @@ export async function buildServer({
   infiniteWorldsProviders,
   createApiAssets = createApiAssetComposition,
   createApiPortable = createApiPortableImportExportComposition,
+  createApiSystemArchive = createApiSystemArchiveComposition,
 }: BuildServerOptions): Promise<FastifyInstance> {
   const illustrationTurnScope = async (turnId: string) => {
     const ownerUserId = await initialOwnerId(pool);
@@ -450,6 +467,10 @@ export async function buildServer({
   });
 
   installRequestSecurity(app, config);
+  registerSystemImportGate(app, {
+    pool,
+    enabled: config.systemArchiveEnabled ?? false,
+  });
 
   app.options("*", async (_request, reply) => {
     return reply.code(204).send();
@@ -462,6 +483,9 @@ export async function buildServer({
     archiveRoot: config.archiveStorageRoot,
     assetRoot: config.assetStorageRoot
   });
+  const apiSystemArchive = config.systemArchiveEnabled === true
+    ? createApiSystemArchive({ pool, config, storage: apiAssets.storage })
+    : undefined;
   const apiPortable = await createApiPortable({
     pool,
     config,
@@ -479,6 +503,20 @@ export async function buildServer({
       fieldSize: config.security.apiImportBodyLimitBytes
     }
   });
+  if (apiSystemArchive) {
+    await app.register(registerSystemArchiveRoutes, {
+      enabled: true,
+      application: apiSystemArchive.application,
+      downloads: apiSystemArchive.downloads,
+      resolveOwner: async () => ({ ownerUserId: await initialOwnerId(pool) }),
+      limits: {
+        chunkBytes: config.systemArchiveChunkBytes!,
+        maximumUploadBytes: config.systemArchiveLimits.maxCompressedBytes,
+        maximumDownloadBytes: config.systemArchiveLimits.maxCompressedBytes,
+        downloadDeadlineMs: Math.max(60_000, config.workerLeaseSeconds * 4_000),
+      },
+    });
+  }
   await app.register(registerArchiveRoutes, {
     pool,
     config,
@@ -561,7 +599,10 @@ export async function buildServer({
     }
   });
 
-  app.get("/api/v1/meta", async () => parseResponseProjection(metaResponseSchema, { application: applicationMetadata() }));
+  app.get("/api/v1/meta", async () => parseResponseProjection(metaResponseSchema, {
+    application: applicationMetadata(),
+    capabilities: { systemArchive: config.systemArchiveEnabled === true },
+  }));
 
   app.get("/api/v1/dashboard/stats", async () => {
     const ownerScope = await resolveWorldCampaignOwnerScope();

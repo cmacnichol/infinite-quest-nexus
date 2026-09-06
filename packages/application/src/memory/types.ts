@@ -20,6 +20,9 @@ export type CampaignWorldVersionMemoryScope = CampaignMemoryScope & Readonly<{
   worldVersionId: string;
 }>;
 
+export type CampaignStateCorrectionProjectionScope = CampaignWorldVersionMemoryScope & Readonly<{ stateEditId: string }>;
+export type CorrectionMemoryChanges = Readonly<{ changedMemoryIds: readonly string[]; removedMemoryIds: readonly string[] }>;
+
 export type ChronicleJobScope = MemoryOwnerScope & Readonly<{
   jobId: string;
 }>;

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { apiTimestampSchema } from "./http.js";
+import { storyLengthProfileSchema } from "./story-settings.js";
 
 export const providerTypeSchema = z.enum(["lmstudio", "openrouter", "manifest", "openai_compatible", "sogni", "sogni_sdk"]);
 export const providerRoleSchema = z.enum(["text", "image", "embedding", "intent"]);
@@ -72,6 +73,7 @@ export const providerTextRequestSchema = z.object({
 
 export const generationRequestSchema = z.object({
   action: z.string().trim().min(1).max(12_000),
+  storyLengthProfileOverride: storyLengthProfileSchema.optional(),
   requestedInputMode: turnInputSelectionSchema.default("action"),
   resolvedInputMode: turnInputModeSchema.default("action"),
   inputModeSource: turnInputModeSourceSchema.default("explicit"),

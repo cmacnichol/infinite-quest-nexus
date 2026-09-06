@@ -16,7 +16,7 @@ import {
   type FileHandle
 } from "node:fs/promises";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
-import { Readable, Transform, Writable, type TransformCallback } from "node:stream";
+import { PassThrough, Readable, Transform, Writable, type TransformCallback } from "node:stream";
 import { finished, pipeline } from "node:stream/promises";
 import unzipper, { type File as ZipFile } from "unzipper";
 import {
@@ -46,6 +46,31 @@ const LOCAL_FILE_HEADER_SIGNATURE = 0x04034b50;
 const EOCD_MINIMUM_BYTES = 22;
 const EOCD_MAXIMUM_COMMENT_BYTES = 65_535;
 const EOCD_TAIL_BYTES = EOCD_MINIMUM_BYTES + EOCD_MAXIMUM_COMMENT_BYTES;
+
+function baseManifestAssets(manifest: ArchiveManifest): readonly unknown[] {
+  if (manifest.archiveType !== "system") return manifest.assets;
+  return manifest.assets.map((asset) => {
+    const { authority: _systemAuthority, ...baseAsset } = asset as typeof asset & {
+      authority?: unknown;
+    };
+    const bindings = asset.bindings.map((binding) => {
+      if (binding.role === "illustration_segment_variant") {
+        const { createdAt: _systemCreatedAt, ...baseBinding } = binding as typeof binding & {
+          createdAt?: unknown;
+        };
+        return baseBinding;
+      }
+      if (binding.role === "generation_context") {
+        const { authority: _systemBindingAuthority, ...baseBinding } = binding as typeof binding & {
+          authority?: unknown;
+        };
+        return baseBinding;
+      }
+      return binding;
+    });
+    return { ...baseAsset, bindings };
+  });
+}
 
 export function supportsSecureGeneratedArchiveStaging(
   platform: NodeJS.Platform = process.platform
@@ -939,7 +964,10 @@ async function preflightZipMetadata(
 function archiveHandleSource(handle: FileHandle, archiveSize: number): {
   size: () => Promise<number>;
   stream: (offset: number, length?: number) => Readable;
+  waitForActiveReads(): Promise<void>;
 } {
+  const activeReads = new Set<Promise<void>>();
+
   return {
     size: async () => archiveSize,
     stream: (offset, length) => {
@@ -954,7 +982,7 @@ function archiveHandleSource(handle: FileHandle, archiveSize: number): {
         : Math.min(archiveSize - 1, offset + length);
       let position = offset;
       let reading = false;
-      return new Readable({
+      const stream = new Readable({
         read(requestedBytes) {
           if (reading) return;
           if (position > end) {
@@ -964,7 +992,7 @@ function archiveHandleSource(handle: FileHandle, archiveSize: number): {
           reading = true;
           const byteLength = Math.min(Math.max(1, requestedBytes), 64 * 1024, end - position + 1);
           const buffer = Buffer.allocUnsafe(byteLength);
-          void handle.read(buffer, 0, byteLength, position).then((result) => {
+          const read = handle.read(buffer, 0, byteLength, position).then((result) => {
             reading = false;
             if (result.bytesRead === 0) {
               this.push(null);
@@ -976,8 +1004,24 @@ function archiveHandleSource(handle: FileHandle, archiveSize: number): {
             reading = false;
             this.destroy(error);
           });
+          activeReads.add(read);
+          void read.finally(() => activeReads.delete(read));
         }
       });
+      // A consumer can finish its parent operation while the final asynchronous
+      // read is resolving. Retain an error listener so a late stream failure is
+      // returned through the operation rather than terminating the process.
+      stream.on("error", () => undefined);
+      return stream;
+    },
+    async waitForActiveReads() {
+      // unzipper's custom source resolves its directory before its final read
+      // callback has necessarily settled. The FileHandle must remain usable
+      // until those callbacks are done, otherwise a later callback can raise
+      // EBADF after the verified operation closes the handle.
+      while (activeReads.size > 0) await Promise.all(activeReads);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      while (activeReads.size > 0) await Promise.all(activeReads);
     }
   };
 }
@@ -993,9 +1037,12 @@ async function openArchiveFromHandle(
       source: ReturnType<typeof archiveHandleSource>,
       options: { tailSize: number }
     ) => Promise<unzipper.CentralDirectory>;
-    return await customOpen(archiveHandleSource(handle, archiveSize), {
+    const source = archiveHandleSource(handle, archiveSize);
+    const directory = await customOpen(source, {
       tailSize: Math.min(archiveSize, EOCD_TAIL_BYTES)
     });
+    await source.waitForActiveReads();
+    return directory;
   } catch (error) {
     if (error instanceof ArchiveError) throw error;
     throw archiveError("archive-format-unrecognized", "The uploaded file is not a recognized ZIP archive.");
@@ -1450,6 +1497,86 @@ export async function readVerifiedContainerEntry(
   });
 }
 
+export type VerifiedContainerEntryConsumption<Value> = Readonly<{
+  value: Value;
+  byteLength: number;
+  sha256: string;
+}>;
+
+/**
+ * Consume one verified container entry without collecting its body. The
+ * consumer must drain the supplied source; returning early fails closed so a
+ * checksum cannot describe bytes that the consumer never inspected.
+ */
+export async function consumeVerifiedContainerEntry<Value>(
+  archive: InspectedArchiveContainer,
+  path: string,
+  maximumBytes: number,
+  consume: (source: AsyncIterable<Uint8Array>) => Promise<Value>
+): Promise<VerifiedContainerEntryConsumption<Value>> {
+  if (!safeInteger(maximumBytes)) {
+    throw archiveError("archive-limit-exceeded", "The requested archive read limit is invalid.");
+  }
+  const normalized = normalizeArchivePath(path);
+  const entry = archive.entries.get(normalized.comparisonPath);
+  const internal = archive as InternalInspectedArchiveContainer;
+  const identity = internal[INSPECTED_IDENTITY];
+  const limits = internal[INSPECTED_LIMITS];
+  if (!entry || !identity || !limits) {
+    throw archiveError("archive-entry-missing", "The requested archive entry does not exist.", {
+      path: normalized.comparisonPath
+    });
+  }
+  if (entry.uncompressedBytes > maximumBytes) {
+    throw archiveError("archive-limit-exceeded", "The requested archive entry exceeds the configured byte limit.", {
+      path: normalized.comparisonPath
+    });
+  }
+
+  return withVerifiedStagedArchive(archive.staged, limits, identity, async (handle, _identity, archiveSize) => {
+    const directory = await openArchiveFromHandle(handle, archiveSize, limits);
+    const central = inspectCentralDirectory(directory.files, limits);
+    await inspectLocalHeaders(handle, directory.files, archiveSize);
+    const file = central.filesByPath.get(normalized.comparisonPath);
+    if (!file
+      || file.compressedSize !== entry.compressedBytes
+      || file.uncompressedSize !== entry.uncompressedBytes) {
+      throw archiveError("archive-checksum-mismatch", "The requested archive entry metadata changed.", {
+        path: normalized.comparisonPath
+      });
+    }
+
+    const hash = createHash("sha256");
+    let byteLength = 0;
+    const source: AsyncIterable<Uint8Array> = {
+      async *[Symbol.asyncIterator]() {
+        try {
+          for await (const chunk of file.stream()) {
+            const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            const nextLength = byteLength + value.byteLength;
+            if (!Number.isSafeInteger(nextLength) || nextLength > maximumBytes) {
+              throw archiveError("archive-limit-exceeded", "An archive entry exceeds its configured byte limit.");
+            }
+            byteLength = nextLength;
+            hash.update(value);
+            yield value;
+          }
+        } catch (error) {
+          if (error instanceof ArchiveError) throw error;
+          throw archiveError("archive-checksum-mismatch", "An archive entry could not be decoded and verified.");
+        }
+      }
+    };
+    const value = await consume(source);
+    if (byteLength !== entry.uncompressedBytes) {
+      throw archiveError("archive-checksum-mismatch", "The requested archive entry was not consumed completely.", {
+        path: normalized.comparisonPath
+      });
+    }
+    return Object.freeze({ value, byteLength, sha256: hash.digest("hex") });
+  });
+}
+
 function assertWriterEntries(entries: readonly ArchiveArtifactEntry[]): void {
   const paths = new Set<string>();
   for (const entry of entries) {
@@ -1589,11 +1716,166 @@ async function hashFileHandle(handle: FileHandle, expectedSize: number): Promise
   return hash.digest("hex");
 }
 
+async function writeArchiveArtifactStream(
+  output: Writable,
+  entries: readonly ArchiveArtifactEntry[],
+  buildManifest: (entries: readonly ArchiveEntry[]) => ArchiveManifest,
+  limits: ArchiveLimits | undefined,
+  parseBuiltManifest: (value: unknown) => ArchiveManifest,
+): Promise<void> {
+  assertWriterEntries(entries);
+  if (limits && entries.length + 1 > limits.maxEntries) {
+    throw archiveError("archive-limit-exceeded", "The archive contains too many entries.");
+  }
+  let archive: Archiver | undefined;
+  let activeSource: Readable | undefined;
+  let activeTransform: Transform | undefined;
+  const outputCompleted = finished(output);
+  const outputFailed = new Promise<never>((_resolve, reject) => {
+    output.once("error", (error) => {
+      activeSource?.destroy(error);
+      activeTransform?.destroy(error);
+      archive?.abort();
+      reject(error);
+    });
+  });
+  void outputFailed.catch(() => undefined);
+  try {
+    archive = new ZipArchive({ forceLocalTime: false, zlib: { level: 9 } });
+    archive.on("warning", (error) => output.destroy(error));
+    archive.on("error", (error) => output.destroy(error));
+    archive.pipe(output);
+
+    const measuredEntries: ArchiveEntry[] = [];
+    let uncompressedBytes = 0;
+    for (const entry of entries) {
+      const normalized = normalizeArchivePath(entry.path);
+      const mediaType = entry.mediaType.toLocaleLowerCase("en-US");
+      const jsonEntry = mediaType === "application/json"
+        || mediaType === "application/x-ndjson"
+        || mediaType.endsWith("+json")
+        || normalized.logicalPath.toLocaleLowerCase("en-US").endsWith(".json")
+        || normalized.logicalPath.toLocaleLowerCase("en-US").endsWith(".ndjson");
+      const entryMaximum = limits
+        ? Math.min(
+          limits.maxUncompressedBytes,
+          ...(jsonEntry ? [limits.maxJsonEntryBytes] : []),
+          ...(mediaType.startsWith("image/") ? [limits.maxOriginalImageBytes] : [])
+        )
+        : Number.MAX_SAFE_INTEGER;
+      const measured = measuringTransform(entryMaximum, (byteLength) => {
+        const nextTotal = uncompressedBytes + byteLength;
+        if (!Number.isSafeInteger(nextTotal)
+          || (limits !== undefined && nextTotal > limits.maxUncompressedBytes)) {
+          throw archiveError("archive-limit-exceeded", "The archive exceeds the configured uncompressed byte limit.");
+        }
+        uncompressedBytes = nextTotal;
+      });
+      archive.append(measured.transform, {
+        name: normalized.logicalPath,
+        date: FIXED_ZIP_DATE,
+        mode: 0o100640,
+      });
+      activeSource = entry.source as Readable;
+      activeTransform = measured.transform;
+      const entryPipeline = pipeline(activeSource, activeTransform);
+      try {
+        await Promise.race([entryPipeline, outputFailed]);
+      } catch (error) {
+        measured.transform.destroy();
+        (entry.source as Readable).destroy?.();
+        await entryPipeline.catch(() => undefined);
+        throw error;
+      }
+      activeSource = undefined;
+      activeTransform = undefined;
+      const measurement = measured.measurement();
+      measuredEntries.push({
+        path: normalized.logicalPath,
+        logicalType: entry.logicalType,
+        mediaType: entry.mediaType,
+        ...measurement,
+      });
+    }
+
+    const manifest = parseBuiltManifest(buildManifest(measuredEntries));
+    archiveManifestSchema.parse({
+      format: manifest.format,
+      formatVersion: manifest.formatVersion,
+      archiveType: manifest.archiveType,
+      createdAt: manifest.createdAt,
+      contentFingerprint: manifest.contentFingerprint,
+      campaignId: manifest.campaignId,
+      worldId: manifest.worldId,
+      worldVersionId: manifest.worldVersionId,
+      entries: manifest.entries,
+      payloads: manifest.payloads,
+      assets: baseManifestAssets(manifest),
+    });
+    if (canonicalArchiveJson(manifest.entries) !== canonicalArchiveJson(measuredEntries)) {
+      throw archiveError("archive-export-inconsistent", "The archive manifest entries do not match the streamed artifact entries.");
+    }
+    const manifestBytes = Buffer.from(canonicalArchiveJson(manifest), "utf8");
+    if (limits && manifestBytes.byteLength > limits.maxManifestBytes) {
+      throw archiveError("archive-limit-exceeded", "manifest.json exceeds the configured byte limit.");
+    }
+    if (limits && (!Number.isSafeInteger(uncompressedBytes + manifestBytes.byteLength)
+      || uncompressedBytes + manifestBytes.byteLength > limits.maxUncompressedBytes)) {
+      throw archiveError("archive-limit-exceeded", "The archive exceeds the configured uncompressed byte limit.");
+    }
+    archive.append(manifestBytes, {
+      name: "manifest.json",
+      date: FIXED_ZIP_DATE,
+      mode: 0o100640,
+      store: true,
+    });
+    await archive.finalize();
+    await outputCompleted;
+  } catch (error) {
+    activeSource?.destroy();
+    activeTransform?.destroy();
+    archive?.unpipe(output);
+    archive?.abort();
+    output.destroy(error instanceof Error ? error : undefined);
+    await outputCompleted.catch(() => undefined);
+    if (error instanceof ArchiveError && error.code === "archive-limit-exceeded") throw error;
+    if (error instanceof ArchiveError) throw error;
+    throw archiveError("archive-export-inconsistent", "The archive artifact could not be completed.");
+  }
+}
+
+/**
+ * Produces a deterministic validated ZIP stream without creating an unmanaged
+ * filesystem artifact. The caller supplies the durable bounded sink.
+ */
+export function createArchiveArtifactSource(
+  entries: readonly ArchiveArtifactEntry[],
+  buildManifest: (entries: readonly ArchiveEntry[]) => ArchiveManifest,
+  limits?: ArchiveLimits,
+  parseBuiltManifest: (value: unknown) => ArchiveManifest = (value) => archiveManifestSchema.parse(value),
+): AsyncIterable<Uint8Array> {
+  return {
+    async *[Symbol.asyncIterator]() {
+      const output = new PassThrough({ highWaterMark: 64 * 1024 });
+      const writing = writeArchiveArtifactStream(output, entries, buildManifest, limits, parseBuiltManifest);
+      void writing.catch(() => undefined);
+      try {
+        for await (const chunk of output) yield new Uint8Array(chunk);
+        await writing;
+      } finally {
+        if (!output.destroyed) output.destroy();
+        await writing.catch(() => undefined);
+      }
+    },
+  };
+}
+
 export async function writeArchiveArtifact(
   archiveRoot: string,
   entries: readonly ArchiveArtifactEntry[],
   buildManifest: (entries: readonly ArchiveEntry[]) => ArchiveManifest,
-  limits?: ArchiveLimits
+  limits?: ArchiveLimits,
+  parseBuiltManifest: (value: unknown) => ArchiveManifest = (value) => archiveManifestSchema.parse(value)
 ): Promise<CompletedArchiveArtifact> {
   assertWriterEntries(entries);
   if (limits && entries.length + 1 > limits.maxEntries) {
@@ -1691,7 +1973,20 @@ export async function writeArchiveArtifact(
       });
     }
 
-    const manifest = archiveManifestSchema.parse(buildManifest(measuredEntries));
+    const manifest = parseBuiltManifest(buildManifest(measuredEntries));
+    archiveManifestSchema.parse({
+      format: manifest.format,
+      formatVersion: manifest.formatVersion,
+      archiveType: manifest.archiveType,
+      createdAt: manifest.createdAt,
+      contentFingerprint: manifest.contentFingerprint,
+      campaignId: manifest.campaignId,
+      worldId: manifest.worldId,
+      worldVersionId: manifest.worldVersionId,
+      entries: manifest.entries,
+      payloads: manifest.payloads,
+      assets: baseManifestAssets(manifest)
+    });
     if (canonicalArchiveJson(manifest.entries) !== canonicalArchiveJson(measuredEntries)) {
       throw archiveError("archive-export-inconsistent", "The archive manifest entries do not match the streamed artifact entries.");
     }

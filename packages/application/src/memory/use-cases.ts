@@ -18,6 +18,7 @@ export function createMemoryApplication(
     enqueueEmbeddingReindex: (scope) => dependencies.jobs.enqueueEmbeddingReindex(scope),
     getJob: (scope) => dependencies.jobs.getJob(scope),
     generation: {
+      applyCampaignStateCorrection: (database, scope) => dependencies.transaction.applyCampaignStateCorrection(database, scope),
       autoEnableCampaignEmbedding: (database, scope) =>
         dependencies.transaction.autoEnableCampaignEmbedding(database, scope),
       buildContextPreview: (database, scope) =>

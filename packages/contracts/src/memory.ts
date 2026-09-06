@@ -1,4 +1,13 @@
 import { z } from "zod";
+import { campaignRuntimeStateContentSchema } from "./generation.js";
+
+export const currentContinuitySchema = campaignRuntimeStateContentSchema.pick({
+  continuitySummary: true,
+  openThreads: true,
+  canonicalFacts: true,
+  scratchpad: true
+});
+export type CurrentContinuity = z.infer<typeof currentContinuitySchema>;
 
 export const DEFAULT_EMBEDDING_MODEL = "text-embedding-nomic-embed-text-v1.5";
 export const MAX_MEMORY_CONTEXT_BUDGET_TOKENS = 1_000_000;

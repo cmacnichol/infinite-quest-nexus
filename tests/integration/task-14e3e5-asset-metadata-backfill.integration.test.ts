@@ -215,6 +215,64 @@ integration("Task 14e3e5 private asset metadata backfill", () => {
     });
   });
 
+  it("records original dimensions independently from the bounded thumbnail dimensions", async () => {
+    const bytes = await sharp({
+      create: {
+        width: 1200,
+        height: 800,
+        channels: 4,
+        background: { r: 27, g: 53, b: 91, alpha: 1 }
+      }
+    }).png().toBuffer();
+    const source = await createLegacyAsset("original-dimensions", bytes);
+    const composition = await compose();
+
+    await expect(composition.executor.processOne({ workerId: "e5-original-dimensions", leaseSeconds: 30 }))
+      .resolves.toEqual({ outcome: "completed", assetId: source.assetId });
+    await expect(pool.query(
+      `SELECT asset.pixel_width,asset.pixel_height,
+              derivative.pixel_width AS thumbnail_width,derivative.pixel_height AS thumbnail_height
+         FROM assets asset
+         JOIN asset_derivatives derivative
+           ON derivative.owner_user_id=asset.owner_user_id AND derivative.source_asset_id=asset.id
+          AND derivative.derivative_kind='thumbnail' AND derivative.transform_version=1
+        WHERE asset.owner_user_id=$1 AND asset.id=$2`,
+      [ownerUserId, source.assetId],
+    )).resolves.toMatchObject({
+      rows: [{ pixel_width: 1200, pixel_height: 800, thumbnail_width: 480, thumbnail_height: 320 }]
+    });
+  });
+
+  it("backfills a published asset without reopening original publication authority", async () => {
+    const source = await createLegacyAsset("published-identity");
+    await pool.query(
+      `UPDATE asset_publication_identities
+          SET lifecycle='published',idempotency_key_hash=$3,request_fingerprint=$4,
+              result='{}'::jsonb,pending_finalization=NULL,published_at=clock_timestamp()
+        WHERE owner_user_id=$1 AND asset_id=$2`,
+      [
+        ownerUserId,
+        source.assetId,
+        hash(Buffer.from("published-idempotency")),
+        hash(Buffer.from("published-request")),
+      ],
+    );
+    const composition = await compose();
+
+    await expect(composition.executor.processOne({ workerId: "e5-published-identity", leaseSeconds: 30 }))
+      .resolves.toEqual({ outcome: "completed", assetId: source.assetId });
+    const storage = await createAssetImportStorageComposition(pool, { archiveRoot, assetRoot });
+    await expect(storage.journal.reserve(
+      { resourceKind: "asset", ownerUserId, assetId: source.assetId },
+      {
+        purpose: "asset_original",
+        leaseOwner: "e5-published-original-rejected",
+        expiresAt: new Date(Date.now() + 30_000).toISOString()
+      },
+    )).rejects.toThrow("asset filesystem operation requires live publication identity");
+    await storage.close();
+  });
+
   it("uses SKIP LOCKED so two private compositions publish only one thumbnail", async () => {
     const source = await createLegacyAsset("concurrent");
     const first = await compose();
@@ -322,7 +380,7 @@ integration("Task 14e3e5 private asset metadata backfill", () => {
       claim!,
       thumbnail,
       prepared.attachment,
-      { format: "png", pages: 1, orientation: null },
+      { pixelWidth: 8, pixelHeight: 6, format: "png", pages: 1, orientation: null },
     ))).rejects.toThrow("asset_metadata_backfill_claim_unavailable");
     await prepared.rollback();
     await expect(pool.query(
@@ -400,7 +458,9 @@ integration("Task 14e3e5 private asset metadata backfill", () => {
       pixelHeight: normalized.thumbnail.slot.pixelHeight,
       transformVersion: 1 as const
     };
-    const technicalMetadata = {
+    const originalMetadata = {
+      pixelWidth: normalized.original.technicalMetadata.pixelWidth,
+      pixelHeight: normalized.original.technicalMetadata.pixelHeight,
       format: normalized.original.technicalMetadata.format,
       pages: 1 as const,
       orientation: normalized.original.technicalMetadata.orientation
@@ -415,7 +475,7 @@ integration("Task 14e3e5 private asset metadata backfill", () => {
       claim!,
       thumbnail,
       prepared.attachment,
-      technicalMetadata,
+      originalMetadata,
     ));
     await storage.close();
     await pool.query(

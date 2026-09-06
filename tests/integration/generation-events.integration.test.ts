@@ -595,7 +595,9 @@ integration("generation job notification delivery", () => {
           "0074_chronicle_retrieval_observability",
           "0075_chronicle_query_embedding_cache",
           "0076_chronicle_chunk_skip_reasons",
-          "0077_chronicle_chunk_processed_signature"
+          "0077_chronicle_chunk_processed_signature",
+          "0078_system_archive_jobs",
+          "0079_resumable_system_archive_uploads"
         ]);
       await expect(migrationPool.query<{ trigger_name: string | null; function_name: string | null }>(
          `SELECT (

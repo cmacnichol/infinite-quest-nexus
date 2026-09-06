@@ -1,6 +1,8 @@
 import type {
   AcceptedTurnFictionScope,
   CampaignMemoryScope,
+  CampaignStateCorrectionProjectionScope,
+  CorrectionMemoryChanges,
   CampaignWorldVersionMemoryScope,
   ChronicleClaimCompletion,
   ChronicleClaimFailure,
@@ -56,6 +58,7 @@ export interface ChronicleJobRepository {
  * context. This port intentionally has no pool, begin, or transaction factory.
  */
 export interface MemoryGenerationTransactionPort {
+  applyCampaignStateCorrection(database: MemoryTransactionContext, scope: CampaignStateCorrectionProjectionScope): Promise<CorrectionMemoryChanges>;
   autoEnableCampaignEmbedding(
     database: MemoryTransactionContext,
     scope: CampaignWorldVersionMemoryScope,

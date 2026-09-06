@@ -191,9 +191,9 @@ describe("Story campaign tools", () => {
     const { tools, campaigns, reload } = controller();
     campaigns.updateState.mockRejectedValueOnce(error);
 
-    await expect(tools.saveCurrentState({ continuitySummary: "Keep this draft." } as never)).rejects.toThrow("State save failed");
+    await expect(tools.saveCurrentState({ continuitySummary: "Keep this draft.", expectedTurnNumber: 7 } as never)).rejects.toThrow("State save failed");
 
-    expect(campaigns.updateState).toHaveBeenCalledWith(campaignId, { continuitySummary: "Keep this draft." }, undefined);
+    expect(campaigns.updateState).toHaveBeenCalledWith(campaignId, { continuitySummary: "Keep this draft.", expectedTurnNumber: 7 }, undefined);
     expect(reload).not.toHaveBeenCalled();
   });
 
@@ -201,7 +201,7 @@ describe("Story campaign tools", () => {
     const first = deferred<{ campaignId: string; viewedTurnNumber: number }>();
     const { tools, campaigns } = controller();
     campaigns.updateState.mockReturnValueOnce(first.promise);
-    const request = { continuitySummary: "Keep this draft." } as never;
+    const request = { continuitySummary: "Keep this draft.", expectedTurnNumber: 7 } as never;
 
     const saving = tools.saveCurrentState(request);
     expect(await tools.saveCurrentState(request)).toBeNull();

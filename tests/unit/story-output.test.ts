@@ -230,7 +230,7 @@ describe("story output integrity", () => {
   });
 
   it("privately requests readable narration paragraphs with a versioned protocol", () => {
-    expect(STORY_PROMPT_PROTOCOL_VERSION).toBe("story-v12-soft-length-goal");
+    expect(STORY_PROMPT_PROTOCOL_VERSION).toBe("story-v13-current-state-corrections");
     expect(STORY_SYSTEM_PROMPT).toContain("paragraphs separated by two newline characters");
     expect(STORY_SYSTEM_PROMPT).toContain("change of speaker, scene transition, or meaningful shift in focus");
     expect(STORY_SYSTEM_PROMPT).toContain("The length range is a soft pacing goal, not a requirement.");

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compactStoryLengthWordRange } from "../../packages/story-engine/src/prompt.js";
+import { buildStoryUserPrompt, compactStoryLengthWordRange } from "../../packages/story-engine/src/prompt.js";
 
 describe("compactStoryLengthWordRange", () => {
   it("caps large input limits to the compact profile limits", () => {
@@ -34,5 +34,27 @@ describe("compactStoryLengthWordRange", () => {
     const input = { profile: "brief" as const, minWords: 200, maxWords: 350 };
     const result = compactStoryLengthWordRange(input);
     expect(result).toEqual({ profile: "brief", minWords: 200, maxWords: 350 });
+  });
+});
+
+describe("current continuity prompt authority", () => {
+  it("places an exact current correction in the authoritative envelope with its conflict rule", () => {
+    const currentContinuity = {
+      continuitySummary: "The keeper is alive.",
+      openThreads: [],
+      canonicalFacts: [],
+      scratchpad: ""
+    };
+
+    const input = JSON.parse(buildStoryUserPrompt({
+      worldCanon: {},
+      campaignCanon: {},
+      chronicle: [],
+      currentScene: null,
+      currentContinuity
+    }, "Ask the keeper about the harbor."));
+
+    expect(input.authoritative_context.currentContinuity).toEqual(currentContinuity);
+    expect(input.instructions.join(" ")).toContain("corrected current continuity");
   });
 });

@@ -1,0 +1,60 @@
+@layer web-awesome;
+
+@import "@awesome.me/webawesome/dist/styles/themes/default.css" layer(web-awesome);
+
+:root,
+:root.wa-light,
+:root.wa-dark {
+  --wa-color-surface-raised: var(--surface-paper);
+  --wa-color-surface-default: var(--surface-entry);
+  --wa-color-surface-lowered: var(--surface-muted);
+  --wa-color-surface-border: var(--rule);
+  --wa-color-text-normal: var(--text-primary);
+  --wa-color-text-quiet: var(--text-secondary);
+  --wa-color-text-link: var(--accent);
+  --wa-color-overlay-modal: var(--artwork-overlay);
+  --wa-color-overlay-inline: var(--focus-shadow);
+  --wa-color-shadow: var(--focus-shadow);
+  --wa-color-focus: var(--accent);
+  --wa-color-mix-hover: var(--accent-soft);
+  --wa-color-mix-active: var(--accent-soft);
+
+  --wa-color-brand-fill-quiet: var(--accent-soft);
+  --wa-color-brand-fill-normal: var(--accent-soft);
+  --wa-color-brand-fill-loud: var(--accent);
+  --wa-color-brand-border-quiet: var(--rule);
+  --wa-color-brand-border-normal: var(--accent);
+  --wa-color-brand-border-loud: var(--accent);
+  --wa-color-brand-on-quiet: var(--text-primary);
+  --wa-color-brand-on-normal: var(--text-primary);
+  --wa-color-brand-on-loud: var(--text-on-accent);
+
+  --wa-color-danger-fill-quiet: var(--status-error-soft);
+  --wa-color-danger-fill-normal: var(--status-error-soft);
+  --wa-color-danger-fill-loud: var(--status-error);
+  --wa-color-danger-border-quiet: var(--rule);
+  --wa-color-danger-border-normal: var(--status-error);
+  --wa-color-danger-border-loud: var(--status-error);
+  --wa-color-danger-on-quiet: var(--text-primary);
+  --wa-color-danger-on-normal: var(--text-primary);
+  --wa-color-danger-on-loud: var(--text-on-accent);
+
+  --wa-border-radius-scale: 0;
+  --wa-font-family-body: "Geologica", sans-serif;
+  --wa-font-family-heading: "Chakra Petch", sans-serif;
+  --wa-font-family-longform: var(--font-prose);
+  --wa-form-control-background-color: var(--surface-entry);
+  --wa-form-control-border-color: var(--rule-strong);
+  --wa-form-control-border-radius: 0;
+}
+
+wa-button::part(button),
+wa-input::part(input-wrapper),
+wa-select::part(combobox),
+wa-dropdown > [slot="trigger"] {
+  min-height: var(--control-min-height);
+}
+
+wa-textarea::part(textarea) {
+  min-height: var(--story-draft-min-height);
+}

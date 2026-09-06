@@ -12,7 +12,7 @@ describe("Nexus central dashboard", () => {
     expect(dashboardHtml.indexOf('id="navDashboard"')).toBeLessThan(dashboardHtml.indexOf('id="storyViewLink"'));
     expect(dashboardHtml).toContain('id="navSetup" class="nav-menu-trigger"');
     expect(dashboardHtml).toContain('class="nav-section-divider"');
-    expect(dashboardHtml).toContain('id="navImports" href="#imports"');
+    expect(dashboardHtml).toContain('id="navDataTransfer" href="#data-transfer"');
     expect(dashboardHtml).not.toContain('>Export</button>');
     expect(dashboardHtml).not.toContain('<details class="nav-menu">');
     expect(dashboardHtml).not.toContain('<summary>Setup</summary>');

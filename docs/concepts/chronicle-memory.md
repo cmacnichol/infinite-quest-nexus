@@ -12,13 +12,17 @@ Chronicle combines:
 - Scoped entity identities, aliases, and keyword matches
 - Optional semantic similarity
 
-The accepted-turn ledger remains the recovery source of truth. Structured fact projections, summaries, entity identities, and vectors can be rebuilt without rewriting accepted narration. New fact corrections reference an exact visible fact ID; normalized text matching is retained only for legacy snapshots.
+The accepted-turn ledger and append-only user correction ledger remain the recovery sources of truth. Structured fact projections, summaries, entity identities, and vectors can be rebuilt without rewriting accepted narration. New fact corrections reference an exact visible fact ID; normalized text matching is retained only for legacy snapshots.
+
+Ordinary current-state saves project only changed summary/thread documents and affected fact groups, preserving unrelated embeddings and chunks. Private scratchpad changes create no Chronicle work. Index eligibility/signature scans may still read the campaign; this is not a constant-time guarantee. A changed grouped fact document is embedded as a group, not one vector per edited word or fact.
+
+Reserve full rebuilds for maintenance/recovery. Replay turn-zero corrections first, then each accepted turn followed by corrections effective at that turn in revision order. Applying all old corrections after the latest turn can resurrect superseded facts and must not be used. Deploy matching API, worker, and both UIs together; an application rollback must retain the current-only guard and correction-aware prompt reader.
 
 Stable entity IDs are derived only from the campaign's pinned world version, selected-character snapshot, and campaign character profile. Authored world aliases, snapshot aliases, and schema-v5 profile aliases may identify the same scoped entity. Ambiguous aliases are not resolved.
 
 Chronicle uses exact scoped-ID overlap to supplement lexical and semantic candidate selection. Owner, campaign, and historical turn cutoffs remain mandatory. Internal IDs are retrieval metadata only: prompt scopes contain human-readable fiction and names, never `entity_ids`.
 
-**Semantic Retrieval** is an optional derived index. `legacy_hybrid` is the production default. An operator may enable safe shadow comparison for selected campaigns and later opt a ready campaign into `chunked_hybrid`; neither migrations nor calibration change campaign selection. Shadow work records only safe comparison metadata and never changes the context selected for production.
+**Semantic Retrieval** is an optional derived index. New campaigns created from a world select `chunked_hybrid` with shadow comparison enabled; existing campaign settings are preserved. Chunked selection uses the complete legacy fallback until its index is ready. An operator may stage an existing legacy campaign through shadow comparison before selecting chunked retrieval; neither migrations nor calibration changes that campaign selection. Shadow work records only safe comparison metadata and never changes the context selected for production.
 
 Chunked retrieval divides current Chronicle parents into deterministic `chronicle-chunk-v1` records and indexes them through the fixed `index_memory_chunks_v2` job. Production may use the chunked implementation only after 100% terminal coverage: every current parent hash has at least one current-protocol chunk in terminal `embedded` or sanitized `skipped` status, every current chunk is terminal, at least one current chunk is embedded, and the latest job is completed or absent. A fully sanitized-skipped index uses the complete legacy path with the existing `chunk_index_not_ready` fallback. Until that gate is met, Chronicle does not mix partially trusted chunk results into production.
 

@@ -4,6 +4,10 @@
 
 Accepted
 
+## Current contract clarification (2026-09-05)
+
+This ADR describes implemented pre-commit dispatch; it does not prove that provisional excerpts have passed final-turn validation. The requirement to validate narration before illustration dispatch remains in conflict with that timing. No runtime or safety-policy change is authorized by this documentation correction. See [the current lifecycle and open conflict](../concepts/illustration-pipeline.md#provisional-streaming-path-and-open-contract-conflict).
+
 ## Context
 
 The story engine generation process has historically awaited completion of narrative text before finalizing turns and subsequently initiating any necessary illustration generation. This sequential process resulted in long delays before users could view illustrations corresponding to their narrative, hindering the immersive experience.

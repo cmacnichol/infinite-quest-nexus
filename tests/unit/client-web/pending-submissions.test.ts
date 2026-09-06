@@ -24,10 +24,18 @@ const append: StoredGenerationSubmission = {
     requestedInputMode: "action",
     resolvedInputMode: "action",
     inputModeSource: "explicit",
+    storyLengthProfileOverride: "extended",
     idempotencyKey: "append-key",
     context: { budgetTokens: 32000, compression: "auto", recentTurns: 8 }
   }
 };
+
+const { storyLengthProfileOverride: _appendStoryLengthProfileOverride, ...appendRequestWithoutStoryLengthOverride } = append.request;
+const appendWithoutStoryLengthOverride: StoredGenerationSubmission = {
+  ...append,
+  request: appendRequestWithoutStoryLengthOverride
+};
+void _appendStoryLengthProfileOverride;
 
 const replacement: StoredGenerationSubmission = {
   operationKind: "replace_latest",
@@ -116,7 +124,7 @@ describe("pending generation submission storage", () => {
   });
 
   it.each([
-    ["append", append],
+    ["append", appendWithoutStoryLengthOverride],
     ["replace_latest", replacementWithoutJob]
   ] as const)("migrates the flat legacy %s record without changing its idempotency key", (_kind, expected) => {
     const storage = new MemoryStorage();
@@ -275,6 +283,6 @@ describe("pending generation submission storage", () => {
       createdAt: append.createdAt
     }));
     migrationStorage.setError = new DOMException("Quota exceeded", "QuotaExceededError");
-    expect(createPendingSubmissionStore(migrationStorage).load(campaignId)).toEqual(append);
+    expect(createPendingSubmissionStore(migrationStorage).load(campaignId)).toEqual(appendWithoutStoryLengthOverride);
   });
 });

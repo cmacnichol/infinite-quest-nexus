@@ -235,6 +235,41 @@ integration("Task 14e3b4 secure storage repository", () => {
     });
   });
 
+  it("atomically persists an owner-wide System Archive ZIP", async () => {
+    const fixture = await candidate("portable_export");
+    const scope: PortableExportScope = {
+      ownerUserId,
+      exportKind: "system_zip",
+      campaignId: null,
+      worldId: null,
+      worldVersionId: null
+    };
+    const issuance = bindPrivateAtomicExportIssuance(scope, "application/zip", fixture.attachment);
+
+    const issued = await withTransaction(pool, (client) => secure.issueExportRetrieval(client, issuance));
+
+    const stored = await pool.query<{
+      retrieval_token_hash: string;
+      export_kind: string;
+      campaign_id: string | null;
+      world_id: string | null;
+      world_version_id: string | null;
+      content_type: string;
+    }>(
+      `SELECT retrieval_token_hash,export_kind,campaign_id,world_id,world_version_id,content_type
+         FROM portable_export_artifacts WHERE filesystem_operation_id=$1`,
+      [fixture.operation.operationId],
+    );
+    expect(stored.rows[0]).toEqual({
+      retrieval_token_hash: sha256(issued.retrieval),
+      export_kind: "system_zip",
+      campaign_id: null,
+      world_id: null,
+      world_version_id: null,
+      content_type: "application/zip"
+    });
+  });
+
   it("claims a crashed pre-write without bearer material and rehydrates its exact node identity", async () => {
     const expiresAt = new Date(Date.now() + 60_000).toISOString();
     const scopeId = `prewrite:${crypto.randomUUID()}`;
@@ -341,6 +376,59 @@ integration("Task 14e3b4 secure storage repository", () => {
     });
     expect(repeated.find((value) => value.operation.operationId === reserved.operation.operationId))
       .toBeUndefined();
+  });
+
+  it("keeps expired finalized staging fenced while its durable read lease is renewed", async () => {
+    const expiresAt = new Date(Date.now() + 2_000).toISOString();
+    const fixture = await candidate("portable_staging", expiresAt);
+    const issued = await withTransaction(
+      pool,
+      (client) => secure.issueStagedInput(
+        client,
+        bindPrivateAtomicStagedIssuance({ ownerUserId }, fixture.attachment),
+      ),
+    );
+    await expect(durable.journal.finalizeAfterCommit(issued.operation, issued.claim))
+      .resolves.toMatchObject({ outcome: "finalized" });
+
+    const imports = createPostgresImportRepository(pool);
+    const rehydrated = await imports.rehydrateStagedInput(
+      { ownerUserId },
+      issued.stagedInput,
+      { leaseOwner: "b4-active-stage-reader", leaseSeconds: 1 },
+    );
+    expect(rehydrated).not.toBeNull();
+    const renewed = await durable.journal.heartbeatRecoveryClaim(rehydrated!.claim, 3);
+    expect(renewed).not.toBeNull();
+
+    await waitForExpiry(expiresAt);
+    const restartedReaper = createPostgresSecureStorageRepository(
+      pool,
+      createPostgresDurableFilesystemRepository(pool),
+    );
+    const whileActive = await restartedReaper.claimExpiredPortableWork({
+      leaseOwner: "b4-active-stage-reaper",
+      leaseSeconds: 1,
+      limit: 10
+    });
+    expect(whileActive.find(
+      (value) => value.operation.operationId === fixture.operation.operationId,
+    )).toBeUndefined();
+
+    await pool.query(
+      `UPDATE durable_filesystem_operations
+          SET lease_expires_at=clock_timestamp()-interval '1 second'
+        WHERE id=$1`,
+      [fixture.operation.operationId],
+    );
+    const afterReaderLease = await secure.claimExpiredPortableWork({
+      leaseOwner: "b4-finished-stage-reaper",
+      leaseSeconds: 1,
+      limit: 10
+    });
+    expect(afterReaderLease.find(
+      (value) => value.operation.operationId === fixture.operation.operationId,
+    )?.action).toBe("cleanup");
   });
 
   it("atomically rejects late or substituted identity binding and retains target-only intent", async () => {

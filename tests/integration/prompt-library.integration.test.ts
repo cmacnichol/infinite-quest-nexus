@@ -37,6 +37,7 @@ integration("Prompt Library persistence", () => {
       title: `${title} Campaign`,
       selectedCharacterId: "hero",
       storyLengthProfile: "standard",
+      storyContextBudgetTokens: 32_000,
       turnControlStyle: "flexible_auto"
     })).id;
   });

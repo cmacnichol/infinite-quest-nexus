@@ -132,6 +132,13 @@ export default withMermaid({
           ]
         },
         {
+          text: "Operations",
+          collapsed: false,
+          items: [
+            { text: "System data transfer", link: "/nexus-guide/operations/system-data-transfer" }
+          ]
+        },
+        {
           text: "Chronicle",
           collapsed: true,
           items: [

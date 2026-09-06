@@ -69,6 +69,14 @@ function sources(overrides: Readonly<Record<string, string>> = {}): readonly Sou
         return createPortableImportExportComposition();
       }
     `,
+    "services/runtime/src/system-archive-composition.ts": `
+      import type { ApiAssetComposition } from "./api-asset-composition.js";
+      export function createApiSystemArchiveComposition(
+        options: { storage: Pick<ApiAssetComposition["storage"], "adapter"> },
+      ) {
+        return options.storage;
+      }
+    `,
     "services/runtime/src/private-asset-metadata-backfill-composition.ts": `
       import { createAssetImportStorageComposition } from "./asset-import-composition.js";
       export async function createPrivateAssetMetadataBackfillComposition() {
@@ -210,6 +218,21 @@ describe("Task 14e3e8 private composition parity boundaries", () => {
 
   it("allows only the named e3g API composition to consume portable authority", () => {
     expect(check(readPrivateCompositionParitySources(process.cwd()))).toEqual([]);
+  });
+
+  it("rejects System Archive bypassing the named e3g asset composition even for a type-only dependency", () => {
+    expect(check(sources({
+      "services/runtime/src/system-archive-composition.ts": `
+        import type { AssetImportStorageComposition } from "./asset-import-composition.js";
+        export function createApiSystemArchiveComposition(
+          options: { storage: Pick<AssetImportStorageComposition, "adapter"> },
+        ) {
+          return options.storage;
+        }
+      `,
+    }))).toEqual(expect.arrayContaining([
+      expect.stringContaining("must not bypass its named e3g composition consumer"),
+    ]));
   });
 
   it("freezes generation + 4/+8 capacity and excludes private maintenance from manifests", () => {

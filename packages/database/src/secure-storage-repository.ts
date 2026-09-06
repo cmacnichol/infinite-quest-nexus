@@ -234,6 +234,7 @@ export function createPostgresSecureStorageRepository(
   ): Promise<PrivateAtomicExportIssuanceResult> => {
     validateIssuance(issuance, "portable_export");
     const expectedContentType = issuance.exportScope.exportKind === "campaign_zip"
+      || issuance.exportScope.exportKind === "system_zip"
       ? "application/zip"
       : "application/json";
     if (issuance.exportScope.ownerUserId !== issuance.owner.ownerUserId
@@ -384,6 +385,13 @@ export function createPostgresSecureStorageRepository(
             AND artifact.filesystem_operation_id=operation.id
           WHERE operation.resource_kind='portable'
             AND operation.lifecycle IN ('reserved','attached','finalized','cleanup_pending')
+            AND NOT EXISTS (
+              SELECT 1
+                FROM system_archive_uploads system_upload
+               WHERE system_upload.filesystem_operation_id=operation.id
+                 AND system_upload.status IN ('created','uploading','completed')
+                 AND system_upload.expires_at>clock_timestamp()
+            )
             AND (
               (operation.lifecycle='reserved'
                 AND EXISTS (SELECT 1 FROM durable_filesystem_prewrite_nodes prewrite
@@ -393,6 +401,7 @@ export function createPostgresSecureStorageRepository(
               OR
               (operation.lifecycle IN ('attached','finalized')
                 AND COALESCE(staged.id,artifact.id) IS NOT NULL
+                AND operation.lease_expires_at <= clock_timestamp()
                 AND (operation.expires_at <= clock_timestamp()
                   OR COALESCE(staged.expires_at,artifact.expires_at) <= clock_timestamp()))
               OR
@@ -430,6 +439,16 @@ export function createPostgresSecureStorageRepository(
               [candidate.id],
             );
         const portable = lockedPortable.rows[0] ?? null;
+        const activeSystemUpload = await client.query(
+          `SELECT id
+             FROM system_archive_uploads
+            WHERE filesystem_operation_id=$1
+              AND status IN ('created','uploading','completed')
+              AND expires_at>clock_timestamp()
+            FOR UPDATE`,
+          [candidate.id],
+        );
+        if (activeSystemUpload.rowCount !== 0) continue;
         const clock = await client.query<{ current_time: Date }>(
           "SELECT clock_timestamp() AS current_time",
         );
@@ -437,6 +456,7 @@ export function createPostgresSecureStorageRepository(
         const reservedPartial = candidate.lifecycle === "reserved"
           && (candidate.expires_at <= currentTime || candidate.lease_expires_at <= currentTime);
         const pairedExpired = portable !== null
+          && candidate.lease_expires_at <= currentTime
           && (candidate.expires_at <= currentTime || portable.expires_at <= currentTime);
         const pendingExpired = candidate.lifecycle === "cleanup_pending"
           && candidate.lease_expires_at <= currentTime;

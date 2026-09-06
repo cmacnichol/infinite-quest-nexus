@@ -31,7 +31,13 @@ async function bootLegacyStory({
   updateProfile,
   rewindCampaign = vi.fn().mockResolvedValue({}),
   fetchCampaignState = vi.fn().mockResolvedValue({ activeTurnNumber: 100 }),
-  workflow = { resume: async () => null }
+  getTurnCorrection = vi.fn().mockResolvedValue({ effectiveNarration: "", correctionRevision: 0 }),
+  correctTurnNarration = vi.fn().mockResolvedValue({ effectiveNarration: "", correctionRevision: 0 }),
+  illustrationConfig = { enabled: false, sourcePolicy: "off" },
+  illustrationSegments = [],
+  classifyTurnInput,
+  workflow = { resume: async () => null },
+  updateCampaignState = vi.fn().mockResolvedValue({})
 }: {
   turns: Array<Record<string, unknown>>;
   nextCursor?: string | null;
@@ -41,11 +47,21 @@ async function bootLegacyStory({
   updateProfile?: ReturnType<typeof vi.fn>;
   rewindCampaign?: ReturnType<typeof vi.fn>;
   fetchCampaignState?: ReturnType<typeof vi.fn>;
+  getTurnCorrection?: ReturnType<typeof vi.fn>;
+  correctTurnNarration?: ReturnType<typeof vi.fn>;
+  illustrationConfig?: Record<string, unknown>;
+  illustrationSegments?: Array<Record<string, unknown>>;
+  classifyTurnInput?: ReturnType<typeof vi.fn>;
   workflow?: Record<string, unknown>;
+  updateCampaignState?: ReturnType<typeof vi.fn>;
 }) {
   const { document, window } = parseHTML(storyHtml);
   Object.defineProperty(window, "location", { value: { pathname: "/story/campaign-1" }, configurable: true });
   for (const dialog of document.querySelectorAll("dialog")) {
+    Object.defineProperty(dialog, "open", {
+      get: () => dialog.hasAttribute("open"),
+      configurable: true
+    });
     (dialog as unknown as { showModal: () => void }).showModal = () => dialog.setAttribute("open", "");
     (dialog as unknown as { close: () => void }).close = () => dialog.removeAttribute("open");
   }
@@ -55,14 +71,14 @@ async function bootLegacyStory({
   vi.stubGlobal("HTMLElement", window.HTMLElement);
   vi.stubGlobal("HTMLInputElement", window.HTMLInputElement);
   vi.stubGlobal("localStorage", { getItem: () => null, removeItem: () => undefined, setItem: () => undefined });
-  Object.defineProperty(window.HTMLElement.prototype, "scrollIntoView", { value: () => undefined, configurable: true });
+  Object.defineProperty(window.HTMLElement.prototype, "scrollIntoView", { value: () => undefined, writable: true, configurable: true });
   Object.defineProperty(document.getElementById("userProfileDefaultTurnControlStyle"), "value", {
     value: "flexible_auto",
     writable: true,
     configurable: true
   });
   const syncCampaign = syncStatus || vi.fn().mockResolvedValue({
-    campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 100 },
+    campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 100, storyLengthProfile: "standard" },
     world: {},
     turns: { campaignId: "campaign-1", turns, nextCursor }
   });
@@ -78,10 +94,22 @@ async function bootLegacyStory({
       },
       providers: { list: async () => ({ providers: [{ providerRole: "text" }] }) },
       generation: { syncStatus: syncCampaign },
-      campaigns: { state: fetchCampaignState, turns: fetchTurns, rewind: rewindCampaign },
+      campaigns: {
+        state: fetchCampaignState,
+        updateState: updateCampaignState,
+        turns: fetchTurns,
+        rewind: rewindCampaign,
+        getTurnCorrection,
+        correctTurnNarration,
+        ...(classifyTurnInput ? { classifyTurnInput } : {})
+      },
       meta: { get: async () => ({}) }
     },
-    illustrations: { config: async () => ({ enabled: false, sourcePolicy: "off" }), segments: async () => ({ segments: [] }), imageJobs: async () => ({ jobs: [] }) },
+    illustrations: {
+      config: async () => illustrationConfig,
+      segments: async () => ({ segments: illustrationSegments }),
+      imageJobs: async () => ({ jobs: [] })
+    },
     workflow,
     pendingSubmissions: { clear: () => undefined },
     idFactory: { create: () => "submission-101" },
@@ -90,7 +118,16 @@ async function bootLegacyStory({
   document.dispatchEvent(new window.Event("DOMContentLoaded"));
   await new Promise((resolve) => setTimeout(resolve, 0));
   await new Promise((resolve) => setTimeout(resolve, 0));
-  return { document, window, fetchTurns, fetchCampaignState, rewindCampaign };
+  return {
+    document,
+    window,
+    fetchTurns,
+    fetchCampaignState,
+    rewindCampaign,
+    updateCampaignState,
+    getTurnCorrection,
+    correctTurnNarration
+  };
 }
 
 function controlledPrintWindow() {
@@ -120,7 +157,115 @@ const makeTurns = (first: number, last: number) => Array.from(
   })
 );
 
+function selectOption(select: HTMLSelectElement, value: string) {
+  select.querySelectorAll("option").forEach((option) => { option.selected = false; });
+  const option = select.querySelector(`option[value="${value}"]`) as HTMLOptionElement | null;
+  if (!option) throw new Error(`Missing select option: ${value}`);
+  option.selected = true;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("story-player: new Story Player UI contracts & gameplay logic", () => {
+  it.each(["sync", "state"])("does not generate or enable input when initial %s loading fails", async (failure) => {
+    const workflow = { resume: vi.fn(async () => null), submit: vi.fn().mockRejectedValue(new Error("Unexpected generation")) };
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: [], workflow,
+        ...(failure === "sync"
+          ? { syncStatus: vi.fn().mockRejectedValue(new Error("Campaign unavailable")) }
+          : { fetchCampaignState: vi.fn().mockRejectedValue(new Error("State unavailable")) })
+      });
+      expect(workflow.submit).not.toHaveBeenCalled();
+      expect(workflow.resume).not.toHaveBeenCalled();
+      expect((document.getElementById("freeAction") as HTMLTextAreaElement).disabled).toBe(true);
+      expect((document.getElementById("btnTakeAction") as HTMLButtonElement).disabled).toBe(true);
+      document.getElementById("btnTakeAction")!.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(workflow.submit).not.toHaveBeenCalled();
+      expect(document.getElementById("toast")?.textContent).toContain("Error loading campaign");
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("submits the authored opening action once and keeps it complete in escaped history", async () => {
+    const openingAction = 'Open the old gate and ask the keeper which road leads to the observatory.\nRead the sign: <img src=x onerror=alert(1)> & wait.';
+    const turn = { id: "turn-1", turnNumber: 1, action: openingAction, narration: "The keeper raises the lantern." };
+    const submitted: unknown[] = [];
+    const workflow = { resume: async () => null, submit: async (_campaignId: string, request: unknown) => {
+      submitted.push(request);
+      return { jobId: "opening-job", async *watch() {
+        yield { type: "settled", outcome: "completed", result: { ...turn, resultTurnId: turn.id } };
+      } };
+    } };
+    const sync = (activeTurnNumber: number) => ({
+      campaign: { id: "campaign-1", title: "Opening campaign", activeTurnNumber, storyLengthProfile: "standard" },
+      world: { firstAction: openingAction },
+      turns: { campaignId: "campaign-1", turns: activeTurnNumber ? [turn] : [], nextCursor: null }
+    });
+    try {
+      const { document, window } = await bootLegacyStory({ turns: [], workflow,
+        syncStatus: vi.fn().mockResolvedValueOnce(sync(0)).mockResolvedValue(sync(1)),
+        fetchCampaignState: vi.fn().mockResolvedValue({ activeTurnNumber: 0 })
+      });
+      await vi.waitFor(() => expect(document.querySelector("#scene-1")?.textContent).toContain(turn.narration));
+      expect(submitted).toEqual([expect.objectContaining({ expectedTurnNumber: 1, operationKind: "append", request: expect.objectContaining({ action: openingAction, inputModeSource: "opening_action" }) })]);
+      document.getElementById("btnOpenActivityLog")!.dispatchEvent(new window.Event("click", { bubbles: true }));
+      expect(document.getElementById("activityLogList")?.textContent).not.toContain("Campaign load failed");
+      document.getElementById("turnPill")!.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await vi.waitFor(() => expect(document.querySelectorAll("#turnHistoryModalList .history-card")).toHaveLength(1));
+      const prompt = document.querySelector("#turnHistoryModalList .history-card .turn-history-prompt");
+      expect(prompt?.textContent).toBe(openingAction);
+      expect(prompt?.querySelector("img")).toBeNull();
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("keeps Story context controls out of the legacy Story player and leaves the server authoritative", async () => {
+    const submissions: unknown[] = [];
+    const workflow = {
+      resume: async () => null,
+      submit: vi.fn(async (_campaignId: string, submission: unknown) => {
+        submissions.push(submission);
+        return {
+          jobId: "retry-context-job",
+          async *watch() { yield { type: "settled", outcome: "discarded", error: new Error("test discard") }; }
+        };
+      })
+    };
+    const { document, window } = await bootLegacyStory({
+      turns: makeTurns(1, 1),
+      workflow
+    });
+
+    expect(document.getElementById("turnStoryContextBudget")).toBeNull();
+    expect(document.getElementById("retryStoryContextBudget")).toBeNull();
+
+    document.getElementById("btnRetry")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+    const editor = document.getElementById("retryPromptEditor") as HTMLTextAreaElement;
+    Object.defineProperty(editor, "select", { configurable: true, value: () => undefined });
+    editor.value = "Take the lantern.";
+    document.getElementById("btnRetryPromptSubmit")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+    for (let attempt = 0; attempt < 8 && submissions.length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    expect(submissions).toHaveLength(1);
+    expect(submissions[0]).toMatchObject({
+      operationKind: "replace_latest",
+      request: {
+        action: "Take the lantern.",
+        context: { budgetTokens: 32_000, compression: "auto", recentTurns: 8 }
+      }
+    });
+  });
+
   it("uses semantic progress and a served stylesheet for printable story documents", () => {
     expect(storyScript).toContain('<progress class="turn-progress-meter" max="100" value="${percent}"');
     expect(storyScript).toContain('href="/nexus/story-print.css"');
@@ -213,7 +358,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
 
   it("supports choice selection and free action submission with input validation and busy indicator", () => {
     expect(storyScript).toContain('async function submitAction(actionText, options = {})');
-    expect(storyScript).toContain('if (state.busy) return;');
+    expect(storyScript).toContain('if (state.busy || !state.campaignLoaded) return;');
     expect(storyScript).toContain('if (!action) { toast("Enter an action first."); return; }');
     expect(storyScript).toContain('function renderChoices(choices, customSuggestion, ownerKey)');
     expect(storyScript).toContain('submitAction(text)');
@@ -234,6 +379,199 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('function setTurnInputMode(mode, options = {})');
     expect(storyScript).toContain('state.nextTurnInputModeSource = "generated_choice"');
     expect(storyScript).toContain('inputModeSource: "opening_action"');
+  });
+
+  it("exposes one-shot story-length overrides for normal and retry submissions", () => {
+    expect(storyHtml).toContain('id="turnStoryLengthProfileOverride"');
+    expect(storyHtml).toContain('id="retryStoryLengthProfileOverride"');
+    expect(storyHtml).toContain('Campaign default — Standard');
+    expect(storyHtml).toContain('<option value="brief">Brief</option>');
+    expect(storyHtml).toContain('<option value="standard">Standard</option>');
+    expect(storyHtml).toContain('<option value="long">Long</option>');
+    expect(storyHtml).toContain('<option value="extended">Extended</option>');
+    expect(storyScript).toContain('function selectedStoryLengthOverride(controlId)');
+    expect(storyScript).toContain('function syncStoryLengthOverrideControls()');
+    expect(storyScript).toContain('function resetStoryLengthOverrideControls()');
+    expect(storyScript).toContain('storyLengthProfileOverride: submission.storyLengthProfileOverride');
+  });
+
+  it("submits and resets a one-shot legacy turn-length override after durable attachment", async () => {
+    const workflow = {
+      resume: async () => null,
+      submit: vi.fn().mockResolvedValue({ jobId: "generation-override", watch: async function* () {} })
+    };
+    try {
+      const { document, window } = await bootLegacyStory({ turns: makeTurns(1, 1), workflow });
+      const length = document.getElementById("turnStoryLengthProfileOverride") as HTMLSelectElement;
+      const action = document.getElementById("freeAction") as HTMLTextAreaElement;
+      expect(length.options[0]?.textContent).toBe("Campaign default — Standard");
+
+      selectOption(length, "extended");
+      document.querySelector<HTMLElement>('[data-turn-input-mode="action"]')
+        ?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      action.value = "Inspect the ruins";
+      document.getElementById("btnTakeAction")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      for (let attempt = 0; attempt < 8 && workflow.submit.mock.calls.length === 0; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(workflow.submit).toHaveBeenCalledWith("campaign-1", expect.objectContaining({
+        request: expect.objectContaining({ storyLengthProfileOverride: "extended" })
+      }));
+      expect(length.value).toBe("");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps the captured Auto override through ambiguity and preserves it after an enqueue rejection", async () => {
+    const classified = vi.fn().mockResolvedValue({ classification: "mixed", confidenceBand: "ambiguous", resolvedMode: "scene" });
+    const rejectedWorkflow = {
+      resume: async () => null,
+      submit: vi.fn().mockRejectedValue(new Error("queue unavailable"))
+    };
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeTurns(1, 1),
+        workflow: rejectedWorkflow,
+        classifyTurnInput: classified,
+        syncStatus: vi.fn().mockResolvedValue({
+          campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 1, turnControlStyle: "flexible_auto", storyLengthProfile: "standard" },
+          world: {},
+          turns: { campaignId: "campaign-1", turns: makeTurns(1, 1), nextCursor: null }
+        })
+      });
+      const length = document.getElementById("turnStoryLengthProfileOverride") as HTMLSelectElement;
+      const action = document.getElementById("freeAction") as HTMLTextAreaElement;
+      selectOption(length, "extended");
+      action.value = "A mixed prompt";
+      document.getElementById("btnTakeAction")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      for (let attempt = 0; attempt < 8 && document.getElementById("turnIntentDecision")?.classList.contains("hidden"); attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+
+      expect(classified).toHaveBeenCalledWith("campaign-1", expect.objectContaining({ text: "A mixed prompt" }));
+      selectOption(length, "brief");
+      document.getElementById("btnSubmitAsAction")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      for (let attempt = 0; attempt < 8 && rejectedWorkflow.submit.mock.calls.length === 0; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(rejectedWorkflow.submit).toHaveBeenCalledWith("campaign-1", expect.objectContaining({
+        request: expect.objectContaining({ storyLengthProfileOverride: "extended" })
+      }));
+      expect(length.value).toBe("brief");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("preserves the selected length after a normal enqueue rejection", async () => {
+    const workflow = {
+      resume: async () => null,
+      submit: vi.fn().mockRejectedValue(new Error("queue unavailable"))
+    };
+    try {
+      const { document, window } = await bootLegacyStory({ turns: makeTurns(1, 1), workflow });
+      const length = document.getElementById("turnStoryLengthProfileOverride") as HTMLSelectElement;
+      const action = document.getElementById("freeAction") as HTMLTextAreaElement;
+      selectOption(length, "long");
+      document.querySelector<HTMLElement>('[data-turn-input-mode="action"]')
+        ?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      action.value = "Inspect the ruins";
+      document.getElementById("btnTakeAction")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      for (let attempt = 0; attempt < 8 && workflow.submit.mock.calls.length === 0; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(length.value).toBe("long");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("submits a retry-dialog override without inferring one from the accepted turn", async () => {
+    const workflow = {
+      resume: async () => null,
+      submit: vi.fn().mockResolvedValue({ jobId: "retry-override", watch: async function* () {} })
+    };
+    try {
+      const { document, window } = await bootLegacyStory({ turns: makeTurns(1, 1), workflow });
+      document.getElementById("btnRetry")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      const retryEditor = document.getElementById("retryPromptEditor") as HTMLTextAreaElement;
+      retryEditor.select = () => undefined;
+      const retryLength = document.getElementById("retryStoryLengthProfileOverride") as HTMLSelectElement;
+      expect(retryLength.options[0]?.textContent).toBe("Campaign default — Standard");
+      selectOption(retryLength, "brief");
+      document.getElementById("btnRetryPromptSubmit")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      for (let attempt = 0; attempt < 8 && workflow.submit.mock.calls.length === 0; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(workflow.submit).toHaveBeenCalledWith("campaign-1", expect.objectContaining({
+        operationKind: "replace_latest",
+        request: expect.objectContaining({ storyLengthProfileOverride: "brief" })
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps a rejected retry dialog's length selection for the next replacement attempt", async () => {
+    const workflow = {
+      resume: async () => null,
+      submit: vi.fn()
+        .mockRejectedValueOnce(new Error("queue unavailable"))
+        .mockResolvedValueOnce({ jobId: "retry-after-rejection", watch: async function* () {} })
+    };
+    try {
+      const { document, window } = await bootLegacyStory({ turns: makeTurns(1, 1), workflow });
+      const retryEditor = document.getElementById("retryPromptEditor") as HTMLTextAreaElement;
+      retryEditor.select = () => undefined;
+      document.getElementById("btnRetry")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      const retryDialog = document.getElementById("retryPromptDialog") as HTMLDialogElement;
+      const retryLength = document.getElementById("retryStoryLengthProfileOverride") as HTMLSelectElement;
+      selectOption(retryLength, "brief");
+      document.getElementById("btnRetryPromptSubmit")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      for (let attempt = 0; attempt < 8 && workflow.submit.mock.calls.length === 0; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(retryDialog.hasAttribute("open")).toBe(true);
+      expect(retryLength.value).toBe("brief");
+      expect(workflow.submit.mock.calls[0]).toEqual(["campaign-1", expect.objectContaining({
+        operationKind: "replace_latest",
+        request: expect.objectContaining({ storyLengthProfileOverride: "brief" })
+      })]);
+
+      document.getElementById("btnRetryPromptSubmit")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      for (let attempt = 0; attempt < 8 && workflow.submit.mock.calls.length < 2; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(workflow.submit).toHaveBeenCalledTimes(2);
+      expect(workflow.submit.mock.calls[1]).toEqual(["campaign-1", expect.objectContaining({
+        operationKind: "replace_latest",
+        request: expect.objectContaining({ storyLengthProfileOverride: "brief" })
+      })]);
+      expect(retryDialog.hasAttribute("open")).toBe(false);
+      expect(retryLength.value).toBe("");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("uses the campaign preference and preserves the draft while toggling multiple generated choices", async () => {
@@ -347,7 +685,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
         api: {
           session: { get: async () => ({ user: { settings: { continuousReading: false, autoSubmitTurnChoices: true, defaultTurnControlStyle: "flexible_scene" } } }) },
           providers: { list: async () => ({ providers: [{ providerRole: "text" }] }) },
-          generation: { syncStatus: async () => ({ campaign: { title: "Auto campaign", activeTurnNumber: 1, turnControlStyle: "flexible_auto" }, world: {}, turns: { turns } }) },
+          generation: { syncStatus: async () => ({ campaign: { title: "Auto campaign", activeTurnNumber: 1, turnControlStyle: "flexible_auto", storyLengthProfile: "standard" }, world: {}, turns: { turns } }) },
           campaigns: {
             state: async () => ({ activeTurnNumber: 1 }),
             turns: async () => ({ turns }),
@@ -375,6 +713,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
         await new Promise((resolve) => setTimeout(resolve, 0));
       }
 
+      selectOption(document.getElementById("turnStoryLengthProfileOverride") as HTMLSelectElement, "extended");
       document.querySelector<HTMLButtonElement>("#choiceArea .choice")?.dispatchEvent(new window.Event("click", { bubbles: true }));
       for (let attempt = 0; attempt < 10 && submissions.length === 0; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 0));
@@ -388,7 +727,8 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
           action: "Open the gate.",
           requestedInputMode: "auto",
           resolvedInputMode: "action",
-          classificationId: "classification-1"
+          classificationId: "classification-1",
+          storyLengthProfileOverride: "extended"
         }
       });
       expect((document.getElementById("freeAction") as HTMLTextAreaElement).value).toBe("");
@@ -825,6 +1165,186 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('const btnSaveEditState = $("btnSaveEditState") || $("btnSaveScratch");');
   });
 
+  it("loads current continuity without a viewed-turn argument while reading an older turn", async () => {
+    const currentState = {
+      campaignId: "campaign-1",
+      activeTurnNumber: 2,
+      viewedTurnNumber: 2,
+      isCurrent: true,
+      revision: 4,
+      continuitySummary: "Current summary.",
+      scratchpad: "Current scratchpad.",
+      openThreads: ["Find the keeper."],
+      canonicalFacts: [{ id: "00000000-0000-4000-8000-000000000001", content: "The keeper is alive." }],
+      trackers: [],
+      rpgStats: [],
+      eventTriggers: [],
+      pendingEventTriggers: []
+    };
+    const fetchCampaignState = vi.fn().mockResolvedValue(currentState);
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeTurns(1, 2),
+        fetchCampaignState
+      });
+
+      document.getElementById("btnPrev")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      document.getElementById("btnOpenEditState")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(fetchCampaignState).toHaveBeenLastCalledWith("campaign-1");
+      expect((document.getElementById("editStateContinuitySummary") as HTMLTextAreaElement).value)
+        .toBe("Current summary.");
+      expect(document.getElementById("editStateMeta")?.textContent).toContain("turn 2");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps a dirty Current State editor open when a tab click lands outside its post-layout bounds", async () => {
+    const currentState = {
+      campaignId: "campaign-1",
+      activeTurnNumber: 2,
+      viewedTurnNumber: 2,
+      isCurrent: true,
+      revision: 4,
+      continuitySummary: "Current summary.",
+      scratchpad: "Current scratchpad.",
+      openThreads: [],
+      canonicalFacts: [],
+      trackers: [],
+      rpgStats: [],
+      eventTriggers: [],
+      pendingEventTriggers: []
+    };
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeTurns(1, 2),
+        fetchCampaignState: vi.fn().mockResolvedValue(currentState)
+      });
+      const editStateDialog = document.getElementById("editStateDialog") as HTMLDialogElement | null;
+      const summary = document.getElementById("editStateContinuitySummary") as HTMLTextAreaElement | null;
+      const scratchpadTab = document.querySelector('#editStateDialog [data-tab="scratch"]');
+      const discardChangesDialog = document.getElementById("discardChangesDialog") as HTMLDialogElement | null;
+      if (!editStateDialog || !summary || !scratchpadTab || !discardChangesDialog) {
+        throw new Error("Current State modal controls are required.");
+      }
+
+      document.getElementById("btnOpenEditState")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      summary.value = "Changed summary.";
+      editStateDialog.getBoundingClientRect = () => ({
+        left: 600,
+        right: 800,
+        top: 300,
+        bottom: 700
+      }) as DOMRect;
+
+      const click = new window.Event("click", { bubbles: true });
+      Object.defineProperties(click, {
+        clientX: { value: 20 },
+        clientY: { value: 20 }
+      });
+      scratchpadTab.dispatchEvent(click);
+
+      expect(editStateDialog.hasAttribute("open")).toBe(true);
+      expect(discardChangesDialog.hasAttribute("open")).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("opens the discard confirmation for a dirty Current State modal backdrop click", async () => {
+    const currentState = {
+      campaignId: "campaign-1",
+      activeTurnNumber: 2,
+      viewedTurnNumber: 2,
+      isCurrent: true,
+      revision: 4,
+      continuitySummary: "Current summary.",
+      scratchpad: "Current scratchpad.",
+      openThreads: [],
+      canonicalFacts: [],
+      trackers: [],
+      rpgStats: [],
+      eventTriggers: [],
+      pendingEventTriggers: []
+    };
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeTurns(1, 2),
+        fetchCampaignState: vi.fn().mockResolvedValue(currentState)
+      });
+      const editStateDialog = document.getElementById("editStateDialog") as HTMLDialogElement | null;
+      const summary = document.getElementById("editStateContinuitySummary") as HTMLTextAreaElement | null;
+      const discardChangesDialog = document.getElementById("discardChangesDialog") as HTMLDialogElement | null;
+      if (!editStateDialog || !summary || !discardChangesDialog) {
+        throw new Error("Current State modal controls are required.");
+      }
+
+      document.getElementById("btnOpenEditState")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      summary.value = "Changed summary.";
+      editStateDialog.getBoundingClientRect = () => ({
+        left: 600,
+        right: 800,
+        top: 300,
+        bottom: 700
+      }) as DOMRect;
+
+      const click = new window.Event("click", { bubbles: true });
+      Object.defineProperties(click, {
+        clientX: { value: 20 },
+        clientY: { value: 20 }
+      });
+      editStateDialog.dispatchEvent(click);
+
+      expect(discardChangesDialog.hasAttribute("open")).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("disables legacy current-state editing while a durable generation is pending", async () => {
+    const currentState = {
+      campaignId: "campaign-1",
+      activeTurnNumber: 2,
+      viewedTurnNumber: 2,
+      isCurrent: true,
+      revision: 4,
+      continuitySummary: "Current summary.",
+      scratchpad: "Current scratchpad.",
+      openThreads: [],
+      canonicalFacts: [],
+      trackers: [],
+      rpgStats: [],
+      eventTriggers: [],
+      pendingEventTriggers: []
+    };
+    const fetchCampaignState = vi.fn().mockResolvedValue(currentState);
+    try {
+      const { document } = await bootLegacyStory({
+        turns: makeTurns(1, 2),
+        fetchCampaignState,
+        syncStatus: vi.fn().mockResolvedValue({
+          campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 2, storyLengthProfile: "standard" },
+          world: {},
+          turns: { campaignId: "campaign-1", turns: makeTurns(1, 2), nextCursor: null },
+          pendingGeneration: { id: "generation-1" }
+        })
+      });
+
+      const edit = document.getElementById("btnOpenEditState") as HTMLButtonElement;
+      const initialStateLoads = fetchCampaignState.mock.calls.length;
+      expect(edit.disabled).toBe(true);
+      edit.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(fetchCampaignState).toHaveBeenCalledTimes(initialStateLoads);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("saves editor DOM values through the campaign-state API before applying the response", async () => {
     const { document } = parseHTML(`
       <dialog open id="editStateDialog"></dialog>
@@ -886,6 +1406,237 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(dialog.hasAttribute("open")).toBe(false);
   });
 
+  it("edits the latest completed response from Setup with the correction fences captured on open", async () => {
+    const getTurnCorrection = vi.fn().mockResolvedValue({
+      effectiveNarration: "Effective second narration",
+      correctionRevision: 7
+    });
+    const correctTurnNarration = vi.fn().mockResolvedValue({
+      effectiveNarration: "Corrected second narration",
+      correctionRevision: 8,
+      illustrationsMayBeStale: true
+    });
+    const syncStatus = vi.fn().mockResolvedValue({
+      campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 2, storyLengthProfile: "standard" },
+      world: {},
+      turns: { campaignId: "campaign-1", turns: makeTurns(1, 2), nextCursor: null }
+    });
+
+    const { document, window } = await bootLegacyStory({
+      turns: makeTurns(1, 2),
+      syncStatus,
+      getTurnCorrection,
+      correctTurnNarration
+    });
+    try {
+      const editButton = document.getElementById("btnOpenEditResponse") as HTMLButtonElement;
+      const dialog = document.getElementById("editResponseDialog") as HTMLDialogElement;
+      const editor = document.getElementById("responseEditor") as HTMLTextAreaElement;
+
+      expect(editButton).not.toBeNull();
+      expect(editButton.disabled).toBe(false);
+      expect(document.getElementById("btnEditResponse")).toBeNull();
+
+      editButton.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(getTurnCorrection).toHaveBeenCalledWith("campaign-1", "turn-2");
+      expect(dialog.open).toBe(true);
+      expect(editor.value).toBe("Effective second narration");
+
+      editor.value = "Corrected second narration";
+      document.getElementById("btnEditResponseSave")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(correctTurnNarration).toHaveBeenCalledWith("campaign-1", "turn-2", {
+        narration: "Corrected second narration",
+        expectedCorrectionRevision: 7,
+        expectedActiveTurnNumber: 2,
+        source: "user_edit"
+      });
+      expect(document.querySelector("#scene-2 .narration")?.textContent).toContain("Corrected second narration");
+      expect(dialog.open).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps response correction unavailable without a completed turn or while generation is pending", async () => {
+    const emptySyncStatus = vi.fn().mockResolvedValue({
+      campaign: { id: "campaign-1", title: "Empty campaign", activeTurnNumber: 0, storyLengthProfile: "standard" },
+      world: {},
+      turns: { campaignId: "campaign-1", turns: [], nextCursor: null }
+    });
+    const empty = await bootLegacyStory({
+      turns: [],
+      syncStatus: emptySyncStatus,
+      workflow: { resume: async () => ({}) }
+    });
+    try {
+      expect((empty.document.getElementById("btnOpenEditResponse") as HTMLButtonElement).disabled).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+
+    const pendingSyncStatus = vi.fn().mockResolvedValue({
+      campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 1, storyLengthProfile: "standard" },
+      world: {},
+      pendingGeneration: { id: "generation-1", status: "generating" },
+      turns: { campaignId: "campaign-1", turns: makeTurns(1, 1), nextCursor: null }
+    });
+    const pending = await bootLegacyStory({ turns: makeTurns(1, 1), syncStatus: pendingSyncStatus });
+    try {
+      expect((pending.document.getElementById("btnOpenEditResponse") as HTMLButtonElement).disabled).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("shows corrected narration and retains existing illustration controls when segment prose is stale", async () => {
+    const turns = makeTurns(1, 1).map((turn) => ({
+      ...turn,
+      narration: "Silver rain patters across the observatory dome."
+    }));
+    const syncStatus = vi.fn().mockResolvedValue({
+      campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 1, storyLengthProfile: "standard" },
+      world: {},
+      turns: { campaignId: "campaign-1", turns, nextCursor: null }
+    });
+    const { document } = await bootLegacyStory({
+      turns,
+      syncStatus,
+      illustrationConfig: { enabled: true, sourcePolicy: "generated" },
+      illustrationSegments: [{
+        id: "segment-1",
+        turnId: "turn-1",
+        ordinal: 0,
+        startWord: 0,
+        endWord: 6,
+        text: "Brass rain patters across the observatory dome.",
+        variants: [{ variantIndex: 0, url: "https://images.example/old-segment.png" }]
+      }]
+    });
+    try {
+      expect(document.querySelector("#scene-1 .narration")?.textContent).toContain("Silver rain");
+      expect(document.querySelector("#scene-1 .narration")?.textContent).not.toContain("Brass rain");
+      expect(document.getElementById("storyIllustrationPanel")?.classList.contains("hidden")).toBe(false);
+      expect(document.querySelector("#storyIllustrationContent img")?.getAttribute("src")).toBe("https://images.example/old-segment.png");
+      expect(document.getElementById("storyIllustrationContent")?.textContent).not.toContain("no illustration segments yet");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("clears an editor load superseded by generation and allows reopening after generation resolves", async () => {
+    const correctionLoad = deferred<{ effectiveNarration: string; correctionRevision: number }>();
+    const generationGate = deferred<void>();
+    const getTurnCorrection = vi.fn()
+      .mockReturnValueOnce(correctionLoad.promise)
+      .mockResolvedValueOnce({ effectiveNarration: "Latest response", correctionRevision: 3 });
+    const workflow = {
+      resume: async () => null,
+      submit: vi.fn(async () => ({
+        jobId: "generation-1",
+        async *watch() {
+          await generationGate.promise;
+          yield { type: "settled", outcome: "discarded", error: new Error("Stopped for test") };
+        }
+      }))
+    };
+    const syncStatus = vi.fn().mockResolvedValue({
+      campaign: {
+        id: "campaign-1",
+        title: "Long campaign",
+        activeTurnNumber: 1,
+        storyLengthProfile: "standard",
+        turnControlStyle: "action_only"
+      },
+      world: {},
+      turns: { campaignId: "campaign-1", turns: makeTurns(1, 1), nextCursor: null }
+    });
+    const { document } = await bootLegacyStory({
+      turns: makeTurns(1, 1),
+      syncStatus,
+      getTurnCorrection,
+      workflow
+    });
+    try {
+      const editButton = document.getElementById("btnOpenEditResponse") as HTMLButtonElement;
+      const dialog = document.getElementById("editResponseDialog") as HTMLDialogElement;
+      editButton.click();
+      (document.getElementById("freeAction") as HTMLTextAreaElement).value = "Start the next scene.";
+      (document.getElementById("btnTakeAction") as HTMLButtonElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      correctionLoad.resolve({ effectiveNarration: "Old response", correctionRevision: 2 });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(dialog.open).toBe(false);
+      expect(editButton.disabled).toBe(true);
+
+      generationGate.resolve();
+      for (let attempt = 0; attempt < 8 && editButton.disabled; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      expect(editButton.disabled).toBe(false);
+      editButton.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(dialog.open).toBe(true);
+      expect((document.getElementById("responseEditor") as HTMLTextAreaElement).value).toBe("Latest response");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("ignores stale response loads and preserves a failed correction draft while a save is in flight", async () => {
+    const correctionLoad = deferred<{ effectiveNarration: string; correctionRevision: number }>();
+    const correctionSave = deferred<{ effectiveNarration: string; correctionRevision: number }>();
+    const getTurnCorrection = vi.fn()
+      .mockReturnValueOnce(correctionLoad.promise)
+      .mockResolvedValueOnce({ effectiveNarration: "Current response", correctionRevision: 4 });
+    const correctTurnNarration = vi.fn(() => correctionSave.promise);
+    const syncStatus = vi.fn().mockResolvedValue({
+      campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 2, storyLengthProfile: "standard" },
+      world: {},
+      turns: { campaignId: "campaign-1", turns: makeTurns(1, 2), nextCursor: null }
+    });
+    const { document, window } = await bootLegacyStory({
+      turns: makeTurns(1, 2),
+      syncStatus,
+      getTurnCorrection,
+      correctTurnNarration
+    });
+    try {
+      const editButton = document.getElementById("btnOpenEditResponse") as HTMLButtonElement;
+      const dialog = document.getElementById("editResponseDialog") as HTMLDialogElement;
+      const editor = document.getElementById("responseEditor") as HTMLTextAreaElement;
+
+      editButton.click();
+      (document.getElementById("btnPrev") as HTMLButtonElement).click();
+      correctionLoad.resolve({ effectiveNarration: "Old response", correctionRevision: 4 });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(dialog.open).toBe(false);
+      expect(editButton.disabled).toBe(true);
+
+      (document.getElementById("btnNext") as HTMLButtonElement).click();
+      expect(editButton.disabled).toBe(false);
+      editButton.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(editor.value).toBe("Current response");
+      editor.value = "Draft that must survive";
+      document.getElementById("btnEditResponseSave")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      document.getElementById("btnEditResponseSave")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      expect(correctTurnNarration).toHaveBeenCalledTimes(1);
+
+      correctionSave.reject(new Error("Revision conflict"));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(dialog.open).toBe(true);
+      expect(editor.value).toBe("Draft that must survive");
+      expect((document.getElementById("btnEditResponseSave") as HTMLButtonElement).disabled).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("keeps editor controls and state intact when a campaign-state save is rejected", async () => {
     const { document } = parseHTML(`
       <dialog open id="editStateDialog"></dialog>
@@ -945,8 +1696,8 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       activeTurnNumber: 4,
       revision: 7,
       rpgStats: [{ id: "resolve", name: "Resolve", value: 61, note: "" }],
-      eventTriggers: [{ id: "lens-lit", label: "Lens lit" }],
-      pendingEventTriggers: [{ id: "sea-road", name: "Sea road" }]
+      eventTriggers: [],
+      pendingEventTriggers: []
     };
     const editSession = captureCampaignStateEditSession(runtimeState);
     runtimeState.rpgStats[0]!.value = 62;
@@ -955,7 +1706,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       activeTurnNumber: 5,
       revision: 8,
       rpgStats: [{ id: "resolve", name: "Resolve", value: 75, note: "Refreshed" }],
-      eventTriggers: [{ id: "gate-open", label: "Gate open" }],
+      eventTriggers: [],
       pendingEventTriggers: []
     };
     const requests: Array<{ campaignId: string; value: unknown }> = [];
@@ -981,8 +1732,8 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       scratchpad: "Private continuity.",
       trackers: [],
       rpgStats: [{ id: "resolve", name: "Resolve", value: 61, note: "" }],
-      eventTriggers: [{ id: "lens-lit", label: "Lens lit" }],
-      pendingEventTriggers: [{ id: "sea-road", name: "Sea road" }]
+      eventTriggers: [],
+      pendingEventTriggers: []
     });
   });
 
@@ -1798,7 +2549,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyHtml).toContain('id="btnOpenEditState" type="button"');
     expect(storyHtml).not.toContain('nav-menu-item-flush');
     expect(navigationCss).toContain('.nav-profile-button {');
-    expect(storyScript).toContain('const generationLocked = state.busy || Boolean(state.pendingGeneration);');
+    expect(storyScript).toContain('const generationLocked = state.busy || !state.campaignLoaded || Boolean(state.pendingGeneration);');
     expect(storyScript).toContain('const storyInputLocked = generationLocked || !isLatest;');
     expect(storyScript).toContain('if (btnAction) btnAction.disabled = storyInputLocked;');
     expect(storyScript).not.toContain('inputAction.style.pointerEvents = "none";');

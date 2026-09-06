@@ -95,7 +95,8 @@ integration("Task 14e3e7 private asset-maintenance composition", () => {
       if (options.expire ?? true) {
         await pool.query(
           `UPDATE durable_filesystem_operations
-              SET expires_at=clock_timestamp()-interval '1 second'
+              SET expires_at=clock_timestamp()-interval '1 second',
+                  lease_expires_at=clock_timestamp()-interval '1 second'
             WHERE id=$1`,
           [staged.operation.operationId],
         );

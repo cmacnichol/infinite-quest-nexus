@@ -74,12 +74,20 @@ function embeddingFailureDiagnostic(error: unknown): EmbeddingFailureDiagnostic 
   return { diagnosticCode: "embedding_failed" };
 }
 
-function batchMemories(retrieval: ChronicleWorkerRetrieval) {
-  return retrieval.memories.map((memory) => {
+function batchMemories(retrieval: ChronicleWorkerRetrieval, fingerprint: string) {
+  return retrieval.memories.flatMap((memory) => {
     const id = typeof memory.id === "string" ? memory.id : "";
     const content = typeof memory.content === "string" ? memory.content : "";
     if (!id || !content) throw new Error("Chronicle retrieval returned an invalid embedding row.");
-    return { id, content, contentHash: chronicleContentHash(content) };
+    const contentHash = chronicleContentHash(content);
+    if (memory.hasEmbedding === true
+      && memory.embeddingContentHash === contentHash
+      && memory.embeddingProviderProfileId === retrieval.config.providerProfileId
+      && memory.embeddingModel === retrieval.config.model
+      && memory.embeddingProviderFingerprint === fingerprint
+      && typeof memory.embeddingDimensions === "number" && memory.embeddingDimensions > 0
+      && memory.embeddingDimensions === memory.vectorDimensions) return [];
+    return [{ id, content, contentHash }];
   });
 }
 
@@ -129,9 +137,11 @@ async function executeChronicleClaim(
     model: config.model
   };
   let processed = 0;
+  let skipped = 0;
   while (true) {
     throwIfLeaseLost(lifecycle);
-    const memories = batchMemories(retrieval);
+    const memories = batchMemories(retrieval, fingerprint);
+    skipped += retrieval.memories.length - memories.length;
     if (memories.length) {
       let result: Awaited<ReturnType<ChronicleEmbeddingProviderPort["embed"]>>;
       try {
@@ -180,7 +190,7 @@ async function executeChronicleClaim(
   }
   await dependencies.embeddings.recordHealth(pool, providerScope, true);
   throwIfLeaseLost(lifecycle);
-  return { embedded: processed, skipped: 0, total: first.totalMemories };
+  return { embedded: processed, skipped, total: first.totalMemories };
 }
 
 export function createChronicleClaimExecution(

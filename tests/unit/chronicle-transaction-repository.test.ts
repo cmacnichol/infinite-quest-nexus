@@ -19,6 +19,7 @@ function databaseClient(
 ): DatabaseClient {
   return {
     query: vi.fn((sql: string, values: readonly unknown[]) => {
+      if (sql.includes("JOIN campaign_state_edits edit")) return { rows: [], rowCount: 0 };
       if (/^(?:SAVEPOINT|RELEASE SAVEPOINT|ROLLBACK TO SAVEPOINT) chronicle_(?:retrieval|query_embedding_cache)_/.test(sql)) {
         return { rows: [], rowCount: 0 };
       }
@@ -140,7 +141,6 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
   });
 
   it("enqueues embedding reindex work directly when the caller transaction has an eligible config", async () => {
-    let callerClient: DatabaseClient;
     const client = databaseClient((sql) => {
       if (sql.includes("FROM campaigns")) {
         return { rows: [{ world_version_id: scope.worldVersionId }] };
@@ -160,15 +160,9 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       }
       throw new Error(`Unexpected SQL: ${sql}`);
     });
-    callerClient = client;
     const transaction = createPostgresChronicleGenerationTransactionPort({
-      embeddings: embeddingPort({
-        resolve: async (database, requestedScope) => {
-          expect(database).toBe(callerClient);
-          expect(requestedScope.selectedProviderProfileId).toBe("embedding-profile");
-          return { status: "resolved", resolutionSource: "dedicated_embedding", resolvedRole: "embedding", providerProfileId: "embedding-profile", providerType: "openrouter", model: "embed-v1" };
-        }
-      })
+      // All provider operations throw: scheduling must only read persisted configuration.
+      embeddings: embeddingPort()
     });
 
     await expect(transaction.enqueueEmbeddingReindex(client, scope)).resolves.toBe("embedding-job-2");
@@ -342,7 +336,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       if (sql.includes("FROM campaign_state_edits")) {
         return { rows: [{
           id: "state-edit-1",
-          effective_turn_number: 3,
+          effective_turn_number: 0,
           state_snapshot_private: {
             continuitySummary: "The gate was corrected to open.",
             openThreads: ["Find the silver key."],
@@ -357,11 +351,11 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
         canonicalWrites.push({ sql, values });
         return { rows: [], rowCount: 1 };
       }
-      if (sql.includes("SELECT id, source_turn_id") && sql.includes("valid_until_turn IS NULL")) {
+      if (sql.includes("SELECT id,source_turn_id") && sql.includes("valid_until_turn IS NULL")) {
         return { rows: [{
           id: "corrected-fact-1",
           source_turn_id: null,
-          source_turn_number: 3,
+          source_turn_number: 0,
           content: "The moon gate is open.",
           entities: [],
           entity_ids: []
@@ -369,8 +363,9 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       }
       if (sql.includes("INSERT INTO chronicle_memories")) {
         memoryWrites.push({ sql, values });
-        return { rows: [], rowCount: 1 };
+        return { rows: [{ id: `memory-${memoryWrites.length}` }], rowCount: 1 };
       }
+      if (sql.includes("SELECT id,memory_kind,turn_id,content") && sql.includes("FROM chronicle_memories")) return { rows: [] };
       if (sql.includes("DELETE FROM")) return { rows: [], rowCount: 1 };
       throw new Error(`Unexpected SQL: ${sql}`);
     });
@@ -383,10 +378,10 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     expect(canonicalWrites).toHaveLength(1);
     expect(canonicalWrites[0]!.sql).toContain("source_state_edit_id");
     expect(canonicalWrites[0]!.values).toContain("state-edit-1");
-    const canonicalMemory = memoryWrites.find(({ sql }) => sql.includes("'canonical_fact'"));
-    expect(canonicalMemory?.values[3]).toBeNull();
-    expect(memoryWrites.every(({ values }) => String(values.at(-1)).includes('"stateEditId":"state-edit-1"'))).toBe(true);
-    expect(memoryWrites.every(({ values }) => values[3] !== "state-edit-1")).toBe(true);
+    const canonicalMemory = memoryWrites.find(({ values }) => values[10] === "canonical_fact");
+    expect(canonicalMemory?.values[11]).toBeNull();
+    expect(memoryWrites.every(({ values }) => String(values[7]).includes('"stateEditId":"state-edit-1"'))).toBe(true);
+    expect(memoryWrites.every(({ values }) => values[11] !== "state-edit-1")).toBe(true);
   });
 
   it("builds a scoped context preview and attributes semantic retrieval on the caller client", async () => {

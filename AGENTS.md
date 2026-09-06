@@ -8,15 +8,13 @@ Text generation and image generation must be independent provider concerns. Stor
 
 Do not embed sample worlds, campaign records, accepted turns, story history, imported lore, or other user content in `index.html` or application source. Runtime world and campaign data belongs in the authoritative database; sanitized regression content belongs only in test fixtures. Legacy exports may be imported through explicit migration code but must not be silently bundled or restored by the client.
 
-Product domains, naming conventions, and deployment names: see [docs/architecture/repository-overview.md](docs/architecture/repository-overview.md).
+Before changing product terminology or deployment names, read [docs/architecture/repository-overview.md](docs/architecture/repository-overview.md).
 
 ## Target Architecture
 
 Store database credentials, text-endpoint tokens, image-endpoint tokens, and other credentials as separate Docker Swarm secrets. Store non-sensitive endpoint and runtime settings in Swarm configs or environment configuration. Do not assume `host.docker.internal` is available from Swarm nodes.
 
-Full service-topology description (web/API/worker/DB/text/image/vector-search breakdown): see [docs/architecture/repository-overview.md](docs/architecture/repository-overview.md#target-architecture).
-
-Compose/Swarm build-and-deploy contract, migration-locking strategy, and manifest layout: see [docs/runbooks/deployment.md](docs/runbooks/deployment.md).
+Before changing service boundaries or runtime topology, read [docs/architecture/repository-overview.md](docs/architecture/repository-overview.md#target-architecture).
 
 ## Domain and Persistence Rules
 
@@ -35,36 +33,11 @@ Every campaign-owned row and memory record must be scoped by `campaign_id`; reus
 
 ## User Identity and Future Authentication
 
-Design ownership now even though interactive login and OIDC are deferred. Use a stable, non-semantic internal UUID `user_id` as the application identity. Never use an email address, display name, username, OIDC `sub`, or provider-specific identifier as a primary or foreign key.
+Use a stable internal UUID for application identity. Resolve the pre-auth initial user on the server; browser-supplied identifiers and imported provenance do not establish authorization. Preserve the existing initial-owner UUID and idempotent bootstrap behavior.
 
-The first database migration must idempotently create one credential-free **initial user** identified by a stable system key such as `initial-owner`. The database generates and retains its UUID; every API and worker replica looks it up by that system key. Until authentication is implemented, the server assigns all created, generated, and imported content to this initial user. Do not accept an arbitrary `user_id` header, query value, or request field from the browser as proof of identity.
+Keep root records owner-scoped and protect child records through scoped relationships and database constraints. Future OIDC identities must link explicitly to the existing internal user without transferring legacy ownership to the first login.
 
-User-owned root records must have a non-null `owner_user_id`, including worlds, world versions where ownership is materialized, campaigns, assets, provider profiles, and imports. Operational and retrieval records such as memories, generation jobs, image jobs, and model chains must carry or reliably derive the same user scope so queries cannot cross ownership boundaries. Turns and other children must remain protected through their campaign relationship and database constraints.
-
-Plan for these identity tables and constraints:
-
-```text
-users
-  id UUID primary key
-  system_key unique nullable
-  display_name
-  status
-  created_at / updated_at
-
-user_identities                added when authentication is implemented
-  id UUID primary key
-  user_id foreign key -> users.id
-  provider
-  issuer
-  subject
-  unique (issuer, subject)
-```
-
-OIDC identities must link to the internal user rather than replace it. When authentication is introduced, use an explicit administrative claim or configured migration to attach the intended OIDC `(issuer, subject)` to the existing initial user. Do not automatically grant all legacy content to whichever account happens to log in first. After the link succeeds, the same internal `user_id` continues to own all existing content without rewriting world, campaign, turn, or memory ownership.
-
-Legacy browser saves and portable exports do not establish authorization. During the pre-auth phase, imports belong to the initial user. After authentication exists, imports belong to the authenticated user unless an administrator explicitly performs an ownership migration. Export formats may contain provenance but must not rely on a source-system `user_id` being valid in another installation.
-
-Keep repository, service, and database APIs user-scoped from their first implementation even when only one user exists. This provides a clean future path to authorization, sharing, collaborators, and database row-level policies without a broad ownership backfill.
+Before changing ownership, imports, identity bootstrap, or authentication, read [Identity and ownership](docs/concepts/identity-and-ownership.md), including the deferred OIDC design.
 
 ## Story Memory Model
 
@@ -95,9 +68,9 @@ Keep mechanics and fiction in separate typed prompt paths. Rolls, dice, checks, 
 
 ## Repository Structure and Migration Roadmap
 
-Prefer TypeScript for new application services and shared packages so validated logic can move out of the current JavaScript without maintaining separate implementations. Record meaningful architecture changes as short ADRs under `docs/architecture/`. Do not leave undocumented scripts as the only way to operate the project. Keep JSON import and export as a portable backup and migration format even after the database becomes authoritative.
+Prefer TypeScript for new application services and shared packages so validated logic can move out of the current JavaScript without maintaining separate implementations. Record system-wide architecture decisions under `docs/architecture/` and context-local decisions under the relevant context's `docs/adr/`, following [Domain docs](docs/agents/domain.md). Do not leave undocumented scripts as the only way to operate the project. Keep JSON import and export as a portable backup and migration format even after the database becomes authoritative.
 
-Target directory layout, how to run the legacy client standalone, and the 5-phase incremental migration plan: see [docs/architecture/repository-overview.md](docs/architecture/repository-overview.md#repository-structure).
+Before changing repository layout or planning a legacy-client migration, read [docs/architecture/repository-overview.md](docs/architecture/repository-overview.md#repository-structure).
 
 ## Coding and Contract Conventions
 
@@ -111,15 +84,13 @@ Favor pure domain functions for state transitions, prompt assembly, retrieval ra
 
 Every code change must include a review of the tests associated with each changed file. Update or add those tests whenever behavior, contracts, fixtures, or expectations change; do not consider the change complete until the related tests reflect it.
 
-Tests must verify that rejected or incomplete generations do not mutate campaign state or Chronicle memory and that one campaign's data cannot appear in another campaign's prompt.
-Tests must also cover images disabled, image endpoint unavailable, incompatible image models, independent image retries, and successful story completion when illustration generation fails.
-Identity tests must verify initial-user bootstrap idempotency, automatic ownership of pre-auth content, import ownership, rejection of caller-supplied identity spoofing, cross-user query isolation, and explicit OIDC linking to the existing initial user without changing its internal UUID.
+Select tests for the affected behavior using the [test matrix](docs/workflows/testing.md): generation and retrieval changes require integrity and isolation coverage; illustration changes require independent-failure and retry coverage; ownership changes require identity and authorization coverage. Add OIDC linking tests when implementing that feature.
 
-Manual test checklist (until automated infrastructure exists) and the required test-type matrix for new services: see [docs/workflows/testing.md](docs/workflows/testing.md).
+For visible UI changes, verify affected interactions in a rendered browser and include screenshots. Report checks as passed, failed, or skipped, with reasons for skips; distinguish unit evidence from real PostgreSQL, browser, and live-provider verification. For documentation-only changes, check links and the diff; application tests are needed only if executable behavior changes.
 
 ## Deployment and Operations
 
-Health checks, logging fields, migration safety rules, and rolling-update/rollback policy: see [docs/runbooks/deployment.md](docs/runbooks/deployment.md).
+Before changing deployment manifests, secrets, database migrations, health checks, or shutdown and rollback behavior, read [docs/runbooks/deployment.md](docs/runbooks/deployment.md).
 
 ## Security
 
@@ -133,80 +104,48 @@ Use short imperative commit summaries naming the affected domain or service. Kee
 
 Before submitting, run the documented tests, check `git diff --check`, review the complete diff for unrelated changes, and include screenshots for visible UI changes.
 
-<!-- Repowise's auto-generated "Codebase Intelligence" block was intentionally removed here on 2026-08-01 (editor_files.agents_md: false in .repowise/config.yaml — see AGENT_INSTRUCTIONS_AUDIT.md, Decision #5). It had gone stale the moment it stopped being refreshed, and stale architecture summaries are worse than none. The Repowise MCP tools (get_answer, search_codebase, get_context, get_risk, get_why, get_change_risk, get_health, get_dead_code) remain fully available regardless of this setting — call get_overview() for a live architecture map instead of reading a frozen one here. Build/test/dev commands: pnpm build / pnpm test / pnpm dev. -->
+## Agent Working Practices
 
-<!-- REPOWISE_AGENTS:START — Do not edit below this line. Auto-generated by Repowise. -->
-## Codebase Intelligence for InfiniteQuest (Repowise)
+### Task Execution & Autonomy
 
-Indexed by [Repowise](https://repowise.dev). Last indexed: 2026-08-17 (commit 05c39cb). Confidence: 100%.
-The MCP tools below serve pre-verified docs, symbols, history, and health from that index. Every response carries `_meta` freshness fields; a `stale_warning` appears only when a file the response actually serves changed after indexing, so silence means current.
+- For implementation or fix requests, carry the authorized work through implementation and relevant verification. Do not stop at a proposed plan when you can proceed.
+- Make reasonable assumptions for routine, reversible decisions. Ask a focused question when missing information materially affects correctness, scope, or authorization.
+- Continue with authorized read-only actions, local worktrees, branch edits, and appropriate tests without repeatedly asking.
+- Before requesting approval, finish the preparation that is already authorized and present a concrete, reviewable result.
+- Respect required approval gates. Ask before destructive, irreversible, or otherwise unauthorized actions.
+- Avoid boilerplate warnings about hypothetical risks. Explain concrete blockers or material risks when relevant.
 
-### How to work in this repo
+### Instruction Conflicts
 
-- **Pre-edit phase** (locate, understand, assess) is where these tools win: `get_answer` for how/where/why, `search_codebase` to find, `get_context` for a file's map, `get_risk` before touching a hotspot.
-- **Edit phase**: reading a file before you edit it is correct and expected. Use these tools to decide *which* files to read and edit, not to replace that read.
-- **Noisy commands** (tests, builds, `git log`/`diff`, searches, listings): prefer `repowise distill <cmd>`, the same command with its exit code preserved and errors-first compact output. A `[repowise#<ref>: N lines omitted]` marker is fully recoverable via `repowise expand <ref>` (add `-q <regex>` to filter); never re-run the command to see omitted output.
+- Explicit user instructions take precedence over conflicting skill guidelines, subject to higher-priority instructions and actual permission boundaries.
+- If a skill causes a pause or deviation, identify the file and relevant rule, and explain whether it is an explicit requirement or your interpretation. Continue any unaffected authorized work.
 
-### Trust protocol
+### Style & Output
 
-- `verified: true` means the served bytes were checked against the live tree. Never follow it with a re-read of the same lines.
-- `get_answer` at `confidence: "high"` or `grounding: "extracted"` is content-grounded: cite it directly. `symbol_bodies`, `quotes`, and `code_rationale` entries are live source, so use them instead of opening the file.
-- The **only** re-read triggers: `bounds: "approximate"`, `_meta.stale_warning`, `search_method: "bm25"`, `confidence: "low"`. `index_behind: true` alone is informational; the served content is unaffected by the drift.
-- Not valid reasons to re-read: "just to be safe", "to see full context" (use the skeleton or a range read), "the file might have changed" (`verified` already checked).
-- For exhaustive literal sweeps (rename every call site) plain text search is unbeatable, so use it. Reach for `get_context(include=["callers"])` when you need the `callers_total`/`callers_truncated` honesty signal instead of a maybe-incomplete grep.
+- Lead with the result. Use plain language, active voice, and concise paragraphs. Include technical details that help assess the work.
+- Use lists when they improve readability; avoid repetitive transitions and stock phrases such as "it's worth noting", "delve", "leverage", and "Bottom line".
+- Report what changed, what was verified, and any remaining uncertainty.
 
-### Tools
+### Verification
 
-| Tool | When and why |
-|------|--------------|
-| `get_answer(question)` | First call for any how / where / why question. `confidence: "high"` or `grounding: "extracted"` is content-grounded — cite it directly. When the question names an indexed symbol, `symbol_bodies` carries its full live body (skip the `get_symbol` follow-up). Low confidence returns `best_guesses` with one-line justifications plus `code_rationale` (rationale comments mined live from candidate source). |
-| `get_context(targets=[...])` | Triage card for files/modules/symbols: summary, signatures, `symbol_id`s, `hotspot` bit. File targets auto-serve a `verified` skeleton (every signature at a fraction of a full Read); `mostly_full` marks files where Read costs little more. Batch targets in one call. Opt-in blocks: `include=["callers"|"callees"|"ownership"|"decisions"|"metrics"]`. |
-| `get_symbol(id)` | One verified body: `"path.py::Name"` (indexed symbol), `"path.py:140-180"` (live range read), or `"repowise#<hex>"` (omission ref). Source arrives in Read's numbered format — treat it as an already-performed Read. `truncated` responses carry a `continuation` naming the exact next range; ambiguous ids return every match in `candidates`. Index misses fall back to live-grep `fallback_lines`. |
-| `search_codebase(query)` | Hybrid search, auto-routed by query shape: identifier → symbol hits (pipe `symbol_id` into `get_symbol`), path → file pages, prose → wiki-semantic. Force with `mode=symbol|path|concept|hybrid`. Concept hits carry a `sources` list; a hit whose sources are `[fts]` only is a keyword match with no semantic agreement — verify it. |
-| `get_why(query, targets?)` | Why the code is shaped this way: decision records with evidence and supersession lineage, falling back to git archaeology and `code_rationale` comments. Call before refactors or pattern divergences. |
-| `get_risk(targets, changed_files?)` | What history says about touching these files: churn, owners, co-change partners, blast radius. PR mode (`changed_files`) leads with a `directive` block — read `will_break` / `missing_cochanges` / `missing_tests` / `tests_to_run` first. `tests_to_run` is coverage-backed (the tests the per-test map proves exercise the changed files); empty means unknown, never no tests. To score a whole commit or diff range instead, use `get_change_risk`. |
-| `get_change_risk(revspec, extensions?, exclude_patterns?)` | Pre-merge defect score for a whole commit or `base..head` range, computed from its diff shape on the live checkout (no index, no LLM). Lead with `risk_percentile` (this change ranked against sampled recent commits), summarized by `review_priority` and `classification`; `score` / `probability` / `level` are the corpus-calibrated fallback. Distinct from `get_risk`, which scores indexed files by path. A `warning` field flags an empty diff (bad revspec or over-tight extension / exclusion filters). |
-| `get_health(targets?, include?)` | Health scores + findings on three dimensions (defect / maintainability / performance). Self-check the files you touched before finishing; `include=["biomarkers"|"refactoring"|"signals"]` for depth. |
-| `get_dead_code()` | Confidence-tiered unreachable files / unused exports / zombie packages. For cleanup sweeps, not targeted fixes. |
-| `get_overview()` | Architecture map + tool recipes. Call once, first, in an unfamiliar repo; skip it after that. |
+- Match verification to the scope and impact of the change. Complete required checks; expand testing when a concrete unresolvedconcern justifies it.
 
-**Compose them:** low-confidence `get_answer` then read `best_guesses[0].file`; `get_context` shows `hotspot: true` then `get_risk` before editing; `decision_records` titles then `get_why(targets=[...])`; PR review then `get_risk(targets, changed_files)` and read `directive` first. A `tombstone` error means the file moved, so follow `successor_paths`.
+## Agent skills
 
-### Architecture
-InfiniteQuest is a server-backed platform that consumes authored worlds, campaign actions, and model-provider requests, transforms them through validated domain, story-generation, persistence, and retrieval pipelines, and produces persistent campaigns, Chronicle records, world-management artifacts, and optional illustrations through web and API interfaces. The repository implements Infinite Quest Nexus, with the player-facing experience referred to as Infinite Quest. The system separates authoritative application state from language-model context. Worlds have immutable versions, campaigns evolve independently from their source worlds, and accepted story turns provide the canonical recovery ledger.
+### Issue tracker
 
-### Key modules
-- `packages/logger/src` — The logging and illustration-provider layer is an application support boundary: it exposes structured logging, Chronicle processing…
-- `packages/contracts/src` — The application data-contract layer is the shared TypeScript boundary between authored world and campaign data, API services, worker…
-- `services/api/src` — The API service layer is the orchestration boundary for campaign-facing metadata, assets, state, transfers, character profiles, generation…
-- `packages/domain/src` — I’m applying the required workflow guidance for this documentation task, then I’ll produce the page directly from the supplied subsystem…
-- `packages/database/src` — The database lifecycle layer is the persistence boundary for connection configuration, pool creation, and schema migration: it consumes…
-- `root` — Runtime composition is the hosting layer for Infinite Quest’s executable entrypoints, browser-facing assets, background worker startup…
+Before creating or updating GitHub issues for `cmacnichol/infinite-quest-nexus`, read [Issue tracker](docs/agents/issue-tracker.md).
 
-### Entry points
-- `services/api/src/server.ts`
-- `services/runtime/src/main.ts`
+### Triage labels
 
-### Files that need care (bug-fix history first, then churn — check `get_risk` before editing)
-- `tests/integration/generation.integration.test.ts` — 12 bug fixes, last fix 5 days ago (bug magnet); 25 commits/90d
-- `services/api/src/server.ts` — 12 bug fixes, last fix yesterday (bug magnet); 30 commits/90d
-- `tests/integration/image-pipeline.integration.test.ts` — 11 bug fixes, last fix 8 days ago (bug magnet); 20 commits/90d
-- `services/api/src/generation-service.ts` — 11 bug fixes, last fix 2 weeks ago (bug magnet); 47 commits/90d
-- `tests/unit/web-next-world-editor-page.test.ts` — 8 bug fixes, last fix 4 days ago (bug magnet); 15 commits/90d
+Before assigning triage labels, read [Triage labels](docs/agents/triage-labels.md) and use the five defaults without aliases.
 
-### Code health
-Three co-equal signals: defect risk 6.48/10 avg, hotspot health 4.69/10 (stable), worst `apps/web/public/nexus.js` at 1.0/10 · maintainability 7.14/10 · performance risk 618 open static I/O-in-loop / N+1 findings. Detail: `get_health()`.
+### Domain docs
 
-Critical files:
-- `packages/application/src/world-campaign/types.ts` — change entropy — impact −3.0
-- `packages/database/src/durable-filesystem-repository.ts` — change entropy — impact −2.5
-- `packages/database/src/chronicle-chunk-repository.ts` — complex conditional (validateProgress) — impact −2.5
-- `packages/story-engine/src/providers/illustration/sogni/index.ts` — nested complexity (normalizeHttpError) — impact −2.4
-- `scripts/evaluate-chronicle-retrieval.ts` — function hotspot (seedCorpus) — impact −2.3
+Before exploring a domain or changing domain documentation, read [Domain docs](docs/agents/domain.md), then the relevant context map and context documentation.
 
-### Commands
-- Build: `pnpm build`
-- Test: `pnpm test`
-- Dev: `pnpm dev`
+## Documentation and tools
 
-<!-- REPOWISE_AGENTS:END -->
+Before changing scene-context assembly or tracker handling, read the [scene-context and mechanics review note](docs/architecture/scene-context-mechanics-review.md). The note records an open review question; existing mechanics-separation safeguards remain in force.
+
+Use verified tool output without redundant reads. Inspect current source when evidence is incomplete, contradictory, or insufficient for the task. If code-intelligence tools are unavailable, use direct repository searches.

@@ -4,6 +4,7 @@ import {
   MAX_PLAYABLE_CHARACTERS,
   WORLD_CONTENT_SCHEMA_VERSION,
   campaignCreateSchema,
+  campaignUpdateSchema,
   canonicalizeWorldContent,
   characterProfileSchema,
   playableCharacterGenerationPreviewRequestSchema,
@@ -201,6 +202,20 @@ describe("World Library contracts", () => {
     });
     expect(portable.content.world.title).toBe("Synthetic Test World");
     expect(() => campaignCreateSchema.parse({ title: "Synthetic Campaign", worldVersionId: "not-a-uuid" })).toThrow();
+  });
+
+  it("defaults a new campaign to the standard Story context budget", () => {
+    const campaign = campaignCreateSchema.parse({
+      title: "Synthetic Campaign",
+      worldVersionId: crypto.randomUUID()
+    });
+
+    expect(campaign.storyContextBudgetTokens).toBe(32_000);
+  });
+
+  it("accepts an approved Story context budget when updating a campaign", () => {
+    expect(campaignUpdateSchema.parse({ storyContextBudgetTokens: 256_000 }))
+      .toEqual({ storyContextBudgetTokens: 256_000 });
   });
 });
 

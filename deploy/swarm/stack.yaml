@@ -14,6 +14,10 @@ services:
       ASSET_STORAGE_DRIVER: filesystem
       ASSET_STORAGE_ROOT: /var/lib/infinitequest/assets
       ARCHIVE_STORAGE_ROOT: /var/lib/infinitequest/archives
+      # This replicated bind-mount topology is not safe for System Archive.
+      # Use system-archive-validation.override.yaml only for the reviewed
+      # single-node validation drill.
+      SYSTEM_ARCHIVE_ENABLED: "false"
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
       WORLD_SHARING_ENABLED: ${WORLD_SHARING_ENABLED:-false}
       PROVIDER_NETWORK_ALLOWLIST: ${PROVIDER_NETWORK_ALLOWLIST:-}
@@ -80,6 +84,8 @@ services:
       ASSET_STORAGE_DRIVER: filesystem
       ASSET_STORAGE_ROOT: /var/lib/infinitequest/assets
       ARCHIVE_STORAGE_ROOT: /var/lib/infinitequest/archives
+      # Keep this base topology hard-disabled; see the validation override.
+      SYSTEM_ARCHIVE_ENABLED: "false"
       WORKER_POLL_INTERVAL_MS: 2000
       WORKER_GENERATION_CONCURRENCY: ${WORKER_GENERATION_CONCURRENCY:-1}
       PROVIDER_NETWORK_ALLOWLIST: ${PROVIDER_NETWORK_ALLOWLIST:-}

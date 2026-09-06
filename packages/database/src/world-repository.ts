@@ -32,6 +32,8 @@ import {
   type WorldContent
 } from "../../contracts/src/world-library.js";
 import { normalizeCampaignTrackers } from "../../domain/src/campaign-trackers.js";
+import { normalizeCampaignEventTriggers } from "../../domain/src/campaign-event-triggers.js";
+import { playerEventTriggerSchema } from "../../contracts/src/generation.js";
 import { sha256, stableStringify } from "../../domain/src/text.js";
 import {
   assessWorldCampaignReadiness,
@@ -1088,6 +1090,7 @@ function createPostgresCampaignRepository(
         `SELECT c.id, c.title, c.status, c.active_turn_number AS "activeTurnNumber",
                 c.created_at AS "createdAt", c.updated_at AS "updatedAt",
                 c.story_length_profile AS "storyLengthProfile",
+                c.story_context_budget_tokens AS "storyContextBudgetTokens",
                 c.turn_control_style AS "turnControlStyle",
                 c.selected_character_id AS "selectedCharacterId",
                 COALESCE(c.character_profile->>'name', c.character_snapshot->>'name') AS "selectedCharacterName",
@@ -1154,13 +1157,18 @@ function createPostgresCampaignRepository(
       }
       const snapshot = characterSnapshot(seed.character);
       const campaignProfile = campaignProfileFromCharacter(seed.character);
+      const eventRules = playerEventTriggerSchema.array().max(200).safeParse(normalizeCampaignEventTriggers(content.eventTriggers));
+      if (!eventRules.success) {
+        return failure("invalid_transition", { worldVersionId: request.worldVersionId });
+      }
+      const initialEventTriggers = eventRules.data;
       const campaign = await client.query<{ id: string }>(
         `INSERT INTO campaigns (
-           owner_user_id, world_version_id, title, story_length_profile, turn_control_style,
+           owner_user_id, world_version_id, title, story_length_profile, story_context_budget_tokens, turn_control_style,
            selected_character_id, character_snapshot, character_profile, character_profile_revision, legacy_settings
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
         [scope.ownerUserId, request.worldVersionId, request.title, request.storyLengthProfile,
-          request.turnControlStyle, seed.character.id, json(snapshot), campaignProfile ? json(campaignProfile) : null,
+          request.storyContextBudgetTokens, request.turnControlStyle, seed.character.id, json(snapshot), campaignProfile ? json(campaignProfile) : null,
           campaignProfile ? 1 : 0, json({ useRpgStats: seed.rpgStats.length > 0 })]
       );
       const campaignId = campaign.rows[0]?.id;
@@ -1189,7 +1197,7 @@ function createPostgresCampaignRepository(
           scope.ownerUserId,
           json(initialTrackers),
           json(defaultTrackers),
-          json(content.eventTriggers),
+          json(initialEventTriggers),
           json(seed.rpgStats),
           json({
             sourceType: "world_library",
@@ -1200,11 +1208,18 @@ function createPostgresCampaignRepository(
           json({
             scratchpad: "",
             trackers: initialTrackers,
-            eventTriggers: content.eventTriggers,
+            eventTriggers: initialEventTriggers,
             pendingEventTriggers: [],
             rpgStats: seed.rpgStats
           })
         ]
+      );
+      // Only new world campaigns opt in; existing campaigns and imports retain their settings.
+      await client.query(
+        `INSERT INTO campaign_memory_configs (
+           campaign_id, owner_user_id, retrieval_implementation, retrieval_shadow_enabled
+         ) VALUES ($1,$2,'chunked_hybrid',true)`,
+        [campaignId, scope.ownerUserId]
       );
       await collaborators.memory.autoEnableCampaignEmbedding(client, {
         ownerUserId: scope.ownerUserId,
@@ -1217,6 +1232,7 @@ function createPostgresCampaignRepository(
         status: "active",
         activeTurnNumber: 0,
         storyLengthProfile: request.storyLengthProfile,
+        storyContextBudgetTokens: request.storyContextBudgetTokens,
         turnControlStyle: request.turnControlStyle,
         worldId: source.world_id,
         worldVersionId: request.worldVersionId,
@@ -1246,17 +1262,21 @@ function createPostgresCampaignRepository(
              text_provider_profile_id = CASE WHEN $5 THEN $6 ELSE text_provider_profile_id END,
              image_provider_profile_id = CASE WHEN $7 THEN $8 ELSE image_provider_profile_id END,
              story_length_profile = COALESCE($9, story_length_profile),
-             turn_control_style = COALESCE($10, turn_control_style), updated_at = now()
+             story_context_budget_tokens = COALESCE($10, story_context_budget_tokens),
+             turn_control_style = COALESCE($11, turn_control_style), updated_at = now()
           WHERE id = $1 AND owner_user_id = $2
           RETURNING id, title, status, active_turn_number AS "activeTurnNumber",
             text_provider_profile_id AS "textProviderProfileId",
             image_provider_profile_id AS "imageProviderProfileId",
-            story_length_profile AS "storyLengthProfile", turn_control_style AS "turnControlStyle",
+            story_length_profile AS "storyLengthProfile",
+            story_context_budget_tokens AS "storyContextBudgetTokens",
+            turn_control_style AS "turnControlStyle",
             updated_at AS "updatedAt"`,
         [scope.campaignId, scope.ownerUserId, request.title ?? null, request.status ?? null,
           request.textProviderProfileId !== undefined, request.textProviderProfileId ?? null,
           request.imageProviderProfileId !== undefined, request.imageProviderProfileId ?? null,
-          request.storyLengthProfile ?? null, request.turnControlStyle ?? null]
+          request.storyLengthProfile ?? null, request.storyContextBudgetTokens ?? null,
+          request.turnControlStyle ?? null]
       );
       const row = updated.rows[0];
       if (!row) return failure("campaign_not_found", { campaignId: scope.campaignId });
@@ -1306,11 +1326,21 @@ function createPostgresCampaignRepository(
            UNION ALL
            SELECT 'memory' AS kind FROM chronicle_jobs
             WHERE campaign_id = $1 AND owner_user_id = $2 AND status IN ('queued','running')
+           UNION ALL
+           SELECT 'export' AS kind FROM portable_export_artifacts
+            WHERE campaign_id = $1 AND owner_user_id = $2 AND status <> 'cleaned'
          ) work GROUP BY kind ORDER BY kind`,
         [scope.campaignId, scope.ownerUserId]
       );
       const blockers = active.rows.map(({ kind, count }) => `${kind}:${Number(count)}`);
       if (blockers.length > 0) return failure("deletion_blocked", { campaignId: scope.campaignId, blockers });
+      // Completed export delivery metadata must not retain the campaign forever.
+      // The database guard also requires its filesystem journal to be cleaned.
+      await client.query(
+        `DELETE FROM portable_export_artifacts
+          WHERE campaign_id = $1 AND owner_user_id = $2 AND status = 'cleaned'`,
+        [scope.campaignId, scope.ownerUserId]
+      );
       await client.query(
         "DELETE FROM imports WHERE campaign_id = $1 AND owner_user_id = $2",
         [scope.campaignId, scope.ownerUserId]

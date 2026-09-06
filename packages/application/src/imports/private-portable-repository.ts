@@ -20,6 +20,7 @@ import type {
 declare const privatePortableStagedRehydrationBrand: unique symbol;
 declare const privatePortablePreviewRehydrationBrand: unique symbol;
 declare const privatePortableExportRehydrationBrand: unique symbol;
+declare const privateSystemArchiveExportRehydrationBrand: unique symbol;
 declare const privatePortableStagedCleanupPreparationBrand: unique symbol;
 declare const privatePortableExportCleanupPreparationBrand: unique symbol;
 
@@ -79,6 +80,18 @@ export type PrivatePortableExportRehydration = Readonly<{
   claim: DurableFilesystemRecoveryClaim;
   descriptor: PrivateStorageDescriptor;
   [privatePortableExportRehydrationBrand]: true;
+}>;
+
+export type PrivateSystemArchiveExportRehydration = Readonly<{
+  identity: Readonly<{
+    ownerUserId: string;
+    jobId: string;
+    contentType: "application/zip";
+  }>;
+  operation: AttachedFilesystemOperation;
+  claim: DurableFilesystemRecoveryClaim;
+  descriptor: PrivateStorageDescriptor;
+  [privateSystemArchiveExportRehydrationBrand]: true;
 }>;
 
 export type PrivatePortableStagedCleanupPreparation = Readonly<{
@@ -144,6 +157,11 @@ export interface PrivatePortableRepositoryPort {
     retrieval: PortableArchiveExportRetrieval,
     request: PrivatePortableClaimRequest,
   ): Promise<PrivatePortableExportRehydration | null>;
+  rehydrateSystemArchiveExport?(
+    owner: ImportOwnerScope,
+    jobId: string,
+    request: PrivatePortableClaimRequest,
+  ): Promise<PrivateSystemArchiveExportRehydration | null>;
   prepareExportCleanup(
     database: DurableFilesystemTransactionContext,
     rehydration: PrivatePortableExportRehydration,
@@ -235,12 +253,14 @@ function requireFreshClaim(
 }
 
 function requireExportScope(scope: PortableExportScope): void {
-  const baseIsInvalid = !nonBlank(scope.ownerUserId)
-    || !nonBlank(scope.worldId)
-    || !nonBlank(scope.worldVersionId);
-  const kindIsInvalid = !["campaign_zip", "world_json"].includes(scope.exportKind)
-    || (scope.exportKind === "campaign_zip" && (scope.campaignId === null || !nonBlank(scope.campaignId)))
-    || (scope.exportKind === "world_json" && scope.campaignId !== null);
+  const baseIsInvalid = !nonBlank(scope.ownerUserId);
+  const worldScoped = scope.worldId !== null && nonBlank(scope.worldId)
+    && scope.worldVersionId !== null && nonBlank(scope.worldVersionId);
+  const kindIsInvalid = !["campaign_zip", "world_json", "system_zip"].includes(scope.exportKind)
+    || (scope.exportKind === "campaign_zip" && (!worldScoped || scope.campaignId === null || !nonBlank(scope.campaignId)))
+    || (scope.exportKind === "world_json" && (!worldScoped || scope.campaignId !== null))
+    || (scope.exportKind === "system_zip"
+      && (scope.campaignId !== null || scope.worldId !== null || scope.worldVersionId !== null));
   if (baseIsInvalid || kindIsInvalid) throw new Error("portable_export_scope_invalid");
 }
 
@@ -311,6 +331,7 @@ export function bindPrivatePortableExportRehydration(
 ): PrivatePortableExportRehydration {
   requireExportScope(identity.exportScope);
   const expectedContentType = identity.exportScope.exportKind === "campaign_zip"
+    || identity.exportScope.exportKind === "system_zip"
     ? "application/zip"
     : "application/json";
   if (!nonBlank(identity.retrieval) || identity.contentType !== expectedContentType) {
@@ -328,6 +349,27 @@ export function bindPrivatePortableExportRehydration(
     claim: snapshotClaim(claim),
     descriptor: snapshotDescriptor(descriptor)
   }) as PrivatePortableExportRehydration;
+}
+
+export function bindPrivateSystemArchiveExportRehydration(
+  identity: Readonly<{ ownerUserId: string; jobId: string; contentType: "application/zip" }>,
+  operation: AttachedFilesystemOperation,
+  claim: DurableFilesystemRecoveryClaim,
+  descriptor: PrivateStorageDescriptor,
+): PrivateSystemArchiveExportRehydration {
+  if (!nonBlank(identity.ownerUserId)
+    || !nonBlank(identity.jobId)
+    || identity.contentType !== "application/zip") {
+    throw new Error("system_archive_export_identity_invalid");
+  }
+  requireOperation(operation, identity.ownerUserId, "portable_export");
+  requireFreshClaim(operation, claim);
+  return Object.freeze({
+    identity: Object.freeze({ ...identity }),
+    operation: snapshotOperation(operation),
+    claim: snapshotClaim(claim),
+    descriptor: snapshotDescriptor(descriptor),
+  }) as PrivateSystemArchiveExportRehydration;
 }
 
 export function bindPrivatePortableStagedCleanupPreparation(

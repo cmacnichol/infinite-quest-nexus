@@ -39,6 +39,8 @@ function makeConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
     archiveStorageRoot: resolve("local-data/archives"),
     archivePreviewTtlSeconds: 1_800,
     systemArchiveArtifactTtlSeconds: 86_400,
+    systemArchiveUploadTtlSeconds: 86_400,
+    systemArchiveChunkBytes: 16_777_216,
     campaignArchiveLimits: {
       maxCompressedBytes: 2_147_483_648,
       maxUncompressedBytes: 21_474_836_480,
@@ -129,6 +131,171 @@ describe("API server security and CORS headers", () => {
         : [],
     }),
   } as unknown as DatabasePool;
+
+  it("keeps readiness available while System Import rejects domain mutations", async () => {
+    const gateClient = {
+      query: vi.fn(async (sql: string) => sql.includes("pg_try_advisory_lock_shared")
+        ? { rows: [{ acquired: false }] }
+        : { rows: [] }),
+      release: vi.fn(),
+    };
+    const pool = {
+      connect: vi.fn(async () => gateClient),
+      query: vi.fn(async (sql: string) => sql.includes("current_setting('server_version')")
+        ? { rows: [{ database_version: "17.2", vector_version: "0.8.0" }] }
+        : { rows: [] }),
+    } as unknown as DatabasePool;
+    const app = await buildServer(serverOptions({
+      config: makeConfig({ systemArchiveEnabled: true }),
+      pool,
+    }));
+
+    const mutation = await app.inject({
+      method: "POST",
+      url: "/api/v1/worlds",
+      payload: { title: "Blocked while importing" },
+    });
+    const readiness = await app.inject({ method: "GET", url: "/health/ready" });
+
+    expect(mutation.statusCode).toBe(503);
+    expect(mutation.json()).toMatchObject({ code: "system-import-in-progress" });
+    expect(readiness.statusCode).toBe(200);
+    expect(readiness.json()).toMatchObject({ status: "ready" });
+    await app.close();
+  });
+
+  it("constructs System Archive routes only when the capability is enabled", async () => {
+    const jobId = "22222222-2222-4222-8222-222222222222";
+    const getJob = vi.fn(async () => ({
+      id: jobId,
+      kind: "export" as const,
+      status: "queued" as const,
+      createdAt: "2026-08-25T12:00:00.000Z",
+      updatedAt: "2026-08-25T12:00:00.000Z",
+      report: null,
+    }));
+    const createApiSystemArchive = vi.fn(() => ({
+      application: {
+        enqueueExport: vi.fn(),
+        getJob,
+        cancelJob: vi.fn(),
+        createUpload: vi.fn(),
+        getUpload: vi.fn(),
+        cancelUpload: vi.fn(),
+        putChunk: vi.fn(),
+        completeUpload: vi.fn(),
+        previewImport: vi.fn(),
+        commitImport: vi.fn(),
+      },
+      downloads: { metadata: vi.fn(), open: vi.fn() },
+    } as never));
+
+    const disabled = await buildServer({
+      ...serverOptions({ config: makeConfig({ systemArchiveEnabled: false }), pool: mockPool }),
+      createApiSystemArchive,
+    });
+    expect((await disabled.inject({
+      method: "GET",
+      url: `/api/v1/system-exports/${jobId}`,
+    })).statusCode).toBe(404);
+    expect((await disabled.inject({ method: "GET", url: "/api/v1/meta" })).json())
+      .toMatchObject({ capabilities: { systemArchive: false } });
+    expect(createApiSystemArchive).not.toHaveBeenCalled();
+    await disabled.close();
+
+    const enabled = await buildServer({
+      ...serverOptions({ config: makeConfig({ systemArchiveEnabled: true }), pool: mockPool }),
+      createApiSystemArchive,
+    });
+    const response = await enabled.inject({
+      method: "GET",
+      url: `/api/v1/system-exports/${jobId}`,
+    });
+    expect(response.statusCode, response.body).toBe(200);
+    expect((await enabled.inject({ method: "GET", url: "/api/v1/meta" })).json())
+      .toMatchObject({ capabilities: { systemArchive: true } });
+    expect(createApiSystemArchive).toHaveBeenCalledOnce();
+    expect(getJob).toHaveBeenCalledWith({
+      ownerUserId: "11111111-1111-4111-8111-111111111111",
+      jobId,
+    });
+    await enabled.close();
+  });
+
+  it("exposes only sanitized System Archive server errors through the production envelope", async () => {
+    const operationJobId = "22222222-2222-4222-8222-222222222222";
+    const projectionJobId = "33333333-3333-4333-8333-333333333333";
+    const marker = "C:\\private\\story-secret-token.txt";
+    const getJob = vi.fn(async ({ jobId }: { jobId: string }) => {
+      if (jobId === operationJobId) {
+        throw Object.assign(new Error(marker), {
+          statusCode: 500,
+          code: "story-secret-token",
+          details: { rawPath: marker },
+        });
+      }
+      return {
+        id: marker,
+        kind: "export" as const,
+        status: "queued" as const,
+        createdAt: "2026-08-25T12:00:00.000Z",
+        updatedAt: "2026-08-25T12:00:00.000Z",
+        report: null,
+      };
+    });
+    const app = await buildServer({
+      ...serverOptions({
+        config: makeConfig({ systemArchiveEnabled: true }),
+        pool: mockPool,
+      }),
+      createApiSystemArchive: () => ({
+        application: {
+          enqueueExport: vi.fn(),
+          getJob,
+          cancelJob: vi.fn(),
+          createUpload: vi.fn(),
+          getUpload: vi.fn(),
+          cancelUpload: vi.fn(),
+          putChunk: vi.fn(),
+          completeUpload: vi.fn(),
+          previewImport: vi.fn(),
+          commitImport: vi.fn(),
+        },
+        downloads: { metadata: vi.fn(), open: vi.fn() },
+      } as never),
+    });
+
+    for (const expected of [
+      {
+        jobId: operationJobId,
+        code: "system-archive-operation-failed",
+        message: "System Archive operation failed.",
+      },
+      {
+        jobId: projectionJobId,
+        code: "system-archive-response-invalid",
+        message: "System Archive response failed validation.",
+      },
+    ]) {
+      const response = await app.inject({
+        method: "GET",
+        url: `/api/v1/system-exports/${expected.jobId}`,
+      });
+      const body = response.json();
+
+      expect(response.statusCode).toBe(500);
+      expect(body).toMatchObject({
+        error: "SystemArchiveError",
+        code: expected.code,
+        details: {},
+      });
+      expect(body.message).toBe(`${expected.message} Correlation ID: ${body.correlationId}.`);
+      expect(JSON.stringify(body)).not.toContain(marker);
+      expect(JSON.stringify(body)).not.toContain("story-secret-token");
+    }
+
+    await app.close();
+  });
 
   it("exposes public application metadata without querying the database", async () => {
     const config = makeConfig();

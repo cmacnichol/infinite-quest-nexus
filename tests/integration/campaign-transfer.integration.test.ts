@@ -4,7 +4,7 @@ import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../pac
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { campaignCreateSchema, worldContentSchema, worldCreateSchema, worldPublishSchema } from "../../packages/contracts/src/world-library.js";
 import { campaignTransferCommitRequestSchema, campaignTransferPreviewRequestSchema } from "../../packages/contracts/src/campaign-transfer.js";
-import { createCampaign, createWorld, previewCampaignWorldTransfer, publishWorld, transferCampaignWorld } from "../helpers/memory-aware-services.js";
+import { createCampaign, createWorld, previewCampaignWorldTransfer, publishWorld, rebuildCampaignMemories, transferCampaignWorld } from "../helpers/memory-aware-services.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -53,6 +53,8 @@ integration("cross-world campaign transfer", () => {
       selectedCharacterId: "source-hero"
     }));
     const ownerUserId = await initialOwnerId(pool);
+    const sourceCorrectionFactId = crypto.randomUUID();
+    const sourceCorrectionContent = "The transfer gate recognizes the copper seal.";
     const currentProfile = {
       name: "Transferred Hero",
       profile: {
@@ -92,8 +94,13 @@ integration("cross-world campaign transfer", () => {
       `INSERT INTO campaign_state_edits (
          owner_user_id, campaign_id, effective_turn_number, revision, state_snapshot_private, changed_fields
        ) VALUES ($1,$2,1,1,$3,'["scratchpad"]')`,
-      [ownerUserId, source.id, JSON.stringify({ scratchpad: "private", trackers: [], eventTriggers: [], pendingEventTriggers: [], rpgStats: [] })]
+      [ownerUserId, source.id, JSON.stringify({
+        scratchpad: "private", trackers: [], eventTriggers: [], pendingEventTriggers: [], rpgStats: [],
+        continuitySummary: "", openThreads: [],
+        canonicalFacts: [{ id: sourceCorrectionFactId, content: sourceCorrectionContent }]
+      })]
     );
+    await rebuildCampaignMemories(pool, source.id);
     const asset = await pool.query<{ id: string }>(
       `INSERT INTO assets (owner_user_id, campaign_id, turn_id, content_hash, storage_driver, storage_path, mime_type, byte_length)
        VALUES ($1,$2,$3,$4,'filesystem',$5,'image/png',4) RETURNING id`,
@@ -172,6 +179,18 @@ integration("cross-world campaign transfer", () => {
       cost_count: 0
     });
     expect(copied.rows[0]?.character_snapshot).toMatchObject({ id: "source-hero" });
+    const transferredCorrection = await pool.query<{
+      state_snapshot_private: { canonicalFacts?: Array<{ id: string; content: string }> };
+    }>(
+      `SELECT state_snapshot_private FROM campaign_state_edits
+        WHERE owner_user_id=$1 AND campaign_id=$2 AND revision=1`,
+      [ownerUserId, transferred.targetCampaignId]
+    );
+    expect(transferredCorrection.rows[0]?.state_snapshot_private.canonicalFacts).toEqual([
+      { id: expect.any(String), content: sourceCorrectionContent }
+    ]);
+    expect(transferredCorrection.rows[0]?.state_snapshot_private.canonicalFacts?.[0]?.id)
+      .not.toBe(sourceCorrectionFactId);
     expect(await pool.query(
       `SELECT revision, edit_source, next_profile
          FROM campaign_character_profile_edits WHERE campaign_id = $1`,

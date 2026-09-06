@@ -1,4 +1,4 @@
-import { initializeAppTheme, renderAppShell } from "./app-shell";
+import { mountAppShell } from "./app-shell-lifecycle";
 import {
   attachCreatedWorldCover as attachCreatedWorldCoverRequest,
   createWorld as createWorldRequest,
@@ -251,12 +251,11 @@ export function mountWorldCreationPage(
   root: HTMLElement,
   dependencies: WorldCreationPageDependencies = {}
 ): MountedPage {
-  renderAppShell(root, creationMarkup, "world-library");
-  const theme = initializeAppTheme(root);
+  const shell = mountAppShell(root, creationMarkup, "world-library");
   const document = root.ownerDocument;
   const view = document.defaultView;
   if (!view) {
-    theme.dispose();
+    shell.dispose();
     throw new Error("The World Creation interface could not be initialized.");
   }
   const pageView = view;
@@ -1569,7 +1568,7 @@ export function mountWorldCreationPage(
       root.removeEventListener("click", onRootClick);
       document.removeEventListener("keydown", onKeyDown);
       pageView.removeEventListener("pageshow", onPageShow);
-      theme.dispose();
+      shell.dispose();
     }
   };
 }

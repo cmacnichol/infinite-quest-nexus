@@ -25,6 +25,14 @@ Maintain separate deployment manifests where orchestrator behavior differs:
 - Optional `compose.override.yaml` for developer-only ports or mounts.
 - `deploy/swarm/stack.yaml` for replicated services, configs, secrets, health checks, placement, updates, and rollback policy.
 
+### System Archive validation topology
+
+The base Swarm stack deliberately sets `SYSTEM_ARCHIVE_ENABLED` to `false`, even when an environment variable has another value. Its API and worker replicas use node-local bind mounts and may be scheduled on different nodes, so enabling System Archive in that topology could leave durable transfer files visible to only one role.
+
+For a reviewed, non-production source-to-empty-destination validation drill only, render `deploy/swarm/stack.yaml` together with `deploy/swarm/system-archive-validation.override.yaml`. The override requires an explicit gate value and `SYSTEM_ARCHIVE_VALIDATION_NODE`; it places exactly one API and one worker replica on that hostname. Before deploying such a reviewed drill, ensure the named node has both `ASSET_STORAGE_ROOT` and `ARCHIVE_STORAGE_ROOT` host roots mounted with the required permissions. Returning to the base stack disables System Archive again.
+
+Do not use the validation override for multi-node production. A future multi-node enablement needs shared asset and archive storage mounted identically on every eligible API and worker node, not merely identical container path strings, plus separate explicit production approval. Root Compose enables System Archive by default through its environment expansion and does not have this split-role, node-local bind-mount topology.
+
 Compose credentials may come from an ignored local environment/secrets file with a committed redacted example. Swarm credentials must use Swarm secrets. The application should support file-based secret inputs so the same image can consume either mechanism without placing credentials in image layers or source control.
 
 ## Deployment and Operations
@@ -33,20 +41,40 @@ Swarm services must define health checks, resource expectations, restart behavio
 
 Compose and Swarm must use the same schema migrations, initial-user bootstrap, provider configuration, job semantics, and API contracts. Add deployment smoke tests that start the two-container Compose environment, wait for PostgreSQL and application readiness, verify migrations and initial-user ownership, and exercise one database-backed API operation. Validate the Swarm stack configuration separately even when CI cannot launch a full multi-node swarm.
 
+### Replacement Story UI build selection and rollback
+
+`VITE_UI_COMPONENTS` is a Docker **build argument** consumed while Vite compiles the replacement Story static bundle. It is not a runtime service setting: changing a container or server environment after image creation cannot switch the already-built bundle. The current application default remains native until separately approved release gates are complete.
+
+Build a native rollback image without starting a service, changing a database, or removing browser preference keys:
+
+```powershell
+docker build --build-arg VITE_UI_COMPONENTS=native -t infinitequest-nexus:ui-native .
+```
+
+For Compose image creation only:
+
+```powershell
+docker compose build --build-arg VITE_UI_COMPONENTS=native infinitequest-app
+```
+
+Both commands create images only. Deploying either image requires separate approval. A Swarm update must use a prebuilt, tested image; do not rely on a runtime environment value to choose the renderer.
+
 Use structured logs with correlation IDs for campaign, generation job, model request, and accepted turn. Record prompt size, retrieved-memory identifiers, context utilization, model and endpoint identity, recovery attempts, validation results, and latency without logging credentials, private reasoning, or unnecessary sensitive story content.
 
 Database migrations must be ordered, repeatable, reviewed, and safe for the deployed application version. Prefer backward-compatible expand/contract changes so rolling API replicas can coexist. Applied online migrations are automatic; destructive or downtime-requiring `.maintenance.sql` migrations must remain exceptional and require an explicit operator opt-in on an existing database. Back up authoritative database data and test restoration. Treat embeddings and summaries as rebuildable unless operational requirements later make their backup worthwhile.
 
 ## Chronicle chunked retrieval staged rollout
 
-Chunked Chronicle retrieval is an explicit campaign-level opt-in. Database migrations add only derived chunk, fencing, observability, and query-cache schema and jobs; they do not rewrite accepted turns or change a campaign's production retrieval implementation.
+New campaigns created from a world select `chunked_hybrid` with shadow comparison enabled. Eligible embedding providers trigger asynchronous indexing; until readiness is satisfied, production uses the complete legacy fallback. Existing campaign settings are preserved. Database migrations add derived chunk, fencing, observability, and query-cache schema and jobs without rewriting accepted turns.
+
+The staged procedure below applies when deliberately moving an existing legacy campaign to chunked retrieval. It is not the default creation workflow; see [retrieval modes](../nexus-guide/chronicle/retrieval-modes.md).
 
 Use this sequence:
 
 1. Back up the authoritative database and prove restoration. Deploy compatible API and worker code before enabling shadow comparison. Apply migrations `0072` through `0077` under the normal migration lock, then confirm both old and new replicas tolerate the expanded schema during any rolling overlap. All of these are ordinary online migrations; none carries the `.maintenance.sql` suffix, so none requires operator opt-in.
 
    Upgrading a database that already holds a chunk index is additive and does not rebuild it. `0076` narrows `embedding_skip_reason` to the closed sanitized set, which every previously written value already satisfies, and `0077` adds a nullable `processed_signature`. No turn, Chronicle memory, chunk, or vector is rewritten. Indexing is incremental, so the first job enqueued after the upgrade finds no parent needing work on an already-covered campaign. Two bounded one-time effects are expected. A job that was queued or running at upgrade time has no recorded prefix, so its durable cursor is cleared and it rescans from the first parent; because indexing is incremental this rescans rather than re-embeds, and parents already chunked at their current content are skipped. Separately, a job resumed with a capability fingerprint recorded before the batching default changed clears that campaign's chunk vectors and re-embeds them once, which is the existing behaviour for any capability change. The campaign continues on its complete legacy retrieval path while either completes. Older replicas tolerate the new schema during a rolling overlap because they only write values the new constraint accepts and ignore the added column.
-2. Leave every campaign on the default `legacy_hybrid` production implementation with shadow disabled. Enqueue `index_memory_chunks_v2` only after the compatible worker is live.
+2. For each existing campaign selected for this staged rollout, retain `legacy_hybrid` production selection and initially leave shadow disabled. Enqueue `index_memory_chunks_v2` only after the compatible worker is live.
 3. Monitor job leases, progress, provider health, fixed fallback codes, and compatible coverage. Wait for 100% terminal coverage: every current parent hash has at least one current `chronicle-chunk-v1` chunk in terminal `embedded` or sanitized `skipped` status, every current chunk is terminal, at least one current chunk is embedded, and the latest chunk job is completed or absent. A fully sanitized-skipped index uses the complete legacy path with the existing `chunk_index_not_ready` fallback; a partially ready campaign also continues through the complete legacy path.
 4. Establish the deterministic label-only legacy baseline, calibrate the generated production profile, and verify the final chunked result:
 
@@ -58,7 +86,7 @@ Use this sequence:
 
    Run these commands only against a dedicated non-production calibration database. Never point `TEST_DATABASE_URL` at a production or shared authoritative database: the fixture data is rolled back, but the evaluator applies pending migrations before opening that transaction. When `TEST_DATABASE_URL` is unset, the evaluator starts the repository's dedicated local test PostgreSQL service and uses its test database. Calibration evaluates the deterministic fixture corpus in a PostgreSQL transaction, writes a source profile only when requested, and does not update campaign configuration. Review recall, NDCG, duplicate rate, leakage, prompt-token efficiency, latency, and embedding-request gates before deploying a changed generated profile.
 5. Enable shadow comparison for a small set of ready campaigns while keeping their production implementation on `legacy_hybrid`. Compare lexical, legacy-hybrid, and proposed chunked ranks, fixed fallback codes, selection flags, latency, token estimates, and provider/cache cost identifiers. Shadow execution and telemetry are best-effort and never change production selection.
-6. After diagnostics meet the release criteria, explicitly set only the selected ready campaigns to `chunked_hybrid`. Recheck context previews, production selection flags, provider health, fallback rate, generation latency, and continuity. Do not automatically convert existing or newly created campaigns.
+6. After diagnostics meet the release criteria, explicitly set only the selected ready campaigns to `chunked_hybrid`. Recheck context previews, production selection flags, provider health, fallback rate, generation latency, and continuity. Do not bulk-convert other existing campaigns. New campaigns created from a world use the creation defaults described above.
 
 There is no reranking stage and no reranker provider dependency. The generated chunked profile combines semantic, lexical, entity, recency, and chronology ranks with weighted reciprocal-rank fusion, followed by deterministic duplicate and diversity controls.
 

@@ -1,6 +1,6 @@
 # Optional illustrations
 
-Illustrations are independent child jobs started only after narration has been validated and accepted.
+Illustrations run independently from story acceptance. Accepted-turn jobs start after commitment; with streaming segmentation, provisional images can begin while narration is still being generated. They are attached to the turn on acceptance. See the [illustration lifecycle](../concepts/illustration-pipeline.md#provisional-streaming-path-and-open-contract-conflict) for the unresolved validation-boundary conflict.
 
 ## What image generation can affect
 

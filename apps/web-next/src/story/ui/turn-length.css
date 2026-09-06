@@ -1,0 +1,98 @@
+.story-turn-length {
+  display: grid;
+  grid-template-columns: minmax(min(100%, 22rem), 1fr) auto;
+  align-items: end;
+  gap: 0.5rem;
+}
+
+.story-turn-length__select,
+.story-turn-length__staged {
+  min-width: 0;
+}
+
+main[data-ui-implementation="web-awesome"] .story-turn-length :is(
+  .story-turn-length__select,
+  .story-turn-length__staged
+)::part(combobox) {
+  min-height: var(--control-min-height);
+  border-radius: 0;
+  font: 600 0.75rem / 1.2 "Chakra Petch", sans-serif;
+  letter-spacing: 0.035em;
+}
+
+.story-turn-length__details,
+.story-turn-length__cancel,
+.story-turn-length__apply {
+  min-height: var(--control-min-height);
+  padding: 10px 16px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 0;
+  font: 600 0.78rem / 1.2 "Chakra Petch", sans-serif;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.story-turn-length__details,
+.story-turn-length__cancel {
+  color: var(--text-primary);
+  background: var(--surface-entry);
+}
+
+.story-turn-length__apply {
+  color: var(--text-on-accent);
+  background: var(--accent);
+}
+
+.story-turn-length__details:hover:not(:disabled),
+.story-turn-length__cancel:hover:not(:disabled) {
+  background: var(--surface-entry-hover);
+}
+
+.story-turn-length__apply:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.story-turn-length__details:focus-visible,
+.story-turn-length__cancel:focus-visible,
+.story-turn-length__apply:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.story-turn-length__details:disabled,
+.story-turn-length__cancel:disabled,
+.story-turn-length__apply:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.story-turn-length__dialog .app-dialog__body {
+  display: grid;
+  gap: 1rem;
+}
+
+.story-turn-length__explanation {
+  max-width: 52ch;
+  margin: 0;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+@media (max-width: 720px) {
+  .story-turn-length {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+  }
+
+  .story-turn-length__details {
+    min-width: var(--control-min-height);
+    padding-inline: 0.75rem;
+    font-size: 0;
+  }
+
+  .story-turn-length__details::after {
+    content: "Details";
+    font-size: 0.72rem;
+  }
+}

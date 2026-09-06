@@ -31,6 +31,36 @@ function managementFunctions<T extends Record<string, (...args: never[]) => unkn
 }
 
 describe("Nexus management UI contracts", () => {
+  it("unifies portable formats under Data Transfer without breaking legacy import deep links", () => {
+    expect(managementHtml).toContain('id="navDataTransfer" href="#data-transfer"');
+    expect(managementHtml).toContain('<strong>Data Transfer</strong>');
+    expect(managementHtml).toContain('id="data-transfer"');
+    expect(managementHtml).toContain('id="imports"');
+    expect(managementHtml).toContain("System Archive");
+    expect(managementHtml).toContain("World &amp; Campaign Archives");
+    expect(managementHtml).toContain("Legacy &amp; External Imports");
+    expect(managementHtml).toContain("Readable Story Exports");
+    expect(managementScript).toContain('hash === "#data-transfer" || hash === "#imports"');
+    expect(managementScript).toContain("capabilities?.systemArchive === true");
+    expect(managementScript).not.toContain("new JSZip");
+    expect(managementHtml).not.toContain('/nexus/jszip.min.js');
+  });
+
+  it("keeps System Archive preview and confirmation server-owned in legacy Nexus", () => {
+    const systemPanel = managementDocument.querySelector("#systemArchiveTransfer");
+    expect(systemPanel?.querySelector('input[type="file"][accept*=".zip"]')).not.toBeNull();
+    expect(systemPanel?.querySelector('[role="status"][aria-live="polite"]')).not.toBeNull();
+    expect(systemPanel?.textContent).toContain("Destination must be empty");
+    expect(systemPanel?.textContent).toContain("provider credentials");
+    expect(systemPanel?.textContent).toContain("non-cancellable");
+    expect(managementScript).toContain("/api/v1/system-imports/uploads");
+    expect(managementScript).toContain("/api/v1/system-imports/preview");
+    expect(managementScript).toContain("acknowledgeNonCancellableBoundary: true");
+    expect(managementScript).toContain("renderSystemImportReport");
+    expect(managementScript).toContain("cancelSystemArchiveOperation");
+    expect(managementScript).not.toMatch(/systemArchive[\s\S]{0,240}(JSZip|loadAsync|\.file\()/);
+  });
+
   it("organizes the selected legacy campaign into five accessible settings panels", () => {
     const rail = managementDocument.querySelector("#campaignSettingsRail");
     expect(rail?.getAttribute("role")).toBe("tablist");
@@ -696,7 +726,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain('storyLengthProfile: elements.campaignStoryLengthProfile.value');
     expect(managementScript).toContain('turnControlStyle: elements.newCampaignTurnControlStyle.value');
     expect(managementScript).toContain('turnControlStyle: elements.campaignTurnControlStyle.value');
-    expect(managementScript).toContain('promptLibraryView ? "prompt-library" : "worlds"');
+    expect(managementScript).toContain('dataTransferView ? "data-transfer" : "worlds"');
     expect(managementCss).toContain('body[data-management-view="dashboard"] .world-management');
     expect(managementCss).toContain('body[data-management-view="providers"] .world-management');
     expect(managementCss).toContain('body[data-management-view="worlds"] .provider-management');

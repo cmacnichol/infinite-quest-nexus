@@ -13,6 +13,9 @@
     } catch {}
   }
   const theme = explicit || (systemDark ? "dark" : "light");
-  document.documentElement.dataset.theme = theme;
-  document.documentElement.style.colorScheme = theme;
+  const root = document.documentElement;
+  root.dataset.theme = theme;
+  root.style.colorScheme = theme;
+  root.classList.toggle("wa-dark", theme === "dark");
+  root.classList.toggle("wa-light", theme === "light");
 })();

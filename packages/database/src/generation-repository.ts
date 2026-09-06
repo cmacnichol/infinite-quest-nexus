@@ -309,9 +309,10 @@ export function createPostgresGenerationCommandRepository(
           active_turn_number: number;
           text_provider_profile_id: string | null;
           story_length_profile: string;
+          story_context_budget_tokens: number;
           turn_control_style: string;
         }>(
-          `SELECT active_turn_number, text_provider_profile_id, story_length_profile, turn_control_style
+          `SELECT active_turn_number, text_provider_profile_id, story_length_profile, story_context_budget_tokens, turn_control_style
              FROM campaigns WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
           [scope.campaignId, scope.ownerUserId]
         );
@@ -320,11 +321,13 @@ export function createPostgresGenerationCommandRepository(
         const classificationId = await validateTurnInputMode(client, scope.ownerUserId, scope.campaignId, request, campaign.turn_control_style);
         const providerProfileId = await resolveTextProviderId(client, scope.ownerUserId, request.providerProfileId || campaign.text_provider_profile_id);
         if (!providerProfileId) throw new GenerationApplicationError("provider_required", { reason: "no_text_provider" });
-        const storyLengthProfile = storyLengthProfileFromUnknown(campaign.story_length_profile);
+        const storyLengthProfile = request.storyLengthProfileOverride
+          ?? storyLengthProfileFromUnknown(campaign.story_length_profile);
         const storyLength = storyLengthWordRange(storyLengthProfile);
         const promptSnapshot = await dependencies.resolvePromptSnapshot(client, scope.ownerUserId, scope.campaignId);
         const contextSnapshot = {
           ...request.context,
+          budgetTokens: campaign.story_context_budget_tokens,
           storyLengthProfile,
           narrationMinWords: storyLength.minWords,
           narrationMaxWords: storyLength.maxWords
@@ -380,9 +383,10 @@ export function createPostgresGenerationCommandRepository(
           active_turn_number: number;
           text_provider_profile_id: string | null;
           story_length_profile: string;
+          story_context_budget_tokens: number;
           turn_control_style: string;
         }>(
-          `SELECT active_turn_number, text_provider_profile_id, story_length_profile, turn_control_style
+          `SELECT active_turn_number, text_provider_profile_id, story_length_profile, story_context_budget_tokens, turn_control_style
              FROM campaigns WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
           [scope.campaignId, scope.ownerUserId]
         );
@@ -447,11 +451,14 @@ export function createPostgresGenerationCommandRepository(
           baseState = baseEdit.rows[0].state_snapshot_private || baseState;
           baseScratchpadSafeForPrompt = true;
         }
-        const storyLength = storyLengthWordRange(storyLengthProfileFromUnknown(campaign.story_length_profile));
+        const storyLengthProfile = request.storyLengthProfileOverride
+          ?? storyLengthProfileFromUnknown(campaign.story_length_profile);
+        const storyLength = storyLengthWordRange(storyLengthProfile);
         const promptSnapshot = await dependencies.resolvePromptSnapshot(client, scope.ownerUserId, scope.campaignId);
         const contextSnapshot = {
           ...request.context,
-          storyLengthProfile: storyLength.profile,
+          budgetTokens: campaign.story_context_budget_tokens,
+          storyLengthProfile,
           narrationMinWords: storyLength.minWords,
           narrationMaxWords: storyLength.maxWords
         };

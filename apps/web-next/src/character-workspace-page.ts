@@ -1,5 +1,5 @@
 import { playableCharacterSchema } from "../../../packages/contracts/src/world-library";
-import { initializeAppTheme, renderAppShell } from "./app-shell";
+import { mountAppShell } from "./app-shell-lifecycle";
 import {
   generateCharacterPreview as generateCharacterPreviewRequest,
   loadCharacterGenerationProgress as loadCharacterGenerationProgressRequest
@@ -130,14 +130,12 @@ export function mountCharacterWorkspacePage(
   const session = sessionStore?.load(sessionKey) ?? null;
   const returnPath = sessionStore?.returnPath(sessionKey) ?? session?.parentRoute ?? null;
   if (!session) {
-    renderAppShell(root, unavailableMarkup(returnPath), "world-library");
-    const theme = initializeAppTheme(root);
-    return { dispose: () => theme.dispose() };
+    const shell = mountAppShell(root, unavailableMarkup(returnPath), "world-library");
+    return { dispose: () => shell.dispose() };
   }
 
   const activeSession = session;
-  renderAppShell(root, workspaceMarkup(activeSession.parentRoute), "world-library");
-  const theme = initializeAppTheme(root);
+  const shell = mountAppShell(root, workspaceMarkup(activeSession.parentRoute), "world-library");
   const canvas = required<HTMLElement>(root, "[data-character-canvas]");
   const stageButtons = [...root.querySelectorAll<HTMLButtonElement>("[data-character-stage]")];
   const dialog = required<HTMLDialogElement>(root, ".character-prompt-dialog");
@@ -741,7 +739,7 @@ export function mountCharacterWorkspacePage(
       document.removeEventListener("focusin", onDocumentFocusIn);
       stopGeneration();
       clearDirty();
-      theme.dispose();
+      shell.dispose();
     }
   };
 }

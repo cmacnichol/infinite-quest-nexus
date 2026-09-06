@@ -4,11 +4,24 @@ Architecture decision records (ADRs) preserve consequential design decisions and
 
 See also [Repository Overview](./repository-overview.md) for project-goal/naming/target-architecture/repo-structure context (moved out of `AGENTS.md` on 2026-08-01), [../runbooks/deployment.md](../runbooks/deployment.md) for the Compose/Swarm deployment runbook, and [../workflows/testing.md](../workflows/testing.md) for the detailed test matrix.
 
+## Cross-cutting guidance
+
+- [Identity and ownership, including deferred OIDC design](../concepts/identity-and-ownership.md)
+- [Scene context and mechanics: pending review](./scene-context-mechanics-review.md)
+
 ## Persistence, jobs, and migrations
 
 - [ADR 0001: PostgreSQL owns campaigns and Chronicle memory](./0001-postgresql-chronicle.md)
 - [ADR 0002: PostgreSQL provides the initial durable worker queue](./0002-postgresql-worker-jobs.md)
 - [ADR 0009: Automatic coordinated schema migrations](./0009-automatic-schema-migrations.md)
+- [ADR 0030: Separate System Archives from disaster recovery](./0030-separate-system-archives-from-disaster-recovery.md)
+- [ADR 0031: Import System Archives only into empty destinations](./0031-empty-destination-system-imports.md)
+- [ADR 0032: System Archives preserve portable authority and original assets](./0032-system-archives-preserve-portable-authority.md)
+- [ADR 0033: System Archives use versioned deterministic logical contracts](./0033-versioned-deterministic-system-archives.md)
+- [ADR 0034: System transfers are durable, staged, and auditable](./0034-durable-staged-system-transfers.md)
+- [ADR 0035: Unify portable data transfer without removing specialized formats](./0035-unified-data-transfer-experience.md)
+- [ADR 0036: Disaster recovery is an operator-managed isolated restore](./0036-operator-managed-disaster-recovery.md)
+- [ADR 0037: Every persisted domain has an explicit portability classification](./0037-exhaustive-portability-classification.md)
 
 ## Story Engine and Chronicle
 
@@ -50,6 +63,10 @@ ADR 0014 supersedes only the backward-compatibility portions of ADR 0013 that al
 ## Client and application boundaries
 
 - [ADR 0028: Modular client and application boundaries](./0028-modular-client-and-application-boundaries.md)
+
+## Operating guidance
+
+The ADRs define the System Archive, specialized-format, and disaster-recovery boundaries. For the current default-off release status, exact environment variables, transfer procedure, acknowledgements, and recovery checklist, use [System data transfer](../nexus-guide/operations/system-data-transfer.md). For exact-installation recovery, use [Back up and restore Nexus](../operations/backup-restore.md).
 
 ## Reading historical decisions
 
