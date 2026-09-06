@@ -36,6 +36,7 @@ import type {
 import {
   bindPrivatePortableExportCleanupPreparation,
   bindPrivatePortableExportRehydration,
+  bindPrivateSystemArchiveExportRehydration,
   bindPrivatePortablePreviewRehydration,
   bindPrivatePortableStagedCleanupPreparation,
   bindPrivatePortableStagedRehydration,
@@ -46,7 +47,8 @@ import {
   type PrivatePortablePreviewRepositoryPort,
   type PrivatePortableRepositoryPort,
   type PrivatePortableStagedCleanupPreparation,
-  type PrivatePortableStagedRehydration
+  type PrivatePortableStagedRehydration,
+  type PrivateSystemArchiveExportRehydration
 } from "../../application/src/imports/private-portable-repository.js";
 import type { PortableExportScope as PrivatePortableExportScope } from "../../application/src/imports/private-portable-authority.js";
 import {
@@ -143,10 +145,10 @@ type PortableExportAuthorityRow = Readonly<{
   artifact_owner_user_id: string;
   retrieval_token_hash: string;
   filesystem_operation_id: string;
-  export_kind: "campaign_zip" | "world_json";
+  export_kind: "campaign_zip" | "world_json" | "system_zip";
   campaign_id: string | null;
-  world_id: string;
-  world_version_id: string;
+  world_id: string | null;
+  world_version_id: string | null;
   content_type: "application/zip" | "application/json";
   status: "ready" | "consumed" | "expired" | "failed" | "cleanup_pending" | "cleaned";
   artifact_content_hash: string;
@@ -1297,7 +1299,8 @@ async function lockedExportAuthority(
        FROM portable_export_artifacts
       WHERE id=$1 AND owner_user_id=$2 AND filesystem_operation_id=$3
         AND export_kind=$4 AND campaign_id IS NOT DISTINCT FROM $5::uuid
-        AND world_id=$6 AND world_version_id=$7
+        AND world_id IS NOT DISTINCT FROM $6::uuid
+        AND world_version_id IS NOT DISTINCT FROM $7::uuid
         AND ($8::text IS NULL OR retrieval_token_hash=$8)
       FOR UPDATE`,
     [
@@ -1314,7 +1317,7 @@ async function lockedExportAuthority(
   await databaseClock(client);
   const row = selected.rows[0] ?? null;
   if (!row) return null;
-  const expectedContentType = row.export_kind === "campaign_zip"
+  const expectedContentType = row.export_kind === "campaign_zip" || row.export_kind === "system_zip"
     ? "application/zip"
     : "application/json";
   return row.content_type === expectedContentType ? row : null;
@@ -1445,7 +1448,8 @@ async function rehydrateExportArtifact(
          FROM portable_export_artifacts
         WHERE owner_user_id=$1 AND retrieval_token_hash=$2
           AND export_kind=$3 AND campaign_id IS NOT DISTINCT FROM $4::uuid
-          AND world_id=$5 AND world_version_id=$6
+          AND world_id IS NOT DISTINCT FROM $5::uuid
+          AND world_version_id IS NOT DISTINCT FROM $6::uuid
         LIMIT 1`,
       [scope.ownerUserId, bearerHash, scope.exportKind, scope.campaignId, scope.worldId, scope.worldVersionId]
     );
@@ -1471,6 +1475,63 @@ async function rehydrateExportArtifact(
       portableOperation(claimed),
       portableClaim(claimed),
       delivery,
+    );
+  });
+}
+
+async function rehydrateSystemArchiveExport(
+  pool: DatabasePool,
+  owner: ImportOwnerScope,
+  jobId: string,
+  request: Readonly<{ leaseOwner: string; leaseSeconds: number }>,
+): Promise<PrivateSystemArchiveExportRehydration | null> {
+  requirePortableClaimRequest(request);
+  const scope: PortableExportScope = {
+    ownerUserId: owner.ownerUserId,
+    exportKind: "system_zip",
+    campaignId: null,
+    worldId: null,
+    worldVersionId: null,
+  };
+  return withTransaction(pool, async (client) => {
+    const candidate = await client.query<{ artifact_id: string; filesystem_operation_id: string }>(
+      `SELECT artifact.id AS artifact_id,artifact.filesystem_operation_id
+         FROM system_archive_jobs job
+         JOIN portable_export_artifacts artifact
+           ON artifact.id=job.export_artifact_id
+          AND artifact.owner_user_id=job.owner_user_id
+        WHERE job.id=$1 AND job.owner_user_id=$2
+          AND job.kind='export' AND job.status='published'
+          AND artifact.export_kind='system_zip'
+          AND artifact.campaign_id IS NULL
+          AND artifact.world_id IS NULL
+          AND artifact.world_version_id IS NULL
+          AND artifact.status='ready'
+          AND artifact.expires_at>clock_timestamp()
+        LIMIT 1`,
+      [jobId, owner.ownerUserId],
+    );
+    const identity = candidate.rows[0];
+    if (!identity) return null;
+    const operation = await lockedPortableOperation(client, identity.filesystem_operation_id);
+    if (!operation
+      || operation.owner_user_id !== owner.ownerUserId
+      || operation.purpose !== "portable_export"
+      || !operation.operation_scope_hash
+      || !(operation.lifecycle === "attached" || operation.lifecycle === "finalized")) return null;
+    const artifact = await lockedExportAuthority(client, identity.artifact_id, scope, operation.id);
+    if (!artifact || artifact.status !== "ready" || artifact.content_type !== "application/zip") return null;
+    const rows = await portableDescriptorRows(client, operation.id);
+    const descriptors = portableCleanupDescriptors(rows, artifact.artifact_content_hash, artifact.artifact_byte_length);
+    const currentTime = await lockPortablePhysicalPaths(client, descriptors.map((value) => value.relativePath));
+    if (currentTime >= operation.expires_at || currentTime >= artifact.artifact_expires_at) return null;
+    const claimed = await issuePortableClaim(client, operation, artifact.artifact_expires_at, request);
+    if (!claimed) return null;
+    return bindPrivateSystemArchiveExportRehydration(
+      { ownerUserId: owner.ownerUserId, jobId, contentType: "application/zip" },
+      portableOperation(claimed),
+      portableClaim(claimed),
+      descriptors[descriptors.length - 1]!,
     );
   });
 }
@@ -2545,7 +2606,8 @@ async function retrieveExportArtifact(
           AND descriptor.descriptor_role='delivery'
         WHERE artifact.owner_user_id=$1 AND artifact.retrieval_token_hash=$2
           AND artifact.export_kind=$3 AND artifact.campaign_id IS NOT DISTINCT FROM $4::uuid
-          AND artifact.world_id=$5 AND artifact.world_version_id=$6
+          AND artifact.world_id IS NOT DISTINCT FROM $5::uuid
+          AND artifact.world_version_id IS NOT DISTINCT FROM $6::uuid
           AND artifact.status='ready' AND artifact.expires_at > now()
           AND operation.lifecycle IN ('attached','finalized')
         LIMIT 1`,
@@ -2626,6 +2688,9 @@ export function createPostgresImportRepository(pool: DatabasePool): PostgresPort
     },
     rehydrateExportArtifact(scope, retrieval, request) {
       return safeRepositoryCall(() => rehydrateExportArtifact(pool, scope, retrieval, request));
+    },
+    rehydrateSystemArchiveExport(owner, jobId, request) {
+      return safeRepositoryCall(() => rehydrateSystemArchiveExport(pool, owner, jobId, request));
     },
     prepareExportCleanup(database, rehydration) {
       return safeRepositoryCall(() => prepareExportCleanup(database, rehydration));

@@ -4,10 +4,12 @@
 
 | Implementation | Behavior |
 | --- | --- |
-| Legacy hybrid | Default. Uses the established memory-level lexical, entity, semantic, recency, and chronology path. Chronological coverage is a deterministic evenly-spaced sample of at most 32 memories, so a long campaign does not fill the prompt with every past turn and crowd out relevance-selected entries. |
-| Chunked hybrid | Explicit opt-in. Uses current deterministic chunks, the generated weighted reciprocal-rank-fusion profile, and deterministic diversity limits. It falls back to the complete legacy path unless the chunk index meets the readiness gate. |
+| Legacy hybrid | Uses the established memory-level lexical, entity, semantic, recency, and chronology path. Chronological coverage is a deterministic evenly-spaced sample of at most 32 memories, so a long campaign does not fill the prompt with every past turn and crowd out relevance-selected entries. |
+| Chunked hybrid | Default for new campaigns created from a world. Uses current deterministic chunks, the generated weighted reciprocal-rank-fusion profile, and deterministic diversity limits. It falls back to the complete legacy path unless the chunk index meets the readiness gate. |
 
-Enabling **Shadow comparison** calculates lexical, legacy-hybrid, and proposed chunked results for diagnostics while legacy or chunked production selection continues independently. Shadow comparison never changes production selection. Use it only on selected campaigns after compatible code and the derived chunk schema have been deployed.
+Enabling **Shadow comparison** calculates lexical, legacy-hybrid, and proposed chunked results for diagnostics while legacy or chunked production selection continues independently. Shadow comparison never changes production selection. It is enabled by default for new campaigns created from a world; existing campaign settings are unchanged.
+
+Campaign creation automatically queues chunk indexing alongside legacy embedding work when an eligible embedding provider is available. Indexing runs asynchronously, and a new campaign with no accepted memories continues to use the safe fallback until its index is ready. Without a provider, the retrieval defaults are still saved, but Semantic Retrieval remains off and indexing is deferred. Configure an embedding provider and use **Save & index** to enable it later.
 
 Chunked retrieval is eligible at 100% terminal coverage: every current parent has a terminal current-protocol chunk, every current chunk is terminal, at least one current chunk is embedded, and the latest chunk job is completed or absent. A fully sanitized-skipped index uses the complete legacy path with the existing `chunk_index_not_ready` fallback. Available ranks are combined by weighted reciprocal-rank fusion only after the readiness gate, followed by deterministic duplicate and diversity controls. There is no reranking stage or separate reranker provider.
 

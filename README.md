@@ -1,8 +1,9 @@
+![AI Assisted](https://img.shields.io/badge/AI-Assisted-blueviolet)
+
 # Infinite Quest Nexus
 
 [![CI](https://github.com/cmacnichol/infinite-quest-nexus/actions/workflows/ci.yml/badge.svg)](https://github.com/cmacnichol/infinite-quest-nexus/actions/workflows/ci.yml)
 [![Documentation](https://github.com/cmacnichol/infinite-quest-nexus/actions/workflows/docs.yml/badge.svg)](https://github.com/cmacnichol/infinite-quest-nexus/actions/workflows/docs.yml)
-[![AI Assisted](https://img.shields.io/badge/AI-Assisted-7c3aed?style=flat-square)](#ai-assisted-development)
 
 Infinite Quest Nexus is a self-hosted platform for creating reusable, versioned story worlds and running persistent AI-assisted campaigns. PostgreSQL preserves worlds, immutable world versions, campaigns, accepted turns, state, and Chronicle memory independently of a browser session or model context window.
 
@@ -67,7 +68,7 @@ docker compose down
 ```
 
 > [!WARNING]
-> `docker compose down --volumes` permanently removes both the local PostgreSQL data and generated asset volumes unless they were backed up separately.
+> `docker compose down --volumes` permanently removes the local PostgreSQL, generated asset, archive, and encryption-key volumes. Preserve a verified Recovery Set, including the original encryption key, before resetting.
 
 ## Documentation
 
@@ -90,7 +91,7 @@ Maintainers can follow the [GitHub Pages publishing guide](docs/contributing/git
 
 ## Development
 
-Source-level development requires Node.js 22.13 or newer and pnpm 11.14.0.
+Source-level development requires Node.js 22.13 or newer and pnpm 11.24.0.
 
 ```powershell
 pnpm install --frozen-lockfile
@@ -105,6 +106,8 @@ UI and proxies `/api`, `/health`, and the required application asset paths to
 Fastify, preserving same-origin browser behavior.
 
 Integration tests automatically provision a dedicated local PostgreSQL 18/pgvector container through Docker Engine. The generated test-only credentials remain in the ignored `.env.test.local` file. See [the integration test database guide](docs/contributing/integration-test-database.md) for the local endpoint, inspection command, and targeted reset procedure. The application and documentation have separate CI build checks.
+
+When this checkout contains nested worktrees, use `pnpm test:unit --exclude '**/.worktrees/**' --exclude '**/.codex/**'` for the root unit suite, then `pnpm test:integration` for isolated database coverage. The unmodified unit script can discover tests in other worktrees. See [selecting and reporting checks](docs/workflows/testing.md#selecting-and-reporting-checks).
 
 The active code is organized under:
 

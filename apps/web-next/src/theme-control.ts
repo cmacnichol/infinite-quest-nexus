@@ -72,7 +72,9 @@ export function initializeThemeControl(
 
   return {
     current: () => controller.current(),
+    set: (theme: Theme) => controller.set(theme),
     toggle: () => controller.toggle(),
+    subscribe: (listener: (theme: Theme) => void) => controller.subscribe(listener),
     dispose: () => {
       if (disposed) return;
       disposed = true;

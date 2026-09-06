@@ -1,4 +1,4 @@
-import { initializeAppTheme, renderAppShell } from "./app-shell";
+import { mountAppShell } from "./app-shell-lifecycle";
 import { worldCreationPath } from "./world-creation-model";
 import {
   filterWorlds,
@@ -70,12 +70,11 @@ export function mountWorldLibraryPage(
   root: HTMLElement,
   dependencies: WorldLibraryPageDependencies = {}
 ): MountedPage {
-  renderAppShell(root, libraryMarkup, "world-library");
-  const theme = initializeAppTheme(root);
+  const shell = mountAppShell(root, libraryMarkup, "world-library");
   const document = root.ownerDocument;
   const view = document.defaultView;
   if (!view) {
-    theme.dispose();
+    shell.dispose();
     throw new Error("The World Library interface could not be initialized.");
   }
   const pageView = view;
@@ -234,7 +233,7 @@ export function mountWorldLibraryPage(
       controller.abort(new DOMException("World Library closed", "AbortError"));
       searchInput.removeEventListener("input", onSearch);
       document.removeEventListener("keydown", onKeyDown);
-      theme.dispose();
+      shell.dispose();
     }
   };
 }

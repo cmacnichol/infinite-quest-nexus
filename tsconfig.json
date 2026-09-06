@@ -24,6 +24,8 @@
     "packages/client-core",
     "packages/client-web",
     "tests/fixtures/client-boundaries",
+    "tests/fixtures/quiet-leaf-story.ts",
+    "tests/ui",
     "tests/unit/web-next-*.test.ts"
   ]
 }

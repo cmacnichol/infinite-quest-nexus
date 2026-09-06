@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { constants as filesystemConstants } from "node:fs";
 import { lstat, mkdir, open, unlink, type FileHandle } from "node:fs/promises";
 import { isAbsolute } from "node:path";
+import { performance } from "node:perf_hooks";
 import type {
   PrivateBoundedStreamLimits,
   PrivateBoundedStreamSession,
@@ -14,6 +15,7 @@ import type {
 export { bindLegacyPathV1PreviewDescriptor } from "../../../packages/application/src/assets/private-secure-storage.js";
 import type {
   DurableFilesystemJournalPort,
+  DurableFilesystemRecoveryClaim,
   DurableFilesystemRecoveryRecord,
   DurableFilesystemTransactionContext,
   PrivateStorageDescriptor,
@@ -67,6 +69,7 @@ import type {
   PortablePreviewHandle,
   PortableStagedInput
 } from "../../../packages/application/src/imports/types.js";
+import type { SystemArchivePrivateStorageRepositoryPort } from "../../../packages/application/src/system-archives/private-storage.js";
 
 const READ_FLAGS = filesystemConstants.O_RDONLY | filesystemConstants.O_NOFOLLOW;
 const DIRECTORY_FLAGS = READ_FLAGS | filesystemConstants.O_DIRECTORY;
@@ -74,6 +77,38 @@ const CREATE_FLAGS = filesystemConstants.O_WRONLY
   | filesystemConstants.O_CREAT
   | filesystemConstants.O_EXCL
   | filesystemConstants.O_NOFOLLOW;
+const UPDATE_FLAGS = filesystemConstants.O_RDWR | filesystemConstants.O_NOFOLLOW;
+// Do not begin a read at the database/reaper boundary. The claim is the last
+// durable authority known locally, so a stalled renewal must fail closed.
+const PORTABLE_READ_LEASE_SAFETY_MARGIN_MILLISECONDS = 50;
+
+/**
+ * Resolves an ambiguous metadata write before any physical compensation. A
+ * reconciliation failure is itself ambiguous and therefore deliberately
+ * preserves bytes; compensation is safe only after an authoritative miss.
+ */
+export async function persistSystemArchiveChunkWithReconciliation<Result>(
+  persist: () => Promise<Result>,
+  reconcile: () => Promise<Result | null>,
+  compensate: () => Promise<void>,
+): Promise<Result> {
+  try {
+    return await persist();
+  } catch (persistenceError) {
+    let durable: Result | null;
+    try {
+      durable = await reconcile();
+    } catch (reconciliationError) {
+      throw Object.assign(new Error("system_archive_chunk_reconciliation_failed"), {
+        cause: reconciliationError,
+        persistenceError,
+      });
+    }
+    if (durable !== null) return durable;
+    await compensate();
+    throw persistenceError;
+  }
+}
 
 export interface SecureFilesystemTransactionRunner {
   run<Result>(
@@ -94,6 +129,7 @@ export type SecureFilesystemAdapterOptions = Readonly<{
   atomicPortable?: PrivateAtomicPortableIssuancePort;
   prewrite?: PrivatePrewriteNodeRepositoryPort;
   expiry?: PrivatePortableExpiryRecoveryPort;
+  systemArchiveStorage?: SystemArchivePrivateStorageRepositoryPort;
   /** Private recovery seam used to coordinate an in-process filesystem drain. */
   recoveryHooks?: Readonly<{
     beforePhysicalDelete?(input: Readonly<{
@@ -102,6 +138,15 @@ export type SecureFilesystemAdapterOptions = Readonly<{
     }>): Promise<void> | void;
   }>;
   transactions: SecureFilesystemTransactionRunner;
+}>;
+
+export type SystemArchiveExportStreamSession = Readonly<{
+  contentType: "application/zip";
+  byteLength: number;
+  totalByteLength: number;
+  sha256: string;
+  chunks: AsyncIterable<Uint8Array>;
+  finalize(reason: PrivateStreamTerminalReason): Promise<void>;
 }>;
 
 export type SecureFilesystemAdapter = Readonly<{
@@ -123,6 +168,61 @@ export type SecureFilesystemAdapter = Readonly<{
     operation: import("../../../packages/application/src/assets/private-storage-lifecycle.js").AttachedFilesystemOperation;
     claim: import("../../../packages/application/src/assets/private-storage-lifecycle.js").DurableFilesystemRecoveryClaim;
   }>>;
+  /** Internal bounded staging for generated portable artifacts whose exact size is known only after streaming. */
+  stagePortableScratch(input: Readonly<{
+    owner: ImportOwnerScope;
+    operationScopeId: string;
+    leaseOwner: string;
+    expiresAt: string;
+    maximumBytes: number;
+    source: AsyncIterable<Uint8Array> | Iterable<Uint8Array>;
+  }>): Promise<Readonly<{
+    stagedInput: PortableStagedInput;
+    operation: import("../../../packages/application/src/assets/private-storage-lifecycle.js").AttachedFilesystemOperation;
+    claim: import("../../../packages/application/src/assets/private-storage-lifecycle.js").DurableFilesystemRecoveryClaim;
+    byteLength: number;
+    contentHash: string;
+  }>>;
+  prepareSystemArchiveUpload(input: Readonly<{
+    ownerUserId: string;
+    operationScopeId: string;
+    leaseOwner: string;
+    expiresAt: string;
+  }>): Promise<Readonly<{
+    filesystemOperationId: string;
+    rollback(): Promise<void>;
+  }>>;
+  publishSystemArchiveUploadChunk<Result>(input: Readonly<{
+    ownerUserId: string;
+    uploadId: string;
+    filesystemOperationId: string;
+    leaseOwner: string;
+    leaseSeconds: number;
+    activitySeconds: number;
+    offset: number;
+    bytes: Uint8Array;
+    sha256: string;
+  }>, persist: () => Promise<Result>, reconcile: () => Promise<Result | null>): Promise<Result>;
+  assembleSystemArchiveUpload(input: Readonly<{
+    ownerUserId: string;
+    uploadId: string;
+    filesystemOperationId: string;
+    leaseOwner: string;
+    leaseSeconds: number;
+    activitySeconds: number;
+    byteLength: number;
+    sha256: string;
+  }>): Promise<Readonly<{
+    stagedInputId: string;
+    byteLength: number;
+    sha256: string;
+    rollback(): Promise<void>;
+  }>>;
+  discardPortableStagedInput(input: Readonly<{
+    owner: ImportOwnerScope;
+    stagedInput: PortableStagedInput;
+    claim: Readonly<{ leaseOwner: string; leaseSeconds: number }>;
+  }>): Promise<void>;
   publishPortableExport(input: Readonly<{
     exportScope: PortableExportScope;
     operationScopeId: string;
@@ -155,6 +255,14 @@ export type SecureFilesystemAdapter = Readonly<{
     claim: Readonly<{ leaseOwner: string; leaseSeconds: number }>;
     limits: PrivateBoundedStreamLimits;
   }>): Promise<PrivateBoundedStreamSession>;
+  openSystemArchiveExportSession(input: Readonly<{
+    owner: ImportOwnerScope;
+    jobId: string;
+    claim: Readonly<{ leaseOwner: string; leaseSeconds: number }>;
+    range: Readonly<{ start: number; end: number }>;
+    expectedSha256: string;
+    limits: PrivateBoundedStreamLimits;
+  }>): Promise<SystemArchiveExportStreamSession>;
   openAssetSession(input: Readonly<{
     scope: AssetScope;
     request: AssetDeliveryRequest;
@@ -370,6 +478,37 @@ async function writeExactContent(
   return hash.digest("hex");
 }
 
+async function writeBoundedContent(
+  handle: FileHandle,
+  source: AsyncIterable<Uint8Array> | Iterable<Uint8Array>,
+  maximumBytes: number,
+  expiresAt: string,
+): Promise<Readonly<{ contentHash: string; byteLength: number }>> {
+  if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 0) {
+    throw new Error("filesystem_length_invalid");
+  }
+  const hash = createHash("sha256");
+  let position = 0;
+  for await (const value of source) {
+    if (Date.now() >= Date.parse(expiresAt)) throw new Error("filesystem_write_expired");
+    const chunk = Buffer.from(value);
+    if (!Number.isSafeInteger(position + chunk.byteLength)
+      || position + chunk.byteLength > maximumBytes) {
+      throw new Error("filesystem_write_oversized");
+    }
+    let offset = 0;
+    while (offset < chunk.byteLength) {
+      const result = await handle.write(chunk, offset, chunk.byteLength - offset, position + offset);
+      if (result.bytesWritten <= 0) throw new Error("filesystem_write_partial");
+      offset += result.bytesWritten;
+    }
+    hash.update(chunk);
+    position += chunk.byteLength;
+  }
+  await handle.sync();
+  return Object.freeze({ contentHash: hash.digest("hex"), byteLength: position });
+}
+
 async function verifyContentAddressedFile(
   handle: FileHandle,
   relativePath: string,
@@ -490,6 +629,7 @@ function boundedReadSession(input: Readonly<{
   initialStat: BigIntStat;
   limits: PrivateBoundedStreamLimits;
   allowLegacyBase64Hash?: boolean;
+  authorityCurrent?: () => boolean;
   onClosed?: () => void;
   afterClose: (reason: PrivateStreamTerminalReason) => Promise<void>;
 }>): PrivateBoundedStreamSession {
@@ -520,6 +660,7 @@ function boundedReadSession(input: Readonly<{
   const throwIfTerminated = (): void => {
     if (terminalReason === "timeout") throw new Error("filesystem_stream_timeout");
     if (terminalReason) throw new Error("filesystem_stream_closed");
+    if (input.authorityCurrent?.() === false) throw new Error("filesystem_stream_lease_lost");
   };
   const timeoutMilliseconds = Math.min(
     2_147_483_647,
@@ -563,6 +704,7 @@ function boundedReadSession(input: Readonly<{
           legacyRemainder = Buffer.from(pending.subarray(completeLength));
         }
         position += bytesRead;
+        throwIfTerminated();
         yield Uint8Array.from(chunk);
       }
       throwIfTerminated();
@@ -612,6 +754,114 @@ function boundedReadSession(input: Readonly<{
   });
 }
 
+function boundedRangeReadSession(input: Readonly<{
+  handle: FileHandle;
+  descriptor: PrivateStorageDescriptor;
+  initialStat: BigIntStat;
+  range: Readonly<{ start: number; end: number }>;
+  limits: PrivateBoundedStreamLimits;
+  authorityCurrent(): boolean;
+  onClosed(): void;
+  afterClose(reason: PrivateStreamTerminalReason): Promise<void>;
+}>): SystemArchiveExportStreamSession {
+  requireLimits(input.limits, input.descriptor.byteLength);
+  if (!Number.isSafeInteger(input.range.start)
+    || !Number.isSafeInteger(input.range.end)
+    || input.range.start < 0
+    || input.range.end < input.range.start
+    || input.range.end >= input.descriptor.byteLength) {
+    throw new Error("system_archive_download_range_invalid");
+  }
+  let finalization: Promise<void> | undefined;
+  let terminalReason: PrivateStreamTerminalReason | undefined;
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  const finalize = (reason: PrivateStreamTerminalReason): Promise<void> => {
+    terminalReason ??= reason;
+    if (deadlineTimer) {
+      clearTimeout(deadlineTimer);
+      deadlineTimer = undefined;
+    }
+    finalization ??= (async () => {
+      let closeError: unknown;
+      try {
+        await input.handle.close();
+      } catch (error) {
+        closeError = error;
+      } finally {
+        input.onClosed();
+      }
+      await input.afterClose(terminalReason!);
+      if (closeError) throw closeError;
+    })();
+    return finalization;
+  };
+  const throwIfTerminated = (): void => {
+    if (terminalReason === "timeout") throw new Error("filesystem_stream_timeout");
+    if (terminalReason) throw new Error("filesystem_stream_closed");
+    if (!input.authorityCurrent()) throw new Error("filesystem_stream_lease_lost");
+  };
+  const timeoutMilliseconds = Math.min(
+    2_147_483_647,
+    Math.max(0, Date.parse(input.limits.deadlineAt) - Date.now()),
+  );
+  deadlineTimer = setTimeout(() => {
+    void finalize("timeout").catch(() => undefined);
+  }, timeoutMilliseconds);
+  deadlineTimer.unref?.();
+  const chunks = (async function* (): AsyncGenerator<Uint8Array> {
+    let reason: PrivateStreamTerminalReason = "abort";
+    let position = input.range.start;
+    try {
+      while (position <= input.range.end) {
+        throwIfTerminated();
+        if (Date.now() >= Date.parse(input.limits.deadlineAt)) {
+          reason = "timeout";
+          throw new Error("filesystem_stream_timeout");
+        }
+        const requested = Math.min(
+          input.limits.chunkBytes,
+          input.range.end - position + 1,
+        );
+        const buffer = Buffer.allocUnsafe(requested);
+        const { bytesRead } = await input.handle.read(buffer, 0, requested, position);
+        throwIfTerminated();
+        if (bytesRead !== requested) throw new Error("filesystem_stream_partial");
+        position += bytesRead;
+        yield Uint8Array.from(buffer.subarray(0, bytesRead));
+      }
+      const finalStat = await input.handle.stat({ bigint: true }) as BigIntStat;
+      throwIfTerminated();
+      const initial = statIdentity(input.initialStat);
+      const final = statIdentity(finalStat);
+      if (!finalStat.isFile()
+        || final.deviceId !== initial.deviceId
+        || final.fileId !== initial.fileId
+        || final.changeToken !== initial.changeToken
+        || final.byteLength !== input.descriptor.byteLength) {
+        throw new Error("filesystem_stream_identity_changed");
+      }
+      reason = "eof";
+    } catch (error) {
+      if (terminalReason === "timeout") {
+        reason = "timeout";
+        throw new Error("filesystem_stream_timeout");
+      }
+      if (reason !== "timeout") reason = "read_failure";
+      throw error;
+    } finally {
+      await finalize(reason);
+    }
+  })();
+  return Object.freeze({
+    contentType: "application/zip" as const,
+    byteLength: input.range.end - input.range.start + 1,
+    totalByteLength: input.descriptor.byteLength,
+    sha256: input.descriptor.contentHash,
+    chunks,
+    finalize,
+  });
+}
+
 export async function createSecureFilesystemAdapter(
   options: SecureFilesystemAdapterOptions,
 ): Promise<SecureFilesystemAdapter> {
@@ -628,6 +878,11 @@ export async function createSecureFilesystemAdapter(
   }
   const activeStreamHandles = new Set<FileHandle>();
   const activePortableHandles = new Map<string, Set<FileHandle>>();
+  type PortableReadLease = Readonly<{
+    current(): boolean;
+    stop(): Promise<void>;
+  }>;
+  const activePortableReadLeases = new Map<string, Set<PortableReadLease>>();
   const inFlightOpens = new Set<Promise<void>>();
   let closing = false;
   const requireAdapterOpen = (): void => {
@@ -665,7 +920,81 @@ export async function createSecureFilesystemAdapter(
       if (handles.size === 0) activePortableHandles.delete(operationId);
     };
   };
+  const registerPortableReadLease = (
+    operationId: string,
+    lease: PortableReadLease,
+  ): (() => void) => {
+    const leases = activePortableReadLeases.get(operationId) ?? new Set<PortableReadLease>();
+    leases.add(lease);
+    activePortableReadLeases.set(operationId, leases);
+    return () => {
+      leases.delete(lease);
+      if (leases.size === 0) activePortableReadLeases.delete(operationId);
+    };
+  };
+  const startPortableReadLease = async (
+    operationId: string,
+    initialClaim: DurableFilesystemRecoveryClaim,
+    leaseSeconds: number,
+  ): Promise<PortableReadLease> => {
+    if (!options.journal) throw new Error("portable_repository_unavailable");
+    // The immutable portable-content expiry remains the cleanup deadline. A
+    // database-backed operation lease is the restart-safe fence that proves a
+    // bounded reader is still active beyond that original deadline.
+    let claim = initialClaim;
+    let lost = false;
+    let stopped = false;
+    let monotonicLeaseDeadlineMilliseconds = Number.NEGATIVE_INFINITY;
+    let activeHeartbeat: Promise<void> | undefined;
+    let unregister = (): void => undefined;
+    const current = (): boolean => !lost
+      && !stopped
+      && performance.now() < monotonicLeaseDeadlineMilliseconds;
+    const pulse = (): Promise<void> => {
+      if (activeHeartbeat) return activeHeartbeat;
+      // PostgreSQL cannot grant this renewal before the request begins. A
+      // monotonic deadline derived from that lower bound therefore cannot
+      // outlive the database lease even when the host wall clock lags the DB.
+      const requestedAtMilliseconds = performance.now();
+      activeHeartbeat = options.journal!.heartbeatRecoveryClaim(claim, leaseSeconds)
+        .then((renewed) => {
+          if (!renewed) {
+            if (!stopped) lost = true;
+            return;
+          }
+          claim = renewed;
+          monotonicLeaseDeadlineMilliseconds = requestedAtMilliseconds
+            + leaseSeconds * 1_000
+            - PORTABLE_READ_LEASE_SAFETY_MARGIN_MILLISECONDS;
+        })
+        .catch(() => { if (!stopped) lost = true; })
+        .finally(() => { activeHeartbeat = undefined; });
+      return activeHeartbeat;
+    };
+    await pulse();
+    if (!current()) throw new Error("portable_staged_input_lease_lost");
+    const interval = setInterval(() => { void pulse(); }, Math.max(50, Math.floor(leaseSeconds * 333)));
+    interval.unref?.();
+    let stopPromise: Promise<void> | undefined;
+    const lease: PortableReadLease = Object.freeze({
+      current,
+      stop() {
+        stopPromise ??= (async () => {
+          stopped = true;
+          clearInterval(interval);
+          await activeHeartbeat;
+          unregister();
+        })();
+        return stopPromise;
+      }
+    });
+    unregister = registerPortableReadLease(operationId, lease);
+    return lease;
+  };
   const closePortableHandles = async (operationId: string): Promise<void> => {
+    const leases = activePortableReadLeases.get(operationId);
+    activePortableReadLeases.delete(operationId);
+    if (leases) await Promise.allSettled([...leases].map((lease) => lease.stop()));
     const handles = activePortableHandles.get(operationId);
     if (!handles) return;
     activePortableHandles.delete(operationId);
@@ -682,12 +1011,16 @@ export async function createSecureFilesystemAdapter(
     expiresAt: string;
     purpose: "portable_staging" | "portable_export";
     directory: "staging" | "exports";
-    byteLength: number;
+    byteLength?: number;
+    maximumBytes?: number;
     source: AsyncIterable<Uint8Array> | Iterable<Uint8Array>;
   }>) => {
     requireAdapterOpen();
     if (!options.journal || !options.prewrite || !options.candidates) {
       throw new Error("portable_publication_repository_unavailable");
+    }
+    if ((input.byteLength === undefined) === (input.maximumBytes === undefined)) {
+      throw new Error("filesystem_length_invalid");
     }
     const reserved = await options.journal.reserve(
       {
@@ -742,17 +1075,17 @@ export async function createSecureFilesystemAdapter(
         bindPrivatePrewriteNodeAuthority(operation, relativePath, nodeIdentity),
       );
       nodeAuthorityPersisted = true;
-      const contentHash = await writeExactContent(
-        handle,
-        input.source,
-        input.byteLength,
-        input.expiresAt,
-      );
+      const written = input.byteLength === undefined
+        ? await writeBoundedContent(handle, input.source, input.maximumBytes!, input.expiresAt)
+        : Object.freeze({
+          contentHash: await writeExactContent(handle, input.source, input.byteLength, input.expiresAt),
+          byteLength: input.byteLength,
+        });
       const value = descriptorFromStat(
         relativePath,
         await handle.stat({ bigint: true }) as BigIntStat,
-        contentHash,
-        input.byteLength,
+        written.contentHash,
+        written.byteLength,
       );
       await handle.close();
       handle = undefined;
@@ -770,6 +1103,8 @@ export async function createSecureFilesystemAdapter(
           value,
           reserved.claim,
         ),
+        byteLength: written.byteLength,
+        contentHash: written.contentHash,
         rollback
       };
     } catch (error) {
@@ -1114,6 +1449,299 @@ export async function createSecureFilesystemAdapter(
     return issued;
   };
 
+  const stagePortableScratch: SecureFilesystemAdapter["stagePortableScratch"] = async (input) => {
+    if (!options.atomicPortable || !options.journal) {
+      throw new Error("portable_publication_repository_unavailable");
+    }
+    const prepared = await preparePortableFile({
+      ownerUserId: input.owner.ownerUserId,
+      operationScopeId: input.operationScopeId,
+      leaseOwner: input.leaseOwner,
+      expiresAt: input.expiresAt,
+      purpose: "portable_staging",
+      directory: "staging",
+      maximumBytes: input.maximumBytes,
+      source: input.source
+    });
+    let issued;
+    try {
+      issued = await options.transactions.run((database) => options.atomicPortable!.issueStagedInput(
+        database,
+        bindPrivateAtomicStagedIssuance(input.owner, prepared.attachment),
+      ));
+    } catch (error) {
+      await prepared.rollback().catch(() => undefined);
+      throw error;
+    }
+    const finalized = await options.journal.finalizeAfterCommit(issued.operation, issued.claim);
+    if (!["finalized", "already_finalized"].includes(finalized.outcome)) {
+      throw new Error(`portable_staging_finalize_${finalized.outcome}`);
+    }
+    return Object.freeze({
+      ...issued,
+      byteLength: prepared.byteLength,
+      contentHash: prepared.contentHash,
+    });
+  };
+
+  const discardPortableStagedInput: SecureFilesystemAdapter["discardPortableStagedInput"] = (input) => trackOpen(async () => {
+    if (!options.portable) throw new Error("portable_repository_unavailable");
+    const rehydration = await options.portable.rehydrateStagedInput(
+      input.owner,
+      input.stagedInput,
+      input.claim,
+    );
+    if (!rehydration) return;
+    await closePortableHandles(rehydration.operation.operationId);
+    const preparation = await options.transactions.run(
+      (database) => options.portable!.prepareStagedCleanup(database, rehydration),
+    );
+    if (preparation.outcome === "already_cleaned") return;
+    if (preparation.outcome !== "cleanup_required") {
+      throw new Error(`portable_staging_${preparation.outcome}`);
+    }
+    for (const descriptor of preparation.descriptors) {
+      await identitySafeDelete(archiveRoot, descriptor);
+    }
+    const result = await options.transactions.run(
+      (database) => options.portable!.acknowledgeStagedCleanup(database, preparation),
+    );
+    if (!["cleaned", "already_cleaned"].includes(result.outcome)) {
+      throw new Error(`portable_staging_cleanup_${result.outcome}`);
+    }
+  });
+
+  const prepareSystemArchiveUpload: SecureFilesystemAdapter["prepareSystemArchiveUpload"] = async (input) => {
+    requireAdapterOpen();
+    if (!options.journal || !options.prewrite) {
+      throw new Error("system_archive_storage_repository_unavailable");
+    }
+    const reserved = await options.journal.reserve(
+      {
+        resourceKind: "portable",
+        ownerUserId: input.ownerUserId,
+        operationScopeId: input.operationScopeId,
+      },
+      { purpose: "portable_staging", leaseOwner: input.leaseOwner, expiresAt: input.expiresAt },
+    );
+    const operation = reserved.operation;
+    if (operation.resourceKind !== "portable"
+      || operation.ownerUserId !== input.ownerUserId
+      || operation.operationScopeId !== input.operationScopeId
+      || operation.purpose !== "portable_staging"
+      || operation.expiresAt !== input.expiresAt) {
+      throw new Error("system_archive_storage_reservation_mismatch");
+    }
+    const relativePath = `staging/${operation.operationId}.pending`;
+    let handle: FileHandle | undefined;
+    let identity: Readonly<{ deviceId: string; fileId: string }> | undefined;
+    let identityPersisted = false;
+    let rollbackPromise: Promise<void> | undefined;
+    const rollback = (): Promise<void> => {
+      rollbackPromise ??= (async () => {
+        const cleanup = await options.journal!.markCleanup(operation, reserved.claim, { cause: "rollback" });
+        if (cleanup.outcome !== "cleanup_pending" || !identity || !identityPersisted) return;
+        await identitySafeDeletePrewrite(archiveRoot, relativePath, identity);
+        const completed = await options.journal!.completeCleanup(operation, reserved.claim);
+        if (!["cleaned", "already_cleaned"].includes(completed.outcome)) {
+          throw new Error(`system_archive_storage_cleanup_${completed.outcome}`);
+        }
+      })();
+      return rollbackPromise;
+    };
+    try {
+      await ensureAnchoredDirectory(archiveRoot, "staging");
+      await options.prewrite.recordPrewriteTarget(
+        bindPrivatePrewriteTargetAuthority(operation, relativePath),
+      );
+      handle = await openAnchored(archiveRoot, relativePath, CREATE_FLAGS, 0o600);
+      const created = statIdentity(await handle.stat({ bigint: true }) as BigIntStat);
+      identity = Object.freeze({ deviceId: created.deviceId, fileId: created.fileId });
+      await options.prewrite.recordPrewriteNode(
+        bindPrivatePrewriteNodeAuthority(operation, relativePath, identity),
+      );
+      identityPersisted = true;
+      await handle.sync();
+      await handle.close();
+      handle = undefined;
+      return Object.freeze({ filesystemOperationId: operation.operationId, rollback });
+    } catch (error) {
+      await handle?.close().catch(() => undefined);
+      await rollback().catch(() => undefined);
+      throw error;
+    }
+  };
+
+  const publishSystemArchiveUploadChunk: SecureFilesystemAdapter["publishSystemArchiveUploadChunk"] = async (
+    input,
+    persist,
+    reconcile,
+  ) => {
+    requireAdapterOpen();
+    if (!options.systemArchiveStorage) throw new Error("system_archive_storage_repository_unavailable");
+    if (!Number.isSafeInteger(input.offset) || input.offset < 0
+      || input.bytes.byteLength < 1
+      || !Number.isSafeInteger(input.activitySeconds)
+      || input.activitySeconds < input.leaseSeconds
+      || createHash("sha256").update(input.bytes).digest("hex") !== input.sha256) {
+      throw new Error("system_archive_chunk_invalid");
+    }
+    return options.systemArchiveStorage.withUploadLock({
+      ownerUserId: input.ownerUserId,
+      uploadId: input.uploadId,
+      filesystemOperationId: input.filesystemOperationId,
+      leaseOwner: input.leaseOwner,
+      leaseSeconds: input.leaseSeconds,
+      activitySeconds: input.activitySeconds,
+    }, async (authority) => {
+      if (authority.state !== "assembling") throw new Error("system_archive_upload_already_staged");
+      if (!authority.leaseCurrent()) throw new Error("system_archive_storage_lease_lost");
+      const handle = await openAnchored(archiveRoot, authority.relativePath, UPDATE_FLAGS);
+      let originalSize = 0;
+      let previous = Buffer.alloc(0);
+      try {
+        const before = await handle.stat({ bigint: true }) as BigIntStat;
+        const beforeIdentity = statIdentity(before);
+        if (!before.isFile()
+          || beforeIdentity.deviceId !== authority.identity.deviceId
+          || beforeIdentity.fileId !== authority.identity.fileId) {
+          throw new Error("system_archive_upload_identity_mismatch");
+        }
+        originalSize = beforeIdentity.byteLength;
+        const overlap = Math.max(0, Math.min(input.bytes.byteLength, originalSize - input.offset));
+        if (overlap > 0) {
+          previous = Buffer.allocUnsafe(overlap);
+          const read = await handle.read(previous, 0, overlap, input.offset);
+          if (read.bytesRead !== overlap) throw new Error("system_archive_upload_read_partial");
+        }
+        let written = 0;
+        while (written < input.bytes.byteLength) {
+          const result = await handle.write(
+            input.bytes,
+            written,
+            input.bytes.byteLength - written,
+            input.offset + written,
+          );
+          if (result.bytesWritten <= 0) throw new Error("system_archive_upload_write_partial");
+          written += result.bytesWritten;
+        }
+        await handle.sync();
+        const after = statIdentity(await handle.stat({ bigint: true }) as BigIntStat);
+        if (after.deviceId !== authority.identity.deviceId || after.fileId !== authority.identity.fileId) {
+          throw new Error("system_archive_upload_identity_mismatch");
+        }
+        if (!authority.leaseCurrent()) throw new Error("system_archive_storage_lease_lost");
+        return await persistSystemArchiveChunkWithReconciliation(persist, reconcile, async () => {
+          let restored = 0;
+          while (restored < previous.byteLength) {
+            const result = await handle.write(
+              previous,
+              restored,
+              previous.byteLength - restored,
+              input.offset + restored,
+            );
+            if (result.bytesWritten <= 0) throw new Error("system_archive_upload_rollback_partial");
+            restored += result.bytesWritten;
+          }
+          await handle.truncate(originalSize);
+          await handle.sync();
+        });
+      } finally {
+        await handle.close();
+      }
+    });
+  };
+
+  const assembleSystemArchiveUpload: SecureFilesystemAdapter["assembleSystemArchiveUpload"] = async (input) => {
+    requireAdapterOpen();
+    if (!options.systemArchiveStorage || !options.candidates || !options.atomicPortable || !options.journal) {
+      throw new Error("system_archive_storage_repository_unavailable");
+    }
+    return options.systemArchiveStorage.withUploadLock({
+      ownerUserId: input.ownerUserId,
+      uploadId: input.uploadId,
+      filesystemOperationId: input.filesystemOperationId,
+      leaseOwner: input.leaseOwner,
+      leaseSeconds: input.leaseSeconds,
+      activitySeconds: input.activitySeconds,
+    }, async (authority) => {
+      if (authority.state === "staged") {
+        return Object.freeze({
+          stagedInputId: authority.stagedInputId,
+          byteLength: authority.descriptor.byteLength,
+          sha256: authority.descriptor.contentHash,
+          async rollback() {},
+        });
+      }
+      const handle = await openAnchored(archiveRoot, authority.relativePath);
+      let descriptor: PrivateStorageDescriptor;
+      try {
+        const initial = await handle.stat({ bigint: true }) as BigIntStat;
+        const initialIdentity = statIdentity(initial);
+        if (!initial.isFile()
+          || initialIdentity.deviceId !== authority.identity.deviceId
+          || initialIdentity.fileId !== authority.identity.fileId
+          || initialIdentity.byteLength !== input.byteLength) {
+          throw new Error("system_archive_upload_identity_mismatch");
+        }
+        const hash = createHash("sha256");
+        const buffer = Buffer.alloc(Math.min(64 * 1024, Math.max(1, input.byteLength)));
+        let position = 0;
+        while (position < input.byteLength) {
+          const requested = Math.min(buffer.byteLength, input.byteLength - position);
+          const read = await handle.read(buffer, 0, requested, position);
+          if (read.bytesRead !== requested) throw new Error("system_archive_upload_read_partial");
+          hash.update(buffer.subarray(0, read.bytesRead));
+          position += read.bytesRead;
+        }
+        const contentHash = hash.digest("hex");
+        if (contentHash !== input.sha256) throw new Error("system_archive_upload_hash_mismatch");
+        descriptor = descriptorFromStat(
+          authority.relativePath,
+          await handle.stat({ bigint: true }) as BigIntStat,
+          contentHash,
+          input.byteLength,
+        );
+      } finally {
+        await handle.close();
+      }
+      const candidate = await options.candidates!.issuePublicationCandidate(authority.operation, {
+        deliveryRelativePath: authority.relativePath,
+        cleanupDescriptors: [descriptor],
+      });
+      await options.candidates!.completePublicationCandidate(authority.operation, candidate, descriptor);
+      const settledClaim = await authority.settleLease();
+      const attachment = bindPrivateFilesystemCandidateAttachment(
+        authority.operation,
+        candidate,
+        descriptor,
+        settledClaim,
+      );
+      const issued = await options.transactions.run((database) => options.atomicPortable!.issueStagedInput(
+        database,
+        bindPrivateAtomicStagedIssuance({ ownerUserId: input.ownerUserId }, attachment),
+      ));
+      const finalized = await options.journal!.finalizeAfterCommit(issued.operation, issued.claim);
+      if (!["finalized", "already_finalized"].includes(finalized.outcome)) {
+        throw new Error(`system_archive_storage_finalize_${finalized.outcome}`);
+      }
+      const stagedInputId = await options.systemArchiveStorage!.stagedInputIdForOperation(
+        input.ownerUserId,
+        input.filesystemOperationId,
+      );
+      return Object.freeze({
+        stagedInputId,
+        byteLength: descriptor.byteLength,
+        sha256: descriptor.contentHash,
+        rollback: () => discardPortableStagedInput({
+          owner: { ownerUserId: input.ownerUserId },
+          stagedInput: issued.stagedInput,
+          claim: { leaseOwner: input.leaseOwner, leaseSeconds: input.leaseSeconds },
+        }),
+      });
+    });
+  };
+
   const publishPortableExport: SecureFilesystemAdapter["publishPortableExport"] = async (input) => {
     if (!options.atomicPortable || !options.journal) {
       throw new Error("portable_publication_repository_unavailable");
@@ -1146,16 +1774,22 @@ export async function createSecureFilesystemAdapter(
   };
 
   const openStagedInputSession: SecureFilesystemAdapter["openStagedInputSession"] = (input) => trackOpen(async () => {
-    if (!options.portable) throw new Error("portable_repository_unavailable");
+    if (!options.portable || !options.journal) throw new Error("portable_repository_unavailable");
     const rehydration = await options.portable.rehydrateStagedInput(
       input.owner,
       input.stagedInput,
       input.claim,
     );
     if (!rehydration) throw new Error("portable_staged_input_unavailable");
-    const handle = await openAnchored(archiveRoot, rehydration.descriptor.relativePath);
+    const readLease = await startPortableReadLease(
+      rehydration.operation.operationId,
+      rehydration.claim,
+      input.claim.leaseSeconds,
+    );
+    let handle: FileHandle | undefined;
     let unregister: () => void = () => undefined;
     try {
+      handle = await openAnchored(archiveRoot, rehydration.descriptor.relativePath);
       const initialStat = await handle.stat({ bigint: true }) as BigIntStat;
       requireDescriptorIdentity(initialStat, rehydration.descriptor);
       unregister = registerPortableHandle(rehydration.operation.operationId, handle);
@@ -1165,14 +1799,16 @@ export async function createSecureFilesystemAdapter(
         descriptor: rehydration.descriptor,
         initialStat,
         limits: input.limits,
+        authorityCurrent: readLease.current,
         onClosed: unregister,
         // Preview reads never consume or delete staging authority. Commit or
         // durable expiry/reaping owns that lifecycle separately.
-        afterClose: async () => undefined
+        afterClose: async () => readLease.stop()
       });
     } catch (error) {
       unregister();
-      await handle.close().catch(() => undefined);
+      await handle?.close().catch(() => undefined);
+      await readLease.stop();
       throw error;
     }
   });
@@ -1253,6 +1889,48 @@ export async function createSecureFilesystemAdapter(
       unregister();
       if (handle) await handle.close().catch(() => undefined);
       await acknowledge();
+      throw error;
+    }
+  });
+
+  const openSystemArchiveExportSession: SecureFilesystemAdapter["openSystemArchiveExportSession"] = (input) => trackOpen(async () => {
+    const rehydrate = options.portable?.rehydrateSystemArchiveExport;
+    if (!rehydrate) throw new Error("portable_repository_unavailable");
+    const rehydration = await rehydrate(
+      input.owner,
+      input.jobId,
+      input.claim,
+    );
+    if (!rehydration) throw new Error("system_archive_export_unavailable");
+    if (rehydration.descriptor.contentHash !== input.expectedSha256) {
+      throw new Error("system_archive_export_stale");
+    }
+    const readLease = await startPortableReadLease(
+      rehydration.operation.operationId,
+      rehydration.claim,
+      input.claim.leaseSeconds,
+    );
+    let handle: FileHandle | undefined;
+    let unregister: () => void = () => undefined;
+    try {
+      handle = await openAnchored(archiveRoot, rehydration.descriptor.relativePath);
+      const initialStat = await handle.stat({ bigint: true }) as BigIntStat;
+      requireDescriptorIdentity(initialStat, rehydration.descriptor);
+      unregister = registerPortableHandle(rehydration.operation.operationId, handle);
+      return boundedRangeReadSession({
+        handle,
+        descriptor: rehydration.descriptor,
+        initialStat,
+        range: input.range,
+        limits: input.limits,
+        authorityCurrent: readLease.current,
+        onClosed: unregister,
+        afterClose: async () => readLease.stop(),
+      });
+    } catch (error) {
+      unregister();
+      await handle?.close().catch(() => undefined);
+      await readLease.stop();
       throw error;
     }
   });
@@ -1528,10 +2206,16 @@ export async function createSecureFilesystemAdapter(
     discardPreparedAssetPublication,
     finalizeAssetPublication,
     stagePortableInput,
+    stagePortableScratch,
+    prepareSystemArchiveUpload,
+    publishSystemArchiveUploadChunk,
+    assembleSystemArchiveUpload,
+    discardPortableStagedInput,
     publishPortableExport,
     openStagedInputSession,
     openPreviewInputSession,
     openExportSession,
+    openSystemArchiveExportSession,
     openAssetSession,
     openLegacyPathV1Preview,
     reapExpiredPortable,
@@ -1540,10 +2224,15 @@ export async function createSecureFilesystemAdapter(
     close() {
       closing = true;
       const streamHandles = [...activeStreamHandles];
+      const portableReadLeases = [...activePortableReadLeases.values()].flatMap((leases) => [...leases]);
       const pendingOpens = [...inFlightOpens];
       activeStreamHandles.clear();
       activePortableHandles.clear();
+      activePortableReadLeases.clear();
       closed ??= (async () => {
+        const leaseResults = await Promise.allSettled(
+          portableReadLeases.map((lease) => lease.stop()),
+        );
         const streamResults = await Promise.allSettled(
           streamHandles.map((handle) => handle.close()),
         );
@@ -1552,7 +2241,7 @@ export async function createSecureFilesystemAdapter(
           archiveRoot.handle.close(),
           assetRoot.handle.close()
         ]);
-        const rejected = [...streamResults, ...rootResults]
+        const rejected = [...leaseResults, ...streamResults, ...rootResults]
           .find((result): result is PromiseRejectedResult => result.status === "rejected");
         if (rejected) throw rejected.reason;
       })();

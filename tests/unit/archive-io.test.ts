@@ -22,8 +22,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Open } from "unzipper";
 import {
   ArchiveError,
+  consumeVerifiedContainerEntry,
+  createArchiveArtifactSource,
   createArchiveStagingDirectory,
   inspectArchive,
+  inspectArchiveContainer,
   readVerifiedEntry,
   rehydratePersistedStagedArchive,
   removeArchivePath,
@@ -41,6 +44,7 @@ import {
 } from "../helpers/legacy-portable-archive-filesystem-adapter.js";
 import { loadRuntimeConfig } from "../../packages/database/src/config.js";
 import type { ArchiveEntry, ArchiveManifest } from "../../packages/contracts/src/archives.js";
+import { systemArchiveManifestSchema } from "../../packages/contracts/src/system-archives.js";
 
 function createPortableArchiveFilesystemAdapter(
   options: Omit<PortableArchiveFilesystemOptions, "persistence">
@@ -368,7 +372,7 @@ describe("archive runtime configuration", () => {
       maxUncompressedBytes: 214_748_364_800,
       maxEntries: 1_000_000,
       maxExpansionRatio: 100,
-      maxManifestBytes: 5_242_880,
+      maxManifestBytes: 16_777_216,
       maxJsonEntryBytes: 1_073_741_824,
       maxOriginalImageBytes: 26_214_400
     });
@@ -391,6 +395,24 @@ describe("archive runtime configuration", () => {
     expect(config.systemArchiveLimits.maxOriginalImageBytes).toBe(26_214_400);
     expect(config.archivePreviewTtlSeconds).toBe(60);
     expect(config.systemArchiveArtifactTtlSeconds).toBe(604_800);
+  });
+
+  it("keeps Campaign Archive preview TTL configurable when System Archive is enabled", async () => {
+    process.env.DATABASE_URL = "postgresql://test@localhost/test";
+    process.env.SYSTEM_ARCHIVE_ENABLED = "true";
+    process.env.ARCHIVE_PREVIEW_TTL_SECONDS = "137";
+
+    const config = loadRuntimeConfig();
+
+    expect(config.systemArchiveEnabled).toBe(true);
+    expect(config.archivePreviewTtlSeconds).toBe(137);
+    const guide = await readFile("docs/installation/environment-configuration.md", "utf8");
+    expect(guide).toContain(
+      "Campaign and World Archive previews remain configurable through `ARCHIVE_PREVIEW_TTL_SECONDS`",
+    );
+    expect(guide).toContain(
+      "System Archive Preview authority always expires after an independent 1,800 seconds",
+    );
   });
 
   it.each([
@@ -1179,9 +1201,78 @@ describe("bounded manifest and entry verification", () => {
       "archive-checksum-mismatch"
     );
   });
+
+  it("consumes a verified container entry incrementally without returning its body", async () => {
+    const root = await temporaryRoot();
+    const zipPath = join(root, "stream-container-entry.zip");
+    const data = Buffer.alloc(256 * 1024, 0x41);
+    await writeZip(zipPath, [{ name: "records/worlds/000001.ndjson", content: data }]);
+    const staged = await stagedFixture(root, zipPath);
+    const inspected = await inspectArchiveContainer(staged, DEFAULT_LIMITS);
+    let chunks = 0;
+    let largestChunk = 0;
+
+    const consumed = await consumeVerifiedContainerEntry(
+      inspected,
+      "records/worlds/000001.ndjson",
+      data.byteLength,
+      async (source) => {
+        let observed = 0;
+        for await (const chunk of source) {
+          chunks += 1;
+          largestChunk = Math.max(largestChunk, chunk.byteLength);
+          observed += chunk.byteLength;
+        }
+        return observed;
+      }
+    );
+
+    expect(consumed).toEqual({
+      value: data.byteLength,
+      byteLength: data.byteLength,
+      sha256: createHash("sha256").update(data).digest("hex")
+    });
+    expect(chunks).toBeGreaterThan(1);
+    expect(largestChunk).toBeLessThan(data.byteLength);
+    expect(consumed).not.toHaveProperty("buffer");
+  });
 });
 
 describe("archive artifact writing and cleanup", () => {
+  it("streams a validated System ZIP without publishing an unmanaged artifact path", async () => {
+    const data = Buffer.from('{"system":true}', "utf8");
+    const chunks: Buffer[] = [];
+    const source = createArchiveArtifactSource(
+      [{ path: "system.json", logicalType: "system", mediaType: "application/json", source: Readable.from(data) }],
+      (entries) => systemArchiveManifestSchema.parse({
+        ...systemManifest(entries),
+        sourceApplication: "0.1.0",
+        sourceMigration: "0079_resumable_system_archive_uploads",
+        sourceInstallationId: "55555555-5555-4555-8555-555555555555",
+        sourceOwnerCount: 1,
+        sourceOwner: {
+          sourceId: "11111111-1111-4111-8111-111111111111",
+          displayName: "Archive owner"
+        },
+        omittedOperationalRows: 0,
+        operationalOmissions: {
+          generation: 0, illustration: 0, chronicle: 0, imports: 0, "system-archive": 0
+        }
+      }),
+      DEFAULT_LIMITS,
+      (value) => systemArchiveManifestSchema.parse(value)
+    );
+
+    for await (const chunk of source) chunks.push(Buffer.from(chunk));
+    const directory = await Open.buffer(Buffer.concat(chunks));
+
+    expect(directory.files.map((file) => file.path)).toEqual(["system.json", "manifest.json"]);
+    expect(JSON.parse((await directory.files.at(-1)!.buffer()).toString("utf8"))).toMatchObject({
+      archiveType: "system",
+      sourceOwnerCount: 1,
+    });
+  });
+
   it("streams caller-ordered entries, appends manifest last, and atomically publishes the ZIP", async () => {
     const root = await temporaryRoot();
     const first = Buffer.from('{"first":true}');
@@ -1218,6 +1309,112 @@ describe("archive artifact writing and cleanup", () => {
     expect(completed.byteLength).toBe((await readFile(completed.absolutePath)).byteLength);
     expect(completed.contentFingerprint).toBe(manifest.contentFingerprint);
     expect((await readdir(join(root, "artifacts"))).some((name) => name.endsWith(".tmp"))).toBe(false);
+  });
+
+  it("publishes validated System-only manifest metadata through the shared writer", async () => {
+    const root = await temporaryRoot();
+    const data = Buffer.from('{"system":true}', "utf8");
+    const completed = await writeArchiveArtifact(
+      root,
+      [{ path: "system.json", logicalType: "system", mediaType: "application/json", source: Readable.from(data) }],
+      (entries) => systemArchiveManifestSchema.parse({
+        ...systemManifest(entries),
+        sourceApplication: "0.1.0",
+        sourceMigration: "0079_resumable_system_archive_uploads",
+        sourceInstallationId: "55555555-5555-4555-8555-555555555555",
+        sourceOwnerCount: 1,
+        sourceOwner: {
+          sourceId: "11111111-1111-4111-8111-111111111111",
+          displayName: "Archive owner"
+        },
+        omittedOperationalRows: 0,
+        operationalOmissions: {
+          generation: 0, illustration: 0, chronicle: 0, imports: 0, "system-archive": 0
+        }
+      }),
+      DEFAULT_LIMITS,
+      (value) => systemArchiveManifestSchema.parse(value)
+    );
+
+    const directory = await Open.file(completed.absolutePath);
+    const manifest = JSON.parse((await directory.files.at(-1)!.buffer()).toString("utf8")) as Record<string, unknown>;
+    expect(manifest).toMatchObject({
+      archiveType: "system",
+      sourceInstallationId: "55555555-5555-4555-8555-555555555555",
+      sourceOwnerCount: 1,
+      sourceOwner: {
+        sourceId: "11111111-1111-4111-8111-111111111111",
+        displayName: "Archive owner"
+      }
+    });
+  });
+
+  it("rejects unknown specialized manifest extensions", async () => {
+    const root = await temporaryRoot();
+    const data = Buffer.from('{"system":true}', "utf8");
+
+    await expect(writeArchiveArtifact(
+      root,
+      [{ path: "system.json", logicalType: "system", mediaType: "application/json", source: Readable.from(data) }],
+      (entries) => ({
+        ...systemManifest(entries),
+        sourceInstallationId: "55555555-5555-4555-8555-555555555555",
+        sourceOwnerCount: 1,
+        sourceOwner: {
+          sourceId: "11111111-1111-4111-8111-111111111111",
+          displayName: "Archive owner"
+        },
+        unknownExtension: "rejected"
+      } as ArchiveManifest),
+      DEFAULT_LIMITS,
+      (value) => systemArchiveManifestSchema.parse(value)
+    )).rejects.toMatchObject({ code: "archive-export-inconsistent" });
+  });
+
+  it("rejects invalid specialized manifest metadata", async () => {
+    const root = await temporaryRoot();
+    const data = Buffer.from('{"system":true}', "utf8");
+
+    await expect(writeArchiveArtifact(
+      root,
+      [{ path: "system.json", logicalType: "system", mediaType: "application/json", source: Readable.from(data) }],
+      (entries) => ({
+        ...systemManifest(entries),
+        sourceInstallationId: "55555555-5555-4555-8555-555555555555",
+        sourceOwnerCount: 2,
+        sourceOwner: {
+          sourceId: "11111111-1111-4111-8111-111111111111",
+          displayName: "Archive owner"
+        }
+      } as ArchiveManifest),
+      DEFAULT_LIMITS,
+      (value) => systemArchiveManifestSchema.parse(value)
+    )).rejects.toMatchObject({ code: "archive-export-inconsistent" });
+  });
+
+  it("preserves base manifest validation when a specialized parser is supplied", async () => {
+    const root = await temporaryRoot();
+    const data = Buffer.from('{"system":true}', "utf8");
+
+    await expect(writeArchiveArtifact(
+      root,
+      [{ path: "system.json", logicalType: "system", mediaType: "application/json", source: Readable.from(data) }],
+      (entries) => ({ ...systemManifest(entries), format: "invalid-archive-format" } as unknown as ArchiveManifest),
+      DEFAULT_LIMITS,
+      (value) => value as ArchiveManifest
+    )).rejects.toMatchObject({ code: "archive-export-inconsistent" });
+  });
+
+  it.each(["campaign", "world"] as const)("keeps existing %s manifest publication strict", async (archiveType) => {
+    const root = await temporaryRoot();
+    const data = Buffer.from('{"portable":true}', "utf8");
+
+    await expect(writeArchiveArtifact(
+      root,
+      [{ path: `${archiveType}.json`, logicalType: archiveType, mediaType: "application/json", source: Readable.from(data) }],
+      (entries) => ({ ...systemManifest(entries), archiveType, unknownExtension: "rejected" } as ArchiveManifest),
+      DEFAULT_LIMITS
+    )).rejects.toMatchObject({ code: "archive-export-inconsistent" });
   });
 
   it("enforces configured export entry, JSON, and compressed-byte limits", async () => {

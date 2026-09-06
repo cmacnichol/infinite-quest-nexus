@@ -43,6 +43,7 @@ export type SafeProviderConfigurationFields = Readonly<{
   maximumPollIntervalMs?: number;
   generationTimeoutMs?: number;
   maximumAttempts?: number;
+  retryLimit?: number;
   allowPrivateArtifactHosts?: boolean;
   embeddingMaxInputTokens?: number;
   embeddingMaxBatchItems?: number;

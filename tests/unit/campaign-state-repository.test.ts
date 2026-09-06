@@ -46,6 +46,7 @@ describe("campaign state mechanics projection", () => {
         },
         acceptedAt: "2026-08-01T12:00:00.000Z"
       }] };
+      if (sql.includes("SELECT EXISTS")) return { rows: [{ hasProjection: false }] };
       if (sql.includes("FROM campaign_state_edits") || sql.includes("FROM campaign_canonical_facts")) return { rows: [] };
       throw new Error(`Unexpected query: ${sql}`);
     });

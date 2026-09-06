@@ -72,6 +72,7 @@ const tinyPng = Buffer.from(
 // memories are written directly by the legacy importer, while derived indexing
 // belongs to the later Chronicle schema and is covered by focused suites.
 const preChunkChronicleMemory: MemoryGenerationTransactionPort = {
+  async applyCampaignStateCorrection() { throw new Error("Pre-correction schema cannot edit current state."); },
   async autoEnableCampaignEmbedding() {
     return { enabled: false };
   },
@@ -290,7 +291,9 @@ integration("Task 14e2c additive adapter contract matrix", () => {
         "0074_chronicle_retrieval_observability",
         "0075_chronicle_query_embedding_cache",
         "0076_chronicle_chunk_skip_reasons",
-        "0077_chronicle_chunk_processed_signature"
+        "0077_chronicle_chunk_processed_signature",
+        "0078_system_archive_jobs",
+        "0079_resumable_system_archive_uploads"
       ]);
     } finally {
       await pool.end();

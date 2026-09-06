@@ -17,4 +17,10 @@ The selected campaign in **Setup → Campaign Management** provides **Export cam
 
 Current portable exports retain the campaign turn-control style and each accepted turn's resolved Action or Scene direction mode. They do not include Intent provider assignments, classifier audit records, model names, confidence values, or provider credentials. Older imports without mode metadata use Action.
 
-Exports complement database and asset backups but do not replace a complete operator backup.
+## Owner-wide System Archive
+
+The **System Archive** workflow is available in both Data Transfer interfaces and enabled by default in the direct runtime and single-node Compose deployment. The base replicated Swarm stack disables it because its node-local mounts are not shared archive storage. It moves the Current Owner's portable worlds, campaigns, stories, settings, and every retained original image to an empty initialized installation. It is not a way to merge content into another library. An operator may withdraw the capability by setting `SYSTEM_ARCHIVE_ENABLED=false`. Multi-node enablement requires a reviewed shared-storage topology.
+
+System Archive files are sensitive, unencrypted ZIPs. They exclude credentials, external access, operational jobs, derived indexes and thumbnails, and deployment settings. Imported provider profiles remain disabled until an operator supplies and verifies new credentials. See [System data transfer](../nexus-guide/operations/system-data-transfer.md) for the release status and migration procedure.
+
+Readable exports, Campaign Archives, and System Archives complement database and asset backups but do not replace a complete operator Recovery Set.

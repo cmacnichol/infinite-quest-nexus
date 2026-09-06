@@ -44,6 +44,14 @@ type PendingRow = Readonly<{
   operation_lease_expires_at: Date;
 }>;
 
+type PrivateAssetMetadataBackfillOriginalMetadata = Readonly<{
+  pixelWidth: number;
+  pixelHeight: number;
+  format: "png" | "jpeg" | "webp" | "gif";
+  pages: 1;
+  orientation: number | null;
+}>;
+
 export type PrivateAssetMetadataBackfillExecutorRepository = Readonly<{
   enqueueMissing(limit: number): Promise<number>;
   claimNext(input: Readonly<{ workerId: string; leaseSeconds: number }>): Promise<PrivateAssetMetadataBackfillClaim | null>;
@@ -52,14 +60,14 @@ export type PrivateAssetMetadataBackfillExecutorRepository = Readonly<{
   completeWithExistingThumbnail(
     claim: PrivateAssetMetadataBackfillClaim,
     thumbnail: PrivateAssetMetadataBackfillThumbnail,
-    technicalMetadata: Readonly<{ format: "png" | "jpeg" | "webp" | "gif"; pages: 1; orientation: number | null }>,
+    originalMetadata: PrivateAssetMetadataBackfillOriginalMetadata,
   ): Promise<"completed" | "stale">;
   attachThumbnail(
     database: DurableFilesystemTransactionContext,
     claim: PrivateAssetMetadataBackfillClaim,
     thumbnail: PrivateAssetMetadataBackfillThumbnail,
     attachment: PrivateFilesystemCandidateAttachment,
-    technicalMetadata: Readonly<{ format: "png" | "jpeg" | "webp" | "gif"; pages: 1; orientation: number | null }>,
+    originalMetadata: PrivateAssetMetadataBackfillOriginalMetadata,
   ): Promise<PrivateAssetMetadataBackfillFinalization | null>;
   completeFinalization(claim: PrivateAssetMetadataBackfillClaim, operationId: string): Promise<"completed" | "stale" | "lease_lost">;
   reconcileFinalizedOperation(input: Readonly<{ operationId: string; ownerUserId: string }>): Promise<"completed" | "pending" | "noop">;
@@ -256,7 +264,7 @@ export function createPostgresAssetMetadataBackfillExecutorRepository(
     claimValue,
     thumbnail,
     attachment,
-    technicalMetadata,
+    originalMetadata,
   ) => {
     const client = clientFrom(database);
     const locked = await client.query<Readonly<{ id: string }>>(
@@ -305,8 +313,13 @@ export function createPostgresAssetMetadataBackfillExecutorRepository(
               technical_metadata=(technical_metadata - 'backfillError') || $5::jsonb
         WHERE owner_user_id=$1 AND id=$2 AND content_hash=$6 AND mime_type=$7 AND byte_length=$8`,
       [
-        claimValue.ownerUserId, claimValue.assetId, thumbnail.pixelWidth, thumbnail.pixelHeight,
-        JSON.stringify({ state: "verified", ...technicalMetadata }),
+        claimValue.ownerUserId, claimValue.assetId, originalMetadata.pixelWidth, originalMetadata.pixelHeight,
+        JSON.stringify({
+          state: "verified",
+          format: originalMetadata.format,
+          pages: originalMetadata.pages,
+          orientation: originalMetadata.orientation
+        }),
         claimValue.expectedContentHash, claimValue.expectedMimeType, claimValue.expectedByteLength
       ],
     );
@@ -339,7 +352,7 @@ export function createPostgresAssetMetadataBackfillExecutorRepository(
   const completeWithExistingThumbnail: PrivateAssetMetadataBackfillExecutorRepository["completeWithExistingThumbnail"] = async (
     claimValue,
     thumbnail,
-    technicalMetadata,
+    originalMetadata,
   ) => withTransaction(pool, async (database) => {
     const locked = await database.query<Readonly<{ id: string }>>(
       `SELECT job.id
@@ -370,8 +383,13 @@ export function createPostgresAssetMetadataBackfillExecutorRepository(
               technical_metadata=(technical_metadata - 'backfillError') || $5::jsonb
         WHERE owner_user_id=$1 AND id=$2 AND content_hash=$6 AND mime_type=$7 AND byte_length=$8`,
       [
-        claimValue.ownerUserId, claimValue.assetId, thumbnail.pixelWidth, thumbnail.pixelHeight,
-        JSON.stringify({ state: "verified", ...technicalMetadata }), claimValue.expectedContentHash,
+        claimValue.ownerUserId, claimValue.assetId, originalMetadata.pixelWidth, originalMetadata.pixelHeight,
+        JSON.stringify({
+          state: "verified",
+          format: originalMetadata.format,
+          pages: originalMetadata.pages,
+          orientation: originalMetadata.orientation
+        }), claimValue.expectedContentHash,
         claimValue.expectedMimeType, claimValue.expectedByteLength
       ],
     );

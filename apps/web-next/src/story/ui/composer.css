@@ -1,0 +1,128 @@
+main[data-ui-implementation="web-awesome"] .quiet-leaf-composer-control {
+  display: grid;
+  min-width: 0;
+  gap: 0.75rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--rule);
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-intent-confirmation {
+  display: grid;
+  gap: 0.75rem;
+  padding: 1rem;
+  border: 1px solid var(--rule-strong);
+  background: var(--surface-entry);
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-intent-confirmation[hidden] {
+  display: none;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-intent-confirmation__title,
+main[data-ui-implementation="web-awesome"] .quiet-leaf-intent-confirmation__text {
+  margin: 0;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-intent-confirmation__title {
+  font: 600 1rem/1.2 var(--font-ui, sans-serif);
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-intent-confirmation__text,
+main[data-ui-implementation="web-awesome"] .quiet-leaf-composer-status {
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-intent-confirmation__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-intent-confirmation__actions button,
+main[data-ui-implementation="web-awesome"] .quiet-leaf-composer-footer button {
+  min-height: var(--control-min-height);
+  padding: 10px 16px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 0;
+  color: var(--text-primary);
+  background: var(--surface-entry);
+  font: 600 0.78rem/1.2 var(--font-ui, sans-serif);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-intent-confirmation__actions button:hover:not(:disabled),
+main[data-ui-implementation="web-awesome"] .quiet-leaf-composer-footer button:hover:not(:disabled) {
+  background: var(--surface-entry-hover);
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-intent-confirmation__actions button:focus-visible,
+main[data-ui-implementation="web-awesome"] .quiet-leaf-composer-footer button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-intent-confirmation__actions button:disabled,
+main[data-ui-implementation="web-awesome"] .quiet-leaf-composer-footer button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-composer-footer {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 0.75rem;
+  min-width: 0;
+  padding: 0.75rem clamp(1.25rem, 2vw, 2rem);
+  border-top: 1px solid var(--rule-strong);
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-composer-retry {
+  margin-inline-end: 0;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-composer-primary {
+  display: flex;
+  align-items: end;
+  justify-content: flex-end;
+  gap: .75rem;
+  min-width: 0;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-composer-primary .story-turn-length {
+  flex: 1 1 13rem;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-composer-continue {
+  color: var(--text-on-accent) !important;
+  border-color: var(--accent) !important;
+  background: var(--accent) !important;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-composer-continue:hover:not(:disabled) {
+  background: var(--accent-hover) !important;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-composer-history {
+  color: var(--text-secondary) !important;
+}
+
+main[data-ui-implementation="web-awesome"] .quiet-leaf-composer-status {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+@media (max-width: 720px) {
+  main[data-ui-implementation="web-awesome"] .quiet-leaf-composer-footer {
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  main[data-ui-implementation="web-awesome"] .quiet-leaf-composer-primary {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
+  }
+}

@@ -6,9 +6,9 @@
 4. Choose the **Embedding provider** and **Embedding model**.
 5. Under **Advanced retrieval**, optionally set **Document prefix** and **Query prefix**.
 6. Under **Advanced retrieval**, set a bounded **Batch size**.
-7. Under **Advanced retrieval**, keep **Production implementation** on **Legacy hybrid** while preparing and shadowing the chunk index.
-8. Select **Save & index**. This enqueues the durable `index_memory_chunks_v2` job without changing production retrieval.
-9. Under **Advanced retrieval**, after the campaign is fully ready and shadow diagnostics are acceptable, explicitly select **Chunked hybrid**. There is no automatic campaign conversion.
+7. Under **Advanced retrieval**, review **Production implementation** and **Shadow comparison**. New campaigns created from a world default to **Chunked hybrid** with shadow comparison enabled; existing settings are preserved. For a deliberate staged rollout of an existing legacy campaign, retain **Legacy hybrid** while preparing the index.
+8. Select **Save & index** to persist the selected configuration. Chunked or shadow-enabled configuration queues `index_memory_chunks_v2`; legacy-only configuration uses legacy embedding work. Until the chunk readiness gate passes, chunked selection uses the complete legacy fallback.
+9. If staging an existing legacy campaign, select **Chunked hybrid** after the index is ready and shadow diagnostics are acceptable. A new campaign already configured for chunked retrieval begins using it when readiness passes; other existing campaigns are not converted.
 
 Production implementation, shadow comparison, prefixes, and batch size are under **Advanced retrieval**.
 

@@ -1,3 +1,5 @@
+@import "./theme/tokens.css";
+
 @font-face {
   font-family: "Literata";
   src: url("/app/fonts/literata-600.ttf") format("truetype");
@@ -36,58 +38,10 @@
   color: var(--text-primary);
   background: var(--surface-page);
   font-synthesis: none;
-  --surface-page: #dfe7ee;
-  --surface-paper: rgba(248, 250, 251, 0.84);
-  --surface-entry: rgba(248, 250, 251, 0.96);
-  --surface-entry-hover: #ffffff;
-  --surface-muted: #e6ebf0;
-  --surface-inverse: #101418;
-  --surface-atmosphere: #bdcbea;
-  --text-primary: #101418;
-  --text-secondary: #46515c;
-  --text-inverse: #f5f7fb;
-  --text-on-accent: #f5f7fb;
-  --rule: #b8c5d0;
-  --rule-strong: #8798a8;
-  --rule-grid: color-mix(in srgb, var(--rule-strong) 68%, transparent);
-  --accent: #2346a8;
-  --accent-hover: #17327f;
-  --accent-soft: #c8d5f2;
-  --accent-grid: color-mix(in srgb, var(--accent) 16%, transparent);
-  --status-error: #9e2430;
-  --status-error-soft: #f4d9dc;
-  --focus-shadow: rgba(35, 70, 168, 0.2);
-  --artwork-fallback: #e1e7ec;
-  --artwork-overlay: rgba(16, 20, 24, 0.18);
-  --cell: clamp(20px, 2.05vw, 32px);
-  --edge: clamp(20px, 4vw, 64px);
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --surface-page: #111821;
-  --surface-paper: rgba(17, 24, 33, 0.9);
-  --surface-entry: rgba(24, 33, 44, 0.96);
-  --surface-entry-hover: #202c3a;
-  --surface-muted: #263342;
-  --surface-inverse: #080d13;
-  --surface-atmosphere: #1b2b4f;
-  --text-primary: #edf2f7;
-  --text-secondary: #b7c2cd;
-  --text-inverse: #edf2f7;
-  --text-on-accent: #101418;
-  --rule: #39495a;
-  --rule-strong: #5b6c7e;
-  --rule-grid: color-mix(in srgb, var(--rule-strong) 68%, transparent);
-  --accent: #8eabff;
-  --accent-hover: #b5c7ff;
-  --accent-soft: #243760;
-  --accent-grid: color-mix(in srgb, var(--accent) 16%, transparent);
-  --status-error: #ff9da7;
-  --status-error-soft: #4b252d;
-  --focus-shadow: rgba(142, 171, 255, 0.24);
-  --artwork-fallback: #25313d;
-  --artwork-overlay: rgba(16, 20, 24, 0.18);
 }
 
 * {
@@ -2604,6 +2558,481 @@ footer p:first-child {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+}
+
+.campaign-section .campaign-continuity-editor {
+  margin-block: 18px;
+}
+
+.campaign-continuity-editor {
+  display: grid;
+  gap: 16px;
+}
+
+.campaign-continuity-field,
+.campaign-continuity-rows {
+  display: grid;
+  gap: 8px;
+}
+
+.campaign-continuity-field > span,
+.campaign-continuity-rows > h4 { margin: 0; }
+
+.campaign-continuity-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+}
+
+.campaign-continuity-editor textarea { width: 100%; resize: vertical; }
+
+@media (max-width: 540px) {
+  .campaign-continuity-row { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Data Transfer keeps format choice visible while the server owns archive inspection. */
+.data-transfer-page {
+  width: min(1440px, 100%);
+  margin: 0 auto;
+  padding: calc(var(--cell) * 2) var(--edge) calc(var(--cell) * 4);
+}
+
+.data-transfer-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 0.45fr);
+  gap: 8px calc(var(--cell) * 2);
+  align-items: end;
+  padding-bottom: calc(var(--cell) * 1.5);
+  border-bottom: 1px solid var(--rule-strong);
+}
+
+.data-transfer-heading .data-transfer-kicker,
+.data-transfer-heading h1 {
+  grid-column: 1;
+}
+
+.data-transfer-heading h1 {
+  margin: 0;
+  font: 600 clamp(3rem, 7vw, 6.4rem) / 0.9 "Literata", serif;
+  letter-spacing: -0.065em;
+}
+
+.data-transfer-heading > p:last-child {
+  grid-row: 1 / span 2;
+  grid-column: 2;
+  margin: 0;
+  color: var(--text-secondary);
+  line-height: 1.65;
+}
+
+.data-transfer-kicker {
+  margin: 0;
+  color: var(--accent);
+  font: 600 0.72rem/1 "Chakra Petch", sans-serif;
+  letter-spacing: 0.095em;
+  text-transform: uppercase;
+}
+
+.transfer-purpose-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-right: 1px solid var(--rule-strong);
+  border-bottom: 1px solid var(--rule-strong);
+}
+
+.transfer-purpose {
+  position: relative;
+  min-height: 250px;
+  display: flex;
+  flex-direction: column;
+  padding: 24px;
+  border-left: 1px solid var(--rule-strong);
+  background: var(--surface-paper);
+}
+
+.transfer-purpose.system-purpose {
+  color: var(--text-inverse);
+  background: var(--surface-inverse);
+}
+
+.purpose-index {
+  color: var(--accent);
+  font: 600 0.7rem/1 "Chakra Petch", sans-serif;
+  letter-spacing: 0.08em;
+}
+
+.transfer-purpose h2 {
+  max-width: 12ch;
+  margin: auto 0 12px;
+  font: 600 1.45rem/1.05 "Literata", serif;
+}
+
+.transfer-purpose p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.84rem;
+  line-height: 1.55;
+}
+
+.transfer-purpose.system-purpose p {
+  color: var(--text-inverse);
+  opacity: 0.72;
+}
+
+.purpose-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-top: 18px;
+}
+
+.purpose-links a,
+.data-transfer-download,
+.recovery-checklist a {
+  color: var(--accent);
+  font: 600 0.73rem/1.3 "Chakra Petch", sans-serif;
+  letter-spacing: 0.04em;
+  text-underline-offset: 4px;
+  text-transform: uppercase;
+}
+
+.system-transfer-workbench {
+  margin-top: calc(var(--cell) * 2);
+  border: 1px solid var(--rule-strong);
+  background: var(--surface-paper);
+}
+
+.workbench-heading,
+.system-import-preview > header,
+.system-import-report > header {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  align-items: center;
+  padding: 22px 24px;
+  border-bottom: 1px solid var(--rule-strong);
+}
+
+.workbench-heading h2,
+.system-import-preview h3,
+.system-import-report h3 {
+  margin: 5px 0 0;
+  font: 600 1.75rem/1 "Literata", serif;
+}
+
+.capability-badge {
+  padding: 7px 10px;
+  border: 1px solid currentColor;
+  color: var(--accent);
+  font: 600 0.67rem/1 "Chakra Petch", sans-serif;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+[data-system-archive-state="disabled"] .capability-badge {
+  color: var(--text-secondary);
+}
+
+.system-capability-message,
+.system-transfer-status,
+.system-transfer-error {
+  margin: 0;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--rule);
+  color: var(--text-secondary);
+}
+
+.system-transfer-error {
+  color: var(--status-error);
+  background: var(--status-error-soft);
+}
+
+.system-transfer-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.system-operation {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 18px;
+  padding: 28px 24px;
+}
+
+.system-operation + .system-operation {
+  border-left: 1px solid var(--rule-strong);
+}
+
+.operation-heading {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  gap: 14px;
+}
+
+.operation-heading > span {
+  color: var(--accent);
+  font: 600 0.72rem/1 "Chakra Petch", sans-serif;
+  letter-spacing: 0.06em;
+}
+
+.operation-heading h3,
+.preview-detail-grid h4,
+.report-evidence-grid h4,
+.recovery-checklist h4 {
+  margin: 0 0 7px;
+  font-size: 1rem;
+}
+
+.operation-heading p,
+.preview-detail-grid p,
+.report-evidence-grid p,
+.recovery-checklist p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.data-transfer-page button,
+.system-file-field input {
+  font: inherit;
+}
+
+.data-transfer-page button {
+  min-height: 44px;
+  padding: 10px 14px;
+  border: 1px solid var(--rule-strong);
+  color: var(--text-primary);
+  background: transparent;
+  cursor: pointer;
+}
+
+.data-transfer-page button:hover:not(:disabled),
+.data-transfer-page button:focus-visible {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.data-transfer-page button:disabled,
+.system-file-field input:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.data-transfer-page .data-transfer-primary {
+  color: var(--text-on-accent);
+  border-color: var(--accent);
+  background: var(--accent);
+  font-weight: 600;
+}
+
+.data-transfer-page .data-transfer-primary:hover:not(:disabled),
+.data-transfer-page .data-transfer-primary:focus-visible {
+  color: var(--text-on-accent);
+}
+
+.system-file-field {
+  display: grid;
+  gap: 8px;
+  color: var(--text-secondary);
+  font: 500 0.78rem/1.3 "Geologica", sans-serif;
+}
+
+.system-file-field input {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--rule-strong);
+  color: var(--text-primary);
+  background: var(--surface-entry);
+}
+
+.system-upload-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.system-transfer-progress {
+  display: grid;
+  gap: 8px;
+}
+
+.system-transfer-progress > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+}
+
+.system-transfer-progress progress {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.system-import-preview,
+.system-import-report {
+  border-top: 1px solid var(--rule-strong);
+}
+
+.preview-summary-grid,
+.report-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-bottom: 1px solid var(--rule-strong);
+}
+
+.preview-summary-grid > div,
+.report-summary-grid > div {
+  display: grid;
+  gap: 7px;
+  padding: 20px 24px;
+  border-right: 1px solid var(--rule);
+}
+
+.preview-summary-grid span,
+.report-summary-grid span {
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+}
+
+.preview-detail-grid,
+.report-evidence-grid,
+.recovery-checklist {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-bottom: 1px solid var(--rule-strong);
+}
+
+.recovery-checklist {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.report-evidence-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.preview-detail-grid section,
+.report-evidence-grid section,
+.recovery-checklist section {
+  min-width: 0;
+  padding: 20px 24px;
+  border-right: 1px solid var(--rule);
+}
+
+.archive-identity {
+  overflow-wrap: anywhere;
+}
+
+.system-preview-warnings {
+  padding: 14px 24px;
+  color: var(--status-error);
+  border-bottom: 1px solid var(--rule);
+}
+
+.system-acknowledgements {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 22px 24px;
+  border: 0;
+  border-bottom: 1px solid var(--rule-strong);
+}
+
+.system-acknowledgements legend {
+  padding: 0;
+  margin-bottom: 14px;
+  font: 600 0.78rem/1 "Chakra Petch", sans-serif;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.system-acknowledgements label {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.system-acknowledgements input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.system-acknowledgements input[aria-invalid="true"] {
+  outline: 2px solid var(--status-error);
+  outline-offset: 2px;
+}
+
+.system-import-preview > .data-transfer-primary {
+  margin: 20px 24px;
+}
+
+.recovery-checklist a {
+  display: inline-block;
+  margin-top: 14px;
+}
+
+@media (max-width: 1000px) {
+  .transfer-purpose-grid,
+  .preview-summary-grid,
+  .report-summary-grid,
+  .preview-detail-grid,
+  .report-evidence-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .transfer-purpose {
+    min-height: 220px;
+    border-bottom: 1px solid var(--rule);
+  }
+}
+
+@media (max-width: 680px) {
+  .data-transfer-page {
+    padding-top: 28px;
+  }
+
+  .data-transfer-heading,
+  .system-transfer-columns,
+  .transfer-purpose-grid,
+  .preview-summary-grid,
+  .report-summary-grid,
+  .preview-detail-grid,
+  .report-evidence-grid,
+  .recovery-checklist {
+    grid-template-columns: 1fr;
+  }
+
+  .data-transfer-heading > p:last-child {
+    grid-row: auto;
+    grid-column: 1;
+  }
+
+  .system-operation + .system-operation {
+    border-top: 1px solid var(--rule-strong);
+    border-left: 0;
+  }
+
+  .system-upload-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .preview-summary-grid > div,
+  .report-summary-grid > div,
+  .preview-detail-grid section,
+  .report-evidence-grid section,
+  .recovery-checklist section {
+    border-right: 0;
+    border-bottom: 1px solid var(--rule);
   }
 }
 

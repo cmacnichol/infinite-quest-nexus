@@ -8,7 +8,7 @@ import {
   type IdFactory,
   type StoryTurnInputMode
 } from "@infinite-quest/client-core";
-import type { GenerationResult, TurnInputModeSource } from "@infinite-quest/contracts";
+import type { GenerationResult, StoryLengthProfile, TurnInputModeSource } from "@infinite-quest/contracts";
 
 const GENERATION_CONTEXT = { budgetTokens: 32_000, compression: "auto" as const, recentTurns: 8 };
 
@@ -23,6 +23,7 @@ export interface StoryGenerationSubmission {
   readonly resolvedInputMode: "action" | "scene";
   readonly inputModeSource: TurnInputModeSource;
   readonly classificationId?: string;
+  readonly storyLengthProfileOverride?: StoryLengthProfile;
 }
 
 export interface StoryGenerationController {
@@ -132,6 +133,7 @@ export function createStoryGenerationController(
     resolvedInputMode: submission.resolvedInputMode,
     inputModeSource: submission.inputModeSource,
     ...(submission.classificationId ? { classificationId: submission.classificationId } : {}),
+    ...(submission.storyLengthProfileOverride ? { storyLengthProfileOverride: submission.storyLengthProfileOverride } : {}),
     idempotencyKey: dependencies.idFactory.create(),
     context: GENERATION_CONTEXT
   });

@@ -44,10 +44,12 @@ describe("Story Player campaign state editor", () => {
   it("builds a complete update while preserving loaded mechanics", () => {
     const payload = buildCampaignStateUpdate({
       activeTurnNumber: 4,
+      viewedTurnNumber: 4,
+      isCurrent: true,
       revision: 7,
       rpgStats: [{ id: "resolve", name: "Resolve", value: 61, note: "" }],
-      eventTriggers: [{ id: "lens-lit" }],
-      pendingEventTriggers: [{ id: "sea-road" }]
+      eventTriggers: [],
+      pendingEventTriggers: []
     }, {
       continuitySummary: " Corrected summary. ",
       openThreads: [" Find the keeper. ", ""],
@@ -72,8 +74,8 @@ describe("Story Player campaign state editor", () => {
       scratchpad: "Private continuity.",
       trackers: [{ id: "trust", name: "Trust", value: "wary", rules: "" }],
       rpgStats: [{ id: "resolve", name: "Resolve", value: 61, note: "" }],
-      eventTriggers: [{ id: "lens-lit" }],
-      pendingEventTriggers: [{ id: "sea-road" }]
+      eventTriggers: [],
+      pendingEventTriggers: []
     });
   });
 
@@ -115,16 +117,12 @@ describe("Story Player campaign state editor", () => {
     pendingEventTriggers: completeRuntimeState.pendingEventTriggers
   };
 
-  it("targets the viewed turn while retaining current-state concurrency fences", () => {
-    expect(buildCampaignStateUpdate({
+  it("rejects a historical runtime snapshot instead of retargeting a continuity save", () => {
+    expect(() => buildCampaignStateUpdate({
       ...completeRuntimeState,
       viewedTurnNumber: 2,
       isCurrent: false
-    }, completeEditorValues)).toMatchObject({
-      expectedTurnNumber: 4,
-      expectedRevision: 7,
-      effectiveTurnNumber: 2
-    });
+    }, completeEditorValues)).toThrow(/current state/i);
   });
 
   it("submits the complete payload and applies the saved state only after success", async () => {
@@ -171,7 +169,7 @@ describe("Story Player campaign state editor", () => {
     const facts = document.querySelector("#facts");
     if (!threads || !facts) throw new Error("Test containers are required.");
 
-    renderEditableStateCollection(document, threads, ["First thread"], "thread");
+    renderEditableStateCollection(document, threads, [{ key: "thread:0", content: "First thread" }], "thread");
     renderEditableStateCollection(document, facts, [{
       id: "00000000-0000-4000-8000-000000000001",
       content: "The lens is moon glass."
@@ -187,5 +185,23 @@ describe("Story Player campaign state editor", () => {
 
     facts.querySelector("button")?.click();
     expect(collectCanonicalFactEditorValues(facts)).toEqual([]);
+  });
+
+  it("retains the existing fact identity when a multiline fact row is edited", () => {
+    const { document } = parseHTML("<div id='facts'></div>");
+    const container = document.getElementById("facts");
+    if (!container) throw new Error("Fact container is required.");
+    const id = "00000000-0000-4000-8000-000000000001";
+
+    renderEditableStateCollection(document, container, [
+      { id, content: "The keeper is alive.\nThe keeper remains at the harbor." }
+    ], "fact");
+    const textarea = container.querySelector("textarea");
+    if (!textarea) throw new Error("Fact editor is required.");
+    textarea.value = "The keeper is alive and guards the harbor.";
+
+    expect(collectCanonicalFactEditorValues(container)).toEqual([
+      { id, content: "The keeper is alive and guards the harbor." }
+    ]);
   });
 });

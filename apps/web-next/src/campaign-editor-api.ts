@@ -3,7 +3,7 @@ export interface CampaignSummary {
   worldId: string; worldTitle: string; worldVersionId: string; worldVersionNumber: number;
   latestWorldVersionNumber: number; worldUpdateAvailable: boolean; selectedCharacterName: string | null;
   textProviderProfileId: string | null; imageProviderProfileId: string | null;
-  turnControlStyle: string; storyLengthProfile: string; costInformation?: unknown[];
+  turnControlStyle: string; storyLengthProfile: string; storyContextBudgetTokens: number; costInformation?: unknown[];
 }
 
 export class CampaignEditorApiError extends Error {

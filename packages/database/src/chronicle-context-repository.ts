@@ -4,11 +4,13 @@ import { requireCampaignWorldVersionScope } from "../../application/src/memory/h
 import { toSafeProviderConfiguration } from "../../application/src/providers/index.js";
 import {
   CHRONICLE_RETRIEVAL_VERSION,
+  type CurrentContinuity,
   type ChronicleRetrievalCandidate,
   type ChronicleRetrievalComparison,
   type ChronicleRetrievalAudit,
   type CompressionLevel
 } from "../../contracts/src/memory.js";
+import { loadCurrentContinuityCorrection } from "./campaign-continuity-repository.js";
 type RetrievalDiagnosticMode = "production" | "shadow";
 const CHRONICLE_TELEMETRY_CANDIDATE_LIMIT = 1_000;
 import {
@@ -1857,6 +1859,15 @@ export async function buildPostgresChronicleContextPreview(
   dependencies: ChronicleGenerationTransactionDependencies,
 ): Promise<ChronicleContextPreview> {
   const campaign = await loadContextCampaign(client, scope);
+  // Only internal story generation requests the complete private correction.
+  // Public previews can attribute embedding costs without opting into this scope.
+  const currentContinuity = scope.costAttribution?.operation === "retrieval_embedding"
+    ? await loadCurrentContinuityCorrection(
+      client,
+      scope,
+      scope.request.throughTurnNumber ?? campaign.active_turn_number
+    )
+    : null;
   const completeEntityCatalog = buildChronicleEntityCatalog({
     worldContent: campaign.world_content,
     characterSnapshot: campaign.character_snapshot,
@@ -2240,10 +2251,14 @@ export async function buildPostgresChronicleContextPreview(
   const allTurnMemories = memories.filter((memory) => memory.memory_kind === "turn_fiction")
     .sort((left, right) => left.ordinal - right.ordinal || compareDeterministically(left.id, right.id));
   const latest = allTurnMemories.at(-1) ?? null;
+  const currentContinuityTokens = currentContinuity
+    ? budgetTokenEstimate(stableStringify({ currentContinuity }))
+    : 0;
+  const contextBudgetWithoutContinuity = Math.max(0, scope.request.budgetTokens - currentContinuityTokens);
   const buildFixedScopes = (scale: number) => {
     const authoritativeRules = sanitizeChronicleFictionString(
       sourceWorld.rules,
-      Math.max(32, Math.floor(scope.request.budgetTokens * 0.18 * 3.2 * scale))
+      Math.max(32, Math.floor(scope.request.budgetTokens * 0.18 * 3.2 * (currentContinuity ? 1 : scale)))
     );
     const worldCanon = worldFictionCanon(
       campaign.world_content,
@@ -2253,7 +2268,7 @@ export async function buildPostgresChronicleContextPreview(
       Math.max(64, Math.floor(scope.request.budgetTokens * 0.30 * scale))
     );
     const campaignCanon = campaignFictionCanon(
-      campaign,
+      currentContinuity ? { ...campaign, scratchpad_safe_for_prompt: false } : campaign,
       Math.max(48, Math.floor(scope.request.budgetTokens * 0.18 * scale))
     );
     const currentScene = latest ? {
@@ -2269,13 +2284,13 @@ export async function buildPostgresChronicleContextPreview(
   let fixedScale = 1;
   let fixedScopes = buildFixedScopes(fixedScale);
   let fixedScopeTokens = budgetTokenEstimate(stableStringify(fixedScopes));
-  while (fixedScopeTokens > scope.request.budgetTokens && fixedScale > 0.08) {
+  while (fixedScopeTokens > contextBudgetWithoutContinuity && fixedScale > 0.08) {
     fixedScale *= 0.78;
     fixedScopes = buildFixedScopes(fixedScale);
     fixedScopeTokens = budgetTokenEstimate(stableStringify(fixedScopes));
   }
   const { authoritativeRules, worldCanon, campaignCanon, currentScene } = fixedScopes;
-  const availableTokens = Math.max(0, scope.request.budgetTokens - fixedScopeTokens);
+  const availableTokens = Math.max(0, contextBudgetWithoutContinuity - fixedScopeTokens);
   const selectedLevel = scope.request.compression === "auto"
     ? automaticCompression(metrics, availableTokens)
     : scope.request.compression;
@@ -2307,16 +2322,16 @@ export async function buildPostgresChronicleContextPreview(
     consumedTokens += tokens;
   };
   const renderLevel = selectedLevel === "summary" ? "compact" : selectedLevel;
-  const summary = optionalMemories.filter((memory) => memory.memory_kind === "campaign_summary")
+  const summary = currentContinuity ? undefined : optionalMemories.filter((memory) => memory.memory_kind === "campaign_summary")
     .sort((left, right) => right.ordinal - left.ordinal || compareDeterministically(left.id, right.id))[0]
     ?? (selectedLevel === "summary"
       ? optionalMemories.find((memory) => memory.memory_kind === "legacy_summary")
       : undefined);
   if (summary) addMemory(summary, parentContent(summary), "summary_checkpoint");
-  const openThreads = optionalMemories.filter((memory) => memory.memory_kind === "open_thread")
+  const openThreads = currentContinuity ? undefined : optionalMemories.filter((memory) => memory.memory_kind === "open_thread")
     .sort((left, right) => right.ordinal - left.ordinal || compareDeterministically(left.id, right.id))[0];
   if (openThreads) addMemory(openThreads, parentContent(openThreads), "open_threads");
-  optionalMemories.filter((memory) => memory.memory_kind === "canonical_fact")
+  optionalMemories.filter((memory) => !currentContinuity && memory.memory_kind === "canonical_fact")
     .forEach((memory) => addMemory(memory, parentContent(memory), "canonical_fact"));
   for (const memory of turnMemories.slice(-Math.max(1, scope.request.recentTurns))) {
     const content = parentContent(memory);
@@ -2326,7 +2341,7 @@ export async function buildPostgresChronicleContextPreview(
     addMemory(memory, rendered, "recent");
   }
   const selectedIds = new Set(selected.keys());
-  optionalMemories.filter((memory) => ["turn_fiction", "canonical_fact", "open_thread"].includes(memory.memory_kind)
+  optionalMemories.filter((memory) => ["turn_fiction", ...(currentContinuity ? [] : ["canonical_fact", "open_thread"])].includes(memory.memory_kind)
     && !selectedIds.has(memory.id) && memory.relevance > 0)
     .sort((left, right) => (right.relevance - left.relevance)
       || (right.importance - left.importance) || (right.ordinal - left.ordinal))
@@ -2354,17 +2369,28 @@ export async function buildPostgresChronicleContextPreview(
       estimatedTokens: estimateTokens(rendered)
     }));
   let chronicle = renderChronicle();
-  let scopes = { authoritativeRules, worldCanon, campaignCanon, chronicle, currentScene };
+  let scopes: Record<string, unknown> & { currentContinuity?: CurrentContinuity } = {
+    authoritativeRules, worldCanon, campaignCanon, chronicle, currentScene,
+    ...(currentContinuity ? { currentContinuity } : {})
+  };
   let actualTokens = budgetTokenEstimate(stableStringify(scopes));
   while (actualTokens > scope.request.budgetTokens && selected.size > 0) {
     const lowestPriorityMemoryId = [...selected.keys()].at(-1);
     if (!lowestPriorityMemoryId) break;
     selected.delete(lowestPriorityMemoryId);
     chronicle = renderChronicle();
-    scopes = { authoritativeRules, worldCanon, campaignCanon, chronicle, currentScene };
+    scopes = {
+      authoritativeRules, worldCanon, campaignCanon, chronicle, currentScene,
+      ...(currentContinuity ? { currentContinuity } : {})
+    };
     actualTokens = budgetTokenEstimate(stableStringify(scopes));
   }
   const expectedForLevel = metrics.compressionEstimates[selectedLevel];
+  if (currentContinuity && actualTokens > scope.request.budgetTokens) {
+    throw Object.assign(new Error("The corrected current state cannot fit within the configured story context budget."), {
+      code: "context_budget_exceeded"
+    });
+  }
   if (config?.retrieval_shadow_enabled) {
     const productionSelectedParentIds = new Set(selected.keys());
     const comparisons: ChronicleRetrievalComparison[] = retrievalExecutions.map((execution) => ({

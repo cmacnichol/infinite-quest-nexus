@@ -126,6 +126,19 @@ criteria pass does an operator explicitly configure a selected campaign for
 `chunked_hybrid`; no migration, evaluator, worker, or startup path converts a
 campaign automatically.
 
+### New world-campaign defaults (2026-08-31)
+
+New campaigns created from a published world version now explicitly save
+`chunked_hybrid` and shadow comparison enabled within their creation transaction.
+This supersedes the opt-in rollout policy above only for new world campaigns;
+database/schema defaults, existing campaigns, and import settings are unchanged.
+When embedding auto-enable resolves an eligible provider and the saved config
+uses chunked retrieval or shadow comparison, it also queues the existing durable
+chunk-index job in the same transaction as the legacy embedding job. Without a
+provider, creation retains the retrieval preferences with embeddings disabled
+and defers indexing until configuration enables it. No provider request runs
+inside creation. Readiness checks and complete legacy fallback are unchanged.
+
 ## Rollback
 
 Use the following configuration rollback. It leaves accepted turns, Chronicle

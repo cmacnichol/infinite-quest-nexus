@@ -15,6 +15,8 @@ import {
   type DatabasePool
 } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
+import { createPostgresCampaignAuthorityAdapters } from "../../packages/database/src/campaign-state-repository.js";
+import { createPostgresGenerationExecutionRepository } from "../../packages/database/src/generation-execution-repository.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe.sequential : describe.skip;
@@ -144,11 +146,76 @@ integration("PostgreSQL world campaign repository adapters", () => {
         worldVersionId,
         title,
         storyLengthProfile: "standard",
+        storyContextBudgetTokens: 32_000,
         turnControlStyle: "flexible_auto"
       }
     )));
     return { title, created };
   }
+
+  it("loads and preserves mixed authored event rules before the first turn", async () => {
+    const adapters = createAdapters();
+    const rule = "When the gate opens, the keeper greets the traveler.";
+    const structured = {
+      id: "keeper-leaves", label: "Departure", timing: "after", condition: "The keeper leaves.",
+      effect: "The lantern goes dark.", addTextAfter: true, triggeredCount: 0,
+      lastTriggeredTurn: null, lastTriggeredAt: null
+    };
+    const authored = content("Opening compatibility", "Opening");
+    authored.eventTriggers = [rule, structured];
+    const world = unwrap(await adapters.transaction.command((transaction) => adapters.worlds.createWorld(
+      transaction, { ownerUserId }, { title: authored.world.title, content: authored }
+    )));
+    const version = await publishFixtureWorld(adapters, world.id, world.draftRevision, "Opening rules");
+    const { created } = await createFixtureCampaign(adapters, version.worldVersionId, "Opening campaign");
+    const campaignId = created.id;
+    const scope = { ownerUserId, campaignId };
+    const authority = createPostgresCampaignAuthorityAdapters(pool, { memory: {} as never, turnPages: {} as never });
+    const expected = [{
+      id: "world-event-1", label: "World event 1", timing: "before", condition: rule, effect: rule,
+      addTextAfter: false, triggeredCount: 0, lastTriggeredTurn: null, lastTriggeredAt: null
+    }, structured];
+    const sync = await authority.transaction.read((transaction) => authority.sync.readCampaignSyncSnapshot(transaction, scope));
+    expect(sync.projection.world.firstAction).toBe(authored.world.firstAction);
+    expect(sync.projection.campaign.activeTurnNumber).toBe(0);
+    expect(sync.projection.playerConfig.eventTriggers).toEqual(expected);
+    for (const turnNumber of [undefined, 0]) {
+      const runtime = await authority.transaction.read((transaction) => authority.state.getCampaignRuntimeState(transaction, scope, turnNumber));
+      expect(runtime.eventTriggers).toEqual(expected);
+    }
+    const stored = await pool.query("SELECT event_triggers, initial_state_snapshot FROM campaign_state WHERE campaign_id=$1", [campaignId]);
+    expect(stored.rows[0].event_triggers).toEqual(expected);
+    expect(stored.rows[0].initial_state_snapshot.eventTriggers).toEqual(expected);
+    expect((await pool.query("SELECT content FROM world_versions WHERE id=$1", [version.worldVersionId])).rows[0].content.eventTriggers).toEqual([rule, structured]);
+    expect((await pool.query("SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1", [campaignId])).rows[0].count).toBe(0);
+    await expect(authority.transaction.read((transaction) => authority.sync.readCampaignSyncSnapshot(
+      transaction, { ownerUserId: crypto.randomUUID(), campaignId }
+    ))).rejects.toMatchObject({ kind: "not_found" });
+
+    // An already-created zero-turn campaign must also load without a data migration.
+    await pool.query("UPDATE campaign_state SET event_triggers=$2, initial_state_snapshot=jsonb_set(initial_state_snapshot,'{eventTriggers}',$2::jsonb) WHERE campaign_id=$1", [campaignId, JSON.stringify([rule, structured])]);
+    const legacySync = await authority.transaction.read((transaction) => authority.sync.readCampaignSyncSnapshot(transaction, scope));
+    expect(legacySync.projection.playerConfig.eventTriggers).toEqual(expected);
+    const initial = await authority.transaction.read((transaction) => authority.state.getCampaignRuntimeState(transaction, scope, 0));
+    expect(initial.eventTriggers).toEqual(expected);
+    expect((await pool.query("SELECT event_triggers FROM campaign_state WHERE campaign_id=$1", [campaignId])).rows[0].event_triggers).toEqual([rule, structured]);
+  });
+
+  it("rejects unsupported event rules before creating any campaign rows", async () => {
+    const adapters = createAdapters();
+    const authored = content("Invalid opening rules", "Invalid");
+    authored.eventTriggers = [42];
+    const world = unwrap(await adapters.transaction.command((transaction) => adapters.worlds.createWorld(
+      transaction, { ownerUserId }, { title: authored.world.title, content: authored }
+    )));
+    const version = await publishFixtureWorld(adapters, world.id, world.draftRevision, "Invalid rule");
+    const result = await adapters.transaction.command((transaction) => adapters.campaigns.createCampaign(transaction, { ownerUserId }, {
+      worldVersionId: version.worldVersionId, title: "Invalid campaign", storyLengthProfile: "standard",
+      storyContextBudgetTokens: 32_000, turnControlStyle: "flexible_auto"
+    }));
+    expect(result).toMatchObject({ ok: false, failure: { reason: "invalid_transition" } });
+    expect((await pool.query("SELECT count(*)::int AS count FROM campaigns WHERE world_version_id=$1", [version.worldVersionId])).rows[0].count).toBe(0);
+  });
 
   it("creates and lists raw-Date worlds only inside the explicit owner scope", async () => {
     const foreignOwner = await pool.query<{ id: string }>(
@@ -514,6 +581,7 @@ integration("PostgreSQL world campaign repository adapters", () => {
         worldVersionId: ownVersion.worldVersionId,
         title: `Spoofed campaign ${crypto.randomUUID()}`,
         storyLengthProfile: "standard",
+        storyContextBudgetTokens: 32_000,
         turnControlStyle: "flexible_auto"
       }
     ));
@@ -563,7 +631,34 @@ integration("PostgreSQL world campaign repository adapters", () => {
     expect((await pool.query("SELECT id FROM campaigns WHERE id = $1", [ownCampaign.created.id])).rowCount).toBe(0);
   });
 
-  it("auto-enables eligible campaign embedding inside the caller-owned creation transaction", async () => {
+  it("defaults new world campaigns to chunked retrieval and shadow comparison without an embedding provider", async () => {
+    const adapters = createAdapters();
+    const world = await createFixtureWorld(adapters, "Retrieval defaults world");
+    const version = await publishFixtureWorld(adapters, world.created.id, world.created.draftRevision, "Retrieval defaults");
+    const existing = await createFixtureCampaign(adapters, version.worldVersionId, "Existing campaign");
+    await pool.query(
+      `INSERT INTO campaign_memory_configs (campaign_id, owner_user_id, retrieval_implementation, retrieval_shadow_enabled)
+       VALUES ($1,$2,'legacy_hybrid',false)
+       ON CONFLICT (campaign_id) DO UPDATE SET retrieval_implementation = 'legacy_hybrid', retrieval_shadow_enabled = false`,
+      [existing.created.id, ownerUserId]
+    );
+
+    const campaign = await createFixtureCampaign(adapters, version.worldVersionId, "New campaign");
+    const configs = await pool.query(
+      `SELECT campaign_id, embedding_enabled, retrieval_implementation, retrieval_shadow_enabled
+         FROM campaign_memory_configs WHERE owner_user_id = $1 ORDER BY campaign_id`,
+      [ownerUserId]
+    );
+    expect(configs.rows).toHaveLength(2);
+    expect(configs.rows).toEqual(expect.arrayContaining([
+      { campaign_id: existing.created.id, embedding_enabled: false, retrieval_implementation: "legacy_hybrid", retrieval_shadow_enabled: false },
+      { campaign_id: campaign.created.id, embedding_enabled: false, retrieval_implementation: "chunked_hybrid", retrieval_shadow_enabled: true }
+    ]));
+    expect((await pool.query("SELECT id FROM chronicle_jobs WHERE campaign_id = $1", [campaign.created.id])).rows).toEqual([]);
+    expect((await pool.query("SELECT id FROM chronicle_chunk_jobs WHERE campaign_id = $1", [campaign.created.id])).rows).toEqual([]);
+  });
+
+  it("auto-enables eligible campaign embedding and queues chunk indexing inside the caller-owned creation transaction", async () => {
     const adapters = createAdapters();
     const provider = await pool.query<{ id: string }>(
       `INSERT INTO provider_profiles (
@@ -586,10 +681,13 @@ integration("PostgreSQL world campaign repository adapters", () => {
       embedding_enabled: boolean;
       embedding_provider_profile_id: string;
       embedding_model: string;
+      retrieval_implementation: string;
+      retrieval_shadow_enabled: boolean;
       job_type: string;
       status: string;
     }>(
       `SELECT config.embedding_enabled, config.embedding_provider_profile_id, config.embedding_model,
+              config.retrieval_implementation, config.retrieval_shadow_enabled,
               job.job_type, job.status
          FROM campaign_memory_configs config
          JOIN chronicle_jobs job
@@ -601,9 +699,21 @@ integration("PostgreSQL world campaign repository adapters", () => {
       embedding_enabled: true,
       embedding_provider_profile_id: providerProfileId,
       embedding_model: "campaign-embedding-model",
+      retrieval_implementation: "chunked_hybrid",
+      retrieval_shadow_enabled: true,
       job_type: "embed_campaign",
       status: "queued"
     });
+    const chunkJobs = await pool.query(
+      `SELECT owner_user_id, campaign_id, job_type, status FROM chronicle_chunk_jobs WHERE campaign_id = $1`,
+      [campaign.created.id]
+    );
+    expect(chunkJobs.rows).toEqual([{
+      owner_user_id: ownerUserId,
+      campaign_id: campaign.created.id,
+      job_type: "index_memory_chunks_v2",
+      status: "queued"
+    }]);
 
     let rolledBackCampaignId = "";
     await expect(adapters.transaction.command(async (transaction) => {
@@ -614,6 +724,7 @@ integration("PostgreSQL world campaign repository adapters", () => {
           worldVersionId: version.worldVersionId,
           title: `Rolled back embedded campaign ${crypto.randomUUID()}`,
           storyLengthProfile: "standard",
+          storyContextBudgetTokens: 32_000,
           turnControlStyle: "flexible_auto"
         }
       ));
@@ -621,14 +732,15 @@ integration("PostgreSQL world campaign repository adapters", () => {
       throw new Error("synthetic campaign creation rollback");
     })).rejects.toThrow("synthetic campaign creation rollback");
     expect(rolledBackCampaignId).not.toBe("");
-    const rolledBack = await pool.query<{ campaigns: string; configs: string; jobs: string }>(
+    const rolledBack = await pool.query<{ campaigns: string; configs: string; jobs: string; chunk_jobs: string }>(
       `SELECT
          (SELECT count(*)::text FROM campaigns WHERE id = $1) AS campaigns,
          (SELECT count(*)::text FROM campaign_memory_configs WHERE campaign_id = $1) AS configs,
-         (SELECT count(*)::text FROM chronicle_jobs WHERE campaign_id = $1) AS jobs`,
+         (SELECT count(*)::text FROM chronicle_jobs WHERE campaign_id = $1) AS jobs,
+         (SELECT count(*)::text FROM chronicle_chunk_jobs WHERE campaign_id = $1) AS chunk_jobs`,
       [rolledBackCampaignId]
     );
-    expect(rolledBack.rows[0]).toEqual({ campaigns: "0", configs: "0", jobs: "0" });
+    expect(rolledBack.rows[0]).toEqual({ campaigns: "0", configs: "0", jobs: "0", chunk_jobs: "0" });
   });
 
   it("blocks campaign deletion while durable work remains active", async () => {

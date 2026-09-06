@@ -1,5 +1,7 @@
 # Feature Implementation Matrix — Infinite Quest Nexus
 
+> Historical UI audit snapshot from July/August 2026. File paths, implementation states, and gaps below describe that audit, not current completion status. For example, import progress now uses PostgreSQL through `createPostgresImportProgressRepository`. Use [Current capabilities](../reference/capabilities.md) and current source before planning implementation.
+
 **C8 boundary note (2026-08-02):** typed endpoint adoption is incremental.
 Story Player prerequisite/generation routes use `packages/client-web`; the
 eight illustration routes temporarily use the named, schema-validating legacy

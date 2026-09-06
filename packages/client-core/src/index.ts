@@ -7,6 +7,14 @@ export type {
   PendingSubmissionStore,
   SessionPort
 } from "./ports.js";
+export {
+  DEFAULT_STORY_CONTEXT_BUDGET_TOKENS,
+  STORY_CONTEXT_BUDGET_PRESETS,
+  normalizeStoryContextBudgetTokens
+} from "./story-context-budget.js";
+export type {
+  StoryContextBudgetTokens
+} from "./story-context-budget.js";
 export type { Immutable, Store } from "./store.js";
 export {
   CampaignProjectionProtocolError,
@@ -63,6 +71,12 @@ export {
   undoTargetTurnNumber
 } from "./story-turn-window.js";
 export type { StoryCampaignWindow, StoryTurn } from "./story-turn-window.js";
+export {
+  buildCurrentStateUpdate,
+  createCampaignContinuityDraft,
+  hasCampaignContinuityChanges
+} from "./campaign-state-editor.js";
+export type { CampaignContinuityDraft } from "./campaign-state-editor.js";
 export type {
   GenerationEvent,
   GenerationRun,

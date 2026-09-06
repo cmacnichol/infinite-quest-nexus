@@ -1,6 +1,6 @@
 # Recover image jobs
 
-Image jobs are independent children of accepted turns. An image failure does not require story rollback or regeneration.
+Image jobs are independent of story acceptance. They may belong to an accepted turn or a provisional streaming segment scoped to a generation job. An image failure does not require story rollback or regeneration. See the [streaming lifecycle and open contract conflict](../../concepts/illustration-pipeline.md#provisional-streaming-path-and-open-contract-conflict).
 
 World covers use the same durable queue but are world-scoped instead of campaign- and turn-scoped. A cover failure does not affect the world draft or any published version.
 
@@ -13,6 +13,6 @@ World covers use the same durable queue but are world-scoped instead of campaign
 
 To retry a world cover, open the world in **World Management** and select **Generate cover** again. The active-job guard prevents duplicate simultaneous cover requests for the same world.
 
-An explicit retry is a new generation revision and therefore a new provider idempotency key. Automatic retries before the first remote ID is persisted keep the existing key. This distinction prevents routine transport recovery from intentionally duplicating work while still allowing an operator-requested retry to create a fresh image.
+An explicit retry is a new generation revision and therefore a new provider idempotency key. Creative Workflow automatic retries before the first remote ID is persisted keep the existing key. Supernet SDK creates its own project UUID and cannot use that caller key: a crash between provider acceptance and persistence of the project ID can leave untracked work or duplicate retry charges. Once a remote ID is stored, both adapters resume that job. See [Sogni recovery](../../nexus-guide/providers/sogni.md).
 
 Do not send raw history, private mechanics, rejected narration, or text-provider credentials to the image endpoint during manual diagnosis.

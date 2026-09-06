@@ -3,6 +3,7 @@ import {
   type AssetApplication,
   type AssetApplicationDependencies,
 } from "../../../packages/application/src/assets/index.js";
+import type { PrivateAssetPublicationIdentityPort } from "../../../packages/application/src/assets/private-asset-publication.js";
 import { createPostgresAssetRepositories } from "../../../packages/database/src/asset-repository.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import {
@@ -22,6 +23,7 @@ export type ApiAssetCompositionFactories = Readonly<{
   createStorage(
     pool: DatabasePool,
     roots: Readonly<{ archiveRoot: string; assetRoot: string }>,
+    capturePublicationIdentity?: (publication: PrivateAssetPublicationIdentityPort) => void,
   ): Promise<AssetImportStorageComposition>;
 }>;
 
@@ -58,4 +60,42 @@ export async function createApiAssetComposition(
     await storage.close().catch(() => undefined);
     throw error;
   }
+}
+
+export type SystemArchiveAssetStorageComposition = Readonly<{
+  storage: AssetImportStorageComposition;
+  assetPublications: PrivateAssetPublicationIdentityPort;
+  close(): Promise<void>;
+}>;
+
+/**
+ * System Import needs both descriptor-anchored storage and the transactional
+ * Original Asset publication authority. Keep their concrete construction at
+ * the existing canonical storage checkpoint instead of exposing factories to
+ * worker code.
+ */
+export async function createSystemArchiveAssetStorageComposition(
+  pool: DatabasePool,
+  roots: Readonly<{ archiveRoot: string; assetRoot: string }>,
+  factories: Pick<ApiAssetCompositionFactories, "createStorage"> = defaultFactories,
+): Promise<SystemArchiveAssetStorageComposition> {
+  let assetPublications: PrivateAssetPublicationIdentityPort | undefined;
+  const storage = await factories.createStorage(
+    pool,
+    roots,
+    (captured) => { assetPublications = captured; },
+  );
+  if (!assetPublications) {
+    await storage.close();
+    throw new Error("system_archive_asset_publication_unavailable");
+  }
+  let closed: Promise<void> | undefined;
+  return Object.freeze({
+    storage,
+    assetPublications,
+    close() {
+      closed ??= storage.close();
+      return closed;
+    },
+  });
 }

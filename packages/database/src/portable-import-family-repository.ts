@@ -15,7 +15,7 @@ import type {
   PortableJsonValue
 } from "../../application/src/imports/private-portable-composition.js";
 import type { WorldRepositoryPort } from "../../application/src/world-campaign/ports.js";
-import { legacyStorySchema, worldImportRequestSchema } from "../../contracts/src/index.js";
+import { legacyStorySchema, storyContextBudgetTokensFromUnknown, worldImportRequestSchema } from "../../contracts/src/index.js";
 import type {
   ImportOwnerScope,
   PortableArchiveDiagnosticCode,
@@ -34,6 +34,12 @@ import {
 } from "./import-repository.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
+import {
+  preseedAcceptedTurnSnapshotFactIds,
+  remapAcceptedTurnSnapshotFactReferences,
+  remapCorrectionSnapshotFactIds
+} from "./canonical-fact-reference-remapping.js";
+import { rebuildImportedCampaignCanonicalFactProjections } from "./chronicle-repository.js";
 import { importPrivatePortableWorldAtExactTarget } from "./world-repository.js";
 import { runPostgresWorldCampaignCommandWithClient } from "./world-campaign-transaction.js";
 import { estimateTokens, stripMechanicsLeakage } from "../../domain/src/text.js";
@@ -1268,13 +1274,14 @@ async function commitRichPortableCampaign(
   const campaignId = input.targetPlan?.campaignId ?? randomUUID();
   await database.query(
     `INSERT INTO campaigns (
-       id,owner_user_id,world_version_id,title,active_turn_number,legacy_settings,story_length_profile,
+       id,owner_user_id,world_version_id,title,active_turn_number,legacy_settings,story_length_profile,story_context_budget_tokens,
        turn_control_style,selected_character_id,character_snapshot,character_profile,character_profile_revision
-     ) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10::jsonb,$11::jsonb,$12)`,
+     ) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13)`,
     [campaignId, input.owner.ownerUserId, input.destination.worldVersionId,
       typeof sourceCampaign.title === "string" && sourceCampaign.title.trim() ? sourceCampaign.title : "Imported campaign",
       activeTurnNumber, JSON.stringify(settings),
       typeof settings.storyLength === "string" ? settings.storyLength : "standard",
+      storyContextBudgetTokensFromUnknown(settings.storyContextBudgetTokens),
       ["action_only", "flexible_auto", "flexible_action", "flexible_scene"].includes(String(settings.turnControlStyle))
         ? settings.turnControlStyle : "flexible_action",
       typeof sourceCampaign.selectedCharacterId === "string" ? sourceCampaign.selectedCharacterId : null,
@@ -1306,6 +1313,31 @@ async function commitRichPortableCampaign(
   }
   for (const set of unknownArray(archiveRecords.illustrationSets)) mapRichId(maps.illustrationSet, unknownRecord(set).id);
   for (const segment of unknownArray(archiveRecords.illustrationSegments)) mapRichId(maps.illustrationSegment, unknownRecord(segment).id);
+  const destinationFactIds = new Map<string, string>();
+  for (const turnValue of turns) {
+    const turn = unknownRecord(turnValue);
+    preseedAcceptedTurnSnapshotFactIds(
+      unknownRecord(turn.worldStateSnapshot),
+      {
+        sourceCampaignId: String(sourceCampaign.sourceCampaignId ?? "source-campaign"),
+        sourceTurnId: String(turn.id),
+        destinationCampaignId: campaignId,
+        destinationTurnId: requireRichId(maps.turn, turn.id),
+        factIds: destinationFactIds
+      }
+    );
+  }
+  const stateEdits: Array<Record<string, unknown> & { state_snapshot_private: Record<string, unknown> }> = unknownArray(archiveRecords.stateEdits).map((value) => {
+    const row = unknownRecord(value);
+    return {
+      ...row,
+      state_snapshot_private: remapCorrectionSnapshotFactIds(
+        unknownRecord(row.state_snapshot_private),
+        destinationFactIds,
+        randomUUID
+      )
+    };
+  });
   await database.query(
     `INSERT INTO campaign_state (
        campaign_id,owner_user_id,scratchpad_private,trackers,default_triggers,event_triggers,
@@ -1332,7 +1364,16 @@ async function commitRichPortableCampaign(
         typeof turn.inputModeSource === "string" ? turn.inputModeSource : "explicit",
         narration(turn), jsonValue(turn.choices, []), String(turn.customActionSuggestion ?? ""),
         String(turn.imagePrompt ?? ""), typeof turn.imageUrl === "string" && /^https:\/\//u.test(turn.imageUrl) ? turn.imageUrl : "",
-        jsonValue(turn.roll, null), jsonValue(turn.worldStateSnapshot, {}), jsonValue(turn.llmModelInfo, {}),
+        jsonValue(turn.roll, null), jsonValue(remapAcceptedTurnSnapshotFactReferences(
+          unknownRecord(turn.worldStateSnapshot),
+          {
+            sourceCampaignId: String(sourceCampaign.sourceCampaignId ?? "source-campaign"),
+            sourceTurnId: String(turn.id),
+            destinationCampaignId: campaignId,
+            destinationTurnId: requireRichId(maps.turn, turn.id),
+            factIds: destinationFactIds
+          }
+        ), {}), jsonValue(turn.llmModelInfo, {}),
         jsonValue({ importedFrom: "portable_campaign_zip", sourceTurnId: turn.id }, {}), portableDate(turn.createdAt)]
     );
   }
@@ -1347,8 +1388,7 @@ async function commitRichPortableCampaign(
           .includes(String(row.edit_source)) ? row.edit_source : "imported", portableDate(row.created_at)]
     );
   }
-  for (const value of unknownArray(archiveRecords.stateEdits)) {
-    const row = unknownRecord(value);
+  for (const row of stateEdits) {
     await database.query(
       `INSERT INTO campaign_state_edits (
          owner_user_id,campaign_id,effective_turn_number,revision,state_snapshot_private,changed_fields,created_at
@@ -1397,6 +1437,11 @@ async function commitRichPortableCampaign(
         Number(summary.lexicalUnitEstimate ?? 0), portableDate(summary.created_at)]
     );
   }
+  await rebuildImportedCampaignCanonicalFactProjections(database, {
+    ownerUserId: input.owner.ownerUserId,
+    campaignId,
+    worldVersionId: input.destination.worldVersionId
+  });
   const config = unknownRecord(archiveRecords.illustrationConfig);
   if (Object.keys(config).length > 0) {
     const sourcePolicy = ["off", "library_only", "library_then_generate", "generate_only"].includes(String(config.source_policy))
@@ -1609,11 +1654,12 @@ async function commitPortableCampaign(
   await database.query(
     `INSERT INTO campaigns (
        id,owner_user_id,world_version_id,title,active_turn_number,legacy_settings,
-       story_length_profile,turn_control_style,selected_character_id,character_snapshot,
+       story_length_profile,story_context_budget_tokens,turn_control_style,selected_character_id,character_snapshot,
        character_profile,character_profile_revision
-     ) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10::jsonb,$11::jsonb,$12)`,
+     ) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13)`,
     [campaignId, input.owner.ownerUserId, input.destination.worldVersionId, title, story.turns.length,
-      JSON.stringify(legacySettings), storyLengthProfile, turnControlStyle, selectedCharacterId,
+      JSON.stringify(legacySettings), storyLengthProfile,
+      storyContextBudgetTokensFromUnknown(legacySettings.storyContextBudgetTokens), turnControlStyle, selectedCharacterId,
       characterSnapshot ? JSON.stringify(characterSnapshot) : null,
       characterProfile ? JSON.stringify(characterProfile) : null,
       characterProfileRevision]

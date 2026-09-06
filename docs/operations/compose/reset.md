@@ -1,7 +1,7 @@
 # Reset a local Compose installation
 
 ::: danger Permanent data loss
-This procedure deletes the local PostgreSQL and generated-asset volumes. Recovery is possible only from a separately verified database, asset, and encryption-key backup set.
+This procedure deletes all four local volumes: PostgreSQL, generated assets, archive staging/downloads, and the generated credential-encryption key. Recovery requires a separately verified Recovery Set containing the database, assets, compatible application/configuration inventory, and original encryption key. Download any completed portable exports you intend to keep before removing archive storage.
 :::
 
 1. Confirm the resolved Compose project is `infinitequest`.

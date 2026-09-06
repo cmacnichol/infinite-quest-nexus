@@ -1,0 +1,73 @@
+.app-dialog {
+  width: min(46rem, calc(100% - (2 * var(--edge))));
+  max-height: calc(100dvh - (2 * var(--edge)));
+  margin: auto;
+  padding: 0;
+  overflow: hidden auto;
+  border: 1px solid var(--rule-strong);
+  border-radius: 0;
+  color: var(--text-primary);
+  background: var(--surface-paper);
+}
+
+.app-dialog::backdrop {
+  background: var(--artwork-overlay);
+}
+
+.app-dialog__header,
+.app-dialog__footer {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px clamp(20px, 3vw, 32px);
+}
+
+.app-dialog__header {
+  justify-content: space-between;
+  border-bottom: 1px solid var(--rule-strong);
+}
+
+.app-dialog__title {
+  margin: 0;
+  color: var(--text-primary);
+  font: 600 clamp(1.2rem, 2vw, 1.5rem) / 1.2 "Chakra Petch", sans-serif;
+}
+
+.app-dialog__body {
+  padding: clamp(20px, 3vw, 32px);
+}
+
+.app-dialog__footer {
+  justify-content: flex-end;
+  border-top: 1px solid var(--rule-strong);
+  background: var(--surface-muted);
+}
+
+.app-dialog__close {
+  min-width: var(--control-min-height);
+  min-height: var(--control-min-height);
+  padding: 10px 16px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 0;
+  color: var(--text-primary);
+  background: var(--surface-entry);
+  font: 500 0.95rem / 1.2 "Geologica", sans-serif;
+  cursor: pointer;
+}
+
+.app-dialog__close:hover {
+  background: var(--surface-entry-hover);
+}
+
+.app-dialog__close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (max-width: 720px) {
+  .app-dialog {
+    width: 100%;
+    max-height: min(78dvh, calc(100dvh - var(--edge)));
+    margin: auto 0 0;
+  }
+}

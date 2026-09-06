@@ -2,7 +2,7 @@ name: infinitequest-test
 
 services:
   postgres-test:
-    image: pgvector/pgvector:0.8.5-pg18-trixie
+    image: pgvector/pgvector:0.8.6-pg18-trixie
     environment:
       POSTGRES_DB: infinitequest
       POSTGRES_USER: infinitequest
@@ -53,7 +53,7 @@ services:
 
   integration-postgres:
     container_name: infinitequest-integration-postgres
-    image: pgvector/pgvector:0.8.5-pg18-trixie
+    image: pgvector/pgvector:0.8.6-pg18-trixie
     environment:
       POSTGRES_DB: ${POSTGRES_DB:?Run scripts/ensure-test-database.mjs first}
       POSTGRES_USER: ${POSTGRES_USER:?Run scripts/ensure-test-database.mjs first}

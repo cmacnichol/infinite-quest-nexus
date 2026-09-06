@@ -8,12 +8,12 @@
 - Host port 8080 by default
 - Network reachability from `infinitequest-app` to the selected external providers
 
-The included database image is `pgvector/pgvector:0.8.5-pg18-trixie`, providing PostgreSQL 18 and pgvector.
+The included database image is `pgvector/pgvector:0.8.6-pg18-trixie`, providing PostgreSQL 18 and pgvector.
 
 ## Source workflows
 
 - Node.js 22.13 or newer; the container and CI use Node.js 24
-- pnpm 11.14.0
+- pnpm 11.24.0
 - A PostgreSQL/pgvector test database for integration tests
 
 ## Story providers

@@ -301,6 +301,7 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
       world_version_id: WORLD_VERSION_ID,
       title: "The Observatory",
       story_length_profile: "standard",
+      storyContextBudgetTokens: 32_000,
       turn_control_style: "flexible_auto",
       selected_character_id: "observer",
       character_snapshot: { name: "The Observer", characterText: "A patient observer." },
@@ -382,6 +383,7 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
       createdAt: NOW,
       updatedAt: NOW,
       storyLengthProfile: "standard",
+      storyContextBudgetTokens: 32_000,
       turnControlStyle: "flexible_auto",
       selectedCharacterId: "observer",
       selectedCharacterName: "The Observer",
@@ -402,6 +404,7 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
       activeTurnNumber: 2,
       worldVersionId: WORLD_VERSION_ID,
       storyLengthProfile: "standard",
+      storyContextBudgetTokens: 32_000,
       turnControlStyle: "flexible_auto",
       selectedCharacterId: "observer",
       characterSnapshot: { name: "The Observer", characterText: "A patient observer." },
@@ -1498,11 +1501,14 @@ describe("Story route coexistence", () => {
     const storyStorageRoot = await mkdtemp(join(tmpdir(), "infinitequest-story-route-"));
     const app = await buildServer(serverOptions({ config: config(storyStorageRoot), pool: mockPool() }));
     try {
-      const [legacyRoot, legacyCampaign, replacementRoot, replacementCampaign] = await Promise.all([
+      const [legacyRoot, legacyCampaign, replacementRoot, replacementCampaign, worldLibrary, worldEditor, missingAsset] = await Promise.all([
         app.inject({ method: "GET", url: "/story" }),
         app.inject({ method: "GET", url: "/story/campaign-1" }),
         app.inject({ method: "GET", url: "/app/story" }),
-        app.inject({ method: "GET", url: "/app/story/campaign-1" })
+        app.inject({ method: "GET", url: "/app/story/campaign-1" }),
+        app.inject({ method: "GET", url: "/app/worlds" }),
+        app.inject({ method: "GET", url: "/app/worlds/world-1/editor" }),
+        app.inject({ method: "GET", url: "/app/assets/missing.js" })
       ]);
 
       for (const response of [legacyRoot, legacyCampaign, replacementRoot, replacementCampaign]) {
@@ -1516,6 +1522,13 @@ describe("Story route coexistence", () => {
       expect(replacementCampaign.body).toContain('<div id="app"></div>');
       expect(replacementRoot.body).not.toContain("legacy-client.js");
       expect(replacementCampaign.body).not.toContain("legacy-client.js");
+      for (const response of [worldLibrary, worldEditor]) {
+        expect(response.statusCode).toBe(200);
+        expect(response.headers["content-type"]).toContain("text/html");
+        expect(response.body).toContain('<div id="app"></div>');
+      }
+      expect(missingAsset.statusCode).toBe(404);
+      expect(missingAsset.headers["content-type"]).toContain("application/json");
     } finally {
       await app.close();
       await rm(storyStorageRoot, { recursive: true, force: true });
