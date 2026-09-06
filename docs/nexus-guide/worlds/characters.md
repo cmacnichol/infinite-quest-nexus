@@ -23,4 +23,4 @@ When an effective default text model is configured:
 4. Review every populated field.
 5. Select **Add character** or **Save changes**.
 
-Generation never persists the candidate automatically. Unsaved premise and canon editor values may guide the candidate as bounded generation-only context. If either is empty, Nexus shows **World context is incomplete** and requires **Go back** or **Generate anyway**.
+Generation never persists the candidate automatically. Unsaved premise and canon editor values may guide the candidate as bounded generation-only context. If either is empty, Nexus shows **World context is incomplete** and requires **Go back** or **Generate anyway**. If generation cannot be validated, your prompt and candidate fields remain available to review and retry; validated failures identify the affected stage or field and include a correlation ID. If the text provider is unavailable, use **Provider Setup** to open `/nexus/#providers` before retrying.

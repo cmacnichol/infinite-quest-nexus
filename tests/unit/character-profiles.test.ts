@@ -11,6 +11,7 @@ import {
   hasCharacterProfileGuidance
 } from "../../packages/domain/src/world-characters.js";
 import { composeIllustrationProviderPrompt } from "../../packages/domain/src/illustrations.js";
+import { ProviderHttpError } from "../../packages/story-engine/src/providers.js";
 import {
   CHARACTER_PROFILE_ORGANIZER_PROTOCOL_VERSION,
   characterProfileOrganizerInput,
@@ -18,6 +19,7 @@ import {
   characterProfileOrganizerRepairInput,
   characterProfileOrganizerRepairPrompt,
   characterProfileOrganizerSources,
+  organizeWorldCharacterProfileForOwner,
   validateOrganizerResultWithRepair,
   validateOrganizerResult
 } from "../../services/runtime/src/provider-character-organization-adapter.js";
@@ -151,7 +153,7 @@ describe("strict character profile organizer validation", () => {
   it("uses a complete, exact output contract and dynamically lists allowed evidence sources", () => {
     const prompt = characterProfileOrganizerPrompt();
     const input = characterProfileOrganizerInput("Mira", sources);
-    expect(CHARACTER_PROFILE_ORGANIZER_PROTOCOL_VERSION).toBe("character-profile-organizer-v2");
+    expect(CHARACTER_PROFILE_ORGANIZER_PROTOCOL_VERSION).toBe("character-profile-organizer-v3");
     expect(prompt).toContain("The top-level object must contain exactly");
     expect(prompt).toContain("Never use sourceKey, verbatim");
     expect(prompt).toContain("silently verify the output contract");
@@ -200,6 +202,103 @@ describe("strict character profile organizer validation", () => {
     }]);
   });
 
+  it("normalizes provider evidence aliases and removes them before strict parsing", () => {
+    const result = validateOrganizerResult({
+      candidate: { appearance: { clothing: "weathered blue cloak" } },
+      evidence: [{
+        field: "appearance.clothing",
+        sourceKey: "legacyGuidance",
+        content: "weathered blue cloak",
+        verbatim: "weathered blue cloak"
+      }],
+      unassignedText: [], conflicts: [], warnings: [], protocolVersion: "ignored-by-server"
+    }, sources);
+    expect(result.evidence).toEqual([{
+      path: "appearance.clothing",
+      source: "legacyGuidance",
+      quote: "weathered blue cloak"
+    }]);
+  });
+
+  it("rejects conflicting canonical and provider evidence aliases", () => {
+    expect(() => validateOrganizerResult({
+      candidate: { appearance: { clothing: "weathered blue cloak" } },
+      evidence: [{
+        path: "appearance.clothing",
+        field: "appearance.eyes",
+        source: "legacyGuidance",
+        quote: "weathered blue cloak"
+      }],
+      unassignedText: [], conflicts: [], warnings: [], protocolVersion: "ignored-by-server"
+    }, sources)).toThrow();
+  });
+
+  it("rejects evidence that names an inherited source key", () => {
+    expect(() => validateOrganizerResult({
+      candidate: { appearance: { clothing: "weathered blue cloak" } },
+      evidence: [{ path: "appearance.clothing", source: "constructor", quote: "weathered blue cloak" }],
+      unassignedText: [], conflicts: [], warnings: [], protocolVersion: "ignored-by-server"
+    }, sources)).toThrow("was not found");
+  });
+
+  it("rejects evidence paths for empty fields and mechanics in incomplete organizer candidates", () => {
+    expect(() => validateOrganizerResult({
+      candidate: {},
+      evidence: [{ path: "appearance.clothing", source: "legacyGuidance", quote: "weathered blue cloak" }],
+      unassignedText: [], conflicts: [], warnings: [], protocolVersion: "ignored-by-server"
+    }, sources)).toThrow("must refer to a populated profile field");
+
+    expect(() => validateOrganizerResult({
+      candidate: { story: { otherGuidance: "Roll 1d20 to cross the bridge." } },
+      evidence: [{ path: "story.otherGuidance", source: "legacyGuidance", quote: "Mira wears a weathered blue cloak." }],
+      unassignedText: [], conflicts: [], warnings: [], protocolVersion: "ignored-by-server"
+    }, { ...sources, legacyGuidance: "Roll 1d20 to cross the bridge." })).toThrow();
+
+    expect(() => validateOrganizerResult({
+      candidate: { privateReasoning: "never save" }, evidence: [],
+      unassignedText: [], conflicts: [], warnings: [], protocolVersion: "ignored-by-server"
+    }, sources)).toThrow();
+  });
+
+  it.each([
+    [{ privateReasoning: "never save" }, "privateReasoning"],
+    [{ appearance: { credentials: { password: 42 } } }, "appearance.credentials.password"],
+    [{ extensions: [{ hiddenMetadata: false }] }, "extensions.0.hiddenMetadata"],
+    [{ extensions: { api_key: null } }, "extensions.api_key"]
+  ])("rejects prohibited organizer metadata even with valid source evidence: %j", (candidate, path) => {
+    expect(() => validateOrganizerResult({
+      candidate, evidence: [{ path, source: "legacyGuidance", quote: "Blue coat" }],
+      unassignedText: [], conflicts: [], warnings: []
+    }, { legacyGuidance: "Blue coat" })).toThrow("prohibited provider metadata");
+  });
+
+  it.each([true, false])("repairs evidence-backed prohibited organizer metadata once (valid replacement: %s)", async (validReplacement) => {
+    const invalid = { candidate: { privateReasoning: "never save" }, evidence: [{ path: "privateReasoning", source: "legacyGuidance", quote: "Blue coat" }], unassignedText: [], conflicts: [], warnings: [] };
+    const valid = { ...invalid, candidate: { appearance: { clothing: "Blue coat" } }, evidence: [{ path: "appearance.clothing", source: "legacyGuidance", quote: "Blue coat" }] };
+    const responses = [invalid, validReplacement ? valid : invalid];
+    const requests: Array<{ input: string }> = [];
+    const content = worldContentSchema.parse({ world: { title: "Organizer world" } });
+    const result = organizeWorldCharacterProfileForOwner(
+      { query: async () => ({ rows: [{ status: "draft", revision: 1, content }] }) } as never,
+      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "Blue coat", rpgStats: [], defaultTriggers: [], source: {} } },
+      {
+        resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: "provider", model: "model" }) },
+        execution: { text: async () => ({ execute: async (request: { input: string }) => { requests.push(request); return { content: JSON.stringify(responses.shift()), responseId: "response", finishReason: "stop", outputLimited: false, modelInstanceId: "model", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, reportedCost: null, rawMetadata: {} }; } }) },
+        prompts: { loadCharacterOrganizationPromptSnapshot: async () => ({ snapshot: {} }) },
+        promptTools: { content: () => "Organize supplied character facts." }
+      } as never
+    );
+    if (validReplacement) {
+      await expect(result).resolves.toMatchObject({ candidate: { appearance: { clothing: "Blue coat" }, story: { role: "", background: "" } } });
+    } else {
+      const failure = await result.catch((error) => error);
+      expect(failure).toMatchObject({ name: "AuthoringResponseError", authoringFailure: { stage: "organizer", code: "invalid_authoring_output", issues: [{ path: "profile", code: "custom", message: "Generated character contains prohibited provider metadata." }] } });
+      expect(JSON.stringify(failure.authoringFailure)).not.toMatch(/never save|privateReasoning/);
+    }
+    expect(requests).toHaveLength(2);
+    expect(JSON.parse(requests[1]!.input).validationFailures).toEqual([{ path: "profile", code: "custom", message: "Generated character contains prohibited provider metadata." }]);
+  });
+
   it("normalizes single organizer notices into their required text lists", () => {
     const result = validateOrganizerResult({
       candidate: {},
@@ -243,6 +342,118 @@ describe("strict character profile organizer validation", () => {
     const result = await validateOrganizerResultWithRepair(invalid, sources, repair);
     expect(repair).toHaveBeenCalledTimes(1);
     expect(result.evidence[0]?.quote).toBe("weathered blue cloak");
+  });
+
+  it("keeps the direct repair helper bounded for structural organizer failures", async () => {
+    const repair = vi.fn(async (issues) => {
+      expect(issues).toEqual([{
+        path: "evidence",
+        code: "invalid_type",
+        message: "Generated content has an invalid type."
+      }]);
+      return { candidate: {}, evidence: [], unassignedText: [], conflicts: [], warnings: [] };
+    });
+    await expect(validateOrganizerResultWithRepair({
+      candidate: {}, evidence: "not an array", unassignedText: [], conflicts: [], warnings: []
+    }, sources, repair)).resolves.toMatchObject({ candidate: {}, evidence: [] });
+    expect(repair).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends the effective organizer contract on initial and repair provider calls", async () => {
+    const requests: Array<{ systemPrompt: string; input: string }> = [];
+    const responses = [
+      { candidate: { appearance: { clothing: "weathered blue cloak" } }, evidence: [{ path: "appearance.clothing", source: "legacyGuidance", quote: "wrong quote" }], unassignedText: [], conflicts: [], warnings: [] },
+      { candidate: { appearance: { clothing: "weathered blue cloak" } }, evidence: [{ path: "appearance.clothing", source: "legacyGuidance", quote: "weathered blue cloak" }], unassignedText: [], conflicts: [], warnings: [] }
+    ];
+    const content = worldContentSchema.parse({ world: { title: "Organizer world" } });
+    const result = await organizeWorldCharacterProfileForOwner(
+      { query: async () => ({ rows: [{ status: "draft", revision: 1, content }] }) } as never,
+      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "Mira wears a weathered blue cloak.", rpgStats: [], defaultTriggers: [], source: {} } },
+      {
+        resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: "provider", model: "model" }) },
+        execution: { text: async () => ({ execute: async (request: unknown) => { requests.push(request as { systemPrompt: string; input: string }); return { content: JSON.stringify(responses.shift()), responseId: "response", finishReason: "stop", outputLimited: false, modelInstanceId: "model", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, reportedCost: null, rawMetadata: {} }; } }) },
+        prompts: { loadCharacterOrganizationPromptSnapshot: async () => ({ snapshot: {} }) },
+        promptTools: { content: () => "Organize supplied character facts." }
+      } as never
+    );
+    expect(result.candidate.appearance.clothing).toBe("weathered blue cloak");
+    expect(requests).toHaveLength(2);
+    for (const request of requests) {
+      expect(request.systemPrompt).toContain('"path":"appearance.clothing","source":"legacyGuidance","quote":"exact source excerpt"');
+      expect(request.systemPrompt).toContain("character-profile-organizer-v3");
+      expect(request.systemPrompt).toContain("untrusted reference");
+      expect((request as Record<string, unknown>).responseFormatFallback).toBe("forbid");
+      expect(request).not.toHaveProperty("previousResponseId");
+    }
+    expect(JSON.parse(requests[1]!.input).validationFailures).toEqual([{
+      path: "evidence.0.source",
+      code: "custom",
+      message: "Organizer evidence does not support a populated profile field."
+    }]);
+  });
+
+  it("repairs malformed organizer output once and fails safely when the replacement is malformed", async () => {
+    const requests: unknown[] = [];
+    const content = worldContentSchema.parse({ world: { title: "Organizer world" } });
+    await expect(organizeWorldCharacterProfileForOwner(
+      { query: async () => ({ rows: [{ status: "draft", revision: 1, content }] }) } as never,
+      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "Mira wears a weathered blue cloak.", rpgStats: [], defaultTriggers: [], source: {} } },
+      {
+        resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: "provider", model: "model" }) },
+        execution: { text: async () => ({ execute: async (request: unknown) => { requests.push(request); return { content: "not JSON", responseId: "response", finishReason: "stop", outputLimited: false, modelInstanceId: "model", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, reportedCost: null, rawMetadata: {} }; } }) },
+        prompts: { loadCharacterOrganizationPromptSnapshot: async () => ({ snapshot: {} }) },
+        promptTools: { content: () => "Organize supplied character facts." }
+      } as never
+    )).rejects.toMatchObject({ name: "AuthoringResponseError", authoringFailure: { code: "invalid_authoring_output", stage: "organizer" } });
+    expect(requests).toHaveLength(2);
+  });
+
+  it("maps an unavailable organizer resolution to a typed authoring failure", async () => {
+    const content = worldContentSchema.parse({ world: { title: "Organizer world" } });
+    await expect(organizeWorldCharacterProfileForOwner(
+      { query: async () => ({ rows: [{ status: "draft", revision: 1, content }] }) } as never,
+      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "", rpgStats: [], defaultTriggers: [], source: {} } },
+      { resolution: { resolveDirect: async () => ({ status: "unavailable" }) } } as never
+    )).rejects.toMatchObject({ name: "AuthoringResponseError", statusCode: 503, authoringFailure: { code: "authoring_provider_unavailable", stage: "organizer" } });
+  });
+
+  it("maps a missing resolved organizer execution profile to the same typed failure", async () => {
+    const content = worldContentSchema.parse({ world: { title: "Organizer world" } });
+    await expect(organizeWorldCharacterProfileForOwner(
+      { query: async () => ({ rows: [{ status: "draft", revision: 1, content }] }) } as never,
+      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "", rpgStats: [], defaultTriggers: [], source: {} } },
+      {
+        resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: "missing", model: "model" }) },
+        execution: { text: async () => { throw Object.assign(new Error("missing"), { statusCode: 404 }); } }
+      } as never
+    )).rejects.toMatchObject({ name: "AuthoringResponseError", statusCode: 503, authoringFailure: { code: "authoring_provider_unavailable", stage: "organizer" } });
+  });
+
+  it("waits for the bounded provider retry delay before a second organizer request", async () => {
+    vi.useFakeTimers();
+    try {
+      const requests = vi.fn()
+        .mockRejectedValueOnce(new ProviderHttpError(503, null, "unavailable"))
+        .mockResolvedValueOnce({ content: JSON.stringify({ candidate: {}, evidence: [], unassignedText: [], conflicts: [], warnings: [] }), responseId: "response", finishReason: "stop", outputLimited: false, modelInstanceId: "model", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, reportedCost: null, rawMetadata: {} });
+      const content = worldContentSchema.parse({ world: { title: "Organizer world" } });
+      const pending = organizeWorldCharacterProfileForOwner(
+        { query: async () => ({ rows: [{ status: "draft", revision: 1, content }] }) } as never,
+        "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "", rpgStats: [], defaultTriggers: [], source: {} } },
+        {
+          resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: "provider", model: "model" }) },
+          execution: { text: async () => ({ execute: requests }) },
+          prompts: { loadCharacterOrganizationPromptSnapshot: async () => ({ snapshot: {} }) },
+          promptTools: { content: () => "Organize supplied character facts." }
+        } as never
+      );
+      await vi.advanceTimersByTimeAsync(999);
+      expect(requests).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(pending).resolves.toMatchObject({ candidate: {} });
+      expect(requests).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("supplies the failed evidence and original result to a bounded repair prompt", () => {

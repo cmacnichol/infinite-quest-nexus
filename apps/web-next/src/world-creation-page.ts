@@ -13,6 +13,7 @@ import {
   type WorldGenerationPreviewResponse,
   type WorldGenerationProgressResponse
 } from "./world-creation-api";
+import { authoringFailureText } from "./authoring-errors";
 import {
   addCreationCollectionItem,
   appendCreationCharacter,
@@ -217,7 +218,7 @@ const creationMarkup = `
             </div>
             <label class="editor-field creation-prompt-field"><span>Concept prompt</span><textarea rows="7" data-concept-prompt="compact" aria-describedby="creation-clipboard-status creation-generation-status" placeholder="Describe your world concept"></textarea></label>
             <p id="creation-clipboard-status" data-clipboard-status aria-live="polite"></p>
-            <div id="creation-generation-status" data-generation-status aria-live="polite"></div>
+            <div id="creation-generation-status" data-generation-status role="status" aria-live="polite"></div>
             <div class="creation-generation-actions">
               <button type="button" data-action="generate-world" disabled>Generate world draft</button>
               <button type="button" data-action="cancel-generation" hidden>Cancel generation</button>
@@ -983,6 +984,7 @@ export function mountWorldCreationPage(
     generateButton.disabled = true;
     cancelButton.hidden = false;
     generationStatus.textContent = "Generating a structured world draft…";
+    generationStatus.setAttribute("role", "status");
     scheduleProgressPoll(controller, progressKey);
     try {
       const preview = await generateWorldPreview({ title: "", prompt: concept, progressKey }, controller.signal);
@@ -997,8 +999,19 @@ export function mountWorldCreationPage(
       renderStage();
     } catch (error) {
       if (disposed || generationController !== controller || controller.signal.aborted) return;
+      generationStatus.setAttribute("role", "alert");
       if (error instanceof WorldCreationApiError && error.kind === "unavailable") {
-        generationStatus.innerHTML = 'The text provider is unavailable. Check <a href="/nexus/?view=setup">Provider Setup</a>, then try again.';
+        generationStatus.replaceChildren();
+        generationStatus.append(authoringFailureText(error.authoringFailure ?? {
+          code: "authoring_provider_unavailable", stage: "world", retryable: true, issues: []
+        }), " ");
+        const setup = document.createElement("a");
+        setup.dataset.generationProviderSetup = "";
+        setup.href = "/nexus/#providers";
+        setup.textContent = "Provider Setup";
+        generationStatus.append(setup, ", then try again.");
+      } else if (error instanceof WorldCreationApiError && error.authoringFailure) {
+        generationStatus.textContent = authoringFailureText(error.authoringFailure);
       } else {
         generationStatus.textContent = "The world draft could not be generated. Your concept and local fields are safe; try again.";
       }

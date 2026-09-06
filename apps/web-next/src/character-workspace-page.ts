@@ -2,8 +2,10 @@ import { playableCharacterSchema } from "../../../packages/contracts/src/world-l
 import { mountAppShell } from "./app-shell-lifecycle";
 import {
   generateCharacterPreview as generateCharacterPreviewRequest,
-  loadCharacterGenerationProgress as loadCharacterGenerationProgressRequest
+  loadCharacterGenerationProgress as loadCharacterGenerationProgressRequest,
+  CharacterWorkspaceApiError
 } from "./character-workspace-api";
+import { authoringFailureText } from "./authoring-errors";
 import {
   applyGeneratedCharacter,
   characterHandoffCandidate,
@@ -621,7 +623,23 @@ export function mountCharacterWorkspacePage(
       .catch((error: unknown) => {
         if (disposed || sequence !== generationSequence || (error instanceof Error && error.name === "AbortError")) return;
         const status = canvas.querySelector<HTMLElement>("[data-character-generation-status]");
-        if (status) status.textContent = "Character generation failed. Review the prompt and retry.";
+        if (!status) return;
+        status.setAttribute("role", "alert");
+        if (error instanceof CharacterWorkspaceApiError && error.kind === "unavailable") {
+          status.replaceChildren();
+          status.append(authoringFailureText(error.authoringFailure ?? {
+            code: "authoring_provider_unavailable", stage: "character", retryable: true, issues: []
+          }), " ");
+          const setup = document.createElement("a");
+          setup.href = "/nexus/#providers";
+          setup.textContent = "Provider Setup";
+          status.append(setup, ", then try again.");
+        } else if (error instanceof CharacterWorkspaceApiError && error.authoringFailure) {
+          status.textContent = authoringFailureText(error.authoringFailure);
+        } else status.textContent = "Character generation failed. Review the prompt and retry.";
+        // A delayed progress response must not replace the more useful preview failure.
+        stopGeneration();
+        restoreGenerationActions();
       })
       .finally(() => {
         if (sequence !== generationSequence) return;

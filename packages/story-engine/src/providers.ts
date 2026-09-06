@@ -59,6 +59,8 @@ export type ProviderRequest = {
   /** Snapshotted job/provider ceiling; canonical generation must not exceed it. */
   effectiveContextWindowTokens?: number;
   budgetOutput?: ProviderOutputBudget;
+  /** Authoring calls account for every generation request themselves. */
+  responseFormatFallback?: "allow" | "forbid";
 };
 
 export type ProviderResult = {
@@ -211,8 +213,36 @@ export class ProviderTransportError extends Error {
   }
 }
 
+/** A provider HTTP failure with only the status and bounded retry hint retained. */
+export class ProviderHttpError extends Error {
+  readonly statusCode: number;
+  readonly retryAfterMs: number | null;
+
+  constructor(statusCode: number, retryAfterMs: number | null, message: string) {
+    super(message);
+    this.name = "ProviderHttpError";
+    this.statusCode = statusCode;
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
 const DEFAULT_REQUEST_TIMEOUT_MS = 300_000;
 const responseStartTimes = new WeakMap<Response, number>();
+
+function retryAfterMilliseconds(value: string | null): number | null {
+  if (!value) return null;
+  const seconds = Number(value);
+  const milliseconds = Math.round(seconds * 1_000);
+  if (Number.isSafeInteger(milliseconds) && milliseconds >= 0) return milliseconds;
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) return null;
+  const delay = Math.max(0, time - Date.now());
+  return Number.isSafeInteger(delay) ? delay : null;
+}
+
+function providerHttpError(response: Response, message: string): ProviderHttpError {
+  return new ProviderHttpError(response.status, retryAfterMilliseconds(response.headers.get("retry-after")), message);
+}
 
 function requestTimeoutMs(profile: TextProviderProfile): number {
   const value = Number(profile.requestTimeoutMs);
@@ -751,7 +781,7 @@ async function checkedJson(
   try { data = text ? JSON.parse(text) as Record<string, any> : {}; } catch { /* response error below includes preview */ }
   if (!response.ok) {
     const message = String(data.error?.message || data.error || text || response.statusText).slice(0, 2000);
-    throw Object.assign(new Error(`Provider request failed (${response.status}): ${message}`), { statusCode: response.status, providerMessage: message });
+    throw providerHttpError(response, `Provider request failed (${response.status}): ${message}`);
   }
   return data;
 }
@@ -985,7 +1015,7 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
     } finally {
       await originalCancellation?.catch(() => undefined);
     }
-    if (/response_format|json.?mode|structured.?output|grammar/i.test(text)) {
+    if (request.responseFormatFallback !== "forbid" && /response_format|json.?mode|structured.?output|grammar/i.test(text)) {
       prepared = request.canonicalBudgeting
         ? checkedStoryRequest(profile, request, false)
         : serializeLegacyProviderRequest(profile, request, { responseFormat: false });
@@ -994,10 +1024,7 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
       let data: Record<string, any> = {};
       try { data = text ? JSON.parse(text) as Record<string, any> : {}; } catch { /* response error below includes preview */ }
       const message = String(data.error?.message || data.error || text || response.statusText).slice(0, 2000);
-      throw Object.assign(new Error(`Provider request failed (${response.status}): ${message}`), {
-        statusCode: response.status,
-        providerMessage: message
-      });
+      throw providerHttpError(response, `Provider request failed (${response.status}): ${message}`);
     }
   }
   if (response.ok && request.onChunk && response.headers.get("content-type")?.includes("event-stream")) {
