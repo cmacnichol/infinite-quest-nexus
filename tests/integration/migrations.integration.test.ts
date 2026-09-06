@@ -70,7 +70,10 @@ integration("standard database migration runner", () => {
       );
 
       await expect(migrateDatabase(isolatedPool, resolve("database/migrations")))
-        .resolves.toEqual(["0086_prompt_override_protocol_acknowledgements"]);
+        .resolves.toEqual([
+          "0086_prompt_override_protocol_acknowledgements",
+          "0087_chronicle_query_cache_access_sequence"
+        ]);
       const acknowledgement = await isolatedPool.query<{ compatibility_protocol_identity: string }>(
         "SELECT compatibility_protocol_identity FROM prompt_template_overrides WHERE owner_user_id=$1 AND prompt_key='story_system'",
         [ownerUserId]
@@ -1738,7 +1741,8 @@ END;
         "0083_cleaned_campaign_export_deletion",
         "0084_generation_authority_identity",
         "0085_prompt_override_compatibility_acknowledgements",
-        "0086_prompt_override_protocol_acknowledgements"
+        "0086_prompt_override_protocol_acknowledgements",
+        "0087_chronicle_query_cache_access_sequence"
       ]);
 
       const scrubbed = await isolatedPool.query<{ technical_metadata: Record<string, unknown> }>(
@@ -2731,7 +2735,8 @@ END;
         "0083_cleaned_campaign_export_deletion",
         "0084_generation_authority_identity",
         "0085_prompt_override_compatibility_acknowledgements",
-        "0086_prompt_override_protocol_acknowledgements"
+        "0086_prompt_override_protocol_acknowledgements",
+        "0087_chronicle_query_cache_access_sequence"
       ]);
 
       // Accepted turns and every derived vector survive the upgrade untouched.

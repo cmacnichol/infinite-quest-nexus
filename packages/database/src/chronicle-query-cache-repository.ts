@@ -144,7 +144,9 @@ export function createPostgresChronicleQueryCacheRepository(
         await client.query(`SAVEPOINT ${savepoint}`);
         const result = await client.query<CacheRow>(
           `UPDATE chronicle_query_embedding_cache
-              SET last_accessed_at=clock_timestamp(),hit_count=hit_count+1
+              SET last_accessed_at=clock_timestamp(),
+                  last_accessed_sequence=nextval('chronicle_query_embedding_cache_access_sequence'),
+                  hit_count=hit_count+1
             WHERE owner_user_id=$1 AND campaign_id=$2 AND normalized_query_hash=$3
               AND provider_profile_id=$4 AND embedding_model_hash=$5
               AND provider_fingerprint_hash=$6 AND query_prefix_hash=$7
@@ -191,6 +193,7 @@ export function createPostgresChronicleQueryCacheRepository(
                         embedding_model_hash,provider_fingerprint_hash,query_prefix_hash,embedding_protocol_version)
            DO UPDATE SET embedding=EXCLUDED.embedding,embedding_dimensions=EXCLUDED.embedding_dimensions,
                          created_at=EXCLUDED.created_at,last_accessed_at=EXCLUDED.last_accessed_at,
+                         last_accessed_sequence=nextval('chronicle_query_embedding_cache_access_sequence'),
                          expires_at=EXCLUDED.expires_at,hit_count=0`,
           [...keyValues(scope, key), vectorLiteral(vector), vector.length, CACHE_LIFETIME]
         );
@@ -204,7 +207,7 @@ export function createPostgresChronicleQueryCacheRepository(
             WHERE id IN (
               SELECT id FROM chronicle_query_embedding_cache
                WHERE owner_user_id=$1 AND campaign_id=$2
-               ORDER BY last_accessed_at DESC,created_at DESC,id DESC
+               ORDER BY last_accessed_sequence DESC,last_accessed_at DESC,created_at DESC,id DESC
                OFFSET $3
             )`,
           [scope.ownerUserId, scope.campaignId, CACHE_ENTRY_LIMIT]

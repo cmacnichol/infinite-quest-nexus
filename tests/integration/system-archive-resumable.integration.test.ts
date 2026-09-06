@@ -95,7 +95,7 @@ function safePreviewProjection(ownerUserId: string, archiveFingerprint: string) 
       sourceApplication: "0.1.0",
       sourceMigration: "0079_resumable_system_archive_uploads",
       destinationApplication: "0.1.0",
-      destinationMigration: "0086_prompt_override_protocol_acknowledgements"
+      destinationMigration: "0087_chronicle_query_cache_access_sequence"
     },
     sourceOwnerCount: 1 as const,
     archiveFingerprint,
@@ -328,7 +328,7 @@ integration("durable System Archive jobs and resumable uploads", () => {
     const clean = await imports.destinationFingerprint(owner, {});
     expect(clean).toMatchObject({
       initialOwnerId: owner.ownerUserId,
-      latestMigration: "0086_prompt_override_protocol_acknowledgements",
+      latestMigration: "0087_chronicle_query_cache_access_sequence",
       destinationEmpty: true
     });
 

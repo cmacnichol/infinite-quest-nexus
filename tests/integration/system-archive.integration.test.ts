@@ -140,9 +140,9 @@ function importReport(input: Readonly<{
     versions: {
       archiveFormat: 1,
       sourceApplication: "0.1.0",
-      sourceMigration: "0086_prompt_override_protocol_acknowledgements",
+      sourceMigration: "0087_chronicle_query_cache_access_sequence",
       destinationApplication: "0.1.0",
-      destinationMigration: "0086_prompt_override_protocol_acknowledgements",
+      destinationMigration: "0087_chronicle_query_cache_access_sequence",
     },
     sourceOwnerCount: 1,
     ownerMapping: {
@@ -771,7 +771,7 @@ integration("deterministic owner-wide System Archive export", () => {
     );
     expect(manifest).toMatchObject({
       sourceApplication: "0.1.0",
-      sourceMigration: "0086_prompt_override_protocol_acknowledgements",
+      sourceMigration: "0087_chronicle_query_cache_access_sequence",
       sourceInstallationId: ownerUserId,
       sourceOwnerCount: 1,
       sourceOwner: {
@@ -1154,7 +1154,7 @@ integration("deterministic owner-wide System Archive export", () => {
     expect(preview).toMatchObject({
       formatVersion: 1,
       sourceApplication: "0.1.0",
-      sourceMigration: "0086_prompt_override_protocol_acknowledgements",
+      sourceMigration: "0087_chronicle_query_cache_access_sequence",
       archiveFingerprint: exported.result.artifact.contentFingerprint,
       sourceOwnerCount: 1,
       assetCount: 4,
@@ -1182,7 +1182,7 @@ integration("deterministic owner-wide System Archive export", () => {
       }));
       const destination = {
         initialOwnerId: ownerUserId,
-        latestMigration: "0086_prompt_override_protocol_acknowledgements",
+        latestMigration: "0087_chronicle_query_cache_access_sequence",
         authoritativeCountsHash: sha256("empty-authority"),
         activeJobsHash: sha256("no-active-work"),
         checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1216,9 +1216,9 @@ integration("deterministic owner-wide System Archive export", () => {
         versions: {
           archiveFormat: 1,
           sourceApplication: "0.1.0",
-          sourceMigration: "0086_prompt_override_protocol_acknowledgements",
+          sourceMigration: "0087_chronicle_query_cache_access_sequence",
           destinationApplication: "0.1.0",
-          destinationMigration: "0086_prompt_override_protocol_acknowledgements",
+          destinationMigration: "0087_chronicle_query_cache_access_sequence",
         },
         archiveFingerprint: exported.result.artifact.contentFingerprint,
         destinationEmpty: true,
@@ -1251,7 +1251,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0086_prompt_override_protocol_acknowledgements",
+            latestMigration: "0087_chronicle_query_cache_access_sequence",
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1292,7 +1292,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0086_prompt_override_protocol_acknowledgements",
+            latestMigration: "0087_chronicle_query_cache_access_sequence",
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1329,7 +1329,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0086_prompt_override_protocol_acknowledgements",
+            latestMigration: "0087_chronicle_query_cache_access_sequence",
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1381,7 +1381,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0086_prompt_override_protocol_acknowledgements",
+            latestMigration: "0087_chronicle_query_cache_access_sequence",
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1777,7 +1777,7 @@ integration("deterministic owner-wide System Archive export", () => {
     await expect(writer.publish({
       manifest: {
         sourceApplication: "0.1.0",
-        sourceMigration: "0086_prompt_override_protocol_acknowledgements",
+        sourceMigration: "0087_chronicle_query_cache_access_sequence",
         sourceInstallationId: ownerUserId,
         sourceOwnerCount: 1,
         sourceOwner: {
@@ -1825,7 +1825,7 @@ integration("deterministic owner-wide System Archive export", () => {
     await expect(writer.publish({
       manifest: {
         sourceApplication: "0.1.0",
-        sourceMigration: "0086_prompt_override_protocol_acknowledgements",
+        sourceMigration: "0087_chronicle_query_cache_access_sequence",
         sourceInstallationId: ownerUserId,
         sourceOwnerCount: 1,
         sourceOwner: {
@@ -1886,7 +1886,7 @@ integration("deterministic owner-wide System Archive export", () => {
         await expect(writer.publish({
           manifest: {
             sourceApplication: "0.1.0",
-            sourceMigration: "0086_prompt_override_protocol_acknowledgements",
+            sourceMigration: "0087_chronicle_query_cache_access_sequence",
             sourceInstallationId: ownerUserId,
             sourceOwnerCount: 1,
             sourceOwner: {
@@ -3995,7 +3995,7 @@ integration("deterministic owner-wide System Archive export", () => {
         archiveFingerprint: exported.contentFingerprint,
         destination: {
           initialOwnerId: ownerUserId,
-          latestMigration: "0086_prompt_override_protocol_acknowledgements",
+          latestMigration: "0087_chronicle_query_cache_access_sequence",
           authoritativeCountsHash: sha256("empty-authority"),
           activeJobsHash: sha256("ignored-active-import"),
           checkedAt: "2026-08-25T12:00:00.000Z",
@@ -4481,7 +4481,7 @@ integration("deterministic owner-wide System Archive export", () => {
           archiveFingerprint: sha256("expired-preview"),
           destinationFingerprint: {
             initialOwnerId: ownerUserId,
-            latestMigration: "0086_prompt_override_protocol_acknowledgements",
+            latestMigration: "0087_chronicle_query_cache_access_sequence",
             authoritativeCountsHash: sha256("authority"),
             activeJobsHash: sha256("jobs"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -4537,7 +4537,7 @@ integration("deterministic owner-wide System Archive export", () => {
     });
     const destination = {
       initialOwnerId: ownerUserId,
-      latestMigration: "0086_prompt_override_protocol_acknowledgements",
+      latestMigration: "0087_chronicle_query_cache_access_sequence",
       authoritativeCountsHash: sha256("empty-authority"),
       activeJobsHash: sha256("ignored-import"),
       checkedAt: "2026-08-25T12:00:00.000Z",

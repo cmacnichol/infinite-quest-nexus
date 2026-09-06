@@ -604,7 +604,8 @@ integration("generation job notification delivery", () => {
           "0083_cleaned_campaign_export_deletion",
           "0084_generation_authority_identity",
           "0085_prompt_override_compatibility_acknowledgements",
-          "0086_prompt_override_protocol_acknowledgements"
+          "0086_prompt_override_protocol_acknowledgements",
+          "0087_chronicle_query_cache_access_sequence"
         ]);
       await expect(migrationPool.query<{ trigger_name: string | null; function_name: string | null }>(
          `SELECT (
