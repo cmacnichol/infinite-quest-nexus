@@ -175,6 +175,49 @@ function deferred<T>() {
 }
 
 describe("story-player: new Story Player UI contracts & gameplay logic", () => {
+  it("clears recovery controls and stale recovery actions when a clean campaign replaces a recovered one", async () => {
+    const recoveredCampaign = {
+      campaign: { id: "campaign-1", title: "Recovered campaign", activeTurnNumber: 1, storyLengthProfile: "standard" },
+      world: {},
+      turns: { campaignId: "campaign-1", turns: makeTurns(1, 1), nextCursor: null },
+      pendingGeneration: null,
+      generationRecovery: {
+        id: "generation-1", status: "recoverable", expectedTurnNumber: 2, attempts: 1,
+        operationKind: "append", replacementTurnId: null, resultTurnId: null,
+        errorCode: "generation_failed", errorMessage: "Generation could not be completed.",
+        diagnostic: { code: "prompt_override_incompatible", operation: "story_generation", action: "update_prompt" }
+      }
+    };
+    const cleanCampaign = {
+      campaign: { id: "campaign-2", title: "Clean campaign", activeTurnNumber: 1, storyLengthProfile: "standard" },
+      world: {},
+      turns: { campaignId: "campaign-2", turns: makeTurns(1, 1), nextCursor: null },
+      pendingGeneration: null,
+      generationRecovery: null
+    };
+    const workflow = { resume: vi.fn(async () => null) };
+    const syncStatus = vi.fn().mockResolvedValueOnce(recoveredCampaign).mockResolvedValueOnce(cleanCampaign);
+    try {
+      const { document, window } = await bootLegacyStory({ turns: makeTurns(1, 1), syncStatus, workflow });
+      expect(document.getElementById("generationRecoveryPanel")?.classList.contains("hidden")).toBe(false);
+      expect(document.getElementById("btnRetryGeneration")?.classList.contains("hidden")).toBe(false);
+
+      window.location.pathname = "/story/campaign-2";
+      document.dispatchEvent(new window.Event("DOMContentLoaded"));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(document.getElementById("generationRecoveryPanel")?.classList.contains("hidden")).toBe(true);
+      expect(document.getElementById("generationRecoveryPanel")?.getAttribute("data-job-id")).toBe("");
+      const resumesAfterCleanLoad = workflow.resume.mock.calls.length;
+      document.getElementById("btnRetryGeneration")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(workflow.resume).toHaveBeenCalledTimes(resumesAfterCleanLoad);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("renders only allowlisted recovery guidance from the durable recovery snapshot", async () => {
     const privateMarker = "PRIVATE_PROVIDER_PROMPT_AND_RESPONSE";
     try {

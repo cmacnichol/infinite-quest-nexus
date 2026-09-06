@@ -10,6 +10,7 @@ import {
   waitForDatabaseMigrations
 } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, type DatabasePool } from "../../packages/database/src/pool.js";
+import { createPromptRepository } from "../../packages/database/src/prompt-repository.js";
 import {
   createPostgresChronicleChunkBatchPort,
   createPostgresChronicleChunkJobStatePort,
@@ -32,6 +33,57 @@ integration("standard database migration runner", () => {
 
   afterAll(async () => {
     if (pool) await pool.end();
+  });
+
+  it("marks pre-protocol prompt acknowledgements for renewal when 0086 follows 0085", async () => {
+    const databaseName = `infinitequest_prompt_protocol_upgrade_${crypto.randomUUID().replaceAll("-", "")}`;
+    const databaseUrlValue = new URL(databaseUrl!);
+    databaseUrlValue.pathname = `/${databaseName}`;
+    const beforeDirectory = await mkdtemp(join(tmpdir(), "infinitequest-prompt-protocol-before-"));
+    let isolatedPool: DatabasePool | null = null;
+    try {
+      await pool.query(`CREATE DATABASE ${databaseName}`);
+      for (const file of await readdir(resolve("database/migrations"))) {
+        if (file.endsWith(".sql") && file <= "0085_prompt_override_compatibility_acknowledgements.sql") {
+          await copyFile(join(resolve("database/migrations"), file), join(beforeDirectory, file));
+        }
+      }
+      isolatedPool = createDatabasePool(databaseUrlValue.toString(), 2);
+      await migrateDatabase(isolatedPool, beforeDirectory);
+      const ownerUserId = (await isolatedPool.query<{ id: string }>(
+        "SELECT id FROM users WHERE system_key = 'initial-owner'"
+      )).rows[0]!.id;
+      const content = "Keep the established output shape and voice.";
+      const contentHash = createHash("sha256").update(content).digest("hex");
+      await isolatedPool.query(
+        `INSERT INTO prompt_template_overrides (
+           owner_user_id,prompt_key,content,compatibility_required_shape_version,
+           compatibility_content_hash,compatibility_acknowledged_at
+         ) VALUES ($1,'story_system',$2,'story-output-v2',$3,now())`,
+        [ownerUserId, content, contentHash]
+      );
+
+      await expect(migrateDatabase(isolatedPool, resolve("database/migrations")))
+        .resolves.toEqual(["0086_prompt_override_protocol_acknowledgements"]);
+      const acknowledgement = await isolatedPool.query<{ compatibility_protocol_identity: string }>(
+        "SELECT compatibility_protocol_identity FROM prompt_template_overrides WHERE owner_user_id=$1 AND prompt_key='story_system'",
+        [ownerUserId]
+      );
+      expect(acknowledgement.rows).toEqual([
+        { compatibility_protocol_identity: "acknowledgement-required-after-protocol-upgrade" }
+      ]);
+      const client = await isolatedPool.connect();
+      try {
+        await expect(createPromptRepository(client).loadPromptSnapshot({ ownerUserId, scope: "application" }))
+          .rejects.toMatchObject({ code: "prompt_override_incompatible", statusCode: 409 });
+      } finally {
+        client.release();
+      }
+    } finally {
+      if (isolatedPool) await isolatedPool.end();
+      await dropTestDatabaseWhenIdle(pool, databaseName);
+      await rm(beforeDirectory, { recursive: true, force: true });
+    }
   });
 
   it("adds a non-null campaign Story context budget with the standard default", async () => {

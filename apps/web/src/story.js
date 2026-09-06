@@ -417,6 +417,7 @@ async function checkOnboarding() {
 async function loadCampaign(campaignId, options = {}) {
   const loadEpoch = ++storyTurnWindowEpoch;
   clearResponseEditSession();
+  resetGenerationStateForCampaignLoad();
   state.campaignId = campaignId;
   state.campaignLoaded = false;
   completeHistoryLoad = null;
@@ -1550,6 +1551,20 @@ function hideGenerationRecovery() {
     panel.classList.add("hidden");
   }
   state.generationRecoveryKind = null;
+}
+
+function resetGenerationStateForCampaignLoad() {
+  state.abortController?.abort();
+  state.abortController = null;
+  state.pendingGeneration = null;
+  state.generationRecovery = null;
+  state.generationRun = null;
+  state.generationDisplayActive = false;
+  state.generationDisplayAction = "";
+  state.generationJobId = null;
+  state.cancellationConfirmed = false;
+  clearStreamingPreview();
+  hideGenerationRecovery();
 }
 
 async function monitorRecoveryJob(retryFirst) {
