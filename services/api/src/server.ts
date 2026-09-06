@@ -672,6 +672,7 @@ export async function buildServer({
           key: body.key,
           content: body.content,
           scope: body.scope,
+          ...(body.compatibilityAcknowledgement === undefined ? {} : { compatibilityAcknowledgement: body.compatibilityAcknowledgement }),
           ...(body.campaignId === undefined ? {} : { campaignId: body.campaignId })
         };
       })()

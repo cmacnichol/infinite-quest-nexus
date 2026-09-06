@@ -500,6 +500,8 @@
         <p id="promptLibraryEditorDescription" class="muted"></p>
         <p id="promptLibraryEditorMeta" class="field-note"></p>
         <p id="promptLibraryWarning" class="status warning hidden">Engine-critical prompt: invalid instructions can prevent generation or validation from completing.</p>
+        <label id="promptLibraryCompatibility" class="hidden"><span id="promptLibraryCompatibilityCopy" class="field-note"></span><span><input id="promptLibraryCompatibilityAcknowledgement" type="checkbox"> I acknowledge this exact prompt must produce the required shape.</span></label>
+        <pre id="promptLibraryRequiredShape" class="prompt-library-preview hidden"></pre>
         <label>Instructions<textarea id="promptLibraryContent" rows="14" required></textarea></label>
         <div class="button-row"><button id="promptLibraryPreview" class="button secondary" type="button" aria-expanded="false">Preview full request</button><button id="promptLibraryReset" class="button secondary" type="button">Reset this scope</button><span id="promptLibraryUnsaved" class="status warning hidden">Unsaved changes</span><button id="promptLibraryDiscard" class="button secondary hidden" type="button">Discard edits</button><span class="character-action-spacer"></span><button class="button primary" type="submit">Save prompt</button></div>
         <section id="promptLibraryPreviewPanel" class="prompt-library-preview hidden" aria-live="polite"><h4>Sample provider request</h4><p class="field-note">Built on the server with safe sample data. It shows instruction and structured-input sections, estimates tokens, and never calls a provider.</p><pre id="promptLibraryPreviewContent"></pre></section>

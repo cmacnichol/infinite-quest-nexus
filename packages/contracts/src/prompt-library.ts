@@ -1,5 +1,9 @@
 import { z } from "zod";
-import { STORY_SYSTEM_PROMPT } from "./story-prompt.js";
+import {
+  STORY_PROMPT_SCHEMA_VERSION,
+  STORY_PROMPT_REQUIRED_SHAPE_PREVIEW,
+  STORY_SYSTEM_PROMPT
+} from "./story-prompt.js";
 
 export const promptTemplateKeySchema = z.enum([
   "story_system", "story_recovery_output_limit", "story_recovery_mechanics", "story_recovery_schema",
@@ -9,6 +13,29 @@ export const promptTemplateKeySchema = z.enum([
   "infinite_worlds_batch", "infinite_worlds_final_turn", "illustration_refinement", "illustration_direct", "illustration_character_reference"
 ]);
 export type PromptTemplateKey = z.infer<typeof promptTemplateKeySchema>;
+
+export type PromptCompatibilityRequirement = Readonly<{
+  requiredShapeVersion: string;
+  requiredShapePreview: string;
+}>;
+
+/**
+ * Compatibility is an explicit operator acknowledgement, never a heuristic
+ * search through creative override text. These templates must keep the
+ * currently shipped StoryTurnOutput shape to remain safe to execute.
+ */
+export function promptCompatibilityRequirement(key: PromptTemplateKey): PromptCompatibilityRequirement | null {
+  if (key !== "story_system" && key !== "event_extension") return null;
+  return {
+    requiredShapeVersion: STORY_PROMPT_SCHEMA_VERSION,
+    requiredShapePreview: STORY_PROMPT_REQUIRED_SHAPE_PREVIEW
+  };
+}
+
+export const promptCompatibilityAcknowledgementSchema = z.object({
+  requiredShapeVersion: z.string().trim().min(1).max(200),
+  contentHash: z.string().regex(/^[a-f0-9]{64}$/)
+}).strict();
 
 export type PromptSnapshot = Record<PromptTemplateKey, {
   content: string;
@@ -139,7 +166,8 @@ export const promptTemplateOverrideSchema = z.object({
   campaignId: z.uuid().optional(),
   content: z.string().min(1).max(16_000).refine((content) => content.trim().length > 0, {
     message: "Prompt content cannot be blank."
-  })
+  }),
+  compatibilityAcknowledgement: promptCompatibilityAcknowledgementSchema.optional()
 }).superRefine((value, ctx) => {
   const definition = PROMPT_TEMPLATE_CATALOG[value.key];
   const suppliedVariables = new Set(promptTemplateVariables(value.content));

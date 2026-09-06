@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import {
   buildPromptPreview,
   PROMPT_TEMPLATE_CATALOG,
+  promptCompatibilityRequirement,
   promptTemplateOverrideSchema,
   renderPromptTemplate,
   sampleValuesForPrompt
@@ -14,6 +15,7 @@ import { buildTemplateWorldPrompt } from "../../packages/domain/src/world-templa
 import { providerPromptProtocolVersion } from "../helpers/provider-application-fixtures.js";
 import type { PromptSnapshot } from "../../packages/contracts/src/index.js";
 import { infiniteWorldsPromptSet } from "../legacy-api/src/infinite-worlds-import-service.js";
+import { createPromptRepository } from "../../packages/database/src/prompt-repository.js";
 
 describe("Prompt Library catalog", () => {
   it("uses the shared shipped story-system definition", () => {
@@ -114,6 +116,38 @@ describe("Prompt Library catalog", () => {
       scope: "application",
       content: ""
     }).success).toBe(false);
+  });
+
+  it("requires an exact versioned acknowledgement for continuity-shape overrides without inspecting prompt prose", () => {
+    const content = "Use our established creative voice.";
+    const requirement = promptCompatibilityRequirement("story_system");
+    expect(requirement).toMatchObject({
+      requiredShapeVersion: "story-output-v2",
+      requiredShapePreview: expect.stringContaining('"continuity_summary"')
+    });
+    const parsed = promptTemplateOverrideSchema.parse({
+      key: "story_system",
+      scope: "application",
+      content,
+      compatibilityAcknowledgement: {
+        requiredShapeVersion: requirement!.requiredShapeVersion,
+        contentHash: createHash("sha256").update(content).digest("hex")
+      }
+    });
+    expect(parsed.compatibilityAcknowledgement?.contentHash).toBe(createHash("sha256").update(content).digest("hex"));
+    expect(promptCompatibilityRequirement("illustration_direct")).toBeNull();
+  });
+
+  it("rejects an unacknowledged continuity override before persistence can lead to provider execution", async () => {
+    const query = vi.fn();
+    const prompts = createPromptRepository({ query } as never);
+    await expect(prompts.savePromptOverride({
+      ownerUserId: crypto.randomUUID(),
+      scope: "application",
+      key: "event_extension",
+      content: "Keep the existing creative event voice."
+    })).rejects.toMatchObject({ code: "prompt_override_incompatible", statusCode: 409 });
+    expect(query).not.toHaveBeenCalled();
   });
 
   it("renders only engine-supplied placeholder values", () => {

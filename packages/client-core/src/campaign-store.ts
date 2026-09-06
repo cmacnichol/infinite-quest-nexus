@@ -203,6 +203,7 @@ export function createCampaignStore(): CampaignStoreController {
       expectedTurnNumber: recovery.expectedTurnNumber,
       attempts: recovery.attempts,
       resultTurnId: recovery.resultTurnId,
+      diagnostic: recovery.diagnostic ?? null,
       operation: operationOf(recovery)
     };
     const result = recovery.status === "failed"
@@ -241,6 +242,7 @@ export function createCampaignStore(): CampaignStoreController {
       expectedTurnNumber: pending.expectedTurnNumber,
       attempts: null,
       resultTurnId: null,
+      diagnostic: null,
       operation: operationOf(pending)
     };
   }

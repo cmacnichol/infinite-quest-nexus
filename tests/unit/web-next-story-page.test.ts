@@ -702,6 +702,7 @@ describe("Story Player page shell", () => {
         attempts: 1,
         errorCode: "generation_failed",
         errorMessage: "Story generation could not be completed.",
+        diagnostic: { code: "context_budget_exceeded", operation: "story_generation", action: "adjust_context", scope: "campaign_context", requiredTokens: 1200, availableTokens: 1000 },
         resultTurnId: null,
         operationKind: "append",
         replacementTurnId: null
@@ -735,6 +736,7 @@ describe("Story Player page shell", () => {
     expect(reader?.textContent).toContain("The tested story continues.");
     expect(reader?.textContent).not.toMatch(/Resolve Check|mechanics|difficulty/i);
     expect(page.document.querySelector('[data-story-recovery]')?.textContent).toContain("Try again");
+    expect(page.document.querySelector('[data-story-recovery]')?.textContent).toContain("Adjust the campaign context");
     mounted.dispose();
   });
 
