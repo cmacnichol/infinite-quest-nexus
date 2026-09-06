@@ -8,6 +8,7 @@ import type {
 import {
   PUBLIC_GENERATION_FAILURE_CODE,
   PUBLIC_GENERATION_FAILURE_MESSAGE,
+  storyTurnOutputSchema,
   type PlayerEventTrigger,
   type StoryTurnOutput
 } from "../../../packages/contracts/src/generation.js";
@@ -308,7 +309,8 @@ const RECOVERABLE_INTEGRITY_ERROR_CODES = new Set([
   "context_budget_exceeded",
   "context_budget_invalid",
   "continuity_output_budget_exceeded",
-  "extension_narration_limit_exceeded"
+  "extension_narration_limit_exceeded",
+  "generation_checkpoint_incompatible"
 ]);
 
 function isRecoverableIntegrityError(error: unknown): error is ContextBudgetError {
@@ -449,6 +451,39 @@ function sentCanonicalFactIds(storyInput: string): string[] {
     const id = (fact as { id?: unknown }).id;
     return typeof id === "string" ? [id] : [];
   }))];
+}
+
+function compatibleValidatedMainDraft(
+  value: GenerationOrchestrationState["validatedMainDraft"] | undefined,
+  job: GenerationExecutionPayload,
+  provider: GenerationTextProvider,
+  storyInput: string
+) {
+  if (!value) return null;
+  const validResponse = value.response && typeof value.response.content === "string"
+    && typeof value.response.outputLimited === "boolean";
+  const parsedStory = storyTurnOutputSchema.safeParse(value.story);
+  if (!validResponse || !parsedStory.success) {
+    throw Object.assign(new Error("The persisted validated draft checkpoint is malformed."), {
+      code: "generation_checkpoint_incompatible"
+    });
+  }
+  if (value.version !== 1
+      || value.ownerUserId !== job.owner_user_id
+      || value.campaignId !== job.campaign_id
+      || value.worldVersionId !== (job.world_version_id || null)
+      || stableStringify(value.baseIdentity) !== stableStringify(job.generation_base_identity)
+      || value.promptProtocolVersion !== job.prompt_protocol_version
+      || value.providerId !== provider.id
+      || value.providerModel !== provider.model
+      || value.action !== job.action
+      || value.requestPayloadHash !== sha256(storyInput)
+      || value.draftHash !== sha256(stableStringify(parsedStory.data))) {
+    throw Object.assign(new Error("The persisted validated draft does not match this generation input."), {
+      code: "generation_checkpoint_incompatible"
+    });
+  }
+  return { ...value, story: parsedStory.data };
 }
 
 const NO_RETRIEVAL_AUDIT: ChronicleRetrievalAudit = {
@@ -930,7 +965,14 @@ async function executeLoadedGeneration(
       return { storyInput, contextFingerprint, contextDiagnostics, storyMemoryDefaults };
     });
     const { storyInput, contextFingerprint, contextDiagnostics, storyMemoryDefaults } = promptPreparation;
-    const sentFactIds = sentCanonicalFactIds(storyInput);
+    const plannedSentFactIds = sentCanonicalFactIds(storyInput);
+    const validatedDraft = compatibleValidatedMainDraft(
+      orchestration.validatedMainDraft,
+      job,
+      provider,
+      storyInput
+    );
+    const sentFactIds = validatedDraft?.sentFactIds || plannedSentFactIds;
 
     const streamingIllustration = await phase("streaming_illustration_setup", async () => {
       const illustrationConfig = await collaborators.illustration.loadStreamingIllustrationConfig(
@@ -1100,9 +1142,16 @@ async function executeLoadedGeneration(
     const primaryRequest = supportsStreaming && job.attempts === 1
       ? { ...baseRequest, onChunk }
       : baseRequest;
-    let result = await phase("story_generation", () =>
+    let result = validatedDraft?.response || await phase("story_generation", () =>
       callCampaignTextProvider(dependencies, provider, job, "story_generation", primaryRequest));
-    let validation = await phase("story_validation", async () => {
+    let validation = validatedDraft
+      ? {
+          parsed: { ok: true as const, story: validatedDraft.story },
+          firstReason: null,
+          initialValidationErrors: [] as string[],
+          initialAttemptNumber: job.attempts * 2 - 1
+        }
+      : await phase("story_validation", async () => {
       const parsed = parseStoryOutput(result.content, storyMemoryDefaults);
       const firstReason: "invalid_json" | "invalid_schema" | "mechanics_leak" | null =
         !parsed.ok ? parsed.code : null;
@@ -1372,6 +1421,27 @@ async function executeLoadedGeneration(
       }
     }
 
+    if (!validatedDraft) {
+      orchestration = await persistOrchestration(repository, scope, job, {
+        validatedMainDraft: {
+          version: 1,
+          ownerUserId: job.owner_user_id,
+          campaignId: job.campaign_id,
+          worldVersionId: job.world_version_id || null,
+          baseIdentity: job.generation_base_identity,
+          promptProtocolVersion: job.prompt_protocol_version,
+          providerId: provider.id,
+          providerModel: provider.model,
+          action: job.action,
+          requestPayloadHash: sha256(storyInput),
+          draftHash: sha256(stableStringify(parsed.story)),
+          producingAttempt: job.attempts,
+          story: parsed.story,
+          response: result,
+          sentFactIds: plannedSentFactIds
+        }
+      });
+    }
     assertActiveGenerationUpdate(await repository.markValidating(scope), "entering validation");
     if (orchestration.afterEvents === undefined) {
       await phase("after_event_evaluation", async () => {
@@ -1401,7 +1471,7 @@ async function executeLoadedGeneration(
       });
     }
     const immediateEvents = (orchestration.afterEvents || []).filter((event) => event.addTextAfter);
-    if (immediateEvents.length && !orchestration.extension && !orchestration.extensionError) {
+    if (immediateEvents.length && !orchestration.extension) {
       await phase("event_extension", async () => {
         try {
           const guidance = fictionGuidanceForEvents(immediateEvents);
@@ -1434,7 +1504,10 @@ async function executeLoadedGeneration(
                 ? { scratchpad: extension.scratchpad }
                 : {}),
               trackerUpdates: extension.tracker_updates
-            }
+            },
+            // A previous lease may have recorded a transient extension failure.
+            // Successful completion on this lease supersedes that stage outcome.
+            extensionError: undefined
           });
         } catch (error) {
           if (isRecoverableIntegrityError(error)) throw error;

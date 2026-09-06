@@ -69,6 +69,25 @@ export type GenerationLeaseScope = Readonly<{
   workerId: string;
 }>;
 
+/** Durable boundary between validated narration and downstream orchestration. */
+export type GenerationValidatedMainDraftCheckpoint = Readonly<{
+  version: 1;
+  ownerUserId: string;
+  campaignId: string;
+  worldVersionId: string | null;
+  baseIdentity: GenerationBaseIdentity;
+  promptProtocolVersion: string;
+  providerId: string;
+  providerModel: string;
+  action: string;
+  requestPayloadHash: string;
+  draftHash: string;
+  producingAttempt: number;
+  story: StoryTurnOutput;
+  response: ProviderResult;
+  sentFactIds: readonly string[];
+}>;
+
 export type GenerationOrchestrationState = {
   roll?: PrivateRollResolution | null;
   rpgAssessmentError?: string;
@@ -81,7 +100,8 @@ export type GenerationOrchestrationState = {
     scratchpad?: string;
     trackerUpdates: Array<Record<string, unknown>>;
   };
-  extensionError?: string;
+  extensionError?: string | undefined;
+  validatedMainDraft?: GenerationValidatedMainDraftCheckpoint;
 };
 
 export type GenerationStreamingState = Record<string, unknown> & {

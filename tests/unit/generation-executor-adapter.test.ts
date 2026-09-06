@@ -129,6 +129,68 @@ function completeGenerationExecutionPayload(): GenerationExecutionPayload {
 }
 
 describe("generation executor adapter", () => {
+  it("reclaims a compatible validated draft without asking the text provider for a different narration", async () => {
+    const job = completeGenerationExecutionPayload();
+    const firstNarration = "The first validated draft opens the observatory door.";
+    const repository = {
+      loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true),
+      markGenerating: vi.fn(async () => true),
+      saveOrchestration: vi.fn(async (_scope, value) => {
+        job.orchestration_private = value;
+        return true;
+      }),
+      savePartialNarration: vi.fn(async () => true), saveStreamingSegments: vi.fn(async () => true),
+      recordAttempt: vi.fn(async () => undefined), markRecoverable: vi.fn(async () => true),
+      markValidating: vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true),
+      markCommitting: vi.fn(async () => true),
+      commitAcceptedTurn: vi.fn(async () => ({ turnId: "00000000-0000-4000-8000-000000000006" })),
+      markFailed: vi.fn(async () => true)
+    } as unknown as GenerationExecutionRepository;
+    const provider = {
+      id: claim.providerProfileId, name: "Captured provider", providerRole: "text" as const,
+      providerType: "openai_compatible" as const, model: "test-model", contextWindowTokens: 16_000,
+      maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {},
+      execute: vi.fn()
+        .mockResolvedValueOnce({
+          content: JSON.stringify({
+            narration: firstNarration,
+            choices: ["Enter.", "Wait.", "Study.", "Call."],
+            custom_action_suggestion: "Study the lens.", scratchpad: "The door is open.",
+            tracker_updates: [], image_prompt: "A moonlit observatory hall.",
+            continuity_summary: "The observatory door is open.", canonical_facts: [],
+            superseded_facts: [], canonical_fact_updates: [], open_threads: []
+          }),
+          responseId: "first-response", finishReason: "stop", outputLimited: false,
+          modelInstanceId: "test-instance", usage: { inputTokens: 10, outputTokens: 20, totalTokens: 30 },
+          reportedCost: null, rawMetadata: {}
+        })
+        .mockRejectedValueOnce(new Error("A reclaim must not regenerate the main draft."))
+    };
+    const collaborators = {
+      memory: {
+        loadGenerationContext: vi.fn(async () => ({
+          authority: {}, candidates: [], baseIdentity: job.generation_base_identity,
+          chronicleRetrieval: DEDICATED_CHUNKED_AUDIT
+        }))
+      },
+      illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) },
+      loadTextExecution: vi.fn(async () => provider), promptFromSnapshot: vi.fn(() => "Write a concise fictional scene."),
+      recordProfileCost: vi.fn(async () => undefined), attributeGenerationCostsToTurn: vi.fn(async () => undefined)
+    } as unknown as GenerationExecutionCollaborators;
+
+    const executor = createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators });
+    await expect(executor.execute({ workerId: "worker-a", leaseSeconds: 30, claim })).resolves.toBe(true);
+    expect(job.orchestration_private.validatedMainDraft).toBeDefined();
+    job.attempts = 2;
+    await expect(executor.execute({ workerId: "worker-b", leaseSeconds: 30, claim: { ...claim, attempts: 2 } })).resolves.toBe(true);
+
+    expect(provider.execute).toHaveBeenCalledOnce();
+    expect(repository.commitAcceptedTurn).toHaveBeenCalledWith(expect.objectContaining({
+      story: expect.objectContaining({ narration: firstNarration }),
+      response: expect.objectContaining({ responseId: "first-response" })
+    }));
+  });
+
   it("sends planner-selected private authority candidates and records omitted candidates without reading the legacy preview", async () => {
     const job = completeGenerationExecutionPayload();
     job.context_options = { ...job.context_options, budgetTokens: 1_000 };
