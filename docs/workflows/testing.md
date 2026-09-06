@@ -2,7 +2,7 @@
 
 Extracted from `AGENTS.md` during the 2026-08-01 instruction-file migration. The one generalizable rule ("every code change must include a review of the tests associated with each changed file...") stayed in `AGENTS.md`; this is the detailed test matrix.
 
-Until automated infrastructure exists, manually exercise startup, world and character selection, story generation, choice handling, model switching, output-limit recovery, save/load, import/export, and responsive layout.
+Automated unit and integration infrastructure exists. Supplement relevant automated coverage with rendered-browser checks for affected UI flows: startup, world and character selection, story generation, choice handling, model switching, output-limit recovery, save/load, import/export, and responsive layout.
 
 New services should introduce:
 
@@ -12,9 +12,27 @@ New services should introduce:
 - End-to-end tests for world creation, version publication, campaign switching, turn generation, restart recovery, and export/import.
 - Regression fixtures for truncated output, malformed JSON, reasoning-only output, missing stateful responses, model switching, duplicate submissions, and RPG-mechanic leakage.
 
-Tests must verify that rejected or incomplete generations do not mutate campaign state or Chronicle memory and that one campaign's data cannot appear in another campaign's prompt.
-Tests must also cover images disabled, image endpoint unavailable, incompatible image models, independent image retries, and successful story completion when illustration generation fails.
-Identity tests must verify initial-user bootstrap idempotency, automatic ownership of pre-auth content, import ownership, rejection of caller-supplied identity spoofing, cross-user query isolation, and explicit OIDC linking to the existing initial user without changing its internal UUID.
+For generation or retrieval changes, tests must verify that rejected or incomplete generations do not mutate campaign state or Chronicle memory and that one campaign's data cannot appear in another campaign's prompt.
+For illustration changes, tests must cover images disabled, image endpoint unavailable, incompatible image models, independent image retries, and successful story completion when illustration generation fails.
+For ownership, import, or identity-bootstrap changes, tests must verify initial-user bootstrap idempotency, automatic ownership of pre-auth content, import ownership, rejection of caller-supplied identity spoofing, and cross-user query isolation. When implementing OIDC, add tests for explicit linking to the existing initial user without changing its internal UUID, rejection of automatic first-login ownership claims, and identity-link uniqueness.
+
+## Selecting and reporting checks
+
+Review the tests associated with each changed file and update coverage when behavior, contracts, fixtures, or expectations change. Use the applicable matrix above rather than requiring every domain suite for every change.
+
+The root package scripts provide `pnpm test:unit`, `pnpm test:integration` (the isolated integration runner), and `pnpm test` (both). Select relevant focused tests during development; before submission, complete the applicable documented checks, including type/build checks when affected. Consult `package.json` for current script definitions and the applicable runbook for environment prerequisites.
+
+If this checkout contains nested worktrees, the root unit script can discover their tests. Use this explicit exclusion until test discovery is constrained in code:
+
+```sh
+pnpm test:unit --exclude '**/.worktrees/**' --exclude '**/.codex/**'
+```
+
+For focused database tests, pass `--config vitest.integration.config.ts`; it provisions the dedicated test database and installs per-file isolation. Direct Vitest invocation without that configuration may exit successfully while skipping database cases when `TEST_DATABASE_URL` is absent. The full `pnpm test:integration` runner selects that configuration automatically.
+
+Report passed, failed, and skipped checks separately, including reasons for skips. Unit tests do not establish real PostgreSQL, browser, or live-provider behavior. A skipped integration or browser check is not a pass.
+
+For visible UI changes, verify affected interactions in a rendered browser and provide screenshots. For documentation-only changes, validate local links, review the complete scoped diff, and run `git diff --check`; application tests are needed only if executable behavior changes.
 
 ## Generation Notification Verification
 
@@ -39,11 +57,11 @@ Changes to worker scheduling or generation concurrency must retain automated cov
 - An expired lease can be reclaimed and completed while the stale claimant is prevented from committing.
 - Disabled, unavailable, incompatible, failed, retried, and attempt-exhausted image jobs never change story acceptance or rerun narration.
 
-Run the focused unit and real-PostgreSQL coverage before the benchmark. The integration commands expect the repository's test database setup and `TEST_DATABASE_URL`:
+Run the focused unit and real-PostgreSQL coverage before the benchmark. The integration command uses the dedicated configuration to provision the repository test database and isolate test files:
 
 ```sh
-pnpm vitest run tests/unit/worker-concurrency.test.ts tests/unit/security-config.test.ts tests/unit/worker-generation-adapter.test.ts tests/unit/runtime-shutdown.test.ts tests/unit/deployment-cors.test.ts
-pnpm vitest run tests/integration/generation.integration.test.ts tests/integration/image-pipeline.integration.test.ts
+node node_modules/vitest/vitest.mjs run --exclude '**/.worktrees/**' --exclude '**/.codex/**' tests/unit/worker-concurrency.test.ts tests/unit/security-config.test.ts tests/unit/worker-generation-adapter.test.ts tests/unit/runtime-shutdown.test.ts tests/unit/deployment-cors.test.ts
+node node_modules/vitest/vitest.mjs run --config vitest.integration.config.ts tests/integration/generation.integration.test.ts tests/integration/image-pipeline.integration.test.ts
 ```
 
 The repeatable benchmark is `scripts/benchmark-worker-concurrency.mjs`. It uses production `runWorker` scheduling against deterministic PostgreSQL fixtures, covers concurrency `1`, `2`, and `4`, and checks queue latency, database use, active/peak lane counts, provider limits, and duplicate turn commits. The default fixture uses seed `task-12-c0-worker-v1`, 5 warmups, 30 measured samples, 12 generation jobs and 3 jobs per optional lane in every sample. If throughput coefficient of variation exceeds 5%, the script runs two additional batches and selects the median-throughput batch.
@@ -88,8 +106,8 @@ polling behavior, or SSE behavior. Run the focused unit and real-PostgreSQL
 coverage with:
 
 ```sh
-pnpm vitest run tests/unit/database-pool.test.ts tests/unit/play-loop-read-repository.test.ts tests/unit/client-api-routes.test.ts
-pnpm vitest run --config vitest.integration.config.ts tests/integration/play-loop-read-performance.integration.test.ts tests/integration/gameplay.integration.test.ts tests/integration/dashboard-stats.integration.test.ts tests/integration/generation.integration.test.ts
+node node_modules/vitest/vitest.mjs run --exclude '**/.worktrees/**' --exclude '**/.codex/**' tests/unit/database-pool.test.ts tests/unit/play-loop-read-repository.test.ts tests/unit/client-api-routes.test.ts
+node node_modules/vitest/vitest.mjs run --config vitest.integration.config.ts tests/integration/play-loop-read-performance.integration.test.ts tests/integration/gameplay.integration.test.ts tests/integration/dashboard-stats.integration.test.ts tests/integration/generation.integration.test.ts
 ```
 
 The repeatable benchmark is `scripts/benchmark-play-loop.mjs`. It creates and

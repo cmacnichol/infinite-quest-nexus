@@ -34,7 +34,7 @@ For Docker Desktop host services, `host.docker.internal` is commonly available. 
 
 Saving an API key requires a non-empty, stable `CREDENTIAL_ENCRYPTION_KEY`. Provider keys are encrypted in PostgreSQL and are not returned to the browser.
 
-For Sogni, create a bearer API key in the [Sogni account dashboard](https://dashboard.sogni.ai/api-key), then create an **Illustrations** profile. Keep the official base URL unless a trusted deployment uses a documented alternative; Nexus appends `/v1/creative-agent/workflows` for generation and `/api/v1/models/list` for the media catalog. Leave the key field blank while editing to retain the encrypted credential; Nexus never repopulates it. See [Configure Sogni](../nexus-guide/providers/sogni.md) for image, retry, polling, and artifact-handling details.
+For Sogni Creative Workflow or Sogni Supernet SDK, create an API key in the [Sogni account dashboard](https://dashboard.sogni.ai/api-key), then create an **Illustrations** profile. The Creative Workflow adapter appends `/v1/creative-agent/workflows` for generation and `/api/v1/models/list` for its catalog. The separate Supernet SDK adapter uses Projects and requires the `https://api.sogni.ai` origin. Its model/network controls, deadline, and submission-recovery limits differ. Leave the key field blank while editing to retain the encrypted credential; Nexus never repopulates it. See [Configure Sogni](../nexus-guide/providers/sogni.md) for image, retry, polling, and artifact-handling details.
 
 ## Reconfigure providers after System Import
 

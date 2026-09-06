@@ -1,19 +1,26 @@
 # Configure Sogni illustrations
 
-Sogni is an illustration-only provider in Nexus. It has an independent endpoint, encrypted bearer credential, model choice, health state, and retry lifecycle; it never inherits the story-text provider's endpoint or key.
+Nexus offers two illustration-only Sogni adapters. Each profile has independent credentials, model selection, health, and retry state; neither inherits story-text credentials.
 
-## Create the profile
+| Provider type | Remote work | Generation deadline | Recovery distinction |
+| --- | --- | --- | --- |
+| **Sogni Creative Workflow (REST)** (`sogni`) | Creative Workflow REST API | 180 seconds by default; 30–600 seconds | Caller-controlled submission idempotency |
+| **Sogni Supernet SDK** (`sogni_sdk`) | SDK Projects | 600 seconds by default; 30–3,600 seconds | Provider-generated project UUID; submit-boundary crash limitation below |
+
+The Creative Workflow instructions below apply only to `sogni`. For the SDK adapter, use [Supernet SDK setup and recovery](#supernet-sdk-setup-and-recovery).
+
+## Create a Creative Workflow profile {#create-the-profile}
 
 1. Obtain an API key from the [Sogni account dashboard](https://dashboard.sogni.ai/api-key).
-2. In **Provider Management**, add a profile and select **Sogni AI**. Nexus assigns the **Illustrations** role and suggests the official `https://api.sogni.ai` base URL.
+2. In **Provider Management**, add a profile and select **Sogni Creative Workflow (REST)**. Nexus assigns the **Illustrations** role and suggests the official `https://api.sogni.ai` base URL.
 3. Paste the key, then refresh the model picker or enter an image model ID manually. Nexus uses Sogni's media catalog rather than the LLM-only OpenAI model catalog.
-4. Choose one or two images, dimensions, aspect ratio, PNG or JPEG output, quality, and filter mode.
+4. Choose one or two images, dimensions, aspect ratio, PNG or JPEG output, and quality. Content filtering remains provider-default for this adapter.
 5. Set the request, polling, generation-timeout, and submission-attempt limits, then save the profile. Refreshing the saved profile's model inventory performs the first authenticated connectivity check.
 6. Select the profile under a campaign's **Campaign illustrations** settings.
 
-Sogni profile defaults are copied into the campaign illustration form when the profile is selected. The campaign may then override model, size, aspect ratio, quality, output format, and attempts. Image count, sensitive-content filtering, and polling limits remain profile-level settings.
+Sogni profile defaults are copied into the campaign illustration form when the profile is selected. The campaign may then override model, size, aspect ratio, quality, output format, and attempts. Image count and polling limits remain profile-level settings. Creative Workflow does not offer a content-filter override.
 
-## Defaults and limits
+## Creative Workflow defaults and limits {#defaults-and-limits}
 
 | Setting | New-profile default | Supported range or behavior |
 | --- | --- | --- |
@@ -45,10 +52,24 @@ Stored images remain available in the owner-scoped Nexus image library. World co
 
 Sogni may bill by account plan or usage; consult [current Sogni pricing](https://docs.sogni.ai/pricing/) rather than relying on a price embedded in Nexus.
 
-## Troubleshooting
+## Supernet SDK setup and recovery
+
+1. In **Provider Management**, choose **Sogni Supernet SDK** and the **Illustrations** role. Keep `https://api.sogni.ai`; this adapter rejects other origins. Supply its own API key.
+2. Select the **Fast** or **Relaxed** network and refresh the model inventory. Choose a model with available workers on that network. Changing networks can change model availability.
+3. Review the discovered model's size presets and supported controls. The profile supports steps, guidance, seed, sampler, scheduler, and preview count; use model-supported values instead of assuming every model accepts the same options.
+4. Review billing-token selection (`auto`, `sogni`, or `spark`) and content filtering. Defaults are Fast, automatic token choice, filtering enabled, and zero previews. The SDK exposes a filter override; it does not change Nexus's fiction-only prompt boundary.
+5. Save and select the profile in the campaign illustration settings. The generation deadline defaults to 600 seconds, with a 30–3,600-second range. Polling defaults to 2 seconds.
+
+The SDK adapter reuses a deterministic application ID for the profile. Locally tracked projects provide live progress, queue position, and ETA. After a worker change, Nexus reconciles the stored project ID through `/v1/projects/{id}`; a processing-time 404 is treated as pending until the durable deadline. Once the remote ID is persisted, recovery reconciles that project instead of creating another.
+
+The SDK creates its own project UUID and does not accept Nexus's idempotency key. A process failure after remote acceptance but before the ID is persisted can leave an untracked charge or duplicate work on retry. Creative Workflow offers stronger submission idempotency. See [ADR 0022](../../architecture/0022-separate-sogni-sdk-provider.md) for this accepted limitation; a successful local unit test does not establish paid-provider durability.
+
+Both adapters download completed media into Nexus asset storage and exclude temporary artifact URLs from durable provider metadata.
+
+## Creative Workflow troubleshooting {#troubleshooting}
 
 If model discovery returns no compatible entries, confirm **Attempt model discovery** is enabled and enter the exact image model ID manually. An empty filtered inventory does not prove that the creative-workflow endpoint is unavailable.
 
 If generation fails, check the credential, account balance or entitlement, exact model ID, active-workflow or rate limit, output format, content-filter compatibility, request timeout, and generation deadline. Correct deterministic errors before retrying; authentication, invalid-request, unsupported-format, and artifact-validation failures are not automatically resubmitted. The accepted story turn remains complete and is never regenerated by an image retry.
 
-Nexus uses Sogni's documented bearer-authenticated creative-workflow REST API. See the [Sogni API reference](https://docs.sogni.ai/api-reference/) for current workflow, token, rate-limit, and billing behavior.
+The Creative Workflow adapter uses bearer-authenticated creative-workflow REST requests. See the [Sogni API reference](https://docs.sogni.ai/api-reference/) for current workflow, token, rate-limit, and billing behavior.

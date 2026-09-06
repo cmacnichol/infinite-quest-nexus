@@ -13,7 +13,7 @@ The included database image is `pgvector/pgvector:0.8.6-pg18-trixie`, providing 
 ## Source workflows
 
 - Node.js 22.13 or newer; the container and CI use Node.js 24
-- pnpm 11.14.0
+- pnpm 11.24.0
 - A PostgreSQL/pgvector test database for integration tests
 
 ## Story providers

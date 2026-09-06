@@ -16,6 +16,8 @@ The application supports the following runtime settings, but a deployment manife
 | `WORKER_LEASE_SECONDS` | `60` | Job lease duration |
 | `LEGACY_WEB_ROOT` | `apps/web/dist` | Built Nexus and Story Player assets served under `/nexus/` and `/story` |
 | `NEXT_WEB_ROOT` | `apps/web-next/dist` | Built replacement application assets served under `/app/` |
+| `ASSET_STORAGE_DRIVER` | `filesystem` | Only supported asset storage driver |
+| `WORLD_SHARING_ENABLED` | `false` | Enables world share-link creation, listing, revocation, and token redemption routes |
 | `ASSET_STORAGE_ROOT` | `local-data/assets` | Filesystem asset root |
 | `ARCHIVE_STORAGE_ROOT` | `local-data/archives` | Private durable staging/export root for portable archives |
 | `CREDENTIAL_ENCRYPTION_KEY` / `_FILE` | Empty | Provider-key encryption secret |
@@ -27,6 +29,12 @@ The application supports the following runtime settings, but a deployment manife
 | `API_ASSET_BODY_LIMIT_BYTES` | `33554432` | Asset request-body limit in bytes |
 
 Direct secret environment values take precedence over `_FILE` values.
+
+## World sharing
+
+`WORLD_SHARING_ENABLED` is false by default. Disabled sharing routes return 404. When enabled, owner-scoped management routes create, list, and revoke expiring links to published world versions; possession of a valid token allows redemption. Treat share tokens as access capabilities. Enabling sharing does not add login or change the trusted-network requirement.
+
+Compose and the Swarm API manifest pass this flag. Recreate the Compose application or update the Swarm API service after changing it; a running process does not reload the environment. Sharing links and tokens are not portable System Archive authority.
 
 ## System Archive settings
 

@@ -12,6 +12,6 @@ Infinite Quest Nexus is currently a pre-authentication single-user service. The 
 - Keep PostgreSQL unpublished unless temporary trusted development access is required.
 - Treat imported worlds, exports, model output, Markdown, HTML, and assets as untrusted input.
 
-The current CSP is permissive for provider and image connectivity, and an HSTS header does not create TLS by itself. Do not describe the browser perimeter as hardened without an external security review.
+The current CSP uses `default-src 'none'` and `connect-src 'self'`. Browser connections remain same-origin; the server calls inference providers. Image sources allow self, data, blob, and explicitly configured `CSP_IMAGE_ALLOWED_ORIGINS`. An HSTS header does not create TLS, and CSP does not establish authentication.
 
 Never place credentials in URLs, screenshots, logs, issue reports, image prompts, exports, or source control.

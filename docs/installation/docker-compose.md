@@ -37,4 +37,4 @@ Replace `8080` with the configured host `APP_PORT`.
 docker compose down
 ```
 
-This removes containers and the network but preserves named database and asset volumes.
+This removes containers and the network but preserves all four named volumes: database, assets, archives, and the generated encryption key. See [Storage layout](./storage.md).

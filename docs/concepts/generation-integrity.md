@@ -23,4 +23,4 @@ Acceptance requires typed parsing, schema validation, mechanic-leak checks, camp
 
 Recovery reuses persisted private assessment and random results. It does not reroll because a provider response was truncated. Expired worker leases allow safe reclaim after a crash.
 
-The optional illustration job starts only after story commitment and is outside this acceptance transaction.
+Illustration success is independent of story acceptance. Accepted-turn jobs start after commitment, but the streaming implementation can create provisional illustration work before final-turn validation and promote it after commitment. See [Illustration pipeline](./illustration-pipeline.md#provisional-streaming-path-and-open-contract-conflict) for the current behavior and unresolved validation-boundary conflict.
