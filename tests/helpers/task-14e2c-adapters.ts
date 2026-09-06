@@ -636,7 +636,6 @@ export function createTask14e2cAdapters(options: Task14e2cAdapterOptions): Task1
           if (!descriptor) throw new Error("task_14e2c_image_descriptor_missing");
           const attached = requireAttached(await withTransaction(options.pool, async (client) => {
             const result = await durable.journal.attach(client, reserved.operation, candidate);
-            if (input.failBeforeDomainCommit) throw new Error("task_14e2c_forced_image_rollback");
             if (result.outcome !== "attached") return result;
             if (input.simulateCrashAfterAttach) return result;
             const updated = await client.query(
@@ -648,6 +647,9 @@ export function createTask14e2cAdapters(options: Task14e2cAdapterOptions): Task1
             if (!updated.rowCount) throw new Error("task_14e2c_asset_not_found");
             return result;
           }));
+          if (input.failBeforeDomainCommit) {
+            throw new Error("task_14e2c_forced_image_rollback");
+          }
           if (input.simulateCrashAfterAttach) {
             throw new Task14e2cSimulatedCrash("task_14e2c_simulated_image_crash");
           }
