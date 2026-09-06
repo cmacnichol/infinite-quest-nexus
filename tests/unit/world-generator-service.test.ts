@@ -5,6 +5,7 @@ import { ProviderDestinationNotAllowedError } from "../../packages/security/src/
 import { ProviderResponseTooLargeError } from "../../packages/story-engine/src/provider-response.js";
 import {
   ProviderTransportError,
+  ProviderHttpError,
   type ProviderRequest,
   type ProviderResult
 } from "../../packages/story-engine/src/providers.js";
@@ -115,7 +116,10 @@ function providerResult(
   };
 }
 
-function generationHarness(outcomes: Array<ProviderResult | Error>) {
+function generationHarness(
+  outcomes: Array<ProviderResult | Error>,
+  templates: Partial<Record<keyof typeof PROMPT_TEMPLATE_CATALOG, string>> = {}
+) {
   const requests: ProviderRequest[] = [];
   const progressUpdates: Array<{ phase: string; percent: number; message: string }> = [];
   const providers = {
@@ -137,7 +141,7 @@ function generationHarness(outcomes: Array<ProviderResult | Error>) {
     prompts: { loadWorldGenerationPromptSnapshot: async () => ({ snapshot: {} }) },
     promptTools: {
       content: (_snapshot: unknown, key: keyof typeof PROMPT_TEMPLATE_CATALOG) =>
-        PROMPT_TEMPLATE_CATALOG[key].defaultContent,
+        templates[key] ?? PROMPT_TEMPLATE_CATALOG[key].defaultContent,
     },
   } as unknown as WorldGenerationProviderCollaborators;
 
@@ -208,6 +212,34 @@ describe("generateTemplateWorld orchestration", () => {
     }
   });
 
+  it("repairs contaminated outer world fiction before generating any children", async () => {
+    const contaminated = JSON.parse(worldDraftResponse());
+    contaminated.backgroundStory = "Roll d20 with modifier +3 to enter the harbor.";
+    const harness = generationHarness([
+      providerResult(JSON.stringify(contaminated)), providerResult(worldDraftResponse()),
+      ...[1, 2, 3].map((index) => providerResult(JSON.stringify(character(`Character ${index}`))))
+    ]);
+    const generated = await harness.run();
+    expect(generated.content.world.backgroundStory).toBe("Cartographers once governed the coast.");
+    expect(harness.requests).toHaveLength(5);
+    expect(JSON.parse(harness.requests[1]!.recoveryInput!)).toEqual({ issues: [{ path: "world.backgroundStory", code: "custom", message: "Generated fictional content contains mechanics language." }] });
+    for (const request of harness.requests.slice(2)) {
+      expect(JSON.parse(request.input).world.backgroundStory).toBe("Cartographers once governed the coast.");
+    }
+  });
+
+  it("fails at the world stage after a contaminated replacement without child calls", async () => {
+    const contaminated = JSON.parse(worldDraftResponse());
+    contaminated.backgroundStory = "Roll d20 with modifier +3 to enter the harbor.";
+    const replacement = { ...contaminated, backgroundStory: "Private reasoning: PRIVATE_REVIEW_SENTINEL" };
+    const harness = generationHarness([providerResult(JSON.stringify(contaminated)), providerResult(JSON.stringify(replacement))]);
+    const failure = await harness.run().catch((error) => error);
+    expect(failure).toMatchObject({ authoringFailure: { stage: "world", code: "invalid_authoring_output", issues: [{ path: "world.backgroundStory", code: "custom", message: "Generated fictional content contains mechanics language." }] } });
+    expect(harness.requests).toHaveLength(2);
+    expect(harness.progressUpdates.some((update) => update.phase === "generating_character")).toBe(false);
+    expect(JSON.stringify(failure.authoringFailure)).not.toContain("PRIVATE_REVIEW_SENTINEL");
+  });
+
   it("generates four profiles when the world returns four seeds", async () => {
     const harness = generationHarness([
       providerResult(worldDraftResponse(4)),
@@ -254,9 +286,44 @@ describe("generateTemplateWorld orchestration", () => {
     await harness.run();
 
     expect(harness.requests[1]).toMatchObject({
-      previousResponseId: "partial-world",
       rejectedResponse: '{"title":"partial"',
-      recoveryInput: expect.stringContaining("complete replacement")
+      responseFormatFallback: "forbid"
+    });
+    expect(harness.requests[1]).not.toHaveProperty("previousResponseId");
+  });
+
+  it("sends code-owned world and seed contracts on initial and recovery provider requests", async () => {
+    const harness = generationHarness([
+      providerResult('{"title":"partial"', "partial-world", { outputLimited: true }),
+      providerResult(worldDraftResponse(3), "recovered-world"),
+      providerResult('{"id":"seed-1","name":"Character 1"', "partial-character", { outputLimited: true }),
+      providerResult(JSON.stringify(character("Character 1")), "recovered-character"),
+      providerResult(JSON.stringify(character("Character 2"))),
+      providerResult(JSON.stringify(character("Character 3")))
+    ], {
+      world_generation: "CUSTOM_WORLD_INITIAL",
+      world_generation_recovery: "CUSTOM_WORLD_RECOVERY",
+      world_character_generation: "CUSTOM_SEED_INITIAL",
+      world_character_generation_recovery: "CUSTOM_SEED_RECOVERY"
+    });
+
+    await harness.run();
+
+    expect(harness.requests[0]?.systemPrompt).toContain("CUSTOM_WORLD_INITIAL");
+    expect(harness.requests[0]?.systemPrompt).toContain("world-authoring-v2-validated-profile");
+    expect(harness.requests[1]?.systemPrompt).toContain("CUSTOM_WORLD_RECOVERY");
+    expect(harness.requests[1]?.systemPrompt).toContain("world-authoring-v2-validated-profile");
+    expect(harness.requests[2]?.systemPrompt).toContain("CUSTOM_SEED_INITIAL");
+    expect(harness.requests[2]?.systemPrompt).toContain("character-authoring-v3-validated-profile");
+    expect(harness.requests[2]?.systemPrompt).toContain("story.role and story.background must be non-empty");
+    expect(harness.requests[3]?.systemPrompt).toContain("CUSTOM_SEED_RECOVERY");
+    expect(harness.requests[3]?.systemPrompt).toContain("character-authoring-v3-validated-profile");
+    expect(harness.requests[3]?.systemPrompt).toContain("story.motivations, story.goals, or story.narrativeHooks must be non-empty");
+    expect(harness.requests[3]).not.toHaveProperty("previousResponseId");
+    expect(harness.requests[3]?.input).toBe(harness.requests[2]?.input);
+    expect(JSON.parse(harness.requests[3]?.input || "{}")).toMatchObject({
+      seed: { id: "seed-1", name: "Character 1" },
+      world: { title: "The Moving Roads", premise: "Roads rearrange beneath moonlight." }
     });
   });
 
@@ -280,10 +347,10 @@ describe("generateTemplateWorld orchestration", () => {
       "Character 3"
     ]);
     expect(harness.requests[3]).toMatchObject({
-      previousResponseId: "partial-character",
       rejectedResponse: '{"id":"seed-2","name":"Character 2"',
-      recoveryInput: expect.stringContaining("complete replacement")
+      responseFormatFallback: "forbid"
     });
+    expect(harness.requests[3]).not.toHaveProperty("previousResponseId");
     expect(harness.requests).toHaveLength(5);
   });
 
@@ -327,9 +394,8 @@ describe("generateTemplateWorld orchestration", () => {
 
     await expect(harness.run()).resolves.toBeDefined();
 
-    expect(harness.requests[1]).toMatchObject({
-      previousResponseId: "invalid-seeds"
-    });
+    expect(harness.requests[1]).toMatchObject({ responseFormatFallback: "forbid" });
+    expect(harness.requests[1]).not.toHaveProperty("previousResponseId");
     expect(harness.requests).toHaveLength(5);
   });
 
@@ -344,10 +410,16 @@ describe("generateTemplateWorld orchestration", () => {
     await expect(harness.run()).rejects.toMatchObject({
       statusCode: 502,
       expose: true,
-      details: {
-        code: "incomplete_generated_character",
-        characterIndex: 1,
-        seedName: "Character 2"
+      authoringFailure: { code: "invalid_authoring_output", stage: "character", retryable: true }
+    });
+    await expect(generationHarness([
+      providerResult(worldDraftResponse(3)),
+      providerResult(JSON.stringify(character("Character 1"))),
+      providerResult(JSON.stringify({ ...character("Character 2"), id: "other-seed" })),
+      providerResult(JSON.stringify({ ...character("Character 2"), id: "other-seed" }))
+    ]).run()).rejects.toMatchObject({
+      authoringFailure: {
+        issues: [expect.objectContaining({ path: "playableCharacters.1.id", message: "Generated character ID must match the supplied seed." })]
       }
     });
     expect(harness.requests).toHaveLength(4);
@@ -368,16 +440,13 @@ describe("generateTemplateWorld orchestration", () => {
     await expect(harness.run()).rejects.toMatchObject({
       statusCode: 502,
       expose: true,
-      details: {
-        code: "incomplete_generated_character",
-        characterIndex: 1,
-        seedName: "Character 2"
-      }
+      authoringFailure: { code: "invalid_authoring_output", stage: "character", retryable: true }
     });
     expect(harness.requests[3]).toMatchObject({
-      previousResponseId: "invalid-character",
-      rejectedResponse: JSON.stringify(invalidCharacter)
+      rejectedResponse: JSON.stringify(invalidCharacter),
+      responseFormatFallback: "forbid"
     });
+    expect(harness.requests[3]).not.toHaveProperty("previousResponseId");
   });
 
   it("reports sequential character and recovery progress", async () => {
@@ -402,13 +471,10 @@ describe("generateTemplateWorld orchestration", () => {
     ]));
   });
 
-  it("replaces provider HTTP failures with a safe categorized error", async () => {
+  it("maps typed HTTP retry exhaustion to a safe authoring failure", async () => {
     const marker = "SECRET_AT_START_OF_429_BODY";
-    const providerError = Object.assign(new Error(`Provider request failed (429): ${marker}`), {
-      statusCode: 429,
-      providerMessage: marker
-    });
-    const harness = generationHarness([providerError]);
+    const providerError = new ProviderHttpError(429, null, marker);
+    const harness = generationHarness([providerError, providerError]);
 
     let thrown: unknown;
     try {
@@ -417,12 +483,26 @@ describe("generateTemplateWorld orchestration", () => {
       thrown = error;
     }
 
-    expect(thrown).not.toBe(providerError);
     expect(thrown).toMatchObject({
+      name: "AuthoringResponseError",
+      statusCode: 503,
+      expose: true,
+      authoringFailure: { code: "authoring_provider_unavailable", stage: "world", retryable: true }
+    });
+    expect(thrown).not.toHaveProperty("cause");
+    expect(JSON.stringify(thrown)).not.toContain(marker);
+    expect(harness.requests).toHaveLength(2);
+  });
+
+  it("preserves HTTP projection for the typed provider HTTP boundary", () => {
+    const projected = generatedWorldProviderError(
+      new ProviderHttpError(429, 2_000, "private provider body")
+    );
+
+    expect(projected).toMatchObject({
       name: "WorldGenerationProviderError",
       message: "The text provider request failed with HTTP 429.",
       statusCode: 429,
-      expose: true,
       code: "provider_http_error",
       details: {
         code: "provider_http_error",
@@ -430,12 +510,10 @@ describe("generateTemplateWorld orchestration", () => {
         providerStatus: 429
       }
     });
-    expect(thrown).not.toHaveProperty("cause");
-    expect(JSON.stringify(thrown)).not.toContain(marker);
-    expect(harness.requests).toHaveLength(1);
+    expect(JSON.stringify(projected)).not.toContain("private provider body");
   });
 
-  it("replaces provider transport failures with a safe distinct category", async () => {
+  it("maps typed transport retry exhaustion to a safe authoring failure", async () => {
     const marker = "SECRET_AT_START_OF_TRANSPORT_CAUSE";
     const providerError = new ProviderTransportError(
       marker,
@@ -452,7 +530,7 @@ describe("generateTemplateWorld orchestration", () => {
         causeMessage: "The provider connection failed."
       }
     );
-    const harness = generationHarness([providerError]);
+    const harness = generationHarness([providerError, providerError]);
 
     let thrown: unknown;
     try {
@@ -461,55 +539,27 @@ describe("generateTemplateWorld orchestration", () => {
       thrown = error;
     }
 
-    expect(thrown).not.toBe(providerError);
     expect(thrown).toMatchObject({
-      name: "WorldGenerationProviderError",
-      message: "The text provider connection failed.",
-      code: "provider_transport_error",
-      statusCode: 502,
+      name: "AuthoringResponseError",
+      statusCode: 503,
       expose: true,
-      details: {
-        code: "provider_transport_error",
-        category: "transport"
-      }
+      authoringFailure: { code: "authoring_provider_unavailable", stage: "world", retryable: true }
     });
     expect(thrown).not.toHaveProperty("cause");
     expect(JSON.stringify(thrown)).not.toContain(marker);
-    expect(harness.requests).toHaveLength(1);
+    expect(harness.requests).toHaveLength(2);
   });
 
   it.each([
     {
       label: "destination policy",
       rawError: () => new ProviderDestinationNotAllowedError("address"),
-      expected: {
-        name: "ProviderDestinationNotAllowedError",
-        message: "The provider destination is not allowed by the server network policy.",
-        statusCode: 422,
-        code: "PROVIDER_DESTINATION_NOT_ALLOWED",
-        details: {
-          code: "PROVIDER_DESTINATION_NOT_ALLOWED",
-          category: "destination",
-          permanent: true,
-          retryable: false
-        }
-      }
+      expected: { statusCode: 502, authoringFailure: { code: "authoring_provider_rejected", stage: "world", retryable: false } }
     },
     {
       label: "response size",
       rawError: () => new ProviderResponseTooLargeError(4 * 1024 * 1024),
-      expected: {
-        name: "ProviderResponseTooLargeError",
-        message: "The provider response exceeded the server's safe size limit.",
-        statusCode: 502,
-        code: "provider_response_too_large",
-        details: {
-          code: "provider_response_too_large",
-          category: "response_limit",
-          permanent: true,
-          retryable: false
-        }
-      }
+      expected: { statusCode: 502, authoringFailure: { code: "authoring_output_limit", stage: "world", retryable: false } }
     }
   ])("preserves the safe typed $label boundary without retaining private data", async ({ rawError, expected }) => {
     const marker = "SECRET_AT_START_OF_TYPED_PROVIDER_FAILURE";
@@ -531,40 +581,23 @@ describe("generateTemplateWorld orchestration", () => {
     expect(thrown).not.toBe(providerError);
     expect(thrown).toMatchObject({
       ...expected,
-      expose: true,
-      permanent: true,
-      retryable: false
+      expose: true
     });
     expect(thrown).not.toHaveProperty("cause");
     expect(JSON.stringify(thrown)).not.toContain(marker);
     expect(harness.requests).toHaveLength(1);
   });
 
-  it("logs validation metadata from the response that produced each failing stage", async () => {
+  it("returns a typed failure after the one allowed content repair", async () => {
     const malformedInitial = generationHarness([
       providerResult("{", "initial-response"),
       providerResult("{", "recovery-response")
     ]);
-    const malformedCharacter = generationHarness([
-      providerResult(worldDraftResponse(3), "initial-response"),
-      providerResult(JSON.stringify(character("Character 1"))),
-      providerResult("{", "character-response"),
-      providerResult("{", "character-recovery-response")
-    ]);
-    const warnLog = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
-    const errorLog = vi.spyOn(logger, "error").mockImplementation(() => undefined);
-
-    try {
-      await expect(malformedInitial.run()).rejects.toMatchObject({ statusCode: 502 });
-      expect(warnLog.mock.calls.at(-1)?.[0]).toMatchObject({ responseId: "initial-response" });
-      expect(errorLog.mock.calls.at(-1)?.[0]).toMatchObject({ responseId: "recovery-response" });
-
-      await expect(malformedCharacter.run()).rejects.toMatchObject({ statusCode: 502 });
-      expect(errorLog.mock.calls.at(-1)?.[0]).toMatchObject({ responseId: "character-recovery-response" });
-    } finally {
-      warnLog.mockRestore();
-      errorLog.mockRestore();
-    }
+    await expect(malformedInitial.run()).rejects.toMatchObject({
+      statusCode: 502,
+      authoringFailure: { code: "invalid_authoring_output", stage: "world", retryable: true }
+    });
+    expect(malformedInitial.requests).toHaveLength(2);
   });
 });
 

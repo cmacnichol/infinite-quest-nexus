@@ -4,6 +4,8 @@ import {
   worldCreationSubmissionSnapshot
 } from "./world-creation-model";
 import { parseEditableWorldDraft, type EditableWorldDraft } from "./world-editor-model";
+import { parseAuthoringFailure } from "./authoring-errors";
+import type { AuthoringFailure } from "../../../packages/contracts/src/authoring";
 
 export type WorldCreationApiErrorKind =
   | "network"
@@ -15,6 +17,7 @@ export class WorldCreationApiError extends Error {
   readonly kind: WorldCreationApiErrorKind;
   readonly status: number | null;
   readonly details: unknown;
+  readonly authoringFailure: AuthoringFailure | null;
 
   constructor(
     kind: WorldCreationApiErrorKind,
@@ -27,6 +30,7 @@ export class WorldCreationApiError extends Error {
     this.kind = kind;
     this.status = status;
     this.details = details;
+    this.authoringFailure = parseAuthoringFailure(details);
   }
 }
 
@@ -120,7 +124,7 @@ async function fetchJson(url: string, init: RequestInit): Promise<{ response: Re
   if (!response.ok) {
     const body = isRecord(value) ? value : {};
     throw new WorldCreationApiError(
-      response.status === 503 ? "unavailable" : "request_failed",
+      response.status === 503 || (isRecord(body.details) && body.details.code === "default_text_provider_unavailable") ? "unavailable" : "request_failed",
       typeof body.message === "string" ? body.message : `Request failed with status ${response.status}.`,
       response.status,
       body.details

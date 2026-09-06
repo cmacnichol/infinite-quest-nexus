@@ -1,0 +1,60 @@
+{
+  "malformed": "{not-json}",
+  "character": {
+    "id": "synthetic-authoring-character",
+    "name": "Synthetic Cartographer",
+    "character_text": "A careful cartographer follows the glass road.",
+    "profile": {
+      "story": {
+        "role": "Cartographer",
+        "background": "Maps the glass road.",
+        "personality": "Careful.",
+        "motivations": "Protect travelers.",
+        "goals": "Find the observatory.",
+        "fearsAndConflicts": "The road shifts.",
+        "keyRelationships": "Trusts the guide.",
+        "narrativeHooks": "Carries a star map.",
+        "voiceAndMannerisms": "Speaks precisely.",
+        "otherGuidance": ""
+      }
+    },
+    "rpg_statistics": [],
+    "default_triggers": []
+  },
+  "sentinel": "SYNTHETIC_API_KEY_sk_test_PRIVATE_DO_NOT_EXPOSE",
+  "world": {
+    "title": "Synthetic Glass Road",
+    "genre": "Fantasy",
+    "tone": "Hopeful",
+    "backgroundStory": "Travelers built a road of glass.",
+    "premise": "The road leads to a hidden observatory.",
+    "firstAction": "A map glows at dawn.",
+    "story_rules": "Glass remembers the light.",
+    "character_seeds": [
+      {
+        "id": "seed-1",
+        "name": "Synthetic Explorer 1",
+        "role": "Cartographer",
+        "concept": "A traveler maps the road.",
+        "narrative_hook": "Carries a star map."
+      },
+      {
+        "id": "seed-2",
+        "name": "Synthetic Explorer 2",
+        "role": "Cartographer",
+        "concept": "A traveler maps the road.",
+        "narrative_hook": "Carries a star map."
+      },
+      {
+        "id": "seed-3",
+        "name": "Synthetic Explorer 3",
+        "role": "Cartographer",
+        "concept": "A traveler maps the road.",
+        "narrative_hook": "Carries a star map."
+      }
+    ],
+    "rpg_statistics": [],
+    "default_triggers": [],
+    "event_triggers": []
+  }
+}

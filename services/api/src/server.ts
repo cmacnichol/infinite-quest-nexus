@@ -66,6 +66,8 @@ import {
   worldStatusUpdateSchema
 } from "../../../packages/contracts/src/world-library.js";
 import { apiErrorEnvelopeSchema } from "../../../packages/contracts/src/http.js";
+import { authoringFailureSchema } from "../../../packages/contracts/src/authoring.js";
+import { projectAuthoringFailure } from "../../../packages/contracts/src/authoring-error-projection.js";
 import {
   campaignBranchResponseSchema,
   campaignCreateResponseSchema,
@@ -291,6 +293,13 @@ function exposeError(error: unknown, code: number): boolean {
     || (typeof error === "object" && error !== null && "expose" in error && (error as { expose?: unknown }).expose === true);
 }
 
+function isKnownSafeFiveXX(error: unknown, details: ReturnType<typeof errorDetails>, transport: unknown): boolean {
+  if (transport || isSanitizedSystemArchiveServerError(error)) return true;
+  if (!details.details || typeof details.details !== "object") return false;
+  const code = (details.details as { code?: unknown }).code;
+  return code === "incomplete_generated_world" || code === "provider_response_too_large";
+}
+
 function safeLogErrorCode(value: unknown, fallback = "unclassified_error"): string {
   if (typeof value !== "string") return fallback;
   const normalized = value.trim().toLowerCase();
@@ -456,11 +465,20 @@ export async function buildServer({
     const details = errorDetails(error);
     const exposed = exposeError(error, code);
     const transport = providerTransportErrorDetails(error);
+    const authoringFailure = typeof error === "object" && error !== null && "authoringFailure" in error
+      ? authoringFailureSchema.safeParse((error as { authoringFailure?: unknown }).authoringFailure)
+      : null;
+    const safeAuthoringFailure = authoringFailure?.success ? projectAuthoringFailure(authoringFailure.data) : null;
+    const safeFiveXX = safeAuthoringFailure !== null || isKnownSafeFiveXX(error, details, transport);
     const exposedError = (details.name === "ArchiveError" || details.name === "OriginNotAllowedError") && details.code
       ? details.code
       : details.name;
     const providerErrorCode = transport?.timedOut ? "provider_request_timeout" : "provider_transport_error";
-    if (transport) {
+    if (safeAuthoringFailure) {
+      request.log.error({ correlationId: request.id, code, authoringCode: safeAuthoringFailure.code,
+        authoringStage: safeAuthoringFailure.stage, authoringIssues: safeAuthoringFailure.issues,
+        retryable: safeAuthoringFailure.retryable }, "request_failed");
+    } else if (transport) {
       request.log.error({
         correlationId: request.id,
         code,
@@ -473,16 +491,18 @@ export async function buildServer({
       request.log.error({ err: error, code }, "request_failed");
     }
     const payload = apiErrorEnvelopeSchema.parse({
-      error: exposed ? (exposedError || "Provider request failed") : "Internal server error",
+      error: safeAuthoringFailure ? "Authoring request failed" : exposed && (code < 500 || safeFiveXX) ? (exposedError || "Provider request failed") : "Internal server error",
       message: transport
         ? `${transport.timedOut ? "The provider request timed out." : "The provider connection failed."} Correlation ID: ${request.id}.`
-        : exposed ? `${details.message} Correlation ID: ${request.id}.` : "The request failed. Use the correlation ID to locate server diagnostics.",
+        : safeAuthoringFailure ? `Generated ${safeAuthoringFailure.stage} content could not be accepted. Correlation ID: ${request.id}.`
+        : exposed && (code < 500 || safeFiveXX) ? `${details.message} Correlation ID: ${request.id}.` : "The request failed. Use the correlation ID to locate server diagnostics.",
       correlationId: request.id,
-      ...(!exposed || details.code === undefined ? {} : { code: details.code }),
+      ...(safeAuthoringFailure ? { code: safeAuthoringFailure.code } : !exposed || details.code === undefined ? {} : { code: details.code }),
       details: transport
         ? { code: providerErrorCode, category: transport.causeCategory, retryable: true }
-        : exposed ? safeErrorDetails(details.details) : {},
-      ...(details.issues === undefined ? {} : { issues: details.issues })
+        : safeAuthoringFailure ? { ...safeAuthoringFailure, correlationId: request.id }
+        : exposed && (code < 500 || safeFiveXX) ? safeErrorDetails(details.details) : {},
+      ...(!safeAuthoringFailure && code < 500 && details.issues !== undefined ? { issues: details.issues } : {})
     });
     void reply.code(code).send(payload);
   });

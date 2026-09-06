@@ -12,6 +12,11 @@ import {
 import { STORY_SYSTEM_PROMPT } from "../../packages/contracts/src/story-prompt.js";
 import { composeIllustrationProviderPrompt, directIllustrationPrompt } from "../../packages/domain/src/illustrations.js";
 import { buildTemplateWorldPrompt } from "../../packages/domain/src/world-template.js";
+import { appendAuthoringContract } from "../../packages/domain/src/authoring-prompts.js";
+import {
+  characterProfileOrganizerPrompt,
+  characterProfileOrganizerRepairPrompt
+} from "../../services/runtime/src/provider-character-organization-adapter.js";
 import { providerPromptProtocolVersion } from "../helpers/provider-application-fixtures.js";
 import type { PromptSnapshot } from "../../packages/contracts/src/index.js";
 import { infiniteWorldsPromptSet } from "../legacy-api/src/infinite-worlds-import-service.js";
@@ -29,7 +34,10 @@ describe("Prompt Library catalog", () => {
     const character = PROMPT_TEMPLATE_CATALOG.world_character_generation.defaultContent;
     const characterRecovery = PROMPT_TEMPLATE_CATALOG.world_character_generation_recovery.defaultContent;
 
-    for (const prompt of [generation, recovery]) {
+    const effectiveGeneration = buildTemplateWorldPrompt({
+      sourceName: "prompt", sourceKind: "prompt", title: "World", summary: "Summary", keywords: [], excerpts: []
+    }, generation).systemPrompt;
+    for (const prompt of [effectiveGeneration, appendAuthoringContract("world", recovery)]) {
       expect(prompt).toContain("character_seeds");
       expect(prompt).toContain("role");
       expect(prompt).toContain("concept");
@@ -37,8 +45,8 @@ describe("Prompt Library catalog", () => {
       expect(prompt).not.toContain('"profile":{"identity"');
     }
 
-    for (const prompt of [character, characterRecovery]) {
-      expect(prompt).toContain("one complete playable character");
+    for (const prompt of [appendAuthoringContract("world_character", character), appendAuthoringContract("world_character", characterRecovery)]) {
+      expect(prompt).toContain("complete");
       expect(prompt).toContain("character_text");
       expect(prompt).toContain('"profile":{"identity"');
       expect(prompt).toContain("rpg_statistics");
@@ -48,6 +56,23 @@ describe("Prompt Library catalog", () => {
     expect(recovery).toContain("complete replacement");
     expect(characterRecovery).toContain("complete replacement");
     expect(PROMPT_TEMPLATE_CATALOG.world_roster_supplement).toBeDefined();
+  });
+
+  it("retains the organizer evidence schema in shipped and custom repair prompts", () => {
+    const shipped = characterProfileOrganizerPrompt(PROMPT_TEMPLATE_CATALOG.character_profile_organizer.defaultContent);
+    const custom = characterProfileOrganizerPrompt("CUSTOM ORGANIZER {{outputTemplate}} {{protocol}}");
+    const repair = characterProfileOrganizerRepairPrompt(
+      "CUSTOM ORGANIZER {{outputTemplate}} {{protocol}}",
+      "CUSTOM REPAIR {{base}} Return a complete replacement response."
+    );
+
+    for (const prompt of [shipped, custom, repair]) {
+      expect(prompt).toContain('"path":"appearance.clothing","source":"legacyGuidance","quote":"exact source excerpt"');
+      expect(prompt).toContain('"candidate"');
+      expect(prompt).toContain('"evidence"');
+      expect(prompt).toContain("character-profile-organizer-v3");
+    }
+    expect(repair).toContain("complete replacement response");
   });
 
   it("builds seed-oriented input for prompt and CYOA sources", () => {

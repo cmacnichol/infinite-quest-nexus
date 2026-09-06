@@ -72,7 +72,7 @@ function completeWorld(characterCount = 3) {
 }
 
 describe("generated world completion", () => {
-  it("retains complete characters and replaces incomplete entries", () => {
+  it("retains complete structured characters when duplicate guidance is empty", () => {
     const candidates = [
       { id: "complete", name: "Complete", character_text: "Guidance", profile: profile(), rpg_statistics: [], default_triggers: [] },
       { id: "no-profile", name: "No Profile", character_text: "Guidance", rpg_statistics: [], default_triggers: [] },
@@ -81,8 +81,8 @@ describe("generated world completion", () => {
 
     const selected = selectCompleteGeneratedCharacters(candidates);
 
-    expect(selected.characters.map((character) => character.id)).toEqual(["complete"]);
-    expect(selected.needed).toBe(2);
+    expect(selected.characters.map((character) => character.id)).toEqual(["complete", "no-guidance"]);
+    expect(selected.needed).toBe(1);
   });
 
   it("deduplicates complete candidates by normalized name in provider order", () => {
@@ -111,10 +111,13 @@ describe("generated world completion", () => {
     expect(() => parseCompleteGeneratedWorld(completeWorld(5))).toThrow();
   });
 
-  it("rejects an empty characterText even when profile is complete", () => {
+  it("accepts structured creative profiles without duplicate legacy characterText", () => {
     const content = completeWorld();
     content.playableCharacters[1]!.characterText = "";
-    expect(() => parseCompleteGeneratedWorld(content)).toThrow();
+    expect(parseCompleteGeneratedWorld(content).playableCharacters[1]).toMatchObject({
+      name: "Character 2",
+      characterText: ""
+    });
   });
 
   it("rejects a missing profile even when characterText is complete", () => {
@@ -237,6 +240,77 @@ describe("generated world completion", () => {
       code: "custom",
       message: "Generated genre is required."
     }]);
+    expect(JSON.stringify(issues)).not.toContain(marker);
+  });
+
+  it("retains legacy missing-guidance and missing-profile messages at the legacy boundary", () => {
+    const issues = generatedWorldIssues(new z.ZodError([
+      { path: ["playableCharacters", 0, "characterText"], code: "custom", message: "ignored" },
+      { path: ["playableCharacters", 1, "profile"], code: "custom", message: "ignored" }
+    ]));
+
+    expect(issues).toEqual([
+      {
+        path: "playableCharacters.0.characterText",
+        code: "custom",
+        message: "Generated character guidance is required."
+      },
+      {
+        path: "playableCharacters.1.profile",
+        code: "custom",
+        message: "Generated structured character profile is required."
+      }
+    ]);
+  });
+
+  it("retains safe converted-world paths and controlled seed messages", () => {
+    const issues = generatedWorldIssues(new z.ZodError([
+      { path: ["genre"], code: "custom", message: "ignored" },
+      { path: ["story_rules"], code: "custom", message: "ignored" },
+      { path: ["character_seeds", 0, "name"], code: "custom", message: "ignored" }
+    ]));
+
+    expect(issues).toEqual([
+      { path: "genre", code: "custom", message: "Generated genre is required." },
+      { path: "story_rules", code: "custom", message: "Generated rules are required." },
+      { path: "character_seeds.0.name", code: "custom", message: "Generated character seed names must be unique." }
+    ]);
+  });
+
+  it("keeps generated mechanics errors on their exact roster field", () => {
+    const content = completeWorld();
+    content.playableCharacters[0]!.profile.story.role = "She rolls a d20.";
+    let error: unknown;
+    try {
+      parseCompleteGeneratedWorld(content);
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(generatedWorldIssues(error)).toContainEqual({
+      path: "playableCharacters.0.profile.story.role",
+      code: "custom",
+      message: "Generated fictional content contains mechanics language."
+    });
+  });
+
+  it("projects generated profile extensions to a safe parent path", () => {
+    const marker = "PRIVATE_PROVIDER_EXTENSION";
+    const content = completeWorld();
+    Object.assign(content.playableCharacters[0]!.profile, { private_reasoning: marker });
+    let error: unknown;
+    try {
+      parseCompleteGeneratedWorld(content);
+    } catch (caught) {
+      error = caught;
+    }
+
+    const issues = generatedWorldIssues(error);
+    expect(issues).toContainEqual({
+      path: "playableCharacters.0.profile",
+      code: "custom",
+      message: "Generated character contains prohibited provider metadata."
+    });
     expect(JSON.stringify(issues)).not.toContain(marker);
   });
 

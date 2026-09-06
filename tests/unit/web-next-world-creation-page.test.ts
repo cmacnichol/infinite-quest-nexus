@@ -583,7 +583,7 @@ describe("World Creation Method stage", () => {
       progressKey: expect.stringMatching(/^world-gen:/)
     }), expect.any(AbortSignal));
     expect(document.querySelector('[data-generation-status]')?.textContent).toContain("unavailable");
-    expect(document.querySelector<HTMLAnchorElement>('[data-generation-status] a[href="/nexus/?view=setup"]')?.textContent)
+    expect(document.querySelector<HTMLAnchorElement>('[data-generation-status] a[href="/nexus/#providers"]')?.textContent)
       .toContain("Provider Setup");
   });
 });
