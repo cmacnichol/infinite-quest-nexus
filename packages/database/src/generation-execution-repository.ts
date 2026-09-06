@@ -278,6 +278,39 @@ export type GenerationExecutionRepository = Readonly<{
   markFailed(input: GenerationFailedUpdate): Promise<boolean>;
 }>;
 
+/** Reconciles one accepted turn whose provisional illustration promotion rolled back. */
+export async function reconcileNextAcceptedStreamingIllustration(
+  pool: DatabasePool,
+  illustration: IllustrationGenerationTransactionPort,
+): Promise<boolean> {
+  return withTransaction(pool, async (client) => {
+    const pending = await client.query<{
+      id: string; owner_user_id: string; campaign_id: string; result_turn_id: string; narration: string;
+    }>(
+      `SELECT j.id,j.owner_user_id,j.campaign_id,j.result_turn_id,t.narration
+         FROM generation_jobs j JOIN turns t ON t.id=j.result_turn_id AND t.owner_user_id=j.owner_user_id
+        WHERE j.status='completed' AND j.result_turn_id IS NOT NULL
+          AND j.streaming_segments_state->>'provisionalIllustrationReconciliation'='pending'
+        ORDER BY j.completed_at,j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1`
+    );
+    const job = pending.rows[0];
+    if (!job) return false;
+    const config = await illustration.loadStreamingIllustrationConfig(client, {
+      ownerUserId: job.owner_user_id, campaignId: job.campaign_id
+    });
+    await illustration.promoteProvisionalSet(client, {
+      ownerUserId: job.owner_user_id, campaignId: job.campaign_id, generationJobId: job.id, turnId: job.result_turn_id
+    }, { finalNarration: job.narration, config });
+    await client.query(
+      `UPDATE generation_jobs
+          SET streaming_segments_state = streaming_segments_state - 'provisionalIllustrationReconciliation', updated_at=now()
+        WHERE id=$1 AND owner_user_id=$2`,
+      [job.id, job.owner_user_id]
+    );
+    return true;
+  });
+}
+
 type ExecutionPayloadRow = Omit<GenerationExecutionPayload, "orchestration_inputs"> & {
   legacy_settings: Record<string, unknown>;
   rpg_stats: unknown;
@@ -671,6 +704,15 @@ async function commitAcceptedTurn(
   } catch (error) {
     await client.query("ROLLBACK TO SAVEPOINT accepted_turn_illustration_enqueue");
     await client.query("RELEASE SAVEPOINT accepted_turn_illustration_enqueue");
+    if (job.streaming_segments_state?.provisionalSetId) {
+      await client.query(
+        `UPDATE generation_jobs
+            SET streaming_segments_state = streaming_segments_state
+              || '{"provisionalIllustrationReconciliation":"pending"}'::jsonb
+          WHERE id=$1 AND owner_user_id=$2`,
+        [job.id, job.owner_user_id]
+      );
+    }
     input.onIllustrationEnqueueError(error, turnId);
   }
   await collaborators.memory.enqueueEmbeddingReindex(client, {

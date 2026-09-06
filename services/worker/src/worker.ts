@@ -1,11 +1,13 @@
 import { hostname } from "node:os";
 import type {
   GenerationWorkerApplication,
+  IllustrationApplication,
   IllustrationWorkerApplication,
   MemoryWorkerApplication
 } from "../../../packages/application/src/index.js";
 import type { RuntimeConfig } from "../../../packages/database/src/config.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
+import { reconcileNextAcceptedStreamingIllustration } from "../../../packages/database/src/generation-execution-repository.js";
 import { archiveErrorCodeSchema } from "../../../packages/contracts/src/archives.js";
 import { logger } from "../../../packages/logger/src/index.js";
 import {
@@ -25,6 +27,7 @@ import {
 export type WorkerDependencies = Readonly<{
   generation: GenerationWorkerApplication;
   illustration: IllustrationWorkerApplication;
+  generationIllustration?: IllustrationApplication;
   memory: MemoryWorkerApplication;
   optionalLanes?: WorkerOptionalLanes;
 }>;
@@ -124,6 +127,7 @@ function defaultOptionalLanes(
   config: RuntimeConfig,
   workerId: string,
   illustration: IllustrationWorkerApplication,
+  generationIllustration: IllustrationApplication | undefined,
   memory: MemoryWorkerApplication,
   maintenance: PrivateAssetMaintenanceComposition,
   illustrationPublication: PrivateIllustrationAssetPublicationComposition,
@@ -133,6 +137,8 @@ function defaultOptionalLanes(
   return {
     illustration: async () => {
       const request = { workerId, leaseSeconds: config.workerLeaseSeconds };
+      if (generationIllustration
+        && await reconcileNextAcceptedStreamingIllustration(pool, generationIllustration.generation)) return true;
       const recovered = await illustrationPublication.coordinator.recoverNextFinalization(request);
       if (recovered.outcome !== "noop") return true;
       if (await illustration.runPromptHandler(request)) return true;
@@ -187,7 +193,7 @@ export async function runWorker(
   pool: DatabasePool,
   config: RuntimeConfig,
   signal: AbortSignal,
-  { generation, illustration, memory, optionalLanes: injectedOptionalLanes }: WorkerDependencies
+  { generation, illustration, generationIllustration, memory, optionalLanes: injectedOptionalLanes }: WorkerDependencies
 ): Promise<void> {
   const workerId = `${hostname()}:${process.pid}:${crypto.randomUUID().slice(0, 8)}`;
   logger.info({ event: "worker_started", workerId });
@@ -227,6 +233,7 @@ export async function runWorker(
     config,
     workerId,
     illustration,
+    generationIllustration,
     memory,
     maintenance!,
     illustrationPublication!,
