@@ -125,9 +125,9 @@ export async function projectStateCorrection(
   const existing = await client.query<{ id: string; memory_kind: string; turn_id: string | null; content: string; managed: boolean }>(
     `SELECT id,memory_kind,turn_id,content,
             (metadata->>'generatedFromAcceptedTurn' = 'true' OR metadata->>'manualCorrection' = 'true') AS managed
-       FROM chronicle_memories
+      FROM chronicle_memories
       WHERE owner_user_id=$1 AND campaign_id=$2 AND world_version_id=$3 AND memory_kind=ANY($4::text[])
-        AND (memory_kind='canonical_fact' OR turn_id IS NULL)
+        AND (memory_kind='canonical_fact' OR (turn_id IS NULL AND metadata->>'manualCorrection' = 'true'))
       ORDER BY created_at,id`, [...scopeValues, kinds]);
   const consumed = new Set<string>();
   for (const projection of desired) {
