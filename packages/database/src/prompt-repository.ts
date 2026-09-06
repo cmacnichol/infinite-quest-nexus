@@ -206,7 +206,7 @@ export function createPromptRepository(database: DatabaseClient): PromptLibraryP
       if (campaignId) await assertCampaignOwner(database, command.ownerUserId, campaignId);
       await database.query(
         `INSERT INTO prompt_template_overrides(owner_user_id,campaign_id,prompt_key,content,compatibility_required_shape_version,compatibility_protocol_identity,compatibility_content_hash,compatibility_acknowledged_at,updated_at)
-         VALUES($1,$2,$3,$4,$5,$6,$7,CASE WHEN $5 IS NULL THEN NULL ELSE now() END,now())
+         VALUES($1,$2,$3,$4,$5,$6,$7,CASE WHEN $5::text IS NULL THEN NULL ELSE now() END,now())
          ON CONFLICT(owner_user_id,campaign_id,prompt_key)
          DO UPDATE SET content=excluded.content,compatibility_required_shape_version=excluded.compatibility_required_shape_version,compatibility_protocol_identity=excluded.compatibility_protocol_identity,compatibility_content_hash=excluded.compatibility_content_hash,compatibility_acknowledged_at=excluded.compatibility_acknowledged_at,updated_at=now()`,
         [command.ownerUserId, campaignId, value.key, value.content,
