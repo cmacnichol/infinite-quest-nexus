@@ -261,7 +261,7 @@ export async function discoverSogniSdkModels(profile: TextProviderProfile): Prom
     const imageOptions = options?.type === "image" ? {
       sizePresets: presets.map((preset) => ({ id: preset.id, label: preset.label, width: preset.width, height: preset.height, ratio: preset.ratio })),
       steps: options.steps,
-      guidance: options.guidance,
+      ...(options.guidance === undefined ? {} : { guidance: options.guidance }),
       samplers: options.sampler.allowed,
       ...(options.sampler.default ? { defaultSampler: options.sampler.default } : {}),
       schedulers: options.scheduler.allowed,
