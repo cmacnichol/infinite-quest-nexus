@@ -50,6 +50,11 @@ function authoringFailureMessage(failure: AuthoringFailure): string {
     case "authoring_context_exceeded": return "The authoring request exceeds the provider context limit.";
     case "authoring_provider_rejected": return "The text provider rejected the authoring request.";
     case "invalid_authoring_output": return "Generated content did not meet the required format.";
+    case "authoring_conflict": return "The authoring proposal changed. Refresh and try again.";
+    case "authoring_expired": return "This authoring proposal has expired.";
+    case "authoring_cancelled": return "This authoring proposal was cancelled.";
+    case "authoring_retry_exhausted": return "This stage has exhausted its retry limit. Create a new proposal.";
+    case "authoring_apply_unavailable": return "Applying authoring proposals is not available yet.";
   }
 }
 

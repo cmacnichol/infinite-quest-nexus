@@ -64,6 +64,17 @@ function parseCreativeCharacter(content: string) {
 }
 
 describe("runAuthoringResponse", () => {
+  it("renders fixed application failures without raw details", () => {
+    const error = new AuthoringResponseError({
+      code: "authoring_conflict",
+      stage: "world",
+      retryable: false,
+      issues: []
+    });
+
+    expect(error.message).toBe("The authoring proposal changed. Refresh and try again.");
+  });
+
   it("repairs malformed JSON with one complete replacement", async () => {
     const request = vi.fn()
       .mockResolvedValueOnce(providerResult("{"))

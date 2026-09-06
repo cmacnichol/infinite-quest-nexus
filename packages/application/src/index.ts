@@ -7,3 +7,4 @@ export * from "./providers/index.js";
 export * from "./world-campaign/index.js";
 export * from "./turn-corrections/index.js";
 export * from "./system-archives/index.js";
+export * from "./authoring/index.js";
