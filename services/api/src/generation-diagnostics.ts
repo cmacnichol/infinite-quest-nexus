@@ -45,6 +45,8 @@ const SAFE_ERROR_CODES = new Set([
   "active_generation_exists",
   "context_budget_exceeded",
   "context_budget_invalid",
+  "continuity_output_budget_exceeded",
+  "extension_narration_limit_exceeded",
   "generation_cancelled",
   "invalid_json",
   "invalid_schema",
@@ -90,6 +92,19 @@ function safeErrorName(error: unknown): string {
     // A proxy can throw during instanceof checks; use the fixed fallback.
   }
   return "Error";
+}
+
+function safeBudgetScope(error: unknown): "campaign_context" | "provider_request" | "output_skeleton" | "extension_narration" | null {
+  try {
+    const scope = typeof error === "object" && error !== null
+      ? (error as { scope?: unknown }).scope
+      : undefined;
+    return scope === "campaign_context" || scope === "provider_request" || scope === "output_skeleton" || scope === "extension_narration"
+      ? scope
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function emitDiagnostic(emit: () => void): void {
@@ -138,11 +153,13 @@ export async function runTurnGenerationPhase<T>(
   } catch (error) {
     const failedAt = now();
     const errorCode = safeErrorCode(error);
+    const budgetScope = safeBudgetScope(error);
     emitDiagnostic(() => options.logger.error({
       event: "turn_generation_phase_failed",
       ...base,
       errorName: safeErrorName(error),
       errorCode,
+      ...(budgetScope ? { budgetScope } : {}),
       durationMs: failedAt - phaseStartedAt,
       totalDurationMs: failedAt - options.generationStartedAt
     }));

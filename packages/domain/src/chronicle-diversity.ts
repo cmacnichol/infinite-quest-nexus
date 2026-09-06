@@ -101,15 +101,6 @@ function cosineSimilarity(left: readonly number[] | null, right: readonly number
   return Math.max(0, Math.min(1, dotProduct / Math.sqrt(leftMagnitude * rightMagnitude)));
 }
 
-function maximumSelectedSimilarity(
-  candidate: ChronicleParentCandidate,
-  selected: readonly ChronicleParentCandidate[]
-): number {
-  return selected.reduce((maximum, existing) => (
-    Math.max(maximum, cosineSimilarity(candidate.embedding, existing.embedding))
-  ), 0);
-}
-
 function selectedContent(
   candidate: ChronicleParentCandidate,
   siblings: readonly ChronicleParentCandidate[],
@@ -176,6 +167,7 @@ export function selectDiverseChronicleParents(
     && strongestByParent.has(policy.latestSceneParentMemoryId) ? 1 : 0;
   let semanticPenaltiesApplied = 0;
   let turnLimitParentsRemoved = 0;
+  const maximumSimilarityByCandidateId = new Map<string, number>();
   let remaining = maximumParents > 0 ? [...strongestByParent.values()].filter((candidate) => (
     candidate.parentMemoryId !== policy.latestSceneParentMemoryId
   )) : [];
@@ -198,33 +190,30 @@ export function selectDiverseChronicleParents(
       eligible.push(candidate);
     }
     if (eligible.length === 0) break;
-    eligible.sort((left, right) => {
-      const leftKindBonus = selectedCandidates.length > 0 && !selectedKinds.has(left.memoryKind)
+    const adjustedRank = (value: ChronicleParentCandidate): number => {
+      const kindBonus = selectedCandidates.length > 0 && !selectedKinds.has(value.memoryKind)
         ? kindDiversityBonus
         : 0;
-      const rightKindBonus = selectedCandidates.length > 0 && !selectedKinds.has(right.memoryKind)
-        ? kindDiversityBonus
-        : 0;
-      const leftEntityBonus = selectedCandidates.length > 0
-        && left.entityIds.some((entityId) => !selectedEntityIds.has(entityId))
+      const entityBonus = selectedCandidates.length > 0
+        && value.entityIds.some((entityId) => !selectedEntityIds.has(entityId))
         ? entityDiversityBonus
         : 0;
-      const rightEntityBonus = selectedCandidates.length > 0
-        && right.entityIds.some((entityId) => !selectedEntityIds.has(entityId))
-        ? entityDiversityBonus
-        : 0;
-      const leftAdjustedRank = left.fusedRank
-        + maximumSelectedSimilarity(left, selectedCandidates) * semanticSimilarityPenalty
-        - leftKindBonus
-        - leftEntityBonus;
-      const rightAdjustedRank = right.fusedRank
-        + maximumSelectedSimilarity(right, selectedCandidates) * semanticSimilarityPenalty
-        - rightKindBonus
-        - rightEntityBonus;
-      return leftAdjustedRank - rightAdjustedRank || compareCandidates(left, right);
-    });
-    const candidate = eligible[0]!;
-    const similarity = maximumSelectedSimilarity(candidate, selectedCandidates);
+      return value.fusedRank
+        + (maximumSimilarityByCandidateId.get(value.candidateId) ?? 0) * semanticSimilarityPenalty
+        - kindBonus
+        - entityBonus;
+    };
+    let candidate = eligible[0]!;
+    let candidateAdjustedRank = adjustedRank(candidate);
+    for (const eligibleCandidate of eligible.slice(1)) {
+      const eligibleAdjustedRank = adjustedRank(eligibleCandidate);
+      if (eligibleAdjustedRank < candidateAdjustedRank
+        || (eligibleAdjustedRank === candidateAdjustedRank && compareCandidates(eligibleCandidate, candidate) < 0)) {
+        candidate = eligibleCandidate;
+        candidateAdjustedRank = eligibleAdjustedRank;
+      }
+    }
+    const similarity = maximumSimilarityByCandidateId.get(candidate.candidateId) ?? 0;
     if (similarity > 0 && semanticSimilarityPenalty > 0) semanticPenaltiesApplied += 1;
     const contentHash = normalizedContentHash(candidate.parentContent);
     const factIds = canonicalFactIds(candidate);
@@ -235,8 +224,17 @@ export function selectDiverseChronicleParents(
     factIds.forEach((factId) => selectedCanonicalFactIds.add(factId));
     selectedKinds.add(candidate.memoryKind);
     candidate.entityIds.forEach((entityId) => selectedEntityIds.add(entityId));
-    selectedCandidates.push(candidate);
     remaining = eligible.filter((value) => value.parentMemoryId !== candidate.parentMemoryId);
+    if (semanticSimilarityPenalty > 0) {
+      for (const remainingCandidate of remaining) {
+        const existingMaximum = maximumSimilarityByCandidateId.get(remainingCandidate.candidateId) ?? 0;
+        maximumSimilarityByCandidateId.set(
+          remainingCandidate.candidateId,
+          Math.max(existingMaximum, cosineSimilarity(remainingCandidate.embedding, candidate.embedding))
+        );
+      }
+    }
+    selectedCandidates.push(candidate);
   }
   const parents = selectedCandidates.map((candidate) => {
     const content = selectedContent(

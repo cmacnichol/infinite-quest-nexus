@@ -215,6 +215,12 @@ integration("PostgreSQL Chronicle query embedding cache", () => {
         [index, index + 1]
       ));
     }
+    await pool.query(
+      `UPDATE chronicle_query_embedding_cache
+          SET created_at='2000-01-01T00:00:00.000Z',last_accessed_at='2000-01-01T00:00:00.000Z'
+        WHERE campaign_id=$1`,
+      [campaignA.campaignId]
+    );
     await expect(withCache((cache) => cache.getQueryEmbedding(
       campaignA,
       key({ normalizedQueryHash: digest("query-0") })

@@ -209,6 +209,195 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     });
   }
 
+  it("runs the private generation candidate read through the chunked hybrid stage", async () => {
+    const { fixture, providerId } = await configuredFixture("private hybrid candidates");
+    const turnId = await turn(fixture, 1, "Ask about the moon key.", "The Moon Warden carries the complete silver key record.");
+    const currentTurnId = await turn(fixture, 2, "Follow the lantern.", "The Moon Warden points toward the current silver key trail.");
+    const latestTurnId = await turn(fixture, 3, "Cross the harbor.", "The latest scene stays protected by authority.");
+    await pool.query("UPDATE campaigns SET active_turn_number=3 WHERE id=$1", [fixture.campaignId]);
+    const completeOlderContent = `Turn 1 full record: ${"The complete silver key record remains intact. ".repeat(10_000)}`;
+    const memory = await parent(fixture, {
+      turnId,
+      kind: "turn_fiction",
+      ordinal: 1,
+      content: completeOlderContent,
+      entities: ["Moon Warden"],
+      entityIds: ["world:moon-warden"]
+    });
+    const currentMemory = await parent(fixture, {
+      turnId: currentTurnId,
+      kind: "turn_fiction",
+      ordinal: 2,
+      content: "Turn 2 current parent record: the Moon Warden points toward the silver key trail.",
+      entities: ["Moon Warden"],
+      entityIds: ["world:moon-warden"]
+    });
+    const latestMemory = await parent(fixture, {
+      turnId: latestTurnId,
+      kind: "turn_fiction",
+      ordinal: 3,
+      content: "Turn 3 latest protected record: the harbor crossing continues.",
+      entities: ["Moon Warden"],
+      entityIds: ["world:moon-warden"]
+    });
+    await embeddedChunk(fixture, providerId, {
+      parentId: memory.id,
+      parentContentHash: memory.contentHash,
+      kind: "turn_narration",
+      content: "The Moon Warden carries the complete silver key record.",
+      vector: [1, 0],
+      entities: ["Moon Warden"],
+      entityIds: ["world:moon-warden"]
+    });
+    await embeddedChunk(fixture, providerId, {
+      parentId: latestMemory.id,
+      parentContentHash: latestMemory.contentHash,
+      kind: "turn_narration",
+      content: "The latest harbor crossing continues.",
+      vector: [1, 0],
+      entities: ["Moon Warden"],
+      entityIds: ["world:moon-warden"]
+    });
+    await embeddedChunk(fixture, providerId, {
+      parentId: currentMemory.id,
+      parentContentHash: currentMemory.contentHash,
+      kind: "turn_narration",
+      content: "The Moon Warden points toward the current silver key trail.",
+      vector: [1, 0],
+      entities: ["Moon Warden"],
+      entityIds: ["world:moon-warden"]
+    });
+    const generation = transaction(providerId, []);
+
+    const context = await generation.loadGenerationContext(pool, {
+      ownerUserId: fixture.ownerUserId,
+      campaignId: fixture.campaignId,
+      worldVersionId: fixture.worldVersionId,
+      operationKind: "append",
+      expectedTurnNumber: 4,
+      query: "Where is the moon key?"
+    });
+
+    expect(context.chronicleRetrieval).toMatchObject({
+      configuredImplementation: "chunked_hybrid",
+      effectiveImplementation: "chunked_hybrid",
+      effectiveMode: "semantic_hybrid"
+    });
+    expect(context.candidates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: memory.id, content: completeOlderContent, rank: expect.any(Number) })
+    ]));
+    expect(context.candidates.every((candidate) => typeof candidate.rank === "number" && candidate.rank >= 1)).toBe(true);
+    expect(context.candidates.some((candidate) => candidate.id === latestMemory.id)).toBe(false);
+    expect(context.authority.latestTurn).toEqual({
+      action: "Cross the harbor.", narration: "The latest scene stays protected by authority."
+    });
+  });
+
+  it("releases campaign authority locks before a generation query embedding waits", async () => {
+    const fixture = await campaignFixture("authority lock release");
+    const provider = await pool.query<{ id: string }>(
+      `INSERT INTO provider_profiles
+         (owner_user_id,name,provider_type,provider_role,base_url,default_model)
+       VALUES ($1,'authority lock embedding','openai_compatible','embedding','http://fixture.invalid/v1','embed-v1')
+       RETURNING id`,
+      [fixture.ownerUserId]
+    );
+    await pool.query(
+      `INSERT INTO campaign_memory_configs
+         (campaign_id,owner_user_id,embedding_enabled,embedding_provider_profile_id,embedding_model,
+          retrieval_implementation,retrieval_shadow_enabled)
+       VALUES ($1,$2,true,$3,'embed-v1','legacy_hybrid',false)`,
+      [fixture.campaignId, fixture.ownerUserId, provider.rows[0]!.id]
+    );
+    await parent(fixture, {
+      turnId: null,
+      kind: "open_thread",
+      ordinal: 0,
+      content: "The moon key remains behind the lantern door."
+    });
+    let releaseEmbedding!: () => void;
+    const embeddingGate = new Promise<void>((resolve) => { releaseEmbedding = resolve; });
+    let signalEmbeddingStarted!: () => void;
+    const embeddingStarted = new Promise<void>((resolve) => { signalEmbeddingStarted = resolve; });
+    const generation = createPostgresChronicleGenerationTransactionPort({
+      embeddings: {
+        async resolve() {
+          return { status: "resolved" as const, resolutionSource: "dedicated_embedding" as const,
+            resolvedRole: "embedding" as const, providerProfileId: provider.rows[0]!.id,
+            providerType: "openai_compatible", model: "embed-v1" };
+        },
+        async load() {
+          return { id: provider.rows[0]!.id, model: "embed-v1", providerType: "openai_compatible",
+            configuration: { embeddingDimensions: 2 }, async embed() {
+              signalEmbeddingStarted();
+              await embeddingGate;
+              return { embeddings: [[1, 0]], responseId: "blocked-query", usage: {}, reportedCost: null };
+            } };
+        },
+        async embed(providerBinding, documents) { return providerBinding.embed(documents); },
+        async fingerprint() { return "authority-lock-fingerprint"; },
+        async recordHealth() {}, async recordCost() { return null; }, logDiagnostic() {}
+      }
+    });
+    const pending = generation.loadGenerationContext(pool, {
+      ...fixture, operationKind: "append", expectedTurnNumber: 1, query: "Where is the moon key?"
+    });
+    try {
+      await embeddingStarted;
+      const verifier = await pool.connect();
+      try {
+        await expect(verifier.query(
+          `SELECT c.id FROM campaigns c JOIN campaign_state cs ON cs.campaign_id=c.id
+            WHERE c.id=$1 AND c.owner_user_id=$2 FOR UPDATE OF c, cs NOWAIT`,
+          [fixture.campaignId, fixture.ownerUserId]
+        )).resolves.toMatchObject({ rowCount: 1 });
+        await verifier.query("ROLLBACK");
+      } finally {
+        verifier.release();
+      }
+    } finally {
+      releaseEmbedding();
+    }
+    await expect(pending).resolves.toMatchObject({ candidates: expect.any(Array) });
+  });
+
+  it("keeps recent turn records when more than 512 mixed Chronicle rows are eligible", async () => {
+    const fixture = await campaignFixture("bounded recent candidate pool");
+    await pool.query(
+      `INSERT INTO campaign_memory_configs
+         (campaign_id,owner_user_id,embedding_enabled,embedding_provider_profile_id,embedding_model,
+          retrieval_implementation,retrieval_shadow_enabled)
+       VALUES ($1,$2,false,null,'', 'legacy_hybrid',false)`,
+      [fixture.campaignId, fixture.ownerUserId]
+    );
+    await pool.query(
+      `INSERT INTO turns (id,owner_user_id,campaign_id,turn_number,action,narration,state_snapshot_private)
+       SELECT gen_random_uuid(),$1::uuid,$2::uuid,ordinal,'Action ' || ordinal,'Narration ' || ordinal,'{}'::jsonb
+         FROM generate_series(1,600) AS ordinal`,
+      [fixture.ownerUserId, fixture.campaignId]
+    );
+    await pool.query(
+      `INSERT INTO chronicle_memories
+         (id,owner_user_id,campaign_id,world_version_id,turn_id,memory_kind,ordinal,content,
+          token_estimate,importance,entities,entity_ids,metadata)
+       SELECT gen_random_uuid(),$1::uuid,$2::uuid,$3::uuid,turn_row.id,'turn_fiction',turn_row.turn_number,
+              'Turn ' || turn_row.turn_number || ' current beacon',8,0.8,'{}'::text[],'{}'::text[],'{}'::jsonb
+         FROM turns turn_row
+        WHERE turn_row.campaign_id=$2::uuid`,
+      [fixture.ownerUserId, fixture.campaignId, fixture.worldVersionId]
+    );
+    await pool.query("UPDATE campaigns SET active_turn_number=600 WHERE id=$1", [fixture.campaignId]);
+    const generation = transaction("unused-provider", []);
+
+    const preview = await generation.buildContextPreview(pool, {
+      ...fixture,
+      request: { budgetTokens: 4_096, compression: "full", query: "current beacon", recentTurns: 8 }
+    });
+
+    expect((preview.scopes as { currentScene: { ordinal: number; content: string } | null }).currentScene)
+      .toEqual(expect.objectContaining({ ordinal: 600, content: "Turn 600 current beacon" }));
+  });
+
   it("fuses exact, semantic, and authorized alias ranks without future, cross-scope, or superseded leakage", async () => {
     const { fixture, providerId } = await configuredFixture("chunk fusion");
     const firstTurn = await turn(fixture, 1, "Enter the moon court.", "The Moon Warden carries the silver key.");

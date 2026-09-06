@@ -117,6 +117,7 @@ function validStory(narration = "You step into the Ancient Observatory."): strin
     continuity_summary: "Player arrived at the Ancient Observatory and noticed the strange emerald constellations.",
     canonical_facts: ["The Ancient Observatory dome is cracked."],
     superseded_facts: [],
+    canonical_fact_updates: [],
     open_threads: ["Find out how to restore power to the observatory."]
   });
 }
@@ -514,7 +515,7 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     const unchangedPayloadBytes = Buffer.byteLength(unchangedSyncResponse.body);
     // Measured against this deterministic 55-turn fixture with the current
     // synchronized campaign and Chronicle configuration contract.
-    expect({ initialPayloadBytes, unchangedPayloadBytes }).toEqual({ initialPayloadBytes: 19_382, unchangedPayloadBytes: 3_183 });
+    expect({ initialPayloadBytes, unchangedPayloadBytes }).toEqual({ initialPayloadBytes: 19_466, unchangedPayloadBytes: 3_267 });
     expect(unchangedPayloadBytes).toBeLessThan(initialPayloadBytes);
 
     replies.push({ content: validStory("A replacement changes the current history boundary.") });

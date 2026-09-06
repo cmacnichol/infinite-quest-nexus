@@ -10,6 +10,7 @@ import {
   waitForDatabaseMigrations
 } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, type DatabasePool } from "../../packages/database/src/pool.js";
+import { createPromptRepository } from "../../packages/database/src/prompt-repository.js";
 import {
   createPostgresChronicleChunkBatchPort,
   createPostgresChronicleChunkJobStatePort,
@@ -34,6 +35,67 @@ integration("standard database migration runner", () => {
     if (pool) await pool.end();
   });
 
+  it("marks pre-protocol prompt acknowledgements for renewal when 0086 follows 0085", async () => {
+    const databaseName = `infinitequest_prompt_protocol_upgrade_${crypto.randomUUID().replaceAll("-", "")}`;
+    const databaseUrlValue = new URL(databaseUrl!);
+    databaseUrlValue.pathname = `/${databaseName}`;
+    const beforeDirectory = await mkdtemp(join(tmpdir(), "infinitequest-prompt-protocol-before-"));
+    const predecessorMigrations: string[] = [];
+    let isolatedPool: DatabasePool | null = null;
+    try {
+      await pool.query(`CREATE DATABASE ${databaseName}`);
+      for (const file of await readdir(resolve("database/migrations"))) {
+        if (file.endsWith(".sql") && file <= "0085_prompt_override_compatibility_acknowledgements.sql") {
+          await copyFile(join(resolve("database/migrations"), file), join(beforeDirectory, file));
+          predecessorMigrations.push(file.slice(0, -4));
+        }
+      }
+      isolatedPool = createDatabasePool(databaseUrlValue.toString(), 2);
+      await migrateDatabase(isolatedPool, beforeDirectory);
+      await isolatedPool.query("DELETE FROM schema_migrations");
+      for (const migration of predecessorMigrations) {
+        await isolatedPool.query("INSERT INTO schema_migrations (name,run_on) VALUES ($1,now())", [migration]);
+      }
+      const ownerUserId = (await isolatedPool.query<{ id: string }>(
+        "SELECT id FROM users WHERE system_key = 'initial-owner'"
+      )).rows[0]!.id;
+      const content = "Keep the established output shape and voice.";
+      const contentHash = createHash("sha256").update(content).digest("hex");
+      await isolatedPool.query(
+        `INSERT INTO prompt_template_overrides (
+           owner_user_id,prompt_key,content,compatibility_required_shape_version,
+           compatibility_content_hash,compatibility_acknowledged_at
+         ) VALUES ($1,'story_system',$2,'story-output-v2',$3,now())`,
+        [ownerUserId, content, contentHash]
+      );
+
+      await expect(migrateDatabase(isolatedPool, resolve("database/migrations")))
+        .resolves.toEqual([
+          "0086_prompt_override_protocol_acknowledgements",
+          "0087_chronicle_query_cache_access_sequence",
+          "0088_expand_campaign_story_context_budget"
+        ]);
+      const acknowledgement = await isolatedPool.query<{ compatibility_protocol_identity: string }>(
+        "SELECT compatibility_protocol_identity FROM prompt_template_overrides WHERE owner_user_id=$1 AND prompt_key='story_system'",
+        [ownerUserId]
+      );
+      expect(acknowledgement.rows).toEqual([
+        { compatibility_protocol_identity: "acknowledgement-required-after-protocol-upgrade" }
+      ]);
+      const client = await isolatedPool.connect();
+      try {
+        await expect(createPromptRepository(client).loadPromptSnapshot({ ownerUserId, scope: "application" }))
+          .rejects.toMatchObject({ code: "prompt_override_incompatible", statusCode: 409 });
+      } finally {
+        client.release();
+      }
+    } finally {
+      if (isolatedPool) await isolatedPool.end();
+      await dropTestDatabaseWhenIdle(pool, databaseName);
+      await rm(beforeDirectory, { recursive: true, force: true });
+    }
+  });
+
   it("adds a non-null campaign Story context budget with the standard default", async () => {
     const columns = await pool.query<{
       column_name: string;
@@ -54,6 +116,19 @@ integration("standard database migration runner", () => {
       is_nullable: "NO",
       column_default: "32000"
     }]);
+  });
+
+  it("allows supported large campaign Story context budgets", async () => {
+    const constraint = await pool.query<{ definition: string }>(
+      `SELECT pg_get_constraintdef(oid) AS definition
+         FROM pg_constraint
+        WHERE conname = 'campaigns_story_context_budget_tokens_check'`
+    );
+
+    expect(constraint.rows).toEqual([
+      expect.objectContaining({ definition: expect.stringContaining("2000000") })
+    ]);
+    expect(constraint.rows[0]!.definition).toContain("4000000");
   });
 
   it("adds minimal owner-scoped admission buckets and leases", async () => {
@@ -1570,16 +1645,22 @@ END;
     databaseUrlValue.pathname = `/${databaseName}`;
     const migrationDirectory = await mkdtemp(join(tmpdir(), "infinitequest-asset-portable-migrations-"));
     const failingMigrationDirectory = await mkdtemp(join(tmpdir(), "infinitequest-asset-portable-rollback-"));
+    const predecessorMigrations: string[] = [];
     let isolatedPool: DatabasePool | null = null;
     try {
       await pool.query(`CREATE DATABASE ${databaseName}`);
       for (const file of await readdir(resolve("database/migrations"))) {
         if (file.endsWith(".sql") && file < `${migrationName}.sql`) {
           await copyFile(join(resolve("database/migrations"), file), join(migrationDirectory, file));
+          predecessorMigrations.push(file.slice(0, -4));
         }
       }
       isolatedPool = createDatabasePool(databaseUrlValue.toString(), 2);
       await migrateDatabase(isolatedPool, migrationDirectory);
+      await isolatedPool.query("DELETE FROM schema_migrations");
+      for (const migration of predecessorMigrations) {
+        await isolatedPool.query("INSERT INTO schema_migrations (name,run_on) VALUES ($1,now())", [migration]);
+      }
 
       const owner = await isolatedPool.query<{ id: string }>("SELECT id FROM users WHERE system_key = 'initial-owner'");
       const ownerUserId = owner.rows[0]!.id;
@@ -1671,7 +1752,12 @@ END;
         "0080_published_asset_derivative_reservations",
         "0081_campaign_story_context_budget",
         "0082_turn_zero_state_correction_facts",
-        "0083_cleaned_campaign_export_deletion"
+        "0083_cleaned_campaign_export_deletion",
+        "0084_generation_authority_identity",
+        "0085_prompt_override_compatibility_acknowledgements",
+        "0086_prompt_override_protocol_acknowledgements",
+        "0087_chronicle_query_cache_access_sequence",
+        "0088_expand_campaign_story_context_budget"
       ]);
 
       const scrubbed = await isolatedPool.query<{ technical_metadata: Record<string, unknown> }>(
@@ -2661,7 +2747,12 @@ END;
         "0080_published_asset_derivative_reservations",
         "0081_campaign_story_context_budget",
         "0082_turn_zero_state_correction_facts",
-        "0083_cleaned_campaign_export_deletion"
+        "0083_cleaned_campaign_export_deletion",
+        "0084_generation_authority_identity",
+        "0085_prompt_override_compatibility_acknowledgements",
+        "0086_prompt_override_protocol_acknowledgements",
+        "0087_chronicle_query_cache_access_sequence",
+        "0088_expand_campaign_story_context_budget"
       ]);
 
       // Accepted turns and every derived vector survive the upgrade untouched.

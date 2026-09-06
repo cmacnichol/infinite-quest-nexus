@@ -63,6 +63,46 @@ Use structured logs with correlation IDs for campaign, generation job, model req
 
 Database migrations must be ordered, repeatable, reviewed, and safe for the deployed application version. Prefer backward-compatible expand/contract changes so rolling API replicas can coexist. Applied online migrations are automatic; destructive or downtime-requiring `.maintenance.sql` migrations must remain exceptional and require an explicit operator opt-in on an existing database. Back up authoritative database data and test restoration. Treat embeddings and summaries as rebuildable unless operational requirements later make their backup worthwhile.
 
+### Story context integrity upgrade and rollback
+
+Use this sequence for the story-context integrity protocol. It is an operator
+handoff, not a deployment action performed by application code.
+
+1. Take the normal PostgreSQL backup and confirm the restoration procedure.
+   Inventory campaign context budgets, provider settings, and prompt overrides
+   without recording credentials. Export representative non-production campaign
+   copies for canaries.
+2. Stop new generation intake. Let running jobs finish or explicitly cancel
+   them, then inventory queued and recoverable jobs with their protocol version.
+3. Apply only the additive migrations. Deploy API, runtime, and worker binaries
+   with compatible protocol support together; do not leave a mixed worker pool
+   able to consume a new snapshot.
+4. Classify jobs from an incompatible old protocol as recoverable with the
+   upgrade action. Preserve their snapshots and rejected output under normal
+   retention. Do not reinterpret them using the new protocol.
+5. Run copied-campaign canaries: short, long, corrected-state, and event-heavy.
+   Exercise 32K and a genuinely supported larger provider window. Check payload
+   contents, commit/replay/next-turn behavior, actual provider usage, and
+   latency. A model's advertised context size alone is insufficient.
+6. Re-enable intake only after canaries pass. Monitor overflow and recovery
+   rates, extension failures, omitted recent-turn counts, token usage, and
+   latency using safe telemetry.
+
+For rollback, stop intake and drain or cancel new-protocol jobs before changing
+binaries. Keep the additive schema and accepted turns. Before an old reader is
+used, run compatibility coverage for empty continuity summaries, 500 threads,
+and new private snapshots. If that reader cannot represent accepted new state,
+retain a compatible reader while generation stays disabled; never truncate state
+to make an old binary run. Backup restoration is a separately coordinated
+recovery decision that accounts for turns accepted after the backup; ordinary
+rollback does not delete accepted turns.
+
+Existing campaign repair is separate from upgrade. A reviewer must approve a
+source-linked proposal showing current/proposed values, source revision,
+ambiguity, and precedence of later user corrections. Apply it through a
+revision-checked state edit and then rebuild derived memory. Do not use a model
+to invent a fact absent from retained authoritative sources.
+
 ## Chronicle chunked retrieval staged rollout
 
 New campaigns created from a world select `chunked_hybrid` with shadow comparison enabled. Eligible embedding providers trigger asynchronous indexing; until readiness is satisfied, production uses the complete legacy fallback. Existing campaign settings are preserved. Database migrations add derived chunk, fencing, observability, and query-cache schema and jobs without rewriting accepted turns.

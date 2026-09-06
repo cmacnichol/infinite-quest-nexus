@@ -5,6 +5,7 @@ import { generationRequestSchema, storyTurnOutputSchema } from "../../packages/c
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import {
   createPostgresGenerationExecutionRepository,
+  type AcceptedGenerationCommit,
   type AcceptedGenerationCommitCollaborators,
   type GenerationLeaseScope
 } from "../../packages/database/src/generation-execution-repository.js";
@@ -22,6 +23,7 @@ import { providerPromptProtocolVersion, loadPromptSnapshotForTest } from "../hel
 import { createProvider } from "../helpers/provider-application-fixtures.js";
 import { memoryGeneration } from "../helpers/memory-applications.js";
 import { DEDICATED_CHUNKED_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
+import { stableStringify } from "../../packages/domain/src/index.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -83,6 +85,218 @@ integration("PostgreSQL generation execution repository", () => {
         context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 }
       })
     );
+  }
+
+  function supersedingStory(supersedesFactIds: readonly string[]) {
+    return storyTurnOutputSchema.parse({
+      narration: "The observatory's true purpose becomes clear beneath the moon.",
+      choices: ["Enter.", "Wait.", "Study the gate.", "Call the keeper."],
+      custom_action_suggestion: "Inspect the observatory lens.",
+      scratchpad: "The observatory now serves as a night refuge.",
+      tracker_updates: [],
+      image_prompt: "A moonlit observatory.",
+      continuity_summary: "The observatory's purpose is known.",
+      canonical_facts: ["The observatory is a night refuge."],
+      superseded_facts: [],
+      canonical_fact_updates: [{
+        content: "The observatory is a night refuge.",
+        supersedes_fact_ids: [...supersedesFactIds]
+      }],
+      open_threads: ["Learn who built the observatory."]
+    });
+  }
+
+  async function readyAcceptedCommit(campaignId: string, workerId: string) {
+    const queued = await queue(campaignId, "Inspect the canonical fact observatory.");
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(queued.id);
+    const scope = { jobId: queued.id, ownerUserId, workerId };
+    const job = await repository.loadExecutionPayload({ workerId, leaseSeconds: 30, claim: claim! });
+    if (!job) throw new Error("Expected a committing canonical-fact job.");
+    expect(await repository.markGenerating(scope)).toBe(true);
+    expect(await repository.markValidating(scope)).toBe(true);
+    expect(await repository.markCommitting(scope)).toBe(true);
+    return { repository, scope, job };
+  }
+
+  async function insertCanonicalFact(input: Readonly<{
+    ownerUserId?: string;
+    campaignId: string;
+    worldVersionId: string;
+    content: string;
+    validFromTurn: number;
+    validUntilTurn?: number | null;
+  }>) {
+    const factOwnerUserId = input.ownerUserId ?? ownerUserId;
+    const source = await pool.query<{ id: string; turn_number: number }>(
+      `SELECT id,turn_number FROM turns
+        WHERE owner_user_id=$1 AND campaign_id=$2
+        ORDER BY turn_number,id LIMIT 1`,
+      [factOwnerUserId, input.campaignId]
+    );
+    const sourceTurn = source.rows[0];
+    if (!sourceTurn) throw new Error("Expected a source turn for the canonical-fact fixture.");
+    const id = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO campaign_canonical_facts (
+         id,owner_user_id,campaign_id,world_version_id,source_turn_id,source_turn_number,
+         source_fact_index,content,normalized_content,valid_from_turn,valid_until_turn
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      [id, factOwnerUserId, input.campaignId, input.worldVersionId, sourceTurn.id, sourceTurn.turn_number,
+        10_000 + Math.floor(Math.random() * 1_000_000), input.content, input.content.toLowerCase(),
+        input.validFromTurn, input.validUntilTurn ?? null]
+    );
+    return id;
+  }
+
+  async function insertCampaignWithSourceTurn(input: Readonly<{
+    ownerUserId: string;
+    worldVersionId: string;
+    title: string;
+  }>) {
+    const campaignResult = await pool.query<{ id: string }>(
+      "INSERT INTO campaigns (owner_user_id,world_version_id,title) VALUES ($1,$2,$3) RETURNING id",
+      [input.ownerUserId, input.worldVersionId, input.title]
+    );
+    const campaignId = campaignResult.rows[0]?.id;
+    if (!campaignId) throw new Error("Expected a scoped campaign fixture.");
+    await pool.query("INSERT INTO campaign_state (campaign_id,owner_user_id) VALUES ($1,$2)", [campaignId, input.ownerUserId]);
+    await pool.query(
+      `INSERT INTO turns (owner_user_id,campaign_id,turn_number,action,narration,state_snapshot_private)
+       VALUES ($1,$2,1,'Scope fixture action.','Scope fixture narration.','{}'::jsonb)`,
+      [input.ownerUserId, campaignId]
+    );
+    return campaignId;
+  }
+
+  async function foreignScopeFact() {
+    const foreignOwner = await pool.query<{ id: string }>(
+      "INSERT INTO users (display_name) VALUES ('Canonical fact foreign owner') RETURNING id"
+    );
+    const foreignOwnerUserId = foreignOwner.rows[0]?.id;
+    if (!foreignOwnerUserId) throw new Error("Expected a foreign owner fixture.");
+    const world = await pool.query<{ id: string }>(
+      "INSERT INTO worlds (owner_user_id,title) VALUES ($1,'Canonical fact foreign world') RETURNING id",
+      [foreignOwnerUserId]
+    );
+    const worldId = world.rows[0]?.id;
+    if (!worldId) throw new Error("Expected a foreign world fixture.");
+    const version = await pool.query<{ id: string }>(
+      `INSERT INTO world_versions (world_id,owner_user_id,version_number,content)
+       VALUES ($1,$2,1,$3::jsonb) RETURNING id`,
+      [worldId, foreignOwnerUserId, JSON.stringify({ world: { title: "Canonical fact foreign world" }, entities: [] })]
+    );
+    const worldVersionId = version.rows[0]?.id;
+    if (!worldVersionId) throw new Error("Expected a foreign world-version fixture.");
+    const campaignId = await insertCampaignWithSourceTurn({
+      ownerUserId: foreignOwnerUserId,
+      worldVersionId,
+      title: "Canonical fact foreign campaign"
+    });
+    const id = await insertCanonicalFact({
+      ownerUserId: foreignOwnerUserId,
+      campaignId,
+      worldVersionId,
+      content: "The foreign observatory is a lighthouse.",
+      validFromTurn: 1
+    });
+    return { id, ownerUserId: foreignOwnerUserId, campaignId };
+  }
+
+  async function alternateWorldVersion(worldVersionId: string) {
+    const version = await pool.query<{ id: string }>(
+      `INSERT INTO world_versions (world_id,owner_user_id,version_number,content)
+       SELECT world_id,owner_user_id,version_number + 1,$2::jsonb
+         FROM world_versions WHERE id=$1 AND owner_user_id=$3
+       RETURNING id`,
+      [worldVersionId, JSON.stringify({ world: { title: "Canonical fact alternate world version" }, entities: [] }), ownerUserId]
+    );
+    const alternate = version.rows[0]?.id;
+    if (!alternate) throw new Error("Expected an alternate world-version fixture.");
+    return alternate;
+  }
+
+  function acceptedCommitInput(input: Readonly<{
+    scope: GenerationLeaseScope;
+    job: AcceptedGenerationCommit["job"];
+    story: ReturnType<typeof supersedingStory>;
+    sentFactIds?: readonly string[];
+  }>): AcceptedGenerationCommit {
+    return {
+      scope: input.scope,
+      job: input.job,
+      story: input.story,
+      provider: {
+        id: providerProfileId,
+        name: "Execution repository provider",
+        providerType: "openai_compatible",
+        model: "execution-repository-model"
+      },
+      response: {
+        content: JSON.stringify(input.story),
+        responseId: crypto.randomUUID(),
+        finishReason: "stop",
+        outputLimited: false,
+        modelInstanceId: "execution-repository-instance",
+        usage: { inputTokens: 10, outputTokens: 20, totalTokens: 30 },
+        reportedCost: null,
+        rawMetadata: {}
+      },
+      contextFingerprint: "canonical-fact-authorization-context",
+      contextDiagnostics: { retrieval: { selectedMemoryCount: 0 } },
+      ...(input.sentFactIds ? { sentFactIds: input.sentFactIds } : {}),
+      chronicleRetrieval: DEDICATED_CHUNKED_AUDIT,
+      inputs: input.job.orchestration_inputs,
+      orchestration: {},
+      fictionAction: input.job.action,
+      collaborators: {
+        memory: memoryGeneration(pool),
+        illustration: {
+          enqueueAcceptedTurnIllustrationSegments: async () => []
+        } as unknown as AcceptedGenerationCommitCollaborators["illustration"],
+        attributeGenerationCostsToTurn: async () => undefined
+      },
+      onIllustrationEnqueueError: () => undefined
+    };
+  }
+
+  async function acceptedAndChronicleSnapshot(
+    campaignId: string,
+    factScopes: readonly Readonly<{ ownerUserId: string; campaignId: string }>[] = [{ ownerUserId, campaignId }]
+  ) {
+    const [turns, memories, factResults] = await Promise.all([
+      pool.query<{ id: string; turn_number: number; narration: string }>(
+        `SELECT id,turn_number,narration FROM turns
+          WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY turn_number,id`,
+        [ownerUserId, campaignId]
+      ),
+      pool.query<{ id: string; turn_id: string | null; memory_kind: string; content: string }>(
+        `SELECT id,turn_id,memory_kind,content FROM chronicle_memories
+          WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY id`,
+        [ownerUserId, campaignId]
+      ),
+      Promise.all(factScopes.map((scope) => pool.query<{
+        id: string;
+        owner_user_id: string;
+        campaign_id: string;
+        content: string;
+        valid_from_turn: number;
+        valid_until_turn: number | null;
+        superseded_by_fact_id: string | null;
+      }>(
+        `SELECT id,owner_user_id,campaign_id,content,valid_from_turn,valid_until_turn,superseded_by_fact_id
+           FROM campaign_canonical_facts
+          WHERE owner_user_id=$1 AND campaign_id=$2
+          ORDER BY id`,
+        [scope.ownerUserId, scope.campaignId]
+      )))
+    ]);
+    return {
+      turns: turns.rows,
+      memories: memories.rows,
+      facts: factResults.flatMap((result) => result.rows)
+    };
   }
 
   async function turnVersionSnapshot(campaignId: string) {
@@ -226,6 +440,58 @@ integration("PostgreSQL generation execution repository", () => {
       leaseSeconds: 30,
       claim: claim!
     })).resolves.toBeNull();
+  });
+
+  it("does not load a claimed job after its snapshotted authority base changes", async () => {
+    const imported = await campaign();
+    const queued = await queue(imported.campaignId, "Fence a changed authority base.");
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const claim = await repository.claimNext({ workerId: "authority-fence-worker", leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(queued.id);
+    const promptBefore = (await pool.query<{
+      prompt_snapshot: Record<string, unknown>;
+      prompt_protocol_version: string;
+    }>(
+      "SELECT prompt_snapshot, prompt_protocol_version FROM generation_jobs WHERE id = $1",
+      [queued.id]
+    )).rows[0]!;
+
+    await pool.query(
+      `UPDATE campaign_state
+          SET scratchpad_private = 'A correction changed the generation base.', revision = revision + 1
+        WHERE campaign_id = $1 AND owner_user_id = $2`,
+      [imported.campaignId, ownerUserId]
+    );
+
+    await expect(repository.loadExecutionPayload({
+      workerId: "authority-fence-worker",
+      leaseSeconds: 30,
+      claim: claim!
+    })).resolves.toBeNull();
+    await expect(pool.query<{
+      status: string;
+      error_code: string | null;
+      error_message: string | null;
+      recovery_metadata: Record<string, unknown>;
+      prompt_snapshot: Record<string, unknown>;
+      prompt_protocol_version: string;
+      lease_owner: string | null;
+      lease_expires_at: string | null;
+    }>(
+      `SELECT status, error_code, error_message, recovery_metadata, prompt_snapshot, prompt_protocol_version,
+              lease_owner, lease_expires_at
+         FROM generation_jobs WHERE id = $1`,
+      [queued.id]
+    )).resolves.toMatchObject({ rows: [{
+      status: "recoverable",
+      error_code: "generation_authority_stale",
+      error_message: "Campaign changed before generation could start.",
+      recovery_metadata: { reason: "generation_authority_stale" },
+      prompt_snapshot: promptBefore.prompt_snapshot,
+      prompt_protocol_version: promptBefore.prompt_protocol_version,
+      lease_owner: null,
+      lease_expires_at: null
+    }] });
   });
 
   it("applies lease and phase mutations only to the claimed owner, worker, and source state", async () => {
@@ -404,6 +670,84 @@ integration("PostgreSQL generation execution repository", () => {
     ]);
   });
 
+  it("fulfills an older pending occurrence exactly once when its fiction is accepted", async () => {
+    const imported = await campaign();
+    const { repository, scope, job } = await readyAcceptedCommit(imported.campaignId, "pending-fulfillment-worker");
+    const trigger = {
+      id: "observatory-bell", label: "Observatory bell", timing: "after" as const,
+      condition: "The keeper arrives.", effect: "The bell rings.", addTextAfter: false,
+      triggeredCount: 2, lastTriggeredTurn: null, lastTriggeredAt: null
+    };
+    const pending = {
+      id: "observatory-bell-pending", sourceTriggerId: trigger.id, name: trigger.label,
+      timing: "after" as const, condition: trigger.condition, effect: trigger.effect,
+      instructions: "The bell rings.", reason: "", sourceTurn: job.expected_turn_number - 1, addTextAfter: false
+    };
+    const input = acceptedCommitInput({ scope, job, story: supersedingStory([]) });
+    input.story.narration = "The observatory bell rings as the keeper enters.";
+    await repository.commitAcceptedTurn({
+      ...input,
+      inputs: { ...job.orchestration_inputs, eventTriggers: [trigger], pendingEventTriggers: [pending] },
+      orchestration: { beforeEvents: [pending, pending], afterEvents: [] }
+    });
+    const state = await pool.query<{ event_triggers: unknown; pending_event_triggers: unknown }>(
+      "SELECT event_triggers, pending_event_triggers FROM campaign_state WHERE campaign_id=$1 AND owner_user_id=$2",
+      [imported.campaignId, ownerUserId]
+    );
+    expect(state.rows[0]?.event_triggers).toEqual([
+      { ...trigger, triggeredCount: 3, lastTriggeredTurn: pending.sourceTurn, lastTriggeredAt: expect.any(String) }
+    ]);
+    expect(state.rows[0]?.pending_event_triggers).toEqual([]);
+  });
+
+  it("keeps a final event story accepted when its illustration finalization enqueue fails", async () => {
+    const imported = await campaign();
+    const { repository, scope, job } = await readyAcceptedCommit(imported.campaignId, "event-finalization-worker");
+    const finalStory = supersedingStory([]);
+    finalStory.narration = "The observatory bell rings after the keeper's final warning.";
+    const acceptedDuringIllustration = vi.fn(async (database: DatabaseClient) => {
+      const result = await database.query<{ narration: string }>(
+        "SELECT narration FROM turns WHERE campaign_id=$1 AND owner_user_id=$2 ORDER BY turn_number DESC LIMIT 1",
+        [imported.campaignId, ownerUserId]
+      );
+      expect(result.rows[0]?.narration).toBe(finalStory.narration);
+      throw new Error("synthetic illustration finalization fault");
+    });
+    const onIllustrationEnqueueError = vi.fn();
+
+    const committed = await repository.commitAcceptedTurn({
+      ...acceptedCommitInput({ scope, job, story: finalStory }),
+      orchestration: {
+        validatedMainDraft: { draftHash: "validated-main-draft-fixture" } as never,
+        afterEvents: [],
+        extension: {
+          story: finalStory,
+          finalStoryHash: stableStringify(finalStory),
+          producingAttempt: job.attempts,
+          producingOperation: "event_extension",
+          validatedMainDraftHash: "validated-main-draft-fixture",
+          producingRequestPayloadHash: "extension-request-fixture",
+          sentFactIds: []
+        }
+      },
+      collaborators: {
+        memory: memoryGeneration(pool),
+        illustration: {
+          enqueueAcceptedTurnIllustrationSegments: acceptedDuringIllustration
+        } as unknown as AcceptedGenerationCommitCollaborators["illustration"],
+        attributeGenerationCostsToTurn: async () => undefined
+      },
+      onIllustrationEnqueueError
+    });
+
+    expect(acceptedDuringIllustration).toHaveBeenCalledOnce();
+    expect(onIllustrationEnqueueError).toHaveBeenCalledOnce();
+    await expect(pool.query("SELECT narration FROM turns WHERE id=$1", [committed.turnId]))
+      .resolves.toMatchObject({ rows: [{ narration: finalStory.narration }] });
+    await expect(pool.query("SELECT status FROM generation_jobs WHERE id=$1", [job.id]))
+      .resolves.toMatchObject({ rows: [{ status: "completed" }] });
+  });
+
   it("rejects malformed retrieval audit before inserting a turn or touching earlier accepted rows", async () => {
     const imported = await campaign();
     const earlierTurns = await turnVersionSnapshot(imported.campaignId);
@@ -530,7 +874,7 @@ integration("PostgreSQL generation execution repository", () => {
     )).resolves.toMatchObject({ rows: [{ raw_output: "A safe fictional response." }] });
   });
 
-  it("rejects a stale attempt recorder after expired-lease reclaim wins the row-lock race", async () => {
+  it("rejects an expired attempt recorder before it writes private attempt data", async () => {
     const imported = await campaign();
     const queued = await queue(imported.campaignId, "Reclaim the stale attempt recorder.");
     const repository = createPostgresGenerationExecutionRepository(pool);
@@ -571,7 +915,7 @@ integration("PostgreSQL generation execution repository", () => {
         (error: unknown) => ({ status: "rejected" as const, error })
       ).finally(() => { settled = true; });
 
-      expect(await recordAttemptRaceState(() => settled, blockerPid)).toBe("blocked");
+      expect(await recordAttemptRaceState(() => settled, blockerPid)).toBe("settled");
       await reclaim.query("COMMIT");
     } finally {
       await reclaim.query("ROLLBACK").catch(() => undefined);
@@ -586,5 +930,149 @@ integration("PostgreSQL generation execution repository", () => {
       "SELECT id FROM generation_attempts WHERE generation_job_id = $1",
       [queued.id]
     )).resolves.toMatchObject({ rows: [] });
+  });
+
+  it("accepts a supersession only for an active same-campaign fact rendered to the provider", async () => {
+    const imported = await campaign();
+    const { repository, scope, job } = await readyAcceptedCommit(imported.campaignId, "visible-fact-worker");
+    const visibleFactId = await insertCanonicalFact({
+      campaignId: imported.campaignId,
+      worldVersionId: imported.worldVersionId,
+      content: "The observatory is a lighthouse.",
+      validFromTurn: 1
+    });
+    const before = await acceptedAndChronicleSnapshot(imported.campaignId);
+    const story = supersedingStory([visibleFactId]);
+
+    const committed = await repository.commitAcceptedTurn(acceptedCommitInput({
+      scope,
+      job,
+      story,
+      sentFactIds: [visibleFactId]
+    }));
+
+    const superseded = await pool.query<{
+      valid_until_turn: number | null;
+      superseded_by_fact_id: string | null;
+    }>(
+      `SELECT valid_until_turn,superseded_by_fact_id FROM campaign_canonical_facts
+        WHERE owner_user_id=$1 AND campaign_id=$2 AND id=$3`,
+      [ownerUserId, imported.campaignId, visibleFactId]
+    );
+    const after = await acceptedAndChronicleSnapshot(imported.campaignId);
+    expect(committed.turnId).toEqual(expect.any(String));
+    expect(superseded.rows).toEqual([{
+      valid_until_turn: job.expected_turn_number,
+      superseded_by_fact_id: expect.any(String)
+    }]);
+    expect(after.turns).toEqual([
+      ...before.turns,
+      expect.objectContaining({ id: committed.turnId, narration: story.narration })
+    ]);
+    expect(after.memories).toContainEqual(expect.objectContaining({
+      memory_kind: "canonical_fact",
+      content: expect.stringContaining("night refuge")
+    }));
+  });
+
+  it.each([
+    "omitted same-campaign fact",
+    "foreign-owner fact",
+    "other-campaign same-owner same-world fact",
+    "other-world-version same-owner same-campaign fact",
+    "future fact",
+    "expired fact",
+    "duplicate-content different-ID fact",
+    "forged prompt fact ID"
+  ])("rejects a %s without accepting a turn or mutating Chronicle", async (caseName) => {
+    const imported = await campaign();
+    const { repository, scope, job } = await readyAcceptedCommit(
+      imported.campaignId,
+      `rejected-fact-${caseName.replaceAll(/[^a-z]+/giu, "-")}`
+    );
+    const activeFactId = await insertCanonicalFact({
+      campaignId: imported.campaignId,
+      worldVersionId: imported.worldVersionId,
+      content: "The observatory is a lighthouse.",
+      validFromTurn: 1
+    });
+    let supersededFactId = activeFactId;
+    let sentFactIds: readonly string[] | undefined = [activeFactId];
+    const factScopes: Array<{ ownerUserId: string; campaignId: string }> = [{
+      ownerUserId,
+      campaignId: imported.campaignId
+    }];
+
+    if (caseName === "omitted same-campaign fact") {
+      sentFactIds = undefined;
+    } else if (caseName === "foreign-owner fact") {
+      // The campaign/world-version composite foreign keys prohibit a foreign
+      // owner on this campaign. Use a fully valid foreign-owned graph instead.
+      const foreignFact = await foreignScopeFact();
+      supersededFactId = foreignFact.id;
+      factScopes.push({
+        ownerUserId: foreignFact.ownerUserId,
+        campaignId: foreignFact.campaignId
+      });
+      sentFactIds = [supersededFactId];
+    } else if (caseName === "other-campaign same-owner same-world fact") {
+      const otherCampaignId = await insertCampaignWithSourceTurn({
+        ownerUserId,
+        worldVersionId: imported.worldVersionId,
+        title: "Canonical fact same-world campaign decoy"
+      });
+      supersededFactId = await insertCanonicalFact({
+        campaignId: otherCampaignId,
+        worldVersionId: imported.worldVersionId,
+        content: "The other observatory is a lighthouse.",
+        validFromTurn: 1
+      });
+      factScopes.push({ ownerUserId, campaignId: otherCampaignId });
+      sentFactIds = [supersededFactId];
+    } else if (caseName === "other-world-version same-owner same-campaign fact") {
+      const otherWorldVersionId = await alternateWorldVersion(imported.worldVersionId);
+      supersededFactId = await insertCanonicalFact({
+        campaignId: imported.campaignId,
+        worldVersionId: otherWorldVersionId,
+        content: "The alternate observatory is a lighthouse.",
+        validFromTurn: 1
+      });
+      sentFactIds = [supersededFactId];
+    } else if (caseName === "future fact") {
+      supersededFactId = await insertCanonicalFact({
+        campaignId: imported.campaignId,
+        worldVersionId: imported.worldVersionId,
+        content: "The observatory will be a lighthouse.",
+        validFromTurn: job.expected_turn_number
+      });
+      sentFactIds = [supersededFactId];
+    } else if (caseName === "expired fact") {
+      supersededFactId = await insertCanonicalFact({
+        campaignId: imported.campaignId,
+        worldVersionId: imported.worldVersionId,
+        content: "The observatory was a lighthouse.",
+        validFromTurn: 1,
+        validUntilTurn: job.expected_turn_number - 1
+      });
+      sentFactIds = [supersededFactId];
+    } else if (caseName === "duplicate-content different-ID fact") {
+      supersededFactId = await insertCanonicalFact({
+        campaignId: imported.campaignId,
+        worldVersionId: imported.worldVersionId,
+        content: "The observatory is a lighthouse.",
+        validFromTurn: 1
+      });
+    } else if (caseName === "forged prompt fact ID") {
+      supersededFactId = crypto.randomUUID();
+    }
+
+    const before = await acceptedAndChronicleSnapshot(imported.campaignId, factScopes);
+    await expect(repository.commitAcceptedTurn(acceptedCommitInput({
+      scope,
+      job,
+      story: supersedingStory([supersededFactId]),
+      ...(sentFactIds ? { sentFactIds } : {})
+    }))).rejects.toMatchObject({ code: "invalid_fact_supersession" });
+    expect(await acceptedAndChronicleSnapshot(imported.campaignId, factScopes)).toEqual(before);
   });
 });

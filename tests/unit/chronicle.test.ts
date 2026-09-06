@@ -43,6 +43,14 @@ describe("Chronicle memory construction", () => {
     const compact = compressTurnMemory(content, "compact");
     expect(full.length).toBeGreaterThan(balanced.length);
     expect(balanced.length).toBeGreaterThan(compact.length);
+    expect(compact).not.toContain("Outcome:");
+    expect(compact).toContain("Narration excerpt (source: accepted turn; omission:");
+  });
+
+  it("labels an empty historical narration as an omitted excerpt without inventing an outcome", () => {
+    const compact = compressTurnMemory("Turn 4\nPlayer action: Wait.\nNarration: ", "compact");
+    expect(compact).toContain("Narration excerpt (source: accepted turn; omission: narration unavailable):");
+    expect(compact).not.toContain("Outcome:");
   });
 
   it("normalizes legacy fullHistory into a readable checkpoint", () => {

@@ -58,6 +58,10 @@ export function compressTurnMemory(content: string, level: "full" | "balanced" |
     return [turnLabel, actionMatch ? `Player action: ${actionMatch}` : "", narrationMatch ? `Narration: ${truncateAtBoundary(narrationMatch, 1400)}` : ""]
       .filter(Boolean).join("\n");
   }
-  return [turnLabel, actionMatch ? `Action: ${truncateAtBoundary(actionMatch, 260)}` : "", narrationMatch ? `Outcome: ${truncateAtBoundary(narrationMatch, 420)}` : ""]
+  const narration = narrationMatch ? truncateAtBoundary(narrationMatch, 420) : "";
+  const narrationExcerpt = narration
+    ? `Narration excerpt (source: accepted turn; omission: excerpt may omit later details): ${narration}`
+    : "Narration excerpt (source: accepted turn; omission: narration unavailable):";
+  return [turnLabel, actionMatch ? `Action: ${truncateAtBoundary(actionMatch, 260)}` : "", narrationExcerpt]
     .filter(Boolean).join("\n");
 }

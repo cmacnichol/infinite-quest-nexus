@@ -370,4 +370,41 @@ describe("Chronicle parent diversity", () => {
     const diagnostics = JSON.stringify(selection.diagnostics);
     expect(diagnostics).not.toMatch(/secret-chunk|private candidate|0\.25|0\.75/i);
   });
+
+  it("updates vector similarity once per remaining candidate as the parent budget grows", () => {
+    const candidateCount = 96;
+    const selectedCount = 32;
+    const vectorDimensions = 3;
+    let vectorElementReads = 0;
+    const countedVector = (seed: number): readonly number[] => new Proxy([
+      1 + seed / 1000,
+      0.5 + (seed % 7) / 100,
+      0.25 + (seed % 11) / 100
+    ], {
+      get(target, property, receiver) {
+        if (typeof property === "string" && /^\d+$/u.test(property)) vectorElementReads += 1;
+        return Reflect.get(target, property, receiver);
+      }
+    }) as unknown as readonly number[];
+    const selection = selectDiverseChronicleParents(
+      Array.from({ length: candidateCount }, (_, index) => candidate({
+        candidateId: `chunk-${index}`,
+        parentMemoryId: `parent-${index}`,
+        parentTurnId: null,
+        ordinal: index,
+        parentContent: `Distinct parent ${index}.`,
+        embedding: countedVector(index),
+        fusedRank: index + 1
+      })),
+      {
+        maximumParents: selectedCount,
+        semanticSimilarityPenalty: 4,
+        kindDiversityBonus: 0,
+        entityDiversityBonus: 0
+      }
+    );
+
+    expect(selection.parents).toHaveLength(selectedCount);
+    expect(vectorElementReads).toBeLessThanOrEqual(2 * vectorDimensions * candidateCount * selectedCount + 256);
+  });
 });

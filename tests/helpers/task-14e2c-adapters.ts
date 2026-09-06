@@ -627,6 +627,8 @@ export function createTask14e2cAdapters(options: Task14e2cAdapterOptions): Task1
           { resourceKind: "asset", ownerUserId: input.ownerUserId, assetId: input.assetId },
           { purpose: "asset_original", leaseOwner: "task-14e2c-image", expiresAt },
         );
+        let cleanupOperation: ReservedFilesystemOperation | AttachedFilesystemOperation = reserved.operation;
+        let cleanupClaim = reserved.claim;
         try {
           const candidate = await filesystem.publishAssetCandidate(reserved.operation, {
             content: input.content,
@@ -636,9 +638,19 @@ export function createTask14e2cAdapters(options: Task14e2cAdapterOptions): Task1
           if (!descriptor) throw new Error("task_14e2c_image_descriptor_missing");
           const attached = requireAttached(await withTransaction(options.pool, async (client) => {
             const result = await durable.journal.attach(client, reserved.operation, candidate);
-            if (input.failBeforeDomainCommit) throw new Error("task_14e2c_forced_image_rollback");
             if (result.outcome !== "attached") return result;
             if (input.simulateCrashAfterAttach) return result;
+            return result;
+          }));
+          cleanupOperation = attached.operation;
+          cleanupClaim = attached.claim;
+          if (input.failBeforeDomainCommit) {
+            throw new Error("task_14e2c_forced_image_rollback");
+          }
+          if (input.simulateCrashAfterAttach) {
+            throw new Task14e2cSimulatedCrash("task_14e2c_simulated_image_crash");
+          }
+          await withTransaction(options.pool, async (client) => {
             const updated = await client.query(
               `UPDATE assets
                   SET storage_path=$3,content_hash=$4,byte_length=$5
@@ -646,11 +658,7 @@ export function createTask14e2cAdapters(options: Task14e2cAdapterOptions): Task1
               [input.assetId, input.ownerUserId, descriptor.relativePath, descriptor.contentHash, descriptor.byteLength]
             );
             if (!updated.rowCount) throw new Error("task_14e2c_asset_not_found");
-            return result;
-          }));
-          if (input.simulateCrashAfterAttach) {
-            throw new Task14e2cSimulatedCrash("task_14e2c_simulated_image_crash");
-          }
+          });
           domainCommitted = true;
           const legacyLocator = attached.operation.operationId as unknown as DatabaseIssuedStorageLocator;
           input.captureAttachedLocator?.(legacyLocator);
@@ -691,12 +699,12 @@ export function createTask14e2cAdapters(options: Task14e2cAdapterOptions): Task1
         } catch (error) {
           if (error instanceof Task14e2cSimulatedCrash || domainCommitted) throw error;
           const marked = await durable.journal.markCleanup(
-            reserved.operation,
-            reserved.claim,
+            cleanupOperation,
+            cleanupClaim,
             { cause: "rollback", diagnosticCode: "asset_storage_unavailable" },
           ).catch(() => ({ outcome: "stale" as const }));
           if (marked.outcome === "cleanup_pending") {
-            await filesystem.cleanupPublishedAsset(reserved.operation, reserved.claim).catch(() => undefined);
+            await filesystem.cleanupPublishedAsset(cleanupOperation, cleanupClaim).catch(() => undefined);
           }
           throw error;
         }

@@ -214,8 +214,8 @@ describe("World Library contracts", () => {
   });
 
   it("accepts an approved Story context budget when updating a campaign", () => {
-    expect(campaignUpdateSchema.parse({ storyContextBudgetTokens: 256_000 }))
-      .toEqual({ storyContextBudgetTokens: 256_000 });
+    expect(campaignUpdateSchema.parse({ storyContextBudgetTokens: 4_000_000 }))
+      .toEqual({ storyContextBudgetTokens: 4_000_000 });
   });
 });
 

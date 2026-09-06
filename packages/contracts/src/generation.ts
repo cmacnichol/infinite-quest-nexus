@@ -1,4 +1,15 @@
 import { z } from "zod";
+export {
+  canonicalFactUpdateSchema,
+  storyTurnOutputHistoricalSchema,
+  storyTurnOutputSchema,
+  type StoryTurnOutput
+} from "./story-prompt.js";
+import {
+  MAX_CONTINUITY_OPEN_THREADS,
+  safeGenerationDiagnosticSchema,
+  storyTurnOutputSchema
+} from "./story-prompt.js";
 import { apiTimestampSchema } from "./http.js";
 import { storyLengthProfileSchema } from "./story-settings.js";
 
@@ -82,7 +93,7 @@ export const generationRequestSchema = z.object({
   model: z.string().trim().max(500).optional(),
   idempotencyKey: z.string().trim().min(8).max(200),
   context: z.object({
-    budgetTokens: z.coerce.number().int().min(512).max(1_000_000).default(32000),
+    budgetTokens: z.coerce.number().int().min(512).max(4_000_000).default(32000),
     compression: z.enum(["auto", "full", "balanced", "compact", "summary"]).default("auto"),
     recentTurns: z.coerce.number().int().min(1).max(100).default(8),
     modelContextWindowTokens: z.coerce.number().int().min(1024).max(4_000_000).optional()
@@ -329,7 +340,7 @@ export const campaignCanonicalFactEditorSchema = z.object({
 
 export const campaignRuntimeStateContentSchema = z.object({
   continuitySummary: z.string().max(20_000),
-  openThreads: z.array(z.string().trim().min(1).max(4000)).max(500),
+  openThreads: z.array(z.string().trim().min(1).max(4000)).max(MAX_CONTINUITY_OPEN_THREADS),
   canonicalFacts: z.array(campaignCanonicalFactEditorSchema).max(2000),
   scratchpad: z.string().max(100_000),
   trackers: z.array(campaignTrackerSchema).max(200),
@@ -383,28 +394,23 @@ export const eventTriggerDecisionOutputSchema = z.object({
 });
 
 export const eventExtensionOutputSchema = z.object({
-  additional_text: z.string().trim().min(1).max(20_000),
-  scratchpad: z.string().max(100_000).optional(),
-  tracker_updates: z.array(z.record(z.string(), z.unknown())).max(200).default([])
-});
-
-export const canonicalFactUpdateSchema = z.object({
-  content: z.string().trim().min(1).max(4000),
-  supersedes_fact_ids: z.array(z.uuid()).max(100).default([])
-});
-
-export const storyTurnOutputSchema = z.object({
-  narration: z.string().trim().min(1).max(200_000),
-  choices: z.array(z.string().trim().min(1).max(2000)).length(4),
-  custom_action_suggestion: z.string().trim().min(1).max(2000),
-  scratchpad: z.string().max(100_000),
-  tracker_updates: z.array(z.record(z.string(), z.unknown())).max(200).default([]),
-  image_prompt: z.string().max(20_000).default(""),
-  continuity_summary: z.string().trim().min(1).max(20_000),
-  canonical_facts: z.array(z.string().trim().min(1).max(4000)).max(100),
-  superseded_facts: z.array(z.string().trim().min(1).max(4000)).max(100),
-  canonical_fact_updates: z.array(canonicalFactUpdateSchema).max(100).default([]),
-  open_threads: z.array(z.string().trim().min(1).max(4000)).max(100)
+  narration: storyTurnOutputSchema.shape.narration,
+  choices: storyTurnOutputSchema.shape.choices,
+  custom_action_suggestion: storyTurnOutputSchema.shape.custom_action_suggestion,
+  scratchpad: storyTurnOutputSchema.shape.scratchpad,
+  tracker_updates: storyTurnOutputSchema.shape.tracker_updates,
+  image_prompt: storyTurnOutputSchema.shape.image_prompt,
+  continuity_summary: storyTurnOutputSchema.shape.continuity_summary,
+  canonical_facts: storyTurnOutputSchema.shape.canonical_facts,
+  superseded_facts: storyTurnOutputSchema.shape.superseded_facts,
+  canonical_fact_updates: storyTurnOutputSchema.shape.canonical_fact_updates,
+  open_threads: storyTurnOutputSchema.shape.open_threads
+}).superRefine((value, context) => {
+  if (value.superseded_facts.length) context.addIssue({
+    code: "custom",
+    path: ["superseded_facts"],
+    message: "New event extension output must use canonical_fact_updates for supersession."
+  });
 });
 
 export const generationJobStatusSchema = z.object({
@@ -440,7 +446,8 @@ export const PUBLIC_GENERATION_FAILURE_MESSAGE = "Generation could not be comple
 
 const publicGenerationFailureFields = {
   errorCode: z.literal(PUBLIC_GENERATION_FAILURE_CODE).nullable(),
-  errorMessage: z.literal(PUBLIC_GENERATION_FAILURE_MESSAGE).nullable()
+  errorMessage: z.literal(PUBLIC_GENERATION_FAILURE_MESSAGE).nullable(),
+  diagnostic: safeGenerationDiagnosticSchema.nullable().optional()
 };
 
 const generationJobSnapshotBaseSchema = generationJobStatusSchema.omit({
@@ -509,7 +516,6 @@ export type WorldCoverRequest = z.infer<typeof worldCoverRequestSchema>;
 export type SogniIllustrationProviderConfig = z.infer<typeof sogniIllustrationProviderConfigSchema>;
 export type SogniSdkIllustrationProviderConfig = z.infer<typeof sogniSdkIllustrationProviderConfigSchema>;
 export type IllustrationGenerationRequest = z.infer<typeof illustrationGenerationRequestSchema>;
-export type StoryTurnOutput = z.infer<typeof storyTurnOutputSchema>;
 export type PlayerCampaignConfig = z.infer<typeof playerCampaignConfigSchema>;
 export type CampaignRuntimeStateContent = z.infer<typeof campaignRuntimeStateContentSchema>;
 export type CampaignRuntimeStateUpdate = z.infer<typeof campaignRuntimeStateUpdateSchema>;

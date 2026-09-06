@@ -28,6 +28,7 @@ import {
   type TextProviderProfile
 } from "../../packages/story-engine/src/providers.js";
 import { logger } from "../../packages/logger/src/index.js";
+import { serializeLegacyProviderRequest } from "../../packages/story-engine/src/provider-request.js";
 import { setSogniSdkClientFactoryForTests } from "../../packages/story-engine/src/providers/illustration/sogni-sdk/index.js";
 
 const profile: TextProviderProfile = {
@@ -66,6 +67,26 @@ function createTestProviderTransport(fetcher: typeof fetch): ProviderTransport {
 afterEach(() => vi.restoreAllMocks());
 
 describe("text provider adapters", () => {
+  it("keeps response-chain recovery in the explicitly named legacy serializer", () => {
+    const prepared = serializeLegacyProviderRequest(profile, {
+      systemPrompt: "system prompt",
+      input: "authoritative snapshot",
+      previousResponseId: "legacy-response-id",
+      recoveryInput: "return replacement JSON",
+      rejectedResponse: "rejected draft"
+    });
+
+    expect(JSON.parse(prepared.body)).toEqual({
+      model: "loaded-instance-id",
+      input: "return replacement JSON",
+      store: true,
+      stream: false,
+      temperature: 0.2,
+      max_output_tokens: 4096,
+      previous_response_id: "legacy-response-id"
+    });
+  });
+
   it("defaults provider request deadlines to five minutes", () => {
     const parsed = providerProfileInputSchema.parse({
       name: "Synthetic provider",
@@ -855,6 +876,39 @@ describe("text provider adapters", () => {
     expect(cancelled).toBe(true);
   });
 
+  it("returns the exact fallback body that produced an OpenAI-compatible result", async () => {
+    const sentBodies: string[] = [];
+    const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      sentBodies.push(String(init?.body));
+      if (sentBodies.length === 1) {
+        return new Response(JSON.stringify({ error: { message: "response_format is unsupported" } }), { status: 400 });
+      }
+      return new Response(JSON.stringify({
+        id: "fallback-response",
+        choices: [{ message: { content: "{}" }, finish_reason: "stop" }],
+        usage: {}
+      }), { status: 200 });
+    });
+    const openAiProfile: TextProviderProfile = {
+      ...profile,
+      providerType: "openai_compatible",
+      baseUrl: "https://api.openai.com/v1"
+    };
+
+    const result = await callTextProvider(openAiProfile, {
+      systemPrompt: "private canary system",
+      input: "private canary input"
+    }, createTestProviderTransport(fetcher as typeof fetch));
+
+    expect(sentBodies).toHaveLength(2);
+    expect(JSON.parse(sentBodies[0]!).response_format).toEqual({ type: "json_object" });
+    expect(JSON.parse(sentBodies[1]!).response_format).toBeUndefined();
+    expect(result.preparedRequest).toEqual({
+      body: sentBodies[1],
+      payloadHash: expect.any(String)
+    });
+  });
+
   it("preserves provider destination denials through the public text adapter", async () => {
     const transport = createProviderTransport({
       policy: {
@@ -906,6 +960,10 @@ describe("text provider adapters", () => {
     }, createTestProviderTransport(fetcher as typeof fetch));
     expect(streamChunks).toEqual(["Hello", "Hello world"]);
     expect(result.content).toBe("Hello world");
+    expect(result.preparedRequest).toEqual({
+      body: expect.stringContaining('"stream":true'),
+      payloadHash: expect.any(String)
+    });
   });
 
   it("cancels oversized SSE responses and returns a safe typed failure", async () => {

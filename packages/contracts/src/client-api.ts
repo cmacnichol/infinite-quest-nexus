@@ -16,6 +16,7 @@ import {
   turnInputModeSchema,
   turnInputModeSourceSchema
 } from "./generation.js";
+import { safeGenerationDiagnosticSchema } from "./story-prompt.js";
 import { apiTimestampSchema } from "./http.js";
 import { chronicleRetrievalAuditSchema } from "./memory.js";
 import { storyContextBudgetTokensSchema, storyLengthProfileSchema } from "./story-settings.js";
@@ -224,6 +225,7 @@ const generationRecoveryBaseSchema = z.object({
   attempts: z.number().int().min(0),
   errorCode: z.literal(PUBLIC_GENERATION_FAILURE_CODE).nullable(),
   errorMessage: z.literal(PUBLIC_GENERATION_FAILURE_MESSAGE).nullable(),
+  diagnostic: safeGenerationDiagnosticSchema.nullable().optional(),
   resultTurnId: z.uuid().nullable()
 });
 

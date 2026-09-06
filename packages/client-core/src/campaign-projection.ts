@@ -30,6 +30,7 @@ export interface HydratedGenerationProjection {
   readonly expectedTurnNumber: number;
   readonly attempts: number | null;
   readonly resultTurnId: string | null;
+  readonly diagnostic: import("@infinite-quest/contracts").SafeGenerationDiagnostic | null;
   readonly operation: GenerationOperationProjection;
 }
 

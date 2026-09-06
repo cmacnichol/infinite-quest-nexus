@@ -152,7 +152,12 @@ describe("runtime role generation composition", () => {
       pool,
       expect.objectContaining({ role: "worker" }),
       controller.signal,
-      { generation: workerGeneration, illustration: workerIllustration, memory: workerMemory }
+      {
+        generation: workerGeneration,
+        illustration: workerIllustration,
+        generationIllustration: illustration,
+        memory: workerMemory
+      }
     );
     expect(values.createApiGeneration).not.toHaveBeenCalled();
     expect(values.createApiWorldCampaign).not.toHaveBeenCalled();
@@ -191,7 +196,12 @@ describe("runtime role generation composition", () => {
       pool,
       expect.objectContaining({ role: "all" }),
       controller.signal,
-      { generation: workerGeneration, illustration: workerIllustration, memory: workerMemory }
+      {
+        generation: workerGeneration,
+        illustration: workerIllustration,
+        generationIllustration: illustration,
+        memory: workerMemory
+      }
     );
     expect(server.close).toHaveBeenCalledOnce();
   });

@@ -79,6 +79,9 @@ const preChunkChronicleMemory: MemoryGenerationTransactionPort = {
   async buildContextPreview() {
     throw new Error("Task 14e2c does not build Chronicle context previews.");
   },
+  async loadGenerationContext() {
+    throw new Error("Task 14e2c does not load private generation authority.");
+  },
   async enqueueEmbeddingReindex() {
     return null;
   },
@@ -293,7 +296,16 @@ integration("Task 14e2c additive adapter contract matrix", () => {
         "0076_chronicle_chunk_skip_reasons",
         "0077_chronicle_chunk_processed_signature",
         "0078_system_archive_jobs",
-        "0079_resumable_system_archive_uploads"
+        "0079_resumable_system_archive_uploads",
+        "0080_published_asset_derivative_reservations",
+        "0081_campaign_story_context_budget",
+        "0082_turn_zero_state_correction_facts",
+        "0083_cleaned_campaign_export_deletion",
+        "0084_generation_authority_identity",
+        "0085_prompt_override_compatibility_acknowledgements",
+        "0086_prompt_override_protocol_acknowledgements",
+        "0087_chronicle_query_cache_access_sequence",
+        "0088_expand_campaign_story_context_budget"
       ]);
     } finally {
       await pool.end();
@@ -1211,6 +1223,7 @@ The durable record is verified.`;
       zipBytes.byteLength,
       { simulateCrashAfterAttach: true },
     );
+    await adapters.filesystem.close();
     const crashed = await pool.query<{ id: string }>(
       `SELECT operation.id
          FROM durable_filesystem_operations operation

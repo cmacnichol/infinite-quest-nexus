@@ -23,6 +23,8 @@ export function createMemoryApplication(
         dependencies.transaction.autoEnableCampaignEmbedding(database, scope),
       buildContextPreview: (database, scope) =>
         dependencies.transaction.buildContextPreview(database, scope),
+      loadGenerationContext: (database, scope) =>
+        dependencies.transaction.loadGenerationContext(database, scope),
       enqueueEmbeddingReindex: (database, scope) =>
         dependencies.transaction.enqueueEmbeddingReindex(database, scope),
       enqueueChunkIndex: (database, scope) =>

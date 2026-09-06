@@ -1,5 +1,5 @@
 import type { CampaignWorldVersionMemoryScope } from "../../application/src/memory/index.js";
-import { currentContinuitySchema, type CurrentContinuity } from "../../contracts/src/memory.js";
+import { campaignRuntimeStateContentSchema, type CampaignRuntimeStateContent } from "../../contracts/src/generation.js";
 import type { DatabaseClient } from "./pool.js";
 
 /**
@@ -10,7 +10,7 @@ export async function loadCurrentContinuityCorrection(
   client: DatabaseClient,
   scope: CampaignWorldVersionMemoryScope,
   baseTurnNumber: number,
-): Promise<CurrentContinuity | null> {
+): Promise<CampaignRuntimeStateContent | null> {
   const result = await client.query<{ state_snapshot_private: unknown }>(
     `SELECT edit.state_snapshot_private
        FROM campaigns campaign
@@ -26,5 +26,32 @@ export async function loadCurrentContinuityCorrection(
     [scope.ownerUserId, scope.campaignId, scope.worldVersionId, baseTurnNumber]
   );
   const row = result.rows[0];
-  return row ? currentContinuitySchema.parse(row.state_snapshot_private) : null;
+  return row ? materializeGenerationContinuity(row.state_snapshot_private) : null;
+}
+
+/**
+ * Normalizes an accepted or initial state snapshot for private generation.
+ * This is intentionally separate from an exact correction: a saved empty
+ * correction is already complete authority and must never be merged here.
+ */
+export function materializeGenerationContinuity(
+  snapshot: unknown,
+): CampaignRuntimeStateContent {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    throw new Error("Generation authority state snapshot is invalid.");
+  }
+  const source = snapshot as Record<string, unknown>;
+  const canonicalFacts = Array.isArray(source.canonicalFacts)
+    ? source.canonicalFacts.map((fact) => typeof fact === "string" ? { id: null, content: fact } : fact)
+    : source.canonicalFacts ?? [];
+  return campaignRuntimeStateContentSchema.parse({
+    continuitySummary: source.continuitySummary ?? "",
+    scratchpad: source.scratchpad ?? "",
+    openThreads: source.openThreads ?? [],
+    canonicalFacts,
+    trackers: source.trackers ?? [],
+    rpgStats: source.rpgStats ?? [],
+    eventTriggers: source.eventTriggers ?? [],
+    pendingEventTriggers: source.pendingEventTriggers ?? []
+  });
 }

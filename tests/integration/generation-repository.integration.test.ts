@@ -189,13 +189,15 @@ integration("PostgreSQL generation command repository", () => {
     status: string,
     options: Readonly<{ resultTurnId?: string | null; expectedTurnNumber?: number }> = {}
   ): Promise<string> {
+    const promptSnapshot = await loadPromptSnapshotForTest(pool, ownerUserId, campaignId);
     const result = await pool.query<{ id: string }>(
       `INSERT INTO generation_jobs (
          owner_user_id, campaign_id, provider_profile_id, idempotency_key, expected_turn_number,
-         action, status, result_turn_id, completed_at
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,CASE WHEN $8::uuid IS NULL THEN NULL ELSE now() END) RETURNING id`,
+         action, status, result_turn_id, completed_at, prompt_snapshot, prompt_protocol_version
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,CASE WHEN $8::uuid IS NULL THEN NULL ELSE now() END,$9,$10) RETURNING id`,
       [ownerUserId, campaignId, providerProfileId, crypto.randomUUID(), options.expectedTurnNumber ?? 3,
-        "Inspect the repository observatory.", status, options.resultTurnId ?? null]
+        "Inspect the repository observatory.", status, options.resultTurnId ?? null,
+        JSON.stringify(promptSnapshot), providerPromptProtocolVersion(promptSnapshot)]
     );
     return result.rows[0]!.id;
   }
@@ -399,6 +401,26 @@ integration("PostgreSQL generation command repository", () => {
     )).rejects.toMatchObject({ kind: "conflict", details: { reason: "idempotency_mismatch" } });
   });
 
+  it("persists append authority separately from replacement-only base fields", async () => {
+    const imported = await campaign();
+    const queued = await repository().enqueueAppend(
+      { ownerUserId, campaignId: imported.campaignId },
+      appendRequest("Capture the append authority observatory.")
+    );
+
+    await expect(pool.query<{ generation_base_identity: Record<string, unknown>; base_turn_number: number | null }>(
+      "SELECT generation_base_identity, base_turn_number FROM generation_jobs WHERE id = $1",
+      [queued.id]
+    )).resolves.toMatchObject({ rows: [{
+      base_turn_number: null,
+      generation_base_identity: expect.objectContaining({
+        operationKind: "append",
+        expectedTurnNumber: 3,
+        baseTurnNumber: 2
+      })
+    }] });
+  });
+
   it("classifies missing and resolved-mode-mismatched Auto classifications as conflicts", async () => {
     const imported = await campaign();
     const commands = repository();
@@ -574,6 +596,61 @@ integration("PostgreSQL generation command repository", () => {
     await expect(discardCommands.getResult({ ownerUserId, jobId: discardCompletedJobId })).resolves.toEqual(discardResultBefore);
   });
 
+  it("rejects an incompatible retry without rewriting its durable prompt snapshot", async () => {
+    const imported = await campaign();
+    const jobId = await directGenerationJob(imported.campaignId, "recoverable");
+    const before = (await pool.query<{ prompt_snapshot: Record<string, unknown>; prompt_protocol_version: string }>(
+      `UPDATE generation_jobs
+          SET prompt_snapshot = '{"story":"legacy instruction"}'::jsonb,
+              prompt_protocol_version = 'story-v1'
+        WHERE id = $1
+        RETURNING prompt_snapshot, prompt_protocol_version`,
+      [jobId]
+    )).rows[0]!;
+    await expect(repository().retry({ ownerUserId, jobId }))
+      .rejects.toMatchObject({ kind: "conflict", details: { reason: "retry_protocol_incompatible" } });
+
+    const after = (await pool.query<{ prompt_snapshot: Record<string, unknown>; prompt_protocol_version: string }>(
+      "SELECT prompt_snapshot, prompt_protocol_version FROM generation_jobs WHERE id = $1",
+      [jobId]
+    )).rows[0]!;
+    expect(after.prompt_snapshot).toEqual(before.prompt_snapshot);
+    expect(after.prompt_protocol_version).toBe(before.prompt_protocol_version);
+  });
+
+  it("rejects a malformed retry snapshot even when its stored protocol hash matches", async () => {
+    const imported = await campaign();
+    const jobId = await directGenerationJob(imported.campaignId, "recoverable");
+    const emptySnapshot = {};
+    const before = (await pool.query<{
+      status: string;
+      prompt_snapshot: Record<string, unknown>;
+      prompt_protocol_version: string;
+    }>(
+      `UPDATE generation_jobs
+          SET prompt_snapshot = $2::jsonb, prompt_protocol_version = $3
+        WHERE id = $1
+        RETURNING status, prompt_snapshot, prompt_protocol_version`,
+      [jobId, JSON.stringify(emptySnapshot), providerPromptProtocolVersion(emptySnapshot as never)]
+    )).rows[0]!;
+    const providerCallsBefore = await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM generation_attempts WHERE generation_job_id = $1",
+      [jobId]
+    );
+
+    await expect(repository().retry({ ownerUserId, jobId }))
+      .rejects.toMatchObject({ kind: "conflict", details: { reason: "retry_protocol_incompatible" } });
+
+    await expect(pool.query(
+      "SELECT status, prompt_snapshot, prompt_protocol_version FROM generation_jobs WHERE id = $1",
+      [jobId]
+    )).resolves.toMatchObject({ rows: [before] });
+    await expect(pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM generation_attempts WHERE generation_job_id = $1",
+      [jobId]
+    )).resolves.toEqual(providerCallsBefore);
+  });
+
   it("leaves completed result data and authoritative campaign records intact on invalid mutations", async () => {
     const imported = await campaign();
     const turnId = await latestTurnId(imported.campaignId);
@@ -625,9 +702,11 @@ integration("PostgreSQL generation command repository", () => {
     const retryJobId = await directGenerationJob(retryCampaign.campaignId, "recoverable");
     statements.length = 0;
     await commands.retry({ ownerUserId, jobId: retryJobId });
-    expect(statements).toHaveLength(1);
-    expect(statements.filter((statement) => /^(BEGIN|COMMIT|ROLLBACK)/.test(statement))).toEqual([]);
-    expect(statements.filter((statement) => statement.startsWith("WITH source AS"))).toHaveLength(1);
+    expect(statements.filter((statement) => statement === "BEGIN")).toHaveLength(1);
+    expect(statements.filter((statement) => statement === "COMMIT")).toHaveLength(1);
+    expect(statements.filter((statement) => statement === "ROLLBACK")).toHaveLength(0);
+    expect(statements.filter((statement) => statement.startsWith("SELECT id, status AS \"generationStatus\""))).toHaveLength(1);
+    expect(statements.filter((statement) => statement.startsWith("UPDATE generation_jobs"))).toHaveLength(1);
 
     const discardCampaign = await campaign();
     const discardJobId = await directGenerationJob(discardCampaign.campaignId, "failed");

@@ -1,19 +1,28 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import {
   buildPromptPreview,
   PROMPT_TEMPLATE_CATALOG,
+  promptCompatibilityRequirement,
   promptTemplateOverrideSchema,
   renderPromptTemplate,
   sampleValuesForPrompt
 } from "../../packages/contracts/src/prompt-library.js";
+import { STORY_SYSTEM_PROMPT } from "../../packages/contracts/src/story-prompt.js";
 import { composeIllustrationProviderPrompt, directIllustrationPrompt } from "../../packages/domain/src/illustrations.js";
 import { buildTemplateWorldPrompt } from "../../packages/domain/src/world-template.js";
 import { providerPromptProtocolVersion } from "../helpers/provider-application-fixtures.js";
 import type { PromptSnapshot } from "../../packages/contracts/src/index.js";
 import { infiniteWorldsPromptSet } from "../legacy-api/src/infinite-worlds-import-service.js";
+import { createPromptRepository } from "../../packages/database/src/prompt-repository.js";
 
 describe("Prompt Library catalog", () => {
+  it("uses the shared shipped story-system definition", () => {
+    expect(PROMPT_TEMPLATE_CATALOG.story_system.defaultContent).toBe(STORY_SYSTEM_PROMPT);
+    expect(STORY_SYSTEM_PROMPT).toContain("currentContinuity");
+  });
+
   it("separates world seeds from complete generated character profiles", () => {
     const generation = PROMPT_TEMPLATE_CATALOG.world_generation.defaultContent;
     const recovery = PROMPT_TEMPLATE_CATALOG.world_generation_recovery.defaultContent;
@@ -89,6 +98,121 @@ describe("Prompt Library catalog", () => {
     expect(promptTemplateOverrideSchema.safeParse({ key: "story_system", scope: "campaign", campaignId: crypto.randomUUID(), content: "Write safely." }).success).toBe(true);
     expect(promptTemplateOverrideSchema.safeParse({ key: "world_generation", scope: "campaign", campaignId: crypto.randomUUID(), content: "Write safely." }).success).toBe(false);
     expect(promptTemplateOverrideSchema.safeParse({ key: "story_system", scope: "application", campaignId: crypto.randomUUID(), content: "Write safely." }).success).toBe(false);
+  });
+
+  it("preserves override content byte-for-byte while validating its length and presence", () => {
+    const content = "  Keep this exact prompt.  ";
+    const parsed = promptTemplateOverrideSchema.parse({
+      key: "story_system",
+      scope: "campaign",
+      campaignId: crypto.randomUUID(),
+      content
+    });
+    expect(parsed.content).toBe(content);
+    expect(createHash("sha256").update(parsed.content).digest("hex"))
+      .toBe(createHash("sha256").update(content).digest("hex"));
+    expect(promptTemplateOverrideSchema.safeParse({
+      key: "story_system",
+      scope: "application",
+      content: ""
+    }).success).toBe(false);
+  });
+
+  it("requires an exact versioned acknowledgement for continuity-shape overrides without inspecting prompt prose", () => {
+    const content = "Use our established creative voice.";
+    const requirement = promptCompatibilityRequirement("story_system");
+    expect(requirement).toMatchObject({
+      requiredShapeVersion: "story-output-v2",
+      protocolIdentity: "story-v13-current-state-corrections|story-output-v2|current-continuity-v2",
+      requiredShapePreview: expect.stringContaining('"continuity_summary"')
+    });
+    const parsed = promptTemplateOverrideSchema.parse({
+      key: "story_system",
+      scope: "application",
+      content,
+      compatibilityAcknowledgement: {
+        requiredShapeVersion: requirement!.requiredShapeVersion,
+        protocolIdentity: requirement!.protocolIdentity,
+        contentHash: createHash("sha256").update(content).digest("hex")
+      }
+    });
+    expect(parsed.compatibilityAcknowledgement?.contentHash).toBe(createHash("sha256").update(content).digest("hex"));
+    expect(promptCompatibilityRequirement("illustration_direct")).toBeNull();
+  });
+
+  it("rejects an unacknowledged continuity override before persistence can lead to provider execution", async () => {
+    const query = vi.fn();
+    const prompts = createPromptRepository({ query } as never);
+    await expect(prompts.savePromptOverride({
+      ownerUserId: crypto.randomUUID(),
+      scope: "application",
+      key: "event_extension",
+      content: "Keep the existing creative event voice."
+    })).rejects.toMatchObject({ code: "prompt_override_incompatible", statusCode: 409 });
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it("persists an exact protected-prompt acknowledgement and accepts it when loading the saved override", async () => {
+    const content = "Keep the established output shape and voice.";
+    const requirement = promptCompatibilityRequirement("story_system")!;
+    let saved: Record<string, unknown> | null = null;
+    const query = vi.fn(async (sql: string, values?: readonly unknown[]) => {
+      if (sql.includes("INSERT INTO prompt_template_overrides")) {
+        saved = {
+          prompt_key: "story_system",
+          content,
+          campaign_id: null,
+          compatibility_required_shape_version: values?.[4],
+          compatibility_protocol_identity: values?.[5],
+          compatibility_content_hash: values?.[6]
+        };
+        return { rows: [] };
+      }
+      if (sql.includes("FROM prompt_template_overrides")) return { rows: saved ? [saved] : [] };
+      return { rows: [] };
+    });
+    const prompts = createPromptRepository({ query } as never);
+
+    await expect(prompts.savePromptOverride({
+      ownerUserId: crypto.randomUUID(),
+      scope: "application",
+      key: "story_system",
+      content,
+      compatibilityAcknowledgement: {
+        requiredShapeVersion: requirement.requiredShapeVersion,
+        protocolIdentity: requirement.protocolIdentity,
+        contentHash: createHash("sha256").update(content).digest("hex")
+      }
+    })).resolves.toMatchObject({
+      templates: expect.arrayContaining([expect.objectContaining({
+        key: "story_system",
+        effectiveContent: content,
+        compatibility: expect.objectContaining({ acknowledged: true })
+      })])
+    });
+
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining("compatibility_protocol_identity"),
+      expect.arrayContaining([requirement.requiredShapeVersion, requirement.protocolIdentity])
+    );
+  });
+
+  it("blocks a saved protected override acknowledged under an earlier prompt protocol identity", async () => {
+    const content = "Keep the established output shape and voice.";
+    const query = vi.fn().mockResolvedValue({
+      rows: [{
+        prompt_key: "story_system",
+        content,
+        campaign_id: null,
+        compatibility_required_shape_version: "story-output-v2",
+        compatibility_protocol_identity: "story-v12|story-output-v2|current-continuity-v2",
+        compatibility_content_hash: createHash("sha256").update(content).digest("hex")
+      }]
+    });
+    const prompts = createPromptRepository({ query } as never);
+
+    await expect(prompts.loadPromptSnapshot({ ownerUserId: crypto.randomUUID(), scope: "application" }))
+      .rejects.toMatchObject({ code: "prompt_override_incompatible", statusCode: 409 });
   });
 
   it("renders only engine-supplied placeholder values", () => {

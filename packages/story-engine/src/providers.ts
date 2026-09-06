@@ -1,6 +1,9 @@
 import type { ProviderType } from "../../contracts/src/generation.js";
 import { logger } from "../../logger/src/index.js";
 import { ProviderDestinationNotAllowedError } from "../../security/src/provider-network-policy.js";
+import { estimatedInputSafetyAllowanceTokens, serializeCheckedProviderRequest, serializeLegacyProviderRequest, validateCompleteRejectedDraft } from "./provider-request.js";
+import { resolveEffectiveContextWindowTokens } from "./context-budget.js";
+import type { CanonicalProviderRequest, PreparedProviderRequest, ProviderOutputBudget } from "./provider-request.js";
 import {
   MAX_IMAGE_PROVIDER_RESPONSE_BYTES,
   MAX_PROVIDER_JSON_RESPONSE_BYTES,
@@ -52,6 +55,10 @@ export type ProviderRequest = {
   recoveryInput?: string;
   rejectedResponse?: string;
   onChunk?: (delta: string, accumulated: string) => void | Promise<void>;
+  canonicalBudgeting?: boolean;
+  /** Snapshotted job/provider ceiling; canonical generation must not exceed it. */
+  effectiveContextWindowTokens?: number;
+  budgetOutput?: ProviderOutputBudget;
 };
 
 export type ProviderResult = {
@@ -63,6 +70,11 @@ export type ProviderResult = {
   usage: { inputTokens: number; outputTokens: number; totalTokens: number };
   reportedCost: ReportedProviderCost | null;
   rawMetadata: Record<string, unknown>;
+  /** Private immutable wire evidence for the request that produced this result. */
+  preparedRequest?: Readonly<{
+    body: string;
+    payloadHash: string;
+  }>;
 };
 
 export type ReportedProviderCost = {
@@ -681,6 +693,24 @@ function openAiRoot(baseUrl: string): string {
   return /\/v1$/i.test(root) ? root : `${root}/v1`;
 }
 
+/** Sends an already measured payload exactly as prepared, without rebuilding it. */
+export async function sendPreparedProviderRequest(
+  profile: TextProviderProfile,
+  prepared: PreparedProviderRequest,
+  transport: ProviderTransport = defaultProviderTransport()
+): Promise<Response> {
+  const url = profile.providerType === "lmstudio"
+    ? `${lmStudioRoot(profile.baseUrl)}/api/v1/chat`
+    : `${openAiRoot(profile.baseUrl)}/chat/completions`;
+  return providerFetch(
+    profile,
+    prepared.operation,
+    url,
+    { method: "POST", headers: headers(profile, url), body: prepared.body },
+    transport
+  );
+}
+
 function headers(profile: TextProviderProfile, endpoint?: string): Record<string, string> {
   let forwardAuthorization = Boolean(profile.apiKey);
   if (endpoint) {
@@ -864,26 +894,38 @@ async function readSseStream(
   return { content: accumulated, finalData, allData };
 }
 
-async function callLmStudio(profile: TextProviderProfile, request: ProviderRequest, transport: ProviderTransport): Promise<ProviderResult> {
-  await ensureLmStudioModelLoaded(profile, "story generation model loading", transport);
-  const rejectedResponse = String(request.rejectedResponse || "").trim()
-    .slice(0, Math.max(4000, Math.min(80_000, profile.maxOutputTokens * 4)));
-  const payload: Record<string, unknown> = {
-    model: profile.model,
-    input: request.previousResponseId && request.recoveryInput
-      ? request.recoveryInput
-      : request.recoveryInput
-        ? `${request.input}${rejectedResponse ? `\n\nREJECTED RESPONSE TO REWRITE:\n${rejectedResponse}` : ""}\n\nRECOVERY REQUIREMENT:\n${request.recoveryInput}`
-        : request.input,
-    store: true,
-    stream: Boolean(request.onChunk),
-    temperature: request.recoveryInput ? 0.2 : profile.temperature,
-    max_output_tokens: profile.maxOutputTokens
+function canonicalRequest(request: ProviderRequest): CanonicalProviderRequest {
+  const completeRejectedDraft = validateCompleteRejectedDraft(request.rejectedResponse);
+  return {
+    systemPrompt: request.systemPrompt,
+    input: request.input,
+    ...(request.recoveryInput ? { recoveryInput: request.recoveryInput } : {}),
+    ...(completeRejectedDraft ? { completeRejectedDraft } : {}),
+    ...(request.onChunk ? { onChunk: request.onChunk } : {})
   };
-  if (request.previousResponseId) payload.previous_response_id = request.previousResponseId;
-  else payload.system_prompt = request.systemPrompt;
+}
+
+function checkedStoryRequest(profile: TextProviderProfile, request: ProviderRequest, responseFormat?: boolean): PreparedProviderRequest {
+  const effectiveContextWindowTokens = resolveEffectiveContextWindowTokens(
+    profile.contextWindowTokens,
+    request.effectiveContextWindowTokens
+  );
+  return serializeCheckedProviderRequest(profile, canonicalRequest(request), {
+    inputLimit: effectiveContextWindowTokens - profile.maxOutputTokens,
+    count: (body) => body.length,
+    countMode: "estimated",
+    safetyAllowanceTokens: estimatedInputSafetyAllowanceTokens,
+    contextWindowTokens: effectiveContextWindowTokens,
+    output: request.budgetOutput ?? { kind: "story_append" },
+    ...(responseFormat === undefined ? {} : { responseFormat })
+  });
+}
+
+async function callLmStudio(profile: TextProviderProfile, request: ProviderRequest, transport: ProviderTransport): Promise<ProviderResult> {
+  const prepared = request.canonicalBudgeting ? checkedStoryRequest(profile, request) : serializeLegacyProviderRequest(profile, request);
+  await ensureLmStudioModelLoaded(profile, "story generation model loading", transport);
   const url = `${lmStudioRoot(profile.baseUrl)}/api/v1/chat`;
-  const response = await providerFetch(profile, "story generation", url, { method: "POST", headers: headers(profile, url), body: JSON.stringify(payload) }, transport);
+  const response = await sendPreparedProviderRequest(profile, prepared, transport);
   if (response.ok && request.onChunk && response.headers.get("content-type")?.includes("event-stream")) {
     const { content, finalData, allData } = await readSseStream(response, request.onChunk, profile, "story generation", url);
     const stats = allData.findLast((item) => item.stats)?.stats || finalData.stats || {};
@@ -904,7 +946,8 @@ async function callLmStudio(profile: TextProviderProfile, request: ProviderReque
       modelInstanceId: String(finalData.model_instance_id || profile.model),
       usage: { inputTokens: Number(stats.input_tokens || 0), outputTokens, totalTokens: Number(stats.input_tokens || 0) + outputTokens },
       reportedCost: null,
-      rawMetadata: { status: finalData.status || "", modelInstanceId: finalData.model_instance_id || "" }
+      rawMetadata: { status: finalData.status || "", modelInstanceId: finalData.model_instance_id || "" },
+      preparedRequest: { body: prepared.body, payloadHash: prepared.payloadHash }
     };
   }
   const data = await checkedJson(response, profile, "story generation", url);
@@ -921,35 +964,16 @@ async function callLmStudio(profile: TextProviderProfile, request: ProviderReque
     modelInstanceId: String(data.model_instance_id || profile.model),
     usage: { inputTokens: Number(data.stats?.input_tokens || 0), outputTokens, totalTokens: Number(data.stats?.input_tokens || 0) + outputTokens },
     reportedCost: null,
-    rawMetadata: { status: data.status || "", modelInstanceId: data.model_instance_id || "" }
+    rawMetadata: { status: data.status || "", modelInstanceId: data.model_instance_id || "" },
+    preparedRequest: { body: prepared.body, payloadHash: prepared.payloadHash }
   };
 }
 
 async function callOpenAiCompatible(profile: TextProviderProfile, request: ProviderRequest, transport: ProviderTransport): Promise<ProviderResult> {
-  const rejectedResponse = String(request.rejectedResponse || "").trim()
-    .slice(0, Math.max(4000, Math.min(80_000, profile.maxOutputTokens * 4)));
-  const messages = [
-    { role: "system", content: request.systemPrompt },
-    { role: "user", content: request.input },
-    ...(request.recoveryInput ? [
-      { role: "assistant", content: rejectedResponse || "The previous response was incomplete or invalid." },
-      { role: "user", content: request.recoveryInput }
-    ] : [])
-  ];
-  const payload: Record<string, unknown> = {
-    model: profile.model,
-    messages,
-    temperature: request.recoveryInput ? 0.2 : profile.temperature,
-    max_tokens: profile.maxOutputTokens,
-    response_format: { type: "json_object" }
-  };
-  if (request.onChunk) {
-    payload.stream = true;
-    payload.stream_options = { include_usage: true };
-  }
+  let prepared = request.canonicalBudgeting ? checkedStoryRequest(profile, request) : serializeLegacyProviderRequest(profile, request);
   const url = `${openAiRoot(profile.baseUrl)}/chat/completions`;
-  const send = () => providerFetch(profile, "story generation", url, { method: "POST", headers: headers(profile, url), body: JSON.stringify(payload) }, transport);
-  let response = await send();
+  const send = (preparedRequest: PreparedProviderRequest) => sendPreparedProviderRequest(profile, preparedRequest, transport);
+  let response = await send(prepared);
   if (!response.ok) {
     const clone = response.clone();
     const originalCancellation = response.body?.cancel();
@@ -962,8 +986,10 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
       await originalCancellation?.catch(() => undefined);
     }
     if (/response_format|json.?mode|structured.?output|grammar/i.test(text)) {
-      delete payload.response_format;
-      response = await send();
+      prepared = request.canonicalBudgeting
+        ? checkedStoryRequest(profile, request, false)
+        : serializeLegacyProviderRequest(profile, request, { responseFormat: false });
+      response = await send(prepared);
     } else {
       let data: Record<string, any> = {};
       try { data = text ? JSON.parse(text) as Record<string, any> : {}; } catch { /* response error below includes preview */ }
@@ -992,7 +1018,8 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
         totalTokens: Number(usageObj.total_tokens || 0)
       },
       reportedCost: reportedProviderCost(usageObj),
-      rawMetadata: { model: modelInstanceId, provider: finalData.provider || "" }
+      rawMetadata: { model: modelInstanceId, provider: finalData.provider || "" },
+      preparedRequest: { body: prepared.body, payloadHash: prepared.payloadHash }
     };
   }
   const data = await checkedJson(response, profile, "story generation", url);
@@ -1013,7 +1040,8 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
       totalTokens: Number(data.usage?.total_tokens || 0)
     },
     reportedCost: reportedProviderCost(data.usage),
-    rawMetadata: { model: data.model || "", provider: data.provider || "" }
+    rawMetadata: { model: data.model || "", provider: data.provider || "" },
+    preparedRequest: { body: prepared.body, payloadHash: prepared.payloadHash }
   };
 }
 

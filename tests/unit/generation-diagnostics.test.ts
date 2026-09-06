@@ -35,6 +35,12 @@ describe("turn generation phase diagnostics", () => {
     expect(isSafeGenerationDiagnosticErrorCode("active_generation_exists")).toBe(true);
   });
 
+  it("recognizes safe output-budget diagnostic error codes", () => {
+    expect(isSafeGenerationDiagnosticErrorCode("continuity_output_budget_exceeded")).toBe(true);
+    expect(isSafeGenerationDiagnosticErrorCode("extension_narration_limit_exceeded")).toBe(true);
+    expect(isSafeGenerationDiagnosticErrorCode("provider_body_with_private_prompt")).toBe(false);
+  });
+
   it("rejects private diagnostic error codes", () => {
     expect(isSafeGenerationDiagnosticErrorCode("private_provider_token")).toBe(false);
   });
@@ -139,6 +145,29 @@ describe("turn generation phase diagnostics", () => {
       durationMs: 0,
       totalDurationMs: 100
     }]]);
+  });
+
+  it("carries a safe budget scope without serializing private budget details", async () => {
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const failure = Object.assign(new Error("PRIVATE_PROMPT_CONTENT"), {
+      code: "continuity_output_budget_exceeded",
+      scope: "output_skeleton",
+      protectedBlockIds: ["PRIVATE_BLOCK_ID"]
+    });
+
+    await expect(runTurnGenerationPhase({
+      logger: logger as any,
+      context,
+      phase: "story_generation",
+      generationStartedAt: 100,
+      now: () => 200
+    }, async () => { throw failure; })).rejects.toBe(failure);
+
+    expect(logger.error.mock.calls[0]?.[0]).toMatchObject({
+      errorCode: "continuity_output_budget_exceeded",
+      budgetScope: "output_skeleton"
+    });
+    expect(JSON.stringify(logger.error.mock.calls[0]?.[0])).not.toContain("PRIVATE_");
   });
 
   it("replaces syntactically valid provider-controlled failure metadata with safe fallbacks", async () => {

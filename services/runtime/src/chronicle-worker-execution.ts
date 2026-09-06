@@ -78,7 +78,8 @@ function batchMemories(retrieval: ChronicleWorkerRetrieval, fingerprint: string)
   return retrieval.memories.flatMap((memory) => {
     const id = typeof memory.id === "string" ? memory.id : "";
     const content = typeof memory.content === "string" ? memory.content : "";
-    if (!id || !content) throw new Error("Chronicle retrieval returned an invalid embedding row.");
+    if (!id) throw new Error("Chronicle retrieval returned an invalid embedding row.");
+    if (!content.trim()) return [];
     const contentHash = chronicleContentHash(content);
     if (memory.hasEmbedding === true
       && memory.embeddingContentHash === contentHash

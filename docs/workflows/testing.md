@@ -34,6 +34,48 @@ Report passed, failed, and skipped checks separately, including reasons for skip
 
 For visible UI changes, verify affected interactions in a rendered browser and provide screenshots. For documentation-only changes, validate local links, review the complete scoped diff, and run `git diff --check`; application tests are needed only if executable behavior changes.
 
+## Story context integrity verification
+
+The prompt-memory remediation is covered by the focused unit suites,
+`tests/integration/story-continuity-remediation.integration.test.ts`, and the
+full isolated integration harness. The composed test uses real PostgreSQL and a
+deterministic provider to verify private authority loading, serialized payload,
+validation, private checkpoint, commit, and next-turn replay. It is evidence of
+application behavior, not a live-model quality claim.
+
+Required regression coverage includes protected-context and full-request budget
+ceilings; complete records and omission reasons; output feasibility; 0, 100,
+150, and 500 threads with 501 rejected; empty correction semantics; historical
+and import compatibility; provider-operation payload guards; self-contained
+repair without `previous_response_id`; protocol/override incompatibility;
+exact-draft reclaim; immediate versus deferred event accounting; no mutation on
+recovery; and safe polling/SSE diagnostics. Rollback-reader coverage must also
+prove that an empty summary, 500 threads, and a new snapshot are either read
+correctly by the selected old binary or keep generation disabled behind a
+compatible reader.
+
+Before release, run the pinned package-manager commands from the implementation
+checkout and record each result separately:
+
+```sh
+pnpm test:unit
+pnpm test:integration
+pnpm check
+pnpm build
+git diff --check
+```
+
+Run `tests/e2e/generation-integrity-diagnostics.e2e.test.ts` for browser
+diagnostics coverage. It renders recoverable prompt-compatibility guidance and
+available recovery actions in both Story surfaces, checks that a private
+diagnostic canary is absent, and records desktop and 390x844 captures under
+`docs/review/assets/generation-integrity-diagnostics/`. The same test verifies
+the Prompt Library's required-shape acknowledgement before it submits a
+protected override.
+The production rollout still requires copied-campaign canaries with the actual
+provider, payload/commit/next-turn checks, and observed usage/latency. A skipped
+database, browser, or provider check is not a passed gate.
+
 ## Generation Notification Verification
 
 Run `tests/integration/generation-events.integration.test.ts` against real

@@ -1,6 +1,7 @@
 import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
@@ -12,6 +13,7 @@ import { createApiGenerationApplication } from "../helpers/runtime-application-f
 import { createWorkerGenerationApplication } from "../helpers/runtime-application-fixtures.js";
 import { createWorkerGenerationApplication as composeWorkerGenerationApplication } from "../../services/runtime/src/generation-worker-composition.js";
 import { createApiIllustrationApplication } from "../helpers/runtime-application-fixtures.js";
+import { reconcileNextAcceptedStreamingIllustration } from "../../packages/database/src/generation-execution-repository.js";
 import { runWorker } from "../../services/worker/src/worker.js";
 import { startNextGeneration } from "../../services/worker/src/worker.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
@@ -46,6 +48,7 @@ import {
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
 const credentialSecret = "integration-test-credential-secret";
+const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 async function generationAuthoritySnapshot(pool: DatabasePool, campaignId: string) {
   const [campaign, state, turns, memories, canonicalFacts, checkpoints] = await Promise.all([
@@ -129,12 +132,27 @@ async function cancelGeneration(pool: DatabasePool, jobId: string) {
 
 type MockReply = {
   content: string;
+  contentForRequest?: (request: Record<string, any>) => string;
   finishReason?: string;
   streamChunks?: string[];
   streamChunkDelayMs?: number;
   onRequest?: () => void;
   waitFor?: Promise<void>;
 };
+
+function eventCoverageReply(request: Record<string, any>): string {
+  const userMessage = request.messages?.find((message: { role?: string }) => message.role === "user");
+  const input = typeof userMessage?.content === "string" ? JSON.parse(userMessage.content) : {};
+  const requiredEvents = Array.isArray(input.required_events) ? input.required_events : [];
+  return JSON.stringify({
+    event_results: requiredEvents.map((event: { event_id?: unknown }) => ({
+      event_id: event.event_id,
+      covered: true,
+      missing_required_beats: [],
+      contradictions: []
+    }))
+  });
+}
 
 function validStory(narration = "Location Gamma opens and Marker Three becomes visible."): string {
   return JSON.stringify({
@@ -147,6 +165,7 @@ function validStory(narration = "Location Gamma opens and Marker Three becomes v
     continuity_summary: "Test Character has reached Location Gamma after discovering Marker Three.",
     canonical_facts: ["Location Gamma is open."],
     superseded_facts: [],
+    canonical_fact_updates: [],
     open_threads: ["Determine what Marker Three unlocks."]
   });
 }
@@ -163,7 +182,7 @@ integration("durable Story Engine integration", () => {
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 5);
-    await migrateDatabase(pool, resolve("database/migrations"));
+    await migrateDatabase(pool, resolve(repositoryRoot, "database/migrations"));
     providerTransport = installIntegrationProviderTransport();
     server = createServer((request, response) => {
       let body = "";
@@ -204,7 +223,7 @@ integration("durable Story Engine integration", () => {
         response.end(JSON.stringify({
           id: crypto.randomUUID(),
           model: "deterministic-mock",
-          choices: [{ message: { content: reply.content }, finish_reason: reply.finishReason || "stop" }],
+          choices: [{ message: { content: reply.contentForRequest?.(providerRequest) ?? reply.content }, finish_reason: reply.finishReason || "stop" }],
           usage: { prompt_tokens: 700, completion_tokens: 220, total_tokens: 920, cost: 0.00125 }
         }));
       });
@@ -239,7 +258,7 @@ integration("durable Story Engine integration", () => {
     title?: string,
     targetPool = pool
   ) {
-    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+    const fixture = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
     fixture.world.title = title ?? `Generated campaign ${crypto.randomUUID()}`;
     if (storyLength) fixture.settings.storyLength = storyLength;
     return importLegacyStory(targetPool, storyImportRequestSchema.parse({ sourceName: "generation.story", story: fixture }));
@@ -659,7 +678,317 @@ integration("durable Story Engine integration", () => {
     expect(committed.rows).toEqual([{ count: 1, distinct_turns: 1 }]);
   });
 
-  it("commits the accepted turn when illustration enqueue hits a database error", async () => {
+  it("reclaims the persisted validated draft without generating a second narration", async () => {
+    const imported = await campaign();
+    const narration = "The checkpointed draft reaches Location Gamma exactly once.";
+    const requestOffset = requests.length;
+    const job = await queue(imported.campaignId, "Resume the checkpointed draft.");
+    const originalQuery = pool.query.bind(pool) as (...args: any[]) => Promise<any>;
+    const querySpy = vi.spyOn(pool, "query");
+    let checkpointed = false;
+    querySpy.mockImplementation((async (...args: any[]) => {
+      const statement = String(args[0]);
+      const parameters = Array.isArray(args[1]) ? args[1] : [];
+      const result = await originalQuery(...args);
+      if (!checkpointed && statement.includes("SET orchestration_private")
+          && String(parameters[3]).includes("validatedMainDraft")) {
+        checkpointed = true;
+        await originalQuery(
+          "UPDATE generation_jobs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
+          [job.id]
+        );
+      }
+      return result;
+    }) as any);
+    try {
+      const checkpointStory = JSON.parse(validStory(narration));
+      checkpointStory.canonical_fact_updates = [];
+      replies.push({ content: JSON.stringify(checkpointStory) });
+      await runGenerationJob(pool, "checkpoint-worker-a", 30, credentialSecret);
+      expect(checkpointed).toBe(true);
+      const checkpoint = await pool.query<{
+        orchestration_private: { validatedMainDraft?: { draftHash?: string; requestPayloadHash?: string } };
+      }>("SELECT orchestration_private FROM generation_jobs WHERE id = $1", [job.id]);
+      expect(checkpoint.rows[0]?.orchestration_private.validatedMainDraft).toMatchObject({
+        draftHash: expect.any(String), requestPayloadHash: expect.any(String)
+      });
+      const interrupted = await pool.query<{ attempts: number; status: string; lease_expired: boolean }>(
+        "SELECT attempts, status, lease_expires_at <= now() AS lease_expired FROM generation_jobs WHERE id = $1",
+        [job.id]
+      );
+      expect(interrupted.rows).toEqual([{ attempts: 1, status: "generating", lease_expired: true }]);
+
+      expect(await runGenerationJob(pool, "checkpoint-worker-b", 30, credentialSecret)).toBe(true);
+      expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed", attempts: 2 });
+      expect(requests.slice(requestOffset).filter((request) => Array.isArray(request.messages))).toHaveLength(1);
+      const audit = await pool.query<{ attempt_number: number; recovery_kind: string }>(
+        "SELECT attempt_number, recovery_kind FROM generation_attempts WHERE generation_job_id = $1 ORDER BY attempt_number",
+        [job.id]
+      );
+      expect(audit.rows).toEqual([{ attempt_number: 1, recovery_kind: "initial" }]);
+      const accepted = await pool.query<{ n: number }>(
+        "SELECT count(*)::int AS n FROM turns WHERE campaign_id=$1 AND owner_user_id=$2 AND turn_number=$3",
+        [imported.campaignId, await initialOwnerId(pool), 3]
+      );
+      expect(accepted.rows[0]?.n).toBe(1);
+      const turn = await pool.query<{ narration: string }>(
+        "SELECT narration FROM turns WHERE campaign_id=$1 AND turn_number=$2",
+        [imported.campaignId, 3]
+      );
+      expect(turn.rows[0]?.narration).toBe(narration);
+      const artifacts = await pool.query<{ count: number; distinct_turns: number }>(
+        `SELECT count(*)::int AS count, count(DISTINCT memory.turn_id)::int AS distinct_turns
+           FROM chronicle_memories memory
+           JOIN turns turn_row ON turn_row.id = memory.turn_id
+          WHERE memory.campaign_id = $1 AND turn_row.turn_number = 3`,
+        [imported.campaignId]
+      );
+      expect(artifacts.rows).toEqual([{ count: 2, distinct_turns: 1 }]);
+    } finally {
+      querySpy.mockRestore();
+    }
+  });
+
+  it("commits checkpoint-authorized fact updates despite later audit visibility", async () => {
+    const imported = await campaign();
+    const before = await getCampaignRuntimeState(pool, imported.campaignId);
+    const state = await updateCampaignRuntimeState(pool, imported.campaignId, {
+      expectedTurnNumber: before.activeTurnNumber,
+      expectedRevision: before.revision,
+      continuitySummary: "The original beacon is still lit.",
+      openThreads: [],
+      canonicalFacts: [{ id: null, content: "The original beacon is lit." }],
+      scratchpad: "The beacon is visible from the harbor.",
+      trackers: before.trackers,
+      rpgStats: before.rpgStats,
+      eventTriggers: before.eventTriggers,
+      pendingEventTriggers: before.pendingEventTriggers
+    });
+    const sourceFactId = state.canonicalFacts[0]!.id;
+    const job = await queue(imported.campaignId, "Change the beacon.");
+    const originalQuery = pool.query.bind(pool) as (...args: any[]) => Promise<any>;
+    const querySpy = vi.spyOn(pool, "query");
+    let checkpointed = false;
+    querySpy.mockImplementation((async (...args: any[]) => {
+      const statement = String(args[0]);
+      const parameters = Array.isArray(args[1]) ? args[1] : [];
+      const result = await originalQuery(...args);
+      if (!checkpointed && statement.includes("SET orchestration_private")
+          && String(parameters[3]).includes("validatedMainDraft")) {
+        checkpointed = true;
+        await originalQuery(
+          "UPDATE generation_attempts SET request_metadata = '{\"sentFactIds\":[]}'::jsonb WHERE generation_job_id = $1",
+          [job.id]
+        );
+        await originalQuery(
+          "UPDATE generation_jobs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
+          [job.id]
+        );
+      }
+      return result;
+    }) as any);
+    try {
+      const story = JSON.parse(validStory("The beacon goes dark over the harbor."));
+      story.canonical_facts = ["The original beacon is dark."];
+      story.canonical_fact_updates = [{
+        content: "The original beacon is dark.", supersedes_fact_ids: [sourceFactId]
+      }];
+      replies.push({ content: JSON.stringify(story) });
+      await runGenerationJob(pool, "fact-checkpoint-worker-a", 30, credentialSecret);
+      expect(checkpointed).toBe(true);
+      const persisted = await pool.query<{
+        orchestration_private: { validatedMainDraft: { sentFactIds: string[] } };
+        request_metadata: { sentFactIds: string[] };
+      }>(
+        `SELECT job.orchestration_private, attempt.request_metadata
+           FROM generation_jobs job JOIN generation_attempts attempt ON attempt.generation_job_id = job.id
+          WHERE job.id = $1 AND attempt.attempt_number = 1`,
+        [job.id]
+      );
+      expect(persisted.rows[0]).toMatchObject({
+        orchestration_private: { validatedMainDraft: { sentFactIds: [sourceFactId] } },
+        request_metadata: { sentFactIds: [] }
+      });
+      expect(await runGenerationJob(pool, "fact-checkpoint-worker-b", 30, credentialSecret)).toBe(true);
+      expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed", attempts: 2 });
+      const facts = await pool.query<{ content: string; valid_from_turn: number; valid_until_turn: number | null }>(
+        `SELECT content, valid_from_turn, valid_until_turn FROM campaign_canonical_facts
+          WHERE campaign_id = $1 AND content = ANY($2::text[]) ORDER BY content`,
+        [imported.campaignId, ["The original beacon is dark.", "The original beacon is lit."]]
+      );
+      expect(facts.rows).toEqual([
+        { content: "The original beacon is dark.", valid_from_turn: 3, valid_until_turn: null },
+        { content: "The original beacon is lit.", valid_from_turn: 2, valid_until_turn: 3 }
+      ]);
+      expect((await getCampaignRuntimeState(pool, imported.campaignId)).canonicalFacts).toEqual([
+        { id: expect.any(String), content: "The original beacon is dark." }
+      ]);
+    } finally {
+      querySpy.mockRestore();
+    }
+  });
+
+  it("does not repeat a consumed automatic repair after a lease reclaim", async () => {
+    const imported = await campaign();
+    const requestOffset = requests.length;
+    const job = await queue(imported.campaignId, "Repair this draft once.");
+    const originalQuery = pool.query.bind(pool) as (...args: any[]) => Promise<any>;
+    const querySpy = vi.spyOn(pool, "query");
+    let repairConsumed = false;
+    querySpy.mockImplementation((async (...args: any[]) => {
+      const statement = String(args[0]);
+      const parameters = Array.isArray(args[1]) ? args[1] : [];
+      const result = await originalQuery(...args);
+      if (!repairConsumed && statement.includes("SET orchestration_private")
+          && String(parameters[3]).includes("automaticRepair")) {
+        repairConsumed = true;
+        await originalQuery(
+          "UPDATE generation_jobs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
+          [job.id]
+        );
+      }
+      return result;
+    }) as any);
+    try {
+      replies.push({ content: "not valid story JSON" }, { content: validStory("The single repair response is never repeated.") });
+      await runGenerationJob(pool, "repair-worker-a", 30, credentialSecret);
+      expect(repairConsumed).toBe(true);
+      expect(await runGenerationJob(pool, "repair-worker-b", 30, credentialSecret)).toBe(true);
+      expect(requests.slice(requestOffset).filter((request) => Array.isArray(request.messages))).toHaveLength(2);
+      expect(await getGenerationJob(pool, job.id)).toMatchObject({
+        status: "recoverable",
+        errorCode: "automatic_repair_consumed",
+        attempts: 2
+      });
+      const accepted = await pool.query<{ n: number }>(
+        "SELECT count(*)::int AS n FROM turns WHERE campaign_id=$1 AND turn_number=$2",
+        [imported.campaignId, 3]
+      );
+      expect(accepted.rows).toEqual([{ n: 0 }]);
+      await retryGeneration(pool, job.id);
+      const retryReset = await pool.query<{ orchestration_private: { automaticRepair?: unknown } }>(
+        "SELECT orchestration_private FROM generation_jobs WHERE id = $1",
+        [job.id]
+      );
+      expect(retryReset.rows[0]?.orchestration_private.automaticRepair).toBeUndefined();
+      expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "queued" });
+      expect(await cancelGeneration(pool, job.id)).toMatchObject({ status: "cancelled" });
+    } finally {
+      querySpy.mockRestore();
+    }
+  });
+
+  it("makes a failed event extension recoverable, then retries only that extension", async () => {
+    const imported = await campaign();
+    await syncPlayerCampaignConfig(pool, imported.campaignId, {
+      expectedTurnNumber: 2,
+      useRpgStats: false,
+      suppressEventTriggers: false,
+      rpgStats: [],
+      eventTriggers: [{
+        id: "checkpoint-after-extension", label: "Checkpoint extension", timing: "after",
+        condition: "The narration reaches Location Gamma.", effect: "A lantern appears in the hall.",
+        addTextAfter: true, triggeredCount: 0, lastTriggeredTurn: null, lastTriggeredAt: null
+      }],
+      pendingEventTriggers: []
+    });
+    const baseNarration = "The party reaches Location Gamma and opens the hall.";
+    const requestOffset = requests.length;
+    const job = await queue(imported.campaignId, "Reach Location Gamma.");
+    const originalQuery = pool.query.bind(pool) as (...args: any[]) => Promise<any>;
+    const querySpy = vi.spyOn(pool, "query");
+    let extensionFailurePersisted = false;
+    querySpy.mockImplementation((async (...args: any[]) => {
+      const statement = String(args[0]);
+      const parameters = Array.isArray(args[1]) ? args[1] : [];
+      const result = await originalQuery(...args);
+      if (!extensionFailurePersisted && statement.includes("SET orchestration_private")
+          && String(parameters[3]).includes("extensionError")) {
+        extensionFailurePersisted = true;
+      }
+      return result;
+    }) as any);
+    try {
+      const checkpointStory = JSON.parse(validStory(baseNarration));
+      checkpointStory.canonical_fact_updates = [];
+      const finalExtensionStory = JSON.parse(validStory(`${baseNarration}\n\nA lantern appears in the hall, guiding the party onward.`));
+      finalExtensionStory.canonical_fact_updates = [];
+      replies.push(
+        { content: JSON.stringify(checkpointStory) },
+        { content: JSON.stringify({
+          activated_trigger_ids: ["checkpoint-after-extension"],
+          reasons: { "checkpoint-after-extension": "The party reaches the hall." }
+        }) },
+        { content: "not valid extension JSON" },
+        { content: JSON.stringify(finalExtensionStory) },
+        { content: "", contentForRequest: eventCoverageReply },
+        { content: "", contentForRequest: eventCoverageReply }
+      );
+      await runGenerationJob(pool, "extension-worker-a", 30, credentialSecret);
+      expect(extensionFailurePersisted).toBe(true);
+      const interrupted = await pool.query<{
+        attempts: number; status: string;
+        orchestration_private: { validatedMainDraft?: unknown; afterEvents?: unknown[]; extensionError?: string };
+      }>(
+        "SELECT attempts, status, orchestration_private FROM generation_jobs WHERE id = $1",
+        [job.id]
+      );
+      expect(interrupted.rows[0]).toMatchObject({
+        attempts: 1,
+        status: "recoverable",
+        orchestration_private: {
+          validatedMainDraft: expect.any(Object),
+          afterEvents: [expect.objectContaining({ sourceTriggerId: "checkpoint-after-extension" })],
+          extensionError: expect.any(String)
+        }
+      });
+      const uncommitted = await pool.query<{ n: number }>(
+        "SELECT count(*)::int AS n FROM turns WHERE campaign_id=$1 AND turn_number=$2",
+        [imported.campaignId, 3]
+      );
+      expect(uncommitted.rows).toEqual([{ n: 0 }]);
+      await retryGeneration(pool, job.id);
+      expect(await runGenerationJob(pool, "extension-worker-b", 30, credentialSecret)).toBe(true);
+
+      expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed", attempts: 2 });
+      expect(requests.slice(requestOffset).filter((request) => Array.isArray(request.messages))).toHaveLength(6);
+      const audit = await pool.query<{ attempt_number: number; recovery_kind: string }>(
+        "SELECT attempt_number, recovery_kind FROM generation_attempts WHERE generation_job_id = $1 ORDER BY attempt_number",
+        [job.id]
+      );
+      expect(audit.rows).toEqual([{ attempt_number: 1, recovery_kind: "initial" }]);
+      const turn = await pool.query<{ narration: string }>(
+        "SELECT narration FROM turns WHERE campaign_id=$1 AND turn_number=$2",
+        [imported.campaignId, 3]
+      );
+      expect(turn.rows[0]?.narration).toContain(baseNarration);
+      expect(turn.rows[0]?.narration).toContain("A lantern appears in the hall");
+      const accepted = await pool.query<{ n: number }>(
+        "SELECT count(*)::int AS n FROM turns WHERE campaign_id=$1 AND owner_user_id=$2 AND turn_number=$3",
+        [imported.campaignId, await initialOwnerId(pool), 3]
+      );
+      expect(accepted.rows[0]?.n).toBe(1);
+      const afterState = await pool.query<{ event_triggers: Array<{ id: string; triggeredCount: number }> }>(
+        "SELECT event_triggers FROM campaign_state WHERE campaign_id = $1",
+        [imported.campaignId]
+      );
+      expect(afterState.rows[0]?.event_triggers).toContainEqual(
+        expect.objectContaining({ id: "checkpoint-after-extension", triggeredCount: 1 })
+      );
+      const artifacts = await pool.query<{ count: number; distinct_turns: number }>(
+        `SELECT count(*)::int AS count, count(DISTINCT memory.turn_id)::int AS distinct_turns
+           FROM chronicle_memories memory
+           JOIN turns turn_row ON turn_row.id = memory.turn_id
+          WHERE memory.campaign_id = $1 AND turn_row.turn_number = 3`,
+        [imported.campaignId]
+      );
+      expect(artifacts.rows).toEqual([{ count: 2, distinct_turns: 1 }]);
+    } finally {
+      querySpy.mockRestore();
+    }
+  });
+
+  it("reconciles a provisional illustration promotion that rolls back after accepting its turn", async () => {
     const imported = await campaign();
     await setIllustrationConfig(pool, imported.campaignId, illustrationConfigSchema.parse({
       sourcePolicy: "library_only",
@@ -669,24 +998,31 @@ integration("durable Story Engine integration", () => {
       model: ""
     }));
     const suffix = crypto.randomUUID().replaceAll("-", "");
-    const functionName = `reject_illustration_enqueue_${suffix}`;
-    const triggerName = `reject_illustration_enqueue_trigger_${suffix}`;
+    const functionName = `reject_provisional_illustration_promotion_${suffix}`;
+    const triggerName = `reject_provisional_illustration_promotion_trigger_${suffix}`;
     await pool.query(`CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN
         IF NEW.campaign_id::text = '${imported.campaignId}' THEN
-          RAISE EXCEPTION 'synthetic illustration enqueue failure' USING ERRCODE = '23514';
+          RAISE EXCEPTION 'synthetic provisional illustration promotion failure' USING ERRCODE = '23514';
         END IF;
         RETURN NEW;
       END
     $$`);
-    await pool.query(`CREATE TRIGGER ${triggerName} BEFORE INSERT ON turn_illustration_sets
-      FOR EACH ROW EXECUTE FUNCTION ${functionName}()`);
+    await pool.query(`CREATE TRIGGER ${triggerName} BEFORE UPDATE ON turn_illustration_sets
+      FOR EACH ROW WHEN (OLD.status = 'provisional' AND NEW.status <> OLD.status)
+      EXECUTE FUNCTION ${functionName}()`);
     try {
+      const narration = Array.from({ length: 110 }, () => "A lantern opens the quiet observatory.").join(" ");
+      const streamedStory = validStory(narration);
+      await pool.query(
+        "UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1",
+        [providerId, JSON.stringify({ streaming: true })]
+      );
+      replies.push({ content: streamedStory, streamChunks: [streamedStory] });
       const job = await queue(imported.campaignId, "Continue into the accepted scene.");
 
       await runGenerationJob(pool, "story-worker-illustration-enqueue-failure", 30, credentialSecret);
 
-      expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
       const committed = await pool.query<{ id: string; narration: string; memory_kinds: string[] }>(
         `SELECT turns.id, turns.narration,
                 array_agg(chronicle_memories.memory_kind ORDER BY chronicle_memories.memory_kind) AS memory_kinds
@@ -698,8 +1034,21 @@ integration("durable Story Engine integration", () => {
       );
       expect(committed.rows).toEqual([{
         id: expect.any(String),
-        narration: "Location Gamma opens and Marker Three becomes visible.",
+        narration: expect.stringContaining("A lantern opens the quiet observatory."),
         memory_kinds: ["canonical_fact", "turn_fiction"]
+      }]);
+      expect(await getGenerationJob(pool, job.id)).toMatchObject({
+        status: "completed",
+        resultTurnId: committed.rows[0]?.id
+      });
+      const pending = await pool.query<{
+        streaming_segments_state: { provisionalSetId: string; provisionalIllustrationReconciliation: string };
+      }>("SELECT streaming_segments_state FROM generation_jobs WHERE id = $1", [job.id]);
+      expect(pending.rows).toEqual([{
+        streaming_segments_state: {
+          provisionalSetId: expect.any(String),
+          provisionalIllustrationReconciliation: "pending"
+        }
       }]);
       expect(await pool.query(
         `SELECT campaigns.active_turn_number, campaign_state.scratchpad_private
@@ -713,13 +1062,41 @@ integration("durable Story Engine integration", () => {
           scratchpad_private: "Private synthetic continuity marker."
         }]
       });
+      const provisional = await pool.query<{ id: string; turn_id: string | null; status: string }>(
+        "SELECT id, turn_id, status FROM turn_illustration_sets WHERE generation_job_id = $1",
+        [job.id]
+      );
+      expect(provisional.rows).toEqual([{
+        id: pending.rows[0]!.streaming_segments_state.provisionalSetId,
+        turn_id: null,
+        status: "provisional"
+      }]);
+
+      await pool.query(`DROP TRIGGER IF EXISTS ${triggerName} ON turn_illustration_sets`);
+      expect(await reconcileNextAcceptedStreamingIllustration(
+        pool,
+        createApiIllustrationApplication(pool).generation
+      )).toBe(true);
       expect(await pool.query(
-        "SELECT id FROM turn_illustration_sets WHERE turn_id = $1",
-        [committed.rows[0]?.id]
-      )).toMatchObject({ rowCount: 0 });
+        "SELECT turn_id, status FROM turn_illustration_sets WHERE id = $1",
+        [provisional.rows[0]!.id]
+      )).toMatchObject({ rows: [{ turn_id: committed.rows[0]!.id, status: "queued" }] });
+      expect(await pool.query(
+        "SELECT streaming_segments_state FROM generation_jobs WHERE id = $1",
+        [job.id]
+      )).toMatchObject({ rows: [{ streaming_segments_state: { provisionalSetId: provisional.rows[0]!.id } }] });
+      expect(await reconcileNextAcceptedStreamingIllustration(
+        pool,
+        createApiIllustrationApplication(pool).generation
+      )).toBe(false);
+      expect(await pool.query(
+        "SELECT count(*)::int AS count FROM turns WHERE campaign_id = $1",
+        [imported.campaignId]
+      )).toMatchObject({ rows: [{ count: 3 }] });
     } finally {
       await pool.query(`DROP TRIGGER IF EXISTS ${triggerName} ON turn_illustration_sets`);
       await pool.query(`DROP FUNCTION IF EXISTS ${functionName}()`);
+      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({})]);
     }
   });
 
@@ -1669,7 +2046,8 @@ integration("durable Story Engine integration", () => {
       continuitySummary: edited.continuitySummary,
       openThreads: [],
       canonicalFacts: edited.canonicalFacts,
-      scratchpad: edited.scratchpad
+      scratchpad: edited.scratchpad,
+      trackers: edited.trackers
     });
     const advanced = await getCampaignRuntimeState(pool, imported.campaignId);
     expect(advanced).toMatchObject({
@@ -1707,7 +2085,13 @@ integration("durable Story Engine integration", () => {
     delete branchStory.canonical_facts;
     delete branchStory.superseded_facts;
     delete branchStory.open_threads;
-    replies.push({ content: JSON.stringify(branchStory) });
+    // Missing derived fields trigger one bounded schema-repair request. Give
+    // that request the complete replacement story so this branch test keeps a
+    // deterministic provider-response sequence.
+    replies.push(
+      { content: JSON.stringify(branchStory) },
+      { content: validStory("The reply opens a different path through Location Gamma.") }
+    );
     const branchJob = await queue(imported.campaignId, "Reply.");
     await runGenerationJob(pool, "story-worker-branch-reply", 30, credentialSecret);
 
@@ -1719,7 +2103,7 @@ integration("durable Story Engine integration", () => {
   });
 
   it("creates an optional campaign branch on the same immutable world version", async () => {
-    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+    const fixture = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
     fixture.world.title = `Branch source ${crypto.randomUUID()}`;
     const source = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "branch-source.story", story: fixture }));
     const before = await pool.query<{ worlds: string; campaigns: string }>(
@@ -1830,7 +2214,8 @@ integration("durable Story Engine integration", () => {
     replies.push(
       { content: JSON.stringify({ activated_trigger_ids: ["before-location"], reasons: { "before-location": "Location Gamma is being opened." } }) },
       { content: validStory("Marker Four activates as Location Gamma opens.") },
-      { content: JSON.stringify({ activated_trigger_ids: ["after-object"], reasons: { "after-object": "Marker Three is now visible." } }) }
+      { content: JSON.stringify({ activated_trigger_ids: ["after-object"], reasons: { "after-object": "Marker Three is now visible." } }) },
+      { content: "", contentForRequest: eventCoverageReply }
     );
     const requestOffset = requests.length;
     const job = await queue(imported.campaignId);
@@ -1851,9 +2236,9 @@ integration("durable Story Engine integration", () => {
     expect(beforeEvents).toHaveLength(1);
     expect(afterEvents).toHaveLength(1);
     expect(pendingEventTriggers).toHaveLength(1);
-    expect(eventTriggers.every((trigger) => (
-      typeof trigger === "object" && trigger !== null && "triggeredCount" in trigger && trigger.triggeredCount === 1
-    ))).toBe(true);
+    expect(eventTriggers).toContainEqual(expect.objectContaining({ id: "before-location", triggeredCount: 1 }));
+    // A deferred after-event is pending fiction, not a fulfilled occurrence.
+    expect(eventTriggers).toContainEqual(expect.objectContaining({ id: "after-object", triggeredCount: 0 }));
     const storyRequest = requests.slice(requestOffset).find((request) => JSON.stringify(request).includes("fiction writer for Infinite Quest"));
     expect(JSON.stringify(storyRequest)).toContain("Marker Four becomes active");
     expect(JSON.stringify(storyRequest)).not.toContain("activation_reason");

@@ -44,6 +44,7 @@ import {
   providerTextRequestSchema,
   turnInputClassificationRequestSchema
 } from "../../../packages/contracts/src/generation.js";
+import { projectSafeGenerationDiagnostic } from "../../../packages/contracts/src/story-prompt.js";
 import {
   campaignCreateSchema,
   campaignCharacterProfileUpdateSchema,
@@ -321,12 +322,30 @@ function generationPublicError(value: unknown): { errorCode: null | typeof PUBLI
   return { errorCode: null, errorMessage: null };
 }
 
+function generationPublicDiagnostic(value: unknown) {
+  const metadata = typeof value === "object" && value !== null && "recoveryMetadata" in value
+    ? (value as { recoveryMetadata?: unknown }).recoveryMetadata
+    : null;
+  const candidate = typeof metadata === "object" && metadata !== null && "diagnostic" in metadata
+    ? (metadata as { diagnostic?: unknown }).diagnostic
+    : null;
+  return projectSafeGenerationDiagnostic(candidate);
+}
+
 function generationSnapshot(value: unknown) {
-  return parseResponseProjection(generationJobSnapshotSchema, { ...value as object, ...generationPublicError(value) });
+  return parseResponseProjection(generationJobSnapshotSchema, {
+    ...value as object,
+    ...generationPublicError(value),
+    diagnostic: generationPublicDiagnostic(value)
+  });
 }
 
 function generationStreamSnapshot(value: unknown) {
-  return parseResponseProjection(generationStreamSnapshotSchema, { ...value as object, ...generationPublicError(value) });
+  return parseResponseProjection(generationStreamSnapshotSchema, {
+    ...value as object,
+    ...generationPublicError(value),
+    diagnostic: generationPublicDiagnostic(value)
+  });
 }
 
 const GENERATION_STREAM_RECONCILIATION_MS = 15_000;
@@ -402,7 +421,9 @@ export async function buildServer({
   const app = Fastify({
     logger: createLoggerOptions(),
     bodyLimit: config.security.apiDefaultBodyLimitBytes,
-    trustProxy: config.security.trustProxyHops,
+    trustProxy: config.security.trustProxyHops > 0
+      ? (_address, hop) => hop < config.security.trustProxyHops
+      : false,
     requestIdHeader: "x-correlation-id",
     genReqId: () => crypto.randomUUID()
   });
@@ -653,6 +674,7 @@ export async function buildServer({
           key: body.key,
           content: body.content,
           scope: body.scope,
+          ...(body.compatibilityAcknowledgement === undefined ? {} : { compatibilityAcknowledgement: body.compatibilityAcknowledgement }),
           ...(body.campaignId === undefined ? {} : { campaignId: body.campaignId })
         };
       })()

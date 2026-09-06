@@ -173,6 +173,7 @@ export async function dispatchRuntimeRole(
     await dependencies.runWorker(pool, config, signal, {
       generation,
       illustration: workerIllustration,
+      generationIllustration: illustration,
       memory: dependencies.createWorkerMemory(pool, providerGraph.chronicle)
     });
     return;
@@ -207,6 +208,7 @@ export async function dispatchRuntimeRole(
   await dependencies.runWorker(pool, config, signal, {
     generation: workerGeneration,
     illustration: workerIllustration,
+    generationIllustration: workerIllustrationTransactions,
     memory: dependencies.createWorkerMemory(pool, workerProviderGraph.chronicle)
   });
   await server.close();

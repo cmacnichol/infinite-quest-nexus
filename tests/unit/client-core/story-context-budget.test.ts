@@ -7,7 +7,7 @@ import {
 } from "../../../packages/client-core/src/index.js";
 
 describe("Story context budget contract", () => {
-  it.each([undefined, null, "", "64000", "64000x", 512, 48_000, 1_000_001])(
+  it.each([undefined, null, "", "64000", "64000x", 512, 48_000, 1_000_001, 4_000_001])(
     "falls back to Standard when %j is not a supported preset",
     (value) => {
       expect(normalizeStoryContextBudgetTokens(value)).toBe(32_000);
@@ -16,10 +16,10 @@ describe("Story context budget contract", () => {
 
   it("exposes the shared presets and no browser-storage API", () => {
     expect(STORY_CONTEXT_BUDGET_PRESETS.map(({ value }) => value)).toEqual([
-      32_000, 64_000, 128_000, 256_000, 1_000_000
+      32_000, 64_000, 128_000, 256_000, 1_000_000, 2_000_000, 4_000_000
     ]);
     expect(STORY_CONTEXT_BUDGET_PRESETS.map(({ label }) => label)).toEqual([
-      "Standard · 32K", "Expanded · 64K", "Large · 128K", "Very large · 256K", "Maximum available · up to 1M"
+      "Standard · 32K", "Expanded · 64K", "Large · 128K", "Very large · 256K", "Large context · 1M", "Expanded context · 2M", "Maximum available · up to 4M"
     ]);
     expect(clientCore).not.toHaveProperty("STORY_CONTEXT_BUDGET_STORAGE_KEY");
     expect(clientCore).not.toHaveProperty("loadStoryContextBudgetTokens");

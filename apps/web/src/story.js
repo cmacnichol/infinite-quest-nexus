@@ -40,7 +40,8 @@ import {
 } from "./story-choice-selection.js";
 import {
   createCampaignContinuityDraft,
-  formatChronicleRetrievalAudit
+  formatChronicleRetrievalAudit,
+  generationRecoveryGuidance
 } from "@infinite-quest/client-core";
 
 "use strict";
@@ -110,6 +111,7 @@ const state = {
   providers: [],
   abortController: null,
   pendingGeneration: null,
+  generationRecovery: null,
   generationRun: null,
   generationDisplayActive: false,
   generationDisplayAction: "",
@@ -415,6 +417,7 @@ async function checkOnboarding() {
 async function loadCampaign(campaignId, options = {}) {
   const loadEpoch = ++storyTurnWindowEpoch;
   clearResponseEditSession();
+  resetGenerationStateForCampaignLoad();
   state.campaignId = campaignId;
   state.campaignLoaded = false;
   completeHistoryLoad = null;
@@ -430,6 +433,7 @@ async function loadCampaign(campaignId, options = {}) {
     state.world = syncData.world || state.campaign.world || null;
     state.playerConfig = syncData.playerConfig || state.campaign.playerConfig || null;
     state.pendingGeneration = syncData.pendingGeneration || null;
+    state.generationRecovery = syncData.generationRecovery || null;
     syncTurnInputModeFromCampaign();
 
     publishStoryTurnWindow(turnData.turns || [], turnData.nextCursor || null);
@@ -467,6 +471,15 @@ async function loadCampaign(campaignId, options = {}) {
 
     recordActivity("system", "Campaign loaded", `${state.turns.length} turns loaded for "${name}".`);
     state.campaignLoaded = true;
+    if (!state.pendingGeneration && (state.generationRecovery?.status === "recoverable" || state.generationRecovery?.status === "failed")) {
+      const guidance = generationRecoveryGuidance(state.generationRecovery.diagnostic);
+      showGenerationRecovery(
+        state.generationRecovery.id,
+        guidance?.message || "This durable generation needs your direction.",
+        "generation",
+        guidance
+      );
+    }
     return true;
   } catch (err) {
     toast(`Error loading campaign: ${err.message}`);
@@ -1511,7 +1524,7 @@ async function cancelActiveGeneration() {
   });
 }
 
-function showGenerationRecovery(jobId, message, kind = "generation") {
+function showGenerationRecovery(jobId, message, kind = "generation", guidance = null) {
   const panel = $("generationRecoveryPanel");
   const messageEl = $("generationRecoveryMessage");
   const continueButton = $("btnContinueGeneration");
@@ -1524,7 +1537,10 @@ function showGenerationRecovery(jobId, message, kind = "generation") {
   }
   if (messageEl) messageEl.textContent = message || "The durable generation needs attention.";
   if (continueButton) continueButton.classList.toggle("hidden", kind === "result");
-  if (retryButton) retryButton.textContent = kind === "result" ? "Retry loading result" : "Retry generation job";
+  if (retryButton) {
+    retryButton.classList.toggle("hidden", kind !== "result" && guidance?.retryable === false);
+    retryButton.textContent = kind === "result" ? "Retry loading result" : "Retry generation job";
+  }
   if (discardButton) discardButton.classList.toggle("hidden", kind === "result");
 }
 
@@ -1535,6 +1551,20 @@ function hideGenerationRecovery() {
     panel.classList.add("hidden");
   }
   state.generationRecoveryKind = null;
+}
+
+function resetGenerationStateForCampaignLoad() {
+  state.abortController?.abort();
+  state.abortController = null;
+  state.pendingGeneration = null;
+  state.generationRecovery = null;
+  state.generationRun = null;
+  state.generationDisplayActive = false;
+  state.generationDisplayAction = "";
+  state.generationJobId = null;
+  state.cancellationConfirmed = false;
+  clearStreamingPreview();
+  hideGenerationRecovery();
 }
 
 async function monitorRecoveryJob(retryFirst) {

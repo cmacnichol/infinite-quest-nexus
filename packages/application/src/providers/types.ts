@@ -311,6 +311,12 @@ export type PromptTemplateView = Readonly<{
   effectiveContent: string;
   effectiveSource: "shipped" | "application" | "campaign";
   contentHash: string;
+  compatibility: Readonly<{
+    requiredShapeVersion: string;
+    protocolIdentity: string;
+    requiredShapePreview: string;
+    acknowledged: boolean;
+  }> | null;
 }>;
 
 export type PromptLibraryView = Readonly<{
@@ -337,6 +343,11 @@ export type PromptPreviewView = Readonly<{
 export type SavePromptOverrideCommand = PromptScope & Readonly<{
   key: PromptTemplateKey;
   content: string;
+  compatibilityAcknowledgement?: Readonly<{
+    requiredShapeVersion: string;
+    protocolIdentity: string;
+    contentHash: string;
+  }>;
 }>;
 
 export type ResetPromptOverrideCommand = PromptScope & Readonly<{

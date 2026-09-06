@@ -42,6 +42,7 @@ describe("MemoryApplication", () => {
         applyCampaignStateCorrection: vi.fn().mockResolvedValue({ changedMemoryIds: [], removedMemoryIds: [] }),
         autoEnableCampaignEmbedding: vi.fn().mockResolvedValue({ enabled: true }),
         buildContextPreview: vi.fn().mockResolvedValue({ scopes: { campaignCanon: [] } }),
+        loadGenerationContext: vi.fn(),
         enqueueEmbeddingReindex: vi.fn().mockResolvedValue("embedding-1"),
         enqueueChunkIndex: vi.fn().mockResolvedValue("chunk-1"),
         rebuildCampaignMemories: vi.fn().mockResolvedValue(3),
@@ -75,6 +76,7 @@ describe("MemoryApplication", () => {
       applyCampaignStateCorrection: vi.fn().mockResolvedValue({ changedMemoryIds: [], removedMemoryIds: [] }),
       autoEnableCampaignEmbedding: vi.fn().mockResolvedValue({ enabled: true }),
       buildContextPreview: vi.fn().mockResolvedValue({ scopes: { campaignCanon: [] } }),
+      loadGenerationContext: vi.fn(),
       enqueueEmbeddingReindex: vi.fn().mockResolvedValue("embedding-1"),
       enqueueChunkIndex: vi.fn().mockResolvedValue("chunk-1"),
       rebuildCampaignMemories: vi.fn().mockResolvedValue(2),
@@ -102,6 +104,12 @@ describe("MemoryApplication", () => {
         generationJobId: "generation-1",
         operation: "retrieval_embedding"
       }
+    });
+    await application.generation.loadGenerationContext(transaction, {
+      ...scope,
+      operationKind: "append",
+      expectedTurnNumber: 1,
+      query: "safe action"
     });
     await application.generation.enqueueEmbeddingReindex(transaction, scope);
     await application.generation.enqueueChunkIndex(transaction, scope);

@@ -34,11 +34,14 @@ import {
   turnListResponseSchema,
   userProfileResponseSchema,
   worldCreateResponseSchema,
-  worldListResponseSchema
+  worldListResponseSchema,
+  PROMPT_TEMPLATE_CATALOG,
+  type PromptSnapshot
 } from "../../packages/contracts/src/index.js";
 import { buildServer } from "../../services/api/src/server.js";
 import { inertStorageServerOptions as serverOptions, testWorldCampaignApplication } from "../helpers/build-server-options.js";
 import { legacyDashboardRouteContracts, legacyStoryRouteContracts } from "../helpers/legacy-ui-route-contracts.js";
+import { providerPromptProtocolVersion } from "../helpers/provider-application-fixtures.js";
 import { DEDICATED_CHUNKED_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
 
 const OWNER_ID = "00000000-0000-4000-8000-000000000001";
@@ -91,6 +94,10 @@ const WORLD_CONTENT = {
   eventTriggers: [],
   defaults: { trackers: [] }
 };
+const RETRY_PROMPT_SNAPSHOT = Object.fromEntries(Object.values(PROMPT_TEMPLATE_CATALOG).map((template) => [
+  template.key,
+  { content: template.defaultContent, hash: "test-prompt-hash", source: "shipped" }
+])) as PromptSnapshot;
 
 type MockPoolOptions = {
   malformedJob?: boolean;
@@ -99,6 +106,7 @@ type MockPoolOptions = {
   onInitialOwnerRead?: () => void;
   onQuery?: (sql: string) => void;
   rawGenerationError?: boolean;
+  generationDiagnostic?: Record<string, unknown>;
   onGenerationJobRead?: () => void;
   streamReadFailure?: boolean;
   streamReadFailureAfterReads?: number;
@@ -185,7 +193,7 @@ function jobRow(options: MockPoolOptions) {
     resultTurnId: TURN_ID,
     errorCode: null,
     errorMessage: null,
-    recoveryMetadata: {},
+    recoveryMetadata: options.generationDiagnostic ? { diagnostic: options.generationDiagnostic } : {},
     createdAt: NOW,
     updatedAt: NOW,
     completedAt: NOW,
@@ -522,6 +530,19 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
       jobAttempt: 1
     }] };
 
+    if (sql.startsWith("SELECT id, status AS \"generationStatus\", campaign_id AS \"campaignId\"")) return { rows: [{
+      id: JOB_ID,
+      generationStatus: "recoverable",
+      campaignId: CAMPAIGN_ID,
+      providerProfileId: PROVIDER_ID,
+      expectedTurnNumber: 3,
+      attempts: 1,
+      operationKind: "append",
+      replacementTurnId: null,
+      promptSnapshot: RETRY_PROMPT_SNAPSHOT,
+      promptProtocolVersion: providerPromptProtocolVersion(RETRY_PROMPT_SNAPSHOT)
+    }] };
+
     if (sql.startsWith("WITH source AS ( SELECT id, status, campaign_id AS \"campaignId\"")) return { rows: [{
       id: JOB_ID,
       status: "queued",
@@ -532,6 +553,12 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
       expectedTurnNumber: 3,
       attempts: 1,
       generationStatus: "recoverable"
+    }] };
+    if (sql.startsWith("UPDATE generation_jobs SET status = CASE WHEN operation_kind")) return { rows: [{
+      id: JOB_ID,
+      status: "queued",
+      operationKind: "append",
+      replacementTurnId: null
     }] };
     if (sql.startsWith("WITH source AS ( SELECT id, status FROM generation_jobs")) return { rows: [{
       id: JOB_ID,
@@ -747,6 +774,31 @@ describe("client API route contracts without PostgreSQL", () => {
         errorMessage: "Generation could not be completed."
       });
       expect(response.body).not.toContain("MODEL_SECRET=distinctive-raw-provider-detail");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("projects one allowlisted recovery diagnostic identically to polling and SSE", async () => {
+    const diagnostic = {
+      code: "context_budget_exceeded",
+      operation: "story_generation",
+      action: "adjust_context",
+      requiredTokens: 33_000,
+      availableTokens: 32_000
+    };
+    const app = await buildServer(serverOptions({
+      config: config(storageRoot),
+      pool: mockPool({ rawGenerationError: true, generationDiagnostic: diagnostic })
+    }));
+    try {
+      const polling = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}` });
+      const stream = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}/stream` });
+      const frame = JSON.parse(stream.body.trim().replace(/^data: /, ""));
+
+      expect(polling.json().diagnostic).toEqual(diagnostic);
+      expect(frame.diagnostic).toEqual(diagnostic);
+      expect(polling.body).not.toContain("MODEL_SECRET=distinctive-raw-provider-detail");
     } finally {
       await app.close();
     }

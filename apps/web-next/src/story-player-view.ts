@@ -113,6 +113,15 @@ function recovery(document: Document, projection: Readonly<CampaignProjection>):
   const failed = generation.result.state === "failed" || generation.origin === "hydrated_recovery";
   section.append(element(document, "h2", undefined, failed ? "Story generation needs attention" : "Story generation in progress"));
   section.append(element(document, "p", undefined, failed ? "Try again when the text provider is ready." : "The accepted story remains unchanged until completion."));
+  const diagnostic = generation.snapshot?.diagnostic ?? generation.hydratedGeneration?.diagnostic;
+  if (diagnostic) {
+    const action = diagnostic.action === "adjust_context" ? "Adjust the campaign context and try again."
+      : diagnostic.action === "adjust_output_or_state" ? "Shorten the current state or output target and try again."
+      : diagnostic.action === "check_provider_window" ? "Check the selected provider context window and try again."
+      : diagnostic.action === "update_prompt" ? "Update the compatible prompt override and try again."
+      : "Follow the recovery action and try again.";
+    section.append(element(document, "p", "story-recovery-diagnostic", action));
+  }
   const actions = element(document, "div", "story-generation-actions");
   if (generation.monitoring === "detached") {
     const resume = element(document, "button", undefined, "Resume monitoring");

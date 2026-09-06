@@ -1,5 +1,6 @@
 import type { CampaignStateCorrectionProjectionScope, CampaignWorldVersionMemoryScope, CorrectionMemoryChanges } from "../../application/src/memory/index.js";
 import { campaignRuntimeStateContentSchema } from "../../contracts/src/generation.js";
+import { MAX_CONTINUITY_OPEN_THREADS } from "../../contracts/src/story-prompt.js";
 import { buildChronicleEntityCatalog, chronicleContentHash, sanitizeChronicleFictionString, sanitizeChronicleMemoryLines } from "../../domain/src/chronicle-memory-helpers.js";
 import { canonicalFactDeduplicationKey } from "../../domain/src/canonical-facts.js";
 import { resolveEntityMetadata, type EntityReference } from "../../domain/src/entity-references.js";
@@ -114,7 +115,7 @@ export async function projectStateCorrection(
   }
   if (changedFields.has("openThreads")) {
     kinds.push("open_thread");
-    const threads = sanitizeChronicleMemoryLines(edit.snapshot.openThreads);
+    const threads = sanitizeChronicleMemoryLines(edit.snapshot.openThreads, MAX_CONTINUITY_OPEN_THREADS);
     if (threads.length) {
       const content = [`Open story threads after turn ${edit.effectiveTurnNumber}`, ...threads.map((thread) => `- ${thread}`)].join("\n");
       desired.push({ kind: "open_thread", turnId: null, ordinal: edit.effectiveTurnNumber, content, importance: 0.95,
@@ -124,9 +125,12 @@ export async function projectStateCorrection(
   const existing = await client.query<{ id: string; memory_kind: string; turn_id: string | null; content: string; managed: boolean }>(
     `SELECT id,memory_kind,turn_id,content,
             (metadata->>'generatedFromAcceptedTurn' = 'true' OR metadata->>'manualCorrection' = 'true') AS managed
-       FROM chronicle_memories
+      FROM chronicle_memories
       WHERE owner_user_id=$1 AND campaign_id=$2 AND world_version_id=$3 AND memory_kind=ANY($4::text[])
-        AND (memory_kind='canonical_fact' OR turn_id IS NULL)
+        AND (memory_kind='canonical_fact' OR (turn_id IS NULL AND (
+          metadata->>'manualCorrection' = 'true'
+          OR metadata->>'generatedFromAcceptedTurn' = 'true'
+        )))
       ORDER BY created_at,id`, [...scopeValues, kinds]);
   const consumed = new Set<string>();
   for (const projection of desired) {
@@ -145,7 +149,13 @@ export async function projectStateCorrection(
       changedMemoryIds.push(parent.id);
     } else {
       const inserted = await client.query<{ id: string }>(`INSERT INTO chronicle_memories (owner_user_id,campaign_id,world_version_id,content,token_estimate,
-        entities,entity_ids,metadata,ordinal,importance,memory_kind,turn_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
+        entities,entity_ids,metadata,ordinal,importance,memory_kind,turn_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        ON CONFLICT (campaign_id,turn_id,memory_kind) DO UPDATE SET
+          world_version_id=EXCLUDED.world_version_id,content=EXCLUDED.content,token_estimate=EXCLUDED.token_estimate,
+          entities=EXCLUDED.entities,entity_ids=EXCLUDED.entity_ids,metadata=EXCLUDED.metadata,ordinal=EXCLUDED.ordinal,
+          importance=EXCLUDED.importance,embedding=NULL,embedding_provider_profile_id=NULL,embedding_model=NULL,
+          embedding_dimensions=NULL,embedding_content_hash=NULL,embedding_updated_at=NULL,embedding_provider_fingerprint=NULL,updated_at=now()
+        RETURNING id`,
       [...values, projection.kind, projection.turnId]);
       changedMemoryIds.push(inserted.rows[0]!.id);
     }

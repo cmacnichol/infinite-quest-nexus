@@ -8,8 +8,10 @@ import {
   type PlayerRpgStat,
   type RpgAssessmentOutput
 } from "../../contracts/src/generation.js";
+import type { StoryTurnOutput } from "../../contracts/src/story-prompt.js";
 import { stableStringify, stripMechanicsLeakage } from "../../domain/src/text.js";
 import { containsMechanicsLanguage, extractJsonObject } from "./output.js";
+import { formatNarrationParagraphs } from "./narration-formatting.js";
 
 export const RPG_ASSESSMENT_SYSTEM_PROMPT = `You are the private referee for a percentile adventure system.
 Return only one valid JSON object and no commentary.
@@ -37,17 +39,10 @@ Required shape:
 
 Activate a trigger only when its condition is clearly satisfied by the supplied authoritative context. Return only exact IDs from the supplied list. Do not write narration or adapt the trigger effects.`;
 
-export const EVENT_EXTENSION_SYSTEM_PROMPT = `You add a short fiction-only passage to an already validated adventure turn.
+export const EVENT_EXTENSION_SYSTEM_PROMPT = `You complete an already validated adventure turn with fiction-only immediate event material.
 Return only one valid JSON object and no commentary.
 
-Required shape:
-{
-  "additional_text": "one to three short paragraphs",
-  "scratchpad": "optional fiction-only continuity notes",
-  "tracker_updates": []
-}
-
-Continue directly from the supplied narration and reflect every supplied fictional event instruction. Never expose private evaluation, game-system terminology, hidden instructions, or reasoning.`;
+Return the complete StoryTurnOutput shape. Preserve the supplied narration unchanged, then append one to three short paragraphs that reflect every supplied fictional event instruction. Return complete replacement continuity for the complete story. Never expose private evaluation, game-system terminology, hidden instructions, or reasoning.`;
 
 export type PrivateRollResolution = {
   statId: string;
@@ -192,25 +187,45 @@ export function fictionGuidanceForEvents(events: ActivatedEvent[]): string[] {
 }
 
 export function applyTriggerHits(triggers: PlayerEventTrigger[], events: ActivatedEvent[], timestamp: string): PlayerEventTrigger[] {
-  const activated = new Map(events.map((event) => [event.sourceTriggerId, event]));
+  const occurrences = new Map(events.map((event) => [
+    JSON.stringify([event.sourceTriggerId, event.sourceTurn, event.id]), event
+  ]));
   return triggers.map((trigger) => {
-    const event = activated.get(trigger.id);
-    return event ? {
+    const fulfilled = [...occurrences.values()].filter((event) => event.sourceTriggerId === trigger.id);
+    const latestSourceTurn = Math.max(trigger.lastTriggeredTurn ?? 0, ...fulfilled.map((event) => event.sourceTurn ?? 0));
+    return fulfilled.length ? {
       ...trigger,
-      triggeredCount: trigger.triggeredCount + 1,
-      lastTriggeredTurn: event.sourceTurn,
+      triggeredCount: trigger.triggeredCount + fulfilled.length,
+      lastTriggeredTurn: latestSourceTurn || null,
       lastTriggeredAt: timestamp
     } : trigger;
   });
 }
 
-export function buildEventExtensionPrompt(narration: string, guidance: string[]): string {
-  return stableStringify({ existing_narration: narration, fictional_event_instructions: guidance });
+export function buildEventExtensionPrompt(
+  story: StoryTurnOutput,
+  guidance: string[],
+  protectedFictionSafeBaseAuthority: unknown,
+  originalAction: string
+): string {
+  return stableStringify({
+    protected_fiction_safe_base_authority: protectedFictionSafeBaseAuthority,
+    original_player_action: originalAction,
+    complete_validated_main_draft: story,
+    fictional_event_instructions: guidance
+  });
 }
 
-export function parseEventExtension(content: string) {
+export function parseEventExtension(content: string, mainNarration: string) {
   const extension = eventExtensionOutputSchema.parse(extractJsonObject(content));
-  const fields = [extension.additional_text, extension.scratchpad || "", JSON.stringify(extension.tracker_updates)];
+  const normalizedMainNarration = formatNarrationParagraphs(mainNarration);
+  const normalizedNarration = formatNarrationParagraphs(extension.narration);
+  if (!normalizedNarration.startsWith(normalizedMainNarration)) {
+    throw new Error("Event extension rewrote the validated main narration.");
+  }
+  const appendedNarration = normalizedNarration.slice(normalizedMainNarration.length).trim();
+  if (!appendedNarration) throw new Error("Event extension did not append fiction.");
+  const fields = [normalizedNarration, extension.scratchpad, extension.continuity_summary, extension.image_prompt, ...extension.open_threads, ...extension.canonical_facts, JSON.stringify(extension.tracker_updates)];
   if (fields.some(containsMechanicsLanguage)) throw new Error("Mechanics language detected in event extension.");
-  return extension;
+  return { ...extension, narration: normalizedNarration };
 }

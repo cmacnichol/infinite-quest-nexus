@@ -255,11 +255,17 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
       content: string;
       scope: "application" | "campaign";
       campaignId?: string;
+      compatibilityAcknowledgement?: Readonly<{ requiredShapeVersion: string; protocolIdentity: string; contentHash: string }>;
     }>) {
       const scope = input.scope === "campaign"
         ? { ownerUserId, scope: "campaign" as const, campaignId: input.campaignId! }
         : { ownerUserId, scope: "application" as const };
-      return composition.application.savePromptOverride({ ...scope, key: input.key, content: input.content });
+      return composition.application.savePromptOverride({
+        ...scope,
+        key: input.key,
+        content: input.content,
+        ...(input.compatibilityAcknowledgement === undefined ? {} : { compatibilityAcknowledgement: input.compatibilityAcknowledgement })
+      });
     },
 
     resetPromptOverride(ownerUserId: string, input: Readonly<{

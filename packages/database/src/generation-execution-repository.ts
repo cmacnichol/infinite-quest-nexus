@@ -10,6 +10,7 @@ import {
   pendingEventTriggerSchema,
   playerEventTriggerSchema,
   playerRpgStatSchema,
+  storyTurnOutputSchema,
   type CampaignTracker,
   type PlayerEventTrigger,
   type PlayerRpgStat,
@@ -32,8 +33,13 @@ import {
 import {
   buildScopedEntityCatalog,
   normalizeCampaignTrackers,
-  resolveEntityMetadata
+  resolveEntityMetadata,
+  stableStringify
 } from "../../domain/src/index.js";
+import {
+  resolveGenerationAuthoritySnapshot,
+  type GenerationBaseIdentity
+} from "./generation-authority.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { normalizeCampaignEventTriggers } from "../../domain/src/campaign-event-triggers.js";
 import { withTransaction } from "./pool.js";
@@ -63,20 +69,106 @@ export type GenerationLeaseScope = Readonly<{
   workerId: string;
 }>;
 
+/** Durable boundary between validated narration and downstream orchestration. */
+export type GenerationValidatedMainDraftCheckpoint = Readonly<{
+  version: 2;
+  ownerUserId: string;
+  campaignId: string;
+  worldVersionId: string | null;
+  baseIdentity: GenerationBaseIdentity;
+  promptProtocolVersion: string;
+  providerId: string;
+  providerModel: string;
+  /** Hash of the effective non-secret provider configuration used on the wire. */
+  providerConfigurationHash: string;
+  action: string;
+  /** Normalized original action sent to the generation workflow. */
+  originalInputHash: string;
+  /** Exact serialized request body that produced the accepted draft. Private only. */
+  requestBody: string;
+  requestPayloadHash: string;
+  draftHash: string;
+  producingAttempt: number;
+  story: StoryTurnOutput;
+  response: ProviderResult;
+  sentFactIds: readonly string[];
+}>;
+
 export type GenerationOrchestrationState = {
   roll?: PrivateRollResolution | null;
   rpgAssessmentError?: string;
   beforeEvents?: ActivatedEvent[];
   beforeTriggerError?: string;
-  afterEvents?: ActivatedEvent[];
+  afterEvents?: ActivatedEvent[] | undefined;
   afterTriggerError?: string;
   extension?: {
-    additionalText: string;
-    scratchpad?: string;
-    trackerUpdates: Array<Record<string, unknown>>;
-  };
-  extensionError?: string;
+    story: StoryTurnOutput;
+    /** Fences the exact validated extension object across lease reclaim. */
+    finalStoryHash: string;
+    producingAttempt: number;
+    producingOperation: "event_extension" | "scene_coverage_rewrite";
+    /** The exact validated main draft that this complete replacement extends. */
+    validatedMainDraftHash: string;
+    /** The serialized extension request, including its protected authority. */
+    producingRequestPayloadHash: string;
+    /** Private exact serialized extension request that produced the final story. */
+    producingRequestBody?: string;
+    providerConfigurationHash?: string;
+    /** Exact fact records rendered into that extension request. */
+    sentFactIds: readonly string[];
+  } | undefined;
+  extensionError?: string | undefined;
+  /** A durable fence for one automatic repair of a particular rejected draft. */
+  automaticRepair?: {
+    stage: "schema_repair" | "mechanics_cleanup";
+    rejectedDraftHash: string;
+    consumedAttempt: number;
+  } | undefined;
+  /** One durable, provenance-fenced rewrite allowance for rejected event fiction. */
+  eventCoverageRepair?: {
+    rejectedFinalStoryHash: string;
+    validatedMainDraftHash: string;
+    extensionFinalStoryHash: string | null;
+    extensionProducingAttempt: number | null;
+    consumedAttempt: number;
+    /** Retains the consumed before/pending-stage allowance after an immediate repair. */
+    mainRepairConsumed?: boolean;
+    repairedFinalStoryHash?: string;
+    repairedMainRequestPayloadHash?: string;
+  } | undefined;
+  validatedMainDraft?: GenerationValidatedMainDraftCheckpoint;
 };
+
+function hasValidAutomaticRepair(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const repair = value as Record<string, unknown>;
+  return (repair.stage === "schema_repair" || repair.stage === "mechanics_cleanup")
+    && typeof repair.rejectedDraftHash === "string" && repair.rejectedDraftHash.length > 0
+    && typeof repair.consumedAttempt === "number" && Number.isSafeInteger(repair.consumedAttempt)
+    && repair.consumedAttempt > 0;
+}
+
+function hasValidEventCoverageRepair(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const repair = value as Record<string, unknown>;
+  return typeof repair.rejectedFinalStoryHash === "string" && repair.rejectedFinalStoryHash.length > 0
+    && typeof repair.validatedMainDraftHash === "string" && repair.validatedMainDraftHash.length > 0
+    && (repair.extensionFinalStoryHash === null
+      || (typeof repair.extensionFinalStoryHash === "string" && repair.extensionFinalStoryHash.length > 0))
+    && (repair.extensionProducingAttempt === null
+      || (typeof repair.extensionProducingAttempt === "number"
+        && Number.isSafeInteger(repair.extensionProducingAttempt)
+        && repair.extensionProducingAttempt > 0))
+    && typeof repair.consumedAttempt === "number" && Number.isSafeInteger(repair.consumedAttempt)
+    && repair.consumedAttempt > 0
+    && (repair.mainRepairConsumed === undefined || typeof repair.mainRepairConsumed === "boolean")
+    && (repair.repairedFinalStoryHash === undefined
+      || (typeof repair.repairedFinalStoryHash === "string" && repair.repairedFinalStoryHash.length > 0))
+    && (repair.repairedMainRequestPayloadHash === undefined
+      || (typeof repair.repairedMainRequestPayloadHash === "string" && repair.repairedMainRequestPayloadHash.length > 0));
+}
 
 export type GenerationStreamingState = Record<string, unknown> & {
   provisionalSetId?: string | null;
@@ -123,6 +215,7 @@ export type GenerationExecutionPayload = {
   };
   prompt_protocol_version: string;
   prompt_snapshot: PromptSnapshot;
+  generation_base_identity: GenerationBaseIdentity;
   attempts: number;
   orchestration_private: GenerationOrchestrationState;
   streaming_segments_state: GenerationStreamingState;
@@ -182,6 +275,8 @@ export type AcceptedGenerationCommit = Readonly<{
   response: ProviderResult;
   contextFingerprint: string;
   contextDiagnostics: Record<string, unknown>;
+  /** Exact canonical-fact IDs rendered into the producing story request. */
+  sentFactIds?: readonly string[];
   chronicleRetrieval: ChronicleRetrievalAudit;
   inputs: GenerationOrchestrationInputs;
   orchestration: GenerationOrchestrationState;
@@ -204,6 +299,39 @@ export type GenerationExecutionRepository = Readonly<{
   commitAcceptedTurn(input: AcceptedGenerationCommit): Promise<{ turnId: string }>;
   markFailed(input: GenerationFailedUpdate): Promise<boolean>;
 }>;
+
+/** Reconciles one accepted turn whose provisional illustration promotion rolled back. */
+export async function reconcileNextAcceptedStreamingIllustration(
+  pool: DatabasePool,
+  illustration: IllustrationGenerationTransactionPort,
+): Promise<boolean> {
+  return withTransaction(pool, async (client) => {
+    const pending = await client.query<{
+      id: string; owner_user_id: string; campaign_id: string; result_turn_id: string; narration: string;
+    }>(
+      `SELECT j.id,j.owner_user_id,j.campaign_id,j.result_turn_id,t.narration
+         FROM generation_jobs j JOIN turns t ON t.id=j.result_turn_id AND t.owner_user_id=j.owner_user_id
+        WHERE j.status='completed' AND j.result_turn_id IS NOT NULL
+          AND j.streaming_segments_state->>'provisionalIllustrationReconciliation'='pending'
+        ORDER BY j.completed_at,j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1`
+    );
+    const job = pending.rows[0];
+    if (!job) return false;
+    const config = await illustration.loadStreamingIllustrationConfig(client, {
+      ownerUserId: job.owner_user_id, campaignId: job.campaign_id
+    });
+    await illustration.promoteProvisionalSet(client, {
+      ownerUserId: job.owner_user_id, campaignId: job.campaign_id, generationJobId: job.id, turnId: job.result_turn_id
+    }, { finalNarration: job.narration, config });
+    await client.query(
+      `UPDATE generation_jobs
+          SET streaming_segments_state = streaming_segments_state - 'provisionalIllustrationReconciliation', updated_at=now()
+        WHERE id=$1 AND owner_user_id=$2`,
+      [job.id, job.owner_user_id]
+    );
+    return true;
+  });
+}
 
 type ExecutionPayloadRow = Omit<GenerationExecutionPayload, "orchestration_inputs"> & {
   legacy_settings: Record<string, unknown>;
@@ -302,16 +430,53 @@ async function commitAcceptedTurn(
   input: AcceptedGenerationCommit
 ): Promise<{ turnId: string }> {
   const chronicleRetrieval = chronicleRetrievalAuditSchema.parse(input.chronicleRetrieval);
-  const { job, scope, story, provider, response, inputs, orchestration, collaborators } = input;
+  const { job, scope, provider, response, inputs, orchestration, collaborators } = input;
+  // The commit boundary accepts only the current protocol. Historical/import
+  // replay goes through the explicitly named Chronicle compatibility path.
+  const story = storyTurnOutputSchema.parse(input.story);
   const lease = await client.query<{ id: string }>(
     `SELECT id FROM generation_jobs
       WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status = 'committing'
+        AND lease_expires_at > now()
       FOR UPDATE`,
     [scope.jobId, scope.ownerUserId, scope.workerId]
   );
   if (!lease.rows[0]) {
     throw Object.assign(new Error("Generation lease was lost or cancelled before commit."), {
       code: "lease_lost"
+    });
+  }
+  const requestedSupersessionIds = [...new Set(story.canonical_fact_updates.flatMap((update) => update.supersedes_fact_ids))];
+  if (requestedSupersessionIds.length) {
+    const sentFactIds = new Set(input.sentFactIds ?? []);
+    if (!input.sentFactIds || requestedSupersessionIds.some((id) => !sentFactIds.has(id))) {
+      throw Object.assign(new Error("A canonical fact update referenced an ID that was not sent to the provider."), {
+        code: "invalid_fact_supersession"
+      });
+    }
+    const activeFacts = await client.query<{ id: string }>(
+      `SELECT id FROM campaign_canonical_facts
+        WHERE owner_user_id=$1 AND campaign_id=$2 AND world_version_id=$3 AND id=ANY($4::uuid[])
+          AND valid_from_turn <= $5 AND (valid_until_turn IS NULL OR valid_until_turn > $5)
+        FOR UPDATE`,
+      [job.owner_user_id, job.campaign_id, job.world_version_id, requestedSupersessionIds, job.expected_turn_number - 1]
+    );
+    const activeIds = new Set(activeFacts.rows.map((fact) => fact.id));
+    if (requestedSupersessionIds.some((id) => !activeIds.has(id))) {
+      throw Object.assign(new Error("A canonical fact update referenced an inactive or out-of-scope fact."), {
+        code: "invalid_fact_supersession"
+      });
+    }
+  }
+  const authority = await resolveGenerationAuthoritySnapshot(client, {
+    ownerUserId: job.owner_user_id,
+    campaignId: job.campaign_id,
+    operationKind: job.operation_kind,
+    expectedTurnNumber: job.expected_turn_number
+  });
+  if (!matchesGenerationBaseIdentity(job.generation_base_identity, authority.baseIdentity)) {
+    throw Object.assign(new Error("Campaign authority changed before this generation could commit."), {
+      code: "stale_campaign"
     });
   }
   const campaignResult = await client.query<{
@@ -377,9 +542,25 @@ async function commitAcceptedTurn(
     ? job.base_state_private.trackers
     : stateResult.rows[0]?.trackers;
   const trackers = mergedTrackers(trackerBase, story.tracker_updates);
-  const allEvents = [...(orchestration.beforeEvents || []), ...(orchestration.afterEvents || [])];
-  const newlyActivated = allEvents.filter((event) => event.sourceTurn === job.expected_turn_number);
-  const eventTriggers = applyTriggerHits(inputs.eventTriggers, newlyActivated, new Date().toISOString());
+  if (orchestration.extension && (
+      orchestration.extension.finalStoryHash !== stableStringify(orchestration.extension.story)
+      || stableStringify(story) !== orchestration.extension.finalStoryHash
+      || !orchestration.validatedMainDraft
+      || orchestration.extension.validatedMainDraftHash !== orchestration.validatedMainDraft.draftHash
+      || !orchestration.extension.producingRequestPayloadHash
+      || !Array.isArray(orchestration.extension.sentFactIds)
+      || stableStringify([...(input.sentFactIds ?? [])].sort())
+        !== stableStringify([...orchestration.extension.sentFactIds].sort()))) {
+    throw Object.assign(new Error("The persisted final event story no longer matches its validated producing request."), {
+      code: "generation_checkpoint_incompatible"
+    });
+  }
+  const fulfilledEvents = [
+    ...(orchestration.beforeEvents || []),
+    // An after-event is fulfilled only when its immediate fiction was accepted.
+    ...((orchestration.extension ? orchestration.afterEvents || [] : []).filter((event) => event.addTextAfter))
+  ];
+  const eventTriggers = applyTriggerHits(inputs.eventTriggers, fulfilledEvents, new Date().toISOString());
   const pendingEventTriggers = (orchestration.afterEvents || [])
     .filter((event) => !event.addTextAfter || Boolean(orchestration.extensionError))
     .map(({ addTextAfter: _addTextAfter, ...event }) => event);
@@ -552,6 +733,15 @@ async function commitAcceptedTurn(
   } catch (error) {
     await client.query("ROLLBACK TO SAVEPOINT accepted_turn_illustration_enqueue");
     await client.query("RELEASE SAVEPOINT accepted_turn_illustration_enqueue");
+    if (job.streaming_segments_state?.provisionalSetId) {
+      await client.query(
+        `UPDATE generation_jobs
+            SET streaming_segments_state = streaming_segments_state
+              || '{"provisionalIllustrationReconciliation":"pending"}'::jsonb
+          WHERE id=$1 AND owner_user_id=$2`,
+        [job.id, job.owner_user_id]
+      );
+    }
     input.onIllustrationEnqueueError(error, turnId);
   }
   await collaborators.memory.enqueueEmbeddingReindex(client, {
@@ -564,6 +754,7 @@ async function commitAcceptedTurn(
        provider_finish_reason = $5, completed_at = now(), updated_at = now(), lease_owner = NULL, lease_expires_at = NULL,
        partial_output = NULL, error_code = NULL, error_message = NULL
      WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $6 AND status = 'committing'
+       AND lease_expires_at > now()
      RETURNING id`,
     [job.id, job.owner_user_id, turnId, response.responseId || null,
       response.finishReason || null, scope.workerId]
@@ -578,6 +769,13 @@ async function commitAcceptedTurn(
 
 function changed(result: { rows: readonly unknown[] }): boolean {
   return result.rows.length === 1;
+}
+
+function matchesGenerationBaseIdentity(
+  stored: GenerationBaseIdentity,
+  resolved: GenerationBaseIdentity
+): boolean {
+  return stableStringify(stored) === stableStringify(resolved);
 }
 
 export function createPostgresGenerationExecutionRepository(
@@ -614,12 +812,14 @@ export function createPostgresGenerationExecutionRepository(
     },
 
     async loadExecutionPayload(request) {
-      const result = await pool.query<ExecutionPayloadRow>(
+      return withTransaction(pool, async (client) => {
+        const result = await client.query<ExecutionPayloadRow>(
         `SELECT j.id, j.owner_user_id, j.campaign_id, j.provider_profile_id,
                 j.expected_turn_number, j.operation_kind, j.replacement_turn_id,
                 j.base_turn_number, j.base_state_private, j.base_scratchpad_safe_for_prompt,
                 j.action, j.requested_input_mode, j.resolved_input_mode, j.input_mode_source,
                 j.requested_model, j.context_options, j.prompt_protocol_version, j.prompt_snapshot,
+                j.generation_base_identity,
                 j.attempts, j.orchestration_private, j.streaming_segments_state,
                 c.world_version_id, c.legacy_settings, c.character_profile, c.character_snapshot,
                 cs.rpg_stats, cs.event_triggers, cs.pending_event_triggers,
@@ -633,11 +833,45 @@ export function createPostgresGenerationExecutionRepository(
               ORDER BY turn_number DESC LIMIT 1
            ) latest ON true
           WHERE j.id = $1 AND j.owner_user_id = $2
-            AND j.lease_owner = $3 AND j.status = 'assessing'`,
+            AND j.lease_owner = $3 AND j.status = 'assessing' AND j.lease_expires_at > now()
+          FOR UPDATE OF j`,
         [request.claim.jobId, request.claim.ownerUserId, request.workerId]
       );
       const row = result.rows[0];
       if (!row) return null;
+      if (!hasValidAutomaticRepair(row.orchestration_private?.automaticRepair)
+          || !hasValidEventCoverageRepair(row.orchestration_private?.eventCoverageRepair)) {
+        await client.query(
+          `UPDATE generation_jobs
+              SET status = 'recoverable', error_code = 'generation_checkpoint_incompatible',
+                  error_message = 'Saved generation recovery state is invalid.',
+                  recovery_metadata = recovery_metadata || $4::jsonb,
+                  lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+            WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
+              AND status = 'assessing' AND lease_expires_at > now()`,
+          [row.id, row.owner_user_id, request.workerId, json({ reason: "orchestration_repair_invalid" })]
+        );
+        return null;
+      }
+      const authority = await resolveGenerationAuthoritySnapshot(client, {
+        ownerUserId: row.owner_user_id,
+        campaignId: row.campaign_id,
+        operationKind: row.operation_kind,
+        expectedTurnNumber: row.expected_turn_number
+      });
+      if (!matchesGenerationBaseIdentity(row.generation_base_identity, authority.baseIdentity)) {
+        await client.query(
+          `UPDATE generation_jobs
+              SET status = 'recoverable', error_code = 'generation_authority_stale',
+                  error_message = 'Campaign changed before generation could start.',
+                  recovery_metadata = recovery_metadata || $4::jsonb,
+                  lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+            WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
+              AND status = 'assessing' AND lease_expires_at > now()`,
+          [row.id, row.owner_user_id, request.workerId, json({ reason: "generation_authority_stale" })]
+        );
+        return null;
+      }
       const {
         legacy_settings: _legacySettings,
         rpg_stats: _rpgStats,
@@ -649,6 +883,7 @@ export function createPostgresGenerationExecutionRepository(
         ...payload
       } = row;
       return { ...payload, orchestration_inputs: orchestrationInputs(row) };
+      });
     },
 
     async renewLease(scope, leaseSeconds) {
@@ -657,6 +892,7 @@ export function createPostgresGenerationExecutionRepository(
             SET lease_expires_at = now() + ($4::text || ' seconds')::interval, updated_at = now()
           WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
             AND status IN ('assessing','generating','validating','committing')
+            AND lease_expires_at > now()
           RETURNING id`,
         [scope.jobId, scope.ownerUserId, scope.workerId, leaseSeconds]
       ));
@@ -666,6 +902,7 @@ export function createPostgresGenerationExecutionRepository(
       return changed(await pool.query<{ id: string }>(
         `UPDATE generation_jobs SET status = 'generating', updated_at = now()
           WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status = 'assessing'
+            AND lease_expires_at > now()
           RETURNING id`,
         [scope.jobId, scope.ownerUserId, scope.workerId]
       ));
@@ -676,6 +913,7 @@ export function createPostgresGenerationExecutionRepository(
         `UPDATE generation_jobs SET orchestration_private = $4, updated_at = now()
           WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
             AND status IN ('assessing','generating','validating','committing')
+            AND lease_expires_at > now()
           RETURNING id`,
         [scope.jobId, scope.ownerUserId, scope.workerId, json(value)]
       ));
@@ -685,6 +923,7 @@ export function createPostgresGenerationExecutionRepository(
       return changed(await pool.query<{ id: string }>(
         `UPDATE generation_jobs SET partial_output = $4, updated_at = now()
           WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status = 'generating'
+            AND lease_expires_at > now()
           RETURNING id`,
         [scope.jobId, scope.ownerUserId, scope.workerId, narration]
       ));
@@ -694,6 +933,7 @@ export function createPostgresGenerationExecutionRepository(
       return changed(await pool.query<{ id: string }>(
         `UPDATE generation_jobs SET streaming_segments_state = $4, updated_at = now()
           WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status = 'generating'
+            AND lease_expires_at > now()
           RETURNING id`,
         [scope.jobId, scope.ownerUserId, scope.workerId, json(value)]
       ));
@@ -705,6 +945,7 @@ export function createPostgresGenerationExecutionRepository(
            SELECT id FROM generation_jobs
             WHERE id = $2 AND owner_user_id = $1 AND lease_owner = $11
               AND status IN ('assessing','generating','validating','committing')
+              AND lease_expires_at > now()
             FOR UPDATE
          )
          INSERT INTO generation_attempts (
@@ -740,6 +981,7 @@ export function createPostgresGenerationExecutionRepository(
            lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
          WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
            AND status IN ('assessing','generating','validating','committing')
+           AND lease_expires_at > now()
          RETURNING id`,
         [input.jobId, input.ownerUserId, input.workerId, input.providerResponseId,
           input.providerFinishReason, input.errorCode, input.errorMessage,
@@ -751,6 +993,7 @@ export function createPostgresGenerationExecutionRepository(
       return changed(await pool.query<{ id: string }>(
         `UPDATE generation_jobs SET status = 'validating', updated_at = now()
           WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status = 'generating'
+            AND lease_expires_at > now()
           RETURNING id`,
         [scope.jobId, scope.ownerUserId, scope.workerId]
       ));
@@ -760,6 +1003,7 @@ export function createPostgresGenerationExecutionRepository(
       return changed(await pool.query<{ id: string }>(
         `UPDATE generation_jobs SET status = 'committing', updated_at = now()
           WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status = 'validating'
+            AND lease_expires_at > now()
           RETURNING id`,
         [scope.jobId, scope.ownerUserId, scope.workerId]
       ));
@@ -776,6 +1020,7 @@ export function createPostgresGenerationExecutionRepository(
            lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
          WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
            AND status IN ('assessing','generating','validating','committing')
+           AND lease_expires_at > now()
          RETURNING id`,
         [input.jobId, input.ownerUserId, input.workerId, input.errorCode,
           input.errorMessage, json(input.recoveryMetadata)]

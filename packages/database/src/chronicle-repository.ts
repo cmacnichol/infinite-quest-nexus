@@ -18,6 +18,7 @@ import type {
 import { MEMORY_PUBLIC_FAILURE_MESSAGE } from "../../application/src/memory/index.js";
 import { requireCampaignWorldVersionScope } from "../../application/src/memory/helpers.js";
 import { toSafeProviderConfiguration } from "../../application/src/providers/index.js";
+import { MAX_CONTINUITY_OPEN_THREADS } from "../../contracts/src/story-prompt.js";
 import {
   CHRONICLE_RETRIEVAL_VERSION,
   chronicleHealthSchema,
@@ -57,6 +58,11 @@ import {
   buildPostgresChronicleContextPreview,
   loadPostgresChronicleContextMetrics
 } from "./chronicle-context-repository.js";
+import {
+  loadPostgresChronicleGenerationAuthorityContext,
+  loadPostgresChronicleGenerationCandidatesContext,
+  loadPostgresChronicleGenerationContext
+} from "./chronicle-generation-context.js";
 
 type ChronicleJobRow = Readonly<{
   id: string;
@@ -418,13 +424,14 @@ async function storeDerivedMemories(
       characterSnapshot: campaign.character_snapshot,
       characterProfile: campaign.character_profile
     });
+  const hasContinuitySummary = scope.derived.continuitySummary !== undefined;
   const summary = sanitizeChronicleFictionString(scope.derived.continuitySummary, 20_000);
-  const threads = sanitizeChronicleMemoryLines(scope.derived.openThreads);
+  const threads = sanitizeChronicleMemoryLines(scope.derived.openThreads, MAX_CONTINUITY_OPEN_THREADS);
   await projectCanonicalFacts(client, {
     ...scope,
     derived: { ...scope.derived, entityCatalog }
   });
-  if (summary) {
+  if (hasContinuitySummary) {
     const entities = resolveEntityMetadata(summary, entityCatalog);
     await client.query(
       `INSERT INTO chronicle_memories (
@@ -440,9 +447,9 @@ async function storeDerivedMemories(
          embedding_updated_at = NULL, embedding_provider_fingerprint = NULL, updated_at = now()`,
       [scope.ownerUserId, scope.campaignId, scope.worldVersionId, scope.ordinal, summary, estimateTokens(summary),
         entities.entities, entities.entityIds,
-        json({ throughTurn: scope.ordinal, generatedFromAcceptedTurn: true })]
+        json({ throughTurn: scope.ordinal, clearsPriorContinuity: !summary, generatedFromAcceptedTurn: true })]
     );
-    if (scope.ordinal % 8 === 0) {
+    if (summary && scope.ordinal % 8 === 0) {
       await client.query(
         `INSERT INTO summary_checkpoints (owner_user_id, campaign_id, through_turn, summary_kind, content, token_estimate)
          VALUES ($1,$2,$3,'campaign_continuity',$4,$5)`,
@@ -834,8 +841,33 @@ export function createPostgresChronicleGenerationTransactionPort(
         return withTransaction(pool, (client) => buildPostgresChronicleContextPreview(client, scope, dependencies));
       }
       return buildPostgresChronicleContextPreview(transactionClient(database), scope, dependencies);
+    },
+    async loadGenerationContext(database, scope) {
+      const pool = transactionPool(database);
+      if (pool) {
+        const authorityContext = await withTransaction(
+          pool,
+          (client) => loadPostgresChronicleGenerationAuthorityContext(client, scope)
+        );
+        const retrievalClient = await pool.connect();
+        try {
+          return await loadPostgresChronicleGenerationCandidatesContext(
+            retrievalClient,
+            scope,
+            authorityContext,
+            dependencies,
+            { useSavepoints: false }
+          );
+        } finally {
+          retrievalClient.release();
+        }
+      }
+      // This client belongs to an enclosing caller transaction. Do not start,
+      // commit, or extend that transaction with provider I/O; the caller gets
+      // its locked authority snapshot and no optional derived retrieval.
+      return loadPostgresChronicleGenerationContext(transactionClient(database), scope);
     }
-  } as MemoryGenerationTransactionPort;
+  } satisfies MemoryGenerationTransactionPort;
 }
 
 async function requireCampaign(

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { buildCanonicalFactProjection } from "./canonical-facts.js";
+import { buildCanonicalFactProjection, canonicalFactDeduplicationKey } from "./canonical-facts.js";
 import {
   buildScopedEntityCatalog,
   resolveEntityMetadata,
@@ -176,13 +176,19 @@ export function buildCanonicalChronicleFacts(input: ChronicleCanonicalFactInput)
     const content = sanitizeChronicleFictionString(update.content, 4000);
     return content ? [{ content, supersedesFactIds: [...new Set(update.supersedesFactIds ?? [])].slice(0, 100) }] : [];
   });
-  const source = structured.length
-    ? structured
-    : sanitizeChronicleMemoryLines(input.canonicalFacts).map((content) => ({ content, supersedesFactIds: [] as string[] }));
+  const source = [
+    ...structured,
+    ...sanitizeChronicleMemoryLines(input.canonicalFacts).map((content) => ({ content, supersedesFactIds: [] as string[] }))
+  ];
   const updates = new Map<string, { content: string; supersedesFactIds: string[] }>();
   for (const update of source) {
-    const key = update.content.normalize("NFKC").replace(/[\s\u00a0]+/gu, " ").trim().toLocaleLowerCase("en-US");
-    if (!updates.has(key)) updates.set(key, update);
+    const key = canonicalFactDeduplicationKey(update.content);
+    const existing = updates.get(key);
+    if (!existing) {
+      updates.set(key, update);
+      continue;
+    }
+    existing.supersedesFactIds = [...new Set([...existing.supersedesFactIds, ...update.supersedesFactIds])];
   }
   const ordered = [...updates.values()];
   return buildCanonicalFactProjection(ordered.map((update, factIndex) => ({

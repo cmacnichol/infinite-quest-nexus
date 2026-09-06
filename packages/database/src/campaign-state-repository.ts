@@ -10,6 +10,7 @@ import {
   PUBLIC_GENERATION_FAILURE_MESSAGE,
   type CampaignRuntimeStateContent
 } from "../../contracts/src/generation.js";
+import { projectSafeGenerationDiagnostic } from "../../contracts/src/story-prompt.js";
 import { storyContextBudgetTokensSchema } from "../../contracts/src/story-settings.js";
 import { z } from "zod";
 import { normalizeCampaignEventTriggers } from "../../domain/src/campaign-event-triggers.js";
@@ -1498,7 +1499,7 @@ type CampaignSyncRow = {
   activeTurnNumber: number;
   worldVersionId: string;
   storyLengthProfile: "brief" | "standard" | "long" | "extended";
-  storyContextBudgetTokens: 32_000 | 64_000 | 128_000 | 256_000 | 1_000_000;
+  storyContextBudgetTokens: 32_000 | 64_000 | 128_000 | 256_000 | 1_000_000 | 2_000_000 | 4_000_000;
   turnControlStyle: "action_only" | "flexible_auto" | "flexible_action" | "flexible_scene";
   updatedAt: Date | string;
   selectedCharacterId: string | null;
@@ -1529,6 +1530,7 @@ type CampaignSyncRow = {
   recoveryAttempts: number | null;
   recoveryResultTurnId: string | null;
   recoveryReplacementTurnId: string | null;
+  recoveryMetadata: Record<string, unknown> | null;
   recoveryResultIsRecent: boolean | null;
   latestTurnId: string | null;
   latestTurnNumber: number | null;
@@ -1566,6 +1568,7 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
                 recovery.expected_turn_number AS "recoveryExpectedTurnNumber", recovery.attempts AS "recoveryAttempts",
                 recovery.result_turn_id AS "recoveryResultTurnId",
                 recovery.replacement_turn_id AS "recoveryReplacementTurnId",
+                recovery.recovery_metadata AS "recoveryMetadata",
                 latest_turn.id AS "latestTurnId", latest_turn.turn_number AS "latestTurnNumber",
                 (recovery.result_turn_id IS NOT NULL AND EXISTS (
                   SELECT 1 FROM (
@@ -1589,7 +1592,7 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
            ) pending ON true
            LEFT JOIN LATERAL (
              SELECT id, status, operation_kind, expected_turn_number, attempts,
-                    result_turn_id, replacement_turn_id
+                    result_turn_id, replacement_turn_id, recovery_metadata
                FROM generation_jobs
               WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id
                 AND status IN ('recoverable','failed','completed')
@@ -1689,6 +1692,7 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
           expectedTurnNumber: row.recoveryExpectedTurnNumber,
           attempts: row.recoveryAttempts,
           ...publicGenerationError(row.recoveryStatus),
+          diagnostic: projectSafeGenerationDiagnostic(objectValue(row.recoveryMetadata).diagnostic),
           resultTurnId: row.recoveryResultTurnId
         }
         : null;

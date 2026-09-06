@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
+import { promptCompatibilityRequirement } from "../../packages/contracts/src/prompt-library.js";
 import { worldContentSchema } from "../../packages/contracts/src/world-library.js";
 import { createCampaign, createWorld, publishWorld } from "../helpers/memory-aware-services.js";
 import {
@@ -47,15 +49,29 @@ integration("Prompt Library persistence", () => {
   });
 
   it("resolves campaign override, application override, and shipped default in order", async () => {
-    await savePromptOverride(pool, { key: "story_system", scope: "application", content: "Application story prompt." });
+    const requiredCompatibility = promptCompatibilityRequirement("story_system")!;
+    const compatibilityAcknowledgement = (content: string) => ({
+      requiredShapeVersion: requiredCompatibility.requiredShapeVersion,
+      protocolIdentity: requiredCompatibility.protocolIdentity,
+      contentHash: createHash("sha256").update(content).digest("hex")
+    });
+    const applicationContent = "Application story prompt.";
+    await savePromptOverride(pool, {
+      key: "story_system",
+      scope: "application",
+      content: applicationContent,
+      compatibilityAcknowledgement: compatibilityAcknowledgement(applicationContent)
+    });
     expect((await loadPromptSnapshotForTest(pool, ownerUserId, campaignId)).story_system)
       .toMatchObject({ content: "Application story prompt.", source: "application" });
 
+    const campaignContent = "Campaign story prompt.";
     await savePromptOverride(pool, {
       key: "story_system",
       scope: "campaign",
       campaignId,
-      content: "Campaign story prompt."
+      content: campaignContent,
+      compatibilityAcknowledgement: compatibilityAcknowledgement(campaignContent)
     });
     expect((await loadPromptSnapshotForTest(pool, ownerUserId, campaignId)).story_system)
       .toMatchObject({ content: "Campaign story prompt.", source: "campaign" });

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   buildSceneCoveragePrompt,
+  buildEventCoveragePrompt,
+  parseEventCoverageOutput,
   buildTurnIntentPrompt,
   parseSceneCoverageOutput,
   parseTurnIntentOutput,
@@ -44,5 +46,21 @@ describe("turn input intent", () => {
     const result = parseSceneCoverageOutput('{"covered":false,"missing_required_beats":["bell breaks"],"contradictions":["bell remains intact"]}');
     expect(result.covered).toBe(false);
     expect(sceneCoverageRewriteInstruction(result.missing_required_beats, result.contradictions)).toContain("bell remains intact");
+  });
+
+  it("rejects omitted, duplicate, and foreign event coverage IDs", () => {
+    const prompt = buildEventCoveragePrompt([{ id: "bell", fiction: "A bell rings." }, { id: "door", fiction: "A door opens." }], "A bell rings and the door opens.");
+    expect(prompt).toContain("required_events");
+    expect(() => parseEventCoverageOutput('{"event_results":[{"event_id":"bell","covered":true,"missing_required_beats":[],"contradictions":[]}]}', ["bell", "door"]))
+      .toThrow(/every expected event ID/);
+    expect(() => parseEventCoverageOutput('{"event_results":[{"event_id":"bell","covered":true,"missing_required_beats":[],"contradictions":[]},{"event_id":"bell","covered":true,"missing_required_beats":[],"contradictions":[]}]}', ["bell", "door"]))
+      .toThrow(/every expected event ID/);
+    expect(() => parseEventCoverageOutput('{"event_results":[{"event_id":"bell","covered":true,"missing_required_beats":[],"contradictions":[]},{"event_id":"foreign","covered":true,"missing_required_beats":[],"contradictions":[]}]}', ["bell", "door"]))
+      .toThrow(/every expected event ID/);
+    expect(parseEventCoverageOutput('{"event_results":[{"event_id":"bell","covered":true,"missing_required_beats":[],"contradictions":[]},{"event_id":"door","covered":true,"missing_required_beats":[],"contradictions":[]}]}', ["bell", "door"]).covered).toBe(true);
+    expect(parseEventCoverageOutput('{"event_results":[{"event_id":"bell","covered":true,"missing_required_beats":["bell absent"],"contradictions":[]},{"event_id":"door","covered":true,"missing_required_beats":[],"contradictions":[]}]}', ["bell", "door"]).covered).toBe(false);
+    expect(parseEventCoverageOutput('{"event_results":[{"event_id":"bell","covered":true,"missing_required_beats":[],"contradictions":["bell is silent"]},{"event_id":"door","covered":true,"missing_required_beats":[],"contradictions":[]}]}', ["bell", "door"]).covered).toBe(false);
+    expect(() => parseEventCoverageOutput('{"event_results":[]}', ["bell"]))
+      .toThrow(/every expected event ID/);
   });
 });

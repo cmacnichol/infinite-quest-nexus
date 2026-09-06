@@ -144,6 +144,38 @@ export type MemoryGenerationContextPreviewScope = CampaignWorldVersionMemoryScop
   }>;
 }>;
 
+/** Private authority read for provider work; no HTTP/API adapter may expose it. */
+export type MemoryGenerationAuthorityScope = CampaignWorldVersionMemoryScope & Readonly<{
+  operationKind: "append" | "replace_latest";
+  expectedTurnNumber: number;
+  query: string;
+  /**
+   * Runtime-calculated provider-safe allowance for optional Chronicle
+   * retrieval. Public previews deliberately omit it and retain calibration.
+   */
+  retrievalBudgetTokens?: number;
+  expectedBaseIdentity?: Readonly<{
+    operationKind: "append" | "replace_latest";
+    expectedTurnNumber: number;
+    baseTurnNumber: number;
+    campaignActiveTurnNumber: number;
+    campaignStateRevision: number;
+    stateEditRevision: number | null;
+    narrationCorrectionRevision: number | null;
+    baseTurnId: string | null;
+    stateFingerprint: string;
+    narrationFingerprint: string | null;
+  }>;
+}>;
+
+export type MemoryGenerationAuthorityContext = Readonly<{
+  authority: Readonly<Record<string, unknown>>;
+  candidates: readonly Readonly<Record<string, unknown>>[];
+  baseIdentity: Readonly<Record<string, unknown>>;
+  /** Retrieval provenance belongs to the private authority read, never a separate preview switch. */
+  chronicleRetrieval?: ChronicleRetrievalAudit;
+}>;
+
 export type MemoryWorkerClaimRequest = Readonly<{
   workerId: string;
   leaseSeconds: number;
@@ -288,6 +320,8 @@ export type ChronicleChunkBatchCommit = Readonly<{
 export type MemoryContextPreviewRequest = MemoryContextQuery & Readonly<{
   /** API preview is pinned to a world-version even when campaign version later changes. */
   throughTurnNumber?: number;
+  /** Private generation-only candidate-pool allowance; public previews omit it. */
+  retrievalBudgetTokens?: number;
 }>;
 
 export type MemoryEmbeddingConfigInput = CampaignEmbeddingConfig;

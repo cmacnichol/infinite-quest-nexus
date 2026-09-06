@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { loadCurrentContinuityCorrection } from "../../packages/database/src/campaign-continuity-repository.js";
+import {
+  loadCurrentContinuityCorrection,
+  materializeGenerationContinuity
+} from "../../packages/database/src/campaign-continuity-repository.js";
 import type { DatabaseClient } from "../../packages/database/src/pool.js";
 
 const scope = {
@@ -15,6 +18,20 @@ function clientReturning(rows: readonly Record<string, unknown>[]): DatabaseClie
 }
 
 describe("loadCurrentContinuityCorrection", () => {
+  it("materializes persisted turn facts as editable canonical facts", () => {
+    expect(materializeGenerationContinuity({
+      continuitySummary: "The keeper is dead.",
+      scratchpad: "late password: moonfall",
+      openThreads: ["Bury the keeper."],
+      canonicalFacts: ["The keeper died defending the gate."]
+    })).toEqual({
+      continuitySummary: "The keeper is dead.",
+      scratchpad: "late password: moonfall",
+      openThreads: ["Bury the keeper."],
+      canonicalFacts: [{ id: null, content: "The keeper died defending the gate." }],
+      trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: []
+    });
+  });
   it("returns the highest revision at the exact requested base turn, preserving intentional empties", async () => {
     const client = clientReturning([{
       state_snapshot_private: {
@@ -29,7 +46,11 @@ describe("loadCurrentContinuityCorrection", () => {
       continuitySummary: "The keeper is alive.",
       openThreads: [],
       canonicalFacts: [],
-      scratchpad: ""
+      scratchpad: "",
+      trackers: [],
+      rpgStats: [],
+      eventTriggers: [],
+      pendingEventTriggers: []
     });
 
     expect(client.query).toHaveBeenCalledWith(expect.stringContaining("effective_turn_number = $4"), [

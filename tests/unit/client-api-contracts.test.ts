@@ -456,7 +456,8 @@ describe("client API response contracts", () => {
       partialOutput: "raw provider response",
       partialNarration: "Sanitized narration",
       errorCode: null,
-      errorMessage: null
+      errorMessage: null,
+      diagnostic: null
     };
     const parsed = generationStreamSnapshotSchema.parse(snapshot);
 
@@ -471,10 +472,56 @@ describe("client API response contracts", () => {
       attempts: 1,
       partialNarration: "Sanitized narration",
       errorCode: null,
-      errorMessage: null
+      errorMessage: null,
+      diagnostic: null
     });
     expect(generationStreamSnapshotSchema.safeParse({ ...snapshot, expectedTurnNumber: "3" }).success).toBe(false);
     expect(generationStreamSnapshotSchema.safeParse({ ...snapshot, status: "mystery" }).success).toBe(false);
+  });
+
+  it("carries the same allowlisted diagnostic through polling, SSE, and recovery contracts", () => {
+    const diagnostic = {
+      code: "context_budget_exceeded",
+      operation: "story_generation",
+      action: "adjust_context",
+      requiredTokens: 33000,
+      availableTokens: 32000
+    } as const;
+    const common = {
+      id: JOB_ID,
+      campaignId: CAMPAIGN_ID,
+      expectedTurnNumber: 3,
+      action: "Open the dome.",
+      requestedInputMode: "action" as const,
+      resolvedInputMode: "action" as const,
+      inputModeSource: "explicit" as const,
+      operationKind: "append" as const,
+      replacementTurnId: null,
+      status: "recoverable" as const,
+      attempts: 1,
+      resultTurnId: null,
+      errorCode: "generation_failed" as const,
+      errorMessage: "Generation could not be completed."
+    };
+
+    expect(generationJobSnapshotSchema.parse({ ...common, createdAt: TIMESTAMP, updatedAt: TIMESTAMP, diagnostic }).diagnostic)
+      .toEqual(diagnostic);
+    expect(generationStreamSnapshotSchema.parse({ ...common, partialNarration: null, diagnostic }).diagnostic)
+      .toEqual(diagnostic);
+    expect(generationRecoverySchema.parse({
+      id: JOB_ID,
+      status: "recoverable",
+      expectedTurnNumber: 3,
+      attempts: 1,
+      errorCode: "generation_failed",
+      errorMessage: "Generation could not be completed.",
+      resultTurnId: null,
+      operationKind: "append",
+      replacementTurnId: null,
+      diagnostic
+    }).diagnostic).toEqual(diagnostic);
+    expect(generationJobSnapshotSchema.safeParse({ ...common, createdAt: TIMESTAMP, updatedAt: TIMESTAMP, diagnostic: { ...diagnostic, scratchpad: "PRIVATE_CANARY" } }).success)
+      .toBe(false);
   });
 
   it("exports the full polling snapshot while excluding raw partial output", () => {

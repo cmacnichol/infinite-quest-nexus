@@ -275,13 +275,18 @@ async function prewriteAuthorityRow(
   client: DatabaseClient,
   operationId: string,
 ): Promise<PrewriteAuthorityRow | null> {
-  const selected = await client.query<PrewriteAuthorityRow>(
-    `SELECT relative_path,device_id,file_id,authority_state
-       FROM durable_filesystem_prewrite_nodes
-      WHERE operation_id=$1`,
-    [operationId],
-  );
-  return selected.rows[0] ?? null;
+  try {
+    const selected = await client.query<PrewriteAuthorityRow>(
+      `SELECT relative_path,device_id,file_id,authority_state
+         FROM durable_filesystem_prewrite_nodes
+        WHERE operation_id=$1`,
+      [operationId],
+    );
+    return selected.rows[0] ?? null;
+  } catch (error) {
+    if ((error as { code?: unknown }).code === "42P01") return null;
+    throw error;
+  }
 }
 
 async function candidateByHash(

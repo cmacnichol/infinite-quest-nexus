@@ -98,6 +98,7 @@ export async function savePromptOverride(
     scope: "application" | "campaign";
     campaignId?: string;
     content: string;
+    compatibilityAcknowledgement?: Parameters<ReturnType<typeof createPromptRepository>["savePromptOverride"]>[0]["compatibilityAcknowledgement"];
   }>,
 ) {
   const ownerUserId = await initialOwnerId(pool);
@@ -105,6 +106,7 @@ export async function savePromptOverride(
     ownerUserId,
     key: request.key,
     content: request.content,
+    ...(request.compatibilityAcknowledgement === undefined ? {} : { compatibilityAcknowledgement: request.compatibilityAcknowledgement }),
     ...(request.scope === "campaign" ? { scope: "campaign" as const, campaignId: request.campaignId! } : { scope: "application" as const }),
   });
 }

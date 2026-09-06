@@ -10,9 +10,10 @@ import {
   type ChronicleRetrievalAudit,
   type CompressionLevel
 } from "../../contracts/src/memory.js";
-import { loadCurrentContinuityCorrection } from "./campaign-continuity-repository.js";
 type RetrievalDiagnosticMode = "production" | "shadow";
 const CHRONICLE_TELEMETRY_CANDIDATE_LIMIT = 1_000;
+const GENERATION_RETRIEVAL_BUDGET_STEP_TOKENS = 32_000;
+const MAX_GENERATION_RETRIEVAL_BUDGET_TOKENS = 4_000_000;
 import {
   buildChronicleEntityCatalog,
   CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
@@ -45,7 +46,8 @@ import {
   fuseChronicleRanks,
   type ChronicleRankCandidate,
   type ChronicleRankInput,
-  type ChronicleRankSignal
+  type ChronicleRankSignal,
+  type ChronicleProductionRankFusionProfile
 } from "../../domain/src/chronicle-rank-fusion.js";
 import { CHRONICLE_RETRIEVAL_PROFILE_V2 } from "../../domain/src/generated/chronicle-retrieval-profile-v2.js";
 import { estimateTokens, stableStringify, truncateAtBoundary } from "../../domain/src/text.js";
@@ -124,6 +126,22 @@ type ContextMemoryRow = Readonly<{
   relevance: number;
 };
 
+/** Private bounded full-record retrieval for provider generation. */
+export type ChronicleGenerationCandidate = Readonly<{
+  id: string;
+  turnId: string | null;
+  ordinal: number;
+  kind: ContextMemoryRow["memory_kind"];
+  content: string;
+  tokenEstimate: number;
+  rank: number;
+}>;
+
+export type ChronicleGenerationCandidateResult = Readonly<{
+  candidates: readonly ChronicleGenerationCandidate[];
+  chronicleRetrieval: ChronicleRetrievalAudit;
+}>;
+
 type ChunkCandidateRow = Readonly<{
   candidate_id: string;
   parent_memory_id: string;
@@ -185,6 +203,20 @@ type RetrievalExecution = Readonly<{
   costIds: readonly string[];
   auditTrace: ChronicleRetrievalAuditTrace;
   telemetryCandidates?: readonly ChronicleRetrievalCandidate[];
+}>;
+
+type ChronicleRetrievalStage = Readonly<{
+  campaign: ContextCampaignRow;
+  currentContinuity: CurrentContinuity | null;
+  expandedQuery: string;
+  memories: ContextMemoryRow[];
+  selectedParentContent: ReadonlyMap<string, string> | null;
+  retrieval: Record<string, unknown>;
+  chronicleRetrieval: ChronicleRetrievalAudit;
+  config: EmbeddingConfigRow | undefined;
+  productionImplementation: RetrievalExecution["implementation"];
+  productionExecution: RetrievalExecution;
+  retrievalExecutions: RetrievalExecution[];
 }>;
 
 type ContextMetricRow = Readonly<{
@@ -351,12 +383,56 @@ async function loadContextCampaign(
   };
 }
 
+export function generationChronicleRetrievalLimits(retrievalBudgetTokens: number | undefined): Readonly<{
+  perSignal: number;
+  maximumParents: number;
+  maximumParentsPerTurn: number;
+  candidatePool: number;
+  historicalCanonicalFacts: number;
+  canonicalCandidates: number;
+  turnSequenceCoverage: number;
+  turnLexicalCandidates: number;
+  entityCandidates: number;
+}> {
+  const safeBudget = Number.isFinite(retrievalBudgetTokens) && Number(retrievalBudgetTokens) > 0
+    ? Math.min(MAX_GENERATION_RETRIEVAL_BUDGET_TOKENS, Math.floor(Number(retrievalBudgetTokens)))
+    : GENERATION_RETRIEVAL_BUDGET_STEP_TOKENS;
+  const scale = Math.max(1, Math.ceil(safeBudget / GENERATION_RETRIEVAL_BUDGET_STEP_TOKENS));
+  return {
+    perSignal: 16 * scale,
+    maximumParents: 16 * scale,
+    maximumParentsPerTurn: 2 * scale,
+    candidatePool: 512 * scale,
+    historicalCanonicalFacts: 256 * scale,
+    canonicalCandidates: 64 * scale,
+    turnSequenceCoverage: 8 * scale,
+    turnLexicalCandidates: 96 * scale,
+    entityCandidates: 64 * scale
+  };
+}
+
+function generationRankFusionProfile(
+  profile: ChronicleProductionRankFusionProfile,
+  limits: ReturnType<typeof generationChronicleRetrievalLimits>,
+): ChronicleProductionRankFusionProfile {
+  return {
+    ...profile,
+    candidateLimits: { ...profile.candidateLimits, perSignal: limits.perSignal },
+    diversityPolicy: {
+      ...profile.diversityPolicy,
+      maximumParents: limits.maximumParents,
+      maximumParentsPerTurn: limits.maximumParentsPerTurn
+    }
+  };
+}
+
 async function loadContextMemories(
   client: DatabaseClient,
   scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
   query: string,
   queryEntityIds: string[],
 ): Promise<ContextMemoryRow[]> {
+  const limits = generationChronicleRetrievalLimits(scope.request.retrievalBudgetTokens);
   const result = await client.query<ContextMemoryRow>(
     `WITH base AS (
        SELECT id, turn_id, memory_kind, ordinal, content, token_estimate, importance, entities, entity_ids, metadata,
@@ -392,16 +468,22 @@ async function loadContextMemories(
             relevance
        FROM ranked
       WHERE memory_kind IN ('campaign_summary','legacy_summary','open_thread')
-         OR (memory_kind = 'canonical_fact' AND (recent_rank <= 64 OR ($4 <> '' AND lexical_rank <= 64)
-              OR (entity_ids && $7::text[] AND entity_rank <= 64)))
+         OR (memory_kind = 'canonical_fact' AND (recent_rank <= $8::integer OR ($4 <> '' AND lexical_rank <= $8::integer)
+              OR (entity_ids && $7::text[] AND entity_rank <= $8::integer)))
          OR (memory_kind = 'turn_fiction' AND (
-              recent_rank <= GREATEST(32, $5::integer * 2) OR sequence_rank <= 8
-              OR mod(sequence_rank - 1, GREATEST(1, CEIL(kind_count / 32.0)::integer)) = 0
-              OR ($4 <> '' AND lexical_rank <= 96) OR (entity_ids && $7::text[] AND entity_rank <= 64)))
-      ORDER BY ordinal ASC, memory_kind, id
-      LIMIT 512`,
+              recent_rank <= GREATEST($9::integer, $5::integer * 2) OR sequence_rank <= $10::integer
+              OR mod(sequence_rank - 1, GREATEST(1, CEIL(kind_count / $11::real)::integer)) = 0
+              OR ($4 <> '' AND lexical_rank <= $12::integer) OR (entity_ids && $7::text[] AND entity_rank <= $13::integer)))
+      ORDER BY
+        CASE WHEN memory_kind = 'turn_fiction' AND recent_rank <= GREATEST($9::integer, $5::integer * 2) THEN 0 ELSE 1 END,
+        CASE WHEN memory_kind = 'turn_fiction' THEN recent_rank ELSE 2147483647 END,
+        CASE WHEN $4 <> '' THEN lexical_rank ELSE 2147483647 END,
+        ordinal DESC, memory_kind, id
+      LIMIT $14::integer`,
     [scope.ownerUserId, scope.campaignId, scope.worldVersionId, query.trim(), scope.request.recentTurns,
-      scope.request.throughTurnNumber ?? null, queryEntityIds]
+      scope.request.throughTurnNumber ?? null, queryEntityIds, limits.canonicalCandidates,
+      limits.canonicalCandidates / 2, limits.turnSequenceCoverage, limits.canonicalCandidates / 2,
+      limits.turnLexicalCandidates, limits.entityCandidates, limits.candidatePool]
   );
   if (scope.request.throughTurnNumber === undefined) return [...result.rows];
   const historical = await client.query<ContextMemoryRow>(
@@ -416,10 +498,73 @@ async function loadContextMemories(
       WHERE owner_user_id = $1 AND campaign_id = $2 AND world_version_id = $3
         AND valid_from_turn <= $5 AND (valid_until_turn IS NULL OR valid_until_turn > $5)
       ORDER BY source_turn_number DESC, source_fact_index
-      LIMIT 256`,
-    [scope.ownerUserId, scope.campaignId, scope.worldVersionId, query.trim(), scope.request.throughTurnNumber]
+      LIMIT $6::integer`,
+    [scope.ownerUserId, scope.campaignId, scope.worldVersionId, query.trim(), scope.request.throughTurnNumber,
+      limits.historicalCanonicalFacts]
   );
-  return [...result.rows, ...historical.rows];
+  return [...result.rows, ...historical.rows]
+    .sort((left, right) => left.ordinal - right.ordinal
+      || left.memory_kind.localeCompare(right.memory_kind)
+      || compareDeterministically(left.id, right.id));
+}
+
+/**
+ * Provider generation needs whole candidate records. Keep this private seam
+ * separate from the sanitized, compressed public preview projection.
+ */
+export async function loadPostgresChronicleGenerationCandidates(
+  client: DatabaseClient,
+  scope: Readonly<{
+    ownerUserId: string;
+    campaignId: string;
+    worldVersionId: string;
+    query: string;
+    throughTurnNumber: number;
+    retrievalBudgetTokens?: number;
+  }>,
+  dependencies: ChronicleGenerationTransactionDependencies,
+  options: Readonly<{ useSavepoints?: boolean }> = {},
+): Promise<ChronicleGenerationCandidateResult> {
+  const stage = await loadChronicleRetrievalStage(client, {
+    ownerUserId: scope.ownerUserId,
+    campaignId: scope.campaignId,
+    worldVersionId: scope.worldVersionId,
+    request: {
+      // This request initializes retrieval only. It is never rendered or used
+      // as a generation budget; selected parents retain their full content.
+      budgetTokens: 32_000,
+      compression: "full",
+      query: scope.query,
+      ...(scope.retrievalBudgetTokens === undefined ? {} : { retrievalBudgetTokens: scope.retrievalBudgetTokens }),
+      // This controls only the bounded retrieval pool. It must stay small so
+      // the oldest-first candidate query cannot crowd out current records;
+      // generation still receives every selected parent as a full record.
+      recentTurns: 8,
+      throughTurnNumber: scope.throughTurnNumber
+    }
+  }, dependencies, options);
+  const selectedParentContent = stage.selectedParentContent;
+  const selected = (selectedParentContent === null
+    ? stage.memories
+    : stage.memories.filter((memory) => selectedParentContent.has(memory.id)))
+    // The base turn is protected authority and is rendered separately by the
+    // provider prompt builder. Do not reintroduce it as optional Chronicle.
+    .filter((memory) => !(memory.memory_kind === "turn_fiction" && memory.ordinal === scope.throughTurnNumber));
+  const candidates = [...selected]
+    .sort((left, right) => (right.relevance - left.relevance)
+      || (right.importance - left.importance)
+      || (right.ordinal - left.ordinal)
+      || compareDeterministically(left.id, right.id))
+    .map((memory, index) => ({
+    id: memory.id,
+    turnId: memory.turn_id,
+    ordinal: memory.ordinal,
+    kind: memory.memory_kind,
+    content: memory.content,
+    tokenEstimate: Math.max(0, memory.token_estimate),
+    rank: index + 1
+  }));
+  return { candidates, chronicleRetrieval: stage.chronicleRetrieval };
 }
 
 function contextMetrics(row: ContextMetricRow): ContextMetrics {
@@ -567,6 +712,7 @@ function queryCache(
   client: DatabaseClient,
   scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
   dependencies: ChronicleGenerationTransactionDependencies,
+  useSavepoints = true,
 ) {
   return createPostgresChronicleQueryCacheRepository(client, {
     logDiagnostic(error, context) {
@@ -577,7 +723,7 @@ function queryCache(
         cacheOperation: context.cacheOperation
       });
     }
-  });
+  }, useSavepoints);
 }
 
 function queryCacheKey(
@@ -622,7 +768,9 @@ async function applyContextSemanticRelevance(
   diagnosticMode: RetrievalDiagnosticMode = "production",
   diagnosticImplementation: RetrievalExecution["implementation"] = "legacy_hybrid",
   expectedDimensionsOverride: number | null = null,
+  useSavepoints = true,
 ): Promise<LegacyRetrievalResult> {
+  const limits = generationChronicleRetrievalLimits(scope.request.retrievalBudgetTokens);
   const normalizedQuery = query.toLowerCase();
   const queryEntityIdSet = new Set(queryEntityIds);
   const newestOrdinal = memories.reduce((maximum, memory) => Math.max(maximum, memory.ordinal), 0);
@@ -701,7 +849,7 @@ async function applyContextSemanticRelevance(
       ?? expectedDimensionsOverride
       ?? inferredDimensions?.rows[0]?.expected_dimensions
       ?? null;
-    const cache = queryCache(client, scope, dependencies);
+    const cache = queryCache(client, scope, dependencies, useSavepoints);
     const cacheKey = queryCacheKey(query.trim(), providerProfileId, config.embedding_model, fingerprint, prefixes.queryPrefix);
     const cachedQueryVector = await cache.getQueryEmbedding(scope, cacheKey);
     let queryVector = usableCachedQueryVector(cachedQueryVector, expectedDimensions);
@@ -736,9 +884,10 @@ async function applyContextSemanticRelevance(
           AND embedding_dimensions = $7 AND embedding_provider_fingerprint = $8
           AND embedding IS NOT NULL
          ORDER BY embedding <=> $6::vector
-         LIMIT 96`,
+         LIMIT $10::integer`,
       [scope.ownerUserId, scope.campaignId, scope.worldVersionId, providerProfileId, config.embedding_model,
-        vectorLiteral(queryVector), queryVector.length, fingerprint, scope.request.throughTurnNumber ?? null]
+        vectorLiteral(queryVector), queryVector.length, fingerprint, scope.request.throughTurnNumber ?? null,
+        limits.turnLexicalCandidates]
     );
     const freshScores = scored.rows.filter((row) => row.embedding_content_hash
       && row.embedding_content_hash === chronicleContentHash(row.content));
@@ -1440,8 +1589,14 @@ async function applyChunkedRankFusion(
   dependencies: ChronicleGenerationTransactionDependencies,
   diagnosticMode: RetrievalDiagnosticMode = "production",
   embeddingIdentity?: ChunkEmbeddingIdentity,
+  useSavepoints = true,
 ): Promise<ChunkedRankFusionResult> {
-  const rankFusionProfile = dependencies.rankFusionProfile ?? CHRONICLE_RETRIEVAL_PROFILE_V2;
+  const rankFusionProfile = scope.request.retrievalBudgetTokens === undefined
+    ? dependencies.rankFusionProfile ?? CHRONICLE_RETRIEVAL_PROFILE_V2
+    : generationRankFusionProfile(
+      dependencies.rankFusionProfile ?? CHRONICLE_RETRIEVAL_PROFILE_V2,
+      generationChronicleRetrievalLimits(scope.request.retrievalBudgetTokens)
+    );
   const candidateLimit = Math.max(1, Math.floor(rankFusionProfile.candidateLimits.perSignal));
   const variants = plannedChunkQueries(scope, memories, entityCatalog);
   const actionVariant: ChronicleQueryVariant = variants[0] ?? { kind: "action", query: "", entityIds: [] };
@@ -1497,7 +1652,7 @@ async function applyChunkedRankFusion(
           ?? toSafeProviderConfiguration(provider.configuration).embeddingDimensions
           ?? null;
         providerFingerprint = fingerprint;
-        const cache = queryCache(client, scope, dependencies);
+        const cache = queryCache(client, scope, dependencies, useSavepoints);
         const cacheKeys = variants.map((variant) => queryCacheKey(
           variant.query,
           providerProfileId,
@@ -1660,6 +1815,58 @@ async function applyChunkedRankFusion(
   const nonsemanticRanks = await loadAuthorizedChunkRanks(client, scope, nonsemanticRequests, candidateLimit);
   nonsemanticRanks.forEach(({ request, rows }) => addRank(request.signal, request.variant, rows));
 
+  const historicalCanonicalByCandidateId = new Map<string, ContextMemoryRow>(
+    (scope.request.throughTurnNumber === undefined
+      ? []
+      : memories.filter((memory) => memory.memory_kind === "canonical_fact")
+    ).map((memory) => [`historical-canonical:${memory.id}`, memory] as const)
+  );
+  const historicalCanonicalCandidates = [...historicalCanonicalByCandidateId.entries()].map(([candidateId, memory]) => ({
+    candidateId,
+    parentMemoryId: memory.id,
+    parentTurnId: memory.turn_id,
+    parentOrdinal: memory.ordinal,
+    memoryKind: memory.memory_kind,
+    activeFact: true
+  }));
+  const historicalRank = (
+    signal: ChronicleRankSignal,
+    candidates: readonly (typeof historicalCanonicalCandidates)[number][],
+  ): void => {
+    if (candidates.length) inputs.push({ signal, variant: actionVariant.kind, candidates });
+  };
+  const newestHistoricalOrdinal = historicalCanonicalCandidates.reduce(
+    (maximum, candidate) => Math.max(maximum, candidate.parentOrdinal),
+    0
+  );
+  historicalRank("full_text", [...historicalCanonicalCandidates]
+    .filter((candidate) => Number(historicalCanonicalByCandidateId.get(candidate.candidateId)?.relevance) > 0)
+    .sort((left, right) => Number(historicalCanonicalByCandidateId.get(right.candidateId)?.relevance)
+      - Number(historicalCanonicalByCandidateId.get(left.candidateId)?.relevance)
+      || right.parentOrdinal - left.parentOrdinal
+      || compareDeterministically(left.candidateId, right.candidateId)));
+  historicalRank("entity", historicalCanonicalCandidates
+    .filter((candidate) => candidate.parentMemoryId !== "" && historicalCanonicalByCandidateId.get(candidate.candidateId)!
+      .entity_ids.some((entityId) => actionVariant.entityIds.includes(entityId)))
+    .sort((left, right) => right.parentOrdinal - left.parentOrdinal
+      || compareDeterministically(left.candidateId, right.candidateId)));
+  historicalRank("recency", [...historicalCanonicalCandidates]
+    .sort((left, right) => right.parentOrdinal - left.parentOrdinal
+      || compareDeterministically(left.candidateId, right.candidateId)));
+  historicalRank("importance", [...historicalCanonicalCandidates]
+    .sort((left, right) => Number(historicalCanonicalByCandidateId.get(right.candidateId)?.importance)
+      - Number(historicalCanonicalByCandidateId.get(left.candidateId)?.importance)
+      || right.parentOrdinal - left.parentOrdinal
+      || compareDeterministically(left.candidateId, right.candidateId)));
+  historicalRank("kind", [...historicalCanonicalCandidates]
+    .sort((left, right) => right.parentOrdinal - left.parentOrdinal
+      || compareDeterministically(left.candidateId, right.candidateId)));
+  historicalRank("temporal", [...historicalCanonicalCandidates]
+    .sort((left, right) => Math.abs(left.parentOrdinal - newestHistoricalOrdinal)
+      - Math.abs(right.parentOrdinal - newestHistoricalOrdinal)
+      || right.parentOrdinal - left.parentOrdinal
+      || compareDeterministically(left.candidateId, right.candidateId)));
+
   const fused = fuseChronicleRanks(inputs, rankFusionProfile);
   const fusedRankByCandidateId = new Map<string, number>();
   let previousFusedScore: number | null = null;
@@ -1671,16 +1878,15 @@ async function applyChunkedRankFusion(
     fusedRankByCandidateId.set(candidate.candidateId, currentFusedRank);
     previousFusedScore = candidate.score;
   });
-  const historicalCanonicalFusedRank = (fusedRankByCandidateId.size > 0
-    ? Math.max(...fusedRankByCandidateId.values())
-    : 0) + 1;
   const latestSceneParentMemoryId = memories.filter((memory) => memory.memory_kind === "turn_fiction")
     .sort((left, right) => left.ordinal - right.ordinal || compareDeterministically(left.id, right.id))
     .at(-1)?.id ?? null;
   // Vectors are only needed for the maximal-marginal-relevance penalty over fused candidates.
   // Selecting them inside every rank query rendered the whole campaign's vectors as text once
   // per signal per variant, which is what made retrieval latency grow with campaign length.
-  const fusedCandidateIds = fused.map((candidate) => candidate.candidateId);
+  const fusedCandidateIds = fused
+    .map((candidate) => candidate.candidateId)
+    .filter((candidateId) => candidateRows.has(candidateId));
   const embeddingByCandidateId = new Map<string, readonly number[] | null>();
   if (fusedCandidateIds.length) {
     const vectors = await client.query<{ id: string; embedding: string | null }>(
@@ -1711,26 +1917,25 @@ async function applyChunkedRankFusion(
       fusedRank: fusedRankByCandidateId.get(candidate.candidateId) ?? index + 1
     }] : [];
   });
-  // Cutoff-mode canonical rows come from loadContextMemories' independently scoped validity-window query.
-  const historicalCanonicalParents = scope.request.throughTurnNumber === undefined
-    ? []
-    : memories.filter((memory) => memory.memory_kind === "canonical_fact")
-      .map((memory) => ({
-        candidateId: `historical-canonical:${memory.id}`,
-        parentMemoryId: memory.id,
-        parentTurnId: memory.turn_id,
-        ordinal: memory.ordinal,
-        memoryKind: memory.memory_kind,
-        parentContent: memory.content,
-        parentMetadata: memory.metadata,
-        entities: memory.entities,
-        entityIds: memory.entity_ids,
-        chunkOrdinal: 0,
-        chunkKind: "canonical_fact" as const,
-        chunkContent: memory.content,
-        embedding: null,
-        fusedRank: historicalCanonicalFusedRank
-      }));
+  const historicalCanonicalParents = fused.flatMap((candidate) => {
+    const memory = historicalCanonicalByCandidateId.get(candidate.candidateId);
+    return memory ? [{
+      candidateId: candidate.candidateId,
+      parentMemoryId: memory.id,
+      parentTurnId: memory.turn_id,
+      ordinal: memory.ordinal,
+      memoryKind: memory.memory_kind,
+      parentContent: memory.content,
+      parentMetadata: memory.metadata,
+      entities: memory.entities,
+      entityIds: memory.entity_ids,
+      chunkOrdinal: 0,
+      chunkKind: "canonical_fact" as const,
+      chunkContent: memory.content,
+      embedding: null,
+      fusedRank: fusedRankByCandidateId.get(candidate.candidateId) ?? 1
+    }] : [];
+  });
   const parentSelection = selectDiverseChronicleParents([
     ...rankedChunkParents,
     ...historicalCanonicalParents
@@ -1747,8 +1952,9 @@ async function applyChunkedRankFusion(
   for (const candidate of fused) {
     if (!selectedParentIds.has(candidate.parentMemoryId)) continue;
     const row = candidateRows.get(candidate.candidateId);
-    if (!row) continue;
-    const memory = memoriesById.get(candidate.parentMemoryId) ?? contextMemoryFromChunk(row);
+    const historicalMemory = historicalCanonicalByCandidateId.get(candidate.candidateId);
+    if (!row && !historicalMemory) continue;
+    const memory = historicalMemory ?? memoriesById.get(candidate.parentMemoryId) ?? contextMemoryFromChunk(row!);
     const normalizedScore = maximumScore > 0 ? candidate.score / maximumScore : 0;
     const normalizedSignalScore = (signal: ChronicleRankSignal): number => maximumScore > 0
       ? candidate.contributions
@@ -1853,21 +2059,23 @@ function rankedMemoryTelemetryCandidates(
     }));
 }
 
-export async function buildPostgresChronicleContextPreview(
+/**
+ * Runs the common, scope-isolated retrieval and rank-fusion stage. Consumers
+ * choose their own rendering policy after this point: the public preview
+ * budgets and compresses, while provider generation keeps selected parents as
+ * complete records.
+ */
+export async function loadChronicleRetrievalStage(
   client: DatabaseClient,
   scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
   dependencies: ChronicleGenerationTransactionDependencies,
-): Promise<ChronicleContextPreview> {
+  options: Readonly<{ useSavepoints?: boolean }> = {},
+): Promise<ChronicleRetrievalStage> {
+  const useSavepoints = options.useSavepoints ?? true;
   const campaign = await loadContextCampaign(client, scope);
-  // Only internal story generation requests the complete private correction.
-  // Public previews can attribute embedding costs without opting into this scope.
-  const currentContinuity = scope.costAttribution?.operation === "retrieval_embedding"
-    ? await loadCurrentContinuityCorrection(
-      client,
-      scope,
-      scope.request.throughTurnNumber ?? campaign.active_turn_number
-    )
-    : null;
+  // Preview is always a sanitized retrieval projection. Complete corrected
+  // authority belongs exclusively to loadPostgresChronicleGenerationContext.
+  const currentContinuity: CurrentContinuity | null = null;
   const completeEntityCatalog = buildChronicleEntityCatalog({
     worldContent: campaign.world_content,
     characterSnapshot: campaign.character_snapshot,
@@ -1923,7 +2131,8 @@ export async function buildPostgresChronicleContextPreview(
       executionConfig,
       diagnosticMode,
       implementation,
-      expectedDimensionsOverride
+      expectedDimensionsOverride,
+      useSavepoints
     );
     return {
       implementation,
@@ -1995,7 +2204,7 @@ export async function buildPostgresChronicleContextPreview(
     }>;
     let attempt: ChunkAttempt;
     let chunkAttemptTrace = emptyChronicleRetrievalAuditTrace();
-    await client.query(`SAVEPOINT ${attemptSavepoint}`);
+    if (useSavepoints) await client.query(`SAVEPOINT ${attemptSavepoint}`);
     try {
       chunkEmbeddingResolution ??= dependencies.embeddings.resolve(client, {
         ownerUserId: scope.ownerUserId,
@@ -2035,7 +2244,8 @@ export async function buildPostgresChronicleContextPreview(
             config,
             dependencies,
             diagnosticMode,
-            identity
+            identity,
+            useSavepoints
           );
           if (result.legacyFallbackReason) {
             attempt = {
@@ -2054,10 +2264,12 @@ export async function buildPostgresChronicleContextPreview(
           }
         }
       }
-      await client.query(`RELEASE SAVEPOINT ${attemptSavepoint}`);
+      if (useSavepoints) await client.query(`RELEASE SAVEPOINT ${attemptSavepoint}`);
     } catch {
-      await client.query(`ROLLBACK TO SAVEPOINT ${attemptSavepoint}`);
-      await client.query(`RELEASE SAVEPOINT ${attemptSavepoint}`);
+      if (useSavepoints) {
+        await client.query(`ROLLBACK TO SAVEPOINT ${attemptSavepoint}`);
+        await client.query(`RELEASE SAVEPOINT ${attemptSavepoint}`);
+      }
       try {
         dependencies.embeddings.logDiagnostic(new Error(
           diagnosticMode === "shadow" ? "chronicle_retrieval_shadow_failed" : "chronicle_retrieval_failed"
@@ -2106,14 +2318,16 @@ export async function buildPostgresChronicleContextPreview(
   ): Promise<RetrievalExecution> => {
     const startedAt = performance.now();
     const savepoint = `chronicle_retrieval_shadow_${implementation}`;
-    await client.query(`SAVEPOINT ${savepoint}`);
+    if (useSavepoints) await client.query(`SAVEPOINT ${savepoint}`);
     try {
       const execution = await execute();
-      await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+      if (useSavepoints) await client.query(`RELEASE SAVEPOINT ${savepoint}`);
       return execution;
     } catch {
-      await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
-      await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+      if (useSavepoints) {
+        await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+        await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+      }
       try {
         dependencies.embeddings.logDiagnostic(new Error("chronicle_retrieval_shadow_failed"), {
           campaignId: scope.campaignId,
@@ -2149,15 +2363,17 @@ export async function buildPostgresChronicleContextPreview(
     const startedAt = performance.now();
     const savepoint = `chronicle_retrieval_production_${implementation}`;
     let completedExecution: RetrievalExecution | undefined;
-    await client.query(`SAVEPOINT ${savepoint}`);
+    if (useSavepoints) await client.query(`SAVEPOINT ${savepoint}`);
     try {
       const execution = await execute();
       completedExecution = execution;
-      await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+      if (useSavepoints) await client.query(`RELEASE SAVEPOINT ${savepoint}`);
       return execution;
     } catch {
-      await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
-      await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+      if (useSavepoints) {
+        await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+        await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+      }
       try {
         dependencies.embeddings.logDiagnostic(new Error("chronicle_retrieval_failed"), {
           campaignId: scope.campaignId,
@@ -2244,6 +2460,39 @@ export async function buildPostgresChronicleContextPreview(
     fallbackCode: auditRetrievalFallbackCode(retrievalResult),
     trace: productionExecution.auditTrace
   });
+  return {
+    campaign,
+    currentContinuity,
+    expandedQuery,
+    memories,
+    selectedParentContent,
+    retrieval,
+    chronicleRetrieval,
+    config,
+    productionImplementation,
+    productionExecution,
+    retrievalExecutions
+  };
+}
+
+export async function buildPostgresChronicleContextPreview(
+  client: DatabaseClient,
+  scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
+  dependencies: ChronicleGenerationTransactionDependencies,
+): Promise<ChronicleContextPreview> {
+  const {
+    campaign,
+    currentContinuity,
+    expandedQuery,
+    memories,
+    selectedParentContent,
+    retrieval,
+    chronicleRetrieval,
+    config,
+    productionImplementation,
+    productionExecution,
+    retrievalExecutions
+  } = await loadChronicleRetrievalStage(client, scope, dependencies);
   const metrics = await loadPostgresChronicleContextMetrics(client, scope);
   const sourceWorld = typeof campaign.world_content.world === "object" && campaign.world_content.world !== null
     ? campaign.world_content.world as Record<string, unknown>
