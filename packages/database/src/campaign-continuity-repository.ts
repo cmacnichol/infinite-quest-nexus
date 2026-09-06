@@ -1,5 +1,4 @@
 import type { CampaignWorldVersionMemoryScope } from "../../application/src/memory/index.js";
-import { currentContinuitySchema, type CurrentContinuity } from "../../contracts/src/memory.js";
 import { campaignRuntimeStateContentSchema, type CampaignRuntimeStateContent } from "../../contracts/src/generation.js";
 import type { DatabaseClient } from "./pool.js";
 
@@ -11,7 +10,7 @@ export async function loadCurrentContinuityCorrection(
   client: DatabaseClient,
   scope: CampaignWorldVersionMemoryScope,
   baseTurnNumber: number,
-): Promise<CurrentContinuity | null> {
+): Promise<CampaignRuntimeStateContent | null> {
   const result = await client.query<{ state_snapshot_private: unknown }>(
     `SELECT edit.state_snapshot_private
        FROM campaigns campaign
@@ -27,7 +26,7 @@ export async function loadCurrentContinuityCorrection(
     [scope.ownerUserId, scope.campaignId, scope.worldVersionId, baseTurnNumber]
   );
   const row = result.rows[0];
-  return row ? currentContinuitySchema.parse(row.state_snapshot_private) : null;
+  return row ? materializeGenerationContinuity(row.state_snapshot_private) : null;
 }
 
 /**

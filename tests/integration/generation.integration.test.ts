@@ -2030,7 +2030,11 @@ integration("durable Story Engine integration", () => {
       continuitySummary: edited.continuitySummary,
       openThreads: [],
       canonicalFacts: edited.canonicalFacts,
-      scratchpad: edited.scratchpad
+      scratchpad: edited.scratchpad,
+      trackers: edited.trackers,
+      rpgStats: edited.rpgStats,
+      eventTriggers: edited.eventTriggers,
+      pendingEventTriggers: edited.pendingEventTriggers
     });
     const advanced = await getCampaignRuntimeState(pool, imported.campaignId);
     expect(advanced).toMatchObject({
@@ -2068,7 +2072,13 @@ integration("durable Story Engine integration", () => {
     delete branchStory.canonical_facts;
     delete branchStory.superseded_facts;
     delete branchStory.open_threads;
-    replies.push({ content: JSON.stringify(branchStory) });
+    // Missing derived fields trigger one bounded schema-repair request. Give
+    // that request the complete replacement story so this branch test keeps a
+    // deterministic provider-response sequence.
+    replies.push(
+      { content: JSON.stringify(branchStory) },
+      { content: validStory("The reply opens a different path through Location Gamma.") }
+    );
     const branchJob = await queue(imported.campaignId, "Reply.");
     await runGenerationJob(pool, "story-worker-branch-reply", 30, credentialSecret);
 

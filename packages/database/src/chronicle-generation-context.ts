@@ -3,10 +3,9 @@ import type {
   MemoryGenerationAuthorityScope
 } from "../../application/src/memory/types.js";
 import type { CampaignRuntimeStateContent } from "../../contracts/src/generation.js";
-import { currentContinuitySchema } from "../../contracts/src/memory.js";
 import type { DatabaseClient } from "./pool.js";
 import { resolveGenerationAuthoritySnapshot } from "./generation-authority.js";
-import { stableStringify } from "../../domain/src/index.js";
+import { stableStringify, stripMechanicsLeakage } from "../../domain/src/index.js";
 import { buildPostgresChronicleContextPreview } from "./chronicle-context-repository.js";
 import type { ChronicleGenerationTransactionDependencies } from "./chronicle-repository.js";
 import {
@@ -89,8 +88,8 @@ export async function loadPostgresChronicleGenerationContext(
   const campaignRow = campaign.rows[0];
   if (!campaignRow) throw new Error("Generation authority campaign was not found.");
   const currentContinuity = await loadCurrentContinuityCorrection(client, scope, baseTurnNumber);
-  const acceptedState = baseTurnNumber > 0 ? await client.query<{ state_snapshot_private: unknown }>(
-    `SELECT state_snapshot_private FROM turns
+  const acceptedState = baseTurnNumber > 0 ? await client.query<{ state_snapshot_private: unknown; model_metadata: Record<string, unknown> }>(
+    `SELECT state_snapshot_private, model_metadata FROM turns
       WHERE owner_user_id = $1 AND campaign_id = $2 AND turn_number = $3`,
     [scope.ownerUserId, scope.campaignId, baseTurnNumber]
   ) : null;
@@ -108,14 +107,19 @@ export async function loadPostgresChronicleGenerationContext(
   const acceptedContinuity = materializeGenerationContinuity(
     baseTurnNumber === 0 ? campaignRow.initial_state_snapshot : acceptedState?.rows[0]?.state_snapshot_private ?? currentContinuity
   );
-  const correction = currentContinuity === null ? null : currentContinuitySchema.parse(currentContinuity);
-  const continuity = correction === null ? acceptedContinuity : {
-    ...acceptedContinuity,
-    continuitySummary: correction.continuitySummary,
-    scratchpad: correction.scratchpad,
-    openThreads: correction.openThreads,
-    canonicalFacts: correction.canonicalFacts
-  };
+  // Legacy snapshots may retain imported scratchpad text that was never
+  // validated for prompt use. Only accepted generation output may carry a
+  // scratchpad forward into a later provider request.
+  const hasPromptSafeScratchpad = baseTurnNumber > 0
+    && typeof acceptedState?.rows[0]?.model_metadata?.promptProtocolVersion === "string";
+  const promptSafeContinuity = hasPromptSafeScratchpad
+    ? acceptedContinuity
+    : { ...acceptedContinuity, scratchpad: "" };
+  // A state edit is the authoritative full runtime snapshot at its effective
+  // turn, including trackers and event state as well as prose continuity.
+  const continuity = currentContinuity === null
+    ? promptSafeContinuity
+    : currentContinuity;
   const preview = dependencies ? await buildPostgresChronicleContextPreview(client, {
     ownerUserId: scope.ownerUserId,
     campaignId: scope.campaignId,
@@ -152,7 +156,10 @@ export async function loadPostgresChronicleGenerationContext(
       rpgStats: continuity.rpgStats,
       eventTriggers: continuity.eventTriggers,
       pendingEventTriggers: continuity.pendingEventTriggers,
-      latestTurn: latest?.rows[0] ?? null
+      latestTurn: latest?.rows[0] ? {
+        action: stripMechanicsLeakage(latest.rows[0].action).text,
+        narration: stripMechanicsLeakage(latest.rows[0].narration).text
+      } : null
     },
     candidates,
     baseIdentity: resolved.baseIdentity,
