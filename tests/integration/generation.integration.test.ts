@@ -712,6 +712,77 @@ integration("durable Story Engine integration", () => {
     }
   });
 
+  it("retries a failed event extension after reclaim without regenerating its checkpointed narration", async () => {
+    const imported = await campaign();
+    await syncPlayerCampaignConfig(pool, imported.campaignId, {
+      expectedTurnNumber: 2,
+      useRpgStats: false,
+      suppressEventTriggers: false,
+      rpgStats: [],
+      eventTriggers: [{
+        id: "checkpoint-after-extension", label: "Checkpoint extension", timing: "after",
+        condition: "The narration reaches Location Gamma.", effect: "A lantern appears in the hall.",
+        addTextAfter: true, triggeredCount: 0, lastTriggeredTurn: null, lastTriggeredAt: null
+      }],
+      pendingEventTriggers: []
+    });
+    const baseNarration = "The party reaches Location Gamma and opens the hall.";
+    const requestOffset = requests.length;
+    const job = await queue(imported.campaignId, "Reach Location Gamma.");
+    const originalQuery = pool.query.bind(pool) as (...args: any[]) => Promise<any>;
+    const querySpy = vi.spyOn(pool, "query");
+    let extensionFailurePersisted = false;
+    querySpy.mockImplementation((async (...args: any[]) => {
+      const statement = String(args[0]);
+      const parameters = Array.isArray(args[1]) ? args[1] : [];
+      const result = await originalQuery(...args);
+      if (!extensionFailurePersisted && statement.includes("SET orchestration_private")
+          && String(parameters[3]).includes("extensionError")) {
+        extensionFailurePersisted = true;
+        await originalQuery(
+          "UPDATE generation_jobs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
+          [job.id]
+        );
+      }
+      return result;
+    }) as any);
+    try {
+      const checkpointStory = JSON.parse(validStory(baseNarration));
+      checkpointStory.canonical_fact_updates = [];
+      replies.push(
+        { content: JSON.stringify(checkpointStory) },
+        { content: JSON.stringify({
+          activated_trigger_ids: ["checkpoint-after-extension"],
+          reasons: { "checkpoint-after-extension": "The party reaches the hall." }
+        }) },
+        { content: "not valid extension JSON" },
+        { content: JSON.stringify({
+          additional_text: "A lantern appears in the hall, guiding the party onward.",
+          tracker_updates: []
+        }) }
+      );
+      await runGenerationJob(pool, "extension-worker-a", 30, credentialSecret);
+      expect(extensionFailurePersisted).toBe(true);
+      expect(await runGenerationJob(pool, "extension-worker-b", 30, credentialSecret)).toBe(true);
+
+      expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed", attempts: 2 });
+      expect(requests.slice(requestOffset).filter((request) => Array.isArray(request.messages))).toHaveLength(4);
+      const turn = await pool.query<{ narration: string }>(
+        "SELECT narration FROM turns WHERE campaign_id=$1 AND turn_number=$2",
+        [imported.campaignId, 3]
+      );
+      expect(turn.rows[0]?.narration).toContain(baseNarration);
+      expect(turn.rows[0]?.narration).toContain("A lantern appears in the hall");
+      const accepted = await pool.query<{ n: number }>(
+        "SELECT count(*)::int AS n FROM turns WHERE campaign_id=$1 AND owner_user_id=$2 AND turn_number=$3",
+        [imported.campaignId, await initialOwnerId(pool), 3]
+      );
+      expect(accepted.rows[0]?.n).toBe(1);
+    } finally {
+      querySpy.mockRestore();
+    }
+  });
+
   it("commits the accepted turn when illustration enqueue hits a database error", async () => {
     const imported = await campaign();
     await setIllustrationConfig(pool, imported.campaignId, illustrationConfigSchema.parse({
