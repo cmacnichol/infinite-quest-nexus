@@ -1641,7 +1641,7 @@ async function executeLoadedGeneration(
             }
           ));
           if (!repairResponse.outputLimited) {
-            const repaired = parseEventExtension(repairResponse.content, parsed.story.narration);
+            const repaired = parseEventExtension(repairResponse.content, committedStory.narration);
             if (!mechanicsLeakFields(repaired).length) repairedStory = repaired;
           }
         } catch (error) {
