@@ -1,10 +1,11 @@
+import type {
+  MemoryGenerationAuthorityContext,
+  MemoryGenerationAuthorityScope
+} from "../../application/src/memory/types.js";
 import type { CampaignRuntimeStateContent } from "../../contracts/src/generation.js";
 import { currentContinuitySchema } from "../../contracts/src/memory.js";
 import type { DatabaseClient } from "./pool.js";
-import {
-  resolveGenerationAuthoritySnapshot,
-  type GenerationBaseIdentity
-} from "./generation-authority.js";
+import { resolveGenerationAuthoritySnapshot } from "./generation-authority.js";
 import { stableStringify } from "../../domain/src/index.js";
 import { buildPostgresChronicleContextPreview } from "./chronicle-context-repository.js";
 import type { ChronicleGenerationTransactionDependencies } from "./chronicle-repository.js";
@@ -13,17 +14,7 @@ import {
   materializeGenerationContinuity
 } from "./campaign-continuity-repository.js";
 
-export type GenerationContextScope = Readonly<{
-  ownerUserId: string;
-  campaignId: string;
-  worldVersionId: string;
-  operationKind: "append" | "replace_latest";
-  expectedTurnNumber: number;
-  query: string;
-  expectedBaseIdentity?: GenerationBaseIdentity;
-}>;
-
-export type GenerationContextCandidate = Readonly<{
+type GenerationContextCandidate = Readonly<{
   id: string;
   turnId: string | null;
   ordinal: number;
@@ -33,7 +24,7 @@ export type GenerationContextCandidate = Readonly<{
   rank: number;
 }>;
 
-export type GenerationContextAuthority = Readonly<{
+type GenerationContextAuthority = Readonly<{
   rules: readonly string[];
   worldCanon: Readonly<Record<string, unknown>>;
   selectedCharacterId: string | null;
@@ -46,12 +37,6 @@ export type GenerationContextAuthority = Readonly<{
   eventTriggers: CampaignRuntimeStateContent["eventTriggers"];
   pendingEventTriggers: CampaignRuntimeStateContent["pendingEventTriggers"];
   latestTurn: Readonly<{ action: string; narration: string }> | null;
-}>;
-
-export type GenerationContext = Readonly<{
-  authority: GenerationContextAuthority;
-  candidates: readonly GenerationContextCandidate[];
-  baseIdentity: GenerationBaseIdentity;
 }>;
 
 function invalidRules(): never {
@@ -74,9 +59,9 @@ function completeRules(value: unknown): readonly string[] {
  */
 export async function loadPostgresChronicleGenerationContext(
   client: DatabaseClient,
-  scope: GenerationContextScope,
+  scope: MemoryGenerationAuthorityScope,
   dependencies?: ChronicleGenerationTransactionDependencies,
-): Promise<GenerationContext> {
+): Promise<MemoryGenerationAuthorityContext> {
   const resolved = await resolveGenerationAuthoritySnapshot(client, scope);
   if (scope.expectedBaseIdentity
     && stableStringify(resolved.baseIdentity) !== stableStringify(scope.expectedBaseIdentity)) {

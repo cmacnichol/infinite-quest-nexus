@@ -843,7 +843,7 @@ export function createPostgresChronicleGenerationTransactionPort(
       if (pool) return withTransaction(pool, (client) => loadPostgresChronicleGenerationContext(client, scope, dependencies));
       return loadPostgresChronicleGenerationContext(transactionClient(database), scope, dependencies);
     }
-  } as MemoryGenerationTransactionPort;
+  } satisfies MemoryGenerationTransactionPort;
 }
 
 async function requireCampaign(
