@@ -8,7 +8,7 @@ Infinite Quest uses separate portable formats for different jobs:
 | --- | --- | --- |
 | **World JSON** | One explicit immutable world-version snapshot and its portability provenance. | Campaigns, campaign history, Chronicle records, or campaign images. |
 | **Campaign Archive** | One campaign, its exact pinned world version, accepted turns, state, portable Chronicle content, and associated original images. | Other campaigns, other world versions, provider profiles and credentials, jobs, thumbnails, and vectors. |
-| **System Archive** *(planned release; default-off)* | One Current Owner's portable worlds, campaigns, settings, and every retained Original Asset. | Credentials, access authority, operational work, derived indexes/thumbnails, and deployment configuration. |
+| **System Archive** *(enabled by default in direct runtime/Compose)* | One Current Owner's portable worlds, campaigns, settings, and every retained Original Asset. | Credentials, access authority, operational work, derived indexes/thumbnails, and deployment configuration. |
 
 None of these files proves that the source user is authorized on the receiving installation. Imported content is owned by the receiving server's resolved user; source IDs are provenance only.
 
@@ -41,6 +41,6 @@ Imports are content-addressed or idempotent where the format supports it. Provid
 
 ## System Archive is separate and release-gated
 
-**System Archive** is implemented as a separate owner-wide portability format, but its production release remains planned and the capability is default-off until its round-trip gate is approved. Its server-owned workflow requires an empty initialized destination, preserves portable non-user UUIDs, remaps ownership to that destination's initial owner, and never merges a world into populated data.
+**System Archive** is a released owner-wide portability format, enabled by default in the direct runtime and single-node Compose deployment. The base replicated Swarm stack disables it because its node-local mounts are not shared archive storage. Its server-owned workflow requires an empty initialized destination, preserves portable non-user UUIDs, remaps ownership to that destination's initial owner, and never merges a world into populated data.
 
 See [System data transfer](../operations/system-data-transfer.md) for exact operation and current release blockers. Do not use World JSON or Campaign Archive as an owner-wide migration substitute. Do not use System Archive as a disaster-recovery substitute: none of these portable formats restores credentials, encryption material, deployment configuration, or exact operational state.

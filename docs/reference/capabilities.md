@@ -91,17 +91,17 @@ This page summarizes behavior implemented in the current repository. It is not a
 - LM Studio native text generation and loaded-model discovery
 - OpenRouter, Manifest, and generic OpenAI-compatible text adapters
 - LM Studio and compatible embedding requests
-- OpenRouter image generation, durable asynchronous Sogni illustration jobs, and generic compatible image endpoints
+- OpenRouter image generation, separate asynchronous Sogni Creative Workflow and Sogni Supernet SDK illustration adapters, and generic compatible image endpoints
 - Independent endpoints, credentials, models, health, timeouts, and defaults for every role
 - Safe transport diagnostics that exclude credentials and prompt bodies
 - Explicit-only system default for Intent, with Story text and campaign-mode fallbacks
 
 ## Illustrations
 
-- Optional image child jobs after a story turn is accepted
+- Optional accepted-turn image jobs and provisional streaming illustration jobs; see the [lifecycle and open validation-boundary conflict](../concepts/illustration-pipeline.md#provisional-streaming-path-and-open-contract-conflict)
 - Independent campaign image provider, model, format, size, aspect, quality, and retry settings
 - Durable world-cover generation through the default image provider from new-world and edit-world workflows
-- Sogni profile defaults for one or two images, sensitive-content filtering, polling intervals, generation deadline, and submission attempts
+- Adapter-specific Sogni profile defaults and recovery: Creative Workflow uses caller-controlled idempotency; Supernet SDK adds network/model controls and has a documented submit-boundary recovery limitation. See [Sogni configuration](../nexus-guide/providers/sogni.md).
 - Replica-safe retries that never rerun or reject story narration
 - Fiction-only image prompts that exclude mechanics, scratchpads, and private reasoning
 - Base64 and restricted-download PNG, JPEG, and WebP signature validation, with temporary provider URLs excluded from durable metadata

@@ -18,8 +18,8 @@ importers:
         specifier: workspace:*
         version: link:packages/contracts
       '@sogni-ai/sogni-client':
-        specifier: 5.3.1
-        version: 5.3.1
+        specifier: 5.23.0
+        version: 5.23.0
       '@types/archiver':
         specifier: ^8.0.0
         version: 8.0.0
@@ -27,8 +27,8 @@ importers:
         specifier: ^8.0.0
         version: 8.0.0
       fastify:
-        specifier: ^5.11.0
-        version: 5.11.0
+        specifier: ^5.12.1
+        version: 5.12.1
       jszip:
         specifier: ^3.10.1
         version: 3.10.1
@@ -64,14 +64,14 @@ importers:
         version: 4.4.3
     devDependencies:
       '@babel/parser':
-        specifier: 7.29.7
-        version: 7.29.7
+        specifier: 8.0.4
+        version: 8.0.4
       '@playwright/test':
         specifier: ^1.62.1
         version: 1.62.1
       '@types/node':
-        specifier: ^26.3.0
-        version: 26.3.0
+        specifier: ^26.4.0
+        version: 26.4.0
       '@types/pg':
         specifier: ^8.23.1
         version: 8.23.1
@@ -89,7 +89,7 @@ importers:
         version: 7.0.2
       vitest:
         specifier: ^4.1.10
-        version: 4.1.10(@types/node@26.3.0)(vite@7.3.6(@types/node@26.3.0)(jiti@2.7.0)(tsx@4.23.12))
+        version: 4.1.10(@types/node@26.4.0)(vite@7.3.6(@types/node@26.4.0)(jiti@2.7.0)(tsx@4.23.12))
 
   apps/web:
     dependencies:
@@ -102,13 +102,13 @@ importers:
     devDependencies:
       vite:
         specifier: ^7.3.6
-        version: 7.3.6(@types/node@26.3.0)(jiti@2.7.0)(tsx@4.23.12)
+        version: 7.3.6(@types/node@26.4.0)(jiti@2.7.0)(tsx@4.23.12)
 
   apps/web-next:
     dependencies:
       '@awesome.me/webawesome':
         specifier: 3.12.0
-        version: 3.12.0(@floating-ui/utils@0.2.12)(@types/node@26.3.0)(@types/react@19.2.18)
+        version: 3.12.0(@floating-ui/utils@0.2.12)(@types/node@26.4.0)(@types/react@19.2.18)
       '@infinite-quest/client-core':
         specifier: workspace:*
         version: link:../../packages/client-core
@@ -118,7 +118,7 @@ importers:
     devDependencies:
       vite:
         specifier: ^7.3.6
-        version: 7.3.6(@types/node@26.3.0)(jiti@2.7.0)(tsx@4.23.12)
+        version: 7.3.6(@types/node@26.4.0)(jiti@2.7.0)(tsx@4.23.12)
 
   docs:
     devDependencies:
@@ -127,10 +127,10 @@ importers:
         version: 11.16.0
       vitepress:
         specifier: ^1.6.4
-        version: 1.6.4(@algolia/client-search@5.56.0)(@types/node@26.3.0)(jwt-decode@4.0.0)(postcss@8.5.19)(search-insights@2.17.3)(typescript@7.0.2)
+        version: 1.6.4(@algolia/client-search@5.56.0)(@types/node@26.4.0)(jwt-decode@4.0.0)(postcss@8.5.19)(search-insights@2.17.3)(typescript@7.0.2)
       vitepress-plugin-mermaid:
         specifier: ^2.0.17
-        version: 2.0.17(mermaid@11.16.0)(vitepress@1.6.4(@algolia/client-search@5.56.0)(@types/node@26.3.0)(jwt-decode@4.0.0)(postcss@8.5.19)(search-insights@2.17.3)(typescript@7.0.2))
+        version: 2.0.17(mermaid@11.16.0)(vitepress@1.6.4(@algolia/client-search@5.56.0)(@types/node@26.4.0)(jwt-decode@4.0.0)(postcss@8.5.19)(search-insights@2.17.3)(typescript@7.0.2))
 
   packages/application:
     dependencies:
@@ -254,18 +254,35 @@ packages:
     resolution: {integrity: sha512-Pb5ijPrZ89GDH8223L4UP8i6QApWxs04RbPQJTeWDV0/keR2E36MeKnyr6LYmUUvqRRI+Iv87SuF1W6ErINzYw==}
     engines: {node: '>=6.9.0'}
 
+  '@babel/helper-string-parser@8.0.0':
+    resolution: {integrity: sha512-6mJgmFFFIIO82vvoLt9XtRC7/TkzXfts1t/SpRX4IHSzMgqoPYCWesVu1udUPUWioAE/2fcG6WuI8zrkE1gwrg==}
+    engines: {node: ^22.18.0 || >=24.11.0}
+
   '@babel/helper-validator-identifier@7.29.7':
     resolution: {integrity: sha512-qehxGkRj55h/ff8EMaJ+cYhyaKlHIxqYDn682wQD7RNp9UujOQsHog2uS0r2vzr4pW+sXf90NeeayjcNaX3fFg==}
     engines: {node: '>=6.9.0'}
+
+  '@babel/helper-validator-identifier@8.0.4':
+    resolution: {integrity: sha512-4wFaiLd0bVo4cIoTXI3zKI038NIWE/cr3jvBjejOVYVxV/m8Ltav1USiGzG1fmS5J2RhgEOgXNNK46cRPnRsrg==}
+    engines: {node: ^22.18.0 || >=24.11.0}
 
   '@babel/parser@7.29.7':
     resolution: {integrity: sha512-hnORnjP/1P/zFEndoeX+n+t1RwWRJiJpM/jO7FW32Kn9r5+sJB2JWOdYo4L6k78j15eCwY3Gm/7364B1EMwtNg==}
     engines: {node: '>=6.0.0'}
     hasBin: true
 
+  '@babel/parser@8.0.4':
+    resolution: {integrity: sha512-srpptsAkEbbNIC/q8nT7o+m6CQe8CJUTV/t7MYc9NnWlgYVtHOb7JH6SorxMhN0kuRJjVqXbKClG6xSbPtzz+g==}
+    engines: {node: ^22.18.0 || >=24.11.0}
+    hasBin: true
+
   '@babel/types@7.29.7':
     resolution: {integrity: sha512-4zBIxpPzowiZpusoFkyGVwakdRJUyuH5PxQ/PrqghfdFWWasvnCdPfQXHrenDai+gyLARulZjZowCOj6fjT4pA==}
     engines: {node: '>=6.9.0'}
+
+  '@babel/types@8.0.4':
+    resolution: {integrity: sha512-eY+Yn3dCqTGmyiq2QRU66lA5FL8lqqqvecHt0fF3uHONIa7ToYsaCiWV8lOKqAs0Rb2SjixiKFROngnulPtt2g==}
+    engines: {node: ^22.18.0 || >=24.11.0}
 
   '@braintree/sanitize-url@6.0.4':
     resolution: {integrity: sha512-s3jaWicZd0pkP0jf5ysyHUI/RE7MHos6qlToFcGWXVp+ykHOy77OUMrfbgJ9it2C5bow7OIQwYYaHjk9XlBQ2A==}
@@ -1052,12 +1069,12 @@ packages:
   '@shoelace-style/localize@3.2.3':
     resolution: {integrity: sha512-pWoZywizMilenLfQcpE9bjaqi7WKiQXJB42cxvmSPwYS76U776wJ7B5QQ0P28yVit1vpHuFZzq1CtfVFv32jaQ==}
 
-  '@sogni-ai/sogni-client@5.3.1':
-    resolution: {integrity: sha512-3JLa/VNrlby30nnDOxKnpEYOVbLjCNBxuciGtq0DCqP/2FZ42zw1JixrVWAlG0ZGjHVpWqG8IbVMiKe7x0nr2w==}
+  '@sogni-ai/sogni-client@5.23.0':
+    resolution: {integrity: sha512-YUDIJj+BFz9nqZYNe109vbthGYyDLfSRp3no/zH09rvv+dC430IEESPqhuRk0SBqWEGtysrZZ3D7F91t/kebnw==}
     engines: {node: '>=22'}
 
-  '@sogni-ai/sogni-protocol@1.0.0-alpha.10':
-    resolution: {integrity: sha512-U/AI3Sj5NUon38FsjvEPwkPixR7H4aphTF12SCMyzi3Q6Yrnp9FdtKtobI8z9pGEq3bzkpTlA9PbtfuFDXr7+A==}
+  '@sogni-ai/sogni-protocol@1.0.0-alpha.30':
+    resolution: {integrity: sha512-GUfjHhSalcJ5uOqP9010jeumYZSjjp6ZEHRHfVy/52jL0bNlxvk/U0f9Lmy0nhEO4iWeYlzWPhcWUvg4VJ8+Mg==}
 
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
@@ -1197,8 +1214,8 @@ packages:
   '@types/node@22.7.5':
     resolution: {integrity: sha512-jML7s2NAzMWc//QSJ1a3prpk78cOPchGvXJsC3C6R6PSMoooztvRVQEz89gmBTBY1SPMaqo5teB4uNHPdetShQ==}
 
-  '@types/node@26.3.0':
-    resolution: {integrity: sha512-L3fgrnchriRC2ExBflb8j4uZZURHZfQsmQeyVzhjcHW4kkwVyo8/0h1B2MVzMTrYUJYu6G7EWs14hW/L9putqw==}
+  '@types/node@26.4.0':
+    resolution: {integrity: sha512-faiGnoIrLH/V8cibOMEAZ8pMw6oXqSukl29ra4mN8GdaB2ZewzeaLj+INpV5N+Z1eKWzY+IzaIZH2EIR6YZRNQ==}
 
   '@types/pg@8.23.1':
     resolution: {integrity: sha512-fKVHpikPdg4GKks3JuLEhvwSyvwzF23hnabPy6DD8ljVbC7+6J5dQzdv4arV6jqq57djnMgs1HKBxX4P8aBI3A==}
@@ -2012,8 +2029,8 @@ packages:
   fastify-plugin@6.0.0:
     resolution: {integrity: sha512-fZOty7z3O7vOliF6d8bHE3wiEh1KcNnKEQensSgTk9C1DvN6nRLS++XVd86v33Hw/8u9Un8A1zDrQ8ujcQDHEg==}
 
-  fastify@5.11.0:
-    resolution: {integrity: sha512-Y/Ecx1yt0hYzrQR+QVLbxaUN8wCX+MQzMevh29r5RRvlOIArmi4+WAXXaGl5Hw5gBr2wduZpZaT3gRCnXoyVgA==}
+  fastify@5.12.1:
+    resolution: {integrity: sha512-FWi+tQvwxR/PeRX7Z2mhfEF5ozJ3jn9asiiclzKXNSzJRHAYcU924aIOKAdHFJ+YIKieh3cqr1IwCOvTr41B3Q==}
 
   fastq@1.20.1:
     resolution: {integrity: sha512-GGToxJ/w1x32s/D2EKND7kTil4n8OVk/9mycTc4VDza13lOvpUZTGX3mFSCtV9ksdGBVzvsyAVLM6mHFThxXxw==}
@@ -3096,12 +3113,12 @@ snapshots:
       package-manager-detector: 1.7.0
       tinyexec: 1.2.4
 
-  '@awesome.me/webawesome@3.12.0(@floating-ui/utils@0.2.12)(@types/node@26.3.0)(@types/react@19.2.18)':
+  '@awesome.me/webawesome@3.12.0(@floating-ui/utils@0.2.12)(@types/node@26.4.0)(@types/react@19.2.18)':
     dependencies:
       '@ctrl/tinycolor': 4.1.0
       '@floating-ui/dom': 1.8.0
       '@konnorr/qr-creator': 1.1.0
-      '@lit-labs/ssr': 4.1.0(@types/node@26.3.0)
+      '@lit-labs/ssr': 4.1.0(@types/node@26.4.0)
       '@lit-labs/ssr-client': 1.1.8
       '@lit/context': 1.1.6
       '@lit/react': 1.0.8(@types/react@19.2.18)
@@ -3118,16 +3135,29 @@ snapshots:
 
   '@babel/helper-string-parser@7.29.7': {}
 
+  '@babel/helper-string-parser@8.0.0': {}
+
   '@babel/helper-validator-identifier@7.29.7': {}
+
+  '@babel/helper-validator-identifier@8.0.4': {}
 
   '@babel/parser@7.29.7':
     dependencies:
       '@babel/types': 7.29.7
 
+  '@babel/parser@8.0.4':
+    dependencies:
+      '@babel/types': 8.0.4
+
   '@babel/types@7.29.7':
     dependencies:
       '@babel/helper-string-parser': 7.29.7
       '@babel/helper-validator-identifier': 7.29.7
+
+  '@babel/types@8.0.4':
+    dependencies:
+      '@babel/helper-string-parser': 8.0.0
+      '@babel/helper-validator-identifier': 8.0.4
 
   '@braintree/sanitize-url@6.0.4':
     optional: true
@@ -3511,7 +3541,7 @@ snapshots:
 
   '@lit-labs/ssr-dom-shim@1.6.0': {}
 
-  '@lit-labs/ssr@4.1.0(@types/node@26.3.0)':
+  '@lit-labs/ssr@4.1.0(@types/node@26.4.0)':
     dependencies:
       '@lit-labs/ssr-client': 1.1.8
       '@lit-labs/ssr-dom-shim': 1.6.0
@@ -3524,7 +3554,7 @@ snapshots:
       node-fetch: 3.3.2
       parse5: 7.3.0
     optionalDependencies:
-      '@types/node': 26.3.0
+      '@types/node': 26.4.0
 
   '@lit/context@1.1.6':
     dependencies:
@@ -3696,10 +3726,10 @@ snapshots:
 
   '@shoelace-style/localize@3.2.3': {}
 
-  '@sogni-ai/sogni-client@5.3.1':
+  '@sogni-ai/sogni-client@5.23.0':
     dependencies:
       '@lukeed/uuid': 2.0.1
-      '@sogni-ai/sogni-protocol': 1.0.0-alpha.10
+      '@sogni-ai/sogni-protocol': 1.0.0-alpha.30
       '@types/js-cookie': 3.0.6
       '@types/lodash': 4.17.24
       '@types/ws': 8.18.1
@@ -3713,7 +3743,7 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  '@sogni-ai/sogni-protocol@1.0.0-alpha.10': {}
+  '@sogni-ai/sogni-protocol@1.0.0-alpha.30': {}
 
   '@standard-schema/spec@1.1.0': {}
 
@@ -3721,7 +3751,7 @@ snapshots:
 
   '@types/archiver@8.0.0':
     dependencies:
-      '@types/node': 26.3.0
+      '@types/node': 26.4.0
       '@types/readdir-glob': 1.1.5
 
   '@types/chai@5.2.3':
@@ -3877,13 +3907,13 @@ snapshots:
     dependencies:
       undici-types: 6.19.8
 
-  '@types/node@26.3.0':
+  '@types/node@26.4.0':
     dependencies:
       undici-types: 8.3.0
 
   '@types/pg@8.23.1':
     dependencies:
-      '@types/node': 26.3.0
+      '@types/node': 26.4.0
       pg-protocol: 1.16.0
       pg-types: 2.2.0
 
@@ -3893,7 +3923,7 @@ snapshots:
 
   '@types/readdir-glob@1.1.5':
     dependencies:
-      '@types/node': 26.3.0
+      '@types/node': 26.4.0
 
   '@types/trusted-types@2.0.7': {}
 
@@ -3901,13 +3931,13 @@ snapshots:
 
   '@types/unzipper@0.10.11':
     dependencies:
-      '@types/node': 26.3.0
+      '@types/node': 26.4.0
 
   '@types/web-bluetooth@0.0.21': {}
 
   '@types/ws@8.18.1':
     dependencies:
-      '@types/node': 26.3.0
+      '@types/node': 26.4.0
 
   '@typescript/typescript-aix-ppc64@7.0.2':
     optional: true
@@ -3976,9 +4006,9 @@ snapshots:
       d3-selection: 3.0.0
       d3-transition: 3.0.1(d3-selection@3.0.0)
 
-  '@vitejs/plugin-vue@5.2.4(vite@5.4.21(@types/node@26.3.0))(vue@3.5.40(typescript@7.0.2))':
+  '@vitejs/plugin-vue@5.2.4(vite@5.4.21(@types/node@26.4.0))(vue@3.5.40(typescript@7.0.2))':
     dependencies:
-      vite: 5.4.21(@types/node@26.3.0)
+      vite: 5.4.21(@types/node@26.4.0)
       vue: 3.5.40(typescript@7.0.2)
 
   '@vitest/expect@4.1.10':
@@ -3990,13 +4020,13 @@ snapshots:
       chai: 6.2.2
       tinyrainbow: 3.1.0
 
-  '@vitest/mocker@4.1.10(vite@7.3.6(@types/node@26.3.0)(jiti@2.7.0)(tsx@4.23.12))':
+  '@vitest/mocker@4.1.10(vite@7.3.6(@types/node@26.4.0)(jiti@2.7.0)(tsx@4.23.12))':
     dependencies:
       '@vitest/spy': 4.1.10
       estree-walker: 3.0.3
       magic-string: 0.30.21
     optionalDependencies:
-      vite: 7.3.6(@types/node@26.3.0)(jiti@2.7.0)(tsx@4.23.12)
+      vite: 7.3.6(@types/node@26.4.0)(jiti@2.7.0)(tsx@4.23.12)
 
   '@vitest/pretty-format@4.1.10':
     dependencies:
@@ -4710,7 +4740,7 @@ snapshots:
 
   fastify-plugin@6.0.0: {}
 
-  fastify@5.11.0:
+  fastify@5.12.1:
     dependencies:
       '@fastify/ajv-compiler': 4.0.5
       '@fastify/error': 4.2.0
@@ -5563,16 +5593,16 @@ snapshots:
       '@types/unist': 3.0.3
       vfile-message: 4.0.3
 
-  vite@5.4.21(@types/node@26.3.0):
+  vite@5.4.21(@types/node@26.4.0):
     dependencies:
       esbuild: 0.21.5
       postcss: 8.5.19
       rollup: 4.62.2
     optionalDependencies:
-      '@types/node': 26.3.0
+      '@types/node': 26.4.0
       fsevents: 2.3.3
 
-  vite@7.3.6(@types/node@26.3.0)(jiti@2.7.0)(tsx@4.23.12):
+  vite@7.3.6(@types/node@26.4.0)(jiti@2.7.0)(tsx@4.23.12):
     dependencies:
       esbuild: 0.28.2
       fdir: 6.5.0(picomatch@4.0.5)
@@ -5581,19 +5611,19 @@ snapshots:
       rollup: 4.62.2
       tinyglobby: 0.2.17
     optionalDependencies:
-      '@types/node': 26.3.0
+      '@types/node': 26.4.0
       fsevents: 2.3.3
       jiti: 2.7.0
       tsx: 4.23.12
 
-  vitepress-plugin-mermaid@2.0.17(mermaid@11.16.0)(vitepress@1.6.4(@algolia/client-search@5.56.0)(@types/node@26.3.0)(jwt-decode@4.0.0)(postcss@8.5.19)(search-insights@2.17.3)(typescript@7.0.2)):
+  vitepress-plugin-mermaid@2.0.17(mermaid@11.16.0)(vitepress@1.6.4(@algolia/client-search@5.56.0)(@types/node@26.4.0)(jwt-decode@4.0.0)(postcss@8.5.19)(search-insights@2.17.3)(typescript@7.0.2)):
     dependencies:
       mermaid: 11.16.0
-      vitepress: 1.6.4(@algolia/client-search@5.56.0)(@types/node@26.3.0)(jwt-decode@4.0.0)(postcss@8.5.19)(search-insights@2.17.3)(typescript@7.0.2)
+      vitepress: 1.6.4(@algolia/client-search@5.56.0)(@types/node@26.4.0)(jwt-decode@4.0.0)(postcss@8.5.19)(search-insights@2.17.3)(typescript@7.0.2)
     optionalDependencies:
       '@mermaid-js/mermaid-mindmap': 9.3.0
 
-  vitepress@1.6.4(@algolia/client-search@5.56.0)(@types/node@26.3.0)(jwt-decode@4.0.0)(postcss@8.5.19)(search-insights@2.17.3)(typescript@7.0.2):
+  vitepress@1.6.4(@algolia/client-search@5.56.0)(@types/node@26.4.0)(jwt-decode@4.0.0)(postcss@8.5.19)(search-insights@2.17.3)(typescript@7.0.2):
     dependencies:
       '@docsearch/css': 3.8.2
       '@docsearch/js': 3.8.2(@algolia/client-search@5.56.0)(search-insights@2.17.3)
@@ -5602,7 +5632,7 @@ snapshots:
       '@shikijs/transformers': 2.5.0
       '@shikijs/types': 2.5.0
       '@types/markdown-it': 14.1.2
-      '@vitejs/plugin-vue': 5.2.4(vite@5.4.21(@types/node@26.3.0))(vue@3.5.40(typescript@7.0.2))
+      '@vitejs/plugin-vue': 5.2.4(vite@5.4.21(@types/node@26.4.0))(vue@3.5.40(typescript@7.0.2))
       '@vue/devtools-api': 7.7.10
       '@vue/shared': 3.5.40
       '@vueuse/core': 12.8.2(typescript@7.0.2)
@@ -5611,7 +5641,7 @@ snapshots:
       mark.js: 8.11.1
       minisearch: 7.2.0
       shiki: 2.5.0
-      vite: 5.4.21(@types/node@26.3.0)
+      vite: 5.4.21(@types/node@26.4.0)
       vue: 3.5.40(typescript@7.0.2)
     optionalDependencies:
       postcss: 8.5.19
@@ -5643,10 +5673,10 @@ snapshots:
       - typescript
       - universal-cookie
 
-  vitest@4.1.10(@types/node@26.3.0)(vite@7.3.6(@types/node@26.3.0)(jiti@2.7.0)(tsx@4.23.12)):
+  vitest@4.1.10(@types/node@26.4.0)(vite@7.3.6(@types/node@26.4.0)(jiti@2.7.0)(tsx@4.23.12)):
     dependencies:
       '@vitest/expect': 4.1.10
-      '@vitest/mocker': 4.1.10(vite@7.3.6(@types/node@26.3.0)(jiti@2.7.0)(tsx@4.23.12))
+      '@vitest/mocker': 4.1.10(vite@7.3.6(@types/node@26.4.0)(jiti@2.7.0)(tsx@4.23.12))
       '@vitest/pretty-format': 4.1.10
       '@vitest/runner': 4.1.10
       '@vitest/snapshot': 4.1.10
@@ -5663,10 +5693,10 @@ snapshots:
       tinyexec: 1.2.4
       tinyglobby: 0.2.17
       tinyrainbow: 3.1.0
-      vite: 7.3.6(@types/node@26.3.0)(jiti@2.7.0)(tsx@4.23.12)
+      vite: 7.3.6(@types/node@26.4.0)(jiti@2.7.0)(tsx@4.23.12)
       why-is-node-running: 2.3.0
     optionalDependencies:
-      '@types/node': 26.3.0
+      '@types/node': 26.4.0
     transitivePeerDependencies:
       - msw
 

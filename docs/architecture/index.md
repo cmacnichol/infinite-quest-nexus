@@ -4,6 +4,11 @@ Architecture decision records (ADRs) preserve consequential design decisions and
 
 See also [Repository Overview](./repository-overview.md) for project-goal/naming/target-architecture/repo-structure context (moved out of `AGENTS.md` on 2026-08-01), [../runbooks/deployment.md](../runbooks/deployment.md) for the Compose/Swarm deployment runbook, and [../workflows/testing.md](../workflows/testing.md) for the detailed test matrix.
 
+## Cross-cutting guidance
+
+- [Identity and ownership, including deferred OIDC design](../concepts/identity-and-ownership.md)
+- [Scene context and mechanics: pending review](./scene-context-mechanics-review.md)
+
 ## Persistence, jobs, and migrations
 
 - [ADR 0001: PostgreSQL owns campaigns and Chronicle memory](./0001-postgresql-chronicle.md)
