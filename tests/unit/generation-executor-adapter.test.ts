@@ -7,7 +7,7 @@ import type { GenerationExecutionRepository } from "../../packages/database/src/
 import type { GenerationExecutionPayload } from "../../packages/database/src/generation-execution-repository.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
 import { PROMPT_TEMPLATE_CATALOG } from "../../packages/contracts/src/prompt-library.js";
-import { sha256 } from "../../packages/domain/src/index.js";
+import { sha256, stableStringify } from "../../packages/domain/src/index.js";
 import { ContextBudgetError } from "../../packages/story-engine/src/context-budget.js";
 import {
   createGenerationExecutor,
@@ -316,16 +316,23 @@ describe("generation executor adapter", () => {
       story: expect.objectContaining({ narration: "The observatory door opens.\n\nThe chamber stays silent.\n\nA silver bell rings." })
     }));
     job.attempts = 2;
-    job.orchestration_private.eventCoverageRepair = {
-      ...job.orchestration_private.eventCoverageRepair!,
-      validatedMainDraftHash: "tampered-main-draft-hash"
+    job.orchestration_private.extension = {
+      story: JSON.parse(story("The observatory door opens.\n\nThe keeper's unique warning remains.")),
+      finalStoryHash: "",
+      producingAttempt: 1
     };
+    job.orchestration_private.extension.finalStoryHash = stableStringify(job.orchestration_private.extension.story);
+    delete job.orchestration_private.eventCoverageRepair;
+    provider.execute.mockReset()
+      .mockResolvedValueOnce({ content: JSON.stringify({ covered: false, missing_required_beats: ["bell"], contradictions: [] }), responseId: "coverage-drop", finishReason: "stop", outputLimited: false, modelInstanceId: "test-instance", usage: {}, reportedCost: null, rawMetadata: {} })
+      .mockResolvedValueOnce({ content: story("The observatory door opens.\n\nA silver bell rings."), responseId: "repair-drop", finishReason: "stop", outputLimited: false, modelInstanceId: "test-instance", usage: {}, reportedCost: null, rawMetadata: {} });
     await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
       .execute({ workerId: "event-repair-reclaim", leaseSeconds: 30, claim: { ...claim, attempts: 2 } })).resolves.toBe(true);
-    expect(provider.execute).toHaveBeenCalledTimes(5);
+    expect(provider.execute).toHaveBeenCalledTimes(2);
     expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({
-      errorCode: "generation_checkpoint_incompatible"
+      errorCode: "event_coverage_failed"
     }));
+    expect(repository.commitAcceptedTurn).toHaveBeenCalledTimes(1);
   });
 
   it("sends planner-selected private authority candidates and records omitted candidates without reading the legacy preview", async () => {
