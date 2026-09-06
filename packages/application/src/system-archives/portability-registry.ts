@@ -228,7 +228,7 @@ export const SYSTEM_ARCHIVE_SOURCE_COLUMN_CLASSIFICATIONS = Object.freeze({
   campaigns: sourceColumns({
     portable_exact: [
       "id", "world_version_id", "title", "status", "active_turn_number", "created_at", "updated_at",
-      "text_provider_profile_id", "image_provider_profile_id", "story_length_profile", "selected_character_id",
+      "text_provider_profile_id", "image_provider_profile_id", "story_length_profile", "story_context_budget_tokens", "selected_character_id",
       "character_snapshot", "turn_control_style", "character_profile", "character_profile_revision"
     ],
     portable_sanitized: ["legacy_settings"],
@@ -255,7 +255,11 @@ export const SYSTEM_ARCHIVE_SOURCE_COLUMN_CLASSIFICATIONS = Object.freeze({
     owner_remapped: ["owner_user_id"]
   }),
   prompt_template_overrides: sourceColumns({
-    portable_exact: ["id", "campaign_id", "prompt_key", "content", "updated_at", "created_at"],
+    portable_exact: [
+      "id", "campaign_id", "prompt_key", "content", "updated_at", "created_at",
+      "compatibility_required_shape_version", "compatibility_protocol_identity",
+      "compatibility_content_hash", "compatibility_acknowledged_at"
+    ],
     owner_remapped: ["owner_user_id"]
   }),
   provider_cost_events: sourceColumns({
