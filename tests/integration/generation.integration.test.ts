@@ -12,6 +12,7 @@ import { createApiGenerationApplication } from "../helpers/runtime-application-f
 import { createWorkerGenerationApplication } from "../helpers/runtime-application-fixtures.js";
 import { createWorkerGenerationApplication as composeWorkerGenerationApplication } from "../../services/runtime/src/generation-worker-composition.js";
 import { createApiIllustrationApplication } from "../helpers/runtime-application-fixtures.js";
+import { reconcileNextAcceptedStreamingIllustration } from "../../packages/database/src/generation-execution-repository.js";
 import { runWorker } from "../../services/worker/src/worker.js";
 import { startNextGeneration } from "../../services/worker/src/worker.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
@@ -967,7 +968,7 @@ integration("durable Story Engine integration", () => {
     }
   });
 
-  it("commits the accepted turn when illustration enqueue hits a database error", async () => {
+  it("reconciles a provisional illustration promotion that rolls back after accepting its turn", async () => {
     const imported = await campaign();
     await setIllustrationConfig(pool, imported.campaignId, illustrationConfigSchema.parse({
       sourcePolicy: "library_only",
@@ -977,24 +978,31 @@ integration("durable Story Engine integration", () => {
       model: ""
     }));
     const suffix = crypto.randomUUID().replaceAll("-", "");
-    const functionName = `reject_illustration_enqueue_${suffix}`;
-    const triggerName = `reject_illustration_enqueue_trigger_${suffix}`;
+    const functionName = `reject_provisional_illustration_promotion_${suffix}`;
+    const triggerName = `reject_provisional_illustration_promotion_trigger_${suffix}`;
     await pool.query(`CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN
         IF NEW.campaign_id::text = '${imported.campaignId}' THEN
-          RAISE EXCEPTION 'synthetic illustration enqueue failure' USING ERRCODE = '23514';
+          RAISE EXCEPTION 'synthetic provisional illustration promotion failure' USING ERRCODE = '23514';
         END IF;
         RETURN NEW;
       END
     $$`);
-    await pool.query(`CREATE TRIGGER ${triggerName} BEFORE INSERT ON turn_illustration_sets
-      FOR EACH ROW EXECUTE FUNCTION ${functionName}()`);
+    await pool.query(`CREATE TRIGGER ${triggerName} BEFORE UPDATE ON turn_illustration_sets
+      FOR EACH ROW WHEN (OLD.status = 'provisional' AND NEW.status <> OLD.status)
+      EXECUTE FUNCTION ${functionName}()`);
     try {
+      const narration = Array.from({ length: 110 }, () => "A lantern opens the quiet observatory.").join(" ");
+      const streamedStory = validStory(narration);
+      await pool.query(
+        "UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1",
+        [providerId, JSON.stringify({ streaming: true })]
+      );
+      replies.push({ content: streamedStory, streamChunks: [streamedStory] });
       const job = await queue(imported.campaignId, "Continue into the accepted scene.");
 
       await runGenerationJob(pool, "story-worker-illustration-enqueue-failure", 30, credentialSecret);
 
-      expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
       const committed = await pool.query<{ id: string; narration: string; memory_kinds: string[] }>(
         `SELECT turns.id, turns.narration,
                 array_agg(chronicle_memories.memory_kind ORDER BY chronicle_memories.memory_kind) AS memory_kinds
@@ -1006,8 +1014,21 @@ integration("durable Story Engine integration", () => {
       );
       expect(committed.rows).toEqual([{
         id: expect.any(String),
-        narration: "Location Gamma opens and Marker Three becomes visible.",
+        narration,
         memory_kinds: ["canonical_fact", "turn_fiction"]
+      }]);
+      expect(await getGenerationJob(pool, job.id)).toMatchObject({
+        status: "completed",
+        resultTurnId: committed.rows[0]?.id
+      });
+      const pending = await pool.query<{
+        streaming_segments_state: { provisionalSetId: string; provisionalIllustrationReconciliation: string };
+      }>("SELECT streaming_segments_state FROM generation_jobs WHERE id = $1", [job.id]);
+      expect(pending.rows).toEqual([{
+        streaming_segments_state: {
+          provisionalSetId: expect.any(String),
+          provisionalIllustrationReconciliation: "pending"
+        }
       }]);
       expect(await pool.query(
         `SELECT campaigns.active_turn_number, campaign_state.scratchpad_private
@@ -1021,13 +1042,41 @@ integration("durable Story Engine integration", () => {
           scratchpad_private: "Private synthetic continuity marker."
         }]
       });
+      const provisional = await pool.query<{ id: string; turn_id: string | null; status: string }>(
+        "SELECT id, turn_id, status FROM turn_illustration_sets WHERE generation_job_id = $1",
+        [job.id]
+      );
+      expect(provisional.rows).toEqual([{
+        id: pending.rows[0]!.streaming_segments_state.provisionalSetId,
+        turn_id: null,
+        status: "provisional"
+      }]);
+
+      await pool.query(`DROP TRIGGER IF EXISTS ${triggerName} ON turn_illustration_sets`);
+      expect(await reconcileNextAcceptedStreamingIllustration(
+        pool,
+        createApiIllustrationApplication(pool).generation
+      )).toBe(true);
       expect(await pool.query(
-        "SELECT id FROM turn_illustration_sets WHERE turn_id = $1",
-        [committed.rows[0]?.id]
-      )).toMatchObject({ rowCount: 0 });
+        "SELECT turn_id, status FROM turn_illustration_sets WHERE id = $1",
+        [provisional.rows[0]!.id]
+      )).toMatchObject({ rows: [{ turn_id: committed.rows[0]!.id, status: "queued" }] });
+      expect(await pool.query(
+        "SELECT streaming_segments_state FROM generation_jobs WHERE id = $1",
+        [job.id]
+      )).toMatchObject({ rows: [{ streaming_segments_state: { provisionalSetId: provisional.rows[0]!.id } }] });
+      expect(await reconcileNextAcceptedStreamingIllustration(
+        pool,
+        createApiIllustrationApplication(pool).generation
+      )).toBe(false);
+      expect(await pool.query(
+        "SELECT count(*)::int AS count FROM turns WHERE campaign_id = $1",
+        [imported.campaignId]
+      )).toMatchObject({ rows: [{ count: 3 }] });
     } finally {
       await pool.query(`DROP TRIGGER IF EXISTS ${triggerName} ON turn_illustration_sets`);
       await pool.query(`DROP FUNCTION IF EXISTS ${functionName}()`);
+      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({})]);
     }
   });
 
