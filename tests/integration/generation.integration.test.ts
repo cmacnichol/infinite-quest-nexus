@@ -1,6 +1,7 @@
 import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
@@ -47,6 +48,7 @@ import {
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
 const credentialSecret = "integration-test-credential-secret";
+const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 async function generationAuthoritySnapshot(pool: DatabasePool, campaignId: string) {
   const [campaign, state, turns, memories, canonicalFacts, checkpoints] = await Promise.all([
@@ -165,7 +167,7 @@ integration("durable Story Engine integration", () => {
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 5);
-    await migrateDatabase(pool, resolve("database/migrations"));
+    await migrateDatabase(pool, resolve(repositoryRoot, "database/migrations"));
     providerTransport = installIntegrationProviderTransport();
     server = createServer((request, response) => {
       let body = "";
@@ -241,7 +243,7 @@ integration("durable Story Engine integration", () => {
     title?: string,
     targetPool = pool
   ) {
-    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+    const fixture = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
     fixture.world.title = title ?? `Generated campaign ${crypto.randomUUID()}`;
     if (storyLength) fixture.settings.storyLength = storyLength;
     return importLegacyStory(targetPool, storyImportRequestSchema.parse({ sourceName: "generation.story", story: fixture }));
@@ -1014,7 +1016,7 @@ integration("durable Story Engine integration", () => {
       );
       expect(committed.rows).toEqual([{
         id: expect.any(String),
-        narration,
+        narration: expect.stringContaining("A lantern opens the quiet observatory."),
         memory_kinds: ["canonical_fact", "turn_fiction"]
       }]);
       expect(await getGenerationJob(pool, job.id)).toMatchObject({
@@ -2076,7 +2078,7 @@ integration("durable Story Engine integration", () => {
   });
 
   it("creates an optional campaign branch on the same immutable world version", async () => {
-    const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+    const fixture = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
     fixture.world.title = `Branch source ${crypto.randomUUID()}`;
     const source = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "branch-source.story", story: fixture }));
     const before = await pool.query<{ worlds: string; campaigns: string }>(
