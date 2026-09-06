@@ -475,6 +475,26 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     expect(memoryWrites).toContainEqual(expect.arrayContaining(["", expect.any(Number)]));
   });
 
+  it("clears a correction projection without selecting accepted-turn summaries for deletion", async () => {
+    let correctionLookup = "";
+    const client = databaseClient((sql) => {
+      if (sql.includes("SELECT id,memory_kind") && sql.includes("FROM chronicle_memories")) {
+        correctionLookup = sql;
+        return { rows: [] };
+      }
+      if (sql.includes("DELETE FROM chronicle_memories")) throw new Error("accepted-turn history must not be deleted");
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+
+    await projectStateCorrection(client, scope, [], {
+      id: "clear-correction-only",
+      effectiveTurnNumber: 5,
+      snapshot: { continuitySummary: "", openThreads: [], canonicalFacts: [] }
+    }, new Set(["continuitySummary", "openThreads"]));
+
+    expect(correctionLookup).toContain("metadata->>'manualCorrection' = 'true'");
+  });
+
   it("rebuilds Chronicle rows from accepted turns without opening a nested transaction", async () => {
     const sqlStatements: string[] = [];
     const rebuiltFiction: string[] = [];
