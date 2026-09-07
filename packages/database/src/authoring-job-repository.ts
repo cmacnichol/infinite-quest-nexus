@@ -4,6 +4,9 @@ import {
   authoringJobListItemSchema,
   authoringStageOutputSchema,
   authoringJobViewSchema,
+  parseAuthoringCommandForJob,
+  type AuthoringReview,
+  normalizeAuthoringSubmitForAdmission,
   authoringSubmitSchema,
   authoringTargetSchema,
   type AuthoringExecutionSnapshot,
@@ -13,12 +16,18 @@ import {
   type AuthoringStageOutput,
   type AuthoringSubmit
 } from "../../contracts/src/authoring.js";
+import { randomUUID } from "node:crypto";
+import { playableCharacterSchema, type WorldContent } from "../../contracts/src/world-library.js";
 import type {
   AuthoringClaim,
-  AuthoringExecutionRepository
+  AuthoringExecutionRepository,
+  AuthoringTargetPort
 } from "../../application/src/authoring/ports.js";
+import { AuthoringRepositoryError } from "../../application/src/authoring/types.js";
 import type { OwnerScope } from "../../application/src/generation/types.js";
+import { retryAuthoringStage, type AuthoringStageLifecycle } from "../../domain/src/authoring-jobs.js";
 import { projectAuthoringFailure, validateGeneratedCharacter, validateGeneratedWorldFiction } from "../../domain/src/authoring-output.js";
+import { assembleGeneratedWorldContent } from "../../domain/src/generated-world-assembly.js";
 import { withTransaction, type DatabaseClient, type DatabasePool } from "./pool.js";
 
 const MAX_INPUT_BYTES = 2 * 1024 * 1024;
@@ -59,13 +68,6 @@ type StageRow = {
   output: unknown;
   failure: unknown;
 };
-
-export class AuthoringRepositoryConflict extends Error {
-  constructor() {
-    super("The idempotency key was already used for a different authoring request.");
-    this.name = "AuthoringRepositoryConflict";
-  }
-}
 
 function json(value: unknown): string {
   return JSON.stringify(value);
@@ -119,10 +121,18 @@ function validateStageOutput(stageKey: string, value: unknown): AuthoringStageOu
 function stageKey(input: AuthoringSubmit): string {
   if (input.kind === "world_concept") return "world";
   const targetCharacterId = input.target.kind === "world_draft" ? input.target.characterId : undefined;
-  return `character:${input.characterId ?? targetCharacterId ?? "initial"}`;
+  // Called only after inserting a new job. Keep application identity in the stage,
+  // because public characterId denotes an existing roster member to edit.
+  return `character:${input.characterId ?? targetCharacterId ?? randomUUID()}`;
+}
+
+function isDiscardedInput(value: unknown): boolean {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    && (value as Record<string, unknown>).discarded === true;
 }
 
 function jobView(job: JobRow, stages: StageRow[]): AuthoringJobView {
+  if (isDiscardedInput(job.input)) throw new AuthoringRepositoryError("not_found");
   const input = authoringSubmitSchema.parse(job.input);
   const target = authoringTargetSchema.parse(job.target);
   const parsedStages = stages.map((stage) => {
@@ -138,7 +148,9 @@ function jobView(job: JobRow, stages: StageRow[]): AuthoringJobView {
     return value;
   });
   const currentStages = parsedStages.filter((stage) => !parsedStages.some((other) => other.key === stage.key && other.generation > stage.generation));
-  const allValidated = currentStages.length > 0 && currentStages.every((stage) => stage.status === "validated");
+  const activeStages = currentStages.filter((stage) => stage.status !== "cancelled");
+  const allValidated = activeStages.length > 0 && activeStages.every((stage) => stage.status === "validated");
+  const result = job.kind === "world_concept" ? partialWorldResult(stages) : undefined;
   return authoringJobViewSchema.parse({
     id: job.id,
     kind: job.kind,
@@ -150,8 +162,32 @@ function jobView(job: JobRow, stages: StageRow[]): AuthoringJobView {
     canApply: job.status === "awaiting_review" || job.status === "recoverable",
     incomplete: !allValidated,
     request: input,
+    ...(result === undefined ? {} : { result }),
     ...(job.reviewedContent === null || job.reviewedContent === undefined ? {} : { reviewedContent: job.reviewedContent })
   });
+}
+
+/** Build a reviewable preview solely from validated active stages; it never fills missing characters. */
+function partialWorldResult(stages: readonly StageRow[]): WorldContent | undefined {
+  const current = currentStagesForRows(stages).filter((stage) => stage.status !== "cancelled");
+  const outlineStage = current.find((stage) => stage.stageKey === "world" && stage.status === "validated");
+  if (!outlineStage?.output) return undefined;
+  const outline = validateStageOutput("world", outlineStage.output);
+  if (outline.kind !== "outline") return undefined;
+  const characterIds = new Set(outline.outline.seeds.map((seed) => seed.id));
+  const playableCharacters = current
+    .filter((stage) => stage.stageKey.startsWith("character:") && stage.status === "validated" && stage.output !== null)
+    .map((stage) => validateStageOutput(stage.stageKey, stage.output))
+    .flatMap((output) => output.kind === "character" && characterIds.has(output.character.id) ? [output.character] : []);
+  return assembleGeneratedWorldContent({
+    outline: outline.outline,
+    playableCharacters,
+    importedFrom: "authoring-proposal"
+  });
+}
+
+function currentStagesForRows(rows: readonly StageRow[]): StageRow[] {
+  return rows.filter((stage) => !rows.some((other) => other.stageKey === stage.stageKey && other.generation > stage.generation));
 }
 
 function listItem(job: JobRow, stages: StageRow[]): AuthoringJobListItem {
@@ -175,7 +211,7 @@ function encodeListCursor(createdAt: unknown, id: string): string {
 
 function metadataListItem(job: JobListRow, stages: StageRow[]): AuthoringJobListItem {
   const views = stages.map((stage) => ({ id: stage.id, key: stage.stageKey, generation: stage.generation, status: stage.status, attemptCount: stage.attemptCount, ...(stage.failure === null || stage.failure === undefined ? {} : { failure: projectAuthoringFailure(authoringFailureSchema.parse(stage.failure)) }) }));
-  const current = views.filter((stage) => !views.some((other) => other.key === stage.key && other.generation > stage.generation));
+  const current = views.filter((stage) => !views.some((other) => other.key === stage.key && other.generation > stage.generation) && stage.status !== "cancelled");
   return authoringJobListItemSchema.parse({ id: job.id, kind: job.kind, revision: job.revision, status: job.status, target: authoringTargetSchema.parse(job.target), stages: views, expiresAt: timestamp(job.expiresAt), canApply: job.status === "awaiting_review" || job.status === "recoverable", incomplete: !(current.length > 0 && current.every((stage) => stage.status === "validated")) });
 }
 
@@ -222,9 +258,30 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
       [jobId, scope.ownerUserId]
     );
     const job = jobs.rows[0];
-    if (!job) return null;
+    if (!job || isDiscardedInput(job.input)) return null;
     const stages = await loadStages([job.id]);
     return jobView(job, stages.get(job.id) ?? []);
+  }
+
+  async function assertDraftTarget(client: DatabaseClient, scope: OwnerScope, target: { worldId: string; expectedRevision: number; characterId?: string | undefined }): Promise<void> {
+    const draft = await client.query<{ revision: number; content: unknown }>(
+      `SELECT wd.revision, wd.content FROM worlds w
+        JOIN world_drafts wd ON wd.world_id = w.id AND wd.owner_user_id = w.owner_user_id
+       WHERE w.id = $1 AND w.owner_user_id = $2 AND w.status <> 'archived'
+       FOR KEY SHARE OF w, wd`,
+      [target.worldId, scope.ownerUserId]
+    );
+    const current = draft.rows[0];
+    if (!current) throw new AuthoringRepositoryError("not_found");
+    if (current.revision !== target.expectedRevision) throw new AuthoringRepositoryError("revision_conflict");
+    if (target.characterId !== undefined) {
+      const matches = await client.query(
+        `SELECT 1 FROM jsonb_array_elements(COALESCE($1::jsonb->'playableCharacters', '[]'::jsonb)) character
+          WHERE character->>'id' = $2`,
+        [json(current.content), target.characterId]
+      );
+      if (matches.rowCount !== 1) throw new AuthoringRepositoryError("not_found");
+    }
   }
 
   function claimParameters(claim: AuthoringClaim): unknown[] {
@@ -274,18 +331,107 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
 
   async function completeCurrentStages(client: DatabaseClient, jobId: string): Promise<boolean> {
     const stages = await client.query<StageRow>(`SELECT ${STAGE_SELECT} FROM authoring_job_stages stages WHERE stages.job_id = $1 AND stages.generation = (SELECT max(current.generation) FROM authoring_job_stages current WHERE current.job_id = stages.job_id AND current.stage_key = stages.stage_key)`, [jobId]);
-    return stages.rows.length > 0 && (await Promise.all(stages.rows.map(async (stage) => stage.status === "validated" && parentsAreValidated(client, jobId, stage.parentGenerations)))).every(Boolean);
+    const active = stages.rows.filter((stage) => stage.status !== "cancelled");
+    if (active.length === 0) return false;
+    for (const stage of active) {
+      if (stage.status !== "validated" || !await parentsAreValidated(client, jobId, stage.parentGenerations)) return false;
+    }
+    return true;
+  }
+
+  /**
+   * The world checkpoint and its active child roster share the claim transaction.
+   * Regeneration placeholders from P2.3 are retained only when their assigned
+   * application identities still occur in the newly accepted outline.
+   */
+  async function reconcileOutlineChildren(client: DatabaseClient, job: JobRow, stage: StageRow, output: AuthoringStageOutput): Promise<void> {
+    if (output.kind !== "outline") return;
+    const desired = new Set(output.outline.seeds.map((seed) => `character:${seed.id}`));
+    if (desired.size !== output.outline.seeds.length) throw new TypeError("The durable outline requires unique assigned character identities.");
+    // Legacy synchronous-compatible fixtures can carry no seed roster. They do
+    // not declare a replacement roster, so preserve already-created children.
+    if (desired.size === 0) return;
+    const all = await client.query<StageRow>(`SELECT ${STAGE_SELECT} FROM authoring_job_stages WHERE job_id = $1 AND stage_key LIKE 'character:%' FOR UPDATE`, [job.id]);
+    const current = currentStagesForRows(all.rows);
+    const hasCurrentParent = (candidate: StageRow) => {
+      const parents = candidate.parentGenerations as Record<string, unknown>;
+      return Number(parents.world) === stage.generation;
+    };
+    for (const key of desired) {
+      const existing = current.find((candidate) => candidate.stageKey === key && hasCurrentParent(candidate));
+      if (existing) continue;
+      const generations = all.rows.filter((candidate) => candidate.stageKey === key).map((candidate) => candidate.generation);
+      const generation = generations.length ? Math.max(...generations) + 1 : 1;
+      await client.query(
+        `INSERT INTO authoring_job_stages (job_id, owner_user_id, stage_key, generation, parent_generations, status, next_attempt_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, 'queued', clock_timestamp())`,
+        [job.id, job.ownerUserId, key, generation, json({ world: stage.generation })]
+      );
+    }
+    const obsolete = current.filter((candidate) => candidate.stageKey.startsWith("character:") && hasCurrentParent(candidate) && !desired.has(candidate.stageKey) && ["queued", "running", "recoverable"].includes(String(candidate.status)));
+    if (obsolete.length) {
+      await client.query(
+        `UPDATE authoring_job_stages
+            SET status = 'cancelled', lease_token = NULL, lease_owner = NULL, lease_expires_at = NULL, updated_at = clock_timestamp()
+          WHERE id = ANY($1::uuid[])`,
+        [obsolete.map((candidate) => candidate.id)]
+      );
+    }
+  }
+
+  async function lockedView(client: DatabaseClient, jobId: string): Promise<AuthoringJobView> {
+    const jobs = await client.query<JobRow>(`SELECT ${JOB_SELECT} FROM authoring_jobs WHERE id = $1`, [jobId]);
+    const job = jobs.rows[0];
+    if (!job || isDiscardedInput(job.input)) throw new AuthoringRepositoryError("not_found");
+    const stages = await client.query<StageRow>(`SELECT ${STAGE_SELECT} FROM authoring_job_stages WHERE job_id = $1 ORDER BY stage_key, generation`, [jobId]);
+    return jobView(job, stages.rows);
+  }
+
+  function currentStages(rows: readonly StageRow[]): StageRow[] {
+    return rows.filter((stage) => !rows.some((other) => other.stageKey === stage.stageKey && other.generation > stage.generation));
+  }
+
+  function commandJob(job: JobRow, expectedRevision: number): void {
+    if (isDiscardedInput(job.input)) throw new AuthoringRepositoryError("not_found");
+    if (job.revision !== expectedRevision) throw new AuthoringRepositoryError("revision_conflict");
+  }
+
+  async function requireUnexpired(client: DatabaseClient, jobId: string): Promise<void> {
+    const active = await client.query("SELECT 1 FROM authoring_jobs WHERE id = $1 AND expires_at > clock_timestamp()", [jobId]);
+    if (active.rowCount !== 1) throw new AuthoringRepositoryError("invalid_state");
   }
 
   return {
+    async findIdempotency(scope, idempotencyKey) {
+      const existing = await pool.query<JobRow>(
+        `SELECT ${JOB_SELECT} FROM authoring_jobs WHERE owner_user_id = $1 AND idempotency_key = $2`,
+        [scope.ownerUserId, idempotencyKey]
+      );
+      const job = existing.rows[0];
+      if (!job) return null;
+      if (isDiscardedInput(job.input)) return { requestHash: job.requestHash, job: null };
+      const stages = await loadStages([job.id]);
+      return { requestHash: job.requestHash, job: jobView(job, stages.get(job.id) ?? []) };
+    },
     async submit(scope, rawInput, rawHash) {
-      const input = authoringSubmitSchema.parse(rawInput);
+      const input = normalizeAuthoringSubmitForAdmission(authoringSubmitSchema.parse(rawInput));
       const hash = requestHash(rawHash);
       const encoded = json(input);
       if (Buffer.byteLength(encoded, "utf8") > MAX_INPUT_BYTES) {
         throw new RangeError("Authoring input exceeds the 2 MiB durable submission limit.");
       }
       const job = await withTransaction(pool, async (client) => {
+        const existing = await client.query<JobRow>(
+          `SELECT ${JOB_SELECT} FROM authoring_jobs WHERE owner_user_id = $1 AND idempotency_key = $2 FOR UPDATE`,
+          [scope.ownerUserId, input.idempotencyKey]
+        );
+        const replay = existing.rows[0];
+        if (replay) {
+          if (replay.requestHash !== hash) throw new AuthoringRepositoryError("idempotency_conflict");
+          if (isDiscardedInput(replay.input)) throw new AuthoringRepositoryError("invalid_state");
+          return replay;
+        }
+        if (input.target.kind === "world_draft") await assertDraftTarget(client, scope, input.target);
         const inserted = await client.query<JobRow>(
           `INSERT INTO authoring_jobs (owner_user_id, kind, target, input, request_hash, idempotency_key)
            VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6)
@@ -302,14 +448,15 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
           );
           return created;
         }
-        const existing = await client.query<JobRow>(
+        const concurrent = await client.query<JobRow>(
           `SELECT ${JOB_SELECT} FROM authoring_jobs WHERE owner_user_id = $1 AND idempotency_key = $2`,
           [scope.ownerUserId, input.idempotencyKey]
         );
-        const replay = existing.rows[0];
-        if (!replay) throw new Error("Authoring idempotency replay was not readable.");
-        if (replay.requestHash !== hash) throw new AuthoringRepositoryConflict();
-        return replay;
+        const raced = concurrent.rows[0];
+        if (!raced) throw new Error("Authoring idempotency replay was not readable.");
+        if (raced.requestHash !== hash) throw new AuthoringRepositoryError("idempotency_conflict");
+        if (isDiscardedInput(raced.input)) throw new AuthoringRepositoryError("invalid_state");
+        return raced;
       });
       const stages = await loadStages([job.id]);
       return jobView(job, stages.get(job.id) ?? []);
@@ -322,6 +469,7 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
       const jobs = await pool.query<JobListRow>(
         `SELECT ${JOB_LIST_SELECT} FROM authoring_jobs
           WHERE owner_user_id = $1
+            AND input <> '{"discarded":true}'::jsonb
             AND ($2::timestamptz IS NULL OR created_at < $2::timestamptz OR (created_at = $2::timestamptz AND id < $3::uuid))
           ORDER BY created_at DESC, id DESC LIMIT $4`,
         [scope.ownerUserId, after?.createdAt ?? null, after?.id ?? null, PAGE_SIZE + 1]
@@ -333,6 +481,138 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
       const tail = page.at(-1);
       const next = jobs.rows.length > PAGE_SIZE && tail ? encodeListCursor(tail.createdAt, tail.id) : undefined;
       return { jobs: page.map((job) => metadataListItem(job, stages.get(job.id) ?? [])), ...(next ? { nextCursor: next } : {}) };
+    },
+
+    async review(scope, jobId, rawInput) {
+      return withTransaction(pool, async (client) => {
+        const jobs = await client.query<JobRow>(`SELECT ${JOB_SELECT} FROM authoring_jobs WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`, [jobId, scope.ownerUserId]);
+        const job = jobs.rows[0];
+        if (!job || isDiscardedInput(job.input)) throw new AuthoringRepositoryError("not_found");
+        await requireUnexpired(client, job.id);
+        const target = authoringTargetSchema.parse(job.target);
+        const input = parseAuthoringCommandForJob({ kind: job.kind as never, target }, "review", rawInput) as AuthoringReview;
+        commandJob(job, input.expectedRevision);
+        if (!["queued", "running", "awaiting_review", "recoverable"].includes(job.status as string)) throw new AuthoringRepositoryError("invalid_state");
+        if ((job.status === "queued" || job.status === "running") && job.reviewedContent === null && input.selectedStageIds.length === 0) throw new AuthoringRepositoryError("invalid_state");
+        const request = authoringSubmitSchema.parse(job.input);
+        const stages = await client.query<StageRow>(`SELECT ${STAGE_SELECT} FROM authoring_job_stages WHERE job_id = $1 FOR UPDATE`, [job.id]);
+        const current = currentStages(stages.rows);
+        const characterId = job.kind === "character" && request.kind === "character"
+          ? (target.kind === "world_draft" ? target.characterId ?? request.characterId : request.characterId)
+            ?? current.find((stage) => stage.stageKey.startsWith("character:"))?.stageKey.slice("character:".length)
+          : undefined;
+        if (characterId !== undefined && playableCharacterSchema.parse(input.content).id !== characterId) throw new AuthoringRepositoryError("invalid_state");
+        const selected = new Set(input.selectedStageIds);
+        if (selected.size !== input.selectedStageIds.length || [...selected].some((id) => current.find((stage) => stage.id === id)?.status !== "validated")) {
+          throw new AuthoringRepositoryError("invalid_state");
+        }
+        await client.query(
+          `UPDATE authoring_jobs SET reviewed_content = $2::jsonb, review_generation = review_generation + 1,
+             revision = revision + 1, last_activity_at = clock_timestamp(), expires_at = clock_timestamp() + interval '7 days', updated_at = clock_timestamp()
+           WHERE id = $1`,
+          [job.id, json(input.content)]
+        );
+        return lockedView(client, job.id);
+      });
+    },
+
+    async retry(scope, jobId, stageId, expectedRevision) {
+      return withTransaction(pool, async (client) => {
+        const jobs = await client.query<JobRow>(`SELECT ${JOB_SELECT} FROM authoring_jobs WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`, [jobId, scope.ownerUserId]);
+        const job = jobs.rows[0];
+        if (!job) throw new AuthoringRepositoryError("not_found");
+        await requireUnexpired(client, job.id);
+        commandJob(job, expectedRevision);
+        if (job.status !== "awaiting_review" && job.status !== "recoverable") throw new AuthoringRepositoryError("invalid_state");
+        const stages = await client.query<StageRow>(`SELECT ${STAGE_SELECT} FROM authoring_job_stages WHERE job_id = $1 AND owner_user_id = $2 FOR UPDATE`, [job.id, scope.ownerUserId]);
+        const current = currentStages(stages.rows);
+        const source = current.find((stage) => stage.id === stageId);
+        if (!source) throw new AuthoringRepositoryError("not_found");
+        const idsByKey = new Map(current.map((stage) => [stage.stageKey, stage.id]));
+        const lifecycle: AuthoringStageLifecycle[] = current.map((stage) => ({
+          id: stage.id,
+          key: stage.stageKey,
+          generation: stage.generation,
+          status: stage.status as AuthoringStageLifecycle["status"],
+          attemptCount: stage.attemptCount,
+          ...(stage.output === null || stage.output === undefined ? {} : { output: stage.output }),
+          explicitRetryGenerations: stage.retryCount,
+          dependsOn: Object.keys(stage.parentGenerations as Record<string, unknown>).flatMap((key) => {
+            const id = idsByKey.get(key);
+            return id === undefined ? [] : [id];
+          }),
+          parentGenerations: stage.parentGenerations as Record<string, number>
+        }));
+        let next: AuthoringStageLifecycle[];
+        try { next = retryAuthoringStage(lifecycle, stageId, { allowValidated: true }); }
+        catch { throw new AuthoringRepositoryError("invalid_state"); }
+        for (const replacement of next) {
+          const prior = lifecycle.find((stage) => stage.id === replacement.id)!;
+          if (replacement.generation === prior.generation) continue;
+          const original = current.find((stage) => stage.id === replacement.id)!;
+          if (original.status === "running") {
+            await client.query("UPDATE authoring_job_stages SET status = 'cancelled', lease_token = NULL, lease_owner = NULL, lease_expires_at = NULL, updated_at = clock_timestamp() WHERE id = $1", [original.id]);
+          }
+          await client.query(
+            `INSERT INTO authoring_job_stages (job_id, owner_user_id, stage_key, generation, parent_generations, status, attempt_count, retry_count, next_attempt_at)
+             VALUES ($1, $2, $3, $4, $5::jsonb, 'queued', 0, $6, clock_timestamp())`,
+            [job.id, scope.ownerUserId, replacement.key, replacement.generation, json(replacement.parentGenerations ?? {}), replacement.explicitRetryGenerations ?? original.retryCount]
+          );
+        }
+        await client.query(
+          `UPDATE authoring_jobs SET status = 'queued', revision = revision + 1,
+             last_activity_at = clock_timestamp(), expires_at = clock_timestamp() + interval '7 days', updated_at = clock_timestamp()
+           WHERE id = $1`,
+          [job.id]
+        );
+        return lockedView(client, job.id);
+      });
+    },
+
+    async cancel(scope, jobId, expectedRevision) {
+      return withTransaction(pool, async (client) => {
+        const jobs = await client.query<JobRow>(`SELECT ${JOB_SELECT} FROM authoring_jobs WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`, [jobId, scope.ownerUserId]);
+        const job = jobs.rows[0];
+        if (!job || isDiscardedInput(job.input)) throw new AuthoringRepositoryError("not_found");
+        await requireUnexpired(client, job.id);
+        if (job.status === "cancelled" && (expectedRevision === job.revision || expectedRevision === job.revision - 1)) return lockedView(client, job.id);
+        commandJob(job, expectedRevision);
+        if (["failed", "applied", "expired"].includes(job.status as string)) throw new AuthoringRepositoryError("invalid_state");
+        await client.query(`SELECT id FROM authoring_job_stages WHERE job_id = $1 FOR UPDATE`, [job.id]);
+        await client.query(
+          `UPDATE authoring_job_stages SET status = 'cancelled', lease_token = NULL, lease_owner = NULL, lease_expires_at = NULL, updated_at = clock_timestamp()
+            WHERE job_id = $1 AND generation = (SELECT max(current.generation) FROM authoring_job_stages current WHERE current.job_id = authoring_job_stages.job_id AND current.stage_key = authoring_job_stages.stage_key)
+              AND status IN ('queued', 'running', 'recoverable')`,
+          [job.id]
+        );
+        await client.query("UPDATE authoring_jobs SET status = 'cancelled', revision = revision + 1, execution_generation = execution_generation + 1, updated_at = clock_timestamp() WHERE id = $1", [job.id]);
+        return lockedView(client, job.id);
+      });
+    },
+
+    async discard(scope, jobId, expectedRevision) {
+      await withTransaction(pool, async (client) => {
+        const jobs = await client.query<JobRow>(`SELECT ${JOB_SELECT} FROM authoring_jobs WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`, [jobId, scope.ownerUserId]);
+        const job = jobs.rows[0];
+        if (!job) throw new AuthoringRepositoryError("not_found");
+        await requireUnexpired(client, job.id);
+        if (isDiscardedInput(job.input) && (expectedRevision === job.revision || expectedRevision === job.revision - 1)) return;
+        commandJob(job, expectedRevision);
+        if (job.status === "applied") throw new AuthoringRepositoryError("invalid_state");
+        await client.query(`SELECT id FROM authoring_job_stages WHERE job_id = $1 FOR UPDATE`, [job.id]);
+        await client.query(
+          `UPDATE authoring_job_stages SET status = CASE WHEN status = 'running' THEN 'cancelled' ELSE status END,
+             lease_token = NULL, lease_owner = NULL, lease_expires_at = NULL, output = NULL, failure = NULL, updated_at = clock_timestamp()
+           WHERE job_id = $1`,
+          [job.id]
+        );
+        await client.query(
+          `UPDATE authoring_jobs SET input = '{"discarded":true}'::jsonb, reviewed_content = NULL, execution_snapshot = NULL,
+             status = 'cancelled', revision = revision + 1, execution_generation = execution_generation + 1, updated_at = clock_timestamp()
+           WHERE id = $1`,
+          [job.id]
+        );
+      });
     },
 
     async claim(workerId, requestedLeaseSeconds) {
@@ -375,6 +655,7 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
         const output = validateStageOutput(stage.stageKey, parsedOutput);
         const updated = await client.query("UPDATE authoring_job_stages SET status = 'validated', output = $2::jsonb, failure = NULL, lease_token = NULL, lease_owner = NULL, lease_expires_at = NULL, completed_at = clock_timestamp(), updated_at = clock_timestamp() WHERE id = $1 AND lease_expires_at > clock_timestamp()", [stage.id, json(output)]);
         if (updated.rowCount !== 1) return false;
+        await reconcileOutlineChildren(client, job, stage, output);
         const complete = await completeCurrentStages(client, job.id);
         await client.query("UPDATE authoring_jobs SET status = $2, last_activity_at = clock_timestamp(), expires_at = clock_timestamp() + interval '7 days', updated_at = clock_timestamp() WHERE id = $1", [job.id, complete ? "awaiting_review" : "running"]);
         return true;
@@ -383,11 +664,18 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
 
     async fail(claim, rawFailure) {
       const failure = projectAuthoringFailure(authoringFailureSchema.parse(rawFailure));
-      const nextStatus = failure.retryable ? "recoverable" : "failed";
       return (await withCurrentClaim(claim, async (client, job, stage) => {
-        const updated = await client.query("UPDATE authoring_job_stages SET status = $2, failure = $3::jsonb, lease_token = NULL, lease_owner = NULL, lease_expires_at = NULL, completed_at = clock_timestamp(), updated_at = clock_timestamp() WHERE id = $1 AND lease_expires_at > clock_timestamp()", [stage.id, nextStatus, json(failure)]);
+        const retainsPartialWorld = stage.stageKey.startsWith("character:") && (await client.query(
+          `SELECT 1 FROM authoring_job_stages world
+            WHERE world.job_id = $1 AND world.stage_key = 'world' AND world.status = 'validated'
+              AND world.generation = (SELECT max(current.generation) FROM authoring_job_stages current WHERE current.job_id = world.job_id AND current.stage_key = 'world')`,
+          [job.id]
+        )).rowCount === 1;
+        const stageStatus = failure.retryable ? "recoverable" : "failed";
+        const jobStatus = failure.retryable || retainsPartialWorld ? "recoverable" : "failed";
+        const updated = await client.query("UPDATE authoring_job_stages SET status = $2, failure = $3::jsonb, lease_token = NULL, lease_owner = NULL, lease_expires_at = NULL, completed_at = clock_timestamp(), updated_at = clock_timestamp() WHERE id = $1 AND lease_expires_at > clock_timestamp()", [stage.id, stageStatus, json(failure)]);
         if (updated.rowCount !== 1) return false;
-        await client.query("UPDATE authoring_jobs SET status = $2, last_activity_at = clock_timestamp(), expires_at = clock_timestamp() + interval '7 days', updated_at = clock_timestamp() WHERE id = $1", [job.id, nextStatus]);
+        await client.query("UPDATE authoring_jobs SET status = $2, last_activity_at = clock_timestamp(), expires_at = clock_timestamp() + interval '7 days', updated_at = clock_timestamp() WHERE id = $1", [job.id, jobStatus]);
         return true;
       })) ?? false;
     },
@@ -425,5 +713,31 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
       };
       })) ?? null;
     }
+  };
+}
+
+/** Owner/revision-scoped draft validation used before first enqueue. It has no publishing capability. */
+export function createPostgresAuthoringTargetPort(pool: DatabasePool): AuthoringTargetPort {
+  return {
+    assertCurrent: async (scope, target) => withTransaction(pool, async (client) => {
+      const draft = await client.query<{ revision: number; content: unknown }>(
+        `SELECT wd.revision, wd.content FROM worlds w
+          JOIN world_drafts wd ON wd.world_id = w.id AND wd.owner_user_id = w.owner_user_id
+         WHERE w.id = $1 AND w.owner_user_id = $2 AND w.status <> 'archived'
+         FOR KEY SHARE OF w, wd`,
+        [target.worldId, scope.ownerUserId]
+      );
+      const current = draft.rows[0];
+      if (!current) throw new AuthoringRepositoryError("not_found");
+      if (current.revision !== target.expectedRevision) throw new AuthoringRepositoryError("revision_conflict");
+      if (target.characterId !== undefined) {
+        const matches = await client.query(
+          `SELECT 1 FROM jsonb_array_elements(COALESCE($1::jsonb->'playableCharacters', '[]'::jsonb)) character
+            WHERE character->>'id' = $2`,
+          [json(current.content), target.characterId]
+        );
+        if (matches.rowCount !== 1) throw new AuthoringRepositoryError("not_found");
+      }
+    })
   };
 }

@@ -95,6 +95,34 @@ describe("runAuthoringResponse", () => {
     });
   });
 
+  it("does not make a repair request after the current-claim guard refuses it", async () => {
+    const request = vi.fn().mockResolvedValue(providerResult("{"));
+    const currentClaim = vi.fn()
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+
+    await expect(runAuthoringResponse({
+      stage: "world", request, parse: JSON.parse, delay: async () => undefined, currentClaim
+    })).rejects.toMatchObject({ authoringFailure: { code: "authoring_cancelled", retryable: false } });
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(currentClaim).toHaveBeenCalledTimes(2);
+  });
+
+  it("fences transport before the initial request and acceptance after a valid response", async () => {
+    const blocked = vi.fn().mockResolvedValue(providerResult('{"value":1}'));
+    await expect(runAuthoringResponse({
+      stage: "world", request: blocked, parse: JSON.parse, delay: async () => undefined, currentClaim: async () => false
+    })).rejects.toMatchObject({ authoringFailure: { code: "authoring_cancelled", retryable: false } });
+    expect(blocked).not.toHaveBeenCalled();
+
+    const acceptedThenCancelled = vi.fn().mockResolvedValue(providerResult('{"value":1}'));
+    const guard = vi.fn().mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    await expect(runAuthoringResponse({
+      stage: "world", request: acceptedThenCancelled, parse: JSON.parse, delay: async () => undefined, currentClaim: guard
+    })).rejects.toMatchObject({ authoringFailure: { code: "authoring_cancelled", retryable: false } });
+    expect(acceptedThenCancelled).toHaveBeenCalledTimes(1);
+  });
+
   it("uses the organizer candidate path for a malformed organizer response", async () => {
     const request = vi.fn()
       .mockResolvedValueOnce(providerResult("{"))
@@ -103,6 +131,19 @@ describe("runAuthoringResponse", () => {
     await runAuthoringResponse({ stage: "organizer", request, parse: JSON.parse, delay: async () => undefined });
 
     expect(request.mock.calls[1]?.[0].issues).toMatchObject([{ path: "profile", code: "invalid_json" }]);
+  });
+
+  it("stops cancellation during transport backoff before spending a retry call", async () => {
+    let active = true;
+    let calls = 0;
+    await expect(runAuthoringResponse({
+      stage: "character",
+      request: async () => { calls += 1; throw timeoutError(); },
+      parse: JSON.parse,
+      currentClaim: async () => active,
+      delay: async () => { active = false; }
+    })).rejects.toMatchObject({ authoringFailure: { code: "authoring_cancelled", retryable: false } });
+    expect(calls).toBe(1);
   });
 
   it("repairs a recognized schema failure with its safe issue", async () => {

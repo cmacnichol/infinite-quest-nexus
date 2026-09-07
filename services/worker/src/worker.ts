@@ -1,6 +1,7 @@
 import { hostname } from "node:os";
 import type {
   GenerationWorkerApplication,
+  AuthoringWorkerApplication,
   IllustrationApplication,
   IllustrationWorkerApplication,
   MemoryWorkerApplication
@@ -29,6 +30,7 @@ export type WorkerDependencies = Readonly<{
   illustration: IllustrationWorkerApplication;
   generationIllustration?: IllustrationApplication;
   memory: MemoryWorkerApplication;
+  authoring?: AuthoringWorkerApplication;
   optionalLanes?: WorkerOptionalLanes;
 }>;
 
@@ -37,6 +39,7 @@ export type WorkerOptionalLanes = Readonly<{
   chronicle(): Promise<boolean>;
   asset(): Promise<boolean>;
   systemArchive?(): Promise<boolean>;
+  authoring?(): Promise<boolean>;
 }>;
 
 export type StartedGeneration = Readonly<{
@@ -99,7 +102,7 @@ function wait(milliseconds: number, signal: AbortSignal): Promise<void> {
 }
 
 type ActiveLane = {
-  name: "illustration" | "chronicle" | "asset" | "system-archive";
+  name: "illustration" | "chronicle" | "asset" | "system-archive" | "authoring";
   active: Set<Promise<boolean>>;
   nextEligibleAt: number;
   run(): Promise<boolean>;
@@ -132,6 +135,7 @@ function defaultOptionalLanes(
   maintenance: PrivateAssetMaintenanceComposition,
   illustrationPublication: PrivateIllustrationAssetPublicationComposition,
   systemArchive: ProductionSystemArchiveWorkerLane | undefined,
+  authoring: AuthoringWorkerApplication | undefined,
   signal: AbortSignal,
 ): WorkerOptionalLanes {
   return {
@@ -164,6 +168,9 @@ function defaultOptionalLanes(
       return result.completed > 0;
     },
     ...(systemArchive === undefined ? {} : { systemArchive: systemArchive.runNext }),
+    ...(authoring === undefined || config.aiAuthoringJobsEnabled !== true ? {} : {
+      authoring: () => authoring.runNext({ workerId, leaseSeconds: config.workerLeaseSeconds })
+    }),
   };
 }
 
@@ -193,7 +200,7 @@ export async function runWorker(
   pool: DatabasePool,
   config: RuntimeConfig,
   signal: AbortSignal,
-  { generation, illustration, generationIllustration, memory, optionalLanes: injectedOptionalLanes }: WorkerDependencies
+  { generation, illustration, generationIllustration, memory, authoring, optionalLanes: injectedOptionalLanes }: WorkerDependencies
 ): Promise<void> {
   const workerId = `${hostname()}:${process.pid}:${crypto.randomUUID().slice(0, 8)}`;
   logger.info({ event: "worker_started", workerId });
@@ -228,7 +235,7 @@ export async function runWorker(
   }
   const activeGeneration = new Set<Promise<boolean>>();
   let generationNextEligibleAt = 0;
-  const optionalLanes = injectedOptionalLanes ?? defaultOptionalLanes(
+  const configuredOptionalLanes = injectedOptionalLanes ?? defaultOptionalLanes(
     pool,
     config,
     workerId,
@@ -238,8 +245,13 @@ export async function runWorker(
     maintenance!,
     illustrationPublication!,
     systemArchive,
+    authoring,
     signal,
   );
+  const { authoring: configuredAuthoring, ...nonAuthoringLanes } = configuredOptionalLanes;
+  const optionalLanes: WorkerOptionalLanes = config.aiAuthoringJobsEnabled === true
+    ? configuredOptionalLanes
+    : nonAuthoringLanes;
   const lanes: ActiveLane[] = [
     { name: "illustration", active: new Set(), nextEligibleAt: 0, run: optionalLanes.illustration },
     { name: "chronicle", active: new Set(), nextEligibleAt: 0, run: optionalLanes.chronicle },
@@ -249,6 +261,12 @@ export async function runWorker(
       active: new Set<Promise<boolean>>(),
       nextEligibleAt: 0,
       run: optionalLanes.systemArchive,
+    }]),
+    ...(optionalLanes.authoring === undefined ? [] : [{
+      name: "authoring" as const,
+      active: new Set<Promise<boolean>>(),
+      nextEligibleAt: 0,
+      run: optionalLanes.authoring,
     }]),
   ];
 
@@ -328,7 +346,9 @@ export async function runWorker(
                   ...(diagnostic === undefined ? {} : { diagnostic }),
                 };
               })()
-              : { message: error instanceof Error ? error.message : String(error) })
+              : lane.name === "authoring"
+                ? { errorCode: "authoring-execution-failed", message: "Authoring job execution failed." }
+                : { message: error instanceof Error ? error.message : String(error) })
           });
           return false;
         })
@@ -372,6 +392,7 @@ export async function runWorker(
         chronicleJobs: lanes[1]!.active.size,
         assetJobs: lanes[2]!.active.size,
         systemArchiveJobs: lanes.find((lane) => lane.name === "system-archive")?.active.size ?? 0,
+        authoringJobs: lanes.find((lane) => lane.name === "authoring")?.active.size ?? 0,
       });
       await Promise.allSettled(draining);
     }

@@ -88,6 +88,20 @@ const characterSubmitSchema = z.object({
 
 export const authoringSubmitSchema = z.discriminatedUnion("kind", [worldConceptSubmitSchema, characterSubmitSchema]);
 
+/**
+ * Existing drafts have one durable character identity. Canonicalize the two
+ * compatible request spellings before idempotency hashing and persistence.
+ * New-world requests retain their root characterId because it identifies an
+ * unsaved local-parent edit rather than a persisted draft target.
+ */
+export function normalizeAuthoringSubmitForAdmission(input: AuthoringSubmit): AuthoringSubmit {
+  if (input.kind !== "character" || input.target.kind !== "world_draft") return input;
+  const characterId = input.target.characterId ?? input.characterId;
+  if (characterId === undefined) return input;
+  const { characterId: _rootCharacterId, ...request } = input;
+  return { ...request, target: { ...input.target, characterId } };
+}
+
 /** Internal durable-stage contract. It is not part of any HTTP response projection. */
 export const authoringWorldOutlineSchema = z.object({
   title: z.string().trim().min(1).max(500),

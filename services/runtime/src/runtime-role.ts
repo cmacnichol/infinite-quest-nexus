@@ -7,6 +7,7 @@ import type {
   MemoryApplication,
   MemoryWorkerApplication,
   WorldCampaignApplication
+  , AuthoringWorkerApplication
 } from "../../../packages/application/src/index.js";
 import type { DatabasePool, RuntimeConfig } from "../../../packages/database/src/index.js";
 import type { BuildServerOptions } from "../../api/src/server.js";
@@ -78,6 +79,11 @@ export type RuntimeRoleDependencies = Readonly<{
     memory: MemoryApplication,
     providers: WorkerProviderApplicationComposition["generation"],
   ): GenerationWorkerApplication;
+  createWorkerAuthoring(
+    pool: DatabasePool,
+    providers: WorkerProviderApplicationComposition["worldGeneration"],
+    signal: AbortSignal,
+  ): AuthoringWorkerApplication;
   buildServer(options: BuildServerOptions): Promise<RuntimeServer>;
   runWorker(
     pool: DatabasePool,
@@ -166,6 +172,7 @@ export async function dispatchRuntimeRole(
     const illustration = dependencies.createApiIllustration(pool, providerGraph.illustration);
     const memory = dependencies.createApiMemory(pool, providerGraph.chronicle);
     const generation = dependencies.createWorkerGeneration(pool, illustration, memory, providerGraph.generation);
+    const authoring = dependencies.createWorkerAuthoring(pool, providerGraph.worldGeneration, signal);
     const workerIllustration = dependencies.createWorkerIllustration(
       pool,
       providerGraph.illustration,
@@ -174,7 +181,8 @@ export async function dispatchRuntimeRole(
       generation,
       illustration: workerIllustration,
       generationIllustration: illustration,
-      memory: dependencies.createWorkerMemory(pool, providerGraph.chronicle)
+      memory: dependencies.createWorkerMemory(pool, providerGraph.chronicle),
+      authoring
     });
     return;
   }
@@ -196,6 +204,7 @@ export async function dispatchRuntimeRole(
   const workerGeneration = dependencies.createWorkerGeneration(
     pool, workerIllustrationTransactions, workerMemoryTransactions, workerProviderGraph.generation,
   );
+  const authoring = dependencies.createWorkerAuthoring(pool, workerProviderGraph.worldGeneration, signal);
   const workerIllustration = dependencies.createWorkerIllustration(
     pool,
     workerProviderGraph.illustration,
@@ -209,7 +218,8 @@ export async function dispatchRuntimeRole(
     generation: workerGeneration,
     illustration: workerIllustration,
     generationIllustration: workerIllustrationTransactions,
-    memory: dependencies.createWorkerMemory(pool, workerProviderGraph.chronicle)
+    memory: dependencies.createWorkerMemory(pool, workerProviderGraph.chronicle),
+    authoring
   });
   await server.close();
 }

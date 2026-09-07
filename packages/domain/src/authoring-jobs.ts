@@ -39,11 +39,11 @@ export function canTransitionAuthoringJob(from: AuthoringJobStatus, to: Authorin
 }
 
 export function canReviewAuthoringJob(status: AuthoringJobStatus): boolean {
-  return status === "awaiting_review" || status === "recoverable";
+  return status === "queued" || status === "running" || status === "awaiting_review" || status === "recoverable";
 }
 
 export function canApplyAuthoringJob(status: AuthoringJobStatus): boolean {
-  return canReviewAuthoringJob(status);
+  return status === "awaiting_review" || status === "recoverable";
 }
 
 export function canRecoverAuthoringStageLease(recoveryCount: number): boolean {

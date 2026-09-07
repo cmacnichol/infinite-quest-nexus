@@ -50,6 +50,13 @@ describe("authoring job lifecycle", () => {
     }
   });
 
+  it("allows autosave review while work is queued or running but never broadens apply eligibility", () => {
+    expect(canReviewAuthoringJob("queued")).toBe(true);
+    expect(canReviewAuthoringJob("running")).toBe(true);
+    expect(canApplyAuthoringJob("queued")).toBe(false);
+    expect(canApplyAuthoringJob("running")).toBe(false);
+  });
+
   it("bounds lease recovery and failed-stage retry generations", () => {
     expect(canRecoverAuthoringStageLease(2)).toBe(true);
     expect(canRecoverAuthoringStageLease(3)).toBe(false);
