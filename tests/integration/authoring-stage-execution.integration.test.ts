@@ -316,6 +316,34 @@ integration("durable authoring real repository and stage dispatcher", () => {
     await expect(repository.loadClaim(claim)).resolves.toBeNull();
   });
 
+  it("cancels while the repair provider request is in flight and rejects its late valid result", async () => {
+    const repository = createPostgresAuthoringRepository(pool);
+    const request = authoringSubmitSchema.parse({ kind: "character", target: { kind: "new_world" }, idempotencyKey: randomUUID(), prompt: "Create a cartographer.", content: worldContentSchema.parse({ world: { title: "In-flight repair fixture" } }) });
+    const job = await repository.submit({ ownerUserId }, request, sha256(JSON.stringify(request)));
+    const claim = (await repository.claim("in-flight-repair", 60))!;
+    const repairing = deferred<void>();
+    const finishRepair = deferred<ProviderResult>();
+    let calls = 0;
+    const adapter = runtime(async providerRequest => {
+      calls += 1;
+      if (calls === 1) return result(fixture.malformed);
+      expect(providerRequest.rejectedResponse).toBeDefined();
+      repairing.resolve();
+      return finishRepair.promise;
+    });
+    await repository.initializeExecutionSnapshot(claim, adapter.snapshot);
+    const execution = executeAuthoringStage({ claim, repository, dispatch: adapter.dispatch });
+    await repairing.promise;
+    const current = (await repository.read({ ownerUserId }, job.id))!;
+    await repository.cancel({ ownerUserId }, job.id, current.revision);
+    finishRepair.resolve(result(JSON.stringify(fixture.character)));
+    await expect(execution).rejects.toMatchObject({ authoringFailure: { code: "authoring_cancelled", retryable: false } });
+    expect(calls).toBe(2);
+    expect((await pool.query("SELECT output FROM authoring_job_stages WHERE job_id = $1", [job.id])).rows).toEqual([{ output: null }]);
+    await expect(repository.loadClaim(claim)).resolves.toBeNull();
+    await expect(repository.claim("no-post-cancel-stage", 60)).resolves.toBeNull();
+  });
+
   it("projects application-owned world mechanics identically to synchronous assembly with zero, one or two completed characters", async () => {
     const repository = createPostgresAuthoringRepository(pool);
     const request = authoringSubmitSchema.parse({ kind: "world_concept", target: { kind: "new_world" }, idempotencyKey: randomUUID(), prompt: "Create a glass road world." });

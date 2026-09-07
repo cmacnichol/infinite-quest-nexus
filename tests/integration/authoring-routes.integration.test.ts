@@ -205,6 +205,65 @@ integration("authoring HTTP commands", () => {
     } finally { await server.close(); }
   });
 
+  it("recovers a checkpointed proposal after its polling HTTP response is dropped before delivery", async () => {
+    const repository = createPostgresAuthoringRepository(pool);
+    const job = await repository.submit({ ownerUserId }, submit(`dropped-poll-${crypto.randomUUID()}`), "d".repeat(64));
+    jobIds.push(job.id);
+    const claim = (await repository.claim("checkpoint-before-http", 60))!;
+    expect(await repository.checkpoint(claim, appliedOutline as Parameters<typeof repository.checkpoint>[1])).toBe(true);
+    const bytes = (await pool.query("SELECT output::text AS bytes FROM authoring_job_stages WHERE id = $1", [claim.stageId])).rows[0]!.bytes;
+    const broken = await app();
+    broken.addHook("onSend", async (request, reply, payload) => {
+      if (request.url === `/api/v1/authoring/jobs/${job.id}`) reply.raw.destroy();
+      return payload;
+    });
+    try {
+      const address = await broken.listen({ host: "127.0.0.1", port: 0 });
+      await expect(fetch(`${address}/api/v1/authoring/jobs/${job.id}`)).rejects.toThrow();
+    } finally { await broken.close(); }
+    const restarted = await app();
+    try {
+      const address = await restarted.listen({ host: "127.0.0.1", port: 0 });
+      const response = await fetch(`${address}/api/v1/authoring/jobs/${job.id}`);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ id: job.id, status: "awaiting_review", result: appliedContent });
+      expect((await pool.query("SELECT output::text AS bytes FROM authoring_job_stages WHERE id = $1", [claim.stageId])).rows[0]!.bytes).toBe(bytes);
+      await expect(repository.claim("no-replay-after-http-loss", 60)).resolves.toBeNull();
+    } finally { await restarted.close(); }
+  });
+
+  it("replays an apply whose actual HTTP socket closes after the transaction commits", async () => {
+    const application = createRuntimeAuthoringApplication(pool, value => createHash("sha256").update(value).digest("hex"));
+    const job = await application.submit({ ownerUserId }, submit(`dropped-apply-${crypto.randomUUID()}`));
+    jobIds.push(job.id);
+    const repository = createPostgresAuthoringRepository(pool);
+    const claim = (await repository.claim("apply-http-loss", 60))!;
+    expect(await repository.checkpoint(claim, appliedOutline as Parameters<typeof repository.checkpoint>[1])).toBe(true);
+    const reviewed = await application.review({ ownerUserId }, job.id, { expectedRevision: job.revision, content: appliedContent, selectedStageIds: [claim.stageId] });
+    const input = { expectedRevision: reviewed.revision, idempotencyKey: "socket-loss-apply", selectedStageIds: [claim.stageId], content: appliedContent };
+    const broken = await app();
+    broken.addHook("onSend", async (request, reply, payload) => {
+      if (request.url.endsWith("/apply")) reply.raw.destroy();
+      return payload;
+    });
+    let receipt;
+    try {
+      const address = await broken.listen({ host: "127.0.0.1", port: 0 });
+      await expect(fetch(`${address}/api/v1/authoring/jobs/${job.id}/apply`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) })).rejects.toThrow();
+      receipt = (await pool.query("SELECT apply_receipt FROM authoring_jobs WHERE id = $1", [job.id])).rows[0]!.apply_receipt;
+      expect(receipt).toMatchObject({ jobId: job.id, draftRevision: 1 });
+      worldIds.push(receipt.worldId);
+    } finally { await broken.close(); }
+    const restarted = await app();
+    try {
+      const address = await restarted.listen({ host: "127.0.0.1", port: 0 });
+      const response = await fetch(`${address}/api/v1/authoring/jobs/${job.id}/apply`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual(receipt);
+      expect((await pool.query("SELECT count(*)::int AS count FROM worlds WHERE title = $1", [appliedContent.world.title])).rows).toEqual([{ count: 1 }]);
+    } finally { await restarted.close(); }
+  });
+
   it("maps the repository's transactional active-proposal limit to a safe HTTP 429", async () => {
     const server = await app();
     try {

@@ -326,6 +326,19 @@ integration("authoring apply PostgreSQL integration", () => {
     })).rejects.toMatchObject({ code: "authoring_invalid_state" });
   });
 
+  it("rejects apply after its target world is deleted and preserves the unapplied review", async () => {
+    const { worldId } = await createDraft(3);
+    const { application, jobId, stageId, revision } = await reviewedCharacterJob(worldId, 3);
+    await pool.query("DELETE FROM worlds WHERE id = $1", [worldId]);
+    await expect(application.apply({ ownerUserId }, jobId, {
+      expectedRevision: revision, idempotencyKey: "deleted-world-apply",
+      selectedStageIds: [stageId], content: revisedHero
+    })).rejects.toMatchObject({ code: "authoring_not_found" });
+    expect((await pool.query("SELECT id FROM worlds WHERE id = $1", [worldId])).rows).toEqual([]);
+    expect((await pool.query("SELECT apply_receipt, reviewed_content FROM authoring_jobs WHERE id = $1", [jobId])).rows[0])
+      .toMatchObject({ apply_receipt: null, reviewed_content: revisedHero });
+  });
+
   it("rolls back the world write when receipt persistence fails after the mutation", async () => {
     const { application, jobId, stageId, revision } = await reviewedWorldJob();
     const suffix = crypto.randomUUID().replaceAll("-", "");

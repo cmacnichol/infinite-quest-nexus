@@ -1,6 +1,6 @@
 # AI Assist Implementation Roadmap and Design
 
-**Status:** Patch 1 is implemented and verified in its isolated worktree; Patches 2 and 3 remain proposed. See the [Patch 1 verification record](../../review/2026-09-06-ai-assist-patch-1-verification.md). This document alone does not authorize implementation, publication, or the next patch.
+**Status:** Patch 1 is implemented and verified. Patch 2 implementation and verification are ready for independent P2.10 task review and the subsequent whole-branch review; see the [Patch 2 verification record](../../review/2026-09-06-ai-assist-patch-2-verification.md). Patch 3 remains proposed and is not authorized by this record.
 **Source revision inspected:** 707baa8cd8eab704a8d5202e99c5a7ce2b7201c7.
 **Requested delivery:** Implement one patch at a time. Finish its review and verification gate, then stop. Do not start the next patch until the user requests it.
 

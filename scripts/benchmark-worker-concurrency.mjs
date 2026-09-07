@@ -11,7 +11,8 @@ const DEFAULT_OPTIONAL_JOBS_PER_LANE = 3;
 const DEFAULT_PROVIDER_DELAY_MS = 24;
 const DEFAULT_OPTIONAL_DELAY_MS = 8;
 const VARIANCE_RERUN_THRESHOLD = 0.05;
-const OPTIONAL_LANES = ["illustration", "chronicle", "asset"];
+const BASELINE_OPTIONAL_LANES = ["illustration", "chronicle", "asset"];
+const AUTHORING_OPTIONAL_LANES = ["authoring", "authoring-cleanup"];
 
 function mean(values) {
   return values.reduce((total, value) => total + value, 0) / Math.max(values.length, 1);
@@ -55,10 +56,14 @@ export function summarizeConcurrencySamples(samples) {
     peakIllustration: maximum(samples.map((sample) => sample.peakIllustration ?? 0)),
     peakChronicle: maximum(samples.map((sample) => sample.peakChronicle ?? 0)),
     peakAsset: maximum(samples.map((sample) => sample.peakAsset ?? 0)),
+    peakAuthoring: maximum(samples.map((sample) => sample.peakAuthoring ?? 0)),
+    peakAuthoringCleanup: maximum(samples.map((sample) => sample.peakAuthoringCleanup ?? 0)),
     completedGenerationJobs: samples.reduce((total, sample) => total + (sample.completedGenerationJobs ?? 0), 0),
     completedIllustrationJobs: samples.reduce((total, sample) => total + (sample.completedIllustrationJobs ?? 0), 0),
     completedChronicleJobs: samples.reduce((total, sample) => total + (sample.completedChronicleJobs ?? 0), 0),
-    completedAssetJobs: samples.reduce((total, sample) => total + (sample.completedAssetJobs ?? 0), 0)
+    completedAssetJobs: samples.reduce((total, sample) => total + (sample.completedAssetJobs ?? 0), 0),
+    completedAuthoringJobs: samples.reduce((total, sample) => total + (sample.completedAuthoringJobs ?? 0), 0),
+    completedAuthoringCleanupJobs: samples.reduce((total, sample) => total + (sample.completedAuthoringCleanupJobs ?? 0), 0)
   };
 }
 
@@ -199,7 +204,7 @@ async function createBenchmarkTables(pool, schema) {
   )`);
   await pool.query(`CREATE TABLE ${namespace}.optional_jobs (
     id uuid PRIMARY KEY,
-    lane text NOT NULL CHECK (lane IN ('illustration','chronicle','asset')),
+    lane text NOT NULL CHECK (lane IN ('illustration','chronicle','asset','authoring','authoring-cleanup')),
     status text NOT NULL CHECK (status IN ('queued','running','completed')),
     created_at timestamptz NOT NULL,
     claimed_at timestamptz,
@@ -207,7 +212,7 @@ async function createBenchmarkTables(pool, schema) {
   )`);
 }
 
-async function seedSample(pool, schema, seed, generationJobCount, optionalJobsPerLane) {
+async function seedSample(pool, schema, seed, generationJobCount, optionalJobsPerLane, optionalLanes) {
   const namespace = quotedSchema(schema);
   const client = await pool.connect();
   try {
@@ -228,7 +233,7 @@ async function seedSample(pool, schema, seed, generationJobCount, optionalJobsPe
         ]
       );
     }
-    for (const lane of OPTIONAL_LANES) {
+    for (const lane of optionalLanes) {
       for (let index = 0; index < optionalJobsPerLane; index += 1) {
         await client.query(
           `INSERT INTO ${namespace}.optional_jobs (id, lane, status, created_at)
@@ -251,7 +256,9 @@ function createMetrics() {
     generation: { active: 0, peak: 0, completed: 0 },
     illustration: { active: 0, peak: 0, completed: 0 },
     chronicle: { active: 0, peak: 0, completed: 0 },
-    asset: { active: 0, peak: 0, completed: 0 }
+    asset: { active: 0, peak: 0, completed: 0 },
+    authoring: { active: 0, peak: 0, completed: 0 },
+    "authoring-cleanup": { active: 0, peak: 0, completed: 0 }
   };
 }
 
@@ -337,7 +344,7 @@ function createGenerationApplication(pool, schema, metrics, providerDelayMs) {
   };
 }
 
-function createOptionalLane(pool, schema, lane, metrics, optionalDelayMs) {
+function createOptionalLane(pool, schema, lane, metrics, optionalDelayMs, optionalLanes) {
   const namespace = quotedSchema(schema);
   return async () => {
     const claimed = await pool.query(
@@ -359,7 +366,7 @@ function createOptionalLane(pool, schema, lane, metrics, optionalDelayMs) {
     enterMetric(metric);
     let completed = false;
     try {
-      await delay(optionalDelayMs + OPTIONAL_LANES.indexOf(lane));
+      await delay(optionalDelayMs + optionalLanes.indexOf(lane));
       const result = await pool.query(
         `UPDATE ${namespace}.optional_jobs
             SET status = 'completed', completed_at = clock_timestamp()
@@ -416,9 +423,10 @@ async function runSample({
   optionalJobsPerLane,
   providerDelayMs,
   optionalDelayMs,
+  optionalLanes,
   runWorker
 }) {
-  await seedSample(pool, schema, seed, generationJobCount, optionalJobsPerLane);
+  await seedSample(pool, schema, seed, generationJobCount, optionalJobsPerLane, optionalLanes);
   const metrics = createMetrics();
   const controller = new AbortController();
   const databaseSamples = [];
@@ -434,14 +442,17 @@ async function runSample({
     workerGenerationConcurrency: concurrency,
     workerLeaseSeconds: 30,
     workerPollIntervalMs: 2,
+    aiAuthoringJobsEnabled: optionalLanes.includes("authoring"),
     credentialEncryptionKey: "benchmark-no-provider-secret",
     assetStorageRoot: "/tmp/infinite-quest-benchmark-unused"
   }, controller.signal, {
     generation: createGenerationApplication(pool, schema, metrics, providerDelayMs),
     optionalLanes: {
-      illustration: createOptionalLane(pool, schema, "illustration", metrics, optionalDelayMs),
-      chronicle: createOptionalLane(pool, schema, "chronicle", metrics, optionalDelayMs),
-      asset: createOptionalLane(pool, schema, "asset", metrics, optionalDelayMs)
+      illustration: createOptionalLane(pool, schema, "illustration", metrics, optionalDelayMs, optionalLanes),
+      chronicle: createOptionalLane(pool, schema, "chronicle", metrics, optionalDelayMs, optionalLanes),
+      asset: createOptionalLane(pool, schema, "asset", metrics, optionalDelayMs, optionalLanes),
+      ...(optionalLanes.includes("authoring") ? { authoring: createOptionalLane(pool, schema, "authoring", metrics, optionalDelayMs, optionalLanes) } : {}),
+      ...(optionalLanes.includes("authoring-cleanup") ? { authoringCleanup: createOptionalLane(pool, schema, "authoring-cleanup", metrics, optionalDelayMs, optionalLanes) } : {})
     }
   });
 
@@ -450,7 +461,7 @@ async function runSample({
       pool,
       schema,
       generationJobCount,
-      optionalJobsPerLane * OPTIONAL_LANES.length,
+      optionalJobsPerLane * optionalLanes.length,
       30_000
     );
   } finally {
@@ -479,7 +490,7 @@ async function runSample({
   if (metrics.generation.peak > concurrency) {
     throw new Error(`Provider concurrency ${metrics.generation.peak} exceeded configured limit ${concurrency}.`);
   }
-  for (const lane of OPTIONAL_LANES) {
+  for (const lane of optionalLanes) {
     if (metrics[lane].peak > 1 || metrics[lane].completed !== optionalJobsPerLane) {
       throw new Error(`Optional lane ${lane} violated its capacity or completion contract.`);
     }
@@ -495,10 +506,14 @@ async function runSample({
     peakIllustration: metrics.illustration.peak,
     peakChronicle: metrics.chronicle.peak,
     peakAsset: metrics.asset.peak,
+    peakAuthoring: metrics.authoring.peak,
+    peakAuthoringCleanup: metrics["authoring-cleanup"].peak,
     completedGenerationJobs: metrics.generation.completed,
     completedIllustrationJobs: metrics.illustration.completed,
     completedChronicleJobs: metrics.chronicle.completed,
-    completedAssetJobs: metrics.asset.completed
+    completedAssetJobs: metrics.asset.completed,
+    completedAuthoringJobs: metrics.authoring.completed,
+    completedAuthoringCleanupJobs: metrics["authoring-cleanup"].completed
   };
 }
 
@@ -538,6 +553,7 @@ async function runConcurrencyPoint(databaseUrl, concurrency, settings, runWorker
       optionalJobsPerLane: settings.optionalJobsPerLane,
       providerDelayMs: settings.providerDelayMs,
       optionalDelayMs: settings.optionalDelayMs,
+      optionalLanes: settings.optionalLanes,
       warmups: settings.warmups,
       samples: settings.samples,
       seed: `${settings.seed}:concurrency:${concurrency}`,
@@ -556,7 +572,7 @@ async function runConcurrencyPoint(databaseUrl, concurrency, settings, runWorker
       databaseMaxConnections,
       providerLimit: concurrency,
       providerDelayMs: settings.providerDelayMs,
-      optionalLaneCapacity: { illustration: 1, chronicle: 1, asset: 1 },
+      optionalLaneCapacity: Object.fromEntries(settings.optionalLanes.map((lane) => [lane, 1])),
       optionalDelayMs: settings.optionalDelayMs,
       variancePolicy: {
         thresholdRatio: VARIANCE_RERUN_THRESHOLD,
@@ -607,7 +623,10 @@ async function runBenchmark() {
       "WORKER_BENCHMARK_OPTIONAL_DELAY_MS",
       DEFAULT_OPTIONAL_DELAY_MS,
       10_000
-    )
+    ),
+    optionalLanes: process.env.WORKER_BENCHMARK_INCLUDE_AUTHORING === "true"
+      ? [...BASELINE_OPTIONAL_LANES, ...AUTHORING_OPTIONAL_LANES]
+      : BASELINE_OPTIONAL_LANES
   };
   const results = [];
   for (const concurrency of CONCURRENCY_POINTS) {
@@ -645,6 +664,7 @@ async function runBenchmark() {
         seed: settings.seed,
         generationJobsPerSample: settings.generationJobCount,
         optionalJobsPerLanePerSample: settings.optionalJobsPerLane,
+        optionalLanes: settings.optionalLanes,
         warmupsPerBatch: settings.warmups,
         measuredSamplesPerBatch: settings.samples
       }
