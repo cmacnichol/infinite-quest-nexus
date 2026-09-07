@@ -80,6 +80,7 @@ export function createAuthoringApplication(dependencies: AuthoringApplicationDep
     submit: async (scope, rawInput) => {
       requireOwner(scope);
       const input = normalizeAuthoringSubmitForAdmission(authoringSubmitSchema.parse(rawInput));
+      if (input.kind === "story_source") throw new AuthoringApplicationError("authoring_invalid_state");
       const hash = requestHash(input, dependencies.sha256);
       const replay = await dependencies.repository.findIdempotency(scope, input.idempotencyKey);
       if (replay) {

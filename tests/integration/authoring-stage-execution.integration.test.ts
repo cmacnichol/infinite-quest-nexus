@@ -347,6 +347,7 @@ integration("durable authoring real repository and stage dispatcher", () => {
   it("projects application-owned world mechanics identically to synchronous assembly with zero, one or two completed characters", async () => {
     const repository = createPostgresAuthoringRepository(pool);
     const request = authoringSubmitSchema.parse({ kind: "world_concept", target: { kind: "new_world" }, idempotencyKey: randomUUID(), prompt: "Create a glass road world." });
+    if (request.kind !== "world_concept") throw new Error("Expected a world concept input.");
     const job = await repository.submit({ ownerUserId }, request, sha256(JSON.stringify(request)));
     const raw = {
       ...fixture.world,

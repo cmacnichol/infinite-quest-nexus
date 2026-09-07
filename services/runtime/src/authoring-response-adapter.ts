@@ -55,6 +55,11 @@ function authoringFailureMessage(failure: AuthoringFailure): string {
     case "authoring_cancelled": return "This authoring proposal was cancelled.";
     case "authoring_retry_exhausted": return "This stage has exhausted its retry limit. Create a new proposal.";
     case "authoring_apply_unavailable": return "Applying authoring proposals is not available yet.";
+    case "source_requires_larger_context": return "Source extraction needs a larger context window.";
+    case "source_coverage_incomplete": return "Source extraction did not cover the selected source boundary.";
+    case "source_evidence_invalid": return "Source extraction evidence was invalid.";
+    case "choose_source_facts": return "Choose source facts before continuing.";
+    case "source_review_conflict": return "The source review changed. Refresh and try again.";
   }
 }
 

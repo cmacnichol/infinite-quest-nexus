@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION, WORLD_AUTHORING_PROMPT_PROTOCOL_VERSION } from "../../packages/domain/src/authoring-prompts.js";
 import type { AuthoringClaim, AuthoringExecutionRepository } from "../../packages/application/src/authoring/ports.js";
@@ -155,6 +155,21 @@ describe("executeAuthoringStage", () => {
     expect(output).toMatchObject({ kind: "character", character: { id: "durable-character", name: "Iris" } });
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ profileId: "text-1", model: "model-pinned" });
+  });
+
+  it("rejects source authoring before loading a text provider", async () => {
+    const text = vi.fn();
+    const dispatch = createRuntimeAuthoringStageDispatcher({ execution: { text } as never, sha256 });
+
+    await expect(dispatch(runtimeStage({
+      input: {
+        kind: "story_source", idempotencyKey: "source-key", target: { kind: "new_world" },
+        name: "chapter.txt", text: "A chapter.", mode: "faithful", boundaryParagraphId: "paragraph:0", instructions: ""
+      },
+      stageKey: "source"
+    }))).rejects.toMatchObject({ authoringFailure: { code: "source_evidence_invalid", stage: "source", retryable: false } });
+
+    expect(text).not.toHaveBeenCalled();
   });
 
   it("turns deleted or disabled pinned provider loads into a recoverable safe failure", async () => {

@@ -74,12 +74,14 @@ integration("authoring job PostgreSQL repository", () => {
   afterAll(async () => { await pool?.end(); });
 
   function input(key = `authoring-${crypto.randomUUID()}`) {
-    return authoringSubmitSchema.parse({
+    const parsed = authoringSubmitSchema.parse({
       kind: "world_concept",
       idempotencyKey: key,
       target: { kind: "new_world" },
       prompt: "Create a faithful fantasy world proposal."
     });
+    if (parsed.kind !== "world_concept") throw new Error("Expected a world concept input.");
+    return parsed;
   }
 
   function snapshot() {

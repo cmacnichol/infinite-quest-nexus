@@ -75,6 +75,14 @@ describe("runAuthoringResponse", () => {
     expect(error.message).toBe("The authoring proposal changed. Refresh and try again.");
   });
 
+  it("renders a fixed source failure without provider diagnostics", () => {
+    const error = new AuthoringResponseError({
+      code: "source_evidence_invalid", stage: "source", retryable: false, issues: []
+    });
+
+    expect(error.message).toBe("Source extraction evidence was invalid.");
+  });
+
   it("repairs malformed JSON with one complete replacement", async () => {
     const request = vi.fn()
       .mockResolvedValueOnce(providerResult("{"))

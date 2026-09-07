@@ -126,6 +126,9 @@ export function createRuntimeAuthoringStageDispatcher(options: Readonly<{
   sha256: (value: string) => string;
 }>): (stage: LoadedAuthoringStage) => Promise<AuthoringStageOutput> {
   return async (stage) => {
+    if (stage.input.kind === "story_source") {
+      throw new AuthoringResponseError({ code: "source_evidence_invalid", stage: "source", retryable: false, issues: [] });
+    }
     let provider: RuntimeTextExecution;
     try {
       provider = await options.execution.text(

@@ -155,6 +155,28 @@ describe("runtime authoring worker composition", () => {
     }));
   });
 
+  it("rejects source input before resolving or loading a text provider", async () => {
+    const claim = { jobId: "job", stageId: "stage", ownerUserId: "owner", jobGeneration: 1, stageGeneration: 1, leaseToken: "token", leaseExpiresAt: "2026-09-06T00:00:30.000Z" };
+    const source = { kind: "story_source" as const, idempotencyKey: "source-key", target: { kind: "new_world" as const }, name: "chapter.txt", text: "A chapter.", mode: "faithful" as const, boundaryParagraphId: "paragraph:0", instructions: "" };
+    const repository = {
+      claim: vi.fn(async () => claim), heartbeat: vi.fn(async () => true), checkpoint: vi.fn(async () => true), fail: vi.fn(async () => true),
+      loadClaim: vi.fn().mockResolvedValueOnce(null), readClaimInput: vi.fn(async () => source), initializeExecutionSnapshot: vi.fn()
+    };
+    const resolution = { resolveDirect: vi.fn() };
+    const execution = { text: vi.fn() };
+    const application = createRuntimeAuthoringWorkerApplication({
+      repository: repository as never,
+      providers: { resolution, execution, prompts: { loadWorldGenerationPromptSnapshot: vi.fn() }, promptTools: { content: () => "" } } as never,
+      sha256: () => "a".repeat(64), dispatch: vi.fn()
+    });
+
+    await expect(application.runNext({ workerId: "worker", leaseSeconds: 30 })).resolves.toBe(false);
+
+    expect(resolution.resolveDirect).not.toHaveBeenCalled();
+    expect(execution.text).not.toHaveBeenCalled();
+    expect(repository.fail).toHaveBeenCalledWith(claim, expect.objectContaining({ code: "source_evidence_invalid", stage: "source", retryable: false }));
+  });
+
   it("does not claim after runtime shutdown has started", async () => {
     const controller = new AbortController();
     controller.abort();

@@ -90,6 +90,11 @@ export function createRuntimeAuthoringWorkerApplication(options: Readonly<{
           claim, repository,
           currentClaim,
           resolveSnapshot: async (input) => {
+            if (input.kind === "story_source") {
+              throw Object.assign(new Error("story source authoring is not available"), {
+                authoringFailure: { code: "source_evidence_invalid", stage: "source", retryable: false, issues: [] }
+              });
+            }
             const resolution = await options.providers.resolution.resolveDirect({ ownerUserId: claim.ownerUserId, providerRole: "text" });
             if (resolution.status !== "resolved") throw Object.assign(new Error("authoring provider unavailable"), { authoringFailure: { code: "authoring_provider_unavailable", stage: input.kind === "world_concept" ? "world" : "character", retryable: true, issues: [] } });
             const provider = await options.providers.execution.text({ ownerUserId: claim.ownerUserId }, resolution.providerProfileId, "text", resolution.model);

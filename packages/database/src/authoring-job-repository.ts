@@ -140,6 +140,7 @@ function validateStageOutput(stageKey: string, value: unknown): AuthoringStageOu
 
 function stageKey(input: AuthoringSubmit): string {
   if (input.kind === "world_concept") return "world";
+  if (input.kind === "story_source") throw new AuthoringRepositoryError("invalid_state");
   const targetCharacterId = input.target.kind === "world_draft" ? input.target.characterId : undefined;
   // Called only after inserting a new job. Keep application identity in the stage,
   // because public characterId denotes an existing roster member to edit.
@@ -240,6 +241,7 @@ function hasValidatedOutput(stage: StageRow): boolean {
 }
 
 function canApply(job: Pick<JobRow, "kind" | "target" | "status" | "reviewedStageIds"> & { hasReviewedContent: boolean }, stages: readonly StageRow[]): boolean {
+  if (job.kind === "story_source") return false;
   if (job.status !== "awaiting_review" && job.status !== "recoverable") return false;
   if (!job.hasReviewedContent) return false;
   const target = authoringTargetSchema.parse(job.target);

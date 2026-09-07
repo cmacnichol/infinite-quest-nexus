@@ -379,7 +379,7 @@ export function mountWorldCreationPage(
     } catch { if (!disposed) authoringResumeStatus.textContent = "Saved proposals could not be loaded. Try again."; }
     finally { authoringListBusy = false; if (!disposed) { more.disabled = false; show.disabled = false; } }
   }
-  let pendingSubmission: AuthoringSubmit | null = null;
+  let pendingSubmission: Extract<AuthoringSubmit, { kind: "world_concept" }> | null = null;
   let savedCharacterParent: AuthoringJobView | null = null;
   let activeCollection: EditableCollection = "entities";
   let activeCharacterHandoff: Pick<CharacterWorkspaceSession, "key" | "workflowId"> | null = null;

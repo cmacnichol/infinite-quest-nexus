@@ -7,6 +7,7 @@ export * from "./client-api.js";
 export * from "./prompt-library.js";
 export * from "./story-prompt.js";
 export * from "./world-library.js";
+export * from "./source-authoring.js";
 export * from "./authoring.js";
 export * from "./authoring-error-projection.js";
 export * from "./users.js";
