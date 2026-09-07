@@ -5,6 +5,94 @@ import type { AuthoringJobView } from "../../packages/contracts/src/authoring.js
 const candidate = (title: string) => ({ schemaVersion: 5, world: { title, genre: "fantasy", tone: "bright", premise: "p", backgroundStory: "b", firstAction: "a", rules: "r" }, playableCharacters: [], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [], defaults: {}, preservedLore: {} });
 const job = (revision = 1, result = candidate("Remote")): AuthoringJobView => ({ id: "job-1", revision, status: "awaiting_review", target: { kind: "new_world" }, stages: [], expiresAt: "2026-09-13T00:00:00.000Z", canApply: true, incomplete: false, kind: "world_concept", result });
 
+it("P2-F1 explicit first review saves an untouched candidate and current selection", async () => {
+  const initial = { ...job(), canApply: false, stages: [{ id: "world", key: "world", generation: 1, status: "validated" as const, attemptCount: 1 }] };
+  const saveReview = vi.fn(async (_id, input) => ({ ...initial, revision: 2, canApply: true, reviewedContent: input.content, reviewedStageIds: input.selectedStageIds }));
+  const session = createAuthoringJobSession({ job: initial, saveReview });
+  try {
+    session.receive(initial); await session.flush(); expect(saveReview).not.toHaveBeenCalled();
+    session.adoptPendingResult(); await session.flush();
+    expect(session.state().job).toMatchObject({ reviewedContent: candidate("Remote"), reviewedStageIds: ["world"], canApply: true });
+    expect(saveReview).toHaveBeenCalledOnce();
+  } finally { session.dispose(); }
+});
+
+it.each([false, true])("P2-F3 pending replacement preserves durable intent and human content through reload (empty %s)", async empty => {
+  const initial: AuthoringJobView = { ...job(), reviewedContent: candidate("Human"), reviewedStageIds: empty ? [] : ["old"], stages: [
+    { id: "old", key: "world", generation: 1, status: "validated", attemptCount: 1 },
+    { id: "replacement", key: "world", generation: 2, status: "queued", attemptCount: 0 },
+    { id: "sibling", key: "character:other", generation: 1, status: "validated", attemptCount: 1 }
+  ], result: undefined, canApply: false };
+  let persisted = initial;
+  const saveReview = vi.fn(async (_id, input) => (persisted = { ...persisted, revision: persisted.revision + 1, reviewedContent: input.content, reviewedStageIds: input.selectedStageIds }));
+  let session = createAuthoringJobSession({ job: persisted, saveReview });
+  try {
+    session.adoptPendingResult(); await session.flush();
+    expect(persisted.reviewedStageIds).toEqual(empty ? [] : ["old"]);
+    expect(saveReview).not.toHaveBeenCalled();
+    session.dispose();
+    persisted = { ...persisted, revision: 3, result: candidate("Replacement"), stages: persisted.stages.map(stage => stage.id === "replacement" ? { ...stage, status: "validated" as const } : stage) };
+    session = createAuthoringJobSession({ job: persisted, saveReview });
+    session.receive(persisted); session.receive(persisted);
+    expect(session.currentCandidate()).toEqual(candidate("Human"));
+    expect(persisted.reviewedStageIds).toEqual(empty ? [] : ["old"]);
+    session.adoptPendingResult(); await session.flush();
+    expect(persisted.reviewedStageIds).toEqual(empty ? [] : ["replacement"]);
+    expect(persisted.reviewedContent).toEqual(candidate("Human"));
+  } finally { session.dispose(); }
+});
+
+it("P2-F3 explicit review drops cancelled obsolete roster keys after a changed outline without adding new siblings", async () => {
+  const initial: AuthoringJobView = { ...job(), reviewedContent: candidate("Human"), reviewedStageIds: ["old-world", "old-child"], stages: [
+    { id: "old-world", key: "world", generation: 1, status: "validated", attemptCount: 1 },
+    { id: "old-child", key: "character:removed", generation: 1, status: "validated", attemptCount: 1 },
+    { id: "world-new", key: "world", generation: 2, status: "validated", attemptCount: 1 },
+    { id: "removed", key: "character:removed", generation: 2, status: "cancelled", attemptCount: 0 },
+    { id: "new-child", key: "character:new", generation: 1, status: "validated", attemptCount: 1 }
+  ] };
+  const saveReview = vi.fn(async (_id, input) => ({ ...initial, revision: 2, reviewedContent: input.content, reviewedStageIds: input.selectedStageIds }));
+  const session = createAuthoringJobSession({ job: initial, saveReview });
+  try {
+    session.receive(initial); expect(session.currentCandidate()).toEqual(candidate("Human"));
+    session.adoptPendingResult(); await session.flush();
+    expect(session.state().job.reviewedStageIds).toEqual(["world-new"]);
+    expect(session.currentCandidate()).toEqual(candidate("Human"));
+  } finally { session.dispose(); }
+});
+
+it.each(["ack before validation", "ack after validation", "conflict"])("P2-F3 pending Review keeps selection through an in-flight old save: %s", async mode => {
+  const initial: AuthoringJobView = { ...job(), reviewedContent: candidate("Saved"), reviewedStageIds: ["old"], stages: [{ id: "old", key: "world", generation: 1, status: "validated", attemptCount: 1 }] };
+  const human = candidate("Human edit");
+  let release!: (value: AuthoringJobView) => void;
+  const saving = new Promise<AuthoringJobView>(resolve => { release = resolve; });
+  const pending: AuthoringJobView = { ...initial, revision: 3, reviewedContent: human, result: undefined, canApply: false, stages: [...initial.stages, { id: "next", key: "world", generation: 2, status: "running", attemptCount: 1 }] };
+  const validated: AuthoringJobView = { ...pending, revision: 4, result: human, stages: pending.stages.map(stage => stage.id === "next" ? { ...stage, status: "validated" } : stage) };
+  const saveReview = vi.fn(async (_id, input) => saveReview.mock.calls.length === 1 ? saving : ({ ...validated, revision: 5, reviewedContent: input.content, reviewedStageIds: input.selectedStageIds }));
+  const session = createAuthoringJobSession({ job: initial, saveReview });
+  try {
+    session.edit(human); const flushed = session.flush();
+    session.receive(pending); session.receive(pending);
+    expect(session.adoptPendingResult()).toBeNull(); expect(session.currentCandidate()).toEqual(human);
+    expect(saveReview.mock.calls[0]![1].selectedStageIds).toEqual(["old"]);
+    if (mode !== "ack before validation") { session.receive(validated); session.receive(validated); session.adoptPendingResult(); }
+    if (mode === "conflict") session.receive({ ...validated, revision: 5, reviewedContent: candidate("Other tab") });
+    release({ ...initial, revision: 2, reviewedContent: human });
+    if (mode === "conflict") {
+      await expect(flushed).rejects.toThrow("Review is not saved"); expect(saveReview).toHaveBeenCalledOnce();
+      expect(session.state().saveState).toBe("conflict");
+    } else {
+      if (mode === "ack after validation") await expect(flushed).rejects.toThrow("Review is not saved");
+      else await flushed;
+      await session.flush();
+      if (mode === "ack before validation") { session.receive(validated); session.receive(validated); session.adoptPendingResult(); await session.flush(); }
+      expect(saveReview).toHaveBeenCalledTimes(2);
+      expect(saveReview.mock.calls[1]![1]).toEqual({ expectedRevision: 4, content: human, selectedStageIds: ["next"] });
+      expect(session.state().job.reviewedStageIds).toEqual(["next"]);
+    }
+    expect(session.currentCandidate()).toEqual(human);
+  } finally { session.dispose(); }
+});
+
 it("P28-F3 first review selects only current validated generations, even while replacements are pending", async () => {
   const initial: AuthoringJobView = { ...job(), stages: [
     { id: "old-world", key: "world", generation: 1, status: "validated", attemptCount: 1 },

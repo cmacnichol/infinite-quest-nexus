@@ -7,6 +7,23 @@ const content = (title = "Glass Atlas") => ({ schemaVersion: 5, world: { title, 
 const worldJob = (): AuthoringJobView => ({ id: "world-job", revision: 1, kind: "world_concept", status: "recoverable", target: { kind: "new_world" }, request: { kind: "world_concept", idempotencyKey: "world-request", target: { kind: "new_world" }, prompt: "A city under glass" }, stages: [{ id: "outline-stage", key: "world", status: "validated", generation: 0, attemptCount: 1 }, { id: "failed-child", key: "character:hero", status: "recoverable", generation: 0, attemptCount: 1 }], expiresAt: "2026-09-13T00:00:00.000Z", incomplete: true, canApply: false, result: content() });
 const characterJob = (): AuthoringJobView => ({ id: "character-job", revision: 1, kind: "character", status: "awaiting_review", target: { kind: "new_world" }, request: { kind: "character", idempotencyKey: "character-request", target: { kind: "new_world" }, prompt: "A patient guide", content: content() }, stages: [{ id: "character-stage", key: "character:hero", status: "validated", generation: 0, attemptCount: 1 }], expiresAt: "2026-09-13T00:00:00.000Z", incomplete: false, canApply: false, result: character() });
 
+test("P2-M1 superseded failures have no Retry command in either workspace", async ({ page, context }) => {
+  const world = worldJob();
+  world.stages.push({ id: "replacement", key: "character:hero", status: "validated", generation: 1, attemptCount: 1 });
+  const char = characterJob();
+  char.stages.unshift({ id: "historical", key: "character:hero", status: "recoverable", generation: -1, attemptCount: 1 });
+  // Production generations start at one; preserve a real historical/current pair.
+  char.stages[0]!.generation = 1; char.stages[1]!.generation = 2;
+  await fixture(context, [world, char]);
+  await page.goto(`${base}/app/worlds/new?authoringJob=world-job`);
+  await expect(page.getByRole("button", { name: "Review available results" })).toBeVisible();
+  await expect.soft(page.getByRole("button", { name: "Retry character:hero", exact: true })).toHaveCount(0);
+  await page.goto(`${base}/app/characters/lost?authoringJob=character-job`);
+  await page.getByRole("button", { name: "Restore parent draft", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Review available results" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry character:hero", exact: true })).toHaveCount(0);
+});
+
 async function fixture(context: BrowserContext, jobs: AuthoringJobView[]) {
   const store = new Map(jobs.map(job => [job.id, structuredClone(job)]));
   const submissions: AuthoringSubmit[] = []; const commands: string[] = []; const applies: unknown[] = []; let saves = 0;
@@ -111,7 +128,8 @@ test("late world results preserve human edits and stage, compare real candidates
 });
 
 test("two world tabs keep a conflicting local review until explicit compare and reload", async ({ page, context }, testInfo) => {
-  const server = await fixture(context, [worldJob()]); const second = await context.newPage(); const errors = health(second);
+  const reviewed = worldJob(); reviewed.reviewedContent = content(); reviewed.reviewedStageIds = ["outline-stage"];
+  const server = await fixture(context, [reviewed]); const second = await context.newPage(); const errors = health(second);
   const firstSnapshot = structuredClone(server.store.get("world-job")!); let stale = true;
   await second.route("**/api/v1/authoring/jobs/world-job", route => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(stale ? firstSnapshot : server.store.get("world-job")) }));
   for (const tab of [page, second]) { await tab.goto(`${base}/app/worlds/new?authoringJob=world-job`); await tab.getByRole("button", { name: "Review available results" }).click(); }
@@ -290,6 +308,42 @@ function existingWorld(draft = content(), revision = 8) {
   return { id: existingWorldId, title: draft.world.title, status: "draft", imageUrl: "", forkedFromWorldId: null, forkedFromWorldVersionId: null,
     createdAt: "2026-09-07T00:00:00.000Z", updatedAt: "2026-09-07T00:00:00.000Z", draftRevision: revision, draftContent: draft,
     draftBasedOnWorldVersionId: null, draftUpdatedAt: "2026-09-07T00:00:00.000Z", versions: [], campaigns: [] };
+}
+
+for (const changedParent of [false, true]) {
+test(`P2-F4 normal editor launch preserves parent edits and allows durable apply (edited ${changedParent})`, async ({ page, context }, testInfo) => {
+  const server = await fixture(context, []); const errors = health(page);
+  let world = existingWorld();
+  await page.route(`**/api/v1/worlds/${existingWorldId}`, route => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(world) }));
+  await page.route("**/api/v1/authoring/jobs/character-job/apply", async route => {
+    const body = route.request().postDataJSON(); server.applies.push(body);
+    world = existingWorld({ ...content(), playableCharacters: [...content().playableCharacters, body.content] }, 9);
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ jobId: "character-job", worldId: existingWorldId, draftRevision: 9, characterId: body.content.id }) });
+  });
+  await page.goto(`${base}/app/worlds/${existingWorldId}`);
+  if (changedParent) await page.locator('[name="world.title"]').fill("Local parent edit");
+  await page.locator('[data-section-target="characters"]').click();
+  await page.locator('[data-action="add-item"]').click();
+  await page.locator('[name="characterMethod"][value="ai"]').check();
+  await page.locator('[data-character-prompt="compact"]').fill("A patient guide");
+  await page.getByRole("button", { name: "Generate character", exact: true }).click();
+  await page.getByRole("button", { name: "Review available results", exact: true }).click();
+  for (let index = 0; index < 4; index += 1) await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await page.getByRole("button", { name: "Add to world draft", exact: true }).click();
+  await expect(page).toHaveURL(/authoringCharacter=character-job/);
+  const apply = page.getByRole("button", { name: "Apply reviewed character", exact: true }); await expect(apply).toBeVisible();
+  expect(server.applies).toHaveLength(0);
+  await expect(page.locator('[name="world.title"]')).toHaveValue(changedParent ? "Local parent edit" : "Glass Atlas");
+  await apply.click();
+  if (changedParent) {
+    await expect(page.getByText("Save or reload your local draft before applying this reviewed character. Your local edits were not changed.", { exact: true })).toBeVisible();
+    expect(server.applies).toHaveLength(0);
+  } else {
+    await expect.poll(() => server.applies.length).toBe(1);
+    await expect(page.locator('[data-action="save-draft"]')).toBeDisabled();
+  }
+  await evidence(page, testInfo, `fresh-editor-${changedParent}`, errors);
+});
 }
 function existingCharacterJob(): AuthoringJobView {
   const job = characterJob();
@@ -475,7 +529,7 @@ test("P28-F3 fix3 explicit review survives a historical autosave started before 
 });
 
 test("P27-F1 repeated world polls keep the new generation available for explicit review", async ({ page, context }, testInfo) => {
-  const job = worldJob(); job.reviewedContent = content("Earlier review");
+  const job = worldJob(); job.reviewedContent = content("Earlier review"); job.reviewedStageIds = ["outline-stage"];
   const server = await fixture(context, [job]); const errors = health(page); let newerPolls = 0;
   page.on("response", response => { if (response.url().endsWith("/authoring/jobs/world-job") && server.store.get("world-job")!.revision === 2) newerPolls += 1; });
   await page.goto(`${base}/app/worlds/new?authoringJob=world-job`);

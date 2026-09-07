@@ -3,7 +3,7 @@
 ## Rollout
 
 1. Back up the authoritative database and apply the additive migrations with compatible API and worker builds deployed together.
-2. Keep `AI_AUTHORING_JOBS_ENABLED=false` in Compose or in both Swarm API and worker services. Confirm `/api/v1/meta` reports the capability as unavailable and existing clients retain synchronous preview behavior.
+2. Keep `AI_AUTHORING_JOBS_ENABLED=false` in Compose or in both Swarm API and worker services. Confirm `/api/v1/authoring/capabilities` reports `enabled: false` and existing clients retain synchronous preview behavior.
 3. In a disposable environment, verify the worker’s bounded authoring cleanup lane and a normal generation lane. Do not infer this proof from a configuration render.
 4. Set `AI_AUTHORING_JOBS_ENABLED=true` for the combined Compose runtime, or for both compatible Swarm API and worker services. Recreate or update the services; runtime environment settings are read at process start.
 5. Confirm the capability before enabling durable-proposal client flows. Keep the gate false if workers are not yet compatible.

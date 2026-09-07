@@ -2170,7 +2170,7 @@ it("P27-F1 durable adoption retains the saved roster without scheduling a change
   Object.defineProperty(window, "location", { configurable: true, value: { href: "http://local/app/worlds/new?authoringJob=world-job" } });
   Object.defineProperty(window, "history", { configurable: true, value: { replaceState: vi.fn() } });
   const saved = { ...generatedPreview.content, playableCharacters: [reviewedCharacter("retained", "Retained Hero")] };
-  const job = { id: "world-job", revision: 1, kind: "world_concept", status: "awaiting_review", target: { kind: "new_world" }, stages: [], expiresAt: "2026-09-13T00:00:00.000Z", incomplete: false, canApply: false, result: saved, reviewedContent: saved };
+  const job = { id: "world-job", revision: 1, kind: "world_concept", status: "awaiting_review", target: { kind: "new_world" }, stages: [], expiresAt: "2026-09-13T00:00:00.000Z", incomplete: false, canApply: false, result: saved, reviewedContent: saved, reviewedStageIds: [] };
   const save = vi.fn().mockResolvedValue(job);
   const mounted = mountWorldCreationPage(root, { authoringJobsApi: { loadAuthoringCapabilities: vi.fn().mockResolvedValue({ enabled: true, supportedKinds: ["world_concept"] }), loadAuthoringJob: vi.fn().mockResolvedValue(job), saveAuthoringReview: save } as never });
   await vi.advanceTimersByTimeAsync(0); document.querySelector<HTMLButtonElement>('[data-action="adopt-authoring-result"]')!.click();

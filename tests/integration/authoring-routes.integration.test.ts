@@ -9,7 +9,12 @@ import { buildServer } from "../../services/api/src/server.js";
 import { inertStorageServerOptions } from "../helpers/build-server-options.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { AuthoringSubmit } from "../../packages/contracts/src/authoring.js";
-import { worldContentSchema } from "../../packages/contracts/src/world-library.js";
+import { playableCharacterSchema, worldContentSchema } from "../../packages/contracts/src/world-library.js";
+import { createRuntimeAuthoringWorkerApplication } from "../../services/runtime/src/authoring-composition.js";
+import { authoringRuntimeFixture, authoringResult, authoringHash } from "../helpers/authoring-runtime.js";
+import reliability from "../fixtures/authoring/reliability.json" with { type: "json" };
+import { reviewedCharacterParent } from "../../apps/web-next/src/authoring-character-parent.js";
+import { createApiWorldCampaignApplication } from "../helpers/runtime-application-fixtures.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe.sequential : describe.skip;
@@ -111,9 +116,62 @@ integration("authoring HTTP commands", () => {
     return buildServer(inertStorageServerOptions({
       config: config(enabled),
       pool,
+      worldCampaign: createApiWorldCampaignApplication(pool, { credentialSecret: config(enabled).credentialEncryptionKey }),
       authoring: createRuntimeAuthoringApplication(pool, (value) => createHash("sha256").update(value).digest("hex"))
     }));
   }
+
+  it.each(["new-create", "new-edit", "existing-create", "existing-edit"])("P2-F2/F4 projects validated standalone %s output through HTTP and preserves its exact identity", async operation => {
+    const server = await app();
+    const repository = createPostgresAuthoringRepository(pool);
+    const original = playableCharacterSchema.parse({ ...reliability.character, id: "original", name: "Original" });
+    const sibling = playableCharacterSchema.parse({ ...original, id: "sibling", name: "Unselected sibling" });
+    const parent = worldContentSchema.parse({ ...appliedContent, playableCharacters: [original, sibling] });
+    const existing = operation.startsWith("existing"); const edit = operation.endsWith("edit");
+    try {
+      let target: AuthoringSubmit["target"] = { kind: "new_world" };
+      if (existing) {
+        const response = await server.inject({ method: "POST", url: "/api/v1/worlds", payload: { title: parent.world.title, content: parent } });
+        expect(response.statusCode).toBe(201);
+        const world = response.json(); worldIds.push(world.id);
+        target = { kind: "world_draft", worldId: world.id, expectedRevision: world.draftRevision, ...(edit ? { characterId: "original" } : {}) };
+      }
+      const response = await server.inject({ method: "POST", url: "/api/v1/authoring/jobs", payload: { kind: "character", idempotencyKey: crypto.randomUUID(), target, content: parent, prompt: "A patient guide", ...(edit ? { characterId: "original" } : {}) } });
+      expect(response.statusCode).toBe(202); const submitted = response.json(); jobIds.push(submitted.id);
+      expect(submitted.result).toBeUndefined(); expect(submitted.reviewedContent).toBeUndefined();
+      const runtime = authoringRuntimeFixture(async () => authoringResult(JSON.stringify(reliability.character)));
+      const worker = createRuntimeAuthoringWorkerApplication({ repository, providers: runtime.providers, sha256: authoringHash });
+      expect(await worker.runNext({ workerId: "projection-proof", leaseSeconds: 60 })).toBe(true);
+      const get = async () => (await server.inject({ method: "GET", url: `/api/v1/authoring/jobs/${submitted.id}` })).json();
+      const completed = await get();
+      expect(completed.status).toBe("awaiting_review"); expect(completed.reviewedContent).toBeUndefined();
+      expect(completed.result).toMatchObject({ id: edit ? "original" : submitted.stages[0].key.slice("character:".length), name: reliability.character.name });
+      const stage = completed.stages[0];
+      const review = await server.inject({ method: "PUT", url: `/api/v1/authoring/jobs/${submitted.id}/review`, payload: { expectedRevision: completed.revision, selectedStageIds: [stage.id], content: completed.result } });
+      expect(review.statusCode).toBe(200);
+      const reviewed = review.json();
+      const restored = reviewedCharacterParent(reviewed);
+      expect(restored.playableCharacters).toHaveLength(edit ? 2 : 3);
+      expect(restored.playableCharacters.find(character => character.id === "sibling")).toEqual(sibling);
+      if (existing) {
+        const body = { expectedRevision: reviewed.revision, selectedStageIds: [stage.id], content: reviewed.result, idempotencyKey: "character-receipt" };
+        const apply = await server.inject({ method: "POST", url: `/api/v1/authoring/jobs/${submitted.id}/apply`, payload: body });
+        expect(apply.statusCode).toBe(200);
+        expect((await server.inject({ method: "POST", url: `/api/v1/authoring/jobs/${submitted.id}/apply`, payload: body })).json()).toEqual(apply.json());
+        const saved = (await server.inject({ method: "GET", url: `/api/v1/worlds/${worldIds[0]}` })).json();
+        expect(saved.draftRevision).toBe(2);
+        expect(saved.draftContent.playableCharacters).toEqual(restored.playableCharacters);
+        expect((await pool.query("SELECT apply_receipt FROM authoring_jobs WHERE id = $1", [submitted.id])).rows[0]!.apply_receipt).toEqual(apply.json());
+      } else {
+        const retry = await server.inject({ method: "POST", url: `/api/v1/authoring/jobs/${submitted.id}/retry`, payload: { expectedRevision: reviewed.revision, stageId: stage.id } });
+        expect(retry.statusCode).toBe(200);
+        const pending = await get(); expect(pending.result).toBeUndefined(); expect(pending.reviewedContent).toEqual(reviewed.result);
+        expect(await worker.runNext({ workerId: "replacement-proof", leaseSeconds: 60 })).toBe(true);
+        const replacement = await get(); expect(replacement.result.id).toBe(reviewed.result.id);
+        expect(replacement.stages.filter((s: { generation: number; status: string }) => s.generation === 2)[0].status).toBe("validated");
+      }
+    } finally { await server.close(); }
+  });
 
   it("uses the composed owner-scoped application for durable commands and metadata-only pages", async () => {
     const server = await app();

@@ -105,7 +105,7 @@ services:
       - infinitequest-backend
     stop_grace_period: 10m
     healthcheck:
-      test: ["CMD", "node", "-e", "import('./dist/packages/database/src/config.js').then(c=>import('./dist/packages/database/src/pool.js').then(p=>p.createDatabasePool(c.databaseConfig()).query('SELECT 1').then(()=>process.exit(0)))).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "import('./dist/packages/database/src/config.js').then(c=>import('./dist/packages/database/src/pool.js').then(p=>p.createDatabasePool(c.loadRuntimeConfig().databaseUrl).query('SELECT 1').then(()=>process.exit(0)))).catch(()=>process.exit(1))"]
       interval: 15s
       timeout: 5s
       retries: 4

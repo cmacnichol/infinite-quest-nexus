@@ -177,7 +177,12 @@ function jobView(job: JobRow, stages: StageRow[]): AuthoringJobView {
   const currentStages = parsedStages.filter((stage) => !parsedStages.some((other) => other.key === stage.key && other.generation > stage.generation));
   const activeStages = currentStages.filter((stage) => stage.status !== "cancelled");
   const allValidated = activeStages.length > 0 && activeStages.every((stage) => stage.status === "validated");
-  const result = job.kind === "world_concept" ? partialWorldResult(stages) : undefined;
+  const characterStage = job.kind === "character"
+    ? currentStagesForRows(stages).find(stage => stage.stageKey.startsWith("character:") && stage.status === "validated" && parentsAreCurrentAndValidated(stages, stage.parentGenerations))
+    : undefined;
+  const characterOutput = characterStage?.output ? validateStageOutput(characterStage.stageKey, characterStage.output) : undefined;
+  const result = job.kind === "world_concept" ? partialWorldResult(stages)
+    : characterOutput?.kind === "character" ? characterOutput.character : undefined;
   return authoringJobViewSchema.parse({
     id: job.id,
     kind: job.kind,

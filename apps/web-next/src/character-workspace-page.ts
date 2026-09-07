@@ -254,7 +254,7 @@ export function mountCharacterWorkspacePage(
     if (!terminal && (snapshot.pendingGeneratedResult || snapshot.saveState === "conflict")) button("compare-character-job", "Compare local and server review");
     if (!terminal && snapshot.saveState === "conflict") button("reload-character-job", "Reload server review");
     if (!terminal) {
-      for (const stage of snapshot.job.stages.filter(stage => ["recoverable", "failed"].includes(stage.status))) button("retry-character-job", `Retry ${stage.key}`, stage.id);
+      for (const stage of snapshot.job.stages.filter(stage => ["recoverable", "failed"].includes(stage.status) && !snapshot.job.stages.some(other => other.key === stage.key && other.generation > stage.generation))) button("retry-character-job", `Retry ${stage.key}`, stage.id);
       button("cancel-character-job", "Cancel proposal");
     }
   }
@@ -850,7 +850,7 @@ export function mountCharacterWorkspacePage(
         } else if (status) status.textContent = "This character could not be accepted. Return to the world and try again.";
         return;
       }
-      if (dependencies.recoveredSession && durableSession && authoringApi) {
+      if (durableSession && authoringApi) {
         if (acceptancePending) return;
         if (durableSession.state().saveState === "conflict") { if (status) status.textContent = "Resolve the review conflict before returning to the parent draft."; return; }
         acceptancePending = true;

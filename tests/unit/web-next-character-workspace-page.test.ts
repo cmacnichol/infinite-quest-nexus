@@ -581,6 +581,34 @@ describe("durable character recovery", () => {
   });
 });
 
+it.each(["new", "existing"])("P2-F4 fresh durable character acceptance waits for exact review before %s parent handoff", async target => {
+  const { root, document } = fixture(); const navigate = vi.fn();
+  const active = session();
+  if (target === "new") { active.origin = "world-creation"; active.parentRoute = "/app/worlds/new"; active.expectedWorldRevision = null; }
+  const sessionStore = store(active);
+  const jobTarget = target === "new" ? { kind: "new_world" as const } : { kind: "world_draft" as const, worldId: "world-1", expectedRevision: 4 };
+  const initial = { id: "character-job", revision: 1, kind: "character" as const, target: jobTarget, status: "awaiting_review" as const, expiresAt: "2026-09-13T00:00:00.000Z", incomplete: false, canApply: false,
+    request: { kind: "character" as const, idempotencyKey: "fresh", prompt: "A guide", target: jobTarget, content: draft() }, result: generatedCharacter,
+    stages: [{ id: "character-stage", key: "character:provider-id", status: "validated" as const, generation: 1, attemptCount: 1 }] };
+  const saving = deferred<typeof initial>();
+  const saveReview = vi.fn((_id, _input) => saving.promise);
+  const mounted = mountCharacterWorkspacePage(root, "opaque-key", { sessionStore, navigate, resumeJobId: initial.id, authoringJobsApi: {
+    loadAuthoringCapabilities: async () => ({ enabled: true, supportedKinds: ["character"] }), loadAuthoringJob: async () => initial, saveAuthoringReview: saveReview
+  } as never });
+  try {
+    await vi.waitFor(() => expect(root.textContent).toContain("Review available results"));
+    click(document, '[data-action="review-character-job"]');
+    for (let index = 0; index < 4; index += 1) click(document, '[data-action="continue-character"]');
+    click(document, '[data-action="accept-character"]'); await settle();
+    expect(navigate).not.toHaveBeenCalled(); expect(sessionStore.complete).not.toHaveBeenCalled();
+    expect(saveReview).toHaveBeenCalledOnce();
+    const input = saveReview.mock.calls[0]![1];
+    expect(input).toMatchObject({ content: { id: "provider-id", name: "Ilyra Venn" }, selectedStageIds: ["character-stage"] });
+    saving.resolve({ ...initial, revision: 2, reviewedContent: input.content, reviewedStageIds: input.selectedStageIds });
+    await vi.waitFor(() => expect(navigate).toHaveBeenCalledWith(target === "new" ? "/app/worlds/new?authoringCharacter=character-job" : "/app/worlds/world-1?tab=characters&authoringCharacter=character-job"));
+  } finally { mounted.dispose(); }
+});
+
 
 it("cancel leaves a recovered workspace even when its local session is gone", async () => {
   const { root, document } = fixture(); const navigate = vi.fn(); const missingStore = store(null); missingStore.complete.mockReturnValue(false);

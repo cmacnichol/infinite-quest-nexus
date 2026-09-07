@@ -25,10 +25,14 @@ const server = createServer((request, response) => {
   request.on("end", () => {
     calls += 1;
     const text = JSON.parse(body).messages?.map((message) => message.content ?? "").join("\n") ?? "";
-    const id = /char-\d+-[\w-]+/u.exec(text)?.[0];
+    const system = JSON.parse(body).messages?.filter(message => message.role === "system").map(message => message.content ?? "").join("\n") ?? "";
+    const standalone = system.includes("Do not return an id or source.");
+    const id = standalone ? "standalone-fixture" : /char-\d+-[\w-]+/u.exec(text)?.[0];
 
     const content = id && failCharacterResponses-- > 0
       ? JSON.stringify({ wrong: true })
+      : standalone
+      ? JSON.stringify({ name: "Standalone guide", profile: { story: { role: "Guide", background: "Maps careful roads.", motivations: "Protect travelers.", goals: "Reach the observatory.", narrativeHooks: "Carries a map." } }, rpgStats: [], defaultTriggers: [] })
       : id
       ? JSON.stringify({ id, name: id.replace(/^char-\d+-/u, "").split("-").map(word => word[0].toUpperCase() + word.slice(1)).join(" "), character_text: "A dependable explorer.", profile: { story: { role: "Guide", background: "Maps careful roads.", personality: "Measured.", motivations: "Protect travelers.", goals: "Reach the observatory.", fearsAndConflicts: "The road shifts.", keyRelationships: "Trusts companions.", narrativeHooks: "Carries a map.", voiceAndMannerisms: "Speaks precisely.", otherGuidance: "" } }, rpg_statistics: [], default_triggers: [] })
       : JSON.stringify({ title: "Compose proof", genre: "Fantasy", tone: "Hopeful", premise: "A measured world.", backgroundStory: "Roads remember.", firstAction: "Follow the road.", story_rules: "Promises matter.", character_seeds: [

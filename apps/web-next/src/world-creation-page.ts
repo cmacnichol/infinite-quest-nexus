@@ -444,7 +444,7 @@ export function mountWorldCreationPage(
     requiredElement<HTMLButtonElement>(authoringResume, '[data-action="compare-authoring"]').hidden = terminal || (!snapshot.pendingGeneratedResult && snapshot.saveState !== "conflict");
     requiredElement<HTMLButtonElement>(authoringResume, '[data-action="reload-authoring"]').hidden = terminal || snapshot.saveState !== "conflict";
     const stageActions = requiredElement<HTMLElement>(authoringResume, "[data-authoring-stage-actions]");
-    stageActions.replaceChildren(...snapshot.job.stages.filter((stage) => !terminal && (stage.status === "recoverable" || stage.status === "failed")).map((stage) => {
+    stageActions.replaceChildren(...snapshot.job.stages.filter((stage) => !terminal && (stage.status === "recoverable" || stage.status === "failed") && !snapshot.job.stages.some(other => other.key === stage.key && other.generation > stage.generation)).map((stage) => {
       const button = document.createElement("button"); button.type = "button"; button.dataset.action = "retry-authoring-stage"; button.dataset.stageId = stage.id; button.textContent = `Retry ${stage.key}`; return button;
     }));
     if (authoringApply && !createdWorld) {

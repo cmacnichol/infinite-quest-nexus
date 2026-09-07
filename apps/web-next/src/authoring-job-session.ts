@@ -95,6 +95,11 @@ export function createAuthoringJobSession(options: AuthoringJobSessionOptions): 
     return job.stages.filter(stage => stage.status === "validated" &&
       !job.stages.some(other => other.key === stage.key && other.generation > stage.generation));
   }
+  function isRemovedStageKey(key: string): boolean {
+    const generations = job.stages.filter(stage => stage.key === key);
+    const latest = generations.reduce((current, stage) => stage.generation > current.generation ? stage : current);
+    return latest.status === "cancelled";
+  }
   function selectedStageIds(): string[] {
     return savedSelection === null
       ? currentValidatedStages().map(stage => stage.id)
@@ -242,15 +247,24 @@ export function createAuthoringJobSession(options: AuthoringJobSessionOptions): 
     hasPendingGeneratedResult: () => remoteCandidate !== null,
     adoptPendingResult() {
       if (disposed || unavailable || conflictFrozen || isTerminal(job.status)) return null;
-      let selectionChanged = false;
+      let selectionChanged = savedSelection === null && candidate !== null;
       // Explicit review reconciles stage identity even when replacement text
       // is identical or the replacement was already present on resume. Polls
       // and ordinary edits must never advance the saved selection themselves.
       if (savedSelection !== null) {
         const selectedKeys = new Set(job.stages.filter(stage => savedSelection!.includes(stage.id)).map(stage => stage.key));
-        const selection = currentValidatedStages().filter(stage => selectedKeys.has(stage.key)).map(stage => stage.id);
+        const validated = currentValidatedStages();
+        // Keep the persisted historical IDs as selection intent until every
+        // selected key has a validated replacement. Saving [] here would lose
+        // that intent across reload. Cancelled obsolete roster keys are removed
+        // only by this explicit review. The server still rejects stale IDs on
+        // ordinary saves/apply; no pending output or local edit is adopted.
+        if ([...selectedKeys].some(key => !validated.some(stage => stage.key === key) && !isRemovedStageKey(key))) return null;
+        const selection = validated.filter(stage => selectedKeys.has(stage.key)).map(stage => stage.id);
         selectionChanged = !equal(savedSelection, selection);
         savedSelection = selection;
+      } else if (candidate) {
+        savedSelection = currentValidatedStages().map(stage => stage.id);
       }
       if (selectionChanged || remoteCandidate) editGeneration += 1;
       if (remoteCandidate) {

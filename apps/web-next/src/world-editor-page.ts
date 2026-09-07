@@ -1083,6 +1083,16 @@ export function mountWorldEditorPage(
             }
             const savedSelection = job.reviewedStageIds ?? [];
             if (job.kind === "character" && (replay || (job.canApply && job.reviewedContent && savedSelection.length))) {
+              // This owner-loaded proposal returns through durable apply. Its
+              // local pointer restored only the original parent, never a legacy
+              // accepted character. Retire it before a receipt reload can restore
+              // that older parent over the newly applied authoritative draft.
+              if (activeCharacterHandoff) {
+                clearCharacterHandoffPointer(activeCharacterHandoff);
+                activeCharacterHandoff = null;
+                characterHandoffError = null;
+                renderSection(); renderStatus();
+              }
               const expectedRevision = job.revision;
               const expectedDraftRevision = target.kind === "world_draft" ? target.expectedRevision : -1;
               const apply = button("apply-authoring-character", "Apply reviewed character");
@@ -1392,13 +1402,17 @@ export function mountWorldEditorPage(
       renderStatus();
       return;
     }
-    state = {
-      ...replaceWorldDraft(state, session.parentDraft),
-      revision: session.expectedWorldRevision
-    };
+    if (JSON.stringify(state.draft) !== JSON.stringify(session.parentDraft)) {
+      state = {
+        ...replaceWorldDraft(state, session.parentDraft),
+        revision: session.expectedWorldRevision
+      };
+    }
     resetItemIdentities(state.draft);
     renderOverviewFields();
-    consumeCharacterHandoff();
+    // Durable return is verified by requestWorld before retiring this pointer.
+    // Its character must only enter the draft through receipt-backed apply.
+    if (!new URLSearchParams(dependencies.creationStatusSearch ?? pageView.location?.search ?? "").has("authoringCharacter")) consumeCharacterHandoff();
   }
 
   function consumeCharacterHandoff(): void {

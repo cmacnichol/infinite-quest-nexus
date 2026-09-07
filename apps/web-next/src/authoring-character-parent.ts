@@ -1,5 +1,5 @@
-import type { AuthoringJobView } from "../../../packages/contracts/src/authoring";
-import { worldContentSchema, type WorldContent } from "../../../packages/contracts/src/world-library";
+import type { AuthoringJobView } from "../../../packages/contracts/src/authoring.js";
+import { worldContentSchema, type WorldContent } from "../../../packages/contracts/src/world-library.js";
 
 /** Reconstruct only owner-loaded, explicitly reviewed character proposals, in memory. */
 export function reviewedCharacterParent(job: AuthoringJobView): WorldContent {
