@@ -75,6 +75,10 @@ integration("durable story-source authoring", () => {
   let providerCalls = 0;
   let outputLimitedResponses = 0;
   let rejectProviderRequests = false;
+  let sourceWorldFixture = false;
+  let sourceWorldExpansionFixture = false;
+  let sourceWorldUnknownExpansionFixture = false;
+  let sourceWorldAcceptedFactIds: string[][] = [];
   const jobs: string[] = [];
 
   beforeAll(async () => {
@@ -83,7 +87,9 @@ integration("durable story-source authoring", () => {
     ownerUserId = await initialOwnerId(pool);
     provider = createServer((request, response) => {
       providerCalls += 1;
-      request.resume();
+      let body = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk) => { body += chunk; });
       request.on("end", () => {
         if (rejectProviderRequests) {
           response.writeHead(400, { "Content-Type": "application/json" });
@@ -92,8 +98,47 @@ integration("durable story-source authoring", () => {
         }
         const outputLimited = outputLimitedResponses > 0;
         if (outputLimited) outputLimitedResponses -= 1;
+        let content = JSON.stringify({ facts: [] });
+        if (sourceWorldFixture && !outputLimited && body.trim()) {
+          const payload = JSON.parse(body) as { messages?: Array<{ role?: string; content?: string }> };
+          const sourceRequest = [...(payload.messages ?? [])].reverse().find((message) => message.role === "user")?.content;
+          const frame = sourceRequest ? JSON.parse(sourceRequest) as {
+            acceptedFacts?: Array<{ id: string; kind: string; subject: string; predicate: string; value: string; provenance?: string }>;
+            selectedCharacterFactIds?: string[];
+            chunk?: { sourceRange: { start: number; end: number }; paragraphSpans: Array<{ paragraphId: string; start: number; end: number }> };
+            sourceText?: string;
+          } : {};
+          if (Array.isArray(frame.acceptedFacts)) {
+            sourceWorldAcceptedFactIds.push(frame.acceptedFacts.map((fact) => fact.id));
+            const selected = frame.selectedCharacterFactIds?.[0];
+            const fact = frame.acceptedFacts.find((candidate) => candidate.id === selected);
+            const reviewedExpansion = frame.acceptedFacts.find((candidate) => candidate.provenance === "invented" && candidate.predicate === "rule");
+            const support = frame.acceptedFacts[0];
+            content = JSON.stringify(sourceWorldUnknownExpansionFixture && support
+              ? { fields: [], characterFields: [], expansionCandidates: [{ target: "world", path: "world.backgroundStory", value: "An unsupported candidate", supportingFactIds: [support.id] }] }
+              : sourceWorldExpansionFixture && support && !reviewedExpansion
+              ? {
+                  fields: [], characterFields: [], expansionCandidates: [
+                    { target: "world", path: "world.rules", value: "The gates cannot be crossed after dusk.", supportingFactIds: [support.id] },
+                    { target: "world", path: "world.tone", value: "Somber", supportingFactIds: [support.id] },
+                    ...(selected ? [{ target: selected, path: "profile.appearance.hair", value: "black hair", supportingFactIds: [support.id] }] : [])
+                  ]
+                }
+              : reviewedExpansion
+                ? { fields: [{ path: "world.rules", value: reviewedExpansion.value, supportingFactIds: [reviewedExpansion.id] }], characterFields: [] }
+                : selected && fact
+              ? { fields: [], characterFields: [{ selectedCharacterFactId: selected, fields: [{ path: "profile.appearance.clothing", value: fact.value, supportingFactIds: [fact.id] }] }] }
+              : { fields: [], characterFields: [] });
+          } else if (frame.chunk && frame.sourceText) {
+            const span = frame.chunk.paragraphSpans[0]!;
+            content = JSON.stringify({ facts: [{
+              category: "character", subject: "Iris", predicate: "clothing", value: "blue coat", provenance: "stated",
+              citations: [{ paragraphId: span.paragraphId, start: span.start, end: span.end, quote: frame.sourceText }]
+            }] });
+          }
+        }
         response.writeHead(200, { "Content-Type": "application/json" });
-        response.end(JSON.stringify({ id: randomUUID(), choices: [{ message: { role: "assistant", content: JSON.stringify({ facts: [] }) }, finish_reason: outputLimited ? "length" : "stop" }] }));
+        response.end(JSON.stringify({ id: randomUUID(), choices: [{ message: { role: "assistant", content }, finish_reason: outputLimited ? "length" : "stop" }] }));
       });
     });
     await new Promise<void>((ready) => provider.listen(0, "127.0.0.1", ready));
@@ -207,6 +252,226 @@ integration("durable story-source authoring", () => {
     expect(synthesis.status).toBe("queued");
     expect(synthesis.result).toBeUndefined();
     expect(synthesis.stages.some((stage) => stage.key === "source:synthesis" && stage.status === "queued")).toBe(true);
+    const synthesisClaim = await repository.claim("source-selection-fence", 60);
+    expect(synthesisClaim).not.toBeNull();
+    const loadedSelection = await repository.loadClaim(synthesisClaim!);
+    expect(loadedSelection?.sourceSelection).toMatchObject({
+      reviewGeneration: expect.any(Number),
+      acceptedFacts: expect.arrayContaining([expect.objectContaining({ id: visitsIds[0] })]),
+      selectedCharacterFactIds: [visitsIds[0]],
+      characterIdentityGroups: [{ representativeFactId: visitsIds[0], factIds: resolvedAccepted }]
+    });
+    await pool.query("UPDATE authoring_jobs SET review_generation = review_generation + 1, revision = revision + 1 WHERE id = $1", [submitted.id]);
+    await expect(repository.loadClaim(synthesisClaim!)).resolves.toBeNull();
+    await expect(repository.checkpoint(synthesisClaim!, { kind: "source_world", proposal: { schemaVersion: 5, world: { title: "ignored", genre: "", tone: "", premise: "", backgroundStory: "", firstAction: "", rules: "" }, playableCharacters: [], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [], defaults: {} } })).resolves.toBe(false);
+  });
+
+  it("retires a completed source synthesis when a later fact review changes its selection", async () => {
+    const repository = createPostgresAuthoringRepository(pool);
+    const text = "Iris wears a blue coat.";
+    const submitted = await repository.submit({ ownerUserId }, {
+      kind: "story_source", idempotencyKey: randomUUID(), target: { kind: "new_world" }, name: "fence.txt", text,
+      mode: "faithful", boundaryParagraphId: "paragraph:0", instructions: "Preserve exact evidence."
+    }, sha256(text));
+    jobs.push(submitted.id);
+    const source = normalizeSourceDocument("fence.txt", text, submitted.id);
+    const chunks = planSourceChunks({ source, boundaryParagraphId: "paragraph:0", systemPrompt: "source", instructions: "Preserve exact evidence.", budget: { contextWindowTokens: 100_000, maxOutputTokens: 100, countTokens: value => Buffer.byteLength(value, "utf8") } });
+    const planClaim = await repository.claim("source-synthesis-fence-plan", 60);
+    await repository.initializeExecutionSnapshot(planClaim!, { providerProfileId: randomUUID(), model: "synthetic", configurationHash: "d".repeat(64), contextWindowTokens: 100_000, maxOutputTokens: 100, requestTimeoutMs: 10_000, prompts: {}, protocols: { source: "source-extraction-v1" } });
+    await repository.checkpoint(planClaim!, { kind: "source_plan", chunks });
+    const chunk = chunks[0]!;
+    const chunkClaim = await repository.claim("source-synthesis-fence-chunk", 60);
+    await repository.checkpoint(chunkClaim!, { kind: "source_extraction", facts: [{
+      id: "iris-coat", kind: "character", subject: "Iris", predicate: "clothing", value: "blue coat", provenance: "stated",
+      citations: [{ sourceId: source.id, paragraphId: chunk.spans[0]!.paragraphId, start: chunk.spans[0]!.start, end: chunk.spans[0]!.end, quote: source.text }]
+    }] });
+    const extracted = await repository.read({ ownerUserId }, submitted.id);
+    if (extracted?.kind !== "story_source") throw new Error("Expected source authoring detail.");
+    const factId = extracted.source!.facts[0]!.id;
+    const review = await repository.reviewSourceFacts!({ ownerUserId }, submitted.id, {
+      expectedRevision: extracted.revision, acceptedFactIds: [factId], rejectedFactIds: [], uncertainFactIds: [], selectedCharacterFactIds: [factId],
+      characterIdentityGroups: [{ representativeFactId: factId, factIds: [factId] }], manualFacts: []
+    });
+    const queued = await repository.startSourceSynthesis!({ ownerUserId }, submitted.id, review.revision);
+    const synthesisClaim = await repository.claim("source-synthesis-fence-overview", 60);
+    await repository.checkpoint(synthesisClaim!, { kind: "source_world", proposal: { schemaVersion: 5, world: { title: "fence.txt", genre: "", tone: "", premise: "", backgroundStory: "", firstAction: "", rules: "" }, playableCharacters: [], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [], defaults: {} } });
+    const afterOverview = await repository.read({ ownerUserId }, submitted.id);
+    expect(afterOverview?.stages).toEqual(expect.arrayContaining([expect.objectContaining({ key: `source:character:${factId}`, status: "queued" })]));
+    const characterClaim = await repository.claim("source-synthesis-fence-character", 60);
+    await repository.checkpoint(characterClaim!, { kind: "source_world", proposal: { schemaVersion: 5, world: { title: "fence.txt", genre: "", tone: "", premise: "", backgroundStory: "", firstAction: "", rules: "" }, playableCharacters: [], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [], defaults: {} } });
+    const changedReview = await repository.reviewSourceFacts!({ ownerUserId }, submitted.id, {
+      expectedRevision: queued.revision, acceptedFactIds: [factId], rejectedFactIds: [], uncertainFactIds: [], selectedCharacterFactIds: [],
+      characterIdentityGroups: [{ representativeFactId: factId, factIds: [factId] }], manualFacts: []
+    });
+    expect(changedReview.stages.filter((stage) => stage.key === "source:synthesis" && stage.status === "cancelled")).toHaveLength(1);
+    const replacement = await repository.startSourceSynthesis!({ ownerUserId }, submitted.id, changedReview.revision);
+    expect(replacement.stages).toEqual(expect.arrayContaining([expect.objectContaining({ key: "source:synthesis", generation: 2, status: "queued" })]));
+  });
+
+  it("runs bounded source-world overview and selected-character stages through the real worker", async () => {
+    const profile = await createProvider(pool, {
+      name: `P3 source world ${randomUUID()}`, providerType: "openai_compatible", providerRole: "text",
+      baseUrl: `http://127.0.0.1:${providerPort}/v1`, defaultModel: "source-test", contextWindowTokens: 8_192,
+      maxOutputTokens: 256, temperature: 0, enabled: true, isDefault: true, configuration: {}
+    }, credentialSecret);
+    const repository = createPostgresAuthoringRepository(pool);
+    const text = "Iris wears a blue coat.";
+    const submitted = await repository.submit({ ownerUserId }, {
+      kind: "story_source", idempotencyKey: randomUUID(), target: { kind: "new_world" }, name: "worker-world.txt", text,
+      mode: "faithful", boundaryParagraphId: "paragraph:0", instructions: "P3.5 source-world worker fixture."
+    }, sha256(text));
+    jobs.push(submitted.id);
+    sourceWorldFixture = true;
+    try {
+      expect(await runSourceWorker(16)).toEqual({ completed: 2, runs: [true, true, false] });
+      const extracted = await repository.read({ ownerUserId }, submitted.id);
+      if (extracted?.kind !== "story_source") throw new Error("Expected extracted source detail.");
+      expect(extracted.source).toMatchObject({ extractionComplete: true, facts: [expect.objectContaining({ subject: "Iris", predicate: "clothing", value: "blue coat" })] });
+      const factId = extracted.source?.facts[0]?.id;
+      if (!factId) throw new Error("Source-world worker fixture did not produce a reviewed fact.");
+      const reviewed = await repository.reviewSourceFacts!({ ownerUserId }, submitted.id, {
+        expectedRevision: extracted.revision, acceptedFactIds: [factId], rejectedFactIds: [], uncertainFactIds: [], selectedCharacterFactIds: [factId],
+        characterIdentityGroups: [{ representativeFactId: factId, factIds: [factId] }], manualFacts: []
+      });
+      await repository.startSourceSynthesis!({ ownerUserId }, submitted.id, reviewed.revision);
+      expect(await runSourceWorker(16)).toEqual({ completed: 2, runs: [true, true, false] });
+      const completed = await repository.read({ ownerUserId }, submitted.id);
+      expect(completed).toMatchObject({
+        status: "awaiting_review",
+        result: { world: { title: "worker-world.txt" }, playableCharacters: [expect.objectContaining({ name: "Iris", profile: expect.objectContaining({ appearance: expect.objectContaining({ clothing: "blue coat" }) }) })] },
+        stages: expect.arrayContaining([expect.objectContaining({ key: "source:synthesis", status: "validated" }), expect.objectContaining({ key: `source:character:${factId}`, status: "validated" })])
+      });
+      const evidence = await pool.query<{ mappings: unknown; candidates: unknown }>(
+        "SELECT output->'mappings' AS mappings, output->'expansionCandidates' AS candidates FROM authoring_job_stages WHERE job_id = $1 AND stage_key = $2 AND status = 'validated'",
+        [submitted.id, `source:character:${factId}`]
+      );
+      expect(evidence.rows).toEqual([expect.objectContaining({
+        mappings: [expect.objectContaining({ target: { characterRepresentativeFactId: factId }, path: "profile.appearance.clothing", supportingFactIds: [factId] })],
+        candidates: []
+      })]);
+    } finally {
+      sourceWorldFixture = false;
+      await pool.query("DELETE FROM provider_profiles WHERE id = $1", [profile.id]);
+    }
+  });
+
+  it("retains explicitly reviewed expansion candidates across synthesis replacement without promoting rejected or uncertain candidates", async () => {
+    const profile = await createProvider(pool, {
+      name: `P3 expansion review ${randomUUID()}`, providerType: "openai_compatible", providerRole: "text",
+      baseUrl: `http://127.0.0.1:${providerPort}/v1`, defaultModel: "source-test", contextWindowTokens: 8_192,
+      maxOutputTokens: 256, temperature: 0, enabled: true, isDefault: true, configuration: {}
+    }, credentialSecret);
+    const repository = createPostgresAuthoringRepository(pool);
+    const text = "Iris wears a blue coat.";
+    const submitted = await repository.submit({ ownerUserId }, {
+      kind: "story_source", idempotencyKey: randomUUID(), target: { kind: "new_world" }, name: "expand.txt", text,
+      mode: "expand", boundaryParagraphId: "paragraph:0", instructions: "Offer separately reviewed expansion candidates."
+    }, sha256(text));
+    jobs.push(submitted.id);
+    sourceWorldFixture = true;
+    sourceWorldExpansionFixture = true;
+    sourceWorldAcceptedFactIds = [];
+    try {
+      expect(await runSourceWorker(16)).toEqual({ completed: 2, runs: [true, true, false] });
+      const extracted = await repository.read({ ownerUserId }, submitted.id);
+      if (extracted?.kind !== "story_source") throw new Error("Expected extracted expansion source detail.");
+      const statedFactId = extracted.source?.facts[0]?.id;
+      if (!statedFactId) throw new Error("Expansion fixture did not produce its stated fact.");
+      const firstReview = await repository.reviewSourceFacts!({ ownerUserId }, submitted.id, {
+        expectedRevision: extracted.revision, acceptedFactIds: [statedFactId], rejectedFactIds: [], uncertainFactIds: [], selectedCharacterFactIds: [statedFactId],
+        characterIdentityGroups: [{ representativeFactId: statedFactId, factIds: [statedFactId] }], manualFacts: []
+      });
+      await repository.startSourceSynthesis!({ ownerUserId }, submitted.id, firstReview.revision);
+      expect(await runSourceWorker(16)).toEqual({ completed: 2, runs: [true, true, false] });
+      const candidatesView = await repository.read({ ownerUserId }, submitted.id);
+      if (candidatesView?.kind !== "story_source") throw new Error("Expected current expansion candidate detail.");
+      const candidates = candidatesView.source?.expansionCandidates ?? [];
+      const acceptedCandidate = candidates.find((fact) => fact.value === "The gates cannot be crossed after dusk.");
+      const rejectedCandidate = candidates.find((fact) => fact.value === "Somber");
+      const uncertainCandidate = candidates.find((fact) => fact.value === "black hair");
+      expect(acceptedCandidate).toMatchObject({ provenance: "invented", kind: "rule", predicate: "rule", citations: [] });
+      expect(rejectedCandidate).toMatchObject({ provenance: "invented", kind: "tone", predicate: "tone", citations: [] });
+      expect(uncertainCandidate).toMatchObject({ provenance: "invented", citations: [] });
+      if (!acceptedCandidate || !rejectedCandidate || !uncertainCandidate) throw new Error("Expected all generated expansion candidates.");
+      await expect(repository.reviewSourceFacts!({ ownerUserId }, submitted.id, {
+        expectedRevision: candidatesView.revision, acceptedFactIds: [statedFactId, "source-fact:expansion:foreign"], rejectedFactIds: [], uncertainFactIds: [], selectedCharacterFactIds: [],
+        characterIdentityGroups: [{ representativeFactId: statedFactId, factIds: [statedFactId] }], manualFacts: []
+      })).rejects.toMatchObject({ code: "invalid_state" });
+      const reviewed = await repository.reviewSourceFacts!({ ownerUserId }, submitted.id, {
+        expectedRevision: candidatesView.revision, acceptedFactIds: [statedFactId, acceptedCandidate.id], rejectedFactIds: [rejectedCandidate.id], uncertainFactIds: [uncertainCandidate.id], selectedCharacterFactIds: [],
+        characterIdentityGroups: [{ representativeFactId: statedFactId, factIds: [statedFactId] }], manualFacts: []
+      });
+      if (reviewed.kind !== "story_source") throw new Error("Expected reviewed expansion detail.");
+      expect(reviewed.source).toMatchObject({
+        acceptedFactIds: [statedFactId, acceptedCandidate.id],
+        rejectedFactIds: [rejectedCandidate.id],
+        uncertainFactIds: [uncertainCandidate.id],
+        expansionCandidates: expect.arrayContaining([
+          expect.objectContaining({ id: acceptedCandidate.id, provenance: "invented", value: acceptedCandidate.value, citations: [] }),
+          expect.objectContaining({ id: rejectedCandidate.id, provenance: "invented", value: rejectedCandidate.value, citations: [] }),
+          expect.objectContaining({ id: uncertainCandidate.id, provenance: "invented", value: uncertainCandidate.value, citations: [] })
+        ])
+      });
+      expect(reviewed.stages).toEqual(expect.arrayContaining([expect.objectContaining({ key: "source:synthesis", status: "cancelled" })]));
+      await repository.startSourceSynthesis!({ ownerUserId }, submitted.id, reviewed.revision);
+      expect(await runSourceWorker(16)).toEqual({ completed: 1, runs: [true, false] });
+      expect(sourceWorldAcceptedFactIds.at(-1)).toEqual([statedFactId, acceptedCandidate.id]);
+      const completed = await repository.read({ ownerUserId }, submitted.id);
+      expect(completed).toMatchObject({
+        result: { world: { rules: acceptedCandidate.value } },
+        source: {
+          acceptedFactIds: [statedFactId, acceptedCandidate.id],
+          rejectedFactIds: [rejectedCandidate.id],
+          uncertainFactIds: [uncertainCandidate.id]
+        }
+      });
+    } finally {
+      sourceWorldExpansionFixture = false;
+      sourceWorldFixture = false;
+      sourceWorldAcceptedFactIds = [];
+      await pool.query("DELETE FROM provider_profiles WHERE id = $1", [profile.id]);
+    }
+  });
+
+  it("rejects an unknown expansion path before it reaches review inventory or canon", async () => {
+    const profile = await createProvider(pool, {
+      name: `P3 unknown expansion ${randomUUID()}`, providerType: "openai_compatible", providerRole: "text",
+      baseUrl: `http://127.0.0.1:${providerPort}/v1`, defaultModel: "source-test", contextWindowTokens: 8_192,
+      maxOutputTokens: 256, temperature: 0, enabled: true, isDefault: true, configuration: {}
+    }, credentialSecret);
+    const repository = createPostgresAuthoringRepository(pool);
+    const text = "Iris wears a blue coat.";
+    const submitted = await repository.submit({ ownerUserId }, {
+      kind: "story_source", idempotencyKey: randomUUID(), target: { kind: "new_world" }, name: "unknown-expand.txt", text,
+      mode: "expand", boundaryParagraphId: "paragraph:0", instructions: "Reject unknown expansion targets."
+    }, sha256(text));
+    jobs.push(submitted.id);
+    sourceWorldFixture = true;
+    sourceWorldUnknownExpansionFixture = true;
+    try {
+      expect(await runSourceWorker(16)).toEqual({ completed: 2, runs: [true, true, false] });
+      const extracted = await repository.read({ ownerUserId }, submitted.id);
+      if (extracted?.kind !== "story_source") throw new Error("Expected extracted unknown-expansion detail.");
+      const statedFactId = extracted.source?.facts[0]?.id;
+      if (!statedFactId) throw new Error("Unknown-expansion fixture did not produce its stated fact.");
+      const reviewed = await repository.reviewSourceFacts!({ ownerUserId }, submitted.id, {
+        expectedRevision: extracted.revision, acceptedFactIds: [statedFactId], rejectedFactIds: [], uncertainFactIds: [], selectedCharacterFactIds: [],
+        characterIdentityGroups: [{ representativeFactId: statedFactId, factIds: [statedFactId] }], manualFacts: []
+      });
+      await repository.startSourceSynthesis!({ ownerUserId }, submitted.id, reviewed.revision);
+      expect(await runSourceWorker(16)).toEqual({ completed: 0, runs: [false] });
+      const failed = await repository.read({ ownerUserId }, submitted.id);
+      expect(failed).toMatchObject({
+        status: "recoverable",
+        source: { acceptedFactIds: [statedFactId], expansionCandidates: [] }
+      });
+      expect(failed?.stages).toEqual(expect.arrayContaining([expect.objectContaining({ key: "source:synthesis", status: "recoverable" })]));
+      expect(failed?.result).toBeUndefined();
+    } finally {
+      sourceWorldUnknownExpansionFixture = false;
+      sourceWorldFixture = false;
+      await pool.query("DELETE FROM provider_profiles WHERE id = $1", [profile.id]);
+    }
   });
 
   it("requires explicit source-character identities while preserving separate same-name people", async () => {

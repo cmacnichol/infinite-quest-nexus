@@ -105,19 +105,27 @@ export const sourceCharacterIdentityGroupSchema = z.object({
   factIds: z.array(sourceDocumentIdSchema).min(1).max(50_000)
 }).strict();
 
-/** Mutable owner decision over immutable extracted facts. */
-export const sourceFactReviewSchema = z.object({
+const sourceManualFactSchema = sourceFactSchema.extend({
+  provenance: z.literal("manual"),
+  citations: z.array(sourceCitationSchema).length(0)
+}).strict();
+
+const sourceInventedFactSchema = sourceFactSchema.extend({
+  provenance: z.literal("invented"),
+  citations: z.array(sourceCitationSchema).length(0)
+}).strict();
+
+const sourceFactReviewShape = {
   expectedRevision: z.number().int().nonnegative(),
   acceptedFactIds: z.array(sourceDocumentIdSchema).max(50_000),
   rejectedFactIds: z.array(sourceDocumentIdSchema).max(50_000),
   uncertainFactIds: z.array(sourceDocumentIdSchema).max(50_000).default([]),
   selectedCharacterFactIds: z.array(sourceDocumentIdSchema).max(20),
   characterIdentityGroups: z.array(sourceCharacterIdentityGroupSchema).max(50_000).default([]),
-  manualFacts: z.array(sourceFactSchema.extend({
-    provenance: z.literal("manual"),
-    citations: z.array(sourceCitationSchema).length(0)
-  }).strict()).max(200)
-}).strict().superRefine((value, context) => {
+  manualFacts: z.array(sourceManualFactSchema).max(200)
+};
+
+function validateSourceFactReview(value: z.infer<z.ZodObject<typeof sourceFactReviewShape>>, context: z.RefinementCtx) {
   for (const [key, ids] of [["acceptedFactIds", value.acceptedFactIds], ["rejectedFactIds", value.rejectedFactIds], ["uncertainFactIds", value.uncertainFactIds], ["selectedCharacterFactIds", value.selectedCharacterFactIds]] as const) {
     if (new Set(ids).size !== ids.length) context.addIssue({ code: "custom", path: [key], message: "Fact IDs must be unique." });
   }
@@ -142,7 +150,16 @@ export const sourceFactReviewSchema = z.object({
     }
   }
   if (value.selectedCharacterFactIds.some((id) => !representatives.has(id))) context.addIssue({ code: "custom", path: ["selectedCharacterFactIds"], message: "Selected character facts must be identity representatives." });
-});
+}
+
+/** Mutable owner command over immutable extracted facts. Browser requests cannot supply generated candidate inventory. */
+export const sourceFactReviewSchema = z.object(sourceFactReviewShape).strict().superRefine(validateSourceFactReview);
+
+/** Internal persisted review state. Candidate facts are reconstructed by the repository from current durable stage output. */
+export const persistedSourceFactReviewSchema = z.object({
+  ...sourceFactReviewShape,
+  expansionCandidates: z.array(sourceInventedFactSchema).max(200).default([])
+}).strict().superRefine(validateSourceFactReview);
 
 export const sourceAuthoringInputSchema = z.object({
   kind: z.literal("story_source"),
@@ -175,5 +192,6 @@ export type SourceCitation = z.infer<typeof sourceCitationSchema>;
 export type SourceFact = z.infer<typeof sourceFactSchema>;
 export type SourceCharacterIdentityGroup = z.infer<typeof sourceCharacterIdentityGroupSchema>;
 export type SourceFactReview = z.infer<typeof sourceFactReviewSchema>;
+export type PersistedSourceFactReview = z.infer<typeof persistedSourceFactReviewSchema>;
 export type SourceAuthoringInput = z.infer<typeof sourceAuthoringInputSchema>;
 export type SourceAuthoringView = z.infer<typeof sourceAuthoringViewSchema>;

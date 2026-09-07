@@ -14,7 +14,7 @@ import type {
 } from "./types.js";
 import type { AuthoringApplyReceipt, AuthoringTarget } from "@infinite-quest/contracts";
 import type { PlayableCharacter, WorldContent } from "@infinite-quest/contracts";
-import type { SourceFactReview } from "@infinite-quest/contracts";
+import type { SourceCharacterIdentityGroup, SourceDocument, SourceFact, SourceFactReview } from "@infinite-quest/contracts";
 
 /** Opaque transaction binding owned by the persistence adapter. */
 export interface AuthoringTransaction {
@@ -91,6 +91,16 @@ export interface AuthoringExecutionRepository extends AuthoringRepository {
     parentOutputs: AuthoringStageOutput[];
     /** Mutable source-plan leaf projection; immutable parent output remains retained for lineage. */
     sourcePlan?: unknown;
+    /** Exact source review projection bound to a source synthesis/character stage. */
+    sourceSelection?: Readonly<{
+      source: SourceDocument;
+      boundaryParagraphId: string;
+      acceptedFacts: SourceFact[];
+      selectedCharacterFactIds: string[];
+      characterIdentityGroups: SourceCharacterIdentityGroup[];
+      mode: "faithful" | "expand";
+      reviewGeneration: number;
+    }>;
   } | null>;
   /** Replaces one current source leaf with two fenced child leaves after output truncation. */
   splitSourceChunk?(claim: AuthoringClaim, chunkId: string): Promise<boolean>;

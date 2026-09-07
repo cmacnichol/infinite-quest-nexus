@@ -17,7 +17,7 @@ import {
   executeAuthoringStage,
   type LoadedAuthoringStage
 } from "./authoring-stage-adapter.js";
-import { SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION } from "../../../packages/domain/src/authoring-prompts.js";
+import { SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION, SOURCE_WORLD_PROMPT_PROTOCOL_VERSION } from "../../../packages/domain/src/authoring-prompts.js";
 import { SourceExtractionSplitNeededError } from "./source-authoring-adapter.js";
 import { resolveSourceAuthoringTextExecution } from "./source-authoring-budget.js";
 
@@ -50,7 +50,9 @@ function snapshotPrompts(snapshot: Record<string, unknown>, content: (snapshot: 
     world_character_generation_recovery: content(snapshot, "world_character_generation_recovery"),
     character_generation: content(snapshot, "character_generation"),
     source_extraction: content(snapshot, "source_extraction"),
-    source_extraction_recovery: content(snapshot, "source_extraction_recovery")
+    source_extraction_recovery: content(snapshot, "source_extraction_recovery"),
+    source_world: content(snapshot, "source_world"),
+    source_world_recovery: content(snapshot, "source_world_recovery")
   };
 }
 
@@ -110,7 +112,7 @@ export function createRuntimeAuthoringWorkerApplication(options: Readonly<{
               : await options.providers.execution.text({ ownerUserId: claim.ownerUserId }, resolution.providerProfileId, "text", resolution.model);
             const prompt = await options.providers.prompts.loadWorldGenerationPromptSnapshot({ ownerUserId: claim.ownerUserId, worldId: claim.jobId });
             return createAuthoringExecutionSnapshot(provider, snapshotPrompts(prompt.snapshot as Record<string, unknown>, options.providers.promptTools.content as never), input.kind === "story_source"
-              ? { ...AUTHORING_EXECUTION_PROTOCOLS, source: SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION }
+              ? { ...AUTHORING_EXECUTION_PROTOCOLS, source: SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION, sourceWorld: SOURCE_WORLD_PROMPT_PROTOCOL_VERSION }
               : AUTHORING_EXECUTION_PROTOCOLS, options.sha256);
           },
             dispatch: async (stage) => dispatch(stage)

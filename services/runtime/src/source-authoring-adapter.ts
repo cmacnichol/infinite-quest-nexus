@@ -6,6 +6,12 @@ import {
 } from "../../../packages/domain/src/source-authoring.js";
 import type { SourceChunk } from "../../../packages/domain/src/source-authoring-budget.js";
 import { buildSourceExtractionPrompt } from "../../../packages/domain/src/authoring-prompts.js";
+import { buildSourceWorldPrompt } from "../../../packages/domain/src/authoring-prompts.js";
+import {
+  assembleSourceWorldProposalWithEvidence,
+  type SourceWorldProposalAssembly,
+  type SourceWorldSelection
+} from "../../../packages/domain/src/source-world-proposal.js";
 import type { ProviderRequest, ProviderResult } from "../../../packages/story-engine/src/providers.js";
 import { AuthoringResponseError, runAuthoringResponse } from "./authoring-response-adapter.js";
 
@@ -160,3 +166,76 @@ export function createSourceAuthoringAdapter(options: Readonly<{
 
 export type SourceAuthoringAdapter = ReturnType<typeof createSourceAuthoringAdapter>;
 export { MAX_SOURCE_FACTS_PER_CHUNK };
+
+export type SourceWorldSynthesisInput = Readonly<{
+  selection: SourceWorldSelection;
+  reviewGeneration: number;
+  instructions: string;
+}>;
+
+function sourceWorldOutputIssue(): z.ZodError {
+  return new z.ZodError([{
+    code: "custom",
+    path: ["sourceWorld"],
+    message: "Generated source-world fields must use the reviewed closed target mapping.",
+    params: { authoringReason: "source_evidence" }
+  }]);
+}
+
+function parseSourceWorldResponse(input: SourceWorldSynthesisInput, content: string): SourceWorldProposalAssembly {
+  let generated: unknown;
+  try {
+    generated = JSON.parse(content);
+  } catch {
+    throw sourceWorldOutputIssue();
+  }
+  try {
+    return assembleSourceWorldProposalWithEvidence(input.selection, generated);
+  } catch {
+    throw sourceWorldOutputIssue();
+  }
+}
+
+/** Rendered through the same bounded source transport as extraction. */
+export function renderSourceWorldProviderRequest(
+  input: SourceWorldSynthesisInput,
+  repair: boolean,
+  issues: unknown,
+  rejectedResponse?: string
+): ProviderRequest {
+  const prompt = buildSourceWorldPrompt({
+    instructions: input.instructions,
+    reviewGeneration: input.reviewGeneration,
+    selection: input.selection,
+    repair
+  });
+  return {
+    systemPrompt: prompt.systemPrompt,
+    input: prompt.input,
+    responseFormatFallback: "forbid",
+    ...(repair ? { recoveryInput: JSON.stringify({ issues }) } : {}),
+    ...(rejectedResponse === undefined ? {} : { rejectedResponse })
+  };
+}
+
+export function createSourceWorldAuthoringAdapter(options: Readonly<{
+  requestBudget: SourceExtractionRequestBudget;
+  delay(milliseconds: number): Promise<void>;
+}>): Readonly<{ synthesizeSourceWorld(input: SourceWorldSynthesisInput, currentClaim?: () => Promise<boolean>): Promise<SourceWorldProposalAssembly> }> {
+  return Object.freeze({
+    async synthesizeSourceWorld(input, currentClaim) {
+      return runAuthoringResponse({
+        stage: "source",
+        request: async (attempt) => {
+          const request = renderSourceWorldProviderRequest(input, attempt.repair, attempt.issues, attempt.rejectedResponse);
+          return attempt.repair
+            ? options.requestBudget.executeRepair(request)
+            : options.requestBudget.executeInitial(request);
+        },
+        parse: (content) => parseSourceWorldResponse(input, content),
+        delay: options.delay,
+        ...(currentClaim === undefined ? {} : { currentClaim })
+      });
+    }
+  });
+}

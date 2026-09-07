@@ -15,3 +15,4 @@ export * from "./redaction.js";
 export * from "./chronicle-memory-helpers.js";
 export * from "./image-media.js";
 export * from "./source-authoring-budget.js";
+export * from "./source-world-proposal.js";

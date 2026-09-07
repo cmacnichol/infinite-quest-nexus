@@ -14,7 +14,7 @@ import {
 } from "../../packages/domain/src/authoring-prompts.js";
 import { createRuntimeSourceAuthoringRequestBudget } from "../../services/runtime/src/source-authoring-budget.js";
 import type { RuntimeTextExecution } from "../../services/runtime/src/provider-credential-transport-adapter.js";
-import { createSourceAuthoringAdapter, renderSourceExtractionProviderRequest, renderSourceExtractionRequest } from "../../services/runtime/src/source-authoring-adapter.js";
+import { createSourceAuthoringAdapter, renderSourceExtractionProviderRequest, renderSourceExtractionRequest, renderSourceWorldProviderRequest } from "../../services/runtime/src/source-authoring-adapter.js";
 
 const fixture = readFileSync(new URL("../fixtures/authoring/source-chapter.txt", import.meta.url), "utf8");
 
@@ -142,6 +142,36 @@ describe("source authoring adapter", () => {
     expect(prepared.body).toContain("sourceRange");
     expect(prepared.body).toContain("expand");
     expect(prepared.byteLength).toBe(new TextEncoder().encode(prepared.body).length);
+  });
+
+  it("keeps excluded source tail out of initial and repair overview and character synthesis bodies", () => {
+    const source = normalizeSourceDocument("bounded.txt", "Iris wears a blue coat.\n\nEXCLUDED_REVELATION_SENTINEL", "bounded-source");
+    const fact = {
+      id: "source-fact:iris", kind: "character" as const, subject: "Iris", predicate: "clothing", value: "blue coat", provenance: "stated" as const,
+      citations: [{ sourceId: source.id, paragraphId: "paragraph:0", start: 0, end: 22, quote: "Iris wears a blue coat" }]
+    };
+    const execution: RuntimeTextExecution = {
+      id: "source-profile", name: "Source test", providerRole: "text", providerType: "openai_compatible", model: "source-model",
+      contextWindowTokens: 8_000, maxOutputTokens: 400, temperature: 0.2, requestTimeoutMs: 30_000, configuration: {}, execute: async () => result('{"fields":[],"characterFields":[]}')
+    };
+    const requestBudget = createRuntimeSourceAuthoringRequestBudget(execution);
+    const frame = (selectedCharacterFactIds: string[]) => ({
+      selection: { source, boundaryParagraphId: "paragraph:0", acceptedFacts: [fact], selectedCharacterFactIds, characterIdentityGroups: [{ representativeFactId: fact.id, factIds: [fact.id] }], mode: "faithful" as const },
+      reviewGeneration: 4, instructions: "Use reviewed facts."
+    });
+    const bodies = [
+      requestBudget.prepareInitial(renderSourceWorldProviderRequest(frame([]), false, [])).body,
+      requestBudget.prepareRepair(renderSourceWorldProviderRequest(frame([]), true, [{ path: "fields", message: "repair" }], "bad response")).body,
+      requestBudget.prepareInitial(renderSourceWorldProviderRequest(frame([fact.id]), false, [])).body,
+      requestBudget.prepareRepair(renderSourceWorldProviderRequest(frame([fact.id]), true, [{ path: "characterFields", message: "repair" }], "bad response")).body
+    ];
+    for (const body of bodies) {
+      expect(body).not.toContain("EXCLUDED_REVELATION_SENTINEL");
+      expect(body).toContain(fact.id);
+    }
+    const expand = renderSourceWorldProviderRequest({ ...frame([fact.id]), selection: { ...frame([fact.id]).selection, mode: "expand" } }, false, []);
+    expect(expand.systemPrompt).toContain("separately labeled expansionCandidates");
+    expect(renderSourceWorldProviderRequest(frame([]), false, []).systemPrompt).toContain("expansionCandidates must be empty");
   });
 
   it("binds planner probes to the exact coordinate-bearing source request frame before final budget preparation", () => {

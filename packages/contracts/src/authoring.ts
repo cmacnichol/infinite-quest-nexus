@@ -149,7 +149,18 @@ export const authoringStageOutputSchema = z.discriminatedUnion("kind", [
     contentHash: z.string().regex(/^[0-9a-f]{64}$/u),
     spans: z.array(z.object({ paragraphId: authoringIdSchema, start: z.number().int().nonnegative(), end: z.number().int().nonnegative() }).strict()).max(200_000)
   }).strict()).min(1).max(200) }).strict(),
-  z.object({ kind: z.literal("source_extraction"), facts: z.array(sourceFactSchema).max(200) }).strict()
+  z.object({ kind: z.literal("source_extraction"), facts: z.array(sourceFactSchema).max(200) }).strict(),
+  z.object({
+    kind: z.literal("source_world"), proposal: worldContentSchema,
+    mappings: z.array(z.object({
+      target: z.union([z.literal("world"), z.object({ characterRepresentativeFactId: authoringIdSchema }).strict()]),
+      path: z.string().min(1), value: z.string(), supportingFactIds: z.array(authoringIdSchema).min(1)
+    }).strict()).default([]),
+    expansionCandidates: z.array(z.object({
+      target: z.union([z.literal("world"), z.object({ characterRepresentativeFactId: authoringIdSchema }).strict()]),
+      path: z.string().min(1), value: z.string(), supportingFactIds: z.array(authoringIdSchema).min(1), provenance: z.literal("invented")
+    }).strict()).default([])
+  }).strict()
 ]);
 
 /** Safe pinned execution fields only; endpoint URLs and credentials are deliberately absent. */

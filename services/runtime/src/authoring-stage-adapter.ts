@@ -10,12 +10,12 @@ import {
   generateWorldOutline
 } from "./provider-world-generation-adapter.js";
 import { buildTemplateWorldPrompt } from "../../../packages/domain/src/world-template.js";
-import { CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION, WORLD_AUTHORING_PROMPT_PROTOCOL_VERSION } from "../../../packages/domain/src/authoring-prompts.js";
-import { SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION } from "../../../packages/domain/src/authoring-prompts.js";
+import { CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION, SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION, SOURCE_WORLD_PROMPT_PROTOCOL_VERSION, WORLD_AUTHORING_PROMPT_PROTOCOL_VERSION } from "../../../packages/domain/src/authoring-prompts.js";
 import { sourceDocumentFromNormalizedText } from "../../../packages/domain/src/source-authoring.js";
 import { planSourceChunks } from "../../../packages/domain/src/source-authoring-budget.js";
 import { createRuntimeSourceAuthoringRequestBudget } from "./source-authoring-budget.js";
-import { createSourceAuthoringAdapter, renderSourceExtractionProviderRequest } from "./source-authoring-adapter.js";
+import { createSourceAuthoringAdapter, createSourceWorldAuthoringAdapter, renderSourceExtractionProviderRequest } from "./source-authoring-adapter.js";
+import type { SourceWorldSelection } from "../../../packages/domain/src/source-world-proposal.js";
 
 export const AUTHORING_EXECUTION_PROTOCOLS = Object.freeze({
   world: WORLD_AUTHORING_PROMPT_PROTOCOL_VERSION,
@@ -79,6 +79,7 @@ export type LoadedAuthoringStage = Readonly<{
   stageKey: string;
   parentOutputs: AuthoringStageOutput[];
   sourcePlan?: unknown;
+  sourceSelection?: SourceWorldSelection & Readonly<{ reviewGeneration: number }>;
   ownerUserId: string;
   currentClaim?(): Promise<boolean>;
 }>;
@@ -151,12 +152,50 @@ export function createRuntimeAuthoringStageDispatcher(options: Readonly<{
       throw new AuthoringResponseError({ code: "authoring_provider_unavailable", stage: providerFailureStage(stage), retryable: true, issues: [] });
     }
     if (stage.input.kind === "story_source") {
-      if (stage.snapshot.protocols.source !== SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION) {
+      const isSourceWorldStage = stage.stageKey === "source:synthesis" || stage.stageKey.startsWith("source:character:");
+      const actualSourceProtocol = isSourceWorldStage
+        ? stage.snapshot.protocols.sourceWorld
+        : stage.snapshot.protocols.source;
+      const expectedSourceProtocol = isSourceWorldStage
+        ? SOURCE_WORLD_PROMPT_PROTOCOL_VERSION
+        : SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION;
+      if (actualSourceProtocol !== expectedSourceProtocol) {
         throw new AuthoringResponseError({ code: "source_evidence_invalid", stage: "source", retryable: false, issues: [] });
       }
       const sourceInput = stage.input;
-      const source = sourceDocumentFromNormalizedText(sourceInput.name, sourceInput.text, stage.jobId);
       const requestBudget = createRuntimeSourceAuthoringRequestBudget(provider);
+      if (isSourceWorldStage) {
+        if (!stage.sourceSelection) {
+          throw new AuthoringResponseError({ code: "source_review_conflict", stage: "source", retryable: false, issues: [] });
+        }
+        const selectedCharacterFactIds = stage.stageKey === "source:synthesis"
+          ? []
+          : [stage.stageKey.slice("source:character:".length)];
+        if (selectedCharacterFactIds.some((id) => !stage.sourceSelection!.selectedCharacterFactIds.includes(id))) {
+          throw new AuthoringResponseError({ code: "source_review_conflict", stage: "source", retryable: false, issues: [] });
+        }
+        const adapter = createSourceWorldAuthoringAdapter({ requestBudget, delay: async () => undefined });
+        const assembled = await adapter.synthesizeSourceWorld({
+          selection: { ...stage.sourceSelection, selectedCharacterFactIds },
+          reviewGeneration: stage.sourceSelection.reviewGeneration,
+          instructions: sourceInput.instructions
+        }, stage.currentClaim);
+        return {
+          kind: "source_world",
+          proposal: assembled.proposal,
+          mappings: assembled.mappings.map((mapping) => ({
+            ...mapping,
+            target: mapping.target === "world" ? "world" : { ...mapping.target },
+            supportingFactIds: [...mapping.supportingFactIds]
+          })),
+          expansionCandidates: assembled.expansionCandidates.map((candidate) => ({
+            ...candidate,
+            target: candidate.target === "world" ? "world" : { ...candidate.target },
+            supportingFactIds: [...candidate.supportingFactIds]
+          }))
+        };
+      }
+      const source = sourceDocumentFromNormalizedText(sourceInput.name, sourceInput.text, stage.jobId);
       if (stage.stageKey === "source:plan") {
         const chunks = planSourceChunks({
           source,
