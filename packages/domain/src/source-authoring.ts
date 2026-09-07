@@ -6,7 +6,8 @@ import {
   sourceDocumentSchema,
   sourceIntakeTextSchema,
   type SourceCitation,
-  type SourceDocument
+  type SourceDocument,
+  type SourceFact
 } from "../../contracts/src/source-authoring.js";
 import { sourceFactKindSchema } from "../../contracts/src/source-authoring.js";
 import { z } from "zod";
@@ -73,12 +74,19 @@ export function hasValidSourceDocumentIntegrity(source: SourceDocument): boolean
 
 export function normalizeSourceDocument(name: string, text: string, id: string): SourceDocument {
   const normalized = normalizeSourceText(text);
+  return sourceDocumentFromNormalizedText(name, normalized, id);
+}
+
+/** Reconstruct the exact persisted normalization without applying BOM/line-ending normalization again. */
+export function sourceDocumentFromNormalizedText(name: string, text: string, id: string): SourceDocument {
+  sourceIntakeTextSchema.parse(text);
+  if (text.includes("\r")) throw new TypeError("Persisted normalized source text cannot contain carriage returns.");
   return sourceDocumentSchema.parse({
     id: sourceDocumentIdSchema.parse(id),
     name: sourceDocumentNameSchema.parse(name),
-    text: normalized,
-    sha256: sha256(normalized),
-    paragraphs: paragraphMap(normalized)
+    text,
+    sha256: sha256(text),
+    paragraphs: paragraphMap(text)
   });
 }
 
@@ -101,6 +109,39 @@ export function validateSourceCitationWithinBoundary(
   const boundaryIndex = source.paragraphs.findIndex((paragraph) => paragraph.id === boundaryParagraphId);
   const citationIndex = source.paragraphs.findIndex((paragraph) => paragraph.id === citation.paragraphId);
   return boundaryIndex >= 0 && citationIndex >= 0 && citationIndex <= boundaryIndex;
+}
+
+function normalizedFactValue(value: string): string {
+  return value.trim().replace(/\s+/gu, " ").toLocaleLowerCase();
+}
+
+function citationKey(citation: SourceCitation): string {
+  return [citation.sourceId, citation.paragraphId, citation.start, citation.end, citation.quote]
+    .map((part) => JSON.stringify(part)).join("|");
+}
+
+/**
+ * Dedupe only exact normalized statements. Names alone are never an identity
+ * signal, so differing predicate/value/provenance remains separately reviewable.
+ */
+export function mergeSourceFacts(facts: readonly SourceFact[]): SourceFact[] {
+  const merged: Array<SourceFact & { readonly __mergeKey?: string }> = [];
+  for (const fact of facts) {
+    const key = [fact.kind, fact.subject, fact.predicate, fact.value, fact.provenance]
+      .map(normalizedFactValue).join("\u0000");
+    const factCitationKeys = new Set(fact.citations.map(citationKey));
+    const index = merged.findIndex((candidate) => candidate.__mergeKey === key
+      && candidate.citations.some((citation) => factCitationKeys.has(citationKey(citation))));
+    const current = index < 0 ? undefined : merged[index];
+    if (!current) {
+      merged.push({ ...fact, citations: [...fact.citations], __mergeKey: key });
+      continue;
+    }
+    const citations = new Map(current.citations.map((citation) => [citationKey(citation), citation]));
+    for (const citation of fact.citations) citations.set(citationKey(citation), citation);
+    merged[index] = { ...current, citations: [...citations.values()] };
+  }
+  return merged.map(({ __mergeKey: _mergeKey, ...fact }) => fact);
 }
 
 /** Validates the emitted text identity and paragraph spans of one planned chunk. */

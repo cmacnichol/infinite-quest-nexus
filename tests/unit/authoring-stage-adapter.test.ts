@@ -175,8 +175,8 @@ describe("executeAuthoringStage", () => {
     );
   });
 
-  it("rejects source authoring before loading a text provider", async () => {
-    const text = vi.fn();
+  it("uses the pinned source provider before rejecting an invalid source stage", async () => {
+    const text = vi.fn(async () => ({ ...descriptor, execute: async () => providerResult(JSON.stringify({ facts: [] })) }));
     const dispatch = createRuntimeAuthoringStageDispatcher({ execution: { text } as never, sha256 });
 
     await expect(dispatch(runtimeStage({
@@ -187,7 +187,37 @@ describe("executeAuthoringStage", () => {
       stageKey: "source"
     }))).rejects.toMatchObject({ authoringFailure: { code: "source_evidence_invalid", stage: "source", retryable: false } });
 
-    expect(text).not.toHaveBeenCalled();
+    expect(text).toHaveBeenCalledWith({ ownerUserId: "owner-1" }, "text-1", "text", "model-pinned", snapshot.contextWindowTokens);
+  });
+
+  it.each(["source:plan", "source:chunk:source-chunk:0"])("classifies an unavailable resumed %s provider as a source failure", async (stageKey) => {
+    const dispatch = createRuntimeAuthoringStageDispatcher({
+      execution: { text: async () => { throw new Error("pinned provider unavailable"); } } as never,
+      sha256
+    });
+
+    await expect(dispatch(runtimeStage({
+      input: {
+        kind: "story_source", idempotencyKey: "source-key", target: { kind: "new_world" },
+        name: "chapter.txt", text: "A chapter.", mode: "faithful", boundaryParagraphId: "paragraph:0", instructions: ""
+      },
+      stageKey
+    }))).rejects.toMatchObject({ authoringFailure: { code: "authoring_provider_unavailable", stage: "source", retryable: true } });
+  });
+
+  it.each(["source:plan", "source:chunk:source-chunk:0"])("classifies resumed %s provider snapshot drift as a source failure", async (stageKey) => {
+    const dispatch = createRuntimeAuthoringStageDispatcher({
+      execution: { text: async () => ({ ...descriptor, contextWindowTokens: 4096, execute: async () => providerResult(JSON.stringify({ facts: [] })) }) } as never,
+      sha256
+    });
+
+    await expect(dispatch(runtimeStage({
+      input: {
+        kind: "story_source", idempotencyKey: "source-key", target: { kind: "new_world" },
+        name: "chapter.txt", text: "A chapter.", mode: "faithful", boundaryParagraphId: "paragraph:0", instructions: ""
+      },
+      stageKey
+    }))).rejects.toMatchObject({ authoringFailure: { code: "authoring_provider_unavailable", stage: "source", retryable: true } });
   });
 
   it("turns deleted or disabled pinned provider loads into a recoverable safe failure", async () => {

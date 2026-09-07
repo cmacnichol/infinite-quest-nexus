@@ -99,6 +99,51 @@ export const sourceFactSchema = z.object({
   citations: z.array(sourceCitationSchema).max(200)
 }).strict();
 
+/** An explicit owner decision that several extracted facts describe one source character. */
+export const sourceCharacterIdentityGroupSchema = z.object({
+  representativeFactId: sourceDocumentIdSchema,
+  factIds: z.array(sourceDocumentIdSchema).min(1).max(50_000)
+}).strict();
+
+/** Mutable owner decision over immutable extracted facts. */
+export const sourceFactReviewSchema = z.object({
+  expectedRevision: z.number().int().nonnegative(),
+  acceptedFactIds: z.array(sourceDocumentIdSchema).max(50_000),
+  rejectedFactIds: z.array(sourceDocumentIdSchema).max(50_000),
+  uncertainFactIds: z.array(sourceDocumentIdSchema).max(50_000).default([]),
+  selectedCharacterFactIds: z.array(sourceDocumentIdSchema).max(20),
+  characterIdentityGroups: z.array(sourceCharacterIdentityGroupSchema).max(50_000).default([]),
+  manualFacts: z.array(sourceFactSchema.extend({
+    provenance: z.literal("manual"),
+    citations: z.array(sourceCitationSchema).length(0)
+  }).strict()).max(200)
+}).strict().superRefine((value, context) => {
+  for (const [key, ids] of [["acceptedFactIds", value.acceptedFactIds], ["rejectedFactIds", value.rejectedFactIds], ["uncertainFactIds", value.uncertainFactIds], ["selectedCharacterFactIds", value.selectedCharacterFactIds]] as const) {
+    if (new Set(ids).size !== ids.length) context.addIssue({ code: "custom", path: [key], message: "Fact IDs must be unique." });
+  }
+  const accepted = new Set(value.acceptedFactIds);
+  const manualFactIds = value.manualFacts.map((fact) => fact.id);
+  const manualFactIdSet = new Set(manualFactIds);
+  if (value.rejectedFactIds.some((id) => accepted.has(id))) context.addIssue({ code: "custom", path: ["rejectedFactIds"], message: "A fact cannot be both accepted and rejected." });
+  if (value.uncertainFactIds.some((id) => accepted.has(id) || value.rejectedFactIds.includes(id))) context.addIssue({ code: "custom", path: ["uncertainFactIds"], message: "An uncertain fact cannot also be accepted or rejected." });
+  if (manualFactIdSet.size !== manualFactIds.length) context.addIssue({ code: "custom", path: ["manualFacts"], message: "Manual fact request references must be unique." });
+  if (value.selectedCharacterFactIds.some((id) => !accepted.has(id))) context.addIssue({ code: "custom", path: ["selectedCharacterFactIds"], message: "Selected character facts must be accepted." });
+  const groupedFactIds = new Set<string>();
+  const representatives = new Set<string>();
+  for (const [index, group] of value.characterIdentityGroups.entries()) {
+    if (new Set(group.factIds).size !== group.factIds.length) context.addIssue({ code: "custom", path: ["characterIdentityGroups", index, "factIds"], message: "Identity fact IDs must be unique." });
+    if (!group.factIds.includes(group.representativeFactId)) context.addIssue({ code: "custom", path: ["characterIdentityGroups", index, "representativeFactId"], message: "An identity representative must be one of its facts." });
+    if (!accepted.has(group.representativeFactId)) context.addIssue({ code: "custom", path: ["characterIdentityGroups", index, "representativeFactId"], message: "An identity representative must be accepted." });
+    if (!representatives.add(group.representativeFactId)) context.addIssue({ code: "custom", path: ["characterIdentityGroups", index, "representativeFactId"], message: "Identity representatives must be unique." });
+    for (const factId of group.factIds) {
+      if (!accepted.has(factId)) context.addIssue({ code: "custom", path: ["characterIdentityGroups", index, "factIds"], message: "Identity facts must be accepted." });
+      if (groupedFactIds.has(factId)) context.addIssue({ code: "custom", path: ["characterIdentityGroups", index, "factIds"], message: "A fact can belong to only one identity." });
+      groupedFactIds.add(factId);
+    }
+  }
+  if (value.selectedCharacterFactIds.some((id) => !representatives.has(id))) context.addIssue({ code: "custom", path: ["selectedCharacterFactIds"], message: "Selected character facts must be identity representatives." });
+});
+
 export const sourceAuthoringInputSchema = z.object({
   kind: z.literal("story_source"),
   idempotencyKey: z.string().trim().min(1).max(512),
@@ -119,12 +164,16 @@ export const sourceAuthoringViewSchema = z.object({
   extractionComplete: z.boolean(),
   acceptedFactIds: z.array(sourceDocumentIdSchema).max(50_000),
   rejectedFactIds: z.array(sourceDocumentIdSchema).max(50_000),
+  uncertainFactIds: z.array(sourceDocumentIdSchema).max(50_000),
   selectedCharacterFactIds: z.array(sourceDocumentIdSchema).max(20),
+  characterIdentityGroups: z.array(sourceCharacterIdentityGroupSchema).max(50_000),
   expansionCandidates: z.array(sourceFactSchema).max(50_000)
 }).strict();
 
 export type SourceDocument = z.infer<typeof sourceDocumentSchema>;
 export type SourceCitation = z.infer<typeof sourceCitationSchema>;
 export type SourceFact = z.infer<typeof sourceFactSchema>;
+export type SourceCharacterIdentityGroup = z.infer<typeof sourceCharacterIdentityGroupSchema>;
+export type SourceFactReview = z.infer<typeof sourceFactReviewSchema>;
 export type SourceAuthoringInput = z.infer<typeof sourceAuthoringInputSchema>;
 export type SourceAuthoringView = z.infer<typeof sourceAuthoringViewSchema>;

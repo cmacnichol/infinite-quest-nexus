@@ -14,6 +14,7 @@ import type {
 } from "./types.js";
 import type { AuthoringApplyReceipt, AuthoringTarget } from "@infinite-quest/contracts";
 import type { PlayableCharacter, WorldContent } from "@infinite-quest/contracts";
+import type { SourceFactReview } from "@infinite-quest/contracts";
 
 /** Opaque transaction binding owned by the persistence adapter. */
 export interface AuthoringTransaction {
@@ -49,6 +50,8 @@ export interface AuthoringRepository {
   checkpoint(claim: AuthoringClaim, output: unknown): Promise<boolean>;
   fail(claim: AuthoringClaim, failure: AuthoringFailure): Promise<boolean>;
   review(scope: OwnerScope, jobId: string, input: AuthoringReview): Promise<AuthoringJobView>;
+  reviewSourceFacts?(scope: OwnerScope, jobId: string, review: SourceFactReview): Promise<AuthoringJobView>;
+  startSourceSynthesis?(scope: OwnerScope, jobId: string, expectedRevision: number): Promise<AuthoringJobView>;
   retry(scope: OwnerScope, jobId: string, stageId: string, expectedRevision: number): Promise<AuthoringJobView>;
   cancel(scope: OwnerScope, jobId: string, expectedRevision: number): Promise<AuthoringJobView>;
   discard(scope: OwnerScope, jobId: string, expectedRevision: number): Promise<void>;
@@ -86,5 +89,9 @@ export interface AuthoringExecutionRepository extends AuthoringRepository {
     snapshot: AuthoringExecutionSnapshot;
     stageKey: string;
     parentOutputs: AuthoringStageOutput[];
+    /** Mutable source-plan leaf projection; immutable parent output remains retained for lineage. */
+    sourcePlan?: unknown;
   } | null>;
+  /** Replaces one current source leaf with two fenced child leaves after output truncation. */
+  splitSourceChunk?(claim: AuthoringClaim, chunkId: string): Promise<boolean>;
 }

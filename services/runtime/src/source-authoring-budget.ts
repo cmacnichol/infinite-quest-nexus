@@ -111,6 +111,8 @@ export type PreparedSourceAuthoringRequest = Readonly<{
 export type RuntimeSourceAuthoringRequestBudget = Readonly<{
   budget: AuthoringBudget;
   inputLimit: number;
+  /** Exact credential-free legacy envelope used for non-paid source planning probes. */
+  render(request: ProviderRequest): string;
   prepareInitial(request: ProviderRequest): PreparedSourceAuthoringRequest;
   prepareRepair(request: ProviderRequest): PreparedSourceAuthoringRequest;
   executeInitial(request: ProviderRequest): Promise<ProviderResult>;
@@ -184,6 +186,10 @@ export function createRuntimeSourceAuthoringRequestBudget(
   return Object.freeze({
     budget,
     inputLimit,
+    render: (request) => {
+      assertMeasuredLegacySourceRequest(request);
+      return serializeLegacyProviderRequest(profile, request).body;
+    },
     prepareInitial,
     prepareRepair,
     executeInitial: async (request) => {

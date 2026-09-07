@@ -19,7 +19,14 @@ import {
   type AuthoringStageOutput,
   type AuthoringSubmit
 } from "../../contracts/src/authoring.js";
-import { randomUUID } from "node:crypto";
+import {
+  sourceAuthoringViewSchema,
+  sourceFactReviewSchema,
+  type SourceAuthoringInput,
+  type SourceFact,
+  type SourceFactReview
+} from "../../contracts/src/source-authoring.js";
+import { createHash, randomUUID } from "node:crypto";
 import { playableCharacterSchema, type WorldContent } from "../../contracts/src/world-library.js";
 import type {
   AuthoringClaim,
@@ -32,6 +39,7 @@ import type { OwnerScope } from "../../application/src/generation/types.js";
 import { retryAuthoringStage, type AuthoringStageLifecycle } from "../../domain/src/authoring-jobs.js";
 import { projectAuthoringFailure, validateGeneratedCharacter, validateGeneratedWorldFiction } from "../../domain/src/authoring-output.js";
 import { assembleGeneratedWorldContent } from "../../domain/src/generated-world-assembly.js";
+import { mergeSourceFacts, normalizeSourceDocument, sourceDocumentFromNormalizedText } from "../../domain/src/source-authoring.js";
 import { withTransaction, type DatabaseClient, type DatabasePool } from "./pool.js";
 import { runPostgresWorldCampaignCommandWithClient } from "./world-campaign-transaction.js";
 
@@ -60,6 +68,8 @@ type JobRow = {
   applyKey: string | null;
   applyHash: string | null;
   applyReceipt: unknown;
+  sourcePlan: unknown;
+  sourceReview: unknown;
   expiresAt: unknown;
   createdAt: unknown;
 };
@@ -113,6 +123,9 @@ function requestHash(value: string): string {
 
 function validateStageOutput(stageKey: string, value: unknown): AuthoringStageOutput {
   const output = authoringStageOutputSchema.parse(value);
+  if (stageKey === "source:plan" && output.kind !== "source_plan") throw new TypeError("The source planning stage requires a source plan output.");
+  if (stageKey.startsWith("source:chunk:") && output.kind !== "source_extraction") throw new TypeError("A source extraction stage requires source facts.");
+  if (stageKey === "source:plan" || stageKey.startsWith("source:chunk:")) return output;
   if (stageKey === "world" && output.kind !== "outline") throw new TypeError("The world stage requires an outline output.");
   if (stageKey.startsWith("character:") && output.kind !== "character") throw new TypeError("A character stage requires a character output.");
   if (stageKey.startsWith("character:") && output.kind === "character") {
@@ -122,7 +135,7 @@ function validateStageOutput(stageKey: string, value: unknown): AuthoringStageOu
   if (stageKey !== "world" && !stageKey.startsWith("character:")) throw new TypeError("Unknown durable authoring stage key.");
   if (output.kind === "character") {
     validateGeneratedCharacter(output.character, "creative");
-  } else {
+  } else if (output.kind === "outline") {
     validateGeneratedWorldFiction(output.outline);
     for (const seed of output.outline.seeds) {
       validateGeneratedWorldFiction({
@@ -140,7 +153,7 @@ function validateStageOutput(stageKey: string, value: unknown): AuthoringStageOu
 
 function stageKey(input: AuthoringSubmit): string {
   if (input.kind === "world_concept") return "world";
-  if (input.kind === "story_source") throw new AuthoringRepositoryError("invalid_state");
+  if (input.kind === "story_source") return "source:plan";
   const targetCharacterId = input.target.kind === "world_draft" ? input.target.characterId : undefined;
   // Called only after inserting a new job. Keep application identity in the stage,
   // because public characterId denotes an existing roster member to edit.
@@ -155,6 +168,80 @@ function isDiscardedInput(value: unknown): boolean {
 function isAppliedInput(value: unknown): boolean {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     && (value as Record<string, unknown>).applied === true;
+}
+
+function currentSourceFacts(stages: readonly StageRow[]): SourceFact[] {
+  return currentStagesForRows(stages)
+    .filter((stage) => stage.stageKey.startsWith("source:chunk:") && stage.status === "validated" && stage.output !== null && stage.output !== undefined && parentsAreCurrentAndValidated(stages, stage.parentGenerations))
+    .flatMap((stage) => {
+      const output = validateStageOutput(stage.stageKey, stage.output);
+      // The immutable provider output retains its source-local fact id. Review
+      // commands use this generation-bound projection, so a retried leaf cannot
+      // silently accept an id from its superseded extraction generation.
+      return output.kind === "source_extraction"
+        ? output.facts.map((fact) => ({ ...fact, id: `source-fact:${stage.id}:${createHash("sha256").update(fact.id, "utf8").digest("hex")}` }))
+        : [];
+    });
+}
+
+function sourceDetail(job: JobRow, input: SourceAuthoringInput, stages: readonly StageRow[]) {
+  const source = sourceDocumentFromNormalizedText(input.name, input.text, job.id);
+  const planStage = currentStagesForRows(stages).find((stage) => stage.stageKey === "source:plan" && stage.status === "validated" && stage.output !== null);
+  const plan = planStage?.output ? validateStageOutput("source:plan", planStage.output) : undefined;
+  const plannedChunks = plan?.kind === "source_plan" ? plan.chunks : [];
+  const persistedPlan = typeof job.sourcePlan === "object" && job.sourcePlan !== null && !Array.isArray(job.sourcePlan)
+    ? (job.sourcePlan as { chunks?: unknown }).chunks
+    : undefined;
+  const persistedOutput = Array.isArray(persistedPlan)
+    ? authoringStageOutputSchema.parse({ kind: "source_plan", chunks: persistedPlan })
+    : undefined;
+  const chunks = persistedOutput?.kind === "source_plan" ? persistedOutput.chunks : plannedChunks;
+  const current = currentStagesForRows(stages);
+  const extractionComplete = chunks.length > 0 && chunks.every((chunk) => current.some((stage) =>
+    stage.stageKey === `source:chunk:${chunk.id}` && stage.status === "validated" && parentsAreCurrentAndValidated(stages, stage.parentGenerations)));
+  const review = job.sourceReview === null || job.sourceReview === undefined
+    ? undefined
+    : sourceFactReviewSchema.safeParse(job.sourceReview).data;
+  const facts = mergeSourceFacts([...currentSourceFacts(stages), ...(review?.manualFacts ?? [])]);
+  return sourceAuthoringViewSchema.parse({
+    source,
+    boundaryParagraphId: input.boundaryParagraphId,
+    mode: input.mode,
+    facts,
+    extractionComplete,
+    acceptedFactIds: review?.acceptedFactIds ?? [],
+    rejectedFactIds: review?.rejectedFactIds ?? [],
+    uncertainFactIds: review?.uncertainFactIds ?? [],
+    selectedCharacterFactIds: review?.selectedCharacterFactIds ?? [],
+    characterIdentityGroups: review?.characterIdentityGroups ?? [],
+    expansionCandidates: facts.filter((fact) => fact.provenance !== "stated")
+  });
+}
+
+function factsConflict(facts: readonly SourceFact[]): boolean {
+  return facts.some((fact, index) => facts.slice(index + 1).some((other) =>
+    fact.subject.trim().toLocaleLowerCase() === other.subject.trim().toLocaleLowerCase()
+    && fact.predicate.trim().toLocaleLowerCase() === other.predicate.trim().toLocaleLowerCase()
+    && fact.value.trim().toLocaleLowerCase() !== other.value.trim().toLocaleLowerCase()));
+}
+
+function splitSourceChunk(source: ReturnType<typeof sourceDocumentFromNormalizedText>, chunk: Extract<AuthoringStageOutput, { kind: "source_plan" }> ["chunks"][number]) {
+  const characters = Array.from(source.text);
+  const { start, end } = chunk.sourceRange;
+  if (end - start < 2) throw new TypeError("The smallest source extraction chunk cannot be split further.");
+  const midpoint = start + Math.floor((end - start) / 2);
+  const makeChild = (rangeStart: number, rangeEnd: number, suffix: string) => ({
+    id: `${chunk.id}:split-${suffix}`,
+    sourceId: source.id,
+    sourceRange: { start: rangeStart, end: rangeEnd },
+    contentHash: createHash("sha256").update(characters.slice(rangeStart, rangeEnd).join(""), "utf8").digest("hex"),
+    spans: source.paragraphs.filter((paragraph) => paragraph.end > rangeStart && paragraph.start < rangeEnd).map((paragraph) => ({
+      paragraphId: paragraph.id,
+      start: Math.max(rangeStart, paragraph.start),
+      end: Math.min(rangeEnd, paragraph.end)
+    }))
+  });
+  return [makeChild(start, midpoint, "a"), makeChild(midpoint, end, "b")];
 }
 
 function jobView(job: JobRow, stages: StageRow[]): AuthoringJobView {
@@ -196,6 +283,7 @@ function jobView(job: JobRow, stages: StageRow[]): AuthoringJobView {
     incomplete: !allValidated,
     ...(input === undefined ? {} : { request: input }),
     ...(result === undefined ? {} : { result }),
+    ...(input?.kind === "story_source" ? { source: sourceDetail(job, input, stages) } : {}),
     ...(job.reviewedContent === null || job.reviewedContent === undefined ? {} : {
       reviewedContent: job.reviewedContent,
       reviewedStageIds: Array.isArray(job.reviewedStageIds) ? job.reviewedStageIds : []
@@ -287,6 +375,7 @@ const JOB_SELECT = `
   execution_snapshot AS "executionSnapshot", reviewed_content AS "reviewedContent",
   reviewed_stage_ids AS "reviewedStageIds", review_generation AS "reviewGeneration",
   apply_key AS "applyKey", apply_hash AS "applyHash", apply_receipt AS "applyReceipt",
+  source_plan AS "sourcePlan", source_review AS "sourceReview",
   expires_at AS "expiresAt", created_at AS "createdAt"`;
 const JOB_LIST_SELECT = `id, kind, target, status, revision, reviewed_stage_ids AS "reviewedStageIds", reviewed_content IS NOT NULL AS "hasReviewedContent", expires_at AS "expiresAt", to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "createdAt"`;
 
@@ -522,6 +611,12 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
         );
         const created = inserted.rows[0];
         if (created) {
+          if (input.kind === "story_source") {
+            const normalized = normalizeSourceDocument(input.name, input.text, created.id);
+            const persisted = { ...input, text: normalized.text };
+            await client.query("UPDATE authoring_jobs SET input = $2::jsonb, updated_at = clock_timestamp() WHERE id = $1", [created.id, json(persisted)]);
+            created.input = persisted;
+          }
           await client.query(
             `INSERT INTO authoring_job_stages (job_id, owner_user_id, stage_key)
              VALUES ($1, $2, $3)`,
@@ -663,6 +758,114 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
         );
         await client.query("UPDATE authoring_job_stages SET output = NULL, failure = NULL, updated_at = clock_timestamp() WHERE job_id = $1", [job.id]);
         return receipt;
+      });
+    },
+
+    async reviewSourceFacts(scope, jobId, rawReview) {
+      return withTransaction(pool, async (client) => {
+        const jobs = await client.query<JobRow>(`SELECT ${JOB_SELECT} FROM authoring_jobs WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`, [jobId, scope.ownerUserId]);
+        const job = jobs.rows[0];
+        if (!job || isDiscardedInput(job.input)) throw new AuthoringRepositoryError("not_found");
+        if (job.kind !== "story_source") throw new AuthoringRepositoryError("invalid_state");
+        await requireUnexpired(client, job.id);
+        const review = sourceFactReviewSchema.parse(rawReview);
+        commandJob(job, review.expectedRevision);
+        if (job.status !== "awaiting_review" && job.status !== "recoverable") throw new AuthoringRepositoryError("invalid_state");
+        const stages = await client.query<StageRow>(`SELECT ${STAGE_SELECT} FROM authoring_job_stages WHERE job_id = $1 FOR UPDATE`, [job.id]);
+        const detail = sourceDetail(job, authoringSubmitSchema.parse(job.input) as SourceAuthoringInput, stages.rows);
+        if (!detail.extractionComplete) throw new AuthoringRepositoryError("invalid_state");
+        const priorReview = sourceFactReviewSchema.safeParse(job.sourceReview).data;
+        const existingFacts = mergeSourceFacts([...currentSourceFacts(stages.rows), ...(priorReview?.manualFacts ?? [])]);
+        const existingFactById = new Map(existingFacts.map((fact) => [fact.id, fact]));
+        const submittedManualIds = review.manualFacts.map((fact) => fact.id);
+        if (new Set(submittedManualIds).size !== submittedManualIds.length
+          || submittedManualIds.some((id) => existingFactById.has(id))
+          || review.rejectedFactIds.some((id) => submittedManualIds.includes(id))
+          || review.uncertainFactIds.some((id) => submittedManualIds.includes(id))) {
+          throw new AuthoringRepositoryError("invalid_state");
+        }
+        const manualIdMap = new Map(submittedManualIds.map((id) => [id, `source-fact:manual:${randomUUID()}`]));
+        const remapManualReference = (id: string) => manualIdMap.get(id) ?? id;
+        const manualFacts = review.manualFacts.map((fact) => ({ ...fact, id: manualIdMap.get(fact.id)!, provenance: "manual" as const, citations: [] }));
+        const finalReview = sourceFactReviewSchema.parse({
+          ...review,
+          acceptedFactIds: [...review.acceptedFactIds, ...submittedManualIds.filter((id) => !review.acceptedFactIds.includes(id))].map(remapManualReference),
+          rejectedFactIds: review.rejectedFactIds.map(remapManualReference),
+          uncertainFactIds: review.uncertainFactIds.map(remapManualReference),
+          selectedCharacterFactIds: review.selectedCharacterFactIds.map(remapManualReference),
+          characterIdentityGroups: review.characterIdentityGroups.map((group) => ({
+            representativeFactId: remapManualReference(group.representativeFactId),
+            factIds: group.factIds.map(remapManualReference)
+          })),
+          manualFacts: [...(priorReview?.manualFacts ?? []), ...manualFacts]
+        });
+        const facts = mergeSourceFacts([...existingFacts, ...manualFacts]);
+        const factById = new Map(facts.map((fact) => [fact.id, fact]));
+        const requestedIds = [
+          ...finalReview.acceptedFactIds,
+          ...finalReview.rejectedFactIds,
+          ...finalReview.uncertainFactIds,
+          ...finalReview.selectedCharacterFactIds,
+          ...finalReview.characterIdentityGroups.flatMap((group) => [group.representativeFactId, ...group.factIds])
+        ];
+        if (requestedIds.some((id) => !factById.has(id))) throw new AuthoringRepositoryError("invalid_state");
+        if (finalReview.selectedCharacterFactIds.some((id) => factById.get(id)?.kind !== "character")) throw new AuthoringRepositoryError("invalid_state");
+        const accepted = finalReview.acceptedFactIds.map((id) => factById.get(id)!);
+        const acceptedCharacterIds = new Set(accepted.filter((fact) => fact.kind === "character").map((fact) => fact.id));
+        const identityMembership = new Set<string>();
+        for (const group of finalReview.characterIdentityGroups) {
+          if (group.factIds.some((id) => factById.get(id)?.kind !== "character" || !acceptedCharacterIds.has(id))) {
+            throw new AuthoringRepositoryError("invalid_state");
+          }
+          if (!group.factIds.includes(group.representativeFactId) || !acceptedCharacterIds.has(group.representativeFactId)) {
+            throw new AuthoringRepositoryError("invalid_state");
+          }
+          for (const factId of group.factIds) {
+            if (identityMembership.has(factId)) throw new AuthoringRepositoryError("invalid_state");
+            identityMembership.add(factId);
+          }
+          if (factsConflict(group.factIds.map((id) => factById.get(id)!))) throw new AuthoringRepositoryError("invalid_state");
+        }
+        if (identityMembership.size !== acceptedCharacterIds.size) throw new AuthoringRepositoryError("invalid_state");
+        const representatives = new Set(finalReview.characterIdentityGroups.map((group) => group.representativeFactId));
+        if (finalReview.selectedCharacterFactIds.some((id) => !representatives.has(id))) throw new AuthoringRepositoryError("invalid_state");
+        if (factsConflict(accepted.filter((fact) => fact.kind !== "character"))) throw new AuthoringRepositoryError("invalid_state");
+        const persisted = finalReview;
+        await client.query(
+          `UPDATE authoring_jobs SET source_review = $2::jsonb, review_generation = review_generation + 1,
+             revision = revision + 1, last_activity_at = clock_timestamp(), expires_at = clock_timestamp() + interval '7 days', updated_at = clock_timestamp()
+           WHERE id = $1`,
+          [job.id, json(persisted)]
+        );
+        return lockedView(client, job.id);
+      });
+    },
+
+    async startSourceSynthesis(scope, jobId, expectedRevision) {
+      return withTransaction(pool, async (client) => {
+        const jobs = await client.query<JobRow>(`SELECT ${JOB_SELECT} FROM authoring_jobs WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`, [jobId, scope.ownerUserId]);
+        const job = jobs.rows[0];
+        if (!job || isDiscardedInput(job.input)) throw new AuthoringRepositoryError("not_found");
+        if (job.kind !== "story_source") throw new AuthoringRepositoryError("invalid_state");
+        await requireUnexpired(client, job.id);
+        commandJob(job, expectedRevision);
+        if (job.status !== "awaiting_review" && job.status !== "recoverable") throw new AuthoringRepositoryError("invalid_state");
+        const review = sourceFactReviewSchema.safeParse(job.sourceReview).data;
+        if (!review?.acceptedFactIds.length) throw new AuthoringRepositoryError("choose_source_facts");
+        const stages = await client.query<StageRow>(`SELECT ${STAGE_SELECT} FROM authoring_job_stages WHERE job_id = $1 FOR UPDATE`, [job.id]);
+        const detail = sourceDetail(job, authoringSubmitSchema.parse(job.input) as SourceAuthoringInput, stages.rows);
+        if (!detail.extractionComplete) throw new AuthoringRepositoryError("invalid_state");
+        const parents = Object.fromEntries(currentStages(stages.rows)
+          .filter((stage) => stage.stageKey.startsWith("source:chunk:") && stage.status === "validated")
+          .map((stage) => [stage.stageKey, stage.generation]));
+        await client.query(
+          `INSERT INTO authoring_job_stages (job_id, owner_user_id, stage_key, parent_generations, status, next_attempt_at)
+           VALUES ($1, $2, 'source:synthesis', $3::jsonb, 'queued', clock_timestamp())
+           ON CONFLICT (job_id, stage_key, generation) DO NOTHING`,
+          [job.id, scope.ownerUserId, json(parents)]
+        );
+        await client.query("UPDATE authoring_jobs SET status = 'queued', revision = revision + 1, updated_at = clock_timestamp() WHERE id = $1", [job.id]);
+        return lockedView(client, job.id);
       });
     },
 
@@ -858,9 +1061,73 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
         const output = validateStageOutput(stage.stageKey, parsedOutput);
         const updated = await client.query("UPDATE authoring_job_stages SET status = 'validated', output = $2::jsonb, failure = NULL, lease_token = NULL, lease_owner = NULL, lease_expires_at = NULL, completed_at = clock_timestamp(), updated_at = clock_timestamp() WHERE id = $1 AND lease_expires_at > clock_timestamp()", [stage.id, json(output)]);
         if (updated.rowCount !== 1) return false;
-        await reconcileOutlineChildren(client, job, stage, output);
+        if (output.kind === "source_plan") {
+          if (output.chunks.length > 200) throw new TypeError("A source authoring job cannot create more than 200 extraction chunks.");
+          await client.query("UPDATE authoring_jobs SET source_plan = $2::jsonb WHERE id = $1", [job.id, json({ chunks: output.chunks, planningStageGeneration: stage.generation })]);
+          // A regenerated plan invalidates every dependent leaf, including
+          // completed output. Keep those immutable rows for audit, but never
+          // let their old parent generation remain selectable or claimable.
+          await client.query(
+            `UPDATE authoring_job_stages children
+                SET status = 'cancelled', lease_token = NULL, lease_owner = NULL, lease_expires_at = NULL, updated_at = clock_timestamp()
+              WHERE children.job_id = $1 AND children.stage_key LIKE 'source:chunk:%'
+                AND children.generation = (SELECT max(current.generation) FROM authoring_job_stages current WHERE current.job_id = children.job_id AND current.stage_key = children.stage_key)`,
+            [job.id]
+          );
+          for (const chunk of output.chunks) {
+            await client.query(
+              `INSERT INTO authoring_job_stages (job_id, owner_user_id, stage_key, generation, parent_generations, status, next_attempt_at)
+               VALUES ($1, $2, $3, (SELECT coalesce(max(current.generation), 0) + 1 FROM authoring_job_stages current WHERE current.job_id = $1 AND current.stage_key = $3), $4::jsonb, 'queued', clock_timestamp())`,
+              [job.id, job.ownerUserId, `source:chunk:${chunk.id}`, json({ "source:plan": stage.generation })]
+            );
+          }
+        } else {
+          await reconcileOutlineChildren(client, job, stage, output);
+        }
         const complete = await completeCurrentStages(client, job.id);
         await client.query("UPDATE authoring_jobs SET status = $2, last_activity_at = clock_timestamp(), expires_at = clock_timestamp() + interval '7 days', updated_at = clock_timestamp() WHERE id = $1", [job.id, complete ? "awaiting_review" : "running"]);
+        return true;
+      })) ?? false;
+    },
+
+    async splitSourceChunk(claim, chunkId) {
+      return (await withCurrentClaim(claim, async (client, job, stage) => {
+        if (job.kind !== "story_source" || stage.stageKey !== `source:chunk:${chunkId}`) return false;
+        const planValue = typeof job.sourcePlan === "object" && job.sourcePlan !== null && !Array.isArray(job.sourcePlan)
+          ? (job.sourcePlan as { chunks?: unknown; splitCount?: unknown; planningStageGeneration?: unknown })
+          : undefined;
+        if (!planValue || !Array.isArray(planValue.chunks)) return false;
+        const parsed = authoringStageOutputSchema.parse({ kind: "source_plan", chunks: planValue.chunks });
+        if (parsed.kind !== "source_plan") return false;
+        const parent = parsed.chunks.find((chunk) => chunk.id === chunkId);
+        if (!parent) return false;
+        const cumulative = await client.query<{ count: string }>(
+          "SELECT count(DISTINCT stage_key)::text AS count FROM authoring_job_stages WHERE job_id = $1 AND stage_key LIKE 'source:chunk:%'",
+          [job.id]
+        );
+        if (Number(cumulative.rows[0]?.count ?? 0) + 2 > 200) return false;
+        const input = authoringSubmitSchema.parse(job.input);
+        if (input.kind !== "story_source") return false;
+        const children = splitSourceChunk(sourceDocumentFromNormalizedText(input.name, input.text, job.id), parent);
+        const planGeneration = typeof planValue.planningStageGeneration === "number" && Number.isInteger(planValue.planningStageGeneration)
+          ? planValue.planningStageGeneration
+          : 1;
+        const cancelled = await client.query(
+          "UPDATE authoring_job_stages SET status = 'cancelled', failure = NULL, lease_token = NULL, lease_owner = NULL, lease_expires_at = NULL, completed_at = clock_timestamp(), updated_at = clock_timestamp() WHERE id = $1 AND lease_expires_at > clock_timestamp()",
+          [stage.id]
+        );
+        if (cancelled.rowCount !== 1) return false;
+        await client.query(
+          "UPDATE authoring_jobs SET source_plan = $2::jsonb, status = 'queued', revision = revision + 1, last_activity_at = clock_timestamp(), expires_at = clock_timestamp() + interval '7 days', updated_at = clock_timestamp() WHERE id = $1",
+          [job.id, json({ chunks: [...parsed.chunks.filter((chunk) => chunk.id !== chunkId), ...children], planningStageGeneration: planGeneration, splitCount: Number(planValue.splitCount ?? 0) + 1 })]
+        );
+        for (const child of children) {
+          await client.query(
+            `INSERT INTO authoring_job_stages (job_id, owner_user_id, stage_key, parent_generations, status, next_attempt_at)
+             VALUES ($1, $2, $3, $4::jsonb, 'queued', clock_timestamp())`,
+            [job.id, job.ownerUserId, `source:chunk:${child.id}`, json({ "source:plan": planGeneration })]
+          );
+        }
         return true;
       })) ?? false;
     },
@@ -874,8 +1141,14 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
               AND world.generation = (SELECT max(current.generation) FROM authoring_job_stages current WHERE current.job_id = world.job_id AND current.stage_key = 'world')`,
           [job.id]
         )).rowCount === 1;
+        const retainsPartialSource = stage.stageKey.startsWith("source:chunk:") && ((await client.query(
+          `SELECT 1 FROM authoring_job_stages source
+            WHERE source.job_id = $1 AND source.stage_key LIKE 'source:chunk:%' AND source.status = 'validated'
+              AND source.generation = (SELECT max(current.generation) FROM authoring_job_stages current WHERE current.job_id = source.job_id AND current.stage_key = source.stage_key)`,
+          [job.id]
+        )).rowCount ?? 0) >= 1;
         const stageStatus = failure.retryable ? "recoverable" : "failed";
-        const jobStatus = failure.retryable || retainsPartialWorld ? "recoverable" : "failed";
+        const jobStatus = failure.retryable || retainsPartialWorld || retainsPartialSource ? "recoverable" : "failed";
         const updated = await client.query("UPDATE authoring_job_stages SET status = $2, failure = $3::jsonb, lease_token = NULL, lease_owner = NULL, lease_expires_at = NULL, completed_at = clock_timestamp(), updated_at = clock_timestamp() WHERE id = $1 AND lease_expires_at > clock_timestamp()", [stage.id, stageStatus, json(failure)]);
         if (updated.rowCount !== 1) return false;
         await client.query("UPDATE authoring_jobs SET status = $2, last_activity_at = clock_timestamp(), expires_at = clock_timestamp() + interval '7 days', updated_at = clock_timestamp() WHERE id = $1", [job.id, jobStatus]);
@@ -912,7 +1185,8 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
         input: authoringSubmitSchema.parse(job.input),
         snapshot: authoringExecutionSnapshotSchema.parse(job.executionSnapshot),
         stageKey: stage.stageKey,
-        parentOutputs: parents.rows.map((parent) => validateStageOutput(parent.stageKey, parent.output))
+        parentOutputs: parents.rows.map((parent) => validateStageOutput(parent.stageKey, parent.output)),
+        ...(job.kind === "story_source" && job.sourcePlan !== null && job.sourcePlan !== undefined ? { sourcePlan: job.sourcePlan } : {})
       };
       })) ?? null;
     }

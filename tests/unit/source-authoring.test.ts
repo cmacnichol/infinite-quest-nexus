@@ -12,6 +12,7 @@ import {
   sourceAuthoringInputSchema,
   sourceAuthoringViewSchema,
   sourceCitationSchema,
+  sourceFactReviewSchema,
   utf8ByteLength
 } from "../../packages/contracts/src/source-authoring.js";
 import {
@@ -148,6 +149,46 @@ describe("source authoring provenance", () => {
     expect(concept.prompt).toHaveLength(200_000);
   });
 
+  it("requires selected source-character facts to be explicit identity representatives", () => {
+    const base = {
+      expectedRevision: 0,
+      acceptedFactIds: ["north-detail", "north-role", "south-detail"],
+      rejectedFactIds: [],
+      uncertainFactIds: [],
+      manualFacts: [],
+      characterIdentityGroups: [
+        { representativeFactId: "north-detail", factIds: ["north-detail", "north-role"] },
+        { representativeFactId: "south-detail", factIds: ["south-detail"] }
+      ]
+    };
+
+    expect(sourceFactReviewSchema.parse({ ...base, selectedCharacterFactIds: ["north-detail"] }).characterIdentityGroups).toEqual(base.characterIdentityGroups);
+    expect(sourceFactReviewSchema.safeParse({ ...base, selectedCharacterFactIds: ["north-role"] }).success).toBe(false);
+    expect(sourceFactReviewSchema.safeParse({ ...base, selectedCharacterFactIds: ["north-detail", "south-detail"], characterIdentityGroups: [
+      { representativeFactId: "north-detail", factIds: ["north-detail", "north-role"] },
+      { representativeFactId: "south-detail", factIds: ["north-role", "south-detail"] }
+    ] }).success).toBe(false);
+  });
+
+  it("treats manual fact IDs as unique references while allowing retained dispositions", () => {
+    const manualCharacter = {
+      id: "manual-request:iris", kind: "character" as const, subject: "Iris", predicate: "role", value: "harbor keeper", provenance: "manual" as const, citations: []
+    };
+    const review = {
+      expectedRevision: 0,
+      acceptedFactIds: [manualCharacter.id],
+      rejectedFactIds: [],
+      uncertainFactIds: [],
+      selectedCharacterFactIds: [manualCharacter.id],
+      characterIdentityGroups: [{ representativeFactId: manualCharacter.id, factIds: [manualCharacter.id] }],
+      manualFacts: [manualCharacter]
+    };
+
+    expect(sourceFactReviewSchema.safeParse(review).success).toBe(true);
+    expect(sourceFactReviewSchema.safeParse({ ...review, manualFacts: [manualCharacter, { ...manualCharacter, value: "navigator" }] }).success).toBe(false);
+    expect(sourceFactReviewSchema.safeParse({ ...review, acceptedFactIds: [], selectedCharacterFactIds: [], characterIdentityGroups: [], uncertainFactIds: [manualCharacter.id] }).success).toBe(true);
+  });
+
   it("refuses unpaired surrogates before UTF-8 hashing can replace them", () => {
     for (const text of ["\uD800", "\uD800A"]) {
       expect(() => normalizeSourceDocument("chapter.txt", text, "source-1")).toThrow(/surrogate/u);
@@ -173,7 +214,9 @@ describe("source authoring provenance", () => {
       extractionComplete: true,
       acceptedFactIds: [fact.id],
       rejectedFactIds: [],
+      uncertainFactIds: [],
       selectedCharacterFactIds: [],
+      characterIdentityGroups: [],
       expansionCandidates: []
     };
     const job = {

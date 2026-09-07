@@ -8,7 +8,9 @@ import {
 } from "./world-library.js";
 import {
   sourceAuthoringInputSchema,
-  sourceAuthoringViewSchema
+  sourceAuthoringViewSchema,
+  sourceFactReviewSchema,
+  sourceFactSchema
 } from "./source-authoring.js";
 
 export const authoringStageSchema = z.enum(["world", "character", "organizer", "source"]);
@@ -139,7 +141,15 @@ export const authoringWorldOutlineSchema = z.object({
 
 export const authoringStageOutputSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("outline"), outline: authoringWorldOutlineSchema }).strict(),
-  z.object({ kind: z.literal("character"), character: playableCharacterSchema }).strict()
+  z.object({ kind: z.literal("character"), character: playableCharacterSchema }).strict(),
+  z.object({ kind: z.literal("source_plan"), chunks: z.array(z.object({
+    id: authoringIdSchema,
+    sourceId: authoringIdSchema,
+    sourceRange: z.object({ start: z.number().int().nonnegative(), end: z.number().int().nonnegative() }).strict(),
+    contentHash: z.string().regex(/^[0-9a-f]{64}$/u),
+    spans: z.array(z.object({ paragraphId: authoringIdSchema, start: z.number().int().nonnegative(), end: z.number().int().nonnegative() }).strict()).max(200_000)
+  }).strict()).min(1).max(200) }).strict(),
+  z.object({ kind: z.literal("source_extraction"), facts: z.array(sourceFactSchema).max(200) }).strict()
 ]);
 
 /** Safe pinned execution fields only; endpoint URLs and credentials are deliberately absent. */
@@ -242,6 +252,10 @@ export const authoringReviewSchema = z.object({
   selectedStageIds: z.array(authoringIdSchema).max(10_000)
 }).strict();
 
+export const authoringSourceSynthesisSchema = z.object({
+  expectedRevision: authoringRevisionSchema
+}).strict();
+
 /** Strict command envelopes shared by the HTTP API and replacement client. */
 export const authoringRetrySchema = z.object({
   stageId: authoringIdSchema,
@@ -301,6 +315,7 @@ export type AuthoringJobListItem = z.infer<typeof authoringJobListItemSchema>;
 export type AuthoringCapabilities = z.infer<typeof authoringCapabilitiesSchema>;
 export type AuthoringJobPage = z.infer<typeof authoringJobPageSchema>;
 export type AuthoringReview = z.infer<typeof authoringReviewSchema>;
+export type AuthoringSourceSynthesis = z.infer<typeof authoringSourceSynthesisSchema>;
 export type AuthoringRetry = z.infer<typeof authoringRetrySchema>;
 export type AuthoringRevisionCommand = z.infer<typeof authoringRevisionCommandSchema>;
 export type AuthoringApply = z.infer<typeof authoringApplySchema>;

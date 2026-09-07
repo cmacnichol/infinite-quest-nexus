@@ -190,13 +190,13 @@ describe("authoring application use cases", () => {
     expect(replay).toEqual(accepted);
   });
 
-  it("rejects source authoring before durable authoring execution is implemented", async () => {
+  it("admits source authoring through the durable provider-free command boundary", async () => {
     const repository = repositoryFixture();
     const submit = vi.spyOn(repository, "submit");
     const fixture = dependencies(repository);
     const application = createAuthoringApplication(fixture);
 
-    await expect(application.submit(owner, {
+    await application.submit(owner, {
       kind: "story_source",
       idempotencyKey: "source-not-yet-admitted",
       target: { kind: "new_world" },
@@ -205,9 +205,9 @@ describe("authoring application use cases", () => {
       mode: "faithful",
       boundaryParagraphId: "paragraph:0",
       instructions: ""
-    })).rejects.toMatchObject({ code: "authoring_invalid_state" });
+    });
 
-    expect(submit).not.toHaveBeenCalled();
+    expect(submit).toHaveBeenCalledWith(owner, expect.objectContaining({ kind: "story_source", name: "chapter.txt" }), expect.stringMatching(/^[0-9a-f]{64}$/u));
   });
 
   it("canonicalizes an existing-draft character identity before admission and hashing", async () => {

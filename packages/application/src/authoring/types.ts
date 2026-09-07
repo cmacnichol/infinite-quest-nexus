@@ -13,6 +13,7 @@ import type {
   AuthoringJobListItem,
   AuthoringJobView,
   AuthoringReview,
+  SourceFactReview,
   AuthoringSubmit,
   AuthoringTarget
 } from "@infinite-quest/contracts";
@@ -28,6 +29,8 @@ export interface AuthoringApplication {
   get(scope: AuthoringOwnerScope, id: string): Promise<AuthoringJobView | null>;
   list(scope: AuthoringOwnerScope, cursor?: string): Promise<{ jobs: AuthoringJobListItem[]; nextCursor?: string }>;
   review(scope: AuthoringOwnerScope, id: string, input: AuthoringReview): Promise<AuthoringJobView>;
+  reviewSourceFacts(scope: AuthoringOwnerScope, id: string, review: SourceFactReview): Promise<AuthoringJobView>;
+  startSourceSynthesis(scope: AuthoringOwnerScope, id: string, expectedRevision: number): Promise<AuthoringJobView>;
   retry(scope: AuthoringOwnerScope, id: string, stageId: string, expectedRevision: number): Promise<AuthoringJobView>;
   cancel(scope: AuthoringOwnerScope, id: string, expectedRevision: number): Promise<AuthoringJobView>;
   discard(scope: AuthoringOwnerScope, id: string, expectedRevision: number): Promise<void>;
@@ -43,6 +46,7 @@ export type AuthoringApplicationErrorCode =
   | "authoring_idempotency_conflict"
   | "authoring_input_too_large"
   | "authoring_active_job_limit"
+  | "choose_source_facts"
   | "authoring_apply_unavailable";
 
 export class AuthoringApplicationError extends Error {
@@ -54,7 +58,7 @@ export class AuthoringApplicationError extends Error {
 
 /** Typed adapter error. SQL adapters must not leak database-local error classes across this boundary. */
 export class AuthoringRepositoryError extends Error {
-  constructor(readonly code: "idempotency_conflict" | "revision_conflict" | "invalid_state" | "not_found" | "active_job_limit") {
+  constructor(readonly code: "idempotency_conflict" | "revision_conflict" | "invalid_state" | "not_found" | "active_job_limit" | "choose_source_facts") {
     super(code);
     this.name = "AuthoringRepositoryError";
   }

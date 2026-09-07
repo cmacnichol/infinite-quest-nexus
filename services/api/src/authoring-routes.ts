@@ -10,8 +10,10 @@ import {
   authoringRetrySchema,
   authoringRevisionCommandSchema,
   authoringReviewSchema,
-  authoringSubmitSchema
+  authoringSubmitSchema,
+  authoringSourceSynthesisSchema
 } from "../../../packages/contracts/src/authoring.js";
+import { sourceAuthoringInputSchema, sourceFactReviewSchema } from "../../../packages/contracts/src/source-authoring.js";
 import type { AuthoringApplication } from "../../../packages/application/src/authoring/types.js";
 import { AuthoringApplicationError } from "../../../packages/application/src/authoring/types.js";
 import type { OwnerScope } from "../../../packages/application/src/generation/types.js";
@@ -46,6 +48,7 @@ function mapAuthoringError(error: unknown): AuthoringRouteError | null {
     case "authoring_idempotency_conflict": return new AuthoringRouteError(409, error.code, "This idempotency key was already used for a different request.");
     case "authoring_input_too_large": return new AuthoringRouteError(413, error.code, "The authoring request exceeds the durable input limit.");
     case "authoring_active_job_limit": return new AuthoringRouteError(429, error.code, "Finish, cancel, or discard an existing proposal before creating another.");
+    case "choose_source_facts": return new AuthoringRouteError(409, error.code, "Choose at least one supported source fact before synthesis.");
     case "authoring_apply_unavailable": return new AuthoringRouteError(409, error.code, "Applying authoring proposals is not available yet.");
     default: return new AuthoringRouteError(409, error.code, "The authoring job cannot accept that command now.");
   }
@@ -83,13 +86,21 @@ async function withAdmission<T>(options: AuthoringRoutesOptions, scope: OwnerSco
 export async function registerAuthoringRoutes(app: FastifyInstance, options: AuthoringRoutesOptions): Promise<void> {
   app.get("/api/v1/authoring/capabilities", async () => authoringCapabilitiesSchema.parse({
     enabled: options.enabled,
-    supportedKinds: ["world_concept", "character"],
+    supportedKinds: ["world_concept", "character", "story_source"],
     limits: { activeJobsPerOwner: activeJobLimit, maximumInputBytes: MAXIMUM_INPUT_BYTES, listPageSize: 20 }
   }));
 
   app.post("/api/v1/authoring/jobs", { bodyLimit: AUTHORING_BODY_LIMIT_BYTES }, async (request, reply) => command(request, reply, async () => {
     if (!options.enabled) throw unavailable();
     const input = authoringSubmitSchema.parse(request.body);
+    const scope = await options.resolveOwner();
+    return withAdmission(options, scope, reply, async () => reply.code(202).send(authoringJobViewSchema.parse(await options.application.submit(scope, input))));
+  }));
+
+  /** Source intake has a named route so the client cannot accidentally use a concept flow. */
+  app.post("/api/v1/authoring/source-jobs", { bodyLimit: AUTHORING_BODY_LIMIT_BYTES }, async (request, reply) => command(request, reply, async () => {
+    if (!options.enabled) throw unavailable();
+    const input = sourceAuthoringInputSchema.parse(request.body);
     const scope = await options.resolveOwner();
     return withAdmission(options, scope, reply, async () => reply.code(202).send(authoringJobViewSchema.parse(await options.application.submit(scope, input))));
   }));
@@ -109,6 +120,16 @@ export async function registerAuthoringRoutes(app: FastifyInstance, options: Aut
   app.put("/api/v1/authoring/jobs/:id/review", { bodyLimit: AUTHORING_BODY_LIMIT_BYTES }, async (request, reply) => command(request, reply, async () => {
     const { id } = paramsSchema.parse(request.params);
     return authoringJobViewSchema.parse(await options.application.review(await options.resolveOwner(), id, authoringReviewSchema.parse(request.body)));
+  }));
+
+  app.put("/api/v1/authoring/source-jobs/:id/facts", { bodyLimit: AUTHORING_BODY_LIMIT_BYTES }, async (request, reply) => command(request, reply, async () => {
+    const { id } = paramsSchema.parse(request.params);
+    return authoringJobViewSchema.parse(await options.application.reviewSourceFacts(await options.resolveOwner(), id, sourceFactReviewSchema.parse(request.body)));
+  }));
+
+  app.post("/api/v1/authoring/source-jobs/:id/synthesis", async (request, reply) => command(request, reply, async () => {
+    const { id } = paramsSchema.parse(request.params);
+    return authoringJobViewSchema.parse(await options.application.startSourceSynthesis(await options.resolveOwner(), id, authoringSourceSynthesisSchema.parse(request.body).expectedRevision));
   }));
 
   app.post("/api/v1/authoring/jobs/:id/retry", async (request, reply) => command(request, reply, async () => {
