@@ -325,6 +325,69 @@ describe("worker concurrency scheduler", () => {
     expect(authoring).not.toHaveBeenCalled();
   });
 
+  it("waits one poll interval before refilling cleanup while other lanes still run with authoring disabled", async () => {
+    const controller = new AbortController();
+    const cleanup = vi.fn(async () => true);
+    const authoring = vi.fn(async () => true);
+    const optionalLanes: WorkerOptionalLanes = {
+      illustration: vi.fn(async () => false),
+      chronicle: vi.fn(async () => false),
+      asset: vi.fn(async () => false),
+      authoring,
+      authoringCleanup: cleanup,
+    };
+    const running = runWorker(pool, {
+      ...workerConfig(1),
+      workerPollIntervalMs: 60_000,
+      aiAuthoringJobsEnabled: false,
+    }, controller.signal, {
+      generation: { claimNext: vi.fn(async () => null), executeClaimed: vi.fn(async () => false) },
+      illustration: inertWorkerIllustration,
+      memory: inertWorkerMemory,
+      optionalLanes,
+    });
+
+    await vi.waitFor(() => expect(cleanup).toHaveBeenCalledOnce());
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect(authoring).not.toHaveBeenCalled();
+    expect(optionalLanes.illustration).toHaveBeenCalledOnce();
+    expect(optionalLanes.chronicle).toHaveBeenCalledOnce();
+    expect(optionalLanes.asset).toHaveBeenCalledOnce();
+
+    controller.abort();
+    await running;
+  });
+
+  it("keeps one active cleanup promise while feature-disabled retention is running", async () => {
+    const controller = new AbortController();
+    const pendingCleanup = deferred<boolean>();
+    const cleanup = vi.fn(() => pendingCleanup.promise);
+    const authoring = vi.fn(async () => true);
+    const optionalLanes: WorkerOptionalLanes = {
+      illustration: vi.fn(async () => false),
+      chronicle: vi.fn(async () => false),
+      asset: vi.fn(async () => false),
+      authoring,
+      authoringCleanup: cleanup,
+    };
+    const running = runWorker(pool, { ...workerConfig(1), aiAuthoringJobsEnabled: false }, controller.signal, {
+      generation: { claimNext: vi.fn(async () => null), executeClaimed: vi.fn(async () => false) },
+      illustration: inertWorkerIllustration,
+      memory: inertWorkerMemory,
+      optionalLanes,
+    });
+
+    await vi.waitFor(() => expect(cleanup).toHaveBeenCalledOnce());
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect(authoring).not.toHaveBeenCalled();
+
+    controller.abort();
+    pendingCleanup.resolve(true);
+    await running;
+  });
+
   it("never writes a raw authoring provider failure into scheduler logs", async () => {
     const controller = new AbortController();
     const marker = "https://private.example/secret-token";

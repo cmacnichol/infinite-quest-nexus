@@ -41,6 +41,14 @@ Swarm services must define health checks, resource expectations, restart behavio
 
 Compose and Swarm must use the same schema migrations, initial-user bootstrap, provider configuration, job semantics, and API contracts. Add deployment smoke tests that start the two-container Compose environment, wait for PostgreSQL and application readiness, verify migrations and initial-user ownership, and exercise one database-backed API operation. Validate the Swarm stack configuration separately even when CI cannot launch a full multi-node swarm.
 
+### Durable AI authoring rollout and rollback
+
+`AI_AUTHORING_JOBS_ENABLED` is a compatible API-and-worker capability gate and defaults to `false`. Deploy the API and worker binaries that understand the durable authoring tables before setting it to `true`, and pass the same value to both Swarm roles. The client must use the capability returned by the API and retain its synchronous compatibility flow when durable authoring is unavailable; do not infer availability from a browser build or environment value.
+
+While the gate is `false`, compatible workers continue their ordinary bounded authoring-retention tick. This cleans expired seven-day proposal checkpoints and thirty-day applied receipts without admitting new durable proposals or calling an authoring provider. A rollback returns the gate to `false` and keeps the additive tables, existing unexpired rows, and scrubbed expired terminal rows. It does not require a down migration or an immediate purge.
+
+See [Durable AI authoring operations](./ai-authoring.md) for the retention deadlines, rendered configuration checks, worker cadence, and recovery procedure.
+
 ### Replacement Story UI build selection and rollback
 
 `VITE_UI_COMPONENTS` is a Docker **build argument** consumed while Vite compiles the replacement Story static bundle. It is not a runtime service setting: changing a container or server environment after image creation cannot switch the already-built bundle. The current application default remains native until separately approved release gates are complete.

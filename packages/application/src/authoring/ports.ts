@@ -75,6 +75,7 @@ export interface AuthoringApplicationDependencies {
 
 /** Execution-only data is never part of the HTTP-facing repository projection. */
 export interface AuthoringExecutionRepository extends AuthoringRepository {
+  cleanupAuthoring(input: { batchSize: number; now?: Date }): Promise<number>;
   readClaimInput(claim: AuthoringClaim): Promise<AuthoringSubmit | null>;
   initializeExecutionSnapshot(
     claim: AuthoringClaim,

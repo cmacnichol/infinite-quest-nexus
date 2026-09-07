@@ -3,6 +3,7 @@ import type { AuthoringClaim, AuthoringExecutionRepository } from "./ports.js";
 
 export interface AuthoringWorkerApplication {
   runNext(input: { workerId: string; leaseSeconds: number }): Promise<boolean>;
+  cleanup(): Promise<number>;
 }
 
 export type AuthoringStageExecutor = (claim: AuthoringClaim, input: { workerId: string; leaseSeconds: number }) => Promise<AuthoringStageOutput | null>;
@@ -20,7 +21,7 @@ function executionFailure(error: unknown) {
  * executor passed here.
  */
 export function createAuthoringWorkerApplication(options: Readonly<{
-  repository: Pick<AuthoringExecutionRepository, "claim" | "checkpoint" | "fail">;
+  repository: Pick<AuthoringExecutionRepository, "claim" | "checkpoint" | "fail" | "cleanupAuthoring">;
   execute: AuthoringStageExecutor;
 }>): AuthoringWorkerApplication {
   return {
@@ -36,6 +37,7 @@ export function createAuthoringWorkerApplication(options: Readonly<{
         await options.repository.fail(claim, failure);
         return false;
       }
-    }
+    },
+    cleanup: () => options.repository.cleanupAuthoring({ batchSize: 100 })
   };
 }

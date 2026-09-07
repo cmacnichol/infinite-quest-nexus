@@ -40,6 +40,7 @@ const MAX_LEASE_SECONDS = 3_600;
 const PAGE_SIZE = 20;
 const ACTIVE_JOB_LIMIT = 5;
 const ACTIVE_JOB_STATUSES = ["queued", "running", "awaiting_review", "recoverable", "cancel_requested"];
+const MAX_CLEANUP_BATCH_SIZE = 100;
 
 type JobRow = {
   id: string;
@@ -157,7 +158,9 @@ function isAppliedInput(value: unknown): boolean {
 
 function jobView(job: JobRow, stages: StageRow[]): AuthoringJobView {
   if (isDiscardedInput(job.input)) throw new AuthoringRepositoryError("not_found");
-  const input = isAppliedInput(job.input) ? undefined : authoringSubmitSchema.parse(job.input);
+  const input = isAppliedInput(job.input) || job.status === "expired"
+    ? undefined
+    : authoringSubmitSchema.parse(job.input);
   const target = authoringTargetSchema.parse(job.target);
   const parsedStages = stages.map((stage) => {
     if (stage.output !== null && stage.output !== undefined) validateStageOutput(stage.stageKey, stage.output);
@@ -752,6 +755,59 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
            WHERE id = $1`,
           [job.id]
         );
+      });
+    },
+
+    async cleanupAuthoring({ batchSize, now = new Date() }) {
+      if (!Number.isInteger(batchSize) || batchSize < 1) {
+        throw new RangeError("Authoring cleanup batch size must be a positive integer.");
+      }
+      if (!(now instanceof Date) || Number.isNaN(now.getTime())) {
+        throw new TypeError("Authoring cleanup requires a valid cutoff timestamp.");
+      }
+      const limit = Math.min(batchSize, MAX_CLEANUP_BATCH_SIZE);
+      return withTransaction(pool, async (client) => {
+        // Lock jobs before their stages. SKIP LOCKED keeps cleanup bounded and
+        // lets an active checkpoint finish rather than blocking the lane.
+        const candidates = await client.query<JobRow>(
+          `SELECT ${JOB_SELECT} FROM authoring_jobs jobs
+             WHERE jobs.expires_at <= $1::timestamptz
+               AND jobs.status <> 'expired'
+             ORDER BY jobs.expires_at, jobs.id
+             FOR UPDATE SKIP LOCKED
+             LIMIT $2`,
+          [now.toISOString(), limit]
+        );
+        for (const job of candidates.rows) {
+          // A running claim is fenced before any payload is cleared. The
+          // condition intentionally uses the database clock through the
+          // normal claim guard, never the injected test cutoff.
+          await client.query(
+            `SELECT id FROM authoring_job_stages
+              WHERE job_id = $1 AND owner_user_id = $2
+              FOR UPDATE`,
+            [job.id, job.ownerUserId]
+          );
+          await client.query(
+            `UPDATE authoring_job_stages
+                SET status = 'cancelled',
+                    lease_token = NULL, lease_owner = NULL, lease_expires_at = NULL,
+                    output = NULL, failure = NULL, updated_at = clock_timestamp()
+              WHERE job_id = $1 AND owner_user_id = $2`,
+            [job.id, job.ownerUserId]
+          );
+          await client.query(
+            `UPDATE authoring_jobs
+                SET status = 'expired', input = '{"expired":true}'::jsonb,
+                    reviewed_content = NULL, reviewed_stage_ids = '[]'::jsonb,
+                    execution_snapshot = NULL, apply_key = NULL, apply_hash = NULL,
+                    apply_receipt = NULL, execution_generation = execution_generation + 1,
+                    revision = revision + 1, updated_at = clock_timestamp()
+              WHERE id = $1 AND owner_user_id = $2`,
+            [job.id, job.ownerUserId]
+          );
+        }
+        return candidates.rows.length;
       });
     },
 

@@ -17,6 +17,7 @@ function repository(overrides: Partial<AuthoringExecutionRepository> = {}): Auth
     claim: vi.fn(async () => claim),
     checkpoint: vi.fn(async () => true),
     fail: vi.fn(async () => true),
+    cleanupAuthoring: vi.fn(async () => 0),
     heartbeat: vi.fn(async () => true),
     readClaimInput: vi.fn(),
     initializeExecutionSnapshot: vi.fn(),
@@ -27,6 +28,15 @@ function repository(overrides: Partial<AuthoringExecutionRepository> = {}): Auth
 }
 
 describe("authoring worker application", () => {
+  it("runs bounded retention cleanup without claiming generation", async () => {
+    const store = repository();
+    const application = createAuthoringWorkerApplication({ repository: store, execute: vi.fn() });
+
+    await expect(application.cleanup()).resolves.toBe(0);
+    expect(store.cleanupAuthoring).toHaveBeenCalledWith({ batchSize: 100 });
+    expect(store.claim).not.toHaveBeenCalled();
+  });
+
   it("claims one stage and checkpoints the executor's validated output", async () => {
     const store = repository();
     const output = { kind: "character", character: { id: "hero", name: "Hero" } } as never;

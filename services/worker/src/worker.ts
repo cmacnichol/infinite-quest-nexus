@@ -40,6 +40,7 @@ export type WorkerOptionalLanes = Readonly<{
   asset(): Promise<boolean>;
   systemArchive?(): Promise<boolean>;
   authoring?(): Promise<boolean>;
+  authoringCleanup?(): Promise<boolean>;
 }>;
 
 export type StartedGeneration = Readonly<{
@@ -102,9 +103,10 @@ function wait(milliseconds: number, signal: AbortSignal): Promise<void> {
 }
 
 type ActiveLane = {
-  name: "illustration" | "chronicle" | "asset" | "system-archive" | "authoring";
+  name: "illustration" | "chronicle" | "asset" | "system-archive" | "authoring" | "authoring-cleanup";
   active: Set<Promise<boolean>>;
   nextEligibleAt: number;
+  pollAfterWork?: boolean;
   run(): Promise<boolean>;
 };
 
@@ -168,6 +170,9 @@ function defaultOptionalLanes(
       return result.completed > 0;
     },
     ...(systemArchive === undefined ? {} : { systemArchive: systemArchive.runNext }),
+    ...(authoring === undefined || typeof authoring.cleanup !== "function" ? {} : {
+      authoringCleanup: async () => (await authoring.cleanup()) > 0
+    }),
     ...(authoring === undefined || config.aiAuthoringJobsEnabled !== true ? {} : {
       authoring: () => authoring.runNext({ workerId, leaseSeconds: config.workerLeaseSeconds })
     }),
@@ -268,6 +273,13 @@ export async function runWorker(
       nextEligibleAt: 0,
       run: optionalLanes.authoring,
     }]),
+    ...(optionalLanes.authoringCleanup === undefined ? [] : [{
+      name: "authoring-cleanup" as const,
+      active: new Set<Promise<boolean>>(),
+      nextEligibleAt: 0,
+      pollAfterWork: true,
+      run: optionalLanes.authoringCleanup,
+    }]),
   ];
 
   try {
@@ -322,15 +334,18 @@ export async function runWorker(
     }
 
     // Each optional lane is independently bounded at one active promise. A
-    // lane that finds no work waits for the poll interval, while completed
-    // work is eligible for immediate refill on the next full rotation.
+    // lane that finds no work waits for the poll interval. Cleanup also waits
+    // after productive work so a full bounded cleanup batch cannot become a
+    // continuous backlog-draining loop.
     for (const lane of lanes) {
       if (signal.aborted || lane.active.size > 0 || Date.now() < lane.nextEligibleAt) continue;
       let tracked!: Promise<boolean>;
       tracked = Promise.resolve()
         .then(() => lane.run())
         .then((worked) => {
-          lane.nextEligibleAt = worked ? 0 : Date.now() + config.workerPollIntervalMs;
+          lane.nextEligibleAt = worked && !lane.pollAfterWork
+            ? 0
+            : Date.now() + config.workerPollIntervalMs;
           return worked;
         })
         .catch((error) => {
@@ -346,7 +361,7 @@ export async function runWorker(
                   ...(diagnostic === undefined ? {} : { diagnostic }),
                 };
               })()
-              : lane.name === "authoring"
+              : lane.name === "authoring" || lane.name === "authoring-cleanup"
                 ? { errorCode: "authoring-execution-failed", message: "Authoring job execution failed." }
                 : { message: error instanceof Error ? error.message : String(error) })
           });

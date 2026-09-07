@@ -112,6 +112,7 @@ export function createRuntimeAuthoringWorkerApplication(options: Readonly<{
     }
   });
   return {
-    runNext: (input) => options.signal?.aborted === true ? Promise.resolve(false) : application.runNext(input)
+    runNext: (input) => options.signal?.aborted === true ? Promise.resolve(false) : application.runNext(input),
+    cleanup: () => typeof repository.cleanupAuthoring === "function" ? application.cleanup() : Promise.resolve(0)
   };
 }

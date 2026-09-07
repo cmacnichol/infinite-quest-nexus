@@ -2,6 +2,10 @@
 
 Campaign creation requires a published version with at least one complete playable character.
 
+## AI-assisted character proposals
+
+When the instance enables durable AI authoring, character proposals can be resumed and reviewed after a refresh or retry. Applying a reviewed proposal updates only the selected current world draft with its expected revision; it does not publish the world or alter campaign snapshots. Proposals expire after seven days of inactivity, and reading one does not extend retention. See [Durable AI authoring operations](../../runbooks/ai-authoring.md) for enablement and rollback behavior.
+
 ## Add manually
 
 1. Open **Mechanics & Characters**.

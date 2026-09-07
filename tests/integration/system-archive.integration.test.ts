@@ -140,9 +140,9 @@ function importReport(input: Readonly<{
     versions: {
       archiveFormat: 1,
       sourceApplication: "0.1.0",
-      sourceMigration: "0088_expand_campaign_story_context_budget",
+      sourceMigration: "0090_authoring_apply_review_selection",
       destinationApplication: "0.1.0",
-      destinationMigration: "0088_expand_campaign_story_context_budget",
+      destinationMigration: "0090_authoring_apply_review_selection",
     },
     sourceOwnerCount: 1,
     ownerMapping: {
@@ -771,7 +771,7 @@ integration("deterministic owner-wide System Archive export", () => {
     );
     expect(manifest).toMatchObject({
       sourceApplication: "0.1.0",
-      sourceMigration: "0088_expand_campaign_story_context_budget",
+      sourceMigration: "0090_authoring_apply_review_selection",
       sourceInstallationId: ownerUserId,
       sourceOwnerCount: 1,
       sourceOwner: {
@@ -922,6 +922,34 @@ integration("deterministic owner-wide System Archive export", () => {
     const inventory = JSON.parse(await zip.file("assets/assets.json")!.async("string")) as { assets: unknown[] };
     expect(inventory.assets).toHaveLength(4);
     expect(serialized).toContain("The gate opens silently.");
+  });
+
+  it("excludes durable authoring inputs, reviews, stages, and receipts without mutating source rows", async () => {
+    const inputSentinel = `AUTHORING_INPUT_${randomUUID()}`;
+    const reviewSentinel = `AUTHORING_REVIEW_${randomUUID()}`;
+    const stageSentinel = `AUTHORING_STAGE_${randomUUID()}`;
+    const receiptSentinel = `AUTHORING_RECEIPT_${randomUUID()}`;
+    const job = await pool.query<{ id: string }>(
+      `INSERT INTO authoring_jobs (owner_user_id, kind, target, input, request_hash, idempotency_key, reviewed_content, apply_receipt, status)
+       VALUES ($1, 'world_concept', '{"kind":"new_world"}'::jsonb, $2::jsonb, repeat('a',64), $3, $4::jsonb, $5::jsonb, 'awaiting_review')
+       RETURNING id`,
+      [ownerUserId, JSON.stringify({ sentinel: inputSentinel }), `authoring-archive-${randomUUID()}`,
+        JSON.stringify({ sentinel: reviewSentinel }), JSON.stringify({ sentinel: receiptSentinel })],
+    );
+    try {
+      await pool.query(
+        `INSERT INTO authoring_job_stages (job_id, owner_user_id, stage_key, status, output)
+         VALUES ($1, $2, 'world', 'validated', $3::jsonb)`,
+        [job.rows[0]!.id, ownerUserId, JSON.stringify({ sentinel: stageSentinel })],
+      );
+      const source = await pool.query("SELECT input, reviewed_content, apply_receipt FROM authoring_jobs WHERE id=$1", [job.rows[0]!.id]);
+      const exported = await exportArchive();
+      const { serialized } = await archiveText(exported.bytes);
+      for (const sentinel of [inputSentinel, reviewSentinel, stageSentinel, receiptSentinel]) expect(serialized).not.toContain(sentinel);
+      await expect(pool.query("SELECT input, reviewed_content, apply_receipt FROM authoring_jobs WHERE id=$1", [job.rows[0]!.id])).resolves.toEqual(source);
+    } finally {
+      await pool.query("DELETE FROM authoring_jobs WHERE id=$1", [job.rows[0]!.id]);
+    }
   });
 
   it("normalizes legacy world mechanics into portable v2 authority", async () => {
@@ -1154,7 +1182,7 @@ integration("deterministic owner-wide System Archive export", () => {
     expect(preview).toMatchObject({
       formatVersion: 1,
       sourceApplication: "0.1.0",
-      sourceMigration: "0088_expand_campaign_story_context_budget",
+      sourceMigration: "0090_authoring_apply_review_selection",
       archiveFingerprint: exported.result.artifact.contentFingerprint,
       sourceOwnerCount: 1,
       assetCount: 4,
@@ -1182,7 +1210,7 @@ integration("deterministic owner-wide System Archive export", () => {
       }));
       const destination = {
         initialOwnerId: ownerUserId,
-        latestMigration: "0088_expand_campaign_story_context_budget",
+        latestMigration: "0090_authoring_apply_review_selection",
         authoritativeCountsHash: sha256("empty-authority"),
         activeJobsHash: sha256("no-active-work"),
         checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1216,9 +1244,9 @@ integration("deterministic owner-wide System Archive export", () => {
         versions: {
           archiveFormat: 1,
           sourceApplication: "0.1.0",
-          sourceMigration: "0088_expand_campaign_story_context_budget",
+          sourceMigration: "0090_authoring_apply_review_selection",
           destinationApplication: "0.1.0",
-          destinationMigration: "0088_expand_campaign_story_context_budget",
+          destinationMigration: "0090_authoring_apply_review_selection",
         },
         archiveFingerprint: exported.result.artifact.contentFingerprint,
         destinationEmpty: true,
@@ -1241,7 +1269,7 @@ integration("deterministic owner-wide System Archive export", () => {
     const exported = await exportArchive();
     const zip = await JSZip.loadAsync(exported.bytes);
     const manifest = JSON.parse(await zip.file("manifest.json")!.async("string")) as Record<string, unknown>;
-    manifest.sourceMigration = "0089_future_system_archive_shape";
+    manifest.sourceMigration = "0091_future_system_archive_shape";
     zip.file("manifest.json", JSON.stringify(manifest));
     const newer = await zip.generateAsync({ type: "nodebuffer" });
 
@@ -1251,7 +1279,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0088_expand_campaign_story_context_budget",
+            latestMigration: "0090_authoring_apply_review_selection",
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1273,7 +1301,7 @@ integration("deterministic owner-wide System Archive export", () => {
       await expect(service.preview({ ownerUserId }, randomUUID())).resolves.toMatchObject({
         valid: false,
         previewHandle: null,
-        versions: { sourceMigration: "0089_future_system_archive_shape" },
+        versions: { sourceMigration: "0091_future_system_archive_shape" },
         errors: ["archive-version-unsupported"],
       });
       expect(createPreview).not.toHaveBeenCalled();
@@ -1292,7 +1320,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0088_expand_campaign_story_context_budget",
+            latestMigration: "0090_authoring_apply_review_selection",
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1329,7 +1357,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0088_expand_campaign_story_context_budget",
+            latestMigration: "0090_authoring_apply_review_selection",
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1381,7 +1409,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0088_expand_campaign_story_context_budget",
+            latestMigration: "0090_authoring_apply_review_selection",
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1777,7 +1805,7 @@ integration("deterministic owner-wide System Archive export", () => {
     await expect(writer.publish({
       manifest: {
         sourceApplication: "0.1.0",
-        sourceMigration: "0088_expand_campaign_story_context_budget",
+        sourceMigration: "0090_authoring_apply_review_selection",
         sourceInstallationId: ownerUserId,
         sourceOwnerCount: 1,
         sourceOwner: {
@@ -1825,7 +1853,7 @@ integration("deterministic owner-wide System Archive export", () => {
     await expect(writer.publish({
       manifest: {
         sourceApplication: "0.1.0",
-        sourceMigration: "0088_expand_campaign_story_context_budget",
+        sourceMigration: "0090_authoring_apply_review_selection",
         sourceInstallationId: ownerUserId,
         sourceOwnerCount: 1,
         sourceOwner: {
@@ -1886,7 +1914,7 @@ integration("deterministic owner-wide System Archive export", () => {
         await expect(writer.publish({
           manifest: {
             sourceApplication: "0.1.0",
-            sourceMigration: "0088_expand_campaign_story_context_budget",
+            sourceMigration: "0090_authoring_apply_review_selection",
             sourceInstallationId: ownerUserId,
             sourceOwnerCount: 1,
             sourceOwner: {
@@ -3995,7 +4023,7 @@ integration("deterministic owner-wide System Archive export", () => {
         archiveFingerprint: exported.contentFingerprint,
         destination: {
           initialOwnerId: ownerUserId,
-          latestMigration: "0088_expand_campaign_story_context_budget",
+          latestMigration: "0090_authoring_apply_review_selection",
           authoritativeCountsHash: sha256("empty-authority"),
           activeJobsHash: sha256("ignored-active-import"),
           checkedAt: "2026-08-25T12:00:00.000Z",
@@ -4481,7 +4509,7 @@ integration("deterministic owner-wide System Archive export", () => {
           archiveFingerprint: sha256("expired-preview"),
           destinationFingerprint: {
             initialOwnerId: ownerUserId,
-            latestMigration: "0088_expand_campaign_story_context_budget",
+            latestMigration: "0090_authoring_apply_review_selection",
             authoritativeCountsHash: sha256("authority"),
             activeJobsHash: sha256("jobs"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -4537,7 +4565,7 @@ integration("deterministic owner-wide System Archive export", () => {
     });
     const destination = {
       initialOwnerId: ownerUserId,
-      latestMigration: "0088_expand_campaign_story_context_budget",
+      latestMigration: "0090_authoring_apply_review_selection",
       authoritativeCountsHash: sha256("empty-authority"),
       activeJobsHash: sha256("ignored-import"),
       checkedAt: "2026-08-25T12:00:00.000Z",

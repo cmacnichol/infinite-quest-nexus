@@ -40,6 +40,15 @@ describe("deployment security configuration", () => {
 
   it.each([
     ["Compose combined app", "compose.yaml", "infinitequest-app"],
+    ["Swarm API", "deploy/swarm/stack.yaml", "infinitequest-api"],
+    ["Swarm worker", "deploy/swarm/stack.yaml", "infinitequest-worker"]
+  ])("forwards the default-off durable authoring gate to %s", (_name, path, service) => {
+    const environment = serviceEnvironment(readFileSync(path, "utf8"), service);
+    expect(environment).toContain("AI_AUTHORING_JOBS_ENABLED: ${AI_AUTHORING_JOBS_ENABLED:-false}");
+  });
+
+  it.each([
+    ["Compose combined app", "compose.yaml", "infinitequest-app"],
     ["Swarm API", "deploy/swarm/stack.yaml", "infinitequest-api"]
   ])("uses the built legacy and replacement web roots in the %s service", (_name, path, service) => {
     const environment = serviceEnvironment(readFileSync(path, "utf8"), service);
