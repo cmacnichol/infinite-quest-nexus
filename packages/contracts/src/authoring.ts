@@ -305,13 +305,13 @@ export function parseAuthoringCommandForJob(
   command: "review" | "apply",
   input: unknown
 ): AuthoringReview | AuthoringApply {
-  if (context.kind === "story_source") {
-    throw new TypeError("Review and apply commands are not available for story source authoring yet.");
-  }
+  if (context.kind === "story_source" && command === "review") throw new TypeError("Story source facts use the dedicated review command.");
   const parsed = command === "review" ? authoringReviewSchema.parse(input) : authoringApplySchema.parse(input);
   const content = context.kind === "world_concept"
     ? worldContentSchema.parse(parsed.content)
-    : playableCharacterSchema.parse(parsed.content);
+    : context.kind === "story_source"
+      ? worldContentSchema.parse(parsed.content)
+      : playableCharacterSchema.parse(parsed.content);
   return { ...parsed, content } as AuthoringReview | AuthoringApply;
 }
 

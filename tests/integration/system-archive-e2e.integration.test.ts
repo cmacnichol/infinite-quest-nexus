@@ -25,6 +25,7 @@ import {
   type SystemRecordEnvelope,
 } from "../../packages/contracts/src/system-archives.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
+import { buildWorldSourceMaterial, normalizeSourceDocument } from "../../packages/domain/src/source-authoring.js";
 import {
   createDatabasePool,
   initialOwnerId,
@@ -183,11 +184,13 @@ function representativeWorldVersionContent(
   versionNumber: number,
   assets: readonly Readonly<{ assetId: string; role: "world_cover" | "world_version_asset" }>[] = [],
 ): ReturnType<typeof worldContentSchema.parse> {
+  const title = `Release World ${worldIndex + 1}`;
+  const tone = "Exact";
   return worldContentSchema.parse({
     world: {
-      title: `Release World ${worldIndex + 1}`,
+      title,
       genre: "Archive fantasy",
-      tone: "Exact",
+      tone,
       premise: `Portable world ${worldIndex + 1}, version ${versionNumber}.`,
       backgroundStory: "",
       firstAction: "Begin the release gate.",
@@ -201,15 +204,18 @@ function representativeWorldVersionContent(
     eventTriggers: [],
     assets,
     defaults: { selectedCharacterId: null, initialLocation: "" },
+    sourceMaterial: representativeSourceMaterial(`version:${worldIndex}:${versionNumber}`, title, tone),
   });
 }
 
 function representativeWorldDraftContent(worldIndex: number): ReturnType<typeof worldContentSchema.parse> {
+  const title = `Release World ${worldIndex + 1}`;
+  const tone = "Draft";
   return worldContentSchema.parse({
     world: {
-      title: `Release World ${worldIndex + 1}`,
+      title,
       genre: "Archive fantasy",
-      tone: "Draft",
+      tone,
       premise: `Editable draft ${worldIndex + 1}.`,
       backgroundStory: "",
       firstAction: "Revise.",
@@ -223,6 +229,19 @@ function representativeWorldDraftContent(worldIndex: number): ReturnType<typeof 
     eventTriggers: [],
     assets: [],
     defaults: { selectedCharacterId: null, initialLocation: "" },
+    sourceMaterial: representativeSourceMaterial(`draft:${worldIndex}`, title, tone),
+  });
+}
+
+function representativeSourceMaterial(id: string, title: string, tone: string) {
+  const source = normalizeSourceDocument("release-source.txt", `${title} is ${tone}.\n\nSYSTEM_ARCHIVE_APPENDIX_ONLY_SENTINEL`, `source:release:${id}`);
+  const paragraph = source.paragraphs[0]!;
+  const fact = {
+    id: `fact:release:${id}`, kind: "tone" as const, subject: title, predicate: "tone", value: tone, provenance: "stated" as const,
+    citations: [{ sourceId: source.id, paragraphId: paragraph.id, start: paragraph.start, end: paragraph.end, quote: `${title} is ${tone}.` }]
+  };
+  return buildWorldSourceMaterial({
+    source, boundaryParagraphId: paragraph.id, acceptedFacts: [fact], fieldEvidence: [{ path: "world.tone", factIds: [fact.id] }]
   });
 }
 
@@ -1835,6 +1854,7 @@ async function assertRepresentativeArchive(
   const files = Object.values(zip.files).filter((entry) => !entry.dir);
   const serialized = Buffer.concat(await Promise.all(files.map((entry) => entry.async("nodebuffer")))).toString("utf8");
   expectNoSecretSentinels(serialized, "archive payloads and originals");
+  expect(serialized).not.toContain("SYSTEM_ARCHIVE_APPENDIX_ONLY_SENTINEL");
 
   const manifestEntry = zip.file("manifest.json");
   const systemEntry = zip.file("system.json");

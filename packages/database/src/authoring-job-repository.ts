@@ -40,7 +40,13 @@ import type { OwnerScope } from "../../application/src/generation/types.js";
 import { retryAuthoringStage, type AuthoringStageLifecycle } from "../../domain/src/authoring-jobs.js";
 import { projectAuthoringFailure, validateGeneratedCharacter, validateGeneratedWorldFiction } from "../../domain/src/authoring-output.js";
 import { assembleGeneratedWorldContent } from "../../domain/src/generated-world-assembly.js";
-import { mergeSourceFacts, normalizeSourceDocument, sourceDocumentFromNormalizedText } from "../../domain/src/source-authoring.js";
+import {
+  buildWorldSourceMaterial,
+  mergeSourceFacts,
+  normalizeSourceDocument,
+  sourceDocumentFromNormalizedText,
+  validateWorldSourceMaterialForContent
+} from "../../domain/src/source-authoring.js";
 import { withTransaction, type DatabaseClient, type DatabasePool } from "./pool.js";
 import { runPostgresWorldCampaignCommandWithClient } from "./world-campaign-transaction.js";
 
@@ -388,6 +394,48 @@ function sourceWorldResult(stages: readonly StageRow[]): WorldContent | undefine
   return canonicalizeWorldContent({ ...overview.proposal, playableCharacters });
 }
 
+/** Maps only current validated source-world outputs into portable field evidence. */
+function sourceWorldContentWithMaterial(job: JobRow, input: SourceAuthoringInput, stages: readonly StageRow[], rawContent: WorldContent): WorldContent {
+  const selection = reviewedSourceSelection(job, input, stages);
+  if (!selection) throw new AuthoringRepositoryError("invalid_state");
+  const current = currentStagesForRows(stages).filter((stage) => stage.status === "validated" && parentsAreCurrentAndValidated(stages, stage.parentGenerations));
+  const fieldEvidence = current
+    .filter((stage) => stage.stageKey === "source:synthesis" || stage.stageKey.startsWith("source:character:"))
+    .flatMap((stage) => {
+      if (!stage.output) return [];
+      const output = validateStageOutput(stage.stageKey, stage.output);
+      return output.kind === "source_world" ? output.mappings : [];
+    })
+    .flatMap((mapping) => {
+      if (mapping.target === "world") {
+        const key = mapping.path === "world.tone" ? "tone" : mapping.path === "world.rules" ? "rules" : undefined;
+        return key !== undefined && rawContent.world[key] === mapping.value
+          ? [{ path: mapping.path, factIds: mapping.supportingFactIds }]
+          : [];
+      }
+      const target = mapping.target;
+      if (typeof target === "string") return [];
+      const character = rawContent.playableCharacters.find((candidate) => candidate.id === `source-character:${target.characterRepresentativeFactId}`);
+      const key = mapping.path.startsWith("profile.appearance.")
+        ? mapping.path.slice("profile.appearance.".length) as "clothing" | "hair" | "eyes" | "apparentAge"
+        : undefined;
+      return character?.profile?.appearance[key ?? "clothing"] === mapping.value && key !== undefined
+        ? [{ path: `playableCharacters.${character.id}.${mapping.path}`, factIds: mapping.supportingFactIds }]
+        : [];
+    });
+  const content = canonicalizeWorldContent({
+    ...rawContent,
+    sourceMaterial: buildWorldSourceMaterial({
+      source: selection.source,
+      boundaryParagraphId: selection.boundaryParagraphId,
+      acceptedFacts: selection.acceptedFacts,
+      fieldEvidence,
+      characterIdentityGroups: selection.characterIdentityGroups
+    })
+  });
+  return validateWorldSourceMaterialForContent(content);
+}
+
 function currentStagesForRows(rows: readonly StageRow[]): StageRow[] {
   return rows.filter((stage) => !rows.some((other) => other.stageKey === stage.stageKey && other.generation > stage.generation));
 }
@@ -406,8 +454,12 @@ function hasValidatedOutput(stage: StageRow): boolean {
   return stage.hasOutput ?? (stage.output !== null && stage.output !== undefined);
 }
 
-function canApply(job: Pick<JobRow, "kind" | "target" | "status" | "reviewedStageIds"> & { hasReviewedContent: boolean }, stages: readonly StageRow[]): boolean {
-  if (job.kind === "story_source") return false;
+function canApply(job: Pick<JobRow, "kind" | "target" | "status" | "reviewedStageIds"> & { hasReviewedContent: boolean; sourceReview?: unknown }, stages: readonly StageRow[]): boolean {
+  if (job.kind === "story_source") {
+    return (job.status === "awaiting_review" || job.status === "recoverable")
+      && persistedSourceFactReviewSchema.safeParse(job.sourceReview).success
+      && sourceWorldResult(stages) !== undefined;
+  }
   if (job.status !== "awaiting_review" && job.status !== "recoverable") return false;
   if (!job.hasReviewedContent) return false;
   const target = authoringTargetSchema.parse(job.target);
@@ -847,8 +899,8 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
         await requireUnexpired(client, job.id);
         commandJob(job, input.expectedRevision);
         if (job.status !== "awaiting_review" && job.status !== "recoverable") throw new AuthoringRepositoryError("invalid_state");
-        if (job.reviewedContent === null || job.reviewedContent === undefined ||
-          stableJson(job.reviewedContent) !== stableJson(input.content)) {
+        if (job.kind !== "story_source" && (job.reviewedContent === null || job.reviewedContent === undefined ||
+          stableJson(job.reviewedContent) !== stableJson(input.content))) {
           throw new AuthoringRepositoryError("invalid_state");
         }
 
@@ -858,7 +910,11 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
         );
         const current = currentStages(stages.rows).filter((stage) => stage.status !== "cancelled");
         const selected = [...new Set(input.selectedStageIds)].sort();
-        const reviewed = Array.isArray(job.reviewedStageIds) ? [...new Set(job.reviewedStageIds.filter((value): value is string => typeof value === "string"))].sort() : [];
+        const reviewed = job.kind === "story_source"
+          ? current.filter((stage) => (stage.stageKey === "source:synthesis" || stage.stageKey.startsWith("source:character:"))
+            && stage.status === "validated" && hasValidatedOutput(stage) && parentsAreCurrentAndValidated(stages.rows, stage.parentGenerations))
+            .map((stage) => stage.id).sort()
+          : Array.isArray(job.reviewedStageIds) ? [...new Set(job.reviewedStageIds.filter((value): value is string => typeof value === "string"))].sort() : [];
         if (!selected.length || selected.length !== input.selectedStageIds.length || stableJson(selected) !== stableJson(reviewed) ||
           selected.some((id) => {
             const stage = current.find((candidate) => candidate.id === id);
@@ -869,8 +925,11 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
         const target = authoringTargetSchema.parse(job.target);
         if (job.kind === "world_concept" && target.kind === "world_draft" && target.characterId !== undefined) throw new AuthoringRepositoryError("invalid_state");
         if (job.kind === "character" && target.kind === "new_world") throw new AuthoringRepositoryError("invalid_state");
+        const content = job.kind === "story_source"
+          ? sourceWorldContentWithMaterial(job, authoringSubmitSchema.parse(job.input) as SourceAuthoringInput, stages.rows, canonicalizeWorldContent(input.content))
+          : input.content;
         const receiptParts = await runPostgresWorldCampaignCommandWithClient(client, (transaction) =>
-          worlds.applyInTransaction(transaction, scope, target, input.content)
+          worlds.applyInTransaction(transaction, scope, target, content)
         );
         const receipt = authoringApplyReceiptSchema.parse({ jobId: job.id, ...receiptParts });
         await client.query(

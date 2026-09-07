@@ -16,9 +16,11 @@ import {
   utf8ByteLength
 } from "../../packages/contracts/src/source-authoring.js";
 import {
+  buildWorldSourceMaterial,
   normalizeSourceDocument,
   validateSourceCitation,
-  validateSourceCitationWithinBoundary
+  validateSourceCitationWithinBoundary,
+  validateWorldSourceMaterialForContent
 } from "../../packages/domain/src/source-authoring.js";
 
 const sourceInput = {
@@ -97,6 +99,38 @@ describe("source authoring provenance", () => {
     expect(validateSourceCitation(source, { ...citation, quote: "Blue cloak." })).toBe(false);
     expect(validateSourceCitation(source, { ...citation, sourceId: "other-source" })).toBe(false);
     expect(validateSourceCitation({ ...source, sha256: "0".repeat(64) }, citation)).toBe(false);
+  });
+
+  it("retains a selected source prefix and rejects stale or cross-identity portable evidence", () => {
+    const source = normalizeSourceDocument("chapter.txt", "Iris wears a blue coat.\n\nEXCLUDED_SOURCE_TAIL", "source-appendix");
+    const paragraph = source.paragraphs[0]!;
+    const citation = { sourceId: source.id, paragraphId: paragraph.id, start: 0, end: paragraph.end, quote: "Iris wears a blue coat." };
+    const iris = { id: "fact:iris", kind: "character" as const, subject: "Iris", predicate: "clothing", value: "blue coat", provenance: "stated" as const, citations: [citation] };
+    const wrongPredicate = { ...iris, id: "fact:wrong-predicate", predicate: "hair" };
+    const sameNamedOther = { ...iris, id: "fact:iris-other" };
+    const material = buildWorldSourceMaterial({
+      source, boundaryParagraphId: paragraph.id, acceptedFacts: [iris, wrongPredicate, sameNamedOther],
+      fieldEvidence: [{ path: "playableCharacters.source-character:fact:iris.profile.appearance.clothing", factIds: [iris.id] }],
+      characterIdentityGroups: [
+        { representativeFactId: iris.id, factIds: [iris.id, wrongPredicate.id] },
+        { representativeFactId: sameNamedOther.id, factIds: [sameNamedOther.id] }
+      ]
+    });
+    const content = worldContentSchema.parse({
+      world: { title: "Appendix World" },
+      playableCharacters: [{ id: "source-character:fact:iris", name: "Iris", characterText: "", profile: { appearance: { clothing: "blue coat" } } }],
+      sourceMaterial: material
+    });
+    expect(material.documents[0]?.text).toBe("Iris wears a blue coat.");
+    expect(validateWorldSourceMaterialForContent(content)).toBe(content);
+    expect(() => validateWorldSourceMaterialForContent(worldContentSchema.parse({
+      ...content,
+      sourceMaterial: { ...material, fieldEvidence: [{ ...material.fieldEvidence[0]!, factIds: [wrongPredicate.id] }] }
+    }))).toThrow(/field evidence/u);
+    expect(() => validateWorldSourceMaterialForContent(worldContentSchema.parse({
+      ...content,
+      sourceMaterial: { ...material, fieldEvidence: [{ ...material.fieldEvidence[0]!, factIds: [sameNamedOther.id] }] }
+    }))).toThrow(/field evidence/u);
   });
 
   it("rejects a self-consistent hash and map over unnormalized retained text", () => {
@@ -245,7 +279,13 @@ describe("source authoring provenance", () => {
       expectedRevision: 0,
       content: { schemaVersion: 5, world: { title: "World" } },
       selectedStageIds: []
-    })).toThrow(/not available/u);
+    })).toThrow(/dedicated review/u);
+    expect(parseAuthoringCommandForJob({ kind: "story_source", target: { kind: "new_world" } }, "apply", {
+      expectedRevision: 1,
+      idempotencyKey: "source-apply-command",
+      content: { schemaVersion: 6, world: { title: "World" } },
+      selectedStageIds: []
+    })).toMatchObject({ content: { schemaVersion: 6, world: { title: "World" } } });
   });
 
   it("allows the fixed source failures only at the source stage", () => {

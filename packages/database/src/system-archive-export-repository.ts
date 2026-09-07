@@ -11,7 +11,7 @@ import {
   type SystemArchiveDomain,
   type SystemRecordEnvelope,
 } from "../../contracts/src/index.js";
-import { canonicalizeWorldContent } from "../../contracts/src/world-library.js";
+import { canonicalizeWorldContent, worldSourceMaterialSchema } from "../../contracts/src/world-library.js";
 import { toSafeProviderConfiguration } from "../../application/src/providers/use-cases.js";
 import type {
   SystemArchiveExportJobPort,
@@ -398,6 +398,7 @@ function projectWorldContent(value: unknown): Record<string, unknown> {
           : null,
       initialLocation: typeof defaults.initialLocation === "string" ? defaults.initialLocation : "",
     },
+    ...(content.sourceMaterial === undefined ? {} : { sourceMaterial: worldSourceMaterialSchema.parse(content.sourceMaterial) }),
   };
 }
 

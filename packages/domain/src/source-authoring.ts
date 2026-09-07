@@ -5,11 +5,17 @@ import {
   sourceCitationSchema,
   sourceDocumentSchema,
   sourceIntakeTextSchema,
+  sourceFactSchema,
   type SourceCitation,
   type SourceDocument,
   type SourceFact
 } from "../../contracts/src/source-authoring.js";
 import { sourceFactKindSchema } from "../../contracts/src/source-authoring.js";
+import {
+  worldSourceMaterialSchema,
+  type WorldContent,
+  type WorldSourceMaterial
+} from "../../contracts/src/world-library.js";
 import { z } from "zod";
 import type { SourceChunk } from "./source-authoring-budget.js";
 
@@ -109,6 +115,107 @@ export function validateSourceCitationWithinBoundary(
   const boundaryIndex = source.paragraphs.findIndex((paragraph) => paragraph.id === boundaryParagraphId);
   const citationIndex = source.paragraphs.findIndex((paragraph) => paragraph.id === citation.paragraphId);
   return boundaryIndex >= 0 && citationIndex >= 0 && citationIndex <= boundaryIndex;
+}
+
+/**
+ * Validates the portable appendix after structural contract parsing. The retained
+ * document is deliberately a selected prefix: its boundary is its final paragraph.
+ */
+export function validateWorldSourceMaterial(value: unknown): WorldSourceMaterial {
+  const material = worldSourceMaterialSchema.parse(value);
+  const source = material.documents[0]!;
+  if (!hasValidSourceDocumentIntegrity(source)
+    || material.boundary.sourceId !== source.id
+    || source.paragraphs.at(-1)?.id !== material.boundary.paragraphId
+    || source.paragraphs.at(-1)?.end !== Array.from(source.text).length) {
+    throw new TypeError("Portable source material has invalid selected-source integrity.");
+  }
+  const facts = material.acceptedFacts.map((fact) => sourceFactSchema.parse(fact));
+  const byId = new Map<string, SourceFact>();
+  for (const fact of facts) {
+    if (byId.has(fact.id)) throw new TypeError("Portable source material repeats an accepted fact.");
+    const cited = fact.provenance === "stated" || fact.provenance === "inferred";
+    if ((cited && (!fact.citations.length || !fact.citations.every((citation) => validateSourceCitationWithinBoundary(source, citation, material.boundary.paragraphId))))
+      || (!cited && fact.citations.length !== 0)) {
+      throw new TypeError("Portable source material has invalid accepted evidence.");
+    }
+    byId.set(fact.id, fact);
+  }
+  const paths = new Set<string>();
+  for (const evidence of material.fieldEvidence) {
+    if (paths.has(evidence.path) || new Set(evidence.factIds).size !== evidence.factIds.length || evidence.factIds.some((id) => !byId.has(id))) {
+      throw new TypeError("Portable source material has invalid field evidence.");
+    }
+    paths.add(evidence.path);
+  }
+  const acceptedCharacterIds = new Set(facts.filter((fact) => fact.kind === "character").map((fact) => fact.id));
+  const groups = material.characterIdentityGroups ?? [];
+  const grouped = new Set<string>();
+  for (const group of groups) {
+    if (!group.factIds.includes(group.representativeFactId)
+      || group.factIds.some((id) => grouped.has(id) || !acceptedCharacterIds.has(id))) {
+      throw new TypeError("Portable source material has invalid character identity groups.");
+    }
+    for (const id of group.factIds) grouped.add(id);
+  }
+  const characterEvidence = material.fieldEvidence.filter((evidence) => evidence.path.startsWith("playableCharacters."));
+  if (characterEvidence.length && (!material.characterIdentityGroups || grouped.size !== acceptedCharacterIds.size)) {
+    throw new TypeError("Portable source material character evidence requires complete reviewed identity groups.");
+  }
+  return material;
+}
+
+/** Construct a prefix-only portable appendix and revalidate it before persistence. */
+export function buildWorldSourceMaterial(input: Readonly<{
+  source: SourceDocument;
+  boundaryParagraphId: string;
+  acceptedFacts: readonly SourceFact[];
+  fieldEvidence: readonly WorldSourceMaterial["fieldEvidence"][number][];
+  characterIdentityGroups?: WorldSourceMaterial["characterIdentityGroups"];
+}>): WorldSourceMaterial {
+  if (!hasValidSourceDocumentIntegrity(input.source)) throw new TypeError("Source document integrity is invalid.");
+  const boundary = input.source.paragraphs.find((paragraph) => paragraph.id === input.boundaryParagraphId);
+  if (!boundary) throw new TypeError("Selected source boundary is invalid.");
+  const text = Array.from(input.source.text).slice(0, boundary.end).join("");
+  const source = sourceDocumentFromNormalizedText(input.source.name, text, input.source.id);
+  return validateWorldSourceMaterial({
+    version: 1,
+    documents: [source],
+    boundary: { sourceId: source.id, paragraphId: boundary.id },
+    acceptedFacts: input.acceptedFacts,
+    fieldEvidence: input.fieldEvidence,
+    ...(input.characterIdentityGroups === undefined ? {} : { characterIdentityGroups: input.characterIdentityGroups })
+  });
+}
+
+/** Reject portable stale evidence after an import, rather than silently relabeling edited canon. */
+export function validateWorldSourceMaterialForContent(content: WorldContent): WorldContent {
+  if (!content.sourceMaterial) return content;
+  const material = validateWorldSourceMaterial(content.sourceMaterial);
+  const facts = new Map(material.acceptedFacts.map((fact) => [fact.id, fact]));
+  for (const evidence of material.fieldEvidence) {
+    const worldPath = /^world\.(tone|rules)$/u.exec(evidence.path);
+    const characterPath = /^playableCharacters\.(source-character:(.+))\.profile\.appearance\.(clothing|hair|eyes|apparentAge)$/u.exec(evidence.path);
+    const expected = worldPath === null
+      ? undefined
+      : { value: content.world[worldPath[1] as "tone" | "rules"], kind: worldPath[1] === "tone" ? "tone" : "rule", predicate: worldPath[1] };
+    const character = characterPath === null ? undefined : content.playableCharacters.find((candidate) => candidate.id === characterPath[1]);
+    const characterExpected = characterPath === null || !character
+      ? undefined
+      : { value: character.profile?.appearance[characterPath[3] as "clothing" | "hair" | "eyes" | "apparentAge"], kind: "character" as const, predicate: characterPath[3], representativeFactId: characterPath[2] };
+    const target = expected ?? characterExpected;
+    const group = characterExpected === undefined ? undefined : material.characterIdentityGroups?.find((candidate) => candidate.representativeFactId === characterExpected.representativeFactId);
+    const predicate = expected?.predicate ?? characterExpected?.predicate;
+    if (!target || typeof target.value !== "string" || predicate === undefined
+      || evidence.factIds.some((id) => {
+        const fact = facts.get(id);
+        return !fact || fact.value !== target.value || fact.kind !== target.kind || fact.predicate.trim().toLocaleLowerCase() !== predicate.toLocaleLowerCase()
+          || (characterExpected !== undefined && !group?.factIds.includes(id));
+      })) {
+      throw new TypeError("Portable source material field evidence does not match canonical content.");
+    }
+  }
+  return content;
 }
 
 function normalizedFactValue(value: string): string {
