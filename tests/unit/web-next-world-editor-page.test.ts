@@ -1799,3 +1799,106 @@ it.each([8, 9])("restores a recovered character only at its bound existing draft
   if (revision === 8) { document.querySelector<HTMLButtonElement>('[data-action="restore-authoring-character"]')?.click(); expect(root.textContent).toContain("Recovered Hero"); }
   expect(save).not.toHaveBeenCalled(); mounted.dispose();
 });
+
+it("P28-F3 applies only the saved current character subset and exactly replays after a lost response despite local edits", async () => {
+  const { root, document, window } = editorFixture();
+  const candidate = reviewedCharacter("durable-character", "Applied Hero");
+  const apply = vi.fn()
+    .mockRejectedValueOnce(new Error("response lost"))
+    .mockResolvedValueOnce({ jobId: "character-job", worldId, draftRevision: 9, characterId: "durable-character" });
+  const api = {
+    loadAuthoringJob: vi.fn().mockResolvedValue({
+      id: "character-job", revision: 3, kind: "character", status: "awaiting_review",
+      target: { kind: "world_draft", worldId, expectedRevision: 8 },
+      stages: [
+        { id: "historical-stage", key: "character:durable-character", generation: 1, status: "validated", attemptCount: 1 },
+        { id: "validated-stage", key: "character:durable-character", generation: 2, status: "validated", attemptCount: 1 },
+        { id: "unselected-sibling", key: "character:other", generation: 1, status: "validated", attemptCount: 1 }
+      ],
+      reviewedStageIds: ["validated-stage"],
+      expiresAt: "2026-09-13T00:00:00.000Z", incomplete: false, canApply: true,
+      request: { kind: "character", idempotencyKey: "request", prompt: "Guide", target: { kind: "world_draft", worldId, expectedRevision: 8 }, content: draft, characterId: "durable-character" },
+      result: candidate, reviewedContent: candidate
+    }),
+    applyAuthoringJob: apply
+  };
+  const save = vi.fn();
+  const mounted = mountWorldEditorPage(root, worldId, {
+    loadWorld: vi.fn().mockResolvedValue(world), saveWorldDraft: save,
+    creationStatusSearch: "?authoringCharacter=character-job", authoringJobsApi: api as never
+  });
+  await vi.waitFor(() => expect(document.querySelector('[data-action="apply-authoring-character"]')).not.toBeNull());
+  expect(apply).not.toHaveBeenCalled();
+  const action = document.querySelector<HTMLButtonElement>('[data-action="apply-authoring-character"]');
+  action?.click();
+  await vi.waitFor(() => expect(apply).toHaveBeenCalledTimes(1));
+  await vi.waitFor(() => expect(action?.disabled).toBe(false));
+  const title = document.querySelector<HTMLInputElement>('[name="world.title"]')!;
+  title.value = "Unsaved after response loss";
+  title.dispatchEvent(new window.Event("input", { bubbles: true }));
+  expect(document.querySelector('[data-action="apply-authoring-character"]')).not.toBeNull();
+  document.querySelector<HTMLButtonElement>('[data-action="apply-authoring-character"]')!.click();
+  await vi.waitFor(() => expect(apply).toHaveBeenCalledTimes(2));
+  expect(apply.mock.calls[0]?.[1]).toMatchObject({ expectedRevision: 3, selectedStageIds: ["validated-stage"], content: candidate });
+  expect(apply.mock.calls[1]?.slice(0, 2)).toEqual(apply.mock.calls[0]?.slice(0, 2));
+  await vi.waitFor(() => expect(root.textContent).toContain("Your local edits are still on this page"));
+  expect(title.value).toBe("Unsaved after response loss");
+  expect(save).not.toHaveBeenCalled();
+  mounted.dispose();
+});
+
+it("P28 preserves unsaved editor fields and blocks an initial character apply", async () => {
+  const { root, document, window } = editorFixture();
+  const candidate = reviewedCharacter("durable-character", "Reviewed Hero");
+  const apply = vi.fn(); const save = vi.fn();
+  const mounted = mountWorldEditorPage(root, worldId, {
+    loadWorld: vi.fn().mockResolvedValue(world), saveWorldDraft: save,
+    creationStatusSearch: "?authoringCharacter=character-job",
+    authoringJobsApi: { loadAuthoringJob: vi.fn().mockResolvedValue({
+      id: "character-job", revision: 3, kind: "character", status: "awaiting_review",
+      target: { kind: "world_draft", worldId, expectedRevision: 8 },
+      stages: [{ id: "stage", key: "character:durable-character", generation: 1, status: "validated", attemptCount: 1 }],
+      reviewedStageIds: ["stage"], reviewedContent: candidate, result: candidate,
+      expiresAt: "2026-09-13T00:00:00.000Z", incomplete: false, canApply: true
+    }), applyAuthoringJob: apply } as never
+  });
+  try {
+    await vi.waitFor(() => expect(document.querySelector('[data-action="apply-authoring-character"]')).not.toBeNull());
+    const title = document.querySelector<HTMLInputElement>('[name="world.title"]')!;
+    title.value = "Unsaved before apply"; title.dispatchEvent(new window.Event("input", { bubbles: true }));
+    expect(document.querySelector('[data-action="apply-authoring-character"]')).not.toBeNull();
+    document.querySelector<HTMLButtonElement>('[data-action="apply-authoring-character"]')!.click();
+    await settle();
+    expect(root.textContent).toContain("Save or reload your local draft before applying");
+    expect(title.value).toBe("Unsaved before apply");
+    expect(apply).not.toHaveBeenCalled(); expect(save).not.toHaveBeenCalled();
+    const unload = new window.Event("beforeunload", { cancelable: true }); window.dispatchEvent(unload);
+    expect(unload.defaultPrevented).toBe(true);
+  } finally { mounted.dispose(); }
+});
+
+it("P28 preserves editor changes made while a successful character apply response is pending", async () => {
+  const { root, document, window } = editorFixture();
+  const pending = deferred<{ jobId: string; worldId: string; draftRevision: number; characterId: string }>();
+  const apply = vi.fn().mockReturnValue(pending.promise); const load = vi.fn().mockResolvedValue(world);
+  const candidate = reviewedCharacter("hero", "Reviewed Hero");
+  const mounted = mountWorldEditorPage(root, worldId, {
+    loadWorld: load, creationStatusSearch: "?authoringCharacter=character-job",
+    authoringJobsApi: { loadAuthoringJob: vi.fn().mockResolvedValue({
+      id: "character-job", revision: 3, kind: "character", status: "awaiting_review",
+      target: { kind: "world_draft", worldId, expectedRevision: 8 },
+      stages: [{ id: "stage", key: "character:hero", generation: 1, status: "validated", attemptCount: 1 }],
+      reviewedStageIds: ["stage"], reviewedContent: candidate, canApply: true
+    }), applyAuthoringJob: apply } as never
+  });
+  try {
+    await vi.waitFor(() => expect(document.querySelector('[data-action="apply-authoring-character"]')).not.toBeNull());
+    document.querySelector<HTMLButtonElement>('[data-action="apply-authoring-character"]')!.click();
+    await vi.waitFor(() => expect(apply).toHaveBeenCalledOnce());
+    const title = document.querySelector<HTMLInputElement>('[name="world.title"]')!;
+    title.value = "Typed during apply"; title.dispatchEvent(new window.Event("input", { bubbles: true }));
+    pending.resolve({ jobId: "character-job", worldId, draftRevision: 9, characterId: "hero" });
+    await vi.waitFor(() => expect(root.textContent).toContain("Your local edits are still on this page"));
+    expect(title.value).toBe("Typed during apply"); expect(load).toHaveBeenCalledOnce();
+  } finally { mounted.dispose(); }
+});

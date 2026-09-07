@@ -5,6 +5,112 @@ import type { AuthoringJobView } from "../../packages/contracts/src/authoring.js
 const candidate = (title: string) => ({ schemaVersion: 5, world: { title, genre: "fantasy", tone: "bright", premise: "p", backgroundStory: "b", firstAction: "a", rules: "r" }, playableCharacters: [], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [], defaults: {}, preservedLore: {} });
 const job = (revision = 1, result = candidate("Remote")): AuthoringJobView => ({ id: "job-1", revision, status: "awaiting_review", target: { kind: "new_world" }, stages: [], expiresAt: "2026-09-13T00:00:00.000Z", canApply: true, incomplete: false, kind: "world_concept", result });
 
+it("P28-F3 first review selects only current validated generations, even while replacements are pending", async () => {
+  const initial: AuthoringJobView = { ...job(), stages: [
+    { id: "old-world", key: "world", generation: 1, status: "validated", attemptCount: 1 },
+    { id: "current-world", key: "world", generation: 2, status: "validated", attemptCount: 1 },
+    { id: "old-child", key: "character:hero", generation: 1, status: "validated", attemptCount: 1 },
+    { id: "pending-child", key: "character:hero", generation: 2, status: "queued", attemptCount: 0 }
+  ] };
+  const saveReview = vi.fn(async (_id, input) => ({ ...initial, revision: 2, reviewedContent: input.content, reviewedStageIds: input.selectedStageIds }));
+  const session = createAuthoringJobSession({ job: initial, saveReview });
+  try {
+    session.edit(candidate("First review")); await session.flush();
+    expect(saveReview.mock.calls[0]?.[1].selectedStageIds).toEqual(["current-world"]);
+  } finally { session.dispose(); }
+});
+
+it("P28-F3 explicit generated-result adoption advances selected generations without adding an unselected sibling", async () => {
+  const initial: AuthoringJobView = { ...job(), reviewedContent: candidate("Saved"), reviewedStageIds: ["old-world"], stages: [
+    { id: "old-world", key: "world", generation: 1, status: "validated", attemptCount: 1 }
+  ] };
+  const newer: AuthoringJobView = { ...initial, revision: 2, result: candidate("Regenerated"), stages: [
+    ...initial.stages,
+    { id: "current-world", key: "world", generation: 2, status: "validated", attemptCount: 1 },
+    { id: "unselected-child", key: "character:hero", generation: 1, status: "validated", attemptCount: 1 }
+  ] };
+  const saveReview = vi.fn(async (_id, input) => ({ ...newer, revision: 3, reviewedContent: input.content, reviewedStageIds: input.selectedStageIds }));
+  const session = createAuthoringJobSession({ job: initial, saveReview });
+  try {
+    session.receive(newer);
+    expect(session.currentCandidate()).toEqual(candidate("Saved"));
+    expect(session.adoptPendingResult()).toEqual(candidate("Regenerated"));
+    session.receive(newer);
+    session.receive(newer);
+    await session.flush();
+    expect(saveReview.mock.calls[0]?.[1].selectedStageIds).toEqual(["current-world"]);
+  } finally { session.dispose(); }
+});
+
+it.each(["live identical", "resumed identical", "resumed changed"])("P28-F3 fix2 explicit review reconciles %s selected generations independently of pending content", async scenario => {
+  vi.useFakeTimers();
+  const initial: AuthoringJobView = { ...job(), result: candidate("Generated"), reviewedContent: candidate("Human saved review"), reviewedStageIds: ["old-world"], stages: [
+    { id: "old-world", key: "world", generation: 1, status: "validated", attemptCount: 1 }
+  ] };
+  const replacement: AuthoringJobView = { ...initial, revision: 2, canApply: false, result: candidate(scenario === "resumed changed" ? "Replacement text" : "Generated"), stages: [
+    ...initial.stages,
+    { id: "current-world", key: "world", generation: 2, status: "validated", attemptCount: 1 },
+    { id: "unselected-sibling", key: "character:other", generation: 1, status: "validated", attemptCount: 1 }
+  ] };
+  const saveReview = vi.fn(async (_id, input) => ({ ...replacement, revision: 3, reviewedContent: input.content, reviewedStageIds: input.selectedStageIds }));
+  const session = createAuthoringJobSession({ job: scenario === "live identical" ? initial : replacement, saveReview });
+  try {
+    session.receive(replacement); session.receive(replacement);
+    await vi.advanceTimersByTimeAsync(600);
+    expect(session.currentCandidate()).toEqual(candidate("Human saved review"));
+    expect(session.hasPendingGeneratedResult()).toBe(false);
+    expect(saveReview).not.toHaveBeenCalled();
+    expect(session.adoptPendingResult()).toEqual(candidate("Human saved review"));
+    session.receive(replacement); session.receive(replacement);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(saveReview).toHaveBeenCalledOnce();
+    expect(saveReview.mock.calls[0]?.[1]).toMatchObject({ content: candidate("Human saved review"), selectedStageIds: ["current-world"] });
+    session.edit(candidate("Later human edit")); await session.flush();
+    expect(saveReview.mock.calls[1]?.[1]).toMatchObject({ content: candidate("Later human edit"), selectedStageIds: ["current-world"] });
+  } finally { session.dispose(); vi.useRealTimers(); }
+});
+
+it.each(["older response", "same revision response", "cancelled", "conflict"])("P28-F3 fix3 preserves explicit selection while a historical save is pending: %s", async scenario => {
+  vi.useFakeTimers();
+  const initial: AuthoringJobView = { ...job(), reviewedContent: candidate("Saved"), reviewedStageIds: ["old-world"], stages: [
+    { id: "old-world", key: "world", generation: 1, status: "validated", attemptCount: 1 }
+  ] };
+  const local = candidate("Human edit");
+  const historical: AuthoringJobView = { ...initial, revision: 2, reviewedContent: local };
+  const replacement: AuthoringJobView = { ...historical, result: local, revision: scenario === "same revision response" ? 2 : 3, canApply: false, stages: [
+    ...initial.stages,
+    { id: "current-world", key: "world", generation: 2, status: "validated", attemptCount: 1 },
+    { id: "unselected-sibling", key: "character:other", generation: 1, status: "validated", attemptCount: 1 }
+  ] };
+  let release!: (value: AuthoringJobView) => void;
+  const pending = new Promise<AuthoringJobView>(resolve => { release = resolve; });
+  const saveReview = vi.fn(async (_id, input) => saveReview.mock.calls.length === 1 ? pending : ({ ...replacement, revision: 4, canApply: true, reviewedContent: input.content, reviewedStageIds: input.selectedStageIds }));
+  const session = createAuthoringJobSession({ job: initial, saveReview });
+  try {
+    session.edit(local); await vi.advanceTimersByTimeAsync(500);
+    expect(saveReview.mock.calls[0]?.[1]).toMatchObject({ content: local, selectedStageIds: ["old-world"] });
+    session.receive(replacement); session.receive(replacement);
+    expect(session.adoptPendingResult()).toEqual(local);
+    session.receive(replacement); session.receive(replacement);
+    await vi.advanceTimersByTimeAsync(600);
+    expect(saveReview).toHaveBeenCalledOnce();
+    if (scenario === "cancelled") session.receive({ ...replacement, revision: 5, status: "cancelled" });
+    if (scenario === "conflict") session.receive({ ...replacement, revision: 5, reviewedContent: candidate("Other tab") });
+    release(scenario === "same revision response" ? replacement : historical); await vi.advanceTimersByTimeAsync(1500);
+    if (scenario === "cancelled" || scenario === "conflict") {
+      expect(saveReview).toHaveBeenCalledOnce();
+      expect(session.state()).toMatchObject(scenario === "cancelled" ? { job: { status: "cancelled" } } : { saveState: "conflict" });
+      await expect(session.flush()).rejects.toThrow("Review is not saved");
+    } else {
+      expect(saveReview).toHaveBeenCalledTimes(2);
+      expect(saveReview.mock.calls[1]?.[1]).toEqual({ expectedRevision: replacement.revision, content: local, selectedStageIds: ["current-world"] });
+      expect(session.state()).toMatchObject({ localDirty: false, saveState: "saved", job: { canApply: true, reviewedStageIds: ["current-world"] } });
+      await session.flush();
+      expect(session.currentCandidate()).toEqual(local);
+    }
+  } finally { session.dispose(); vi.useRealTimers(); }
+});
+
 describe("authoring job session", () => {
   it("keeps a local edit when a completed remote result arrives", () => {
     const session = createAuthoringJobSession({ job: job() });
@@ -207,6 +313,28 @@ it("flush waits for the current saved review before a parent handoff", async () 
   expect(typeof session.flush).toBe("function");
   await session.flush();
   expect(session.state().localDirty).toBe(false); expect(session.currentCandidate()).toEqual(candidate("For parent")); expect(saveReview).toHaveBeenCalledTimes(1); session.dispose();
+});
+
+it("P28 reuses the exact saved selection after a regenerated sibling stage", async () => {
+  const initial = {
+    ...job(),
+    reviewedContent: candidate("Saved"),
+    reviewedStageIds: ["stage"],
+    stages: [{ id: "stage", key: "world", generation: 1, status: "validated" as const, attemptCount: 1 }]
+  };
+  const regenerated = {
+    ...initial,
+    revision: 2,
+    stages: [
+      ...initial.stages,
+      { id: "replacement", key: initial.stages[0]!.key, generation: 2, status: "validated" as const, attemptCount: 1 }
+    ]
+  };
+  const saveReview = vi.fn(async (_id, input) => ({ ...regenerated, revision: 3, reviewedContent: input.content, reviewedStageIds: input.selectedStageIds }));
+  const session = createAuthoringJobSession({ job: initial, saveReview });
+  session.receive(regenerated); session.edit(candidate("Edited")); await session.flush();
+  expect(saveReview).toHaveBeenCalledWith("job-1", expect.objectContaining({ selectedStageIds: ["stage"] }), expect.any(AbortSignal));
+  session.dispose();
 });
 
 it("does not advance review CAS past an unseen edit from another tab", async () => {

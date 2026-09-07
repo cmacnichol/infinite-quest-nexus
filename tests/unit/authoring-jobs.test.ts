@@ -133,6 +133,16 @@ describe("authoring job lifecycle", () => {
 });
 
 describe("durable authoring public contracts", () => {
+  it.each(["world_concept", "character"] as const)("P28-F3 retains the exact %s review selection only in the detail contract", kind => {
+    const common = { id: "job", revision: 4, kind, status: "awaiting_review", target: { kind: "new_world" }, stages: [],
+      expiresAt: "2026-09-13T00:00:00.000Z", canApply: false, incomplete: false };
+    const detail = { ...common, reviewedContent: kind === "world_concept" ? worldContent : playableCharacter, reviewedStageIds: ["current-selected"] };
+    expect(authoringJobViewSchema.parse(detail).reviewedStageIds).toEqual(["current-selected"]);
+    expect(authoringJobViewSchema.parse({ ...detail, reviewedStageIds: [] }).reviewedStageIds).toEqual([]);
+    expect(authoringJobListItemSchema.safeParse({ ...common, reviewedStageIds: ["current-selected"] }).success).toBe(false);
+    expect(authoringJobListItemSchema.parse(common)).not.toHaveProperty("reviewedStageIds");
+  });
+
   it("accepts incomplete manual world content for a character proposal", () => {
     expect(authoringSubmitSchema.parse({
       kind: "character",

@@ -9,9 +9,24 @@ import { buildServer } from "../../services/api/src/server.js";
 import { inertStorageServerOptions } from "../helpers/build-server-options.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { AuthoringSubmit } from "../../packages/contracts/src/authoring.js";
+import { worldContentSchema } from "../../packages/contracts/src/world-library.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe.sequential : describe.skip;
+
+const appliedContent = worldContentSchema.parse({
+  world: { title: "HTTP Receipt Lantern", genre: "fantasy", tone: "hopeful", premise: "A lantern remembers every promise.", backgroundStory: "The city follows its light.", firstAction: "Follow the lantern.", rules: "Promises have weight." },
+  playableCharacters: [], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [], defaults: {}
+});
+const appliedOutline = {
+  kind: "outline",
+  outline: {
+    title: appliedContent.world.title, genre: appliedContent.world.genre, tone: appliedContent.world.tone,
+    premise: appliedContent.world.premise, backgroundStory: appliedContent.world.backgroundStory,
+    firstAction: appliedContent.world.firstAction, rules: appliedContent.world.rules,
+    seeds: [], rpgStats: [], defaultTriggers: [], eventTriggers: []
+  }
+};
 
 function config(enabled = true): RuntimeConfig {
   return {
@@ -72,6 +87,7 @@ integration("authoring HTTP commands", () => {
   let pool: DatabasePool;
   let ownerUserId: string;
   const jobIds: string[] = [];
+  const worldIds: string[] = [];
   const foreignUserIds: string[] = [];
 
   beforeAll(async () => {
@@ -81,9 +97,11 @@ integration("authoring HTTP commands", () => {
   });
 
   afterEach(async () => {
+    if (worldIds.length) await pool.query("DELETE FROM worlds WHERE id = ANY($1::uuid[])", [worldIds]);
     if (jobIds.length) await pool.query("DELETE FROM authoring_jobs WHERE id = ANY($1::uuid[])", [jobIds]);
     if (foreignUserIds.length) await pool.query("DELETE FROM users WHERE id = ANY($1::uuid[])", [foreignUserIds]);
     jobIds.length = 0;
+    worldIds.length = 0;
     foreignUserIds.length = 0;
   });
 
@@ -136,7 +154,7 @@ integration("authoring HTTP commands", () => {
     } finally { await server.close(); }
   });
 
-  it("inherits request security, bounded authoring bodies, and deterministic disabled/apply behavior", async () => {
+  it("inherits request security, bounded authoring bodies, and routes apply through the composed application", async () => {
     const server = await app();
     try {
       const rejectedOrigin = await server.inject({ method: "POST", url: "/api/v1/authoring/jobs", headers: { host: "localhost:8080", origin: "https://untrusted.invalid" }, payload: submit(`origin-${crypto.randomUUID()}`) });
@@ -148,9 +166,9 @@ integration("authoring HTTP commands", () => {
 
       const accepted = await server.inject({ method: "POST", url: "/api/v1/authoring/jobs", payload: submit(`apply-${crypto.randomUUID()}`) });
       jobIds.push(accepted.json().id);
-      const unavailableApply = await server.inject({ method: "POST", url: `/api/v1/authoring/jobs/${accepted.json().id}/apply`, payload: { expectedRevision: 0, idempotencyKey: "apply-test", selectedStageIds: [], content: { schemaVersion: 5, world: { title: "Test", genre: "Test", tone: "Test", premise: "Test", backgroundStory: "Test", firstAction: "Test", rules: "" }, playableCharacters: [], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [], defaults: { trackers: [] } } } });
-      expect(unavailableApply.statusCode).toBe(409);
-      expect(unavailableApply.json().code).toBe("authoring_apply_unavailable");
+      const invalidApply = await server.inject({ method: "POST", url: `/api/v1/authoring/jobs/${accepted.json().id}/apply`, payload: { expectedRevision: 0, idempotencyKey: "apply-test", selectedStageIds: [], content: { schemaVersion: 5, world: { title: "Test", genre: "Test", tone: "Test", premise: "Test", backgroundStory: "Test", firstAction: "Test", rules: "" }, playableCharacters: [], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [], defaults: { trackers: [] } } } });
+      expect(invalidApply.statusCode).toBe(409);
+      expect(invalidApply.json().code).toBe("authoring_invalid_state");
     } finally { await server.close(); }
 
     const disabled = await app(false);
@@ -158,6 +176,33 @@ integration("authoring HTTP commands", () => {
       expect((await disabled.inject({ method: "GET", url: "/api/v1/authoring/capabilities" })).json()).toMatchObject({ enabled: false });
       expect((await disabled.inject({ method: "POST", url: "/api/v1/authoring/jobs", payload: submit(`disabled-${crypto.randomUUID()}`) })).statusCode).toBe(503);
     } finally { await disabled.close(); }
+  });
+
+  it("executes a reviewed apply through the actual HTTP runtime composition and returns its durable receipt", async () => {
+    const server = await app();
+    try {
+      const accepted = await server.inject({ method: "POST", url: "/api/v1/authoring/jobs", payload: submit(`http-apply-${crypto.randomUUID()}`) });
+      expect(accepted.statusCode).toBe(202);
+      const job = accepted.json();
+      jobIds.push(job.id);
+      const stageId = job.stages[0].id;
+      await pool.query("UPDATE authoring_jobs SET status = 'awaiting_review' WHERE id = $1", [job.id]);
+      await pool.query("UPDATE authoring_job_stages SET status = 'validated', output = $2::jsonb WHERE id = $1", [stageId, JSON.stringify(appliedOutline)]);
+      const reviewed = await server.inject({ method: "PUT", url: `/api/v1/authoring/jobs/${job.id}/review`, payload: {
+        expectedRevision: job.revision, content: appliedContent, selectedStageIds: [stageId]
+      } });
+      expect(reviewed.statusCode).toBe(200);
+
+      const applied = await server.inject({ method: "POST", url: `/api/v1/authoring/jobs/${job.id}/apply`, payload: {
+        expectedRevision: reviewed.json().revision, idempotencyKey: "http-apply-receipt", selectedStageIds: [stageId], content: appliedContent
+      } });
+      expect(applied.statusCode).toBe(200);
+      expect(applied.headers["cache-control"]).toBe("no-store");
+      expect(applied.json()).toMatchObject({ jobId: job.id, draftRevision: 1 });
+      worldIds.push(applied.json().worldId);
+      await expect(pool.query("SELECT status, reviewed_content AS \"reviewedContent\", apply_receipt AS \"applyReceipt\" FROM authoring_jobs WHERE id = $1", [job.id]))
+        .resolves.toMatchObject({ rows: [{ status: "applied", reviewedContent: null, applyReceipt: applied.json() }] });
+    } finally { await server.close(); }
   });
 
   it("maps the repository's transactional active-proposal limit to a safe HTTP 429", async () => {

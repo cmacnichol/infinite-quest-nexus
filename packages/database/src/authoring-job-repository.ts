@@ -3,9 +3,12 @@ import {
   authoringExecutionSnapshotSchema,
   authoringJobListItemSchema,
   authoringStageOutputSchema,
+  authoringApplyReceiptSchema,
   authoringJobViewSchema,
   parseAuthoringCommandForJob,
   type AuthoringReview,
+  type AuthoringApply,
+  type AuthoringApplyReceipt,
   normalizeAuthoringSubmitForAdmission,
   authoringSubmitSchema,
   authoringTargetSchema,
@@ -21,7 +24,8 @@ import { playableCharacterSchema, type WorldContent } from "../../contracts/src/
 import type {
   AuthoringClaim,
   AuthoringExecutionRepository,
-  AuthoringTargetPort
+  AuthoringTargetPort,
+  AuthoringWorldApplyPort
 } from "../../application/src/authoring/ports.js";
 import { AuthoringRepositoryError } from "../../application/src/authoring/types.js";
 import type { OwnerScope } from "../../application/src/generation/types.js";
@@ -29,6 +33,7 @@ import { retryAuthoringStage, type AuthoringStageLifecycle } from "../../domain/
 import { projectAuthoringFailure, validateGeneratedCharacter, validateGeneratedWorldFiction } from "../../domain/src/authoring-output.js";
 import { assembleGeneratedWorldContent } from "../../domain/src/generated-world-assembly.js";
 import { withTransaction, type DatabaseClient, type DatabasePool } from "./pool.js";
+import { runPostgresWorldCampaignCommandWithClient } from "./world-campaign-transaction.js";
 
 const MAX_INPUT_BYTES = 2 * 1024 * 1024;
 const MAX_LEASE_SECONDS = 3_600;
@@ -49,11 +54,15 @@ type JobRow = {
   executionGeneration: number;
   executionSnapshot: unknown;
   reviewedContent: unknown;
+  reviewedStageIds: unknown;
   reviewGeneration: number;
+  applyKey: string | null;
+  applyHash: string | null;
+  applyReceipt: unknown;
   expiresAt: unknown;
   createdAt: unknown;
 };
-type JobListRow = Pick<JobRow, "id" | "kind" | "target" | "status" | "revision" | "expiresAt" | "createdAt">;
+type JobListRow = Pick<JobRow, "id" | "kind" | "target" | "status" | "revision" | "reviewedStageIds" | "expiresAt" | "createdAt"> & { hasReviewedContent: boolean };
 
 type StageRow = {
   id: string;
@@ -68,11 +77,19 @@ type StageRow = {
   leaseToken: string | null;
   leaseExpiresAt: unknown;
   output: unknown;
+  hasOutput?: boolean;
   failure: unknown;
 };
 
 function json(value: unknown): string {
   return JSON.stringify(value);
+}
+
+function stableJson(value: unknown): string {
+  if (value === undefined || value === null || typeof value !== "object") return JSON.stringify(value ?? null);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(",")}}`;
 }
 
 function timestamp(value: unknown): string {
@@ -133,9 +150,14 @@ function isDiscardedInput(value: unknown): boolean {
     && (value as Record<string, unknown>).discarded === true;
 }
 
+function isAppliedInput(value: unknown): boolean {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    && (value as Record<string, unknown>).applied === true;
+}
+
 function jobView(job: JobRow, stages: StageRow[]): AuthoringJobView {
   if (isDiscardedInput(job.input)) throw new AuthoringRepositoryError("not_found");
-  const input = authoringSubmitSchema.parse(job.input);
+  const input = isAppliedInput(job.input) ? undefined : authoringSubmitSchema.parse(job.input);
   const target = authoringTargetSchema.parse(job.target);
   const parsedStages = stages.map((stage) => {
     if (stage.output !== null && stage.output !== undefined) validateStageOutput(stage.stageKey, stage.output);
@@ -161,11 +183,14 @@ function jobView(job: JobRow, stages: StageRow[]): AuthoringJobView {
     target,
     stages: parsedStages,
     expiresAt: timestamp(job.expiresAt),
-    canApply: job.status === "awaiting_review" || job.status === "recoverable",
+    canApply: canApply({ ...job, hasReviewedContent: job.reviewedContent !== null && job.reviewedContent !== undefined }, stages),
     incomplete: !allValidated,
-    request: input,
+    ...(input === undefined ? {} : { request: input }),
     ...(result === undefined ? {} : { result }),
-    ...(job.reviewedContent === null || job.reviewedContent === undefined ? {} : { reviewedContent: job.reviewedContent })
+    ...(job.reviewedContent === null || job.reviewedContent === undefined ? {} : {
+      reviewedContent: job.reviewedContent,
+      reviewedStageIds: Array.isArray(job.reviewedStageIds) ? job.reviewedStageIds : []
+    })
   });
 }
 
@@ -192,9 +217,37 @@ function currentStagesForRows(rows: readonly StageRow[]): StageRow[] {
   return rows.filter((stage) => !rows.some((other) => other.stageKey === stage.stageKey && other.generation > stage.generation));
 }
 
+function parentsAreCurrentAndValidated(stages: readonly StageRow[], rawParents: unknown): boolean {
+  if (!rawParents || typeof rawParents !== "object" || Array.isArray(rawParents)) return false;
+  const parents = Object.entries(rawParents as Record<string, unknown>);
+  if (parents.some(([, generation]) => !Number.isInteger(generation) || (generation as number) < 1)) return false;
+  const current = currentStagesForRows(stages);
+  return parents.every(([key, generation]) => current.some((stage) =>
+    stage.stageKey === key && stage.generation === generation && stage.status === "validated"
+  ));
+}
+
+function hasValidatedOutput(stage: StageRow): boolean {
+  return stage.hasOutput ?? (stage.output !== null && stage.output !== undefined);
+}
+
+function canApply(job: Pick<JobRow, "kind" | "target" | "status" | "reviewedStageIds"> & { hasReviewedContent: boolean }, stages: readonly StageRow[]): boolean {
+  if (job.status !== "awaiting_review" && job.status !== "recoverable") return false;
+  if (!job.hasReviewedContent) return false;
+  const target = authoringTargetSchema.parse(job.target);
+  if (job.kind === "character" && target.kind === "new_world") return false;
+  const selected = Array.isArray(job.reviewedStageIds) ? job.reviewedStageIds : [];
+  if (!selected.length || new Set(selected).size !== selected.length || !selected.every((id): id is string => typeof id === "string")) return false;
+  const current = currentStagesForRows(stages).filter((stage) => stage.status !== "cancelled");
+  return selected.every((id) => {
+    const stage = current.find((candidate) => candidate.id === id);
+    return stage?.status === "validated" && hasValidatedOutput(stage) && parentsAreCurrentAndValidated(stages, stage.parentGenerations);
+  });
+}
+
 function listItem(job: JobRow, stages: StageRow[]): AuthoringJobListItem {
   const view = jobView(job, stages);
-  const { request: _request, result: _result, reviewedContent: _reviewedContent, ...item } = view;
+  const { request: _request, result: _result, reviewedContent: _reviewedContent, reviewedStageIds: _reviewedStageIds, ...item } = view;
   return authoringJobListItemSchema.parse(item);
 }
 
@@ -214,7 +267,7 @@ function encodeListCursor(createdAt: unknown, id: string): string {
 function metadataListItem(job: JobListRow, stages: StageRow[]): AuthoringJobListItem {
   const views = stages.map((stage) => ({ id: stage.id, key: stage.stageKey, generation: stage.generation, status: stage.status, attemptCount: stage.attemptCount, ...(stage.failure === null || stage.failure === undefined ? {} : { failure: projectAuthoringFailure(authoringFailureSchema.parse(stage.failure)) }) }));
   const current = views.filter((stage) => !views.some((other) => other.key === stage.key && other.generation > stage.generation) && stage.status !== "cancelled");
-  return authoringJobListItemSchema.parse({ id: job.id, kind: job.kind, revision: job.revision, status: job.status, target: authoringTargetSchema.parse(job.target), stages: views, expiresAt: timestamp(job.expiresAt), canApply: job.status === "awaiting_review" || job.status === "recoverable", incomplete: !(current.length > 0 && current.every((stage) => stage.status === "validated")) });
+  return authoringJobListItemSchema.parse({ id: job.id, kind: job.kind, revision: job.revision, status: job.status, target: authoringTargetSchema.parse(job.target), stages: views, expiresAt: timestamp(job.expiresAt), canApply: canApply(job, stages), incomplete: !(current.length > 0 && current.every((stage) => stage.status === "validated")) });
 }
 
 const JOB_SELECT = `
@@ -222,8 +275,10 @@ const JOB_SELECT = `
   request_hash AS "requestHash", idempotency_key AS "idempotencyKey", status,
   revision, execution_generation AS "executionGeneration",
   execution_snapshot AS "executionSnapshot", reviewed_content AS "reviewedContent",
-  review_generation AS "reviewGeneration", expires_at AS "expiresAt", created_at AS "createdAt"`;
-const JOB_LIST_SELECT = `id, kind, target, status, revision, expires_at AS "expiresAt", to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "createdAt"`;
+  reviewed_stage_ids AS "reviewedStageIds", review_generation AS "reviewGeneration",
+  apply_key AS "applyKey", apply_hash AS "applyHash", apply_receipt AS "applyReceipt",
+  expires_at AS "expiresAt", created_at AS "createdAt"`;
+const JOB_LIST_SELECT = `id, kind, target, status, revision, reviewed_stage_ids AS "reviewedStageIds", reviewed_content IS NOT NULL AS "hasReviewedContent", expires_at AS "expiresAt", to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "createdAt"`;
 
 const STAGE_SELECT = `
   id, job_id AS "jobId", owner_user_id AS "ownerUserId", stage_key AS "stageKey",
@@ -491,7 +546,7 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
         [scope.ownerUserId, after?.createdAt ?? null, after?.id ?? null, PAGE_SIZE + 1]
       );
       const page = jobs.rows.slice(0, PAGE_SIZE);
-      const stageRows = page.length ? await pool.query<StageRow>(`SELECT id, job_id AS "jobId", owner_user_id AS "ownerUserId", stage_key AS "stageKey", generation, '{}'::jsonb AS "parentGenerations", status, attempt_count AS "attemptCount", retry_count AS "retryCount", NULL::uuid AS "leaseToken", NULL::timestamptz AS "leaseExpiresAt", NULL::jsonb AS output, failure FROM authoring_job_stages WHERE job_id = ANY($1::uuid[]) ORDER BY stage_key, generation`, [page.map((job) => job.id)]) : { rows: [] as StageRow[] };
+      const stageRows = page.length ? await pool.query<StageRow>(`SELECT id, job_id AS "jobId", owner_user_id AS "ownerUserId", stage_key AS "stageKey", generation, parent_generations AS "parentGenerations", status, attempt_count AS "attemptCount", retry_count AS "retryCount", NULL::uuid AS "leaseToken", NULL::timestamptz AS "leaseExpiresAt", NULL::jsonb AS output, output IS NOT NULL AS "hasOutput", failure FROM authoring_job_stages WHERE job_id = ANY($1::uuid[]) ORDER BY stage_key, generation`, [page.map((job) => job.id)]) : { rows: [] as StageRow[] };
       const stages = new Map<string, StageRow[]>();
       for (const stage of stageRows.rows) stages.set(stage.jobId, [...(stages.get(stage.jobId) ?? []), stage]);
       const tail = page.at(-1);
@@ -519,16 +574,85 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
           : undefined;
         if (characterId !== undefined && playableCharacterSchema.parse(input.content).id !== characterId) throw new AuthoringRepositoryError("invalid_state");
         const selected = new Set(input.selectedStageIds);
-        if (selected.size !== input.selectedStageIds.length || [...selected].some((id) => current.find((stage) => stage.id === id)?.status !== "validated")) {
+        if (selected.size !== input.selectedStageIds.length || [...selected].some((id) => {
+          const stage = current.find((candidate) => candidate.id === id);
+          return !stage || stage.status !== "validated" || !hasValidatedOutput(stage) || !parentsAreCurrentAndValidated(stages.rows, stage.parentGenerations);
+        })) {
           throw new AuthoringRepositoryError("invalid_state");
         }
         await client.query(
-          `UPDATE authoring_jobs SET reviewed_content = $2::jsonb, review_generation = review_generation + 1,
+          `UPDATE authoring_jobs SET reviewed_content = $2::jsonb, reviewed_stage_ids = $3::jsonb, review_generation = review_generation + 1,
              revision = revision + 1, last_activity_at = clock_timestamp(), expires_at = clock_timestamp() + interval '7 days', updated_at = clock_timestamp()
            WHERE id = $1`,
-          [job.id, json(input.content)]
+          [job.id, json(input.content), json([...new Set(input.selectedStageIds)].sort())]
         );
         return lockedView(client, job.id);
+      });
+    },
+
+    async apply(scope, jobId, rawInput, rawRequestHash, worlds) {
+      const input = rawInput as AuthoringApply;
+      const applyHash = requestHash(rawRequestHash);
+      return withTransaction(pool, async (client) => {
+        // The proposal lock is deliberately taken before the target draft lock.
+        const jobs = await client.query<JobRow>(
+          `SELECT ${JOB_SELECT} FROM authoring_jobs WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
+          [jobId, scope.ownerUserId]
+        );
+        const job = jobs.rows[0];
+        if (!job || isDiscardedInput(job.input)) throw new AuthoringRepositoryError("not_found");
+
+        // Receipt replay is intentionally first: an HTTP retry may carry the
+        // pre-apply proposal revision and arrive after normal proposal expiry.
+        if (job.applyReceipt !== null && job.applyReceipt !== undefined) {
+          const receipt = authoringApplyReceiptSchema.parse(job.applyReceipt);
+          if (job.applyKey !== input.idempotencyKey || job.applyHash !== applyHash) {
+            throw new AuthoringRepositoryError("idempotency_conflict");
+          }
+          // Applied jobs use expires_at as their receipt-retention deadline.
+          // A seven-day-inactive proposal can replay, but a receipt that has
+          // passed its thirty-day deadline cannot outlive cleanup policy.
+          await requireUnexpired(client, job.id);
+          return receipt;
+        }
+        await requireUnexpired(client, job.id);
+        commandJob(job, input.expectedRevision);
+        if (job.status !== "awaiting_review" && job.status !== "recoverable") throw new AuthoringRepositoryError("invalid_state");
+        if (job.reviewedContent === null || job.reviewedContent === undefined ||
+          stableJson(job.reviewedContent) !== stableJson(input.content)) {
+          throw new AuthoringRepositoryError("invalid_state");
+        }
+
+        const stages = await client.query<StageRow>(
+          `SELECT ${STAGE_SELECT} FROM authoring_job_stages WHERE job_id = $1 AND owner_user_id = $2 FOR UPDATE`,
+          [job.id, scope.ownerUserId]
+        );
+        const current = currentStages(stages.rows).filter((stage) => stage.status !== "cancelled");
+        const selected = [...new Set(input.selectedStageIds)].sort();
+        const reviewed = Array.isArray(job.reviewedStageIds) ? [...new Set(job.reviewedStageIds.filter((value): value is string => typeof value === "string"))].sort() : [];
+        if (!selected.length || selected.length !== input.selectedStageIds.length || stableJson(selected) !== stableJson(reviewed) ||
+          selected.some((id) => {
+            const stage = current.find((candidate) => candidate.id === id);
+            return !stage || stage.status !== "validated" || !hasValidatedOutput(stage) || !parentsAreCurrentAndValidated(stages.rows, stage.parentGenerations);
+          })) {
+          throw new AuthoringRepositoryError("invalid_state");
+        }
+        const target = authoringTargetSchema.parse(job.target);
+        if (job.kind === "world_concept" && target.kind === "world_draft" && target.characterId !== undefined) throw new AuthoringRepositoryError("invalid_state");
+        if (job.kind === "character" && target.kind === "new_world") throw new AuthoringRepositoryError("invalid_state");
+        const receiptParts = await runPostgresWorldCampaignCommandWithClient(client, (transaction) =>
+          worlds.applyInTransaction(transaction, scope, target, input.content)
+        );
+        const receipt = authoringApplyReceiptSchema.parse({ jobId: job.id, ...receiptParts });
+        await client.query(
+          `UPDATE authoring_jobs SET status = 'applied', input = '{"applied":true}'::jsonb, reviewed_content = NULL,
+             reviewed_stage_ids = '[]'::jsonb, execution_snapshot = NULL, apply_key = $2, apply_hash = $3, apply_receipt = $4::jsonb,
+             revision = revision + 1, last_activity_at = clock_timestamp(), expires_at = clock_timestamp() + interval '30 days', updated_at = clock_timestamp()
+           WHERE id = $1`,
+          [job.id, input.idempotencyKey, applyHash, json(receipt)]
+        );
+        await client.query("UPDATE authoring_job_stages SET output = NULL, failure = NULL, updated_at = clock_timestamp() WHERE job_id = $1", [job.id]);
+        return receipt;
       });
     },
 

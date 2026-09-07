@@ -93,6 +93,10 @@ function repositoryFixture(initial = job()): AuthoringRepository {
       requireCurrent(scope, id, expectedRevision);
       current = null;
     },
+    apply: async (scope, id, input) => {
+      requireCurrent(scope, id, input.expectedRevision);
+      return { jobId: id, worldId: "world-1", draftRevision: 1 };
+    },
     claim: async () => null,
     heartbeat: async () => false,
     checkpoint: async () => false,
@@ -109,7 +113,8 @@ function dependencies(repository = repositoryFixture()): AuthoringApplicationDep
   return {
     repository,
     sha256: vi.fn((value: string) => createHash("sha256").update(value).digest("hex")),
-    targets: { assertCurrent: vi.fn(async () => undefined) }
+    targets: { assertCurrent: vi.fn(async () => undefined) },
+    worlds: { applyInTransaction: vi.fn() }
   };
 }
 
@@ -229,7 +234,7 @@ describe("authoring application use cases", () => {
       .rejects.toMatchObject({ code: "authoring_not_found" });
   });
 
-  it("has no campaign or publisher dependency and rejects apply without mutation", async () => {
+  it("delegates a parsed apply command to the provider-free atomic application port", async () => {
     const fixture = dependencies();
     const application = createAuthoringApplication(fixture);
     const before = await application.get(owner, "job-1");
@@ -239,10 +244,10 @@ describe("authoring application use cases", () => {
       idempotencyKey: "apply-test",
       selectedStageIds: [],
       content: worldContent
-    } as unknown as AuthoringApply)).rejects.toMatchObject({ code: "authoring_apply_unavailable" });
+    } as unknown as AuthoringApply)).resolves.toMatchObject({ jobId: "job-1", worldId: "world-1" });
 
     await expect(application.get(owner, "job-1")).resolves.toEqual(before);
-    expect(Object.keys(fixture)).toEqual(["repository", "sha256", "targets"]);
+    expect(Object.keys(fixture)).toEqual(["repository", "sha256", "targets", "worlds"]);
   });
 
   it("rejects a world concept that names a character-only target before enqueue", async () => {

@@ -9,13 +9,13 @@ const characterJob = (): AuthoringJobView => ({ id: "character-job", revision: 1
 
 async function fixture(context: BrowserContext, jobs: AuthoringJobView[]) {
   const store = new Map(jobs.map(job => [job.id, structuredClone(job)]));
-  const submissions: AuthoringSubmit[] = []; const commands: string[] = []; let saves = 0;
+  const submissions: AuthoringSubmit[] = []; const commands: string[] = []; const applies: unknown[] = []; let saves = 0;
   await context.route("**/api/v1/authoring/**", async route => {
     const request = route.request(); const url = new URL(request.url()); const path = url.pathname.split("/");
     const json = (body: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
     if (url.pathname.endsWith("capabilities")) return json({ enabled: true, supportedKinds: ["world_concept", "character"], limits: { activeJobsPerOwner: 5, maximumInputBytes: 2 * 1024 * 1024, listPageSize: 20 } });
     const id = path[5]; const command = path[6];
-    if (!id && request.method() === "GET") return json({ jobs: [...store.values()].map(({ request: _request, result: _result, reviewedContent: _review, ...item }) => item) });
+    if (!id && request.method() === "GET") return json({ jobs: [...store.values()].map(({ request: _request, result: _result, reviewedContent: _review, reviewedStageIds: _selection, ...item }) => item) });
     if (!id && request.method() === "POST") {
       const input = request.postDataJSON() as AuthoringSubmit; submissions.push(input);
       const job = input.kind === "world_concept" ? worldJob() : characterJob();
@@ -27,12 +27,22 @@ async function fixture(context: BrowserContext, jobs: AuthoringJobView[]) {
     const body = request.postDataJSON();
     if (body.expectedRevision !== job.revision) return json({ error: "conflict" }, 409);
     commands.push(command!); job.revision += 1;
-    if (command === "review") { saves += 1; job.reviewedContent = body.content; }
+    if (command === "apply") {
+      applies.push(body);
+      job.status = "applied";
+      job.canApply = false;
+      delete job.request; delete job.result; delete job.reviewedContent; delete job.reviewedStageIds;
+      return json({ jobId: job.id, worldId: "44444444-4444-4444-8444-444444444444", draftRevision: 1 });
+    }
+    if (command === "review") {
+      saves += 1; job.reviewedContent = body.content; job.reviewedStageIds = body.selectedStageIds;
+      job.canApply = body.selectedStageIds.length > 0 && (job.kind === "world_concept" || job.target.kind === "world_draft") && ["awaiting_review", "recoverable"].includes(job.status);
+    }
     if (command === "cancel") job.status = "cancelled";
     if (command === "retry") { job.status = "running"; const stage = job.stages.find(stage => stage.id === body.stageId)!; stage.status = "queued"; stage.generation += 1; }
     return json(job);
   });
-  return { store, submissions, commands, saves: () => saves };
+  return { store, submissions, commands, applies, saves: () => saves };
 }
 
 function health(page: Page) {
@@ -194,6 +204,274 @@ test("capability lookup failure never falls back to synchronous world generation
   expect(server.submissions).toHaveLength(1);
   expect(server.submissions[0]!.prompt).toBe("Keep my concept");
   expect(legacyCalls).toBe(0);
+});
+
+test("P28 applies a reviewed world through the durable receipt path in the rendered creation flow", async ({ page, context }, testInfo) => {
+  const ready = worldJob();
+  ready.status = "awaiting_review";
+  ready.incomplete = false;
+  ready.stages = [{ id: "validated-world", key: "world", status: "validated", generation: 1, attemptCount: 1 }];
+  ready.result = content();
+  ready.reviewedContent = content();
+  ready.reviewedStageIds = ["validated-world"];
+  ready.canApply = true;
+  const server = await fixture(context, [ready]);
+  const errors = health(page);
+  let legacyCreates = 0;
+  await page.route("**/api/v1/worlds", route => {
+    if (route.request().method() === "POST") { legacyCreates += 1; return route.abort(); }
+    return route.fallback();
+  });
+  await page.route("**/api/v1/worlds/44444444-4444-4444-8444-444444444444", route => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      id: "44444444-4444-4444-8444-444444444444", title: "Glass Atlas", status: "draft", imageUrl: "",
+      forkedFromWorldId: null, forkedFromWorldVersionId: null,
+      createdAt: "2026-09-07T00:00:00.000Z", updatedAt: "2026-09-07T00:00:00.000Z",
+      draftRevision: 1, draftContent: content(), draftBasedOnWorldVersionId: null,
+      draftUpdatedAt: "2026-09-07T00:00:00.000Z", versions: [], campaigns: []
+    })
+  }));
+  await page.goto(`${base}/app/worlds/new?authoringJob=world-job`);
+  await page.getByRole("button", { name: "Review available results" }).click();
+  for (let index = 0; index < 5; index += 1) await page.locator('[data-action="continue-stage"]').click();
+  await expect(page.getByRole("button", { name: "Create world", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Create world", exact: true }).click();
+  await expect.poll(() => server.applies.length).toBe(1);
+  expect(server.applies[0]).toMatchObject({ expectedRevision: 1, selectedStageIds: ["validated-world"], content: content() });
+  expect(legacyCreates).toBe(0);
+  await evidence(page, testInfo, "p28-durable-apply", errors);
+});
+
+for (const scenario of ["applied poll", "invalid local review"] as const) {
+test(`P28 replays a lost world apply after ${scenario} without legacy creation`, async ({ page, context }, testInfo) => {
+  const ready = worldJob(); ready.status = "awaiting_review"; ready.incomplete = false;
+  ready.stages = [{ id: "validated-world", key: "world", status: "validated", generation: 2, attemptCount: 1 }];
+  ready.result = content(); ready.reviewedContent = content(); ready.reviewedStageIds = ["validated-world"]; ready.canApply = true;
+  const server = await fixture(context, [ready]); const errors = health(page); const bodies: unknown[] = []; let first = true; let legacyCreates = 0;
+  await page.route("**/api/v1/worlds", route => route.request().method() === "POST" ? (legacyCreates += 1, route.abort()) : route.fallback());
+  await page.route("**/api/v1/authoring/jobs/world-job/apply", route => {
+    bodies.push(route.request().postDataJSON());
+    if (first) {
+      first = false;
+      if (scenario === "applied poll") {
+        const applied = server.store.get("world-job")!; applied.status = "applied"; applied.canApply = false; applied.revision += 1;
+        delete applied.request; delete applied.result; delete applied.reviewedContent; delete applied.reviewedStageIds;
+      }
+      return route.fulfill({ status: 502, body: "lost" });
+    }
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ jobId: "world-job", worldId: "44444444-4444-4444-8444-444444444444", draftRevision: 1 }) });
+  });
+  await page.route("**/api/v1/worlds/44444444-4444-4444-8444-444444444444", route => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ id: "44444444-4444-4444-8444-444444444444", title: "Glass Atlas", status: "draft", imageUrl: "", forkedFromWorldId: null, forkedFromWorldVersionId: null, createdAt: "2026-09-07T00:00:00.000Z", updatedAt: "2026-09-07T00:00:00.000Z", draftRevision: 1, draftContent: content(), draftBasedOnWorldVersionId: null, draftUpdatedAt: "2026-09-07T00:00:00.000Z", versions: [], campaigns: [] }) }));
+  await page.goto(`${base}/app/worlds/new?authoringJob=world-job`); await page.getByRole("button", { name: "Review available results" }).click();
+  for (let index = 0; index < 5; index += 1) await page.locator('[data-action="continue-stage"]').click();
+  await page.getByRole("button", { name: "Create world", exact: true }).click(); await expect(page.locator("[data-creation-error]")).toContainText("did not confirm");
+  if (scenario === "applied poll") {
+    await expect(page.locator("[data-authoring-resume-status]")).toContainText("applied");
+  } else {
+    await page.locator('[data-stage="foundation"]').click();
+    await page.locator('[name="world.title"]').fill("");
+    await expect(page.locator('[name="world.title"]')).toHaveValue("");
+    await page.locator('[data-stage="review"]').click();
+    await expect(page.locator('[name="world.title"]')).toBeVisible();
+  }
+  const savesBeforeReplay = server.saves();
+  await evidence(page, testInfo, `p28-world-${scenario.replaceAll(" ", "-")}-before-retry`, errors);
+  await page.getByRole("button", { name: "Retry world apply", exact: true }).click(); await expect.poll(() => bodies.length).toBe(2);
+  expect(bodies[1]).toEqual(bodies[0]); expect(legacyCreates).toBe(0); expect(server.saves()).toBe(savesBeforeReplay);
+  await expect(page).toHaveURL(/worlds\/44444444-4444-4444-8444-444444444444/);
+  await evidence(page, testInfo, `p28-world-${scenario.replaceAll(" ", "-")}-retried`, errors);
+});
+}
+
+const existingWorldId = "44444444-4444-4444-8444-444444444444";
+function existingWorld(draft = content(), revision = 8) {
+  return { id: existingWorldId, title: draft.world.title, status: "draft", imageUrl: "", forkedFromWorldId: null, forkedFromWorldVersionId: null,
+    createdAt: "2026-09-07T00:00:00.000Z", updatedAt: "2026-09-07T00:00:00.000Z", draftRevision: revision, draftContent: draft,
+    draftBasedOnWorldVersionId: null, draftUpdatedAt: "2026-09-07T00:00:00.000Z", versions: [], campaigns: [] };
+}
+function existingCharacterJob(): AuthoringJobView {
+  const job = characterJob();
+  job.target = { kind: "world_draft", worldId: existingWorldId, expectedRevision: 8 };
+  if (job.kind !== "character" || !job.request) throw new Error("Expected character job");
+  job.request.target = job.target;
+  job.reviewedContent = character("hero", "Reviewed Ilyra"); job.reviewedStageIds = ["character-current"]; job.canApply = true;
+  job.stages = [
+    { id: "character-old", key: "character:hero", generation: 1, status: "validated", attemptCount: 1 },
+    { id: "character-current", key: "character:hero", generation: 2, status: "validated", attemptCount: 1 },
+    { id: "unselected-sibling", key: "character:other", generation: 1, status: "validated", attemptCount: 1 }
+  ];
+  return job;
+}
+
+for (const scenario of ["explicit apply", "lost response with local edits", "unsaved before apply", "edited during apply"] as const) {
+test(`P28 existing-world character ${scenario} preserves reviewed identity and local edits`, async ({ page, context }, testInfo) => {
+  const job = existingCharacterJob(); const server = await fixture(context, [job]); const errors = health(page);
+  let world = existingWorld(); const bodies: unknown[] = []; let saves = 0;
+  let release!: () => void; const pending = new Promise<void>(resolve => { release = resolve; });
+  await page.route(`**/api/v1/worlds/${existingWorldId}`, route => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(world) }));
+  await page.route(`**/api/v1/worlds/${existingWorldId}/draft`, route => { saves += 1; return route.abort(); });
+  await page.route("**/api/v1/authoring/jobs/character-job/apply", async route => {
+    bodies.push(route.request().postDataJSON());
+    world = existingWorld({ ...content(), playableCharacters: [...content().playableCharacters, character("hero", "Reviewed Ilyra")] }, 9);
+    const applied = server.store.get(job.id)!; applied.status = "applied"; applied.canApply = false; applied.revision += 1;
+    delete applied.request; delete applied.result; delete applied.reviewedContent; delete applied.reviewedStageIds;
+    if (scenario === "lost response with local edits" && bodies.length === 1) return route.fulfill({ status: 502, body: "lost" });
+    if (scenario === "edited during apply") await pending;
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ jobId: job.id, worldId: existingWorldId, draftRevision: 9, characterId: "hero" }) });
+  });
+  await page.goto(`${base}/app/worlds/${existingWorldId}?authoringCharacter=character-job`);
+  const apply = page.getByRole("button", { name: "Apply reviewed character", exact: true });
+  await expect(apply).toBeVisible(); expect(bodies).toHaveLength(0);
+  await expect(page.locator('[name="world.title"]')).toHaveValue("Glass Atlas");
+  if (scenario === "unsaved before apply") await page.locator('[name="world.title"]').fill("Unsaved before apply");
+  await apply.click();
+  if (scenario === "unsaved before apply") {
+    await expect(page.locator("main")).toContainText("Save or reload your local draft before applying");
+    expect(bodies).toHaveLength(0); await expect(page.locator('[name="world.title"]')).toHaveValue("Unsaved before apply");
+  } else {
+    await expect.poll(() => bodies.length).toBe(1);
+    expect(bodies[0]).toMatchObject({ expectedRevision: 1, selectedStageIds: ["character-current"], content: character("hero", "Reviewed Ilyra") });
+    if (scenario === "lost response with local edits") {
+      await expect(page.locator("main")).toContainText("did not confirm whether");
+      await page.locator('[name="world.title"]').fill("Unsaved after response loss");
+      await apply.click(); await expect.poll(() => bodies.length).toBe(2);
+      expect(bodies[1]).toEqual(bodies[0]);
+      await expect(page.locator("main")).toContainText("Your local edits are still on this page");
+      await expect(page.locator('[name="world.title"]')).toHaveValue("Unsaved after response loss");
+    } else if (scenario === "edited during apply") {
+      await page.locator('[name="world.title"]').fill("Typed while apply pending"); release();
+      await expect(page.locator("main")).toContainText("Your local edits are still on this page");
+      await expect(page.locator('[name="world.title"]')).toHaveValue("Typed while apply pending");
+    } else {
+      await expect(page.locator("main")).toContainText("Revision 9");
+      await page.locator('[data-section-target="characters"]').click();
+      await expect(page.locator("[data-collection-list]")).toContainText("Reviewed Ilyra");
+      await expect(page.locator("[data-collection-list]")).toContainText("Companion");
+      expect(world.draftContent.playableCharacters.map(item => item.id)).toEqual(["companion", "hero"]);
+    }
+  }
+  expect(saves).toBe(0);
+  await evidence(page, testInfo, `p28-character-${scenario.replaceAll(" ", "-")}`, errors);
+});
+}
+
+for (const scenario of ["live identical", "resumed identical", "resumed changed"] as const) {
+test(`P28-F3 fix2 ${scenario} generation saves the current subset only after explicit review and applies it`, async ({ page, context }, testInfo) => {
+  const initial = worldJob(); initial.status = "awaiting_review"; initial.incomplete = false; initial.canApply = true;
+  if (initial.kind !== "world_concept") throw new Error("Expected world fixture");
+  initial.result = content("Generated original"); initial.reviewedContent = content("Human saved review"); initial.reviewedStageIds = ["old-world"];
+  initial.stages = [{ id: "old-world", key: "world", generation: 1, status: "validated", attemptCount: 1 }];
+  const replacement: AuthoringJobView = { ...initial, revision: 2, canApply: false,
+    result: content(scenario === "resumed changed" ? "Generated replacement" : "Generated original"), stages: [
+      ...initial.stages,
+      { id: "current-world", key: "world", generation: 2, status: "validated", attemptCount: 1 },
+      { id: "unselected-sibling", key: "character:other", generation: 1, status: "validated", attemptCount: 1 }
+    ] };
+  const server = await fixture(context, [scenario === "live identical" ? initial : replacement]); const errors = health(page);
+  const reviews: { content: ReturnType<typeof content>; selectedStageIds: string[] }[] = [];
+  let polls = 0; let release!: () => void; const pending = new Promise<void>(resolve => { release = resolve; });
+  page.on("response", response => { if (response.url().endsWith("/authoring/jobs/world-job")) polls += 1; });
+  await page.route("**/api/v1/authoring/jobs/world-job/review", async route => {
+    const body = route.request().postDataJSON(); reviews.push(body);
+    if (reviews.length === 1) await pending;
+    if (JSON.stringify(body.selectedStageIds) !== JSON.stringify(["current-world"])) return route.fulfill({ status: 409, body: "historical or unselected stage" });
+    return route.fallback();
+  });
+  await page.route(`**/api/v1/worlds/${existingWorldId}`, route => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(existingWorld(content("Human after review"), 1)) }));
+  let legacyCreates = 0;
+  await page.route("**/api/v1/worlds", route => route.request().method() === "POST" ? (legacyCreates += 1, route.abort()) : route.fallback());
+  await page.goto(`${base}/app/worlds/new?authoringJob=world-job`);
+  if (scenario === "live identical") {
+    await page.getByRole("button", { name: "Review available results" }).click();
+    await expect(page.locator('[name="world.title"]')).toHaveValue("Human saved review");
+    server.store.set("world-job", structuredClone(replacement));
+  }
+  const pollsBeforeReview = polls;
+  await expect.poll(() => polls).toBeGreaterThanOrEqual(pollsBeforeReview + 2);
+  expect(reviews).toHaveLength(0); expect(server.store.get("world-job")!.reviewedStageIds).toEqual(["old-world"]);
+  await page.getByRole("button", { name: "Review available results" }).click();
+  await expect.poll(() => reviews.length).toBe(1);
+  expect(reviews[0]).toMatchObject({ selectedStageIds: ["current-world"], content: content("Human saved review") });
+  const pollsDuringSave = polls;
+  await expect.poll(() => polls).toBeGreaterThanOrEqual(pollsDuringSave + 2);
+  await expect(page.locator('[name="world.title"]')).toHaveValue("Human saved review");
+  release(); await expect.poll(() => server.saves()).toBe(1);
+  await page.locator('[name="world.title"]').fill("Human after review");
+  await expect.poll(() => server.saves()).toBe(2);
+  expect(reviews[1]).toMatchObject({ selectedStageIds: ["current-world"], content: content("Human after review") });
+  expect(server.store.get("world-job")!.reviewedStageIds).toEqual(["current-world"]);
+  await evidence(page, testInfo, `p28-fix2-${scenario.replaceAll(" ", "-")}-reviewed`, errors);
+  for (let index = 0; index < 5; index += 1) await page.locator('[data-action="continue-stage"]').click();
+  await page.getByRole("button", { name: "Create world", exact: true }).click();
+  await expect.poll(() => server.applies.length).toBe(1);
+  expect(server.applies[0]).toMatchObject({ selectedStageIds: ["current-world"], content: content("Human after review") });
+  expect(legacyCreates).toBe(0);
+  await expect(page).toHaveURL(new RegExp(`/app/worlds/${existingWorldId}`));
+  await expect(page.locator('[name="world.title"]')).toHaveValue("Human after review");
+  await evidence(page, testInfo, `p28-fix2-${scenario.replaceAll(" ", "-")}-applied`, errors);
+});
+}
+
+test("P28-F3 fix3 explicit review survives a historical autosave started before replacement adoption", async ({ page, context }, testInfo) => {
+  const initial = worldJob(); initial.status = "awaiting_review"; initial.incomplete = false; initial.canApply = true;
+  if (initial.kind !== "world_concept") throw new Error("Expected world fixture");
+  initial.result = content(); initial.reviewedContent = content(); initial.reviewedStageIds = ["old-world"];
+  initial.stages = [{ id: "old-world", key: "world", generation: 1, status: "validated", attemptCount: 1 }];
+  const server = await fixture(context, [initial]); const errors = health(page);
+  const reviews: { expectedRevision: number; content: ReturnType<typeof content>; selectedStageIds: string[] }[] = [];
+  let polls = 0; let release!: () => void; const pending = new Promise<void>(resolve => { release = resolve; });
+  page.on("response", response => { if (response.url().endsWith("/authoring/jobs/world-job")) polls += 1; });
+  await page.route("**/api/v1/authoring/jobs/world-job/review", async route => {
+    const body = route.request().postDataJSON(); reviews.push(body);
+    if (reviews.length === 1) {
+      // Commit the old-generation review before replacement exists, but delay
+      // its HTTP response until after the author explicitly reviews generation 2.
+      expect(body).toMatchObject({ expectedRevision: 1, selectedStageIds: ["old-world"] });
+      const saved: AuthoringJobView = { ...initial, revision: 2, reviewedContent: body.content, reviewedStageIds: body.selectedStageIds };
+      server.store.set(initial.id, saved);
+      const response = JSON.stringify(saved);
+      await pending;
+      return route.fulfill({ status: 200, contentType: "application/json", body: response });
+    }
+    expect(body).toMatchObject({ expectedRevision: 3, selectedStageIds: ["current-world"] });
+    return route.fallback();
+  });
+  await page.route(`**/api/v1/worlds/${existingWorldId}`, route => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(existingWorld(content("Human before replacement"), 1)) }));
+  let legacyCreates = 0;
+  await page.route("**/api/v1/worlds", route => route.request().method() === "POST" ? (legacyCreates += 1, route.abort()) : route.fallback());
+  try {
+    await page.goto(`${base}/app/worlds/new?authoringJob=world-job`);
+    await page.getByRole("button", { name: "Review available results" }).click();
+    await page.locator('[name="world.title"]').fill("Human before replacement");
+    await expect.poll(() => reviews.length).toBe(1);
+    const saved = server.store.get(initial.id)!;
+    if (saved.kind !== "world_concept") throw new Error("Expected world fixture");
+    server.store.set(initial.id, { ...saved, revision: 3, result: content("Human before replacement"), canApply: false, stages: [
+      ...saved.stages,
+      { id: "current-world", key: "world", generation: 2, status: "validated", attemptCount: 1 },
+      { id: "unselected-sibling", key: "character:other", generation: 1, status: "validated", attemptCount: 1 }
+    ] });
+    const beforeAdoption = polls; await expect.poll(() => polls).toBeGreaterThanOrEqual(beforeAdoption + 2);
+    await page.getByRole("button", { name: "Review available results" }).click();
+    const duringSave = polls; await expect.poll(() => polls).toBeGreaterThanOrEqual(duringSave + 2);
+    expect(reviews).toHaveLength(1);
+    await expect(page.locator('[name="world.title"]')).toHaveValue("Human before replacement");
+    release(); await expect.poll(() => reviews.length).toBe(2);
+    await expect.poll(() => server.saves()).toBe(1);
+    expect(reviews[1]).toMatchObject({ expectedRevision: 3, selectedStageIds: ["current-world"], content: content("Human before replacement") });
+    expect(server.store.get(initial.id)!.reviewedStageIds).toEqual(["current-world"]);
+    await evidence(page, testInfo, "p28-fix3-pending-historical-save-reviewed", errors);
+    for (let index = 0; index < 5; index += 1) await page.locator('[data-action="continue-stage"]').click();
+    await page.getByRole("button", { name: "Create world", exact: true }).click();
+    await expect.poll(() => server.applies.length).toBe(1);
+    expect(server.applies[0]).toMatchObject({ expectedRevision: 4, selectedStageIds: ["current-world"], content: content("Human before replacement") });
+    expect(legacyCreates).toBe(0);
+    await expect(page).toHaveURL(new RegExp(`/app/worlds/${existingWorldId}`));
+    await expect(page.locator('[name="world.title"]')).toHaveValue("Human before replacement");
+    await evidence(page, testInfo, "p28-fix3-pending-historical-save-applied", errors);
+  } finally { release(); }
 });
 
 test("P27-F1 repeated world polls keep the new generation available for explicit review", async ({ page, context }, testInfo) => {

@@ -7,6 +7,7 @@ import {
   type AuthoringWorkerApplication
 } from "../../../packages/application/src/index.js";
 import { createPostgresAuthoringRepository, createPostgresAuthoringTargetPort } from "../../../packages/database/src/authoring-job-repository.js";
+import { createPostgresAuthoringWorldApplyAdapter } from "../../../packages/database/src/authoring-world-apply-adapter.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import type { AuthoringWorkerProviderCollaborators } from "./provider-application-composition.js";
 import {
@@ -27,6 +28,7 @@ export function createRuntimeAuthoringApplication(
   return createAuthoringApplication({
     repository: createPostgresAuthoringRepository(pool),
     targets: createPostgresAuthoringTargetPort(pool),
+    worlds: createPostgresAuthoringWorldApplyAdapter(),
     sha256
   });
 }

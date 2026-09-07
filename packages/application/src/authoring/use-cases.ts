@@ -42,6 +42,15 @@ function requestHash(input: AuthoringSubmit, sha256: AuthoringSha256): string {
   return hash;
 }
 
+function applyRequestHash(input: AuthoringApply, sha256: AuthoringSha256): string {
+  const hash = sha256(stableJson({
+    selectedStageIds: [...input.selectedStageIds].sort(),
+    content: input.content
+  }));
+  if (!/^[0-9a-f]{64}$/u.test(hash)) throw new TypeError("Authoring SHA-256 must return a lower-case hex digest.");
+  return hash;
+}
+
 function mapRepositoryError(error: unknown): never {
   if (error instanceof RangeError) throw new AuthoringApplicationError("authoring_input_too_large");
   if (error instanceof AuthoringRepositoryError) {
@@ -65,7 +74,7 @@ async function commandJob(dependencies: AuthoringApplicationDependencies, scope:
   return job;
 }
 
-/** Provider-free proposal commands. Applying authoritative content is deliberately deferred to P2.8. */
+/** Provider-free proposal commands. Database adapters own atomic authoritative application. */
 export function createAuthoringApplication(dependencies: AuthoringApplicationDependencies): AuthoringApplication {
   return {
     submit: async (scope, rawInput) => {
@@ -127,8 +136,10 @@ export function createAuthoringApplication(dependencies: AuthoringApplicationDep
       requireOwner(scope);
       requireIdentifier(id);
       const job = await commandJob(dependencies, scope, id);
-      parseAuthoringCommandForJob(job, "apply", rawInput as AuthoringApply);
-      throw new AuthoringApplicationError("authoring_apply_unavailable");
+      const input = parseAuthoringCommandForJob(job, "apply", rawInput) as AuthoringApply;
+      try {
+        return await dependencies.repository.apply(scope, id, input, applyRequestHash(input, dependencies.sha256), dependencies.worlds);
+      } catch (error) { return mapRepositoryError(error); }
     }
   };
 }

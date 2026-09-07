@@ -67,7 +67,7 @@ import { createAuthoringJobSession, type AuthoringJobSession } from "./authoring
 import { reviewedCharacterParent } from "./authoring-character-parent.js";
 import { renderAuthoringComparison } from "./authoring-comparison.js";
 import { worldContentSchema } from "../../../packages/contracts/src/world-library.js";
-import type { AuthoringJobView, AuthoringSubmit } from "../../../packages/contracts/src/authoring.js";
+import type { AuthoringApply, AuthoringJobView, AuthoringSubmit } from "../../../packages/contracts/src/authoring.js";
 
 export interface WorldCreationPageDependencies {
   generateWorldPreview?: (
@@ -338,7 +338,10 @@ export function mountWorldCreationPage(
   let generationSequence = 0;
   let generationController: AbortController | null = null;
   let creationController: AbortController | null = null;
-  let createdWorld: CreatedWorldResponse | null = null;
+  let createdWorld: Pick<CreatedWorldResponse, "id"> | null = null;
+  // Retrying an uncertain apply must reuse the exact request body as well as
+  // its key; the receipt hash deliberately covers both selection and content.
+  let authoringApply: { jobId: string; input: AuthoringApply } | null = null;
   let coverError: WorldCreationApiError | Error | null = null;
   let coverStatus: string | null = null;
   let coverHandoff: Exclude<CreationCoverHandoff, "none" | "recovery"> | null = null;
@@ -444,6 +447,11 @@ export function mountWorldCreationPage(
     stageActions.replaceChildren(...snapshot.job.stages.filter((stage) => !terminal && (stage.status === "recoverable" || stage.status === "failed")).map((stage) => {
       const button = document.createElement("button"); button.type = "button"; button.dataset.action = "retry-authoring-stage"; button.dataset.stageId = stage.id; button.textContent = `Retry ${stage.key}`; return button;
     }));
+    if (authoringApply && !createdWorld) {
+      const retryApply = button("retry-authoring-apply", "Retry world apply");
+      retryApply.disabled = creationController !== null;
+      stageActions.append(retryApply);
+    }
     requiredElement<HTMLButtonElement>(authoringResume, '[data-action="cancel-authoring"]').hidden = terminal || ["queued", "running", "recoverable", "cancel_requested"].includes(snapshot.job.status) === false;
     authoringResume.querySelectorAll<HTMLButtonElement>('[data-action="retry-authoring-stage"], [data-action="cancel-authoring"]').forEach(button => { button.disabled = snapshot.commandPending; });
   }
@@ -483,6 +491,7 @@ export function mountWorldCreationPage(
   function beginAuthoringSession(job: Awaited<ReturnType<AuthoringJobsApi["loadAuthoringJob"]>>): void {
     if (disposed || job.kind !== "world_concept" || job.target.kind !== "new_world") return;
     authoringSession?.dispose();
+    authoringApply = null;
     authoringSession = createAuthoringJobSession({
       job,
       loadAuthoringJob: authoringJobs!.loadAuthoringJob,
@@ -932,7 +941,9 @@ export function mountWorldCreationPage(
       error.dataset.creationError = "";
       error.tabIndex = -1;
       error.setAttribute("role", "alert");
-      error.textContent = `The world was not created. ${state.creationError.message} Your local work is unchanged; try again.`;
+      error.textContent = authoringApply
+        ? `Nexus did not confirm whether the world was created. ${state.creationError.message} Retry uses the same request key and frozen proposal.`
+        : `The world was not created. ${state.creationError.message} Your local work is unchanged; try again.`;
       editingStage.append(error);
     }
     if (createdWorld && coverError) {
@@ -1188,7 +1199,7 @@ export function mountWorldCreationPage(
   }
 
   async function performCover(
-    world: CreatedWorldResponse,
+    world: Pick<CreatedWorldResponse, "id">,
     intent: WorldCreationState["coverIntent"],
     controller: AbortController
   ): Promise<boolean> {
@@ -1231,11 +1242,17 @@ export function mountWorldCreationPage(
 
   async function submitCreation(): Promise<void> {
     if (creationController || createdWorld) return;
-    const validation = validateCreationStage(state, "review");
-    if (validation.issues.length > 0) {
-      renderReview();
-      editingStage.querySelector<HTMLElement>("[data-review-errors]")?.focus();
-      return;
+    // A request that may have committed before its response was lost is a
+    // frozen replay. It must not be replaced by current local edits, an
+    // applied poll, validation, or a synchronous legacy creation fallback.
+    const replay = authoringApply;
+    if (!replay) {
+      const validation = validateCreationStage(state, "review");
+      if (validation.issues.length > 0) {
+        renderReview();
+        editingStage.querySelector<HTMLElement>("[data-review-errors]")?.focus();
+        return;
+      }
     }
 
     const snapshot = worldCreationSubmissionSnapshot(state.draft);
@@ -1245,7 +1262,38 @@ export function mountWorldCreationPage(
     state = beginCreation(state);
     renderReview();
     try {
-      const result = await createWorld(snapshot, controller.signal);
+      const durableSession = authoringSession;
+      const durable = durableSession?.state();
+      const hasDurableWorldProposal = durableSession && durable?.job.kind === "world_concept" && durable.job.target.kind === "new_world" && authoringJobs;
+      const result = replay
+        ? await (async () => {
+          if (!authoringJobs) throw new Error("The frozen proposal cannot be retried without authoring service access.");
+          const receipt = await authoringJobs.applyAuthoringJob(replay.jobId, replay.input, controller.signal);
+          return { id: receipt.worldId };
+        })()
+        : hasDurableWorldProposal
+          ? await (async () => {
+          await durableSession.flush();
+          const current = durableSession.state().job;
+          const selectedStageIds = current.reviewedStageIds ?? [];
+          if (!current.canApply || !current.reviewedContent || !selectedStageIds.length) {
+            throw new Error("The reviewed proposal is not ready to apply.");
+          }
+          const frozen = {
+            jobId: current.id,
+            input: {
+              expectedRevision: current.revision,
+              idempotencyKey: crypto.randomUUID(),
+              selectedStageIds: structuredClone(selectedStageIds),
+              content: structuredClone(worldContentSchema.parse(current.reviewedContent))
+            }
+          };
+          authoringApply = frozen;
+          updateAuthoringResume();
+          const receipt = await authoringJobs.applyAuthoringJob(frozen.jobId, frozen.input, controller.signal);
+          return { id: receipt.worldId };
+        })()
+          : await createWorld(snapshot, controller.signal);
       if (disposed || creationController !== controller || controller.signal.aborted) return;
       createdWorld = result;
       state = completeCreation(state, result.id);
@@ -1265,6 +1313,7 @@ export function mountWorldCreationPage(
       editingStage.querySelector<HTMLElement>("[data-creation-error]")?.focus();
     } finally {
       if (creationController === controller) creationController = null;
+      updateAuthoringResume();
     }
   }
 
@@ -1555,7 +1604,7 @@ export function mountWorldCreationPage(
       renderStage();
     } else if (action === "continue-stage") validateAndContinue();
     else if (action === "back-stage") goBack();
-    else if (action === "create-world") void submitCreation();
+    else if (action === "create-world" || action === "retry-authoring-apply") void submitCreation();
     else if (action === "retry-cover") void retryCover();
     else if (action === "open-created-world" && createdWorld) {
       navigate(createdWorldDestination(createdWorld.id, "recovery"));

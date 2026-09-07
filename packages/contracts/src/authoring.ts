@@ -165,7 +165,9 @@ const worldConceptJobViewSchema = z.object({
   kind: z.literal("world_concept"),
   result: worldContentSchema.optional(),
   request: worldConceptSubmitSchema.optional(),
-  reviewedContent: worldContentSchema.optional()
+  reviewedContent: worldContentSchema.optional(),
+  /** Exact selection saved with the current owner review; list projections omit it. */
+  reviewedStageIds: z.array(authoringIdSchema).max(10_000).optional()
 }).strict();
 
 const characterJobViewSchema = z.object({
@@ -173,7 +175,9 @@ const characterJobViewSchema = z.object({
   kind: z.literal("character"),
   result: playableCharacterSchema.optional(),
   request: characterSubmitSchema.optional(),
-  reviewedContent: playableCharacterSchema.optional()
+  reviewedContent: playableCharacterSchema.optional(),
+  /** Exact selection saved with the current owner review; list projections omit it. */
+  reviewedStageIds: z.array(authoringIdSchema).max(10_000).optional()
 }).strict();
 
 /** Owner-only detail projection. It intentionally retains resumable proposal content. */

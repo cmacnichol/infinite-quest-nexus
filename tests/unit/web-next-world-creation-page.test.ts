@@ -2179,3 +2179,208 @@ it("P27-F1 durable adoption retains the saved roster without scheduling a change
   expect(document.querySelector("[data-character-roster]")?.textContent).toContain("Retained Hero");
   mounted.dispose(); vi.useRealTimers();
 });
+
+it.each(["identical", "changed"])("P28-F3 fix2 mounted resumed %s replacement saves current selection on explicit review and applies it", async scenario => {
+  vi.useFakeTimers();
+  const fixture = creationFixture();
+  Object.defineProperty(fixture.window, "location", { configurable: true, value: { href: "http://local/app/worlds/new?authoringJob=world-job" } });
+  Object.defineProperty(fixture.window, "history", { configurable: true, value: { replaceState: vi.fn() } });
+  let server: import("../../packages/contracts/src/authoring.js").AuthoringJobView = {
+    id: "world-job", kind: "world_concept", target: { kind: "new_world" }, revision: 2, status: "awaiting_review", canApply: false, incomplete: false,
+    expiresAt: "2026-09-13T00:00:00.000Z", reviewedContent: generatedPreview.content, reviewedStageIds: ["old-world"],
+    result: { ...generatedPreview.content, world: { ...generatedPreview.content.world, title: scenario === "changed" ? "Replacement generated" : generatedPreview.content.world.title } },
+    stages: [
+      { id: "old-world", key: "world", generation: 1, status: "validated", attemptCount: 1 },
+      { id: "current-world", key: "world", generation: 2, status: "validated", attemptCount: 1 },
+      { id: "unselected-sibling", key: "character:other", generation: 1, status: "validated", attemptCount: 1 }
+    ]
+  };
+  const save = vi.fn(async (_id, input) => { server = { ...server, revision: server.revision + 1, reviewedContent: input.content, reviewedStageIds: input.selectedStageIds, canApply: true }; return server; });
+  const apply = vi.fn().mockResolvedValue({ jobId: server.id, worldId: createdWorld.id, draftRevision: 1 }); const legacy = vi.fn();
+  const mounted = mountWorldCreationPage(fixture.root, { createWorld: legacy, navigate: vi.fn(), authoringJobsApi: {
+    loadAuthoringCapabilities: vi.fn().mockResolvedValue({ enabled: true, supportedKinds: ["world_concept"] }),
+    loadAuthoringJob: vi.fn(async () => server), saveAuthoringReview: save, applyAuthoringJob: apply
+  } as never });
+  try {
+    await vi.advanceTimersByTimeAsync(2100); expect(save).not.toHaveBeenCalled();
+    fixture.document.querySelector<HTMLButtonElement>('[data-action="adopt-authoring-result"]')!.click();
+    await vi.advanceTimersByTimeAsync(2100);
+    expect(save).toHaveBeenCalledOnce();
+    expect(save.mock.calls[0]?.[1]).toMatchObject({ selectedStageIds: ["current-world"], content: generatedPreview.content });
+    const title = fixture.document.querySelector<HTMLInputElement>('[name="world.title"]')!;
+    expect(title.value).toBe(generatedPreview.content.world.title);
+    title.value = "Human after review"; title.dispatchEvent(new fixture.window.Event("input", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(500);
+    for (let index = 0; index < 5; index += 1) fixture.document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')!.click();
+    fixture.document.querySelector<HTMLButtonElement>('[data-action="create-world"]')!.click(); await vi.advanceTimersByTimeAsync(0);
+    expect(apply).toHaveBeenCalledWith(server.id, expect.objectContaining({ selectedStageIds: ["current-world"], content: expect.objectContaining({ world: expect.objectContaining({ title: "Human after review" }) }) }), expect.any(AbortSignal));
+    expect(legacy).not.toHaveBeenCalled();
+  } finally { mounted.dispose(); vi.useRealTimers(); }
+});
+
+it("P28-F3 fix3 mounted explicit review queues current selection after an already pending historical autosave", async () => {
+  vi.useFakeTimers();
+  const fixture = creationFixture();
+  Object.defineProperty(fixture.window, "location", { configurable: true, value: { href: "http://local/app/worlds/new?authoringJob=world-job" } });
+  Object.defineProperty(fixture.window, "history", { configurable: true, value: { replaceState: vi.fn() } });
+  let server: import("../../packages/contracts/src/authoring.js").AuthoringJobView = {
+    id: "world-job", kind: "world_concept", target: { kind: "new_world" }, revision: 1, status: "awaiting_review", canApply: true, incomplete: false,
+    expiresAt: "2026-09-13T00:00:00.000Z", reviewedContent: generatedPreview.content, reviewedStageIds: ["old-world"], result: generatedPreview.content,
+    stages: [{ id: "old-world", key: "world", generation: 1, status: "validated", attemptCount: 1 }]
+  };
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const save = vi.fn(async (_id, input) => {
+    server = { ...server, revision: server.revision + 1, reviewedContent: input.content, reviewedStageIds: input.selectedStageIds, canApply: true };
+    const response = server;
+    if (save.mock.calls.length === 1) await pending;
+    return response;
+  });
+  const apply = vi.fn().mockResolvedValue({ jobId: server.id, worldId: createdWorld.id, draftRevision: 1 }); const legacy = vi.fn();
+  const mounted = mountWorldCreationPage(fixture.root, { createWorld: legacy, navigate: vi.fn(), authoringJobsApi: {
+    loadAuthoringCapabilities: vi.fn().mockResolvedValue({ enabled: true, supportedKinds: ["world_concept"] }),
+    loadAuthoringJob: vi.fn(async () => server), saveAuthoringReview: save, applyAuthoringJob: apply
+  } as never });
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    fixture.document.querySelector<HTMLButtonElement>('[data-action="adopt-authoring-result"]')!.click();
+    const title = fixture.document.querySelector<HTMLInputElement>('[name="world.title"]')!;
+    title.value = "Human before replacement"; title.dispatchEvent(new fixture.window.Event("input", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(500);
+    expect(save.mock.calls[0]?.[1].selectedStageIds).toEqual(["old-world"]);
+    server = { ...server, revision: 3, result: server.reviewedContent, canApply: false, stages: [
+      ...server.stages,
+      { id: "current-world", key: "world", generation: 2, status: "validated", attemptCount: 1 },
+      { id: "unselected-sibling", key: "character:other", generation: 1, status: "validated", attemptCount: 1 }
+    ] };
+    await vi.advanceTimersByTimeAsync(2100);
+    fixture.document.querySelector<HTMLButtonElement>('[data-action="adopt-authoring-result"]')!.click();
+    await vi.advanceTimersByTimeAsync(2100); expect(save).toHaveBeenCalledOnce();
+    release(); await vi.advanceTimersByTimeAsync(2100);
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(save.mock.calls[1]?.[1]).toMatchObject({ expectedRevision: 3, selectedStageIds: ["current-world"], content: { world: { title: "Human before replacement" } } });
+    for (let index = 0; index < 5; index += 1) fixture.document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')!.click();
+    fixture.document.querySelector<HTMLButtonElement>('[data-action="create-world"]')!.click(); await vi.advanceTimersByTimeAsync(0);
+    expect(apply).toHaveBeenCalledWith(server.id, expect.objectContaining({ expectedRevision: 4, selectedStageIds: ["current-world"], content: expect.objectContaining({ world: expect.objectContaining({ title: "Human before replacement" }) }) }), expect.any(AbortSignal));
+    expect(legacy).not.toHaveBeenCalled();
+  } finally { release(); mounted.dispose(); vi.useRealTimers(); }
+});
+
+it.each([undefined, []])("P28-F3 never reconstructs an absent or empty saved selection (%s)", async reviewedStageIds => {
+  vi.useFakeTimers();
+  const job = { id: "world-job", kind: "world_concept", target: { kind: "new_world" }, revision: 1, status: "awaiting_review",
+    expiresAt: "2026-09-13T00:00:00.000Z", incomplete: false, canApply: true, result: generatedPreview.content, reviewedContent: generatedPreview.content,
+    reviewedStageIds, stages: [{ id: "historical", key: "world", generation: 1, status: "validated", attemptCount: 1 }] };
+  const apply = vi.fn(); const legacy = vi.fn();
+  const { document, mounted } = durableReviewFixture("review", { createWorld: legacy, authoringJobsApi: {
+    loadAuthoringCapabilities: vi.fn().mockResolvedValue({ enabled: true, supportedKinds: ["world_concept"] }),
+    loadAuthoringJob: vi.fn().mockResolvedValue(job), saveAuthoringReview: vi.fn().mockResolvedValue(job), applyAuthoringJob: apply
+  } as never });
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    document.querySelector<HTMLButtonElement>('[data-action="create-world"]')!.click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(apply).not.toHaveBeenCalled(); expect(legacy).not.toHaveBeenCalled();
+    expect(document.querySelector("[data-creation-error]")?.textContent).toContain("not ready to apply");
+  } finally { mounted.dispose(); vi.useRealTimers(); }
+});
+
+it("P28-F1 flushes the first current-generation review before checking canApply", async () => {
+  vi.useFakeTimers();
+  const initial: import("../../packages/contracts/src/authoring.js").AuthoringJobView = {
+    id: "world-job", kind: "world_concept", target: { kind: "new_world" }, revision: 1, status: "awaiting_review",
+    expiresAt: "2026-09-13T00:00:00.000Z", incomplete: false, canApply: false, result: generatedPreview.content,
+    stages: [
+      { id: "old-world", key: "world", generation: 1, status: "validated", attemptCount: 1 },
+      { id: "current-world", key: "world", generation: 2, status: "validated", attemptCount: 1 }
+    ]
+  };
+  const calls: string[] = [];
+  const save = vi.fn(async (_id, input) => { calls.push("save"); return { ...initial, revision: 2, canApply: true, reviewedContent: input.content, reviewedStageIds: input.selectedStageIds }; });
+  const apply = vi.fn(async () => { calls.push("apply"); return { jobId: initial.id, worldId: createdWorld.id, draftRevision: 1 }; });
+  const legacy = vi.fn();
+  const { document, window, mounted } = durableReviewFixture("foundation", {
+    createWorld: legacy, navigate: vi.fn(), authoringJobsApi: {
+      loadAuthoringCapabilities: vi.fn().mockResolvedValue({ enabled: true, supportedKinds: ["world_concept"] }),
+      loadAuthoringJob: vi.fn().mockResolvedValue(initial), saveAuthoringReview: save, applyAuthoringJob: apply
+    } as never
+  });
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    const title = document.querySelector<HTMLInputElement>('[name="world.title"]')!;
+    title.value = "Human first review"; title.dispatchEvent(new window.Event("input", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>('[data-stage="review"]')!.click();
+    document.querySelector<HTMLButtonElement>('[data-action="create-world"]')!.click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toEqual(["save", "apply"]);
+    expect(save.mock.calls[0]?.[1].selectedStageIds).toEqual(["current-world"]);
+    expect(apply).toHaveBeenCalledWith(initial.id, expect.objectContaining({ expectedRevision: 2, selectedStageIds: ["current-world"], content: expect.objectContaining({ world: expect.objectContaining({ title: "Human first review" }) }) }), expect.any(AbortSignal));
+    expect(legacy).not.toHaveBeenCalled();
+  } finally { mounted.dispose(); vi.useRealTimers(); }
+});
+
+it.each(["applied poll", "edited review", "invalid review"])("P28-F1 replays the exact frozen world request after %s without legacy creation", async scenario => {
+  vi.useFakeTimers();
+  const { document, root, window } = creationFixture();
+  Object.defineProperty(window, "location", { configurable: true, value: { href: "http://local/app/worlds/new?authoringJob=world-job" } });
+  Object.defineProperty(window, "history", { configurable: true, value: { replaceState: vi.fn() } });
+  const job = {
+    id: "world-job", revision: 4, kind: "world_concept" as const, status: "awaiting_review" as const,
+    target: { kind: "new_world" as const },
+    stages: [
+      { id: "historical-world", key: "world", generation: 1, status: "validated" as const, attemptCount: 1 },
+      { id: "validated-world", key: "world", generation: 2, status: "validated" as const, attemptCount: 1 },
+      { id: "unselected-child", key: "character:hero", generation: 1, status: "validated" as const, attemptCount: 1 }
+    ],
+    reviewedStageIds: ["validated-world"],
+    expiresAt: "2026-09-13T00:00:00.000Z", incomplete: false, canApply: true,
+    request: { kind: "world_concept" as const, idempotencyKey: "proposal", target: { kind: "new_world" as const }, prompt: "Build the glass atlas." },
+    result: generatedPreview.content, reviewedContent: generatedPreview.content
+  };
+  const apply = vi.fn()
+    .mockRejectedValueOnce(new Error("response lost"))
+    .mockResolvedValueOnce({ jobId: job.id, worldId: createdWorld.id, draftRevision: 1 });
+  const legacyCreate = vi.fn();
+  const save = vi.fn().mockResolvedValue(job);
+  const load = vi.fn(async () => scenario === "applied poll" && apply.mock.calls.length
+    ? { ...job, revision: 5, status: "applied", canApply: false, request: undefined, result: undefined, reviewedContent: undefined, reviewedStageIds: undefined }
+    : job);
+  const initialState = { ...createWorldCreationState(), method: "ai" as const, stage: "review" as const, furthestStageIndex: 6, draft: generatedPreview.content };
+  const mounted = mountWorldCreationPage(root, {
+    initialState, createWorld: legacyCreate, navigate: vi.fn(),
+    authoringJobsApi: {
+      loadAuthoringCapabilities: vi.fn().mockResolvedValue({ enabled: true, supportedKinds: ["world_concept"] }),
+      loadAuthoringJob: load,
+      saveAuthoringReview: save,
+      applyAuthoringJob: apply
+    } as never
+  });
+  try {
+  await vi.advanceTimersByTimeAsync(0);
+  expect(root.textContent).toContain("Proposal world-job");
+  document.querySelector<HTMLButtonElement>('[data-action="create-world"]')?.click();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(apply).toHaveBeenCalledTimes(1);
+  expect(document.querySelector("[data-creation-error]")?.textContent).toContain("did not confirm");
+  const savedCount = save.mock.calls.length;
+  if (scenario === "applied poll") {
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(document.querySelector("[data-authoring-resume-status]")?.textContent).toContain("applied");
+  } else {
+    document.querySelector<HTMLButtonElement>('[data-stage="foundation"]')!.click();
+    const title = document.querySelector<HTMLInputElement>('[name="world.title"]')!;
+    title.value = scenario === "invalid review" ? "" : "Later local edit";
+    title.dispatchEvent(new window.Event("input", { bubbles: true }));
+    expect(title.value).toBe(scenario === "invalid review" ? "" : "Later local edit");
+    document.querySelector<HTMLButtonElement>('[data-stage="review"]')!.click();
+  }
+  const retryAction = scenario === "invalid review" ? "retry-authoring-apply" : "create-world";
+  document.querySelector<HTMLButtonElement>(`[data-action="${retryAction}"]`)!.click();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(apply).toHaveBeenCalledTimes(2);
+  expect(apply).toHaveBeenCalledWith(job.id, expect.objectContaining({ expectedRevision: job.revision, selectedStageIds: ["validated-world"], content: generatedPreview.content }), expect.any(AbortSignal));
+  expect(apply.mock.calls[1]?.slice(0, 2)).toEqual(apply.mock.calls[0]?.slice(0, 2));
+  expect(save).toHaveBeenCalledTimes(savedCount);
+  expect(legacyCreate).not.toHaveBeenCalled();
+  } finally { mounted.dispose(); vi.useRealTimers(); }
+});

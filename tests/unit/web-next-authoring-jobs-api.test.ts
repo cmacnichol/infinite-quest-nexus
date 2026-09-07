@@ -9,6 +9,20 @@ const job = {
 };
 
 describe("authoring jobs API", () => {
+  it("P28-F3 carries the saved review subset through HTTP validation into the apply request", async () => {
+    const calls: { path: string; body: unknown }[] = [];
+    const api = createAuthoringJobsApi(async (path, init) => {
+      calls.push({ path: String(path), body: init?.body ? JSON.parse(String(init.body)) : null });
+      return new Response(JSON.stringify(String(path).endsWith("/apply")
+        ? { jobId: job.id, worldId: "world", draftRevision: 1 }
+        : { ...job, reviewedContent: job.result, reviewedStageIds: ["current-selected"] }), { status: 200 });
+    });
+    const review = await api.saveAuthoringReview(job.id, { expectedRevision: 1, content: job.result, selectedStageIds: ["current-selected"] });
+    await api.applyAuthoringJob(job.id, { expectedRevision: review.revision, idempotencyKey: "frozen-key", content: review.reviewedContent!, selectedStageIds: review.reviewedStageIds! });
+    expect(calls[0]?.body).toMatchObject({ selectedStageIds: ["current-selected"] });
+    expect(calls[1]?.body).toMatchObject({ expectedRevision: 2, selectedStageIds: ["current-selected"], idempotencyKey: "frozen-key", content: job.result });
+  });
+
   it("validates a submitted job and every command response through the shared contracts", async () => {
     const fetch = vi.fn(async (_url: string, init?: RequestInit) => new Response(JSON.stringify(job), { status: 202, headers: { "content-type": "application/json" } }));
     const api = createAuthoringJobsApi(fetch as typeof globalThis.fetch);

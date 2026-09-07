@@ -124,7 +124,7 @@ integration("durable authoring real repository and stage dispatcher", () => {
 
   it.each(["new standalone", "existing-world addition", "canonical existing edit", "local-parent edit"] as const)("preserves %s identity through submit, replay, claim recovery and explicit retry", async (mode) => {
     const repository = createPostgresAuthoringRepository(pool);
-    const application = createAuthoringApplication({ repository, targets: createPostgresAuthoringTargetPort(pool), sha256 });
+    const application = createAuthoringApplication({ repository, targets: createPostgresAuthoringTargetPort(pool), worlds: {} as never, sha256 });
     const edit = mode.endsWith("edit");
     const content = worldContentSchema.parse({ world: { title: "Identity fixture" }, playableCharacters: edit ? [playableCharacterSchema.parse({ ...fixture.character, id: "existing-hero" })] : [] });
     let target: { kind: "new_world" } | { kind: "world_draft"; worldId: string; expectedRevision: number } = { kind: "new_world" };

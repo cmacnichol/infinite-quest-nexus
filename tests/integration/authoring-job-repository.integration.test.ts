@@ -917,6 +917,7 @@ integration("authoring job PostgreSQL repository", () => {
     const application = createAuthoringApplication({
       repository,
       targets: createPostgresAuthoringTargetPort(pool),
+      worlds: {} as never,
       sha256: (value) => createHash("sha256").update(value).digest("hex")
     });
     const base = {
@@ -995,7 +996,9 @@ integration("authoring job PostgreSQL repository", () => {
     })).resolves.toBe(true);
 
     const partial = await repository.read({ ownerUserId }, submitted.id);
-    expect(partial).toMatchObject({ status: "recoverable", canApply: true, incomplete: true });
+    // A partial result is reviewable, but P2.8 only advertises apply after an
+    // explicit saved review includes a current selected stage set.
+    expect(partial).toMatchObject({ status: "recoverable", canApply: false, incomplete: true });
     expect(partial!.result).toMatchObject({
       world: { title: "TDD Lantern" },
       playableCharacters: [expect.objectContaining({ id: "hero" })]

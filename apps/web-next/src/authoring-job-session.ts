@@ -86,9 +86,19 @@ export function createAuthoringJobSession(options: AuthoringJobSessionOptions): 
   let reloadController: AbortController | null = null;
   let saving: Promise<void> | null = null;
   let savingCandidate: AuthoringResult | null = null;
+  // Undefined means no review has ever been saved: select the then-current
+  // validated stages for the first review only. Once a review exists, its
+  // deliberate subset (including []) is authoritative until replaced.
+  let savedSelection: string[] | null = job.reviewedStageIds === undefined ? null : [...job.reviewedStageIds];
 
+  function currentValidatedStages() {
+    return job.stages.filter(stage => stage.status === "validated" &&
+      !job.stages.some(other => other.key === stage.key && other.generation > stage.generation));
+  }
   function selectedStageIds(): string[] {
-    return job.stages.filter((stage) => stage.status === "validated").map((stage) => stage.id);
+    return savedSelection === null
+      ? currentValidatedStages().map(stage => stage.id)
+      : [...savedSelection];
   }
   function clearSaveTimer(): void { if (saveTimer !== null) cancelTimer(saveTimer); saveTimer = null; }
   function clearPollTimer(): void { if (pollTimer !== null) cancelTimer(pollTimer); pollTimer = null; }
@@ -111,6 +121,7 @@ export function createAuthoringJobSession(options: AuthoringJobSessionOptions): 
     clearSaveTimer();
     if (disposed || unavailable || saveController || isTerminal(job.status) || !localDirty || !candidate || !options.saveReview || commandPending || conflictFrozen) return;
     const generation = ++saveGeneration;
+    const savedEditGeneration = editGeneration;
     const expectedRevision = job.revision;
     saveState = "saving";
     const signal = new AbortController();
@@ -120,9 +131,14 @@ export function createAuthoringJobSession(options: AuthoringJobSessionOptions): 
     try {
       const received = await options.saveReview(job.id, { expectedRevision, content: candidate, selectedStageIds: selectedStageIds() }, signal.signal);
       if (disposed || generation !== saveGeneration || saveController !== signal) return;
-      if (received.revision >= job.revision) job = received;
-      // Do not erase a new edit made while the save was in flight.
-      if (!localDirty || equal(candidate, received.reviewedContent ?? received.result)) localDirty = false;
+      const editedWhileSaving = editGeneration !== savedEditGeneration;
+      if (received.revision >= job.revision) {
+        job = received;
+        if (!editedWhileSaving && received.reviewedStageIds !== undefined) savedSelection = [...received.reviewedStageIds];
+      }
+      // Content and selection belong to the same review. A response can only
+      // acknowledge the edit generation it submitted, including selection-only adoption.
+      localDirty = editedWhileSaving || !equal(candidate, received.reviewedContent ?? received.result);
       saveState = localDirty ? "idle" : "saved";
       if (localDirty) scheduleSave();
       notify();
@@ -171,6 +187,7 @@ export function createAuthoringJobSession(options: AuthoringJobSessionOptions): 
     if (conflictFrozen && !isTerminal(received.status)) return;
     if (!isTerminal(received.status) && received.reviewedContent && !equal(received.reviewedContent, job.reviewedContent) && !equal(received.reviewedContent, candidate) && !equal(received.reviewedContent, savingCandidate)) {
       conflictFrozen = true; saveState = "conflict"; remoteCandidate = received.reviewedContent; job = received;
+      if (received.reviewedStageIds !== undefined) savedSelection = [...received.reviewedStageIds];
       saveGeneration += 1; saveController?.abort();
       clearSaveTimer(); notify(); return;
     }
@@ -178,6 +195,7 @@ export function createAuthoringJobSession(options: AuthoringJobSessionOptions): 
     const generated = received.result ?? candidateFor(received);
     const newlyGenerated = received.result !== undefined && !equal(received.result, priorResult);
     job = received;
+    if (!localDirty && received.reviewedStageIds !== undefined) savedSelection = [...received.reviewedStageIds];
     if (isTerminal(received.status)) {
       clearSaveTimer(); clearPollTimer();
       saveState = "idle";
@@ -224,8 +242,22 @@ export function createAuthoringJobSession(options: AuthoringJobSessionOptions): 
     hasPendingGeneratedResult: () => remoteCandidate !== null,
     adoptPendingResult() {
       if (disposed || unavailable || conflictFrozen || isTerminal(job.status)) return null;
+      let selectionChanged = false;
+      // Explicit review reconciles stage identity even when replacement text
+      // is identical or the replacement was already present on resume. Polls
+      // and ordinary edits must never advance the saved selection themselves.
+      if (savedSelection !== null) {
+        const selectedKeys = new Set(job.stages.filter(stage => savedSelection!.includes(stage.id)).map(stage => stage.key));
+        const selection = currentValidatedStages().filter(stage => selectedKeys.has(stage.key)).map(stage => stage.id);
+        selectionChanged = !equal(savedSelection, selection);
+        savedSelection = selection;
+      }
+      if (selectionChanged || remoteCandidate) editGeneration += 1;
       if (remoteCandidate) {
         candidate = remoteCandidate; remoteCandidate = null; localDirty = true;
+      }
+      if (selectionChanged || localDirty) {
+        localDirty = true;
         saveState = "idle"; scheduleSave(); notify();
       }
       return candidate;
@@ -260,7 +292,7 @@ export function createAuthoringJobSession(options: AuthoringJobSessionOptions): 
       conflictFrozen = false;
       if (startingEdit !== editGeneration) { receive(received); return; }
       clearSaveTimer(); saveGeneration += 1; saveController?.abort();
-      job = received; candidate = candidateFor(received); localDirty = false; remoteCandidate = null; saveState = "saved";
+      job = received; if (received.reviewedStageIds !== undefined) savedSelection = [...received.reviewedStageIds]; candidate = candidateFor(received); localDirty = false; remoteCandidate = null; saveState = "saved";
       notify(); schedulePoll(1_000);
     },
     dispose() { if (disposed) return; disposed = true; clearSaveTimer(); clearPollTimer(); abortAll(); }

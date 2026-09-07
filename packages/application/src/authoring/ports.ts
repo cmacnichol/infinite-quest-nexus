@@ -12,6 +12,22 @@ import type {
   AuthoringStageOutput,
   AuthoringWorldDraftTarget
 } from "./types.js";
+import type { AuthoringApplyReceipt, AuthoringTarget } from "@infinite-quest/contracts";
+import type { PlayableCharacter, WorldContent } from "@infinite-quest/contracts";
+
+/** Opaque transaction binding owned by the persistence adapter. */
+export interface AuthoringTransaction {
+  readonly __authoringTransaction?: never;
+}
+
+export interface AuthoringWorldApplyPort {
+  applyInTransaction(
+    transaction: AuthoringTransaction,
+    scope: OwnerScope,
+    target: AuthoringTarget,
+    content: WorldContent | PlayableCharacter
+  ): Promise<{ worldId: string; draftRevision: number; characterId?: string }>;
+}
 
 export type AuthoringClaim = Readonly<{
   jobId: string;
@@ -36,6 +52,13 @@ export interface AuthoringRepository {
   retry(scope: OwnerScope, jobId: string, stageId: string, expectedRevision: number): Promise<AuthoringJobView>;
   cancel(scope: OwnerScope, jobId: string, expectedRevision: number): Promise<AuthoringJobView>;
   discard(scope: OwnerScope, jobId: string, expectedRevision: number): Promise<void>;
+  apply(
+    scope: OwnerScope,
+    jobId: string,
+    input: AuthoringApply,
+    requestHash: string,
+    worlds: AuthoringWorldApplyPort
+  ): Promise<AuthoringApplyReceipt>;
 }
 
 /** Read/check port used before durable enqueue; it carries no publishing or campaign capability. */
@@ -46,6 +69,7 @@ export interface AuthoringTargetPort {
 export interface AuthoringApplicationDependencies {
   repository: AuthoringRepository;
   targets: AuthoringTargetPort;
+  worlds: AuthoringWorldApplyPort;
   sha256: (value: string) => string;
 }
 
