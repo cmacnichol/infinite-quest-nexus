@@ -33,6 +33,8 @@ import { withTransaction, type DatabaseClient, type DatabasePool } from "./pool.
 const MAX_INPUT_BYTES = 2 * 1024 * 1024;
 const MAX_LEASE_SECONDS = 3_600;
 const PAGE_SIZE = 20;
+const ACTIVE_JOB_LIMIT = 5;
+const ACTIVE_JOB_STATUSES = ["queued", "running", "awaiting_review", "recoverable", "cancel_requested"];
 
 type JobRow = {
   id: string;
@@ -421,6 +423,9 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
         throw new RangeError("Authoring input exceeds the 2 MiB durable submission limit.");
       }
       const job = await withTransaction(pool, async (client) => {
+        // Serialize every owner enqueue before replay lookup and capacity
+        // accounting. A same-key replay must win even when the owner is full.
+        await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`authoring-active:${scope.ownerUserId}`]);
         const existing = await client.query<JobRow>(
           `SELECT ${JOB_SELECT} FROM authoring_jobs WHERE owner_user_id = $1 AND idempotency_key = $2 FOR UPDATE`,
           [scope.ownerUserId, input.idempotencyKey]
@@ -430,6 +435,17 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
           if (replay.requestHash !== hash) throw new AuthoringRepositoryError("idempotency_conflict");
           if (isDiscardedInput(replay.input)) throw new AuthoringRepositoryError("invalid_state");
           return replay;
+        }
+        // The replay check deliberately runs before this count. An existing
+        // durable request remains safe to resume even when the owner is at cap.
+        const active = await client.query<{ count: number }>(
+          `SELECT count(*)::int AS count FROM authoring_jobs
+            WHERE owner_user_id = $1 AND expires_at > clock_timestamp()
+              AND status = ANY($2::text[]) AND input <> '{"discarded":true}'::jsonb`,
+          [scope.ownerUserId, ACTIVE_JOB_STATUSES]
+        );
+        if ((active.rows[0]?.count ?? 0) >= ACTIVE_JOB_LIMIT) {
+          throw new AuthoringRepositoryError("active_job_limit");
         }
         if (input.target.kind === "world_draft") await assertDraftTarget(client, scope, input.target);
         const inserted = await client.query<JobRow>(

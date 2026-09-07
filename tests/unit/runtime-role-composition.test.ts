@@ -24,6 +24,7 @@ import type {
   MemoryWorkerApplication,
   WorldCampaignApplication
   , AuthoringWorkerApplication
+  , AuthoringApplication
 } from "../../packages/application/src/index.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
@@ -46,6 +47,7 @@ const workerIllustration = { kind: "worker-illustration" } as unknown as Illustr
 const memory = { kind: "memory" } as unknown as MemoryApplication;
 const workerMemory = { kind: "worker-memory" } as unknown as MemoryWorkerApplication;
 const workerAuthoring = { kind: "worker-authoring", runNext: async () => false } as unknown as AuthoringWorkerApplication;
+const apiAuthoring = { kind: "api-authoring" } as unknown as AuthoringApplication;
 const worldCampaign = { kind: "world-campaign" } as unknown as WorldCampaignApplication;
 const generationEvents = { kind: "generation-events" } as unknown as GenerationEventSource;
 const providerTransport = { kind: "provider-transport" } as unknown as ProviderTransport;
@@ -108,6 +110,7 @@ function dependencies(controller: AbortController) {
       createWorkerIllustration: vi.fn(() => workerIllustration),
       createWorkerGeneration: vi.fn(() => workerGeneration),
       createWorkerAuthoring: vi.fn(() => workerAuthoring),
+      createApiAuthoring: vi.fn(() => apiAuthoring),
       migrateDatabase: vi.fn(async () => []),
       runWorker: vi.fn(async () => undefined),
       waitForDatabaseMigrations: vi.fn(async () => undefined)
@@ -170,6 +173,7 @@ describe("runtime role generation composition", () => {
       providers: providerApiAdapter,
       generationEvents,
       worldCampaign,
+      authoring: apiAuthoring,
       infiniteWorldsProviders: apiInfiniteWorldsProviders,
     });
     expect(values.runWorker).not.toHaveBeenCalled();
@@ -241,6 +245,7 @@ describe("runtime role generation composition", () => {
       providers: providerApiAdapter,
       generationEvents,
       worldCampaign,
+      authoring: apiAuthoring,
       infiniteWorldsProviders: apiInfiniteWorldsProviders,
     });
     expect(values.runWorker).toHaveBeenCalledWith(

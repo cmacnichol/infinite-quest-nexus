@@ -43,14 +43,17 @@ function requestHash(input: AuthoringSubmit, sha256: AuthoringSha256): string {
 }
 
 function mapRepositoryError(error: unknown): never {
+  if (error instanceof RangeError) throw new AuthoringApplicationError("authoring_input_too_large");
   if (error instanceof AuthoringRepositoryError) {
     const code = error.code === "idempotency_conflict"
       ? "authoring_idempotency_conflict"
       : error.code === "revision_conflict"
         ? "authoring_revision_conflict"
-        : error.code === "not_found"
+      : error.code === "not_found"
           ? "authoring_not_found"
-          : "authoring_invalid_state";
+          : error.code === "active_job_limit"
+            ? "authoring_active_job_limit"
+            : "authoring_invalid_state";
     throw new AuthoringApplicationError(code);
   }
   throw error;

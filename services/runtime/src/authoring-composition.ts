@@ -1,10 +1,12 @@
 import {
+  createAuthoringApplication,
   createAuthoringWorkerApplication,
+  type AuthoringApplication,
   type AuthoringExecutionRepository,
   type AuthoringStageOutput,
   type AuthoringWorkerApplication
 } from "../../../packages/application/src/index.js";
-import { createPostgresAuthoringRepository } from "../../../packages/database/src/authoring-job-repository.js";
+import { createPostgresAuthoringRepository, createPostgresAuthoringTargetPort } from "../../../packages/database/src/authoring-job-repository.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import type { AuthoringWorkerProviderCollaborators } from "./provider-application-composition.js";
 import {
@@ -16,6 +18,18 @@ import {
 } from "./authoring-stage-adapter.js";
 
 type RuntimeRepository = AuthoringExecutionRepository;
+
+/** Provider-free API composition. Execution credentials stay in the worker graph. */
+export function createRuntimeAuthoringApplication(
+  pool: DatabasePool,
+  sha256: (value: string) => string
+): AuthoringApplication {
+  return createAuthoringApplication({
+    repository: createPostgresAuthoringRepository(pool),
+    targets: createPostgresAuthoringTargetPort(pool),
+    sha256
+  });
+}
 
 function heartbeatDelayMilliseconds(leaseSeconds: number, requested?: number): number {
   const safeMaximum = Math.max(1, Math.floor(leaseSeconds * 1000 / 2));

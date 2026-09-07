@@ -185,10 +185,40 @@ export const authoringJobListItemSchema = z.object({
   kind: authoringKindSchema
 }).strict();
 
+/** Compatibility discovery has no provider or proposal details. */
+export const authoringCapabilitiesSchema = z.object({
+  enabled: z.boolean(),
+  supportedKinds: z.array(authoringKindSchema),
+  limits: z.object({
+    activeJobsPerOwner: z.literal(5),
+    maximumInputBytes: z.literal(2 * 1024 * 1024),
+    listPageSize: z.literal(20)
+  }).strict()
+}).strict();
+
+export const authoringJobPageSchema = z.object({
+  jobs: z.array(authoringJobListItemSchema).max(20),
+  nextCursor: z.string().min(1).optional()
+}).strict();
+
 export const authoringReviewSchema = z.object({
   expectedRevision: authoringRevisionSchema,
   content: z.union([worldContentSchema, playableCharacterSchema]),
   selectedStageIds: z.array(authoringIdSchema).max(10_000)
+}).strict();
+
+/** Strict command envelopes shared by the HTTP API and replacement client. */
+export const authoringRetrySchema = z.object({
+  stageId: authoringIdSchema,
+  expectedRevision: authoringRevisionSchema
+}).strict();
+
+export const authoringRevisionCommandSchema = z.object({
+  expectedRevision: authoringRevisionSchema
+}).strict();
+
+export const authoringJobListQuerySchema = z.object({
+  cursor: z.string().min(1).max(2_000).optional()
 }).strict();
 
 export const authoringApplySchema = z.object({
@@ -230,7 +260,11 @@ export type AuthoringSubmit = z.infer<typeof authoringSubmitSchema>;
 export type AuthoringStageView = z.infer<typeof authoringStageViewSchema>;
 export type AuthoringJobView = z.infer<typeof authoringJobViewSchema>;
 export type AuthoringJobListItem = z.infer<typeof authoringJobListItemSchema>;
+export type AuthoringCapabilities = z.infer<typeof authoringCapabilitiesSchema>;
+export type AuthoringJobPage = z.infer<typeof authoringJobPageSchema>;
 export type AuthoringReview = z.infer<typeof authoringReviewSchema>;
+export type AuthoringRetry = z.infer<typeof authoringRetrySchema>;
+export type AuthoringRevisionCommand = z.infer<typeof authoringRevisionCommandSchema>;
 export type AuthoringApply = z.infer<typeof authoringApplySchema>;
 export type AuthoringApplyReceipt = z.infer<typeof authoringApplyReceiptSchema>;
 export type AuthoringJobCommandContext = z.infer<typeof authoringJobCommandContextSchema>;

@@ -124,6 +124,37 @@ integration("authoring job PostgreSQL repository", () => {
     });
   });
 
+  it("admits exactly five concurrent active proposals while retaining same-key replay and retry at capacity", async () => {
+    const repository = createPostgresAuthoringRepository(pool);
+    const requests = Array.from({ length: 8 }, (_, index) => input(`active-cap-${index}-${crypto.randomUUID()}`));
+    const results = await Promise.allSettled(requests.map((request, index) =>
+      repository.submit({ ownerUserId }, request, `${index}`.padStart(64, "a"))
+    ));
+    const accepted = results.filter((result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof repository.submit>>> => result.status === "fulfilled");
+    const rejected = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+    jobIds.push(...accepted.map((result) => result.value.id));
+
+    expect(accepted).toHaveLength(5);
+    expect(rejected).toHaveLength(3);
+    expect(rejected.map((result) => result.reason)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "active_job_limit" })
+    ]));
+    await expect(repository.submit({ ownerUserId }, requests[0]!, "a".repeat(63) + "0"))
+      .resolves.toMatchObject({ id: accepted[0]!.value.id });
+
+    const retryable = accepted[0]!.value;
+    await pool.query("UPDATE authoring_jobs SET status = 'recoverable' WHERE id = $1", [retryable.id]);
+    await pool.query("UPDATE authoring_job_stages SET status = 'recoverable' WHERE id = $1", [retryable.stages[0]!.id]);
+    await expect(repository.retry({ ownerUserId }, retryable.id, retryable.stages[0]!.id, retryable.revision))
+      .resolves.toMatchObject({ id: retryable.id, status: "queued" });
+
+    const active = await pool.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM authoring_jobs WHERE owner_user_id = $1 AND expires_at > clock_timestamp() AND status = ANY($2::text[])",
+      [ownerUserId, ["queued", "running", "awaiting_review", "recoverable", "cancel_requested"]]
+    );
+    expect(active.rows[0]?.count).toBe(5);
+  });
+
   it("rolls back a submission when its required first stage cannot be created", async () => {
     const repository = createPostgresAuthoringRepository(pool);
     const request = input();
@@ -557,7 +588,14 @@ integration("authoring job PostgreSQL repository", () => {
 
   it("paginates owner metadata in stable 20-item pages without proposal fields", async () => {
     const repository = createPostgresAuthoringRepository(pool);
-    const submissions = await Promise.all(Array.from({ length: 21 }, (_, index) => repository.submit({ ownerUserId }, input(`page-${index}-${crypto.randomUUID()}`), "a".repeat(63) + (index % 10))));
+    const submissions = [];
+    for (let index = 0; index < 21; index += 1) {
+      const submitted = await repository.submit({ ownerUserId }, input(`page-${index}-${crypto.randomUUID()}`), "a".repeat(63) + (index % 10));
+      submissions.push(submitted);
+      // These retained rows exercise list pagination without bypassing the
+      // production five-active-proposal admission rule.
+      await pool.query("UPDATE authoring_jobs SET status = 'failed' WHERE id = $1", [submitted.id]);
+    }
     jobIds.push(...submissions.map((job) => job.id));
     const foreign = await pool.query<{ id: string }>("INSERT INTO users (display_name) VALUES ($1) RETURNING id", [`Foreign list owner ${crypto.randomUUID()}`]);
     const foreignOwnerUserId = foreign.rows[0]!.id;
