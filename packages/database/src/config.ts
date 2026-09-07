@@ -41,6 +41,7 @@ export type RuntimeConfig = {
   workerPollIntervalMs: number;
   workerLeaseSeconds: number;
   workerGenerationConcurrency: number;
+  aiAuthoringJobsEnabled?: boolean;
   legacyWebRoot: string;
   nextWebRoot: string;
   assetStorageDriver: "filesystem";
@@ -222,6 +223,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
     workerPollIntervalMs: integerSetting("WORKER_POLL_INTERVAL_MS", 2000, 250, 60000),
     workerLeaseSeconds: integerSetting("WORKER_LEASE_SECONDS", 60, 15, 3600),
     workerGenerationConcurrency,
+    aiAuthoringJobsEnabled: booleanSetting("AI_AUTHORING_JOBS_ENABLED", false),
     legacyWebRoot: resolve(process.env.LEGACY_WEB_ROOT?.trim() || "apps/web/dist"),
     nextWebRoot: resolve(process.env.NEXT_WEB_ROOT?.trim() || "apps/web-next/dist"),
     assetStorageDriver: "filesystem",

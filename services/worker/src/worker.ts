@@ -1,6 +1,7 @@
 import { hostname } from "node:os";
 import type {
   GenerationWorkerApplication,
+  AuthoringWorkerApplication,
   IllustrationApplication,
   IllustrationWorkerApplication,
   MemoryWorkerApplication
@@ -29,6 +30,7 @@ export type WorkerDependencies = Readonly<{
   illustration: IllustrationWorkerApplication;
   generationIllustration?: IllustrationApplication;
   memory: MemoryWorkerApplication;
+  authoring?: AuthoringWorkerApplication;
   optionalLanes?: WorkerOptionalLanes;
 }>;
 
@@ -37,6 +39,8 @@ export type WorkerOptionalLanes = Readonly<{
   chronicle(): Promise<boolean>;
   asset(): Promise<boolean>;
   systemArchive?(): Promise<boolean>;
+  authoring?(): Promise<boolean>;
+  authoringCleanup?(): Promise<boolean>;
 }>;
 
 export type StartedGeneration = Readonly<{
@@ -99,9 +103,10 @@ function wait(milliseconds: number, signal: AbortSignal): Promise<void> {
 }
 
 type ActiveLane = {
-  name: "illustration" | "chronicle" | "asset" | "system-archive";
+  name: "illustration" | "chronicle" | "asset" | "system-archive" | "authoring" | "authoring-cleanup";
   active: Set<Promise<boolean>>;
   nextEligibleAt: number;
+  pollAfterWork?: boolean;
   run(): Promise<boolean>;
 };
 
@@ -132,6 +137,7 @@ function defaultOptionalLanes(
   maintenance: PrivateAssetMaintenanceComposition,
   illustrationPublication: PrivateIllustrationAssetPublicationComposition,
   systemArchive: ProductionSystemArchiveWorkerLane | undefined,
+  authoring: AuthoringWorkerApplication | undefined,
   signal: AbortSignal,
 ): WorkerOptionalLanes {
   return {
@@ -164,6 +170,12 @@ function defaultOptionalLanes(
       return result.completed > 0;
     },
     ...(systemArchive === undefined ? {} : { systemArchive: systemArchive.runNext }),
+    ...(authoring === undefined || typeof authoring.cleanup !== "function" ? {} : {
+      authoringCleanup: async () => (await authoring.cleanup()) > 0
+    }),
+    ...(authoring === undefined || config.aiAuthoringJobsEnabled !== true ? {} : {
+      authoring: () => authoring.runNext({ workerId, leaseSeconds: config.workerLeaseSeconds })
+    }),
   };
 }
 
@@ -193,7 +205,7 @@ export async function runWorker(
   pool: DatabasePool,
   config: RuntimeConfig,
   signal: AbortSignal,
-  { generation, illustration, generationIllustration, memory, optionalLanes: injectedOptionalLanes }: WorkerDependencies
+  { generation, illustration, generationIllustration, memory, authoring, optionalLanes: injectedOptionalLanes }: WorkerDependencies
 ): Promise<void> {
   const workerId = `${hostname()}:${process.pid}:${crypto.randomUUID().slice(0, 8)}`;
   logger.info({ event: "worker_started", workerId });
@@ -228,7 +240,7 @@ export async function runWorker(
   }
   const activeGeneration = new Set<Promise<boolean>>();
   let generationNextEligibleAt = 0;
-  const optionalLanes = injectedOptionalLanes ?? defaultOptionalLanes(
+  const configuredOptionalLanes = injectedOptionalLanes ?? defaultOptionalLanes(
     pool,
     config,
     workerId,
@@ -238,8 +250,13 @@ export async function runWorker(
     maintenance!,
     illustrationPublication!,
     systemArchive,
+    authoring,
     signal,
   );
+  const { authoring: configuredAuthoring, ...nonAuthoringLanes } = configuredOptionalLanes;
+  const optionalLanes: WorkerOptionalLanes = config.aiAuthoringJobsEnabled === true
+    ? configuredOptionalLanes
+    : nonAuthoringLanes;
   const lanes: ActiveLane[] = [
     { name: "illustration", active: new Set(), nextEligibleAt: 0, run: optionalLanes.illustration },
     { name: "chronicle", active: new Set(), nextEligibleAt: 0, run: optionalLanes.chronicle },
@@ -249,6 +266,19 @@ export async function runWorker(
       active: new Set<Promise<boolean>>(),
       nextEligibleAt: 0,
       run: optionalLanes.systemArchive,
+    }]),
+    ...(optionalLanes.authoring === undefined ? [] : [{
+      name: "authoring" as const,
+      active: new Set<Promise<boolean>>(),
+      nextEligibleAt: 0,
+      run: optionalLanes.authoring,
+    }]),
+    ...(optionalLanes.authoringCleanup === undefined ? [] : [{
+      name: "authoring-cleanup" as const,
+      active: new Set<Promise<boolean>>(),
+      nextEligibleAt: 0,
+      pollAfterWork: true,
+      run: optionalLanes.authoringCleanup,
     }]),
   ];
 
@@ -304,15 +334,18 @@ export async function runWorker(
     }
 
     // Each optional lane is independently bounded at one active promise. A
-    // lane that finds no work waits for the poll interval, while completed
-    // work is eligible for immediate refill on the next full rotation.
+    // lane that finds no work waits for the poll interval. Cleanup also waits
+    // after productive work so a full bounded cleanup batch cannot become a
+    // continuous backlog-draining loop.
     for (const lane of lanes) {
       if (signal.aborted || lane.active.size > 0 || Date.now() < lane.nextEligibleAt) continue;
       let tracked!: Promise<boolean>;
       tracked = Promise.resolve()
         .then(() => lane.run())
         .then((worked) => {
-          lane.nextEligibleAt = worked ? 0 : Date.now() + config.workerPollIntervalMs;
+          lane.nextEligibleAt = worked && !lane.pollAfterWork
+            ? 0
+            : Date.now() + config.workerPollIntervalMs;
           return worked;
         })
         .catch((error) => {
@@ -328,7 +361,9 @@ export async function runWorker(
                   ...(diagnostic === undefined ? {} : { diagnostic }),
                 };
               })()
-              : { message: error instanceof Error ? error.message : String(error) })
+              : lane.name === "authoring" || lane.name === "authoring-cleanup"
+                ? { errorCode: "authoring-execution-failed", message: "Authoring job execution failed." }
+                : { message: error instanceof Error ? error.message : String(error) })
           });
           return false;
         })
@@ -372,6 +407,7 @@ export async function runWorker(
         chronicleJobs: lanes[1]!.active.size,
         assetJobs: lanes[2]!.active.size,
         systemArchiveJobs: lanes.find((lane) => lane.name === "system-archive")?.active.size ?? 0,
+        authoringJobs: lanes.find((lane) => lane.name === "authoring")?.active.size ?? 0,
       });
       await Promise.allSettled(draining);
     }

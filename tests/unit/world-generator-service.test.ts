@@ -471,6 +471,20 @@ describe("generateTemplateWorld orchestration", () => {
     ]));
   });
 
+  it("reports original world repair progress before expanding any character", async () => {
+    const harness = generationHarness([
+      providerResult("{"),
+      providerResult(worldDraftResponse(3)),
+      ...[1, 2, 3].map((index) => providerResult(JSON.stringify(character(`Character ${index}`))))
+    ]);
+    await harness.run();
+    const recovery = { phase: "recovering_world", percent: 35, message: "Generated world was incomplete. Requesting a complete replacement…" };
+    expect(harness.progressUpdates.filter((update) => update.phase === "recovering_world")).toEqual([recovery]);
+    expect(harness.progressUpdates.findIndex((update) => update.phase === "recovering_world"))
+      .toBeLessThan(harness.progressUpdates.findIndex((update) => update.phase === "generating_character"));
+    expect(harness.requests).toHaveLength(5);
+  });
+
   it("maps typed HTTP retry exhaustion to a safe authoring failure", async () => {
     const marker = "SECRET_AT_START_OF_429_BODY";
     const providerError = new ProviderHttpError(429, null, marker);

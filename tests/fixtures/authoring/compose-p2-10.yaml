@@ -1,0 +1,44 @@
+name: infinitequest-ai-assist-p2-10-proof
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.6-pg18-trixie
+    environment:
+      POSTGRES_DB: p2proof
+      POSTGRES_USER: p2proof
+      POSTGRES_PASSWORD: ${P2_PROOF_DATABASE_PASSWORD:?set a disposable password}
+    tmpfs: /var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U p2proof -d p2proof"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  provider:
+    image: node:26-bookworm-slim
+    command: ["node", "/fixture/compose-provider.mjs"]
+    volumes: ["./compose-provider.mjs:/fixture/compose-provider.mjs:ro"]
+  api:
+    image: ${P2_PROOF_IMAGE:?build the final runtime image}
+    environment: &runtime
+      APP_ROLE: api
+      APP_PORT: 8080
+      DATABASE_URL: postgresql://p2proof:${P2_PROOF_DATABASE_PASSWORD}@postgres:5432/p2proof
+      CREDENTIAL_ENCRYPTION_KEY: ${P2_PROOF_CREDENTIAL_KEY:?set a disposable 32-byte key}
+      AI_AUTHORING_JOBS_ENABLED: "true"
+      PROVIDER_NETWORK_ALLOWLIST: 0.0.0.0/0
+      LOG_LEVEL: silent
+    ports: ["127.0.0.1:${P2_PROOF_PORT:-45680}:8080"]
+    depends_on:
+      postgres: { condition: service_healthy }
+  worker:
+    image: ${P2_PROOF_IMAGE:?build the final runtime image}
+    healthcheck:
+      test: ["CMD", "node", "-e", "import('./dist/packages/database/src/config.js').then(c=>import('./dist/packages/database/src/pool.js').then(p=>p.createDatabasePool(c.loadRuntimeConfig().databaseUrl).query('SELECT 1').then(()=>process.exit(0)))).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 4
+      start_period: 20s
+    environment:
+      <<: *runtime
+      APP_ROLE: worker
+    depends_on:
+      postgres: { condition: service_healthy }

@@ -21,4 +21,6 @@ export * from "./world-repository.js";
 export * from "./effective-turn-narration.js";
 export * from "./turn-correction-repository.js";
 export * from "./world-share-repository.js";
+export * from "./authoring-job-repository.js";
+export * from "./authoring-world-apply-adapter.js";
 export * from "./readable-campaign-export-repository.js";

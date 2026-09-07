@@ -1,5 +1,6 @@
 import "./styles.css";
 import { generateWorldPreview } from "./world-creation-api";
+import { createAuthoringJobsApi } from "./authoring-jobs-api";
 import { mountCampaignEditorPage } from "./campaign-editor-page";
 import { campaignRouteFromPath } from "./campaign-editor-model";
 import { mountCharacterWorkspacePage } from "./character-workspace-page";
@@ -60,7 +61,7 @@ async function start(): Promise<MountedPage | null> {
   const campaignRoute = campaignRouteFromPath(window.location.pathname);
   const worldId = worldIdFromPath(window.location.pathname);
   return characterSessionKey !== null
-    ? mountCharacterWorkspacePage(appRoot, characterSessionKey)
+    ? mountCharacterWorkspacePage(appRoot, characterSessionKey, { authoringJobsApi: createAuthoringJobsApi() })
     : storyRoute !== null
       ? mountStoryPlayerPage(appRoot, storyRoute)
       : campaignRoute !== null
@@ -68,12 +69,12 @@ async function start(): Promise<MountedPage | null> {
         : window.location.pathname === "/app/data-transfer" || window.location.pathname === "/app/data-transfer/"
           ? mountDataTransferPage(appRoot)
           : isWorldCreationPath(window.location.pathname)
-            ? mountWorldCreationPage(appRoot, { generateWorldPreview })
+            ? mountWorldCreationPage(appRoot, { generateWorldPreview, authoringJobsApi: createAuthoringJobsApi() })
             : window.location.pathname === "/app/worlds" || window.location.pathname === "/app/worlds/"
               ? mountWorldLibraryPage(appRoot)
               : worldId === null
               ? mountWorldLibraryPage(appRoot)
-              : mountWorldEditorPage(appRoot, worldId);
+              : mountWorldEditorPage(appRoot, worldId, { authoringJobsApi: createAuthoringJobsApi() });
 }
 
 function showLoading(): void {

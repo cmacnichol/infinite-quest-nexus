@@ -549,3 +549,84 @@ describe("Character Workspace page", () => {
     expect(cancelling.complete).toHaveBeenCalledWith("opaque-key", "workflow-1", { status: "cancelled" });
   });
 });
+
+describe("durable character recovery", () => {
+  function durableJob() {
+    return { id: "character-job", revision: 2, status: "awaiting_review" as const, target: { kind: "new_world" as const }, stages: [], expiresAt: "2026-09-13T00:00:00.000Z", canApply: false, incomplete: false, kind: "character" as const,
+      request: { kind: "character" as const, idempotencyKey: "submission", target: { kind: "new_world" as const }, prompt: "A guide", content: draft() }, result: generatedCharacter };
+  }
+  it("offers explicit parent restoration before mounting a lost local character session", async () => {
+    const { root, document } = fixture();
+    const mounted = mountCharacterWorkspacePage(root, "lost", { sessionStore: store(null), resumeJobId: "character-job", authoringJobsApi: {
+      loadAuthoringCapabilities: vi.fn().mockResolvedValue({ enabled: true, supportedKinds: ["character"] }), loadAuthoringJob: vi.fn().mockResolvedValue(durableJob())
+    } as never });
+    await settle(); await settle();
+    expect(root.textContent).toContain("Restore parent draft");
+    expect(document.querySelector('[data-action="accept-character"]')).toBeNull();
+    click(document, '[data-action="restore-authoring-parent"]'); await settle();
+    expect(root.textContent).toContain("Character workspace");
+    expect(root.textContent).toContain("Review available results");
+    mounted.dispose();
+  });
+  it("aborts recovery and never mounts after disposal", async () => {
+    const { root } = fixture(); const loading = deferred<ReturnType<typeof durableJob>>();
+    const load = vi.fn(() => loading.promise);
+    const mounted = mountCharacterWorkspacePage(root, "lost", { sessionStore: store(null), resumeJobId: "character-job", authoringJobsApi: {
+      loadAuthoringCapabilities: vi.fn().mockResolvedValue({ enabled: true, supportedKinds: ["character"] }), loadAuthoringJob: load
+    } as never });
+    await settle(); mounted.dispose(); loading.resolve(durableJob()); await settle();
+    expect(load.mock.calls[0]?.[1]?.aborted).toBe(true);
+    expect(root.querySelector('[data-action="restore-authoring-parent"]')?.hasAttribute("hidden")).toBe(true);
+    expect(root.querySelector('[data-page="character-workspace"]')).toBeNull();
+  });
+});
+
+it.each(["new", "existing"])("P2-F4 fresh durable character acceptance waits for exact review before %s parent handoff", async target => {
+  const { root, document } = fixture(); const navigate = vi.fn();
+  const active = session();
+  if (target === "new") { active.origin = "world-creation"; active.parentRoute = "/app/worlds/new"; active.expectedWorldRevision = null; }
+  const sessionStore = store(active);
+  const jobTarget = target === "new" ? { kind: "new_world" as const } : { kind: "world_draft" as const, worldId: "world-1", expectedRevision: 4 };
+  const initial = { id: "character-job", revision: 1, kind: "character" as const, target: jobTarget, status: "awaiting_review" as const, expiresAt: "2026-09-13T00:00:00.000Z", incomplete: false, canApply: false,
+    request: { kind: "character" as const, idempotencyKey: "fresh", prompt: "A guide", target: jobTarget, content: draft() }, result: generatedCharacter,
+    stages: [{ id: "character-stage", key: "character:provider-id", status: "validated" as const, generation: 1, attemptCount: 1 }] };
+  const saving = deferred<typeof initial>();
+  const saveReview = vi.fn((_id, _input) => saving.promise);
+  const mounted = mountCharacterWorkspacePage(root, "opaque-key", { sessionStore, navigate, resumeJobId: initial.id, authoringJobsApi: {
+    loadAuthoringCapabilities: async () => ({ enabled: true, supportedKinds: ["character"] }), loadAuthoringJob: async () => initial, saveAuthoringReview: saveReview
+  } as never });
+  try {
+    await vi.waitFor(() => expect(root.textContent).toContain("Review available results"));
+    click(document, '[data-action="review-character-job"]');
+    for (let index = 0; index < 4; index += 1) click(document, '[data-action="continue-character"]');
+    click(document, '[data-action="accept-character"]'); await settle();
+    expect(navigate).not.toHaveBeenCalled(); expect(sessionStore.complete).not.toHaveBeenCalled();
+    expect(saveReview).toHaveBeenCalledOnce();
+    const input = saveReview.mock.calls[0]![1];
+    expect(input).toMatchObject({ content: { id: "provider-id", name: "Ilyra Venn" }, selectedStageIds: ["character-stage"] });
+    saving.resolve({ ...initial, revision: 2, reviewedContent: input.content, reviewedStageIds: input.selectedStageIds });
+    await vi.waitFor(() => expect(navigate).toHaveBeenCalledWith(target === "new" ? "/app/worlds/new?authoringCharacter=character-job" : "/app/worlds/world-1?tab=characters&authoringCharacter=character-job"));
+  } finally { mounted.dispose(); }
+});
+
+
+it("cancel leaves a recovered workspace even when its local session is gone", async () => {
+  const { root, document } = fixture(); const navigate = vi.fn(); const missingStore = store(null); missingStore.complete.mockReturnValue(false);
+  const recovered = { ...session(), origin: "world-creation" as const, parentRoute: "/app/worlds/new", expectedWorldRevision: null };
+  const mounted = mountCharacterWorkspacePage(root, "lost", { sessionStore: missingStore, recoveredSession: recovered, navigate });
+  click(document, '[data-action="cancel-character"]');
+  expect(navigate).toHaveBeenCalledWith("/app/worlds/new"); mounted.dispose();
+});
+
+it.each([false, true])("P27-F4 character list reaches page two with an unrelated first page (missing session %s)", async missing => {
+  const { root, document } = fixture();
+  const list = vi.fn().mockResolvedValueOnce({ jobs: [{ id: "other-world", kind: "world_concept", status: "applied" }], nextCursor: "characters-page-two" }).mockResolvedValueOnce({ jobs: [{ id: "saved-character", kind: "character", status: "awaiting_review" }] });
+  const mounted = mountCharacterWorkspacePage(root, "local", { sessionStore: store(missing ? null : session()), authoringJobsApi: { loadAuthoringCapabilities: vi.fn().mockResolvedValue({ enabled: true, supportedKinds: ["character"] }), listAuthoringJobs: list } as never });
+  if (!missing) { await settle(); click(document, '[data-action="list-character-jobs"]'); }
+  await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(1));
+  const more = document.querySelector<HTMLButtonElement>('[data-action="more-character-jobs"]'); expect(more).not.toBeNull(); expect(more!.hidden).toBe(false);
+  more!.click();
+  await vi.waitFor(() => expect(root.textContent).toContain("saved-character"));
+  expect(list).toHaveBeenLastCalledWith("characters-page-two", expect.any(AbortSignal)); expect(more!.hidden).toBe(true);
+  expect(root.textContent).not.toContain("other-world"); mounted.dispose();
+});

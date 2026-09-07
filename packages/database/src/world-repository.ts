@@ -270,7 +270,7 @@ export async function importPrivatePortableWorldAtExactTarget(
     : failure("invalid_transition");
 }
 
-function createPostgresWorldRepository(): PostgresWorldRepository {
+export function createPostgresWorldRepository(): PostgresWorldRepository {
   return {
     async listWorlds(transaction, scope): Promise<WorldListSource> {
       const client = worldCampaignDatabaseClient(transaction);

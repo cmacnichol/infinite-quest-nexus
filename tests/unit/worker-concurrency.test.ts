@@ -241,7 +241,7 @@ describe("worker concurrency scheduler", () => {
       }),
     };
 
-    const running = runWorker(pool, workerConfig(2), controller.signal, {
+    const running = runWorker(pool, { ...workerConfig(2), aiAuthoringJobsEnabled: true }, controller.signal, {
       generation,
       illustration: inertWorkerIllustration,
       memory: inertWorkerMemory,
@@ -273,6 +273,136 @@ describe("worker concurrency scheduler", () => {
     systemArchive.resolve(true);
     generationExecutions.forEach((execution) => execution.resolve(true));
     await running;
+  });
+
+  it("visits a capacity-one authoring lane without starving filled story slots or other optional lanes", async () => {
+    const controller = new AbortController();
+    const storyA = deferred<boolean>();
+    const storyB = deferred<boolean>();
+    const authoring = deferred<boolean>();
+    const trace: string[] = [];
+    let claimNumber = 0;
+    const generation: GenerationWorkerApplication = {
+      claimNext: vi.fn(async () => claim(String(++claimNumber))),
+      executeClaimed: vi.fn(({ claim: claimed }) => {
+        trace.push(`story:${claimed.jobId}`);
+        return claimed.jobId === "1" ? storyA.promise : storyB.promise;
+      })
+    };
+    const optionalLanes: WorkerOptionalLanes = {
+      illustration: vi.fn(async () => { trace.push("illustration"); return false; }),
+      chronicle: vi.fn(async () => { trace.push("chronicle"); return false; }),
+      asset: vi.fn(async () => { trace.push("asset"); return false; }),
+      authoring: vi.fn(() => { trace.push("authoring"); return authoring.promise; })
+    };
+    const running = runWorker(pool, { ...workerConfig(2), aiAuthoringJobsEnabled: true }, controller.signal, {
+      generation, illustration: inertWorkerIllustration, memory: inertWorkerMemory, optionalLanes
+    });
+    await vi.waitFor(() => expect(optionalLanes.authoring).toHaveBeenCalledOnce());
+    expect(trace.slice(0, 6)).toEqual(["story:1", "story:2", "illustration", "chronicle", "asset", "authoring"]);
+    storyA.resolve(true);
+    await vi.waitFor(() => expect(generation.executeClaimed).toHaveBeenCalledTimes(3));
+    expect(optionalLanes.authoring).toHaveBeenCalledOnce();
+    controller.abort();
+    storyB.resolve(true);
+    authoring.resolve(true);
+    await running;
+  });
+
+  it("does not claim injected authoring work while the rollout flag is disabled", async () => {
+    const controller = new AbortController();
+    const authoring = vi.fn(async () => true);
+    const optionalLanes: WorkerOptionalLanes = {
+      illustration: vi.fn(async () => { controller.abort(); return false; }),
+      chronicle: vi.fn(async () => false),
+      asset: vi.fn(async () => false),
+      authoring,
+    };
+    await runWorker(pool, workerConfig(1), controller.signal, {
+      generation: { claimNext: vi.fn(async () => null), executeClaimed: vi.fn(async () => false) },
+      illustration: inertWorkerIllustration, memory: inertWorkerMemory, optionalLanes
+    });
+    expect(authoring).not.toHaveBeenCalled();
+  });
+
+  it("waits one poll interval before refilling cleanup while other lanes still run with authoring disabled", async () => {
+    const controller = new AbortController();
+    const cleanup = vi.fn(async () => true);
+    const authoring = vi.fn(async () => true);
+    const optionalLanes: WorkerOptionalLanes = {
+      illustration: vi.fn(async () => false),
+      chronicle: vi.fn(async () => false),
+      asset: vi.fn(async () => false),
+      authoring,
+      authoringCleanup: cleanup,
+    };
+    const running = runWorker(pool, {
+      ...workerConfig(1),
+      workerPollIntervalMs: 60_000,
+      aiAuthoringJobsEnabled: false,
+    }, controller.signal, {
+      generation: { claimNext: vi.fn(async () => null), executeClaimed: vi.fn(async () => false) },
+      illustration: inertWorkerIllustration,
+      memory: inertWorkerMemory,
+      optionalLanes,
+    });
+
+    await vi.waitFor(() => expect(cleanup).toHaveBeenCalledOnce());
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect(authoring).not.toHaveBeenCalled();
+    expect(optionalLanes.illustration).toHaveBeenCalledOnce();
+    expect(optionalLanes.chronicle).toHaveBeenCalledOnce();
+    expect(optionalLanes.asset).toHaveBeenCalledOnce();
+
+    controller.abort();
+    await running;
+  });
+
+  it("keeps one active cleanup promise while feature-disabled retention is running", async () => {
+    const controller = new AbortController();
+    const pendingCleanup = deferred<boolean>();
+    const cleanup = vi.fn(() => pendingCleanup.promise);
+    const authoring = vi.fn(async () => true);
+    const optionalLanes: WorkerOptionalLanes = {
+      illustration: vi.fn(async () => false),
+      chronicle: vi.fn(async () => false),
+      asset: vi.fn(async () => false),
+      authoring,
+      authoringCleanup: cleanup,
+    };
+    const running = runWorker(pool, { ...workerConfig(1), aiAuthoringJobsEnabled: false }, controller.signal, {
+      generation: { claimNext: vi.fn(async () => null), executeClaimed: vi.fn(async () => false) },
+      illustration: inertWorkerIllustration,
+      memory: inertWorkerMemory,
+      optionalLanes,
+    });
+
+    await vi.waitFor(() => expect(cleanup).toHaveBeenCalledOnce());
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect(authoring).not.toHaveBeenCalled();
+
+    controller.abort();
+    pendingCleanup.resolve(true);
+    await running;
+  });
+
+  it("never writes a raw authoring provider failure into scheduler logs", async () => {
+    const controller = new AbortController();
+    const marker = "https://private.example/secret-token";
+    const optionalLanes: WorkerOptionalLanes = {
+      illustration: vi.fn(async () => false), chronicle: vi.fn(async () => false), asset: vi.fn(async () => false),
+      authoring: vi.fn(async () => { controller.abort(); throw new Error(marker); })
+    };
+    await runWorker(pool, { ...workerConfig(1), aiAuthoringJobsEnabled: true }, controller.signal, {
+      generation: { claimNext: vi.fn(async () => null), executeClaimed: vi.fn(async () => false) },
+      illustration: inertWorkerIllustration, memory: inertWorkerMemory, optionalLanes
+    });
+    const fields = log.error.mock.calls.filter(([entry]) => (entry as { event?: string }).event === "worker_authoring_error");
+    expect(fields).toHaveLength(1);
+    expect(fields[0]?.[0]).toMatchObject({ errorCode: "authoring-execution-failed", message: "Authoring job execution failed." });
+    expect(JSON.stringify(fields)).not.toContain(marker);
   });
 
   it("yields to the event loop between synchronously successful rotations", async () => {

@@ -50,6 +50,11 @@ function authoringFailureMessage(failure: AuthoringFailure): string {
     case "authoring_context_exceeded": return "The authoring request exceeds the provider context limit.";
     case "authoring_provider_rejected": return "The text provider rejected the authoring request.";
     case "invalid_authoring_output": return "Generated content did not meet the required format.";
+    case "authoring_conflict": return "The authoring proposal changed. Refresh and try again.";
+    case "authoring_expired": return "This authoring proposal has expired.";
+    case "authoring_cancelled": return "This authoring proposal was cancelled.";
+    case "authoring_retry_exhausted": return "This stage has exhausted its retry limit. Create a new proposal.";
+    case "authoring_apply_unavailable": return "Applying authoring proposals is not available yet.";
   }
 }
 
@@ -123,6 +128,8 @@ export async function runAuthoringResponse<T>(options: {
   request(attempt: AuthoringAttempt): Promise<ProviderResult>;
   parse(content: string): T;
   delay(milliseconds: number): Promise<void>;
+  /** Durable callers fence each paid request and accepted response to a live claim. */
+  currentClaim?(): Promise<boolean>;
 }): Promise<T> {
   let generationCalls = 0;
   let repair = false;
@@ -133,6 +140,9 @@ export async function runAuthoringResponse<T>(options: {
     let result: ProviderResult | undefined;
     let transportAttempts = 0;
     while (transportAttempts < MAX_TRANSPORT_ATTEMPTS_PER_RESPONSE && generationCalls < MAX_GENERATION_CALLS) {
+      if (options.currentClaim && !await options.currentClaim()) {
+        throw failure(options.stage, "authoring_cancelled", false);
+      }
       generationCalls += 1;
       transportAttempts += 1;
       try {
@@ -154,7 +164,11 @@ export async function runAuthoringResponse<T>(options: {
     if (!result) throw failure(options.stage, "authoring_provider_unavailable", true);
 
     try {
-      return options.parse(result.content);
+      const parsed = options.parse(result.content);
+      if (options.currentClaim && !await options.currentClaim()) {
+        throw failure(options.stage, "authoring_cancelled", false);
+      }
+      return parsed;
     } catch (error) {
       const projected = recognizedOutputIssues(error);
       if (!projected) throw error;

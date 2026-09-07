@@ -1341,6 +1341,7 @@ footer p:first-child {
   display: none;
 }
 
+.authoring-actions button,
 .creation-generation-actions button,
 .creation-manual-action button,
 .creation-stage-actions button {
@@ -1365,6 +1366,7 @@ footer p:first-child {
   background: var(--accent);
 }
 
+.authoring-actions button:hover,
 .creation-generation-actions button:hover,
 .creation-manual-action button:hover,
 .creation-stage-actions button:hover {
@@ -1373,6 +1375,7 @@ footer p:first-child {
   border-color: var(--accent-hover);
 }
 
+.authoring-actions button:disabled,
 .creation-generation-actions button:disabled,
 .creation-stage-actions button:disabled {
   color: var(--text-secondary);
@@ -3722,3 +3725,48 @@ footer p:first-child {
     transition: none;
   }
 }
+
+/* Durable proposal controls remain available while moving between authoring stages. */
+[data-authoring-resume],
+[data-character-authoring-resume],
+[data-page="character-workspace-recovery"] {
+  padding: 1rem;
+  margin-block: 1rem;
+  border: 1px solid var(--rule-strong);
+  background: var(--surface-entry);
+  border-radius: 0.75rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+[data-authoring-resume] button,
+[data-character-authoring-resume] button,
+[data-page="character-workspace-recovery"] button {
+  margin: 0.25rem;
+  max-width: 100%;
+  white-space: normal;
+}
+[data-authoring-comparison],
+[data-character-comparison] {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr));
+  gap: 1rem;
+}
+[data-authoring-comparison][hidden] { display: none; }
+[data-authoring-comparison] pre,
+[data-character-comparison] pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 24rem;
+  overflow: auto;
+  font-size: 0.8rem;
+}
+
+.authoring-comparison-fields {
+  max-height: 20rem;
+  overflow: auto;
+  border-top: 1px solid var(--rule-strong);
+  padding: 0.75rem;
+  background: var(--surface-muted);
+}
+.authoring-comparison-fields dt { font-weight: 600; margin-block-start: 0.75rem; }
+.authoring-comparison-fields dd { margin: 0.25rem 0 0.75rem; white-space: pre-wrap; overflow-wrap: anywhere; }

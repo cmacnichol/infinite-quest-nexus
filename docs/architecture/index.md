@@ -22,6 +22,7 @@ See also [Repository Overview](./repository-overview.md) for project-goal/naming
 - [ADR 0035: Unify portable data transfer without removing specialized formats](./0035-unified-data-transfer-experience.md)
 - [ADR 0036: Disaster recovery is an operator-managed isolated restore](./0036-operator-managed-disaster-recovery.md)
 - [ADR 0037: Every persisted domain has an explicit portability classification](./0037-exhaustive-portability-classification.md)
+- [ADR 0038: Durable AI authoring proposals have bounded operational retention](./0038-durable-ai-authoring-retention.md)
 
 ## Story Engine and Chronicle
 

@@ -19,6 +19,8 @@ import { dispatchRuntimeRole } from "./runtime-role.js";
 import { createRuntimeGenerationEventSource } from "./generation-event-composition.js";
 import { createApiMemoryApplication, createWorkerMemoryApplication } from "./memory-composition.js";
 import { createApiWorldCampaignApplication } from "./world-campaign-composition.js";
+import { createRuntimeAuthoringApplication, createRuntimeAuthoringWorkerApplication } from "./authoring-composition.js";
+import { createHash } from "node:crypto";
 import {
   createApiProviderApplicationComposition,
   createWorkerProviderApplicationComposition
@@ -64,6 +66,13 @@ await runRuntimeLifecycle(config, abortController, {
     createWorkerMemory: createWorkerMemoryApplication,
     createWorkerIllustration: createWorkerIllustrationApplication,
     createWorkerGeneration: createWorkerGenerationApplication,
+    createWorkerAuthoring: (pool, providers, signal) => createRuntimeAuthoringWorkerApplication({
+      pool, providers, signal, sha256: (value) => createHash("sha256").update(value).digest("hex")
+    }),
+    createApiAuthoring: (pool) => createRuntimeAuthoringApplication(
+      pool,
+      (value) => createHash("sha256").update(value).digest("hex")
+    ),
     buildServer,
     runWorker
   }, providerTransport, generationEvents)

@@ -14,7 +14,8 @@ import type {
   GenerationEventSource,
   GenerationEventSubscription,
   IllustrationApplication,
-  MemoryApplication
+  MemoryApplication,
+  AuthoringApplication
 } from "../../../packages/application/src/index.js";
 import { initialOwnerId } from "../../../packages/database/src/pool.js";
 import { createLoggerOptions, logger } from "../../../packages/logger/src/index.js";
@@ -137,6 +138,8 @@ import {
   registerSystemArchiveRoutes,
 } from "./system-archive-routes.js";
 import { registerArchiveRoutes } from "./archive-routes.js";
+import { registerAuthoringRoutes } from "./authoring-routes.js";
+import { acquireAdmission, releaseAdmission } from "./admission-service.js";
 import { createApiAssetComposition } from "../../runtime/src/api-asset-composition.js";
 import type { ApiAssetComposition } from "../../runtime/src/api-asset-composition.js";
 import {
@@ -170,6 +173,8 @@ export type BuildServerOptions = {
   worldCampaign: import("../../../packages/application/src/world-campaign/index.js").WorldCampaignApplication;
   providers: ProviderApiTransportAdapter;
   infiniteWorldsProviders: InfiniteWorldsImportProviderCollaborators;
+  /** Provider-free durable proposal commands, composed by the runtime role. */
+  authoring?: AuthoringApplication;
   createApiAssets?: (pool: DatabasePool, roots: Readonly<{ archiveRoot: string; assetRoot: string }>) => Promise<ApiAssetComposition>;
   createApiPortable?: (options: ApiPortableImportExportCompositionOptions) => Promise<ApiPortableImportExportComposition>;
   createApiSystemArchive?: (options: Readonly<{
@@ -402,6 +407,7 @@ export async function buildServer({
   worldCampaign,
   providers,
   infiniteWorldsProviders,
+  authoring,
   createApiAssets = createApiAssetComposition,
   createApiPortable = createApiPortableImportExportComposition,
   createApiSystemArchive = createApiSystemArchiveComposition,
@@ -566,6 +572,21 @@ export async function buildServer({
     portable: apiPortable.portable,
     resolveOwner: async () => ({ ownerUserId: await initialOwnerId(pool) }),
   });
+  if (authoring) {
+    await app.register(registerAuthoringRoutes, {
+      application: authoring,
+      enabled: config.aiAuthoringJobsEnabled === true,
+      resolveOwner: async () => ({ ownerUserId: await initialOwnerId(pool) }),
+      acquireAdmission: (scope) => acquireAdmission(pool, scope.ownerUserId, crypto.randomUUID(), {
+        key: "generation",
+        windowSeconds: config.security.apiRateLimitWindowSeconds,
+        maxRequests: config.security.apiRateLimitGenerationRequests,
+        maxConcurrent: null,
+        leaseSeconds: config.workerLeaseSeconds
+      }),
+      releaseAdmission: (leaseId) => releaseAdmission(pool, leaseId)
+    });
+  }
   await app.register(fastifyStatic, {
     root: config.legacyWebRoot,
     prefix: "/nexus/",

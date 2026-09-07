@@ -5,6 +5,7 @@ export * from "./world-template.js";
 export * from "./legacy-story-world.js";
 export * from "./legacy-campaign-normalization.js";
 export * from "./character-authoring.js";
+export * from "./authoring-jobs.js";
 export * from "./illustrations.js";
 export * from "./campaign-transfer.js";
 export * from "./entity-references.js";

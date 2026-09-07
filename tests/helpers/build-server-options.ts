@@ -35,7 +35,7 @@ import {
 
 export type ServerOptionsOverrides = Readonly<
   Pick<BuildServerOptions, "config" | "pool"> &
-  Partial<Pick<BuildServerOptions, "generation" | "illustration" | "memory" | "generationEvents" | "worldCampaign" | "providers" | "infiniteWorldsProviders" | "createApiAssets" | "createApiPortable">>
+  Partial<Pick<BuildServerOptions, "generation" | "illustration" | "memory" | "generationEvents" | "worldCampaign" | "providers" | "infiniteWorldsProviders" | "authoring" | "createApiAssets" | "createApiPortable">>
 >;
 
 async function unexpectedPortableCall(): Promise<never> {
