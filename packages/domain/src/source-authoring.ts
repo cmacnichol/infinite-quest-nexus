@@ -55,7 +55,8 @@ function sameParagraphMap(left: SourceDocument["paragraphs"], right: SourceDocum
   });
 }
 
-function hasValidSourceIntegrity(source: SourceDocument): boolean {
+/** Validates the retained normalized source once before any downstream planning. */
+export function hasValidSourceDocumentIntegrity(source: SourceDocument): boolean {
   if (!sourceDocumentSchema.safeParse(source).success) return false;
   // Intake removes only one BOM. A retained BOM may therefore be the preserved
   // second BOM from raw input and cannot be distinguished from this projection.
@@ -76,7 +77,7 @@ export function normalizeSourceDocument(name: string, text: string, id: string):
 
 /** Validates a citation against the retained complete source document. */
 export function validateSourceCitation(source: SourceDocument, citation: SourceCitation): boolean {
-  if (!hasValidSourceIntegrity(source) || !sourceCitationSchema.safeParse(citation).success) return false;
+  if (!hasValidSourceDocumentIntegrity(source) || !sourceCitationSchema.safeParse(citation).success) return false;
   if (citation.sourceId !== source.id || citation.start >= citation.end) return false;
   const paragraph = source.paragraphs.find((candidate) => candidate.id === citation.paragraphId);
   if (!paragraph || citation.start < paragraph.start || citation.end > paragraph.end) return false;

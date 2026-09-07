@@ -157,6 +157,24 @@ describe("executeAuthoringStage", () => {
     expect(calls[0]).toMatchObject({ profileId: "text-1", model: "model-pinned" });
   });
 
+  it("reuses the pinned effective context cap when loading a provider for a resumed stage", async () => {
+    const text = vi.fn(async () => ({
+      ...descriptor,
+      execute: async () => providerResult(JSON.stringify(characterContent()))
+    }));
+    const dispatch = createRuntimeAuthoringStageDispatcher({ execution: { text } as never, sha256 });
+
+    await dispatch(runtimeStage());
+
+    expect(text).toHaveBeenCalledWith(
+      { ownerUserId: "owner-1" },
+      "text-1",
+      "text",
+      "model-pinned",
+      snapshot.contextWindowTokens
+    );
+  });
+
   it("rejects source authoring before loading a text provider", async () => {
     const text = vi.fn();
     const dispatch = createRuntimeAuthoringStageDispatcher({ execution: { text } as never, sha256 });

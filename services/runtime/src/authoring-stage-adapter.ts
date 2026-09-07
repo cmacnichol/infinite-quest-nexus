@@ -132,7 +132,8 @@ export function createRuntimeAuthoringStageDispatcher(options: Readonly<{
     let provider: RuntimeTextExecution;
     try {
       provider = await options.execution.text(
-        { ownerUserId: stage.ownerUserId }, stage.snapshot.providerProfileId, "text", stage.snapshot.model
+        { ownerUserId: stage.ownerUserId }, stage.snapshot.providerProfileId, "text", stage.snapshot.model,
+        stage.snapshot.contextWindowTokens
       );
     } catch {
       throw new AuthoringResponseError({ code: "authoring_provider_unavailable", stage: stage.stageKey === "world" ? "world" : "character", retryable: true, issues: [] });
