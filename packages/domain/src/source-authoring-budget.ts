@@ -26,6 +26,10 @@ export type SourceRequestRenderInput = Readonly<{
   systemPrompt: string;
   instructions: string;
   sourceText: string;
+  /** Exact global coordinates supplied with the candidate chunk, when a runtime renderer needs them. */
+  sourceRange?: SourceChunk["sourceRange"];
+  paragraphSpans?: SourceChunk["spans"];
+  mode?: "faithful" | "expand";
   repair: boolean;
 }>;
 
@@ -42,6 +46,9 @@ export type SourceChunkPlanInput = Readonly<{
   instructions: string;
   budget: AuthoringBudget;
   renderRequest?: SourceRequestRenderer;
+  /** Opt-in for source extractors that emit global chunk coordinates in each provider request. */
+  includeChunkCoordinates?: boolean;
+  mode?: "faithful" | "expand";
 }>;
 
 export class SourceAuthoringBudgetError extends Error {
@@ -65,6 +72,9 @@ function defaultRenderRequest(input: SourceRequestRenderInput): string {
     systemPrompt: input.systemPrompt,
     instructions: input.instructions,
     source: input.sourceText,
+    ...(input.sourceRange === undefined ? {} : { sourceRange: input.sourceRange }),
+    ...(input.paragraphSpans === undefined ? {} : { paragraphSpans: input.paragraphSpans }),
+    ...(input.mode === undefined ? {} : { mode: input.mode }),
     repair: input.repair
   });
 }
@@ -104,10 +114,25 @@ function countRenderedRequest(
   systemPrompt: string,
   instructions: string,
   sourceText: string,
+  source: SourceDocument | undefined,
+  sourceRange: Readonly<{ start: number; end: number }> | undefined,
+  includeChunkCoordinates: boolean,
+  mode: "faithful" | "expand",
   repair: boolean,
   budget: AuthoringBudget
 ): number {
-  const count = budget.countTokens(renderRequest({ systemPrompt, instructions, sourceText, repair }));
+  const paragraphSpans = !includeChunkCoordinates || source === undefined || sourceRange === undefined
+    ? undefined
+    : spansForRange(source, sourceRange.start, sourceRange.end);
+  const count = budget.countTokens(renderRequest({
+    systemPrompt,
+    instructions,
+    sourceText,
+    ...(!includeChunkCoordinates || sourceRange === undefined ? {} : { sourceRange }),
+    ...(paragraphSpans === undefined ? {} : { paragraphSpans }),
+    ...(!includeChunkCoordinates || source === undefined ? {} : { mode }),
+    repair
+  }));
   if (!Number.isFinite(count) || count < 0) {
     throw new SourceAuthoringBudgetError("authoring_context_exceeded", "The source request counter returned an invalid value.");
   }
@@ -119,11 +144,15 @@ function fitsBothRequests(
   systemPrompt: string,
   instructions: string,
   sourceText: string,
+  source: SourceDocument | undefined,
+  sourceRange: Readonly<{ start: number; end: number }> | undefined,
+  includeChunkCoordinates: boolean,
+  mode: "faithful" | "expand",
   budget: AuthoringBudget,
   limit: number
 ): boolean {
-  return countRenderedRequest(renderRequest, systemPrompt, instructions, sourceText, false, budget) <= limit
-    && countRenderedRequest(renderRequest, systemPrompt, instructions, sourceText, true, budget) <= limit;
+  return countRenderedRequest(renderRequest, systemPrompt, instructions, sourceText, source, sourceRange, includeChunkCoordinates, mode, false, budget) <= limit
+    && countRenderedRequest(renderRequest, systemPrompt, instructions, sourceText, source, sourceRange, includeChunkCoordinates, mode, true, budget) <= limit;
 }
 
 function spansForRange(source: SourceDocument, start: number, end: number): SourceChunk["spans"] {
@@ -184,7 +213,9 @@ function addOptionalOverlap(
   instructions: string,
   budget: AuthoringBudget,
   limit: number,
-  renderRequest: SourceRequestRenderer
+  renderRequest: SourceRequestRenderer,
+  includeChunkCoordinates: boolean,
+  mode: "faithful" | "expand"
 ): SourceChunk[] {
   return chunks.map((chunk, index) => {
     if (index === 0) return chunk;
@@ -192,7 +223,7 @@ function addOptionalOverlap(
     const priorParagraph = [...source.paragraphs].reverse().find((paragraph) => paragraph.end <= range.start);
     if (!priorParagraph) return chunk;
     const overlapText = requestText(characters, priorParagraph.start, range.end);
-    if (!fitsBothRequests(renderRequest, systemPrompt, instructions, overlapText, budget, limit)) return chunk;
+    if (!fitsBothRequests(renderRequest, systemPrompt, instructions, overlapText, source, { start: priorParagraph.start, end: range.end }, includeChunkCoordinates, mode, budget, limit)) return chunk;
     return makeChunk(source, characters, priorParagraph.start, range.end, index);
   });
 }
@@ -251,7 +282,8 @@ export function planSourceChunks(input: SourceChunkPlanInput): SourceChunk[] {
   const selectedEnd = selectedPrefixEnd(input.source, input.boundaryParagraphId);
   const limit = inputLimit(input.budget);
   const renderRequest = input.renderRequest ?? defaultRenderRequest;
-  if (!fitsBothRequests(renderRequest, input.systemPrompt, input.instructions, "", input.budget, limit)) {
+  const mode = input.mode ?? "faithful";
+  if (!fitsBothRequests(renderRequest, input.systemPrompt, input.instructions, "", undefined, undefined, input.includeChunkCoordinates === true, mode, input.budget, limit)) {
     throw new SourceAuthoringBudgetError("authoring_context_exceeded", "Mandatory source extraction instructions exceed the effective request budget.");
   }
 
@@ -263,6 +295,10 @@ export function planSourceChunks(input: SourceChunkPlanInput): SourceChunk[] {
       input.systemPrompt,
       input.instructions,
       requestText(characters, start, end),
+      input.source,
+      { start, end },
+      input.includeChunkCoordinates === true,
+      mode,
       input.budget,
       limit
     );
@@ -282,7 +318,7 @@ export function planSourceChunks(input: SourceChunkPlanInput): SourceChunk[] {
     start = acceptedEnd;
   }
 
-  const planned = addOptionalOverlap(chunks, input.source, characters, input.systemPrompt, input.instructions, input.budget, limit, renderRequest);
+  const planned = addOptionalOverlap(chunks, input.source, characters, input.systemPrompt, input.instructions, input.budget, limit, renderRequest, input.includeChunkCoordinates === true, mode);
   if (planned.length > MAX_SOURCE_CHUNKS) {
     throw new SourceAuthoringBudgetError(
       "source_requires_larger_context",

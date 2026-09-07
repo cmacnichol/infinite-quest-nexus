@@ -1,6 +1,6 @@
 import type { AuthoringFailure, AuthoringIssue } from "./authoring.js";
 
-export type AuthoringIssueReason = "missing_role" | "missing_background" | "missing_drive" | "missing_story_fact" | "mechanics_language" | "prohibited_metadata" | "seed_id_mismatch" | "seed_name_mismatch" | "organizer_evidence";
+export type AuthoringIssueReason = "missing_role" | "missing_background" | "missing_drive" | "missing_story_fact" | "mechanics_language" | "prohibited_metadata" | "seed_id_mismatch" | "seed_name_mismatch" | "organizer_evidence" | "source_evidence";
 
 const ISSUE_LIMIT = 20;
 const PROFILE_PATH = /^profile\.(?:identity\.(?:aliases|pronouns)|story\.(?:role|background|personality|motivations|goals|fearsAndConflicts|keyRelationships|narrativeHooks|voiceAndMannerisms|otherGuidance)|appearance\.(?:ancestryOrSpecies|apparentAge|genderPresentation|build|skinOrComplexion|face|eyes|hair|distinguishingFeatures|clothing|equipmentAndAccessories|otherVisualDetails)|unclassifiedNotes)$/;
@@ -8,6 +8,7 @@ const WORLD_PATH = /^world\.(?:title|genre|tone|premise|backgroundStory|firstAct
 const CHARACTER_PATH = /^playableCharacters\.\d+\.(?:id|name|characterText|profile(?:\.(?:identity\.(?:aliases|pronouns)|story\.(?:role|background|personality|motivations|goals|fearsAndConflicts|keyRelationships|narrativeHooks|voiceAndMannerisms|otherGuidance)|appearance\.(?:ancestryOrSpecies|apparentAge|genderPresentation|build|skinOrComplexion|face|eyes|hair|distinguishingFeatures|clothing|equipmentAndAccessories|otherVisualDetails)|unclassifiedNotes))?|rpgStats|defaultTriggers)$/;
 const ORGANIZER_PATH = /^(?:candidate(?:\.(?:identity\.(?:aliases|pronouns)|story\.(?:role|background|personality|motivations|goals|fearsAndConflicts|keyRelationships|narrativeHooks|voiceAndMannerisms|otherGuidance)|appearance\.(?:ancestryOrSpecies|apparentAge|genderPresentation|build|skinOrComplexion|face|eyes|hair|distinguishingFeatures|clothing|equipmentAndAccessories|otherVisualDetails)|unclassifiedNotes))?|evidence(?:\.\d+\.(?:path|source|quote))?|unassignedText|conflicts|warnings)$/;
 const CONVERTED_WORLD_PATH = /^(?:title|genre|tone|backgroundStory|premise|firstAction|story_rules|character_seeds|character_seeds\.\d+\.(?:id|name|role|concept|narrative_hook))$/;
+const SOURCE_FACT_PATH = /^facts(?:\.\d+\.(?:category|subject|predicate|value|provenance|citations(?:\.\d+\.(?:paragraphId|start|end|quote))?))?$/;
 
 const CODE_MESSAGES: Readonly<Record<string, string>> = {
   missing: "Generated content is missing a required value.",
@@ -24,13 +25,13 @@ const CODE_MESSAGES: Readonly<Record<string, string>> = {
 
 const ALLOWED_CODES = new Set(["custom", ...Object.keys(CODE_MESSAGES)]);
 const AUTHORING_REASONS = new Set<AuthoringIssueReason>([
-  "missing_role", "missing_background", "missing_drive", "missing_story_fact", "mechanics_language", "prohibited_metadata", "seed_id_mismatch", "seed_name_mismatch", "organizer_evidence"
+  "missing_role", "missing_background", "missing_drive", "missing_story_fact", "mechanics_language", "prohibited_metadata", "seed_id_mismatch", "seed_name_mismatch", "organizer_evidence", "source_evidence"
 ]);
 
 function isAllowedPath(path: string): boolean {
   return path === "name" || path === "characterText" || path === "rpgStats" || path === "defaultTriggers"
     || path === "playableCharacters" || path === "generatedCharacter" || path === "generatedWorld"
-    || PROFILE_PATH.test(path) || WORLD_PATH.test(path) || CHARACTER_PATH.test(path) || ORGANIZER_PATH.test(path) || CONVERTED_WORLD_PATH.test(path);
+    || PROFILE_PATH.test(path) || WORLD_PATH.test(path) || CHARACTER_PATH.test(path) || ORGANIZER_PATH.test(path) || CONVERTED_WORLD_PATH.test(path) || SOURCE_FACT_PATH.test(path);
 }
 
 export function safeAuthoringIssuePath(path: string, fallback = "generatedWorld"): string {
@@ -53,6 +54,7 @@ export function authoringIssueMessage(path: string, code: string, reason?: unkno
     case "mechanics_language": return "Generated fictional content contains mechanics language.";
     case "prohibited_metadata": return "Generated character contains prohibited provider metadata.";
     case "organizer_evidence": return "Organizer evidence does not support a populated profile field.";
+    case "source_evidence": return "Generated source facts need exact evidence inside the selected source chunk.";
     case "missing_role": return "Generated character role is required.";
     case "missing_background": return "Generated character background is required.";
     case "missing_drive": return "Generated character needs a motivation, goal, or narrative hook.";
@@ -83,7 +85,7 @@ const SAFE_MESSAGES = new Set([
   ...Object.values(CODE_MESSAGES),
   ...[...AUTHORING_REASONS].map((reason) => authoringIssueMessage("", "custom", reason)),
   ...["", "world.title", "world.genre", "world.tone", "world.premise", "world.backgroundStory",
-    "world.firstAction", "world.rules", "profile.story.role", "profile.story.background",
+    "world.firstAction", "world.rules", "profile.story.role", "profile.story.background", "facts.0.citations",
     "profile.story.motivations", "characterText", "profile", "playableCharacters.0.name",
     "playableCharacters.0.id", "playableCharacters"].map((path) => authoringIssueMessage(path, "custom"))
 ]);
