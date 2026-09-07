@@ -1787,3 +1787,15 @@ describe("World Editor Overview page", () => {
     expect(signal?.aborted).toBe(true);
   });
 });
+
+it.each([8, 9])("restores a recovered character only at its bound existing draft revision (current %s)", async revision => {
+  const { root, document } = editorFixture();
+  const candidate = reviewedCharacter("durable-character", "Recovered Hero");
+  const api = { loadAuthoringJob: vi.fn().mockResolvedValue({ id: "character-job", revision: 3, kind: "character", status: "awaiting_review", target: { kind: "world_draft", worldId, expectedRevision: 8 }, stages: [], expiresAt: "2026-09-13T00:00:00.000Z", incomplete: false, canApply: false,
+    request: { kind: "character", idempotencyKey: "request", prompt: "Guide", target: { kind: "world_draft", worldId, expectedRevision: 8 }, content: draft }, result: candidate, reviewedContent: candidate }) };
+  const save = vi.fn();
+  const mounted = mountWorldEditorPage(root, worldId, { loadWorld: vi.fn().mockResolvedValue({ ...world, draftRevision: revision }), saveWorldDraft: save, creationStatusSearch: "?authoringCharacter=character-job", authoringJobsApi: api as never });
+  await vi.waitFor(() => expect(root.textContent).toContain(revision === 8 ? "Restore reviewed parent draft" : "different world or draft revision"));
+  if (revision === 8) { document.querySelector<HTMLButtonElement>('[data-action="restore-authoring-character"]')?.click(); expect(root.textContent).toContain("Recovered Hero"); }
+  expect(save).not.toHaveBeenCalled(); mounted.dispose();
+});

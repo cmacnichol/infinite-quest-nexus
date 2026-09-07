@@ -2037,3 +2037,145 @@ describe("World Creation generation and convergent editing", () => {
     expect(generateWorldPreview).not.toHaveBeenCalled();
   });
 });
+
+it("restores a server-backed character parent beyond the legacy storage limit and preserves its roster", async () => {
+  const { document, root } = creationFixture();
+  const original = reviewedCharacter("selected", "Original");
+  const companion = reviewedCharacter("companion", "Companion");
+  const content = { ...generatedPreview.content, playableCharacters: [original, companion], preservedLore: "x".repeat(600_000) };
+  const mounted = mountWorldCreationPage(root, { resumeCharacterJobId: "character-job", authoringJobsApi: {
+    loadAuthoringCapabilities: vi.fn().mockResolvedValue({ enabled: true, supportedKinds: ["world_concept", "character"] }),
+    loadAuthoringJob: vi.fn().mockResolvedValue({ id: "character-job", revision: 3, kind: "character", status: "awaiting_review", target: { kind: "new_world" }, stages: [], expiresAt: "2026-09-13T00:00:00.000Z", incomplete: false, canApply: false,
+      request: { kind: "character", idempotencyKey: "request", prompt: "Improve selected", characterId: "selected", target: { kind: "new_world" }, content }, reviewedContent: reviewedCharacter("selected", "Reviewed") })
+  } as never });
+  await settle(); await settle();
+  await vi.waitFor(() => expect(document.querySelector('[data-action="restore-reviewed-parent"]')).not.toBeNull());
+  document.querySelector<HTMLButtonElement>('[data-action="restore-reviewed-parent"]')?.click();
+  expect(root.textContent).toContain("Reviewed");
+  expect(root.textContent).toContain("Companion");
+  expect(document.querySelectorAll("[data-character-roster-item]")).toHaveLength(2);
+  mounted.dispose();
+});
+
+
+it("bounds the readable comparison and omits schema metadata", async () => {
+  const { root, document, window } = creationFixture();
+  const localState = editCreationDraft(selectCreationMethod(createWorldCreationState(), "manual"), ["world", "title"], "Local title");
+  const remote = { ...generatedPreview.content, world: { ...generatedPreview.content.world, title: "Remote title" } };
+  const job = { id: "job", revision: 1, kind: "world_concept", target: { kind: "new_world" }, status: "awaiting_review", stages: [], expiresAt: "2026-09-13T00:00:00.000Z", incomplete: false, canApply: false, result: remote };
+  Object.defineProperty(window, "location", { configurable: true, value: { href: "http://local/app/worlds/new?authoringJob=job" } });
+  Object.defineProperty(window, "history", { configurable: true, value: { replaceState: vi.fn() } });
+  const mounted = mountWorldCreationPage(root, { initialState: localState, authoringJobsApi: { loadAuthoringCapabilities: vi.fn().mockResolvedValue({ enabled: true, supportedKinds: ["world_concept"] }), loadAuthoringJob: vi.fn().mockResolvedValue(job) } as never });
+  await vi.waitFor(() => expect(root.textContent).toContain("Proposal job"));
+  document.querySelector<HTMLButtonElement>('[data-action="compare-authoring"]')?.click();
+  await vi.waitFor(() => expect(document.querySelector("[data-authoring-compare-remote]")?.textContent).toContain("Remote title"));
+  expect(document.querySelector("[data-authoring-comparison]")?.textContent).not.toContain("schemaVersion");
+  mounted.dispose();
+});
+
+function durableReviewFixture(stage: WorldCreationState["stage"] = "mechanics", extras: Partial<Parameters<typeof mountWorldCreationPage>[1]> = {}) {
+  const fixture = creationFixture(); const { window, root } = fixture;
+  Object.defineProperty(window, "location", { configurable: true, value: { href: "http://local/app/worlds/new?authoringJob=world-job" } });
+  Object.defineProperty(window, "history", { configurable: true, value: { replaceState: vi.fn() } });
+  let server: import("../../packages/contracts/src/authoring.js").AuthoringJobView = { id: "world-job", revision: 1, kind: "world_concept", status: "awaiting_review", target: { kind: "new_world" }, stages: [], expiresAt: "2026-09-13T00:00:00.000Z", incomplete: false, canApply: false, result: generatedPreview.content, reviewedContent: generatedPreview.content };
+  const save = vi.fn(async (_id: string, input: import("../../packages/contracts/src/authoring.js").AuthoringReview) => {
+    server = { ...server, revision: server.revision + 1, reviewedContent: input.content } as typeof server; return server;
+  });
+  const load = vi.fn(async () => server);
+  const mounted = mountWorldCreationPage(root, { initialState: { ...createWorldCreationState(), method: "ai", stage, furthestStageIndex: 6, draft: generatedPreview.content }, authoringJobsApi: { loadAuthoringCapabilities: vi.fn().mockResolvedValue({ enabled: true, supportedKinds: ["world_concept"] }), loadAuthoringJob: load, saveAuthoringReview: save } as never, ...extras });
+  return { ...fixture, mounted, save, load, getServer: () => server, setServer: (next: typeof server) => { server = next; } };
+}
+
+it("P27-F2 autosaves applied defaults JSON but not its unapplied text or collection search", async () => {
+  vi.useFakeTimers(); const { document, window, mounted, save } = durableReviewFixture();
+  await vi.advanceTimersByTimeAsync(600); save.mockClear();
+  const area = document.querySelector<HTMLTextAreaElement>("[data-defaults-json]")!;
+  area.value = '{"difficulty":"heroic"}'; area.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await vi.advanceTimersByTimeAsync(600); expect(save).not.toHaveBeenCalled();
+  document.querySelector<HTMLButtonElement>('[data-action="apply-defaults-json"]')!.click();
+  await vi.advanceTimersByTimeAsync(500);
+  expect(save.mock.calls.at(-1)?.[1].content).toMatchObject({ defaults: { difficulty: "heroic" } });
+  save.mockClear();
+  const search = document.querySelector<HTMLInputElement>("[data-collection-search]")!; search.value = "unrelated"; search.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await vi.advanceTimersByTimeAsync(600); expect(save).not.toHaveBeenCalled(); mounted.dispose(); vi.useRealTimers();
+});
+
+it("P27-F2 autosaves roster removal and undo through the child roster handlers", async () => {
+  vi.useFakeTimers(); const initial = { ...generatedPreview.content, playableCharacters: [reviewedCharacter("hero", "Hero")] };
+  const { document, mounted, save } = durableReviewFixture("characters", { initialState: { ...createWorldCreationState(), method: "ai", stage: "characters", furthestStageIndex: 6, draft: initial } });
+  await vi.advanceTimersByTimeAsync(600); save.mockClear();
+  document.querySelector<HTMLButtonElement>('[data-action="remove-character"]')!.click(); await vi.advanceTimersByTimeAsync(500);
+  expect(save.mock.calls.at(-1)?.[1].content).toMatchObject({ playableCharacters: [] });
+  document.querySelector<HTMLButtonElement>('[data-action="undo-character-removal"]')!.click(); await vi.advanceTimersByTimeAsync(500);
+  expect(save.mock.calls.at(-1)?.[1].content).toMatchObject({ playableCharacters: [expect.objectContaining({ id: "hero" })] });
+  mounted.dispose(); vi.useRealTimers();
+});
+
+it("P27-F1 mounted review adopts the pending generation after two repeated polls", async () => {
+  vi.useFakeTimers(); const { document, mounted, setServer, getServer } = durableReviewFixture("foundation");
+  await vi.advanceTimersByTimeAsync(600);
+  const server = getServer(); setServer({ ...server, revision: server.revision + 1, result: { ...generatedPreview.content, world: { ...generatedPreview.content.world, title: "Later generated" } } });
+  await vi.advanceTimersByTimeAsync(3500);
+  expect(document.querySelector('[data-action="compare-authoring"]')?.hasAttribute("hidden")).toBe(false);
+  document.querySelector<HTMLButtonElement>('[data-action="adopt-authoring-result"]')!.click();
+  expect(document.querySelector<HTMLInputElement>('[name="world.title"]')?.value).toBe("Later generated"); mounted.dispose(); vi.useRealTimers();
+});
+
+it("P27-F3 mounted controls remain available after an old successful save follows a conflict", async () => {
+  vi.useFakeTimers(); const { document, window, mounted, save, getServer, setServer } = durableReviewFixture("foundation");
+  await vi.advanceTimersByTimeAsync(600);
+  let resolve!: (value: import("../../packages/contracts/src/authoring.js").AuthoringJobView) => void;
+  save.mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+  const title = document.querySelector<HTMLInputElement>('[name="world.title"]')!; title.value = "Local typed"; title.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await vi.advanceTimersByTimeAsync(500); const old = getServer();
+  setServer({ ...old, revision: old.revision + 2, reviewedContent: { ...generatedPreview.content, world: { ...generatedPreview.content.world, title: "Other tab" } } });
+  await vi.advanceTimersByTimeAsync(1000);
+  resolve({ ...old, revision: old.revision + 1, reviewedContent: { ...generatedPreview.content, world: { ...generatedPreview.content.world, title: "Local typed" } } });
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(document.querySelector("[data-authoring-resume-status]")?.textContent).toContain("another tab");
+  expect(document.querySelector('[data-action="reload-authoring"]')?.hasAttribute("hidden")).toBe(false);
+  expect(document.querySelector('[data-action="compare-authoring"]')?.hasAttribute("hidden")).toBe(false);
+  expect(title.value).toBe("Local typed"); mounted.dispose(); vi.useRealTimers();
+});
+
+it("P27-F4 world recovery reaches page two when page one contains only character jobs", async () => {
+  vi.useFakeTimers();
+  const world = { id: "page-two-world", revision: 1, kind: "world_concept", status: "recoverable", target: { kind: "new_world" }, stages: [], expiresAt: "2026-09-13T00:00:00.000Z", incomplete: false, canApply: false };
+  const list = vi.fn().mockResolvedValueOnce({ jobs: [{ ...world, id: "other-kind", kind: "character" }], nextCursor: "page-two" }).mockResolvedValueOnce({ jobs: [world] });
+  const { document, mounted } = durableReviewFixture("foundation", { authoringJobsApi: { loadAuthoringCapabilities: vi.fn().mockResolvedValue({ enabled: true, supportedKinds: ["world_concept"] }), loadAuthoringJob: vi.fn().mockResolvedValue({ ...world, result: generatedPreview.content }), listAuthoringJobs: list } as never });
+  await vi.advanceTimersByTimeAsync(0);
+  document.querySelector<HTMLButtonElement>('[data-action="resume-authoring"]')!.click(); await vi.advanceTimersByTimeAsync(0);
+  expect(document.querySelector("[data-authoring-resume-list]")?.textContent).not.toContain("other-kind");
+  const more = document.querySelector<HTMLButtonElement>('[data-action="more-authoring"]'); expect(more).not.toBeNull(); expect(more!.hidden).toBe(false);
+  more!.click(); await vi.advanceTimersByTimeAsync(0);
+  expect(list).toHaveBeenLastCalledWith("page-two", expect.any(AbortSignal));
+  expect(document.querySelector("[data-authoring-resume-list]")?.textContent).toContain("page-two-world"); expect(more!.hidden).toBe(true);
+  mounted.dispose(); vi.useRealTimers();
+});
+
+it("P27-F2 returned local character handoff autosaves the parent roster", async () => {
+  vi.useFakeTimers(); const handoff = handoffStore(); const pointer = creationHandoffPointerStore();
+  const { document, window, mounted, save } = durableReviewFixture("characters", { characterSessionStore: handoff.store, characterHandoffPointerStore: pointer.store, navigate: vi.fn() });
+  await vi.advanceTimersByTimeAsync(600); save.mockClear();
+  document.querySelector<HTMLButtonElement>('[data-action="add-character"]')!.click();
+  const session = [...handoff.sessions.values()][0]!;
+  expect(handoff.store.complete(session.key, session.workflowId, { status: "accepted", candidate: reviewedCharacter("returned", "Returned Hero") })).toBe(true);
+  window.dispatchEvent(new window.Event("pageshow")); await vi.advanceTimersByTimeAsync(500);
+  expect(save.mock.calls.at(-1)?.[1].content).toMatchObject({ playableCharacters: [expect.objectContaining({ id: "returned", name: "Returned Hero" })] });
+  mounted.dispose(); vi.useRealTimers();
+});
+
+it("P27-F1 durable adoption retains the saved roster without scheduling a changed review", async () => {
+  vi.useFakeTimers(); const { document, root, window } = creationFixture();
+  Object.defineProperty(window, "location", { configurable: true, value: { href: "http://local/app/worlds/new?authoringJob=world-job" } });
+  Object.defineProperty(window, "history", { configurable: true, value: { replaceState: vi.fn() } });
+  const saved = { ...generatedPreview.content, playableCharacters: [reviewedCharacter("retained", "Retained Hero")] };
+  const job = { id: "world-job", revision: 1, kind: "world_concept", status: "awaiting_review", target: { kind: "new_world" }, stages: [], expiresAt: "2026-09-13T00:00:00.000Z", incomplete: false, canApply: false, result: saved, reviewedContent: saved };
+  const save = vi.fn().mockResolvedValue(job);
+  const mounted = mountWorldCreationPage(root, { authoringJobsApi: { loadAuthoringCapabilities: vi.fn().mockResolvedValue({ enabled: true, supportedKinds: ["world_concept"] }), loadAuthoringJob: vi.fn().mockResolvedValue(job), saveAuthoringReview: save } as never });
+  await vi.advanceTimersByTimeAsync(0); document.querySelector<HTMLButtonElement>('[data-action="adopt-authoring-result"]')!.click();
+  await vi.advanceTimersByTimeAsync(600); expect(save).not.toHaveBeenCalled();
+  for (let index = 0; index < 4; index += 1) document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')!.click();
+  expect(document.querySelector("[data-character-roster]")?.textContent).toContain("Retained Hero");
+  mounted.dispose(); vi.useRealTimers();
+});

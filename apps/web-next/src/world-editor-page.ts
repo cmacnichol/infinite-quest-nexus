@@ -1,4 +1,6 @@
 import { mountAppShell } from "./app-shell-lifecycle";
+import type { AuthoringJobsApi } from "./authoring-jobs-api";
+import { reviewedCharacterParent } from "./authoring-character-parent";
 import {
   loadWorld as loadWorldRequest,
   saveWorldDraft as saveWorldDraftRequest,
@@ -56,6 +58,7 @@ import {
 import type { MountedPage } from "./world-library-page";
 
 export interface WorldEditorPageDependencies {
+  authoringJobsApi?: AuthoringJobsApi;
   loadWorld?: (worldId: string, signal?: AbortSignal) => Promise<WorldAggregate>;
   saveWorldDraft?: (
     worldId: string,
@@ -1054,7 +1057,29 @@ export function mountWorldEditorPage(
     loadState.replaceChildren();
     try {
       const world = await loadWorld(worldId, controller.signal);
-      if (!disposed && loadController === controller && !controller.signal.aborted) adoptWorld(world);
+      if (!disposed && loadController === controller && !controller.signal.aborted) {
+        adoptWorld(world);
+        const jobId = new URLSearchParams(dependencies.creationStatusSearch ?? pageView.location?.search ?? "").get("authoringCharacter");
+        if (jobId && dependencies.authoringJobsApi) {
+          try {
+            const job = await dependencies.authoringJobsApi.loadAuthoringJob(jobId, controller.signal);
+            if (disposed || controller.signal.aborted || loadController !== controller) return;
+            if (job.target.kind !== "world_draft" || job.target.worldId !== worldId || job.target.expectedRevision !== state?.revision) {
+              announcement.textContent = "This proposal belongs to a different world or draft revision. The current draft was not changed."; return;
+            }
+            const parent = reviewedCharacterParent(job);
+            const expectedRevision = job.target.expectedRevision;
+            const restore = button("restore-authoring-character", "Restore reviewed parent draft");
+            restore.addEventListener("click", () => {
+              if (disposed || !state || state.revision !== expectedRevision || isReadOnly()) return;
+              state = replaceWorldDraft(state, parent); activeSection = "characters";
+              resetItemIdentities(state.draft); renderOverviewFields(); renderSection(); renderStatus(); setDirtyGuard(true);
+              restore.remove(); announcement.textContent = "Parent draft restored with the reviewed character. Review before saving.";
+            }, { once: true });
+            conflictHost.append(restore);
+          } catch { if (!disposed && !controller.signal.aborted) announcement.textContent = "The reviewed character proposal is unavailable or expired. The current draft was not changed."; }
+        }
+      }
     } catch (error) {
       if (!disposed && loadController === controller && !controller.signal.aborted) renderLoadError(error);
     }

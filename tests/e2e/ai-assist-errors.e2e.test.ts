@@ -1,6 +1,9 @@
 import { expect, test } from "@playwright/test";
 
 test("world creation retains its prompt and renders a safe authoring error", async ({ page }, testInfo) => {
+  await page.route("**/api/v1/authoring/capabilities", (route) => route.fulfill({
+    status: 200, contentType: "application/json", body: JSON.stringify({ enabled: false, supportedKinds: ["world_concept", "character"], limits: { activeJobsPerOwner: 5, maximumInputBytes: 2 * 1024 * 1024, listPageSize: 20 } })
+  }));
   const marker = "https://private-provider.example/v1?token=SECRET";
   await page.route("**/api/v1/worlds/generate-preview", (route) => route.fulfill({
     status: 502, contentType: "application/json", body: JSON.stringify({
@@ -25,6 +28,9 @@ test("world creation retains its prompt and renders a safe authoring error", asy
 });
 
 test("character workspace retains its prompt and renders a safe provider recovery", async ({ page }, testInfo) => {
+  await page.route("**/api/v1/authoring/capabilities", (route) => route.fulfill({
+    status: 200, contentType: "application/json", body: JSON.stringify({ enabled: false, supportedKinds: ["world_concept", "character"], limits: { activeJobsPerOwner: 5, maximumInputBytes: 2 * 1024 * 1024, listPageSize: 20 } })
+  }));
   const draft = { schemaVersion: 5, world: { title: "Glass Atlas", genre: "", tone: "", premise: "", backgroundStory: "", firstAction: "", rules: "" },
     playableCharacters: [], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [], defaults: {}, preservedLore: { cartographer: "Ilyra" } };
   await page.addInitScript((session) => {

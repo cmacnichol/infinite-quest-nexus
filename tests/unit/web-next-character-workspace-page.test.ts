@@ -549,3 +549,56 @@ describe("Character Workspace page", () => {
     expect(cancelling.complete).toHaveBeenCalledWith("opaque-key", "workflow-1", { status: "cancelled" });
   });
 });
+
+describe("durable character recovery", () => {
+  function durableJob() {
+    return { id: "character-job", revision: 2, status: "awaiting_review" as const, target: { kind: "new_world" as const }, stages: [], expiresAt: "2026-09-13T00:00:00.000Z", canApply: false, incomplete: false, kind: "character" as const,
+      request: { kind: "character" as const, idempotencyKey: "submission", target: { kind: "new_world" as const }, prompt: "A guide", content: draft() }, result: generatedCharacter };
+  }
+  it("offers explicit parent restoration before mounting a lost local character session", async () => {
+    const { root, document } = fixture();
+    const mounted = mountCharacterWorkspacePage(root, "lost", { sessionStore: store(null), resumeJobId: "character-job", authoringJobsApi: {
+      loadAuthoringCapabilities: vi.fn().mockResolvedValue({ enabled: true, supportedKinds: ["character"] }), loadAuthoringJob: vi.fn().mockResolvedValue(durableJob())
+    } as never });
+    await settle(); await settle();
+    expect(root.textContent).toContain("Restore parent draft");
+    expect(document.querySelector('[data-action="accept-character"]')).toBeNull();
+    click(document, '[data-action="restore-authoring-parent"]'); await settle();
+    expect(root.textContent).toContain("Character workspace");
+    expect(root.textContent).toContain("Review available results");
+    mounted.dispose();
+  });
+  it("aborts recovery and never mounts after disposal", async () => {
+    const { root } = fixture(); const loading = deferred<ReturnType<typeof durableJob>>();
+    const load = vi.fn(() => loading.promise);
+    const mounted = mountCharacterWorkspacePage(root, "lost", { sessionStore: store(null), resumeJobId: "character-job", authoringJobsApi: {
+      loadAuthoringCapabilities: vi.fn().mockResolvedValue({ enabled: true, supportedKinds: ["character"] }), loadAuthoringJob: load
+    } as never });
+    await settle(); mounted.dispose(); loading.resolve(durableJob()); await settle();
+    expect(load.mock.calls[0]?.[1]?.aborted).toBe(true);
+    expect(root.querySelector('[data-action="restore-authoring-parent"]')?.hasAttribute("hidden")).toBe(true);
+    expect(root.querySelector('[data-page="character-workspace"]')).toBeNull();
+  });
+});
+
+
+it("cancel leaves a recovered workspace even when its local session is gone", async () => {
+  const { root, document } = fixture(); const navigate = vi.fn(); const missingStore = store(null); missingStore.complete.mockReturnValue(false);
+  const recovered = { ...session(), origin: "world-creation" as const, parentRoute: "/app/worlds/new", expectedWorldRevision: null };
+  const mounted = mountCharacterWorkspacePage(root, "lost", { sessionStore: missingStore, recoveredSession: recovered, navigate });
+  click(document, '[data-action="cancel-character"]');
+  expect(navigate).toHaveBeenCalledWith("/app/worlds/new"); mounted.dispose();
+});
+
+it.each([false, true])("P27-F4 character list reaches page two with an unrelated first page (missing session %s)", async missing => {
+  const { root, document } = fixture();
+  const list = vi.fn().mockResolvedValueOnce({ jobs: [{ id: "other-world", kind: "world_concept", status: "applied" }], nextCursor: "characters-page-two" }).mockResolvedValueOnce({ jobs: [{ id: "saved-character", kind: "character", status: "awaiting_review" }] });
+  const mounted = mountCharacterWorkspacePage(root, "local", { sessionStore: store(missing ? null : session()), authoringJobsApi: { loadAuthoringCapabilities: vi.fn().mockResolvedValue({ enabled: true, supportedKinds: ["character"] }), listAuthoringJobs: list } as never });
+  if (!missing) { await settle(); click(document, '[data-action="list-character-jobs"]'); }
+  await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(1));
+  const more = document.querySelector<HTMLButtonElement>('[data-action="more-character-jobs"]'); expect(more).not.toBeNull(); expect(more!.hidden).toBe(false);
+  more!.click();
+  await vi.waitFor(() => expect(root.textContent).toContain("saved-character"));
+  expect(list).toHaveBeenLastCalledWith("characters-page-two", expect.any(AbortSignal)); expect(more!.hidden).toBe(true);
+  expect(root.textContent).not.toContain("other-world"); mounted.dispose();
+});
