@@ -87,6 +87,8 @@ For each task, use the same unit command form with that task's named tests. For 
 
 **Interfaces**
 
+Export the matching closed schemas as `campaignTurnControlStyleSchema`, `historicalCampaignTurnControlStyleSchema`, `storyOnlyPromptSnapshotSchema`, and `generationPolicySnapshotSchema`. The legacy policy branch permits only Action styles, not flexible_scene; historical null jobs bypass the new-policy parser and use their stored resolved mode. Do not manufacture a new policy for them.
+
 ```ts
 export type CampaignPlayMode = "legacy" | "story_only"; // execution discriminator only
 export type CampaignTurnControlStyle = "action_only" | "flexible_action" | "flexible_scene";
@@ -100,7 +102,7 @@ export type StoryOnlyPromptSnapshot = Readonly<{
   choiceRepairSystemHash: string;
 }>;
 export type GenerationPolicySnapshot =
-  | Readonly<{ version: 1; playMode: "legacy"; turnControlStyle: CampaignTurnControlStyle }>
+  | Readonly<{ version: 1; playMode: "legacy"; turnControlStyle: Exclude<CampaignTurnControlStyle, "flexible_scene"> }>
   | Readonly<{
       version: 1;
       playMode: "story_only";
@@ -168,11 +170,12 @@ Add constraints for non-null policy objects with version 1 and supported source 
 
 ## Task 3: Freeze policy at enqueue and preserve protocol identity
 
-**Owner:** Terra generation-admission implementer. **Depends on:** Task 2.
+**Owner:** Terra generation-admission implementer. **Depends on:** Task 2. Own the complete backend classifier retirement here; Task 7 removes client consumers and verifies closure, not a second backend implementation.
 
 **Files**
 - Create `packages/story-engine/src/story-only-prompt.ts`, `tests/unit/story-only-prompt.test.ts`.
 - Modify `packages/database/src/generation-repository.ts`, `packages/database/src/generation-execution-repository.ts`, `packages/database/src/prompt-repository.ts`, `packages/domain/src/campaign-generation-policy.ts`, `packages/story-engine/src/index.ts`.
+- Modify `services/api/src/server.ts` for the retired route and its owner-scoped 410 tests. Remove active `packages/story-engine/src/turn-intent.ts` exports/callers and classifier request/application/provider dispatch in this task; keep historical schema data only.
 - Modify `services/runtime/src/provider-turn-intent-adapter.ts` and `packages/application/src/providers/{ports,types,use-cases}.ts` to retire active classification dispatch. Cover it with `tests/unit/provider-intent.test.ts` and the provider/route integration harness.
 - Trace/update application generation collaborator contracts through `packages/application/src` and `services/runtime/src/generation-api-composition.ts`/`generation-worker-composition.ts` when signatures change.
 - Tests: `tests/integration/generation-repository.integration.test.ts`, `tests/unit/generation-authority.test.ts`, `tests/unit/prompt-library.test.ts`, `tests/unit/provider-request-budget.test.ts`, new prompt suite.
@@ -190,7 +193,7 @@ export function composeStoryOnlySystemPrompt(
 ): string;
 ```
 
-Use existing SHA-256/stable-stringify utilities; verify frozen text against stored hashes. `generationPolicyIdentity` includes policy version and both exact template hashes. The policy supplement contains the spec's input/choice requirements and an explicit reminder that trigger rules and hidden mechanics are inactive. Keep `PromptSnapshot` required keys and legacy RUNTIME_KEYS hashing unchanged. No new required prompt-catalog keys in this phase.
+Use existing SHA-256/stable-stringify utilities; verify frozen text against stored hashes. `generationPolicyIdentity` includes policy version and both exact template hashes. The policy supplement contains the spec's input/choice requirements and an explicit reminder that trigger rules and hidden mechanics are inactive. Keep `PromptSnapshot` required keys and legacy RUNTIME_KEYS hashing unchanged. No new required prompt-catalog keys in this phase. Retain the frozen `turn_intent` snapshot field/hash solely as compatibility data, including inert snapshot construction if necessary to preserve the legacy hash algorithm. Filter it out of active prompt listing/edit/preview APIs and reject new overrides; preserve stored historical overrides without evaluating them. Do not introduce a live classifier to produce that inert field. Tests must distinguish frozen snapshot compatibility from active catalog visibility.
 
 - [ ] Write RED tests proving legacy execution identity remains byte-for-byte equal, story-only differs, supplement changes invalidate story-only identity, and malformed hash fails before provider dispatch.
 
@@ -206,6 +209,7 @@ expect(generationExecutionProtocolIdentity("legacy-fixture", policy)).not.toBe("
 - [ ] Retire `/api/v1/campaigns/:campaignId/turn-input/classify` for every campaign: remove its application/provider dispatch and replace it with an owner-scoped safe 410 `turn_input_classification_removed` response for stale clients (or remove the route if compatibility tests establish a clear refresh error). It must not resolve a provider, generate text, or write a classification record. New generation requests containing `requestedInputMode: auto`, classified/fallback sources, or classification IDs fail with actionable refresh/use-campaign-setting guidance; preserve historical job decoding.
 - [ ] Add policy to execution payload types, SQL projections, row parsing, persisted draft/recovery compatibility, and model-chain scope. Historical null maps legacy; malformed new values stop with a safe actionable policy/protocol error. Retry checks composed protocol identity and must not regenerate or overwrite policy/supplement text from current source.
 - [ ] Compose the exact story-only system prompt before estimating protected envelopes and final request budgets. Test a supplement-induced overflow fails before dispatch without truncating authority. Keep legacy prompt override acknowledgement semantics; incompatible overrides still fail explicitly.
+- [ ] Add policy-null historical Action/Scene/Auto job resume fixtures and a newly queued Action-policy retry/reclaim case. Historical protocol/hash identity stays unchanged; new Action jobs may retain the legacy protocol string only because exact policy identity is additionally included in chain/context and saved-draft compatibility. Compare frozen policy, never current campaign style.
 - [ ] Run GREEN and existing recovery/identity tests. Commit `Snapshot story-only execution policy at enqueue`.
 
 ## Task 4: Route story-only jobs through the short worker path
@@ -314,7 +318,7 @@ expect(() => parseChoiceRepair(JSON.stringify({...fields, narration: "Changed"})
 
 Current System Archive has record/data versions v1 and v2 while its shared manifest base is v1. Introduce manifest v2 plus System data/record envelope v3 for new exports; reuse unchanged domain record shapes under the new envelope. Campaign v3 records retain the existing turnControlStyle and add the generationPolicyVersion marker; turn records carry source-setting/execution provenance. Keep v1/v2 readers unchanged and normalize historical missing policy to legacy only inside compatibility adapters. Old strict manifest readers must reject the new artifact before applying records. Do not silently redefine v2 by adding a field that may be stripped or misread.
 
-Store only portable accepted provenance such as `{version: 1, playMode, turnControlStyle, protocolVersion: string | null}` in archive turns. Do not export raw job policy prompt texts, repair checkpoints, response chains, credentials, or operational jobs. Reconstruct runtime policy for newly generated turns from the retained campaign turn-control style and destination snapshots, not source job data.
+Define a strict `portableAcceptedGenerationPolicyProvenanceSchema` in contracts: null denotes historical unknown/unrecorded execution policy (required field, not an absent property in new exports); otherwise a closed version-1 union requires a consistent Action/legacy pair or flexible_scene/story_only pair and an exact known protocol identifier. Never invent a policy for historical turns based on current settings. Reject unknown versions/protocols, contradictory pairs and extra fields. Keep this schema distinct from runtime policy snapshots. Add tamper, missing-field, and fingerprint regressions. Store only portable accepted provenance such as `{version: 1, playMode, turnControlStyle, protocolVersion: string | null}` in archive turns. Do not export raw job policy prompt texts, repair checkpoints, response chains, credentials, or operational jobs. Reconstruct runtime policy for newly generated turns from the retained campaign turn-control style and destination snapshots, not source job data.
 
 For imported historical turns, leave the full runtime `turns.generation_policy` column null and preserve the validated portable provenance in the existing portable turn/model-metadata mapping. Do not manufacture missing prompt snapshots to satisfy the runtime policy schema. Public/export projections distinguish this imported provenance from a locally executed full policy; a new generation job always receives a new complete snapshot. Include provenance in fingerprints so import cannot silently erase it.
 
@@ -383,7 +387,7 @@ Use an HTTP transport spy for the retired classification URL and the mounted pla
 - [ ] Run GREEN DOM/workflow tests. Run browser checks against a disposable runtime: select Story Direction in the existing selector -> generate -> choice -> refresh/resume -> settings conflict -> switch to Action -> switch back, desktop and mobile, keyboard/Enter/multiselect, auto-submit on/off, history and replacement, both active routes and both replacement renderer build variants. Capture screenshots under `docs/review/story-only-campaigns/screenshots/` using sanitized fixtures.
 ### Required cleanup gate: remove automatic turn-type selection
 
-This is implementation work within Task 7, completed by Terra implementer 7B after 7A and Task 3 finish. Both workers remove their surface-specific classifier code; 7B verifies the shared dependency cleanup. Do not leave the feature hidden behind a flag or mark this cleanup complete with comments alone.
+This is client cleanup and cross-layer verification within Task 7, completed by Terra implementer 7B after 7A and Task 3 finish. All backend classifier removal listed below is owned and completed by Task 3; 7B verifies it and reports any residual dependency rather than duplicating the work. Both workers remove their surface-specific classifier code; 7B verifies the shared dependency cleanup. Do not leave the feature hidden behind a flag or mark this cleanup complete with comments alone.
 
 **Cleanup targets**
 - `packages/story-engine/src/turn-intent.ts` and its active exports: remove classifier prompt construction/parsing once callers are removed.
@@ -460,7 +464,7 @@ Use configured browser project/base URL for the disposable instance, never the u
 - Complete `docs/review/story-only-campaigns/verification.md` with release limitations and operator checklist.
 
 - [ ] Cross-check each product statement against final code and screenshot evidence. Correct old docs that claim every choice forcibly switches to Action; describe legacy/current behavior separately from Story only. Explain dormant pending events, the changed semantics of existing Story Direction selections for new jobs, setting changes in either direction, repair, and the removed independent scene-fidelity check.
-- [ ] Document migrations and versioned archive readers/writers, immutable job policy, safe unknown-version failure, Auto-to-Action migration, the retired classification endpoint, and old-worker incompatibility. Deployment is coordinated: stop intake, drain/resolve old work, apply additive schema, deploy compatible API/workers, run disposable canaries, then resume intake. No mixed old-worker pool may claim story-only jobs.
+- [ ] Document migrations and versioned archive readers/writers, immutable job policy, safe unknown-version failure, Auto-to-Action migration, the retired classification endpoint, and old-worker incompatibility. Deployment is coordinated: stop intake, drain/resolve old work, apply additive schema, deploy compatible API/workers, run disposable canaries, then resume intake. No mixed old-worker pool may claim story-only jobs. This is a hard deployment prerequisite: stop intake; drain/cancel unresolved jobs; stop old workers and verify zero old worker processes/leases; migrate and deploy compatible workers/API/UI; run one disposable canary and inspect its operation list; only then resume intake. A new-worker capability check cannot fence an old binary that ignores it. Before rollback, resolve all new-policy jobs and stop compatible workers before any old binary may start. Record evidence of the drained pool in the operator checklist; deployment itself is not part of this implementation.
 - [ ] Document rollback: stop intake, resolve new-policy jobs, retain additive schema/accepted data, keep compatible readers, and restore legacy behavior only for legacy campaigns. No bulk mode reset, pending-event deletion, automatic down migration, or restoration over newly accepted history.
 - [ ] Run `pnpm --filter @infinite-quest/docs build`, local link validation, and `git diff --check`. Resolve documentation build failures introduced by changed schemas/examples or navigation. Commit `Document story-only campaign workflow and rollout`.
 - [ ] Controller packages whole-branch diff from `977d8a53`, spec, all task reports, verification evidence, and parked findings for a fresh Terra reviewer. Require review of authority boundaries, policy immutability, pending-state preservation, prompt/repair provenance, portability versions, legacy regression, and UI screenshots.
