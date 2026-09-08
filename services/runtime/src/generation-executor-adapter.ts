@@ -53,6 +53,7 @@ import {
   ContextBudgetError,
   resolveEffectiveContextWindowTokens,
   estimatedInputSafetyAllowanceTokens,
+  estimateStoryTokens,
   planContext,
   serializeProviderRequest,
   fictionGuidanceForEvents,
@@ -79,7 +80,6 @@ import type { RuntimeTextExecution } from "./provider-credential-transport-adapt
 import {
   StreamingSegmentTracker,
   characterVisualReference,
-  estimateTokens,
   isIllustrationSegmentEligible,
   sha256,
   stableStringify
@@ -284,10 +284,6 @@ async function runTurnGenerationPhase<T>(
   }
 }
 
-function budgetTokenEstimate(text: string): number {
-  return Math.max(estimateTokens(text), Math.ceil(text.length / 3));
-}
-
 function generationLogContext(
   job: GenerationExecutionPayload,
   workerId?: string
@@ -344,7 +340,9 @@ function recoverableIntegrityDiagnostic(error: unknown): Readonly<{
       requiredTokens: error.requiredTokens,
       availableTokens: error.availableTokens,
       ...(error.requiredCharacters === undefined ? {} : { requiredCharacters: error.requiredCharacters }),
-      ...(error.availableCharacters === undefined ? {} : { availableCharacters: error.availableCharacters })
+      ...(error.availableCharacters === undefined ? {} : { availableCharacters: error.availableCharacters }),
+      countMode: "estimated",
+      estimatorVersion: "story-token-estimate-v1"
     })
     : null;
   return {
@@ -738,9 +736,9 @@ function planGenerationPromptContext(
   });
   const plan = planContext({
     blocks,
-    contextLimit: Math.min(contextLimit, inputLimit),
+    contextLimit,
     inputLimit,
-    count: (value) => value.length,
+    count: estimateStoryTokens,
     safetyAllowanceTokens: estimatedInputSafetyAllowanceTokens,
     contextSafetyAllowanceTokens: 0,
     serializeContext: (selected) => stableStringify(promptContext(selected)),
@@ -969,8 +967,8 @@ async function executeLoadedGeneration(
       const inputTokenLimit = effectiveContextWindow - provider.maxOutputTokens;
       const emptyPromptContext = { worldCanon: {}, campaignCanon: {}, chronicle: [], currentScene: null };
       const storySystemPrompt = collaborators.promptFromSnapshot(job.prompt_snapshot, "story_system");
-      const fixedPromptEnvelope = budgetTokenEstimate(storySystemPrompt)
-        + budgetTokenEstimate(buildStoryUserPrompt(
+      const fixedPromptEnvelope = estimateStoryTokens(storySystemPrompt)
+        + estimateStoryTokens(buildStoryUserPrompt(
           emptyPromptContext,
           safeAction,
           false,
@@ -984,8 +982,9 @@ async function executeLoadedGeneration(
           `The provider context window (${effectiveContextWindow}) cannot fit the configured output reserve (${provider.maxOutputTokens}) and story prompt envelope.`
         ), { code: "context_budget_invalid" });
       }
+      const configuredCampaignContextBudget = Number(job.context_options.budgetTokens || 32000);
       const safeContextBudget = Math.max(512, Math.min(
-        Number(job.context_options.budgetTokens || 32000),
+        configuredCampaignContextBudget,
         inputTokenLimit - fixedPromptEnvelope
       ));
       return {
@@ -994,6 +993,7 @@ async function executeLoadedGeneration(
         effectiveContextWindow,
         inputTokenLimit,
         storySystemPrompt,
+        configuredCampaignContextBudget,
         safeContextBudget
       };
     });
@@ -1003,6 +1003,7 @@ async function executeLoadedGeneration(
       effectiveContextWindow,
       inputTokenLimit,
       storySystemPrompt,
+      configuredCampaignContextBudget,
       safeContextBudget
     } = preparedInput;
 
@@ -1104,7 +1105,7 @@ async function executeLoadedGeneration(
       assertActiveGenerationUpdate(await repository.markGenerating(scope), "entering generation");
       const planned = planGenerationPromptContext(
         generationContext, provider, storySystemPrompt, safeAction, safeGuidance,
-        storyLength, job.resolved_input_mode, safeContextBudget, inputTokenLimit
+        storyLength, job.resolved_input_mode, configuredCampaignContextBudget, inputTokenLimit
       );
       promptContext = planned.promptContext;
       const { storyInput, contextPlan } = planned;
@@ -1119,6 +1120,8 @@ async function executeLoadedGeneration(
         context: promptContext
       }));
       const contextDiagnostics = {
+        countMode: "estimated",
+        estimatorVersion: "story-token-estimate-v1",
         effectiveContextWindow,
         inputTokenLimit,
         reservedOutputTokens: provider.maxOutputTokens,

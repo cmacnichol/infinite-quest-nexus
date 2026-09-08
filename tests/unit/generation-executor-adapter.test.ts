@@ -626,6 +626,10 @@ describe("generation executor adapter", () => {
     const accepted = (repository.commitAcceptedTurn as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
     expect(accepted.contextDiagnostics.selectedContext).toEqual([{ id: "authority", revision: expect.any(String) }, { id: "selected-memory", revision: expect.any(String) }]);
     expect(accepted.contextDiagnostics.omittedContext).toEqual([{ id: "omitted-memory", revision: expect.any(String), reason: "context_limit" }]);
+    expect(accepted.contextDiagnostics).toMatchObject({
+      countMode: "estimated",
+      estimatorVersion: "story-token-estimate-v1"
+    });
   });
 
   it("makes a provider-request budget overflow recoverable before an RPG fallback can commit a turn", async () => {
@@ -696,7 +700,9 @@ describe("generation executor adapter", () => {
           action: "adjust_context",
           scope: "provider_request",
           requiredTokens: 100,
-          availableTokens: 10
+          availableTokens: 10,
+          countMode: "estimated",
+          estimatorVersion: "story-token-estimate-v1"
         }
       })
     }));
@@ -707,6 +713,43 @@ describe("generation executor adapter", () => {
       expectedBaseIdentity: job.generation_base_identity,
       retrievalBudgetTokens: 8_000
     }));
+  });
+
+  it("classifies a provider-window overflow independently from a larger campaign context budget", async () => {
+    const job = completeGenerationExecutionPayload();
+    job.context_options = { ...job.context_options, budgetTokens: 1_000_000 };
+    const repository = {
+      loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
+      saveOrchestration: vi.fn(async () => true), savePartialNarration: vi.fn(async () => true), saveStreamingSegments: vi.fn(async () => true),
+      recordAttempt: vi.fn(async () => undefined), markRecoverable: vi.fn(async () => true), markValidating: vi.fn(async () => true),
+      markCommitting: vi.fn(async () => true), commitAcceptedTurn: vi.fn(async () => ({ turnId: "unexpected" })), markFailed: vi.fn(async () => true)
+    } as unknown as GenerationExecutionRepository;
+    const provider = {
+      id: claim.providerProfileId, name: "Constrained provider", providerRole: "text" as const,
+      providerType: "openai_compatible" as const, model: "test-model", contextWindowTokens: 20_000,
+      maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {}, execute: vi.fn()
+    };
+    const collaborators = {
+      memory: {
+        loadGenerationContext: vi.fn(async () => ({
+          authority: { worldCanon: { gazetteer: "word ".repeat(12_000) } }, candidates: [],
+          baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT
+        }))
+      },
+      illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) },
+      loadTextExecution: vi.fn(async () => provider), promptFromSnapshot: vi.fn(() => "Write a concise fictional scene."),
+      recordProfileCost: vi.fn(async () => undefined), attributeGenerationCostsToTurn: vi.fn(async () => undefined)
+    } as unknown as GenerationExecutionCollaborators;
+
+    const executor = createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators });
+    await expect(executor.execute({ workerId: "worker-a", leaseSeconds: 30, claim })).resolves.toBe(true);
+
+    expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({
+      errorCode: "context_budget_exceeded",
+      recoveryMetadata: expect.objectContaining({ diagnostic: expect.objectContaining({ scope: "provider_request" }) })
+    }));
+    expect(provider.execute).not.toHaveBeenCalled();
+    expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
   });
 
   it("treats a missing guarded payload as cancellation before provider work or mutation", async () => {

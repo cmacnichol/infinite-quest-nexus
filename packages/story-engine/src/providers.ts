@@ -3,6 +3,7 @@ import { logger } from "../../logger/src/index.js";
 import { ProviderDestinationNotAllowedError } from "../../security/src/provider-network-policy.js";
 import { estimatedInputSafetyAllowanceTokens, serializeCheckedProviderRequest, serializeLegacyProviderRequest, validateCompleteRejectedDraft } from "./provider-request.js";
 import { resolveEffectiveContextWindowTokens } from "./context-budget.js";
+import { estimateStoryTokens } from "./token-estimate.js";
 import type { CanonicalProviderRequest, PreparedProviderRequest, ProviderOutputBudget } from "./provider-request.js";
 import {
   MAX_IMAGE_PROVIDER_RESPONSE_BYTES,
@@ -942,7 +943,7 @@ function checkedStoryRequest(profile: TextProviderProfile, request: ProviderRequ
   );
   return serializeCheckedProviderRequest(profile, canonicalRequest(request), {
     inputLimit: effectiveContextWindowTokens - profile.maxOutputTokens,
-    count: (body) => body.length,
+    count: estimateStoryTokens,
     countMode: "estimated",
     safetyAllowanceTokens: estimatedInputSafetyAllowanceTokens,
     contextWindowTokens: effectiveContextWindowTokens,
