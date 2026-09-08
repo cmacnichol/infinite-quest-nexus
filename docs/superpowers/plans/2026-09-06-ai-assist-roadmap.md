@@ -1,6 +1,6 @@
 # AI Assist Implementation Roadmap and Design
 
-**Status:** Patch 1 is implemented and verified. Patch 2 implementation and verification are ready for independent P2.10 task review and the subsequent whole-branch review; see the [Patch 2 verification record](../../review/2026-09-06-ai-assist-patch-2-verification.md). Patch 3 remains proposed and is not authorized by this record.
+**Status:** Proposed implementation plan; no implementation is authorized by this document alone.
 **Source revision inspected:** 707baa8cd8eab704a8d5202e99c5a7ce2b7201c7.
 **Requested delivery:** Implement one patch at a time. Finish its review and verification gate, then stop. Do not start the next patch until the user requests it.
 
@@ -32,7 +32,7 @@ For each task, give the implementer this roadmap, the patch plan, the task ident
 10. A patch completion gate is not permission to merge, deploy, or start the next patch. Report blocked or skipped runtime checks honestly.
 
 Required repository readings before execution:
-- Repository guidelines (`AGENTS.md` at the repository root)
+- [Repository guidelines](../../../AGENTS.md)
 - [Domain guidance](../../agents/domain.md)
 - [Architecture and service boundaries](../../architecture/repository-overview.md)
 - [Roster and incomplete-draft decision](../../architecture/0014-roster-only-world-character-guidance.md)
@@ -131,3 +131,4 @@ For every task and patch, record:
     Commit or review reference, if requested:
 
 Planning-only changes require local-link and diff validation; application tests are not needed until implementation begins.
+

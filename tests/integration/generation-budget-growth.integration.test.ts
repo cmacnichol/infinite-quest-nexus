@@ -13,6 +13,7 @@ import { enqueueChronicleReindex, importLegacyStory, runNextChronicle, setCampai
 import { runGenerationJob } from "../helpers/generation-worker-harness.js";
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 import { estimatedInputSafetyAllowanceTokens } from "../../packages/story-engine/src/provider-request.js";
+import { estimateStoryTokens } from "../../packages/story-engine/src/token-estimate.js";
 import { logger } from "../../packages/logger/src/index.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -130,7 +131,8 @@ integration("generation budget grows the actual provider Chronicle context", () 
 
   async function seedEquivalentCampaign(
     budget: number,
-    retrieval: "chunked_ready" | "chunked_fallback"
+    retrieval: "chunked_ready" | "chunked_fallback",
+    options: Readonly<{ protectedAuthorityRecords?: number }> = {}
   ): Promise<string> {
     const fixture = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
     fixture.world.title = `Budget growth corpus ${budget} ${crypto.randomUUID()}`;
@@ -158,7 +160,13 @@ integration("generation budget grows the actual provider Chronicle context", () 
                   'Archive fact ' || ordinal || '-0 remains authoritative [fact-tail-' || ordinal || '-0]',
                   'Archive fact ' || ordinal || '-1 remains authoritative [fact-tail-' || ordinal || '-1]',
                   'Archive fact ' || ordinal || '-2 remains authoritative [fact-tail-' || ordinal || '-2]'
-                ),
+                ) || COALESCE((
+                  SELECT jsonb_agg(
+                    'Archive fact ' || ordinal || '-' || fact_index || ' remains authoritative [fact-tail-'
+                      || ordinal || '-' || fact_index || ']'
+                  )
+                  FROM generate_series(3,9) fact_index
+                ), '[]'::jsonb),
                 'canonicalFactUpdates','[]'::jsonb
               ),now()
          FROM generate_series(3,122) AS ordinal
@@ -216,6 +224,22 @@ integration("generation budget grows the actual provider Chronicle context", () 
       );
     }
     await pool.query("UPDATE campaigns SET active_turn_number=122 WHERE id=$1", [campaignId]);
+    if (options.protectedAuthorityRecords) {
+      await pool.query(
+        `UPDATE turns
+            SET state_snapshot_private = jsonb_set(
+              state_snapshot_private,
+              '{canonicalFacts}',
+              (SELECT jsonb_agg(
+                'Protected authority ' || ordinal || ': '
+                  || repeat('The archive charter remains complete and authoritative. ', 20)
+                  || '[protected-authority-tail-' || ordinal || ']'
+              ) FROM generate_series(1,$3) ordinal)
+            )
+          WHERE owner_user_id=$1 AND campaign_id=$2 AND turn_number=122`,
+        [ownerUserId, campaignId, options.protectedAuthorityRecords]
+      );
+    }
     return campaignId;
   }
 
@@ -346,8 +370,9 @@ integration("generation budget grows the actual provider Chronicle context", () 
     for (const snapshot of [small, medium, large]) {
       const sent = `${snapshot.body}\n${snapshot.serializedContext}`;
       expect(sent).not.toContain("OUT-OF-SCOPE-BUDGET-GROWTH");
-      expect(snapshot.serializedContext.length).toBeLessThanOrEqual(snapshot.budget);
-      expect(snapshot.body.length + estimatedInputSafetyAllowanceTokens(snapshot.body.length))
+      expect(estimateStoryTokens(snapshot.serializedContext)).toBeLessThanOrEqual(snapshot.budget);
+      const requestTokens = estimateStoryTokens(snapshot.body);
+      expect(requestTokens + estimatedInputSafetyAllowanceTokens(requestTokens))
         .toBeLessThanOrEqual(providerContextWindowTokens - providerMaxOutputTokens);
       expect(snapshot.authorityFacts.map((fact) => fact.content)).toEqual(expect.arrayContaining([
         "Archive fact 122-0 remains authoritative [fact-tail-122-0]",
@@ -369,5 +394,123 @@ integration("generation budget grows the actual provider Chronicle context", () 
 
   it("grows actual context through configured chunked retrieval when its index is not ready", async () => {
     await assertGrowthFor("chunked_fallback");
+  }, 120_000);
+
+  it("does not reject complete protected authority solely because its characters exceed the campaign budget", async () => {
+    const campaignId = await seedEquivalentCampaign(128_000, "chunked_ready", { protectedAuthorityRecords: 140 });
+    const application = createApiGenerationApplication(pool, credentialSecret);
+    const requestOffset = requests.length;
+    const acceptedBefore = await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL",
+      [campaignId]
+    );
+    const job = await application.enqueueAppend({ ownerUserId, campaignId }, generationRequestSchema.parse({
+      action: "Compare the complete protected archive authority.",
+      providerProfileId: providerId,
+      idempotencyKey: crypto.randomUUID(),
+      context: { budgetTokens: 128_000, compression: "full", recentTurns: 8 }
+    }));
+
+    expect(await runGenerationJob(pool, `budget-growth-protected-authority-${crypto.randomUUID()}`, 30, credentialSecret)).toBe(true);
+    const result = await application.getJob({ ownerUserId, jobId: job.id });
+    expect(result).toMatchObject({ status: "completed" });
+    const providerRequest = requests.slice(requestOffset).find((candidate) => Array.isArray(candidate.parsed.messages));
+    expect(providerRequest).toBeDefined();
+    expect(providerRequest!.body).toContain("[protected-authority-tail-1]");
+    expect(providerRequest!.body).toContain("[protected-authority-tail-140]");
+    const userMessage = (providerRequest!.parsed.messages as Array<{ role?: string; content?: string }>)
+      .find((message) => message.role === "user");
+    const payload = JSON.parse(userMessage?.content || "{}") as { authoritative_context?: unknown };
+    const serializedContext = JSON.stringify(payload.authoritative_context);
+    expect(serializedContext.length).toBeGreaterThan(128_000);
+    expect(estimateStoryTokens(serializedContext)).toBeLessThanOrEqual(128_000);
+    const authorityFacts = (payload.authoritative_context as {
+      currentContinuity?: { canonicalFacts?: Array<{ content?: string }> };
+    })?.currentContinuity?.canonicalFacts ?? [];
+    expect(authorityFacts).toHaveLength(140);
+    expect(authorityFacts.map((fact) => fact.content)).toEqual(Array.from({ length: 140 }, (_, index) =>
+      expect.stringContaining(`[protected-authority-tail-${index + 1}]`)
+    ));
+    const acceptedAfter = await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL",
+      [campaignId]
+    );
+    expect(Number(acceptedAfter.rows[0]?.count)).toBe(Number(acceptedBefore.rows[0]?.count) + 1);
+  }, 120_000);
+
+  it("keeps accepted state and Chronicle unchanged when protected authority exceeds the estimated campaign budget", async () => {
+    const campaignId = await seedEquivalentCampaign(128_000, "chunked_ready", { protectedAuthorityRecords: 500 });
+    const application = createApiGenerationApplication(pool, credentialSecret);
+    const requestOffset = requests.length;
+    const before = await pool.query<{ state: unknown; acceptedTurns: unknown; chronicle: unknown }>(
+      `SELECT
+         (SELECT to_jsonb(state_row) FROM campaign_state state_row WHERE campaign_id=$1) AS state,
+         (SELECT jsonb_agg(to_jsonb(turn_row) ORDER BY turn_number) FROM turns turn_row
+           WHERE campaign_id=$1 AND accepted_at IS NOT NULL) AS "acceptedTurns",
+         (SELECT jsonb_agg(jsonb_build_object('kind', memory_kind, 'content', content) ORDER BY memory_kind,id)
+           FROM chronicle_memories WHERE campaign_id=$1) AS chronicle`,
+      [campaignId]
+    );
+    const job = await application.enqueueAppend({ ownerUserId, campaignId }, generationRequestSchema.parse({
+      action: "Compare the oversized protected archive authority.",
+      providerProfileId: providerId,
+      idempotencyKey: crypto.randomUUID(),
+      context: { budgetTokens: 128_000, compression: "full", recentTurns: 8 }
+    }));
+
+    expect(await runGenerationJob(pool, `budget-growth-estimated-overflow-${crypto.randomUUID()}`, 30, credentialSecret)).toBe(true);
+    await expect(application.getJob({ ownerUserId, jobId: job.id })).resolves.toMatchObject({
+      status: "recoverable",
+      errorCode: "context_budget_exceeded"
+    });
+    const diagnostic = await pool.query<{ value: unknown }>(
+      "SELECT recovery_metadata->'diagnostic' AS value FROM generation_jobs WHERE id=$1",
+      [job.id]
+    );
+    expect(diagnostic.rows[0]?.value).toMatchObject({
+      scope: "campaign_context",
+      countMode: "estimated",
+      estimatorVersion: "story-token-estimate-v1"
+    });
+    expect(requests.slice(requestOffset).filter((candidate) => Array.isArray(candidate.parsed.messages))).toEqual([]);
+    const after = await pool.query<{ state: unknown; acceptedTurns: unknown; chronicle: unknown }>(
+      `SELECT
+         (SELECT to_jsonb(state_row) FROM campaign_state state_row WHERE campaign_id=$1) AS state,
+         (SELECT jsonb_agg(to_jsonb(turn_row) ORDER BY turn_number) FROM turns turn_row
+           WHERE campaign_id=$1 AND accepted_at IS NOT NULL) AS "acceptedTurns",
+         (SELECT jsonb_agg(jsonb_build_object('kind', memory_kind, 'content', content) ORDER BY memory_kind,id)
+           FROM chronicle_memories WHERE campaign_id=$1) AS chronicle`,
+      [campaignId]
+    );
+    expect(after.rows).toEqual(before.rows);
+  }, 120_000);
+
+  it("reports provider-request scope when campaign context fits but the provider window cannot hold the request and output reserve", async () => {
+    const campaignId = await seedEquivalentCampaign(1_000_000, "chunked_ready", { protectedAuthorityRecords: 140 });
+    await pool.query("UPDATE provider_profiles SET context_window_tokens=$2 WHERE id=$1", [providerId, 20_000]);
+    const application = createApiGenerationApplication(pool, credentialSecret);
+    const requestOffset = requests.length;
+    const job = await application.enqueueAppend({ ownerUserId, campaignId }, generationRequestSchema.parse({
+      action: "Check the provider-window limited archive authority.",
+      providerProfileId: providerId,
+      idempotencyKey: crypto.randomUUID(),
+      context: { budgetTokens: 1_000_000, compression: "full", recentTurns: 8 }
+    }));
+
+    expect(await runGenerationJob(pool, `budget-growth-provider-window-${crypto.randomUUID()}`, 30, credentialSecret)).toBe(true);
+    await expect(application.getJob({ ownerUserId, jobId: job.id })).resolves.toMatchObject({
+      status: "recoverable",
+      errorCode: "context_budget_exceeded"
+    });
+    const diagnostic = await pool.query<{ value: unknown }>(
+      "SELECT recovery_metadata->'diagnostic' AS value FROM generation_jobs WHERE id=$1",
+      [job.id]
+    );
+    expect(diagnostic.rows[0]?.value).toMatchObject({
+      scope: "provider_request",
+      countMode: "estimated",
+      estimatorVersion: "story-token-estimate-v1"
+    });
+    expect(requests.slice(requestOffset).filter((candidate) => Array.isArray(candidate.parsed.messages))).toEqual([]);
   }, 120_000);
 });

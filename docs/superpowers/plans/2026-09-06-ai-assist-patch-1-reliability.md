@@ -10,10 +10,6 @@
 
 **Spec:** [AI Assist roadmap and design](2026-09-06-ai-assist-roadmap.md), especially shared requirements and Patch 1 decisions.
 
-## Execution status - 2026-09-06
-
-P1.1-P1.7 are implemented, verified and task-reviewed. Independent whole-patch review and the final scoped re-review passed; both integrity findings are resolved. The [verification record](../../review/2026-09-06-ai-assist-patch-1-verification.md) records the final audit, 398 unit tests, 46 PostgreSQL cases, two browser flows and four refreshed live checks. Changes remain uncommitted in the isolated worktree; main integration, deployment and Patch 2/3 implementation have not started.
-
 ## Global constraints
 
 - Implement P1.1–P1.7 in order; each task is a separate reviewable checkpoint.
@@ -30,7 +26,6 @@ P1.1-P1.7 are implemented, verified and task-reviewed. Independent whole-patch r
 | File | Action | Responsibility |
 | --- | --- | --- |
 | packages/contracts/src/authoring.ts | Create | Sanitized authoring issue/failure schema |
-| packages/contracts/src/authoring-error-projection.ts | Create | Shared browser-safe path, code and message policy used by domain/API/UI |
 | packages/contracts/src/index.ts | Modify | Export authoring contracts |
 | packages/domain/src/authoring-output.ts | Create | Generated-output normalization and completion validation |
 | packages/domain/src/authoring-prompts.ts | Create | Code-owned schema/evidence prompt suffix |
@@ -75,7 +70,7 @@ No unrelated reshaping of the large runtime adapter. Extract only the responsibi
 
 PlayableCharacter is the existing contract type. Source mode is a validator option only; there is no source workflow in this patch. It requires a nonempty name and at least one story field, with evidence enforced by Patch 3.
 
-- [x] Write the RED cases using an application-owned ID and the existing empty-profile schema:
+- [ ] Write the RED cases using an application-owned ID and the existing empty-profile schema:
 
         const empty = {
           id: "test-character", name: "Iris", characterText: "",
@@ -84,13 +79,13 @@ PlayableCharacter is the existing contract type. Source mode is a validator opti
         expect(() => validateGeneratedCharacter(empty, "creative")).toThrow();
         expect(playableCharacterSchema.safeParse(empty).success).toBe(true);
 
-- [x] Add cases for role plus background but no motivation/goal/hook; meaningful profile with unknown appearance; null/wrong object types; invalid arrays; duplicate names; and arbitrary raw error text excluded from the projected issue messages.
-- [x] Run the new test file and capture the missing-validator or incorrect-completion RED result.
-- [x] Implement the creative minimum from the roadmap. Keep all required checks in one pure validator. Preserve standalone characterText compatibility; use hasCharacterProfileGuidance and characterLegacyText in packages/domain/src/world-characters.ts when a legacy text projection is needed. Do not overwrite existing legacy guidance or require a second model-authored copy of profile prose.
-- [x] Apply the same validator at final world completion. Preserve strict 3–4 concept-world roster semantics in this patch. Do not reject incomplete manual saves. Check generated fictional fields with the existing mechanics-leakage boundary in packages/domain/src/text.ts; reject/repair contaminated generated content rather than silently saving it. Add a synthetic dice/modifier sentinel regression and preserve legitimate diegetic numbers.
-- [x] Cap error lists at 20 issues and paths at 500 characters, accepting only schema-known field paths or application-owned indexed paths; use fixed messages for each code.
-- [x] Run new and associated tests GREEN; inspect fixtures affected by stronger completion and update only generation fixtures with meaningful content.
-- [x] Review the diff and checkpoint only this task when commits are requested.
+- [ ] Add cases for role plus background but no motivation/goal/hook; meaningful profile with unknown appearance; null/wrong object types; invalid arrays; duplicate names; and arbitrary raw error text excluded from the projected issue messages.
+- [ ] Run the new test file and capture the missing-validator or incorrect-completion RED result.
+- [ ] Implement the creative minimum from the roadmap. Keep all required checks in one pure validator. Preserve standalone characterText compatibility; use hasCharacterProfileGuidance and characterLegacyText in packages/domain/src/world-characters.ts when a legacy text projection is needed. Do not overwrite existing legacy guidance or require a second model-authored copy of profile prose.
+- [ ] Apply the same validator at final world completion. Preserve strict 3–4 concept-world roster semantics in this patch. Do not reject incomplete manual saves. Check generated fictional fields with the existing mechanics-leakage boundary in packages/domain/src/text.ts; reject/repair contaminated generated content rather than silently saving it. Add a synthetic dice/modifier sentinel regression and preserve legitimate diegetic numbers.
+- [ ] Cap error lists at 20 issues and paths at 500 characters, accepting only schema-known field paths or application-owned indexed paths; use fixed messages for each code.
+- [ ] Run new and associated tests GREEN; inspect fixtures affected by stronger completion and update only generation fixtures with meaningful content.
+- [ ] Review the diff and checkpoint only this task when commits are requested.
 
 **Acceptance:** Empty generated profiles fail; valid sparse appearance passes; manual drafts retain their existing validity.
 
@@ -108,7 +103,7 @@ PlayableCharacter is the existing contract type. Source mode is a validator opti
 
 Code owns complete JSON examples, required types, completion requirements, and the evidence item { path, source, quote }. Use one shared structured-profile example in both character paths. Runtime prompt snapshots must contain the effective mandatory suffix.
 
-- [x] Write the RED test against the shipped template and an intentionally minimal custom override:
+- [ ] Write the RED test against the shipped template and an intentionally minimal custom override:
 
         for (const guidance of [
           PROMPT_TEMPLATE_CATALOG.character_generation.defaultContent,
@@ -120,13 +115,13 @@ Code owns complete JSON examples, required types, completion requirements, and t
           expect(prompt).toContain("untrusted reference");
         }
 
-- [x] Add tests proving world-seed and standalone contracts share profile structure, organizer evidence includes exact keys, appended contract appears once, and custom text remains present.
-- [x] Run the new tests RED.
-- [x] Implement a unique bounded contract marker and append once at the final builder boundary. Do not trust a user-supplied marker as proof the suffix already exists: rebuild the final contract from code.
-- [x] Version character generation to character-authoring-v3-validated-profile and organizer to character-profile-organizer-v3; introduce world-authoring-v2-validated-profile metadata for new world generations. Leave saved historical protocol values intact.
-- [x] Update template descriptions and snapshot tests. Remove contradictory “fields supplied in input” wording; customized content still receives the suffix.
-- [x] Run prompt and character/world unit tests GREEN. Check exact effective prompts, not only fallback strings.
-- [x] Review and checkpoint.
+- [ ] Add tests proving world-seed and standalone contracts share profile structure, organizer evidence includes exact keys, appended contract appears once, and custom text remains present.
+- [ ] Run the new tests RED.
+- [ ] Implement a unique bounded contract marker and append once at the final builder boundary. Do not trust a user-supplied marker as proof the suffix already exists: rebuild the final contract from code.
+- [ ] Version character generation to character-authoring-v3-validated-profile and organizer to character-profile-organizer-v3; introduce world-authoring-v2-validated-profile metadata for new world generations. Leave saved historical protocol values intact.
+- [ ] Update template descriptions and snapshot tests. Remove contradictory “fields supplied in input” wording; customized content still receives the suffix.
+- [ ] Run prompt and character/world unit tests GREEN. Check exact effective prompts, not only fallback strings.
+- [ ] Review and checkpoint.
 
 **Acceptance:** No active prompt can omit the mandatory shape merely because a shipped/custom template replaces fallback text.
 
@@ -151,7 +146,7 @@ Code owns complete JSON examples, required types, completion requirements, and t
 
 ProviderResult is the existing provider response type. Domain validation produces recognized schema/semantic errors. Programming errors propagate to the API's generic sanitized failure boundary rather than being misdiagnosed as repairable model output.
 
-- [x] Write the RED test with two deterministic responses:
+- [ ] Write the RED test with two deterministic responses:
 
         const request = vi.fn()
           .mockResolvedValueOnce({ content: "{", outputLimited: false })
@@ -164,13 +159,13 @@ ProviderResult is the existing provider response type. Domain validation produce
         expect(request).toHaveBeenCalledTimes(2);
         expect(request.mock.calls[1][0].repair).toBe(true);
 
-- [x] Add RED cases for wrong schema, missing creative minimum, reasoning-only/empty output, truncated response, invalid repaired response, and a valid response marked outputLimited. Define the latter as acceptable only when full parse and semantic completion pass.
-- [x] Add typed transport cases: 401 and network-policy errors make one call; 429 then success retries once; two timeouts fail; malformed initial output followed by two repair transport failures stops at the configured bound; assert total calls never exceed four. Use fake timers/injected delay, not wall-clock sleeps.
-- [x] Implement parse → validation → one full-replacement repair. Feed actual sanitized issue paths/codes, original task context, and bounded rejected output into repair. Do not append arbitrary syntax fragments or fabricate facts locally.
-- [x] Bound rejectedResponse to 16,000 Unicode code points and label any diagnostic truncation. This bound applies to rejected provider output, never the user's source. If a response chain is missing/incompatible, rebuild the repair request statelessly within the same call budget.
-- [x] Implement typed retry classification and delay policy from the roadmap. Preserve existing network policy and response-size safeguards.
-- [x] Run the new suite GREEN and confirm final failures contain only AuthoringFailure plus application-authored messages.
-- [x] Review and checkpoint.
+- [ ] Add RED cases for wrong schema, missing creative minimum, reasoning-only/empty output, truncated response, invalid repaired response, and a valid response marked outputLimited. Define the latter as acceptable only when full parse and semantic completion pass.
+- [ ] Add typed transport cases: 401 and network-policy errors make one call; 429 then success retries once; two timeouts fail; malformed initial output followed by two repair transport failures stops at the configured bound; assert total calls never exceed four. Use fake timers/injected delay, not wall-clock sleeps.
+- [ ] Implement parse → validation → one full-replacement repair. Feed actual sanitized issue paths/codes, original task context, and bounded rejected output into repair. Do not append arbitrary syntax fragments or fabricate facts locally.
+- [ ] Bound rejectedResponse to 16,000 Unicode code points and label any diagnostic truncation. This bound applies to rejected provider output, never the user's source. If a response chain is missing/incompatible, rebuild the repair request statelessly within the same call budget.
+- [ ] Implement typed retry classification and delay policy from the roadmap. Preserve existing network policy and response-size safeguards.
+- [ ] Run the new suite GREEN and confirm final failures contain only AuthoringFailure plus application-authored messages.
+- [ ] Review and checkpoint.
 
 **Acceptance:** Syntax, shape, and semantic failures share one bounded loop; permanent failures are not retried.
 
@@ -182,7 +177,7 @@ ProviderResult is the existing provider response type. Domain validation produce
 **Consumes:** runAuthoringResponse, appendAuthoringContract, validateGeneratedCharacter.
 **Produces:** Existing exported preview functions and existing response shapes, with corrected validation/repair.
 
-- [x] Add a runtime preview RED test using the existing collaborator harness pattern:
+- [ ] Add a runtime preview RED test using the existing collaborator harness pattern:
 
         const execute = vi.fn()
           .mockResolvedValueOnce(providerResult('{"name":"Iris","profile":{"story":"wrong"}}'))
@@ -195,13 +190,13 @@ ProviderResult is the existing provider response type. Domain validation produce
 
 The helper providerResult returns all ProviderResult fields using the shape in world-generator-service.test.ts. Create validCharacterResponse with role "Cartographer", background "Raised in a harbor", goals "Map the inland roads", and empty unknown appearance. providersWithExecute, pool, ownerId, request, and progressDependencies follow that existing test's in-memory collaborator fixture, with no real database connection.
 
-- [x] Add equivalent world-child tests; verify supplied seed association and application-owned IDs survive repair. Keep mismatched seed rejection; do not trust model IDs as application identity.
-- [x] Run RED; capture the currently single-call failure and empty-profile acceptance regression.
-- [x] Adapt old snake_case world child fields once at the provider boundary, then call the shared character validator. Preserve existing metadata and imported extension fields during revision.
-- [x] Replace separate catch/recovery implementations with the P1.3 pipeline. Preserve progress updates and standalone/world provider selection.
-- [x] Verify failures make no world/draft writes and no campaign/Chronicle calls in the in-memory collaborators.
-- [x] Run world-generator-service, generated-world, world-library, and character-generator-service tests GREEN.
-- [x] Review and checkpoint.
+- [ ] Add equivalent world-child tests; verify supplied seed association and application-owned IDs survive repair. Keep mismatched seed rejection; do not trust model IDs as application identity.
+- [ ] Run RED; capture the currently single-call failure and empty-profile acceptance regression.
+- [ ] Adapt old snake_case world child fields once at the provider boundary, then call the shared character validator. Preserve existing metadata and imported extension fields during revision.
+- [ ] Replace separate catch/recovery implementations with the P1.3 pipeline. Preserve progress updates and standalone/world provider selection.
+- [ ] Verify failures make no world/draft writes and no campaign/Chronicle calls in the in-memory collaborators.
+- [ ] Run world-generator-service, generated-world, world-library, and character-generator-service tests GREEN.
+- [ ] Review and checkpoint.
 
 **Acceptance:** Both character entry points have the same semantic minimum and retry policy without changing API payloads.
 
@@ -212,7 +207,7 @@ The helper providerResult returns all ProviderResult fields using the shape in w
 
 **Interfaces:** Preserve validateOrganizerResult for direct validation. Change validateOrganizerResultWithRepair to accept syntax/structural/semantic issues rather than only one unsupported quote; both production organization entry points use runAuthoringResponse so JSON extraction is inside the bounded loop. Make the old repair helper a compatibility wrapper or remove its production use; never nest two repair loops and accidentally permit a second repair.
 
-- [x] Write the RED test using a complete organizer object:
+- [ ] Write the RED test using a complete organizer object:
 
         const value = {
           candidate: characterProfileSchema.parse({ appearance: { clothing: "Blue coat" } }),
@@ -225,13 +220,13 @@ The helper providerResult returns all ProviderResult fields using the shape in w
           { path: "appearance.clothing", source: "legacyGuidance", quote: "Blue coat" }
         ]);
 
-- [x] Add tests for field→path, content→quote, sourceKey→source, and verbatim→quote. If canonical and alias values conflict, produce a validation failure rather than silently selecting one. Remove translated alias keys before strict parsing.
-- [x] Add RED cases for invalid JSON, malformed evidence arrays, unknown source keys, missing evidence paths, unsupported quotes, and malformed repaired output. Assert exactly one content repair and safe terminal failure.
-- [x] Run RED and implement normalization plus the shared loop. Preserve exact-quote/whitespace matching policy; do not weaken the strict public result schema or turn source text into prompt instructions.
-- [x] Ensure evidence path refers to a populated candidate field and every populated field has evidence. Keep unrelated world lore out of character facts; flag unsupported content rather than inventing.
-- [x] Include both owner-scoped world and campaign endpoint tests, including foreign-owner inputs and failed-output non-persistence.
-- [x] Run unit tests GREEN and the dedicated integration cases when configured.
-- [x] Review against the earlier organizer plan, record covered requirements, and checkpoint.
+- [ ] Add tests for field→path, content→quote, sourceKey→source, and verbatim→quote. If canonical and alias values conflict, produce a validation failure rather than silently selecting one. Remove translated alias keys before strict parsing.
+- [ ] Add RED cases for invalid JSON, malformed evidence arrays, unknown source keys, missing evidence paths, unsupported quotes, and malformed repaired output. Assert exactly one content repair and safe terminal failure.
+- [ ] Run RED and implement normalization plus the shared loop. Preserve exact-quote/whitespace matching policy; do not weaken the strict public result schema or turn source text into prompt instructions.
+- [ ] Ensure evidence path refers to a populated candidate field and every populated field has evidence. Keep unrelated world lore out of character facts; flag unsupported content rather than inventing.
+- [ ] Include both owner-scoped world and campaign endpoint tests, including foreign-owner inputs and failed-output non-persistence.
+- [ ] Run unit tests GREEN and the dedicated integration cases when configured.
+- [ ] Review against the earlier organizer plan, record covered requirements, and checkpoint.
 
 **Acceptance:** Structural and semantic failures have bounded recovery; unsupported claims cannot become saved character facts.
 
@@ -247,7 +242,7 @@ The helper providerResult returns all ProviderResult fields using the shape in w
 
 Legacy raw/unknown errors retain a generic fallback. Public envelopes retain existing HTTP compatibility and add sanitized details; do not expose arbitrary 5xx exceptions globally.
 
-- [x] Write RED API/page tests showing an invalid character response identifies character stage and profile.story.background while retaining correlation ID:
+- [ ] Write RED API/page tests showing an invalid character response identifies character stage and profile.story.background while retaining correlation ID:
 
         const message = authoringFailureText({
           code: "invalid_authoring_output", stage: "character", retryable: true,
@@ -257,13 +252,13 @@ Legacy raw/unknown errors retain a generic fallback. Public envelopes retain exi
         expect(message).toContain("background");
         expect(message).toContain("fixture-correlation");
 
-- [x] Add tests excluding HTML, provider URLs, credentials, raw JSON, and quotes from error UI; assert textContent rendering, accessible status/error announcements, and preserved input after failure/cancel.
-- [x] Run RED and implement allowlisted server projection with expose: true only for known sanitized authoring errors.
-- [x] Preserve details through API parsing; display stage, concise issue list, retry action, and provider-setup link only for provider availability failures.
-- [x] Ensure a failed progress poll cannot overwrite the more useful POST error or erase current form fields. Handle delayed completion and stale responses using existing generation sequence checks.
-- [x] Add a Playwright test routing the new error envelope through each rendered creation flow; assert prompt preservation and capture screenshots with page.screenshot({ path: ... }) under the test output directory.
-- [x] Run unit and browser tests GREEN; update the two user guides with actual behavior and no claims of guaranteed model compliance.
-- [x] Review and checkpoint.
+- [ ] Add tests excluding HTML, provider URLs, credentials, raw JSON, and quotes from error UI; assert textContent rendering, accessible status/error announcements, and preserved input after failure/cancel.
+- [ ] Run RED and implement allowlisted server projection with expose: true only for known sanitized authoring errors.
+- [ ] Preserve details through API parsing; display stage, concise issue list, retry action, and provider-setup link only for provider availability failures.
+- [ ] Ensure a failed progress poll cannot overwrite the more useful POST error or erase current form fields. Handle delayed completion and stale responses using existing generation sequence checks.
+- [ ] Add a Playwright test routing the new error envelope through each rendered creation flow; assert prompt preservation and capture screenshots with page.screenshot({ path: ... }) under the test output directory.
+- [ ] Run unit and browser tests GREEN; update the two user guides with actual behavior and no claims of guaranteed model compliance.
+- [ ] Review and checkpoint.
 
 **Acceptance:** Users can distinguish invalid output from unavailable provider without receiving raw provider internals.
 
@@ -274,10 +269,10 @@ Legacy raw/unknown errors retain a generic fallback. Public envelopes retain exi
 
 **Deliverable:** Reviewable evidence for the entire synchronous request → provider → repair → validated preview → explicit save path.
 
-- [x] Add integration test seeds with actual assertions: malformed initial response followed by valid repair returns 200; malformed repair returns a sanitized 502; query world/draft/profile revisions before and after failed previews and assert equality.
-- [x] Include one server fixture response with a secret-shaped sentinel; assert the sentinel is absent from public response and safe logs. Fixtures contain synthetic content only.
-- [x] Run new cases before remaining fixes and rerun GREEN. Shared projection: five expected RED failures then GREEN. API harness/contract corrections are documented separately and not claimed as product-defect RED evidence.
-- [x] Run:
+- [ ] Add integration test seeds with actual assertions: malformed initial response followed by valid repair returns 200; malformed repair returns a sanitized 502; query world/draft/profile revisions before and after failed previews and assert equality.
+- [ ] Include one server fixture response with a secret-shaped sentinel; assert the sentinel is absent from public response and safe logs. Fixtures contain synthetic content only.
+- [ ] Run new cases RED before any remaining integration fixes; make only fixes within this patch and rerun those cases GREEN.
+- [ ] Run:
 
         node node_modules/vitest/vitest.mjs run tests/unit/authoring-output.test.ts tests/unit/authoring-prompts.test.ts tests/unit/authoring-response-adapter.test.ts tests/unit/character-generator-service.test.ts tests/unit/world-generator-service.test.ts tests/unit/generated-world.test.ts tests/unit/world-library.test.ts tests/unit/character-profiles.test.ts tests/unit/prompt-library.test.ts tests/unit/web-next-authoring-errors.test.ts tests/unit/web-next-world-creation-api.test.ts tests/unit/web-next-world-creation-page.test.ts tests/unit/web-next-character-workspace-api.test.ts tests/unit/web-next-character-workspace-page.test.ts tests/unit/server-security.test.ts --exclude '**/.worktrees/**' --exclude '**/.codex/**'
         node node_modules/vitest/vitest.mjs run --config vitest.integration.config.ts tests/integration/authoring-reliability.integration.test.ts tests/integration/world-generation.integration.test.ts tests/integration/world-library.integration.test.ts
@@ -286,9 +281,9 @@ Legacy raw/unknown errors retain a generic fallback. Public envelopes retain exi
         pnpm build
         git diff --check
 
-- [x] Exercise one world generation, one standalone character, and world/campaign organization against the selected live text provider only in an explicitly selected disposable test world. Record model, protocol, attempt counts, duration, and outcome without raw responses. If unavailable, mark live-provider verification skipped and explain the remaining release risk.
-- [x] Verify screenshots and explicit save; inspect the complete diff for unrelated changes. Record any unrelated baseline check failures distinctly.
-- [x] Document rollback: revert Patch 1 code/templates together; no database rollback. Preserve historical prompt snapshots and existing saved worlds.
-- [x] Produce the patch completion record and stop. Do not begin durable jobs.
+- [ ] Exercise one world generation, one standalone character, and world/campaign organization against the selected live text provider only in an explicitly selected disposable test world. Record model, protocol, attempt counts, duration, and outcome without raw responses. If unavailable, mark live-provider verification skipped and explain the remaining release risk.
+- [ ] Verify screenshots and explicit save; inspect the complete diff for unrelated changes. Record any unrelated baseline check failures distinctly.
+- [ ] Document rollback: revert Patch 1 code/templates together; no database rollback. Preserve historical prompt snapshots and existing saved worlds.
+- [ ] Produce the patch completion record and stop. Do not begin durable jobs.
 
 **Patch 1 gate:** All deterministic regression, database, browser, build, and boundary checks pass, or a concrete blocker is reported without declaring completion. Live-provider evidence is separately classified; do not substitute unit results for it.

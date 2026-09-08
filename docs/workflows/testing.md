@@ -36,6 +36,19 @@ For visible UI changes, verify affected interactions in a rendered browser and p
 
 ## Story context integrity verification
 
+Story token-accounting regressions cover the shared estimate in
+`tests/unit/story-token-estimate.test.ts` and the canonical transport boundary
+in `tests/unit/provider-request-budget.test.ts`. The composed PostgreSQL
+coverage in `tests/integration/generation-budget-growth.integration.test.ts`
+must admit protected context whose character count exceeds the token budget
+when its estimate fits. It must also reject estimated overflow before story
+dispatch without changing accepted state, retain complete authority records,
+and keep other campaigns out of the prompt. Growth assertions compare token
+estimates with budgets, not character lengths. Test both semantic-ready and
+fallback retrieval, full-request/output reservation, and backward-compatible
+estimate diagnostics. Deterministic mock-provider results do not establish
+an exact live-model token count.
+
 The prompt-memory remediation is covered by the focused unit suites,
 `tests/integration/story-continuity-remediation.integration.test.ts`, and the
 full isolated integration harness. The composed test uses real PostgreSQL and a

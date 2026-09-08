@@ -158,6 +158,39 @@ UPDATE campaign_memory_configs
 
 This leaves accepted turns, parent Chronicle memories, chunk rows, and vectors intact. Keep legacy vectors until a separately reviewed removal plan is approved; their presence preserves immediate configuration-only recovery. Repair or rebuild derived chunks after the application is stable, shadow selected campaigns again, and require a new explicit opt-in before returning to chunked production.
 
+## Story token estimates
+
+Canonical story generation uses the shared `story-token-estimate-v1` heuristic
+for protected context, optional context selection, the fixed prompt envelope,
+and the final serialized provider request. It does not treat character length
+as token usage. ASCII text uses the greater of the domain estimate and a
+characters/3 floor; non-ASCII runs use UTF-8 byte length as a conservative
+fallback. These are estimates, not measurements from the selected model's
+tokenizer. Multilingual or unusual content can still be overestimated or
+underestimated for a particular model.
+
+The campaign budget limits story context. The effective provider/job window
+limits the complete request, including instructions and transport envelope,
+plus the reserved output and the existing input safety allowance (20% of the
+request estimate plus 1,024 tokens). The input allowance is applied once to
+the request; output space is reserved once. Optional Chronicle records may
+be omitted to fit, but protected authority is never silently truncated.
+
+New context and budget-failure diagnostics identify estimated counts and the
+estimator version. Historical diagnostics without this metadata remain
+readable. Provider-reported input usage is a separate observation; do not
+compare character totals directly to token budgets or use one observed
+character/token ratio as a universal conversion.
+
+Before releasing an accounting change, replay the affected campaign's
+authority read in a read-only transaction with the candidate estimator.
+Report only counts, component sizes, applicable limits, and estimate mode.
+Do not log prompt text, mutate campaign state, or submit a provider request
+as part of that replay. After an approved release, compare estimates with
+provider usage from ordinary generation. An application-image rollback
+requires no accounting migration or data rewrite; preserve existing campaign
+budgets and investigate provider overflows rather than silently raising them.
+
 ## Worker Concurrency and Graceful Shutdown
 
 `WORKER_GENERATION_CONCURRENCY` controls the number of story generations that one worker process may execute concurrently. It accepts integers from `1` through `4` and defaults to `1`. Keep it at `1` for behavior equivalent to the original serial worker; raise it only after checking text-provider capacity and database connection headroom. Illustration, Chronicle, and asset work use separate scheduler lanes with capacity `1` each, so an unavailable image provider cannot block or invalidate a completed story turn.
