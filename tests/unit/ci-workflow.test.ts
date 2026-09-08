@@ -34,7 +34,7 @@ describe("GitHub CI test workflow", () => {
     const workflow = await readFile(resolve(".github/workflows/ci.yml"), "utf8");
 
     expect(workflow).toMatch(
-      /name: Test PostgreSQL integration suite\r?\n\s+timeout-minutes: 10\r?\n\s+run: pnpm test:integration/u
+      /name: Test PostgreSQL integration suite\r?\n\s+timeout-minutes: 20\r?\n\s+run: pnpm test:integration/u
     );
   });
 });
