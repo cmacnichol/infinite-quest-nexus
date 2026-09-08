@@ -19,8 +19,8 @@ function sourceInput(text: string, name = "chapter.txt") {
   return { kind: "story_source", idempotencyKey: "source-request", target: { kind: "new_world" }, name, text, mode: "faithful", boundaryParagraphId: "paragraph:0", instructions: "" };
 }
 
-function authoringCapabilities() {
-  return { enabled: true, supportedKinds: ["world_concept", "story_source"], limits: { activeJobsPerOwner: 5, maximumInputBytes: 2 * 1024 * 1024, listPageSize: 20 } };
+function authoringCapabilities(supportedKinds = ["world_concept", "story_source"]) {
+  return { enabled: true, supportedKinds, limits: { activeJobsPerOwner: 5, maximumInputBytes: 2 * 1024 * 1024, listPageSize: 20 } };
 }
 
 async function openSource(page: import("@playwright/test").Page) {
@@ -316,6 +316,34 @@ test("current source-stage failure stays actionable and a rejected retry remains
   await page.locator("[data-retry-stage-id='current-chunk']").click();
   await expect(page.locator("[data-source-command-status]")).toContainText("retry queued");
   expect(attempts).toBe(2);
+});
+
+test("a paused source capability still resumes and saves fact review while synthesis reports the execution pause", async ({ page }, testInfo) => {
+  const input = sourceInput("The harbor is silent.");
+  const source = normalizeSourceDocument("chapter.txt", input.text, "source");
+  const job = sourceJob(input);
+  const citation = { sourceId: source.id, paragraphId: "paragraph:0", start: 0, end: Array.from(input.text).length, quote: input.text };
+  const fact = { id: "harbor", kind: "location" as const, subject: "Harbor", predicate: "is", value: "silent", provenance: "stated" as const, citations: [citation] };
+  job.status = "awaiting_review"; job.incomplete = false;
+  job.source = { ...job.source, source, extractionComplete: true, facts: [fact], acceptedFactIds: [fact.id] };
+  let reviews = 0;
+  await page.route("**/api/v1/authoring/capabilities", route => route.fulfill({ contentType: "application/json", body: JSON.stringify(authoringCapabilities(["world_concept"])) }));
+  await page.route("**/api/v1/authoring/source-jobs/source-job/facts", route => {
+    reviews += 1; job.revision += 1;
+    return route.fulfill({ contentType: "application/json", body: JSON.stringify(authoringJobViewSchema.parse(job)) });
+  });
+  await page.route("**/api/v1/authoring/source-jobs/source-job/synthesis", route => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ code: "source_authoring_disabled" }) }));
+  await page.route("**/api/v1/authoring/jobs/source-job", route => route.fulfill({ contentType: "application/json", body: JSON.stringify(authoringJobViewSchema.parse(job)) }));
+  await page.goto(`${base}/app/worlds/new?authoringJob=source-job`);
+  await expect(page.locator('[name="creationMethod"][value="source"]')).toBeDisabled();
+  await expect(page.getByText("Extraction complete.")).toBeVisible();
+  await page.getByRole("button", { name: "Use selected facts" }).click();
+  await expect.poll(() => reviews).toBe(1);
+  await page.getByRole("button", { name: "Generate world draft" }).click();
+  await expect(page.locator("[data-source-command-status]")).toContainText("Story-source execution is paused");
+  await expect(page.locator("[data-fact-disposition='harbor']")).toBeEnabled();
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.screenshot({ path: testInfo.outputPath("source-paused-resume-review-desktop.png"), fullPage: true });
 });
 
 test("a source-review 409 preserves focused local work until explicit compare and reconciliation", async ({ page }, testInfo) => {

@@ -23,6 +23,7 @@ const app = Fastify({ logger: false });
 await registerAuthoringRoutes(app, {
   application,
   enabled: true,
+  sourceEnabled: process.env.AUTHORING_PROCESS_SOURCE_ENABLED !== "false",
   resolveOwner: async () => ({ ownerUserId }),
   acquireAdmission: async () => ({ allowed: true })
 });

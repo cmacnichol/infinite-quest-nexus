@@ -23,6 +23,7 @@ const securitySettingNames = [
   "DATABASE_MAX_CONNECTIONS",
   "WORKER_GENERATION_CONCURRENCY",
   "AI_AUTHORING_JOBS_ENABLED",
+  "AI_STORY_SOURCE_AUTHORING_ENABLED",
   "SYSTEM_ARCHIVE_ENABLED",
   "SYSTEM_ARCHIVE_UPLOAD_TTL_SECONDS",
   "SYSTEM_ARCHIVE_CHUNK_BYTES",
@@ -113,6 +114,15 @@ describe("worker concurrency configuration", () => {
     expect(loadRuntimeConfig().aiAuthoringJobsEnabled).toBe(true);
     process.env.AI_AUTHORING_JOBS_ENABLED = "maybe";
     expect(() => loadRuntimeConfig()).toThrow("AI_AUTHORING_JOBS_ENABLED must be true or false.");
+  });
+
+  it("keeps story-source execution independently enabled unless explicitly paused", () => {
+    minimumEnvironment();
+    expect(loadRuntimeConfig().aiStorySourceAuthoringEnabled).toBe(true);
+    process.env.AI_STORY_SOURCE_AUTHORING_ENABLED = "false";
+    expect(loadRuntimeConfig().aiStorySourceAuthoringEnabled).toBe(false);
+    process.env.AI_STORY_SOURCE_AUTHORING_ENABLED = "maybe";
+    expect(() => loadRuntimeConfig()).toThrow("AI_STORY_SOURCE_AUTHORING_ENABLED must be true or false.");
   });
   it("defaults generation concurrency to one with role-safe pool capacities", () => {
     minimumEnvironment();

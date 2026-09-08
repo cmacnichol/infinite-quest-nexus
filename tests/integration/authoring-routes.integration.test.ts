@@ -15,6 +15,8 @@ import { authoringRuntimeFixture, authoringResult, authoringHash } from "../help
 import reliability from "../fixtures/authoring/reliability.json" with { type: "json" };
 import { reviewedCharacterParent } from "../../apps/web-next/src/authoring-character-parent.js";
 import { createApiWorldCampaignApplication } from "../helpers/runtime-application-fixtures.js";
+import { normalizeSourceDocument } from "../../packages/domain/src/source-authoring.js";
+import { planSourceChunks } from "../../packages/domain/src/source-authoring-budget.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe.sequential : describe.skip;
@@ -70,6 +72,19 @@ function submit(idempotencyKey: string): Extract<AuthoringSubmit, { kind: "world
   return { kind: "world_concept", idempotencyKey, target: { kind: "new_world" }, prompt: "Create a durable world proposal." };
 }
 
+function sourceSubmit(idempotencyKey: string, boundaryParagraphId = "paragraph:0") {
+  return {
+    kind: "story_source" as const,
+    idempotencyKey,
+    target: { kind: "new_world" as const },
+    name: "chapter.txt",
+    text: "Iris carries a blue coat.\n\nThe excluded revelation stays beyond the boundary.",
+    mode: "faithful" as const,
+    boundaryParagraphId,
+    instructions: "Extract only supported facts."
+  };
+}
+
 function boundedCharacterSubmit(idempotencyKey: string, entityCount: number) {
   return {
     kind: "character",
@@ -112,14 +127,169 @@ integration("authoring HTTP commands", () => {
 
   afterAll(async () => { await pool?.end(); });
 
-  async function app(enabled = true) {
+  async function app(enabled = true, sourceEnabled = true) {
+    const runtimeConfig = config(enabled) as RuntimeConfig & { aiStorySourceAuthoringEnabled?: boolean };
+    runtimeConfig.aiStorySourceAuthoringEnabled = sourceEnabled;
     return buildServer(inertStorageServerOptions({
-      config: config(enabled),
+      config: runtimeConfig,
       pool,
-      worldCampaign: createApiWorldCampaignApplication(pool, { credentialSecret: config(enabled).credentialEncryptionKey }),
+      worldCampaign: createApiWorldCampaignApplication(pool, { credentialSecret: runtimeConfig.credentialEncryptionKey }),
       authoring: createRuntimeAuthoringApplication(pool, (value) => createHash("sha256").update(value).digest("hex"))
     }));
   }
+
+  it("pauses only source admission while retaining Patch 2 authoring and exposes the capability", async () => {
+    const server = await app(true, false);
+    try {
+      const capabilities = await server.inject({ method: "GET", url: "/api/v1/authoring/capabilities" });
+      expect(capabilities.statusCode).toBe(200);
+      expect(capabilities.json()).toMatchObject({ enabled: true, supportedKinds: ["world_concept", "character"] });
+
+      const generic = await server.inject({ method: "POST", url: "/api/v1/authoring/jobs", payload: sourceSubmit(`source-paused-generic-${crypto.randomUUID()}`) });
+      if (generic.statusCode === 202) jobIds.push(generic.json().id);
+      expect(generic.statusCode).toBe(503);
+      expect(generic.json()).toMatchObject({ code: "source_authoring_disabled" });
+
+      const named = await server.inject({ method: "POST", url: "/api/v1/authoring/source-jobs", payload: sourceSubmit(`source-paused-named-${crypto.randomUUID()}`) });
+      if (named.statusCode === 202) jobIds.push(named.json().id);
+      expect(named.statusCode).toBe(503);
+      expect(named.json()).toMatchObject({ code: "source_authoring_disabled" });
+
+      const concept = await server.inject({ method: "POST", url: "/api/v1/authoring/jobs", payload: submit(`p2-remains-enabled-${crypto.randomUUID()}`) });
+      expect(concept.statusCode).toBe(202);
+      jobIds.push(concept.json().id);
+    } finally { await server.close(); }
+  });
+
+  it("rejects an unknown source boundary before durable admission", async () => {
+    const server = await app();
+    try {
+      const response = await server.inject({ method: "POST", url: "/api/v1/authoring/source-jobs", payload: sourceSubmit(`invalid-boundary-${crypto.randomUUID()}`, "paragraph:999") });
+      if (response.statusCode === 202) jobIds.push(response.json().id);
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toMatchObject({ code: "authoring_invalid_request" });
+      await expect(pool.query("SELECT count(*)::int AS count FROM authoring_jobs WHERE owner_user_id = $1 AND kind = 'story_source'", [ownerUserId]))
+        .resolves.toMatchObject({ rows: [{ count: 0 }] });
+    } finally { await server.close(); }
+  });
+
+  it("rejects a source-shaped UTF-8 body above the one MiB source limit before job creation", async () => {
+    const server = await app();
+    try {
+      const response = await server.inject({ method: "POST", url: "/api/v1/authoring/source-jobs", payload: { ...sourceSubmit(`oversize-source-${crypto.randomUUID()}`), text: "漢".repeat(350_000) } });
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toMatchObject({ code: "authoring_invalid_request" });
+      await expect(pool.query("SELECT count(*)::int AS count FROM authoring_jobs WHERE owner_user_id = $1 AND kind = 'story_source'", [ownerUserId]))
+        .resolves.toMatchObject({ rows: [{ count: 0 }] });
+    } finally { await server.close(); }
+  });
+
+  it("pauses source retry and synthesis while retaining owner-scoped source review, apply, cancel, and discard commands", async () => {
+    const enabled = await app();
+    let source: { id: string; revision: number };
+    try {
+      const submitted = await enabled.inject({ method: "POST", url: "/api/v1/authoring/source-jobs", payload: sourceSubmit(`source-paused-commands-${crypto.randomUUID()}`) });
+      expect(submitted.statusCode).toBe(202);
+      source = submitted.json(); jobIds.push(source.id);
+    } finally { await enabled.close(); }
+
+    const paused = await app(true, false);
+    try {
+      expect((await paused.inject({ method: "GET", url: `/api/v1/authoring/jobs/${source!.id}` })).statusCode).toBe(200);
+      const retry = await paused.inject({ method: "POST", url: `/api/v1/authoring/jobs/${source!.id}/retry`, payload: { expectedRevision: source!.revision, stageId: "unknown-stage" } });
+      expect(retry.statusCode).toBe(503);
+      const synthesis = await paused.inject({ method: "POST", url: `/api/v1/authoring/source-jobs/${source!.id}/synthesis`, payload: { expectedRevision: source!.revision } });
+      expect(synthesis.statusCode).toBe(503);
+
+      const review = await paused.inject({ method: "PUT", url: `/api/v1/authoring/source-jobs/${source!.id}/facts`, payload: { expectedRevision: source!.revision, acceptedFactIds: [], rejectedFactIds: [], uncertainFactIds: [], selectedCharacterFactIds: [], characterIdentityGroups: [], manualFacts: [] } });
+      expect(review.statusCode).toBe(409);
+      const apply = await paused.inject({ method: "POST", url: `/api/v1/authoring/jobs/${source!.id}/apply`, payload: { expectedRevision: source!.revision, idempotencyKey: "source-paused-apply", selectedStageIds: [], content: appliedContent } });
+      expect(apply.statusCode).toBe(409);
+
+      const cancelled = await paused.inject({ method: "POST", url: `/api/v1/authoring/jobs/${source!.id}/cancel`, payload: { expectedRevision: source!.revision } });
+      expect(cancelled.statusCode).toBe(200);
+      const discarded = await paused.inject({ method: "DELETE", url: `/api/v1/authoring/jobs/${source!.id}`, payload: { expectedRevision: cancelled.json().revision } });
+      expect(discarded.statusCode).toBe(204);
+    } finally { await paused.close(); }
+  });
+
+  it("allows paused retained source fact review and apply after the provider work already completed", async () => {
+    const repository = createPostgresAuthoringRepository(pool);
+    const request = sourceSubmit(`source-paused-complete-${crypto.randomUUID()}`);
+    const submitted = await repository.submit({ ownerUserId }, request, createHash("sha256").update(request.text).digest("hex"));
+    jobIds.push(submitted.id);
+    const source = normalizeSourceDocument(request.name, request.text, submitted.id);
+    const chunks = planSourceChunks({ source, boundaryParagraphId: request.boundaryParagraphId, systemPrompt: "source", instructions: request.instructions, budget: { contextWindowTokens: 10_000, maxOutputTokens: 100, countTokens: value => Buffer.byteLength(value, "utf8") } });
+    const planned = (await repository.claim("paused-complete-plan", 60))!;
+    await repository.initializeExecutionSnapshot(planned, { providerProfileId: crypto.randomUUID(), model: "test", configurationHash: "a".repeat(64), contextWindowTokens: 10_000, maxOutputTokens: 100, requestTimeoutMs: 1_000, prompts: {}, protocols: { source: "test" } });
+    await repository.checkpoint(planned, { kind: "source_plan", chunks });
+    const extracting = (await repository.claim("paused-complete-extraction", 60))!;
+    const paragraph = source.paragraphs[0]!;
+    await repository.checkpoint(extracting, { kind: "source_extraction", facts: [{ id: "raw-tone", kind: "tone", subject: "Harbor", predicate: "tone", value: "hopeful", provenance: "stated", citations: [{ sourceId: source.id, paragraphId: paragraph.id, start: paragraph.start, end: paragraph.end, quote: "Iris carries a blue coat." }] }] });
+    const extracted = (await repository.read({ ownerUserId }, submitted.id))!;
+    if (extracted.kind !== "story_source") throw new Error("Expected source fixture.");
+    const fact = extracted.source!.facts[0]!;
+    const paused = await app(true, false);
+    try {
+      const authoritativeState = () => pool.query(
+        "SELECT (SELECT row_to_json(job) FROM (SELECT status, revision, source_plan, source_review, review_generation FROM authoring_jobs WHERE id = $1) job) AS job, (SELECT count(*) FROM worlds) AS worlds, (SELECT count(*) FROM campaigns) AS campaigns, (SELECT count(*) FROM chronicle_memories) AS chronicle",
+        [submitted.id]
+      );
+      const beforeUnknownFact = await authoritativeState();
+      const unknownFact = await paused.inject({ method: "PUT", url: `/api/v1/authoring/source-jobs/${submitted.id}/facts`, payload: { expectedRevision: extracted.revision, acceptedFactIds: ["stale-fact-id"], rejectedFactIds: [], uncertainFactIds: [], selectedCharacterFactIds: [], characterIdentityGroups: [], manualFacts: [] } });
+      expect(unknownFact.statusCode).toBe(409);
+      await expect(authoritativeState()).resolves.toEqual(beforeUnknownFact);
+      const review = await paused.inject({ method: "PUT", url: `/api/v1/authoring/source-jobs/${submitted.id}/facts`, payload: { expectedRevision: extracted.revision, acceptedFactIds: [fact.id], rejectedFactIds: [], uncertainFactIds: [], selectedCharacterFactIds: [], characterIdentityGroups: [], manualFacts: [] } });
+      expect(review.statusCode).toBe(200);
+      const beforeStaleReview = await authoritativeState();
+      const staleReview = await paused.inject({ method: "PUT", url: `/api/v1/authoring/source-jobs/${submitted.id}/facts`, payload: { expectedRevision: extracted.revision, acceptedFactIds: [fact.id], rejectedFactIds: [], uncertainFactIds: [], selectedCharacterFactIds: [], characterIdentityGroups: [], manualFacts: [] } });
+      expect(staleReview.statusCode).toBe(409);
+      await expect(authoritativeState()).resolves.toEqual(beforeStaleReview);
+      await repository.startSourceSynthesis!({ ownerUserId }, submitted.id, review.json().revision);
+      const synthesizing = (await repository.claim("paused-complete-synthesis", 60))!;
+      await repository.checkpoint(synthesizing, { kind: "source_world", proposal: { world: { title: "Paused source receipt", tone: "hopeful" }, playableCharacters: [], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [], defaults: {} }, mappings: [{ target: "world", path: "world.tone", value: "hopeful", supportingFactIds: [fact.id] }] });
+      const ready = (await repository.read({ ownerUserId }, submitted.id))!;
+      if (ready.kind !== "story_source" || !ready.result) throw new Error("Expected completed source fixture.");
+      const stageId = ready.stages.find(stage => stage.key === "source:synthesis")!.id;
+      const applyBody = { expectedRevision: ready.revision, idempotencyKey: "paused-source-receipt", selectedStageIds: [stageId], content: ready.result };
+      const applied = await paused.inject({ method: "POST", url: `/api/v1/authoring/jobs/${submitted.id}/apply`, payload: applyBody });
+      expect(applied.statusCode).toBe(200);
+      worldIds.push(applied.json().worldId);
+      const replay = await paused.inject({ method: "POST", url: `/api/v1/authoring/jobs/${submitted.id}/apply`, payload: applyBody });
+      expect(replay.json()).toEqual(applied.json());
+      const persisted = await pool.query("SELECT source_plan, source_review, apply_receipt FROM authoring_jobs WHERE id = $1", [submitted.id]);
+      expect(persisted.rows[0]).toMatchObject({ source_plan: null, source_review: null, apply_receipt: applied.json() });
+      const world = await paused.inject({ method: "GET", url: `/api/v1/worlds/${applied.json().worldId}` });
+      expect(world.json().draftContent.sourceMaterial.documents[0].text).toContain("Iris carries a blue coat.");
+    } finally { await paused.close(); }
+  });
+
+  it("keeps every foreign source command non-enumerating and leaves the victim proposal unchanged", async () => {
+    const foreign = await pool.query<{ id: string }>("INSERT INTO users (display_name) VALUES ($1) RETURNING id", [`source command foreign ${crypto.randomUUID()}`]);
+    const foreignOwner = foreign.rows[0]!.id;
+    foreignUserIds.push(foreignOwner);
+    const repository = createPostgresAuthoringRepository(pool);
+    const victim = await repository.submit({ ownerUserId: foreignOwner }, sourceSubmit(`foreign-source-${crypto.randomUUID()}`), "f".repeat(64));
+    jobIds.push(victim.id);
+    const before = await pool.query("SELECT status, revision, input, source_plan, source_review, reviewed_content FROM authoring_jobs WHERE id = $1", [victim.id]);
+    const server = await app(true, false);
+    try {
+      const stageId = victim.stages[0]!.id;
+      const attempts = await Promise.all([
+        server.inject({ method: "GET", url: `/api/v1/authoring/jobs/${victim.id}` }),
+        server.inject({ method: "POST", url: `/api/v1/authoring/jobs/${victim.id}/retry`, payload: { expectedRevision: victim.revision, stageId } }),
+        server.inject({ method: "POST", url: `/api/v1/authoring/source-jobs/${victim.id}/synthesis`, payload: { expectedRevision: victim.revision } }),
+        server.inject({ method: "PUT", url: `/api/v1/authoring/source-jobs/${victim.id}/facts`, payload: { expectedRevision: victim.revision, acceptedFactIds: [], rejectedFactIds: [], uncertainFactIds: [], selectedCharacterFactIds: [], characterIdentityGroups: [], manualFacts: [] } }),
+        server.inject({ method: "POST", url: `/api/v1/authoring/jobs/${victim.id}/apply`, payload: { expectedRevision: victim.revision, idempotencyKey: "foreign-source-apply", selectedStageIds: [], content: appliedContent } }),
+        server.inject({ method: "POST", url: `/api/v1/authoring/jobs/${victim.id}/cancel`, payload: { expectedRevision: victim.revision } }),
+        server.inject({ method: "DELETE", url: `/api/v1/authoring/jobs/${victim.id}`, payload: { expectedRevision: victim.revision } })
+      ]);
+      expect(attempts.every(response => response.statusCode === 404)).toBe(true);
+      expect(attempts.every(response => response.json().code === "authoring_not_found")).toBe(true);
+      await expect(pool.query("SELECT status, revision, input, source_plan, source_review, reviewed_content FROM authoring_jobs WHERE id = $1", [victim.id]))
+        .resolves.toEqual(before);
+    } finally { await server.close(); }
+  });
 
   it.each(["new-create", "new-edit", "existing-create", "existing-edit"])("P2-F2/F4 projects validated standalone %s output through HTTP and preserves its exact identity", async operation => {
     const server = await app();

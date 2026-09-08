@@ -49,6 +49,14 @@ describe("authoring worker application", () => {
     expect(store.checkpoint).toHaveBeenCalledWith(claim, output);
   });
 
+  it("passes the source-paused claim kinds without widening the worker contract", async () => {
+    const store = repository();
+    const application = createAuthoringWorkerApplication({ repository: store, execute: vi.fn(async () => null) });
+
+    await expect(application.runNext({ workerId: "worker-a", leaseSeconds: 30, allowedKinds: ["world_concept", "character"] })).resolves.toBe(false);
+    expect(store.claim).toHaveBeenCalledWith("worker-a", 30, ["world_concept", "character"]);
+  });
+
   it("does not overwrite a stage when a fenced executor returns no output", async () => {
     const store = repository();
     const application = createAuthoringWorkerApplication({ repository: store, execute: vi.fn(async () => null) });

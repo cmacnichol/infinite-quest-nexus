@@ -45,6 +45,14 @@ describe("source authoring API", () => {
     expect(error.message).not.toContain("private provider detail");
   });
 
+  it("explains a source execution pause while leaving review-only work available", async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ code: "source_authoring_disabled" }), { status: 503 }));
+    const api = createSourceAuthoringApi(fetch as typeof globalThis.fetch);
+    const error = await api.beginSourceSynthesis("source-job", 1).catch((caught) => caught);
+    expect(error).toMatchObject({ name: "SourceAuthoringApiError", status: 503, code: "source_authoring_disabled" });
+    expect(error.message).toContain("inspect, review, apply");
+  });
+
   it.each(["provider_exploded", "toString", "constructor"])("uses a safe generic fallback for unknown or inherited server code %s", async (code) => {
     const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ code, message: "private provider detail" }), { status: 409 }));
     const api = createSourceAuthoringApi(fetch as typeof globalThis.fetch);
@@ -433,6 +441,20 @@ it("shows only failed stages from the current generation and catches retry failu
   document.querySelector<HTMLButtonElement>("[data-retry-stage-id='current-failure']")!.click();
   await vi.waitFor(() => expect(document.querySelector("[data-source-command-status]")?.textContent).toContain("unavailable"));
   expect(retry).toHaveBeenCalledOnce();
+});
+
+it("keeps a resumed proposal reviewable when disabled source execution rejects synthesis", async () => {
+  const { document } = parseHTML("<main></main>");
+  const fact = { id: "iris", kind: "character" as const, subject: "Iris", predicate: "wears", value: "a blue coat", provenance: "stated", citations: [] };
+  const synthesize = vi.fn().mockRejectedValue(new SourceAuthoringApiError("source_authoring_disabled", 503));
+  const panel = mountSourceAuthoringPanel(document.querySelector("main")!, { api: sourceApi({ beginSourceSynthesis: synthesize }) as never });
+  panel.resume({ ...job, source: { ...job.source, facts: [fact], acceptedFactIds: [fact.id], characterIdentityGroups: [{ representativeFactId: fact.id, factIds: [fact.id] }] } } as never);
+  const generate = document.querySelector<HTMLButtonElement>("[data-action='generate-source-world']")!;
+  expect(generate.disabled).toBe(false);
+  generate.click();
+  await vi.waitFor(() => expect(document.querySelector("[data-source-command-status]")?.textContent).toContain("Story-source execution is paused"));
+  expect(document.querySelector<HTMLSelectElement>("[data-fact-disposition='iris']")!.disabled).toBe(false);
+  expect(document.querySelector<HTMLButtonElement>("[data-action='save-source-review']")!.disabled).toBe(false);
 });
 
 it("aborts intake work and ignores a stale submit response after disposal", async () => {

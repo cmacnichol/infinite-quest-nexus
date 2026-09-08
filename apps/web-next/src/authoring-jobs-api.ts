@@ -21,13 +21,15 @@ import {
   type AuthoringSubmit
 } from "../../../packages/contracts/src/authoring.js";
 
-export type AuthoringJobsApiErrorKind = "unavailable" | "conflict" | "not_found" | "request_failed";
+export type AuthoringJobsApiErrorKind = "unavailable" | "source_paused" | "conflict" | "not_found" | "request_failed";
 
 /** Deliberately excludes server response text because it can contain provider details. */
 export class AuthoringJobsApiError extends Error {
   constructor(readonly kind: AuthoringJobsApiErrorKind, readonly status: number) {
     super(kind === "unavailable"
       ? "Authoring jobs are unavailable. Try again."
+      : kind === "source_paused"
+        ? "Story-source execution is paused. You can still inspect, review, apply, cancel, or discard this retained proposal."
       : kind === "conflict"
         ? "This proposal changed elsewhere. Reload or compare before saving."
         : kind === "not_found"
@@ -39,12 +41,17 @@ export class AuthoringJobsApiError extends Error {
 
 type Fetch = typeof globalThis.fetch;
 
-function errorFor(status: number): AuthoringJobsApiError {
-  return new AuthoringJobsApiError(status === 409 ? "conflict" : status === 404 ? "not_found" : status === 503 ? "unavailable" : "request_failed", status);
+function errorFor(status: number, body?: unknown): AuthoringJobsApiError {
+  const sourcePaused = body !== null && typeof body === "object" && "code" in body && (body as { code?: unknown }).code === "source_authoring_disabled";
+  return new AuthoringJobsApiError(sourcePaused ? "source_paused" : status === 409 ? "conflict" : status === 404 ? "not_found" : status === 503 ? "unavailable" : "request_failed", status);
 }
 
 async function responseJson(response: Response): Promise<unknown> {
-  if (!response.ok) throw errorFor(response.status);
+  if (!response.ok) {
+    let body: unknown = null;
+    try { body = await response.json(); } catch { /* status remains authoritative */ }
+    throw errorFor(response.status, body);
+  }
   try {
     return await response.json();
   } catch {

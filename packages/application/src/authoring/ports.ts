@@ -1,6 +1,7 @@
 import type {
   AuthoringApply,
   AuthoringFailure,
+  AuthoringKind,
   AuthoringJobListItem,
   AuthoringJobView,
   AuthoringReview,
@@ -45,7 +46,7 @@ export interface AuthoringRepository {
   submit(scope: OwnerScope, input: AuthoringSubmit, hash: string): Promise<AuthoringJobView>;
   read(scope: OwnerScope, jobId: string): Promise<AuthoringJobView | null>;
   list(scope: OwnerScope, cursor?: string): Promise<{ jobs: AuthoringJobListItem[]; nextCursor?: string }>;
-  claim(workerId: string, leaseSeconds: number): Promise<AuthoringClaim | null>;
+  claim(workerId: string, leaseSeconds: number, allowedKinds?: readonly AuthoringKind[]): Promise<AuthoringClaim | null>;
   heartbeat(claim: AuthoringClaim, leaseSeconds: number): Promise<boolean>;
   checkpoint(claim: AuthoringClaim, output: unknown): Promise<boolean>;
   fail(claim: AuthoringClaim, failure: AuthoringFailure): Promise<boolean>;

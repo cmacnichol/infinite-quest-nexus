@@ -294,7 +294,14 @@ integration("source world portable provenance", () => {
     if (!ready || ready.kind !== "story_source" || !ready.result) throw new Error("source synthesis fixture failed");
     expect(ready.canApply).toBe(true);
     const stageId = ready.stages.find((stage) => stage.key === "source:synthesis")!.id;
-    const applied = await repository.apply({ ownerUserId }, submitted.id, { expectedRevision: ready.revision, idempotencyKey: randomUUID(), selectedStageIds: [stageId], content: ready.result }, "b".repeat(64), createPostgresAuthoringWorldApplyAdapter());
+    const beforeApplyWorlds = await pool.query<{ count: number }>("SELECT count(*)::int AS count FROM world_drafts WHERE owner_user_id = $1", [ownerUserId]);
+    const applyInput = { expectedRevision: ready.revision, idempotencyKey: randomUUID(), selectedStageIds: [stageId], content: ready.result };
+    const applyHash = "b".repeat(64);
+    const applied = await repository.apply({ ownerUserId }, submitted.id, applyInput, applyHash, createPostgresAuthoringWorldApplyAdapter());
+    const replay = await repository.apply({ ownerUserId }, submitted.id, applyInput, applyHash, createPostgresAuthoringWorldApplyAdapter());
+    expect(replay).toEqual(applied);
+    await expect(pool.query("SELECT count(*)::int AS count FROM world_drafts WHERE owner_user_id = $1", [ownerUserId]))
+      .resolves.toMatchObject({ rows: [{ count: beforeApplyWorlds.rows[0]!.count + 1 }] });
     const persisted = await pool.query<{ content: unknown }>("SELECT content FROM world_drafts WHERE owner_user_id = $1 AND world_id = $2", [ownerUserId, applied.worldId]);
     const saved = worldContentSchema.parse(persisted.rows[0]!.content);
     const expectedMaterial = buildWorldSourceMaterial({
@@ -302,8 +309,8 @@ integration("source world portable provenance", () => {
       fieldEvidence: [], characterIdentityGroups: []
     });
     expect(saved.sourceMaterial).toEqual(expectedMaterial);
-    await expect(pool.query<{ input: unknown; execution_snapshot: unknown }>("SELECT input,execution_snapshot FROM authoring_jobs WHERE id=$1", [submitted.id]))
-      .resolves.toMatchObject({ rows: [{ input: { applied: true }, execution_snapshot: null }] });
+    await expect(pool.query<{ input: unknown; execution_snapshot: unknown; source_plan: unknown; source_review: unknown }>("SELECT input,execution_snapshot,source_plan,source_review FROM authoring_jobs WHERE id=$1", [submitted.id]))
+      .resolves.toMatchObject({ rows: [{ input: { applied: true }, execution_snapshot: null, source_plan: null, source_review: null }] });
     const scrubbedStages = await pool.query<{ output: unknown; failure: unknown }>("SELECT output,failure FROM authoring_job_stages WHERE job_id=$1", [submitted.id]);
     expect(scrubbedStages.rows).not.toHaveLength(0);
     expect(scrubbedStages.rows.every((stage) => stage.output === null && stage.failure === null)).toBe(true);

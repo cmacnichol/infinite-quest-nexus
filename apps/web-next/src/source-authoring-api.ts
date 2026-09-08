@@ -13,7 +13,8 @@ const sourceErrorMessages = {
   authoring_invalid_request: "The source authoring request is invalid.",
   authoring_invalid_state: "This source job cannot accept that command in its current state.",
   authoring_not_found: "This source proposal is unavailable or expired.",
-  authoring_disabled: "Durable source authoring is not enabled."
+  authoring_disabled: "Durable source authoring is not enabled.",
+  source_authoring_disabled: "Story-source execution is paused. You can still inspect, review, apply, cancel, or discard this retained proposal."
 } as const;
 
 export type SourceAuthoringErrorCode = keyof typeof sourceErrorMessages | "unknown";

@@ -576,6 +576,7 @@ export async function buildServer({
     await app.register(registerAuthoringRoutes, {
       application: authoring,
       enabled: config.aiAuthoringJobsEnabled === true,
+      sourceEnabled: config.aiStorySourceAuthoringEnabled !== false,
       resolveOwner: async () => ({ ownerUserId: await initialOwnerId(pool) }),
       acquireAdmission: (scope) => acquireAdmission(pool, scope.ownerUserId, crypto.randomUUID(), {
         key: "generation",

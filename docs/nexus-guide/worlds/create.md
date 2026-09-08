@@ -13,6 +13,8 @@ When durable AI authoring is enabled for the instance, a proposal can resume aft
 
 Proposals expire after seven days of inactivity. Opening or listing a proposal does not extend that deadline. If the capability is disabled, use the synchronous compatibility flow; existing unexpired durable proposals are retained only for their original deadline. See [Durable AI authoring operations](../../runbooks/ai-authoring.md).
 
+For a source-linked draft, choose **From story or chapter** and follow [Create a world from a story or chapter](./create-from-story.md). That flow extracts only through your selected paragraph boundary, requires fact review before synthesis, and keeps publication and campaign creation explicit.
+
 Complete **Overview**, **Lore**, and **Mechanics & Characters**, then select **Save draft**. See [Edit a world draft](./edit-drafts.md) and [Author playable characters](./characters.md).
 
 If no default image provider and model are configured, the world still creates successfully; configure one later and generate the cover from the Overview tab.

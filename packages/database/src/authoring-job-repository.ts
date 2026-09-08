@@ -10,6 +10,7 @@ import {
   type AuthoringApply,
   type AuthoringApplyReceipt,
   normalizeAuthoringSubmitForAdmission,
+  authoringKindSchema,
   authoringSubmitSchema,
   authoringTargetSchema,
   type AuthoringExecutionSnapshot,
@@ -934,7 +935,8 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
         const receipt = authoringApplyReceiptSchema.parse({ jobId: job.id, ...receiptParts });
         await client.query(
           `UPDATE authoring_jobs SET status = 'applied', input = '{"applied":true}'::jsonb, reviewed_content = NULL,
-             reviewed_stage_ids = '[]'::jsonb, execution_snapshot = NULL, apply_key = $2, apply_hash = $3, apply_receipt = $4::jsonb,
+             reviewed_stage_ids = '[]'::jsonb, execution_snapshot = NULL, source_plan = NULL, source_review = NULL,
+             apply_key = $2, apply_hash = $3, apply_receipt = $4::jsonb,
              revision = revision + 1, last_activity_at = clock_timestamp(), expires_at = clock_timestamp() + interval '30 days', updated_at = clock_timestamp()
            WHERE id = $1`,
           [job.id, input.idempotencyKey, applyHash, json(receipt)]
@@ -1157,6 +1159,7 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
         );
         await client.query(
           `UPDATE authoring_jobs SET input = '{"discarded":true}'::jsonb, reviewed_content = NULL, execution_snapshot = NULL,
+             source_plan = NULL, source_review = NULL,
              status = 'cancelled', revision = revision + 1, execution_generation = execution_generation + 1, updated_at = clock_timestamp()
            WHERE id = $1`,
           [job.id]
@@ -1206,7 +1209,7 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
             `UPDATE authoring_jobs
                 SET status = 'expired', input = '{"expired":true}'::jsonb,
                     reviewed_content = NULL, reviewed_stage_ids = '[]'::jsonb,
-                    execution_snapshot = NULL, apply_key = NULL, apply_hash = NULL,
+                    execution_snapshot = NULL, source_plan = NULL, source_review = NULL, apply_key = NULL, apply_hash = NULL,
                     apply_receipt = NULL, execution_generation = execution_generation + 1,
                     revision = revision + 1, updated_at = clock_timestamp()
               WHERE id = $1 AND owner_user_id = $2`,
@@ -1217,11 +1220,12 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
       });
     },
 
-    async claim(workerId, requestedLeaseSeconds) {
+    async claim(workerId, requestedLeaseSeconds, rawAllowedKinds) {
       const seconds = leaseSeconds(requestedLeaseSeconds);
       if (!workerId.trim()) throw new TypeError("Authoring worker ID is required.");
+      const allowedKinds = authoringKindSchema.array().min(1).parse(rawAllowedKinds ?? ["world_concept", "character", "story_source"]);
       const claim = await withTransaction(pool, async (client) => {
-        const jobs = await client.query<JobRow>(`SELECT ${JOB_SELECT} FROM authoring_jobs jobs WHERE jobs.status IN ('queued','running') AND jobs.expires_at > clock_timestamp() AND EXISTS (SELECT 1 FROM authoring_job_stages stages WHERE stages.job_id = jobs.id AND stages.owner_user_id = jobs.owner_user_id AND stages.generation = (SELECT max(current.generation) FROM authoring_job_stages current WHERE current.job_id = stages.job_id AND current.stage_key = stages.stage_key) AND NOT EXISTS (SELECT 1 FROM jsonb_each_text(stages.parent_generations) dependency LEFT JOIN authoring_job_stages parent ON parent.job_id = stages.job_id AND parent.stage_key = dependency.key AND parent.generation = dependency.value::int AND parent.status = 'validated' AND parent.generation = (SELECT max(current.generation) FROM authoring_job_stages current WHERE current.job_id = parent.job_id AND current.stage_key = parent.stage_key) WHERE parent.id IS NULL) AND (stages.status = 'queued' AND stages.next_attempt_at <= clock_timestamp() OR stages.status = 'running' AND stages.lease_expires_at <= clock_timestamp() AND stages.attempt_count <= 3)) ORDER BY jobs.created_at, jobs.id FOR UPDATE SKIP LOCKED LIMIT 1`);
+        const jobs = await client.query<JobRow>(`SELECT ${JOB_SELECT} FROM authoring_jobs jobs WHERE jobs.kind = ANY($1::text[]) AND jobs.status IN ('queued','running') AND jobs.expires_at > clock_timestamp() AND EXISTS (SELECT 1 FROM authoring_job_stages stages WHERE stages.job_id = jobs.id AND stages.owner_user_id = jobs.owner_user_id AND stages.generation = (SELECT max(current.generation) FROM authoring_job_stages current WHERE current.job_id = stages.job_id AND current.stage_key = stages.stage_key) AND NOT EXISTS (SELECT 1 FROM jsonb_each_text(stages.parent_generations) dependency LEFT JOIN authoring_job_stages parent ON parent.job_id = stages.job_id AND parent.stage_key = dependency.key AND parent.generation = dependency.value::int AND parent.status = 'validated' AND parent.generation = (SELECT max(current.generation) FROM authoring_job_stages current WHERE current.job_id = parent.job_id AND current.stage_key = parent.stage_key) WHERE parent.id IS NULL) AND (stages.status = 'queued' AND stages.next_attempt_at <= clock_timestamp() OR stages.status = 'running' AND stages.lease_expires_at <= clock_timestamp() AND stages.attempt_count <= 3)) ORDER BY jobs.created_at, jobs.id FOR UPDATE SKIP LOCKED LIMIT 1`, [allowedKinds]);
         const job = jobs.rows[0];
         if (!job) return null;
         const stages = await client.query<StageRow>(`SELECT ${STAGE_SELECT} FROM authoring_job_stages stages WHERE stages.job_id = $1 AND stages.owner_user_id = $2 AND (stages.source_review_generation IS NULL OR stages.source_review_generation = $3) AND stages.generation = (SELECT max(current.generation) FROM authoring_job_stages current WHERE current.job_id = stages.job_id AND current.stage_key = stages.stage_key) AND NOT EXISTS (SELECT 1 FROM jsonb_each_text(stages.parent_generations) dependency LEFT JOIN authoring_job_stages parent ON parent.job_id = stages.job_id AND parent.stage_key = dependency.key AND parent.generation = dependency.value::int AND parent.status = 'validated' AND parent.generation = (SELECT max(current.generation) FROM authoring_job_stages current WHERE current.job_id = parent.job_id AND current.stage_key = parent.stage_key) WHERE parent.id IS NULL) AND ((stages.status = 'queued' AND stages.next_attempt_at <= clock_timestamp()) OR (stages.status = 'running' AND stages.lease_expires_at <= clock_timestamp() AND stages.attempt_count <= 3)) ORDER BY stages.next_attempt_at, stages.created_at, stages.id FOR UPDATE SKIP LOCKED LIMIT 1`, [job.id, job.ownerUserId, job.reviewGeneration]);
@@ -1234,7 +1238,7 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
       });
       if (claim) return claim;
       await withTransaction(pool, async (client) => {
-        const jobs = await client.query<JobRow>(`SELECT ${JOB_SELECT} FROM authoring_jobs jobs WHERE jobs.status = 'running' AND EXISTS (SELECT 1 FROM authoring_job_stages stages WHERE stages.job_id = jobs.id AND stages.status = 'running' AND stages.lease_expires_at <= clock_timestamp() AND stages.attempt_count > 3 AND stages.generation = (SELECT max(current.generation) FROM authoring_job_stages current WHERE current.job_id = stages.job_id AND current.stage_key = stages.stage_key)) ORDER BY jobs.created_at, jobs.id FOR UPDATE SKIP LOCKED LIMIT 1`);
+        const jobs = await client.query<JobRow>(`SELECT ${JOB_SELECT} FROM authoring_jobs jobs WHERE jobs.kind = ANY($1::text[]) AND jobs.status = 'running' AND EXISTS (SELECT 1 FROM authoring_job_stages stages WHERE stages.job_id = jobs.id AND stages.status = 'running' AND stages.lease_expires_at <= clock_timestamp() AND stages.attempt_count > 3 AND stages.generation = (SELECT max(current.generation) FROM authoring_job_stages current WHERE current.job_id = stages.job_id AND current.stage_key = stages.stage_key)) ORDER BY jobs.created_at, jobs.id FOR UPDATE SKIP LOCKED LIMIT 1`, [allowedKinds]);
         const job = jobs.rows[0];
         if (!job) return;
         const stages = await client.query<StageRow>(`SELECT ${STAGE_SELECT} FROM authoring_job_stages stages WHERE job_id = $1 AND status = 'running' AND lease_expires_at <= clock_timestamp() AND attempt_count > 3 AND generation = (SELECT max(current.generation) FROM authoring_job_stages current WHERE current.job_id = stages.job_id AND current.stage_key = stages.stage_key) ORDER BY created_at, id FOR UPDATE SKIP LOCKED LIMIT 1`, [job.id]);

@@ -42,6 +42,8 @@ export type RuntimeConfig = {
   workerLeaseSeconds: number;
   workerGenerationConcurrency: number;
   aiAuthoringJobsEnabled?: boolean;
+  /** Source intake/execution can pause independently while durable P2 jobs remain available. */
+  aiStorySourceAuthoringEnabled?: boolean;
   legacyWebRoot: string;
   nextWebRoot: string;
   assetStorageDriver: "filesystem";
@@ -224,6 +226,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
     workerLeaseSeconds: integerSetting("WORKER_LEASE_SECONDS", 60, 15, 3600),
     workerGenerationConcurrency,
     aiAuthoringJobsEnabled: booleanSetting("AI_AUTHORING_JOBS_ENABLED", false),
+    aiStorySourceAuthoringEnabled: booleanSetting("AI_STORY_SOURCE_AUTHORING_ENABLED", true),
     legacyWebRoot: resolve(process.env.LEGACY_WEB_ROOT?.trim() || "apps/web/dist"),
     nextWebRoot: resolve(process.env.NEXT_WEB_ROOT?.trim() || "apps/web-next/dist"),
     assetStorageDriver: "filesystem",
