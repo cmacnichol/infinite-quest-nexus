@@ -283,7 +283,7 @@ function reviewedState(method: "manual" | "ai" = "manual"): WorldCreationState {
 }
 
 describe("World Creation Method stage", () => {
-  it("renders the shared shell, theme control, stage context, and two compact radio controls", () => {
+  it("renders the shared shell, theme control, stage context, and three compact radio controls", () => {
     const { document, root } = creationFixture();
 
     mountWorldCreationPage(root, { generateWorldPreview: vi.fn().mockResolvedValue(generatedPreview) });
@@ -293,7 +293,7 @@ describe("World Creation Method stage", () => {
     expect(document.querySelector(".theme-toggle")).not.toBeNull();
     expect(document.querySelector('[data-creation-stage="method"]')).not.toBeNull();
     const methods = [...document.querySelectorAll<HTMLElement>(".creation-method-control")];
-    expect(methods).toHaveLength(2);
+    expect(methods).toHaveLength(3);
     expect(methods.every((method) => method.querySelector('input[type="radio"][name="creationMethod"]'))).toBe(true);
     expect(methods.every((method) => !method.matches("article, .card") && !method.querySelector("p"))).toBe(true);
     expect(methods.every((method) => !method.hasAttribute("data-control-size"))).toBe(true);
@@ -2382,5 +2382,69 @@ it.each(["applied poll", "edited review", "invalid review"])("P28-F1 replays the
   expect(apply.mock.calls[1]?.slice(0, 2)).toEqual(apply.mock.calls[0]?.slice(0, 2));
   expect(save).toHaveBeenCalledTimes(savedCount);
   expect(legacyCreate).not.toHaveBeenCalled();
+  } finally { mounted.dispose(); vi.useRealTimers(); }
+});
+
+it("hands a source submission to the durable world session and records its resume URL immediately", async () => {
+  const { document, root, window } = creationFixture();
+  const replaceState = vi.fn();
+  Object.defineProperty(window, "location", { configurable: true, value: { href: "http://local/app/worlds/new" } });
+  Object.defineProperty(window, "history", { configurable: true, value: { replaceState } });
+  const sourceJob = {
+    id: "source-job", revision: 1, kind: "story_source", status: "running", target: { kind: "new_world" },
+    request: { kind: "story_source", idempotencyKey: "source-request", target: { kind: "new_world" }, name: "Pasted story", text: "Mara waits.", mode: "faithful", boundaryParagraphId: "paragraph:0", instructions: "" },
+    stages: [], expiresAt: "2026-09-13T00:00:00.000Z", incomplete: true, canApply: false,
+    source: { source: { id: "source", name: "Pasted story", text: "Mara waits.", sha256: "0".repeat(64), paragraphs: [{ id: "paragraph:0", start: 0, end: 11 }] }, boundaryParagraphId: "paragraph:0", mode: "faithful", facts: [], extractionComplete: false, acceptedFactIds: [], rejectedFactIds: [], uncertainFactIds: [], selectedCharacterFactIds: [], characterIdentityGroups: [], expansionCandidates: [] }
+  };
+  let sourceSignal: AbortSignal | undefined;
+  vi.stubGlobal("fetch", vi.fn((_path: string, init?: RequestInit) => {
+    sourceSignal = init?.signal ?? undefined;
+    return Promise.resolve(new Response(JSON.stringify(sourceJob), { status: 202 }));
+  }));
+  const mounted = mountWorldCreationPage(root, { authoringJobsApi: {
+    loadAuthoringCapabilities: vi.fn().mockResolvedValue({ enabled: true, supportedKinds: ["world_concept", "story_source"] }),
+    loadAuthoringJob: vi.fn().mockResolvedValue(sourceJob)
+  } as never });
+  try {
+    await settle();
+    const method = document.querySelector<HTMLInputElement>('[name="creationMethod"][value="source"]')!;
+    method.checked = true;
+    method.dispatchEvent(new window.Event("change", { bubbles: true }));
+    const editor = document.querySelector<HTMLTextAreaElement>("[data-source-text]")!;
+    editor.value = "Mara waits.";
+    editor.dispatchEvent(new window.Event("input"));
+    document.querySelector<HTMLButtonElement>("[data-action='submit-source']")!.click();
+    await settle(); await settle();
+    expect(sourceSignal).toBeInstanceOf(AbortSignal);
+    expect(replaceState.mock.calls.at(-1)?.[2]).toContain("authoringJob=source-job");
+    expect(document.querySelector("[data-authoring-resume-status]")?.textContent).toContain("Proposal source-job");
+  } finally {
+    mounted.dispose();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("uses one AuthoringJobSession poll loop for a resumed source extraction", async () => {
+  vi.useFakeTimers();
+  const { document, root, window } = creationFixture();
+  Object.defineProperty(window, "location", { configurable: true, value: { href: "http://local/app/worlds/new?authoringJob=source-job" } });
+  Object.defineProperty(window, "history", { configurable: true, value: { replaceState: vi.fn() } });
+  const sourceJob = {
+    id: "source-job", revision: 1, kind: "story_source", status: "running", target: { kind: "new_world" },
+    request: { kind: "story_source", idempotencyKey: "source-request", target: { kind: "new_world" }, name: "chapter.txt", text: "Mara waits.", mode: "faithful", boundaryParagraphId: "paragraph:0", instructions: "" },
+    stages: [], expiresAt: "2026-09-13T00:00:00.000Z", incomplete: true, canApply: false,
+    source: { source: { id: "source", name: "chapter.txt", text: "Mara waits.", sha256: "0".repeat(64), paragraphs: [{ id: "paragraph:0", start: 0, end: 11 }] }, boundaryParagraphId: "paragraph:0", mode: "faithful", facts: [], extractionComplete: false, acceptedFactIds: [], rejectedFactIds: [], uncertainFactIds: [], selectedCharacterFactIds: [], characterIdentityGroups: [], expansionCandidates: [] }
+  };
+  const load = vi.fn().mockResolvedValue(sourceJob);
+  const mounted = mountWorldCreationPage(root, { authoringJobsApi: {
+    loadAuthoringCapabilities: vi.fn().mockResolvedValue({ enabled: true, supportedKinds: ["world_concept", "story_source"] }),
+    loadAuthoringJob: load
+  } as never });
+  try {
+    await vi.advanceTimersByTimeAsync(0); await settle();
+    await vi.waitFor(() => expect(document.querySelector("[data-source-authoring]")?.hasAttribute("hidden")).toBe(false));
+    load.mockClear();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(load).toHaveBeenCalledTimes(1);
   } finally { mounted.dispose(); vi.useRealTimers(); }
 });

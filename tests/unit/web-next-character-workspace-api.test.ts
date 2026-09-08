@@ -105,7 +105,7 @@ describe("Character Workspace API boundary", () => {
     expect(body.prompt).toBe("Deepen her connection to the mirrors.");
     expect(body.characterId).toBe("trusted-edit-id");
     expect(body.progressKey).toBe("character-preview:unique-1");
-    expect(body.content.schemaVersion).toBe(5);
+    expect(body.content.schemaVersion).toBe(6);
     expect(body.content).not.toHaveProperty("ownerUserId");
     expect(body.content.world).not.toHaveProperty("owner_user_id");
     expect(body.content.playableCharacters[0]).not.toHaveProperty("ownerUserId");

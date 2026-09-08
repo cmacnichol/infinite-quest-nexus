@@ -74,12 +74,14 @@ integration("authoring job PostgreSQL repository", () => {
   afterAll(async () => { await pool?.end(); });
 
   function input(key = `authoring-${crypto.randomUUID()}`) {
-    return authoringSubmitSchema.parse({
+    const parsed = authoringSubmitSchema.parse({
       kind: "world_concept",
       idempotencyKey: key,
       target: { kind: "new_world" },
       prompt: "Create a faithful fantasy world proposal."
     });
+    if (parsed.kind !== "world_concept") throw new Error("Expected a world concept input.");
+    return parsed;
   }
 
   function snapshot() {
@@ -496,7 +498,7 @@ integration("authoring job PostgreSQL repository", () => {
     } else if (parentState === "unvalidated") {
       await pool.query("UPDATE authoring_job_stages SET status = 'queued', output = NULL, next_attempt_at = clock_timestamp() + interval '1 hour' WHERE id = $1", [world!.stageId]);
     } else {
-      await pool.query("INSERT INTO authoring_job_stages (job_id, owner_user_id, stage_key, generation, next_attempt_at) VALUES ($1, $2, 'world', 2, clock_timestamp() + interval '1 hour')", [submitted.id, ownerUserId]);
+      await pool.query("INSERT INTO authoring_job_stages (job_id, owner_user_id, stage_key, generation, retry_count, next_attempt_at) VALUES ($1, $2, 'world', 2, 1, clock_timestamp() + interval '1 hour')", [submitted.id, ownerUserId]);
     }
 
     await expect(repository.claim("invalid-parent-child", 60)).resolves.toBeNull();

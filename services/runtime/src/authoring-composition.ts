@@ -17,6 +17,9 @@ import {
   executeAuthoringStage,
   type LoadedAuthoringStage
 } from "./authoring-stage-adapter.js";
+import { SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION, SOURCE_WORLD_PROMPT_PROTOCOL_VERSION } from "../../../packages/domain/src/authoring-prompts.js";
+import { SourceExtractionSplitNeededError } from "./source-authoring-adapter.js";
+import { resolveSourceAuthoringTextExecution } from "./source-authoring-budget.js";
 
 type RuntimeRepository = AuthoringExecutionRepository;
 
@@ -45,7 +48,11 @@ function snapshotPrompts(snapshot: Record<string, unknown>, content: (snapshot: 
     world_generation_recovery: content(snapshot, "world_generation_recovery"),
     world_character_generation: content(snapshot, "world_character_generation"),
     world_character_generation_recovery: content(snapshot, "world_character_generation_recovery"),
-    character_generation: content(snapshot, "character_generation")
+    character_generation: content(snapshot, "character_generation"),
+    source_extraction: content(snapshot, "source_extraction"),
+    source_extraction_recovery: content(snapshot, "source_extraction_recovery"),
+    source_world: content(snapshot, "source_world"),
+    source_world_recovery: content(snapshot, "source_world_recovery")
   };
 }
 
@@ -86,18 +93,39 @@ export function createRuntimeAuthoringWorkerApplication(options: Readonly<{
         return !stale && !Boolean(options.signal?.aborted) && loaded !== null;
       };
       try {
-        const output = await executeAuthoringStage({
+        let output: AuthoringStageOutput | null;
+        try {
+          output = await executeAuthoringStage({
           claim, repository,
           currentClaim,
           resolveSnapshot: async (input) => {
             const resolution = await options.providers.resolution.resolveDirect({ ownerUserId: claim.ownerUserId, providerRole: "text" });
-            if (resolution.status !== "resolved") throw Object.assign(new Error("authoring provider unavailable"), { authoringFailure: { code: "authoring_provider_unavailable", stage: input.kind === "world_concept" ? "world" : "character", retryable: true, issues: [] } });
-            const provider = await options.providers.execution.text({ ownerUserId: claim.ownerUserId }, resolution.providerProfileId, "text", resolution.model);
+            if (resolution.status !== "resolved") throw Object.assign(new Error("authoring provider unavailable"), { authoringFailure: { code: "authoring_provider_unavailable", stage: input.kind === "world_concept" ? "world" : input.kind === "story_source" ? "source" : "character", retryable: true, issues: [] } });
+            const provider = input.kind === "story_source"
+              ? (await resolveSourceAuthoringTextExecution({
+                execution: options.providers.execution,
+                inventory: options.providers.inventory,
+                scope: { ownerUserId: claim.ownerUserId },
+                providerProfileId: resolution.providerProfileId,
+                model: resolution.model
+              })).execution
+              : await options.providers.execution.text({ ownerUserId: claim.ownerUserId }, resolution.providerProfileId, "text", resolution.model);
             const prompt = await options.providers.prompts.loadWorldGenerationPromptSnapshot({ ownerUserId: claim.ownerUserId, worldId: claim.jobId });
-            return createAuthoringExecutionSnapshot(provider, snapshotPrompts(prompt.snapshot as Record<string, unknown>, options.providers.promptTools.content as never), AUTHORING_EXECUTION_PROTOCOLS, options.sha256);
+            return createAuthoringExecutionSnapshot(provider, snapshotPrompts(prompt.snapshot as Record<string, unknown>, options.providers.promptTools.content as never), input.kind === "story_source"
+              ? { ...AUTHORING_EXECUTION_PROTOCOLS, source: SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION, sourceWorld: SOURCE_WORLD_PROMPT_PROTOCOL_VERSION }
+              : AUTHORING_EXECUTION_PROTOCOLS, options.sha256);
           },
-          dispatch: async (stage) => dispatch(stage)
-        });
+            dispatch: async (stage) => dispatch(stage)
+          });
+        } catch (error) {
+          if (error instanceof SourceExtractionSplitNeededError && repository.splitSourceChunk) {
+            if (await repository.splitSourceChunk(claim, error.chunkId)) return null;
+            throw Object.assign(new Error("Source extraction split limit reached."), {
+              authoringFailure: { code: "source_requires_larger_context", stage: "source", retryable: false, issues: [] }
+            });
+          }
+          throw error;
+        }
         return stale || Boolean(options.signal?.aborted) ? null : output;
       } catch (error) {
         // A local heartbeat/abort can precede database expiry. It is neither a

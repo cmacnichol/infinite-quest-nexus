@@ -1,5 +1,6 @@
 import {
   authoringSubmitSchema,
+  sourceFactReviewSchema,
   normalizeAuthoringSubmitForAdmission,
   parseAuthoringCommandForJob,
   type AuthoringApply,
@@ -62,6 +63,8 @@ function mapRepositoryError(error: unknown): never {
           ? "authoring_not_found"
           : error.code === "active_job_limit"
             ? "authoring_active_job_limit"
+            : error.code === "choose_source_facts"
+              ? "choose_source_facts"
             : "authoring_invalid_state";
     throw new AuthoringApplicationError(code);
   }
@@ -112,6 +115,24 @@ export function createAuthoringApplication(dependencies: AuthoringApplicationDep
       const job = await commandJob(dependencies, scope, id);
       const input = parseAuthoringCommandForJob(job, "review", rawInput) as AuthoringReview;
       try { return await dependencies.repository.review(scope, id, input); } catch (error) { return mapRepositoryError(error); }
+    },
+    reviewSourceFacts: async (scope, id, rawReview) => {
+      requireOwner(scope);
+      requireIdentifier(id);
+      const job = await commandJob(dependencies, scope, id);
+      if (job.kind !== "story_source") throw new AuthoringApplicationError("authoring_invalid_state");
+      const review = sourceFactReviewSchema.parse(rawReview);
+      if (!dependencies.repository.reviewSourceFacts) throw new AuthoringApplicationError("authoring_invalid_state");
+      try { return await dependencies.repository.reviewSourceFacts(scope, id, review); } catch (error) { return mapRepositoryError(error); }
+    },
+    startSourceSynthesis: async (scope, id, expectedRevision) => {
+      requireOwner(scope);
+      requireIdentifier(id);
+      requireRevision(expectedRevision);
+      const job = await commandJob(dependencies, scope, id);
+      if (job.kind !== "story_source") throw new AuthoringApplicationError("authoring_invalid_state");
+      if (!dependencies.repository.startSourceSynthesis) throw new AuthoringApplicationError("authoring_invalid_state");
+      try { return await dependencies.repository.startSourceSynthesis(scope, id, expectedRevision); } catch (error) { return mapRepositoryError(error); }
     },
     retry: async (scope, id, stageId, expectedRevision) => {
       requireOwner(scope);

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   MAX_CHARACTER_MECHANICS_ITEMS,
   MAX_PLAYABLE_CHARACTERS,
+  MAX_WORLD_SOURCE_MATERIAL_BYTES,
   WORLD_CONTENT_SCHEMA_VERSION,
   campaignCreateSchema,
   campaignUpdateSchema,
@@ -12,6 +13,7 @@ import {
   playableCharacterGenerationRequestSchema,
   portableWorldSchema,
   worldContentSchema,
+  worldSourceMaterialSchema,
   worldDraftUpdateSchema,
   worldVersionDeleteSchema,
   type WorldContent
@@ -65,6 +67,27 @@ describe("World Library contracts", () => {
       schemaVersion: 0,
       world: { title: "Invalid Test World" }
     })).toThrow();
+  });
+
+  it("keeps schema-five snapshots readable and bounds a portable source appendix", () => {
+    const historical = {
+      schemaVersion: 5,
+      world: { title: "Historical published world", tone: "Quiet" },
+      customLore: { preserved: true }
+    };
+    expect(worldContentSchema.parse(historical)).toMatchObject(historical);
+
+    const oversized = {
+      version: 1 as const,
+      documents: [{ id: "source:appendix", name: "appendix.txt", text: "x", sha256: "a".repeat(64), paragraphs: [{ id: "paragraph:0", start: 0, end: 1 }] }],
+      boundary: { sourceId: "source:appendix", paragraphId: "paragraph:0" },
+      acceptedFacts: Array.from({ length: 1_100 }, (_, index) => ({
+        id: `fact:${index}`, kind: "tone" as const, subject: "Appendix", predicate: "tone", value: "x".repeat(4_000), provenance: "manual" as const, citations: []
+      })),
+      fieldEvidence: []
+    };
+    expect(Buffer.byteLength(JSON.stringify(oversized), "utf8")).toBeGreaterThan(MAX_WORLD_SOURCE_MATERIAL_BYTES);
+    expect(worldSourceMaterialSchema.safeParse(oversized).success).toBe(false);
   });
 
   it("canonicalizes writes to version 4 without dropping unknown lore fields", () => {

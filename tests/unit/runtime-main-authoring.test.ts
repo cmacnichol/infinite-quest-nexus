@@ -17,9 +17,10 @@ vi.mock("../../services/runtime/src/lifecycle.js", () => ({ runRuntimeLifecycle:
 vi.mock("../../services/runtime/src/runtime-role.js", () => ({ dispatchRuntimeRole: seams.dispatch }));
 
 describe("production main authoring binding", () => {
-  it("exposes only execution, direct resolution and prompt capabilities to worker authoring", () => {
+  it("exposes only execution, model inventory, direct resolution and prompt capabilities to worker authoring", () => {
     const graph = createWorkerProviderApplicationComposition({} as never, { credentialSecret: "synthetic-test-secret", transport: {} as never });
-    expect(Object.keys(graph.worldGeneration).sort()).toEqual(["execution", "promptTools", "prompts", "resolution"]);
+    expect(Object.keys(graph.worldGeneration).sort()).toEqual(["execution", "inventory", "promptTools", "prompts", "resolution"]);
+    expect(Object.keys(graph.worldGeneration.inventory).sort()).toEqual(["discoverCandidateModels", "listModels"]);
     expect(Object.keys(graph.worldGeneration.resolution)).toEqual(["resolveDirect"]);
     expect(graph).not.toHaveProperty("application");
     expect(graph).not.toHaveProperty("transaction");

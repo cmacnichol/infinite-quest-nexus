@@ -1,5 +1,5 @@
 import type { AuthoringClaim, AuthoringExecutionRepository } from "../../../packages/application/src/authoring/ports.js";
-import type { AuthoringExecutionSnapshot, AuthoringStageOutput, } from "../../../packages/application/src/authoring/types.js";
+import { authoringStageOutputSchema, type AuthoringExecutionSnapshot, type AuthoringStageOutput } from "../../../packages/application/src/authoring/types.js";
 import type { RuntimeProviderExecutionPort, RuntimeTextExecution } from "./provider-credential-transport-adapter.js";
 import { AuthoringResponseError } from "./authoring-response-adapter.js";
 import {
@@ -10,7 +10,12 @@ import {
   generateWorldOutline
 } from "./provider-world-generation-adapter.js";
 import { buildTemplateWorldPrompt } from "../../../packages/domain/src/world-template.js";
-import { CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION, WORLD_AUTHORING_PROMPT_PROTOCOL_VERSION } from "../../../packages/domain/src/authoring-prompts.js";
+import { CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION, SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION, SOURCE_WORLD_PROMPT_PROTOCOL_VERSION, WORLD_AUTHORING_PROMPT_PROTOCOL_VERSION } from "../../../packages/domain/src/authoring-prompts.js";
+import { sourceDocumentFromNormalizedText } from "../../../packages/domain/src/source-authoring.js";
+import { planSourceChunks } from "../../../packages/domain/src/source-authoring-budget.js";
+import { createRuntimeSourceAuthoringRequestBudget } from "./source-authoring-budget.js";
+import { createSourceAuthoringAdapter, createSourceWorldAuthoringAdapter, renderSourceExtractionProviderRequest } from "./source-authoring-adapter.js";
+import type { SourceWorldSelection } from "../../../packages/domain/src/source-world-proposal.js";
 
 export const AUTHORING_EXECUTION_PROTOCOLS = Object.freeze({
   world: WORLD_AUTHORING_PROMPT_PROTOCOL_VERSION,
@@ -64,6 +69,7 @@ export function createAuthoringExecutionSnapshot(
 }
 
 export type LoadedAuthoringStage = Readonly<{
+  jobId: string;
   input: Awaited<ReturnType<AuthoringExecutionRepository["loadClaim"]>> extends infer Claim
     ? Claim extends { input: infer Input } ? Input : never
     : never;
@@ -72,6 +78,8 @@ export type LoadedAuthoringStage = Readonly<{
     : never;
   stageKey: string;
   parentOutputs: AuthoringStageOutput[];
+  sourcePlan?: unknown;
+  sourceSelection?: SourceWorldSelection & Readonly<{ reviewGeneration: number }>;
   ownerUserId: string;
   currentClaim?(): Promise<boolean>;
 }>;
@@ -99,7 +107,7 @@ export async function executeAuthoringStage(options: Readonly<{
     loaded = await options.repository.loadClaim(options.claim);
   }
   if (!loaded) return null;
-  return options.dispatch({ ...loaded, ownerUserId: options.claim.ownerUserId, currentClaim: async () => {
+  return options.dispatch({ ...loaded, jobId: options.claim.jobId, ownerUserId: options.claim.ownerUserId, currentClaim: async () => {
     if (options.currentClaim && !await options.currentClaim()) return false;
     if (!await options.repository.loadClaim(options.claim)) return false;
     // Local shutdown/heartbeat loss can happen while the database read waits.
@@ -117,6 +125,11 @@ function compatibleSnapshot(snapshot: AuthoringExecutionSnapshot, execution: Run
     && current.requestTimeoutMs === snapshot.requestTimeoutMs;
 }
 
+function providerFailureStage(stage: LoadedAuthoringStage): "world" | "character" | "source" {
+  if (stage.input.kind === "story_source") return "source";
+  return stage.stageKey === "world" ? "world" : "character";
+}
+
 /**
  * Provider-bound half of the durable adapter. It reloads credentials by exact
  * pinned profile/model and rejects drift instead of resolving a newer default.
@@ -129,13 +142,107 @@ export function createRuntimeAuthoringStageDispatcher(options: Readonly<{
     let provider: RuntimeTextExecution;
     try {
       provider = await options.execution.text(
-        { ownerUserId: stage.ownerUserId }, stage.snapshot.providerProfileId, "text", stage.snapshot.model
+        { ownerUserId: stage.ownerUserId }, stage.snapshot.providerProfileId, "text", stage.snapshot.model,
+        stage.snapshot.contextWindowTokens
       );
     } catch {
-      throw new AuthoringResponseError({ code: "authoring_provider_unavailable", stage: stage.stageKey === "world" ? "world" : "character", retryable: true, issues: [] });
+      throw new AuthoringResponseError({ code: "authoring_provider_unavailable", stage: providerFailureStage(stage), retryable: true, issues: [] });
     }
     if (!compatibleSnapshot(stage.snapshot, provider, options.sha256)) {
-      throw new AuthoringResponseError({ code: "authoring_provider_unavailable", stage: stage.stageKey === "world" ? "world" : "character", retryable: true, issues: [] });
+      throw new AuthoringResponseError({ code: "authoring_provider_unavailable", stage: providerFailureStage(stage), retryable: true, issues: [] });
+    }
+    if (stage.input.kind === "story_source") {
+      const isSourceWorldStage = stage.stageKey === "source:synthesis" || stage.stageKey.startsWith("source:character:");
+      const actualSourceProtocol = isSourceWorldStage
+        ? stage.snapshot.protocols.sourceWorld
+        : stage.snapshot.protocols.source;
+      const expectedSourceProtocol = isSourceWorldStage
+        ? SOURCE_WORLD_PROMPT_PROTOCOL_VERSION
+        : SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION;
+      if (actualSourceProtocol !== expectedSourceProtocol) {
+        throw new AuthoringResponseError({ code: "source_evidence_invalid", stage: "source", retryable: false, issues: [] });
+      }
+      const sourceInput = stage.input;
+      const requestBudget = createRuntimeSourceAuthoringRequestBudget(provider);
+      if (isSourceWorldStage) {
+        if (!stage.sourceSelection) {
+          throw new AuthoringResponseError({ code: "source_review_conflict", stage: "source", retryable: false, issues: [] });
+        }
+        const selectedCharacterFactIds = stage.stageKey === "source:synthesis"
+          ? []
+          : [stage.stageKey.slice("source:character:".length)];
+        if (selectedCharacterFactIds.some((id) => !stage.sourceSelection!.selectedCharacterFactIds.includes(id))) {
+          throw new AuthoringResponseError({ code: "source_review_conflict", stage: "source", retryable: false, issues: [] });
+        }
+        const adapter = createSourceWorldAuthoringAdapter({ requestBudget, delay: async () => undefined });
+        const assembled = await adapter.synthesizeSourceWorld({
+          selection: { ...stage.sourceSelection, selectedCharacterFactIds },
+          reviewGeneration: stage.sourceSelection.reviewGeneration,
+          instructions: sourceInput.instructions
+        }, stage.currentClaim);
+        return {
+          kind: "source_world",
+          proposal: assembled.proposal,
+          mappings: assembled.mappings.map((mapping) => ({
+            ...mapping,
+            target: mapping.target === "world" ? "world" : { ...mapping.target },
+            supportingFactIds: [...mapping.supportingFactIds]
+          })),
+          expansionCandidates: assembled.expansionCandidates.map((candidate) => ({
+            ...candidate,
+            target: candidate.target === "world" ? "world" : { ...candidate.target },
+            supportingFactIds: [...candidate.supportingFactIds]
+          }))
+        };
+      }
+      const source = sourceDocumentFromNormalizedText(sourceInput.name, sourceInput.text, stage.jobId);
+      if (stage.stageKey === "source:plan") {
+        const chunks = planSourceChunks({
+          source,
+          boundaryParagraphId: sourceInput.boundaryParagraphId,
+          systemPrompt: "",
+          instructions: sourceInput.instructions,
+          budget: requestBudget.budget,
+          includeChunkCoordinates: true,
+          mode: sourceInput.mode,
+          renderRequest: (frame) => requestBudget.render(renderSourceExtractionProviderRequest({
+            instructions: frame.instructions,
+            sourceText: frame.sourceText,
+            sourceRange: frame.sourceRange ?? { start: 0, end: 0 },
+            paragraphSpans: frame.paragraphSpans ?? [],
+            mode: frame.mode ?? sourceInput.mode,
+            repair: frame.repair,
+            issues: []
+          }))
+        });
+        return { kind: "source_plan", chunks: chunks.map((chunk) => ({
+          ...chunk,
+          sourceRange: { ...chunk.sourceRange },
+          spans: chunk.spans.map((span) => ({ ...span }))
+        })) };
+      }
+      if (stage.stageKey.startsWith("source:chunk:")) {
+        const parentPlan = stage.parentOutputs.find((output) => output.kind === "source_plan");
+        const persistedPlan = typeof stage.sourcePlan === "object" && stage.sourcePlan !== null && !Array.isArray(stage.sourcePlan)
+          ? (stage.sourcePlan as { chunks?: unknown }).chunks
+          : undefined;
+        const plan = Array.isArray(persistedPlan)
+          ? authoringStageOutputSchema.parse({ kind: "source_plan", chunks: persistedPlan })
+          : parentPlan;
+        const chunk = plan?.kind === "source_plan"
+          ? plan.chunks.find((candidate) => stage.stageKey === `source:chunk:${candidate.id}`)
+          : undefined;
+        if (!chunk) throw new Error("Source extraction stage is missing its durable chunk plan.");
+        const adapter = createSourceAuthoringAdapter({
+          requestBudget,
+          delay: async () => undefined
+        });
+        return { kind: "source_extraction", facts: await adapter.extractSourceChunk({
+          source, chunk, boundaryParagraphId: sourceInput.boundaryParagraphId,
+          mode: sourceInput.mode, instructions: sourceInput.instructions
+        }, stage.currentClaim) };
+      }
+      throw new AuthoringResponseError({ code: "source_evidence_invalid", stage: "source", retryable: false, issues: [] });
     }
     if (stage.stageKey === "world") {
       if (stage.input.kind !== "world_concept") throw new Error("World stage input is invalid.");

@@ -41,6 +41,18 @@ const worlds: WorldSummary[] = [
   }
 ];
 
+function disabledAuthoringCapabilitiesResponse(): Response {
+  return new Response(JSON.stringify({
+    enabled: false,
+    supportedKinds: [],
+    limits: {
+      activeJobsPerOwner: 5,
+      maximumInputBytes: 2 * 1024 * 1024,
+      listPageSize: 20
+    }
+  }), { status: 200 });
+}
+
 describe("World Library overview", () => {
   it("routes world cards into the replacement World Editor", () => {
     expect(worldEditorPath("world / 1")).toBe("/app/worlds/world%20%2F%201");
@@ -81,7 +93,7 @@ describe("World Library overview", () => {
     const { window } = parseHTML('<html><body><div id="app"></div></body></html>');
     window.location = { pathname: "/app/worlds/new" } as Location;
     Object.defineProperty(window, "localStorage", { configurable: true, value: null });
-    const fetch = vi.fn();
+    const fetch = vi.fn().mockResolvedValue(disabledAuthoringCapabilitiesResponse());
     const previousGlobals = new Map<PropertyKey, PropertyDescriptor | undefined>();
     for (const [name, value] of [["window", window], ["document", window.document], ["fetch", fetch]] as const) {
       previousGlobals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
@@ -95,7 +107,11 @@ describe("World Library overview", () => {
       expect(window.document.querySelector('[data-page="world-editor"]')).toBeNull();
       expect(window.document.querySelector('[data-page="world-creation"] button:disabled')).not.toBeNull();
       expect(window.document.querySelector(".theme-toggle")).not.toBeNull();
-      expect(fetch).not.toHaveBeenCalled();
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/v1/authoring/capabilities",
+        expect.objectContaining({ signal: expect.any(AbortSignal) })
+      );
     } finally {
       for (const [name, descriptor] of previousGlobals) {
         if (descriptor) Object.defineProperty(globalThis, name, descriptor);
@@ -110,7 +126,7 @@ describe("World Library overview", () => {
     window.location = { pathname: "/app/characters/opaque-key" } as Location;
     Object.defineProperty(window, "localStorage", { configurable: true, value: null });
     Object.defineProperty(window, "sessionStorage", { configurable: true, value: null });
-    const fetch = vi.fn();
+    const fetch = vi.fn().mockResolvedValue(disabledAuthoringCapabilitiesResponse());
     const previousGlobals = new Map<PropertyKey, PropertyDescriptor | undefined>();
     for (const [name, value] of [["window", window], ["document", window.document], ["fetch", fetch]] as const) {
       previousGlobals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
@@ -120,9 +136,13 @@ describe("World Library overview", () => {
     try {
       vi.resetModules();
       await import("../../apps/web-next/src/bootstrap.js");
-      expect(window.document.querySelectorAll('[data-page="character-workspace-unavailable"]')).toHaveLength(1);
+      expect(window.document.querySelectorAll('[data-page="character-workspace-recovery"]')).toHaveLength(1);
       expect(window.document.querySelector('[data-page="world-library"], [data-page="world-editor"]')).toBeNull();
-      expect(fetch).not.toHaveBeenCalled();
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/v1/authoring/capabilities",
+        expect.objectContaining({ signal: expect.any(AbortSignal) })
+      );
     } finally {
       for (const [name, descriptor] of previousGlobals) {
         if (descriptor) Object.defineProperty(globalThis, name, descriptor);

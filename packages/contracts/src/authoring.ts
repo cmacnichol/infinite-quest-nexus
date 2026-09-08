@@ -6,8 +6,14 @@ import {
   type PlayableCharacter,
   type WorldContent
 } from "./world-library.js";
+import {
+  sourceAuthoringInputSchema,
+  sourceAuthoringViewSchema,
+  sourceFactReviewSchema,
+  sourceFactSchema
+} from "./source-authoring.js";
 
-export const authoringStageSchema = z.enum(["world", "character", "organizer"]);
+export const authoringStageSchema = z.enum(["world", "character", "organizer", "source"]);
 export const authoringIssueSchema = z.object({
   path: z.string().max(500),
   code: z.string().max(100),
@@ -24,7 +30,12 @@ export const authoringFailureCodeSchema = z.enum([
   "authoring_expired",
   "authoring_cancelled",
   "authoring_retry_exhausted",
-  "authoring_apply_unavailable"
+  "authoring_apply_unavailable",
+  "source_requires_larger_context",
+  "source_coverage_incomplete",
+  "source_evidence_invalid",
+  "choose_source_facts",
+  "source_review_conflict"
 ]);
 export const authoringFailureSchema = z.object({
   code: authoringFailureCodeSchema,
@@ -38,7 +49,7 @@ export type AuthoringStage = z.infer<typeof authoringStageSchema>;
 export type AuthoringIssue = z.infer<typeof authoringIssueSchema>;
 export type AuthoringFailure = z.infer<typeof authoringFailureSchema>;
 
-export const authoringKindSchema = z.enum(["world_concept", "character"]);
+export const authoringKindSchema = z.enum(["world_concept", "character", "story_source"]);
 export const authoringJobStatusSchema = z.enum([
   "queued", "running", "awaiting_review", "recoverable", "failed",
   "cancel_requested", "cancelled", "applied", "expired"
@@ -86,7 +97,12 @@ const characterSubmitSchema = z.object({
   }
 });
 
-export const authoringSubmitSchema = z.discriminatedUnion("kind", [worldConceptSubmitSchema, characterSubmitSchema]);
+/** The sole public authoring submission union, including source intake. */
+export const authoringSubmitSchema = z.discriminatedUnion("kind", [
+  worldConceptSubmitSchema,
+  characterSubmitSchema,
+  sourceAuthoringInputSchema
+]);
 
 /**
  * Existing drafts have one durable character identity. Canonicalize the two
@@ -125,7 +141,26 @@ export const authoringWorldOutlineSchema = z.object({
 
 export const authoringStageOutputSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("outline"), outline: authoringWorldOutlineSchema }).strict(),
-  z.object({ kind: z.literal("character"), character: playableCharacterSchema }).strict()
+  z.object({ kind: z.literal("character"), character: playableCharacterSchema }).strict(),
+  z.object({ kind: z.literal("source_plan"), chunks: z.array(z.object({
+    id: authoringIdSchema,
+    sourceId: authoringIdSchema,
+    sourceRange: z.object({ start: z.number().int().nonnegative(), end: z.number().int().nonnegative() }).strict(),
+    contentHash: z.string().regex(/^[0-9a-f]{64}$/u),
+    spans: z.array(z.object({ paragraphId: authoringIdSchema, start: z.number().int().nonnegative(), end: z.number().int().nonnegative() }).strict()).max(200_000)
+  }).strict()).min(1).max(200) }).strict(),
+  z.object({ kind: z.literal("source_extraction"), facts: z.array(sourceFactSchema).max(200) }).strict(),
+  z.object({
+    kind: z.literal("source_world"), proposal: worldContentSchema,
+    mappings: z.array(z.object({
+      target: z.union([z.literal("world"), z.object({ characterRepresentativeFactId: authoringIdSchema }).strict()]),
+      path: z.string().min(1), value: z.string(), supportingFactIds: z.array(authoringIdSchema).min(1)
+    }).strict()).default([]),
+    expansionCandidates: z.array(z.object({
+      target: z.union([z.literal("world"), z.object({ characterRepresentativeFactId: authoringIdSchema }).strict()]),
+      path: z.string().min(1), value: z.string(), supportingFactIds: z.array(authoringIdSchema).min(1), provenance: z.literal("invented")
+    }).strict()).default([])
+  }).strict()
 ]);
 
 /** Safe pinned execution fields only; endpoint URLs and credentials are deliberately absent. */
@@ -180,8 +215,25 @@ const characterJobViewSchema = z.object({
   reviewedStageIds: z.array(authoringIdSchema).max(10_000).optional()
 }).strict();
 
+const storySourceJobViewSchema = z.object({
+  ...authoringJobViewFields,
+  kind: z.literal("story_source"),
+  target: z.object({ kind: z.literal("new_world") }).strict(),
+  request: sourceAuthoringInputSchema.optional(),
+  /** Source synthesis produces a world proposal under the same review boundary as concept authoring. */
+  result: worldContentSchema.optional(),
+  reviewedContent: worldContentSchema.optional(),
+  reviewedStageIds: z.array(authoringIdSchema).max(10_000).optional(),
+  /** Source extraction/review is owner-only detail and is deliberately absent from list items. */
+  source: sourceAuthoringViewSchema.optional()
+}).strict();
+
 /** Owner-only detail projection. It intentionally retains resumable proposal content. */
-export const authoringJobViewSchema = z.discriminatedUnion("kind", [worldConceptJobViewSchema, characterJobViewSchema]);
+export const authoringJobViewSchema = z.discriminatedUnion("kind", [
+  worldConceptJobViewSchema,
+  characterJobViewSchema,
+  storySourceJobViewSchema
+]);
 
 /** Safe list projection. Proposal inputs and outputs are detail-only. */
 export const authoringJobListItemSchema = z.object({
@@ -209,6 +261,10 @@ export const authoringReviewSchema = z.object({
   expectedRevision: authoringRevisionSchema,
   content: z.union([worldContentSchema, playableCharacterSchema]),
   selectedStageIds: z.array(authoringIdSchema).max(10_000)
+}).strict();
+
+export const authoringSourceSynthesisSchema = z.object({
+  expectedRevision: authoringRevisionSchema
 }).strict();
 
 /** Strict command envelopes shared by the HTTP API and replacement client. */
@@ -252,7 +308,9 @@ export function parseAuthoringCommandForJob(
   const parsed = command === "review" ? authoringReviewSchema.parse(input) : authoringApplySchema.parse(input);
   const content = context.kind === "world_concept"
     ? worldContentSchema.parse(parsed.content)
-    : playableCharacterSchema.parse(parsed.content);
+    : context.kind === "story_source"
+      ? worldContentSchema.parse(parsed.content)
+      : playableCharacterSchema.parse(parsed.content);
   return { ...parsed, content } as AuthoringReview | AuthoringApply;
 }
 
@@ -267,6 +325,7 @@ export type AuthoringJobListItem = z.infer<typeof authoringJobListItemSchema>;
 export type AuthoringCapabilities = z.infer<typeof authoringCapabilitiesSchema>;
 export type AuthoringJobPage = z.infer<typeof authoringJobPageSchema>;
 export type AuthoringReview = z.infer<typeof authoringReviewSchema>;
+export type AuthoringSourceSynthesis = z.infer<typeof authoringSourceSynthesisSchema>;
 export type AuthoringRetry = z.infer<typeof authoringRetrySchema>;
 export type AuthoringRevisionCommand = z.infer<typeof authoringRevisionCommandSchema>;
 export type AuthoringApply = z.infer<typeof authoringApplySchema>;

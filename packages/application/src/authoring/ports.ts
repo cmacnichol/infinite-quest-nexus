@@ -1,6 +1,7 @@
 import type {
   AuthoringApply,
   AuthoringFailure,
+  AuthoringKind,
   AuthoringJobListItem,
   AuthoringJobView,
   AuthoringReview,
@@ -14,6 +15,7 @@ import type {
 } from "./types.js";
 import type { AuthoringApplyReceipt, AuthoringTarget } from "@infinite-quest/contracts";
 import type { PlayableCharacter, WorldContent } from "@infinite-quest/contracts";
+import type { SourceCharacterIdentityGroup, SourceDocument, SourceFact, SourceFactReview } from "@infinite-quest/contracts";
 
 /** Opaque transaction binding owned by the persistence adapter. */
 export interface AuthoringTransaction {
@@ -44,11 +46,13 @@ export interface AuthoringRepository {
   submit(scope: OwnerScope, input: AuthoringSubmit, hash: string): Promise<AuthoringJobView>;
   read(scope: OwnerScope, jobId: string): Promise<AuthoringJobView | null>;
   list(scope: OwnerScope, cursor?: string): Promise<{ jobs: AuthoringJobListItem[]; nextCursor?: string }>;
-  claim(workerId: string, leaseSeconds: number): Promise<AuthoringClaim | null>;
+  claim(workerId: string, leaseSeconds: number, allowedKinds?: readonly AuthoringKind[]): Promise<AuthoringClaim | null>;
   heartbeat(claim: AuthoringClaim, leaseSeconds: number): Promise<boolean>;
   checkpoint(claim: AuthoringClaim, output: unknown): Promise<boolean>;
   fail(claim: AuthoringClaim, failure: AuthoringFailure): Promise<boolean>;
   review(scope: OwnerScope, jobId: string, input: AuthoringReview): Promise<AuthoringJobView>;
+  reviewSourceFacts?(scope: OwnerScope, jobId: string, review: SourceFactReview): Promise<AuthoringJobView>;
+  startSourceSynthesis?(scope: OwnerScope, jobId: string, expectedRevision: number): Promise<AuthoringJobView>;
   retry(scope: OwnerScope, jobId: string, stageId: string, expectedRevision: number): Promise<AuthoringJobView>;
   cancel(scope: OwnerScope, jobId: string, expectedRevision: number): Promise<AuthoringJobView>;
   discard(scope: OwnerScope, jobId: string, expectedRevision: number): Promise<void>;
@@ -86,5 +90,19 @@ export interface AuthoringExecutionRepository extends AuthoringRepository {
     snapshot: AuthoringExecutionSnapshot;
     stageKey: string;
     parentOutputs: AuthoringStageOutput[];
+    /** Mutable source-plan leaf projection; immutable parent output remains retained for lineage. */
+    sourcePlan?: unknown;
+    /** Exact source review projection bound to a source synthesis/character stage. */
+    sourceSelection?: Readonly<{
+      source: SourceDocument;
+      boundaryParagraphId: string;
+      acceptedFacts: SourceFact[];
+      selectedCharacterFactIds: string[];
+      characterIdentityGroups: SourceCharacterIdentityGroup[];
+      mode: "faithful" | "expand";
+      reviewGeneration: number;
+    }>;
   } | null>;
+  /** Replaces one current source leaf with two fenced child leaves after output truncation. */
+  splitSourceChunk?(claim: AuthoringClaim, chunkId: string): Promise<boolean>;
 }

@@ -36,6 +36,7 @@ import {
   type RuntimeProviderExecutionPort
 } from "./provider-credential-transport-adapter.js";
 import { createTurnIntentClassificationAdapter } from "./provider-turn-intent-adapter.js";
+import type { SourceAuthoringModelInventory } from "./source-authoring-budget.js";
 import {
   generateTemplateWorld,
   worldGenerationFailureDiagnostic,
@@ -89,6 +90,7 @@ export type WorldGenerationProviderCollaborators = ProviderConsumerRuntime & Rea
 
 export type AuthoringWorkerProviderCollaborators = Readonly<{
   execution: RuntimeProviderExecutionPort;
+  inventory: SourceAuthoringModelInventory;
   resolution: Pick<ProviderResolutionPort, "resolveDirect">;
   prompts: WorldGenerationPromptPort;
   promptTools: ProviderPromptTools;
@@ -335,6 +337,7 @@ export function createWorkerProviderApplicationComposition(
     chronicle: graph.chronicle,
     worldGeneration: Object.freeze({
       execution: graph.worldGeneration.execution,
+      inventory: graph.runtimeAdapter.inventory,
       resolution: Object.freeze({ resolveDirect: graph.worldGeneration.resolution.resolveDirect }),
       prompts: graph.worldGeneration.prompts,
       promptTools: graph.worldGeneration.promptTools

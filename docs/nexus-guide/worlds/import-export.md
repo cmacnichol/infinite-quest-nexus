@@ -12,6 +12,8 @@ Infinite Quest uses separate portable formats for different jobs:
 
 None of these files proves that the source user is authorized on the receiving installation. Imported content is owned by the receiving server's resolved user; source IDs are provenance only.
 
+A world created from a reviewed story prefix stores its accepted `sourceMaterial` appendix inside world content. World JSON, Campaign Archive, and System Archive retain that appendix with the world authority. They do not retain un-applied source jobs, rejected candidates, raw provider output, or credentials. See [Create a world from a story or chapter](./create-from-story.md).
+
 ## Export a published world version
 
 1. Select a world and explicit **Published version**.

@@ -2,11 +2,15 @@ import { describe, expect, it } from "vitest";
 import { PROMPT_TEMPLATE_CATALOG } from "../../packages/contracts/src/prompt-library.js";
 import {
   appendAuthoringContract,
+  buildSourceWorldPrompt,
   effectiveAuthoringPrompt,
   CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION,
   CHARACTER_PROFILE_ORGANIZER_PROMPT_PROTOCOL_VERSION,
+  SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION,
+  SOURCE_WORLD_PROMPT_PROTOCOL_VERSION,
   WORLD_AUTHORING_PROMPT_PROTOCOL_VERSION
 } from "../../packages/domain/src/authoring-prompts.js";
+import { sourceWorldFieldFactRequirements } from "../../packages/domain/src/source-authoring.js";
 
 describe("authoring prompt contracts", () => {
   it("adds the complete character profile contract to shipped and custom guidance", () => {
@@ -63,5 +67,42 @@ describe("authoring prompt contracts", () => {
     expect(effective).toMatchObject({ protocolVersion: "world-authoring-v2-validated-profile" });
     expect(effective.content).toContain(savedOverride);
     expect(effective.content).toContain('IQ_AUTHORING_CONTRACT:world');
+  });
+
+  it("makes source citation coordinates unambiguous for bounded excerpts", () => {
+    const prompt = effectiveAuthoringPrompt("source_extraction", "Extract facts.");
+
+    expect(SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION).toBe("source-extraction-v3-quote-anchor");
+    expect(prompt.content).toContain('"citations":[{"paragraphId":"paragraph:0","quote":"exact source text"}]');
+    expect(prompt.content).toContain("Do not calculate or return coordinates");
+    expect(prompt.content).toContain("provided paragraph span");
+    expect(prompt.content).toContain("unique exact literal passage inside one provided paragraph span");
+    expect(prompt.content).toContain("prefer an entire provided paragraph/span");
+  });
+
+  it("derives the source-world closed mapping contract from the validator rules", () => {
+    const prompt = effectiveAuthoringPrompt("source_world", "Organize reviewed facts.");
+    expect(SOURCE_WORLD_PROMPT_PROTOCOL_VERSION).toBe("source-world-v2-closed-mappings");
+    for (const requirement of sourceWorldFieldFactRequirements()) {
+      expect(prompt.content).toContain(`${requirement.path} requires kind ${requirement.kind} and predicate ${requirement.predicate}`);
+    }
+    expect(prompt.content).toContain("if that list is empty, characterFields must be []");
+    expect(prompt.content).toContain("supporting IDs must belong to that selected identity group");
+    expect(prompt.content).toContain("If no reviewed fact matches a closed mapping, return empty arrays");
+
+    const selection = {
+      source: { id: "source:prompt", name: "prompt.txt", sha256: "a".repeat(64) },
+      boundaryParagraphId: "paragraph:0", acceptedFacts: [], selectedCharacterFactIds: [], characterIdentityGroups: []
+    };
+    const faithful = buildSourceWorldPrompt({ instructions: "", reviewGeneration: 1, selection: { ...selection, mode: "faithful" }, repair: false });
+    const expand = buildSourceWorldPrompt({ instructions: "", reviewGeneration: 1, selection: { ...selection, mode: "expand" }, repair: false });
+    expect(faithful.systemPrompt).toContain("In faithful mode expansionCandidates must be empty");
+    expect(expand.systemPrompt).toContain('"target":"world" or a selected identity representative');
+    expect(expand.systemPrompt).toContain('"path":"closed mapped field path"');
+    expect(expand.systemPrompt).toContain('"supportingFactIds":["current reviewed fact id"]');
+    expect(expand.systemPrompt).toContain("supporting IDs for an identity target must belong to that identity group");
+    expect(expand.systemPrompt).toContain("proposed values need not copy a reviewed value");
+    expect(faithful.systemPrompt).toContain("Invented values are permitted only in explicitly labeled expansionCandidates in expand mode");
+    expect(expand.systemPrompt).toContain("Do not invent mechanics, stats, or trackers in any mode");
   });
 });

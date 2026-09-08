@@ -174,7 +174,11 @@ function defaultOptionalLanes(
       authoringCleanup: async () => (await authoring.cleanup()) > 0
     }),
     ...(authoring === undefined || config.aiAuthoringJobsEnabled !== true ? {} : {
-      authoring: () => authoring.runNext({ workerId, leaseSeconds: config.workerLeaseSeconds })
+      authoring: () => authoring.runNext({
+        workerId,
+        leaseSeconds: config.workerLeaseSeconds,
+        ...(config.aiStorySourceAuthoringEnabled === false ? { allowedKinds: ["world_concept", "character"] as const } : {})
+      })
     }),
   };
 }

@@ -66,6 +66,7 @@ import type { AuthoringJobsApi } from "./authoring-jobs-api.js";
 import { createAuthoringJobSession, type AuthoringJobSession } from "./authoring-job-session.js";
 import { reviewedCharacterParent } from "./authoring-character-parent.js";
 import { renderAuthoringComparison } from "./authoring-comparison.js";
+import { mountSourceAuthoringPanel, type SourceAuthoringPanel } from "./source-authoring-panel.js";
 import { worldContentSchema } from "../../../packages/contracts/src/world-library.js";
 import type { AuthoringApply, AuthoringJobView, AuthoringSubmit } from "../../../packages/contracts/src/authoring.js";
 
@@ -214,6 +215,7 @@ const creationMarkup = `
             <legend>Creation method</legend>
             <label class="creation-method-control"><input type="radio" name="creationMethod" value="manual" /><span>Manual</span></label>
             <label class="creation-method-control"><input type="radio" name="creationMethod" value="ai" /><span>AI-assisted</span></label>
+            <label class="creation-method-control"><input type="radio" name="creationMethod" value="source" /><span>From story or chapter</span></label>
           </fieldset>
           <section class="creation-prompt-authoring" data-ai-prompt hidden aria-labelledby="concept-heading">
             <div class="creation-prompt-heading">
@@ -231,9 +233,10 @@ const creationMarkup = `
               <button type="button" data-action="generate-world" disabled>Generate world draft</button>
               <button type="button" data-action="cancel-generation" hidden>Cancel generation</button>
             </div>
-            <section class="authoring-actions" data-authoring-resume hidden aria-live="polite"><h3>Resume AI Assist</h3><p data-authoring-resume-status>No durable proposal selected.</p><ol data-authoring-resume-list></ol><button type="button" data-action="more-authoring" hidden>Load more world proposals</button><div data-authoring-comparison hidden></div><button type="button" data-action="resume-authoring">Show saved proposals</button><button type="button" data-action="adopt-authoring-result" hidden>Review available results</button><button type="button" data-action="compare-authoring" hidden>Compare local and generated result</button><button type="button" data-action="reload-authoring" hidden>Reload server review</button><div data-authoring-stage-actions></div><button type="button" data-action="cancel-authoring" hidden>Cancel proposal</button></section>
           </section>
+          <section class="authoring-actions" data-authoring-resume hidden aria-live="polite"><h3>Resume AI Assist</h3><p data-authoring-resume-status>No durable proposal selected.</p><ol data-authoring-resume-list></ol><button type="button" data-action="more-authoring" hidden>Load more world proposals</button><div data-authoring-comparison hidden></div><button type="button" data-action="resume-authoring">Show saved proposals</button><button type="button" data-action="adopt-authoring-result" hidden>Review available results</button><button type="button" data-action="compare-authoring" hidden>Compare local and generated result</button><button type="button" data-action="reload-authoring" hidden>Reload server review</button><div data-authoring-stage-actions></div><button type="button" data-action="cancel-authoring" hidden>Cancel proposal</button></section>
           <div class="creation-manual-action" data-manual-action hidden><p>Begin with an empty world and author each section directly.</p><button type="button" data-action="continue-manual">Continue manually</button></div>
+          <section class="creation-source-authoring" data-source-authoring hidden aria-live="polite"></section>
         </div>
         <div class="overview-editor creation-foundation-stage" data-foundation-stage data-editing-stage hidden></div>
       </section>
@@ -275,6 +278,7 @@ export function mountWorldCreationPage(
   const stageItems = [...root.querySelectorAll<HTMLButtonElement>("[data-stage]")];
   const aiPrompt = requiredElement<HTMLElement>(root, "[data-ai-prompt]");
   const manualAction = requiredElement<HTMLElement>(root, "[data-manual-action]");
+  const sourceAuthoringHost = requiredElement<HTMLElement>(root, "[data-source-authoring]");
   const compactPrompt = requiredElement<HTMLTextAreaElement>(root, '[data-concept-prompt="compact"]');
   const expandedPrompt = requiredElement<HTMLTextAreaElement>(root, '[data-concept-prompt="expanded"]');
   const generateButton = requiredElement<HTMLButtonElement>(root, '[data-action="generate-world"]');
@@ -291,6 +295,7 @@ export function mountWorldCreationPage(
   const generateWorldPreview = dependencies.generateWorldPreview ?? generateWorldPreviewRequest;
   const loadWorldGenerationProgress = dependencies.loadWorldGenerationProgress ?? loadWorldGenerationProgressRequest;
   const authoringJobs = dependencies.authoringJobsApi ?? null;
+  let sourceAuthoringPanel: SourceAuthoringPanel | null = null;
   const createWorld = dependencies.createWorld ?? createWorldRequest;
   const attachCreatedWorldCover = dependencies.attachCreatedWorldCover ?? attachCreatedWorldCoverRequest;
   const generateCreatedWorldCover = dependencies.generateCreatedWorldCover ?? generateCreatedWorldCoverRequest;
@@ -349,6 +354,7 @@ export function mountWorldCreationPage(
   let unloadInstalled = false;
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let durableEnabled = false;
+  let durableResumeAvailable = false;
   let durableChecked = false;
   let durableCapabilityRequest: Promise<boolean> | null = null;
   let authoringSession: AuthoringJobSession | null = null;
@@ -368,7 +374,7 @@ export function mountWorldCreationPage(
       const page = await authoringJobs.listAuthoringJobs(cursor, authoringController.signal);
       if (disposed) return;
       if (reset) { list.replaceChildren(); listedAuthoringIds.clear(); }
-      for (const job of page.jobs.filter(job => job.kind === "world_concept" && !listedAuthoringIds.has(job.id))) {
+      for (const job of page.jobs.filter(job => (job.kind === "world_concept" || job.kind === "story_source") && !listedAuthoringIds.has(job.id))) {
         listedAuthoringIds.add(job.id);
         const button = document.createElement("button"); button.type = "button"; button.dataset.action = "select-authoring-job"; button.dataset.jobId = job.id; button.textContent = `${job.id} \u00b7 ${job.status.replaceAll("_", " ")}`;
         const item = document.createElement("li"); item.append(button); list.append(item);
@@ -379,7 +385,7 @@ export function mountWorldCreationPage(
     } catch { if (!disposed) authoringResumeStatus.textContent = "Saved proposals could not be loaded. Try again."; }
     finally { authoringListBusy = false; if (!disposed) { more.disabled = false; show.disabled = false; } }
   }
-  let pendingSubmission: AuthoringSubmit | null = null;
+  let pendingSubmission: Extract<AuthoringSubmit, { kind: "world_concept" }> | null = null;
   let savedCharacterParent: AuthoringJobView | null = null;
   let activeCollection: EditableCollection = "entities";
   let activeCharacterHandoff: Pick<CharacterWorkspaceSession, "key" | "workflowId"> | null = null;
@@ -460,7 +466,7 @@ export function mountWorldCreationPage(
     const serialized = JSON.stringify(state.draft);
     if (serialized === observedAuthoredDraft) return;
     observedAuthoredDraft = serialized;
-    if (disposed || authoringSession?.state().job.kind !== "world_concept") return;
+    if (disposed || !authoringSession || (authoringSession.state().job.kind !== "world_concept" && authoringSession.state().job.kind !== "story_source")) return;
     // Rendering/adopting the server's existing candidate is not a new edit.
     if (serialized === JSON.stringify(authoringSession.currentCandidate())) return;
     const parsed = worldContentSchema.safeParse(state.draft);
@@ -474,9 +480,12 @@ export function mountWorldCreationPage(
     durableCapabilityRequest = authoringJobs.loadAuthoringCapabilities(authoringController.signal).then((capabilities) => {
       if (disposed) return false;
       durableEnabled = capabilities.enabled && capabilities.supportedKinds.includes("world_concept");
+      durableResumeAvailable = capabilities.enabled && capabilities.supportedKinds.some((kind) => kind === "world_concept" || kind === "story_source");
       durableChecked = true;
-      authoringResume.hidden = !durableEnabled;
-      return durableEnabled;
+      const sourceMethod = root.querySelector<HTMLInputElement>('[name="creationMethod"][value="source"]');
+      if (sourceMethod) sourceMethod.disabled = !capabilities.enabled || !capabilities.supportedKinds.includes("story_source");
+      authoringResume.hidden = !durableResumeAvailable;
+      return durableResumeAvailable;
     }).finally(() => { durableCapabilityRequest = null; });
     return durableCapabilityRequest;
   }
@@ -489,7 +498,18 @@ export function mountWorldCreationPage(
   }
 
   function beginAuthoringSession(job: Awaited<ReturnType<AuthoringJobsApi["loadAuthoringJob"]>>): void {
-    if (disposed || job.kind !== "world_concept" || job.target.kind !== "new_world") return;
+    if (disposed || (job.kind !== "world_concept" && job.kind !== "story_source") || job.target.kind !== "new_world") return;
+    if (authoringSession?.state().jobId === job.id) {
+      authoringSession.receive(job);
+      if (job.kind === "story_source") sourceAuthoringPanel?.resume(job);
+      rememberAuthoringJob(job.id);
+      updateAuthoringResume();
+      return;
+    }
+    if (job.kind === "story_source") {
+      if (state.method !== "source" || !sourceAuthoringPanel) updateMethod("source");
+      sourceAuthoringPanel?.resume(job);
+    }
     authoringSession?.dispose();
     authoringApply = null;
     authoringSession = createAuthoringJobSession({
@@ -499,18 +519,22 @@ export function mountWorldCreationPage(
       retryStage: authoringJobs!.retryAuthoringStage,
       cancel: authoringJobs!.cancelAuthoringJob,
       isHidden: () => document.hidden,
-      onChange: updateAuthoringResume
+      onChange() {
+        updateAuthoringResume();
+        const snapshot = authoringSession?.state();
+        if (snapshot?.job.kind === "story_source") sourceAuthoringPanel?.resume(snapshot.job);
+      }
     });
     authoringSession.startPolling();
     if (hasLocalWorldCreationContent(state.draft)) authoringSession.edit(worldContentSchema.parse(state.draft));
-    concept = job.request?.prompt ?? concept; compactPrompt.value = concept; expandedPrompt.value = concept;
+    if (job.kind === "world_concept") { concept = job.request?.prompt ?? concept; compactPrompt.value = concept; expandedPrompt.value = concept; }
     rememberAuthoringJob(job.id);
     updateAuthoringResume();
   }
 
   function adoptAuthoringResult(): void {
     const result = authoringSession?.adoptPendingResult();
-    if (!result || authoringSession?.state().job.kind !== "world_concept") return;
+    if (!result || (authoringSession?.state().job.kind !== "world_concept" && authoringSession?.state().job.kind !== "story_source")) return;
     const parsed = worldContentSchema.safeParse(result); if (!parsed.success) return;
     state = { ...applyGeneratedPreview(state, { title: parsed.data.world.title, content: parsed.data }), draft: parsed.data };
     state = setCreationStage(state, "foundation");
@@ -523,7 +547,7 @@ export function mountWorldCreationPage(
     const job = await authoringJobs.loadAuthoringJob(selected.state().jobId, authoringController.signal);
     if (disposed || selected !== authoringSession) return;
     const remote = selected.state().saveState === "conflict" ? job.reviewedContent ?? job.result : selected.state().remoteCandidate ?? job.reviewedContent ?? job.result;
-    if (!remote || authoringSession?.state().job.kind !== "world_concept") return;
+    if (!remote || (authoringSession?.state().job.kind !== "world_concept" && authoringSession?.state().job.kind !== "story_source")) return;
     const comparison = requiredElement<HTMLElement>(authoringResume, "[data-authoring-comparison]");
     comparison.hidden = false;
     comparison.replaceChildren(...renderAuthoringComparison(document, state.draft, remote));
@@ -1003,11 +1027,22 @@ export function mountWorldCreationPage(
     canvas.setAttribute("aria-labelledby", state.stage === "method" ? "method-heading" : `${state.stage}-heading`);
   }
 
-  function updateMethod(method: "manual" | "ai"): void {
+  function updateMethod(method: "manual" | "ai" | "source"): void {
     if (generationController) cancelGeneration();
     state = selectCreationMethod(state, method);
+    root.querySelectorAll<HTMLInputElement>('[name="creationMethod"]').forEach(control => {
+      control.checked = control.value === method;
+    });
     aiPrompt.hidden = method !== "ai";
     manualAction.hidden = method !== "manual";
+    sourceAuthoringHost.hidden = method !== "source";
+    authoringResume.hidden = !durableResumeAvailable;
+    if (method === "source" && !sourceAuthoringPanel) {
+      sourceAuthoringPanel = mountSourceAuthoringPanel(sourceAuthoringHost, {
+        authoringJobs: authoringJobs ?? undefined,
+        onJobAvailable(job) { beginAuthoringSession(job); }
+      });
+    }
     generationStatus.replaceChildren();
   }
 
@@ -1140,7 +1175,7 @@ export function mountWorldCreationPage(
     try {
       let durable = false;
       if (authoringJobs) {
-        try { durable = await loadDurableCapability(); }
+        try { await loadDurableCapability(); durable = durableEnabled; }
         catch {
           generationStatus.setAttribute("role", "alert");
           generationStatus.textContent = "AI Assist availability could not be checked. Your concept is safe; try again.";
@@ -1264,7 +1299,7 @@ export function mountWorldCreationPage(
     try {
       const durableSession = authoringSession;
       const durable = durableSession?.state();
-      const hasDurableWorldProposal = durableSession && durable?.job.kind === "world_concept" && durable.job.target.kind === "new_world" && authoringJobs;
+      const hasDurableWorldProposal = durableSession && (durable?.job.kind === "world_concept" || durable?.job.kind === "story_source") && durable.job.target.kind === "new_world" && authoringJobs;
       const result = replay
         ? await (async () => {
           if (!authoringJobs) throw new Error("The frozen proposal cannot be retried without authoring service access.");
@@ -1514,7 +1549,7 @@ export function mountWorldCreationPage(
   function onChange(event: Event): void {
     const target = event.target;
     if (!(target instanceof pageView.HTMLInputElement) || !target.checked) return;
-    if (target.name === "creationMethod" && (target.value === "manual" || target.value === "ai")) {
+    if (target.name === "creationMethod" && (target.value === "manual" || target.value === "ai" || target.value === "source")) {
       updateMethod(target.value);
     } else if (target.name === "coverMode") {
       if (target.value === "none") state = setCreationCoverIntent(state, { mode: "none" });
@@ -1820,6 +1855,8 @@ export function mountWorldCreationPage(
       generationController = null;
       authoringSession?.dispose();
       authoringSession = null;
+      sourceAuthoringPanel?.dispose();
+      sourceAuthoringPanel = null;
       creationController?.abort(new DOMException("World creation closed", "AbortError"));
       creationController = null;
       setDirtyGuard(false);

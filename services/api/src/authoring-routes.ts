@@ -10,8 +10,11 @@ import {
   authoringRetrySchema,
   authoringRevisionCommandSchema,
   authoringReviewSchema,
-  authoringSubmitSchema
+  authoringSubmitSchema,
+  authoringSourceSynthesisSchema
 } from "../../../packages/contracts/src/authoring.js";
+import { sourceAuthoringInputSchema, sourceFactReviewSchema } from "../../../packages/contracts/src/source-authoring.js";
+import { normalizeSourceDocument } from "../../../packages/domain/src/source-authoring.js";
 import type { AuthoringApplication } from "../../../packages/application/src/authoring/types.js";
 import { AuthoringApplicationError } from "../../../packages/application/src/authoring/types.js";
 import type { OwnerScope } from "../../../packages/application/src/generation/types.js";
@@ -28,6 +31,7 @@ type AdmissionDecision = Readonly<{ allowed: boolean; leaseId?: string | null; r
 export type AuthoringRoutesOptions = Readonly<{
   application: AuthoringApplication;
   enabled: boolean;
+  sourceEnabled?: boolean;
   resolveOwner(): Promise<OwnerScope>;
   acquireAdmission(scope: OwnerScope): Promise<AdmissionDecision>;
   releaseAdmission?(leaseId: string): Promise<void>;
@@ -46,6 +50,7 @@ function mapAuthoringError(error: unknown): AuthoringRouteError | null {
     case "authoring_idempotency_conflict": return new AuthoringRouteError(409, error.code, "This idempotency key was already used for a different request.");
     case "authoring_input_too_large": return new AuthoringRouteError(413, error.code, "The authoring request exceeds the durable input limit.");
     case "authoring_active_job_limit": return new AuthoringRouteError(429, error.code, "Finish, cancel, or discard an existing proposal before creating another.");
+    case "choose_source_facts": return new AuthoringRouteError(409, error.code, "Choose at least one supported source fact before synthesis.");
     case "authoring_apply_unavailable": return new AuthoringRouteError(409, error.code, "Applying authoring proposals is not available yet.");
     default: return new AuthoringRouteError(409, error.code, "The authoring job cannot accept that command now.");
   }
@@ -53,6 +58,30 @@ function mapAuthoringError(error: unknown): AuthoringRouteError | null {
 
 function unavailable(): AuthoringRouteError {
   return new AuthoringRouteError(503, "authoring_disabled", "Durable authoring jobs are not enabled.");
+}
+
+function sourceUnavailable(): AuthoringRouteError {
+  return new AuthoringRouteError(503, "source_authoring_disabled", "Story-source execution is paused.");
+}
+
+function sourceEnabled(options: AuthoringRoutesOptions): boolean {
+  return options.sourceEnabled !== false;
+}
+
+/** Reject an unknown boundary before it can create a durable source proposal. */
+function assertSourceAdmission(input: z.infer<typeof sourceAuthoringInputSchema>): void {
+  const source = normalizeSourceDocument(input.name, input.text, "source-admission");
+  if (!source.paragraphs.some((paragraph) => paragraph.id === input.boundaryParagraphId)) {
+    throw new AuthoringRouteError(400, "authoring_invalid_request", "The selected source boundary is invalid.");
+  }
+}
+
+async function ownedSourceJob(options: AuthoringRoutesOptions, id: string): Promise<OwnerScope> {
+  const scope = await options.resolveOwner();
+  const job = await options.application.get(scope, id);
+  if (!job) throw new AuthoringRouteError(404, "authoring_not_found", "Authoring job not found.");
+  if (job.kind === "story_source" && !sourceEnabled(options)) throw sourceUnavailable();
+  return scope;
 }
 
 async function command<T>(request: { log: { error(value: unknown, message?: string): void }; id: string }, reply: { code(value: number): { send(value: unknown): unknown }; header(name: string, value: string): unknown }, work: () => Promise<T>): Promise<T | unknown> {
@@ -83,13 +112,27 @@ async function withAdmission<T>(options: AuthoringRoutesOptions, scope: OwnerSco
 export async function registerAuthoringRoutes(app: FastifyInstance, options: AuthoringRoutesOptions): Promise<void> {
   app.get("/api/v1/authoring/capabilities", async () => authoringCapabilitiesSchema.parse({
     enabled: options.enabled,
-    supportedKinds: ["world_concept", "character"],
+    supportedKinds: sourceEnabled(options) ? ["world_concept", "character", "story_source"] : ["world_concept", "character"],
     limits: { activeJobsPerOwner: activeJobLimit, maximumInputBytes: MAXIMUM_INPUT_BYTES, listPageSize: 20 }
   }));
 
   app.post("/api/v1/authoring/jobs", { bodyLimit: AUTHORING_BODY_LIMIT_BYTES }, async (request, reply) => command(request, reply, async () => {
     if (!options.enabled) throw unavailable();
     const input = authoringSubmitSchema.parse(request.body);
+    if (input.kind === "story_source") {
+      if (!sourceEnabled(options)) throw sourceUnavailable();
+      assertSourceAdmission(input);
+    }
+    const scope = await options.resolveOwner();
+    return withAdmission(options, scope, reply, async () => reply.code(202).send(authoringJobViewSchema.parse(await options.application.submit(scope, input))));
+  }));
+
+  /** Source intake has a named route so the client cannot accidentally use a concept flow. */
+  app.post("/api/v1/authoring/source-jobs", { bodyLimit: AUTHORING_BODY_LIMIT_BYTES }, async (request, reply) => command(request, reply, async () => {
+    if (!options.enabled) throw unavailable();
+    const input = sourceAuthoringInputSchema.parse(request.body);
+    if (!sourceEnabled(options)) throw sourceUnavailable();
+    assertSourceAdmission(input);
     const scope = await options.resolveOwner();
     return withAdmission(options, scope, reply, async () => reply.code(202).send(authoringJobViewSchema.parse(await options.application.submit(scope, input))));
   }));
@@ -111,11 +154,25 @@ export async function registerAuthoringRoutes(app: FastifyInstance, options: Aut
     return authoringJobViewSchema.parse(await options.application.review(await options.resolveOwner(), id, authoringReviewSchema.parse(request.body)));
   }));
 
+  app.put("/api/v1/authoring/source-jobs/:id/facts", { bodyLimit: AUTHORING_BODY_LIMIT_BYTES }, async (request, reply) => command(request, reply, async () => {
+    const { id } = paramsSchema.parse(request.params);
+    return authoringJobViewSchema.parse(await options.application.reviewSourceFacts(await options.resolveOwner(), id, sourceFactReviewSchema.parse(request.body)));
+  }));
+
+  app.post("/api/v1/authoring/source-jobs/:id/synthesis", async (request, reply) => command(request, reply, async () => {
+    const { id } = paramsSchema.parse(request.params);
+    const scope = await ownedSourceJob(options, id);
+    return authoringJobViewSchema.parse(await options.application.startSourceSynthesis(scope, id, authoringSourceSynthesisSchema.parse(request.body).expectedRevision));
+  }));
+
   app.post("/api/v1/authoring/jobs/:id/retry", async (request, reply) => command(request, reply, async () => {
     if (!options.enabled) throw unavailable();
     const { id } = paramsSchema.parse(request.params);
     const input = authoringRetrySchema.parse(request.body);
     const scope = await options.resolveOwner();
+    const job = await options.application.get(scope, id);
+    if (!job) throw new AuthoringRouteError(404, "authoring_not_found", "Authoring job not found.");
+    if (job.kind === "story_source" && !sourceEnabled(options)) throw sourceUnavailable();
     return withAdmission(options, scope, reply, async () => authoringJobViewSchema.parse(await options.application.retry(scope, id, input.stageId, input.expectedRevision)));
   }));
 

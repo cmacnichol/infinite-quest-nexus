@@ -217,7 +217,7 @@ export function mountCharacterWorkspacePage(
 
   let durableSession: AuthoringJobSession | null = null;
   let capability: Promise<boolean> | null = null;
-  let pendingSubmission: AuthoringSubmit | null = null;
+  let pendingSubmission: Extract<AuthoringSubmit, { kind: "character" }> | null = null;
   let acceptancePending = false;
   const resumePanel = document.createElement("section");
   resumePanel.dataset.characterAuthoringResume = "";

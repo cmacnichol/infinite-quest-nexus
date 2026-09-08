@@ -37,6 +37,13 @@ describe("authoring jobs API", () => {
     await expect(api.loadAuthoringJob("job-1")).rejects.toMatchObject<Partial<AuthoringJobsApiError>>({ kind: "unavailable", message: "Authoring jobs are unavailable. Try again." });
   });
 
+  it("shows a retained-proposal message when generic source retry is paused", async () => {
+    const api = createAuthoringJobsApi(async () => new Response(JSON.stringify({ code: "source_authoring_disabled", message: "private provider detail" }), { status: 503, headers: { "content-type": "application/json" } }));
+    await expect(api.retryAuthoringStage("job-1", { expectedRevision: 2, stageId: "stage" })).rejects.toMatchObject<Partial<AuthoringJobsApiError>>({
+      kind: "source_paused", message: "Story-source execution is paused. You can still inspect, review, apply, cancel, or discard this retained proposal."
+    });
+  });
+
   it("rejects invalid list cursors and apply commands before issuing a request", async () => {
     const fetch = vi.fn();
     const api = createAuthoringJobsApi(fetch as typeof globalThis.fetch);

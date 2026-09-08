@@ -33,6 +33,7 @@ import {
 } from "../../contracts/src/world-library.js";
 import { normalizeCampaignTrackers } from "../../domain/src/campaign-trackers.js";
 import { normalizeCampaignEventTriggers } from "../../domain/src/campaign-event-triggers.js";
+import { validateWorldSourceMaterialForContent } from "../../domain/src/source-authoring.js";
 import { playerEventTriggerSchema } from "../../contracts/src/generation.js";
 import { sha256, stableStringify } from "../../domain/src/text.js";
 import {
@@ -109,6 +110,11 @@ function contentWithTitle(content: WorldContent, title: string): WorldContent {
     ...content,
     world: { ...content.world, title }
   });
+}
+
+/** Public writes must reject stale or tampered source support before persistence. */
+function validatedWorldContentWithTitle(content: WorldContent, title: string): WorldContent {
+  return validateWorldSourceMaterialForContent(contentWithTitle(content, title));
 }
 
 const SENSITIVE_WORLD_KEYS = new Set([
@@ -196,7 +202,9 @@ export async function importPrivatePortableWorldAtExactTarget(
     || target.sourceHash.length > 200) {
     return failure("invalid_transition");
   }
-  const content = portableWorldContent(request.worldExport.content, request.worldExport.title);
+  let content: WorldContent;
+  try { content = validateWorldSourceMaterialForContent(portableWorldContent(request.worldExport.content, request.worldExport.title)); }
+  catch { return failure("invalid_transition"); }
   await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
     `${scope.ownerUserId}:${target.sourceHash}`
   ]);
@@ -458,7 +466,9 @@ export function createPostgresWorldRepository(): PostgresWorldRepository {
       if (!validPortableWorldContent(request.worldExport.content)) {
         throw new WorldCampaignApplicationError("invalid_request", "invalid_transition");
       }
-      const content = portableWorldContent(request.worldExport.content, request.worldExport.title);
+      let content: WorldContent;
+      try { content = validateWorldSourceMaterialForContent(portableWorldContent(request.worldExport.content, request.worldExport.title)); }
+      catch { throw new WorldCampaignApplicationError("invalid_request", "invalid_transition"); }
       const sourceHash = `world:${sha256(stableStringify(content))}`;
       const prior = await client.query<{ world_id: string | null }>(
         `SELECT world_id FROM imports
@@ -486,7 +496,9 @@ export function createPostgresWorldRepository(): PostgresWorldRepository {
       if (!validPortableWorldContent(request.worldExport.content)) {
         return failure("invalid_transition");
       }
-      const content = portableWorldContent(request.worldExport.content, request.worldExport.title);
+      let content: WorldContent;
+      try { content = validateWorldSourceMaterialForContent(portableWorldContent(request.worldExport.content, request.worldExport.title)); }
+      catch { return failure("invalid_transition"); }
       const sourceHash = `world:${sha256(stableStringify(content))}`;
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
         `${scope.ownerUserId}:${sourceHash}`
@@ -680,7 +692,9 @@ export function createPostgresWorldRepository(): PostgresWorldRepository {
     },
     async createWorld(transaction, scope: OwnerScope, request: WorldCreateRequest) {
       const client = worldCampaignDatabaseClient(transaction);
-      const content = contentWithTitle(normalizeWorldContent(request.title, request.content), request.title);
+      let content: WorldContent;
+      try { content = validatedWorldContentWithTitle(normalizeWorldContent(request.title, request.content), request.title); }
+      catch { return failure("invalid_transition"); }
       const inserted = await client.query<{ id: string }>(
         `INSERT INTO worlds (owner_user_id, title, status)
          VALUES ($1, $2, 'draft') RETURNING id`,
@@ -729,7 +743,9 @@ export function createPostgresWorldRepository(): PostgresWorldRepository {
         });
       }
       const nextTitle = request.title ?? current.title;
-      const content = contentWithTitle(request.content, nextTitle);
+      let content: WorldContent;
+      try { content = validatedWorldContentWithTitle(request.content, nextTitle); }
+      catch { return failure("invalid_transition", { worldId: scope.worldId }); }
       const updated = await client.query<{ revision: number; updatedAt: Date }>(
         `UPDATE world_drafts
             SET content = $3, revision = revision + 1, updated_at = now()
@@ -771,7 +787,9 @@ export function createPostgresWorldRepository(): PostgresWorldRepository {
           actualDraftRevision: draft.revision
         });
       }
-      const content = contentWithTitle(draft.content, draft.title);
+      let content: WorldContent;
+      try { content = validatedWorldContentWithTitle(draft.content, draft.title); }
+      catch { return failure("invalid_transition", { worldId: scope.worldId }); }
       const sourceHash = sha256(stableStringify(content));
       const latest = await client.query<{ source_hash: string | null }>(
         `SELECT source_hash FROM world_versions

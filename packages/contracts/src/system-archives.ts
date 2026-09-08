@@ -7,6 +7,7 @@ import {
   isExcludedPortableMetadataKey
 } from "./archives.js";
 import { providerRoleSchema, providerTypeSchema } from "./generation.js";
+import { worldSourceMaterialSchema } from "./world-library.js";
 
 const nonnegativeSafeIntegerSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const nonBlankStringSchema = (maximum: number) => z.string().max(maximum).refine(
@@ -404,7 +405,8 @@ const systemWorldContentSchema = z.object({
   defaults: z.object({
     selectedCharacterId: identifierSchema.nullable(),
     initialLocation: shortTextSchema
-  }).strict()
+  }).strict(),
+  sourceMaterial: worldSourceMaterialSchema.optional()
 }).strict();
 
 const systemWorldVersionRecordSchema = z.object({

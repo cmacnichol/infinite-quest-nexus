@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import {
   SYSTEM_ARCHIVE_DOMAINS,
   systemArchiveImportReportSchema,
@@ -193,6 +194,45 @@ const validPayload = {
 };
 
 describe("System Archive contracts", () => {
+  it("retains one closed source appendix in portable world records", () => {
+    const sourceText = "The Observatory is mysterious.";
+    const record = {
+      domain: "world-versions",
+      formatVersion: 1,
+      sourceId: worldVersionId,
+      record: {
+        sourceId: worldVersionId,
+        worldId,
+        versionNumber: 1,
+        title: validWorldContent.world.title,
+        content: {
+          ...validWorldContent,
+          schemaVersion: 6,
+          sourceMaterial: {
+            version: 1,
+            documents: [{
+              id: "source:archive-test", name: "chapter.txt", text: sourceText,
+              sha256: createHash("sha256").update(sourceText, "utf8").digest("hex"), paragraphs: [{ id: "paragraph:0", start: 0, end: Array.from(sourceText).length }]
+            }],
+            boundary: { sourceId: "source:archive-test", paragraphId: "paragraph:0" },
+            acceptedFacts: [{
+              id: "fact:observatory-tone", kind: "tone", subject: "The Observatory", predicate: "tone", value: "Mysterious", provenance: "stated",
+              citations: [{ sourceId: "source:archive-test", paragraphId: "paragraph:0", start: 0, end: Array.from(sourceText).length, quote: sourceText }]
+            }],
+            fieldEvidence: [{ path: "world.tone", factIds: ["fact:observatory-tone"] }]
+          }
+        },
+        contentFingerprint: null,
+        releaseNotes: "",
+        createdFromRevision: 1,
+        publishedAt: "2026-08-25T12:00:00.000Z"
+      }
+    };
+    expect(systemRecordEnvelopeSchema.parse(record).record).toMatchObject({
+      content: { schemaVersion: 6, sourceMaterial: { documents: [expect.objectContaining({ text: sourceText })] } }
+    });
+  });
+
   it("accepts only field-complete version-two portable authority records", () => {
     const exact = "  \n# Authority sentinel\n\n```text\n  exact bytes  \n```\n  ";
     const createdAt = "2026-08-25T12:00:00.123Z";

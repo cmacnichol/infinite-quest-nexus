@@ -6,6 +6,13 @@ import {
   storyLengthProfileSchema
 } from "./story-settings.js";
 import { apiTimestampSchema } from "./http.js";
+import {
+  sourceDocumentIdSchema,
+  sourceDocumentSchema,
+  sourceFactSchema,
+  sourceCharacterIdentityGroupSchema,
+  utf8ByteLength
+} from "./source-authoring.js";
 
 const coerceToString = (val: unknown): string => {
   if (val === null || val === undefined) return "";
@@ -25,9 +32,11 @@ const shortText = z.preprocess(coerceToString, z.string().max(2000).default(""))
 const longText = z.preprocess(coerceToString, z.string().max(200_000).default(""));
 const characterId = z.string().trim().min(1).max(200);
 
-export const WORLD_CONTENT_SCHEMA_VERSION = 5;
+export const WORLD_CONTENT_SCHEMA_VERSION = 6;
 export const MAX_PLAYABLE_CHARACTERS = 1000;
 export const MAX_CHARACTER_MECHANICS_ITEMS = 10_000;
+/** Fits the current portable JSON-entry allowance while bounding reviewed evidence fan-out. */
+export const MAX_WORLD_SOURCE_MATERIAL_BYTES = 4 * 1024 * 1024;
 
 const profileText = z.preprocess(coerceToString, z.string().trim().max(20_000).default(""));
 const profileShortText = z.preprocess(coerceToString, z.string().trim().max(2_000).default(""));
@@ -94,6 +103,33 @@ export const worldOverviewSchema = z.object({
   rules: longText
 }).passthrough();
 
+/** Portable, reviewed source evidence. It excludes jobs, provider payloads, and owner authority. */
+export const worldSourceMaterialSchema = z.object({
+  version: z.literal(1),
+  documents: z.array(sourceDocumentSchema).length(1),
+  boundary: z.object({
+    sourceId: sourceDocumentIdSchema,
+    paragraphId: sourceDocumentIdSchema
+  }).strict(),
+  acceptedFacts: z.array(sourceFactSchema).max(50_000),
+  fieldEvidence: z.array(z.object({
+    path: z.string().trim().min(1).max(500),
+    factIds: z.array(sourceDocumentIdSchema).min(1).max(200)
+  }).strict()).max(50_000),
+  /** Required when character evidence needs the reviewed, non-name-based identity decision. */
+  characterIdentityGroups: z.array(sourceCharacterIdentityGroupSchema).max(50_000).optional()
+}).strict().superRefine((value, context) => {
+  if (utf8ByteLength(JSON.stringify(value)) > MAX_WORLD_SOURCE_MATERIAL_BYTES) {
+    context.addIssue({
+      code: "too_big",
+      maximum: MAX_WORLD_SOURCE_MATERIAL_BYTES,
+      inclusive: true,
+      origin: "string",
+      message: "Source material exceeds the portable world appendix byte limit."
+    });
+  }
+});
+
 export const worldContentSchema = z.object({
   schemaVersion: z.number().int().positive().default(WORLD_CONTENT_SCHEMA_VERSION),
   world: worldOverviewSchema,
@@ -104,10 +140,12 @@ export const worldContentSchema = z.object({
   defaultTriggers: z.array(z.unknown()).max(MAX_CHARACTER_MECHANICS_ITEMS).default([]),
   eventTriggers: z.array(z.unknown()).max(10_000).default([]),
   assets: z.array(z.unknown()).max(10_000).default([]),
-  defaults: z.record(z.string(), z.unknown()).default({})
+  defaults: z.record(z.string(), z.unknown()).default({}),
+  sourceMaterial: worldSourceMaterialSchema.optional()
 }).passthrough();
 
 export type WorldContent = z.infer<typeof worldContentSchema>;
+export type WorldSourceMaterial = z.infer<typeof worldSourceMaterialSchema>;
 
 /**
  * Produces the canonical stored representation for new and updated world content.

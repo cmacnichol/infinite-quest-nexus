@@ -38,6 +38,12 @@ export type ProviderRequestSerializationOptions = Readonly<{
   responseFormat?: boolean;
 }>;
 
+/** The legacy body serializer deliberately needs no endpoint or credential data. */
+export type LegacyProviderRequestProfile = Readonly<Pick<
+  TextProviderProfile,
+  "providerType" | "model" | "maxOutputTokens" | "temperature"
+>>;
+
 export type ProviderOutputBudget =
   | Readonly<{
       kind: "story_append" | "story_replace";
@@ -261,7 +267,7 @@ export function serializeCheckedProviderRequest(
  * chains. New generation paths use serializeProviderRequest instead.
  */
 export function serializeLegacyProviderRequest(
-  profile: TextProviderProfile,
+  profile: LegacyProviderRequestProfile,
   request: ProviderRequest,
   options: ProviderRequestSerializationOptions = {}
 ): PreparedProviderRequest {

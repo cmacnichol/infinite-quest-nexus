@@ -20,6 +20,8 @@ import type {
 } from "../../application/src/assets/private-asset-publication.js";
 import { SYSTEM_ARCHIVE_TABLE_CLASSIFICATIONS } from "../../application/src/system-archives/portability-registry.js";
 import { enqueuePostgresChronicleChunkIndex } from "./chronicle-chunk-repository.js";
+import { validateWorldSourceMaterialForContent } from "../../domain/src/source-authoring.js";
+import { worldContentSchema } from "../../contracts/src/world-library.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 
 export type SystemImportDestinationFingerprint = Readonly<{
@@ -2516,6 +2518,10 @@ export function createPostgresSystemArchiveImportRepository(
             }
             for await (const candidate of asyncRecords(records)) {
               const envelope = systemRecordEnvelopeSchema.parse(candidate);
+              if ((envelope.domain === "world-versions" || envelope.domain === "world-drafts") && envelope.record.content.sourceMaterial !== undefined) {
+                try { validateWorldSourceMaterialForContent(worldContentSchema.parse(envelope.record.content)); }
+                catch { throw repositoryError("System Archive source material is invalid.", 400); }
+              }
               if (isV2Envelope(envelope)) sawV2Authority = true;
               const domainIndex = SYSTEM_ARCHIVE_DOMAINS.indexOf(envelope.domain);
               if (domainIndex < lastDomainIndex) {

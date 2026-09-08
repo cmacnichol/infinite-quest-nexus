@@ -33,6 +33,7 @@ import {
   type ProviderTransport,
   type TextProviderProfile
 } from "../../../packages/story-engine/src/index.js";
+import { resolveAuthoringContextWindowTokens } from "./source-authoring-budget.js";
 
 export type RuntimeProviderDescriptor<R extends ProviderRole = ProviderRole> = Readonly<{
   id: string;
@@ -71,6 +72,8 @@ export type RuntimeProviderExecutionPort = Readonly<{
     providerProfileId: string,
     providerRole: "text" | "intent",
     model?: string,
+    /** A caller-supplied selected-model cap may narrow, never enlarge, the profile cap. */
+    verifiedModelContextWindowTokens?: number,
   ): Promise<RuntimeTextExecution>;
   embedding(
     scope: Readonly<{ ownerUserId: string }>,
@@ -151,6 +154,7 @@ export function createRuntimeProviderAdapter(options: Readonly<{
     row: Awaited<ReturnType<typeof load>>,
     providerRole: R,
     model = row.defaultModel,
+    contextWindowTokens = row.contextWindowTokens,
   ): RuntimeProviderDescriptor<R> {
     return Object.freeze({
       id: row.providerProfileId,
@@ -158,7 +162,7 @@ export function createRuntimeProviderAdapter(options: Readonly<{
       providerRole,
       providerType: row.providerType,
       model,
-      contextWindowTokens: row.contextWindowTokens,
+      contextWindowTokens,
       maxOutputTokens: row.maxOutputTokens,
       temperature: row.temperature,
       requestTimeoutMs: row.requestTimeoutMs,
@@ -273,14 +277,15 @@ export function createRuntimeProviderAdapter(options: Readonly<{
   }
 
   const execution: RuntimeProviderExecutionPort = {
-    async text(scope, providerProfileId, providerRole, model) {
+    async text(scope, providerProfileId, providerRole, model, verifiedModelContextWindowTokens) {
       const row = await load(scope.ownerUserId, providerProfileId);
       if (row.providerRole !== providerRole) {
         throw Object.assign(new Error(`Enabled ${providerRole} provider profile not found.`), { statusCode: 404 });
       }
       const selectedModel = model?.trim() || row.defaultModel;
+      const contextWindowTokens = resolveAuthoringContextWindowTokens(row.contextWindowTokens, verifiedModelContextWindowTokens);
       return Object.freeze({
-        ...descriptor(row, providerRole, selectedModel),
+        ...descriptor(row, providerRole, selectedModel, contextWindowTokens),
         execute: (
           request: ProviderRequest,
           policy?: Readonly<{ maxOutputTokens?: number; temperature?: number }>,

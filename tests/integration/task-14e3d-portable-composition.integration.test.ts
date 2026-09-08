@@ -2253,14 +2253,40 @@ integration("Task 14e3d durable portable composition authority", () => {
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 1_200));
     composition = await createRealComposition({ archiveRoot, assetRoot, target, leaseOwner: "14e3d-expiry-b" });
     try {
+      await pool.query(
+        `UPDATE durable_filesystem_operations filesystem
+            SET lease_expires_at=clock_timestamp()+interval '1 minute'
+           FROM portable_import_operations operation
+           JOIN portable_staged_inputs staged
+             ON staged.id=operation.staged_input_id AND staged.owner_user_id=operation.owner_user_id
+           WHERE operation.owner_user_id=$1 AND operation.preview_token_hash=$2
+             AND filesystem.id=staged.filesystem_operation_id`,
+        [ownerUserId, hash(preview.previewHandle.token)],
+      );
       const reaped = await composition.reap({
         leaseOwner: "14e3d-expiry-reaper",
         leaseSeconds: 60,
         limit: 10
       });
-      expect(reaped.claimed).toBeGreaterThanOrEqual(1);
-      expect(reaped.cleaned).toBeGreaterThanOrEqual(1);
-      expect(reaped.pending).toBe(0);
+      expect(reaped).toEqual({ claimed: 0, cleaned: 0, pending: 0 });
+      await pool.query(
+        `UPDATE durable_filesystem_operations filesystem
+            SET lease_expires_at=clock_timestamp()-interval '1 second'
+           FROM portable_import_operations operation
+           JOIN portable_staged_inputs staged
+             ON staged.id=operation.staged_input_id AND staged.owner_user_id=operation.owner_user_id
+           WHERE operation.owner_user_id=$1 AND operation.preview_token_hash=$2
+             AND filesystem.id=staged.filesystem_operation_id`,
+        [ownerUserId, hash(preview.previewHandle.token)],
+      );
+      const cleaned = await composition.reap({
+        leaseOwner: "14e3d-expiry-reaper",
+        leaseSeconds: 60,
+        limit: 10
+      });
+      expect(cleaned.claimed).toBeGreaterThanOrEqual(1);
+      expect(cleaned.cleaned).toBeGreaterThanOrEqual(1);
+      expect(cleaned.pending).toBe(0);
       await expect(pool.query(
         `SELECT operation.status,work.status AS work_status,work.lease_id
            FROM portable_import_operations operation

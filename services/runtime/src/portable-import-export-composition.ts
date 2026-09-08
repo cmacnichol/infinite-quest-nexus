@@ -145,18 +145,27 @@ function jsonText(bytes: Uint8Array): unknown {
   }
 }
 
+function sourceFieldEvidencePath(path: readonly (string | number)[], key: string): boolean {
+  return key === "path"
+    && path.length >= 3
+    && path[path.length - 3] === "sourceMaterial"
+    && path[path.length - 2] === "fieldEvidence"
+    && typeof path[path.length - 1] === "number";
+}
+
 function asJson(value: unknown): PortableJsonValue {
   const parsed = JSON.parse(JSON.stringify(value)) as PortableJsonValue;
-  const sanitize = (candidate: PortableJsonValue): PortableJsonValue => {
+  const sanitize = (candidate: PortableJsonValue, path: readonly (string | number)[] = []): PortableJsonValue => {
     if (candidate === null || typeof candidate !== "object") return candidate;
-    if (Array.isArray(candidate)) return candidate.map(sanitize);
+    if (Array.isArray(candidate)) return candidate.map((child, index) => sanitize(child, [...path, index]));
     return Object.fromEntries(Object.entries(candidate)
-      .filter(([key]) => /^token_(?:estimate|count)$/u.test(key)
+      .filter(([key]) => sourceFieldEvidencePath(path, key)
+        || /^token_(?:estimate|count)$/u.test(key)
         || !/(^|_)(path|bearer|credential|secret|token|api_token|access_token|refresh_token|auth_token|provider_response|raw_response)($|_)/iu.test(key))
       .map(([key, child]) => [
         key === "token_estimate" ? "lexicalUnitEstimate"
           : key === "token_count" ? "lexicalUnitCount" : key,
-        sanitize(child)
+        sanitize(child, [...path, key])
       ]));
   };
   return sanitize(parsed);

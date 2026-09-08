@@ -3,6 +3,8 @@ import { createRuntimeAuthoringWorkerApplication } from "../../services/runtime/
 import { authoringHash, authoringResult, authoringRuntimeFixture, deferred } from "../helpers/authoring-runtime.js";
 import fixture from "../fixtures/authoring/reliability.json" with { type: "json" };
 import { ProviderHttpError } from "../../packages/story-engine/src/providers.js";
+import { SourceExtractionSplitNeededError } from "../../services/runtime/src/source-authoring-adapter.js";
+import { SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION } from "../../packages/domain/src/authoring-prompts.js";
 
 afterEach(() => vi.useRealTimers());
 
@@ -153,6 +155,46 @@ describe("runtime authoring worker composition", () => {
       prompts: expect.objectContaining({ world_generation: "effective world", character_generation: "standalone" }),
       protocols: expect.objectContaining({ world: expect.any(String), character: expect.any(String) })
     }));
+  });
+
+  it("clamps only source admission to a matching inventory cap and persists that snapshot cap", async () => {
+    const claim = { jobId: "source-job", stageId: "stage", ownerUserId: "owner", jobGeneration: 1, stageGeneration: 1, leaseToken: "token", leaseExpiresAt: "2026-09-06T00:00:30.000Z" };
+    const source = { kind: "story_source" as const, idempotencyKey: "source-key", target: { kind: "new_world" as const }, name: "chapter.txt", text: "A chapter.", mode: "faithful" as const, boundaryParagraphId: "paragraph:0", instructions: "Extract facts." };
+    const snapshot = { providerProfileId: "text-profile", model: "model-a", configurationHash: "a".repeat(64), contextWindowTokens: 400, maxOutputTokens: 256, requestTimeoutMs: 5000, prompts: {}, protocols: { source: SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION } };
+    const repository = {
+      claim: vi.fn(async () => claim), heartbeat: vi.fn(async () => true), checkpoint: vi.fn(async () => true), fail: vi.fn(async () => true),
+      loadClaim: vi.fn().mockResolvedValueOnce(null).mockResolvedValue({ input: source, snapshot, stageKey: "source:plan", parentOutputs: [] }),
+      readClaimInput: vi.fn(async () => source), initializeExecutionSnapshot: vi.fn(async () => snapshot)
+    };
+    const text = vi.fn(async (_scope: unknown, _id: unknown, _role: unknown, _model: unknown, cap?: number) => ({ id: "text-profile", model: "model-a", contextWindowTokens: cap ?? 1000, maxOutputTokens: 256, requestTimeoutMs: 5000, temperature: 0, configuration: {} }));
+    const application = createRuntimeAuthoringWorkerApplication({
+      repository: repository as never,
+      providers: { resolution: { resolveDirect: vi.fn(async () => ({ status: "resolved", providerProfileId: "text-profile", model: "model-a" })) }, execution: { text }, inventory: { listModels: vi.fn(async () => ({ models: [{ id: "model-a", contextWindowTokens: 400 }] })) }, prompts: { loadWorldGenerationPromptSnapshot: vi.fn(async () => ({ snapshot: {} })) }, promptTools: { content: () => "" } } as never,
+      sha256: () => "a".repeat(64), dispatch: vi.fn(async () => null as never)
+    });
+
+    await application.runNext({ workerId: "worker", leaseSeconds: 30 });
+    expect(text).toHaveBeenCalledWith({ ownerUserId: "owner" }, "text-profile", "text", "model-a", 400);
+    expect(repository.initializeExecutionSnapshot).toHaveBeenCalledWith(claim, expect.objectContaining({ contextWindowTokens: 400, model: "model-a", protocols: expect.objectContaining({ source: SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION }) }));
+  });
+
+  it("records a final source budget failure when a fenced split cannot create child leaves", async () => {
+    const claim = { jobId: "job", stageId: "stage", ownerUserId: "owner", jobGeneration: 1, stageGeneration: 1, leaseToken: "token", leaseExpiresAt: "2026-09-06T00:00:30.000Z" };
+    const source = { kind: "story_source" as const, idempotencyKey: "source-key", target: { kind: "new_world" as const }, name: "chapter.txt", text: "A chapter.", mode: "faithful" as const, boundaryParagraphId: "paragraph:0", instructions: "" };
+    const loaded = { input: source, snapshot: { providerProfileId: "p", model: "m", configurationHash: "a".repeat(64), contextWindowTokens: 8192, maxOutputTokens: 256, requestTimeoutMs: 5000, prompts: {}, protocols: { source: SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION } }, stageKey: "source:chunk:source-chunk:0", parentOutputs: [] };
+    const repository = {
+      claim: vi.fn(async () => claim), heartbeat: vi.fn(async () => true), checkpoint: vi.fn(async () => true), fail: vi.fn(async () => true),
+      loadClaim: vi.fn(async () => loaded), splitSourceChunk: vi.fn(async () => false)
+    };
+    const application = createRuntimeAuthoringWorkerApplication({
+      repository: repository as never,
+      providers: {} as never,
+      sha256: () => "a".repeat(64), dispatch: vi.fn(async () => { throw new SourceExtractionSplitNeededError("source-chunk:0"); })
+    });
+
+    await expect(application.runNext({ workerId: "worker", leaseSeconds: 30 })).resolves.toBe(false);
+    expect(repository.splitSourceChunk).toHaveBeenCalledWith(claim, "source-chunk:0");
+    expect(repository.fail).toHaveBeenCalledWith(claim, expect.objectContaining({ code: "source_requires_larger_context", stage: "source", retryable: false }));
   });
 
   it("does not claim after runtime shutdown has started", async () => {

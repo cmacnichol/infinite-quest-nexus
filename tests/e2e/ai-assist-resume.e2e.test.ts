@@ -220,7 +220,9 @@ test("capability lookup failure never falls back to synchronous world generation
   await page.getByRole("button", { name: "Generate world draft" }).click();
   await expect(page).toHaveURL(/authoringJob=world-job/);
   expect(server.submissions).toHaveLength(1);
-  expect(server.submissions[0]!.prompt).toBe("Keep my concept");
+  const submission = server.submissions[0]!;
+  if (submission.kind !== "world_concept") throw new Error("Expected a world concept submission.");
+  expect(submission.prompt).toBe("Keep my concept");
   expect(legacyCalls).toBe(0);
 });
 

@@ -1,8 +1,8 @@
-import { authoringFailureSchema, type AuthoringStageOutput } from "@infinite-quest/contracts";
+import { authoringFailureSchema, type AuthoringKind, type AuthoringStageOutput } from "@infinite-quest/contracts";
 import type { AuthoringClaim, AuthoringExecutionRepository } from "./ports.js";
 
 export interface AuthoringWorkerApplication {
-  runNext(input: { workerId: string; leaseSeconds: number }): Promise<boolean>;
+  runNext(input: { workerId: string; leaseSeconds: number; allowedKinds?: readonly AuthoringKind[] }): Promise<boolean>;
   cleanup(): Promise<number>;
 }
 
@@ -25,8 +25,10 @@ export function createAuthoringWorkerApplication(options: Readonly<{
   execute: AuthoringStageExecutor;
 }>): AuthoringWorkerApplication {
   return {
-    async runNext({ workerId, leaseSeconds }) {
-      const claim = await options.repository.claim(workerId, leaseSeconds);
+    async runNext({ workerId, leaseSeconds, allowedKinds }) {
+      const claim = allowedKinds === undefined
+        ? await options.repository.claim(workerId, leaseSeconds)
+        : await options.repository.claim(workerId, leaseSeconds, allowedKinds);
       if (!claim) return false;
       try {
         const output = await options.execute(claim, { workerId, leaseSeconds });

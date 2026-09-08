@@ -38,6 +38,8 @@ async function server(options: { enabled?: boolean; submit?: () => Promise<unkno
       get: async (_scope: unknown, id: string) => id === JOB ? view() : null,
       list: async () => ({ jobs: [] }),
       review: async () => view(),
+      reviewSourceFacts: async () => view(),
+      startSourceSynthesis: async () => view(),
       retry: async () => view(),
       cancel: async () => view(),
       discard: async () => undefined,
@@ -65,6 +67,18 @@ describe("authoring HTTP commands", () => {
         payload: { kind: "world_concept", idempotencyKey: "route-test-key", target: { kind: "new_world" }, prompt: "Create a safe durable proposal.", ownerUserId: FOREIGN_OWNER }
       });
       expect(spoofed.statusCode).toBe(400);
+    } finally { await app.close(); }
+  });
+
+  it("accepts source submission at the explicit durable endpoint", async () => {
+    const app = await server();
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/authoring/source-jobs",
+        payload: { kind: "story_source", idempotencyKey: "source-route-key", target: { kind: "new_world" }, name: "chapter.txt", text: "Iris crossed the bridge.", mode: "faithful", boundaryParagraphId: "paragraph:0", instructions: "Keep contradictions." }
+      });
+      expect(response.statusCode).toBe(202);
     } finally { await app.close(); }
   });
 
