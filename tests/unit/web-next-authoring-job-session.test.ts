@@ -17,6 +17,68 @@ it("P2-F1 explicit first review saves an untouched candidate and current selecti
   } finally { session.dispose(); }
 });
 
+it("F3 saves only current source result stages from a complete source history", async () => {
+  const initial = {
+    ...job(),
+    kind: "story_source" as const,
+    canApply: false,
+    stages: [
+      { id: "plan-1", key: "source:plan", generation: 1, status: "validated" as const, attemptCount: 1 },
+      { id: "chunk-1", key: "source:chunk:0", generation: 1, status: "validated" as const, attemptCount: 1 },
+      { id: "old-synthesis", key: "source:synthesis", generation: 1, status: "validated" as const, attemptCount: 1 },
+      { id: "synthesis-2", key: "source:synthesis", generation: 2, status: "validated" as const, attemptCount: 1 },
+      { id: "character-iris", key: "source:character:iris", generation: 1, status: "validated" as const, attemptCount: 1 }
+    ]
+  } as AuthoringJobView;
+  const saveReview = vi.fn(async (_id, input) => ({ ...initial, revision: 2, canApply: true, reviewedContent: input.content, reviewedStageIds: input.selectedStageIds }));
+  const session = createAuthoringJobSession({ job: initial, saveReview });
+  try {
+    session.adoptPendingResult();
+    await session.flush();
+    expect(saveReview).toHaveBeenCalledWith("job-1", expect.objectContaining({
+      selectedStageIds: ["character-iris", "synthesis-2"]
+    }), expect.any(AbortSignal));
+  } finally { session.dispose(); }
+});
+
+it("F3 keeps a source review's selected results stable until an explicit adoption", async () => {
+  const initial = {
+    ...job(), kind: "story_source" as const, reviewedContent: candidate("Reviewed"), reviewedStageIds: ["synthesis"],
+    stages: [{ id: "plan", key: "source:plan", generation: 1, status: "validated" as const, attemptCount: 1 }, { id: "synthesis", key: "source:synthesis", generation: 1, status: "validated" as const, attemptCount: 1 }]
+  } as AuthoringJobView;
+  const completed = { ...initial, revision: 2, stages: [...initial.stages, { id: "character", key: "source:character:iris", generation: 1, status: "validated" as const, attemptCount: 1 }] };
+  const saveReview = vi.fn(async (_id, input) => ({ ...completed, revision: 3, reviewedContent: input.content, reviewedStageIds: input.selectedStageIds }));
+  const session = createAuthoringJobSession({ job: initial, saveReview });
+  try {
+    session.receive(completed);
+    expect(session.hasPendingGeneratedResult()).toBe(true);
+    session.edit(candidate("Local draft"));
+    await session.flush();
+    expect(saveReview).toHaveBeenLastCalledWith("job-1", expect.objectContaining({ selectedStageIds: ["synthesis"] }), expect.any(AbortSignal));
+    session.adoptPendingResult();
+    await session.flush();
+    expect(saveReview).toHaveBeenLastCalledWith("job-1", expect.objectContaining({ selectedStageIds: ["character", "synthesis"] }), expect.any(AbortSignal));
+  } finally { session.dispose(); }
+});
+
+it("F3 recognizes a server-sorted source selection as the adopted result set", () => {
+  const initial = {
+    ...job(), kind: "story_source" as const, reviewedContent: candidate("Reviewed"),
+    reviewedStageIds: ["a-character", "z-synthesis"],
+    stages: [
+      { id: "plan", key: "source:plan", generation: 1, status: "validated" as const, attemptCount: 1 },
+      { id: "chunk", key: "source:chunk:0", generation: 1, status: "validated" as const, attemptCount: 1 },
+      { id: "z-synthesis", key: "source:synthesis", generation: 1, status: "validated" as const, attemptCount: 1 },
+      { id: "a-character", key: "source:character:iris", generation: 1, status: "validated" as const, attemptCount: 1 }
+    ]
+  } as AuthoringJobView;
+  const session = createAuthoringJobSession({ job: initial });
+  try {
+    session.receive({ ...initial, revision: 2 });
+    expect(session.hasPendingGeneratedResult()).toBe(false);
+  } finally { session.dispose(); }
+});
+
 it.each([false, true])("P2-F3 pending replacement preserves durable intent and human content through reload (empty %s)", async empty => {
   const initial: AuthoringJobView = { ...job(), reviewedContent: candidate("Human"), reviewedStageIds: empty ? [] : ["old"], stages: [
     { id: "old", key: "world", generation: 1, status: "validated", attemptCount: 1 },

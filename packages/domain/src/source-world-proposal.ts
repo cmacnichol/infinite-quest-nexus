@@ -5,7 +5,7 @@ import {
 import {
   sourceFactSchema, type SourceCharacterIdentityGroup, type SourceDocument, type SourceFact
 } from "../../contracts/src/source-authoring.js";
-import { hasValidSourceDocumentIntegrity, validateSourceCitationWithinBoundary } from "./source-authoring.js";
+import { hasValidSourceDocumentIntegrity, sourceWorldFieldFactRule, validateSourceCitationWithinBoundary } from "./source-authoring.js";
 import { containsMechanicsLanguage } from "./text.js";
 
 export type SourceWorldSelection = Readonly<{
@@ -34,6 +34,29 @@ export type SourceWorldProposalAssembly = Readonly<{
   expansionCandidates: readonly SourceWorldExpansionCandidate[];
 }>;
 
+export type SourceWorldProposalFailureReason = "source_world_selection" | "source_world_closed_target" | "source_world_duplicate" | "source_world_unsupported_fact" | "source_world_identity" | "source_world_mechanics" | "source_world_faithful_expansion";
+
+/** Closed, provider-safe synthesis failure metadata; never include IDs, values, or source text. */
+export class SourceWorldProposalError extends TypeError {
+  readonly reason: SourceWorldProposalFailureReason;
+  readonly path: readonly (string | number)[];
+
+  constructor(reason: SourceWorldProposalFailureReason, path: readonly (string | number)[]) {
+    super(reason === "source_world_mechanics"
+      ? "Source mechanics must remain outside fiction-facing world fields."
+      : reason === "source_world_closed_target"
+        ? "Generated source-world fields require a closed source-world target and path."
+        : reason === "source_world_identity"
+          ? "Generated source-world fields must target a selected identity."
+        : reason === "source_world_selection"
+          ? "Accepted facts must have exact evidence inside the selected boundary."
+          : "Generated source-world response did not satisfy the reviewed source contract.");
+    this.name = "SourceWorldProposalError";
+    this.reason = reason;
+    this.path = path;
+  }
+}
+
 const generatedFieldSchema = z.object({ path: z.string(), value: z.string(), supportingFactIds: z.array(z.string()).min(1) }).strict();
 const generatedSchema = z.object({
   fields: z.array(generatedFieldSchema),
@@ -41,41 +64,42 @@ const generatedSchema = z.object({
   expansionCandidates: z.array(generatedFieldSchema.extend({ target: z.union([z.literal("world"), z.string()]) }).strict()).default([])
 }).strict();
 
-const supportedPaths = new Map<string, Readonly<{ kind: SourceFact["kind"]; predicate: string }>>([
-  ["world.rules", { kind: "rule", predicate: "rule" }],
-  ["world.tone", { kind: "tone", predicate: "tone" }],
-  ["profile.appearance.clothing", { kind: "character", predicate: "clothing" }],
-  ["profile.appearance.hair", { kind: "character", predicate: "hair" }],
-  ["profile.appearance.eyes", { kind: "character", predicate: "eyes" }],
-  ["profile.appearance.apparentAge", { kind: "character", predicate: "age" }]
-]);
-
 function requireSelection(selection: SourceWorldSelection) {
-  if (!hasValidSourceDocumentIntegrity(selection.source)) throw new TypeError("Source document integrity is invalid.");
+  if (!hasValidSourceDocumentIntegrity(selection.source)) throw new SourceWorldProposalError("source_world_selection", ["fields"]);
   const boundary = selection.source.paragraphs.find((paragraph) => paragraph.id === selection.boundaryParagraphId);
-  if (!boundary) throw new TypeError("Selected source boundary is invalid.");
-  const facts = selection.acceptedFacts.map((fact) => sourceFactSchema.parse(fact));
+  if (!boundary) throw new SourceWorldProposalError("source_world_selection", ["fields"]);
+  let facts: SourceFact[];
+  try {
+    facts = selection.acceptedFacts.map((fact) => sourceFactSchema.parse(fact));
+  } catch {
+    throw new SourceWorldProposalError("source_world_selection", ["fields"]);
+  }
   const ids = new Set<string>();
   for (const fact of facts) {
     const requiresCitation = fact.provenance === "stated" || fact.provenance === "inferred";
     if (ids.has(fact.id)
       || (requiresCitation && (!fact.citations.length || !fact.citations.every((citation) => validateSourceCitationWithinBoundary(selection.source, citation, selection.boundaryParagraphId))))
-      || (!requiresCitation && fact.citations.length !== 0)) throw new TypeError("Accepted facts must have exact evidence inside the selected boundary.");
+      || (!requiresCitation && fact.citations.length !== 0)) throw new SourceWorldProposalError("source_world_selection", ["fields"]);
     ids.add(fact.id);
   }
   const groups = selection.characterIdentityGroups;
   const grouped = new Set<string>();
   for (const group of groups) {
-    if (!group.factIds.includes(group.representativeFactId) || group.factIds.some((id) => grouped.has(id) || !ids.has(id))) throw new TypeError("Character identity groups must partition accepted facts.");
+    if (!group.factIds.includes(group.representativeFactId) || group.factIds.some((id) => grouped.has(id) || !ids.has(id))) throw new SourceWorldProposalError("source_world_selection", ["fields"]);
     for (const id of group.factIds) grouped.add(id);
   }
-  if (facts.filter((fact) => fact.kind === "character").some((fact) => !grouped.has(fact.id))) throw new TypeError("Every accepted character fact requires an explicit identity group.");
-  if (selection.selectedCharacterFactIds.length > 20 || new Set(selection.selectedCharacterFactIds).size !== selection.selectedCharacterFactIds.length || selection.selectedCharacterFactIds.some((id) => !groups.some((group) => group.representativeFactId === id))) throw new TypeError("Selected characters must be distinct identity representatives.");
+  if (facts.filter((fact) => fact.kind === "character").some((fact) => !grouped.has(fact.id))) throw new SourceWorldProposalError("source_world_selection", ["fields"]);
+  if (selection.selectedCharacterFactIds.length > 20 || new Set(selection.selectedCharacterFactIds).size !== selection.selectedCharacterFactIds.length || selection.selectedCharacterFactIds.some((id) => !groups.some((group) => group.representativeFactId === id))) throw new SourceWorldProposalError("source_world_selection", ["fields"]);
   return { facts, boundary };
 }
 
+/** Validate durable reviewed source data before a provider request can be paid for. */
+export function validateSourceWorldSelection(selection: SourceWorldSelection): void {
+  requireSelection(selection);
+}
+
 function supported(fact: SourceFact, path: string, value: string) {
-  const rule = supportedPaths.get(path);
+  const rule = sourceWorldFieldFactRule(path);
   return rule !== undefined && fact.kind === rule.kind && fact.predicate.trim().toLocaleLowerCase() === rule.predicate && fact.value === value
     && !isMechanicsFact(fact) && !containsMechanicsLanguage(value);
 }
@@ -86,24 +110,24 @@ function isMechanicsFact(fact: SourceFact): boolean {
     || containsMechanicsLanguage(`${fact.predicate}: ${fact.value}`);
 }
 
-function requireFictionSafeMapping(value: string, supportingFactIds: readonly string[], byId: ReadonlyMap<string, SourceFact>): void {
+function requireFictionSafeMapping(value: string, supportingFactIds: readonly string[], byId: ReadonlyMap<string, SourceFact>, path: readonly (string | number)[]): void {
   if (containsMechanicsLanguage(value)
     || supportingFactIds.some((id) => {
       const fact = byId.get(id);
       return fact !== undefined && isMechanicsFact(fact);
     })) {
-    throw new TypeError("Source mechanics must remain outside fiction-facing world fields.");
+    throw new SourceWorldProposalError("source_world_mechanics", path);
   }
 }
 
 function hasClosedTarget(path: string, owner: string | undefined): boolean {
-  const rule = supportedPaths.get(path);
+  const rule = sourceWorldFieldFactRule(path);
   return rule !== undefined && (owner === undefined ? rule.kind !== "character" : rule.kind === "character");
 }
 
-function requireClosedTarget(path: string, owner: string | undefined): void {
+function requireClosedTarget(path: string, owner: string | undefined, issuePath: readonly (string | number)[]): void {
   if (!hasClosedTarget(path, owner)) {
-    throw new TypeError("Generated source-world fields require a closed source-world target and path.");
+    throw new SourceWorldProposalError("source_world_closed_target", issuePath);
   }
 }
 
@@ -116,12 +140,12 @@ export function assembleSourceWorldProposalWithEvidence(selection: SourceWorldSe
   const mappings: SourceWorldFieldMapping[] = [];
   const expansionCandidates: SourceWorldExpansionCandidate[] = [];
   const assigned = new Set<string>();
-  const accept = (path: string, value: string, supportingFactIds: readonly string[], owner?: string) => {
-    requireClosedTarget(path, owner);
-    requireFictionSafeMapping(value, supportingFactIds, byId);
+  const accept = (path: string, value: string, supportingFactIds: readonly string[], issuePath: readonly (string | number)[], owner?: string) => {
+    requireClosedTarget(path, owner, [...issuePath, "path"]);
+    requireFictionSafeMapping(value, supportingFactIds, byId, [...issuePath, "value"]);
     const target: SourceWorldFieldMapping["target"] = owner === undefined ? "world" : { characterRepresentativeFactId: owner };
     const key = `${owner ?? "world"}:${path}`;
-    if (assigned.has(key)) throw new TypeError("Generated source-world fields cannot assign a target more than once.");
+    if (assigned.has(key)) throw new SourceWorldProposalError("source_world_duplicate", issuePath);
     assigned.add(key);
     const accepted = supportingFactIds.every((id) => {
       const fact = byId.get(id);
@@ -129,7 +153,7 @@ export function assembleSourceWorldProposalWithEvidence(selection: SourceWorldSe
         && (!owner || selection.characterIdentityGroups.some((group) => group.representativeFactId === owner && group.factIds.includes(id)));
     });
     if (!accepted) {
-      if (selection.mode === "faithful") throw new TypeError("Generated source-world fields require an exact closed accepted-fact mapping.");
+      if (selection.mode === "faithful") throw new SourceWorldProposalError("source_world_unsupported_fact", [...issuePath, "supportingFactIds"]);
       expansionCandidates.push({ target, path, value, supportingFactIds: [...supportingFactIds], provenance: "invented" });
       return;
     }
@@ -137,30 +161,29 @@ export function assembleSourceWorldProposalWithEvidence(selection: SourceWorldSe
     else fields.set(path, value);
     mappings.push({ target, path, value, supportingFactIds: [...supportingFactIds] });
   };
-  for (const field of response.fields) accept(field.path, field.value, field.supportingFactIds);
-  for (const character of response.characterFields) {
-    if (!selection.selectedCharacterFactIds.includes(character.selectedCharacterFactId)) throw new TypeError("Generated character fields must target a selected identity.");
-    for (const field of character.fields) accept(field.path, field.value, field.supportingFactIds, character.selectedCharacterFactId);
+  for (const [fieldIndex, field] of response.fields.entries()) accept(field.path, field.value, field.supportingFactIds, ["fields", fieldIndex]);
+  for (const [characterIndex, character] of response.characterFields.entries()) {
+    if (!selection.selectedCharacterFactIds.includes(character.selectedCharacterFactId)) throw new SourceWorldProposalError("source_world_identity", ["characterFields", characterIndex, "selectedCharacterFactId"]);
+    for (const [fieldIndex, field] of character.fields.entries()) accept(field.path, field.value, field.supportingFactIds, ["characterFields", characterIndex, "fields", fieldIndex], character.selectedCharacterFactId);
   }
   if (response.expansionCandidates.length) {
-    if (selection.mode !== "expand") throw new TypeError("Faithful source-world responses cannot contain expansion candidates.");
-    for (const candidate of response.expansionCandidates) {
+    if (selection.mode !== "expand") throw new SourceWorldProposalError("source_world_faithful_expansion", ["expansionCandidates", 0]);
+    for (const [candidateIndex, candidate] of response.expansionCandidates.entries()) {
       const owner = candidate.target === "world" ? undefined : candidate.target;
       if (owner !== undefined && !selection.selectedCharacterFactIds.includes(owner)) {
-        throw new TypeError("Expansion candidates can target only a selected identity.");
+        throw new SourceWorldProposalError("source_world_identity", ["expansionCandidates", candidateIndex, "target"]);
       }
-      requireClosedTarget(candidate.path, owner);
-      requireFictionSafeMapping(candidate.value, candidate.supportingFactIds, byId);
+      requireClosedTarget(candidate.path, owner, ["expansionCandidates", candidateIndex, "path"]);
+      requireFictionSafeMapping(candidate.value, candidate.supportingFactIds, byId, ["expansionCandidates", candidateIndex, "value"]);
       if (!candidate.supportingFactIds.every((id) => {
         const fact = byId.get(id);
         return fact !== undefined && (owner === undefined
           || selection.characterIdentityGroups.some((group) => group.representativeFactId === owner && group.factIds.includes(id)));
       })) {
-        if (owner !== undefined) throw new TypeError("Expansion candidates must use supporting facts from their selected identity.");
-        throw new TypeError("Expansion candidates must reference the current reviewed fact generation.");
+        throw new SourceWorldProposalError(owner === undefined ? "source_world_unsupported_fact" : "source_world_identity", ["expansionCandidates", candidateIndex, "supportingFactIds"]);
       }
       const key = `${owner ?? "world"}:${candidate.path}`;
-      if (assigned.has(key)) throw new TypeError("Generated source-world fields cannot assign a target more than once.");
+      if (assigned.has(key)) throw new SourceWorldProposalError("source_world_duplicate", ["expansionCandidates", candidateIndex]);
       assigned.add(key);
       expansionCandidates.push({
         target: owner === undefined ? "world" : { characterRepresentativeFactId: owner },

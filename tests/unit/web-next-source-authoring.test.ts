@@ -97,6 +97,20 @@ it("keeps ordinary source typing focused and renders exact evidence with an expl
   expect(document.querySelector("main")!.textContent).toContain("Identity confirmed: Mara");
 });
 
+it("F5 renders each expanded source fact and decision control once", () => {
+  const { document } = parseHTML("<main></main>");
+  const inferred = { id: "inferred", kind: "location" as const, subject: "Gate", predicate: "may hide", value: "a passage", provenance: "inferred" as const, citations: [] };
+  const invented = { id: "invented", kind: "event" as const, subject: "Mara", predicate: "could discover", value: "a signal", provenance: "invented" as const, citations: [] };
+  const panel = mountSourceAuthoringPanel(document.querySelector("main")!, { api: sourceApi() as never });
+  panel.resume({ ...job, source: { ...job.source, mode: "expand", facts: [inferred, invented], expansionCandidates: [{ ...inferred, value: "a duplicate claim" }, invented] } } as never);
+  expect(document.querySelectorAll("[data-source-fact-id='inferred']")).toHaveLength(1);
+  expect(document.querySelectorAll("[data-source-fact-id='invented']")).toHaveLength(1);
+  expect(document.querySelectorAll("[data-fact-disposition='inferred']")).toHaveLength(1);
+  expect(document.querySelectorAll("[data-fact-disposition='invented']")).toHaveLength(1);
+  expect(document.querySelector("main")!.textContent).toContain("a passage");
+  expect(document.querySelector("main")!.textContent).not.toContain("a duplicate claim");
+});
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -137,11 +151,27 @@ it("hands a submitted source job to the durable session immediately without star
   await Promise.resolve();
   await Promise.resolve();
   expect(onJobAvailable).toHaveBeenCalledWith(running);
-  expect(document.querySelector("main")!.textContent).toContain("Extraction is still running");
+  expect(document.querySelector("main")!.textContent).toContain("Extraction is running");
   await vi.advanceTimersByTimeAsync(5_000);
   expect(loadAuthoringJob).not.toHaveBeenCalled();
   panel.dispose();
   vi.useRealTimers();
+});
+
+it("reports incomplete extraction by durable source-job state without implying it is running", () => {
+  const { document } = parseHTML("<main></main>");
+  const panel = mountSourceAuthoringPanel(document.querySelector("main")!, { api: sourceApi() as never });
+  const resume = (status: "queued" | "running" | "recoverable" | "failed" | "cancel_requested" | "cancelled" | "expired") => {
+    panel.resume({ ...job, status, incomplete: true, source: { ...job.source, extractionComplete: false } } as never);
+    return document.querySelector("main")!.textContent;
+  };
+  expect(resume("queued")).toContain("Extraction is queued");
+  expect(resume("running")).toContain("Extraction is running");
+  expect(resume("recoverable")).toContain("Extraction needs retry");
+  expect(resume("failed")).toContain("failed. Start a new proposal");
+  expect(resume("cancel_requested")).toContain("source proposal is stopping");
+  expect(resume("cancelled")).toContain("source proposal was cancelled");
+  expect(resume("expired")).toContain("source proposal has expired");
 });
 
 it("preserves a manual fact draft and dirty dispositions when the owning session receives a poll", () => {

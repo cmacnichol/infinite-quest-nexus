@@ -127,7 +127,16 @@ export function mountSourceAuthoringPanel(host: HTMLElement, dependencies: Sourc
   }
 
   function visibleFacts(view: SourceAuthoringView): SourceFact[] {
-    return [...view.facts, ...view.expansionCandidates, ...(localReview?.manualFacts ?? [])];
+    // Expansion candidates are a filtered view of the server fact set. Keep
+    // the canonical fact first so every fact owns one disposition, citation,
+    // identity, and roster control even when the API includes it in both.
+    const seen = new Set<string>();
+    return [...view.facts, ...view.expansionCandidates, ...(localReview?.manualFacts ?? [])]
+      .filter((fact) => {
+        if (seen.has(fact.id)) return false;
+        seen.add(fact.id);
+        return true;
+      });
   }
 
   function markDirty(review: SourceFactReview): void {
@@ -136,6 +145,20 @@ export function mountSourceAuthoringPanel(host: HTMLElement, dependencies: Sourc
     localDirty = true;
     editGeneration += 1;
     commandStatus = "Local review decisions have not been saved.";
+  }
+
+  function extractionStatusText(view: SourceAuthoringView): string {
+    if (view.extractionComplete) return "Extraction complete. Inspect each exact passage before accepting it.";
+    switch (current?.status) {
+      case "queued": return "Extraction is queued; synthesis remains unavailable.";
+      case "running": return "Extraction is running; synthesis remains unavailable.";
+      case "recoverable": return "Extraction needs retry before synthesis can begin.";
+      case "failed": return "This source proposal failed. Start a new proposal.";
+      case "cancel_requested": return "This source proposal is stopping.";
+      case "cancelled": return "This source proposal was cancelled.";
+      case "expired": return "This source proposal has expired.";
+      default: return "Extraction is not complete; synthesis remains unavailable.";
+    }
   }
 
   function reviewIssue(view: SourceAuthoringView): string | null {
@@ -240,7 +263,7 @@ export function mountSourceAuthoringPanel(host: HTMLElement, dependencies: Sourc
   function renderReviewComparison(server: Extract<AuthoringJobView, { kind: "story_source" }>): HTMLElement {
     const comparison = document.createElement("div");
     comparison.dataset.sourceReviewComparison = "";
-    if (!localReview || !current?.source || !server.source) return comparison;
+    if (!localReview || current?.kind !== "story_source" || !current.source || !server.source) return comparison;
     comparison.append(
       text(document, `Your review uses revision ${localReview.expectedRevision}.`),
       text(document, `Server revision ${server.revision}.`)
@@ -290,7 +313,7 @@ export function mountSourceAuthoringPanel(host: HTMLElement, dependencies: Sourc
     compare.disabled = !authoringJobs || commandController !== null;
     compare.addEventListener("click", () => { void compareServerReview(); });
     conflict.append(compare);
-    if (reviewConflict.server?.source && localReview) {
+    if (reviewConflict.server?.kind === "story_source" && reviewConflict.server.source && localReview) {
       const server = reviewConflict.server;
       const comparison = renderReviewComparison(server);
       const reconcile = document.createElement("button");
@@ -346,7 +369,7 @@ export function mountSourceAuthoringPanel(host: HTMLElement, dependencies: Sourc
   function renderReview(view: SourceAuthoringView): void {
     localReview = reviewFrom(view, current!.revision);
     host.append(text(document, `${view.source.name} · ${rawBytes(view.source.text)} bytes · ${Array.from(view.source.text).length} code points · ${view.mode} · included through ${view.boundaryParagraphId}.`));
-    host.append(text(document, view.extractionComplete ? "Extraction complete. Inspect each exact passage before accepting it." : "Extraction is still running; synthesis remains unavailable."));
+    host.append(text(document, extractionStatusText(view)));
     const stages = currentStages(current!);
     const chunks = stages.filter((stage) => stage.key.startsWith("source:chunk:"));
     const progress = text(document, `${chunks.filter((stage) => stage.status === "validated").length} of ${chunks.length} extraction chunks complete.`);
@@ -449,7 +472,7 @@ export function mountSourceAuthoringPanel(host: HTMLElement, dependencies: Sourc
       const predicate = controls.get("predicate")!.value.trim();
       const value = controls.get("value")!.value.trim();
       if (!subject || !predicate || !value || !["character", "location", "faction", "relationship", "rule", "event", "tone"].includes(kind)) return;
-      const fact: SourceFact = { id: `manual:${crypto.randomUUID()}`, kind: kind as SourceFact["kind"], subject, predicate, value, provenance: "manual", citations: [] };
+      const fact: SourceFactReview["manualFacts"][number] = { id: `manual:${crypto.randomUUID()}`, kind: kind as SourceFact["kind"], subject, predicate, value, provenance: "manual", citations: [] };
       manualDraft.subject = ""; manualDraft.predicate = ""; manualDraft.value = "";
       markDirty({ ...localReview!, manualFacts: [...localReview!.manualFacts, fact], acceptedFactIds: [...localReview!.acceptedFactIds, fact.id] });
       render();

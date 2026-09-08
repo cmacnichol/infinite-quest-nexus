@@ -305,7 +305,6 @@ export function parseAuthoringCommandForJob(
   command: "review" | "apply",
   input: unknown
 ): AuthoringReview | AuthoringApply {
-  if (context.kind === "story_source" && command === "review") throw new TypeError("Story source facts use the dedicated review command.");
   const parsed = command === "review" ? authoringReviewSchema.parse(input) : authoringApplySchema.parse(input);
   const content = context.kind === "world_concept"
     ? worldContentSchema.parse(parsed.content)

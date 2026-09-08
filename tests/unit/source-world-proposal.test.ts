@@ -27,6 +27,35 @@ describe("source world proposal", () => {
     expect(proposal.playableCharacters[0]?.profile?.appearance.apparentAge).toBe("");
   });
 
+  it("maps closed rule and apparent-age fields to their source fact predicates", () => {
+    const mappedSource = normalizeSourceDocument("mapped.txt", "Iris is thirty.\n\nThe harbor closes after dusk.", "source:mapped");
+    const ageParagraph = mappedSource.paragraphs[0]!;
+    const ruleParagraph = mappedSource.paragraphs[1]!;
+    const rule = {
+      id: "fact:rule", kind: "rule" as const, subject: "The harbor", predicate: "rule", value: "closes after dusk", provenance: "stated" as const,
+      citations: [{ sourceId: mappedSource.id, paragraphId: ruleParagraph.id, start: ruleParagraph.start, end: ruleParagraph.end, quote: "The harbor closes after dusk." }]
+    };
+    const age = {
+      id: "fact:age", kind: "character" as const, subject: "Iris", predicate: "age", value: "thirty", provenance: "stated" as const,
+      citations: [{ sourceId: mappedSource.id, paragraphId: ageParagraph.id, start: ageParagraph.start, end: ageParagraph.end, quote: "Iris is thirty." }]
+    };
+
+    const assembled = assembleSourceWorldProposalWithEvidence({
+      source: mappedSource, boundaryParagraphId: "paragraph:1", acceptedFacts: [rule, age], selectedCharacterFactIds: [age.id],
+      characterIdentityGroups: [{ representativeFactId: age.id, factIds: [age.id] }], mode: "faithful"
+    }, {
+      fields: [{ path: "world.rules", value: rule.value, supportingFactIds: [rule.id] }],
+      characterFields: [{ selectedCharacterFactId: age.id, fields: [{ path: "profile.appearance.apparentAge", value: age.value, supportingFactIds: [age.id] }] }]
+    });
+
+    expect(assembled.proposal.world.rules).toBe(rule.value);
+    expect(assembled.proposal.playableCharacters[0]?.profile?.appearance.apparentAge).toBe(age.value);
+    expect(assembled.mappings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: "world.rules", supportingFactIds: [rule.id] }),
+      expect.objectContaining({ path: "profile.appearance.apparentAge", supportingFactIds: [age.id] })
+    ]));
+  });
+
   it("keeps zero selected characters as lore and leaves unknown appearance blank", () => {
     const proposal = assembleSourceWorldProposal({
       source, boundaryParagraphId: "paragraph:0", acceptedFacts: [iris, gate], selectedCharacterFactIds: [],

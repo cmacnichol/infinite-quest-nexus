@@ -1,0 +1,41 @@
+name: infinitequest-ai-assist-p3-9-smoke
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.6-pg18-trixie
+    environment:
+      POSTGRES_DB: p3source
+      POSTGRES_USER: p3source
+      POSTGRES_PASSWORD: ${P3_SMOKE_DATABASE_PASSWORD:?set a disposable password through the approved secret mechanism}
+    tmpfs: /var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U p3source -d p3source"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  api:
+    image: ${P3_SMOKE_IMAGE:?build the reviewed P3 runtime image}
+    environment: &runtime
+      APP_ROLE: api
+      APP_PORT: 8080
+      DATABASE_URL: postgresql://p3source:${P3_SMOKE_DATABASE_PASSWORD}@postgres:5432/p3source
+      CREDENTIAL_ENCRYPTION_KEY: ${P3_SMOKE_CREDENTIAL_KEY:?set a disposable 32-byte key through the approved secret mechanism}
+      AI_AUTHORING_JOBS_ENABLED: "true"
+      AI_STORY_SOURCE_AUTHORING_ENABLED: "true"
+      PROVIDER_NETWORK_ALLOWLIST: ${P3_SMOKE_PROVIDER_ALLOWLIST:?set only the selected provider hostname or narrow address}
+      LOG_LEVEL: silent
+    ports: ["127.0.0.1:${P3_SMOKE_PORT:-45690}:8080"]
+    depends_on:
+      postgres: { condition: service_healthy }
+  worker:
+    image: ${P3_SMOKE_IMAGE:?build the reviewed P3 runtime image}
+    environment:
+      <<: *runtime
+      APP_ROLE: worker
+    healthcheck:
+      test: ["CMD", "node", "-e", "import('./dist/packages/database/src/config.js').then(c=>import('./dist/packages/database/src/pool.js').then(p=>p.createDatabasePool(c.loadRuntimeConfig().databaseUrl).query('SELECT 1').then(()=>process.exit(0)))).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 4
+      start_period: 20s
+    depends_on:
+      postgres: { condition: service_healthy }

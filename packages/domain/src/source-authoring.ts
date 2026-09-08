@@ -20,6 +20,29 @@ import {
 import { z } from "zod";
 import type { SourceChunk } from "./source-authoring-budget.js";
 
+export type SourceWorldFieldFactRule = Readonly<{
+  kind: SourceFact["kind"];
+  predicate: string;
+}>;
+
+/** Closed canon fields may only be supported by these exact source fact shapes. */
+const sourceWorldFieldFactRules = new Map<string, SourceWorldFieldFactRule>([
+  ["world.rules", { kind: "rule", predicate: "rule" }],
+  ["world.tone", { kind: "tone", predicate: "tone" }],
+  ["profile.appearance.clothing", { kind: "character", predicate: "clothing" }],
+  ["profile.appearance.hair", { kind: "character", predicate: "hair" }],
+  ["profile.appearance.eyes", { kind: "character", predicate: "eyes" }],
+  ["profile.appearance.apparentAge", { kind: "character", predicate: "age" }]
+]);
+
+export function sourceWorldFieldFactRule(path: string): SourceWorldFieldFactRule | undefined {
+  return sourceWorldFieldFactRules.get(path);
+}
+
+/** Closed prompt and validator mapping; callers must not infer additional paths. */
+export function sourceWorldFieldFactRequirements(): readonly Readonly<{ path: string; kind: SourceFact["kind"]; predicate: string }>[] {
+  return [...sourceWorldFieldFactRules.entries()].map(([path, rule]) => ({ path, ...rule }));
+}
 
 function sha256(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
@@ -163,13 +186,15 @@ export function validateWorldSourceMaterialForContent(content: WorldContent): Wo
   for (const evidence of material.fieldEvidence) {
     const worldPath = /^world\.(tone|rules)$/u.exec(evidence.path);
     const characterPath = /^playableCharacters\.(source-character:(.+))\.profile\.appearance\.(clothing|hair|eyes|apparentAge)$/u.exec(evidence.path);
-    const expected = worldPath === null
+    const expectedRule = worldPath === null ? undefined : sourceWorldFieldFactRule(`world.${worldPath[1]}`);
+    const expected = worldPath === null || expectedRule === undefined
       ? undefined
-      : { value: content.world[worldPath[1] as "tone" | "rules"], kind: worldPath[1] === "tone" ? "tone" : "rule", predicate: worldPath[1] };
+      : { value: content.world[worldPath[1] as "tone" | "rules"], ...expectedRule };
     const character = characterPath === null ? undefined : content.playableCharacters.find((candidate) => candidate.id === characterPath[1]);
-    const characterExpected = characterPath === null || !character
+    const characterRule = characterPath === null ? undefined : sourceWorldFieldFactRule(`profile.appearance.${characterPath[3]}`);
+    const characterExpected = characterPath === null || !character || characterRule === undefined
       ? undefined
-      : { value: character.profile?.appearance[characterPath[3] as "clothing" | "hair" | "eyes" | "apparentAge"], kind: "character" as const, predicate: characterPath[3], representativeFactId: characterPath[2] };
+      : { value: character.profile?.appearance[characterPath[3] as "clothing" | "hair" | "eyes" | "apparentAge"], ...characterRule, representativeFactId: characterPath[2] };
     const target = expected ?? characterExpected;
     const group = characterExpected === undefined ? undefined : material.characterIdentityGroups?.find((candidate) => candidate.representativeFactId === characterExpected.representativeFactId);
     const predicate = expected?.predicate ?? characterExpected?.predicate;
@@ -248,12 +273,20 @@ export function hasValidSourceChunkWithinBoundary(source: SourceDocument, chunk:
     && chunk.spans.every((span) => span.end <= boundary.end);
 }
 
-const sourceExtractionCitationSchema = z.object({
+const sourceExtractionLegacyCitationSchema = z.object({
   paragraphId: sourceDocumentIdSchema,
   start: z.number().int().nonnegative(),
   end: z.number().int().nonnegative(),
   quote: z.string().min(1)
 }).strict();
+const sourceExtractionQuoteAnchorCitationSchema = z.object({
+  paragraphId: sourceDocumentIdSchema,
+  quote: z.string().min(1)
+}).strict();
+const sourceExtractionCitationSchema = z.union([
+  sourceExtractionLegacyCitationSchema,
+  sourceExtractionQuoteAnchorCitationSchema
+]);
 
 const sourceExtractionCandidateSchema = z.object({
   category: sourceFactKindSchema,
@@ -267,13 +300,60 @@ const sourceExtractionCandidateSchema = z.object({
 const sourceExtractionCandidatesSchema = z.array(sourceExtractionCandidateSchema).max(200);
 type SourceExtractionCandidate = z.infer<typeof sourceExtractionCandidateSchema>;
 
-function sourceEvidenceIssue(path: Array<string | number>): z.ZodIssue {
+function sourceEvidenceIssue(path: Array<string | number>, authoringReason: "source_evidence" | "source_schema" | "source_citation_target" | "source_coordinate_order" | "source_coordinates" | "source_quote" | "source_quote_ambiguous" = "source_evidence"): z.ZodIssue {
   return {
     code: "custom",
     path,
     message: "Generated source facts need exact evidence inside the selected source chunk.",
-    params: { authoringReason: "source_evidence" }
+    params: { authoringReason }
   };
+}
+
+function deriveUniqueQuoteAnchor(
+  source: SourceDocument,
+  characters: readonly string[],
+  paragraph: SourceDocument["paragraphs"][number],
+  span: SourceChunk["spans"][number],
+  citation: z.infer<typeof sourceExtractionQuoteAnchorCitationSchema>,
+  issuePath: Array<string | number>
+): SourceCitation {
+  const spanText = characters.slice(span.start, span.end).join("");
+  const firstUtf16 = spanText.indexOf(citation.quote);
+  if (firstUtf16 < 0) throw new z.ZodError([sourceEvidenceIssue(issuePath, "source_quote")]);
+  if (spanText.indexOf(citation.quote, firstUtf16 + 1) >= 0) {
+    throw new z.ZodError([sourceEvidenceIssue(issuePath, "source_quote_ambiguous")]);
+  }
+  const start = span.start + Array.from(spanText.slice(0, firstUtf16)).length;
+  const end = start + Array.from(citation.quote).length;
+  if (start < paragraph.start || end > paragraph.end || start < span.start || end > span.end) {
+    throw new z.ZodError([sourceEvidenceIssue(issuePath, "source_coordinates")]);
+  }
+  if (characters.slice(start, end).join("") !== citation.quote) {
+    throw new z.ZodError([sourceEvidenceIssue(issuePath, "source_quote")]);
+  }
+  return { sourceId: source.id, paragraphId: citation.paragraphId, start, end, quote: citation.quote };
+}
+
+/**
+ * Retain a useful structural location without ever returning a provider-supplied
+ * object key. The public projector accepts this closed source path grammar.
+ */
+function safeSourceSchemaIssuePath(path: readonly PropertyKey[]): Array<string | number> {
+  const factIndex = path[0];
+  if (typeof factIndex !== "number" || !Number.isInteger(factIndex) || factIndex < 0) return ["facts"];
+  const base: Array<string | number> = ["facts", factIndex];
+  const field = path[1];
+  if (field === "category" || field === "subject" || field === "predicate" || field === "value" || field === "provenance") {
+    return [...base, field];
+  }
+  if (field !== "citations") return base;
+  const citationIndex = path[2];
+  if (typeof citationIndex !== "number" || !Number.isInteger(citationIndex) || citationIndex < 0) return [...base, "citations"];
+  const citationBase: Array<string | number> = [...base, "citations", citationIndex];
+  const citationField = path[3];
+  return citationField === "paragraphId" || citationField === "start" || citationField === "end" || citationField === "quote"
+    ? [...citationBase, citationField]
+    : citationBase;
 }
 
 function stableSourceFactId(source: SourceDocument, fact: SourceExtractionCandidate, citations: SourceCitation[]): string {
@@ -295,26 +375,28 @@ function validateExtractedSourceFactsWithBoundary(
     parsed = sourceExtractionCandidatesSchema.parse(input);
   } catch (error) {
     if (!(error instanceof z.ZodError)) throw error;
-    throw new z.ZodError(error.issues.map((issue) => issue.code === "too_big"
-      ? ({
+    const oversized = error.issues.find((issue) => issue.code === "too_big");
+    if (oversized) {
+      throw new z.ZodError([{
         code: "too_big",
         origin: "array",
         maximum: 200,
         inclusive: true,
-        path: ["facts", ...issue.path],
+        path: ["facts", ...oversized.path],
         message: "Generated source facts need exact evidence inside the selected source chunk."
-      } as z.ZodIssue)
-      : ({
-        code: "custom",
-        path: ["facts", ...issue.path],
-        message: "Generated source facts need exact evidence inside the selected source chunk.",
-        params: { authoringReason: "source_evidence" }
-      } as z.ZodIssue)));
+      } as z.ZodIssue]);
+    }
+    throw new z.ZodError(error.issues.slice(0, 20).map((issue): z.ZodIssue => ({
+      code: issue.code,
+      path: safeSourceSchemaIssuePath(issue.path),
+      message: "Generated source facts do not match the required fields.",
+      ...(issue.code === "custom" ? { params: { authoringReason: "source_schema" } } : {})
+    }) as z.ZodIssue));
   }
   const integrity = boundaryParagraphId === undefined
     ? hasValidSourceChunkIntegrity(source, chunk)
     : hasValidSourceChunkWithinBoundary(source, chunk, boundaryParagraphId);
-  if (!integrity) throw new z.ZodError([sourceEvidenceIssue(["facts", 0, "citations"])]);
+  if (!integrity) throw new z.ZodError([sourceEvidenceIssue(["facts", 0, "citations"], "source_coordinates")]);
   const characters = sourceCharacters(source);
   const paragraphById = new Map(source.paragraphs.map((paragraph) => [paragraph.id, paragraph]));
   const paragraphIndexById = new Map(source.paragraphs.map((paragraph, index) => [paragraph.id, index]));
@@ -325,12 +407,22 @@ function validateExtractedSourceFactsWithBoundary(
       const paragraph = paragraphById.get(citation.paragraphId);
       const span = spanByParagraph.get(citation.paragraphId);
       const paragraphIndex = paragraphIndexById.get(citation.paragraphId);
-      if (!paragraph || !span || citation.start >= citation.end
-        || citation.start < paragraph.start || citation.end > paragraph.end
+      if (!paragraph || !span || (boundaryIndex !== undefined && (paragraphIndex === undefined || paragraphIndex > boundaryIndex))) {
+        throw new z.ZodError([sourceEvidenceIssue(["facts", factIndex, "citations", citationIndex], "source_citation_target")]);
+      }
+      if (!("start" in citation)) {
+        return deriveUniqueQuoteAnchor(source, characters, paragraph, span, citation, ["facts", factIndex, "citations", citationIndex]);
+      }
+      if (citation.start >= citation.end) {
+        throw new z.ZodError([sourceEvidenceIssue(["facts", factIndex, "citations", citationIndex], "source_coordinate_order")]);
+      }
+      if (citation.start < paragraph.start || citation.end > paragraph.end
         || citation.start < span.start || citation.end > span.end
-        || (boundaryIndex !== undefined && (paragraphIndex === undefined || paragraphIndex > boundaryIndex))
-        || characters.slice(citation.start, citation.end).join("") !== citation.quote) {
-        throw new z.ZodError([sourceEvidenceIssue(["facts", factIndex, "citations", citationIndex])]);
+      ) {
+        throw new z.ZodError([sourceEvidenceIssue(["facts", factIndex, "citations", citationIndex], "source_coordinates")]);
+      }
+      if (characters.slice(citation.start, citation.end).join("") !== citation.quote) {
+        throw new z.ZodError([sourceEvidenceIssue(["facts", factIndex, "citations", citationIndex], "source_quote")]);
       }
       return { sourceId: source.id, ...citation };
     });

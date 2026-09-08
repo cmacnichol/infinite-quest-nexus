@@ -174,7 +174,7 @@ test("evidence review keeps same-name identities separate, joins supporting fact
     const request = route.request(); const url = new URL(request.url());
     if (request.method() === "POST" && url.pathname.endsWith("/source-jobs")) {
       const input = request.postDataJSON() as Record<string, unknown>;
-      view = sourceJob(input); view.status = "awaiting_review"; view.stages = [{ id: "chunk-0", key: "source:chunk:0", status: "validated", generation: 1, attemptCount: 1 }]; view.source = { ...view.source, source: sourceDocument, extractionComplete: true, facts, acceptedFactIds: ["iris-a", "iris-support", "iris-b"], rejectedFactIds: ["rejected"], uncertainFactIds: ["inferred", "invented"] };
+      view = sourceJob({ ...input, mode: "expand" }); view.status = "awaiting_review"; view.stages = [{ id: "chunk-0", key: "source:chunk:0", status: "validated", generation: 1, attemptCount: 1 }]; view.source = { ...view.source, source: sourceDocument, mode: "expand", extractionComplete: true, facts, expansionCandidates: [facts[3]!, facts[5]!], acceptedFactIds: ["iris-a", "iris-support", "iris-b"], rejectedFactIds: ["rejected"], uncertainFactIds: ["inferred", "invented"] };
       return route.fulfill({ status: 202, contentType: "application/json", body: JSON.stringify(authoringJobViewSchema.parse(view)) });
     }
     if (request.method() === "PUT" && url.pathname.endsWith("/facts")) {
@@ -189,6 +189,10 @@ test("evidence review keeps same-name identities separate, joins supporting fact
   await page.locator("[data-source-text]").fill(text);
   await page.getByRole("button", { name: "Extract source facts" }).click();
   await expect(page.getByText("Extraction complete.")).toBeVisible();
+  await expect(page.locator("[data-source-fact-id='inferred']")).toHaveCount(1);
+  await expect(page.locator("[data-source-fact-id='invented']")).toHaveCount(1);
+  await expect(page.locator("[data-fact-disposition='inferred']")).toHaveCount(1);
+  await expect(page.locator("[data-fact-disposition='invented']")).toHaveCount(1);
   const irisA = page.locator("[data-source-fact-id='iris-a']");
   const pollsBeforeOpen = polls;
   await irisA.getByRole("button", { name: "Show paragraph:0" }).click();
@@ -270,12 +274,12 @@ test("source query refresh and owner-list selection resume the same durable extr
   });
   await page.goto(`${base}/app/worlds/new?authoringJob=source-job`);
   await expect(page.locator('[name="creationMethod"][value="source"]')).toBeChecked();
-  await expect(page.getByText("Extraction is still running; synthesis remains unavailable.")).toBeVisible();
+  await expect(page.getByText("Extraction is running; synthesis remains unavailable.")).toBeVisible();
   const beforePoll = reads;
   await expect.poll(() => reads).toBeGreaterThan(beforePoll);
   await page.reload();
   await expect(page.locator('[name="creationMethod"][value="source"]')).toBeChecked();
-  await expect(page.getByText("Extraction is still running; synthesis remains unavailable.")).toBeVisible();
+  await expect(page.getByText("Extraction is running; synthesis remains unavailable.")).toBeVisible();
 
   await page.goto(`${base}/app/worlds/new`);
   await page.locator('[name="creationMethod"][value="source"]').check();
@@ -305,6 +309,7 @@ test("current source-stage failure stays actionable and a rejected retry remains
   });
   await page.route("**/api/v1/authoring/jobs/source-job", route => route.fulfill({ contentType: "application/json", body: JSON.stringify(authoringJobViewSchema.parse(job)) }));
   await page.goto(`${base}/app/worlds/new?authoringJob=source-job`);
+  await expect(page.getByText("Extraction needs retry before synthesis can begin.")).toBeVisible();
   await expect(page.getByText("Retry source:synthesis", { exact: true })).toHaveCount(0);
   await page.locator("[data-retry-stage-id='current-chunk']").click();
   await expect(page.locator("[data-source-command-status]")).toContainText("unavailable");
@@ -438,7 +443,12 @@ test("source synthesis requires explicit adoption, preserves edits through polls
       synthesisReads += 1;
       if (synthesisReads >= 1 && !job.result) {
         job.revision += 1; job.status = "awaiting_review"; job.incomplete = false; job.result = result as never;
-        job.stages = [{ id: "source-world", key: "source:synthesis", generation: 1, status: "validated", attemptCount: 1 }];
+        job.stages = [
+          { id: "source-plan", key: "source:plan", generation: 1, status: "validated", attemptCount: 1 },
+          { id: "source-chunk", key: "source:chunk:0", generation: 1, status: "validated", attemptCount: 1 },
+          { id: "source-world", key: "source:synthesis", generation: 1, status: "validated", attemptCount: 1 },
+          { id: "source-character", key: "source:character:harbor", generation: 1, status: "validated", attemptCount: 1 }
+        ];
       }
     }
     return route.fulfill({ contentType: "application/json", body: JSON.stringify(authoringJobViewSchema.parse(job)) });
@@ -460,6 +470,7 @@ test("source synthesis requires explicit adoption, preserves edits through polls
   await expect(title).toHaveValue("Reviewed Harbor"); await expect(genre).toHaveValue("Coastal fantasy");
   await expect.poll(() => reviewBodies.length).toBeGreaterThan(0);
   expect(reviewBodies.at(-1)?.content).toMatchObject({ world: { title: "Reviewed Harbor", genre: "Coastal fantasy" } });
+  expect(reviewBodies.at(-1)?.selectedStageIds).toEqual(["source-character", "source-world"]);
   expect(legacyWorldWrites).toBe(0); expect(applyBodies).toHaveLength(0);
   await page.setViewportSize({ width: 1280, height: 720 }); await page.screenshot({ path: testInfo.outputPath("source-final-draft-desktop.png"), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 }); await expect(page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).resolves.toBe(true); await page.screenshot({ path: testInfo.outputPath("source-final-draft-narrow.png"), fullPage: true });
@@ -467,6 +478,6 @@ test("source synthesis requires explicit adoption, preserves edits through polls
   for (let index = 0; index < 5; index += 1) await page.locator('[data-action="continue-stage"]').click();
   await page.getByRole("button", { name: "Create world", exact: true }).click();
   await expect.poll(() => applyBodies.length).toBe(1);
-  expect(applyBodies[0]).toMatchObject({ selectedStageIds: ["source-world"], content: { world: { title: "Reviewed Harbor", genre: "Coastal fantasy" } } });
+  expect(applyBodies[0]).toMatchObject({ selectedStageIds: ["source-character", "source-world"], content: { world: { title: "Reviewed Harbor", genre: "Coastal fantasy" } } });
   expect(legacyWorldWrites).toBe(0);
 });

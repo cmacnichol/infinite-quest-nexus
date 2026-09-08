@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import Fastify from "fastify";
 import { createAuthoringApplication } from "../../packages/application/src/authoring/use-cases.js";
 import { createPostgresAuthoringRepository } from "../../packages/database/src/authoring-job-repository.js";
+import { createPostgresAuthoringWorldApplyAdapter } from "../../packages/database/src/authoring-world-apply-adapter.js";
 import { createDatabasePool } from "../../packages/database/src/pool.js";
 import { registerAuthoringRoutes } from "../../services/api/src/authoring-routes.js";
 
@@ -15,7 +16,7 @@ const repository = createPostgresAuthoringRepository(pool);
 const application = createAuthoringApplication({
   repository,
   targets: { assertCurrent: async () => undefined },
-  worlds: { applyInTransaction: async () => { throw new Error("World application is not available in the source API process fixture."); } },
+  worlds: createPostgresAuthoringWorldApplyAdapter(),
   sha256: (value) => createHash("sha256").update(value).digest("hex")
 });
 const app = Fastify({ logger: false });

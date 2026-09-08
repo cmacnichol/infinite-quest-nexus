@@ -95,14 +95,28 @@ export function createAuthoringJobSession(options: AuthoringJobSessionOptions): 
     return job.stages.filter(stage => stage.status === "validated" &&
       !job.stages.some(other => other.key === stage.key && other.generation > stage.generation));
   }
+  function isSourceResultStage(stage: AuthoringJobView["stages"][number]): boolean {
+    return stage.key === "source:synthesis" || stage.key.startsWith("source:character:");
+  }
+  function currentEligibleStages() {
+    const validated = currentValidatedStages();
+    return job.kind === "story_source" ? validated.filter(isSourceResultStage) : validated;
+  }
+  function sourceSelection(): string[] {
+    return currentEligibleStages().map(stage => stage.id).sort();
+  }
   function isRemovedStageKey(key: string): boolean {
     const generations = job.stages.filter(stage => stage.key === key);
     const latest = generations.reduce((current, stage) => stage.generation > current.generation ? stage : current);
     return latest.status === "cancelled";
   }
   function selectedStageIds(): string[] {
-    return savedSelection === null
-      ? currentValidatedStages().map(stage => stage.id)
+    return job.kind === "story_source"
+      ? savedSelection === null
+        ? sourceSelection()
+        : savedSelection.filter((id) => currentEligibleStages().some((stage) => stage.id === id))
+      : savedSelection === null
+      ? currentEligibleStages().map(stage => stage.id)
       : [...savedSelection];
   }
   function clearSaveTimer(): void { if (saveTimer !== null) cancelTimer(saveTimer); saveTimer = null; }
@@ -209,6 +223,12 @@ export function createAuthoringJobSession(options: AuthoringJobSessionOptions): 
       notify();
       return;
     }
+    const sourceReviewRequired = job.kind === "story_source" && savedSelection !== null && !equal(savedSelection, sourceSelection());
+    if (sourceReviewRequired && candidate) {
+      remoteCandidate = received.result ?? candidate;
+      notify();
+      return;
+    }
     if (remoteCandidate && !newlyGenerated) { notify(); return; }
     if (received.reviewedContent && !localDirty && !newlyGenerated) {
       candidate = received.reviewedContent;
@@ -248,10 +268,15 @@ export function createAuthoringJobSession(options: AuthoringJobSessionOptions): 
     adoptPendingResult() {
       if (disposed || unavailable || conflictFrozen || isTerminal(job.status)) return null;
       let selectionChanged = savedSelection === null && candidate !== null;
+      if (job.kind === "story_source") {
+        const selection = sourceSelection();
+        selectionChanged = !equal(savedSelection, selection);
+        savedSelection = selection;
+      }
       // Explicit review reconciles stage identity even when replacement text
       // is identical or the replacement was already present on resume. Polls
       // and ordinary edits must never advance the saved selection themselves.
-      if (savedSelection !== null) {
+      if (job.kind !== "story_source" && savedSelection !== null) {
         const selectedKeys = new Set(job.stages.filter(stage => savedSelection!.includes(stage.id)).map(stage => stage.key));
         const validated = currentValidatedStages();
         // Keep the persisted historical IDs as selection intent until every
@@ -263,7 +288,7 @@ export function createAuthoringJobSession(options: AuthoringJobSessionOptions): 
         const selection = validated.filter(stage => selectedKeys.has(stage.key)).map(stage => stage.id);
         selectionChanged = !equal(savedSelection, selection);
         savedSelection = selection;
-      } else if (candidate) {
+      } else if (job.kind !== "story_source" && candidate) {
         savedSelection = currentValidatedStages().map(stage => stage.id);
       }
       if (selectionChanged || remoteCandidate) editGeneration += 1;

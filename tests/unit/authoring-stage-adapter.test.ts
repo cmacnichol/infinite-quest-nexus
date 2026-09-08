@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
-import { CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION, SOURCE_WORLD_PROMPT_PROTOCOL_VERSION, WORLD_AUTHORING_PROMPT_PROTOCOL_VERSION } from "../../packages/domain/src/authoring-prompts.js";
+import { CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION, SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION, SOURCE_WORLD_PROMPT_PROTOCOL_VERSION, WORLD_AUTHORING_PROMPT_PROTOCOL_VERSION } from "../../packages/domain/src/authoring-prompts.js";
 import { normalizeSourceDocument } from "../../packages/domain/src/source-authoring.js";
+import { planSourceChunks } from "../../packages/domain/src/source-authoring-budget.js";
 import type { AuthoringClaim, AuthoringExecutionRepository } from "../../packages/application/src/authoring/ports.js";
 import type { AuthoringExecutionSnapshot } from "../../packages/application/src/authoring/types.js";
 import { createAuthoringExecutionSnapshot, createRuntimeAuthoringStageDispatcher, executeAuthoringStage } from "../../services/runtime/src/authoring-stage-adapter.js";
@@ -191,6 +192,97 @@ describe("executeAuthoringStage", () => {
     expect(text).toHaveBeenCalledWith({ ownerUserId: "owner-1" }, "text-1", "text", "model-pinned", snapshot.contextWindowTokens);
   });
 
+  it("forwards the durable claim from a source chunk stage before extraction can accept output", async () => {
+    const source = normalizeSourceDocument("chapter.txt", "Iris fastened her blue coat.", "job-1");
+    const chunk = planSourceChunks({
+      source,
+      boundaryParagraphId: source.paragraphs[0]!.id,
+      systemPrompt: "Extract cited source facts.",
+      instructions: "",
+      budget: { contextWindowTokens: descriptor.contextWindowTokens, maxOutputTokens: descriptor.maxOutputTokens, countTokens: (value) => new TextEncoder().encode(value).length }
+    })[0]!;
+    const execute = vi.fn(async () => providerResult(JSON.stringify({ facts: [] })));
+    const currentClaim = vi.fn(async () => false);
+    const dispatch = createRuntimeAuthoringStageDispatcher({
+      execution: { text: async () => ({ ...descriptor, providerType: "lmstudio" as const, execute }) } as never,
+      sha256
+    });
+
+    await expect(dispatch(runtimeStage({
+      input: {
+        kind: "story_source", idempotencyKey: "source-key", target: { kind: "new_world" },
+        name: "chapter.txt", text: source.text, mode: "faithful", boundaryParagraphId: source.paragraphs[0]!.id, instructions: ""
+      },
+      snapshot: { ...snapshot, protocols: { ...snapshot.protocols, source: SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION } },
+      stageKey: `source:chunk:${chunk.id}`,
+      parentOutputs: [{ kind: "source_plan", chunks: [{
+        ...chunk,
+        sourceRange: { ...chunk.sourceRange },
+        spans: chunk.spans.map((span) => ({ ...span }))
+      }] }],
+      jobId: "job-1",
+      currentClaim
+    }))).rejects.toMatchObject({ authoringFailure: { code: "authoring_cancelled", stage: "source", retryable: false } });
+
+    expect(currentClaim).toHaveBeenCalledOnce();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("does not send a resumed source chunk with an older quote-anchor protocol to the provider", async () => {
+    const source = normalizeSourceDocument("chapter.txt", "Iris fastened her blue coat.", "job-1");
+    const chunk = planSourceChunks({
+      source,
+      boundaryParagraphId: source.paragraphs[0]!.id,
+      systemPrompt: "Extract cited source facts.",
+      instructions: "",
+      budget: { contextWindowTokens: descriptor.contextWindowTokens, maxOutputTokens: descriptor.maxOutputTokens, countTokens: (value) => new TextEncoder().encode(value).length }
+    })[0]!;
+    const execute = vi.fn(async () => providerResult(JSON.stringify({ facts: [] })));
+    const dispatch = createRuntimeAuthoringStageDispatcher({
+      execution: { text: async () => ({ ...descriptor, providerType: "lmstudio" as const, execute }) } as never,
+      sha256
+    });
+
+    await expect(dispatch(runtimeStage({
+      input: {
+        kind: "story_source", idempotencyKey: "source-key", target: { kind: "new_world" },
+        name: "chapter.txt", text: source.text, mode: "faithful", boundaryParagraphId: source.paragraphs[0]!.id, instructions: ""
+      },
+      snapshot: { ...snapshot, protocols: { ...snapshot.protocols, source: "source-extraction-v2-absolute-code-points" } },
+      stageKey: `source:chunk:${chunk.id}`,
+      parentOutputs: [{ kind: "source_plan", chunks: [{
+        ...chunk,
+        sourceRange: { ...chunk.sourceRange },
+        spans: chunk.spans.map((span) => ({ ...span }))
+      }] }],
+      jobId: "job-1"
+    }))).rejects.toMatchObject({ authoringFailure: { code: "source_evidence_invalid", stage: "source", retryable: false } });
+
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("does not send a resumed source-world stage with an older closed-mapping protocol to the provider", async () => {
+    const source = normalizeSourceDocument("chapter.txt", "Iris wears a blue coat.", "job-1");
+    const iris = {
+      id: "source-fact:iris", kind: "character" as const, subject: "Iris", predicate: "clothing", value: "blue coat", provenance: "stated" as const,
+      citations: [{ sourceId: source.id, paragraphId: "paragraph:0", start: 0, end: source.paragraphs[0]!.end, quote: source.text }]
+    };
+    const execute = vi.fn(async () => providerResult(JSON.stringify({ fields: [], characterFields: [] })));
+    const dispatch = createRuntimeAuthoringStageDispatcher({
+      execution: { text: async () => ({ ...descriptor, execute }) } as never,
+      sha256
+    });
+
+    await expect(dispatch(runtimeStage({
+      input: { kind: "story_source", idempotencyKey: "source-key", target: { kind: "new_world" }, name: "chapter.txt", text: source.text, mode: "faithful", boundaryParagraphId: "paragraph:0", instructions: "" },
+      snapshot: { ...snapshot, protocols: { ...snapshot.protocols, source: SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION, sourceWorld: "source-world-v1" } },
+      stageKey: "source:synthesis",
+      sourceSelection: { source, boundaryParagraphId: "paragraph:0", acceptedFacts: [iris], selectedCharacterFactIds: [iris.id], characterIdentityGroups: [{ representativeFactId: iris.id, factIds: [iris.id] }], mode: "faithful", reviewGeneration: 1 }
+    }))).rejects.toMatchObject({ authoringFailure: { code: "source_evidence_invalid", stage: "source", retryable: false } });
+
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it("runs a selected source character stage over the complete reviewed selection", async () => {
     const source = normalizeSourceDocument("chapter.txt", "Iris wears a blue coat.", "job-1");
     const iris = {
@@ -208,7 +300,7 @@ describe("executeAuthoringStage", () => {
 
     const output = await dispatch(runtimeStage({
       input: { kind: "story_source", idempotencyKey: "source-key", target: { kind: "new_world" }, name: "chapter.txt", text: source.text, mode: "faithful", boundaryParagraphId: "paragraph:0", instructions: "Use reviewed facts." },
-      snapshot: { ...snapshot, protocols: { ...snapshot.protocols, source: "source-extraction-v1", sourceWorld: SOURCE_WORLD_PROMPT_PROTOCOL_VERSION } },
+      snapshot: { ...snapshot, protocols: { ...snapshot.protocols, source: SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION, sourceWorld: SOURCE_WORLD_PROMPT_PROTOCOL_VERSION } },
       stageKey: `source:character:${iris.id}`,
       sourceSelection: { source, boundaryParagraphId: "paragraph:0", acceptedFacts: [iris], selectedCharacterFactIds: [iris.id], characterIdentityGroups: [{ representativeFactId: iris.id, factIds: [iris.id] }], mode: "faithful", reviewGeneration: 3 }
     }));

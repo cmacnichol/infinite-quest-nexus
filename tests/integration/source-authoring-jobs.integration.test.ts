@@ -8,6 +8,7 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createPostgresAuthoringRepository } from "../../packages/database/src/authoring-job-repository.js";
 import { normalizeSourceDocument } from "../../packages/domain/src/source-authoring.js";
 import { planSourceChunks } from "../../packages/domain/src/source-authoring-budget.js";
+import { SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION } from "../../packages/domain/src/authoring-prompts.js";
 import type { SourceFact } from "../../packages/contracts/src/source-authoring.js";
 import { createProvider } from "../helpers/provider-application-fixtures.js";
 
@@ -16,20 +17,44 @@ const integration = databaseUrl ? describe.sequential : describe.skip;
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
 const credentialSecret = "p3-source-process-secret";
 
-function runSourceWorker(limit: number): Promise<{ completed: number; runs: boolean[] }> {
+type WorkerOutcome = "no_claim" | "claimed_then_null" | "failed" | "checkpoint_lost" | "checkpointed";
+type WorkerProcessResult = { completed: number; runs: boolean[]; outcomes?: Array<{ outcome: WorkerOutcome; jobId?: string; stageId?: string; generation?: number; claimCandidates?: Array<{ jobId: string; stageKey: string; generation: number; due: boolean; stageStatus: string; leaseLive: boolean | null }> }> };
+let workerDiagnosticPool: DatabasePool | undefined;
+let providerCallCount = () => 0;
+
+function runSourceWorker(limit: number, diagnostics = true): Promise<WorkerProcessResult> {
   return new Promise((resolveProcess, reject) => {
+    const providerCallsBefore = providerCallCount();
     const child = spawn(process.execPath, ["--import", "tsx", "tests/helpers/authoring-worker-process.ts"], {
       cwd: process.cwd(),
-      env: { ...process.env, TEST_DATABASE_URL: process.env.TEST_DATABASE_URL!, AUTHORING_PROCESS_CREDENTIAL_SECRET: credentialSecret, AUTHORING_PROCESS_LIMIT: String(limit) },
+      env: {
+        ...process.env,
+        TEST_DATABASE_URL: process.env.TEST_DATABASE_URL!,
+        AUTHORING_PROCESS_CREDENTIAL_SECRET: credentialSecret,
+        AUTHORING_PROCESS_LIMIT: String(limit),
+        ...(diagnostics ? { AUTHORING_PROCESS_DIAGNOSTICS: "true" } : {})
+      },
       stdio: ["ignore", "pipe", "pipe"]
     });
     let stdout = ""; let stderr = "";
     child.stdout.on("data", (chunk) => { stdout += String(chunk); });
     child.stderr.on("data", (chunk) => { stderr += String(chunk); });
     child.once("error", reject);
-    child.once("exit", (code, signal) => {
+    child.once("exit", async (code, signal) => {
       if (code !== 0 || signal) { reject(new Error(`source worker exited ${code ?? signal}: ${stderr}`)); return; }
-      try { resolveProcess(JSON.parse(stdout.trim()) as { completed: number; runs: boolean[] }); }
+      try {
+        const result = JSON.parse(stdout.trim()) as WorkerProcessResult;
+        const outcomes = result.outcomes;
+        const jobId = outcomes?.find((outcome) => outcome.jobId)?.jobId;
+        const eligibility = workerDiagnosticPool && jobId ? await sourceEligibility(workerDiagnosticPool, jobId) : undefined;
+        process.stdout.write(`${JSON.stringify({
+          p3WorkerDiagnostic: outcomes,
+          providerCalls: { before: providerCallsBefore, after: providerCallCount(), delta: providerCallCount() - providerCallsBefore },
+          eligibility
+        })}\n`);
+        if (outcomes) Object.defineProperty(result, "outcomes", { value: outcomes, enumerable: false });
+        resolveProcess(result);
+      }
       catch { reject(new Error(`source worker result was invalid: ${stdout}`)); }
     });
   });
@@ -67,6 +92,78 @@ function startSourceApi(ownerUserId: string): Promise<{ url: string; close(): Pr
   });
 }
 
+/** Safe claim-eligibility observation for restart/failure diagnosis; never returns source or provider payloads. */
+async function sourceEligibility(pool: DatabasePool, jobId: string) {
+  const [job, stages] = await Promise.all([
+    pool.query<{ status: string; execution_generation: number; expired: boolean }>(
+      "SELECT status,execution_generation,expires_at <= clock_timestamp() AS expired FROM authoring_jobs WHERE id=$1",
+      [jobId]
+    ),
+    pool.query<{
+      stage_key: string;
+      generation: number;
+      status: string;
+      attempt_count: number;
+      due: boolean;
+      lease_live: boolean | null;
+      parent_generations: Record<string, number>;
+    }>(
+      `SELECT stage_key,generation,status,attempt_count,
+              next_attempt_at <= clock_timestamp() AS due,
+              CASE WHEN lease_expires_at IS NULL THEN NULL ELSE lease_expires_at > clock_timestamp() END AS lease_live,
+              parent_generations
+         FROM authoring_job_stages current
+        WHERE job_id=$1
+          AND generation=(SELECT max(candidate.generation) FROM authoring_job_stages candidate WHERE candidate.job_id=current.job_id AND candidate.stage_key=current.stage_key)
+          AND stage_key LIKE 'source:%'
+        ORDER BY stage_key,generation`,
+      [jobId]
+    )
+  ]);
+  return { job: job.rows[0], stages: stages.rows };
+}
+
+/** Observes the durable retry schedule; it never changes a stage timestamp. */
+async function waitForStageDue(pool: DatabasePool, jobId: string, stageId: string, timeoutMs = 5_000): Promise<void> {
+  const observations: Array<Record<string, unknown>> = [];
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const result = await pool.query<{ status: string; generation: number; due: boolean; observedAt: string; nextAttemptAt: string; secondsUntilDue: string }>(
+      `SELECT status,generation,next_attempt_at <= clock_timestamp() AS due,clock_timestamp() AS "observedAt",next_attempt_at AS "nextAttemptAt",
+              EXTRACT(epoch FROM (next_attempt_at-clock_timestamp())) AS "secondsUntilDue"
+         FROM authoring_job_stages WHERE job_id=$1 AND id=$2`,
+      [jobId, stageId]
+    );
+    const row = result.rows[0];
+    if (!row) throw new Error(`Retried source stage ${stageId} disappeared before it became due.`);
+    observations.push(row);
+    if (row.due) return;
+    if (Date.now() >= deadline) throw new Error(`Retried source stage ${stageId} did not become due within ${timeoutMs}ms: ${JSON.stringify(observations)}`);
+    await new Promise<void>((resolveWait) => setTimeout(resolveWait, 25));
+  }
+}
+
+/** Retry only after the worker itself observed a due-gated no-claim with no provider work. */
+async function runDueSourceRetry(input: Readonly<{
+  pool: DatabasePool; jobId: string; stageId: string; stageKey: string; generation: number;
+  providerCalls(): number;
+}>): Promise<WorkerProcessResult> {
+  await waitForStageDue(input.pool, input.jobId, input.stageId);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const before = input.providerCalls();
+    const result = await runSourceWorker(16);
+    if (result.completed > 0) return result;
+    expect(result).toEqual(expect.objectContaining({ completed: 0, runs: [false], outcomes: [expect.objectContaining({
+      outcome: "no_claim", claimCandidates: expect.arrayContaining([
+        expect.objectContaining({ jobId: input.jobId, stageKey: input.stageKey, generation: input.generation, stageStatus: "queued", due: false, leaseLive: null })
+      ])
+    })] }));
+    expect(input.providerCalls()).toBe(before);
+    await waitForStageDue(input.pool, input.jobId, input.stageId);
+  }
+  throw new Error(`Retried source stage ${input.stageId} remained due-gated after three worker attempts.`);
+}
+
 integration("durable story-source authoring", () => {
   let pool: DatabasePool;
   let ownerUserId: string;
@@ -76,13 +173,18 @@ integration("durable story-source authoring", () => {
   let outputLimitedResponses = 0;
   let rejectProviderRequests = false;
   let sourceWorldFixture = false;
+  let quoteOnlyExtractionFixture = false;
   let sourceWorldExpansionFixture = false;
+  let sourceWorldAgeExpansionFixture = false;
   let sourceWorldUnknownExpansionFixture = false;
   let sourceWorldAcceptedFactIds: string[][] = [];
+  let sourceWorldResponseCount = 0;
+  let failSourceWorldOnResponse: number | undefined;
   const jobs: string[] = [];
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 4);
+    workerDiagnosticPool = pool;
     await migrateDatabase(pool, resolve("database/migrations"));
     ownerUserId = await initialOwnerId(pool);
     provider = createServer((request, response) => {
@@ -109,12 +211,16 @@ integration("durable story-source authoring", () => {
             sourceText?: string;
           } : {};
           if (Array.isArray(frame.acceptedFacts)) {
+            sourceWorldResponseCount += 1;
             sourceWorldAcceptedFactIds.push(frame.acceptedFacts.map((fact) => fact.id));
             const selected = frame.selectedCharacterFactIds?.[0];
             const fact = frame.acceptedFacts.find((candidate) => candidate.id === selected);
             const reviewedExpansion = frame.acceptedFacts.find((candidate) => candidate.provenance === "invented" && candidate.predicate === "rule");
+            const reviewedAgeExpansion = frame.acceptedFacts.find((candidate) => candidate.provenance === "invented" && candidate.predicate === "age");
             const support = frame.acceptedFacts[0];
-            content = JSON.stringify(sourceWorldUnknownExpansionFixture && support
+            content = JSON.stringify(failSourceWorldOnResponse === sourceWorldResponseCount
+              ? { fields: [{ path: "world.rules", value: 7, supportingFactIds: [] }], characterFields: [] }
+              : sourceWorldUnknownExpansionFixture && support
               ? { fields: [], characterFields: [], expansionCandidates: [{ target: "world", path: "world.backgroundStory", value: "An unsupported candidate", supportingFactIds: [support.id] }] }
               : sourceWorldExpansionFixture && support && !reviewedExpansion
               ? {
@@ -124,6 +230,10 @@ integration("durable story-source authoring", () => {
                     ...(selected ? [{ target: selected, path: "profile.appearance.hair", value: "black hair", supportingFactIds: [support.id] }] : [])
                   ]
                 }
+              : sourceWorldAgeExpansionFixture && selected && support && !reviewedAgeExpansion
+                ? { fields: [], characterFields: [], expansionCandidates: [{ target: selected, path: "profile.appearance.apparentAge", value: "thirty", supportingFactIds: [support.id] }] }
+              : reviewedAgeExpansion && selected
+                ? { fields: [], characterFields: [{ selectedCharacterFactId: selected, fields: [{ path: "profile.appearance.apparentAge", value: reviewedAgeExpansion.value, supportingFactIds: [reviewedAgeExpansion.id] }] }] }
               : reviewedExpansion
                 ? { fields: [{ path: "world.rules", value: reviewedExpansion.value, supportingFactIds: [reviewedExpansion.id] }], characterFields: [] }
                 : selected && fact
@@ -133,7 +243,9 @@ integration("durable story-source authoring", () => {
             const span = frame.chunk.paragraphSpans[0]!;
             content = JSON.stringify({ facts: [{
               category: "character", subject: "Iris", predicate: "clothing", value: "blue coat", provenance: "stated",
-              citations: [{ paragraphId: span.paragraphId, start: span.start, end: span.end, quote: frame.sourceText }]
+              citations: [quoteOnlyExtractionFixture
+                ? { paragraphId: span.paragraphId, quote: frame.sourceText }
+                : { paragraphId: span.paragraphId, start: span.start, end: span.end, quote: frame.sourceText }]
             }] });
           }
         }
@@ -145,9 +257,65 @@ integration("durable story-source authoring", () => {
     const address = provider.address();
     if (!address || typeof address === "string") throw new Error("Source provider did not bind.");
     providerPort = address.port;
+    providerCallCount = () => providerCalls;
   });
-  afterEach(async () => { if (jobs.length) await pool.query("DELETE FROM authoring_jobs WHERE id = ANY($1::uuid[])", [jobs.splice(0)]); });
-  afterAll(async () => { await pool?.end(); if (provider) await new Promise<void>((done) => provider.close(() => done())); });
+
+  it("claims a never-attempted source stage when an initial due timestamp appears ahead after a clock rollback", async () => {
+    const repository = createPostgresAuthoringRepository(pool);
+    const submitted = await repository.submit({ ownerUserId }, {
+      kind: "story_source", idempotencyKey: randomUUID(), target: { kind: "new_world" }, name: "clock-rollback.txt",
+      text: "Mara tends the beacon.", mode: "faithful", boundaryParagraphId: "paragraph:0", instructions: "P3.9 initial claim clock rollback fixture."
+    }, sha256("Mara tends the beacon."));
+    jobs.push(submitted.id);
+    await pool.query("UPDATE authoring_job_stages SET next_attempt_at=clock_timestamp()+interval '60 seconds' WHERE job_id=$1 AND stage_key='source:plan' AND attempt_count=0", [submitted.id]);
+    await expect(repository.claim("p3-9-clock-rollback", 30, ["story_source"])).resolves.toMatchObject({ jobId: submitted.id });
+  });
+
+  it("keeps an explicit retry generation blocked until its scheduled due time", async () => {
+    const repository = createPostgresAuthoringRepository(pool);
+    const submitted = await repository.submit({ ownerUserId }, {
+      kind: "story_source", idempotencyKey: randomUUID(), target: { kind: "new_world" }, name: "retry-schedule.txt",
+      text: "Mara tends the beacon.", mode: "faithful", boundaryParagraphId: "paragraph:0", instructions: "P3.9 retry schedule fixture."
+    }, sha256("Mara tends the beacon."));
+    jobs.push(submitted.id);
+    await pool.query("UPDATE authoring_job_stages SET retry_count=1,next_attempt_at=clock_timestamp()+interval '60 seconds' WHERE job_id=$1 AND stage_key='source:plan' AND attempt_count=0", [submitted.id]);
+    await expect(repository.claim("p3-9-retry-schedule", 30, ["story_source"])).resolves.toBeNull();
+  });
+
+  it("keeps an already-attempted queued stage blocked until its scheduled due time", async () => {
+    const repository = createPostgresAuthoringRepository(pool);
+    const submitted = await repository.submit({ ownerUserId }, {
+      kind: "story_source", idempotencyKey: randomUUID(), target: { kind: "new_world" }, name: "attempted-schedule.txt",
+      text: "Mara tends the beacon.", mode: "faithful", boundaryParagraphId: "paragraph:0", instructions: "P3.9 attempted schedule fixture."
+    }, sha256("Mara tends the beacon."));
+    jobs.push(submitted.id);
+    await pool.query("UPDATE authoring_job_stages SET attempt_count=1,retry_count=0,next_attempt_at=clock_timestamp()+interval '60 seconds' WHERE job_id=$1 AND stage_key='source:plan'", [submitted.id]);
+    await expect(repository.claim("p3-9-attempted-schedule", 30, ["story_source"])).resolves.toBeNull();
+  });
+
+  it("claims an explicit retry generation once its scheduled due time has passed", async () => {
+    const repository = createPostgresAuthoringRepository(pool);
+    const submitted = await repository.submit({ ownerUserId }, {
+      kind: "story_source", idempotencyKey: randomUUID(), target: { kind: "new_world" }, name: "retry-due.txt",
+      text: "Mara tends the beacon.", mode: "faithful", boundaryParagraphId: "paragraph:0", instructions: "P3.9 retry due fixture."
+    }, sha256("Mara tends the beacon."));
+    jobs.push(submitted.id);
+    await pool.query("UPDATE authoring_job_stages SET retry_count=1,next_attempt_at=clock_timestamp()-interval '1 second' WHERE job_id=$1 AND stage_key='source:plan' AND attempt_count=0", [submitted.id]);
+    await expect(repository.claim("p3-9-retry-due", 30, ["story_source"])).resolves.toMatchObject({ jobId: submitted.id });
+  });
+  afterEach(async () => {
+    sourceWorldResponseCount = 0;
+    failSourceWorldOnResponse = undefined;
+    sourceWorldAgeExpansionFixture = false;
+    quoteOnlyExtractionFixture = false;
+    if (jobs.length) await pool.query("DELETE FROM authoring_jobs WHERE id = ANY($1::uuid[])", [jobs.splice(0)]);
+  });
+  afterAll(async () => {
+    workerDiagnosticPool = undefined;
+    providerCallCount = () => 0;
+    await pool?.end();
+    if (provider) await new Promise<void>((done) => provider.close(() => done()));
+  });
 
   it("persists normalized source once, checkpoints independent chunks, and requires explicit review before synthesis", async () => {
     const repository = createPostgresAuthoringRepository(pool);
@@ -163,7 +331,7 @@ integration("durable story-source authoring", () => {
     const chunks = planSourceChunks({ source, boundaryParagraphId: "paragraph:1", systemPrompt: "source", instructions: "Preserve uncertainty.", budget: { contextWindowTokens: 100_000, maxOutputTokens: 100, countTokens: value => Buffer.byteLength(value, "utf8") } });
     const plan = await repository.claim("source-plan", 60);
     expect(plan?.stageId).toBe(submitted.stages[0]?.id);
-    await expect(repository.initializeExecutionSnapshot(plan!, { providerProfileId: randomUUID(), model: "synthetic", configurationHash: "a".repeat(64), contextWindowTokens: 100_000, maxOutputTokens: 100, requestTimeoutMs: 10_000, prompts: {}, protocols: { source: "source-extraction-v1" } })).resolves.toBeTruthy();
+    await expect(repository.initializeExecutionSnapshot(plan!, { providerProfileId: randomUUID(), model: "synthetic", configurationHash: "a".repeat(64), contextWindowTokens: 100_000, maxOutputTokens: 100, requestTimeoutMs: 10_000, prompts: {}, protocols: { source: SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION } })).resolves.toBeTruthy();
     await expect(repository.checkpoint(plan!, { kind: "source_plan", chunks })).resolves.toBe(true);
 
     const fact = (chunk: typeof chunks[number]): SourceFact => ({ id: `fact:${chunk.id}`, kind: "character", subject: "Iris", predicate: "visits", value: chunk.id, provenance: "stated", citations: [{ sourceId: source.id, paragraphId: chunk.spans[0]!.paragraphId, start: chunk.spans[0]!.start, end: chunk.spans[0]!.end, quote: Array.from(source.text).slice(chunk.spans[0]!.start, chunk.spans[0]!.end).join("") }] });
@@ -207,7 +375,7 @@ integration("durable story-source authoring", () => {
     const otherSource = normalizeSourceDocument("other.txt", "Mara watched the tide.", other.id);
     const otherChunks = planSourceChunks({ source: otherSource, boundaryParagraphId: "paragraph:0", systemPrompt: "source", instructions: "Preserve evidence.", budget: { contextWindowTokens: 100_000, maxOutputTokens: 100, countTokens: value => Buffer.byteLength(value, "utf8") } });
     const otherPlanClaim = await repository.claim("foreign-plan", 60);
-    await repository.initializeExecutionSnapshot(otherPlanClaim!, { providerProfileId: randomUUID(), model: "synthetic", configurationHash: "b".repeat(64), contextWindowTokens: 100_000, maxOutputTokens: 100, requestTimeoutMs: 10_000, prompts: {}, protocols: { source: "source-extraction-v1" } });
+    await repository.initializeExecutionSnapshot(otherPlanClaim!, { providerProfileId: randomUUID(), model: "synthetic", configurationHash: "b".repeat(64), contextWindowTokens: 100_000, maxOutputTokens: 100, requestTimeoutMs: 10_000, prompts: {}, protocols: { source: SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION } });
     await repository.checkpoint(otherPlanClaim!, { kind: "source_plan", chunks: otherChunks });
     const otherChunkClaim = await repository.claim("foreign-chunk", 60);
     const otherChunk = otherChunks[0]!;
@@ -277,7 +445,7 @@ integration("durable story-source authoring", () => {
     const source = normalizeSourceDocument("fence.txt", text, submitted.id);
     const chunks = planSourceChunks({ source, boundaryParagraphId: "paragraph:0", systemPrompt: "source", instructions: "Preserve exact evidence.", budget: { contextWindowTokens: 100_000, maxOutputTokens: 100, countTokens: value => Buffer.byteLength(value, "utf8") } });
     const planClaim = await repository.claim("source-synthesis-fence-plan", 60);
-    await repository.initializeExecutionSnapshot(planClaim!, { providerProfileId: randomUUID(), model: "synthetic", configurationHash: "d".repeat(64), contextWindowTokens: 100_000, maxOutputTokens: 100, requestTimeoutMs: 10_000, prompts: {}, protocols: { source: "source-extraction-v1" } });
+    await repository.initializeExecutionSnapshot(planClaim!, { providerProfileId: randomUUID(), model: "synthetic", configurationHash: "d".repeat(64), contextWindowTokens: 100_000, maxOutputTokens: 100, requestTimeoutMs: 10_000, prompts: {}, protocols: { source: SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION } });
     await repository.checkpoint(planClaim!, { kind: "source_plan", chunks });
     const chunk = chunks[0]!;
     const chunkClaim = await repository.claim("source-synthesis-fence-chunk", 60);
@@ -308,6 +476,237 @@ integration("durable story-source authoring", () => {
     expect(replacement.stages).toEqual(expect.arrayContaining([expect.objectContaining({ key: "source:synthesis", generation: 2, status: "queued" })]));
   });
 
+  it("keeps queued and running source-character work claimable through public draft saves while fact review still replaces it", async () => {
+    const repository = createPostgresAuthoringRepository(pool);
+    const text = "Iris wears a blue coat.";
+    const submitted = await repository.submit({ ownerUserId }, {
+      kind: "story_source", idempotencyKey: randomUUID(), target: { kind: "new_world" }, name: "draft-save-fence.txt", text,
+      mode: "faithful", boundaryParagraphId: "paragraph:0", instructions: "Keep reviewed source facts stable across draft saves."
+    }, sha256(text));
+    jobs.push(submitted.id);
+    const source = normalizeSourceDocument("draft-save-fence.txt", text, submitted.id);
+    const chunks = planSourceChunks({ source, boundaryParagraphId: "paragraph:0", systemPrompt: "source", instructions: "Keep reviewed source facts stable across draft saves.", budget: { contextWindowTokens: 100_000, maxOutputTokens: 100, countTokens: value => Buffer.byteLength(value, "utf8") } });
+    const planClaim = await repository.claim("source-draft-save-plan", 60);
+    await repository.initializeExecutionSnapshot(planClaim!, { providerProfileId: randomUUID(), model: "synthetic", configurationHash: "e".repeat(64), contextWindowTokens: 100_000, maxOutputTokens: 100, requestTimeoutMs: 10_000, prompts: {}, protocols: { source: SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION } });
+    await repository.checkpoint(planClaim!, { kind: "source_plan", chunks });
+    const extractionClaim = await repository.claim("source-draft-save-extraction", 60);
+    await repository.checkpoint(extractionClaim!, { kind: "source_extraction", facts: [{
+      id: "iris-coat", kind: "character", subject: "Iris", predicate: "clothing", value: "blue coat", provenance: "stated",
+      citations: [{ sourceId: source.id, paragraphId: chunks[0]!.spans[0]!.paragraphId, start: chunks[0]!.spans[0]!.start, end: chunks[0]!.spans[0]!.end, quote: text }]
+    }] });
+    const extracted = await repository.read({ ownerUserId }, submitted.id);
+    if (extracted?.kind !== "story_source") throw new Error("Expected source draft-save extraction.");
+    const factId = extracted.source!.facts[0]!.id;
+    const factReview = await repository.reviewSourceFacts!({ ownerUserId }, submitted.id, {
+      expectedRevision: extracted.revision, acceptedFactIds: [factId], rejectedFactIds: [], uncertainFactIds: [], selectedCharacterFactIds: [factId],
+      characterIdentityGroups: [{ representativeFactId: factId, factIds: [factId] }], manualFacts: []
+    });
+    await repository.startSourceSynthesis!({ ownerUserId }, submitted.id, factReview.revision);
+    const synthesisClaim = await repository.claim("source-draft-save-synthesis", 60);
+    await repository.checkpoint(synthesisClaim!, { kind: "source_world", proposal: { schemaVersion: 5, world: { title: "draft-save-fence.txt", genre: "", tone: "", premise: "", backgroundStory: "", firstAction: "", rules: "" }, playableCharacters: [], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [], defaults: {} } });
+    const queued = await repository.read({ ownerUserId }, submitted.id);
+    if (queued?.kind !== "story_source" || !queued.result) throw new Error("Expected queued source-character draft result.");
+    const synthesisStageId = queued.stages.find((stage) => stage.key === "source:synthesis")?.id;
+    if (!synthesisStageId) throw new Error("Expected source synthesis stage.");
+    const beforeDraftSaves = await pool.query<{ review_generation: number }>("SELECT review_generation FROM authoring_jobs WHERE id=$1", [submitted.id]);
+    const api = await startSourceApi(ownerUserId);
+    try {
+      const saveQueued = await fetch(`${api.url}/api/v1/authoring/jobs/${submitted.id}/review`, {
+        method: "PUT", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ expectedRevision: queued.revision, content: queued.result, selectedStageIds: [synthesisStageId] })
+      });
+      expect(saveQueued.status).toBe(200);
+      const queuedSaved = await saveQueued.json() as { revision: number; stages: Array<{ key: string; status: string }> };
+      expect(queuedSaved.stages).toEqual(expect.arrayContaining([expect.objectContaining({ key: `source:character:${factId}`, status: "queued" })]));
+      await expect(pool.query<{ review_generation: number }>("SELECT review_generation FROM authoring_jobs WHERE id=$1", [submitted.id]))
+        .resolves.toEqual(beforeDraftSaves);
+
+      const characterClaim = await repository.claim("source-draft-save-character", 60);
+      expect(characterClaim).toMatchObject({ jobId: submitted.id });
+      const saveRunning = await fetch(`${api.url}/api/v1/authoring/jobs/${submitted.id}/review`, {
+        method: "PUT", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ expectedRevision: queuedSaved.revision, content: queued.result, selectedStageIds: [synthesisStageId] })
+      });
+      expect(saveRunning.status).toBe(200);
+      await expect(repository.checkpoint(characterClaim!, { kind: "source_world", proposal: {
+        schemaVersion: 5, world: { title: "draft-save-fence.txt", genre: "", tone: "", premise: "", backgroundStory: "", firstAction: "", rules: "" },
+        playableCharacters: [{ id: `source-character:${factId}`, name: "Iris", characterText: "", profile: { appearance: { clothing: "blue coat" } }, rpgStats: [], defaultTriggers: [], source: { type: "story-source", representativeFactId: factId } }],
+        entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [], defaults: {}
+      } })).resolves.toBe(true);
+    } finally {
+      await api.close();
+    }
+    const completed = await repository.read({ ownerUserId }, submitted.id);
+    expect(completed).toMatchObject({ status: "awaiting_review", stages: expect.arrayContaining([expect.objectContaining({ key: `source:character:${factId}`, status: "validated" })]) });
+
+    const changedFacts = await repository.reviewSourceFacts!({ ownerUserId }, submitted.id, {
+      expectedRevision: completed!.revision, acceptedFactIds: [factId], rejectedFactIds: [], uncertainFactIds: [], selectedCharacterFactIds: [],
+      characterIdentityGroups: [{ representativeFactId: factId, factIds: [factId] }], manualFacts: []
+    });
+    expect(changedFacts.stages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: "source:synthesis", status: "cancelled" }),
+      expect.objectContaining({ key: `source:character:${factId}`, status: "cancelled" })
+    ]));
+  });
+
+  it("requires explicit rereview after a public extraction retry replaces fact IDs", async () => {
+    const repository = createPostgresAuthoringRepository(pool);
+    const text = "Iris wears a blue coat.";
+    const submitted = await repository.submit({ ownerUserId }, {
+      kind: "story_source", idempotencyKey: randomUUID(), target: { kind: "new_world" }, name: "retry-rereview.txt", text,
+      mode: "faithful", boundaryParagraphId: "paragraph:0", instructions: "Do not remap reviewed fact identities."
+    }, sha256(text));
+    jobs.push(submitted.id);
+    const source = normalizeSourceDocument("retry-rereview.txt", text, submitted.id);
+    const chunks = planSourceChunks({ source, boundaryParagraphId: "paragraph:0", systemPrompt: "source", instructions: "Do not remap reviewed fact identities.", budget: { contextWindowTokens: 100_000, maxOutputTokens: 100, countTokens: value => Buffer.byteLength(value, "utf8") } });
+    const plan = await repository.claim("retry-rereview-plan", 60);
+    await repository.initializeExecutionSnapshot(plan!, { providerProfileId: randomUUID(), model: "synthetic", configurationHash: "f".repeat(64), contextWindowTokens: 100_000, maxOutputTokens: 100, requestTimeoutMs: 10_000, prompts: {}, protocols: { source: SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION } });
+    await repository.checkpoint(plan!, { kind: "source_plan", chunks });
+    const extraction = await repository.claim("retry-rereview-extraction", 60);
+    await repository.checkpoint(extraction!, { kind: "source_extraction", facts: [{
+      id: "iris-coat", kind: "character", subject: "Iris", predicate: "clothing", value: "blue coat", provenance: "stated",
+      citations: [{ sourceId: source.id, paragraphId: chunks[0]!.spans[0]!.paragraphId, start: chunks[0]!.spans[0]!.start, end: chunks[0]!.spans[0]!.end, quote: text }]
+    }] });
+    const extracted = await repository.read({ ownerUserId }, submitted.id);
+    if (extracted?.kind !== "story_source") throw new Error("Expected retry-rereview extraction.");
+    const factId = extracted.source!.facts[0]!.id;
+    const reviewed = await repository.reviewSourceFacts!({ ownerUserId }, submitted.id, {
+      expectedRevision: extracted.revision, acceptedFactIds: [factId, "manual:harbor"], rejectedFactIds: [], uncertainFactIds: [], selectedCharacterFactIds: [factId],
+      characterIdentityGroups: [{ representativeFactId: factId, factIds: [factId] }],
+      manualFacts: [{ id: "manual:harbor", kind: "rule", subject: "Harbor", predicate: "rule", value: "keeps the beacon lit", provenance: "manual", citations: [] }]
+    });
+    if (reviewed.kind !== "story_source" || !reviewed.source) throw new Error("Expected reviewed retry-rereview source job.");
+    const manualId = reviewed.source!.facts.find((fact) => fact.provenance === "manual")!.id;
+    await repository.startSourceSynthesis!({ ownerUserId }, submitted.id, reviewed.revision);
+    const synthesis = await repository.claim("retry-rereview-synthesis", 60);
+    await repository.checkpoint(synthesis!, { kind: "source_world", proposal: { schemaVersion: 5, world: { title: "retry-rereview.txt", genre: "", tone: "", premise: "", backgroundStory: "", firstAction: "", rules: "" }, playableCharacters: [], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [], defaults: {} } });
+    const character = await repository.claim("retry-rereview-character", 60);
+    await repository.checkpoint(character!, { kind: "source_world", proposal: { schemaVersion: 5, world: { title: "retry-rereview.txt", genre: "", tone: "", premise: "", backgroundStory: "", firstAction: "", rules: "" }, playableCharacters: [], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [], defaults: {} } });
+    const complete = await repository.read({ ownerUserId }, submitted.id);
+    if (complete?.kind !== "story_source") throw new Error("Expected completed retry-rereview source job.");
+    const leaf = complete.stages.find((stage) => stage.key === `source:chunk:${chunks[0]!.id}`);
+    if (!leaf) throw new Error("Expected validated extraction leaf.");
+    const api = await startSourceApi(ownerUserId);
+    try {
+      const retry = await fetch(`${api.url}/api/v1/authoring/jobs/${submitted.id}/retry`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: complete.revision, stageId: leaf.id })
+      });
+      expect(retry.status).toBe(200);
+      const retryQueued = await retry.json() as { revision: number };
+      const replacement = await repository.claim("retry-rereview-replacement", 60);
+      await repository.checkpoint(replacement!, { kind: "source_extraction", facts: [{
+        id: "iris-coat", kind: "character", subject: "Iris", predicate: "clothing", value: "blue coat", provenance: "stated",
+        citations: [{ sourceId: source.id, paragraphId: chunks[0]!.spans[0]!.paragraphId, start: chunks[0]!.spans[0]!.start, end: chunks[0]!.spans[0]!.end, quote: text }]
+      }] });
+      const refreshed = await repository.read({ ownerUserId }, submitted.id);
+      if (refreshed?.kind !== "story_source") throw new Error("Expected refreshed retry-rereview source job.");
+      const replacementFactId = refreshed.source!.facts.find((fact) => fact.provenance === "stated")!.id;
+      expect(replacementFactId).not.toBe(factId);
+      expect(refreshed.source).toMatchObject({ acceptedFactIds: [manualId], selectedCharacterFactIds: [], characterIdentityGroups: [] });
+      expect(refreshed.source?.facts).toEqual(expect.arrayContaining([expect.objectContaining({ id: manualId, provenance: "manual" })]));
+      expect(refreshed.stages).toEqual(expect.arrayContaining([
+        expect.objectContaining({ key: "source:synthesis", status: "cancelled" }),
+        expect.objectContaining({ key: `source:character:${factId}`, status: "cancelled" })
+      ]));
+      const synthesisRetry = await fetch(`${api.url}/api/v1/authoring/source-jobs/${submitted.id}/synthesis`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: refreshed.revision })
+      });
+      expect(synthesisRetry.status).toBe(409);
+      expect(retryQueued.revision).toBeLessThanOrEqual(refreshed.revision);
+      const rereview = await fetch(`${api.url}/api/v1/authoring/source-jobs/${submitted.id}/facts`, {
+        method: "PUT", headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          expectedRevision: refreshed.revision, acceptedFactIds: [replacementFactId, manualId], rejectedFactIds: [], uncertainFactIds: [], selectedCharacterFactIds: [replacementFactId],
+          characterIdentityGroups: [{ representativeFactId: replacementFactId, factIds: [replacementFactId] }], manualFacts: []
+        })
+      });
+      expect(rereview.status).toBe(200);
+      const rereviewed = await rereview.json() as { revision: number; source: { acceptedFactIds: string[]; selectedCharacterFactIds: string[] } };
+      expect(rereviewed.source).toMatchObject({ acceptedFactIds: [replacementFactId, manualId], selectedCharacterFactIds: [replacementFactId] });
+      const resumed = await fetch(`${api.url}/api/v1/authoring/source-jobs/${submitted.id}/synthesis`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: rereviewed.revision })
+      });
+      expect(resumed.status).toBe(200);
+      const resumedClaim = await repository.claim("retry-rereview-resumed-synthesis", 60);
+      await repository.checkpoint(resumedClaim!, { kind: "source_world", proposal: { schemaVersion: 5, world: { title: "retry-rereview.txt", genre: "", tone: "", premise: "", backgroundStory: "", firstAction: "", rules: "" }, playableCharacters: [], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [], defaults: {} } });
+      const resumedCharacter = await repository.claim("retry-rereview-resumed-character", 60);
+      await repository.checkpoint(resumedCharacter!, { kind: "source_world", proposal: { schemaVersion: 5, world: { title: "retry-rereview.txt", genre: "", tone: "", premise: "", backgroundStory: "", firstAction: "", rules: "" }, playableCharacters: [], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [], defaults: {} } });
+      await expect(repository.read({ ownerUserId }, submitted.id)).resolves.toMatchObject({ status: "awaiting_review", source: { acceptedFactIds: [replacementFactId, manualId] } });
+    } finally {
+      await api.close();
+    }
+  });
+
+  it("does not queue synthesis when a retried leaf leaves a mixed identity group incomplete", async () => {
+    const repository = createPostgresAuthoringRepository(pool);
+    const paragraphs = [0, 1, 2].map((index) => `Iris ${index} keeps the harbor watch. `.repeat(48));
+    const text = paragraphs.join("\n\n");
+    const submitted = await repository.submit({ ownerUserId }, {
+      kind: "story_source", idempotencyKey: randomUUID(), target: { kind: "new_world" }, name: "mixed-identity-retry.txt", text,
+      mode: "faithful", boundaryParagraphId: "paragraph:2", instructions: "Keep explicit character identities separate."
+    }, sha256(text));
+    jobs.push(submitted.id);
+    const source = normalizeSourceDocument("mixed-identity-retry.txt", text, submitted.id);
+    const chunks = planSourceChunks({
+      source, boundaryParagraphId: "paragraph:2", systemPrompt: "source", instructions: "Keep explicit character identities separate.",
+      budget: { contextWindowTokens: 2_000, maxOutputTokens: 100, countTokens: value => Buffer.byteLength(value, "utf8") }
+    });
+    expect(chunks.length).toBeGreaterThanOrEqual(3);
+    const plan = await repository.claim("mixed-identity-retry-plan", 60);
+    await repository.initializeExecutionSnapshot(plan!, { providerProfileId: randomUUID(), model: "synthetic", configurationHash: "f".repeat(64), contextWindowTokens: 2_000, maxOutputTokens: 100, requestTimeoutMs: 10_000, prompts: {}, protocols: { source: SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION } });
+    await repository.checkpoint(plan!, { kind: "source_plan", chunks });
+    for (const [index, chunk] of chunks.entries()) {
+      const claim = await repository.claim(`mixed-identity-retry-extraction-${index}`, 60);
+      const span = chunk.spans.at(-1)!;
+      const [predicate, value] = [["role", "harbor keeper"], ["clothing", "blue coat"], ["hair", "black hair"]][index % 3]!;
+      await repository.checkpoint(claim!, { kind: "source_extraction", facts: [{
+        id: `iris-watch-${index}`, kind: "character", subject: "Iris", predicate, value, provenance: "stated",
+        citations: [{ sourceId: source.id, paragraphId: span.paragraphId, start: span.start, end: span.end, quote: Array.from(text).slice(span.start, span.end).join("") }]
+      }] });
+    }
+    const extracted = await repository.read({ ownerUserId }, submitted.id);
+    if (extracted?.kind !== "story_source") throw new Error("Expected mixed-identity extraction.");
+    const facts = extracted.source!.facts.filter((fact) => fact.provenance === "stated");
+    expect(facts).toHaveLength(chunks.length);
+    const [retained, retried, selected] = facts;
+    if (!retained || !retried || !selected) throw new Error("Expected three source facts for mixed identity coverage.");
+    const reviewed = await repository.reviewSourceFacts!({ ownerUserId }, submitted.id, {
+      expectedRevision: extracted.revision, acceptedFactIds: [retained.id, retried.id, selected.id], rejectedFactIds: [], uncertainFactIds: [], selectedCharacterFactIds: [selected.id],
+      characterIdentityGroups: [
+        { representativeFactId: retained.id, factIds: [retained.id, retried.id] },
+        { representativeFactId: selected.id, factIds: [selected.id] }
+      ], manualFacts: []
+    });
+    const retriedStage = reviewed.stages.find((stage) => stage.key === `source:chunk:${chunks[1]!.id}`);
+    if (!retriedStage) throw new Error("Expected selected retried extraction stage.");
+    const api = await startSourceApi(ownerUserId);
+    try {
+      const retry = await fetch(`${api.url}/api/v1/authoring/jobs/${submitted.id}/retry`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: reviewed.revision, stageId: retriedStage.id })
+      });
+      expect(retry.status).toBe(200);
+      const replacementClaim = await repository.claim("mixed-identity-retry-replacement", 60);
+      const span = chunks[1]!.spans.at(-1)!;
+      await repository.checkpoint(replacementClaim!, { kind: "source_extraction", facts: [{
+        id: "iris-watch-replacement", kind: "character", subject: "Iris", predicate: "clothing", value: "replacement blue coat", provenance: "stated",
+        citations: [{ sourceId: source.id, paragraphId: span.paragraphId, start: span.start, end: span.end, quote: Array.from(text).slice(span.start, span.end).join("") }]
+      }] });
+      const refreshed = await repository.read({ ownerUserId }, submitted.id);
+      if (refreshed?.kind !== "story_source") throw new Error("Expected mixed-identity retry detail.");
+      expect(refreshed.source).toMatchObject({
+        acceptedFactIds: [retained.id, selected.id], selectedCharacterFactIds: [selected.id],
+        characterIdentityGroups: [{ representativeFactId: selected.id, factIds: [selected.id] }]
+      });
+      const synthesis = await fetch(`${api.url}/api/v1/authoring/source-jobs/${submitted.id}/synthesis`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: refreshed.revision })
+      });
+      expect(synthesis.status).toBe(409);
+      expect((await repository.read({ ownerUserId }, submitted.id))?.stages.some((stage) => stage.key === "source:synthesis" && stage.status !== "cancelled")).toBe(false);
+    } finally {
+      await api.close();
+    }
+  });
+
   it("runs bounded source-world overview and selected-character stages through the real worker", async () => {
     const profile = await createProvider(pool, {
       name: `P3 source world ${randomUUID()}`, providerType: "openai_compatible", providerRole: "text",
@@ -322,11 +721,12 @@ integration("durable story-source authoring", () => {
     }, sha256(text));
     jobs.push(submitted.id);
     sourceWorldFixture = true;
+    quoteOnlyExtractionFixture = true;
     try {
       expect(await runSourceWorker(16)).toEqual({ completed: 2, runs: [true, true, false] });
       const extracted = await repository.read({ ownerUserId }, submitted.id);
       if (extracted?.kind !== "story_source") throw new Error("Expected extracted source detail.");
-      expect(extracted.source).toMatchObject({ extractionComplete: true, facts: [expect.objectContaining({ subject: "Iris", predicate: "clothing", value: "blue coat" })] });
+      expect(extracted.source).toMatchObject({ extractionComplete: true, facts: [expect.objectContaining({ subject: "Iris", predicate: "clothing", value: "blue coat", citations: [expect.objectContaining({ paragraphId: "paragraph:0", start: 0, end: Array.from(text).length, quote: text })] })] });
       const factId = extracted.source?.facts[0]?.id;
       if (!factId) throw new Error("Source-world worker fixture did not produce a reviewed fact.");
       const reviewed = await repository.reviewSourceFacts!({ ownerUserId }, submitted.id, {
@@ -352,6 +752,65 @@ integration("durable story-source authoring", () => {
     } finally {
       sourceWorldFixture = false;
       await pool.query("DELETE FROM provider_profiles WHERE id = $1", [profile.id]);
+    }
+  });
+
+  it("retains completed extraction and synthesis while a character stage fails, then retries only that character in a restarted worker", async () => {
+    const profile = await createProvider(pool, {
+      name: `P3 character restart ${randomUUID()}`, providerType: "openai_compatible", providerRole: "text",
+      baseUrl: `http://127.0.0.1:${providerPort}/v1`, defaultModel: "source-test", contextWindowTokens: 8_192,
+      maxOutputTokens: 256, temperature: 0, enabled: true, isDefault: true, configuration: {}
+    }, credentialSecret);
+    const repository = createPostgresAuthoringRepository(pool);
+    const text = "Iris wears a blue coat.";
+    const submitted = await repository.submit({ ownerUserId }, {
+      kind: "story_source", idempotencyKey: randomUUID(), target: { kind: "new_world" }, name: "character-restart.txt", text,
+      mode: "faithful", boundaryParagraphId: "paragraph:0", instructions: "P3.9 character restart fixture."
+    }, sha256(text));
+    jobs.push(submitted.id);
+    sourceWorldFixture = true;
+    sourceWorldResponseCount = 0;
+    failSourceWorldOnResponse = 2;
+    try {
+      expect(await runSourceWorker(16)).toEqual({ completed: 2, runs: [true, true, false] });
+      const extracted = await repository.read({ ownerUserId }, submitted.id);
+      if (extracted?.kind !== "story_source") throw new Error("Expected extracted character restart source detail.");
+      const factId = extracted.source?.facts[0]?.id;
+      if (!factId) throw new Error("Character restart extraction omitted its selected fact.");
+      const reviewed = await repository.reviewSourceFacts!({ ownerUserId }, submitted.id, {
+        expectedRevision: extracted.revision, acceptedFactIds: [factId], rejectedFactIds: [], uncertainFactIds: [], selectedCharacterFactIds: [factId],
+        characterIdentityGroups: [{ representativeFactId: factId, factIds: [factId] }], manualFacts: []
+      });
+      await repository.startSourceSynthesis!({ ownerUserId }, submitted.id, reviewed.revision);
+      expect(await runSourceWorker(16)).toEqual({ completed: 1, runs: [true, false] });
+      const failed = await repository.read({ ownerUserId }, submitted.id);
+      if (failed?.kind !== "story_source") throw new Error("Expected failed character restart source detail.");
+      const synthesis = failed.stages.find((stage) => stage.key === "source:synthesis");
+      const character = failed.stages.find((stage) => stage.key === `source:character:${factId}`);
+      expect(synthesis).toMatchObject({ generation: 1, status: "validated", attemptCount: 1 });
+      expect(character).toMatchObject({ generation: 1, status: "recoverable", attemptCount: 1 });
+      if (!character) throw new Error("Expected one recoverable selected character stage.");
+      const retainedSynthesis = await pool.query<{ output: string }>("SELECT output::text AS output FROM authoring_job_stages WHERE job_id=$1 AND stage_key='source:synthesis' AND generation=1", [submitted.id]);
+      const retainedSynthesisHash = sha256(retainedSynthesis.rows[0]!.output);
+      const retried = await repository.retry({ ownerUserId }, submitted.id, character.id, failed.revision);
+      const replacement = retried.stages.filter((stage) => stage.key === character.key).sort((left, right) => left.generation - right.generation).at(-1);
+      expect(replacement).toMatchObject({ generation: 2, status: "queued", attemptCount: 0 });
+      expect(retried.stages.find((stage) => stage.key === "source:synthesis")).toMatchObject({ generation: 1, status: "validated" });
+      expect(await sourceEligibility(pool, submitted.id)).toMatchObject({
+        job: { status: "queued", expired: false },
+        stages: expect.arrayContaining([expect.objectContaining({ stage_key: character.key, generation: 2, status: "queued", lease_live: null })])
+      });
+      expect(await runDueSourceRetry({ pool, jobId: submitted.id, stageId: replacement!.id, stageKey: character.key, generation: 2, providerCalls: () => providerCalls })).toEqual({ completed: 1, runs: [true, false] });
+      const completed = await repository.read({ ownerUserId }, submitted.id);
+      expect(completed).toMatchObject({
+        status: "awaiting_review",
+        stages: expect.arrayContaining([expect.objectContaining({ key: "source:synthesis", generation: 1, status: "validated", attemptCount: 1 }), expect.objectContaining({ key: character.key, generation: 2, status: "validated", attemptCount: 1 })])
+      });
+      const afterRetrySynthesis = await pool.query<{ output: string }>("SELECT output::text AS output FROM authoring_job_stages WHERE job_id=$1 AND stage_key='source:synthesis' AND generation=1", [submitted.id]);
+      expect(sha256(afterRetrySynthesis.rows[0]!.output)).toBe(retainedSynthesisHash);
+    } finally {
+      sourceWorldFixture = false;
+      await pool.query("DELETE FROM provider_profiles WHERE id=$1", [profile.id]);
     }
   });
 
@@ -433,6 +892,58 @@ integration("durable story-source authoring", () => {
     }
   });
 
+  it("re-synthesizes an explicitly accepted apparent-age expansion as an age fact", async () => {
+    const profile = await createProvider(pool, {
+      name: `P3 age expansion ${randomUUID()}`, providerType: "openai_compatible", providerRole: "text",
+      baseUrl: `http://127.0.0.1:${providerPort}/v1`, defaultModel: "source-test", contextWindowTokens: 8_192,
+      maxOutputTokens: 256, temperature: 0, enabled: true, isDefault: true, configuration: {}
+    }, credentialSecret);
+    const repository = createPostgresAuthoringRepository(pool);
+    const text = "Iris wears a blue coat.";
+    const submitted = await repository.submit({ ownerUserId }, {
+      kind: "story_source", idempotencyKey: randomUUID(), target: { kind: "new_world" }, name: "age-expansion.txt", text,
+      mode: "expand", boundaryParagraphId: "paragraph:0", instructions: "Offer a separately reviewed apparent age."
+    }, sha256(text));
+    jobs.push(submitted.id);
+    sourceWorldFixture = true;
+    sourceWorldAgeExpansionFixture = true;
+    sourceWorldAcceptedFactIds = [];
+    try {
+      expect(await runSourceWorker(16)).toEqual({ completed: 2, runs: [true, true, false] });
+      const extracted = await repository.read({ ownerUserId }, submitted.id);
+      if (extracted?.kind !== "story_source") throw new Error("Expected age-expansion source detail.");
+      const stated = extracted.source?.facts[0];
+      if (!stated) throw new Error("Age expansion fixture omitted stated support.");
+      const firstReview = await repository.reviewSourceFacts!({ ownerUserId }, submitted.id, {
+        expectedRevision: extracted.revision, acceptedFactIds: [stated.id], rejectedFactIds: [], uncertainFactIds: [], selectedCharacterFactIds: [stated.id],
+        characterIdentityGroups: [{ representativeFactId: stated.id, factIds: [stated.id] }], manualFacts: []
+      });
+      await repository.startSourceSynthesis!({ ownerUserId }, submitted.id, firstReview.revision);
+      expect(await runSourceWorker(16)).toEqual({ completed: 2, runs: [true, true, false] });
+      const candidates = await repository.read({ ownerUserId }, submitted.id);
+      if (candidates?.kind !== "story_source") throw new Error("Expected age expansion candidate detail.");
+      const age = candidates.source?.expansionCandidates.find((fact) => fact.predicate === "age" && fact.value === "thirty");
+      expect(age).toMatchObject({ kind: "character", provenance: "invented", citations: [] });
+      if (!age) throw new Error("Expected projected apparent-age expansion.");
+      const reviewed = await repository.reviewSourceFacts!({ ownerUserId }, submitted.id, {
+        expectedRevision: candidates.revision, acceptedFactIds: [stated.id, age.id], rejectedFactIds: [], uncertainFactIds: [], selectedCharacterFactIds: [stated.id],
+        characterIdentityGroups: [{ representativeFactId: stated.id, factIds: [stated.id, age.id] }], manualFacts: []
+      });
+      await repository.startSourceSynthesis!({ ownerUserId }, submitted.id, reviewed.revision);
+      expect(await runSourceWorker(16)).toEqual({ completed: 2, runs: [true, true, false] });
+      const completed = await repository.read({ ownerUserId }, submitted.id);
+      expect(sourceWorldAcceptedFactIds.at(-1)).toEqual([stated.id, age.id]);
+      expect(completed).toMatchObject({
+        result: { playableCharacters: [expect.objectContaining({ profile: expect.objectContaining({ appearance: expect.objectContaining({ apparentAge: "thirty" }) }) })] },
+        source: { acceptedFactIds: [stated.id, age.id] }
+      });
+    } finally {
+      sourceWorldFixture = false;
+      sourceWorldAcceptedFactIds = [];
+      await pool.query("DELETE FROM provider_profiles WHERE id = $1", [profile.id]);
+    }
+  });
+
   it("rejects an unknown expansion path before it reaches review inventory or canon", async () => {
     const profile = await createProvider(pool, {
       name: `P3 unknown expansion ${randomUUID()}`, providerType: "openai_compatible", providerRole: "text",
@@ -487,7 +998,7 @@ integration("durable story-source authoring", () => {
     const chunks = planSourceChunks({ source, boundaryParagraphId: "paragraph:1", systemPrompt: "source", instructions: "Preserve exact source identities.", budget: { contextWindowTokens: 100_000, maxOutputTokens: 100, countTokens: value => Buffer.byteLength(value, "utf8") } });
     expect(chunks).toHaveLength(1);
     const planClaim = await repository.claim("identity-plan", 60);
-    await repository.initializeExecutionSnapshot(planClaim!, { providerProfileId: randomUUID(), model: "synthetic", configurationHash: "c".repeat(64), contextWindowTokens: 100_000, maxOutputTokens: 100, requestTimeoutMs: 10_000, prompts: {}, protocols: { source: "source-extraction-v1" } });
+    await repository.initializeExecutionSnapshot(planClaim!, { providerProfileId: randomUUID(), model: "synthetic", configurationHash: "c".repeat(64), contextWindowTokens: 100_000, maxOutputTokens: 100, requestTimeoutMs: 10_000, prompts: {}, protocols: { source: SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION } });
     await repository.checkpoint(planClaim!, { kind: "source_plan", chunks });
     const chunk = chunks[0]!;
     const claim = await repository.claim("identity-chunk", 60);
@@ -537,7 +1048,7 @@ integration("durable story-source authoring", () => {
     const chunks = planSourceChunks({ source, boundaryParagraphId: "paragraph:0", systemPrompt: "source", instructions: "Preserve exact source identities.", budget: { contextWindowTokens: 100_000, maxOutputTokens: 100, countTokens: value => Buffer.byteLength(value, "utf8") } });
     expect(chunks).toHaveLength(1);
     const planClaim = await repository.claim("manual-identity-plan", 60);
-    await repository.initializeExecutionSnapshot(planClaim!, { providerProfileId: randomUUID(), model: "synthetic", configurationHash: "d".repeat(64), contextWindowTokens: 100_000, maxOutputTokens: 100, requestTimeoutMs: 10_000, prompts: {}, protocols: { source: "source-extraction-v1" } });
+    await repository.initializeExecutionSnapshot(planClaim!, { providerProfileId: randomUUID(), model: "synthetic", configurationHash: "d".repeat(64), contextWindowTokens: 100_000, maxOutputTokens: 100, requestTimeoutMs: 10_000, prompts: {}, protocols: { source: SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION } });
     await repository.checkpoint(planClaim!, { kind: "source_plan", chunks });
     const chunk = chunks[0]!;
     const paragraph = source.paragraphs[0]!;
@@ -621,7 +1132,11 @@ integration("durable story-source authoring", () => {
       expect(firstRun).toEqual({ completed: 1, runs: [true] });
       const planned = await pool.query<{ stage_key: string }>("SELECT stage_key FROM authoring_job_stages WHERE job_id = $1 AND stage_key LIKE 'source:chunk:%' ORDER BY stage_key", [submitted.id]);
       expect(planned.rows.length).toBeGreaterThan(1);
-      expect(await runSourceWorker(1)).toEqual({ completed: 1, runs: [true] });
+      expect(await runSourceWorker(1, true)).toEqual(expect.objectContaining({
+        completed: 1,
+        runs: [true],
+        outcomes: [expect.objectContaining({ outcome: "checkpointed", jobId: submitted.id, stageId: expect.any(String), generation: 1 })]
+      }));
       const completed = await pool.query<{ stage_key: string; output: string }>("SELECT stage_key, output::text AS output FROM authoring_job_stages WHERE job_id = $1 AND stage_key LIKE 'source:chunk:%' AND status = 'validated'", [submitted.id]);
       expect(completed.rows).toHaveLength(1);
       const first = completed.rows[0]!;
@@ -712,18 +1227,47 @@ integration("durable story-source authoring", () => {
     }, sha256(text));
     jobs.push(submitted.id);
     try {
-      expect(await runSourceWorker(1)).toEqual({ completed: 1, runs: [true] });
+      const beforePlan = await sourceEligibility(pool, submitted.id);
+      expect(beforePlan).toMatchObject({
+        job: { status: "queued", expired: false },
+        stages: [expect.objectContaining({ stage_key: "source:plan", generation: 1, status: "queued", due: true, lease_live: null, parent_generations: {} })]
+      });
+      expect(await runSourceWorker(1, true)).toEqual(expect.objectContaining({
+        completed: 1,
+        runs: [true],
+        outcomes: [expect.objectContaining({ outcome: "checkpointed", jobId: submitted.id, stageId: expect.any(String), generation: 1 })]
+      }));
       outputLimitedResponses = 2;
-      expect(await runSourceWorker(1)).toEqual({ completed: 0, runs: [false] });
+      expect(await runSourceWorker(1, true)).toEqual(expect.objectContaining({
+        completed: 0,
+        runs: [false],
+        outcomes: [expect.objectContaining({ outcome: "claimed_then_null", jobId: submitted.id, stageId: expect.any(String), generation: 1 })]
+      }));
       const splitLeaves = await pool.query<{ stage_key: string; status: string }>("SELECT stage_key, status FROM authoring_job_stages WHERE job_id = $1 AND stage_key LIKE 'source:chunk:%' ORDER BY stage_key", [submitted.id]);
       expect(splitLeaves.rows.filter((stage) => stage.status === "cancelled")).toHaveLength(1);
       expect(splitLeaves.rows.filter((stage) => stage.status === "queued")).toHaveLength(2);
-      expect(await runSourceWorker(1)).toEqual({ completed: 1, runs: [true] });
+      const beforeResumedChild = await sourceEligibility(pool, submitted.id);
+      expect(beforeResumedChild).toMatchObject({
+        job: { status: "queued", expired: false },
+        stages: expect.arrayContaining([
+          expect.objectContaining({ stage_key: "source:plan", status: "validated", due: true }),
+          expect.objectContaining({ stage_key: expect.stringMatching(/^source:chunk:/u), status: "queued", due: true, lease_live: null, parent_generations: { "source:plan": 1 } })
+        ])
+      });
+      expect(await runSourceWorker(1, true)).toEqual(expect.objectContaining({
+        completed: 1,
+        runs: [true],
+        outcomes: [expect.objectContaining({ outcome: "checkpointed", jobId: submitted.id, stageId: expect.any(String), generation: 1 })]
+      }));
       const first = await pool.query<{ id: string; output: string }>("SELECT id, output::text AS output FROM authoring_job_stages WHERE job_id = $1 AND stage_key LIKE 'source:chunk:%' AND status = 'validated'", [submitted.id]);
       expect(first.rows).toHaveLength(1);
       const firstHash = sha256(first.rows[0]!.output);
       rejectProviderRequests = true;
-      expect(await runSourceWorker(1)).toEqual({ completed: 0, runs: [false] });
+      expect(await runSourceWorker(1, true)).toEqual(expect.objectContaining({
+        completed: 0,
+        runs: [false],
+        outcomes: [expect.objectContaining({ outcome: "failed", jobId: submitted.id, stageId: expect.any(String), generation: 1 })]
+      }));
       rejectProviderRequests = false;
       const incomplete = (await repository.read({ ownerUserId }, submitted.id))!;
       if (incomplete.kind !== "story_source") throw new Error("Expected source authoring detail.");
@@ -731,9 +1275,11 @@ integration("durable story-source authoring", () => {
       expect(incomplete.stages.some((stage) => stage.key === "source:synthesis")).toBe(false);
       const missing = incomplete.stages.find((stage) => stage.key.startsWith("source:chunk:") && stage.status === "failed");
       expect(missing).toBeDefined();
-      await repository.retry({ ownerUserId }, submitted.id, missing!.id, incomplete.revision);
+      const retried = await repository.retry({ ownerUserId }, submitted.id, missing!.id, incomplete.revision);
+      const replacement = retried.stages.filter((stage) => stage.key === missing!.key).sort((left, right) => left.generation - right.generation).at(-1);
+      if (!replacement) throw new Error("Missing source retry replacement stage.");
       const callsBeforeRetry = providerCalls;
-      expect(await runSourceWorker(16)).toEqual({ completed: 1, runs: [true, false] });
+      expect(await runDueSourceRetry({ pool, jobId: submitted.id, stageId: replacement.id, stageKey: missing!.key, generation: replacement.generation, providerCalls: () => providerCalls })).toEqual({ completed: 1, runs: [true, false] });
       const preserved = await pool.query<{ output: string }>("SELECT output::text AS output FROM authoring_job_stages WHERE id = $1", [first.rows[0]!.id]);
       expect(sha256(preserved.rows[0]!.output)).toBe(firstHash);
       expect(providerCalls - callsBeforeRetry).toBe(1);

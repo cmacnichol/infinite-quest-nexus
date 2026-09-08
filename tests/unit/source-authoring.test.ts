@@ -133,6 +133,37 @@ describe("source authoring provenance", () => {
     }))).toThrow(/field evidence/u);
   });
 
+  it("validates closed rule and apparent-age source evidence while rejecting stale predicates", () => {
+    const source = normalizeSourceDocument("chapter.txt", "Iris is thirty and the harbor closes after dusk.", "source:closed-mapping");
+    const paragraph = source.paragraphs[0]!;
+    const citation = { sourceId: source.id, paragraphId: paragraph.id, start: paragraph.start, end: paragraph.end, quote: source.text };
+    const rule = { id: "fact:rule", kind: "rule" as const, subject: "Harbor", predicate: "rule", value: "closes after dusk", provenance: "stated" as const, citations: [citation] };
+    const age = { id: "fact:age", kind: "character" as const, subject: "Iris", predicate: "age", value: "thirty", provenance: "stated" as const, citations: [citation] };
+    const material = buildWorldSourceMaterial({
+      source, boundaryParagraphId: paragraph.id, acceptedFacts: [rule, age],
+      fieldEvidence: [
+        { path: "world.rules", factIds: [rule.id] },
+        { path: "playableCharacters.source-character:fact:age.profile.appearance.apparentAge", factIds: [age.id] }
+      ],
+      characterIdentityGroups: [{ representativeFactId: age.id, factIds: [age.id] }]
+    });
+    const content = worldContentSchema.parse({
+      world: { title: "Closed mapping", rules: rule.value },
+      playableCharacters: [{ id: "source-character:fact:age", name: "Iris", characterText: "", profile: { appearance: { apparentAge: age.value } } }],
+      sourceMaterial: material
+    });
+
+    expect(validateWorldSourceMaterialForContent(content)).toBe(content);
+    expect(() => validateWorldSourceMaterialForContent(worldContentSchema.parse({
+      ...content,
+      sourceMaterial: { ...material, acceptedFacts: [{ ...rule, predicate: "rules" }, age] }
+    }))).toThrow(/field evidence/u);
+    expect(() => validateWorldSourceMaterialForContent(worldContentSchema.parse({
+      ...content,
+      sourceMaterial: { ...material, acceptedFacts: [rule, { ...age, predicate: "apparentAge" }] }
+    }))).toThrow(/field evidence/u);
+  });
+
   it("rejects a self-consistent hash and map over unnormalized retained text", () => {
     const text = "\uFEFFA\r\n\r\nBlue coat.";
     const source = {
@@ -275,11 +306,11 @@ describe("source authoring provenance", () => {
       kind: "story_source", source: detail, result, reviewedContent: result, reviewedStageIds: []
     });
     expect(() => authoringJobListItemSchema.parse({ ...job, source: detail })).toThrow();
-    expect(() => parseAuthoringCommandForJob({ kind: "story_source", target: { kind: "new_world" } }, "review", {
+    expect(parseAuthoringCommandForJob({ kind: "story_source", target: { kind: "new_world" } }, "review", {
       expectedRevision: 0,
       content: { schemaVersion: 5, world: { title: "World" } },
       selectedStageIds: []
-    })).toThrow(/dedicated review/u);
+    })).toMatchObject({ content: { world: { title: "World" } }, selectedStageIds: [] });
     expect(parseAuthoringCommandForJob({ kind: "story_source", target: { kind: "new_world" } }, "apply", {
       expectedRevision: 1,
       idempotencyKey: "source-apply-command",

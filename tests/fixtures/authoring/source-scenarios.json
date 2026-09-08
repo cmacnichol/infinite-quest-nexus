@@ -1,0 +1,185 @@
+{
+  "version": 1,
+  "scenarios": [
+    {
+      "id": "single-character",
+      "title": "Mara at East Gate",
+      "text": "Mara tends a lantern at East Gate.\n\nEast Gate closes at sunset.",
+      "boundaryParagraphId": "paragraph:1",
+      "accepted": [
+        {
+          "subject": "Mara",
+          "predicate": "tends",
+          "value": "a lantern",
+          "quote": "Mara tends a lantern at East Gate."
+        },
+        {
+          "subject": "East Gate",
+          "predicate": "closes",
+          "value": "at sunset",
+          "quote": "East Gate closes at sunset."
+        }
+      ],
+      "rejected": [],
+      "uncertain": [],
+      "roster": [
+        "Mara"
+      ],
+      "identityGroups": [
+        [
+          "Mara"
+        ]
+      ]
+    },
+    {
+      "id": "multi-chunk-restart",
+      "title": "Harbor Accord",
+      "text": "North Harbor sits beneath a stone beacon.\n\nHarbor archive entry 0 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 1 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 2 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 3 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 4 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 5 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 6 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 7 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 8 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 9 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 10 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 11 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 12 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 13 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 14 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 15 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 16 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 17 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 18 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 19 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 20 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 21 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 22 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 23 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 24 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 25 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 26 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 27 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 28 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 29 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 30 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 31 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 32 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 33 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 34 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 35 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 36 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 37 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 38 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 39 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 40 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 41 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 42 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 43 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 44 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 45 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 46 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 47 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 48 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 49 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 50 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 51 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 52 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 53 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 54 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 55 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 56 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 57 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 58 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 59 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 60 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 61 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 62 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 63 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 64 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 65 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 66 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 67 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 68 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 69 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 70 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 71 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 72 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 73 records an ordinary tide observation for the public ledger.\n\nHarbor archive entry 74 records an ordinary tide observation for the public ledger.\n\nThe Tide Guild keeps the beacon lit.\n\nNo vessel leaves after the bell.\n\nMara records every departure in the harbor ledger.",
+      "boundaryParagraphId": "paragraph:78",
+      "accepted": [
+        {
+          "subject": "North Harbor",
+          "predicate": "sits",
+          "value": "beneath a stone beacon",
+          "quote": "North Harbor sits beneath a stone beacon."
+        },
+        {
+          "subject": "Tide Guild",
+          "predicate": "keeps",
+          "value": "the beacon lit",
+          "quote": "The Tide Guild keeps the beacon lit."
+        },
+        {
+          "subject": "vessel",
+          "predicate": "leaves",
+          "value": "after the bell",
+          "quote": "No vessel leaves after the bell."
+        },
+        {
+          "subject": "Mara",
+          "predicate": "records",
+          "value": "every departure in the harbor ledger",
+          "quote": "Mara records every departure in the harbor ledger."
+        }
+      ],
+      "rejected": [],
+      "uncertain": [],
+      "roster": [
+        "Mara"
+      ],
+      "identityGroups": [
+        [
+          "Mara"
+        ]
+      ]
+    },
+    {
+      "id": "same-name-identities",
+      "title": "Two Irises",
+      "text": "Iris is the lighthouse keeper.\n\nIris keeps the lamp trimmed through storms.\n\nIris marks shoals on the chart.\n\nAnother Iris is the ferry pilot.",
+      "boundaryParagraphId": "paragraph:3",
+      "accepted": [
+        {
+          "subject": "Iris",
+          "predicate": "is",
+          "value": "the lighthouse keeper",
+          "quote": "Iris is the lighthouse keeper."
+        },
+        {
+          "subject": "Iris",
+          "predicate": "keeps",
+          "value": "the lamp trimmed through storms",
+          "quote": "Iris keeps the lamp trimmed through storms."
+        },
+        {
+          "subject": "Iris",
+          "predicate": "marks",
+          "value": "shoals on the chart",
+          "quote": "Iris marks shoals on the chart."
+        },
+        {
+          "subject": "Iris",
+          "predicate": "is",
+          "value": "the ferry pilot",
+          "quote": "Another Iris is the ferry pilot."
+        }
+      ],
+      "rejected": [],
+      "uncertain": [],
+      "roster": [
+        "lighthouse keeper",
+        "ferry pilot"
+      ],
+      "identityGroups": [
+        [
+          "lighthouse keeper",
+          "lamp",
+          "shoals"
+        ],
+        [
+          "ferry pilot"
+        ]
+      ]
+    },
+    {
+      "id": "unsupported-additions",
+      "title": "Gate Without Dragon",
+      "text": "The brass gate opens when Mara lifts the lantern.\n\nThe lantern is kept at East Gate.",
+      "boundaryParagraphId": "paragraph:1",
+      "accepted": [
+        {
+          "subject": "brass gate",
+          "predicate": "opens",
+          "value": "when Mara lifts the lantern",
+          "quote": "The brass gate opens when Mara lifts the lantern."
+        },
+        {
+          "subject": "lantern",
+          "predicate": "is kept",
+          "value": "at East Gate",
+          "quote": "The lantern is kept at East Gate."
+        }
+      ],
+      "rejected": [
+        "dragon guards East Gate"
+      ],
+      "uncertain": [
+        "the gate protects the harbor"
+      ],
+      "roster": [
+        "Mara"
+      ],
+      "identityGroups": [
+        [
+          "Mara"
+        ]
+      ]
+    },
+    {
+      "id": "later-spoiler-boundary",
+      "title": "Village Ferry Boundary",
+      "text": "Merehaven is a village on the river.\n\nThe ferry leaves from the old quay at dawn.\n\nEXCLUDED_REVELATION_SENTINEL The ferryman is the missing king.",
+      "boundaryParagraphId": "paragraph:1",
+      "accepted": [
+        {
+          "subject": "Merehaven",
+          "predicate": "is",
+          "value": "a village on the river",
+          "quote": "Merehaven is a village on the river."
+        },
+        {
+          "subject": "ferry",
+          "predicate": "leaves",
+          "value": "from the old quay at dawn",
+          "quote": "The ferry leaves from the old quay at dawn."
+        }
+      ],
+      "rejected": [
+        "the ferryman is the missing king"
+      ],
+      "uncertain": [],
+      "roster": [],
+      "identityGroups": []
+    }
+  ]
+}

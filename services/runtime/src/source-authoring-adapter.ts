@@ -9,9 +9,12 @@ import { buildSourceExtractionPrompt } from "../../../packages/domain/src/author
 import { buildSourceWorldPrompt } from "../../../packages/domain/src/authoring-prompts.js";
 import {
   assembleSourceWorldProposalWithEvidence,
+  SourceWorldProposalError,
+  validateSourceWorldSelection,
   type SourceWorldProposalAssembly,
   type SourceWorldSelection
 } from "../../../packages/domain/src/source-world-proposal.js";
+import { projectAuthoringIssues } from "../../../packages/domain/src/authoring-output.js";
 import type { ProviderRequest, ProviderResult } from "../../../packages/story-engine/src/providers.js";
 import { AuthoringResponseError, runAuthoringResponse } from "./authoring-response-adapter.js";
 
@@ -88,30 +91,30 @@ export function renderSourceExtractionProviderRequest(input: SourceExtractionReq
   };
 }
 
-function sourceOutputIssue(path: Array<string | number>): z.ZodError {
+function sourceOutputIssue(path: Array<string | number>, authoringReason: "source_json_decode" | "source_envelope" | "source_output_limit"): z.ZodError {
   return new z.ZodError([{
     code: "custom",
     path,
-    message: "Generated source facts need exact evidence inside the selected source chunk.",
-    params: { authoringReason: "source_evidence" }
+    message: "Generated source response failed validation.",
+    params: { authoringReason }
   }]);
 }
 
 const sourceExtractionEnvelopeSchema = z.object({ facts: z.unknown() }).strict();
 
 function parseCandidates(input: SourceExtractionInput, content: string, outputLimited: boolean): SourceFact[] {
-  if (outputLimited) throw sourceOutputIssue(["facts"]);
+  if (outputLimited) throw sourceOutputIssue(["facts"], "source_output_limit");
   let decoded: unknown;
   try {
     decoded = JSON.parse(content);
   } catch {
-    throw sourceOutputIssue(["facts"]);
+    throw sourceOutputIssue(["facts"], "source_json_decode");
   }
   let envelope: { facts: unknown };
   try {
     envelope = sourceExtractionEnvelopeSchema.parse(decoded);
   } catch {
-    throw sourceOutputIssue(["facts"]);
+    throw sourceOutputIssue(["facts"], "source_envelope");
   }
   const facts = validateExtractedSourceFactsWithinBoundary(
     input.source,
@@ -121,7 +124,10 @@ function parseCandidates(input: SourceExtractionInput, content: string, outputLi
   );
   if (input.mode === "faithful") {
     const inferredIndex = facts.findIndex((fact) => fact.provenance !== "stated");
-    if (inferredIndex >= 0) throw sourceOutputIssue(["facts", inferredIndex, "provenance"]);
+    if (inferredIndex >= 0) throw new z.ZodError([{
+      code: "custom", path: ["facts", inferredIndex, "provenance"], message: "Generated source facts must be stated in faithful mode.",
+      params: { authoringReason: "source_schema" }
+    }]);
   }
   return facts;
 }
@@ -135,9 +141,9 @@ function hasOutputLimitIssue(error: unknown): boolean {
 export function createSourceAuthoringAdapter(options: Readonly<{
   requestBudget: SourceExtractionRequestBudget;
   delay(milliseconds: number): Promise<void>;
-}>): Readonly<{ extractSourceChunk(input: SourceExtractionInput): Promise<SourceFact[]> }> {
+}>): Readonly<{ extractSourceChunk(input: SourceExtractionInput, currentClaim?: () => Promise<boolean>): Promise<SourceFact[]> }> {
   return Object.freeze({
-    async extractSourceChunk(input: SourceExtractionInput): Promise<SourceFact[]> {
+    async extractSourceChunk(input: SourceExtractionInput, currentClaim?: () => Promise<boolean>): Promise<SourceFact[]> {
       if (!hasValidSourceChunkWithinBoundary(input.source, input.chunk, input.boundaryParagraphId)) {
         throw new Error("The source chunk does not match the selected source boundary.");
       }
@@ -154,7 +160,8 @@ export function createSourceAuthoringAdapter(options: Readonly<{
             return result;
           },
           parse: (content) => parseCandidates(input, content, outputLimited),
-          delay: options.delay
+          delay: options.delay,
+          ...(currentClaim === undefined ? {} : { currentClaim })
         });
       } catch (error) {
         if (hasOutputLimitIssue(error)) throw new SourceExtractionSplitNeededError(input.chunk.id);
@@ -173,13 +180,25 @@ export type SourceWorldSynthesisInput = Readonly<{
   instructions: string;
 }>;
 
-function sourceWorldOutputIssue(): z.ZodError {
+function sourceWorldOutputIssue(path: Array<string | number>, authoringReason: "source_world_json" | "source_world_schema" | SourceWorldProposalError["reason"]): z.ZodError {
   return new z.ZodError([{
     code: "custom",
-    path: ["sourceWorld"],
-    message: "Generated source-world fields must use the reviewed closed target mapping.",
-    params: { authoringReason: "source_evidence" }
+    path,
+    message: "Generated source-world response failed validation.",
+    params: { authoringReason }
   }]);
+}
+
+function safeSourceWorldSchemaPath(path: readonly PropertyKey[]): Array<string | number> {
+  const root = path[0];
+  if (root !== "fields" && root !== "characterFields" && root !== "expansionCandidates") return ["fields"];
+  if (typeof path[1] !== "number" || !Number.isInteger(path[1]) || path[1] < 0) return [root];
+  const base: Array<string | number> = [root, path[1]];
+  if (root === "fields" || root === "expansionCandidates") return ["path", "value", "supportingFactIds", "target"].includes(String(path[2])) ? [...base, String(path[2])] : base;
+  if (path[2] === "selectedCharacterFactId") return [...base, "selectedCharacterFactId"];
+  if (path[2] !== "fields" || typeof path[3] !== "number" || !Number.isInteger(path[3]) || path[3] < 0) return base;
+  const fieldBase: Array<string | number> = [...base, "fields", path[3]];
+  return ["path", "value", "supportingFactIds"].includes(String(path[4])) ? [...fieldBase, String(path[4])] : fieldBase;
 }
 
 function parseSourceWorldResponse(input: SourceWorldSynthesisInput, content: string): SourceWorldProposalAssembly {
@@ -187,12 +206,21 @@ function parseSourceWorldResponse(input: SourceWorldSynthesisInput, content: str
   try {
     generated = JSON.parse(content);
   } catch {
-    throw sourceWorldOutputIssue();
+    throw sourceWorldOutputIssue(["fields"], "source_world_json");
   }
   try {
     return assembleSourceWorldProposalWithEvidence(input.selection, generated);
-  } catch {
-    throw sourceWorldOutputIssue();
+  } catch (error) {
+    if (error instanceof SourceWorldProposalError) throw sourceWorldOutputIssue([...error.path], error.reason);
+    if (error instanceof z.ZodError) {
+      throw new z.ZodError(error.issues.slice(0, 20).map((issue) => ({
+        code: "custom" as const,
+        path: safeSourceWorldSchemaPath(issue.path),
+        message: "Generated source-world response failed validation.",
+        params: { authoringReason: "source_world_schema" }
+      })));
+    }
+    throw sourceWorldOutputIssue(["fields"], "source_world_selection");
   }
 }
 
@@ -224,6 +252,19 @@ export function createSourceWorldAuthoringAdapter(options: Readonly<{
 }>): Readonly<{ synthesizeSourceWorld(input: SourceWorldSynthesisInput, currentClaim?: () => Promise<boolean>): Promise<SourceWorldProposalAssembly> }> {
   return Object.freeze({
     async synthesizeSourceWorld(input, currentClaim) {
+      try {
+        validateSourceWorldSelection(input.selection);
+      } catch (error) {
+        if (error instanceof SourceWorldProposalError) {
+          throw new AuthoringResponseError({
+            code: "source_review_conflict",
+            stage: "source",
+            retryable: false,
+            issues: projectAuthoringIssues(sourceWorldOutputIssue([...error.path], error.reason))
+          });
+        }
+        throw error;
+      }
       return runAuthoringResponse({
         stage: "source",
         request: async (attempt) => {

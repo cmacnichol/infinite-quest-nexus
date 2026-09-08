@@ -316,6 +316,74 @@ integration("source world portable provenance", () => {
     expect(scrubbedStages.rows.every((stage) => stage.output === null && stage.failure === null)).toBe(true);
   });
 
+  it("applies and imports source rule and apparent-age evidence with the closed predicates", async () => {
+    const repository = createPostgresAuthoringRepository(pool);
+    const adapters = createPostgresWorldRepositoryAdapters(pool, { memory: { async autoEnableCampaignEmbedding() { return { enabled: false }; } } });
+    const text = "Iris is thirty.\n\nThe harbor closes after dusk.";
+    const submitted = await repository.submit({ ownerUserId }, {
+      kind: "story_source", idempotencyKey: randomUUID(), target: { kind: "new_world" }, name: "closed-predicates.txt", text,
+      mode: "faithful", boundaryParagraphId: "paragraph:1", instructions: "Preserve the stated source facts."
+    }, createHash("sha256").update(text).digest("hex"));
+    const source = normalizeSourceDocument("closed-predicates.txt", text, submitted.id);
+    const chunks = planSourceChunks({ source, boundaryParagraphId: "paragraph:1", systemPrompt: "source", instructions: "Preserve the stated source facts.", budget: { contextWindowTokens: 10_000, maxOutputTokens: 100, countTokens: (value) => Buffer.byteLength(value, "utf8") } });
+    const plan = await repository.claim("closed-predicates-plan", 60);
+    await repository.initializeExecutionSnapshot(plan!, { providerProfileId: randomUUID(), model: "test", configurationHash: "d".repeat(64), contextWindowTokens: 10_000, maxOutputTokens: 100, requestTimeoutMs: 1_000, prompts: {}, protocols: { source: "test" } });
+    await repository.checkpoint(plan!, { kind: "source_plan", chunks });
+    const ageParagraph = source.paragraphs[0]!;
+    const ruleParagraph = source.paragraphs[1]!;
+    const extraction = await repository.claim("closed-predicates-extraction", 60);
+    await repository.checkpoint(extraction!, { kind: "source_extraction", facts: [
+      { id: "raw-age", kind: "character", subject: "Iris", predicate: "age", value: "thirty", provenance: "stated", citations: [{ sourceId: source.id, paragraphId: ageParagraph.id, start: ageParagraph.start, end: ageParagraph.end, quote: "Iris is thirty." }] },
+      { id: "raw-rule", kind: "rule", subject: "Harbor", predicate: "rule", value: "closes after dusk", provenance: "stated", citations: [{ sourceId: source.id, paragraphId: ruleParagraph.id, start: ruleParagraph.start, end: ruleParagraph.end, quote: "The harbor closes after dusk." }] }
+    ] });
+    const extracted = await repository.read({ ownerUserId }, submitted.id);
+    if (!extracted || extracted.kind !== "story_source") throw new Error("closed predicate extraction failed");
+    const age = extracted.source!.facts.find((fact) => fact.predicate === "age");
+    const rule = extracted.source!.facts.find((fact) => fact.predicate === "rule");
+    if (!age || !rule) throw new Error("closed predicate facts were not projected");
+    const reviewed = await repository.reviewSourceFacts!({ ownerUserId }, submitted.id, {
+      expectedRevision: extracted.revision, acceptedFactIds: [age.id, rule.id], rejectedFactIds: [], uncertainFactIds: [], selectedCharacterFactIds: [age.id],
+      characterIdentityGroups: [{ representativeFactId: age.id, factIds: [age.id] }], manualFacts: []
+    });
+    await repository.startSourceSynthesis!({ ownerUserId }, submitted.id, reviewed.revision);
+    const synthesis = await repository.claim("closed-predicates-synthesis", 60);
+    await repository.checkpoint(synthesis!, { kind: "source_world", proposal: {
+      schemaVersion: 5, world: { title: "Closed predicates", genre: "", tone: "", premise: "", backgroundStory: "", firstAction: "", rules: rule.value },
+      playableCharacters: [], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [], defaults: {}
+    }, mappings: [{ target: "world", path: "world.rules", value: rule.value, supportingFactIds: [rule.id] }] });
+    const character = await repository.claim("closed-predicates-character", 60);
+    await repository.checkpoint(character!, { kind: "source_world", proposal: {
+      schemaVersion: 5, world: { title: "Closed predicates", genre: "", tone: "", premise: "", backgroundStory: "", firstAction: "", rules: "" },
+      playableCharacters: [{ id: `source-character:${age.id}`, name: "Iris", characterText: "", profile: { appearance: { apparentAge: age.value } }, rpgStats: [], defaultTriggers: [], source: { type: "story-source", representativeFactId: age.id } }],
+      entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [], defaults: {}
+    }, mappings: [{ target: { characterRepresentativeFactId: age.id }, path: "profile.appearance.apparentAge", value: age.value, supportingFactIds: [age.id] }] });
+    const ready = await repository.read({ ownerUserId }, submitted.id);
+    if (!ready || ready.kind !== "story_source" || !ready.result) throw new Error("closed predicate synthesis failed");
+    const selectedStageIds = ready.stages.filter((stage) => stage.key === "source:synthesis" || stage.key === `source:character:${age.id}`).map((stage) => stage.id);
+    const receipt = await repository.apply({ ownerUserId }, submitted.id, {
+      expectedRevision: ready.revision, idempotencyKey: randomUUID(), selectedStageIds, content: ready.result
+    }, "e".repeat(64), createPostgresAuthoringWorldApplyAdapter());
+    const draft = await pool.query<{ revision: number }>("SELECT revision FROM world_drafts WHERE world_id=$1 AND owner_user_id=$2", [receipt.worldId, ownerUserId]);
+    const published = await adapters.transaction.command((transaction) => adapters.worlds.publishWorld(
+      transaction, { ownerUserId, worldId: receipt.worldId }, { expectedRevision: draft.rows[0]!.revision, releaseNotes: "closed source predicates" }
+    ));
+    if (!published.ok) throw new Error("closed predicate world did not publish");
+    const exported = await adapters.transaction.read((transaction) => adapters.worlds.exportWorld(transaction, { ownerUserId, worldId: receipt.worldId, worldVersionId: published.value.worldVersionId }));
+    expect(exported.content).toMatchObject({
+      world: { rules: rule.value },
+      playableCharacters: [expect.objectContaining({ profile: expect.objectContaining({ appearance: expect.objectContaining({ apparentAge: age.value }) }) })]
+    });
+    const destination = await pool.query<{ id: string }>("INSERT INTO users (display_name,status) VALUES ($1,'active') RETURNING id", [`Closed predicates import ${randomUUID()}`]);
+    const imported = await adapters.transaction.command((transaction) => adapters.worlds.importWorld(transaction, { ownerUserId: destination.rows[0]!.id }, worldImportRequestSchema.parse({ sourceName: "closed-predicates.json", worldExport: exported })));
+    expect(imported).toMatchObject({ ok: true, value: { duplicate: false } });
+    const stale = worldImportRequestSchema.parse({ sourceName: "closed-predicates-stale.json", worldExport: {
+      ...exported,
+      content: { ...exported.content, sourceMaterial: { ...exported.content.sourceMaterial!, acceptedFacts: exported.content.sourceMaterial!.acceptedFacts.map((fact) => fact.id === rule.id ? { ...fact, predicate: "rules" } : fact) } }
+    } });
+    await expect(adapters.transaction.command((transaction) => adapters.worlds.importWorld(transaction, { ownerUserId: destination.rows[0]!.id }, stale)))
+      .resolves.toMatchObject({ ok: false, failure: { reason: "invalid_transition" } });
+  });
+
   it("keeps appendix-only text out of the real PostgreSQL Story authority projection", async () => {
     const adapters = createPostgresWorldRepositoryAdapters(pool, { memory: { async autoEnableCampaignEmbedding() { return { enabled: false }; } } });
     const source = normalizeSourceDocument(

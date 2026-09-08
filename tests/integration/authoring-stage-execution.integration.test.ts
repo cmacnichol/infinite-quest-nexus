@@ -116,7 +116,7 @@ integration("durable authoring real repository and stage dispatcher", () => {
     await expect(workerB.runNext({ workerId: "worker-b", leaseSeconds: 30 })).resolves.toBe(true);
     expect(changedDefault).not.toHaveBeenCalled();
     expect(changedPrompts).not.toHaveBeenCalled();
-    expect(providerLoad).toHaveBeenCalledWith({ ownerUserId }, originalSnapshot.providerProfileId, "text", originalSnapshot.model);
+    expect(providerLoad).toHaveBeenCalledWith({ ownerUserId }, originalSnapshot.providerProfileId, "text", originalSnapshot.model, originalSnapshot.contextWindowTokens);
     expect(executeB).toHaveBeenCalledTimes(1);
     expect((await repository.read({ ownerUserId }, job.id))!.status).toBe("awaiting_review");
     await expect(repository.loadClaim(currentClaim)).resolves.toBeNull();

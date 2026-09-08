@@ -240,7 +240,7 @@ export function createRuntimeAuthoringStageDispatcher(options: Readonly<{
         return { kind: "source_extraction", facts: await adapter.extractSourceChunk({
           source, chunk, boundaryParagraphId: sourceInput.boundaryParagraphId,
           mode: sourceInput.mode, instructions: sourceInput.instructions
-        }) };
+        }, stage.currentClaim) };
       }
       throw new AuthoringResponseError({ code: "source_evidence_invalid", stage: "source", retryable: false, issues: [] });
     }

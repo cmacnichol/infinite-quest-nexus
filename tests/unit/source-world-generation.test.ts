@@ -75,6 +75,9 @@ describe("source-world generation", () => {
     };
     expect(() => assembleSourceWorldProposal(separateIdentities, {
       fields: [], characterFields: [{ selectedCharacterFactId: north.id, fields: [{ path: "profile.appearance.clothing", value: "blue coat", supportingFactIds: [south.id] }] }]
-    })).toThrow(/closed accepted-fact mapping/u);
+    })).toThrow(expect.objectContaining({
+      reason: "source_world_unsupported_fact",
+      path: ["characterFields", 0, "fields", 0, "supportingFactIds"]
+    }));
   });
 });
