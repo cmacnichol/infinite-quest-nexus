@@ -7,6 +7,7 @@ import type {
   MemoryApplication,
   MemoryWorkerApplication,
   WorldCampaignApplication
+  , AuthoringWorkerApplication, AuthoringApplication
 } from "../../../packages/application/src/index.js";
 import type { DatabasePool, RuntimeConfig } from "../../../packages/database/src/index.js";
 import type { BuildServerOptions } from "../../api/src/server.js";
@@ -78,6 +79,12 @@ export type RuntimeRoleDependencies = Readonly<{
     memory: MemoryApplication,
     providers: WorkerProviderApplicationComposition["generation"],
   ): GenerationWorkerApplication;
+  createWorkerAuthoring(
+    pool: DatabasePool,
+    providers: WorkerProviderApplicationComposition["worldGeneration"],
+    signal: AbortSignal,
+  ): AuthoringWorkerApplication;
+  createApiAuthoring(pool: DatabasePool): AuthoringApplication;
   buildServer(options: BuildServerOptions): Promise<RuntimeServer>;
   runWorker(
     pool: DatabasePool,
@@ -150,9 +157,10 @@ export async function dispatchRuntimeRole(
     const illustration = dependencies.createApiIllustration(pool, providerGraph.illustration);
     const memory = dependencies.createApiMemory(pool, providerGraph.chronicle);
     const worldCampaign = dependencies.createApiWorldCampaign(pool, providerGraph);
+    const authoring = dependencies.createApiAuthoring(pool);
     const providers = dependencies.createProviderApiAdapter(providerGraph);
     const server = await dependencies.buildServer({
-      config, pool, generation, illustration, memory, providers, generationEvents, worldCampaign,
+      config, pool, generation, illustration, memory, providers, generationEvents, worldCampaign, authoring,
       infiniteWorldsProviders: providerGraph.infiniteWorlds,
     });
     await server.listen({ host: config.host, port: config.port });
@@ -166,6 +174,7 @@ export async function dispatchRuntimeRole(
     const illustration = dependencies.createApiIllustration(pool, providerGraph.illustration);
     const memory = dependencies.createApiMemory(pool, providerGraph.chronicle);
     const generation = dependencies.createWorkerGeneration(pool, illustration, memory, providerGraph.generation);
+    const authoring = dependencies.createWorkerAuthoring(pool, providerGraph.worldGeneration, signal);
     const workerIllustration = dependencies.createWorkerIllustration(
       pool,
       providerGraph.illustration,
@@ -174,7 +183,8 @@ export async function dispatchRuntimeRole(
       generation,
       illustration: workerIllustration,
       generationIllustration: illustration,
-      memory: dependencies.createWorkerMemory(pool, providerGraph.chronicle)
+      memory: dependencies.createWorkerMemory(pool, providerGraph.chronicle),
+      authoring
     });
     return;
   }
@@ -192,16 +202,18 @@ export async function dispatchRuntimeRole(
   const workerMemoryTransactions = dependencies.createApiMemory(pool, workerProviderGraph.chronicle);
   const worldCampaign = dependencies.createApiWorldCampaign(pool, apiProviderGraph);
   const providers = dependencies.createProviderApiAdapter(apiProviderGraph);
+  const apiAuthoring = dependencies.createApiAuthoring(pool);
   if (!generationEvents) throw new Error("The all role requires a generation event source.");
   const workerGeneration = dependencies.createWorkerGeneration(
     pool, workerIllustrationTransactions, workerMemoryTransactions, workerProviderGraph.generation,
   );
+  const authoring = dependencies.createWorkerAuthoring(pool, workerProviderGraph.worldGeneration, signal);
   const workerIllustration = dependencies.createWorkerIllustration(
     pool,
     workerProviderGraph.illustration,
   );
   const server = await dependencies.buildServer({
-    config, pool, generation: apiGeneration, illustration, memory, providers, generationEvents, worldCampaign,
+    config, pool, generation: apiGeneration, illustration, memory, providers, generationEvents, worldCampaign, authoring: apiAuthoring,
     infiniteWorldsProviders: apiProviderGraph.infiniteWorlds,
   });
   await server.listen({ host: config.host, port: config.port });
@@ -209,7 +221,8 @@ export async function dispatchRuntimeRole(
     generation: workerGeneration,
     illustration: workerIllustration,
     generationIllustration: workerIllustrationTransactions,
-    memory: dependencies.createWorkerMemory(pool, workerProviderGraph.chronicle)
+    memory: dependencies.createWorkerMemory(pool, workerProviderGraph.chronicle),
+    authoring
   });
   await server.close();
 }

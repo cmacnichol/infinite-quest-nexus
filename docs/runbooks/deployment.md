@@ -41,6 +41,14 @@ Swarm services must define health checks, resource expectations, restart behavio
 
 Compose and Swarm must use the same schema migrations, initial-user bootstrap, provider configuration, job semantics, and API contracts. Add deployment smoke tests that start the two-container Compose environment, wait for PostgreSQL and application readiness, verify migrations and initial-user ownership, and exercise one database-backed API operation. Validate the Swarm stack configuration separately even when CI cannot launch a full multi-node swarm.
 
+### Durable AI authoring rollout and rollback
+
+`AI_AUTHORING_JOBS_ENABLED` is a compatible API-and-worker capability gate and defaults to `false`. Deploy the API and worker binaries that understand the durable authoring tables before setting it to `true`, and pass the same value to both Swarm roles. The client must use the capability returned by the API and retain its synchronous compatibility flow when durable authoring is unavailable; do not infer availability from a browser build or environment value.
+
+While the gate is `false`, compatible workers continue their ordinary bounded authoring-retention tick. This cleans expired seven-day proposal checkpoints and thirty-day applied receipts without admitting new durable proposals or calling an authoring provider. A rollback returns the gate to `false` and keeps the additive tables, existing unexpired rows, and scrubbed expired terminal rows. It does not require a down migration or an immediate purge.
+
+See [Durable AI authoring operations](./ai-authoring.md) for the retention deadlines, rendered configuration checks, worker cadence, and recovery procedure.
+
 ### Replacement Story UI build selection and rollback
 
 `VITE_UI_COMPONENTS` is a Docker **build argument** consumed while Vite compiles the replacement Story static bundle. It is not a runtime service setting: changing a container or server environment after image creation cannot switch the already-built bundle. The current application default remains native until separately approved release gates are complete.
@@ -149,6 +157,39 @@ UPDATE campaign_memory_configs
 ```
 
 This leaves accepted turns, parent Chronicle memories, chunk rows, and vectors intact. Keep legacy vectors until a separately reviewed removal plan is approved; their presence preserves immediate configuration-only recovery. Repair or rebuild derived chunks after the application is stable, shadow selected campaigns again, and require a new explicit opt-in before returning to chunked production.
+
+## Story token estimates
+
+Canonical story generation uses the shared `story-token-estimate-v1` heuristic
+for protected context, optional context selection, the fixed prompt envelope,
+and the final serialized provider request. It does not treat character length
+as token usage. ASCII text uses the greater of the domain estimate and a
+characters/3 floor; non-ASCII runs use UTF-8 byte length as a conservative
+fallback. These are estimates, not measurements from the selected model's
+tokenizer. Multilingual or unusual content can still be overestimated or
+underestimated for a particular model.
+
+The campaign budget limits story context. The effective provider/job window
+limits the complete request, including instructions and transport envelope,
+plus the reserved output and the existing input safety allowance (20% of the
+request estimate plus 1,024 tokens). The input allowance is applied once to
+the request; output space is reserved once. Optional Chronicle records may
+be omitted to fit, but protected authority is never silently truncated.
+
+New context and budget-failure diagnostics identify estimated counts and the
+estimator version. Historical diagnostics without this metadata remain
+readable. Provider-reported input usage is a separate observation; do not
+compare character totals directly to token budgets or use one observed
+character/token ratio as a universal conversion.
+
+Before releasing an accounting change, replay the affected campaign's
+authority read in a read-only transaction with the candidate estimator.
+Report only counts, component sizes, applicable limits, and estimate mode.
+Do not log prompt text, mutate campaign state, or submit a provider request
+as part of that replay. After an approved release, compare estimates with
+provider usage from ordinary generation. An application-image rollback
+requires no accounting migration or data rewrite; preserve existing campaign
+budgets and investigate provider overflows rather than silently raising them.
 
 ## Worker Concurrency and Graceful Shutdown
 

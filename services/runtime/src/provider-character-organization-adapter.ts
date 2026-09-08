@@ -1,4 +1,5 @@
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
+import { z } from "zod";
 import {
   characterProfileOrganizationResultSchema,
   characterProfileSchema,
@@ -11,8 +12,15 @@ import {
 } from "../../../packages/contracts/src/world-library.js";
 import { extractJsonObject } from "../../../packages/story-engine/src/index.js";
 import type { CharacterOrganizationProviderCollaborators } from "./provider-application-composition.js";
+import {
+  effectiveAuthoringPrompt,
+  CHARACTER_PROFILE_ORGANIZER_PROMPT_PROTOCOL_VERSION
+} from "../../../packages/domain/src/authoring-prompts.js";
+import { validateCharacterProfileFiction } from "../../../packages/domain/src/authoring-output.js";
+import { projectAuthoringIssues } from "../../../packages/domain/src/authoring-output.js";
+import { AuthoringResponseError, runAuthoringResponse } from "./authoring-response-adapter.js";
 
-export const CHARACTER_PROFILE_ORGANIZER_PROTOCOL_VERSION = "character-profile-organizer-v2";
+export const CHARACTER_PROFILE_ORGANIZER_PROTOCOL_VERSION = CHARACTER_PROFILE_ORGANIZER_PROMPT_PROTOCOL_VERSION;
 
 const CHARACTER_PROFILE_ORGANIZER_OUTPUT_TEMPLATE = {
   candidate: characterProfileSchema.parse({}),
@@ -25,6 +33,35 @@ const CHARACTER_PROFILE_ORGANIZER_OUTPUT_TEMPLATE = {
 
 function httpError(statusCode: number, message: string, code: string, additionalDetails: Record<string, unknown> = {}): Error {
   return Object.assign(new Error(message), { statusCode, details: { code, ...additionalDetails } });
+}
+
+function organizerProviderUnavailable(): AuthoringResponseError {
+  return new AuthoringResponseError({
+    code: "authoring_provider_unavailable",
+    stage: "organizer",
+    retryable: true,
+    issues: []
+  });
+}
+
+function providerRetryDelay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function organizerValidationError(path: string, message: string, reason = "organizer_evidence"): z.ZodError {
+  return new z.ZodError([{
+    code: "custom",
+    path: path.split("."),
+    message,
+    params: { authoringReason: reason }
+  }]);
+}
+
+function organizerEvidenceValidationError(index: number, path: string, source: string, quote: string): z.ZodError {
+  return Object.assign(
+    organizerValidationError(`evidence.${index}.source`, `Organizer evidence for ${path} was not found in ${source}.`),
+    { details: { code: "unsupported_organizer_evidence", organizerEvidenceFailure: { path, source, quote } } }
+  );
 }
 
 type OrganizerEvidenceFailure = {
@@ -100,11 +137,18 @@ function normalizeOrganizerResponse(value: unknown): unknown {
   if (Array.isArray(result.evidence)) {
     result.evidence = result.evidence.map((entry) => {
       if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
-      const { sourceKey, verbatim, ...normalized } = entry as Record<string, unknown>;
+      const { field, sourceKey, content, verbatim, ...normalized } = entry as Record<string, unknown>;
+      const aliases: Array<[string, unknown]> = [
+        ["path", field], ["source", sourceKey], ["quote", content], ["quote", verbatim]
+      ];
+      for (const [key, alias] of aliases) {
+        if (alias !== undefined && normalized[key] !== undefined && normalized[key] !== alias) {
+          throw organizerValidationError(`evidence.${key}`, "Organizer evidence aliases must agree with canonical values.");
+        }
+        if (normalized[key] === undefined && alias !== undefined) normalized[key] = alias;
+      }
       return {
-        ...normalized,
-        source: typeof normalized.source === "string" ? normalized.source : sourceKey,
-        quote: typeof normalized.quote === "string" ? normalized.quote : verbatim
+        ...normalized
       };
     });
   }
@@ -124,21 +168,21 @@ export function validateOrganizerResult(
     ...(normalized && typeof normalized === "object" ? normalized : {}),
     protocolVersion: CHARACTER_PROFILE_ORGANIZER_PROTOCOL_VERSION
   });
-  for (const evidence of parsed.evidence) {
-    const source = sources[evidence.source];
-    if (source === undefined || !sourceContainsQuote(source, evidence.quote)) {
-      throw httpError(
-        502,
-        `Organizer evidence for ${evidence.path} was not found in ${evidence.source}.`,
-        "unsupported_organizer_evidence",
-        { organizerEvidenceFailure: { path: evidence.path, source: evidence.source, quote: evidence.quote } }
-      );
+  validateCharacterProfileFiction(parsed.candidate);
+  const populatedPaths = new Set(populatedProfilePaths(parsed.candidate));
+  for (const [index, evidence] of parsed.evidence.entries()) {
+    if (!populatedPaths.has(evidence.path)) {
+      throw organizerValidationError(`evidence.${index}.path`, "Organizer evidence must refer to a populated profile field.");
+    }
+    const source = Object.hasOwn(sources, evidence.source) ? sources[evidence.source] : undefined;
+    if (typeof source !== "string" || !sourceContainsQuote(source, evidence.quote)) {
+      throw organizerEvidenceValidationError(index, evidence.path, evidence.source, evidence.quote);
     }
   }
   const evidencedPaths = new Set(parsed.evidence.map((entry) => entry.path));
-  const unsupported = populatedProfilePaths(parsed.candidate).filter((path) => !evidencedPaths.has(path));
+  const unsupported = [...populatedPaths].filter((path) => !evidencedPaths.has(path));
   if (unsupported.length) {
-    throw httpError(502, `Organizer returned unsupported profile fields: ${unsupported.slice(0, 8).join(", ")}.`, "unsupported_organizer_claim");
+    throw organizerValidationError("candidate", `Organizer returned unsupported profile fields: ${unsupported.slice(0, 8).join(", ")}.`);
   }
   return parsed;
 }
@@ -166,20 +210,22 @@ function organizerEvidenceFailureFrom(error: unknown): OrganizerEvidenceFailure 
 export async function validateOrganizerResultWithRepair(
   value: unknown,
   sources: Record<string, string>,
-  repair: (failure: OrganizerEvidenceFailure) => Promise<unknown>
+  repair: (failure: OrganizerEvidenceFailure | ReturnType<typeof projectAuthoringIssues>) => Promise<unknown>
 ): Promise<CharacterProfileOrganizationResult> {
   try {
     return validateOrganizerResult(value, sources);
   } catch (error) {
     const failure = organizerEvidenceFailureFrom(error);
-    if (!failure) throw error;
-    return validateOrganizerResult(await repair(failure), sources);
+    const issues = projectAuthoringIssues(error);
+    if (!failure && !issues.length) throw error;
+    return validateOrganizerResult(await repair(failure || issues), sources);
   }
 }
 
 export function characterProfileOrganizerPrompt(template?: string): string {
-  if (template) return template.replaceAll("{{outputTemplate}}", JSON.stringify(CHARACTER_PROFILE_ORGANIZER_OUTPUT_TEMPLATE, null, 2)).replaceAll("{{protocol}}", CHARACTER_PROFILE_ORGANIZER_PROTOCOL_VERSION);
-  return `You strictly reorganize existing character facts for Infinite Quest Nexus.
+  const creative = template
+    ? template.replaceAll("{{outputTemplate}}", JSON.stringify(CHARACTER_PROFILE_ORGANIZER_OUTPUT_TEMPLATE, null, 2)).replaceAll("{{protocol}}", CHARACTER_PROFILE_ORGANIZER_PROTOCOL_VERSION)
+    : `You strictly reorganize existing character facts for Infinite Quest Nexus.
 Return one JSON object only. Do not return Markdown, prose before or after JSON, comments, null values, or additional keys.
 
 OUTPUT CONTRACT
@@ -202,10 +248,11 @@ OUTPUT TEMPLATE (replace example values only when the supplied sources support t
 ${JSON.stringify(CHARACTER_PROFILE_ORGANIZER_OUTPUT_TEMPLATE, null, 2)}
 
 Protocol: ${CHARACTER_PROFILE_ORGANIZER_PROTOCOL_VERSION}.`;
+  return effectiveAuthoringPrompt("organizer", creative).content;
 }
 
 export function characterProfileOrganizerRepairPrompt(baseTemplate?: string, repairTemplate?: string): string {
-  if (repairTemplate) return repairTemplate.replaceAll("{{base}}", characterProfileOrganizerPrompt(baseTemplate));
+  if (repairTemplate) return effectiveAuthoringPrompt("organizer", repairTemplate.replaceAll("{{base}}", characterProfileOrganizerPrompt(baseTemplate))).content;
   return `${characterProfileOrganizerPrompt(baseTemplate)}
 
 REPAIR MODE
@@ -230,12 +277,12 @@ export function characterProfileOrganizerRepairInput(
   characterName: string,
   sources: Record<string, string>,
   priorResponse: unknown,
-  failure: OrganizerEvidenceFailure
+  failure: OrganizerEvidenceFailure | unknown[]
 ) {
   return {
     task: "Repair an invalid character profile organization response without adding facts.",
     characterName,
-    validationFailures: [failure],
+    validationFailures: Array.isArray(failure) ? failure : [failure],
     allowedEvidenceSourceKeys: Object.keys(sources),
     outputTemplate: CHARACTER_PROFILE_ORGANIZER_OUTPUT_TEMPLATE,
     priorResponse,
@@ -258,33 +305,39 @@ async function organize(
     ...(campaignTextProviderId === null ? {} : { selectedProviderProfileId: campaignTextProviderId }),
   });
   if (resolution.status !== "resolved") {
-    throw httpError(409, "No enabled text provider is available to organize this profile.", "text_provider_unavailable");
+    throw organizerProviderUnavailable();
   }
-  const provider = await providers.execution.text(
-    { ownerUserId }, resolution.providerProfileId, "text", resolution.model,
-  );
+  let provider;
+  try {
+    provider = await providers.execution.text(
+      { ownerUserId }, resolution.providerProfileId, "text", resolution.model,
+    );
+  } catch (error) {
+    if ((error as { statusCode?: unknown })?.statusCode === 404) throw organizerProviderUnavailable();
+    throw error;
+  }
   const promptSnapshot = (await providers.prompts.loadCharacterOrganizationPromptSnapshot({
     ownerUserId,
     worldId,
     characterId: character.id,
   })).snapshot;
   const sources = characterProfileOrganizerSources(character, content);
-  const result = await provider.execute({
-    systemPrompt: characterProfileOrganizerPrompt(
-      providers.promptTools.content(promptSnapshot, "character_profile_organizer"),
-    ),
-    input: JSON.stringify(characterProfileOrganizerInput(character.name, sources))
-  });
-  const initialResponse = extractJsonObject(result.content);
-  return validateOrganizerResultWithRepair(initialResponse, sources, async (failure) => {
-    const repaired = await provider.execute({
-      systemPrompt: characterProfileOrganizerRepairPrompt(
-        providers.promptTools.content(promptSnapshot, "character_profile_organizer"),
-        providers.promptTools.content(promptSnapshot, "character_profile_repair"),
-      ),
-      input: JSON.stringify(characterProfileOrganizerRepairInput(character.name, sources, initialResponse, failure))
-    });
-    return extractJsonObject(repaired.content);
+  return runAuthoringResponse({
+    stage: "organizer",
+    delay: providerRetryDelay,
+    request: async (attempt) => provider.execute({
+      systemPrompt: attempt.repair
+        ? characterProfileOrganizerRepairPrompt(
+          providers.promptTools.content(promptSnapshot, "character_profile_organizer"),
+          providers.promptTools.content(promptSnapshot, "character_profile_repair"),
+        )
+        : characterProfileOrganizerPrompt(providers.promptTools.content(promptSnapshot, "character_profile_organizer")),
+      input: JSON.stringify(attempt.repair
+        ? characterProfileOrganizerRepairInput(character.name, sources, attempt.rejectedResponse || "", attempt.issues)
+        : characterProfileOrganizerInput(character.name, sources)),
+      responseFormatFallback: "forbid"
+    }),
+    parse: (content) => validateOrganizerResult(extractJsonObject(content), sources)
   });
 }
 

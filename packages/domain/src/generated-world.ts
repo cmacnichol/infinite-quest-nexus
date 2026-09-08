@@ -3,6 +3,7 @@ import {
   worldContentSchema,
   type WorldContent
 } from "../../contracts/src/world-library.js";
+import { authoringIssueMessage, authoringIssueReason, safeAuthoringIssuePath, validateGeneratedCharacter, validateGeneratedWorldFiction } from "./authoring-output.js";
 
 export type GeneratedWorldIssue = {
   path: string;
@@ -44,7 +45,8 @@ const GENERATED_WORLD_CUSTOM_PATH_MESSAGES: Readonly<Record<string, string>> = {
   playableCharacters: "Generated worlds require three or four playable characters."
 };
 
-function controlledGeneratedWorldIssueMessage(path: string, code: string): string {
+function controlledGeneratedWorldIssueMessage(path: string, code: string, reason?: unknown): string {
+  if (authoringIssueReason(reason)) return authoringIssueMessage(path, code, reason);
   if (code !== "custom") {
     return GENERATED_WORLD_ISSUE_MESSAGES[code] || "Generated content failed validation.";
   }
@@ -52,6 +54,8 @@ function controlledGeneratedWorldIssueMessage(path: string, code: string): strin
   if (exact) return exact;
   if (/^playableCharacters\.\d+\.id$/.test(path)) return "Generated character IDs must be distinct.";
   if (/^playableCharacters\.\d+\.name$/.test(path)) return "Generated character names must be distinct.";
+  if (/^character_seeds\.\d+\.id$/.test(path)) return "Generated character seed IDs must be unique.";
+  if (/^character_seeds\.\d+\.name$/.test(path)) return "Generated character seed names must be unique.";
   if (/^(?:playableCharacters\.\d+\.characterText|playable_characters\.\d+\.character_text|character_text)$/.test(path)) {
     return "Generated character guidance is required.";
   }
@@ -66,6 +70,13 @@ export function generatedCharacterNameKey(name: string): string {
 }
 
 const generatedWorldBaseSchema = worldContentSchema.superRefine((content, context) => {
+  try {
+    validateGeneratedWorldFiction(content.world);
+  } catch (error) {
+    if (!(error instanceof z.ZodError)) throw error;
+    for (const issue of error.issues) context.addIssue({ ...issue });
+  }
+
   const requiredWorldFields = [
     ["title", "Generated title is required."],
     ["genre", "Generated genre is required."],
@@ -110,19 +121,26 @@ const generatedWorldBaseSchema = worldContentSchema.superRefine((content, contex
       });
     }
     characterNames.add(nameKey);
-    if (!character.characterText.trim()) {
-      context.addIssue({
-        code: "custom",
-        path: ["playableCharacters", index, "characterText"],
-        message: "Generated character guidance is required."
-      });
-    }
     if (!character.profile) {
       context.addIssue({
         code: "custom",
         path: ["playableCharacters", index, "profile"],
         message: "Generated structured character profile is required."
       });
+      return;
+    }
+    try {
+      validateGeneratedCharacter(character, "creative");
+    } catch (error) {
+      if (!(error instanceof z.ZodError)) throw error;
+      for (const issue of error.issues) {
+        context.addIssue({
+          code: "custom",
+          path: ["playableCharacters", index, ...issue.path],
+          message: issue.message,
+          params: (issue as { params?: Record<string, unknown> }).params
+        });
+      }
     }
   });
 });
@@ -144,10 +162,14 @@ export function projectGeneratedWorldIssues(value: unknown): GeneratedWorldIssue
     const code = typeof candidate.code === "string"
       ? candidate.code.slice(0, GENERATED_WORLD_ISSUE_CODE_LIMIT)
       : "custom";
+    const params = candidate.params && typeof candidate.params === "object" && !Array.isArray(candidate.params)
+      ? candidate.params as Record<string, unknown>
+      : {};
+    const safePath = safeAuthoringIssuePath(path);
     return [{
-      path,
+      path: safePath,
       code,
-      message: controlledGeneratedWorldIssueMessage(path, code)
+      message: controlledGeneratedWorldIssueMessage(safePath, code, params.authoringReason)
     }];
   });
 }
@@ -164,6 +186,7 @@ export function generatedWorldIssues(error: unknown): GeneratedWorldIssue[] {
   return projectGeneratedWorldIssues(error.issues.map((issue) => ({
     path: issue.path.map(String).join("."),
     code: issue.code,
-    message: issue.message
+    message: issue.message,
+    params: (issue as { params?: unknown }).params
   })));
 }

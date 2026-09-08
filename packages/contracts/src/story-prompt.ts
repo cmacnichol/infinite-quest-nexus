@@ -101,7 +101,9 @@ export const safeGenerationDiagnosticSchema = z.object({
   requiredTokens: z.number().int().nonnegative().optional(),
   availableTokens: z.number().int().nonnegative().optional(),
   requiredCharacters: z.number().int().nonnegative().optional(),
-  availableCharacters: z.number().int().nonnegative().optional()
+  availableCharacters: z.number().int().nonnegative().optional(),
+  countMode: z.literal("estimated").optional(),
+  estimatorVersion: z.literal("story-token-estimate-v1").optional()
 }).strict().superRefine((value, context) => {
   if (diagnosticActionByCode[value.code] !== value.action) context.addIssue({ code: "custom", path: ["action"], message: "Diagnostic action must match its code." });
 });

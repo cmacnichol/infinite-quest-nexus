@@ -14,6 +14,8 @@ export const SYSTEM_ARCHIVE_TABLE_CLASSIFICATIONS = {
   activity_events: "portable_authority",
   api_admission_buckets: "operational",
   api_admission_leases: "operational",
+  authoring_job_stages: "operational",
+  authoring_jobs: "operational",
   archive_previews: "operational",
   asset_derivatives: "rebuildable",
   asset_generation_contexts: "portable_normalized",

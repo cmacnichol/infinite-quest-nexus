@@ -1,5 +1,6 @@
 import { cyoaExportSchema, type CyoaChapter, type CyoaExport, type CyoaInfo } from "../../contracts/src/imports.js";
 import { PROMPT_TEMPLATE_CATALOG } from "../../contracts/src/prompt-library.js";
+import { effectiveAuthoringPrompt } from "./authoring-prompts.js";
 
 
 export type TemplateExcerpt = {
@@ -101,7 +102,7 @@ export function extractCyoaLayers(parsed: CyoaExport, sourceName = "cyoa-export.
 }
 
 export function buildTemplateWorldPrompt(input: TemplateWorldInput, systemPromptOverride?: string): { systemPrompt: string; input: string } {
-  const systemPrompt = systemPromptOverride || PROMPT_TEMPLATE_CATALOG.world_generation.defaultContent;
+  const systemPrompt = effectiveAuthoringPrompt("world", systemPromptOverride || PROMPT_TEMPLATE_CATALOG.world_generation.defaultContent).content;
 
   const payload = input.sourceKind === "prompt"
     ? {

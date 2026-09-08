@@ -87,6 +87,13 @@ export type WorldGenerationProviderCollaborators = ProviderConsumerRuntime & Rea
   costs: WorldGenerationCostPort;
 }>;
 
+export type AuthoringWorkerProviderCollaborators = Readonly<{
+  execution: RuntimeProviderExecutionPort;
+  resolution: Pick<ProviderResolutionPort, "resolveDirect">;
+  prompts: WorldGenerationPromptPort;
+  promptTools: ProviderPromptTools;
+}>;
+
 export type CharacterOrganizationProviderCollaborators = ProviderConsumerRuntime & Readonly<{
   prompts: CharacterOrganizationPromptPort;
   costs: CharacterOrganizationCostPort;
@@ -124,6 +131,7 @@ export type WorkerProviderApplicationComposition = Readonly<{
   generation: WorkerGenerationProviderCollaborators;
   illustration: IllustrationProviderCollaborators;
   chronicle: ChronicleProviderCollaborators;
+  worldGeneration: AuthoringWorkerProviderCollaborators;
 }>;
 
 function promptContent(
@@ -324,6 +332,12 @@ export function createWorkerProviderApplicationComposition(
     role: "worker",
     generation: graph.workerGeneration,
     illustration: graph.illustration,
-    chronicle: graph.chronicle
+    chronicle: graph.chronicle,
+    worldGeneration: Object.freeze({
+      execution: graph.worldGeneration.execution,
+      resolution: Object.freeze({ resolveDirect: graph.worldGeneration.resolution.resolveDirect }),
+      prompts: graph.worldGeneration.prompts,
+      promptTools: graph.worldGeneration.promptTools
+    })
   });
 }

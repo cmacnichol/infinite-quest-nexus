@@ -1,4 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
+import { runWorker } from "../../services/worker/src/worker.js";
+import { createRuntimeAuthoringWorkerApplication } from "../../services/runtime/src/authoring-composition.js";
+import { authoringHash, authoringRuntimeFixture, authoringResult } from "../helpers/authoring-runtime.js";
+import { inertWorkerIllustration, inertWorkerMemory } from "../helpers/memory-applications.js";
+
+vi.mock("../../services/runtime/src/private-asset-maintenance-composition.js", () => ({
+  createPrivateAssetMaintenanceComposition: async () => ({ scheduler: { tick: async () => ({ completed: 0 }) }, close: async () => undefined })
+}));
+vi.mock("../../services/runtime/src/illustration-asset-publication-composition.js", () => ({
+  createPrivateIllustrationAssetPublicationComposition: async () => ({ coordinator: { recoverNextFinalization: async () => ({ outcome: "completed" }) }, close: async () => undefined })
+}));
+vi.mock("../../packages/database/src/generation-execution-repository.js", async (original) => ({
+  ...await original<typeof import("../../packages/database/src/generation-execution-repository.js")>(),
+  reconcileNextAcceptedStreamingIllustration: async () => false
+}));
 import type {
   GenerationApplication,
   GenerationEventSource,
@@ -8,6 +23,8 @@ import type {
   MemoryApplication,
   MemoryWorkerApplication,
   WorldCampaignApplication
+  , AuthoringWorkerApplication
+  , AuthoringApplication
 } from "../../packages/application/src/index.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
@@ -29,6 +46,8 @@ const illustration = { kind: "illustration" } as unknown as IllustrationApplicat
 const workerIllustration = { kind: "worker-illustration" } as unknown as IllustrationWorkerApplication;
 const memory = { kind: "memory" } as unknown as MemoryApplication;
 const workerMemory = { kind: "worker-memory" } as unknown as MemoryWorkerApplication;
+const workerAuthoring = { kind: "worker-authoring", runNext: async () => false } as unknown as AuthoringWorkerApplication;
+const apiAuthoring = { kind: "api-authoring" } as unknown as AuthoringApplication;
 const worldCampaign = { kind: "world-campaign" } as unknown as WorldCampaignApplication;
 const generationEvents = { kind: "generation-events" } as unknown as GenerationEventSource;
 const providerTransport = { kind: "provider-transport" } as unknown as ProviderTransport;
@@ -53,6 +72,7 @@ const workerProviders = {
   generation: workerGenerationProviders,
   illustration: workerIllustrationProviders,
   chronicle: workerChronicleProviders,
+  worldGeneration: { kind: "worker-world-generation-providers" },
 } as unknown as WorkerProviderApplicationComposition;
 const providerApiAdapter = { kind: "provider-api-adapter" } as unknown as ProviderApiTransportAdapter;
 
@@ -89,6 +109,8 @@ function dependencies(controller: AbortController) {
       createWorkerMemory: vi.fn(() => workerMemory),
       createWorkerIllustration: vi.fn(() => workerIllustration),
       createWorkerGeneration: vi.fn(() => workerGeneration),
+      createWorkerAuthoring: vi.fn(() => workerAuthoring),
+      createApiAuthoring: vi.fn(() => apiAuthoring),
       migrateDatabase: vi.fn(async () => []),
       runWorker: vi.fn(async () => undefined),
       waitForDatabaseMigrations: vi.fn(async () => undefined)
@@ -97,6 +119,35 @@ function dependencies(controller: AbortController) {
 }
 
 describe("runtime role generation composition", () => {
+  it.each([
+    ["worker", false], ["worker", true], ["all", false], ["all", true]
+  ] as const)("%s production scheduler claims authoring only when rollout is %s", async (role, enabled) => {
+    const controller = new AbortController();
+    const { values, server } = dependencies(controller);
+    server.listen.mockImplementation(async () => undefined);
+    const runtime = authoringRuntimeFixture(async () => authoringResult("unused"));
+    const claim = vi.fn(async () => null);
+    const createAuthoring = vi.fn((_pool: DatabasePool, providers: WorkerProviderApplicationComposition["worldGeneration"], signal: AbortSignal) => createRuntimeAuthoringWorkerApplication({ repository: { claim } as never, providers, signal, sha256: authoringHash }));
+    let rotations = 0;
+    const generation = { claimNext: async () => { if (++rotations === 2) controller.abort(); return null; }, executeClaimed: async () => false };
+    const roleConfig = { ...config(role), aiAuthoringJobsEnabled: enabled, workerGenerationConcurrency: 1, workerPollIntervalMs: 1, workerLeaseSeconds: 7 };
+    await dispatchRuntimeRole(roleConfig, pool, controller.signal, {
+      ...values,
+      createWorkerProviders: () => ({ ...workerProviders, worldGeneration: runtime.providers as WorkerProviderApplicationComposition["worldGeneration"] }),
+      createWorkerAuthoring: createAuthoring,
+      createWorkerGeneration: () => generation,
+      createWorkerIllustration: () => inertWorkerIllustration,
+      createWorkerMemory: () => inertWorkerMemory,
+      runWorker
+    }, providerTransport, generationEvents);
+    expect(createAuthoring).toHaveBeenCalledWith(pool, runtime.providers, controller.signal);
+    expect(claim).toHaveBeenCalledTimes(enabled ? 1 : 0);
+    if (enabled) expect(claim).toHaveBeenCalledWith(expect.any(String), 7);
+    if (role === "all") {
+      expect(values.buildServer).toHaveBeenCalledWith(expect.objectContaining({ config: expect.objectContaining({ aiAuthoringJobsEnabled: enabled }) }));
+      expect(server.close).toHaveBeenCalledOnce();
+    }
+  });
   it("constructs only the API graph and HTTP server for the API role", async () => {
     const controller = new AbortController();
     const { server, values } = dependencies(controller);
@@ -122,6 +173,7 @@ describe("runtime role generation composition", () => {
       providers: providerApiAdapter,
       generationEvents,
       worldCampaign,
+      authoring: apiAuthoring,
       infiniteWorldsProviders: apiInfiniteWorldsProviders,
     });
     expect(values.runWorker).not.toHaveBeenCalled();
@@ -147,6 +199,7 @@ describe("runtime role generation composition", () => {
     expect(values.createWorkerGeneration).toHaveBeenCalledWith(
       pool, illustration, memory, workerGenerationProviders,
     );
+    expect(values.createWorkerAuthoring).toHaveBeenCalledWith(pool, workerProviders.worldGeneration, controller.signal);
     expect(values.runWorker).toHaveBeenCalledOnce();
     expect(values.runWorker).toHaveBeenCalledWith(
       pool,
@@ -156,7 +209,8 @@ describe("runtime role generation composition", () => {
         generation: workerGeneration,
         illustration: workerIllustration,
         generationIllustration: illustration,
-        memory: workerMemory
+        memory: workerMemory,
+        authoring: workerAuthoring
       }
     );
     expect(values.createApiGeneration).not.toHaveBeenCalled();
@@ -181,6 +235,7 @@ describe("runtime role generation composition", () => {
     expect(values.createWorkerGeneration).toHaveBeenCalledWith(
       pool, illustration, memory, workerGenerationProviders,
     );
+    expect(values.createWorkerAuthoring).toHaveBeenCalledWith(pool, workerProviders.worldGeneration, controller.signal);
     expect(values.buildServer).toHaveBeenCalledWith({
       config: expect.objectContaining({ role: "all" }),
       pool,
@@ -190,6 +245,7 @@ describe("runtime role generation composition", () => {
       providers: providerApiAdapter,
       generationEvents,
       worldCampaign,
+      authoring: apiAuthoring,
       infiniteWorldsProviders: apiInfiniteWorldsProviders,
     });
     expect(values.runWorker).toHaveBeenCalledWith(
@@ -200,7 +256,8 @@ describe("runtime role generation composition", () => {
         generation: workerGeneration,
         illustration: workerIllustration,
         generationIllustration: illustration,
-        memory: workerMemory
+        memory: workerMemory,
+        authoring: workerAuthoring
       }
     );
     expect(server.close).toHaveBeenCalledOnce();

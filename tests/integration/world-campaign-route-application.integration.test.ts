@@ -169,6 +169,27 @@ integration("world campaign Fastify production application cutover", () => {
     });
   }
 
+  function expectOrganizerUnavailableProviderResponse(
+    response: Awaited<ReturnType<FastifyInstance["inject"]>>
+  ): void {
+    expect(response.statusCode).toBe(503);
+    const body = response.json();
+    expect(body.correlationId).toEqual(expect.any(String));
+    expect(body).toEqual({
+      error: "Authoring request failed",
+      message: `Generated organizer content could not be accepted. Correlation ID: ${body.correlationId}.`,
+      correlationId: body.correlationId,
+      code: "authoring_provider_unavailable",
+      details: {
+        code: "authoring_provider_unavailable",
+        stage: "organizer",
+        retryable: true,
+        issues: [],
+        correlationId: body.correlationId
+      }
+    });
+  }
+
   async function withTextProvidersUnavailable<T>(operation: () => Promise<T>): Promise<T> {
     const fixtureId = crypto.randomUUID();
     const snapshot = await pool.query<{ id: string; enabled: boolean; is_default: boolean }>(
@@ -468,10 +489,11 @@ integration("world campaign Fastify production application cutover", () => {
         message: "No enabled text provider is available to organize this profile."
       }
     ] as const;
-    providerBackedResponses.forEach((response, index) => {
+    providerBackedResponses.slice(0, 3).forEach((response, index) => {
       const expected = providerFailureModes[index]!;
       expectUnavailableProviderResponse(response, expected.code, expected.message);
     });
+    expectOrganizerUnavailableProviderResponse(providerBackedResponses[3]!);
 
     const progress = await app.inject({
       method: "GET",
@@ -646,11 +668,7 @@ integration("world campaign Fastify production application cutover", () => {
       url: `/api/v1/campaigns/${source.campaign.id}/character-profile/organize`,
       payload: { expectedRevision: 1, character: worldContent(sourceWorld.title).playableCharacters[0] }
     }));
-    expectUnavailableProviderResponse(
-      organize,
-      "text_provider_unavailable",
-      "No enabled text provider is available to organize this profile."
-    );
+    expectOrganizerUnavailableProviderResponse(organize);
 
     const transferTitle = `14c3 transferred ${crypto.randomUUID()}`;
     const preview = await app.inject({

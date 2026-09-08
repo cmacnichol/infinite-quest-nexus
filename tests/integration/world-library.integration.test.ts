@@ -20,6 +20,10 @@ import {
   worldVersionDeleteSchema
 } from "../../packages/contracts/src/world-library.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
+import {
+  organizeCampaignCharacterProfileForOwner,
+  organizeWorldCharacterProfileForOwner
+} from "../../services/runtime/src/provider-character-organization-adapter.js";
 import { campaignTransferCommitRequestSchema, campaignTransferPreviewRequestSchema } from "../../packages/contracts/src/campaign-transfer.js";
 import {
   createWorld,
@@ -1081,4 +1085,145 @@ integration("World Library and campaign version integration", () => {
     expect((await pool.query("SELECT id FROM worlds WHERE id = $1", [world.created.id])).rows).toHaveLength(0);
     expect((await pool.query("SELECT id FROM world_versions WHERE world_id = $1", [world.created.id])).rows).toHaveLength(0);
   });
+
+  it("keeps owner-scoped world and campaign organizer failures read-only", async () => {
+    const world = await publishedWorld("Organizer ownership");
+    const campaign = await createCampaign(pool, campaignCreateSchema.parse({
+      title: `Organizer campaign ${crypto.randomUUID()}`,
+      worldVersionId: world.version.worldVersionId,
+      selectedCharacterId: "character-one"
+    }));
+    const ownerUserId = await initialOwnerId(pool);
+    const foreign = await pool.query<{ id: string }>(
+      "INSERT INTO users (display_name, status) VALUES ($1, 'active') RETURNING id",
+      [`Organizer foreign owner ${crypto.randomUUID()}`]
+    );
+    const request = {
+      expectedRevision: 1,
+      character: {
+        id: "character-one", name: "Character One", characterText: "Character One wears a blue coat.",
+        rpgStats: [], defaultTriggers: [], source: {}
+      }
+    };
+    const providers = {
+      resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: "provider", model: "model" }) },
+      execution: { text: async () => ({ execute: async () => ({
+        content: "malformed organizer output", responseId: "response", finishReason: "stop", outputLimited: false,
+        modelInstanceId: "model", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, reportedCost: null, rawMetadata: {}
+      }) }) },
+      prompts: { loadCharacterOrganizationPromptSnapshot: async () => ({ snapshot: {} }) },
+      promptTools: { content: () => "Organize supplied character facts." }
+    } as never;
+    const worldBefore = await pool.query<{ content: unknown; revision: number }>(
+      "SELECT content, revision FROM world_drafts WHERE world_id = $1 AND owner_user_id = $2", [world.created.id, ownerUserId]
+    );
+    const campaignBefore = await pool.query<{ character_profile: unknown; character_profile_revision: number }>(
+      "SELECT character_profile, character_profile_revision FROM campaigns WHERE id = $1 AND owner_user_id = $2", [campaign.id, ownerUserId]
+    );
+    const campaignRequest = { ...request, expectedRevision: campaignBefore.rows[0]!.character_profile_revision };
+
+    await expect(organizeWorldCharacterProfileForOwner(pool, foreign.rows[0]!.id, world.created.id, request, providers))
+      .rejects.toMatchObject({ statusCode: 404 });
+    await expect(organizeCampaignCharacterProfileForOwner(pool, foreign.rows[0]!.id, campaign.id, campaignRequest, providers))
+      .rejects.toMatchObject({ statusCode: 404 });
+    await expect(organizeWorldCharacterProfileForOwner(pool, ownerUserId, world.created.id, request, providers))
+      .rejects.toMatchObject({ name: "AuthoringResponseError", authoringFailure: { stage: "organizer" } });
+    await expect(organizeCampaignCharacterProfileForOwner(pool, ownerUserId, campaign.id, campaignRequest, providers))
+      .rejects.toMatchObject({ name: "AuthoringResponseError", authoringFailure: { stage: "organizer" } });
+
+    expect(await pool.query("SELECT content, revision FROM world_drafts WHERE world_id = $1 AND owner_user_id = $2", [world.created.id, ownerUserId]))
+      .toMatchObject({ rows: worldBefore.rows });
+    expect(await pool.query("SELECT character_profile, character_profile_revision FROM campaigns WHERE id = $1 AND owner_user_id = $2", [campaign.id, ownerUserId]))
+      .toMatchObject({ rows: campaignBefore.rows });
+  });
+
+  it("keeps successful organizer proposals preview-only until revision-checked saves without changing published canon", async () => {
+    const title = `Synthetic Organizer Save ${crypto.randomUUID()}`;
+    const authored = worldContentSchema.parse({
+      world: { title },
+      playableCharacters: [{
+        id: "synthetic-guide", name: "Synthetic Guide", characterText: "The guide wears a weathered blue cloak."
+      }]
+    });
+    const character = authored.playableCharacters[0]!;
+    const created = await createWorld(pool, worldCreateSchema.parse({ title, content: authored }));
+    const published = await publishWorld(pool, created.id, worldPublishSchema.parse({ expectedRevision: created.draftRevision }));
+    const campaign = await createCampaign(pool, campaignCreateSchema.parse({
+      title: "Synthetic organizer explicit save", worldVersionId: published.worldVersionId, selectedCharacterId: character.id
+    }));
+    const ownerUserId = await initialOwnerId(pool);
+    const candidate = characterProfileSchema.parse({ appearance: { clothing: "weathered blue cloak" } });
+    const evidence = [{ path: "appearance.clothing", source: "legacyGuidance", quote: "weathered blue cloak" }];
+    let providerCalls = 0;
+    const providers = {
+      resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: "synthetic-provider", model: "synthetic-model" }) },
+      execution: { text: async () => ({ execute: async () => {
+        providerCalls += 1;
+        return {
+          content: JSON.stringify({ candidate, evidence, unassignedText: [], conflicts: [], warnings: [] }),
+          responseId: "synthetic-response", finishReason: "stop", outputLimited: false,
+          modelInstanceId: "synthetic-model", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, reportedCost: null, rawMetadata: {}
+        };
+      } }) },
+      prompts: { loadCharacterOrganizationPromptSnapshot: async () => ({ snapshot: {} }) },
+      promptTools: { content: () => "Organize supplied character facts." }
+    } as never;
+    const snapshot = async () => ({
+      draft: (await pool.query("SELECT content, revision FROM world_drafts WHERE world_id = $1 AND owner_user_id = $2", [created.id, ownerUserId])).rows,
+      campaign: (await pool.query("SELECT character_profile, character_profile_revision, character_snapshot FROM campaigns WHERE id = $1 AND owner_user_id = $2", [campaign.id, ownerUserId])).rows,
+      version: (await pool.query("SELECT content FROM world_versions WHERE id = $1 AND owner_user_id = $2", [published.worldVersionId, ownerUserId])).rows,
+      edits: (await pool.query("SELECT revision, edit_source, next_profile FROM campaign_character_profile_edits WHERE campaign_id = $1 AND owner_user_id = $2 ORDER BY revision", [campaign.id, ownerUserId])).rows
+    });
+    const before = await snapshot();
+    expect(before.draft).toHaveLength(1);
+    expect(before.campaign).toHaveLength(1);
+    expect(before.version).toHaveLength(1);
+    const draftRevision = before.draft[0]!.revision;
+    const profileRevision = before.campaign[0]!.character_profile_revision;
+    const worldProposal = await organizeWorldCharacterProfileForOwner(pool, ownerUserId, created.id, {
+      expectedRevision: draftRevision, character
+    }, providers);
+    const campaignProposal = await organizeCampaignCharacterProfileForOwner(pool, ownerUserId, campaign.id, {
+      expectedRevision: profileRevision, character
+    }, providers);
+    expect(providerCalls).toBe(2);
+    expect(worldProposal).toMatchObject({ candidate, evidence });
+    expect(campaignProposal).toMatchObject({ candidate, evidence });
+    expect(await snapshot()).toEqual(before);
+
+    const savedContent = worldContentSchema.parse({ ...authored, playableCharacters: [{ ...character, profile: worldProposal.candidate }] });
+    const savedDraft = await updateWorldDraft(pool, created.id, worldDraftUpdateSchema.parse({
+      expectedRevision: draftRevision, content: savedContent
+    }));
+    expect(savedDraft.revision).toBe(draftRevision + 1);
+    const afterWorldSave = await snapshot();
+    expect(afterWorldSave.draft[0]).toMatchObject({ revision: draftRevision + 1, content: savedContent });
+    expect(afterWorldSave.campaign).toEqual(before.campaign);
+    expect(afterWorldSave.version).toEqual(before.version);
+    expect(afterWorldSave.edits).toEqual(before.edits);
+
+    const profileSave = campaignCharacterProfileUpdateSchema.parse({
+      expectedRevision: profileRevision, name: character.name, profile: campaignProposal.candidate,
+      editSource: "ai_organized", organizerProtocolVersion: campaignProposal.protocolVersion
+    });
+    const savedProfile = await updateCampaignCharacterProfile(pool, campaign.id, profileSave);
+    expect(savedProfile).toMatchObject({ revision: profileRevision + 1, profile: candidate });
+    const afterSaves = await snapshot();
+    expect(afterSaves.campaign[0]).toMatchObject({
+      character_profile_revision: profileRevision + 1, character_profile: { name: character.name, profile: candidate },
+      character_snapshot: before.campaign[0]!.character_snapshot
+    });
+    expect(afterSaves.version).toEqual(before.version);
+    expect(afterSaves.draft).toEqual(afterWorldSave.draft);
+    expect(afterSaves.edits).toHaveLength(before.edits.length + 1);
+    expect(afterSaves.edits.at(-1)).toMatchObject({ revision: profileRevision + 1, edit_source: "ai_organized", next_profile: { name: character.name, profile: candidate } });
+
+    await expect(updateWorldDraft(pool, created.id, worldDraftUpdateSchema.parse({
+      expectedRevision: draftRevision, content: authored
+    }))).rejects.toMatchObject({ statusCode: 409 });
+    await expect(updateCampaignCharacterProfile(pool, campaign.id, profileSave)).rejects.toMatchObject({ statusCode: 409 });
+    expect(await snapshot()).toEqual(afterSaves);
+    expect(providerCalls).toBe(2);
+  });
+
 });

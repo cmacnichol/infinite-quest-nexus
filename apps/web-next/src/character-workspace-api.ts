@@ -6,6 +6,8 @@ import {
 } from "../../../packages/contracts/src/world-library.js";
 import { parseEditableWorldDraft, type EditableWorldDraft } from "./world-editor-model.js";
 import { sanitizeCharacterWorkspaceValue } from "./character-workspace-sanitizer.js";
+import { parseAuthoringFailure } from "./authoring-errors.js";
+import type { AuthoringFailure } from "../../../packages/contracts/src/authoring.js";
 
 export interface WorldGenerationProgressResponse {
   status: "processing" | "completed" | "failed" | "unknown";
@@ -25,6 +27,7 @@ export class CharacterWorkspaceApiError extends Error {
   readonly kind: CharacterWorkspaceApiErrorKind;
   readonly status: number | null;
   readonly details: unknown;
+  readonly authoringFailure: AuthoringFailure | null;
 
   constructor(
     kind: CharacterWorkspaceApiErrorKind,
@@ -37,6 +40,7 @@ export class CharacterWorkspaceApiError extends Error {
     this.kind = kind;
     this.status = status;
     this.details = details;
+    this.authoringFailure = parseAuthoringFailure(details);
   }
 }
 

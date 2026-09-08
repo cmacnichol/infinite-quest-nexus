@@ -21,6 +21,7 @@ import {
   logProviderExecutionError,
   logProviderTransportError,
   pollImageProvider,
+  ProviderHttpError,
   providerTransportErrorDetails,
   reportedProviderCost,
   submitImageProvider,
@@ -67,6 +68,67 @@ function createTestProviderTransport(fetcher: typeof fetch): ProviderTransport {
 afterEach(() => vi.restoreAllMocks());
 
 describe("text provider adapters", () => {
+  it("returns typed HTTP retry metadata and forbids hidden response-format retries for authoring", async () => {
+    const openAiProfile: TextProviderProfile = {
+      ...profile,
+      providerType: "openai_compatible",
+      baseUrl: "https://api.openai.com/v1"
+    };
+    const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      expect(JSON.parse(String(init?.body))).not.toHaveProperty("previous_response_id");
+      return new Response(JSON.stringify({
+        error: { message: "response_format unsupported; synthetic authorization detail" }
+      }), {
+        status: 401,
+        headers: { "retry-after": "2" }
+      });
+    });
+
+    let thrown: unknown;
+    try {
+      await callTextProvider(openAiProfile, {
+        systemPrompt: "system",
+        input: "input",
+        responseFormatFallback: "forbid"
+      }, createTestProviderTransport(fetcher as typeof fetch));
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(ProviderHttpError);
+    expect(thrown).toMatchObject({ statusCode: 401, retryAfterMs: 2_000 });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the default compatible response-format fallback for non-authoring callers", async () => {
+    const sentBodies: string[] = [];
+    const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      sentBodies.push(String(init?.body));
+      if (sentBodies.length === 1) {
+        return new Response(JSON.stringify({ error: { message: "response_format unsupported" } }), { status: 400 });
+      }
+      return new Response(JSON.stringify({
+        id: "fallback-response",
+        choices: [{ message: { content: "{}" }, finish_reason: "stop" }],
+        usage: {}
+      }), { status: 200 });
+    });
+    const openAiProfile: TextProviderProfile = {
+      ...profile,
+      providerType: "openai_compatible",
+      baseUrl: "https://api.openai.com/v1"
+    };
+
+    await callTextProvider(openAiProfile, {
+      systemPrompt: "system",
+      input: "input"
+    }, createTestProviderTransport(fetcher as typeof fetch));
+
+    expect(sentBodies).toHaveLength(2);
+    expect(JSON.parse(sentBodies[0]!).response_format).toEqual({ type: "json_object" });
+    expect(JSON.parse(sentBodies[1]!).response_format).toBeUndefined();
+  });
+
   it("keeps response-chain recovery in the explicitly named legacy serializer", () => {
     const prepared = serializeLegacyProviderRequest(profile, {
       systemPrompt: "system prompt",

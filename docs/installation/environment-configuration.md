@@ -45,6 +45,7 @@ System Archive is enabled by default for the direct runtime and single-node Comp
 | Setting | Default | Accepted range or behavior |
 | --- | --- | --- |
 | `SYSTEM_ARCHIVE_ENABLED` | `true` | Registers the System Archive API and worker lane. Separated API/worker deployments must pass the same value to both roles. |
+| `AI_AUTHORING_JOBS_ENABLED` | `false` | Admits and executes durable AI authoring jobs. Pass the same value to API and worker roles; ordinary bounded retention cleanup remains active in compatible workers while disabled. |
 | `SYSTEM_ARCHIVE_ARTIFACT_TTL_SECONDS` | `86400` (24 hours) | 300 through 604800; lifetime of a published downloadable export and its private authority. |
 | `SYSTEM_ARCHIVE_UPLOAD_TTL_SECONDS` | `86400` (24 hours) | 300 through 604800; inactivity lifetime for resumable upload/staged input authority. |
 | `ARCHIVE_PREVIEW_TTL_SECONDS` | `1800` (30 minutes) | 60 through 86400; controls Campaign and World Archive preview authority only. |

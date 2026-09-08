@@ -3,10 +3,8 @@ import { z } from "zod";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import type { WorldGenerationProgressUpdate } from "../../../packages/application/src/world-campaign/index.js";
 import {
-  canonicalizeWorldContent,
   characterProfileSchema,
   playableCharacterSchema,
-  WORLD_CONTENT_SCHEMA_VERSION,
   worldContentSchema,
   type PlayableCharacterGenerationRequest,
   type PlayableCharacterGenerationPreviewRequest,
@@ -16,25 +14,32 @@ import {
 import {
   CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION,
   buildPlayableCharacterGenerationPrompt,
-  normalizeGeneratedPlayableCharacter,
-  playableCharacterRecoveryInput
+  normalizeGeneratedPlayableCharacter
 } from "../../../packages/domain/src/character-authoring.js";
+import { effectiveAuthoringPrompt } from "../../../packages/domain/src/authoring-prompts.js";
 import {
   generatedCharacterNameKey,
   generatedWorldIssues,
   parseCompleteGeneratedWorld,
   projectGeneratedWorldIssues
 } from "../../../packages/domain/src/generated-world.js";
+import { validateGeneratedCharacter, validateGeneratedWorldFiction } from "../../../packages/domain/src/authoring-output.js";
+import { applicationOwnedRpgStats, applicationOwnedDefaultTriggers, assembleGeneratedWorldContent } from "../../../packages/domain/src/generated-world-assembly.js";
+export { applicationOwnedRpgStats, applicationOwnedDefaultTriggers, applicationOwnedEventTriggers } from "../../../packages/domain/src/generated-world-assembly.js";
 import { buildTemplateWorldPrompt, type TemplateWorldInput } from "../../../packages/domain/src/world-template.js";
 import { ProviderDestinationNotAllowedError } from "../../../packages/security/src/provider-network-policy.js";
 import { ProviderResponseTooLargeError } from "../../../packages/story-engine/src/provider-response.js";
 import {
   extractJsonObject,
+  ProviderHttpError,
   providerTransportErrorDetails,
   type ProviderResult
 } from "../../../packages/story-engine/src/index.js";
 import { logger } from "../../../packages/logger/src/index.js";
 import type { WorldGenerationProviderCollaborators } from "./provider-application-composition.js";
+import type { RuntimeTextExecution } from "./provider-credential-transport-adapter.js";
+import { runAuthoringResponse } from "./authoring-response-adapter.js";
+import type { AuthoringWorldOutline } from "../../../packages/application/src/authoring/types.js";
 
 const coerceText = (val: unknown): string => {
   if (val === null || val === undefined) return "";
@@ -62,9 +67,6 @@ const convertedPlayableCharacterSchema = z.object({
 }).passthrough();
 
 const completeConvertedPlayableCharacterSchema = convertedPlayableCharacterSchema.superRefine((character, context) => {
-  if (!character.character_text.trim()) {
-    context.addIssue({ code: "custom", path: ["character_text"], message: "Generated character guidance is required." });
-  }
   if (!character.profile) {
     context.addIssue({ code: "custom", path: ["profile"], message: "Generated structured character profile is required." });
   }
@@ -72,19 +74,36 @@ const completeConvertedPlayableCharacterSchema = convertedPlayableCharacterSchem
 
 function parseGeneratedCharacterForSeed(
   content: string,
-  seed: z.infer<typeof generatedCharacterSeedSchema>
+  seed: z.infer<typeof generatedCharacterSeedSchema>,
+  characterIndex: number
 ) {
   const character = completeConvertedPlayableCharacterSchema.parse(extractJsonObject(content));
   const issues: z.ZodIssue[] = [];
   if (!character.id.trim()) {
-    issues.push({ code: "custom", path: ["id"], message: "Generated character ID is required." });
+    issues.push({ code: "custom", path: ["playableCharacters", characterIndex, "id"], message: "Generated character ID must match the supplied seed.", params: { authoringReason: "seed_id_mismatch" } });
   } else if (character.id.trim() !== seed.id.trim()) {
-    issues.push({ code: "custom", path: ["id"], message: "Generated character ID must match its seed." });
+    issues.push({ code: "custom", path: ["playableCharacters", characterIndex, "id"], message: "Generated character ID must match the supplied seed.", params: { authoringReason: "seed_id_mismatch" } });
   }
   if (generatedCharacterNameKey(character.name) !== generatedCharacterNameKey(seed.name)) {
-    issues.push({ code: "custom", path: ["name"], message: "Generated character name must match its seed." });
+    issues.push({ code: "custom", path: ["playableCharacters", characterIndex, "name"], message: "Generated character name must match the supplied seed.", params: { authoringReason: "seed_name_mismatch" } });
   }
   if (issues.length) throw new z.ZodError(issues);
+  try {
+    validateGeneratedCharacter(playableCharacterSchema.parse({
+      id: character.id,
+      name: character.name,
+      characterText: character.character_text,
+      profile: character.profile,
+      rpgStats: character.rpg_statistics,
+      defaultTriggers: character.default_triggers
+    }), "creative");
+  } catch (error) {
+    if (!(error instanceof z.ZodError)) throw error;
+    throw new z.ZodError(error.issues.map((issue) => ({
+      ...issue,
+      path: ["playableCharacters", characterIndex, ...issue.path]
+    })));
+  }
   return character;
 }
 
@@ -111,6 +130,13 @@ const convertedWorldSchema = z.object({
 }).passthrough();
 
 const completeConvertedWorldSchema = convertedWorldSchema.superRefine((world, context) => {
+  try {
+    validateGeneratedWorldFiction(world);
+  } catch (error) {
+    if (!(error instanceof z.ZodError)) throw error;
+    for (const issue of error.issues) context.addIssue({ ...issue });
+  }
+
   for (const [key, label] of [
     ["genre", "genre"],
     ["tone", "tone"],
@@ -143,47 +169,6 @@ export function applicationOwnedCharacterIds(
   characters: ReadonlyArray<{ name: string; id?: string }>
 ): string[] {
   return characters.map((character, index) => convertedCharacterId(character.name, index));
-}
-
-export function applicationOwnedRpgStats(items: unknown[], characterId: string) {
-  return items.flatMap((item, index) => {
-    const row = item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : {};
-    const name = String(row.name || row.skill || row.stat || "").trim();
-    if (!name) return [];
-    const numeric = Math.round(Number(row.value ?? row.score ?? row.rating ?? 50));
-    return [{
-      ...row,
-      id: `${characterId}-stat-${index + 1}`.slice(0, 200),
-      name: name.slice(0, 200),
-      value: Number.isFinite(numeric) ? Math.min(99, Math.max(1, numeric)) : 50,
-      note: String(row.note || row.covers || "").slice(0, 2000)
-    }];
-  });
-}
-
-export function applicationOwnedDefaultTriggers(items: unknown[], characterId: string) {
-  return items.flatMap((item, index) => {
-    const row = item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : {};
-    const name = String(row.name || row.label || row.title || "").trim();
-    if (!name) return [];
-    return [{
-      ...row,
-      id: `${characterId}-tracker-${index + 1}`.slice(0, 200),
-      name: name.slice(0, 300),
-      rules: String(row.rules || row.updateRules || row.description || `Track ${name} whenever it changes.`).slice(0, 4000),
-      value: String(row.value ?? row.initialValue ?? "Not yet established.").slice(0, 6000)
-    }];
-  });
-}
-
-export function applicationOwnedEventTriggers(items: unknown[], worldScope: string): unknown[] {
-  return items.map((item, index) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) return item;
-    return {
-      ...(item as Record<string, unknown>),
-      id: `${worldScope}-event-${index + 1}`.slice(0, 200)
-    };
-  });
 }
 
 export type WorldGenProgress = WorldGenerationProgressUpdate;
@@ -322,7 +307,7 @@ export function generatedWorldProviderError(error: unknown): Error {
     code = "provider_transport_error";
     statusCode = 502;
     message = "The text provider connection failed.";
-  } else if (providerStatus && Object.hasOwn(failure, "providerMessage")) {
+  } else if (providerStatus && (error instanceof ProviderHttpError || Object.hasOwn(failure, "providerMessage"))) {
     category = "http";
     code = "provider_http_error";
     statusCode = providerStatus;
@@ -544,6 +529,143 @@ export function normalizeRawWorldJson(raw: unknown): Record<string, unknown> {
   };
 }
 
+/** Named Patch 1 seam shared by synchronous generation and durable stages. */
+export async function generateWorldOutline(options: Readonly<{
+  input: TemplateWorldInput;
+  provider: Pick<RuntimeTextExecution, "execute">;
+  worldPrompt: ReturnType<typeof buildTemplateWorldPrompt>;
+  prompt: string;
+  repairPrompt: string;
+  currentClaim?: () => Promise<boolean>;
+  onRepair?: () => Promise<void> | void;
+}>): Promise<AuthoringWorldOutline> {
+  const converted = await runAuthoringResponse({
+    stage: "world",
+    request: async (attempt) => {
+      if (attempt.repair) await options.onRepair?.();
+      return options.provider.execute({
+        ...options.worldPrompt,
+        systemPrompt: effectiveAuthoringPrompt("world", attempt.repair ? options.repairPrompt : options.prompt).content,
+        responseFormatFallback: "forbid",
+        ...(attempt.rejectedResponse === undefined ? {} : {
+          rejectedResponse: attempt.rejectedResponse,
+          recoveryInput: JSON.stringify({ issues: attempt.issues })
+        })
+      });
+    },
+    parse: (content) => completeConvertedWorldSchema.parse(normalizeRawWorldJson(extractJsonObject(content))),
+    delay: async (milliseconds) => { await new Promise<void>((resolve) => setTimeout(resolve, milliseconds)); },
+    ...(options.currentClaim === undefined ? {} : { currentClaim: options.currentClaim })
+  });
+  return {
+    title: converted.title, genre: converted.genre, tone: converted.tone,
+    backgroundStory: converted.backgroundStory, premise: converted.premise,
+    firstAction: converted.firstAction, rules: converted.story_rules,
+    seeds: converted.character_seeds.map((seed, index) => ({
+      id: seed.id, name: seed.name, role: seed.role, concept: seed.concept, narrativeHook: seed.narrative_hook
+    })),
+    rpgStats: converted.rpg_statistics, defaultTriggers: converted.default_triggers, eventTriggers: converted.event_triggers
+  };
+}
+
+/** Durable world claims convert model seed identifiers once, before checkpointing. */
+export function allocateOutlineCharacterIds(outline: AuthoringWorldOutline): AuthoringWorldOutline {
+  const ids = applicationOwnedCharacterIds(outline.seeds);
+  return { ...outline, seeds: outline.seeds.map((seed, index) => ({ ...seed, id: ids[index]! })) };
+}
+
+/** Named Patch 1 seam shared by synchronous generation and durable child stages. */
+export async function expandWorldCharacterSeed(options: Readonly<{
+  provider: Pick<RuntimeTextExecution, "execute">;
+  outline: AuthoringWorldOutline;
+  seed: AuthoringWorldOutline["seeds"][number];
+  characterIndex: number;
+  acceptedCharacterNames: readonly string[];
+  prompt: string;
+  repairPrompt: string;
+  currentClaim?: () => Promise<boolean>;
+  onRepair?: () => Promise<void> | void;
+}>): Promise<z.infer<typeof completeConvertedPlayableCharacterSchema>> {
+  const characterRequest = {
+    systemPrompt: effectiveAuthoringPrompt("world_character", options.prompt).content,
+    input: JSON.stringify({
+      world: {
+        title: options.outline.title,
+        genre: options.outline.genre,
+        tone: options.outline.tone,
+        backgroundStory: options.outline.backgroundStory,
+        premise: options.outline.premise,
+        firstAction: options.outline.firstAction,
+        storyRules: options.outline.rules
+      },
+      seed: {
+        id: options.seed.id, name: options.seed.name, role: options.seed.role,
+        concept: options.seed.concept, narrative_hook: options.seed.narrativeHook
+      },
+      otherSeeds: options.outline.seeds
+        .filter((candidate) => candidate.id !== options.seed.id)
+        .map(({ id, name, role }) => ({ id, name, role })),
+      acceptedCharacterNames: options.acceptedCharacterNames
+    })
+  };
+  return runAuthoringResponse({
+    stage: "character",
+    request: async (attempt) => {
+      if (attempt.repair) await options.onRepair?.();
+      return options.provider.execute({
+        ...characterRequest,
+        systemPrompt: effectiveAuthoringPrompt("world_character", attempt.repair ? options.repairPrompt : options.prompt).content,
+        responseFormatFallback: "forbid",
+        ...(attempt.rejectedResponse === undefined ? {} : {
+          rejectedResponse: attempt.rejectedResponse,
+          recoveryInput: JSON.stringify({ issues: attempt.issues })
+        })
+      });
+    },
+    parse: (content) => parseGeneratedCharacterForSeed(content, {
+      id: options.seed.id,
+      name: options.seed.name,
+      role: options.seed.role,
+      concept: options.seed.concept,
+      narrative_hook: options.seed.narrativeHook
+    }, options.characterIndex),
+    delay: async (milliseconds) => { await new Promise<void>((resolve) => setTimeout(resolve, milliseconds)); },
+    ...(options.currentClaim === undefined ? {} : { currentClaim: options.currentClaim })
+  });
+}
+
+/** Named Patch 1 assembly seam shared by legacy synchronous generation and durable consumers. */
+export function assembleGeneratedWorld(options: Readonly<{
+  input: TemplateWorldInput;
+  outline: AuthoringWorldOutline;
+  characters: readonly z.infer<typeof completeConvertedPlayableCharacterSchema>[];
+}>): WorldContent {
+  const characterIds = applicationOwnedCharacterIds(options.characters);
+  const playableCharacters = options.characters.map((character, index) => assembleExpandedWorldCharacter(character, characterIds[index]!, index));
+  return parseCompleteGeneratedWorld(assembleGeneratedWorldContent({
+    outline: options.outline,
+    playableCharacters,
+    importedFrom: options.input.sourceKind
+  }));
+}
+
+/** Assembly is separate from seed expansion so durable child checkpoints retain the validated model output. */
+export function assembleExpandedWorldCharacter(
+  character: z.infer<typeof completeConvertedPlayableCharacterSchema>,
+  characterId: string,
+  index = 0,
+) {
+  return playableCharacterSchema.parse({
+    id: characterId,
+    name: character.name,
+    characterText: character.character_text,
+    profile: character.profile,
+    rpgStats: applicationOwnedRpgStats(character.rpg_statistics, characterId),
+    defaultTriggers: applicationOwnedDefaultTriggers(character.default_triggers, characterId),
+    source: { type: "template-world-generator", index, promptProtocolVersion: CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION }
+  });
+}
+
 export async function generateTemplateWorld(
   _pool: DatabasePool,
   ownerUserId: string,
@@ -578,169 +700,50 @@ export async function generateTemplateWorld(
 
   await onProgress?.("generating_world", 30, "Synthesizing world structure and character seeds via LLM…");
   const promptSnapshot = (await providers.prompts.loadWorldGenerationPromptSnapshot({ ownerUserId, worldId })).snapshot;
-  const prompt = buildTemplateWorldPrompt(input, providers.promptTools.content(promptSnapshot, "world_generation"));
-  const result = await callGeneratedWorldProvider(() => provider.execute(prompt));
-  let validationResult = result;
-  logger.debug({ responseId: result.responseId, outputLimited: result.outputLimited }, "Received initial world generation LLM response");
-
-  let converted: z.infer<typeof convertedWorldSchema>;
-  try {
-    converted = completeConvertedWorldSchema.parse(normalizeRawWorldJson(extractJsonObject(result.content)));
-    logger.debug({
-      responseId: result.responseId,
-      characterSeedCount: converted.character_seeds.length
-    }, "Successfully parsed initial generated world JSON");
-  } catch (error) {
-    if (!isGeneratedWorldValidationError(error)) throw error;
-    logger.warn({
-      responseId: result.responseId,
-      finishReason: result.finishReason,
-      outputLimited: result.outputLimited,
-      issues: generatedWorldIssues(error)
-    }, "Initial LLM world generation parse failed, attempting recovery");
-    await onProgress?.("recovering_world", 35, result.outputLimited ? "Output limit reached. Recovering truncated JSON…" : "Generated world was incomplete. Requesting a complete replacement…");
-    const recovered = await callGeneratedWorldProvider(() => provider.execute({
-      ...prompt,
-      ...(result.responseId ? { previousResponseId: result.responseId } : {}),
-      rejectedResponse: result.content,
-      recoveryInput: providers.promptTools.content(promptSnapshot, "world_generation_recovery")
-    }));
-    try {
-      converted = completeConvertedWorldSchema.parse(normalizeRawWorldJson(extractJsonObject(recovered.content)));
-    } catch (recoveryError) {
-      if (!isGeneratedWorldValidationError(recoveryError)) throw recoveryError;
-      logger.error({
-        responseId: recovered.responseId,
-        finishReason: recovered.finishReason,
-        outputLimited: recovered.outputLimited,
-        issues: generatedWorldIssues(recoveryError)
-      }, "Generated world recovery validation failed");
-      throw incompleteGeneratedWorldError(recoveryError);
+  const worldPrompt = buildTemplateWorldPrompt(input, providers.promptTools.content(promptSnapshot, "world_generation"));
+  const worldRepairPrompt = providers.promptTools.content(promptSnapshot, "world_generation_recovery");
+  const converted = await generateWorldOutline({
+    input, provider, worldPrompt, prompt: providers.promptTools.content(promptSnapshot, "world_generation"), repairPrompt: worldRepairPrompt,
+    onRepair: async () => {
+      await onProgress?.("recovering_world", 35, "Generated world was incomplete. Requesting a complete replacement…");
     }
-    validationResult = recovered;
-    logger.info({
-      responseId: recovered.responseId,
-      characterSeedCount: converted.character_seeds.length
-    }, "Successfully recovered generated world JSON");
-  }
+  });
+  let validationResult: ProviderResult | undefined;
 
   const rawCharacters: z.infer<typeof completeConvertedPlayableCharacterSchema>[] = [];
-  for (const [characterIndex, seed] of converted.character_seeds.entries()) {
+  for (const [characterIndex, seed] of converted.seeds.entries()) {
     const safeSeedName = seed.name.slice(0, 200);
-    const percent = 40 + Math.round((characterIndex / converted.character_seeds.length) * 45);
+    const percent = 40 + Math.round((characterIndex / converted.seeds.length) * 45);
     await onProgress?.(
       "generating_character",
       percent,
-      `Generating character ${characterIndex + 1} of ${converted.character_seeds.length}: ${safeSeedName}…`
+      `Generating character ${characterIndex + 1} of ${converted.seeds.length}: ${safeSeedName}…`
     );
-    const characterRequest = {
-      systemPrompt: providers.promptTools.content(promptSnapshot, "world_character_generation"),
-      input: JSON.stringify({
-        world: {
-          title: converted.title,
-          genre: converted.genre,
-          tone: converted.tone,
-          backgroundStory: converted.backgroundStory,
-          premise: converted.premise,
-          firstAction: converted.firstAction,
-          storyRules: converted.story_rules
-        },
-        seed,
-        otherSeeds: converted.character_seeds
-          .filter((candidate) => candidate.id !== seed.id)
-          .map(({ id, name, role }) => ({ id, name, role })),
-        acceptedCharacterNames: rawCharacters.map((character) => character.name)
-      })
-    };
-    const characterResult = await callGeneratedWorldProvider(() => provider.execute(characterRequest));
-    try {
-      rawCharacters.push(parseGeneratedCharacterForSeed(characterResult.content, seed));
-      validationResult = characterResult;
-    } catch (error) {
-      if (!isGeneratedWorldValidationError(error)) throw error;
-      logger.warn({
-        responseId: characterResult.responseId,
-        finishReason: characterResult.finishReason,
-        outputLimited: characterResult.outputLimited,
-        characterIndex,
-        issues: generatedWorldIssues(error)
-      }, "Generated character profile parse failed, attempting recovery");
-      await onProgress?.(
-        "recovering_character",
-        percent,
-        characterResult.outputLimited
-          ? `Output limit reached while generating character ${characterIndex + 1}. Recovering truncated JSON…`
-          : `Character ${characterIndex + 1} was incomplete. Requesting a complete replacement…`
-      );
-      const recovered = await callGeneratedWorldProvider(() => provider.execute({
-        ...characterRequest,
-        ...(characterResult.responseId ? { previousResponseId: characterResult.responseId } : {}),
-        rejectedResponse: characterResult.content,
-        recoveryInput: providers.promptTools.content(promptSnapshot, "world_character_generation_recovery")
-      }));
-      try {
-        rawCharacters.push(parseGeneratedCharacterForSeed(recovered.content, seed));
-        validationResult = recovered;
-      } catch (recoveryError) {
-        if (!isGeneratedWorldValidationError(recoveryError)) throw recoveryError;
-        logger.error({
-          responseId: recovered.responseId,
-          finishReason: recovered.finishReason,
-          outputLimited: recovered.outputLimited,
-          characterIndex,
-          issues: generatedWorldIssues(recoveryError)
-        }, "Generated character recovery validation failed");
-        throw incompleteGeneratedCharacterError(characterIndex, safeSeedName, recoveryError);
+    const generatedCharacter = await expandWorldCharacterSeed({
+      provider,
+      outline: converted,
+      seed,
+      characterIndex,
+      acceptedCharacterNames: rawCharacters.map((character) => character.name),
+      prompt: providers.promptTools.content(promptSnapshot, "world_character_generation"),
+      repairPrompt: providers.promptTools.content(promptSnapshot, "world_character_generation_recovery"),
+      onRepair: async () => {
+        await onProgress?.("recovering_character", percent, `Character ${characterIndex + 1} was incomplete. Requesting a complete replacement…`);
       }
-    }
+    });
+    rawCharacters.push(generatedCharacter);
   }
 
   await onProgress?.("formatting", 85, "Formatting character roster and world attributes…");
   let content: WorldContent;
   try {
-    const characterIds = applicationOwnedCharacterIds(rawCharacters);
-    const playableCharacters = rawCharacters.map((character, index) => {
-      const id = characterIds[index]!;
-      return playableCharacterSchema.parse({
-        id,
-        name: character.name,
-        characterText: character.character_text,
-        profile: character.profile,
-        rpgStats: applicationOwnedRpgStats(character.rpg_statistics, id),
-        defaultTriggers: applicationOwnedDefaultTriggers(character.default_triggers, id),
-        source: { type: "template-world-generator", index }
-      });
-    });
-
-    content = parseCompleteGeneratedWorld(canonicalizeWorldContent({
-      schemaVersion: WORLD_CONTENT_SCHEMA_VERSION,
-      world: {
-        title: converted.title,
-        genre: converted.genre,
-        tone: converted.tone,
-        backgroundStory: converted.backgroundStory,
-        premise: converted.premise,
-        firstAction: converted.firstAction,
-        rules: converted.story_rules
-      },
-      playableCharacters,
-      entities: [],
-      relationships: [],
-      rpgStats: applicationOwnedRpgStats(converted.rpg_statistics, "world-wide"),
-      defaultTriggers: applicationOwnedDefaultTriggers(converted.default_triggers, "world-wide"),
-      eventTriggers: applicationOwnedEventTriggers(converted.event_triggers, "generated-world"),
-      assets: [],
-      defaults: {
-        importedFrom: input.sourceKind,
-        defaultPlayableCharacterId: playableCharacters[0]?.id || ""
-      }
-    }));
+    content = assembleGeneratedWorld({ input, outline: converted, characters: rawCharacters });
   } catch (error) {
     if (!isGeneratedWorldValidationError(error)) throw error;
     logger.error({
-      responseId: validationResult.responseId,
-      finishReason: validationResult.finishReason,
-      outputLimited: validationResult.outputLimited,
+      responseId: validationResult?.responseId,
+      finishReason: validationResult?.finishReason,
+      outputLimited: validationResult?.outputLimited,
       issues: generatedWorldIssues(error)
     }, "Generated world completion validation failed");
     throw incompleteGeneratedWorldError(error);
@@ -868,6 +871,49 @@ function characterGenerationError(message: string, statusCode: number, code: str
   return Object.assign(new Error(message), { statusCode, details: { code } });
 }
 
+/** Named Patch 1 seam for standalone and existing-character durable stages. */
+export async function generateStandalonePlayableCharacter(options: Readonly<{
+  provider: Pick<RuntimeTextExecution, "execute">;
+  content: WorldContent;
+  promptText: string;
+  currentCharacter?: WorldContent["playableCharacters"][number] | undefined;
+  /** Durable callers supply this application-owned identity before the provider call. */
+  characterId?: string | undefined;
+  promptTemplate: string;
+  currentClaim?: () => Promise<boolean>;
+  onRepair?: () => Promise<void> | void;
+}>): Promise<{ character: ReturnType<typeof normalizeGeneratedPlayableCharacter> }> {
+  const prompt = buildPlayableCharacterGenerationPrompt(
+    options.content,
+    options.promptText,
+    options.currentCharacter,
+    options.promptTemplate.replaceAll("{{protocol}}", CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION),
+  );
+  let generatedId = options.characterId ?? options.currentCharacter?.id ?? randomUUID();
+  while (!options.currentCharacter && options.content.playableCharacters.some((character) => character.id === generatedId)) {
+    generatedId = randomUUID();
+  }
+  const character = await runAuthoringResponse({
+    stage: "character",
+    request: async (attempt) => {
+      if (attempt.repair) await options.onRepair?.();
+      return options.provider.execute({
+        ...prompt,
+        systemPrompt: effectiveAuthoringPrompt("character", prompt.systemPrompt).content,
+        responseFormatFallback: "forbid",
+        ...(attempt.rejectedResponse === undefined ? {} : {
+          rejectedResponse: attempt.rejectedResponse,
+          recoveryInput: JSON.stringify({ issues: attempt.issues })
+        })
+      });
+    },
+    parse: (content) => normalizeGeneratedPlayableCharacter(extractJsonObject(content), generatedId, options.currentCharacter),
+    delay: async (milliseconds) => { await new Promise<void>((resolve) => setTimeout(resolve, milliseconds)); },
+    ...(options.currentClaim === undefined ? {} : { currentClaim: options.currentClaim })
+  });
+  return { character };
+}
+
 async function generatePlayableCharacterCandidate(
   pool: DatabasePool,
   ownerUserId: string,
@@ -901,63 +947,19 @@ async function generatePlayableCharacterCandidate(
   );
   await onProgress?.("generating", 35, "Generating character preview.");
   const promptSnapshot = (await providers.prompts.loadWorldGenerationPromptSnapshot({ ownerUserId, worldId })).snapshot;
-  const prompt = buildPlayableCharacterGenerationPrompt(
+  const { character } = await generateStandalonePlayableCharacter({
+    provider,
     content,
-    request.prompt,
+    promptText: request.prompt,
     currentCharacter,
-    providers.promptTools.content(promptSnapshot, "character_generation")
-      .replaceAll("{{protocol}}", CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION),
-  );
-  let generatedId = currentCharacter?.id || randomUUID();
-  while (!currentCharacter && content.playableCharacters.some((character) => character.id === generatedId)) {
-    generatedId = randomUUID();
-  }
-  const providerResult = await provider.execute(prompt);
-  logger.debug({ responseId: providerResult.responseId, outputLimited: providerResult.outputLimited }, "Received character generation LLM response");
+    promptTemplate: providers.promptTools.content(promptSnapshot, "character_generation"),
+    onRepair: async () => {
+      await onProgress?.("generating", 35, "Generated character was incomplete. Requesting a complete replacement.");
+    }
+  });
   await onProgress?.("validating", 80, "Validating generated character.");
-
-  try {
-    const character = normalizeGeneratedPlayableCharacter(
-      extractJsonObject(providerResult.content),
-      generatedId,
-      currentCharacter
-    );
-    logger.info({ characterId: generatedId, name: character.name }, "Playable character candidate generated successfully");
-    return { character };
-  } catch (error) {
-    if (!providerResult.outputLimited) {
-      logger.error({ error: error instanceof Error ? error.message : String(error) }, "Character generation output was invalid and output limit was not reached");
-      throw characterGenerationError(
-        "The text provider returned an invalid character. Revise the prompt and try again.",
-        502,
-        "invalid_generated_character"
-      );
-    }
-
-    logger.warn({ error: error instanceof Error ? error.message : String(error) }, "Initial character output reached output limit, attempting recovery");
-    const recovered = await provider.execute({
-      ...prompt,
-      ...(providerResult.responseId ? { previousResponseId: providerResult.responseId } : {}),
-      rejectedResponse: providerResult.content,
-      recoveryInput: playableCharacterRecoveryInput()
-    });
-    try {
-      const character = normalizeGeneratedPlayableCharacter(
-        extractJsonObject(recovered.content),
-        generatedId,
-        currentCharacter
-      );
-      logger.info({ characterId: generatedId, name: character.name }, "Playable character candidate recovered successfully");
-      return { character };
-    } catch (recoveryErr) {
-      logger.error({ error: recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr), outputLimited: recovered.outputLimited }, "Character generation recovery attempt failed");
-      throw characterGenerationError(
-        "The text provider could not return a complete character after one recovery attempt.",
-        502,
-        recovered.outputLimited ? "character_generation_output_limit" : "invalid_generated_character"
-      );
-    }
-  }
+  logger.info({ characterId: character.id, name: character.name }, "Playable character candidate generated successfully");
+  return { character };
 }
 
 export async function generatePlayableCharacterPreviewForOwner(

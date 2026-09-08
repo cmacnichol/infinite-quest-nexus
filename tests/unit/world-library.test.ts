@@ -265,6 +265,36 @@ describe("playable character generation", () => {
     });
   });
 
+  it("sends the effective character contract on initial and recovery requests", async () => {
+    const requests: Array<{ systemPrompt: string }> = [];
+    const incomplete = {
+      content: '{"name":"Partial"', responseId: "partial", finishReason: "length", outputLimited: true,
+      modelInstanceId: "model", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, reportedCost: null, rawMetadata: {}
+    };
+    const complete = {
+      content: JSON.stringify({ name: "Complete", profile: { story: { role: "Guide", background: "Maps the roads.", motivations: "Keep travelers safe." } }, rpgStats: [], defaultTriggers: [] }), responseId: "complete", finishReason: "stop", outputLimited: false,
+      modelInstanceId: "model", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, reportedCost: null, rawMetadata: {}
+    };
+    const outcomes = [incomplete, complete];
+    const testProviders = {
+      resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: "provider", model: "model" }) },
+      execution: { text: async () => ({ execute: async (request: unknown) => { requests.push(request as { systemPrompt: string }); return outcomes.shift()!; } }) },
+      prompts: { loadWorldGenerationPromptSnapshot: async () => ({ snapshot: {} }) },
+      promptTools: { content: () => "Custom character guidance." }
+    } as unknown as WorldGenerationProviderCollaborators;
+    await generatePlayableCharacterPreviewForOwner(
+      {} as never, "server-owner", { content, prompt: "Create a guide." },
+      testProviders,
+      { createWorldGenerationProgress: async () => undefined, updateWorldGenerationProgress: async () => undefined } as never
+    );
+    expect(requests).toHaveLength(2);
+    for (const request of requests) {
+      expect(request.systemPrompt).toContain('"fearsAndConflicts"');
+      expect(request.systemPrompt).toContain("character-authoring-v3-validated-profile");
+      expect(request.systemPrompt).toContain("untrusted reference");
+    }
+  });
+
   it("normalizes generated fields while keeping application-owned identity and imported metadata", () => {
     const normalized = normalizeGeneratedPlayableCharacter({
       character: {
@@ -272,7 +302,12 @@ describe("playable character generation", () => {
         name: "  Revised Character  ",
         profile: {
           identity: { aliases: ["The Cartographer"], pronouns: "they/them" },
-          story: { role: "  Reluctant guide.  ", personality: "Observant and cautious." },
+          story: {
+            role: "  Reluctant guide.  ",
+            background: "  Raised along the moving roads.  ",
+            personality: "Observant and cautious.",
+            motivations: "Keep travelers safe from shifting paths."
+          },
           appearance: { clothing: "Silver rain cloak.", distinguishingFeatures: ["Ink-stained hands."] },
           unclassifiedNotes: ""
         },
@@ -294,7 +329,12 @@ describe("playable character generation", () => {
       characterText: "Existing guidance.",
       profile: {
         identity: { aliases: ["The Cartographer"], pronouns: "they/them" },
-        story: { role: "Reluctant guide.", personality: "Observant and cautious." },
+        story: {
+          role: "Reluctant guide.",
+          background: "Raised along the moving roads.",
+          personality: "Observant and cautious.",
+          motivations: "Keep travelers safe from shifting paths."
+        },
         appearance: { clothing: "Silver rain cloak.", distinguishingFeatures: ["Ink-stained hands."] }
       },
       source: { type: "world-import", externalId: "source-7" },
@@ -304,6 +344,34 @@ describe("playable character generation", () => {
     });
     expect(JSON.stringify(normalized)).not.toContain("private_reasoning");
     expect(JSON.stringify(normalized)).not.toContain("scratchpad");
+  });
+
+  it("keeps legacy manual guidance without treating it as model-authored fiction during revision validation", () => {
+    const legacy = {
+      ...content.playableCharacters[0]!,
+      characterText: "Roll a d20 before choosing a road.",
+      source: { type: "world-import", externalId: "source-7" }
+    };
+
+    const normalized = normalizeGeneratedPlayableCharacter({
+      name: "Revised Character",
+      profile: {
+        story: {
+          role: "Cartographer",
+          background: "Raised beside the moving roads.",
+          goals: "Map the inland roads."
+        }
+      },
+      rpgStats: [],
+      defaultTriggers: []
+    }, "existing-character", legacy);
+
+    expect(normalized).toMatchObject({
+      id: "existing-character",
+      characterText: "Roll a d20 before choosing a road.",
+      source: { type: "world-import", externalId: "source-7" },
+      profile: { story: { role: "Cartographer", goals: "Map the inland roads." } }
+    });
   });
 
   it("rejects incomplete generated characters and provides a compact recovery instruction", () => {
@@ -353,7 +421,13 @@ describe("playable character preview progress", () => {
         updates.push({ ownerUserId, progressKey, ...progress });
       }
     };
-    const generatedProfile = characterProfileSchema.parse({});
+    const generatedProfile = characterProfileSchema.parse({
+      story: {
+        role: "Careful guide",
+        background: "Learned the roads from an old mapmaker.",
+        motivations: "Keep travelers safe."
+      }
+    });
 
     await expect(generatePlayableCharacterPreviewForOwner(
       {} as never,

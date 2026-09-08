@@ -294,7 +294,7 @@ integration("generated CYOA world persistence", () => {
 
     for (const [index, body] of providerRequestBodies.slice(1).entries()) {
       expect(body.messages?.find((message) => message.role === "system")?.content)
-        .toBe(PROMPT_TEMPLATE_CATALOG.world_character_generation.defaultContent);
+        .toContain(PROMPT_TEMPLATE_CATALOG.world_character_generation.defaultContent);
       const userMessage = body.messages?.find((message) => message.role === "user");
       const input = JSON.parse(userMessage?.content ?? "") as GeneratedCharacterRequestInput;
       const characterIndex = index + 1;
@@ -391,10 +391,11 @@ integration("generated CYOA world persistence", () => {
     }, credentialSecret)).rejects.toMatchObject({
       statusCode: 502,
       expose: true,
-      details: {
-        code: "incomplete_generated_character",
-        characterIndex: 1,
-        seedName: "Explorer 2"
+      authoringFailure: {
+        code: "invalid_authoring_output",
+        stage: "character",
+        retryable: true,
+        issues: [{ path: "profile", code: "custom" }]
       }
     });
 
@@ -404,7 +405,7 @@ integration("generated CYOA world persistence", () => {
       phase: "failed",
       progressPercent: 100
     });
-    expect(progress?.message).toContain("The text provider did not return a complete character profile. Review the missing fields and try again.");
+    expect(progress?.message).toBe("World generation failed with status 502. Check the server logs and try again.");
     expect(progress?.errorMessage).toBe(progress?.message);
     expect(JSON.stringify(progress)).not.toContain(privateMarker);
     expect(progress?.message.length).toBeLessThanOrEqual(500);
@@ -438,10 +439,11 @@ integration("generated CYOA world persistence", () => {
       credentialSecret
     )).rejects.toMatchObject({
       statusCode: 502,
-      details: {
-        code: "incomplete_generated_character",
-        characterIndex: 1,
-        seedName: "Explorer 2"
+      authoringFailure: {
+        code: "invalid_authoring_output",
+        stage: "character",
+        retryable: true,
+        issues: [{ path: "profile", code: "custom" }]
       }
     });
 
@@ -550,14 +552,17 @@ integration("generated CYOA world persistence", () => {
       pool,
       generatedRequest.value,
       credentialSecret
-    )).rejects.toMatchObject({ statusCode: 500 });
+    )).rejects.toMatchObject({
+      statusCode: 502,
+      authoringFailure: { code: "authoring_provider_rejected", stage: "world", retryable: false }
+    });
 
     const progress = getImportProgress(generatedRequest.progressKey);
     expect(progress).toMatchObject({
       status: "failed",
       phase: "failed",
-      message: "The text provider request failed with HTTP 500. Check the provider endpoint and server logs.",
-      errorMessage: "The text provider request failed with HTTP 500. Check the provider endpoint and server logs."
+      message: "World generation failed with status 502. Check the server logs and try again.",
+      errorMessage: "World generation failed with status 502. Check the server logs and try again."
     });
     expect(JSON.stringify(progress)).not.toContain(privateMarker);
   });
@@ -567,9 +572,9 @@ integration("generated CYOA world persistence", () => {
       label: "destination policy",
       prepare: (marker: string) => ({
         providerProfileId: blockedProviderId,
-        expectedStatus: 422,
-        expectedCode: "PROVIDER_DESTINATION_NOT_ALLOWED",
-        expectedMessage: "The provider destination is not allowed by the server network policy."
+        expectedStatus: 502,
+        expectedCode: "authoring_provider_rejected",
+        expectedMessage: "World generation failed with status 502. Check the server logs and try again."
       })
     },
     {
@@ -582,8 +587,8 @@ integration("generated CYOA world persistence", () => {
         return {
           providerProfileId: providerId,
           expectedStatus: 502,
-          expectedCode: "provider_response_too_large",
-          expectedMessage: "The provider response exceeded the server's safe size limit."
+          expectedCode: "authoring_output_limit",
+          expectedMessage: "World generation failed with status 502. Check the server logs and try again."
         };
       }
     }
@@ -609,9 +614,11 @@ integration("generated CYOA world persistence", () => {
 
     expect(thrown).toMatchObject({
       statusCode: expected.expectedStatus,
-      code: expected.expectedCode,
-      permanent: true,
-      retryable: false
+      authoringFailure: {
+        code: expected.expectedCode,
+        stage: "world",
+        retryable: false
+      }
     });
     expect(getImportProgress(generatedRequest.progressKey)).toMatchObject({
       status: "failed",
@@ -620,8 +627,7 @@ integration("generated CYOA world persistence", () => {
       errorMessage: expected.expectedMessage
     });
     expect(errorLogCalls.at(-1)?.[0]).toMatchObject({
-      statusCode: expected.expectedStatus,
-      code: expected.expectedCode
+      statusCode: expected.expectedStatus
     });
     expect(JSON.stringify({ thrown, progress: getImportProgress(generatedRequest.progressKey), errorLogCalls }))
       .not.toContain(marker);

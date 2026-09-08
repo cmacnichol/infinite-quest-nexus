@@ -18,6 +18,7 @@ import {
   generatedWorldProviderError,
   incompleteGeneratedWorldError
 } from "../../services/runtime/src/provider-world-generation-adapter.js";
+import { AuthoringResponseError } from "../../services/runtime/src/authoring-response-adapter.js";
 
 function makeConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
   return {
@@ -752,6 +753,70 @@ describe("API server security and CORS headers", () => {
     });
     expect(response.payload).not.toContain("PRIVATE_PROVIDER_WORLD");
 
+    await app.close();
+  });
+
+  it("projects only the closed authoring failure and safe log fields", async () => {
+    const marker = "PRIVATE_AUTHORING_PROVIDER_RESPONSE";
+    const errorLogs: unknown[] = [];
+    const app = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool }));
+    app.get("/test/authoring-error", async (request) => {
+      (request.log as unknown as { error: (...args: unknown[]) => void }).error = (...args) => errorLogs.push(args);
+      const error = new AuthoringResponseError({
+        code: "invalid_authoring_output", stage: "character", retryable: true,
+        issues: [{ path: "profile.story.background", code: "missing", message: "Character background is required." }]
+      });
+      Object.assign(error, { details: { raw: marker }, issues: [{ message: marker }], cause: new Error(marker) });
+      throw error;
+    });
+    const response = await app.inject({ method: "GET", url: "/test/authoring-error", headers: { "x-correlation-id": "authoring-test" } });
+    expect(response.statusCode).toBe(502);
+    expect(response.json()).toMatchObject({
+      code: "invalid_authoring_output", correlationId: "authoring-test",
+      details: { code: "invalid_authoring_output", stage: "character", correlationId: "authoring-test",
+        issues: [{ path: "profile.story.background", code: "missing" }] }
+    });
+    expect(`${response.payload}${JSON.stringify(errorLogs)}`).not.toContain(marker);
+    await app.close();
+  });
+
+  it("projects schema-valid provider authoring issues before returning or logging them", async () => {
+    const marker = "PRIVATE_PROVIDER_URL=https://provider.example/v1?key=secret";
+    const errorLogs: unknown[] = [];
+    const app = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool }));
+    app.get("/test/schema-valid-authoring-error", async (request) => {
+      (request.log as unknown as { error: (...args: unknown[]) => void }).error = (...args) => errorLogs.push(args);
+      throw new AuthoringResponseError({
+        code: "invalid_authoring_output", stage: "character", retryable: true,
+        issues: [{ path: `profile.story.background.${marker}`, code: marker, message: marker }]
+      });
+    });
+
+    const response = await app.inject({ method: "GET", url: "/test/schema-valid-authoring-error" });
+    expect(response.statusCode).toBe(502);
+    expect(response.json()).toMatchObject({
+      details: {
+        code: "invalid_authoring_output",
+        issues: [{
+          path: "profile",
+          code: "custom",
+          message: "Generated character profile is incomplete or contains mechanics language."
+        }]
+      }
+    });
+    expect(`${response.payload}${JSON.stringify(errorLogs)}`).not.toContain(marker);
+    await app.close();
+  });
+
+  it("does not expose arbitrary 5xx details or issues", async () => {
+    const marker = "PRIVATE_GENERIC_5XX_DETAIL";
+    const app = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool }));
+    app.get("/test/generic-error", async () => {
+      throw Object.assign(new Error(marker), { statusCode: 500, expose: true, details: { marker }, issues: [{ marker }] });
+    });
+    const response = await app.inject({ method: "GET", url: "/test/generic-error" });
+    expect(response.json()).toMatchObject({ error: "Internal server error", details: {} });
+    expect(response.payload).not.toContain(marker);
     await app.close();
   });
 

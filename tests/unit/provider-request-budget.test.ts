@@ -270,6 +270,38 @@ describe("provider request serialization", () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
+  it("sends character-heavy canonical prose when its estimated request fits the provider window", async () => {
+    const fetcher = vi.fn(async (url: string | URL | Request) => {
+      if (String(url).endsWith("/api/v1/models")) {
+        return new Response(JSON.stringify({ models: [{ key: "loaded-instance-id", loaded_instances: [{ id: "loaded-instance-id" }] }] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ output: [{ type: "message", content: "{}" }], stats: {} }), { status: 200 });
+    });
+
+    await callTextProvider(profile, {
+      systemPrompt: "story rules",
+      input: "word ".repeat(30_000),
+      canonicalBudgeting: true
+    }, createTestProviderTransport(fetcher as typeof fetch));
+
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects a canonical request whose estimate exceeds the provider input limit before transport", async () => {
+    const fetcher = vi.fn();
+
+    await expect(callTextProvider(profile, {
+      systemPrompt: "story rules",
+      input: "word ".repeat(100_000),
+      canonicalBudgeting: true
+    }, createTestProviderTransport(fetcher as typeof fetch))).rejects.toMatchObject({
+      code: "context_budget_exceeded",
+      scope: "provider_request"
+    });
+
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it("uses a smaller snapshotted job window instead of the provider window for canonical requests", async () => {
     const fetcher = vi.fn();
     await expect(callTextProvider({
@@ -321,7 +353,7 @@ describe("provider request serialization", () => {
 
   it("omits an oversized complete rejected draft and sends a clean recovery from protected authority", async () => {
     const authorityCanary = `AUTHORITATIVE_CANARY ${"a".repeat(1_000)}`;
-    const rejectedCanary = `REJECTED_CANARY ${"r".repeat(12_000)}`;
+    const rejectedCanary = `REJECTED_CANARY ${"r".repeat(40_000)}`;
     let transportedBody = "";
     const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       if (String(url).endsWith("/api/v1/models")) {
@@ -356,9 +388,9 @@ describe("provider request serialization", () => {
       maxOutputTokens: 1_024
     }, {
       systemPrompt: "scene rewrite rules",
-      input: "x".repeat(2_000),
+      input: "x".repeat(10_000),
       recoveryInput: "rewrite every uncovered beat",
-      rejectedResponse: JSON.stringify({ narration: "y".repeat(2_000) }),
+      rejectedResponse: JSON.stringify({ narration: "y".repeat(10_000) }),
       canonicalBudgeting: true
     }, createTestProviderTransport(fetcher as typeof fetch))).rejects.toMatchObject({
       code: "context_budget_exceeded",

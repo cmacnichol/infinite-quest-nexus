@@ -1,4 +1,7 @@
 import { mountAppShell } from "./app-shell-lifecycle";
+import type { AuthoringJobsApi } from "./authoring-jobs-api";
+import type { AuthoringApply } from "../../../packages/contracts/src/authoring.js";
+import { reviewedCharacterParent } from "./authoring-character-parent";
 import {
   loadWorld as loadWorldRequest,
   saveWorldDraft as saveWorldDraftRequest,
@@ -56,6 +59,7 @@ import {
 import type { MountedPage } from "./world-library-page";
 
 export interface WorldEditorPageDependencies {
+  authoringJobsApi?: AuthoringJobsApi;
   loadWorld?: (worldId: string, signal?: AbortSignal) => Promise<WorldAggregate>;
   saveWorldDraft?: (
     worldId: string,
@@ -330,6 +334,9 @@ export function mountWorldEditorPage(
   const loadState = requiredElement<HTMLElement>(root, "[data-load-state]");
   const announcement = requiredElement<HTMLElement>(root, "[data-save-announcement]");
   const conflictHost = requiredElement<HTMLElement>(root, "[data-conflict-host]");
+  const authoringCharacterActions = document.createElement("div");
+  authoringCharacterActions.dataset.authoringCharacterActions = "";
+  conflictHost.before(authoringCharacterActions);
   const ledgerRevision = requiredElement<HTMLElement>(root, "[data-ledger-revision]");
   const ledgerReadiness = requiredElement<HTMLElement>(root, "[data-ledger-readiness]");
   const ledgerWarnings = requiredElement<HTMLElement>(root, "[data-ledger-warnings]");
@@ -389,6 +396,8 @@ export function mountWorldEditorPage(
   let activeCharacterHandoff: Pick<CharacterWorkspaceSession, "key" | "workflowId"> | null = null;
   let characterHandoffError: string | null = null;
   let characterHandoffResultInvalid = false;
+  // A lost response must retry the identical job/body, not merely reuse a key.
+  let authoringApply: { jobId: string; input: AuthoringApply } | null = null;
   const selectedIndexes = new Map<DraftCollectionName, number>();
   const searches = new Map<DraftCollectionName, string>();
   const itemIdentities = new Map<DraftCollectionName, string[]>();
@@ -1017,6 +1026,7 @@ export function mountWorldEditorPage(
       loadState.append(blockedState);
     }
     conflictHost.replaceChildren();
+    authoringCharacterActions.replaceChildren();
     announcement.textContent = creationMessage;
     renderOverviewFields();
     renderSection();
@@ -1054,7 +1064,88 @@ export function mountWorldEditorPage(
     loadState.replaceChildren();
     try {
       const world = await loadWorld(worldId, controller.signal);
-      if (!disposed && loadController === controller && !controller.signal.aborted) adoptWorld(world);
+      if (!disposed && loadController === controller && !controller.signal.aborted) {
+        adoptWorld(world);
+        const jobId = new URLSearchParams(dependencies.creationStatusSearch ?? pageView.location?.search ?? "").get("authoringCharacter");
+        if (jobId && dependencies.authoringJobsApi) {
+          try {
+            const job = await dependencies.authoringJobsApi.loadAuthoringJob(jobId, controller.signal);
+            if (disposed || controller.signal.aborted || loadController !== controller) return;
+            // Preserve a prior apply body across an uncertain response. An
+            // applied poll is evidence to replay this exact body, not to run
+            // local draft checks or silently abandon the receipt lookup.
+            const replay = authoringApply?.jobId === job.id ? authoringApply : null;
+            if (job.status === "applied" && !replay) return;
+            const target = job.target;
+            if (job.kind === "character" && target.kind !== "world_draft") return;
+            if (!replay && (target.kind !== "world_draft" || target.worldId !== worldId || target.expectedRevision !== state?.revision)) {
+              announcement.textContent = "This proposal belongs to a different world or draft revision. The current draft was not changed."; return;
+            }
+            const savedSelection = job.reviewedStageIds ?? [];
+            if (job.kind === "character" && (replay || (job.canApply && job.reviewedContent && savedSelection.length))) {
+              // This owner-loaded proposal returns through durable apply. Its
+              // local pointer restored only the original parent, never a legacy
+              // accepted character. Retire it before a receipt reload can restore
+              // that older parent over the newly applied authoritative draft.
+              if (activeCharacterHandoff) {
+                clearCharacterHandoffPointer(activeCharacterHandoff);
+                activeCharacterHandoff = null;
+                characterHandoffError = null;
+                renderSection(); renderStatus();
+              }
+              const expectedRevision = job.revision;
+              const expectedDraftRevision = target.kind === "world_draft" ? target.expectedRevision : -1;
+              const apply = button("apply-authoring-character", "Apply reviewed character");
+              apply.addEventListener("click", () => {
+                const priorApply = authoringApply?.jobId === job.id ? authoringApply : null;
+                if (disposed || !state || isReadOnly()) return;
+                if (!priorApply && state.revision !== expectedDraftRevision) return;
+                if (!priorApply && state.status !== "saved") {
+                  announcement.textContent = "Save or reload your local draft before applying this reviewed character. Your local edits were not changed.";
+                  return;
+                }
+                apply.disabled = true;
+                announcement.textContent = "Applying the reviewed character…";
+                const frozen = priorApply
+                  ? priorApply
+                  : {
+                    jobId: job.id,
+                    input: {
+                      expectedRevision,
+                      idempotencyKey: crypto.randomUUID(),
+                      selectedStageIds: structuredClone(savedSelection),
+                      content: structuredClone(job.reviewedContent!)
+                    }
+                  };
+                authoringApply = frozen;
+                void dependencies.authoringJobsApi!.applyAuthoringJob(frozen.jobId, frozen.input).then(async (receipt) => {
+                  if (disposed || receipt.worldId !== worldId) return;
+                  announcement.textContent = "Reviewed character applied to the authoritative draft.";
+                  if (state?.status === "saved" && state.revision === expectedDraftRevision) await requestWorld();
+                  else announcement.textContent = "Reviewed character applied. Your local edits are still on this page; reload when you are ready to see the authoritative draft.";
+                }).catch(() => {
+                  if (!disposed) {
+                    apply.disabled = false;
+                    announcement.textContent = "Nexus did not confirm whether the reviewed character was applied. Retry uses the same request key and frozen proposal.";
+                  }
+                });
+              });
+              authoringCharacterActions.append(apply);
+              return;
+            }
+            const parent = reviewedCharacterParent(job);
+            const expectedRevision = target.kind === "world_draft" ? target.expectedRevision : -1;
+            const restore = button("restore-authoring-character", "Restore reviewed parent draft");
+            restore.addEventListener("click", () => {
+              if (disposed || !state || state.revision !== expectedRevision || isReadOnly()) return;
+              state = replaceWorldDraft(state, parent); activeSection = "characters";
+              resetItemIdentities(state.draft); renderOverviewFields(); renderSection(); renderStatus(); setDirtyGuard(true);
+              restore.remove(); announcement.textContent = "Parent draft restored with the reviewed character. Review before saving.";
+            }, { once: true });
+            authoringCharacterActions.append(restore);
+          } catch { if (!disposed && !controller.signal.aborted) announcement.textContent = "The reviewed character proposal is unavailable or expired. The current draft was not changed."; }
+        }
+      }
     } catch (error) {
       if (!disposed && loadController === controller && !controller.signal.aborted) renderLoadError(error);
     }
@@ -1311,13 +1402,17 @@ export function mountWorldEditorPage(
       renderStatus();
       return;
     }
-    state = {
-      ...replaceWorldDraft(state, session.parentDraft),
-      revision: session.expectedWorldRevision
-    };
+    if (JSON.stringify(state.draft) !== JSON.stringify(session.parentDraft)) {
+      state = {
+        ...replaceWorldDraft(state, session.parentDraft),
+        revision: session.expectedWorldRevision
+      };
+    }
     resetItemIdentities(state.draft);
     renderOverviewFields();
-    consumeCharacterHandoff();
+    // Durable return is verified by requestWorld before retiring this pointer.
+    // Its character must only enter the draft through receipt-backed apply.
+    if (!new URLSearchParams(dependencies.creationStatusSearch ?? pageView.location?.search ?? "").has("authoringCharacter")) consumeCharacterHandoff();
   }
 
   function consumeCharacterHandoff(): void {

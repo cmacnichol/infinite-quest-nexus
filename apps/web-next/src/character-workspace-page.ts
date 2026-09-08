@@ -1,9 +1,15 @@
-import { playableCharacterSchema } from "../../../packages/contracts/src/world-library";
+import { playableCharacterSchema, worldContentSchema } from "../../../packages/contracts/src/world-library";
+import type { AuthoringJobView, AuthoringSubmit } from "../../../packages/contracts/src/authoring";
+import type { AuthoringJobsApi } from "./authoring-jobs-api";
+import { createAuthoringJobSession, type AuthoringJobSession } from "./authoring-job-session";
+import { renderAuthoringComparison } from "./authoring-comparison";
 import { mountAppShell } from "./app-shell-lifecycle";
 import {
   generateCharacterPreview as generateCharacterPreviewRequest,
-  loadCharacterGenerationProgress as loadCharacterGenerationProgressRequest
+  loadCharacterGenerationProgress as loadCharacterGenerationProgressRequest,
+  CharacterWorkspaceApiError
 } from "./character-workspace-api";
+import { authoringFailureText } from "./authoring-errors";
 import {
   applyGeneratedCharacter,
   characterHandoffCandidate,
@@ -17,12 +23,17 @@ import {
 } from "./character-workspace-model";
 import {
   createCharacterWorkspaceSessionStore,
+  type CharacterWorkspaceSession,
   type CharacterWorkspaceSessionStore
 } from "./character-workspace-session";
 import { mergeStructuredFields, structuredFieldsFor } from "./world-editor-fields";
 import type { MountedPage } from "./world-library-page";
 
 export interface CharacterWorkspacePageDependencies {
+  authoringJobsApi?: AuthoringJobsApi;
+  resumeJobId?: string;
+  recoveredSession?: CharacterWorkspaceSession;
+  recoveredJob?: AuthoringJobView;
   sessionStore?: CharacterWorkspaceSessionStore;
   generateCharacterPreview?: typeof generateCharacterPreviewRequest;
   loadGenerationProgress?: typeof loadCharacterGenerationProgressRequest;
@@ -127,9 +138,11 @@ export function mountCharacterWorkspacePage(
     try { defaultStore = createCharacterWorkspaceSessionStore(pageView.sessionStorage); } catch { defaultStore = null; }
   }
   const sessionStore = dependencies.sessionStore ?? defaultStore;
-  const session = sessionStore?.load(sessionKey) ?? null;
+  const session = dependencies.recoveredSession ?? sessionStore?.load(sessionKey) ?? null;
+  const resumeJobId = dependencies.resumeJobId ?? (pageView.location?.href ? new URL(pageView.location.href).searchParams.get("authoringJob") : null);
   const returnPath = sessionStore?.returnPath(sessionKey) ?? session?.parentRoute ?? null;
   if (!session) {
+    if (dependencies.authoringJobsApi) return mountCharacterRecovery(root, sessionKey, resumeJobId, dependencies);
     const shell = mountAppShell(root, unavailableMarkup(returnPath), "world-library");
     return { dispose: () => shell.dispose() };
   }
@@ -163,6 +176,7 @@ export function mountCharacterWorkspacePage(
   let prompt = "";
   let dirty = false;
   let candidateDirty = activeSession.candidate !== null;
+  let candidateEdited = false;
   let disposed = false;
   let completed = false;
   let generationSequence = 0;
@@ -174,6 +188,96 @@ export function mountCharacterWorkspacePage(
   let dialogOpen = false;
   let fallbackModal = false;
   let fallbackInertStates: Array<{ element: HTMLElement; value: string | null }> = [];
+  const authoringApi = dependencies.authoringJobsApi;
+  const durableController = new AbortController();
+  let characterListCursor: string | undefined;
+  let characterListBusy = false;
+  const listedCharacterIds = new Set<string>();
+  async function listCharacterProposals(reset: boolean): Promise<void> {
+    if (!authoringApi || disposed || characterListBusy || (!reset && !characterListCursor)) return;
+    characterListBusy = true;
+    const more = required<HTMLButtonElement>(resumePanel, '[data-action="more-character-jobs"]');
+    const show = required<HTMLButtonElement>(resumePanel, '[data-action="list-character-jobs"]');
+    const list = required<HTMLElement>(resumePanel, "[data-character-jobs]");
+    more.disabled = true; show.disabled = true;
+    try {
+      const cursor = reset ? undefined : characterListCursor;
+      const page = await authoringApi.listAuthoringJobs(cursor, durableController.signal);
+      if (disposed) return;
+      if (reset) { list.replaceChildren(); listedCharacterIds.clear(); }
+      for (const job of page.jobs.filter(job => job.kind === "character" && !listedCharacterIds.has(job.id))) {
+        listedCharacterIds.add(job.id);
+        const item = document.createElement("li"); const link = document.createElement("a"); link.href = `/app/characters/resume?authoringJob=${encodeURIComponent(job.id)}`; link.textContent = `${job.id} \u00b7 ${job.status.replaceAll("_", " ")}`; item.append(link); list.append(item);
+      }
+      characterListCursor = page.nextCursor === cursor ? undefined : page.nextCursor;
+      more.hidden = !characterListCursor;
+    } catch { if (!disposed) durableStatus("Saved character proposals could not be loaded. Try again."); }
+    finally { characterListBusy = false; if (!disposed) { more.disabled = false; show.disabled = false; } }
+  }
+
+  let durableSession: AuthoringJobSession | null = null;
+  let capability: Promise<boolean> | null = null;
+  let pendingSubmission: AuthoringSubmit | null = null;
+  let acceptancePending = false;
+  const resumePanel = document.createElement("section");
+  resumePanel.dataset.characterAuthoringResume = "";
+  resumePanel.className = "authoring-actions";
+  resumePanel.hidden = true;
+  resumePanel.innerHTML = '<h2>Resume AI Assist</h2><p data-authoring-status role="status"></p><button type="button" data-action="list-character-jobs">Show saved character proposals</button><ol data-character-jobs></ol><button type="button" data-action="more-character-jobs" hidden>Load more character proposals</button><div data-character-job-controls></div><div data-character-comparison></div>';
+  required<HTMLElement>(root, ".character-command-row").after(resumePanel);
+
+  function durableCapability(): Promise<boolean> {
+    if (!authoringApi) return Promise.resolve(false);
+    capability ??= authoringApi.loadAuthoringCapabilities(durableController.signal).then(result => {
+      const enabled = result.enabled && result.supportedKinds.includes("character");
+      if (!disposed) resumePanel.hidden = !enabled;
+      return enabled;
+    }).catch(error => { capability = null; throw error; });
+    return capability;
+  }
+  function durableStatus(message: string): void {
+    if (!disposed) required<HTMLElement>(resumePanel, "[data-authoring-status]").textContent = message;
+  }
+  function renderDurable(): void {
+    if (disposed || !durableSession) return;
+    const snapshot = durableSession.state();
+    durableStatus(snapshot.unavailable ? "This proposal is unavailable or expired. Your local character is preserved." : snapshot.saveState === "conflict" ? "This proposal changed in another tab. Compare or reload server review." : `Proposal ${snapshot.jobId}: ${snapshot.job.status.replaceAll("_", " ")} · ${snapshot.saveState}`);
+    const controls = required<HTMLElement>(resumePanel, "[data-character-job-controls]");
+    controls.replaceChildren();
+    function button(action: string, label: string, stageId?: string): void {
+      const element = document.createElement("button"); element.type = "button"; element.dataset.action = action;
+      if (stageId) element.dataset.stageId = stageId;
+      element.textContent = label; element.disabled = snapshot.commandPending; controls.append(element);
+    }
+    const terminal = snapshot.unavailable || ["cancelled", "expired", "failed", "applied"].includes(snapshot.job.status);
+    if (!terminal && durableSession.currentCandidate()) button("review-character-job", "Review available results");
+    if (!terminal && (snapshot.pendingGeneratedResult || snapshot.saveState === "conflict")) button("compare-character-job", "Compare local and server review");
+    if (!terminal && snapshot.saveState === "conflict") button("reload-character-job", "Reload server review");
+    if (!terminal) {
+      for (const stage of snapshot.job.stages.filter(stage => ["recoverable", "failed"].includes(stage.status) && !snapshot.job.stages.some(other => other.key === stage.key && other.generation > stage.generation))) button("retry-character-job", `Retry ${stage.key}`, stage.id);
+      button("cancel-character-job", "Cancel proposal");
+    }
+  }
+  function beginDurable(job: AuthoringJobView): void {
+    if (disposed || job.kind !== "character") return;
+    if (!characterJobMatchesSession(job, activeSession)) { durableStatus("This proposal belongs to a different parent draft. Open it from saved proposals to restore its parent."); return; }
+    durableSession?.dispose();
+    durableSession = createAuthoringJobSession({ job, loadAuthoringJob: authoringApi!.loadAuthoringJob, saveReview: authoringApi!.saveAuthoringReview, retryStage: authoringApi!.retryAuthoringStage, cancel: authoringApi!.cancelAuthoringJob, isHidden: () => document.hidden, onChange: renderDurable });
+    if (candidateEdited) { durableSession.edit(state.candidate); durableSession.receive(job); }
+    prompt = job.request?.prompt ?? prompt;
+    if (pageView.location?.href) { const url = new URL(pageView.location.href); url.searchParams.set("authoringJob", job.id); pageView.history.replaceState(null, "", `${url.pathname}${url.search}`); }
+    resumePanel.hidden = false; durableSession.startPolling(); renderDurable();
+  }
+  function reviewDurable(): void {
+    const snapshot = durableSession?.state();
+    if (!snapshot || ["cancelled", "expired", "failed", "applied"].includes(snapshot.job.status)) return;
+    const result = durableSession?.adoptPendingResult();
+    const parsed = playableCharacterSchema.safeParse(result);
+    if (!parsed.success) return;
+    if (activeSession.mode === "create") state = { ...state, candidate: { ...state.candidate, id: parsed.data.id } };
+    state = applyGeneratedCharacter(state, parsed.data);
+    state = setCharacterStage(state, "identity"); candidateDirty = true; markDirty(); render();
+  }
 
   function beforeUnload(event: Event): void { event.preventDefault(); }
   function markDirty(): void {
@@ -220,6 +324,8 @@ export function mountCharacterWorkspacePage(
   function fieldChanged(path: string[], value: unknown): void {
     if (disposed) return;
     state = editCharacterCandidate(state, path, value);
+    candidateEdited = true;
+    durableSession?.edit(state.candidate);
     candidateDirty = true;
     markDirty();
   }
@@ -606,9 +712,23 @@ export function mountCharacterWorkspacePage(
     const generate = required<HTMLButtonElement>(canvas, '[data-action="generate-character"]');
     const cancel = required<HTMLButtonElement>(canvas, '[data-action="cancel-character-generation"]');
     generate.disabled = true; cancel.hidden = false;
-    poll(progressKey, sequence, controller.signal);
-    void generatePreview({ content: activeSession.worldContext, prompt, ...(activeSession.mode === "edit" ? { characterId: state.candidate.id } : {}), progressKey }, controller.signal)
-      .then(({ character }) => {
+    const submittedPrompt = prompt;
+    void (async () => {
+      if (authoringApi && await durableCapability()) {
+        if (disposed || controller.signal.aborted) return null;
+        const target = activeSession.origin === "world-creation" ? { kind: "new_world" as const } : { kind: "world_draft" as const, worldId: decodeURIComponent(new URL(activeSession.parentRoute, "https://local.invalid").pathname.split("/").at(-1)!), expectedRevision: activeSession.expectedWorldRevision!, ...(activeSession.mode === "edit" ? { characterId: activeSession.candidate!.id } : {}) };
+        if (!pendingSubmission || pendingSubmission.prompt !== submittedPrompt) pendingSubmission = { kind: "character", idempotencyKey: crypto.randomUUID(), target, prompt: submittedPrompt, content: worldContentSchema.parse(activeSession.worldContext), ...(activeSession.mode === "edit" ? { characterId: activeSession.candidate!.id } : {}) };
+        const job = await authoringApi.submitAuthoringJob(pendingSubmission, controller.signal);
+        if (disposed || controller.signal.aborted) return null;
+        pendingSubmission = null; beginDurable(job); return null;
+      }
+      if (disposed || controller.signal.aborted) return null;
+      poll(progressKey, sequence, controller.signal);
+      return generatePreview({ content: activeSession.worldContext, prompt: submittedPrompt, ...(activeSession.mode === "edit" ? { characterId: state.candidate.id } : {}), progressKey }, controller.signal);
+    })()
+      .then((preview) => {
+        if (!preview) return;
+        const { character } = preview;
         if (disposed || sequence !== generationSequence || controller.signal.aborted) return;
         if (candidateDirty && !confirmReplacement()) return;
         if (completionTimer !== null) clearTimeout(completionTimer);
@@ -621,7 +741,23 @@ export function mountCharacterWorkspacePage(
       .catch((error: unknown) => {
         if (disposed || sequence !== generationSequence || (error instanceof Error && error.name === "AbortError")) return;
         const status = canvas.querySelector<HTMLElement>("[data-character-generation-status]");
-        if (status) status.textContent = "Character generation failed. Review the prompt and retry.";
+        if (!status) return;
+        status.setAttribute("role", "alert");
+        if (error instanceof CharacterWorkspaceApiError && error.kind === "unavailable") {
+          status.replaceChildren();
+          status.append(authoringFailureText(error.authoringFailure ?? {
+            code: "authoring_provider_unavailable", stage: "character", retryable: true, issues: []
+          }), " ");
+          const setup = document.createElement("a");
+          setup.href = "/nexus/#providers";
+          setup.textContent = "Provider Setup";
+          status.append(setup, ", then try again.");
+        } else if (error instanceof CharacterWorkspaceApiError && error.authoringFailure) {
+          status.textContent = authoringFailureText(error.authoringFailure);
+        } else status.textContent = "Character generation failed. Review the prompt and retry.";
+        // A delayed progress response must not replace the more useful preview failure.
+        stopGeneration();
+        restoreGenerationActions();
       })
       .finally(() => {
         if (sequence !== generationSequence) return;
@@ -668,6 +804,20 @@ export function mountCharacterWorkspacePage(
       return;
     }
     const action = target.dataset.action;
+    if (action === "list-character-jobs") void listCharacterProposals(true);
+    if (action === "more-character-jobs") void listCharacterProposals(false);
+    if (action === "review-character-job") reviewDurable();
+    if (action === "retry-character-job" && target.dataset.stageId) void durableSession?.retry(target.dataset.stageId).catch(() => durableStatus("The retry could not be confirmed. Reload the proposal before trying again."));
+    if (action === "cancel-character-job") void durableSession?.cancel().catch(() => durableStatus("Cancellation could not be confirmed. Reload the proposal."));
+    if (action === "reload-character-job") void durableSession?.reload().then(() => { if (!disposed && !durableSession?.state().localDirty) reviewDurable(); }).catch(() => durableStatus("Server review could not be loaded."));
+    if (action === "compare-character-job" && authoringApi && durableSession) {
+      const selectedSession = durableSession;
+      void authoringApi.loadAuthoringJob(selectedSession.state().jobId, durableController.signal).then(job => {
+        if (disposed || selectedSession !== durableSession) return;
+        const comparison = required<HTMLElement>(resumePanel, "[data-character-comparison]");
+        comparison.replaceChildren(...renderAuthoringComparison(document, state.candidate, selectedSession.state().saveState === "conflict" ? job.reviewedContent ?? job.result : selectedSession.state().remoteCandidate ?? job.reviewedContent ?? job.result, ["Local character", "Server review"]));
+      }).catch(() => durableStatus("Server review could not be loaded for comparison."));
+    }
     if (target.dataset.characterStage) {
       const destination = target.dataset.characterStage as CharacterStage;
       if (state.stage === "method" && destination !== "method") stopGeneration();
@@ -700,10 +850,24 @@ export function mountCharacterWorkspacePage(
         } else if (status) status.textContent = "This character could not be accepted. Return to the world and try again.";
         return;
       }
+      if (durableSession && authoringApi) {
+        if (acceptancePending) return;
+        if (durableSession.state().saveState === "conflict") { if (status) status.textContent = "Resolve the review conflict before returning to the parent draft."; return; }
+        acceptancePending = true;
+        const snapshot = durableSession.state();
+        durableSession.edit(candidate);
+        void durableSession.flush().then(() => {
+          if (disposed) return;
+          completed = true; clearDirty();
+          const parent = new URL(activeSession.parentRoute, "https://local.invalid"); parent.searchParams.set("authoringCharacter", snapshot.jobId);
+          navigate(`${parent.pathname}${parent.search}`);
+        }).catch(() => { if (status && !disposed) status.textContent = "The reviewed character could not be saved. Reload or compare the proposal before retrying."; }).finally(() => { acceptancePending = false; });
+        return;
+      }
       if (!sessionStore?.complete(activeSession.key, activeSession.workflowId, { status: "accepted", candidate })) { if (status) status.textContent = "This character could not be accepted. Return to the world and try again."; return; }
       completed = true; clearDirty(); navigate(activeSession.parentRoute);
     }
-    if (action === "cancel-character" && !completed && sessionStore?.complete(activeSession.key, activeSession.workflowId, { status: "cancelled" })) { completed = true; clearDirty(); navigate(activeSession.parentRoute); }
+    if (action === "cancel-character" && !completed && (dependencies.recoveredSession || sessionStore?.complete(activeSession.key, activeSession.workflowId, { status: "cancelled" }))) { completed = true; clearDirty(); navigate(activeSession.parentRoute); }
   }
 
   function onDialogKeydown(event: KeyboardEvent): void {
@@ -728,11 +892,16 @@ export function mountCharacterWorkspacePage(
   document.addEventListener("focusin", onDocumentFocusIn);
 
   render();
+  if (dependencies.recoveredJob) beginDurable(dependencies.recoveredJob);
+  else if (authoringApi) void durableCapability().then(async enabled => {
+    if (enabled && resumeJobId && !disposed) beginDurable(await authoringApi.loadAuthoringJob(resumeJobId, durableController.signal));
+  }).catch(() => { if (!disposed) { resumePanel.hidden = false; durableStatus("AI Assist availability could not be checked. Try generation again to retry."); } });
   return {
     dispose() {
       if (disposed) return;
       closeDialog(false);
       disposed = true;
+      durableController.abort(); durableSession?.dispose();
       root.removeEventListener("input", onRootInput);
       root.removeEventListener("click", onRootClick);
       dialog.removeEventListener("keydown", onDialogKeydown);
@@ -742,4 +911,81 @@ export function mountCharacterWorkspacePage(
       shell.dispose();
     }
   };
+}
+
+function characterJobMatchesSession(job: AuthoringJobView, session: CharacterWorkspaceSession): boolean {
+  if (job.kind !== "character" || !job.request) return false;
+  const selectedId = job.request.characterId ?? (job.target.kind === "world_draft" ? job.target.characterId : undefined);
+  if (selectedId !== (session.mode === "edit" ? session.candidate?.id : undefined)) return false;
+  if (job.target.kind === "new_world") return session.origin === "world-creation" && session.expectedWorldRevision === null && JSON.stringify(job.request.content) === JSON.stringify(session.worldContext);
+  const route = new URL(session.parentRoute, "https://local.invalid");
+  return session.origin === "world-editor" && route.pathname === `/app/worlds/${encodeURIComponent(job.target.worldId)}` && session.expectedWorldRevision === job.target.expectedRevision;
+}
+
+function mountCharacterRecovery(root: HTMLElement, sessionKey: string, resumeJobId: string | null, dependencies: CharacterWorkspacePageDependencies): MountedPage {
+  const document = root.ownerDocument;
+  const api = dependencies.authoringJobsApi!;
+  const controller = new AbortController();
+  let disposed = false;
+  let child: MountedPage | null = null;
+  let selected: AuthoringJobView | null = null;
+  const shell = mountAppShell(root, '<main id="main-content" class="authoring-actions" data-page="character-workspace-recovery"><h1>Resume AI Assist</h1><p data-recovery-status role="status">Loading saved character proposals…</p><ol data-recovery-list></ol><button type="button" data-action="more-character-jobs" hidden>Load more character proposals</button><button type="button" data-action="restore-authoring-parent" hidden>Restore parent draft</button><a href="/app/worlds/new">Return to world creation</a></main>', "world-library");
+  const status = required<HTMLElement>(root, "[data-recovery-status]");
+  const restore = required<HTMLButtonElement>(root, '[data-action="restore-authoring-parent"]');
+  async function load(id: string): Promise<void> {
+    const job = await api.loadAuthoringJob(id, controller.signal);
+    if (disposed) return;
+    if (job.kind !== "character" || !job.request || ["expired", "applied", "cancelled", "failed"].includes(job.status)) { status.textContent = "This character proposal is unavailable or expired."; return; }
+    selected = job;
+    status.textContent = `Saved character proposal for ${job.request.content.world.title}. Restore its parent draft to review the character. No world data will be saved.`;
+    restore.hidden = false;
+  }
+  const more = required<HTMLButtonElement>(root, '[data-action="more-character-jobs"]');
+  let nextCursor: string | undefined;
+  let listBusy = false;
+  const listedIds = new Set<string>();
+  async function listProposals(): Promise<void> {
+    if (disposed || listBusy) return;
+    listBusy = true; more.disabled = true;
+    try {
+      const cursor = nextCursor;
+      const page = await api.listAuthoringJobs(cursor, controller.signal);
+      if (disposed) return;
+      const list = required<HTMLElement>(root, "[data-recovery-list]");
+      for (const job of page.jobs.filter(job => job.kind === "character" && !listedIds.has(job.id))) {
+        listedIds.add(job.id);
+        const button = document.createElement("button"); button.textContent = `${job.id} \u00b7 ${job.status.replaceAll("_", " ")}`;
+        button.addEventListener("click", () => { void load(job.id).catch(failed); });
+        const item = document.createElement("li"); item.append(button); list.append(item);
+      }
+      nextCursor = page.nextCursor === cursor ? undefined : page.nextCursor;
+      more.hidden = !nextCursor;
+      status.textContent = listedIds.size ? "Choose a saved character proposal to restore its parent draft." : nextCursor ? "No character proposals on this page. Load more to continue." : "No saved character proposals were found.";
+    } finally { listBusy = false; if (!disposed) more.disabled = false; }
+  }
+  function loadMore(): void { if (nextCursor) void listProposals().catch(failed); }
+  more.addEventListener("click", loadMore);
+  async function initialize(): Promise<void> {
+    const capabilities = await api.loadAuthoringCapabilities(controller.signal);
+    if (disposed) return;
+    if (!capabilities.enabled || !capabilities.supportedKinds.includes("character")) { status.textContent = "This character workspace is unavailable or expired. Return to the world and start again."; return; }
+    if (resumeJobId) { await load(resumeJobId); return; }
+    await listProposals();
+  }
+  function failed(): void { if (!disposed) status.textContent = "Saved proposals could not be loaded. Refresh to try again."; }
+  function restoreParent(): void {
+    if (disposed || selected?.kind !== "character" || !selected.request) return;
+    const job = selected;
+    const request = selected.request;
+    const target = job.target;
+    const selectedId = request.characterId ?? (target.kind === "world_draft" ? target.characterId : undefined);
+    const original = selectedId ? request.content.playableCharacters.find(character => character.id === selectedId) : null;
+    if (selectedId && !original) { status.textContent = "The selected character is missing from the saved parent draft."; return; }
+    const recoveredSession: CharacterWorkspaceSession = { version: 1, key: sessionKey, workflowId: job.id, origin: target.kind === "new_world" ? "world-creation" : "world-editor", mode: selectedId ? "edit" : "create", parentRoute: target.kind === "new_world" ? "/app/worlds/new" : `/app/worlds/${encodeURIComponent(target.worldId)}?tab=characters`, expectedWorldRevision: target.kind === "new_world" ? null : target.expectedRevision, parentDraft: request.content, worldContext: request.content, rosterSummaries: request.content.playableCharacters.map(({ id, name }) => ({ id, name })), candidate: original ?? null, expiresAt: new Date(job.expiresAt).getTime() };
+    shell.dispose();
+    child = mountCharacterWorkspacePage(root, sessionKey, { ...dependencies, recoveredSession, recoveredJob: job });
+  }
+  restore.addEventListener("click", restoreParent);
+  void initialize().catch(failed);
+  return { dispose() { disposed = true; controller.abort(); more.removeEventListener("click", loadMore); restore.removeEventListener("click", restoreParent); child?.dispose(); shell.dispose(); } };
 }
