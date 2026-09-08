@@ -132,17 +132,19 @@ Code owns complete JSON examples, required types, completion requirements, and t
 
 **Interfaces produced:**
 
-    type AuthoringAttempt = {
-      repair: boolean;
-      issues: AuthoringIssue[];
-      rejectedResponse?: string;
-    };
-    runAuthoringResponse<T>(options: {
-      stage: AuthoringStage;
-      request(attempt: AuthoringAttempt): Promise<ProviderResult>;
-      parse(content: string): T;
-      delay(milliseconds: number): Promise<void>;
-    }): Promise<T>;
+```ts
+type AuthoringAttempt = {
+  repair: boolean;
+  issues: AuthoringIssue[];
+  rejectedResponse?: string;
+};
+runAuthoringResponse<T>(options: {
+  stage: AuthoringStage;
+  request(attempt: AuthoringAttempt): Promise<ProviderResult>;
+  parse(content: string): T;
+  delay(milliseconds: number): Promise<void>;
+}): Promise<T>;
+```
 
 ProviderResult is the existing provider response type. Domain validation produces recognized schema/semantic errors. Programming errors propagate to the API's generic sanitized failure boundary rather than being misdiagnosed as repairable model output.
 

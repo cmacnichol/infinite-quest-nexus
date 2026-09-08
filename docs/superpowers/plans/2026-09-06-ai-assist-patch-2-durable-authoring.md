@@ -121,22 +121,24 @@ Use strict discriminated schemas to require content kind matches job/target and 
 
 **Interfaces produced in application/authoring/ports.ts:**
 
-    interface AuthoringRepository {
-      submit(scope: OwnerScope, input: AuthoringSubmit, hash: string): Promise<AuthoringJobView>;
-      read(scope: OwnerScope, jobId: string): Promise<AuthoringJobView | null>;
-      list(scope: OwnerScope, cursor?: string): Promise<{ jobs: AuthoringJobView[]; nextCursor?: string }>;
-      claim(workerId: string, leaseSeconds: number): Promise<AuthoringClaim | null>;
-      heartbeat(claim: AuthoringClaim, leaseSeconds: number): Promise<boolean>;
-      checkpoint(claim: AuthoringClaim, output: unknown): Promise<boolean>;
-      fail(claim: AuthoringClaim, failure: AuthoringFailure): Promise<boolean>;
-    }
-    type AuthoringClaim = {
-      jobId: string; stageId: string; ownerUserId: string;
-      jobGeneration: number; stageGeneration: number;
-      leaseToken: string; leaseExpiresAt: string;
-    };
+```ts
+interface AuthoringRepository {
+  submit(scope: OwnerScope, input: AuthoringSubmit, hash: string): Promise<AuthoringJobView>;
+  read(scope: OwnerScope, jobId: string): Promise<AuthoringJobView | null>;
+  list(scope: OwnerScope, cursor?: string): Promise<{ jobs: AuthoringJobView[]; nextCursor?: string }>;
+  claim(workerId: string, leaseSeconds: number): Promise<AuthoringClaim | null>;
+  heartbeat(claim: AuthoringClaim, leaseSeconds: number): Promise<boolean>;
+  checkpoint(claim: AuthoringClaim, output: unknown): Promise<boolean>;
+  fail(claim: AuthoringClaim, failure: AuthoringFailure): Promise<boolean>;
+}
+type AuthoringClaim = {
+  jobId: string; stageId: string; ownerUserId: string;
+  jobGeneration: number; stageGeneration: number;
+  leaseToken: string; leaseExpiresAt: string;
+};
+```
 
-Define jobGeneration as execution_generation for execution dependency fencing; review_generation tracks reviewed content and public revision changes on user-visible mutations. Review autosave must not increment execution_generation or invalidate an unrelated in-flight stage. Add private loadClaim(claim): Promise<{ input: AuthoringSubmit; snapshot: AuthoringExecutionSnapshot; stageKey: string; parentOutputs: AuthoringStageOutput[] } | null> for P2.4. AuthoringExecutionSnapshot is the pinned safe provider/prompt/limit projection defined in P2.4; keep it out of every HTTP response. User input can be returned through the owner-scoped detail projection, never list responses.
+Define jobGeneration as execution_generation for execution dependency fencing; review_generation tracks reviewed content and public revision changes on user-visible mutations. Review autosave must not increment execution_generation or invalidate an unrelated in-flight stage. Add private `loadClaim(claim): Promise<{ input: AuthoringSubmit; snapshot: AuthoringExecutionSnapshot; stageKey: string; parentOutputs: AuthoringStageOutput[] } | null>` for P2.4. AuthoringExecutionSnapshot is the pinned safe provider/prompt/limit projection defined in P2.4; keep it out of every HTTP response. User input can be returned through the owner-scoped detail projection, never list responses.
 
 - [ ] Add real-PostgreSQL RED tests: simultaneous identical submissions return one ID; changed request hash returns conflict; a foreign owner cannot read/update/checkpoint; two workers cannot claim one generation.
 - [ ] Seed two claims over an expired lease and assert:
@@ -162,16 +164,18 @@ The integration fixture inserts a job and stage, advances lease time through SQL
 
 **Interfaces produced:**
 
-    interface AuthoringApplication {
-      submit(scope: OwnerScope, input: AuthoringSubmit): Promise<AuthoringJobView>;
-      get(scope: OwnerScope, id: string): Promise<AuthoringJobView | null>;
-      list(scope: OwnerScope, cursor?: string): Promise<{ jobs: AuthoringJobView[]; nextCursor?: string }>;
-      review(scope: OwnerScope, id: string, input: AuthoringReview): Promise<AuthoringJobView>;
-      retry(scope: OwnerScope, id: string, stageId: string, expectedRevision: number): Promise<AuthoringJobView>;
-      cancel(scope: OwnerScope, id: string, expectedRevision: number): Promise<AuthoringJobView>;
-      discard(scope: OwnerScope, id: string, expectedRevision: number): Promise<void>;
-      apply(scope: OwnerScope, id: string, input: AuthoringApply): Promise<AuthoringApplyReceipt>;
-    }
+```ts
+interface AuthoringApplication {
+  submit(scope: OwnerScope, input: AuthoringSubmit): Promise<AuthoringJobView>;
+  get(scope: OwnerScope, id: string): Promise<AuthoringJobView | null>;
+  list(scope: OwnerScope, cursor?: string): Promise<{ jobs: AuthoringJobView[]; nextCursor?: string }>;
+  review(scope: OwnerScope, id: string, input: AuthoringReview): Promise<AuthoringJobView>;
+  retry(scope: OwnerScope, id: string, stageId: string, expectedRevision: number): Promise<AuthoringJobView>;
+  cancel(scope: OwnerScope, id: string, expectedRevision: number): Promise<AuthoringJobView>;
+  discard(scope: OwnerScope, id: string, expectedRevision: number): Promise<void>;
+  apply(scope: OwnerScope, id: string, input: AuthoringApply): Promise<AuthoringApplyReceipt>;
+}
+```
 
 The apply method is implemented in P2.8; before then it rejects with authoring_apply_unavailable and cannot mutate state. Add repository methods for these commands with explicit expectedRevision and generation predicates. Provider-free ports take domain values and safe identifiers only.
 
@@ -200,20 +204,22 @@ Construct the fixture with one validated and one recoverable stage using the P2.
 
 **Interfaces produced:**
 
-    type AuthoringWorldOutline = {
-      title: string; genre: string; tone: string; backgroundStory: string;
-      premise: string; firstAction: string; rules: string;
-      seeds: { id: string; name: string; role: string; concept: string; narrativeHook: string }[];
-      rpgStats: unknown[]; defaultTriggers: unknown[]; eventTriggers: unknown[];
-    };
-    type AuthoringStageOutput =
-      | { kind: "outline"; outline: AuthoringWorldOutline }
-      | { kind: "character"; character: PlayableCharacter };
-    executeAuthoringStage(claim: AuthoringClaim): Promise<AuthoringStageOutput>;
+```ts
+type AuthoringWorldOutline = {
+  title: string; genre: string; tone: string; backgroundStory: string;
+  premise: string; firstAction: string; rules: string;
+  seeds: { id: string; name: string; role: string; concept: string; narrativeHook: string }[];
+  rpgStats: unknown[]; defaultTriggers: unknown[]; eventTriggers: unknown[];
+};
+type AuthoringStageOutput =
+  | { kind: "outline"; outline: AuthoringWorldOutline }
+  | { kind: "character"; character: PlayableCharacter };
+executeAuthoringStage(claim: AuthoringClaim): Promise<AuthoringStageOutput>;
+```
 
 Runtime loads the private claim input and pinned execution snapshot, then uses Patch 1 runAuthoringResponse. The snapshot holds provider ID, model, non-secret configuration hash, context/output limits, effective prompts and protocol versions. Resolve secrets freshly through the existing runtime adapter. A disabled/deleted provider or changed incompatible configuration becomes recoverable; never silently switch to another default.
 
-Define AuthoringExecutionSnapshot in application/authoring/types.ts with fields providerProfileId: string, model: string, configurationHash: string, contextWindowTokens: number, maxOutputTokens: number, requestTimeoutMs: number, prompts: Record<string, string>, and protocols: Record<string, string>. Capture it exactly once before the first stage through a repository CAS. RuntimeTextExecution already exposes safe limits and an opaque endpointIdentity; hash that identity with non-secret model/configuration values. Do not persist endpoint URLs or credentials. Response chains, if used for repair, belong only to that stage generation and exact snapshot; never carry one into another stage, job, or campaign.
+Define AuthoringExecutionSnapshot in application/authoring/types.ts with fields providerProfileId: string, model: string, configurationHash: string, contextWindowTokens: number, maxOutputTokens: number, requestTimeoutMs: number, prompts: `Record<string, string>`, and protocols: `Record<string, string>`. Capture it exactly once before the first stage through a repository CAS. RuntimeTextExecution already exposes safe limits and an opaque endpointIdentity; hash that identity with non-secret model/configuration values. Do not persist endpoint URLs or credentials. Response chains, if used for repair, belong only to that stage generation and exact snapshot; never carry one into another stage, job, or campaign.
 
 - [ ] Add RED test: outline and first character checkpoint; second character fails twice; resume invokes only the second character, leaving outline and first character byte-identical.
 - [ ] Assert call identity:
@@ -239,11 +245,13 @@ Build executedStageKeys from the injected provider/stage dispatcher in the test,
 
 **Interfaces produced:**
 
-    interface AuthoringWorkerApplication {
-      runNext(input: { workerId: string; leaseSeconds: number }): Promise<boolean>;
-    }
+```ts
+interface AuthoringWorkerApplication {
+  runNext(input: { workerId: string; leaseSeconds: number }): Promise<boolean>;
+}
+```
 
-Compose one such application per worker. Add optional authoring(): Promise<boolean> to WorkerOptionalLanes and an "authoring" ActiveLane entry with capacity 1. All current lanes retain their relative order and independent capacity.
+Compose one such application per worker. Add optional `authoring(): Promise<boolean>` to WorkerOptionalLanes and an "authoring" ActiveLane entry with capacity 1. All current lanes retain their relative order and independent capacity.
 
 - [ ] Write RED scheduler test with blocked story and authoring promises; confirm story capacity is filled and other optional lanes are visited while authoring remains pending.
 - [ ] Add restart/fencing test:
@@ -309,12 +317,14 @@ Create validSubmit from the P2.1 discriminated schema fixture. Resolve the actua
 
 **Interfaces produced:**
 
-    submitAuthoringJob(input: AuthoringSubmit, signal?: AbortSignal): Promise<AuthoringJobView>;
-    loadAuthoringJob(id: string, signal?: AbortSignal): Promise<AuthoringJobView>;
-    saveAuthoringReview(id: string, review: AuthoringReview): Promise<AuthoringJobView>;
-    type AuthoringResumeState = {
-      jobId: string; observedRevision: number; localDirty: boolean;
-    };
+```ts
+submitAuthoringJob(input: AuthoringSubmit, signal?: AbortSignal): Promise<AuthoringJobView>;
+loadAuthoringJob(id: string, signal?: AbortSignal): Promise<AuthoringJobView>;
+saveAuthoringReview(id: string, review: AuthoringReview): Promise<AuthoringJobView>;
+type AuthoringResumeState = {
+  jobId: string; observedRevision: number; localDirty: boolean;
+};
+```
 
 Add corresponding typed clients for list/retry/cancel/discard/apply. Store only opaque job IDs in URL/session resume metadata. Review buffers are saved through the owner-scoped server proposal endpoint, not embedded in URLs.
 
@@ -344,14 +354,16 @@ Define session as the actual new session controller over injected API and storag
 
 **Interfaces produced:**
 
-    interface AuthoringWorldApplyPort {
-      applyInTransaction(
-        transaction: AuthoringTransaction,
-        scope: OwnerScope,
-        target: AuthoringTarget,
-        content: WorldContent | PlayableCharacter
-      ): Promise<{ worldId: string; draftRevision: number; characterId?: string }>;
-    }
+```ts
+interface AuthoringWorldApplyPort {
+  applyInTransaction(
+    transaction: AuthoringTransaction,
+    scope: OwnerScope,
+    target: AuthoringTarget,
+    content: WorldContent | PlayableCharacter
+  ): Promise<{ worldId: string; draftRevision: number; characterId?: string }>;
+}
+```
 
 AuthoringTransaction is an opaque application transaction context defined in application/authoring/ports.ts. Its database implementation wraps the existing world persistence transaction/context adapter so applying content and writing a receipt use the same connection and transaction.
 

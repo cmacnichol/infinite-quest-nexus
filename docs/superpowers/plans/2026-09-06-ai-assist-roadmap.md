@@ -32,7 +32,7 @@ For each task, give the implementer this roadmap, the patch plan, the task ident
 10. A patch completion gate is not permission to merge, deploy, or start the next patch. Report blocked or skipped runtime checks honestly.
 
 Required repository readings before execution:
-- [Repository guidelines](../../../AGENTS.md)
+- [Repository guidelines](https://github.com/cmacnichol/infinite-quest-nexus/blob/main/AGENTS.md)
 - [Domain guidance](../../agents/domain.md)
 - [Architecture and service boundaries](../../architecture/repository-overview.md)
 - [Roster and incomplete-draft decision](../../architecture/0014-roster-only-world-character-guidance.md)
