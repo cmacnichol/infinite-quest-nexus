@@ -15,6 +15,7 @@ import {
   worldCoverRequestSchema
 } from "../../packages/contracts/src/generation.js";
 import {
+  projectSafeGenerationDiagnostic,
   safeGenerationDiagnosticSchema,
   storyPromptProtocolIdentity,
   storyTurnOutputHistoricalSchema,
@@ -396,6 +397,57 @@ describe("generation contracts", () => {
       expect(safeGenerationDiagnosticSchema.safeParse({ code: "unknown", operation: "story_generation", action: "adjust_context" }).success).toBe(false);
       expect(safeGenerationDiagnosticSchema.safeParse({ code: "context_budget_exceeded", operation: "story_generation", action: "adjust_context", requiredTokens: -1 }).success).toBe(false);
       expect(safeGenerationDiagnosticSchema.safeParse({ code: "context_budget_exceeded", operation: "story_generation", action: "adjust_context", message: "private scratchpad canary" }).success).toBe(false);
+      expect(safeGenerationDiagnosticSchema.safeParse({
+        code: "context_budget_exceeded",
+        operation: "story_generation",
+        action: "adjust_context",
+        scope: "campaign_context",
+        requiredTokens: 1,
+        availableTokens: 0,
+        countMode: "estimated",
+        estimatorVersion: "story-token-estimate-v1"
+      }).success).toBe(true);
+      expect(safeGenerationDiagnosticSchema.safeParse({
+        code: "context_budget_exceeded",
+        operation: "story_generation",
+        action: "adjust_context",
+        countMode: "exact",
+        estimatorVersion: "private-tokenizer-canary"
+      }).success).toBe(false);
+      expect(projectSafeGenerationDiagnostic({
+        code: "context_budget_exceeded",
+        operation: "story_generation",
+        action: "adjust_context",
+        requiredTokens: 1,
+        availableTokens: 0
+      })).toEqual({
+        code: "context_budget_exceeded",
+        operation: "story_generation",
+        action: "adjust_context",
+        requiredTokens: 1,
+        availableTokens: 0
+      });
+      expect(projectSafeGenerationDiagnostic({
+        code: "context_budget_exceeded",
+        operation: "story_generation",
+        action: "adjust_context",
+        countMode: "estimated",
+        estimatorVersion: "story-token-estimate-v1"
+      })).toEqual({
+        code: "context_budget_exceeded",
+        operation: "story_generation",
+        action: "adjust_context",
+        countMode: "estimated",
+        estimatorVersion: "story-token-estimate-v1"
+      });
+      expect(projectSafeGenerationDiagnostic({
+        code: "context_budget_exceeded",
+        operation: "story_generation",
+        action: "adjust_context",
+        countMode: "estimated",
+        estimatorVersion: "story-token-estimate-v1",
+        prompt: "private prompt canary"
+      })).toBeNull();
       expect(safeGenerationDiagnosticSchema.safeParse({
         code: "continuity_output_budget_exceeded",
         operation: "story_generation",
