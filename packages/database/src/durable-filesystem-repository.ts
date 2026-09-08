@@ -275,18 +275,19 @@ async function prewriteAuthorityRow(
   client: DatabaseClient,
   operationId: string,
 ): Promise<PrewriteAuthorityRow | null> {
-  try {
-    const selected = await client.query<PrewriteAuthorityRow>(
-      `SELECT relative_path,device_id,file_id,authority_state
-         FROM durable_filesystem_prewrite_nodes
-        WHERE operation_id=$1`,
-      [operationId],
-    );
-    return selected.rows[0] ?? null;
-  } catch (error) {
-    if ((error as { code?: unknown }).code === "42P01") return null;
-    throw error;
-  }
+  // Older durable schemas intentionally lack this additive table. A failed
+  // relation query would abort this cleanup transaction before we can fall back.
+  const relation = await client.query<{ present: boolean }>(
+    "SELECT to_regclass('durable_filesystem_prewrite_nodes') IS NOT NULL AS present",
+  );
+  if (relation.rows[0]?.present !== true) return null;
+  const selected = await client.query<PrewriteAuthorityRow>(
+    `SELECT relative_path,device_id,file_id,authority_state
+       FROM durable_filesystem_prewrite_nodes
+      WHERE operation_id=$1`,
+    [operationId],
+  );
+  return selected.rows[0] ?? null;
 }
 
 async function candidateByHash(
