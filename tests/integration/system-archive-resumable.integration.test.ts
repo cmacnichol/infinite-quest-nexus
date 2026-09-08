@@ -95,7 +95,7 @@ function safePreviewProjection(ownerUserId: string, archiveFingerprint: string) 
       sourceApplication: "0.1.0",
       sourceMigration: "0079_resumable_system_archive_uploads",
       destinationApplication: "0.1.0",
-      destinationMigration: "0088_expand_campaign_story_context_budget"
+      destinationMigration: "0093_portable_source_material_authority_paths"
     },
     sourceOwnerCount: 1 as const,
     archiveFingerprint,
@@ -328,7 +328,7 @@ integration("durable System Archive jobs and resumable uploads", () => {
     const clean = await imports.destinationFingerprint(owner, {});
     expect(clean).toMatchObject({
       initialOwnerId: owner.ownerUserId,
-      latestMigration: "0088_expand_campaign_story_context_budget",
+      latestMigration: "0093_portable_source_material_authority_paths",
       destinationEmpty: true
     });
 
