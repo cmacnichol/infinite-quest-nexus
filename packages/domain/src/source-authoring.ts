@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { normalizeSourceText, sourceParagraphMap } from "../../contracts/src/source-normalization.js";
 import {
   sourceDocumentIdSchema,
   sourceDocumentNameSchema,
@@ -19,40 +20,6 @@ import {
 import { z } from "zod";
 import type { SourceChunk } from "./source-authoring-budget.js";
 
-function normalizeSourceText(text: string): string {
-  sourceIntakeTextSchema.parse(text);
-  return text.replace(/^\uFEFF/u, "").replace(/\r\n|\r/gu, "\n");
-}
-
-function isBlankLine(characters: readonly string[]): boolean {
-  return characters.every((character) => /\s/u.test(character));
-}
-
-function paragraphMap(text: string): SourceDocument["paragraphs"] {
-  const characters = Array.from(text);
-  const paragraphs: SourceDocument["paragraphs"] = [];
-  let lineStart = 0;
-  let paragraphStart: number | null = null;
-  let paragraphEnd = 0;
-  for (let index = 0; index <= characters.length; index += 1) {
-    if (index !== characters.length && characters[index] !== "\n") continue;
-    const lineEnd = index;
-    if (isBlankLine(characters.slice(lineStart, lineEnd))) {
-      if (paragraphStart !== null) {
-        paragraphs.push({ id: `paragraph:${paragraphs.length}`, start: paragraphStart, end: paragraphEnd });
-        paragraphStart = null;
-      }
-    } else {
-      if (paragraphStart === null) paragraphStart = lineStart;
-      paragraphEnd = lineEnd;
-    }
-    lineStart = index + 1;
-  }
-  if (paragraphStart !== null) {
-    paragraphs.push({ id: `paragraph:${paragraphs.length}`, start: paragraphStart, end: paragraphEnd });
-  }
-  return paragraphs;
-}
 
 function sha256(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
@@ -75,7 +42,7 @@ export function hasValidSourceDocumentIntegrity(source: SourceDocument): boolean
   // Intake removes only one BOM. A retained BOM may therefore be the preserved
   // second BOM from raw input and cannot be distinguished from this projection.
   if (source.text.includes("\r")) return false;
-  return source.sha256 === sha256(source.text) && sameParagraphMap(source.paragraphs, paragraphMap(source.text));
+  return source.sha256 === sha256(source.text) && sameParagraphMap(source.paragraphs, sourceParagraphMap(source.text));
 }
 
 export function normalizeSourceDocument(name: string, text: string, id: string): SourceDocument {
@@ -92,7 +59,7 @@ export function sourceDocumentFromNormalizedText(name: string, text: string, id:
     name: sourceDocumentNameSchema.parse(name),
     text,
     sha256: sha256(text),
-    paragraphs: paragraphMap(text)
+    paragraphs: sourceParagraphMap(text)
   });
 }
 

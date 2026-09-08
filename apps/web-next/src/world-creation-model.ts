@@ -12,7 +12,7 @@ import {
 
 export const WORLD_CREATION_PATH = "/app/worlds/new";
 
-export type CreationMethod = "manual" | "ai";
+export type CreationMethod = "manual" | "ai" | "source";
 export type CreationStage = "method" | "foundation" | "canon" | "mechanics" | "cover" | "characters" | "review";
 export type CreationStatus = "pristine" | "unsaved" | "creating" | "created" | "error";
 export type CreationCoverIntent =
