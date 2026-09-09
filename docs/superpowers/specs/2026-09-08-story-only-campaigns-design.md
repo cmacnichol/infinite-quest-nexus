@@ -23,6 +23,8 @@ The legacy files `apps/web/public/index.html` and `apps/web/public/story.html` a
 
 Require separate legacy and new UI test/browser reports and desktop/mobile screenshots, plus a same-campaign cross-interface check: change the setting in one UI and verify it in the other after refresh. Preserve drafts, auto-submit preference, historical jobs, and settings-conflict behavior on both sides. One interface passing is insufficient for completion.
 
+Both clients are part of the same feature release. Apply the plan's shared UI acceptance checklist separately to each client, including existing Story Direction campaigns on first load, all submission paths, historical Auto preference normalization, and settings changes saved from either interface. Neither UI may retain the previous per-turn behavior as a temporary exception.
+
 ## Execution contract
 
 Successful ordinary path:

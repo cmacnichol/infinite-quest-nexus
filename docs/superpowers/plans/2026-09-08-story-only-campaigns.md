@@ -75,6 +75,10 @@ node node_modules/vitest/vitest.mjs run --exclude '**/.worktrees/**' --exclude '
 
 For each task, use the same unit command form with that task's named tests. For real database tests use `node node_modules/vitest/vitest.mjs run --config vitest.integration.config.ts <named files>` or the documented isolated runner. Never run a database suite without that configuration and claim skipped cases passed. Provision a disposable database; do not point tests at production. Resolve migration-number drift before creating a new file; at this base the latest migration is `0093_portable_source_material_authority_paths.sql`.
 
+## Verified local test environment override
+
+The canonical global setup forcibly provisions the shared named integration container on port 55432. For this worktree, use the verified dedicated container on localhost15439 through `tmp/story-only-test/vitest.config.ts`. It imports `vitest.integration.config.ts` unchanged except for global setup; per-file random-database isolation remains active. Use `node node_modules/vitest/vitest.mjs run --config tmp/story-only-test/vitest.config.ts <files>` for focused tests and `node tmp/story-only-test/run-all.mjs` for the full canonical file-by-file discovery sequence. These replace shared-container commands locally; do not touch another worktree's test credentials. Store only summarized results in committed evidence, never the ignored credential files.
+
 ## Task 1: Map the existing campaign setting to frozen generation policy
 
 **Owner:** Terra contracts implementer. **Depends on:** baseline.
@@ -363,6 +367,17 @@ Use an immutable historical schema fixture copied from the current manifest cont
 | Removed classifier UI | Auto help, decision region, intent-provider setup | Auto help, confidence/fallback state, classification calls, setup link copy | No classifier request or selectable intent-classifier setup remains |
 | Settings transitions | Existing Save campaign flow | Existing Save campaign flow | Same revision fences, conflict feedback, refreshed setting, preserved draft |
 | Recovery and history | Existing legacy controls | New controls and both renderer variants | Old jobs resume with saved semantics; accepted content remains intact |
+
+### Shared UI acceptance checklist
+
+Run this checklist independently for 7A and 7B; include a result for every row in each surface's handoff report. Both clients ship in the same feature release, with the existing campaign setting as their common authority.
+
+- [ ] Creation and settings retain the existing Action / Story Direction selection and explain Story Direction as story-only, without RPG or automated goal/event checks. No Auto option, second mode setting, or conversion control appears.
+- [ ] Existing Story Direction campaigns load the story-only composer immediately after refresh. Typed input, generated choices, custom suggestions, keyboard submission, and automatic choice submission all honor the campaign setting; a saved per-turn preference cannot override it.
+- [ ] Historical Auto campaign/profile preferences display Action after normalization in every relevant dialog. Removing Auto does not remove the separate automatic choice-submission preference.
+- [ ] Switching between Action and Story Direction through the existing save flow refreshes the displayed controls in either UI. Unresolved-job and stale-revision errors preserve draft text and explain why the setting was not saved.
+- [ ] Story-only hides inactive mechanics controls while preserving stored mechanics and historical results. Action campaigns retain their current mechanics behavior; RPG redesign remains deferred.
+- [ ] Verify the same campaign in both interfaces against the same server, including changes saved from either interface, desktop/mobile layouts, both new Story renderers, and zero classification requests after actual submission. Record separate screenshots and outcomes; an unverified UI blocks feature acceptance.
 
 - [ ] **7A RED/GREEN:** implement all legacy cells, add focused DOM/API tests, verify `/nexus/` and `/story/:campaignId` in a disposable browser, and capture legacy screenshots. Hand off shared helper changes, actual files, and test evidence. A pass in the new UI cannot close this gate.
 - [ ] **7B RED/GREEN:** implement all new-UI cells, including both profile render paths and both Story presenters. Verify `/app/` management and `/app/story/:campaignId`, capture new-UI screenshots, and rerun shared helper plus legacy surface regressions after edits. Where the new UI links to existing management, verify that destination instead of building an unrelated duplicate creation/provider page.
