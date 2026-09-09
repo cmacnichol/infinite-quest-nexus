@@ -13,6 +13,8 @@ import {
   type SystemImportPreviewView,
   type SystemRecordEnvelope
 } from "@infinite-quest/contracts";
+import { portableAcceptedTurnModelMetadata } from "../../contracts/src/campaign-generation-policy.js";
+import { normalizeHistoricalTurnControlStyle } from "../../domain/src/campaign-generation-policy.js";
 import type { OwnerScope } from "../../application/src/generation/types.js";
 import type {
   PrivateAssetPublicationCommand,
@@ -467,9 +469,18 @@ function emptyDomainCounts(): Record<SystemArchiveDomain, number> {
 }
 
 function turnControlStyle(value: "Auto" | "Action" | "Scene Direction"): string {
-  if (value === "Auto") return "flexible_auto";
+  if (value === "Auto") return "flexible_action";
   if (value === "Scene Direction") return "flexible_scene";
   return "flexible_action";
+}
+
+function normalizedCompatibilitySettings(settings: Readonly<Record<string, unknown>>): Record<string, unknown> {
+  const turnControlStyle = settings.turnControlStyle === "Auto"
+    ? "flexible_auto"
+    : settings.turnControlStyle;
+  return turnControlStyle === "flexible_auto"
+    ? { ...settings, turnControlStyle: normalizeHistoricalTurnControlStyle(turnControlStyle) }
+    : { ...settings };
 }
 
 function json(value: unknown): string {
@@ -610,10 +621,10 @@ async function requireLogicalMutation(
 
 type SystemPromptEnvelope = Extract<SystemRecordEnvelope, { domain: "prompts" }>;
 type SystemIllustrationEnvelope = Extract<SystemRecordEnvelope, { domain: "illustrations" }>;
-type SystemRecordEnvelopeV2 = Extract<SystemRecordEnvelope, { formatVersion: 2 }>;
+type SystemRecordEnvelopeModern = Extract<SystemRecordEnvelope, { formatVersion: 2 | 3 }>;
 
-function isV2Envelope(envelope: SystemRecordEnvelope): envelope is SystemRecordEnvelopeV2 {
-  return 2 === envelope.formatVersion;
+function isV2Envelope(envelope: SystemRecordEnvelope): envelope is SystemRecordEnvelopeModern {
+  return envelope.formatVersion >= 2;
 }
 type PendingWorldFork = Readonly<{
   worldId: string;
@@ -803,11 +814,11 @@ async function insertLogicalRecord(
             record.title,
             record.status,
             record.activeTurnNumber,
-            json(record.authority.legacySettings),
+            json(normalizedCompatibilitySettings(record.authority.legacySettings)),
             record.authority.textProviderProfileId,
             record.authority.imageProviderProfileId,
             record.authority.storyLengthProfile,
-            record.authority.turnControlStyle,
+            normalizeHistoricalTurnControlStyle(record.authority.turnControlStyle),
             record.selectedCharacterId,
             record.characterSnapshot === null ? null : json(record.characterSnapshot),
             record.characterProfile === null ? null : json(record.characterProfile),
@@ -832,7 +843,7 @@ async function insertLogicalRecord(
           record.title,
           record.status,
           record.activeTurnNumber,
-          json(record.settings),
+          json(normalizedCompatibilitySettings(record.settings)),
           turnControlStyle(record.settings.turnControlStyle),
           record.selectedCharacterId,
           record.characterSnapshot === null ? null : json(record.characterSnapshot),
@@ -847,14 +858,23 @@ async function insertLogicalRecord(
     case "turns": {
       if (isV2Envelope(envelope)) {
         const { record } = envelope;
+        const modelMetadata = envelope.formatVersion === 3
+          ? portableAcceptedTurnModelMetadata(
+            {
+              ...record.authority.modelMetadata,
+              portableAcceptedGenerationPolicyProvenance: (envelope.record.authority as Extract<SystemRecordEnvelope, { formatVersion: 3; domain: "turns" }> ["record"]["authority"]).portableAcceptedGenerationPolicyProvenance,
+            },
+            null,
+          )
+          : record.authority.modelMetadata;
         await requireLogicalMutation(database.query(
           `INSERT INTO turns (
              id,owner_user_id,campaign_id,turn_number,source_turn_id,action,narration,choices,
              custom_action_suggestion,image_prompt,image_url,mechanics_private,state_snapshot_private,
-             model_metadata,import_metadata,accepted_at,created_at,input_mode,input_mode_source
+             model_metadata,import_metadata,accepted_at,created_at,input_mode,input_mode_source,generation_policy
            ) VALUES (
              $1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12::jsonb,$13::jsonb,
-             $14::jsonb,$15::jsonb,$16,$17,$18,$19
+             $14::jsonb,$15::jsonb,$16,$17,$18,$19,NULL
            )`,
           [
             record.sourceId,
@@ -870,7 +890,7 @@ async function insertLogicalRecord(
             record.authority.imageUrl,
             record.authority.mechanicsPrivate === null ? null : json(record.authority.mechanicsPrivate),
             json(record.stateSnapshotPrivate),
-            json(record.authority.modelMetadata),
+            json(modelMetadata),
             json(record.authority.importMetadata),
             record.acceptedAt,
             record.authority.createdAt,
@@ -966,7 +986,8 @@ async function insertLogicalRecord(
       const { record } = envelope;
       const content = parseSystemCampaignHistoryDetails(
         record.eventType,
-        record.content
+        record.content,
+        envelope.formatVersion === 3,
       ).details as Record<string, unknown>;
       switch (record.eventType) {
         case "character-profile-edit": {
@@ -1985,6 +2006,9 @@ async function insertAssetBindings(
   for (const illustration of pendingIllustrations) {
     if (illustration.record.assetId !== asset.sourceAssetId
       || restoredIllustrationIds.has(illustration.sourceId)) continue;
+    const illustrationAuthority = illustration.formatVersion === 1
+      ? null
+      : (illustration as Extract<SystemRecordEnvelope, { domain: "illustrations"; formatVersion: 2 | 3 }>).record.authority;
     const matched = await database.query<{ count: string }>(
       `SELECT count(*)::bigint AS count
          FROM turn_illustration_segment_assets segment_asset
@@ -2006,9 +2030,9 @@ async function insertAssetBindings(
         illustration.record.turnId,
         illustration.record.selected,
         illustration.sourceId,
-        illustration.formatVersion === 2 ? illustration.record.authority.segmentId : null,
-        illustration.formatVersion === 2 ? illustration.record.authority.variantIndex : null,
-        illustration.formatVersion === 2 ? illustration.record.authority.createdAt : null
+        illustrationAuthority?.segmentId ?? null,
+        illustrationAuthority?.variantIndex ?? null,
+        illustrationAuthority?.createdAt ?? null
       ]
     );
     if (Number(matched.rows[0]?.count ?? 0) !== 1) {

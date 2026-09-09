@@ -9,6 +9,7 @@ import {
   systemCampaignHistoryDetailsSchema,
   systemImportPreviewViewSchema,
   systemPortableImageUrlSchema,
+  systemArchiveAssetRecordV2Schema,
   systemRecordEnvelopeSchema
 } from "../../packages/contracts/src/system-archives.js";
 
@@ -194,6 +195,79 @@ const validPayload = {
 };
 
 describe("System Archive contracts", () => {
+  it("requires the story-only campaign marker, active style, and nullable accepted provenance in version-three records", () => {
+    const campaign = systemRecordEnvelopeSchema.parse({
+      formatVersion: 3,
+      domain: "campaigns",
+      sourceId: campaignId,
+      record: {
+        ...validCampaignRecord,
+        authority: {
+          textProviderProfileId: null,
+          imageProviderProfileId: null,
+          storyLengthProfile: "standard",
+          turnControlStyle: "flexible_scene",
+          generationPolicyVersion: 1,
+          legacySettings: {}
+        }
+      }
+    });
+    expect(campaign.formatVersion).toBe(3);
+    const campaignAuthority = (campaign.record as { authority: Record<string, unknown> }).authority;
+
+    expect(systemRecordEnvelopeSchema.safeParse({
+      ...campaign,
+      record: { ...campaign.record, authority: { ...campaignAuthority, generationPolicyVersion: undefined } }
+    }).success).toBe(false);
+
+    const turn = systemRecordEnvelopeSchema.parse({
+      formatVersion: 3,
+      domain: "turns",
+      sourceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      record: {
+        sourceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        campaignId,
+        turnNumber: 1,
+        action: "Look through the lens.",
+        narration: "The stars answer.",
+        choices: [],
+        imagePrompt: "Stars shine around an antique brass lens.",
+        stateSnapshotPrivate: {},
+        acceptedAt: "2026-08-25T12:00:00.000Z",
+        authority: {
+          sourceTurnId: null, customActionSuggestion: "", imageUrl: null, mechanicsPrivate: null,
+          modelMetadata: {}, importMetadata: {}, createdAt: "2026-08-25T12:00:00.000Z",
+          inputMode: "scene", inputModeSource: "explicit",
+          portableAcceptedGenerationPolicyProvenance: null
+        }
+      }
+    });
+    expect(turn.formatVersion).toBe(3);
+    const turnAuthority = (turn.record as { authority: Record<string, unknown> }).authority;
+    expect(systemRecordEnvelopeSchema.safeParse({
+      ...turn,
+      record: { ...turn.record, authority: { ...turnAuthority, portableAcceptedGenerationPolicyProvenance: undefined } }
+    }).success).toBe(false);
+  });
+
+  it("parses historical system payload schemas independently of manifest pairing", () => {
+    const payload = {
+      formatVersion: 3,
+      sourceInstallationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      sourceOwnerCount: 1,
+      sourceOwner: {
+        sourceId: sourceOwnerId,
+        displayName: "Owner",
+        status: "active",
+        settings: {},
+        createdAt: "2026-08-25T12:00:00.000Z",
+        updatedAt: "2026-08-25T12:00:00.000Z"
+      },
+      records: []
+    };
+    expect(systemArchivePayloadSchema.parse(payload).formatVersion).toBe(3);
+    expect(systemArchivePayloadSchema.safeParse({ ...payload, formatVersion: 2 }).success).toBe(true);
+  });
   it("retains one closed source appendix in portable world records", () => {
     const sourceText = "The Observatory is mysterious.";
     const record = {
@@ -1094,6 +1168,37 @@ describe("System Archive contracts", () => {
       ...manifest,
       operationalOmissions: { ...manifest.operationalOmissions, generation: 1 }
     }).success).toBe(false);
+  });
+
+  it("accepts a version-two System manifest with a specialized asset while retaining base integrity", () => {
+    const asset = systemArchiveAssetRecordV2Schema.parse({
+      sourceAssetId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa99",
+      contentHash: "b".repeat(64), archivePath: "assets/original.png", mimeType: "image/png",
+      byteLength: 1, pixelWidth: 1, pixelHeight: 1, technicalMetadata: {},
+      library: { title: "", caption: "", notes: "", tags: [], origin: "imported", reviewStatus: "eligible", reuseScope: "owner_library", automaticReuseEnabled: false, contentCategories: [], favorite: false, archivedAt: null },
+      createdAt: "2026-08-25T12:00:00.000Z", bindings: [{
+        role: "illustration_segment_variant",
+        campaignId,
+        turnId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        segmentId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        variantIndex: 1,
+        createdAt: "2026-08-25T12:00:00.000Z"
+      }],
+      authority: { references: [], library: null }
+    });
+    const manifest = {
+      format: "infinite-quest-archive", formatVersion: 2, archiveType: "system", createdAt: "2026-08-25T12:00:00.000Z",
+      contentFingerprint: "a".repeat(64), sourceApplication: "0.1.0", sourceMigration: "0079_resumable_system_archive_uploads",
+      sourceInstallationId: validPayload.sourceInstallationId, sourceOwnerCount: 1, sourceOwner: validPayload.sourceOwner,
+      omittedOperationalRows: 0, operationalOmissions: { generation: 0, illustration: 0, chronicle: 0, imports: 0, "system-archive": 0 },
+      entries: [{ path: "assets/original.png", logicalType: "asset-original", mediaType: "image/png", byteLength: 1, sha256: "b".repeat(64) }], payloads: [], assets: [asset]
+    };
+    const parsed = systemArchiveManifestSchema.parse(manifest);
+    expect(parsed.formatVersion).toBe(2);
+    const parsedAsset = parsed.assets[0];
+    if (!parsedAsset || !("authority" in parsedAsset)) throw new Error("Expected specialized System asset authority.");
+    expect(parsedAsset.authority.references).toEqual([]);
+    expect(parsedAsset.bindings).toEqual(asset.bindings);
   });
 
   it("requires the durable Import Report to disclose normalization and reconciliation", () => {

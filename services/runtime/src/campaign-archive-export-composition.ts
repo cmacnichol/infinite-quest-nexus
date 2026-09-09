@@ -16,6 +16,7 @@ import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { characterLegacyText } from "../../../packages/domain/src/world-characters.js";
 import { removeProviderSecrets, sha256, stableStringify } from "../../../packages/domain/src/text.js";
 import { detectImageMimeType } from "../../../packages/domain/src/image-media.js";
+import { portableAcceptedGenerationPolicyProvenance } from "../../../packages/contracts/src/campaign-generation-policy.js";
 import {
   ArchiveError,
   writeArchiveArtifact,
@@ -97,7 +98,8 @@ function legacyPayload(snapshot: CampaignArchiveExportSnapshot, exportedAt: stri
   const selectedCharacterText = characterLegacyText(row.character_profile, row.character_snapshot);
   return sanitizePortableValue({
     format: "infinite-quest-campaign",
-    formatVersion: 3,
+    formatVersion: 4,
+    generationPolicyVersion: 1,
     exportedAt,
     campaign: {
       title: row.title,
@@ -123,6 +125,12 @@ function legacyPayload(snapshot: CampaignArchiveExportSnapshot, exportedAt: stri
       narration: turn.narration, choices: turn.choices, customActionSuggestion: turn.custom_action_suggestion,
       imagePrompt: turn.image_prompt, imageUrl: turn.image_url, roll: turn.mechanics_private,
       worldStateSnapshot: turn.state_snapshot_private, llmModelInfo: portableModelMetadata(turn.model_metadata),
+      portableAcceptedGenerationPolicyProvenance: portableAcceptedGenerationPolicyProvenance(
+        turn.generation_policy,
+        turn.model_metadata && typeof turn.model_metadata === "object" && !Array.isArray(turn.model_metadata)
+          ? (turn.model_metadata as Record<string, unknown>).portableAcceptedGenerationPolicyProvenance ?? null
+          : null
+      ),
       createdAt: iso(turn.accepted_at),
     })),
     rpgStats: row.rpg_stats,
@@ -276,7 +284,7 @@ export async function buildCampaignArchiveArtifact(
     const payloadHashes = entries.filter((entry) => entry.mediaType === "application/json").map((entry) => entry.sha256);
     return {
       format: "infinite-quest-archive",
-      formatVersion: 1,
+      formatVersion: 2,
       archiveType: "campaign",
       createdAt: new Date().toISOString(),
       contentFingerprint: calculateContentFingerprint({
@@ -287,7 +295,7 @@ export async function buildCampaignArchiveArtifact(
       worldId: snapshot.campaign.world_id,
       worldVersionId: snapshot.campaign.world_version_id,
       entries: [...entries],
-      payloads: jsonEntries.map(([path, kind]) => ({ kind, path, formatVersion: kind === "campaign" ? 3 : 1 })),
+      payloads: jsonEntries.map(([path, kind]) => ({ kind, path, formatVersion: kind === "campaign" ? 4 : 1 })),
       assets: [...snapshot.assets.records],
     } satisfies ArchiveManifest;
   }, command.limits);

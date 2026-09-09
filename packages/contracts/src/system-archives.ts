@@ -2,11 +2,13 @@ import { z } from "zod";
 import {
   archiveAssetRecordSchema,
   archiveErrorCodeSchema,
-  archiveManifestSchema,
+  archiveManifestV1Schema,
+  archiveManifestV2Schema,
   compactPortableAuthorityName,
   isExcludedPortableMetadataKey
 } from "./archives.js";
 import { providerRoleSchema, providerTypeSchema } from "./generation.js";
+import { portableAcceptedGenerationPolicyProvenanceSchema } from "./campaign-generation-policy.js";
 import { worldSourceMaterialSchema } from "./world-library.js";
 
 const nonnegativeSafeIntegerSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
@@ -763,12 +765,18 @@ export const systemCampaignHistoryDetailsSchema = z.discriminatedUnion("eventTyp
   }).strict()
 ]);
 
-export function parseSystemCampaignHistoryDetails(eventType: string, content: string) {
+export function parseSystemCampaignHistoryDetails(eventType: string, content: string, preserveRawDormantMechanics = false) {
   let details: unknown;
   try {
     details = JSON.parse(content);
   } catch {
     details = undefined;
+  }
+  if (preserveRawDormantMechanics && eventType === "campaign-state-edit") {
+    return z.object({
+      eventType: z.literal("campaign-state-edit"),
+      details: systemCampaignStateEditDetailsV3Schema,
+    }).strict().parse({ eventType, details });
   }
   return systemCampaignHistoryDetailsSchema.parse({ eventType, details });
 }
@@ -898,6 +906,13 @@ const systemCampaignRecordV2Schema = systemCampaignRecordSchema.safeExtend({
   }).strict()
 });
 
+const systemCampaignRecordV3Schema = systemCampaignRecordV2Schema.safeExtend({
+  authority: systemCampaignRecordV2Schema.shape.authority.safeExtend({
+    generationPolicyVersion: z.literal(1),
+    turnControlStyle: z.enum(["action_only", "flexible_action", "flexible_scene"])
+  })
+});
+
 const systemTurnRecordV2Schema = systemTurnRecordSchema.safeExtend({
   authority: z.object({
     sourceTurnId: z.string().max(2_000).nullable(),
@@ -910,6 +925,25 @@ const systemTurnRecordV2Schema = systemTurnRecordSchema.safeExtend({
     inputMode: z.enum(["action", "scene"]),
     inputModeSource: z.enum(["explicit", "auto", "generated_choice", "opening_action", "fallback"])
   }).strict()
+});
+
+// Version three is the first System protocol that preserves dormant campaign
+// mechanics as raw, safe JSON. Earlier readers retain their closed RPG shape.
+const systemCampaignStateSnapshotV3Schema = systemCampaignStateSnapshotSchema.extend({
+  rpgStats: z.array(portableJsonSchema).max(100),
+  pendingEventTriggers: z.array(portableJsonSchema).max(200)
+});
+const systemHistoricalCampaignStateSnapshotV3Schema = systemCampaignStateSnapshotV3Schema.partial().strict();
+
+const systemCampaignStateEditDetailsV3Schema = systemCampaignStateEditDetailsSchema.extend({
+  stateSnapshot: systemCampaignStateSnapshotV3Schema,
+});
+
+const systemTurnRecordV3Schema = systemTurnRecordV2Schema.extend({
+  stateSnapshotPrivate: systemHistoricalCampaignStateSnapshotV3Schema,
+  authority: systemTurnRecordV2Schema.shape.authority.safeExtend({
+    portableAcceptedGenerationPolicyProvenance: portableAcceptedGenerationPolicyProvenanceSchema
+  })
 });
 
 const systemTurnCorrectionRecordV2Schema = systemTurnCorrectionRecordSchema.safeExtend({
@@ -926,6 +960,10 @@ const systemCampaignStateRecordV2Schema = systemCampaignStateRecordSchema.safeEx
     scratchpadSafeForPrompt: z.boolean(),
     initialStateSnapshot: portableJsonSchema
   }).strict()
+});
+
+const systemCampaignStateRecordV3Schema = systemCampaignStateRecordV2Schema.extend({
+  state: systemCampaignStateSnapshotV3Schema
 });
 
 const systemCampaignHistoryRecordV2Base = {
@@ -1076,6 +1114,10 @@ const systemRecordEnvelopeV2Base = {
   formatVersion: z.literal(2),
   sourceId: identifierSchema
 };
+const systemRecordEnvelopeV3Base = {
+  formatVersion: z.literal(3),
+  sourceId: identifierSchema
+};
 
 /**
  * The archive stream is deliberately closed by domain. Each projection carries
@@ -1120,7 +1162,27 @@ const systemRecordEnvelopeV2Schema = z.discriminatedUnion("domain", [
   z.object({ domain: z.literal("activity-events"), ...systemRecordEnvelopeV2Base, record: systemActivityEventRecordV2Schema }).strict()
 ]);
 
+const systemRecordEnvelopeV3Schema = z.discriminatedUnion("domain", [
+  z.object({ domain: z.literal("providers"), ...systemRecordEnvelopeV3Base, record: systemPortableProviderV2Schema }).strict(),
+  z.object({ domain: z.literal("prompts"), ...systemRecordEnvelopeV3Base, record: systemPromptRecordV2Schema }).strict(),
+  z.object({ domain: z.literal("worlds"), ...systemRecordEnvelopeV3Base, record: systemWorldRecordV2Schema }).strict(),
+  z.object({ domain: z.literal("world-versions"), ...systemRecordEnvelopeV3Base, record: systemWorldVersionRecordV2Schema }).strict(),
+  z.object({ domain: z.literal("world-drafts"), ...systemRecordEnvelopeV3Base, record: systemWorldDraftRecordV2Schema }).strict(),
+  z.object({ domain: z.literal("campaigns"), ...systemRecordEnvelopeV3Base, record: systemCampaignRecordV3Schema }).strict(),
+  z.object({ domain: z.literal("turns"), ...systemRecordEnvelopeV3Base, record: systemTurnRecordV3Schema }).strict(),
+  z.object({ domain: z.literal("turn-corrections"), ...systemRecordEnvelopeV3Base, record: systemTurnCorrectionRecordV2Schema }).strict(),
+  z.object({ domain: z.literal("campaign-state"), ...systemRecordEnvelopeV3Base, record: systemCampaignStateRecordV3Schema }).strict(),
+  z.object({ domain: z.literal("campaign-history"), ...systemRecordEnvelopeV3Base, record: systemCampaignHistoryRecordV2Schema }).strict(),
+  z.object({ domain: z.literal("canonical-facts"), ...systemRecordEnvelopeV3Base, record: systemCanonicalFactRecordV2Schema }).strict(),
+  z.object({ domain: z.literal("chronicle"), ...systemRecordEnvelopeV3Base, record: systemChronicleRecordV2Schema }).strict(),
+  z.object({ domain: z.literal("illustrations"), ...systemRecordEnvelopeV3Base, record: systemIllustrationRecordV2Schema }).strict(),
+  z.object({ domain: z.literal("imports"), ...systemRecordEnvelopeV3Base, record: systemImportRecordV2Schema }).strict(),
+  z.object({ domain: z.literal("cost-events"), ...systemRecordEnvelopeV3Base, record: systemCostEventRecordV2Schema }).strict(),
+  z.object({ domain: z.literal("activity-events"), ...systemRecordEnvelopeV3Base, record: systemActivityEventRecordV2Schema }).strict()
+]);
+
 export const systemRecordEnvelopeSchema = z.union([
+  systemRecordEnvelopeV3Schema,
   systemRecordEnvelopeV2Schema,
   systemRecordEnvelopeV1Schema
 ]);
@@ -1155,13 +1217,29 @@ const systemArchivePayloadV2Schema = z.object({
   records: z.array(systemRecordEnvelopeV2Schema)
 }).strict();
 
+const systemArchivePayloadV3Schema = z.object({
+  formatVersion: z.literal(3),
+  sourceInstallationId: z.string().uuid(),
+  sourceOwnerCount: z.literal(1),
+  sourceOwner: z.object({
+    sourceId: z.string().uuid(),
+    displayName: boundedStringSchema(300),
+    status: z.enum(["active", "disabled"]),
+    settings: portableJsonObjectSchema,
+    createdAt: archiveTimestampSchema,
+    updatedAt: archiveTimestampSchema
+  }).strict(),
+  records: z.array(systemRecordEnvelopeV3Schema)
+}).strict();
+
 export const systemArchivePayloadSchema = z.union([
+  systemArchivePayloadV3Schema,
   systemArchivePayloadV2Schema,
   systemArchivePayloadV1Schema
 ]);
 
 export const systemArchiveSafeVersionsSchema = z.object({
-  archiveFormat: z.literal(1),
+  archiveFormat: z.union([z.literal(1), z.literal(2)]),
   sourceApplication: boundedStringSchema(100),
   sourceMigration: z.string().regex(/^\d{4}_[a-z0-9_]+$/u).max(200),
   destinationApplication: boundedStringSchema(100),
@@ -1455,12 +1533,18 @@ const systemArchiveAssetsPayloadV2Schema = z.object({
   assets: z.array(systemArchiveAssetRecordV2Schema)
 }).strict();
 
+const systemArchiveAssetsPayloadV3Schema = z.object({
+  formatVersion: z.literal(3),
+  assets: z.array(systemArchiveAssetRecordV2Schema)
+}).strict();
+
 export const systemArchiveAssetsPayloadSchema = z.union([
+  systemArchiveAssetsPayloadV3Schema,
   systemArchiveAssetsPayloadV2Schema,
   systemArchiveAssetsPayloadV1Schema
 ]);
 
-export const systemArchiveManifestSchema = archiveManifestSchema.safeExtend({
+const systemArchiveManifestFields = {
   archiveType: z.literal("system"),
   assets: z.array(z.union([systemArchiveAssetRecordV2Schema, archiveAssetRecordSchema])),
   sourceApplication: boundedStringSchema(100),
@@ -1473,7 +1557,12 @@ export const systemArchiveManifestSchema = archiveManifestSchema.safeExtend({
   }).strict(),
   omittedOperationalRows: nonnegativeSafeIntegerSchema,
   operationalOmissions: systemArchiveOperationalOmissionsSchema
-}).strict().superRefine((manifest, context) => {
+};
+
+const systemArchiveManifestRefinement = (manifest: {
+  omittedOperationalRows: number;
+  operationalOmissions: z.infer<typeof systemArchiveOperationalOmissionsSchema>;
+}, context: z.RefinementCtx) => {
   if (manifest.omittedOperationalRows !== operationalOmissionTotal(manifest.operationalOmissions)) {
     context.addIssue({
       code: "custom",
@@ -1481,7 +1570,13 @@ export const systemArchiveManifestSchema = archiveManifestSchema.safeExtend({
       message: "Operational omission total must match its categorized inventory."
     });
   }
-});
+};
+
+const systemArchiveManifestV1Schema = archiveManifestV1Schema.safeExtend(systemArchiveManifestFields)
+  .superRefine(systemArchiveManifestRefinement);
+const systemArchiveManifestV2Schema = archiveManifestV2Schema.safeExtend(systemArchiveManifestFields)
+  .superRefine(systemArchiveManifestRefinement);
+export const systemArchiveManifestSchema = z.union([systemArchiveManifestV2Schema, systemArchiveManifestV1Schema]);
 
 export type SystemArchiveDomain = z.infer<typeof systemArchiveDomainSchema>;
 export type SystemArchiveJobKind = z.infer<typeof systemArchiveJobKindSchema>;

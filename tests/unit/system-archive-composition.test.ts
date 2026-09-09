@@ -195,6 +195,10 @@ describe("System Archive durable writer composition", () => {
       sourceId: ownerUserId,
       sourceInstallationId: ownerUserId,
       displayName: "Initial Owner",
+      status: "active",
+      settings: {},
+      createdAt: "2026-09-09T00:00:00.000Z",
+      updatedAt: "2026-09-09T00:00:00.000Z",
     });
     const contentFingerprint = await writer.calculateContentFingerprint({
       payloadHashes: [metadata.sha256],
@@ -234,6 +238,20 @@ describe("System Archive durable writer composition", () => {
 
     await writer.cleanupPublishedStaging();
     expect(staging.activeCount()).toBe(0);
+  });
+
+  it("rejects current System metadata without complete owner authority", async () => {
+    const writer = await createFilesystemSystemArchiveWriter({
+      limits,
+      staging: memoryStaging(),
+      publisher: { publishSystemArchive: vi.fn() },
+    });
+
+    await expect(writer.writeSystemMetadata({
+      sourceId: ownerUserId,
+      sourceInstallationId: ownerUserId,
+      displayName: "Initial Owner",
+    })).rejects.toMatchObject({ code: "archive-export-inconsistent" });
   });
 
   it("derives scratch expiry and a later reopen deadline from the configured artifact lifetime", async () => {
@@ -308,6 +326,10 @@ describe("System Archive durable writer composition", () => {
       sourceId: ownerUserId,
       sourceInstallationId: ownerUserId,
       displayName: "Initial Owner",
+      status: "active",
+      settings: {},
+      createdAt: "2026-09-09T00:00:00.000Z",
+      updatedAt: "2026-09-09T00:00:00.000Z",
     });
     const contentFingerprint = await writer.calculateContentFingerprint({
       payloadHashes: [metadata.sha256],

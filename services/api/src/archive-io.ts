@@ -21,6 +21,8 @@ import { finished, pipeline } from "node:stream/promises";
 import unzipper, { type File as ZipFile } from "unzipper";
 import {
   archiveManifestSchema,
+  archiveManifestV1Schema,
+  archiveManifestV2Schema,
   archivePathSchema,
   canonicalArchiveJson,
   type ArchiveEntry,
@@ -1186,11 +1188,14 @@ function parseManifest(buffer: Buffer): ArchiveManifest {
     || (value as { format?: unknown }).format !== "infinite-quest-archive") {
     throw archiveError("archive-format-unrecognized", "The archive manifest format is not recognized.");
   }
-  if ((value as { formatVersion?: unknown }).formatVersion !== 1) {
+  const formatVersion = (value as { formatVersion?: unknown }).formatVersion;
+  if (formatVersion !== 1 && formatVersion !== 2) {
     throw archiveError("archive-version-unsupported", "The archive manifest version is not supported.");
   }
 
-  const parsed = archiveManifestSchema.safeParse(value);
+  const parsed = formatVersion === 1
+    ? archiveManifestV1Schema.safeParse(value)
+    : archiveManifestV2Schema.safeParse(value);
   if (!parsed.success) {
     const hasAssetIssue = parsed.error.issues.some((issue) => issue.path[0] === "assets");
     throw archiveError(

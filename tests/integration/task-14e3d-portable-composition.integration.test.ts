@@ -278,7 +278,7 @@ integration("Task 14e3d durable portable composition authority", () => {
     return campaignArchiveWithAssets(label, [crypto.randomUUID()]);
   }
 
-  async function richCampaignArchive(label: string) {
+  async function richCampaignArchive(label: string, turnControlStyle = "flexible_action") {
     const sourceCampaignId = crypto.randomUUID();
     const sourceWorldId = crypto.randomUUID();
     const sourceWorldVersionId = crypto.randomUUID();
@@ -303,10 +303,11 @@ integration("Task 14e3d durable portable composition authority", () => {
         selectedCharacterId: "hero", characterSnapshot: { id: "hero", name: "Hero" },
         characterProfile: { name: "Hero" }, characterProfileRevision: 1
       },
-      settings: { storyLength: "standard", turnControlStyle: "flexible_action" },
+      settings: { storyLength: "standard", turnControlStyle },
       world: { canonicalHash: worldHash, sourceWorldId, sourceWorldVersionId },
       turns: [{
         id: sourceTurnId, turnNumber: 1, action: "Look", narration: "A restored archive hall.",
+        inputMode: "scene", inputModeSource: "auto",
         imagePrompt: "A quiet archive hall", imageUrl: `/api/v1/assets/${sourceAssetId}`,
         worldStateSnapshot: { scratchpad: "", trackers: [] }, createdAt: "2030-01-02T00:00:00.000Z"
       }],
@@ -808,6 +809,15 @@ integration("Task 14e3d durable portable composition authority", () => {
       }
     };
     const sourcePayload = structuredClone(payload);
+    const unsupportedVersionPayload = structuredClone(payload);
+    Object.assign(unsupportedVersionPayload.campaign, { formatVersion: 2 });
+    await expect(withTransaction(pool, (database) => mutations.commitCampaignZip(database, {
+      owner: { ownerUserId },
+      destination: { kind: "existing_world_version", worldId: target.worldId, worldVersionId: target.worldVersionId },
+      authorityFingerprint: hash(`14e3d-unsupported-rich-version-${crypto.randomUUID()}`),
+      payload: unsupportedVersionPayload,
+      publishedAssets: []
+    }))).rejects.toThrow("portable_import_payload_invalid");
     const imported = await withTransaction(pool, (database) => mutations.commitCampaignZip(database, {
       owner: { ownerUserId },
       destination: { kind: "existing_world_version", worldId: target.worldId, worldVersionId: target.worldVersionId },
@@ -1213,7 +1223,7 @@ integration("Task 14e3d durable portable composition authority", () => {
     const archiveRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-rich-archive-`);
     const assetRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-rich-assets-`);
     const composition = await createRealComposition({ archiveRoot, assetRoot, target, leaseOwner: "14e3d-rich" });
-    const archive = await richCampaignArchive(`14e3d rich ${crypto.randomUUID()}`);
+    const archive = await richCampaignArchive(`14e3d rich ${crypto.randomUUID()}`, "flexible_auto");
     try {
       const staged = await stagedInput(composition, archive.bytes, "14e3d-rich");
       const preview = await composition.previewCampaignZip({
@@ -1238,7 +1248,9 @@ integration("Task 14e3d durable portable composition authority", () => {
       expect(result.stats).toMatchObject({ memoryCount: 1, summaryCount: 1 });
       expect(await composition.commit(command)).toEqual(committed);
       await expect(pool.query(
-        `SELECT campaign.title,turns.image_url,library.title AS asset_title,library.favorite,
+        `SELECT campaign.title,campaign.turn_control_style,campaign.legacy_settings,
+                turns.image_url,turns.input_mode,turns.input_mode_source,turns.generation_policy,
+                library.title AS asset_title,library.favorite,
                 assets.pixel_width,world.cover_asset_id,
                 (SELECT token_estimate FROM chronicle_memories memory WHERE memory.campaign_id=campaign.id) AS memory_tokens,
                 (SELECT token_estimate FROM summary_checkpoints summary WHERE summary.campaign_id=campaign.id) AS summary_tokens,
@@ -1261,6 +1273,11 @@ integration("Task 14e3d durable portable composition authority", () => {
         [result.campaignId, result.worldId, ownerUserId]
       )).resolves.toMatchObject({
         rows: [{
+          turn_control_style: "flexible_action",
+          legacy_settings: { storyLength: "standard", turnControlStyle: "flexible_action" },
+          input_mode: "scene",
+          input_mode_source: "auto",
+          generation_policy: null,
           asset_title: "Restored hall",
           favorite: true,
           pixel_width: 1,

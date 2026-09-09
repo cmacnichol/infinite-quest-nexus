@@ -140,9 +140,9 @@ function importReport(input: Readonly<{
     versions: {
       archiveFormat: 1,
       sourceApplication: "0.1.0",
-      sourceMigration: "0093_portable_source_material_authority_paths",
+      sourceMigration: "0094_story_generation_policy",
       destinationApplication: "0.1.0",
-      destinationMigration: "0093_portable_source_material_authority_paths",
+      destinationMigration: "0094_story_generation_policy",
     },
     sourceOwnerCount: 1,
     ownerMapping: {
@@ -771,7 +771,7 @@ integration("deterministic owner-wide System Archive export", () => {
     );
     expect(manifest).toMatchObject({
       sourceApplication: "0.1.0",
-      sourceMigration: "0093_portable_source_material_authority_paths",
+      sourceMigration: "0094_story_generation_policy",
       sourceInstallationId: ownerUserId,
       sourceOwnerCount: 1,
       sourceOwner: {
@@ -800,7 +800,7 @@ integration("deterministic owner-wide System Archive export", () => {
         authority: { configuration: Record<string, unknown> };
       };
     };
-    expect(portableProvider.formatVersion).toBe(2);
+    expect(portableProvider.formatVersion).toBe(3);
     expect(portableProvider.record).toMatchObject({
       baseUrl: "https://portable.invalid/v1",
       timeoutMs: 654321,
@@ -983,7 +983,7 @@ integration("deterministic owner-wide System Archive export", () => {
           record: { content: { eventTriggers: unknown[] } };
         }));
       expect(records.find((record) => record.sourceId === worldVersionId)).toEqual(expect.objectContaining({
-        formatVersion: 2,
+        formatVersion: 3,
         record: expect.objectContaining({
           content: expect.objectContaining({
             defaultTriggers: [{
@@ -1078,7 +1078,11 @@ integration("deterministic owner-wide System Archive export", () => {
     await pool.query(
       `UPDATE campaign_state_edits SET state_snapshot_private=$3::jsonb
         WHERE owner_user_id=$1 AND campaign_id=$2 AND revision=1`,
-      [ownerUserId, campaignId, JSON.stringify({ trackers: [{ name: "Legacy state", value: "open" }] })],
+      [ownerUserId, campaignId, JSON.stringify({
+        trackers: [{ name: "Legacy state", value: "open" }],
+        rpgStats: [],
+        pendingEventTriggers: [],
+      })],
     );
 
     try {
@@ -1180,9 +1184,9 @@ integration("deterministic owner-wide System Archive export", () => {
     );
 
     expect(preview).toMatchObject({
-      formatVersion: 1,
+      formatVersion: 2,
       sourceApplication: "0.1.0",
-      sourceMigration: "0093_portable_source_material_authority_paths",
+      sourceMigration: "0094_story_generation_policy",
       archiveFingerprint: exported.result.artifact.contentFingerprint,
       sourceOwnerCount: 1,
       assetCount: 4,
@@ -1210,7 +1214,7 @@ integration("deterministic owner-wide System Archive export", () => {
       }));
       const destination = {
         initialOwnerId: ownerUserId,
-        latestMigration: "0093_portable_source_material_authority_paths",
+        latestMigration: "0094_story_generation_policy",
         authoritativeCountsHash: sha256("empty-authority"),
         activeJobsHash: sha256("no-active-work"),
         checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1242,11 +1246,11 @@ integration("deterministic owner-wide System Archive export", () => {
         valid: true,
         previewHandle: "opaque-preview-authority-token",
         versions: {
-          archiveFormat: 1,
+          archiveFormat: 2,
           sourceApplication: "0.1.0",
-          sourceMigration: "0093_portable_source_material_authority_paths",
+          sourceMigration: "0094_story_generation_policy",
           destinationApplication: "0.1.0",
-          destinationMigration: "0093_portable_source_material_authority_paths",
+          destinationMigration: "0094_story_generation_policy",
         },
         archiveFingerprint: exported.result.artifact.contentFingerprint,
         destinationEmpty: true,
@@ -1279,7 +1283,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0093_portable_source_material_authority_paths",
+            latestMigration: "0094_story_generation_policy",
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1320,7 +1324,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0093_portable_source_material_authority_paths",
+            latestMigration: "0094_story_generation_policy",
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1357,7 +1361,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0093_portable_source_material_authority_paths",
+            latestMigration: "0094_story_generation_policy",
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1409,7 +1413,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0093_portable_source_material_authority_paths",
+            latestMigration: "0094_story_generation_policy",
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1771,6 +1775,10 @@ integration("deterministic owner-wide System Archive export", () => {
         sourceId: ownerUserId,
         sourceInstallationId: ownerUserId,
         displayName: "Initial Owner",
+        status: "active",
+        settings: {},
+        createdAt: "2026-09-09T00:00:00.000Z",
+        updatedAt: "2026-09-09T00:00:00.000Z",
       });
       const created = (await readdir(tmpdir()))
         .filter((name) => name.startsWith("infinitequest-system-export-") && !before.has(name));
@@ -1795,6 +1803,10 @@ integration("deterministic owner-wide System Archive export", () => {
       sourceId: ownerUserId,
       sourceInstallationId: ownerUserId,
       displayName: "Initial Owner",
+      status: "active",
+      settings: {},
+      createdAt: "2026-09-09T00:00:00.000Z",
+      updatedAt: "2026-09-09T00:00:00.000Z",
     });
     const contentFingerprint = await writer.calculateContentFingerprint({
       payloadHashes: [metadata.sha256],
@@ -1805,7 +1817,7 @@ integration("deterministic owner-wide System Archive export", () => {
     await expect(writer.publish({
       manifest: {
         sourceApplication: "0.1.0",
-        sourceMigration: "0093_portable_source_material_authority_paths",
+        sourceMigration: "0094_story_generation_policy",
         sourceInstallationId: ownerUserId,
         sourceOwnerCount: 1,
         sourceOwner: {
@@ -1844,6 +1856,10 @@ integration("deterministic owner-wide System Archive export", () => {
       sourceId: ownerUserId,
       sourceInstallationId: ownerUserId,
       displayName: "Initial Owner",
+      status: "active",
+      settings: {},
+      createdAt: "2026-09-09T00:00:00.000Z",
+      updatedAt: "2026-09-09T00:00:00.000Z",
     });
     const contentFingerprint = await writer.calculateContentFingerprint({
       payloadHashes: [metadata.sha256],
@@ -1853,7 +1869,7 @@ integration("deterministic owner-wide System Archive export", () => {
     await expect(writer.publish({
       manifest: {
         sourceApplication: "0.1.0",
-        sourceMigration: "0093_portable_source_material_authority_paths",
+        sourceMigration: "0094_story_generation_policy",
         sourceInstallationId: ownerUserId,
         sourceOwnerCount: 1,
         sourceOwner: {
@@ -1902,6 +1918,10 @@ integration("deterministic owner-wide System Archive export", () => {
           sourceId: ownerUserId,
           sourceInstallationId: ownerUserId,
           displayName: "Initial Owner",
+          status: "active",
+          settings: {},
+          createdAt: "2026-09-09T00:00:00.000Z",
+          updatedAt: "2026-09-09T00:00:00.000Z",
         });
         const contentFingerprint = await writer.calculateContentFingerprint({
           payloadHashes: [metadata.sha256],
@@ -1914,7 +1934,7 @@ integration("deterministic owner-wide System Archive export", () => {
         await expect(writer.publish({
           manifest: {
             sourceApplication: "0.1.0",
-            sourceMigration: "0093_portable_source_material_authority_paths",
+            sourceMigration: "0094_story_generation_policy",
             sourceInstallationId: ownerUserId,
             sourceOwnerCount: 1,
             sourceOwner: {
@@ -3258,6 +3278,13 @@ integration("deterministic owner-wide System Archive export", () => {
       retrieval_implementation: "chunked_hybrid",
       retrieval_shadow_enabled: true,
     }] });
+    await expect(pool.query<{ turn_control_style: string; legacy_settings: unknown }>(
+      "SELECT turn_control_style,legacy_settings FROM campaigns WHERE id=$1",
+      [campaignId],
+    )).resolves.toMatchObject({ rows: [{
+      turn_control_style: "flexible_action",
+      legacy_settings: { turnControlStyle: "flexible_action" },
+    }] });
     await expect(pool.query(
       `SELECT campaign.selected_character_id,campaign.character_snapshot,
               campaign.character_profile,campaign.character_profile_revision,
@@ -3485,13 +3512,13 @@ integration("deterministic owner-wide System Archive export", () => {
         domain: "campaigns", formatVersion: 2, sourceId: campaignId,
         record: {
           sourceId: campaignId, worldVersionId, title: "V2 Sentinel Campaign", status: "archived",
-          activeTurnNumber: 1, settings: { turnControlStyle: "Scene Direction" },
+          activeTurnNumber: 1, settings: { turnControlStyle: "Auto" },
           selectedCharacterId: null, characterSnapshot: null, characterProfile: null,
           characterProfileRevision: 0, createdAt, updatedAt,
           authority: {
             textProviderProfileId: providerId, imageProviderProfileId: null,
-            storyLengthProfile: "extended", turnControlStyle: "flexible_scene",
-            legacySettings: { markdown: exactText, nested: { sentinel: 73 } },
+            storyLengthProfile: "extended", turnControlStyle: "flexible_auto",
+            legacySettings: { turnControlStyle: "flexible_auto", markdown: exactText, nested: { sentinel: 73 } },
           },
         },
       }),
@@ -3796,8 +3823,8 @@ integration("deterministic owner-wide System Archive export", () => {
       text_provider_profile_id: providerId,
       image_provider_profile_id: null,
       story_length_profile: "extended",
-      turn_control_style: "flexible_scene",
-      legacy_settings: { markdown: exactText, nested: { sentinel: 73 } },
+      turn_control_style: "flexible_action",
+      legacy_settings: { turnControlStyle: "flexible_action", markdown: exactText, nested: { sentinel: 73 } },
       action: exactText,
       narration: exactText,
       custom_action_suggestion: exactText,
@@ -4023,7 +4050,7 @@ integration("deterministic owner-wide System Archive export", () => {
         archiveFingerprint: exported.contentFingerprint,
         destination: {
           initialOwnerId: ownerUserId,
-          latestMigration: "0093_portable_source_material_authority_paths",
+          latestMigration: "0094_story_generation_policy",
           authoritativeCountsHash: sha256("empty-authority"),
           activeJobsHash: sha256("ignored-active-import"),
           checkedAt: "2026-08-25T12:00:00.000Z",
@@ -4509,7 +4536,7 @@ integration("deterministic owner-wide System Archive export", () => {
           archiveFingerprint: sha256("expired-preview"),
           destinationFingerprint: {
             initialOwnerId: ownerUserId,
-            latestMigration: "0093_portable_source_material_authority_paths",
+            latestMigration: "0094_story_generation_policy",
             authoritativeCountsHash: sha256("authority"),
             activeJobsHash: sha256("jobs"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -4565,7 +4592,7 @@ integration("deterministic owner-wide System Archive export", () => {
     });
     const destination = {
       initialOwnerId: ownerUserId,
-      latestMigration: "0093_portable_source_material_authority_paths",
+      latestMigration: "0094_story_generation_policy",
       authoritativeCountsHash: sha256("empty-authority"),
       activeJobsHash: sha256("ignored-import"),
       checkedAt: "2026-08-25T12:00:00.000Z",

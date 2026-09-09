@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { portableAcceptedGenerationPolicyProvenance, portableAcceptedTurnModelMetadata } from "../../contracts/src/campaign-generation-policy.js";
 import type {
   CampaignTransferRepositoryPort,
   CampaignScope,
@@ -241,7 +242,8 @@ const sourceRowSchema = z.object({
   scratchpad_safe_for_prompt: z.boolean(), trackers: z.array(z.unknown()), default_triggers: z.array(z.unknown()),
   event_triggers: z.array(z.unknown()), pending_event_triggers: z.array(z.unknown()), rpg_stats: z.array(z.unknown()),
   import_provenance: z.record(z.string(), z.unknown()), initial_state_snapshot: z.record(z.string(), z.unknown()),
-  state_updated_at: z.date(), campaign_updated_at: z.date(), latest_turn_id: z.uuid().nullable()
+  state_updated_at: z.date(), campaign_updated_at: z.date(), latest_turn_id: z.uuid().nullable(),
+  turn_policy_sources: z.array(z.object({ generationPolicy: z.unknown().nullable(), retained: z.unknown().nullable() }))
 });
 type SourceRow = z.infer<typeof sourceRowSchema>;
 
@@ -290,7 +292,12 @@ async function loadTransferSource(client: DatabaseClient, scope: CampaignScope, 
             cs.pending_event_triggers, cs.rpg_stats, cs.import_provenance, cs.initial_state_snapshot,
             cs.updated_at AS state_updated_at, c.updated_at AS campaign_updated_at,
             (SELECT t.id FROM turns t WHERE t.owner_user_id = c.owner_user_id AND t.campaign_id = c.id
-              ORDER BY t.turn_number DESC LIMIT 1) AS latest_turn_id
+              ORDER BY t.turn_number DESC LIMIT 1) AS latest_turn_id,
+            COALESCE((SELECT jsonb_agg(jsonb_build_object(
+              'generationPolicy',t.generation_policy,
+              'retained',t.model_metadata->'portableAcceptedGenerationPolicyProvenance'
+            ) ORDER BY t.turn_number) FROM turns t
+              WHERE t.owner_user_id=c.owner_user_id AND t.campaign_id=c.id),'[]'::jsonb) AS turn_policy_sources
        FROM campaigns c
        JOIN campaign_state cs ON cs.campaign_id = c.id AND cs.owner_user_id = c.owner_user_id
        JOIN world_versions wv ON wv.id = c.world_version_id AND wv.owner_user_id = c.owner_user_id
@@ -345,6 +352,11 @@ function transferFingerprint(source: SourceRow, targetWorldVersionId: string, re
   return sha256(stableStringify({
     campaignId: source.id, title: source.title, status: source.status,
     activeTurnNumber: source.active_turn_number, stateRevision: source.state_revision,
+    turnControlStyle: source.turn_control_style,
+    acceptedPolicyProvenance: source.turn_policy_sources.map((turn) => portableAcceptedGenerationPolicyProvenance(
+      turn.generationPolicy,
+      turn.retained,
+    )),
     stateUpdatedAt: source.state_updated_at.toISOString(), campaignUpdatedAt: source.campaign_updated_at.toISOString(),
     latestTurnId: source.latest_turn_id, worldVersionId: source.world_version_id, targetWorldVersionId,
     requestedTitle: request.title || null, characterStrategy: request.characterStrategy,
@@ -498,7 +510,7 @@ async function cloneTransferredCampaign(
       action: z.string(), input_mode: z.string(), input_mode_source: z.string(), narration: z.string(),
       choices: z.array(z.unknown()), custom_action_suggestion: z.string(), image_prompt: z.string(),
       image_url: z.string(), mechanics_private: z.record(z.string(), z.unknown()).nullable(),
-      state_snapshot_private: z.record(z.string(), z.unknown()), model_metadata: z.record(z.string(), z.unknown()),
+      state_snapshot_private: z.record(z.string(), z.unknown()), model_metadata: z.record(z.string(), z.unknown()), generation_policy: z.unknown().nullable(),
       import_metadata: z.record(z.string(), z.unknown()), accepted_at: z.date(), created_at: z.date(),
       operationKind: z.enum(["append", "replace_latest"]).nullable(), replacementTurnId: z.uuid().nullable()
     }).safeParse(raw);
@@ -533,7 +545,8 @@ async function cloneTransferredCampaign(
             factIds: destinationFactIds
           }
         )),
-        json(turn.model_metadata), json({ ...turn.import_metadata, transfer: turnProvenance }),
+        json(portableAcceptedTurnModelMetadata(turn.model_metadata, turn.generation_policy)),
+        json({ ...turn.import_metadata, transfer: turnProvenance }),
         turn.accepted_at, turn.created_at],
     );
     turnIds.set(turn.id, destinationTurnId);

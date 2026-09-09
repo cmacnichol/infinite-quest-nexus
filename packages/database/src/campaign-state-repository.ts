@@ -11,6 +11,7 @@ import {
   type CampaignRuntimeStateContent
 } from "../../contracts/src/generation.js";
 import { projectSafeGenerationDiagnostic } from "../../contracts/src/story-prompt.js";
+import { portableAcceptedTurnModelMetadata } from "../../contracts/src/campaign-generation-policy.js";
 import { storyContextBudgetTokensSchema } from "../../contracts/src/story-settings.js";
 import { z } from "zod";
 import { normalizeCampaignEventTriggers } from "../../domain/src/campaign-event-triggers.js";
@@ -118,6 +119,7 @@ const branchTurnRowSchema = z.object({
   turnNumber: z.number().int().positive(),
   stateSnapshotPrivate: z.record(z.string(), z.unknown()),
   modelMetadata: z.record(z.string(), z.unknown()),
+  generationPolicy: z.unknown().nullable(),
   importMetadata: z.record(z.string(), z.unknown())
 });
 
@@ -680,7 +682,8 @@ function createPostgresCampaignAuthorityRepository(
         : await client.query<Record<string, unknown>>(
           `SELECT id, turn_number AS "turnNumber",
                   state_snapshot_private AS "stateSnapshotPrivate",
-                  model_metadata AS "modelMetadata", import_metadata AS "importMetadata"
+                  model_metadata AS "modelMetadata", generation_policy AS "generationPolicy",
+                  import_metadata AS "importMetadata"
              FROM turns
             WHERE campaign_id = $1 AND owner_user_id = $2 AND turn_number <= $3
             ORDER BY turn_number
@@ -692,7 +695,10 @@ function createPostgresCampaignAuthorityRepository(
         row,
         "unavailable",
         scope
-      ));
+      )).map((turn) => ({
+        ...turn,
+        modelMetadata: portableAcceptedTurnModelMetadata(turn.modelMetadata, turn.generationPolicy),
+      }));
       if (sourceTurns.length !== parsed.targetTurnNumber
         || sourceTurns.some((turn, index) => turn.turnNumber !== index + 1)) {
         return failure("invalid_transition", {
@@ -783,7 +789,8 @@ function createPostgresCampaignAuthorityRepository(
         return {
           sourceId: turn.id,
           id,
-          stateSnapshotPrivate: turn.stateSnapshotPrivate
+          stateSnapshotPrivate: turn.stateSnapshotPrivate,
+          modelMetadata: turn.modelMetadata
         };
       });
       const normalizedStateEdits = sourceEdits.map((edit) => ({
@@ -917,7 +924,7 @@ function createPostgresCampaignAuthorityRepository(
            SELECT normalized.id, $1, turn.owner_user_id, turn.turn_number, turn.source_turn_id, turn.action,
                   turn.input_mode, turn.input_mode_source, turn.narration, turn.choices,
                   turn.custom_action_suggestion, turn.image_prompt, turn.image_url,
-                 turn.mechanics_private, normalized."stateSnapshotPrivate", turn.model_metadata,
+                 turn.mechanics_private, normalized."stateSnapshotPrivate", normalized."modelMetadata",
                   turn.import_metadata || jsonb_build_object(
                     'branch',
                     jsonb_build_object(
@@ -937,7 +944,8 @@ function createPostgresCampaignAuthorityRepository(
              JOIN jsonb_to_recordset($6::jsonb) AS normalized(
                "sourceId" uuid,
                id uuid,
-               "stateSnapshotPrivate" jsonb
+               "stateSnapshotPrivate" jsonb,
+               "modelMetadata" jsonb
              ) ON normalized."sourceId" = turn.id
              LEFT JOIN LATERAL (
                SELECT job.operation_kind, job.replacement_turn_id

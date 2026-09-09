@@ -156,6 +156,34 @@ describe("normalizeLegacyCampaign", () => {
     });
   });
 
+  it("normalizes historical Auto settings at legacy portable ingress without rewriting accepted-turn provenance", () => {
+    const story = legacyStorySchema.parse({
+      world: { title: "Historical Auto", character: "Aster" },
+      settings: { turnControlStyle: "flexible_auto", retainedPreference: "keep" },
+      turns: [{
+        action: "Continue.",
+        narration: "The story continues.",
+        inputMode: "scene",
+        inputModeSource: "auto",
+        roll: { total: 17, target: 12 }
+      }]
+    });
+
+    const normalized = normalizeLegacyCampaign({ story, destination: { kind: "create_world" } });
+
+    expect(normalized.campaignSeed.turnControlStyle).toBe("flexible_action");
+    expect(normalized.campaignSeed.legacySettings).toMatchObject({
+      turnControlStyle: "flexible_action",
+      retainedPreference: "keep"
+    });
+    expect(normalized.turns[0]).toMatchObject({
+      inputMode: "scene",
+      inputModeSource: "auto",
+      mechanicsPrivate: { total: 17, target: 12 }
+    });
+    expect(story.settings).toMatchObject({ turnControlStyle: "flexible_auto", retainedPreference: "keep" });
+  });
+
   it("sanitizes fullHistory into a bounded continuity seed with truthful coverage", () => {
     const story = legacyStorySchema.parse({
       world: { title: "Summary", character: "Aster" },

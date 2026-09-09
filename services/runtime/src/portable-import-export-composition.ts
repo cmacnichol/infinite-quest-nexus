@@ -10,6 +10,7 @@ import {
   canonicalizeWorldContent,
   legacyStorySchema,
   portableWorldSchema,
+  portableAcceptedGenerationPolicyProvenanceSchema,
   worldImportRequestSchema,
   type ArchiveAssetRecord,
   type ArchiveManifest,
@@ -779,9 +780,27 @@ async function campaignZip(
   if (assetPayload.formatVersion !== 1 || canonicalArchiveJson(assetPayload.assets) !== canonicalArchiveJson(manifest.assets)) {
     throw new Error("archive_format_invalid");
   }
-  if (!Array.isArray(rawCampaign.turns) || recordValue(rawCampaign.archiveRecords).formatVersion !== 1
+  const campaignPayloadVersion = rawCampaign.formatVersion;
+  const isCurrentPolicyPayload = campaignPayloadVersion === 4;
+  const declaredCampaignPayload = manifest.payloads.find((payload) => payload.kind === "campaign" && payload.path === "campaign.json");
+  const compatibleCampaignPayload = manifest.formatVersion === 1
+    ? campaignPayloadVersion === 3 && (declaredCampaignPayload?.formatVersion === 1 || declaredCampaignPayload?.formatVersion === 3)
+    : campaignPayloadVersion === 4 && declaredCampaignPayload?.formatVersion === 4;
+  if (!declaredCampaignPayload || !compatibleCampaignPayload
+    || (campaignPayloadVersion !== 3 && !isCurrentPolicyPayload)
+    || !Array.isArray(rawCampaign.turns) || recordValue(rawCampaign.archiveRecords).formatVersion !== 1
     || chronicle.formatVersion !== 1 || !Array.isArray(chronicle.memories) || !Array.isArray(chronicle.summaries)) {
     throw new Error("archive_format_invalid");
+  }
+  if (isCurrentPolicyPayload) {
+    const settings = recordValue(rawCampaign.settings);
+    if (rawCampaign.generationPolicyVersion !== 1
+      || !Object.prototype.hasOwnProperty.call(settings, "turnControlStyle")
+      || !["action_only", "flexible_action", "flexible_scene"].includes(String(settings.turnControlStyle))
+      || rawCampaign.turns.some((turn) => !Object.prototype.hasOwnProperty.call(recordValue(turn), "portableAcceptedGenerationPolicyProvenance")
+        || !portableAcceptedGenerationPolicyProvenanceSchema.safeParse(recordValue(turn).portableAcceptedGenerationPolicyProvenance).success)) {
+      throw new Error("archive_format_invalid");
+    }
   }
   const normalized = normalizeCurrentCampaign(rawCampaign, world);
   const campaign = normalized.campaign;

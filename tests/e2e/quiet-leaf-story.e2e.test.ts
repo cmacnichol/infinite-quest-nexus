@@ -35,7 +35,7 @@ test("Custom Action starts tall and grows without replacing the field", async ({
 });
 
 test("flexible controls select Action, Direction, and Auto by keyboard without classifying while typing", async ({ page }) => {
-  const { api, field } = await openStory(page, { turnControlStyle: "flexible_auto" });
+  const { api, field } = await openStory(page, { turnControlStyle: "flexible_action" });
   try {
     const modes = page.locator('wa-radio-group[label="Interpret prompt as"]');
     const auto = page.getByRole("radio", { name: "Auto", exact: true });

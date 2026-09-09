@@ -24,6 +24,7 @@ import {
   systemImportPreviewViewSchema,
 } from "../../../packages/contracts/src/index.js";
 import { calculateContentFingerprint } from "../../../packages/contracts/src/archives-node.js";
+import { normalizeHistoricalDefaultTurnControlStyle } from "../../../packages/contracts/src/users.js";
 import type {
   SystemArchiveExportDependencies,
   SystemArchiveExportJob,
@@ -140,6 +141,18 @@ function archiveFailure(
   return Object.assign(new Error(message), { code });
 }
 
+function normalizedImportedOwnerSettings(settings: Readonly<Record<string, unknown>>): Record<string, unknown> {
+  const defaultTurnControlStyle = settings.defaultTurnControlStyle === "Auto"
+    ? "flexible_auto"
+    : settings.defaultTurnControlStyle;
+  return defaultTurnControlStyle === "flexible_auto"
+    ? {
+      ...settings,
+      defaultTurnControlStyle: normalizeHistoricalDefaultTurnControlStyle(defaultTurnControlStyle)
+    }
+    : { ...settings };
+}
+
 function requireHash(value: string, name: string): void {
   if (!/^[a-f0-9]{64}$/u.test(value)) throw archiveFailure("archive-export-inconsistent", `${name} is invalid.`);
 }
@@ -165,8 +178,8 @@ async function collectStaged(
 }
 
 export type SystemArchiveInspection = Readonly<{
-  formatVersion: 1;
-  payloadFormatVersion: 1 | 2;
+  formatVersion: 1 | 2;
+  payloadFormatVersion: 1 | 2 | 3;
   sourceApplication: string;
   sourceMigration: string;
   archiveFingerprint: string;
@@ -211,7 +224,7 @@ const MAX_SYSTEM_RECORD_BYTES = 256 * 1024 * 1024;
 async function consumeSystemRecordShard(
   source: AsyncIterable<Uint8Array>,
   domain: SystemArchiveDomain,
-  payloadFormatVersion: 1 | 2,
+  payloadFormatVersion: 1 | 2 | 3,
   index: SystemArchivePreviewIndex,
   assetIds: ReadonlySet<string>,
 ): Promise<void> {
@@ -273,7 +286,7 @@ async function consumeSystemRecordShard(
 async function* parseSystemRecordShard(
   source: AsyncIterable<Uint8Array>,
   domain: SystemArchiveDomain,
-  payloadFormatVersion: 1 | 2,
+  payloadFormatVersion: 1 | 2 | 3,
 ): AsyncGenerator<SystemRecordEnvelope> {
   const decoder = new TextDecoder("utf-8", { fatal: true });
   let pending = "";
@@ -384,7 +397,7 @@ export async function inspectSystemArchiveForPreview(
   if (candidate.format !== "infinite-quest-archive" || candidate.archiveType !== "system") {
     throw importFailure("archive-format-unrecognized", "System Archive manifest is not recognized.");
   }
-  if (candidate.formatVersion !== 1) {
+  if (candidate.formatVersion !== 1 && candidate.formatVersion !== 2) {
     throw importFailure("archive-version-unsupported", "System Archive format version is unsupported.");
   }
   if (candidate.sourceOwnerCount !== 1) {
@@ -400,8 +413,14 @@ export async function inspectSystemArchiveForPreview(
     throw importFailure("archive-json-invalid", "System Archive payload versions are incomplete or inconsistent.");
   }
   const payloadFormatVersion = [...payloadVersions][0];
-  if (payloadFormatVersion !== 1 && payloadFormatVersion !== 2) {
+  if (payloadFormatVersion !== 1 && payloadFormatVersion !== 2 && payloadFormatVersion !== 3) {
     throw importFailure("archive-version-unsupported", "System Archive payload version is unsupported.");
+  }
+  const compatiblePayload = manifest.formatVersion === 1
+    ? payloadFormatVersion === 1 || payloadFormatVersion === 2
+    : payloadFormatVersion === 3;
+  if (!compatiblePayload) {
+    throw importFailure("archive-version-unsupported", "System Archive manifest and payload versions are not a compatible reader pair.");
   }
   const declaredPaths = new Set(manifest.entries.map((entry) => normalizedPath(entry.path)));
   const manifestEntriesByPath = new Map(
@@ -579,7 +598,7 @@ export async function inspectSystemArchiveForPreview(
   }
 
   return Object.freeze({
-    formatVersion: 1,
+    formatVersion: manifest.formatVersion,
     payloadFormatVersion,
     sourceApplication: manifest.sourceApplication,
     sourceMigration: manifest.sourceMigration,
@@ -1161,7 +1180,7 @@ async function insertLogicalShards(
   transaction: import("../../../packages/database/src/system-archive-import-repository.js").SystemArchiveAtomicImportTransaction,
   container: Awaited<ReturnType<typeof inspectArchiveContainer>>,
   manifest: ReturnType<typeof systemArchiveManifestSchema.parse>,
-  payloadFormatVersion: 1 | 2,
+  payloadFormatVersion: 1 | 2 | 3,
   limits: ArchiveLimits,
 ): Promise<void> {
   for (const domain of SYSTEM_ARCHIVE_DOMAINS) {
@@ -1323,7 +1342,7 @@ export function createSystemArchiveImportExecutionService(
             jobId: job.id,
             leaseOwner: job.leaseOwner,
           }, async (transaction) => {
-            if (systemPayload.formatVersion === 2) {
+            if (systemPayload.formatVersion === 2 || systemPayload.formatVersion === 3) {
               await transaction.database.query(
                 `UPDATE users
                     SET display_name=$2,status=$3,settings=$4::jsonb,created_at=$5,updated_at=$6
@@ -1332,7 +1351,7 @@ export function createSystemArchiveImportExecutionService(
                   owner.ownerUserId,
                   systemPayload.sourceOwner.displayName,
                   systemPayload.sourceOwner.status,
-                  JSON.stringify(systemPayload.sourceOwner.settings),
+                  JSON.stringify(normalizedImportedOwnerSettings(systemPayload.sourceOwner.settings)),
                   systemPayload.sourceOwner.createdAt,
                   systemPayload.sourceOwner.updatedAt,
                 ],
@@ -1629,7 +1648,7 @@ export async function createFilesystemSystemArchiveWriter(
   const stagedForCleanup = new Set<SystemArchiveStagedContent>();
   const paths = new Set<string>();
   let ownerUserId: string | undefined;
-  let systemPayloadVersion: 1 | 2 | undefined;
+  let systemPayloadVersion: 1 | 2 | 3 | undefined;
   let state: "open" | "published" | "aborted" = "open";
 
   const requireOpen = () => {
@@ -1695,22 +1714,23 @@ export async function createFilesystemSystemArchiveWriter(
         throw archiveFailure("archive-export-inconsistent", "System Archive staging owner changed.");
       }
       ownerUserId = owner.sourceId;
-      systemPayloadVersion = owner.status !== undefined
-        && owner.settings !== undefined
-        && owner.createdAt !== undefined
-        && owner.updatedAt !== undefined ? 2 : 1;
+      if (owner.status === undefined || owner.settings === undefined
+        || owner.createdAt === undefined || owner.updatedAt === undefined) {
+        throw archiveFailure("archive-export-inconsistent", "System Archive owner authority is incomplete for the current format.");
+      }
+      systemPayloadVersion = 3;
       const value = systemArchivePayloadSchema.parse({
         formatVersion: systemPayloadVersion,
         sourceInstallationId: owner.sourceInstallationId,
         sourceOwnerCount: 1,
-        sourceOwner: systemPayloadVersion === 2 ? {
+        sourceOwner: {
           sourceId: owner.sourceId,
           displayName: owner.displayName,
           status: owner.status,
           settings: owner.settings,
           createdAt: owner.createdAt,
           updatedAt: owner.updatedAt,
-        } : { sourceId: owner.sourceId, displayName: owner.displayName },
+        },
         records: [],
       });
       return writeBufferEntry(
@@ -1894,7 +1914,7 @@ export async function createFilesystemSystemArchiveWriter(
       const createdAt = (options.now ?? (() => new Date()))().toISOString();
       const buildManifest = (measuredEntries: readonly ArchiveEntry[]) => systemArchiveManifestSchema.parse({
         format: "infinite-quest-archive",
-        formatVersion: 1,
+        formatVersion: 2,
         archiveType: "system",
         createdAt,
         contentFingerprint: input.contentFingerprint,
