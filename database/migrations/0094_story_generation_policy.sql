@@ -32,7 +32,9 @@ ALTER TABLE turns ADD CONSTRAINT turns_generation_policy_valid CHECK (
     AND generation_policy->>'version' = '1'
     AND (
       (generation_policy->>'playMode' = 'legacy'
-       AND generation_policy->>'turnControlStyle' IN ('action_only', 'flexible_action'))
+       AND generation_policy->>'turnControlStyle' IN ('action_only', 'flexible_action')
+       AND generation_policy ? 'protocolVersion' = false
+       AND generation_policy ? 'prompts' = false)
       OR
       (generation_policy->>'playMode' = 'story_only'
        AND generation_policy->>'turnControlStyle' = 'flexible_scene'

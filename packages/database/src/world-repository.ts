@@ -1281,45 +1281,49 @@ function createPostgresCampaignRepository(
       const changingTurnControlStyle = request.turnControlStyle !== undefined
         && request.turnControlStyle !== current.turn_control_style;
       if (changingTurnControlStyle) {
-        if (request.expectedTurnControlStyle === undefined
-          || request.expectedActiveTurnNumber === undefined
-          || request.expectedStateRevision === undefined) {
+        const missingFences = [
+          request.expectedTurnControlStyle === undefined ? "turn_control_style" : null,
+          request.expectedActiveTurnNumber === undefined ? "active_turn_number" : null,
+          request.expectedStateRevision === undefined ? "state_revision" : null
+        ].filter((fence): fence is string => fence !== null);
+        if (missingFences.length) {
           return failure("turn_control_style_fence_required", {
             campaignId: scope.campaignId,
-            actualTurnControlStyle: current.turn_control_style
+            actualTurnControlStyle: current.turn_control_style,
+            blockers: missingFences
           });
         }
         if (request.expectedTurnControlStyle !== current.turn_control_style) {
           return failure("turn_control_style_changed", {
             campaignId: scope.campaignId,
-            expectedTurnControlStyle: request.expectedTurnControlStyle,
+            expectedTurnControlStyle: request.expectedTurnControlStyle!,
             actualTurnControlStyle: current.turn_control_style
           });
         }
         if (request.expectedActiveTurnNumber !== current.active_turn_number) {
           return failure("active_turn_changed", {
             campaignId: scope.campaignId,
-            expectedTurnNumber: request.expectedActiveTurnNumber,
+            expectedTurnNumber: request.expectedActiveTurnNumber!,
             actualTurnNumber: current.active_turn_number
           });
         }
         if (request.expectedStateRevision !== current.revision) {
           return failure("state_revision_changed", {
             campaignId: scope.campaignId,
-            expectedStateRevision: request.expectedStateRevision,
+            expectedStateRevision: request.expectedStateRevision!,
             actualStateRevision: current.revision
           });
         }
-        const unresolved = await client.query(
-          `SELECT 1 FROM generation_jobs
+        const unresolved = await client.query<{ status: string }>(
+          `SELECT DISTINCT status FROM generation_jobs
             WHERE campaign_id = $1 AND owner_user_id = $2
               AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable')
-            LIMIT 1`,
+            ORDER BY status`,
           [scope.campaignId, scope.ownerUserId]
         );
-if (unresolved.rowCount) return failure("generation_in_progress", {
+        if (unresolved.rowCount) return failure("generation_in_progress", {
           campaignId: scope.campaignId,
-          unresolvedGenerationStatuses: ["queued", "replacement_queued", "assessing", "generating", "validating", "committing", "recoverable"]
+          unresolvedGenerationStatuses: unresolved.rows.map((row) => row.status)
         });
       }
       for (const [profileId, role] of [
