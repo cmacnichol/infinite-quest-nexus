@@ -1,6 +1,7 @@
 # Task 1 report: Story-only campaign policy contracts
 
 Base: `eac2ce16` (`2efb4a3c` plus the controller's plan/spec checkpoint)
+Commit: `9f892c4f` (amended below to include this recorded SHA)
 
 ## Delivered interfaces
 
