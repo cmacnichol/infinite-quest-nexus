@@ -14,7 +14,7 @@ The archive includes:
 
 Original images are stored by content hash and carry explicit bindings, so a cover, selected turn image, and alternate segment variants can be restored as their original files. Export stops with an error if a required original asset is missing or no longer matches its recorded metadata; it never produces a knowingly incomplete archive.
 
-Campaign Archives deliberately exclude other world versions, other campaigns, unrelated owner-library images, provider profiles and prompt overrides, credentials, provider response chains, operational job rows, provisional illustrations that are not attached to an accepted turn, thumbnail derivatives, and vector/embedding records. Provider credentials, Intent assignments, classifier records, confidence values, and any credential-shaped metadata are not portable. The excluded derived data can be rebuilt after import; the accepted-turn ledger and portable Chronicle content remain the recovery record.
+Campaign Archives deliberately exclude other world versions, other campaigns, unrelated owner-library images, provider profiles and prompt overrides, credentials, provider response chains, operational job rows, provisional illustrations that are not attached to an accepted turn, thumbnail derivatives, and vector/embedding records. Provider credentials, retired Intent assignments and classifier records, and any credential-shaped metadata are not portable. The excluded derived data can be rebuilt after import; the accepted-turn ledger and portable Chronicle content remain the recovery record.
 
 The Story-only **Export** menu still provides readable Markdown and print-to-PDF exports for the active story. Use **Export campaign** when you need a portable Campaign Archive.
 
@@ -33,7 +33,7 @@ The importer validates the archive again before one transactional write. Corrupt
 
 ### Compatibility
 
-Current Campaign Archives use a versioned root manifest with checksums and explicit asset bindings. Existing portable campaign JSON remains available through the legacy import path. Earlier campaign ZIPs containing `campaign.json` and `assets/` but no `manifest.json` are also accepted through a compatibility adapter. Their preview warns that source checksums, MIME declarations, and explicit image-binding guarantees were unavailable; inferred legacy bindings should be reviewed after import. A preview also warns when an older archive contains turnless provisional illustration records; those transient records are omitted because the operational generation jobs needed to resume them are not portable. Older portable campaign format data without a turn mode defaults to **Action**.
+Current Campaign Archives use root manifest version 2 and campaign payload version 4. Payload version 4 carries generation-policy version 1 and the portable accepted-turn policy provenance; runtime prompt snapshots, provider chains, and checkpoints remain excluded. Existing portable campaign JSON remains available through the legacy import path. Earlier campaign ZIPs containing `campaign.json` and `assets/` but no `manifest.json` are also accepted through a compatibility adapter. Their preview warns that source checksums, MIME declarations, and explicit image-binding guarantees were unavailable; inferred legacy bindings should be reviewed after import. A preview also warns when an older archive contains turnless provisional illustration records; those transient records are omitted because the operational generation jobs needed to resume them are not portable. Older portable campaign format data without a turn mode defaults to **Action**.
 
 ## Safety and limits
 
@@ -45,7 +45,7 @@ During the pre-authentication phase, imported records belong to the database-bac
 
 ## What a Campaign Archive is not
 
-A Campaign Archive is a portable, single-campaign transfer. It is not an in-place campaign update, a coordinated disaster-recovery backup, or the owner-wide **System Archive**. System Archive is enabled by default in the direct runtime and single-node Compose deployment, and disabled in the base replicated Swarm stack. Setting `SYSTEM_ARCHIVE_ENABLED=false` withdraws that capability. It imports one Current Owner only into an empty initialized destination; it is not a merge path for this campaign.
+A Campaign Archive is a portable, single-campaign transfer. It is not an in-place campaign update, a coordinated disaster-recovery backup, or the owner-wide **System Archive**. Current System Archives use root manifest version 2 and system payload/record version 3; those versions are independent of the Campaign Archive versions above. System Archive is enabled by default in the direct runtime and single-node Compose deployment, and disabled in the base replicated Swarm stack. Setting `SYSTEM_ARCHIVE_ENABLED=false` withdraws that capability. It imports one Current Owner only into an empty initialized destination; it is not a merge path for this campaign.
 
 See [System data transfer](../operations/system-data-transfer.md) for its exact portable scope, exclusions, release status, and destination safeguards. For disaster recovery, use a coordinated PostgreSQL, asset-storage, configuration-inventory, and separately escrowed encryption-key Recovery Set.
 

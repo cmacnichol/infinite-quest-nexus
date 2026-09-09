@@ -14,4 +14,6 @@ The advertised loaded-model context length is used when available. A provider pr
 
 Changing a campaign's text profile affects its next request, which still bootstraps from authoritative campaign state.
 
-The campaign's effective Story text profile also classifies **Auto** turn input when no explicitly default [Turn intent classification](./turn-intent.md) profile is active. Classification is a short structured preflight request. Regardless of which profile classifies the input, narration always returns to the campaign Story text profile.
+The campaign's effective Story text profile generates Action and Story Direction
+turns. Story Direction uses its frozen story-only prompt snapshot and does not
+make a classifier preflight request.

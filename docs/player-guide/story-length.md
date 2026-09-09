@@ -17,6 +17,6 @@ When submitting a turn from either the web-next or legacy **Story** view, the co
 - If an enqueue attempt cannot be accepted, the selected override remains in the composer so you can retry without reselecting it. A later generation failure occurs after the one-shot control has reset.
 - Editing the latest accepted turn to replace it can choose its own per-turn profile. In web-next, retry returns to the composer, where you may choose a different profile before submitting the replacement. In legacy Story, retry opens its retry dialog with its own Turn length choice.
 - **Begin Story** remains automatic and uses the campaign default; it does not add a browser-selected override.
-- When Auto mode asks you to confirm an action or generated choice, the chosen Turn length stays with that confirmation. Generated-choice Auto submissions use the currently selected choice.
+- The selected Turn length stays with the queued submission, including a generated choice copied into the composer for review.
 
 The ranges are soft pacing goals, not guaranteed exact output word counts. Provider limits, recovery, and scene needs still apply. The text profile's **Maximum output** remains a hard provider request ceiling and should be large enough for the selected effective profile plus structured response data.

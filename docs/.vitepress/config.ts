@@ -154,7 +154,7 @@ export default withMermaid({
           collapsed: true,
           items: [
             { text: "Story text", link: "/nexus-guide/providers/text" },
-            { text: "Turn intent", link: "/nexus-guide/providers/turn-intent" },
+            { text: "Turn intent retirement", link: "/nexus-guide/providers/turn-intent" },
             { text: "Embeddings", link: "/nexus-guide/providers/embeddings" },
             { text: "Images", link: "/nexus-guide/providers/images" },
             { text: "Sogni", link: "/nexus-guide/providers/sogni" },
@@ -269,7 +269,8 @@ export default withMermaid({
             { text: "Roster-only guidance", link: "/architecture/0014-roster-only-world-character-guidance" },
             { text: "World-version deletion", link: "/architecture/0015-deletable-unused-world-versions" },
             { text: "Reviewed character authoring", link: "/architecture/0016-reviewed-character-authoring" },
-            { text: "Turn input intent", link: "/architecture/0021-turn-input-intent-classification" }
+            { text: "Story-only campaign policy", link: "/architecture/story-only-campaign-policy" },
+            { text: "Historical turn input intent", link: "/architecture/0021-turn-input-intent-classification" }
           ]
         }
       ],

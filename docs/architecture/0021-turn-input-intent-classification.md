@@ -1,6 +1,6 @@
 # ADR 0021: Typed turn input and optional intent classification
 
-- Status: Accepted
+- Status: Superseded for active turn handling by [Story-only campaign policy](./story-only-campaign-policy.md)
 - Date: 2026-07-22
 
 ## Context

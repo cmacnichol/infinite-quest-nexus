@@ -131,3 +131,49 @@ No disposable live provider and campaign were authorized for this task. The
 live-quality gate remains open: score each case on the five 0/1/2 dimensions,
 require at least 108/120 with no zero, no mechanics language, and no
 fiction-authority violation.
+
+## Implementation status and evidence index
+
+The implementation compares against source base
+`977d8a533e456156aec13d713afd6691ac635186`. Its final Task 8 integrity
+checkpoint is `baaf021b5bda477a3bccc50facef9ecacf16e67d`. The documentation
+reconciliation that follows that checkpoint changes documentation only.
+
+| Task | Implemented outcome | Evidence boundary |
+| --- | --- | --- |
+| 1 | Shared generation-policy contracts establish Actions only, Action, and Story Direction without a second campaign-mode authority. | Contract implementation and final repository/unit checks. |
+| 2 | Campaign style changes use revision/turn fences and persist the additive policy boundary. | Final affected PostgreSQL aggregate and migration coverage. |
+| 3 | Enqueue freezes the policy and retires active Auto/classifier routing. | Focused policy-generation cases and final repository/type check. |
+| 4 | Story-only worker execution preserves authority while skipping RPG, event, and independent semantic-coverage stages. | Composed PostgreSQL fixture evidence in this report. |
+| 5 | Choice validation and bounded repair preserve non-choice authority; pending retry/reclaim provenance is validated. | Final choice-repair 18-case PostgreSQL subset. |
+| 6 | Campaign/System Archive policy provenance, copies, and historical compatibility preserve the documented version boundaries. | Current Linux portability evidence in [the Linux and aggregate report](task-8-linux-verification.md). |
+| 7 | Legacy and replacement interfaces reuse the setting, remove active Auto selection, and preserve separate automatic choice submission. | Legacy browser [18/18 report](task-7a-browser-report.md); replacement [Native42 and Web Awesome42 report](task-7b-browser-report.md) with route/renderer/viewport screenshots. Native42 is a retrospective terminal summary without a saved served-asset hash; Web Awesome42 has retained command output and asset hash. Both use a disposable runtime and synthetic provider. |
+| 8 | Integrity, portability counterparts, benchmark accounting, recovery regression, and aggregate checks are recorded here and in the Linux report. | Synthetic benchmark plus real PostgreSQL/Linux evidence; no live-provider quality claim. |
+| 9 | Product, architecture, archive, recovery, runbook, testing, and navigation documentation describe the final policy and release boundary. | Documentation build and local-link checks are recorded with the final documentation delta; this report does not treat prose checks as deployment evidence. |
+
+The final independent source review closed its rollout and recovery findings.
+It found no open load-bearing policy, mechanics-separation, authority,
+provenance, repair-quota, reclaim, or Story-only choice-validation defect in
+the frozen implementation. The full review summary is published in
+[final review](final-review.md).
+
+## Operator release checklist
+
+This task performed no deployment. Before a Story-only/`0094` rollout:
+
+1. Stop intake and resolve or deliberately cancel queued, running, and
+   recoverable jobs.
+2. Stop old workers and record **zero old worker processes and zero old
+   leases**. The ordinary rolling-worker overlap procedure does not apply.
+3. Apply the additive migration and deploy compatible API, worker, and player
+   builds.
+4. Run a disposable copied-campaign canary for Action and Story Direction;
+   inspect its complete provider operation list, accepted commit, preserved
+   state, and next turn before resuming intake.
+5. Before rollback, stop intake, resolve new-policy jobs, and stop compatible
+   workers before an older binary starts. Keep the additive schema and accepted
+   history; retain compatible readers rather than deleting policy rows or
+   resetting campaigns.
+
+No actual deployment, live-provider quality evaluation, main-branch merge, or
+push occurred in this worktree.

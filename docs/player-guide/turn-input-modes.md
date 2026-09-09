@@ -1,58 +1,62 @@
 # Turn input modes
 
-Infinite Quest can interpret a turn as a player attempt or as scene direction. The campaign's **Turn control style** determines which modes the player offers and which one it selects initially.
+There is no Auto input mode, classifier request, or separate campaign mode
+setting. The campaign's saved **Turn control style** controls the default and
+available choices; the visible controls vary by player interface.
 
 ## Action
 
-Choose **Action** when you are declaring what the player character tries to do. The Story Engine may assess uncertainty, resolve private mechanics, and narrate the result.
+Choose **Action** when the player character is attempting something. The Story
+Engine may assess uncertainty, resolve private mechanics, and narrate the
+result. Include dialogue, priorities, and approach, but do not assert that an
+uncertain outcome has already happened.
 
-Include dialogue, manner, priorities, and intended approach, but do not assume an uncertain outcome has already succeeded. For example: “I distract the sentry with a complaint about the gate roster while Mira slips behind the cart.”
+## Story Direction
 
-Generated choices and a campaign's opening action always use Action mode.
+Choose **Story Direction** when the entered events and details are requested
+fiction for the next narration. The Story Engine treats the direction as
+fiction to dramatize and then advances to its aftermath. Use it for directed
+dialogue, reveals, arrivals, environmental changes, or a decided sequence.
+World canon and corrected campaign continuity still constrain the request, so a
+direction cannot make incompatible facts true. It guides the narration; it does
+not promise every unspecified outcome.
 
-## Scene direction
+Story Direction skips RPG assessment, event evaluation, and independent
+semantic scene-coverage work. It preserves stored RPG data, event triggers,
+and pending events without sending them into narration. World canon, campaign
+state, corrected continuity, Chronicle retrieval, token budgets, validation,
+and mechanics-leak prevention remain active.
 
-Choose **Scene direction** when the entered events and details are facts the next narration must include. The Story Engine treats the described beats as happening in the current turn, writes the story around them, and only then advances to their aftermath. It must not skip them as though they were earlier narration.
-
-Use this mode for directed dialogue, reveals, arrivals, environmental changes, or a well-described sequence whose outcome the campaign author has decided. Scene direction does not run the normal action-resolution assessment. Do not use it to inject system instructions, hidden mechanics, or facts that conflict with campaign canon.
-
-## Auto
-
-Choose **Auto** when either input style is allowed and you want Nexus to classify the text before submission. Auto resolves to Action or Scene direction; it is never sent to story generation as a third prompt mode.
-
-- A clear or probable classification proceeds and briefly shows **Auto → Action** or **Auto → Scene direction**.
-- A mixed or ambiguous entry pauses for confirmation. Select **Submit as Action**, **Submit as Scene**, or return to the editor.
-- If classification is unavailable, Nexus applies the campaign's configured fallback. **Flexible — Auto** falls back to Scene direction so that detailed events are not silently skipped.
-
-Classification runs only when Auto is submitted, not on every keystroke. Generated choices and opening actions bypass it.
-
-The editor and API accept up to 12,000 characters for one turn input. The Story Engine keeps that input in the fixed prompt envelope and removes lower-priority Chronicle memories first when fitting the model context. It does not silently truncate the submitted Action or Scene direction: if the provider's available input window cannot fit it, generation stops with an explicit context-budget error.
-
-## Story context
-
-Configure **Story context** from Campaign Management: the replacement UI's Campaign Overview and the legacy UI's Setup Campaign view offer Standard (32K), Expanded (64K), Large (128K), Very large (256K), and Maximum available (up to 1M). Standard remains the default.
-
-The choice is authoritative campaign configuration. It is included in campaign exports, restored when imported, and used for all newly queued Story requests from either Story Player. An already queued durable generation retains the context snapshot captured when it was queued.
-
-The target is not a promise that every token will be used. The Story Engine reserves output and protocol space, keeps required world and campaign authority first, and never exceeds the selected provider/model window. Larger targets can make more Chronicle material eligible, but the available provider window remains the hard limit.
+The worker requires four distinct next directions and a distinct custom
+suggestion. If only choices are invalid, it may perform one bounded
+choice-only repair that preserves narration, state, facts, and authority. A
+retry or reclaim uses the policy and prompt snapshot saved when the job was
+queued.
 
 ## Campaign control styles
 
-Campaign administrators can choose:
-
-| Control style | Player behavior |
+| Stored style | Player behavior |
 | --- | --- |
-| **Player actions only** | Action is fixed; Auto and Scene direction are unavailable. |
-| **Flexible — Auto** | All modes are available; Auto is selected initially. |
-| **Flexible — Action first** | All modes are available; Action is selected initially and is the ambiguous-input fallback. |
-| **Flexible — Scene direction first** | All modes are available; Scene direction is selected initially and is the ambiguous-input fallback. |
+| **Actions only** (action_only) | Action is fixed. |
+| **Action** (flexible_action) | Action is selected initially; the player can explicitly select Story Direction where that interface offers the control. |
+| **Story Direction** (flexible_scene) | The player submits Story Direction and new jobs use the story-only workflow. |
 
-Changing the campaign setting affects future submissions. Accepted turns retain their resolved mode so retries, recovery, and history do not reinterpret the original input.
+The profile default seeds new campaigns only. Changing it never changes an
+existing campaign or accepted turn. Changing a campaign between Action and
+Story Direction affects newly queued jobs after the save succeeds; it does not
+convert an active, recoverable, or accepted job.
 
-Your profile also has a **Default turn input style for new campaigns** preference. It seeds the creation selector only; changing it never modifies an existing campaign or accepted turn.
+Older persisted `flexible_auto` settings normalize to Action. Historical jobs
+retain their stored resolved input and policy compatibility data; the active
+Auto classification path is retired.
 
-## Privacy and portability
+## Context and portability
 
-Nexus stores the resolved mode with the durable turn. Classification audit data uses an input hash rather than a second copy of the entered text. Provider credentials, classification records, confidence values, and provider assignments are excluded from portable campaign exports. Imported older campaigns default to Action when they do not carry mode metadata.
+The editor and API accept up to 12,000 characters. The Story Engine retains the
+complete input inside its protected request envelope or returns an explicit
+budget error; it does not silently truncate submitted text.
 
-See [Turn intent classification](../nexus-guide/providers/turn-intent.md) for provider selection and failure behavior.
+The selected context budget and turn-control policy are captured for every
+queued job. Portable accepted-turn provenance retains only the policy version,
+play mode, control style, and protocol identity. It excludes runtime prompt
+snapshots, provider credentials, chains, and checkpoints.

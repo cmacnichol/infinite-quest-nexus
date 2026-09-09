@@ -17,9 +17,16 @@ The response-length preference guides narration size and remains independent fro
 
 Configure Semantic Retrieval under **Chronicle** and optional art under **Illustrations**. Those roles do not automatically inherit the story text endpoint or credentials.
 
-**Player actions only** fixes the player to Action mode. The three flexible styles expose Auto, Action, and Scene direction and determine the initial selection and ambiguous-input fallback. Changing this setting affects new submissions; accepted turns and recoverable jobs keep their resolved mode.
+**Player actions only** fixes the player to Action. **Action** selects Action
+initially and can retain an explicit Story Direction control in the player.
+**Story Direction** accepts Story Direction only and selects the story-only
+workflow for new jobs. There is no Auto style or classifier fallback.
 
-Auto classification uses the system-default Intent provider when explicitly configured, otherwise this campaign's effective Story text provider. The Intent provider is a system-wide optimization and is not assigned to individual campaigns. See [Turn intent classification](../providers/turn-intent.md).
+Changing between Action and Story Direction uses the existing settings save and
+is blocked while generation is unresolved. A queued, recoverable, or accepted
+job keeps its stored policy and is never converted by a later campaign save.
+Story Direction preserves stored RPG and pending-event data while skipping
+mechanics and independent scene-coverage work.
 
 ## Correct current continuity
 

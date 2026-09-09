@@ -111,6 +111,26 @@ ambiguity, and precedence of later user corrections. Apply it through a
 revision-checked state edit and then rebuild derived memory. Do not use a model
 to invent a fact absent from retained authoritative sources.
 
+### Story-only campaign-policy rollout and rollback
+
+Migration `0094_story_generation_policy.sql` is additive. Before applying it,
+stop new turn intake and let queued, running, and recoverable generation jobs
+finish or resolve them deliberately. Stop old workers and record zero old worker
+processes and zero old leases; an old worker cannot safely be fenced by a new
+policy snapshot.
+
+Apply the migration, then deploy compatible API, worker, and player builds.
+Use copied-campaign canaries for Action and Story Direction: inspect the
+provider operation list, accepted commit, state preservation, and the next turn
+before intake resumes. The policy captures its prompt identity at queue time,
+so do not change a campaign style to alter in-flight work.
+
+To roll back, stop intake, resolve jobs that use the new policy, and stop the
+compatible workers before an older binary can claim a job. Keep the additive
+schema, policy rows, and accepted history. Do not down-migrate, bulk-reset
+campaigns, or delete policy records to make an older reader start; retain a
+compatible reader while generation is disabled when needed.
+
 ## Chronicle chunked retrieval staged rollout
 
 New campaigns created from a world select `chunked_hybrid` with shadow comparison enabled. Eligible embedding providers trigger asynchronous indexing; until readiness is satisfied, production uses the complete legacy fallback. Existing campaign settings are preserved. Database migrations add derived chunk, fencing, observability, and query-cache schema and jobs without rewriting accepted turns.
@@ -206,6 +226,12 @@ Startup rejects an invalid concurrency value or a pool below the applicable mini
 Both the combined Compose application and the Swarm worker use a ten-minute stop grace period. On termination, the runtime stops claiming new work, waits for every active story and optional-lane promise to settle, and only then closes provider clients and the database pool. Do not reduce the orchestrator grace period below the longest supported provider request unless the corresponding lease-recovery behavior has been revalidated. If a worker is killed after its grace period, another worker may reclaim the expired lease; the guarded commit and unique turn constraints prevent the stale worker from committing the same turn a second time.
 
 For a rolling worker change:
+
+This overlap procedure applies only when both worker versions can safely claim
+every job they may see. Do not use it for the Story-only/`0094` rollout: follow
+[Story-only campaign-policy rollout and rollback](#story-only-campaign-policy-rollout-and-rollback), which requires
+intake stopped and recorded zero old worker processes and leases before any
+compatible worker claims new-policy work.
 
 1. Confirm the database connection budget for the old and new replica sets during overlap.
 2. Confirm the text provider permits `replicas × WORKER_GENERATION_CONCURRENCY` concurrent requests, or configure a lower provider-side limit.

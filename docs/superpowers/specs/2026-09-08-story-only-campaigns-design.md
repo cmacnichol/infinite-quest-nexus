@@ -72,7 +72,7 @@ Use a local story-only parser that distinguishes choice errors from errors in na
 
 When valid JSON has valid non-choice fields and only choice defects, save a durable repair checkpoint, request only replacement choices and custom suggestion, merge those fields into the preserved draft, and revalidate the entire object. The model may not replace narration, facts, trackers, or continuity through this repair. Send only fiction-safe context, not parser diagnostics, rejected mechanics-bearing choices, private assessments, or raw rejected JSON. Use a fixed safe reason code to select repair instructions.
 
-Allow one automatic choice repair per draft under the existing overall automatic-repair discipline. Persist the consumed fence before dispatch. Failure is recoverable; a reclaimed lease does not repeat the provider call. An explicit retry follows the repository's bounded retry policy without rerolling or regenerating an already valid saved draft. General narrative/schema failure retains established bounded recovery; choice repair must not compound into multiple automatic full-story repairs.
+Allow one automatic choice repair per draft under the existing overall automatic-repair discipline. Persist the consumed fence before dispatch. Failure is recoverable; a reclaimed lease does not repeat the provider call. An explicit retry follows the repository's bounded retry policy without rerolling or regenerating an already valid saved draft. General narrative/schema failure retains established bounded recovery; choice repair must not compound into multiple automatic full-story repairs. If that full-response recovery produces valid non-choice fields but invalid Story-only choices, retain the recovered draft and its producing-request provenance as a pending choice repair and leave the job recoverable. The exhausted automatic budget must not grant a third provider request. An explicit retry may repair only the choices; lease reclaim alone must not grant that retry or regenerate the preserved narration.
 
 ## Prompt and compatibility policy
 
@@ -99,7 +99,7 @@ Required evidence: unit tests, real isolated PostgreSQL tests, both active Story
 
 ## Source anchors and required reading
 
-- [Repository instructions](../../../AGENTS.md)
+- [Repository instructions](https://github.com/cmacnichol/infinite-quest-nexus/blob/main/AGENTS.md)
 - [Domain documentation](../../agents/domain.md)
 - [Repository overview](../../architecture/repository-overview.md)
 - [Identity and ownership](../../concepts/identity-and-ownership.md)
