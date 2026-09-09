@@ -7,8 +7,8 @@ import {
 } from "../../../packages/client-core/src/index.js";
 
 describe("shared Story input policy", () => {
-  it("maps campaign control styles to the supported input modes", () => {
-    expect(turnInputModeForControlStyle("flexible_auto")).toBe("auto");
+  it("normalizes historical Auto preferences to the Action composer", () => {
+    expect(turnInputModeForControlStyle("flexible_auto")).toBe("action");
     expect(turnInputModeForControlStyle("flexible_action")).toBe("action");
     expect(turnInputModeForControlStyle("flexible_scene")).toBe("scene");
     expect(turnInputModeForControlStyle("action_only")).toBe("action");
