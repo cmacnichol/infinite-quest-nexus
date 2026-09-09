@@ -541,14 +541,22 @@ async function commitAcceptedTurn(
       });
     }
   }
-  const stateResult = await client.query<{ trackers: unknown }>(
-    "SELECT trackers FROM campaign_state WHERE campaign_id = $1 AND owner_user_id = $2 FOR UPDATE",
+  const stateResult = await client.query<{
+    trackers: unknown;
+    rpg_stats: unknown;
+    event_triggers: unknown;
+    pending_event_triggers: unknown;
+  }>(
+    `SELECT trackers,rpg_stats,event_triggers,pending_event_triggers
+       FROM campaign_state WHERE campaign_id = $1 AND owner_user_id = $2 FOR UPDATE`,
     [job.campaign_id, job.owner_user_id]
   );
   const trackerBase = isReplacement && Array.isArray(job.base_state_private?.trackers)
     ? job.base_state_private.trackers
     : stateResult.rows[0]?.trackers;
   const trackers = mergedTrackers(trackerBase, story.tracker_updates);
+  const storyOnly = job.generation_policy?.playMode === "story_only";
+  const lockedMechanics = stateResult.rows[0];
   if (orchestration.extension && (
       orchestration.extension.finalStoryHash !== stableStringify(orchestration.extension.story)
       || stableStringify(story) !== orchestration.extension.finalStoryHash
@@ -562,13 +570,15 @@ async function commitAcceptedTurn(
       code: "generation_checkpoint_incompatible"
     });
   }
-  const fulfilledEvents = [
+  const fulfilledEvents = storyOnly ? [] : [
     ...(orchestration.beforeEvents || []),
     // An after-event is fulfilled only when its immediate fiction was accepted.
     ...((orchestration.extension ? orchestration.afterEvents || [] : []).filter((event) => event.addTextAfter))
   ];
-  const eventTriggers = applyTriggerHits(inputs.eventTriggers, fulfilledEvents, new Date().toISOString());
-  const pendingEventTriggers = (orchestration.afterEvents || [])
+  const eventTriggers = storyOnly
+    ? lockedMechanics?.event_triggers
+    : applyTriggerHits(inputs.eventTriggers, fulfilledEvents, new Date().toISOString());
+  const pendingEventTriggers = storyOnly ? lockedMechanics?.pending_event_triggers : (orchestration.afterEvents || [])
     .filter((event) => !event.addTextAfter || Boolean(orchestration.extensionError))
     .map(({ addTextAfter: _addTextAfter, ...event }) => event);
   const mechanicsPrivate = {
@@ -607,8 +617,8 @@ async function commitAcceptedTurn(
   }
   const turnResult = await client.query<{ id: string }>(
     `INSERT INTO turns (owner_user_id, campaign_id, turn_number, action, input_mode, input_mode_source, narration, choices,
-       custom_action_suggestion, image_prompt, mechanics_private, state_snapshot_private, model_metadata)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
+       custom_action_suggestion, image_prompt, mechanics_private, state_snapshot_private, model_metadata, generation_policy)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`,
     [job.owner_user_id, job.campaign_id, job.expected_turn_number, job.action,
       job.resolved_input_mode, job.input_mode_source, story.narration, json(story.choices),
       story.custom_action_suggestion, story.image_prompt, json(mechanicsPrivate),
@@ -617,7 +627,7 @@ async function commitAcceptedTurn(
         trackers,
         eventTriggers,
         pendingEventTriggers,
-        rpgStats: inputs.rpgStats,
+        rpgStats: storyOnly ? lockedMechanics?.rpg_stats : inputs.rpgStats,
         continuitySummary: story.continuity_summary,
         canonicalFacts: story.canonical_facts,
         supersededFacts: story.superseded_facts,
@@ -635,10 +645,11 @@ async function commitAcceptedTurn(
         responseId: response.responseId,
         usage: response.usage,
         promptProtocolVersion: job.prompt_protocol_version,
+        generationPolicy: job.generation_policy,
         contextFingerprint: input.contextFingerprint,
         contextDiagnostics: input.contextDiagnostics,
         chronicleRetrieval
-      })]
+      }), job.generation_policy === null ? null : json(job.generation_policy)]
   );
   const turnId = turnResult.rows[0]?.id;
   if (!turnId) throw new Error("Story turn insert did not return an ID.");
@@ -649,13 +660,22 @@ async function commitAcceptedTurn(
     job.id,
     turnId
   );
-  await client.query(
-    `UPDATE campaign_state SET scratchpad_private = $3, scratchpad_safe_for_prompt = true, trackers = $4, event_triggers = $5,
-       pending_event_triggers = $6, rpg_stats = $7, revision = revision + 1, updated_at = now()
-      WHERE campaign_id = $1 AND owner_user_id = $2`,
-    [job.campaign_id, job.owner_user_id, story.scratchpad, json(trackers), json(eventTriggers),
-      json(pendingEventTriggers), json(inputs.rpgStats)]
-  );
+  if (storyOnly) {
+    await client.query(
+      `UPDATE campaign_state SET scratchpad_private = $3, scratchpad_safe_for_prompt = true, trackers = $4,
+         revision = revision + 1, updated_at = now()
+        WHERE campaign_id = $1 AND owner_user_id = $2`,
+      [job.campaign_id, job.owner_user_id, story.scratchpad, json(trackers)]
+    );
+  } else {
+    await client.query(
+      `UPDATE campaign_state SET scratchpad_private = $3, scratchpad_safe_for_prompt = true, trackers = $4, event_triggers = $5,
+         pending_event_triggers = $6, rpg_stats = $7, revision = revision + 1, updated_at = now()
+        WHERE campaign_id = $1 AND owner_user_id = $2`,
+      [job.campaign_id, job.owner_user_id, story.scratchpad, json(trackers), json(eventTriggers),
+        json(pendingEventTriggers), json(inputs.rpgStats)]
+    );
+  }
   await client.query(
     "UPDATE campaigns SET active_turn_number = $3, updated_at = now() WHERE id = $1 AND owner_user_id = $2",
     [job.campaign_id, job.owner_user_id, job.expected_turn_number]

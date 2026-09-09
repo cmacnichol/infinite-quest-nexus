@@ -84,6 +84,7 @@ import type { RuntimeTextExecution } from "./provider-credential-transport-adapt
 import {
   StreamingSegmentTracker,
   characterVisualReference,
+  generationStagePolicy,
   isIllustrationSegmentEligible,
   sha256,
   stableStringify
@@ -982,6 +983,7 @@ async function executeLoadedGeneration(
     return false;
   }
   const generationPolicy = parsedGenerationPolicy === null ? null : parsedGenerationPolicy.data;
+  const stages = generationStagePolicy(generationPolicy?.playMode ?? "legacy");
   let frozenGenerationPolicyIdentity: string | null = null;
   try {
     frozenGenerationPolicyIdentity = generationPolicy ? generationPolicyIdentity(generationPolicy) : null;
@@ -1098,7 +1100,25 @@ async function executeLoadedGeneration(
     const inputs = await phase("orchestration_loading", async () => job.orchestration_inputs);
     let orchestration = job.orchestration_private || {};
 
-    if (orchestration.roll === undefined) {
+    if (!stages.allowEventEvaluation && (
+      orchestration.roll !== undefined
+      || orchestration.beforeEvents !== undefined
+      || orchestration.afterEvents !== undefined
+      || orchestration.extension !== undefined
+      || orchestration.eventCoverageRepair !== undefined
+    )) {
+      assertActiveGenerationUpdate(await repository.markRecoverable({
+        ...scope,
+        providerResponseId: null,
+        providerFinishReason: null,
+        errorCode: "generation_checkpoint_incompatible",
+        errorMessage: "The saved mechanical checkpoint is incompatible with the frozen Story Direction policy.",
+        recoveryMetadata: { retryable: true, stage: "mechanics", reason: "story_only_mechanics_checkpoint" }
+      }), "saving incompatible Story Direction mechanical checkpoint state");
+      return true;
+    }
+
+    if (stages.allowRpgAssessment && orchestration.roll === undefined) {
       await phase("rpg_assessment", async () => {
         if (job.resolved_input_mode === "action" && inputs.useRpgStats
             && job.expected_turn_number > 1 && inputs.rpgStats.length) {
@@ -1131,7 +1151,7 @@ async function executeLoadedGeneration(
         }
       });
     }
-    if (orchestration.beforeEvents === undefined) {
+    if (stages.allowEventEvaluation && orchestration.beforeEvents === undefined) {
       await phase("before_event_evaluation", async () => {
         let activated: ActivatedEvent[] = [];
         let triggerError = "";
@@ -1161,8 +1181,8 @@ async function executeLoadedGeneration(
 
     const promptPreparation = await phase("prompt_preparation", async () => {
       const safeGuidance = [
-        ...fictionGuidanceForRoll(orchestration.roll || null),
-        ...fictionGuidanceForEvents(orchestration.beforeEvents || [])
+        ...(stages.allowRpgAssessment ? fictionGuidanceForRoll(orchestration.roll || null) : []),
+        ...(stages.allowEventEvaluation ? fictionGuidanceForEvents(orchestration.beforeEvents || []) : [])
       ].filter((entry) => entry && !containsMechanicsLanguage(entry));
       assertActiveGenerationUpdate(await repository.markGenerating(scope), "entering generation");
       const planned = planGenerationPromptContext(
@@ -1207,7 +1227,7 @@ async function executeLoadedGeneration(
       provider,
       storyInput
     );
-    if (!compatibleEventCoverageRepair(
+    if (stages.allowSceneCoverage && !compatibleEventCoverageRepair(
       orchestration.eventCoverageRepair,
       validatedDraft,
       orchestration.extension,
@@ -1573,7 +1593,7 @@ async function executeLoadedGeneration(
     }
     const parsedNarration = parsed.story.narration;
 
-    if (job.resolved_input_mode === "scene") {
+    if (stages.allowSceneCoverage && job.resolved_input_mode === "scene") {
       let coverage;
       let coverageOutputLimited = true;
       try {
@@ -1718,7 +1738,7 @@ async function executeLoadedGeneration(
     assertActiveGenerationUpdate(await repository.markValidating(scope), "entering validation");
     const currentMainStory = parsed.ok ? parsed.story : null;
     if (!currentMainStory) throw new Error("Validated main draft was unexpectedly unavailable.");
-    if (orchestration.afterEvents === undefined) {
+    if (stages.allowEventEvaluation && orchestration.afterEvents === undefined) {
       await phase("after_event_evaluation", async () => {
         let activated: ActivatedEvent[] = [];
         let triggerError = "";
@@ -1746,8 +1766,8 @@ async function executeLoadedGeneration(
         });
       });
     }
-    const dueBeforeOrPendingEvents = orchestration.beforeEvents || [];
-    if (dueBeforeOrPendingEvents.length) {
+    const dueBeforeOrPendingEvents = stages.allowEventEvaluation ? orchestration.beforeEvents || [] : [];
+    if (stages.allowSceneCoverage && dueBeforeOrPendingEvents.length) {
       let mainEventCoverage: ReturnType<typeof parseSceneCoverageOutput> | null = null;
       try {
         const coverageResponse = await phase("scene_coverage_validation", () =>
@@ -1845,8 +1865,10 @@ async function executeLoadedGeneration(
         return executeLoadedGeneration(dependencies, workerId, leaseSeconds, job);
       }
     }
-    const immediateEvents = (orchestration.afterEvents || []).filter((event) => event.addTextAfter);
-    if (orchestration.extension) {
+    const immediateEvents = stages.allowEventEvaluation
+      ? (orchestration.afterEvents || []).filter((event) => event.addTextAfter)
+      : [];
+    if (stages.allowSceneCoverage && orchestration.extension) {
       const expectedExtensionInput = immediateEvents.length
         ? buildEventExtensionPrompt(parsed.story, fictionGuidanceForEvents(immediateEvents), promptContext, safeAction)
         : null;

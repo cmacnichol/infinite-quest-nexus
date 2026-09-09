@@ -252,6 +252,164 @@ describe("generation executor adapter", () => {
     expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({ errorCode: "generation_policy_invalid" }));
   });
 
+  it("runs Story Direction through one fiction-only provider operation without dormant mechanics guidance", async () => {
+    const job = completeGenerationExecutionPayload();
+    const policy = {
+      version: 1, playMode: "story_only", turnControlStyle: "flexible_scene", protocolVersion: "story-only-v1",
+      prompts: storyOnlyPromptSnapshot()
+    } as const;
+    job.generation_policy = policy;
+    job.prompt_protocol_version = generationExecutionProtocolIdentity(snapshotProtocolIdentity(job.prompt_snapshot), policy);
+    job.resolved_input_mode = "scene";
+    job.orchestration_inputs = {
+      ...job.orchestration_inputs,
+      useRpgStats: true,
+      suppressEventTriggers: false,
+      rpgStats: [{ id: "private-stat", name: "PRIVATE_STAT_CANARY", value: 17 }] as never,
+      eventTriggers: [
+        { id: "before-trigger", label: "PRIVATE_BEFORE_CANARY", timing: "before", condition: "PRIVATE_BEFORE_CANARY", effect: "PRIVATE_BEFORE_CANARY", addTextAfter: false, triggeredCount: 0, lastTriggeredTurn: null, lastTriggeredAt: null },
+        { id: "after-trigger", label: "PRIVATE_AFTER_CANARY", timing: "after", condition: "PRIVATE_AFTER_CANARY", effect: "PRIVATE_AFTER_CANARY", addTextAfter: true, triggeredCount: 0, lastTriggeredTurn: null, lastTriggeredAt: null }
+      ] as never,
+      pendingEventTriggers: [{ id: "pending-trigger", sourceTriggerId: "dormant-trigger", name: "PRIVATE_PENDING_CANARY", timing: "before", condition: "PRIVATE_PENDING_CANARY", effect: "PRIVATE_PENDING_CANARY", instructions: "PRIVATE_PENDING_CANARY", reason: "", sourceTurn: 2, addTextAfter: false }] as never
+    };
+    const repository = {
+      loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
+      saveOrchestration: vi.fn(async (_scope, value) => { job.orchestration_private = value; return true; }),
+      savePartialNarration: vi.fn(async () => true), saveStreamingSegments: vi.fn(async () => true),
+      recordAttempt: vi.fn(async () => undefined), markRecoverable: vi.fn(async () => true), markValidating: vi.fn(async () => true),
+      markCommitting: vi.fn(async () => true), commitAcceptedTurn: vi.fn(async () => ({ turnId: "00000000-0000-4000-8000-000000000006" })),
+      markFailed: vi.fn(async () => true)
+    } as unknown as GenerationExecutionRepository;
+    const story = {
+      narration: "The observatory door opens onto a room of silver instruments.",
+      choices: ["Enter the room.", "Study the instruments.", "Call for the keeper.", "Wait outside."],
+      custom_action_suggestion: "Examine the moonlit lens.", scratchpad: "The door is open.", tracker_updates: [],
+      image_prompt: "A moonlit observatory.", continuity_summary: "The observatory door is open.",
+      canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: ["Learn who built the observatory."]
+    };
+    const provider = {
+      id: claim.providerProfileId, name: "Story-only provider", providerRole: "text" as const,
+      providerType: "openai_compatible" as const, model: "test-model", contextWindowTokens: 16_000,
+      maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {},
+      execute: vi.fn(async () => ({ content: JSON.stringify(story), responseId: "story-only", finishReason: "stop", outputLimited: false, modelInstanceId: "test-instance", usage: {}, reportedCost: null, rawMetadata: {} }))
+    };
+    const operations: string[] = [];
+    const collaborators = {
+      memory: { loadGenerationContext: vi.fn(async () => ({
+        authority: { rules: ["Protect the observatory."], worldCanon: { title: "Observatory" }, currentContinuity: { openThreads: ["Learn who built the observatory."] }, latestTurn: null },
+        candidates: [], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT
+      })) },
+      illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) },
+      loadTextExecution: vi.fn(async () => provider), promptFromSnapshot: vi.fn(() => "Write a concise fictional scene."),
+      recordProfileCost: vi.fn(async (_pool, _provider, attribution) => { operations.push(attribution.operation); }),
+      attributeGenerationCostsToTurn: vi.fn(async () => undefined)
+    } as unknown as GenerationExecutionCollaborators;
+
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: "story-only-worker", leaseSeconds: 30, claim })).resolves.toBe(true);
+
+    expect(operations).toEqual(["story_generation"]);
+    expect(provider.execute).toHaveBeenCalledOnce();
+    expect(repository.commitAcceptedTurn).toHaveBeenCalledWith(expect.objectContaining({
+      story: expect.objectContaining({ choices: story.choices }),
+      orchestration: expect.not.objectContaining({ beforeEvents: expect.any(Array) })
+    }));
+    expect(repository.commitAcceptedTurn).toHaveBeenCalledWith(expect.objectContaining({
+      orchestration: expect.not.objectContaining({ afterEvents: expect.any(Array) })
+    }));
+    const wire = JSON.stringify((provider.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0]);
+    expect(wire).not.toContain("PRIVATE_STAT_CANARY");
+    expect(wire).not.toContain("PRIVATE_BEFORE_CANARY");
+    expect(wire).not.toContain("PRIVATE_AFTER_CANARY");
+    expect(wire).not.toContain("PRIVATE_PENDING_CANARY");
+  });
+
+  it.each([
+    { label: "malformed JSON", content: "{not-valid-json", outputLimited: false, expectedOperations: ["story_generation", "story_recovery"], errorCode: "invalid_json" },
+    { label: "output-limited partial JSON", content: "{\"narration\":\"The observatory", outputLimited: true, expectedOperations: ["story_generation"], errorCode: "output_limit" }
+  ])("keeps Story Direction $label recoverable without mechanical follow-up dispatch", async ({ content, outputLimited, expectedOperations, errorCode }) => {
+    const job = completeGenerationExecutionPayload();
+    const policy = {
+      version: 1, playMode: "story_only", turnControlStyle: "flexible_scene", protocolVersion: "story-only-v1",
+      prompts: storyOnlyPromptSnapshot()
+    } as const;
+    job.generation_policy = policy;
+    job.prompt_protocol_version = generationExecutionProtocolIdentity(snapshotProtocolIdentity(job.prompt_snapshot), policy);
+    job.resolved_input_mode = "scene";
+    job.orchestration_inputs = {
+      ...job.orchestration_inputs,
+      useRpgStats: true,
+      suppressEventTriggers: false,
+      rpgStats: [{ id: "private-stat", name: "PRIVATE_STAT_CANARY", value: 17 }] as never,
+      eventTriggers: [{ id: "before", label: "PRIVATE_EVENT_CANARY", timing: "before", condition: "PRIVATE_EVENT_CANARY", effect: "PRIVATE_EVENT_CANARY", addTextAfter: false, triggeredCount: 0, lastTriggeredTurn: null, lastTriggeredAt: null }] as never,
+      pendingEventTriggers: [{ id: "pending", sourceTriggerId: "separate", name: "PRIVATE_PENDING_CANARY", timing: "before", condition: "PRIVATE_PENDING_CANARY", effect: "PRIVATE_PENDING_CANARY", instructions: "PRIVATE_PENDING_CANARY", reason: "", sourceTurn: 2, addTextAfter: false }] as never
+    };
+    const repository = {
+      loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
+      saveOrchestration: vi.fn(async (_scope, value) => { job.orchestration_private = value; return true; }),
+      savePartialNarration: vi.fn(async () => true), saveStreamingSegments: vi.fn(async () => true),
+      recordAttempt: vi.fn(async () => undefined), markRecoverable: vi.fn(async () => true), markValidating: vi.fn(async () => true),
+      markCommitting: vi.fn(async () => true), commitAcceptedTurn: vi.fn(async () => ({ turnId: "unexpected" })), markFailed: vi.fn(async () => true)
+    } as unknown as GenerationExecutionRepository;
+    const provider = {
+      id: claim.providerProfileId, name: "Story-only recovery provider", providerRole: "text" as const,
+      providerType: "openai_compatible" as const, model: "test-model", contextWindowTokens: 16_000,
+      maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {},
+      execute: vi.fn(async () => ({ content, responseId: "invalid-story", finishReason: outputLimited ? "length" : "stop", outputLimited, modelInstanceId: "test-instance", usage: {}, reportedCost: null, rawMetadata: {} }))
+    };
+    const operations: string[] = [];
+    const collaborators = {
+      memory: { loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT })) },
+      illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) },
+      loadTextExecution: vi.fn(async () => provider), promptFromSnapshot: vi.fn(() => "Write fiction."),
+      recordProfileCost: vi.fn(async (_pool, _provider, attribution) => { operations.push(attribution.operation); }),
+      attributeGenerationCostsToTurn: vi.fn(async () => undefined)
+    } as unknown as GenerationExecutionCollaborators;
+
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: `story-only-${errorCode}`, leaseSeconds: 30, claim })).resolves.toBe(true);
+
+    expect(operations).toEqual(expectedOperations);
+    expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
+    expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({ errorCode }));
+    expect(repository.markFailed).not.toHaveBeenCalled();
+  });
+
+  it("rejects a reclaimed Story Direction mechanical checkpoint before it can consume dormant events", async () => {
+    const job = completeGenerationExecutionPayload();
+    const policy = {
+      version: 1, playMode: "story_only", turnControlStyle: "flexible_scene", protocolVersion: "story-only-v1",
+      prompts: storyOnlyPromptSnapshot()
+    } as const;
+    job.generation_policy = policy;
+    job.prompt_protocol_version = generationExecutionProtocolIdentity(snapshotProtocolIdentity(job.prompt_snapshot), policy);
+    job.orchestration_private = {
+      beforeEvents: [{ id: "dormant", sourceTriggerId: "dormant", name: "Dormant", timing: "before", condition: "", effect: "", instructions: "must not be consumed", reason: "", sourceTurn: 2, addTextAfter: false }]
+    } as never;
+    const repository = {
+      loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markRecoverable: vi.fn(async () => true),
+      markFailed: vi.fn(async () => true)
+    } as unknown as GenerationExecutionRepository;
+    const provider = { id: claim.providerProfileId, name: "Provider", providerRole: "text" as const, providerType: "openai_compatible" as const,
+      model: "test-model", contextWindowTokens: 16_000, maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {}, execute: vi.fn() };
+    const collaborators = {
+      ...rejectedCollaborators(), loadTextExecution: vi.fn(async () => provider),
+      promptFromSnapshot: vi.fn(() => "Write fiction."),
+      memory: { loadGenerationContext: vi.fn(async () => ({
+        authority: {}, candidates: [], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT
+      })) }
+    } as unknown as GenerationExecutionCollaborators;
+
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: "story-only-reclaim", leaseSeconds: 30, claim: { ...claim, attempts: 2 } })).resolves.toBe(true);
+
+    expect(provider.execute).not.toHaveBeenCalled();
+    expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({
+      errorCode: "generation_checkpoint_incompatible",
+      recoveryMetadata: expect.objectContaining({ reason: "story_only_mechanics_checkpoint" })
+    }));
+  });
+
   it("extracts fact authority from exact main, extension, and LM Studio recovery bodies only", () => {
     const authorized = "11111111-1111-4111-8111-111111111111";
     const invented = "22222222-2222-4222-8222-222222222222";

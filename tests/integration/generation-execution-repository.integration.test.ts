@@ -1,7 +1,11 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { generationRequestSchema, storyTurnOutputSchema } from "../../packages/contracts/src/generation.js";
+import {
+  generationRequestSchema,
+  generationRetryLatestRequestSchema,
+  storyTurnOutputSchema
+} from "../../packages/contracts/src/generation.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import {
   createPostgresGenerationExecutionRepository,
@@ -382,6 +386,226 @@ integration("PostgreSQL generation execution repository", () => {
     });
     expect(payload?.requested_input_mode).toBe("scene");
     expect(payload?.resolved_input_mode).toBe("scene");
+  });
+
+  it("preserves authority-locked dormant mechanics and persists Story Direction policy on acceptance", async () => {
+    const imported = await campaign();
+    const rpgStats = { legacy: "rpg", unknownField: { retained: true } };
+    const eventTriggers = [{ legacy: "event", count: 9, unknownField: true }];
+    const pendingEventTriggers = [{ legacy: "pending", source: "old", unknownField: [1, 2, 3] }];
+    await pool.query("UPDATE campaigns SET turn_control_style='flexible_scene' WHERE id=$1", [imported.campaignId]);
+    await pool.query(
+      `UPDATE campaign_state SET rpg_stats=$2::jsonb,event_triggers=$3::jsonb,pending_event_triggers=$4::jsonb
+        WHERE campaign_id=$1 AND owner_user_id=$5`,
+      [imported.campaignId, JSON.stringify(rpgStats), JSON.stringify(eventTriggers), JSON.stringify(pendingEventTriggers), ownerUserId]
+    );
+    const queued = await commands().enqueueAppend(
+      { ownerUserId, campaignId: imported.campaignId },
+      generationRequestSchema.parse({
+        action: "Set the observatory scene.", providerProfileId, idempotencyKey: crypto.randomUUID(),
+        requestedInputMode: "scene", resolvedInputMode: "scene", inputModeSource: "explicit",
+        context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 }
+      })
+    );
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const claim = await repository.claimNext({ workerId: "story-only-locked-mechanics-worker", leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(queued.id);
+    const scope = { jobId: queued.id, ownerUserId, workerId: "story-only-locked-mechanics-worker" };
+    const job = await repository.loadExecutionPayload({ workerId: scope.workerId, leaseSeconds: 30, claim: claim! });
+    if (!job) throw new Error("Expected a Story Direction payload.");
+    expect(await repository.markGenerating(scope)).toBe(true);
+    expect(await repository.markValidating(scope)).toBe(true);
+    expect(await repository.markCommitting(scope)).toBe(true);
+    expect(job.generation_policy?.playMode).toBe("story_only");
+
+    const committed = await repository.commitAcceptedTurn(acceptedCommitInput({
+      scope,
+      job,
+      story: supersedingStory([])
+    }));
+
+    await expect(pool.query<{
+      rpg_stats: unknown;
+      event_triggers: unknown;
+      pending_event_triggers: unknown;
+    }>(
+      "SELECT rpg_stats,event_triggers,pending_event_triggers FROM campaign_state WHERE campaign_id=$1 AND owner_user_id=$2",
+      [imported.campaignId, ownerUserId]
+    )).resolves.toMatchObject({ rows: [{ rpg_stats: rpgStats, event_triggers: eventTriggers, pending_event_triggers: pendingEventTriggers }] });
+    await expect(pool.query<{
+      generation_policy: Record<string, unknown> | null;
+      state_snapshot_private: Record<string, unknown>;
+      model_metadata: Record<string, unknown>;
+    }>(
+      "SELECT generation_policy,state_snapshot_private,model_metadata FROM turns WHERE id=$1",
+      [committed.turnId]
+    )).resolves.toMatchObject({ rows: [expect.objectContaining({
+      generation_policy: expect.objectContaining({ playMode: "story_only" }),
+      state_snapshot_private: expect.objectContaining({ rpgStats, eventTriggers, pendingEventTriggers }),
+      model_metadata: expect.objectContaining({ generationPolicy: expect.objectContaining({ playMode: "story_only" }) })
+    })] });
+  });
+
+  it("persists SQL NULL policy for an accepted historical legacy job", async () => {
+    const imported = await campaign();
+    const queued = await queue(imported.campaignId, "Accept a historical legacy job.");
+    await pool.query("UPDATE generation_jobs SET generation_policy=NULL WHERE id=$1", [queued.id]);
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const claim = await repository.claimNext({ workerId: "historical-null-policy-worker", leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(queued.id);
+    const scope = { jobId: queued.id, ownerUserId, workerId: "historical-null-policy-worker" };
+    const job = await repository.loadExecutionPayload({ workerId: scope.workerId, leaseSeconds: 30, claim: claim! });
+    if (!job) throw new Error("Expected a historical legacy payload.");
+    expect(job.generation_policy).toBeNull();
+    expect(await repository.markGenerating(scope)).toBe(true);
+    expect(await repository.markValidating(scope)).toBe(true);
+    expect(await repository.markCommitting(scope)).toBe(true);
+    const committed = await repository.commitAcceptedTurn(acceptedCommitInput({
+      scope,
+      job,
+      story: supersedingStory([])
+    }));
+    await expect(pool.query<{ is_sql_null: boolean }>(
+      "SELECT generation_policy IS NULL AS is_sql_null FROM turns WHERE id=$1",
+      [committed.turnId]
+    )).resolves.toMatchObject({ rows: [{ is_sql_null: true }] });
+  });
+
+  it("replaces a Story Direction turn from its base while preserving current locked mechanics", async () => {
+    const imported = await campaign();
+    const actionCommit = await readyAcceptedCommit(imported.campaignId, "replacement-action-worker");
+    const actionTurn = await actionCommit.repository.commitAcceptedTurn(acceptedCommitInput({
+      scope: actionCommit.scope,
+      job: actionCommit.job,
+      story: supersedingStory([])
+    }));
+    const baseMechanics = {
+      rpgStats: [{ source: "replacement-base", value: "obsolete" }],
+      eventTriggers: [{ source: "replacement-base", phase: "before" }],
+      pendingEventTriggers: [{ source: "replacement-base", phase: "pending" }]
+    };
+    const currentRpgStats = { source: "replacement-current", unknownField: { retained: true } };
+    const currentEventTriggers = [{ source: "replacement-current", phase: "before", unknownField: { retained: true } }];
+    const currentPendingEventTriggers = [{ source: "replacement-current", phase: "pending", unknownField: ["kept"] }];
+    await pool.query(
+      `UPDATE turns
+          SET state_snapshot_private = state_snapshot_private || jsonb_build_object(
+            'rpgStats',$4::jsonb,'eventTriggers',$5::jsonb,'pendingEventTriggers',$6::jsonb
+          )
+        WHERE campaign_id=$1 AND owner_user_id=$2 AND turn_number=$3`,
+      [
+        imported.campaignId,
+        ownerUserId,
+        actionCommit.job.expected_turn_number - 1,
+        JSON.stringify(baseMechanics.rpgStats),
+        JSON.stringify(baseMechanics.eventTriggers),
+        JSON.stringify(baseMechanics.pendingEventTriggers)
+      ]
+    );
+    await pool.query("UPDATE campaigns SET turn_control_style='flexible_scene' WHERE id=$1", [imported.campaignId]);
+    await pool.query(
+      `UPDATE campaign_state
+          SET rpg_stats=$3::jsonb,event_triggers=$4::jsonb,pending_event_triggers=$5::jsonb
+        WHERE campaign_id=$1 AND owner_user_id=$2`,
+      [
+        imported.campaignId,
+        ownerUserId,
+        JSON.stringify(currentRpgStats),
+        JSON.stringify(currentEventTriggers),
+        JSON.stringify(currentPendingEventTriggers)
+      ]
+    );
+    const queued = await commands().enqueueReplacement(
+      { ownerUserId, campaignId: imported.campaignId },
+      generationRetryLatestRequestSchema.parse({
+        action: "Replace the observatory scene with its repaired continuity.",
+        providerProfileId,
+        idempotencyKey: crypto.randomUUID(),
+        expectedCurrentTurnNumber: actionCommit.job.expected_turn_number,
+        requestedInputMode: "scene",
+        resolvedInputMode: "scene",
+        inputModeSource: "explicit",
+        context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 }
+      })
+    );
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const workerId = "story-only-replacement-locked-mechanics-worker";
+    const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+    expect(claim).toMatchObject({ jobId: queued.id, operationKind: "replace_latest" });
+    const scope = { jobId: queued.id, ownerUserId, workerId };
+    const job = await repository.loadExecutionPayload({ workerId, leaseSeconds: 30, claim: claim! });
+    if (!job) throw new Error("Expected a Story Direction replacement payload.");
+    await expect(pool.query<{ input_mode: string; generation_policy: Record<string, unknown> | null }>(
+      "SELECT input_mode,generation_policy FROM turns WHERE id=$1",
+      [actionTurn.turnId]
+    )).resolves.toMatchObject({ rows: [expect.objectContaining({
+      input_mode: "action",
+      generation_policy: expect.objectContaining({ playMode: "legacy" })
+    })] });
+    expect(job.generation_policy).toMatchObject({ playMode: "story_only" });
+    expect(job.base_state_private).toMatchObject(baseMechanics);
+    expect(job.base_state_private.eventTriggers).not.toEqual(currentEventTriggers);
+    expect(await repository.markGenerating(scope)).toBe(true);
+    expect(await repository.markValidating(scope)).toBe(true);
+    expect(await repository.markCommitting(scope)).toBe(true);
+    const story = storyTurnOutputSchema.parse({
+      ...supersedingStory([]),
+      narration: "The repaired observatory scene preserves the keeper's warning.",
+      continuity_summary: "The repaired scene keeps the keeper's warning in view.",
+      canonical_facts: ["The keeper's warning remains true after the repair."],
+      canonical_fact_updates: [{
+        content: "The keeper's warning remains true after the repair.",
+        supersedes_fact_ids: []
+      }],
+      open_threads: ["Learn why the keeper gave the warning."],
+      tracker_updates: [{ name: "Observatory repair", value: "complete" }]
+    });
+    const committed = await repository.commitAcceptedTurn(acceptedCommitInput({ scope, job, story }));
+
+    await expect(pool.query<{
+      rpg_stats: unknown;
+      event_triggers: unknown;
+      pending_event_triggers: unknown;
+    }>(
+      "SELECT rpg_stats,event_triggers,pending_event_triggers FROM campaign_state WHERE campaign_id=$1 AND owner_user_id=$2",
+      [imported.campaignId, ownerUserId]
+    )).resolves.toMatchObject({ rows: [{
+      rpg_stats: currentRpgStats,
+      event_triggers: currentEventTriggers,
+      pending_event_triggers: currentPendingEventTriggers
+    }] });
+    await expect(pool.query<{
+      narration: string;
+      generation_policy: Record<string, unknown> | null;
+      state_snapshot_private: Record<string, unknown>;
+    }>(
+      "SELECT narration,generation_policy,state_snapshot_private FROM turns WHERE id=$1",
+      [committed.turnId]
+    )).resolves.toMatchObject({ rows: [expect.objectContaining({
+      narration: story.narration,
+      generation_policy: expect.objectContaining({ playMode: "story_only" }),
+      state_snapshot_private: expect.objectContaining({
+        rpgStats: currentRpgStats,
+        eventTriggers: currentEventTriggers,
+        pendingEventTriggers: currentPendingEventTriggers,
+        continuitySummary: story.continuity_summary,
+        canonicalFacts: story.canonical_facts,
+        openThreads: story.open_threads,
+        trackers: expect.arrayContaining([expect.objectContaining({ name: "Observatory repair", value: "complete" })])
+      })
+    })] });
+    await expect(pool.query<{ content: string }>(
+      `SELECT content FROM campaign_canonical_facts
+        WHERE campaign_id=$1 AND owner_user_id=$2 AND content=$3`,
+      [imported.campaignId, ownerUserId, story.canonical_facts[0]]
+    )).resolves.toMatchObject({ rows: [{ content: story.canonical_facts[0] }] });
+    await expect(pool.query<{ id: string; state_snapshot_private: Record<string, unknown> }>(
+      "SELECT id,state_snapshot_private FROM turns WHERE campaign_id=$1 AND owner_user_id=$2 AND turn_number=$3",
+      [imported.campaignId, ownerUserId, actionCommit.job.expected_turn_number]
+    )).resolves.toMatchObject({ rows: [expect.objectContaining({
+      id: committed.turnId,
+      state_snapshot_private: expect.objectContaining({ openThreads: story.open_threads })
+    })] });
   });
 
   it("retains legacy string event rules in worker inputs without mutating stored history", async () => {
