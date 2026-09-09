@@ -25,6 +25,8 @@ Require separate legacy and new UI test/browser reports and desktop/mobile scree
 
 Both clients are part of the same feature release. Apply the plan's shared UI acceptance checklist separately to each client, including existing Story Direction campaigns on first load, all submission paths, historical Auto preference normalization, and settings changes saved from either interface. Neither UI may retain the previous per-turn behavior as a temporary exception.
 
+The user's explicit requirement to update both interfaces overrides general guidance against maintaining legacy UI parity for this feature. This applies to the served legacy application; the reference-only root `index.html` remains outside scope.
+
 ## Execution contract
 
 Successful ordinary path:
