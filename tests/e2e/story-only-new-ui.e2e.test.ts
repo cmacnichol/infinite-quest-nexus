@@ -226,7 +226,10 @@ test("new UI profile persists Story Direction without Auto", async ({ page }, te
       const box = dialog.getBoundingClientRect();
       return { clientHeight: dialog.clientHeight, scrollHeight: dialog.scrollHeight, scrollTop: dialog.scrollTop, top: box.top, bottom: box.bottom, viewportHeight: window.innerHeight };
     });
-    console.log(JSON.stringify({ profileDialog: dialogMetrics }));
+    await testInfo.attach("profile-dialog-metrics.json", {
+      body: JSON.stringify({ profileDialog: dialogMetrics }),
+      contentType: "application/json"
+    });
     await page.screenshot({ path: screenshotPath("profile-visible", implementation, testInfo.project.name), fullPage: false });
     return;
   }

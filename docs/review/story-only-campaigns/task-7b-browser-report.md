@@ -37,6 +37,12 @@ geometry amendment; Web Awesome42 includes that final static asset. The
 captures below are rendered evidence for their named routes, renderers, and
 viewports.
 
+A subsequent repository check found that the test's direct console output
+violated the test logging boundary. The profile metrics now use Playwright's
+JSON attachment API; its assertions and screenshot flow are unchanged.
+`pnpm check:repository` passed after that correction. The saved aggregate
+output above precedes this diagnostic-only test change.
+
 ## Surface coverage
 
 | Surface | Required behavior covered in source/tests | Browser result | Screenshots | Remaining gate |
