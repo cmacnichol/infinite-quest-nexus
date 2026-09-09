@@ -275,6 +275,8 @@ const effectiveEventTriggers = stages.allowEventEvaluation ? inputs.eventTrigger
 
 **Owner:** Terra choice-repair implementer. **Depends on:** Task 4. Exclusive executor ownership transfers from Task 4.
 
+A separate Terra test worker may own only the new `tests/integration/story-only-choice-repair.integration.test.ts` and its scratch report while the implementer owns production and existing/unit tests. Establish failing PostgreSQL cases against the current implementation, send failures to the sole production writer, and coordinate fixes without shared-file edits. The task still requires one complete fresh review and acceptance of both reports before checkpointing.
+
 **Files**
 - Create `packages/story-engine/src/story-only-output.ts`, `tests/unit/story-only-output.test.ts`, `tests/integration/story-only-choice-repair.integration.test.ts`.
 - Modify `packages/story-engine/src/story-only-prompt.ts`, `packages/story-engine/src/index.ts`, `services/runtime/src/generation-executor-adapter.ts`, `packages/database/src/generation-execution-repository.ts`, `packages/contracts/src/generation.ts` for private checkpoint types.
