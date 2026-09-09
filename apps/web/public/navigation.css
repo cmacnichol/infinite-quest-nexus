@@ -177,6 +177,6 @@
 }
 
 @media (max-width: 340px) {
-  .universal-nav { grid-template-columns: auto minmax(0, 1fr); }
-  .universal-nav .nav-meta { display: none; }
+  .universal-nav { grid-template-columns: minmax(0, 1fr) auto; }
+  .universal-nav .nexus-brand { display: none; }
 }

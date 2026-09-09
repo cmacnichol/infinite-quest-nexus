@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { parseHTML } from "linkedom";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 const storyHtml = readFileSync("apps/web/public/story.html", "utf8");
 const storyScript = readFileSync("apps/web/src/story.js", "utf8");
@@ -31,6 +31,51 @@ function managementFunctions<T extends Record<string, (...args: never[]) => unkn
 }
 
 describe("Nexus management UI contracts", () => {
+  it("ignores an old campaign world response after another campaign is selected", async () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    for (const select of document.querySelectorAll("select")) {
+      Object.defineProperty(select, "value", { value: "", writable: true, configurable: true });
+    }
+    let resolveOldWorld!: (world: unknown) => void;
+    const oldWorld = new Promise((resolve) => { resolveOldWorld = resolve; });
+    const api = vi.fn(async (path: string) => {
+      if (path.endsWith("/state")) return { activeTurnNumber: 1, revision: 2 };
+      if (path === "/api/v1/worlds/world-a") return oldWorld;
+      return { versions: [{ id: "version-b", versionNumber: 1 }] };
+    });
+    const functions = managementFunctions<{ selectCampaign: (campaign: Record<string, unknown>) => Promise<void> }>(["selectCampaign", "normalizedTurnControlStyle"], {
+      elements, document, api, selectedCampaign: null, campaignSelectionRequest: 0,
+      activeCampaignSettingsPanel: "story",
+      Option: function(label: string, value: string) {
+        const option = document.createElement("option");
+        option.textContent = label;
+        option.value = value;
+        return option;
+      },
+      updateStoryViewLink: () => undefined,
+      setCampaignSettingsAvailability: () => undefined,
+      applyStoryProviderContextBudget: () => undefined,
+      populateEmbeddingProviderSelect: () => undefined,
+      setCampaignSettingsPanel: () => undefined,
+      campaignMessage: () => undefined,
+      refreshCampaignMemoryMetrics: async () => ({}),
+      refreshCampaignCostSummary: async () => undefined,
+      loadEmbeddingConfig: async () => undefined,
+      loadIllustrationConfig: async () => undefined,
+      loadLatestImageJob: async () => undefined,
+      previewContext: async () => undefined
+    });
+    const campaign = (suffix: string) => ({ id: `campaign-${suffix}`, title: `Campaign ${suffix}`, status: "active", worldId: `world-${suffix}`, worldVersionId: `version-${suffix}`, worldVersionNumber: 1, turnControlStyle: "flexible_scene" });
+    const firstSelection = functions.selectCampaign(campaign("a"));
+    await vi.waitFor(() => expect(api).toHaveBeenCalledWith("/api/v1/worlds/world-a"));
+    await functions.selectCampaign(campaign("b"));
+    resolveOldWorld({ versions: [{ id: "version-a", versionNumber: 1 }] });
+    await firstSelection;
+    expect((elements.campaignTitle as HTMLInputElement).value).toBe("Campaign b");
+    expect([...elements.campaignWorldVersion!.querySelectorAll("option")].map((option) => option.value)).toEqual(["version-b"]);
+  });
+
   it("unifies portable formats under Data Transfer without breaking legacy import deep links", () => {
     expect(managementHtml).toContain('id="navDataTransfer" href="#data-transfer"');
     expect(managementHtml).toContain('<strong>Data Transfer</strong>');
@@ -249,7 +294,7 @@ describe("Nexus management UI contracts", () => {
     expect(saveSource).toContain("title: elements.campaignTitle.value");
     expect(saveSource).toContain("status: elements.campaignStatus.value");
     expect(saveSource).toContain("textProviderProfileId: elements.campaignTextProvider.value || null");
-    expect(saveSource).toContain("turnControlStyle: elements.campaignTurnControlStyle.value");
+    expect(saveSource).toContain("turnControlStyle: savedTurnControlStyle(elements.campaignTurnControlStyle.value, selectedCampaign.turnControlStyle)");
     expect(saveSource).toContain("storyLengthProfile: elements.campaignStoryLengthProfile.value");
     expect(saveSource).not.toContain("campaignWorldVersion");
   });
@@ -283,6 +328,7 @@ describe("Nexus management UI contracts", () => {
       document,
       window: { matchMedia: () => ({ matches: false }) },
       CAMPAIGN_SETTINGS_PANEL_IDS: ["overview", "story", "illustrations", "chronicle", "usage"],
+      campaignSelectionRequest: 0,
       activeCampaignSettingsPanel: "overview",
       campaigns: [{ id: "deleted-campaign" }],
       selectedCampaign: { id: "deleted-campaign" },
@@ -366,6 +412,7 @@ describe("Nexus management UI contracts", () => {
       document,
       window: { matchMedia: () => ({ matches: false }) },
       CAMPAIGN_SETTINGS_PANEL_IDS: ["overview", "story", "illustrations", "chronicle", "usage"],
+      campaignSelectionRequest: 0,
       activeCampaignSettingsPanel: "overview",
       campaigns: [{ id: "deleted-campaign" }],
       selectedCampaign: { id: "deleted-campaign", title: "Deleted campaign" },
@@ -487,11 +534,106 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("if (dialog === elements.characterDialog && characterModalBusy) return;");
   });
 
-  it("offers an explicit turn-intent provider role without implicit activation", () => {
-    expect(managementHtml).toContain('<option value="intent">Turn intent classification</option>');
-    expect(managementScript).toContain("Inactive · Story text fallback");
-    expect(managementScript).toContain("Make system default");
-    expect(managementScript).toContain("It never generates story narration");
+  it("does not offer a classifier provider role in legacy Nexus", () => {
+    expect(managementHtml).not.toContain('<option value="intent">Turn intent classification</option>');
+    expect(managementHtml).not.toContain("Auto turn-intent classification");
+    expect(managementScript).not.toContain("Classifies Auto as Action or Scene direction");
+  });
+
+  it("renders retained intent provenance without provider actions while active profiles remain actionable", () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    const api = vi.fn();
+    const { renderProviderProfiles } = managementFunctions<{
+      renderProviderProfiles: () => void;
+    }>(["renderProviderProfiles"], {
+      elements,
+      document,
+      providers: [
+        { id: "intent-1", name: "Historical classifier", providerRole: "intent", providerType: "openai_compatible", defaultModel: "old-model", requestTimeoutMs: 300000, enabled: true, isDefault: true },
+        { id: "text-1", name: "Story text", providerRole: "text", providerType: "openai_compatible", defaultModel: "story-model", requestTimeoutMs: 300000, enabled: true, isDefault: false }
+      ],
+      providerTypeLabel: () => "OpenAI compatible",
+      beginProviderEdit: vi.fn(),
+      enabledProviders: (role: string) => role === "text" ? [{ id: "text-1" }] : [],
+      api,
+      loadProviders: vi.fn(),
+      providerMessage: vi.fn(),
+      editingProviderId: "",
+      window: { confirm: () => false }
+    });
+
+    renderProviderProfiles();
+    const rows = [...document.querySelectorAll(".provider-profile")];
+    const retired = rows.find((row) => row.textContent?.includes("Historical classifier"));
+    const active = rows.find((row) => row.textContent?.includes("Story text"));
+    expect(retired?.textContent).toContain("Retired classifier profile");
+    expect(retired?.querySelectorAll("button")).toHaveLength(0);
+    expect(active?.querySelector("button")).not.toBeNull();
+    expect(api).not.toHaveBeenCalled();
+  });
+
+  it("does not render a deferred image job after A to B to A selection changes", async () => {
+    const start = managementScript.indexOf("async function loadLatestImageJob");
+    const end = managementScript.indexOf("\nasync function importStoryObject", start);
+    const source = managementScript.slice(start, end);
+    let resolveJobs: ((value: { jobs: unknown[] }) => void) | undefined;
+    const jobs = new Promise<{ jobs: unknown[] }>((resolve) => { resolveJobs = resolve; });
+    const rendered = vi.fn();
+    const loader = Function("api", "renderImageJobStatus", "monitorImageJob", `
+      let selectedCampaign = { id: "campaign-a" };
+      let campaignSelectionRequest = 1;
+      ${source}
+      return {
+        loadLatestImageJob,
+        select(id, token) { selectedCampaign = { id }; campaignSelectionRequest = token; }
+      };
+    `)(async () => jobs, rendered, vi.fn()) as {
+      loadLatestImageJob: () => Promise<void>;
+      select: (id: string, token: number) => void;
+    };
+
+    const pending = loader.loadLatestImageJob();
+    loader.select("campaign-b", 2);
+    loader.select("campaign-a", 3);
+    resolveJobs?.({ jobs: [{ id: "stale-job", status: "queued" }] });
+    await pending;
+
+    expect(rendered).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["loadEmbeddingConfig", "async function loadIllustrationConfig"],
+    ["loadIllustrationConfig", "function illustrationPolicyUsesLibrary"]
+  ])("does not assign deferred %s data after A to B to A selection changes", async (name, nextMarker) => {
+    const start = managementScript.indexOf(`async function ${name}`);
+    const end = managementScript.indexOf(`\n${nextMarker}`, start);
+    const source = managementScript.slice(start, end);
+    let resolveResult: ((value: Record<string, unknown>) => void) | undefined;
+    const result = new Promise<Record<string, unknown>>((resolve) => { resolveResult = resolve; });
+    const loader = Function("api", `
+      let selectedCampaign = { id: "campaign-a" };
+      let campaignSelectionRequest = 1;
+      let embeddingConfig = null;
+      let illustrationConfig = null;
+      const elements = {};
+      ${source}
+      return {
+        run: ${name},
+        values() { return { embeddingConfig, illustrationConfig }; },
+        select(id, token) { selectedCampaign = { id }; campaignSelectionRequest = token; }
+      };
+    `)(async () => result) as {
+      run: () => Promise<void>;
+      values: () => { embeddingConfig: unknown; illustrationConfig: unknown };
+      select: (id: string, token: number) => void;
+    };
+    const pending = loader.run();
+    loader.select("campaign-b", 2);
+    loader.select("campaign-a", 3);
+    resolveResult?.({ enabled: true, sourcePolicy: "off" });
+    await pending;
+    expect(loader.values()).toEqual({ embeddingConfig: null, illustrationConfig: null });
   });
 
   it("configures Sogni as an independent illustration provider without exposing stored secrets", () => {
@@ -717,15 +859,13 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('id="campaignStoryLengthProfile"');
     expect(managementHtml).toContain('id="campaignTurnControlStyle"');
     expect(managementHtml).toContain('id="newCampaignTurnControlStyle"');
-    expect(managementHtml).toContain('value="action_only">Player actions only');
-    expect(managementHtml).toContain('value="flexible_auto" selected>Flexible — Auto');
-    expect(managementHtml).toContain('value="flexible_action">Flexible — Action first');
-    expect(managementHtml).toContain('value="flexible_scene">Flexible — Scene direction first');
+    expect(managementHtml).toContain('value="flexible_action" selected>Action');
+    expect(managementHtml).toContain('value="flexible_scene">Story Direction');
     expect(managementHtml).toContain('value="brief">Brief — 250–450 words');
     expect(managementHtml).toContain('value="extended">Extended — 1,200–2,000 words');
     expect(managementScript).toContain('storyLengthProfile: elements.campaignStoryLengthProfile.value');
-    expect(managementScript).toContain('turnControlStyle: elements.newCampaignTurnControlStyle.value');
-    expect(managementScript).toContain('turnControlStyle: elements.campaignTurnControlStyle.value');
+    expect(managementScript).toContain('turnControlStyle: normalizedTurnControlStyle(elements.newCampaignTurnControlStyle.value)');
+    expect(managementScript).toContain('turnControlStyle: savedTurnControlStyle(elements.campaignTurnControlStyle.value, selectedCampaign.turnControlStyle)');
     expect(managementScript).toContain('dataTransferView ? "data-transfer" : "worlds"');
     expect(managementCss).toContain('body[data-management-view="dashboard"] .world-management');
     expect(managementCss).toContain('body[data-management-view="providers"] .world-management');
@@ -755,6 +895,50 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("async function openEmbeddingModelPicker(forceRefresh = false)");
     expect(managementScript).toContain("async function refreshActiveModelPicker()");
     expect(managementScript).toContain("Text fallback ·");
+  });
+
+  it("normalizes historical Auto preferences to Action before legacy settings and profiles render", () => {
+    const normalize = managementFunction<(value: unknown) => string>("normalizedTurnControlStyle");
+
+    expect(normalize("flexible_auto")).toBe("flexible_action");
+    expect(normalize(undefined)).toBe("flexible_action");
+    expect(normalize("flexible_scene")).toBe("flexible_scene");
+  });
+
+  it("saves a stale legacy Auto settings value as Action through the campaign handler", async () => {
+    const { document } = parseHTML(managementHtml);
+    const api = vi.fn().mockResolvedValue({});
+    const loadCampaigns = vi.fn().mockResolvedValue(undefined);
+    const campaignMessage = vi.fn();
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    elements.campaignTurnControlStyle = Object.assign(document.createElement("input"), { value: "flexible_auto" });
+    const { saveSelectedCampaign } = managementFunctions<{
+      normalizedTurnControlStyle: (value: unknown) => string;
+      savedTurnControlStyle: (value: unknown, existingStyle: unknown) => string;
+      saveSelectedCampaign: (event: { preventDefault: () => void }) => Promise<void>;
+    }>(["normalizedTurnControlStyle", "savedTurnControlStyle", "saveSelectedCampaign"], {
+      elements,
+      api,
+      selectedCampaign: { id: "campaign-1", turnControlStyle: "flexible_auto", activeTurnNumber: 4, stateRevision: 7 },
+      loadCampaigns,
+      campaignMessage
+    });
+
+    await saveSelectedCampaign({ preventDefault: vi.fn() });
+
+    expect(JSON.parse(api.mock.calls[0]?.[1].body)).toMatchObject({
+      turnControlStyle: "flexible_action",
+      expectedTurnControlStyle: "flexible_auto",
+      expectedActiveTurnNumber: 4,
+      expectedStateRevision: 7
+    });
+    expect(loadCampaigns).toHaveBeenCalledWith("campaign-1");
+  });
+
+  it("keeps an action-only campaign locked while saving unrelated metadata", () => {
+    const saveStyle = managementFunction<(value: unknown, existing: unknown) => string>("savedTurnControlStyle");
+    expect(saveStyle("flexible_action", "action_only")).toBe("action_only");
+    expect(saveStyle("flexible_scene", "action_only")).toBe("flexible_scene");
   });
 
   it("supports pasted exports while keeping Infinite Worlds world and story data separate", () => {
@@ -1008,7 +1192,7 @@ describe("Nexus management UI contracts", () => {
     };
     const run = Function(
       "providers", "elements", "Option", "api",
-      `const selectedCampaign={id:"campaign-1"}; let embeddingConfig=null; let discoveredEmbeddingModels=[]; ${source}; return loadEmbeddingConfig().then(() => elements.embeddingProvider);`
+      `const selectedCampaign={id:"campaign-1"}; let campaignSelectionRequest=0; let embeddingConfig=null; let discoveredEmbeddingModels=[]; ${source}; return loadEmbeddingConfig().then(() => elements.embeddingProvider);`
     ) as (providers: unknown[], elements: unknown, Option: unknown, api: unknown) => Promise<typeof select>;
     const config = {
       enabled: true,

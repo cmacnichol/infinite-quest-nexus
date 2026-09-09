@@ -129,11 +129,10 @@ const state = {
   toastTimer: null,
   streamingAutoFollow: true,
   streamingExpectedScrollY: null,
-  turnInputMode: "auto",
+  turnInputMode: "action",
   nextTurnInputModeSource: null,
   choiceDraftOwnerKey: null,
   choiceDraftSelection: createChoiceDraftSelection(),
-  pendingIntentDecision: null,
   historySelectedTurnNumber: null,
   historyInspectionRequestId: 0,
   user: {
@@ -143,7 +142,7 @@ const state = {
     settings: {
       autoSubmitTurnChoices: true,
       continuousReading: false,
-      defaultTurnControlStyle: "flexible_auto"
+      defaultTurnControlStyle: "flexible_action"
     }
   }
 };
@@ -342,9 +341,8 @@ function syncInputState() {
   if (freeAction) freeAction.disabled = storyInputLocked;
   const storyLengthOverride = $("turnStoryLengthProfileOverride");
   if (storyLengthOverride) storyLengthOverride.disabled = storyInputLocked;
-  document.querySelectorAll("[data-turn-input-mode]").forEach((button) => {
-    button.disabled = storyInputLocked || campaignTurnControlStyle() === "action_only";
-  });
+  const canChooseTurnMode = campaignTurnControlStyle() === "flexible_action" && !storyInputLocked;
+  document.querySelectorAll("[data-turn-input-mode]").forEach((input) => { input.disabled = !canChooseTurnMode; });
   document.querySelectorAll("#choiceArea .choice").forEach(b => { b.disabled = storyInputLocked; });
   syncClearTurnInputButton();
 
@@ -526,9 +524,10 @@ async function showBackgroundStoryBeforeStart() {
 async function startAdventure(options = {}) {
   if (state.busy || !state.campaignLoaded) return;
   await showBackgroundStoryBeforeStart();
+  const inputMode = defaultTurnInputMode();
   await runGeneration(firstActionForNewAdventure(), {
-    requestedInputMode: "action",
-    resolvedInputMode: "action",
+    requestedInputMode: inputMode,
+    resolvedInputMode: inputMode,
     inputModeSource: "opening_action"
   });
 }
@@ -1017,7 +1016,9 @@ function scrollToView() {
 
 // ── Player Input ──────────────────────────────────────────────
 function campaignTurnControlStyle() {
-  return state.campaign?.turnControlStyle || "flexible_auto";
+  if (state.campaign?.turnControlStyle === "flexible_scene") return "flexible_scene";
+  if (state.campaign?.turnControlStyle === "action_only") return "action_only";
+  return "flexible_action";
 }
 
 function campaignStoryLengthProfile() {
@@ -1061,16 +1062,12 @@ function defaultTurnInputMode() {
   return turnInputModeForControlStyle(campaignTurnControlStyle());
 }
 
-function preferredAutoFallback() {
-  return ["flexible_auto", "flexible_scene"].includes(campaignTurnControlStyle()) ? "scene" : "action";
-}
-
 function turnInputCopy(mode) {
   if (mode === "scene") {
     return {
-      label: "Describe the scene events and details that must happen",
-      help: "Scene direction treats concrete events and details as required facts to dramatize before the story advances.",
-      button: "➜ Direct scene",
+      label: "Describe what happens next",
+      help: "Continue the story with dialogue, events, or a direction for the next scene.",
+      button: "➜ Continue story",
       placeholder: "Describe the events, dialogue, atmosphere, and details that must appear in the next scene..."
     };
   }
@@ -1082,12 +1079,6 @@ function turnInputCopy(mode) {
       placeholder: "Describe an action, decision, or dialogue for your character..."
     };
   }
-  return {
-    label: "Describe what you want to do or what happens next",
-    help: "Auto decides whether your prompt is an attempted action or scene direction immediately before submission.",
-    button: "➜ Continue story",
-    placeholder: "Describe an action, dialogue, or the scene events and details that should happen..."
-  };
 }
 
 function updateTurnInputCharacterCount() {
@@ -1103,24 +1094,9 @@ function syncClearTurnInputButton() {
   if (button) button.disabled = !freeAction || freeAction.disabled || !freeAction.value;
 }
 
-function clearTurnIntentDecision() {
-  state.pendingIntentDecision = null;
-  const panel = $("turnIntentDecision");
-  if (panel) panel.classList.add("hidden");
-}
-
 function setTurnInputMode(mode, options = {}) {
-  const locked = campaignTurnControlStyle() === "action_only";
-  state.turnInputMode = locked ? "action" : (["auto", "action", "scene"].includes(mode) ? mode : defaultTurnInputMode());
-  document.querySelectorAll("[data-turn-input-mode]").forEach((button) => {
-    const selected = button.dataset.turnInputMode === state.turnInputMode;
-    button.setAttribute("aria-checked", String(selected));
-    button.disabled = locked || state.busy || Boolean(state.pendingGeneration);
-  });
-  const selector = $("turnInputModeSelector");
-  const lock = $("turnInputModeLock");
-  if (selector) selector.classList.toggle("hidden", locked);
-  if (lock) lock.classList.toggle("hidden", !locked);
+  const controlStyle = campaignTurnControlStyle();
+  state.turnInputMode = controlStyle === "flexible_action" && mode === "scene" ? "scene" : defaultTurnInputMode();
   const copy = turnInputCopy(state.turnInputMode);
   const label = $("turnInputLabel");
   const help = $("turnInputHelp");
@@ -1130,7 +1106,18 @@ function setTurnInputMode(mode, options = {}) {
   if (help) help.textContent = copy.help;
   if (button) button.textContent = copy.button;
   if (freeAction && (options.refreshPlaceholder || !freeAction.placeholder)) freeAction.placeholder = copy.placeholder;
-  clearTurnIntentDecision();
+  const field = $("turnInputModeField");
+  const lock = $("turnInputModeLock");
+  const canChoose = controlStyle === "flexible_action";
+  if (field) field.classList.toggle("hidden", controlStyle === "flexible_scene");
+  for (const input of document.querySelectorAll("[data-turn-input-mode]")) {
+    input.checked = input.value === state.turnInputMode;
+    input.disabled = !canChoose;
+  }
+  if (lock) {
+    lock.classList.toggle("hidden", canChoose || controlStyle === "flexible_scene");
+    lock.textContent = controlStyle === "action_only" ? "This campaign accepts player actions." : "";
+  }
 }
 
 function syncTurnInputModeFromCampaign() {
@@ -1171,7 +1158,7 @@ function renderChoices(choices, customSuggestion, ownerKey) {
       btn.setAttribute("aria-pressed", "false");
       btn.addEventListener("click", () => {
         const autoSubmit = state.user?.settings?.autoSubmitTurnChoices !== false;
-        setTurnInputMode(defaultTurnInputMode(), { refreshPlaceholder: true });
+        setTurnInputMode(state.turnInputMode, { refreshPlaceholder: true });
         if (autoSubmit) {
           if (freeAction) {
             const maxLength = freeAction.maxLength > 0 ? freeAction.maxLength : 12_000;
@@ -1224,7 +1211,6 @@ function renderTurnInput() {
   inputPanel.classList.toggle("hidden", !shouldShowInput);
   syncStoryLengthOverrideControls();
   if (!shouldShowInput) {
-    clearTurnIntentDecision();
     return;
   }
   const latestTurn = state.turns[state.turns.length - 1];
@@ -1237,37 +1223,11 @@ function renderTurnInput() {
   }
 }
 
-function showAmbiguousTurnIntent(action, classification, storyLengthProfileOverride) {
-  state.pendingIntentDecision = { action, classification, storyLengthProfileOverride };
-  const panel = $("turnIntentDecision");
-  const message = $("turnIntentDecisionMessage");
-  if (message) {
-    const label = classification.classification === "mixed" ? "both an action and required scene events" : "an uncertain intent";
-    message.textContent = `Auto found ${label}. Choose how the Story Engine should interpret this turn.`;
-  }
-  if (panel) panel.classList.remove("hidden");
-}
-
-async function classifyTurnInput(action) {
-  try {
-    return await apiClient.campaigns.classifyTurnInput(state.campaignId, {
-      text: action,
-      preferredFallback: preferredAutoFallback()
-    });
-  } catch (error) {
-    const resolvedMode = preferredAutoFallback();
-    toast(`Auto classification was unavailable; using ${resolvedMode === "scene" ? "Scene direction" : "Action"}.`, 4200);
-    recordActivity("error", "Turn intent classification unavailable", error.message);
-    return { classification: "uncertain", confidenceBand: "probable", resolvedMode, providerSource: "fallback" };
-  }
-}
-
 async function submitResolvedTurn(action, details) {
   const freeAction = $("freeAction");
   if (freeAction) freeAction.value = "";
   resetChoiceSelectionFromDraft("");
   updateTurnInputCharacterCount();
-  clearTurnIntentDecision();
   await runGeneration(action, details);
 }
 
@@ -1279,35 +1239,10 @@ async function submitAction(actionText, options = {}) {
   }
   if (!action) { toast("Enter an action first."); return; }
   const storyLengthProfileOverride = selectedStoryLengthOverride("turnStoryLengthProfileOverride");
-  const requestedInputMode = options.requestedInputMode || state.turnInputMode;
-  const inputModeSource = options.inputModeSource || state.nextTurnInputModeSource || (requestedInputMode === "auto" ? "auto" : "explicit");
+  const requestedInputMode = campaignTurnControlStyle() === "flexible_action" ? state.turnInputMode : defaultTurnInputMode();
+  const inputModeSource = options.inputModeSource || state.nextTurnInputModeSource || "explicit";
   state.nextTurnInputModeSource = null;
-  if (requestedInputMode !== "auto") {
-    await submitResolvedTurn(action, { requestedInputMode, resolvedInputMode: requestedInputMode, inputModeSource, storyLengthProfileOverride });
-    return;
-  }
-  showBusy("Determining how to interpret this turn…");
-  let classification;
-  try {
-    classification = await classifyTurnInput(action);
-  } finally {
-    hideBusy();
-  }
-  if ($("freeAction") && $("freeAction").value.trim() !== action) {
-    toast("The prompt changed while Auto was deciding. Review it and submit again.");
-    return;
-  }
-  if (classification.confidenceBand === "ambiguous" || classification.classification === "mixed") {
-    showAmbiguousTurnIntent(action, classification, storyLengthProfileOverride);
-    return;
-  }
-  await submitResolvedTurn(action, {
-    requestedInputMode: classification.classificationId ? "auto" : classification.resolvedMode,
-    resolvedInputMode: classification.resolvedMode,
-    inputModeSource: classification.classificationId ? "auto" : "fallback",
-    classificationId: classification.classificationId,
-    storyLengthProfileOverride
-  });
+  await submitResolvedTurn(action, { requestedInputMode, resolvedInputMode: requestedInputMode, inputModeSource, storyLengthProfileOverride });
 }
 
 // ── Generation Pipeline ───────────────────────────────────────
@@ -1333,7 +1268,6 @@ async function runGeneration(action, options = {}) {
       requestedInputMode: options.requestedInputMode || "action",
       resolvedInputMode: options.resolvedInputMode || "action",
       inputModeSource: options.inputModeSource || "explicit",
-      ...(options.classificationId ? { classificationId: options.classificationId } : {}),
       ...(options.storyLengthProfileOverride ? { storyLengthProfileOverride: options.storyLengthProfileOverride } : {}),
       operationKind,
       expectedTurnNumber,
@@ -1352,7 +1286,6 @@ async function runGeneration(action, options = {}) {
       requestedInputMode: submission.requestedInputMode,
       resolvedInputMode: submission.resolvedInputMode,
       inputModeSource: submission.inputModeSource,
-      ...(submission.classificationId ? { classificationId: submission.classificationId } : {}),
       ...(submission.storyLengthProfileOverride ? { storyLengthProfileOverride: submission.storyLengthProfileOverride } : {}),
       idempotencyKey: submission.idempotencyKey,
       context: submission.context,
@@ -2543,7 +2476,7 @@ function openUserProfile() {
   if (nameInput) nameInput.value = state.user?.displayName || "Initial Owner";
   if (cbSubmit) cbSubmit.checked = state.user?.settings?.autoSubmitTurnChoices !== false;
   if (cbContinuous) cbContinuous.checked = Boolean(state.user?.settings?.continuousReading);
-  if (defaultTurnStyle) defaultTurnStyle.value = state.user?.settings?.defaultTurnControlStyle || "flexible_auto";
+  if (defaultTurnStyle) defaultTurnStyle.value = state.user?.settings?.defaultTurnControlStyle === "flexible_scene" ? "flexible_scene" : "flexible_action";
   openManagedModal(dlg);
 }
 
@@ -2555,7 +2488,7 @@ async function saveUserProfile() {
   const displayName = nameInput ? nameInput.value.trim() : "";
   const autoSubmitTurnChoices = cbSubmit ? cbSubmit.checked : true;
   const continuousReading = cbContinuous ? cbContinuous.checked : false;
-  const defaultTurnControlStyle = defaultTurnStyle ? defaultTurnStyle.value : "flexible_auto";
+  const defaultTurnControlStyle = defaultTurnStyle?.value === "flexible_scene" ? "flexible_scene" : "flexible_action";
   const wasContinuousReading = Boolean(state.user?.settings?.continuousReading);
   let completeHistoryError = null;
 
@@ -2991,11 +2924,15 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   const freeAction = $("freeAction");
+  document.querySelectorAll("[data-turn-input-mode]").forEach((input) => {
+    input.addEventListener("change", () => {
+      if (input.checked) setTurnInputMode(input.value, { refreshPlaceholder: true });
+    });
+  });
   if (freeAction) {
     freeAction.addEventListener("input", () => {
       resetChoiceSelectionFromDraft(freeAction.value);
       updateTurnInputCharacterCount();
-      clearTurnIntentDecision();
     });
     freeAction.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitAction(freeAction.value); }
@@ -3007,30 +2944,7 @@ document.addEventListener("DOMContentLoaded", () => {
     freeAction.value = "";
     resetChoiceSelectionFromDraft("");
     updateTurnInputCharacterCount();
-    clearTurnIntentDecision();
     freeAction.focus();
-  });
-  document.querySelectorAll("[data-turn-input-mode]").forEach((button) => {
-    button.addEventListener("click", () => setTurnInputMode(button.dataset.turnInputMode, { refreshPlaceholder: true }));
-  });
-  const submitAmbiguousTurn = (resolvedInputMode) => {
-    const pending = state.pendingIntentDecision;
-    if (!pending) return;
-    submitResolvedTurn(pending.action, {
-      requestedInputMode: resolvedInputMode,
-      resolvedInputMode,
-      inputModeSource: "explicit",
-      storyLengthProfileOverride: pending.storyLengthProfileOverride
-    });
-  };
-  const btnSubmitAsAction = $("btnSubmitAsAction");
-  if (btnSubmitAsAction) btnSubmitAsAction.addEventListener("click", () => submitAmbiguousTurn("action"));
-  const btnSubmitAsScene = $("btnSubmitAsScene");
-  if (btnSubmitAsScene) btnSubmitAsScene.addEventListener("click", () => submitAmbiguousTurn("scene"));
-  const btnReturnToTurnEditor = $("btnReturnToTurnEditor");
-  if (btnReturnToTurnEditor) btnReturnToTurnEditor.addEventListener("click", () => {
-    clearTurnIntentDecision();
-    if (freeAction) freeAction.focus();
   });
 
   // History navigation

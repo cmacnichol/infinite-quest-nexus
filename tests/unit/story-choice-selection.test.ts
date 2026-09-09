@@ -21,8 +21,8 @@ describe("legacy Story Player generated choice selection", () => {
     expect(toggleChoiceDraftSelection).toBe(toggleSharedChoiceDraftSelection);
   });
 
-  it("maps every campaign turn-control preference to its generated-choice input mode", () => {
-    expect(turnInputModeForControlStyle("flexible_auto")).toBe("auto");
+  it("normalizes historical Auto preferences to the Action generated-choice mode", () => {
+    expect(turnInputModeForControlStyle("flexible_auto")).toBe("action");
     expect(turnInputModeForControlStyle("flexible_action")).toBe("action");
     expect(turnInputModeForControlStyle("flexible_scene")).toBe("scene");
     expect(turnInputModeForControlStyle("action_only")).toBe("action");

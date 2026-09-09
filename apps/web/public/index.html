@@ -25,7 +25,7 @@
         <div id="nexusSetupMenu" class="nav-menu-panel" hidden>
           <a id="navWorlds" href="#world-library"><strong>World Management</strong><span>Author and publish reusable worlds</span></a>
           <a id="navCampaigns" href="#campaigns"><strong>Campaign Management</strong><span>Advanced campaign, Chronicle, and image settings</span></a>
-          <a id="navProviders" href="#providers"><strong>Provider Setup</strong><span>Text, embedding, intent, and image endpoints</span></a>
+          <a id="navProviders" href="#providers"><strong>Provider Setup</strong><span>Text, embedding, and image endpoints</span></a>
           <a id="navPromptLibrary" href="#prompt-library"><strong>Prompt Library</strong><span>Central application and campaign LLM instructions</span></a>
           <a id="navDataTransfer" href="#data-transfer"><strong>Data Transfer</strong><span>System, world, campaign, legacy, and readable formats</span></a>
         </div>
@@ -101,7 +101,7 @@
         <div>
           <p class="eyebrow">Story Engine</p>
           <h2 id="provider-title">Provider profiles</h2>
-          <p>Add independent profiles for story text, Auto turn-intent classification, Chronicle embeddings, and image generation. API keys are encrypted before storage and are never returned to this browser.</p>
+          <p>Add independent profiles for story text, Chronicle embeddings, and image generation. API keys are encrypted before storage and are never returned to this browser.</p>
         </div>
         <div class="button-row">
           <button id="newProviderButton" class="button primary" type="button">New provider profile</button>
@@ -223,13 +223,11 @@
             <section id="campaignPanelStory" role="tabpanel" aria-labelledby="campaignTabStory" data-campaign-settings-content="story" hidden>
               <div class="campaign-panel-fields campaign-controls">
                 <label>Text provider profile<select id="campaignTextProvider" form="campaignForm" disabled><option value="">Use default text provider</option></select></label>
-                <label title="Controls whether players enter attempted actions, required scene events, or let Auto classify each freeform prompt.">
+                <label title="Action preserves RPG mechanics. Story Direction continues the narrative without turn classification.">
                   Turn input style
                   <select id="campaignTurnControlStyle" form="campaignForm" disabled>
-                    <option value="action_only">Player actions only</option>
-                    <option value="flexible_auto">Flexible — Auto</option>
-                    <option value="flexible_action">Flexible — Action first</option>
-                    <option value="flexible_scene">Flexible — Scene direction first</option>
+                    <option value="flexible_action" selected>Action</option>
+                    <option value="flexible_scene">Story Direction</option>
                   </select>
                 </label>
                 <label title="Sets the requested narration size for each new story turn. The provider maximum output remains a separate safety ceiling.">
@@ -714,10 +712,8 @@
       <label class="nexus-profile-option"><input id="nexusUserProfileContinuousReading" type="checkbox"><span>Show the story continuously on one page</span></label>
       <label>Default turn input style for new campaigns
         <select id="nexusUserProfileDefaultTurnControlStyle">
-          <option value="action_only">Player actions only</option>
-          <option value="flexible_auto">Flexible — Auto</option>
-          <option value="flexible_action">Flexible — Action first</option>
-          <option value="flexible_scene">Flexible — Scene direction first</option>
+          <option value="flexible_action" selected>Action</option>
+          <option value="flexible_scene">Story Direction</option>
         </select>
       </label>
       <p id="nexusUserProfileStatus" class="status hidden" role="status" aria-live="polite"></p>
@@ -839,7 +835,6 @@
           <label title="Limits this profile to one provider purpose so credentials and endpoints remain independent.">Role
             <select id="providerRole">
               <option value="text">Story text</option>
-              <option value="intent">Turn intent classification</option>
               <option value="embedding">Chronicle embeddings</option>
               <option value="image">Illustrations</option>
             </select>
@@ -919,7 +914,7 @@
         <div class="fieldset-content">
           <label class="toggle-field" title="Enables real-time token streaming for compatible models during story turn generation, allowing live narration text updates on the frontend."><input id="providerStreaming" type="checkbox"> Streaming</label>
           <label class="toggle-field" title="Disabled profiles remain stored but cannot be selected for new provider work."><input id="providerEnabled" type="checkbox" checked> Profile enabled</label>
-          <label class="toggle-field" title="Used when this provider role has no campaign-specific assignment. Intent profiles must be explicitly made default before Auto uses them."><input id="providerIsDefault" type="checkbox"> Make this the system default profile for its role</label>
+          <label class="toggle-field" title="Used when this provider role has no campaign-specific assignment."><input id="providerIsDefault" type="checkbox"> Make this the system default profile for its role</label>
         </div>
       </fieldset>
       <div class="button-row confirm-actions">
@@ -1150,12 +1145,10 @@
       </label>
       <label>Turn input style
         <select id="newCampaignTurnControlStyle">
-          <option value="action_only">Player actions only</option>
-          <option value="flexible_auto" selected>Flexible — Auto</option>
-          <option value="flexible_action">Flexible — Action first</option>
-          <option value="flexible_scene">Flexible — Scene direction first</option>
+          <option value="flexible_action" selected>Action</option>
+          <option value="flexible_scene">Story Direction</option>
         </select>
-        <span class="field-note">Action resolves an attempt. Scene direction treats described events and details as required story facts. Flexible campaigns can switch per turn.</span>
+        <span class="field-note">Action preserves RPG mechanics. Story Direction continues the narrative from your directions and choices.</span>
       </label>
       <div class="button-row confirm-actions">
         <button id="cancelCreateCampaign" class="button secondary" type="button">Cancel</button>

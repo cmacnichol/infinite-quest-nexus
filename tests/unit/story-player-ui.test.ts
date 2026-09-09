@@ -73,7 +73,7 @@ async function bootLegacyStory({
   vi.stubGlobal("localStorage", { getItem: () => null, removeItem: () => undefined, setItem: () => undefined });
   Object.defineProperty(window.HTMLElement.prototype, "scrollIntoView", { value: () => undefined, writable: true, configurable: true });
   Object.defineProperty(document.getElementById("userProfileDefaultTurnControlStyle"), "value", {
-    value: "flexible_auto",
+    value: "flexible_action",
     writable: true,
     configurable: true
   });
@@ -89,7 +89,7 @@ async function bootLegacyStory({
   (storyModule.startStoryPlayer as (composition: unknown) => void)({
     api: {
       session: {
-        get: async () => ({ user: { settings: { continuousReading, autoSubmitTurnChoices: false, defaultTurnControlStyle: "flexible_auto" } } }),
+        get: async () => ({ user: { settings: { continuousReading, autoSubmitTurnChoices: false, defaultTurnControlStyle: "flexible_action" } } }),
         updateProfile: saveProfile
       },
       providers: { list: async () => ({ providers: [{ providerRole: "text" }] }) },
@@ -277,7 +277,10 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     } finally { vi.unstubAllGlobals(); }
   });
 
-  it("submits the authored opening action once and keeps it complete in escaped history", async () => {
+  it.each([
+    ["flexible_action", "action"],
+    ["flexible_scene", "scene"]
+  ])("submits the authored %s opening once as %s and keeps it complete in escaped history", async (turnControlStyle, inputMode) => {
     const openingAction = 'Open the old gate and ask the keeper which road leads to the observatory.\nRead the sign: <img src=x onerror=alert(1)> & wait.';
     const turn = { id: "turn-1", turnNumber: 1, action: openingAction, narration: "The keeper raises the lantern." };
     const submitted: unknown[] = [];
@@ -288,7 +291,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       } };
     } };
     const sync = (activeTurnNumber: number) => ({
-      campaign: { id: "campaign-1", title: "Opening campaign", activeTurnNumber, storyLengthProfile: "standard" },
+      campaign: { id: "campaign-1", title: "Opening campaign", activeTurnNumber, storyLengthProfile: "standard", turnControlStyle },
       world: { firstAction: openingAction },
       turns: { campaignId: "campaign-1", turns: activeTurnNumber ? [turn] : [], nextCursor: null }
     });
@@ -298,7 +301,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
         fetchCampaignState: vi.fn().mockResolvedValue({ activeTurnNumber: 0 })
       });
       await vi.waitFor(() => expect(document.querySelector("#scene-1")?.textContent).toContain(turn.narration));
-      expect(submitted).toEqual([expect.objectContaining({ expectedTurnNumber: 1, operationKind: "append", request: expect.objectContaining({ action: openingAction, inputModeSource: "opening_action" }) })]);
+      expect(submitted).toEqual([expect.objectContaining({ expectedTurnNumber: 1, operationKind: "append", request: expect.objectContaining({ action: openingAction, inputModeSource: "opening_action", requestedInputMode: inputMode, resolvedInputMode: inputMode }) })]);
       document.getElementById("btnOpenActivityLog")!.dispatchEvent(new window.Event("click", { bubbles: true }));
       expect(document.getElementById("activityLogList")?.textContent).not.toContain("Campaign load failed");
       document.getElementById("turnPill")!.dispatchEvent(new window.Event("click", { bubbles: true }));
@@ -448,21 +451,6 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('if (e.key === "Enter" && !e.shiftKey)');
   });
 
-  it("supports campaign-controlled Action, Scene direction, and Auto turn input", () => {
-    expect(storyHtml).toContain('id="turnInputModeSelector"');
-    expect(storyHtml).toContain('data-turn-input-mode="auto"');
-    expect(storyHtml).toContain('data-turn-input-mode="action"');
-    expect(storyHtml).toContain('data-turn-input-mode="scene"');
-    expect(storyHtml).toContain('id="turnInputModeLock"');
-    expect(storyHtml).toContain('maxlength="12000"');
-    expect(storyScript).toContain('function campaignTurnControlStyle()');
-    expect(storyScript).toContain('state.campaign?.turnControlStyle || "flexible_auto"');
-    expect(storyScript).toContain('campaignTurnControlStyle() === "action_only"');
-    expect(storyScript).toContain('function setTurnInputMode(mode, options = {})');
-    expect(storyScript).toContain('state.nextTurnInputModeSource = "generated_choice"');
-    expect(storyScript).toContain('inputModeSource: "opening_action"');
-  });
-
   it("exposes one-shot story-length overrides for normal and retry submissions", () => {
     expect(storyHtml).toContain('id="turnStoryLengthProfileOverride"');
     expect(storyHtml).toContain('id="retryStoryLengthProfileOverride"');
@@ -489,8 +477,6 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       expect(length.options[0]?.textContent).toBe("Campaign default — Standard");
 
       selectOption(length, "extended");
-      document.querySelector<HTMLElement>('[data-turn-input-mode="action"]')
-        ?.dispatchEvent(new window.Event("click", { bubbles: true }));
       action.value = "Inspect the ruins";
       document.getElementById("btnTakeAction")?.dispatchEvent(new window.Event("click", { bubbles: true }));
       for (let attempt = 0; attempt < 8 && workflow.submit.mock.calls.length === 0; attempt += 1) {
@@ -509,50 +495,6 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     }
   });
 
-  it("keeps the captured Auto override through ambiguity and preserves it after an enqueue rejection", async () => {
-    const classified = vi.fn().mockResolvedValue({ classification: "mixed", confidenceBand: "ambiguous", resolvedMode: "scene" });
-    const rejectedWorkflow = {
-      resume: async () => null,
-      submit: vi.fn().mockRejectedValue(new Error("queue unavailable"))
-    };
-    try {
-      const { document, window } = await bootLegacyStory({
-        turns: makeTurns(1, 1),
-        workflow: rejectedWorkflow,
-        classifyTurnInput: classified,
-        syncStatus: vi.fn().mockResolvedValue({
-          campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 1, turnControlStyle: "flexible_auto", storyLengthProfile: "standard" },
-          world: {},
-          turns: { campaignId: "campaign-1", turns: makeTurns(1, 1), nextCursor: null }
-        })
-      });
-      const length = document.getElementById("turnStoryLengthProfileOverride") as HTMLSelectElement;
-      const action = document.getElementById("freeAction") as HTMLTextAreaElement;
-      selectOption(length, "extended");
-      action.value = "A mixed prompt";
-      document.getElementById("btnTakeAction")?.dispatchEvent(new window.Event("click", { bubbles: true }));
-      for (let attempt = 0; attempt < 8 && document.getElementById("turnIntentDecision")?.classList.contains("hidden"); attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      }
-
-      expect(classified).toHaveBeenCalledWith("campaign-1", expect.objectContaining({ text: "A mixed prompt" }));
-      selectOption(length, "brief");
-      document.getElementById("btnSubmitAsAction")?.dispatchEvent(new window.Event("click", { bubbles: true }));
-      for (let attempt = 0; attempt < 8 && rejectedWorkflow.submit.mock.calls.length === 0; attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      }
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(rejectedWorkflow.submit).toHaveBeenCalledWith("campaign-1", expect.objectContaining({
-        request: expect.objectContaining({ storyLengthProfileOverride: "extended" })
-      }));
-      expect(length.value).toBe("brief");
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
-
   it("preserves the selected length after a normal enqueue rejection", async () => {
     const workflow = {
       resume: async () => null,
@@ -563,8 +505,6 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       const length = document.getElementById("turnStoryLengthProfileOverride") as HTMLSelectElement;
       const action = document.getElementById("freeAction") as HTMLTextAreaElement;
       selectOption(length, "long");
-      document.querySelector<HTMLElement>('[data-turn-input-mode="action"]')
-        ?.dispatchEvent(new window.Event("click", { bubbles: true }));
       action.value = "Inspect the ruins";
       document.getElementById("btnTakeAction")?.dispatchEvent(new window.Event("click", { bubbles: true }));
       for (let attempt = 0; attempt < 8 && workflow.submit.mock.calls.length === 0; attempt += 1) {
@@ -706,7 +646,6 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       choices[0]?.dispatchEvent(new window.Event("click", { bubbles: true }));
       choices[1]?.dispatchEvent(new window.Event("click", { bubbles: true }));
 
-      expect(document.getElementById("turnInputModeScene")?.getAttribute("aria-checked")).toBe("true");
       expect(input.value).toBe("Keep watch.\nOpen the gate.\nCall for the keeper.");
       expect(choices[0]?.getAttribute("aria-pressed")).toBe("true");
       expect(choices[1]?.getAttribute("aria-pressed")).toBe("true");
@@ -738,9 +677,9 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     }
   });
 
-  it("auto-submits a generated choice through Auto classification without treating it as a stale draft", async () => {
+  it("submits a Story Direction choice as scene without invoking the classifier", async () => {
     const { document, window } = parseHTML(storyHtml);
-    Object.defineProperty(window, "location", { value: { pathname: "/story/campaign-auto" }, configurable: true });
+    Object.defineProperty(window, "location", { value: { pathname: "/story/campaign-story" }, configurable: true });
     for (const dialog of document.querySelectorAll("dialog")) {
       (dialog as unknown as { showModal: () => void; close: () => void }).showModal = () => dialog.setAttribute("open", "");
       (dialog as unknown as { showModal: () => void; close: () => void }).close = () => dialog.removeAttribute("open");
@@ -754,27 +693,24 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
 
     try {
       const turns = [{
-        id: "turn-auto",
+        id: "turn-story",
         turnNumber: 1,
         action: "Wait",
         narration: "The gate remains closed.",
         choices: ["Open the gate."]
       }];
-      const classified: string[] = [];
+      const classifyTurnInput = vi.fn();
       const submissions: unknown[] = [];
       const start = storyModule.startStoryPlayer as (composition: unknown) => void;
       start({
         api: {
           session: { get: async () => ({ user: { settings: { continuousReading: false, autoSubmitTurnChoices: true, defaultTurnControlStyle: "flexible_scene" } } }) },
           providers: { list: async () => ({ providers: [{ providerRole: "text" }] }) },
-          generation: { syncStatus: async () => ({ campaign: { title: "Auto campaign", activeTurnNumber: 1, turnControlStyle: "flexible_auto", storyLengthProfile: "standard" }, world: {}, turns: { turns } }) },
+          generation: { syncStatus: async () => ({ campaign: { title: "Story campaign", activeTurnNumber: 1, turnControlStyle: "flexible_scene", storyLengthProfile: "standard" }, world: {}, turns: { turns } }) },
           campaigns: {
             state: async () => ({ activeTurnNumber: 1 }),
             turns: async () => ({ turns }),
-            classifyTurnInput: async (_campaignId: string, request: { text: string }) => {
-              classified.push(request.text);
-              return { classificationId: "classification-1", classification: "action", confidenceBand: "certain", resolvedMode: "action" };
-            }
+            classifyTurnInput
           },
           meta: { get: async () => ({}) }
         },
@@ -783,7 +719,9 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
           resume: async () => null,
           submit: async (_campaignId: string, submission: unknown) => {
             submissions.push(submission);
-            return { jobId: "job-1", watch: async function* () {} };
+            return { jobId: "job-1", watch: async function* () {
+              yield { type: "settled", outcome: "discarded", error: new Error("test discard") };
+            } };
           }
         },
         pendingSubmissions: { clear: () => undefined },
@@ -801,36 +739,81 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
         await new Promise((resolve) => setTimeout(resolve, 0));
       }
 
-      expect(document.getElementById("turnInputModeAuto")?.getAttribute("aria-checked")).toBe("true");
-      expect(classified).toEqual(["Open the gate."]);
+      expect(document.getElementById("turnInputModeField")?.classList.contains("hidden")).toBe(true);
+      expect(document.querySelector('[data-turn-input-mode="auto"]')).toBeNull();
+      expect(document.getElementById("btnTakeAction")?.textContent).toContain("Continue story");
+      expect(classifyTurnInput).not.toHaveBeenCalled();
       expect(submissions).toHaveLength(1);
       expect(submissions[0]).toMatchObject({
         request: {
           action: "Open the gate.",
-          requestedInputMode: "auto",
-          resolvedInputMode: "action",
-          classificationId: "classification-1",
+          requestedInputMode: "scene",
+          resolvedInputMode: "scene",
+          inputModeSource: "generated_choice",
           storyLengthProfileOverride: "extended"
         }
       });
       expect((document.getElementById("freeAction") as HTMLTextAreaElement).value).toBe("");
+      await vi.waitFor(() => expect(document.getElementById("generationProgress")?.classList.contains("hidden")).toBe(true));
     } finally {
       vi.unstubAllGlobals();
     }
   });
 
-  it("classifies Auto immediately before submission and confirms ambiguous intent inline", () => {
-    expect(storyHtml).toContain('id="turnIntentDecision"');
-    expect(storyHtml).toContain('id="btnSubmitAsAction"');
-    expect(storyHtml).toContain('id="btnSubmitAsScene"');
-    expect(storyHtml).toContain('id="btnReturnToTurnEditor"');
-    expect(storyScript).toContain('apiClient.campaigns.classifyTurnInput(state.campaignId, {');
-    expect(storyScript).toContain('preferredFallback: preferredAutoFallback()');
-    expect(storyScript).toContain('classification.confidenceBand === "ambiguous" || classification.classification === "mixed"');
-    expect(storyScript).toContain('requestedInputMode: submission.requestedInputMode');
-    expect(storyScript).toContain('resolvedInputMode: submission.resolvedInputMode');
-    expect(storyScript).toContain('classificationId: submission.classificationId');
+  it("keeps Action campaigns selectable between Action and Story Direction without Auto", async () => {
+    const workflow = { resume: async () => null, submit: vi.fn().mockResolvedValue({ jobId: "scene-choice", watch: async function* () { yield { type: "settled", outcome: "discarded", error: new Error("test discard") }; } }) };
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeTurns(1, 1),
+        workflow,
+        syncStatus: vi.fn().mockResolvedValue({
+          campaign: { id: "campaign-1", title: "Action campaign", activeTurnNumber: 1, storyLengthProfile: "standard", turnControlStyle: "flexible_action" },
+          world: {}, turns: { campaignId: "campaign-1", turns: makeTurns(1, 1), nextCursor: null }
+        })
+      });
+      const scene = document.querySelector<HTMLInputElement>('[data-turn-input-mode="scene"]');
+      const action = document.getElementById("freeAction") as HTMLTextAreaElement;
+      expect(scene?.disabled).toBe(false);
+      expect(document.querySelector('[data-turn-input-mode="auto"]')).toBeNull();
+      scene!.checked = true;
+      scene!.dispatchEvent(new window.Event("change", { bubbles: true }));
+      action.value = "Describe the next scene.";
+      document.getElementById("btnTakeAction")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await vi.waitFor(() => expect((document.getElementById("btnTakeAction") as HTMLButtonElement).disabled).toBe(false));
+      expect(workflow.submit).toHaveBeenCalledWith("campaign-1", expect.objectContaining({
+        request: expect.objectContaining({ requestedInputMode: "scene", resolvedInputMode: "scene" })
+      }));
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
+
+  it("locks action-only campaigns to Action even if a stale scene control change is dispatched", async () => {
+    const workflow = { resume: async () => null, submit: vi.fn().mockResolvedValue({ jobId: "action-lock", watch: async function* () { yield { type: "settled", outcome: "discarded", error: new Error("test discard") }; } }) };
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeTurns(1, 1), workflow,
+        syncStatus: vi.fn().mockResolvedValue({
+          campaign: { id: "campaign-1", title: "Action-only campaign", activeTurnNumber: 1, storyLengthProfile: "standard", turnControlStyle: "action_only" },
+          world: {}, turns: { campaignId: "campaign-1", turns: makeTurns(1, 1), nextCursor: null }
+        })
+      });
+      const scene = document.querySelector<HTMLInputElement>('[data-turn-input-mode="scene"]');
+      expect(scene?.disabled).toBe(true);
+      scene!.checked = true;
+      scene!.dispatchEvent(new window.Event("change", { bubbles: true }));
+      const action = document.getElementById("freeAction") as HTMLTextAreaElement;
+      action.value = "Take the lantern.";
+      document.getElementById("btnTakeAction")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await vi.waitFor(() => expect((document.getElementById("btnTakeAction") as HTMLButtonElement).disabled).toBe(false));
+      expect(workflow.submit).toHaveBeenCalledWith("campaign-1", expect.objectContaining({
+        request: expect.objectContaining({ requestedInputMode: "action", resolvedInputMode: "action" })
+      }));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
 
   it("orchestrates turn generation through the shared workflow with progress, recovery, and retry", () => {
     expect(storyScript).toContain('async function runGeneration(action, options = {})');
@@ -1088,8 +1071,6 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
         scrollTo: { configurable: true, value: scrollTo }
       });
 
-      document.querySelector<HTMLElement>('[data-turn-input-mode="action"]')
-        ?.dispatchEvent(new window.Event("click", { bubbles: true }));
       const action = document.getElementById("freeAction") as HTMLTextAreaElement;
       action.value = "Inspect the ruins";
       document.getElementById("btnTakeAction")?.dispatchEvent(new window.Event("click", { bubbles: true }));
@@ -2141,8 +2122,6 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
       expect(fetchTurns).toHaveBeenCalledTimes(1);
 
-      document.querySelector<HTMLElement>('[data-turn-input-mode="action"]')
-        ?.dispatchEvent(new window.Event("click", { bubbles: true }));
       const action = document.getElementById("freeAction") as HTMLTextAreaElement;
       action.value = "Action 101";
       document.getElementById("btnTakeAction")?.dispatchEvent(new window.Event("click", { bubbles: true }));
