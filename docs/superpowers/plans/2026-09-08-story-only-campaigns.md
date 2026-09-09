@@ -18,6 +18,14 @@ Both clients reuse the existing Action / Story Direction campaign setting, remov
 
 The release gate requires both clients to pass their own behavior checks and the same-campaign cross-interface checks in Task 7. Record missing or skipped surface checks as open gates; do not treat completion of one UI as completion of the other. RPG redesign remains deferred.
 
+Acceptance for this revision applies independently to both interfaces:
+
+- [ ] The existing campaign setting exposes Action and Story Direction with consistent meaning; no new setting or Auto option is introduced or retained.
+- [ ] Story Direction submissions, generated choices, and custom suggestions remain story-only after save, reload, and navigation between clients; they cannot silently switch the campaign to Action.
+- [ ] Each client's obsolete automatic turn-type selection handlers, classifier requests, and associated controls/help text are removed. Preserve automatic choice submission and historical provenance readers.
+- [ ] Each interface has its own Terra implementation/review evidence and rendered browser checks. Verify a setting saved in either client in the other client against the same campaign, including rejected setting changes during unresolved generation.
+- [ ] Deliver both UI updates together with the backend changes. An unimplemented or unverified legacy surface is an open release gate, even if the new UI and shared tests pass.
+
 ## Global constraints
 
 - Both active interfaces are mandatory deliverables: legacy Nexus management `/nexus/` and Story `/story/:campaignId`, plus new management/player surfaces under `/app/`. Neither client may retain Auto or omit the revised campaign-setting behavior. `apps/web/public/index.html` and `apps/web/public/story.html` are active legacy markup in scope; root `index.html` remains reference-only.
