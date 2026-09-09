@@ -1,0 +1,211 @@
+{
+  "version": 1,
+  "purpose": "Sanitized fixture corpus for future story-only output evaluation. It supplies authority and expected developments; it does not record model-quality results.",
+  "scoring_rubric": {
+    "scale": [0, 1, 2],
+    "future_acceptance_gate": {
+      "status": "not_run_preparatory_only",
+      "maximum_score": 120,
+      "minimum_score": 108,
+      "requirements": ["Score all 12 cases across all five dimensions.", "No individual dimension may score 0.", "No output may contain mechanics language or violate fiction authority."],
+      "note": "This gate applies only to an explicitly authorized future live-quality evaluation; this corpus records no scores or quality result."
+    },
+    "dimensions": {
+      "direction_fidelity": { "0": "misses or reverses a required direction", "1": "uses part of the direction", "2": "carries every required direction forward" },
+      "continuity": { "0": "contradicts supplied authority", "1": "does not contradict authority", "2": "uses relevant authority coherently" },
+      "next_choice_relevance": { "0": "choices do not follow the narrated moment", "1": "some choices follow", "2": "all choices offer immediate grounded developments" },
+      "distinctness": { "0": "choices or suggestion duplicate", "1": "mostly different", "2": "four choices and suggestion are clearly distinct" },
+      "mechanics_absence": { "0": "contains mechanics language", "1": "mechanics-free but unclear boundary", "2": "fiction-only and mechanics-free" }
+    }
+  },
+  "cases": [
+    {
+      "id": "dialogue-at-the-floodgate",
+      "category": "dialogue",
+      "fiction_authority": {
+        "world_facts": ["The river gate opens only when its brass keeper recognizes a spoken promise.", "Keeper Orin lost his sister Mara during the last flood."],
+        "continuity": ["Mara's blue ribbon was found caught in the gate mechanism.", "Orin has refused all travelers since dawn."],
+        "open_threads": ["Learn why the ribbon is warm despite the cold water."]
+      },
+      "input": { "direction": "Speak with Orin beside the flooded gate and show him Mara's ribbon." },
+      "required_claims": ["Orin and the blue ribbon are present at the gate.", "The exchange acknowledges Orin's connection to Mara."],
+      "forbidden_claims": ["The gate opens before Orin recognizes a promise.", "Mara is declared alive or dead without new evidence.", "Any roll, score, check, or hidden-mechanics explanation."],
+      "expected_next_developments": ["Offer a promise Orin might recognize.", "Ask what Mara said during the last flood.", "Examine why the ribbon is warm."]
+    },
+    {
+      "id": "multi-beat-lantern-route",
+      "category": "multi_beat_direction",
+      "fiction_authority": {
+        "world_facts": ["The abandoned skyrail has three lantern stations between the market and the observatory.", "Only a lit lantern marks a safe plank crossing."],
+        "continuity": ["The first lantern has gone dark.", "A courier map marks a side stair below station two."],
+        "open_threads": ["Reach the observatory before the storm covers the rail."]
+      },
+      "input": { "direction": "Relight the first lantern, take the side stair at station two, and arrive at the observatory roof." },
+      "required_claims": ["The narration includes relighting the first lantern before using the side stair.", "The narration actually reaches the observatory roof after the stated route."],
+      "forbidden_claims": ["Skipping directly from the market to the roof.", "Inventing a fourth lantern station.", "Any mechanics terminology."],
+      "expected_next_developments": ["Inspect the storm instruments on the roof.", "Search for the courier who marked the map.", "Decide whether to secure the rail behind the party."]
+    },
+    {
+      "id": "mystery-of-the-glass-footprints",
+      "category": "established_mystery",
+      "fiction_authority": {
+        "world_facts": ["Glass footprints appear only in the conservatory after midnight.", "The conservatory has no exterior doors; its roof vents are sealed."],
+        "continuity": ["Three glass prints lead from the fern room to a locked seed vault.", "The curator's silver key has been missing for two days."],
+        "open_threads": ["Identify who leaves the glass footprints."]
+      },
+      "input": { "direction": "Follow the glass footprints to the seed vault and inspect the lock without forcing it." },
+      "required_claims": ["The seed vault remains locked unless new authority supports opening it.", "The glass prints and missing silver key remain relevant clues."],
+      "forbidden_claims": ["Naming the culprit as fact.", "Opening the vault by force.", "Claiming an exterior intruder entered through a sealed vent."],
+      "expected_next_developments": ["Compare the lock with the curator's key description.", "Look for reflections or residue near the prints.", "Question the curator about access to the vault."]
+    },
+    {
+      "id": "absent-cartographer",
+      "category": "absent_character",
+      "fiction_authority": {
+        "world_facts": ["Cartographer Sela is traveling beyond the salt flats and cannot be contacted today.", "Her workshop contains only copied maps, never her original field journal."],
+        "continuity": ["A red pin on Sela's wall map marks the old well.", "A neighbor heard a wind chime in the empty workshop at noon."],
+        "open_threads": ["Find what Sela wanted at the old well."]
+      },
+      "input": { "direction": "Search Sela's workshop for a clue to the old well." },
+      "required_claims": ["Sela remains absent.", "The red pin and copied maps can be examined as available clues."],
+      "forbidden_claims": ["Sela appears, speaks, or sends a new message.", "Her original field journal is found in the workshop.", "Mechanics language."],
+      "expected_next_developments": ["Trace a copied route toward the old well.", "Investigate the noon wind chime.", "Ask the neighbor what they saw near the workshop."]
+    },
+    {
+      "id": "completed-goal-after-the-bell",
+      "category": "completed_goal",
+      "fiction_authority": {
+        "world_facts": ["The harbor bell controls the fog signal.", "The bell tower overlooks the eastern docks."],
+        "continuity": ["The cracked bell rope has already been repaired.", "The fog signal sounded once and the trapped ferry reached harbor."],
+        "open_threads": ["Discover who cut the rope before the storm."]
+      },
+      "input": { "direction": "Return to the bell tower and make sure the ferry can finally enter the harbor." },
+      "required_claims": ["The ferry's safe arrival and repaired rope remain completed events.", "The scene investigates evidence of the prior rope sabotage rather than repeating the rescue."],
+      "forbidden_claims": ["Repairing the rope again.", "Claiming the ferry is still trapped in fog.", "Undoing the completed rescue."],
+      "expected_next_developments": ["Examine the cut fibers for a clue.", "Speak with the ferry crew about what they saw.", "Check who had access to the tower before the storm."]
+    },
+    {
+      "id": "moved-from-the-quarry",
+      "category": "changed_location",
+      "fiction_authority": {
+        "world_facts": ["The quarry lies west of the village; the archive lies under the town hall."],
+        "continuity": ["The party left the quarry at sunset.", "They are now inside the archive's map room with a damp stone shard."],
+        "open_threads": ["Match the shard's markings to an archive map."]
+      },
+      "input": { "direction": "Study the damp stone shard with the map room's lamp." },
+      "required_claims": ["The current scene remains in the archive map room.", "The damp stone shard is available for study."],
+      "forbidden_claims": ["The party is suddenly back at the quarry.", "The quarry collapses during this archive scene.", "Any unannounced travel."],
+      "expected_next_developments": ["Compare the markings with a map legend.", "Search the archive for records of the quarry.", "Follow a marked route from the map room."]
+    },
+    {
+      "id": "world-rule-contradiction-at-sunrise",
+      "category": "contradictory_world_rule",
+      "fiction_authority": {
+        "world_facts": ["The Moon Door can open only beneath moonlight and never at sunrise.", "Its inscription is visible only after the door opens."],
+        "continuity": ["Dawn has begun over the eastern ridge.", "The party has a chalk copy of the door's outer sigil."],
+        "open_threads": ["Learn what the Moon Door protects."]
+      },
+      "input": { "direction": "Open the Moon Door at sunrise and read the inscription inside." },
+      "required_claims": ["The narration acknowledges that sunrise prevents opening the Moon Door.", "The chalk copy remains a usable clue."],
+      "forbidden_claims": ["The Moon Door opens at sunrise.", "The inside inscription is read.", "A new exception to the moonlight rule."],
+      "expected_next_developments": ["Prepare to return under moonlight.", "Study the chalk sigil for a clue.", "Seek a witness who knows the door's history."]
+    },
+    {
+      "id": "ambiguous-gesture-in-the-archive",
+      "category": "ambiguous_action",
+      "fiction_authority": {
+        "world_facts": ["The archivist's raven understands gestures but does not speak.", "The archive reading room is quiet and open to visitors."],
+        "continuity": ["The raven holds a brass tag in its beak.", "The tag bears only the number 17."],
+        "open_threads": ["Find the record associated with tag 17."]
+      },
+      "input": { "direction": "Signal to the raven." },
+      "required_claims": ["The raven and brass tag 17 remain present.", "The response treats the signal as open to plausible interpretation rather than inventing a precise command."],
+      "forbidden_claims": ["Claiming the raven speaks words.", "Claiming the player requested a specific shelf without evidence.", "Mechanics language."],
+      "expected_next_developments": ["Offer a hand or an object to the raven.", "Search the catalog for 17.", "Follow the raven if it moves through the reading room."]
+    },
+    {
+      "id": "dormant-event-under-the-bridge",
+      "category": "dormant_event",
+      "fiction_authority": {
+        "world_facts": ["The old bridge crosses the Alder Run.", "A brass lantern hangs beneath its center span.", "The bridge bell rings only after a red boat docks."],
+        "continuity": ["The party is standing on the north bank at dusk.", "No red boat has docked."],
+        "open_threads": ["Find out who maintains the lantern under the bridge."]
+      },
+      "fixture_state": {
+        "pending_events_before": [{ "id": "bridge-bell", "condition": "A red boat docks", "status": "dormant" }],
+        "pending_events_expected_unchanged": [{ "id": "bridge-bell", "condition": "A red boat docks", "status": "dormant" }]
+      },
+      "input": { "direction": "Walk under the bridge and inspect the brass lantern." },
+      "required_claims": ["The lantern and north-bank approach are used.", "The dormant bell event remains inactive because its stated condition is absent."],
+      "forbidden_claims": ["A red boat docks.", "The bell rings.", "The dormant event is resolved or removed."],
+      "expected_next_developments": ["Examine the lantern's maker mark.", "Look for a maintenance path along the bank.", "Ask nearby boatkeepers about the lantern."]
+    },
+    {
+      "id": "custom-suggestion-duplicates-choice",
+      "category": "custom_suggestion_duplication",
+      "fiction_authority": {
+        "world_facts": ["A clockwork orchard has a locked copper gate and four pear-shaped keys hanging nearby."],
+        "continuity": ["One key is warm, while the other three are cold.", "The gate has not been opened."],
+        "open_threads": ["Determine which key belongs in the copper gate."]
+      },
+      "input": {
+        "direction": "Consider the warm key at the copper gate.",
+        "candidate_choices": ["Try the warm key in the gate.", "Inspect the cold keys for markings.", "Listen to the orchard gears.", "Look for scratches around the lock."],
+        "candidate_custom_action_suggestion": "  try THE warm key in the gate. "
+      },
+      "required_claims": ["The warm key and unopened copper gate remain central.", "A repaired custom suggestion must differ from every choice after normalization."],
+      "forbidden_claims": ["Accepting the candidate custom suggestion as distinct.", "Opening the gate without choosing or narrating a supported action.", "Mechanics language."],
+      "expected_next_developments": ["Compare key temperatures.", "Inspect the lock's scratches.", "Choose a distinct way to investigate the orchard." ]
+    },
+    {
+      "id": "unicode-normalized-duplicate",
+      "category": "unicode_duplicate",
+      "fiction_authority": {
+        "world_facts": ["The tea house keeps its ledger in a blue lacquer cabinet.", "The proprietor has stepped outside to greet a delivery cart."],
+        "continuity": ["A paper crane rests on the cabinet latch.", "The crane contains a folded note bearing the word café.", "The ledger is still closed."],
+        "open_threads": ["Learn why the paper crane was left on the cabinet."]
+      },
+      "input": {
+        "direction": "Inspect the paper crane on the blue cabinet.",
+        "candidate_choices": ["Read the café note folded inside the paper crane.", "Examine the blue cabinet latch.", "Wait for the proprietor to return.", "Search the delivery cart for a matching seal."],
+        "candidate_custom_action_suggestion": "READ   THE CAFE\u0301 NOTE FOLDED INSIDE THE PAPER CRANE."
+      },
+      "required_claims": ["The paper crane, folded café note, blue cabinet, and absent proprietor remain consistent.", "A repair treats canonically equivalent Unicode, case, and whitespace duplicates as invalid."],
+      "forbidden_claims": ["Accepting the candidate custom suggestion as distinct.", "Opening the closed ledger without support.", "Mechanics language."],
+      "expected_next_developments": ["Study the crane's fold pattern.", "Inspect the latch without opening the ledger.", "Ask the proprietor about the delivery seal."],
+      "semantic_live_quality_probes": {
+        "purpose": "Near-duplicate probes for future semantic/live quality evaluation only; the parser does not guarantee their rejection.",
+        "punctuation_variant": "Read the café note folded inside the paper crane!",
+        "word_order_variant": "Folded inside the paper crane, read the café note."
+      }
+    },
+    {
+      "id": "choice-only-repair-preserves-lighthouse",
+      "category": "choice_only_repair",
+      "fiction_authority": {
+        "world_facts": ["The lighthouse lens turns once each minute and points toward the reef.", "The keeper's log is chained to the chart table."],
+        "continuity": ["A blue flare appeared beyond the reef.", "The final narration says the lens pauses toward a narrow channel, and the keeper's log remains chained."],
+        "open_threads": ["Identify the source of the blue flare."]
+      },
+      "input": {
+        "candidate_output": {
+          "narration": "The lens pauses toward a narrow channel beyond the reef while the chained keeper's log trembles on the chart table.",
+          "choices": ["Sail through the narrow channel.", "Sail through the narrow channel.", "Read the chained keeper's log."],
+          "custom_action_suggestion": "Inspect the blue flare.",
+          "scratchpad": "The lighthouse lens paused toward a narrow channel after a blue flare appeared beyond the reef. The keeper's log remains chained.",
+          "tracker_updates": [],
+          "image_prompt": "A stormy lighthouse chart room, a chained log on a wooden table, and a lens pointing toward a blue flare beyond a dark reef.",
+          "continuity_summary": "At the lighthouse, a blue flare appeared beyond the reef. The lens paused toward a narrow channel, while the keeper's log remains chained to the chart table.",
+          "canonical_facts": ["The lighthouse lens paused toward a narrow channel after a blue flare appeared beyond the reef."],
+          "superseded_facts": [],
+          "canonical_fact_updates": [{ "content": "The lighthouse lens paused toward a narrow channel after a blue flare appeared beyond the reef.", "supersedes_fact_ids": [] }],
+          "open_threads": ["Identify the source of the blue flare."]
+        },
+        "choice_defects_only": ["count", "duplicate"]
+      },
+      "required_claims": ["Repair changes only choices and the custom action suggestion.", "Every non-choice field in candidate_output remains byte-for-byte unchanged.", "The repaired output contains exactly four concise, distinct choices and one distinct suggestion."],
+      "forbidden_claims": ["Replacing or expanding the final narration.", "Changing facts, continuity, threads, or trackers.", "Adding parser diagnostics or mechanics language to the repair response."],
+      "expected_next_developments": ["Investigate the narrow channel.", "Study the chained log without claiming it opens.", "Observe the blue flare from the lighthouse."]
+    }
+  ]
+}
