@@ -338,6 +338,8 @@ expect(() => parseChoiceRepair(JSON.stringify({...fields, narration: "Changed"})
 
 **Owner:** Terra portability implementer. **Depends on:** Tasks 2, 3, 5.
 
+**Independent test work:** A fresh Terra test worker may own only the new `tests/unit/story-only-portability-contracts.test.ts` and its scratch report while the primary implementer retains every production file and existing test. Cover strict portable provenance and manifest-version validation parity, communicate observed failures to the primary, and release the file before the controller's final verification. This does not split or waive Task 6's round-trip, ownership, fingerprint, or review gates.
+
 **Files**
 - Modify `packages/contracts/src/archives.ts`, `packages/contracts/src/system-archives.ts`, `packages/domain/src/legacy-campaign-normalization.ts`, `packages/database/src/campaign-archive-export-repository.ts`, `services/runtime/src/campaign-archive-export-composition.ts`, `packages/database/src/portable-import-family-repository.ts`, `packages/database/src/system-archive-export-repository.ts`, `packages/database/src/system-archive-import-repository.ts`, `packages/application/src/system-archives/portability-registry.ts`, `packages/database/src/campaign-transfer-character-repository.ts`, `packages/database/src/campaign-state-repository.ts`.
 - Update consumers of manifest schemas through `services/api/src/archive-io.ts`, archive previews, and application portable import adapters; do not assume `safeExtend` still applies after introducing a versioned union.
