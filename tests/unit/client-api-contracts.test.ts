@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import * as contracts from "../../packages/contracts/src/index.js";
 import {
   apiErrorEnvelopeSchema,
   campaignBranchResponseSchema,
@@ -21,8 +22,6 @@ import {
   playableCharacterListResponseSchema,
   providerListResponseSchema,
   sessionResponseSchema,
-  turnInputClassificationRequestSchema,
-  turnInputClassificationResponseSchema,
   turnListResponseSchema,
   turnPageRequestSchema,
   syncStatusRequestSchema,
@@ -47,13 +46,17 @@ const invalidCompletedActionStatus: GenerationActionResponse["status"] = "comple
 void invalidCompletedActionStatus;
 
 describe("client API response contracts", () => {
+  it("does not publish retired turn-classification request or response contracts", () => {
+    expect("turnInputClassificationRequestSchema" in contracts).toBe(false);
+    expect("turnInputClassificationResponseSchema" in contracts).toBe(false);
+  });
+
   it.each([
     ["meta response", metaResponseSchema],
     ["session response", sessionResponseSchema],
     ["profile response", userProfileResponseSchema],
     ["provider list response", providerListResponseSchema],
     ["runtime state response", campaignRuntimeStateResponseSchema],
-    ["classification response", turnInputClassificationResponseSchema],
     ["rewind response", campaignRewindResponseSchema],
     ["branch response", campaignBranchResponseSchema],
     ["world creation response", worldCreateResponseSchema],
@@ -66,7 +69,6 @@ describe("client API response contracts", () => {
   it.each([
     ["profile update", userProfileUpdateSchema],
     ["runtime state update", campaignRuntimeStateUpdateRequestSchema],
-    ["turn classification", turnInputClassificationRequestSchema],
     ["rewind", campaignRewindSchema],
     ["branch", campaignBranchSchema],
     ["world creation", worldCreateSchema],

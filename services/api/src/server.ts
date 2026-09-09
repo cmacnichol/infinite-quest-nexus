@@ -42,8 +42,7 @@ import {
   playerCampaignConfigSchema,
   providerProfileInputSchema,
   providerProfileUpdateSchema,
-  providerTextRequestSchema,
-  turnInputClassificationRequestSchema
+  providerTextRequestSchema
 } from "../../../packages/contracts/src/generation.js";
 import { projectSafeGenerationDiagnostic } from "../../../packages/contracts/src/story-prompt.js";
 import {
@@ -84,7 +83,6 @@ import {
   providerListResponseSchema,
   sessionResponseSchema,
   syncStatusRequestSchema,
-  turnInputClassificationResponseSchema,
   turnListResponseSchema,
   turnPageRequestSchema,
   userProfileResponseSchema,

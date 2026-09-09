@@ -26,11 +26,11 @@ interface CataloguePanel {
   readonly artworkVisible: boolean;
   readonly draft: string;
   readonly disabled: boolean;
-  readonly turnControlStyle: "action_only" | "flexible_auto" | "flexible_action" | "flexible_scene";
+  readonly turnControlStyle: "action_only" | "flexible_action" | "flexible_scene";
 }
 
 const panels: readonly CataloguePanel[] = [
-  { id: "automatic", label: "Automatic / artwork", width: "auto", artworkVisible: true, draft: "", disabled: false, turnControlStyle: "flexible_auto" },
+  { id: "action", label: "Action / artwork", width: "auto", artworkVisible: true, draft: "", disabled: false, turnControlStyle: "flexible_action" },
   { id: "comfortable", label: "Comfortable / tall field", width: "comfortable", artworkVisible: true, draft: "A tall fixture draft\nthat proves the composer keeps its shape.", disabled: false, turnControlStyle: "flexible_action" },
   { id: "wide", label: "Wide / no artwork", width: "wide", artworkVisible: false, draft: "", disabled: false, turnControlStyle: "flexible_scene" },
   { id: "full", label: "Full / disabled", width: "full", artworkVisible: true, draft: "Generation is in progress.", disabled: true, turnControlStyle: "action_only" }
@@ -216,9 +216,8 @@ function stateFor(panel: CataloguePanel): StoryPlayerViewState {
       choiceBaseText: panel.draft,
       draftOwnerKey: `${campaignId}:1`,
       draftOwnerTurnNumber: 1,
-      requestedInputMode: panel.turnControlStyle === "flexible_scene" ? "scene" : panel.turnControlStyle === "action_only" ? "action" : "auto",
+      requestedInputMode: panel.turnControlStyle === "flexible_scene" ? "scene" : "action",
       storyLengthProfileOverride: null,
-      intentConfirmation: null,
       activeDialog: null,
       continuousReading: false,
       generationFollowing: false,
@@ -239,8 +238,8 @@ function stateFor(panel: CataloguePanel): StoryPlayerViewState {
       historySyncRequired: false,
       runtimeState: null,
       latestStateSnapshot: null,
-      requestedTurnInputMode: "auto",
-      nextTurnInputModeSource: "auto",
+      requestedTurnInputMode: panel.turnControlStyle === "flexible_scene" ? "scene" : "action",
+      nextTurnInputModeSource: "explicit",
       generation: null
     },
     inspectedState: null,

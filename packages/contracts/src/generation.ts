@@ -23,11 +23,6 @@ export const turnInputModeSourceSchema = z.enum(["explicit", "auto", "generated_
 export const turnIntentClassificationSchema = z.enum(["action", "scene", "mixed", "uncertain"]);
 export const turnIntentConfidenceBandSchema = z.enum(["clear", "probable", "ambiguous"]);
 
-export const turnInputClassificationRequestSchema = z.object({
-  text: z.string().trim().min(1).max(12_000),
-  preferredFallback: turnInputModeSchema.optional()
-});
-
 export const providerProfileInputSchema = z.object({
   name: z.string().trim().min(1).max(120),
   providerType: providerTypeSchema,
@@ -503,7 +498,6 @@ export type TurnInputSelection = z.infer<typeof turnInputSelectionSchema>;
 export type TurnInputModeSource = z.infer<typeof turnInputModeSourceSchema>;
 export type TurnIntentClassification = z.infer<typeof turnIntentClassificationSchema>;
 export type TurnIntentConfidenceBand = z.infer<typeof turnIntentConfidenceBandSchema>;
-export type TurnInputClassificationRequest = z.infer<typeof turnInputClassificationRequestSchema>;
 export type GenerationRequest = z.infer<typeof generationRequestSchema>;
 export type GenerationRetryLatestRequest = z.infer<typeof generationRetryLatestRequestSchema>;
 export type CampaignRewindRequest = z.infer<typeof campaignRewindSchema>;

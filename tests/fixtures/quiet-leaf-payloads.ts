@@ -6,7 +6,6 @@ import {
   illustrationConfigResponseSchema,
   illustrationSegmentsResponseSchema,
   sessionResponseSchema,
-  turnInputClassificationResponseSchema,
   turnListResponseSchema,
   worldListResponseSchema,
   type CampaignSyncStatus,
@@ -29,7 +28,6 @@ export interface QuietLeafFixtureOptions {
   readonly turnControlStyle?: CampaignSummary["turnControlStyle"];
   readonly returningUser?: boolean;
   readonly expectedProfileUpdates?: number;
-  readonly expectedClassificationCalls?: number;
 }
 
 export interface QuietLeafApiPayloads {
@@ -40,7 +38,6 @@ export interface QuietLeafApiPayloads {
   readonly turns: ReturnType<typeof turnListResponseSchema.parse>;
   readonly worlds: ReturnType<typeof worldListResponseSchema.parse>;
   readonly runtimeState: ReturnType<typeof campaignRuntimeStateResponseSchema.parse>;
-  readonly classification: ReturnType<typeof turnInputClassificationResponseSchema.parse>;
   readonly illustrationConfig: ReturnType<typeof illustrationConfigResponseSchema.parse>;
   readonly illustrationSegments: ReturnType<typeof illustrationSegmentsResponseSchema.parse>;
   readonly illustrationError: ReturnType<typeof apiErrorEnvelopeSchema.parse>;
@@ -250,14 +247,6 @@ export function quietLeafApiPayloads(options: QuietLeafFixtureOptions = {}): Qui
       eventTriggers: [],
       pendingEventTriggers: [],
       recordedResolution: null
-    }),
-    classification: turnInputClassificationResponseSchema.parse({
-      classificationId: "77777777-7777-4777-8777-777777777777",
-      classification: "action",
-      resolvedMode: "action",
-      confidenceBand: "clear",
-      providerSource: "intent_default",
-      expiresAt: timestamp
     }),
     illustrationConfig: illustrationConfigResponseSchema.parse({
       enabled: illustrationMode === "enabled",

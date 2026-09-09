@@ -12,7 +12,6 @@ import {
   PUBLIC_GENERATION_FAILURE_MESSAGE,
   playerEventTriggerSchema,
   playerRpgStatSchema,
-  turnInputClassificationRequestSchema,
   turnInputModeSchema,
   turnInputModeSourceSchema
 } from "./generation.js";
@@ -101,15 +100,6 @@ export const providerSummarySchema = z.object({
 
 export const providerListResponseSchema = z.object({ providers: z.array(providerSummarySchema) });
 
-export const turnInputClassificationResponseSchema = z.object({
-  classificationId: z.uuid(),
-  classification: z.enum(["action", "scene", "mixed", "uncertain"]),
-  resolvedMode: turnInputModeSchema,
-  confidenceBand: z.enum(["clear", "probable", "ambiguous"]),
-  providerSource: z.enum(["intent_default", "story_text", "campaign_fallback"]),
-  expiresAt: apiTimestampSchema
-});
-
 export const campaignRuntimeStateResponseSchema = campaignRuntimeStateSchema;
 export const campaignRuntimeStateUpdateRequestSchema = campaignRuntimeStateUpdateSchema;
 
@@ -168,7 +158,7 @@ export const playableCharacterListResponseSchema = z.object({
   }).passthrough()
 });
 
-export { campaignBranchSchema, campaignRewindSchema, turnInputClassificationRequestSchema } from "./generation.js";
+export { campaignBranchSchema, campaignRewindSchema } from "./generation.js";
 export { userProfileUpdateSchema } from "./users.js";
 export { campaignCreateSchema, worldCreateSchema } from "./world-library.js";
 
@@ -395,7 +385,6 @@ export type MetaResponse = z.infer<typeof metaResponseSchema>;
 export type SessionResponse = z.infer<typeof sessionResponseSchema>;
 export type UserProfileResponse = z.infer<typeof userProfileResponseSchema>;
 export type ProviderListResponse = z.infer<typeof providerListResponseSchema>;
-export type TurnInputClassificationResponse = z.infer<typeof turnInputClassificationResponseSchema>;
 export type CampaignRuntimeStateResponse = z.infer<typeof campaignRuntimeStateResponseSchema>;
 export type CampaignRewindResponse = z.infer<typeof campaignRewindResponseSchema>;
 export type CampaignBranchResponse = z.infer<typeof campaignBranchResponseSchema>;
