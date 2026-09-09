@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { request as httpRequest } from "node:http";
 import {
   assertStoryOnlyRuntimeTarget,
   assertOwnedStoryOnlyDatabase,
@@ -14,8 +15,15 @@ import {
 } from "../helpers/story-only-runtime-fixture.js";
 import {
   createStoryOnlySyntheticProvider,
+  storyOnlyCoverageResponse,
   storyOnlyNarrativeResponse,
 } from "../helpers/story-only-synthetic-provider.js";
+import {
+  buildEventCoveragePrompt,
+  parseEventCoverageOutput,
+  SCENE_COVERAGE_SYSTEM_PROMPT
+} from "../../packages/story-engine/src/scene-coverage.js";
+import { PROMPT_TEMPLATE_CATALOG } from "../../packages/contracts/src/prompt-library.js";
 
 describe("story-only disposable runtime harness", () => {
   const providers: Array<Awaited<ReturnType<typeof createStoryOnlySyntheticProvider>>> = [];
@@ -23,6 +31,26 @@ describe("story-only disposable runtime harness", () => {
   afterEach(async () => {
     await Promise.all(providers.splice(0).map((provider) => provider.close()));
   });
+
+  function openCompletion(provider: Awaited<ReturnType<typeof createStoryOnlySyntheticProvider>>, body: string) {
+    let resolveResponse: (value: string) => void;
+    let rejectResponse: (reason: unknown) => void;
+    const response = new Promise<string>((resolve, reject) => {
+      resolveResponse = resolve;
+      rejectResponse = reject;
+    });
+    const request = httpRequest(new URL("/v1/chat/completions", provider.baseUrl), {
+      method: "POST", headers: { "content-type": "application/json" }
+    }, (incoming) => {
+      let text = "";
+      incoming.setEncoding("utf8");
+      incoming.on("data", (chunk) => { text += chunk; });
+      incoming.once("end", () => resolveResponse(text));
+    });
+    request.once("error", rejectResponse!);
+    request.write(body);
+    return { end: () => request.end(), response };
+  }
 
   it("accepts only the dedicated local base database target", () => {
     expect(assertStoryOnlyRuntimeTarget("postgresql://test:secret@127.0.0.1:15439/infinitequest_storyonly_test"))
@@ -58,6 +86,113 @@ describe("story-only disposable runtime harness", () => {
     });
     await expect(provider.summary()).resolves.toEqual({ operations: { "chat.completions": 1 }, total: 1 });
     expect(JSON.stringify(await provider.summary())).not.toContain("private prompt");
+  });
+
+  it("returns the structured coverage response only for the known coverage system prompt", async () => {
+    const provider = await createStoryOnlySyntheticProvider();
+    providers.push(provider);
+    const completion = async (body: unknown) => {
+      const response = await fetch(`${provider.baseUrl}/v1/chat/completions`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body)
+      });
+      const payload = await response.json() as { choices: Array<{ message: { content: string } }> };
+      return payload.choices[0]!.message.content;
+    };
+
+    await expect(completion({ messages: [{ role: "system", content: "Ordinary story system prompt." }] }))
+      .resolves.toBe(storyOnlyNarrativeResponse());
+    await expect(completion({ messages: [{ role: "user", content: SCENE_COVERAGE_SYSTEM_PROMPT }] }))
+      .resolves.toBe(storyOnlyNarrativeResponse());
+    await expect(completion({
+      messages: [
+        { role: "system", content: PROMPT_TEMPLATE_CATALOG.scene_coverage.defaultContent },
+        { role: "user", content: "private scene direction must not be retained" }
+      ]
+    })).resolves.toBe(storyOnlyCoverageResponse());
+    await expect(completion({ response_format: { type: "json_schema", json_schema: { name: "scene_coverage" } } }))
+      .resolves.toBe(storyOnlyCoverageResponse());
+    expect(JSON.stringify(await provider.summary())).not.toContain("private scene direction");
+  });
+
+  it("returns deterministic event coverage for the producer-shaped required-events prompt", async () => {
+    const provider = await createStoryOnlySyntheticProvider();
+    providers.push(provider);
+    const requirements = [
+      { id: "event-cross-bridge", fiction: "The traveler crosses the unstable bridge." },
+      { id: "event-ring-bell", fiction: "The bell rings before the gate opens." }
+    ];
+    const response = await fetch(`${provider.baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messages: [
+        { role: "system", content: PROMPT_TEMPLATE_CATALOG.scene_coverage.defaultContent },
+        { role: "user", content: buildEventCoveragePrompt(requirements, "The bridge shudders as the bell rings.") }
+      ] })
+    });
+    const payload = await response.json() as { choices: Array<{ message: { content: string } }> };
+
+    expect(parseEventCoverageOutput(payload.choices[0]!.message.content, requirements.map((requirement) => requirement.id)))
+      .toEqual({ covered: true, missing_required_beats: [], contradictions: [] });
+  });
+
+  it("keeps queued responses authoritative over event coverage dispatch", async () => {
+    const provider = await createStoryOnlySyntheticProvider();
+    providers.push(provider);
+    const requirements = [{ id: "event-queued", fiction: "The guide unlocks the gate." }];
+    const queued = JSON.stringify({ event_results: [{ event_id: "event-queued", covered: false, missing_required_beats: ["The gate remains locked."], contradictions: [] }] });
+    await provider.enqueue({ content: queued });
+    const response = await fetch(`${provider.baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messages: [
+        { role: "system", content: SCENE_COVERAGE_SYSTEM_PROMPT },
+        { role: "user", content: buildEventCoveragePrompt(requirements, "The guide pauses outside the gate.") }
+      ] })
+    });
+    const payload = await response.json() as { choices: Array<{ message: { content: string } }> };
+
+    expect(payload.choices[0]!.message.content).toBe(queued);
+    expect(parseEventCoverageOutput(payload.choices[0]!.message.content, ["event-queued"]))
+      .toEqual({ covered: false, missing_required_beats: ["The gate remains locked."], contradictions: [] });
+  });
+
+  it("gives queued scenarios precedence over coverage dispatch and tolerates malformed completion JSON", async () => {
+    const provider = await createStoryOnlySyntheticProvider();
+    providers.push(provider);
+    const queued = "queued response wins";
+    await provider.enqueue({ content: queued });
+    const coverage = await fetch(`${provider.baseUrl}/v1/chat/completions`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messages: [{ role: "system", content: SCENE_COVERAGE_SYSTEM_PROMPT }] })
+    });
+    await expect(coverage.json()).resolves.toMatchObject({ choices: [{ message: { content: queued } }] });
+
+    const malformed = await fetch(`${provider.baseUrl}/v1/chat/completions`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: "{not json"
+    });
+    await expect(malformed.json()).resolves.toMatchObject({ choices: [{ message: { content: storyOnlyNarrativeResponse() } }] });
+  });
+
+  it("selects queued responses when overlapping completion requests end", async () => {
+    const provider = await createStoryOnlySyntheticProvider();
+    providers.push(provider);
+    await provider.enqueue({ content: "queued response wins" });
+    const narrative = openCompletion(provider, JSON.stringify({ messages: [{ role: "system", content: "Ordinary story system prompt." }] }));
+    const coverage = openCompletion(provider, JSON.stringify({ messages: [{ role: "system", content: SCENE_COVERAGE_SYSTEM_PROMPT }] }));
+
+    coverage.end();
+    await expect(coverage.response.then((body) => JSON.parse(body))).resolves.toMatchObject({ choices: [{ message: { content: "queued response wins" } }] });
+    narrative.end();
+    await expect(narrative.response.then((body) => JSON.parse(body))).resolves.toMatchObject({ choices: [{ message: { content: storyOnlyNarrativeResponse() } }] });
+  });
+
+  it("lets a scenario queued while a completion is in flight override the fallback", async () => {
+    const provider = await createStoryOnlySyntheticProvider();
+    providers.push(provider);
+    const coverage = openCompletion(provider, JSON.stringify({ messages: [{ role: "system", content: SCENE_COVERAGE_SYSTEM_PROMPT }] }));
+    await provider.enqueue({ content: "in-flight queue wins" });
+
+    coverage.end();
+    await expect(coverage.response.then((body) => JSON.parse(body))).resolves.toMatchObject({ choices: [{ message: { content: "in-flight queue wins" } }] });
   });
 
   it("transports a queued provider failure and still counts the completion request", async () => {

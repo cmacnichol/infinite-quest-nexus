@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
+import { SCENE_COVERAGE_SYSTEM_PROMPT } from "../../packages/story-engine/src/scene-coverage.js";
 
 export type StoryOnlySyntheticResponse = Readonly<{
   content: string;
@@ -21,6 +22,76 @@ export function storyOnlyNarrativeResponse(): string {
     canonical_fact_updates: [],
     open_threads: ["Learn who lit the lantern."]
   });
+}
+
+export function storyOnlyCoverageResponse(): string {
+  return JSON.stringify({
+    covered: true,
+    missing_required_beats: [],
+    contradictions: []
+  });
+}
+
+const MAX_COMPLETION_REQUEST_CHARACTERS = 1_000_000;
+const normalizedSceneCoverageSystemPrompt = SCENE_COVERAGE_SYSTEM_PROMPT.replace(/\s+/g, " ").trim();
+
+function hasSceneCoverageSystemPrompt(content: string): boolean {
+  return content.replace(/\s+/g, " ").trim().startsWith(normalizedSceneCoverageSystemPrompt);
+}
+
+function isSceneCoverageRequest(body: string): boolean {
+  try {
+    const payload = JSON.parse(body) as { response_format?: unknown; messages?: unknown };
+    const responseFormat = payload.response_format;
+    if (responseFormat !== null && typeof responseFormat === "object"
+      && (responseFormat as { json_schema?: unknown }).json_schema !== null
+      && typeof (responseFormat as { json_schema?: unknown }).json_schema === "object"
+      && (responseFormat as { json_schema: { name?: unknown } }).json_schema.name === "scene_coverage") return true;
+    if (!Array.isArray(payload.messages)) return false;
+    return payload.messages.some((message) => message !== null && typeof message === "object"
+      && (message as { role?: unknown }).role === "system"
+      && typeof (message as { content?: unknown }).content === "string"
+      && hasSceneCoverageSystemPrompt((message as { content: string }).content));
+  } catch {
+    return false;
+  }
+}
+
+function eventCoverageResponse(body: string): string | null {
+  try {
+    const payload = JSON.parse(body) as { messages?: unknown };
+    if (!isSceneCoverageRequest(body) || !Array.isArray(payload.messages)) return null;
+    for (const message of payload.messages) {
+      if (message === null || typeof message !== "object"
+        || (message as { role?: unknown }).role !== "user"
+        || typeof (message as { content?: unknown }).content !== "string") continue;
+      const prompt = JSON.parse((message as { content: string }).content) as { required_events?: unknown };
+      if (!Array.isArray(prompt.required_events)) continue;
+      const eventIds = prompt.required_events.map((event) => event !== null && typeof event === "object"
+        && typeof (event as { event_id?: unknown }).event_id === "string"
+        && (event as { event_id: string }).event_id.trim().length > 0
+        && typeof (event as { fiction_requirement?: unknown }).fiction_requirement === "string"
+        ? (event as { event_id: string }).event_id
+        : null);
+      if (eventIds.some((eventId) => eventId === null)) return null;
+      return JSON.stringify({
+        event_results: eventIds.map((eventId) => ({
+          event_id: eventId,
+          covered: true,
+          missing_required_beats: [],
+          contradictions: []
+        }))
+      });
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function coverageFallback(body: string): string | null {
+  if (!isSceneCoverageRequest(body)) return null;
+  return eventCoverageResponse(body) ?? storyOnlyCoverageResponse();
 }
 
 export type StoryOnlySyntheticProvider = Readonly<{
@@ -63,15 +134,7 @@ export async function createStoryOnlySyntheticProvider(port = 0, host = "127.0.0
       ? "chat.completions"
       : "other";
     operations.set(operation, (operations.get(operation) ?? 0) + 1);
-    // Consume the request without retaining prompts or request content in memory/logs.
-    request.resume();
-    request.once("end", () => {
-      if (operation !== "chat.completions") {
-        response.writeHead(404, { "content-type": "application/json" });
-        response.end(JSON.stringify({ error: { message: "unsupported synthetic operation" } }));
-        return;
-      }
-      const next = queued.shift() ?? { content: storyOnlyNarrativeResponse() };
+    const complete = (next: StoryOnlySyntheticResponse) => {
       const statusCode = next.statusCode ?? 200;
       response.writeHead(statusCode, { "content-type": "application/json" });
       response.end(JSON.stringify(statusCode >= 400
@@ -82,6 +145,32 @@ export async function createStoryOnlySyntheticProvider(port = 0, host = "127.0.0
             choices: [{ message: { content: next.content }, finish_reason: next.finishReason ?? "stop" }],
             usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }
           }));
+    };
+    if (operation !== "chat.completions") {
+      request.resume();
+      request.once("end", () => {
+        response.writeHead(404, { "content-type": "application/json" });
+        response.end(JSON.stringify({ error: { message: "unsupported synthetic operation" } }));
+      });
+      return;
+    }
+    let body = "";
+    let tooLarge = false;
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => {
+      if (tooLarge) return;
+      if (body.length + chunk.length > MAX_COMPLETION_REQUEST_CHARACTERS) {
+        body = "";
+        tooLarge = true;
+        return;
+      }
+      body += chunk;
+    });
+    request.once("end", () => {
+      const next = queued.shift();
+      const fallback = !tooLarge ? coverageFallback(body) : null;
+      body = "";
+      complete(next ?? { content: fallback ?? storyOnlyNarrativeResponse() });
     });
   });
   await new Promise<void>((resolve, reject) => {
