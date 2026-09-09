@@ -22,6 +22,10 @@ import {
   type MemoryContextQuery
 } from "../../contracts/src/memory.js";
 import type { PromptSnapshot } from "../../contracts/src/prompt-library.js";
+import {
+  generationPolicySnapshotSchema,
+  type GenerationPolicySnapshot
+} from "../../contracts/src/campaign-generation-policy.js";
 import type { StoryLengthProfile } from "../../contracts/src/story-settings.js";
 import {
   applyTriggerHits,
@@ -77,6 +81,7 @@ export type GenerationValidatedMainDraftCheckpoint = Readonly<{
   worldVersionId: string | null;
   baseIdentity: GenerationBaseIdentity;
   promptProtocolVersion: string;
+  generationPolicyIdentity?: string;
   providerId: string;
   providerModel: string;
   /** Hash of the effective non-secret provider configuration used on the wire. */
@@ -215,6 +220,8 @@ export type GenerationExecutionPayload = {
   };
   prompt_protocol_version: string;
   prompt_snapshot: PromptSnapshot;
+  /** Null is a historical row whose policy must never be inferred from current settings. */
+  generation_policy: GenerationPolicySnapshot | null;
   generation_base_identity: GenerationBaseIdentity;
   attempts: number;
   orchestration_private: GenerationOrchestrationState;
@@ -819,7 +826,7 @@ export function createPostgresGenerationExecutionRepository(
                 j.base_turn_number, j.base_state_private, j.base_scratchpad_safe_for_prompt,
                 j.action, j.requested_input_mode, j.resolved_input_mode, j.input_mode_source,
                 j.requested_model, j.context_options, j.prompt_protocol_version, j.prompt_snapshot,
-                j.generation_base_identity,
+                j.generation_base_identity, j.generation_policy,
                 j.attempts, j.orchestration_private, j.streaming_segments_state,
                 c.world_version_id, c.legacy_settings, c.character_profile, c.character_snapshot,
                 cs.rpg_stats, cs.event_triggers, cs.pending_event_triggers,
@@ -850,6 +857,19 @@ export function createPostgresGenerationExecutionRepository(
             WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
               AND status = 'assessing' AND lease_expires_at > now()`,
           [row.id, row.owner_user_id, request.workerId, json({ reason: "orchestration_repair_invalid" })]
+        );
+        return null;
+      }
+      if (row.generation_policy !== null && !generationPolicySnapshotSchema.safeParse(row.generation_policy).success) {
+        await client.query(
+          `UPDATE generation_jobs
+              SET status = 'recoverable', error_code = 'generation_checkpoint_incompatible',
+                  error_message = 'Saved generation policy is invalid.',
+                  recovery_metadata = recovery_metadata || $4::jsonb,
+                  lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+            WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
+              AND status = 'assessing' AND lease_expires_at > now()`,
+          [row.id, row.owner_user_id, request.workerId, json({ reason: "generation_policy_invalid" })]
         );
         return null;
       }

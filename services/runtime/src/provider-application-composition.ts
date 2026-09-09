@@ -35,7 +35,6 @@ import {
   type RuntimeProviderAdapter,
   type RuntimeProviderExecutionPort
 } from "./provider-credential-transport-adapter.js";
-import { createTurnIntentClassificationAdapter } from "./provider-turn-intent-adapter.js";
 import type { SourceAuthoringModelInventory } from "./source-authoring-budget.js";
 import {
   generateTemplateWorld,
@@ -170,14 +169,6 @@ function createInternals(
       transport: options.transport,
       health: providerRepositories.health
     });
-    const intent = createTurnIntentClassificationAdapter({
-      pool,
-      resolution: providerRepositories.resolution,
-      runtime,
-      prompts,
-      costs,
-      health: providerRepositories.health
-    });
     return {
       runtime,
       application: createProviderApplication({
@@ -186,7 +177,6 @@ function createInternals(
         health: providerRepositories.health,
         resolution: providerRepositories.resolution,
         prompts,
-        intent,
         costs
       })
     };

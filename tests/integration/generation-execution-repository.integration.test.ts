@@ -352,6 +352,38 @@ integration("PostgreSQL generation execution repository", () => {
     return "timeout";
   }
 
+  it("hydrates a frozen story-only policy without deriving it from current campaign settings", async () => {
+    const imported = await campaign();
+    await pool.query("UPDATE campaigns SET turn_control_style='flexible_scene' WHERE id=$1", [imported.campaignId]);
+    const queued = await commands().enqueueAppend(
+      { ownerUserId, campaignId: imported.campaignId },
+      generationRequestSchema.parse({
+        action: "Set the scene at the observatory.",
+        providerProfileId,
+        idempotencyKey: crypto.randomUUID(),
+        requestedInputMode: "scene",
+        resolvedInputMode: "scene",
+        inputModeSource: "explicit",
+        context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 }
+      })
+    );
+    await pool.query("UPDATE campaigns SET turn_control_style='flexible_action' WHERE id=$1", [imported.campaignId]);
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const claim = await repository.claimNext({ workerId: "story-only-hydration-worker", leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(queued.id);
+
+    const payload = await repository.loadExecutionPayload({ workerId: "story-only-hydration-worker", leaseSeconds: 30, claim: claim! });
+
+    expect(payload?.generation_policy).toMatchObject({
+      version: 1,
+      playMode: "story_only",
+      turnControlStyle: "flexible_scene",
+      protocolVersion: "story-only-v1"
+    });
+    expect(payload?.requested_input_mode).toBe("scene");
+    expect(payload?.resolved_input_mode).toBe("scene");
+  });
+
   it("retains legacy string event rules in worker inputs without mutating stored history", async () => {
     const imported = await campaign();
     const rule = "When the keeper arrives, light the lantern.";

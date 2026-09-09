@@ -188,14 +188,6 @@ export const inertProviders = {
       campaignId: scope.campaignId,
       hasReportedCosts: false,
       totals: []
-    }),
-    classifyTurnIntent: async () => ({
-      classificationId: "88888888-8888-4888-8888-888888888888",
-      classification: "action",
-      resolvedMode: "action",
-      confidenceBand: "ambiguous",
-      providerSource: "campaign_fallback",
-      expiresAt: "2026-08-01T12:00:00.000Z"
     })
   },
   list: async () => [{

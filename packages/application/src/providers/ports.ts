@@ -30,8 +30,6 @@ import type {
   SavePromptOverrideCommand,
   SetDefaultProviderCommand,
   TurnCostScope,
-  TurnIntentClassificationCommand,
-  TurnIntentClassificationView,
   UpdateProviderProfileCommand
 } from "./types.js";
 import type { OwnerScope } from "../generation/types.js";
@@ -66,10 +64,6 @@ export interface PromptLibraryPort {
   savePromptOverride(command: SavePromptOverrideCommand): Promise<PromptLibraryView>;
   resetPromptOverride(command: ResetPromptOverrideCommand): Promise<PromptLibraryView>;
   loadPromptSnapshot(scope: PromptScope): Promise<PromptSnapshotVersion>;
-}
-
-export interface TurnIntentClassificationPort {
-  classifyTurnIntent(command: TurnIntentClassificationCommand): Promise<TurnIntentClassificationView>;
 }
 
 export interface ProviderCostPort {
@@ -206,7 +200,6 @@ export type ProviderApplicationDependencies = Readonly<{
   health: ProviderHealthPort;
   resolution: ProviderResolutionPort;
   prompts: PromptLibraryPort;
-  intent: TurnIntentClassificationPort;
   costs: ProviderCostPort;
 }>;
 
@@ -216,7 +209,6 @@ export interface ProviderApplication
     ProviderHealthPort,
     ProviderResolutionPort,
     PromptLibraryPort,
-    TurnIntentClassificationPort,
     ProviderCostPort {
   createProfile(command: CreateProviderProfileCommand): Promise<ProviderProfileMutationResult>;
   updateProfile(command: UpdateProviderProfileCommand): Promise<ProviderProfileMutationResult>;

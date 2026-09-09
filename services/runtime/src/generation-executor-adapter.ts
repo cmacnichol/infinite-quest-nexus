@@ -23,6 +23,7 @@ import {
   PromptSnapshot,
   PromptTemplateKey
 } from "../../../packages/contracts/src/prompt-library.js";
+import { generationPolicySnapshotSchema } from "../../../packages/contracts/src/campaign-generation-policy.js";
 import { renderPromptTemplate } from "../../../packages/contracts/src/prompt-library.js";
 import {
   storyLengthProfileFromUnknown,
@@ -54,11 +55,14 @@ import {
   resolveEffectiveContextWindowTokens,
   estimatedInputSafetyAllowanceTokens,
   estimateStoryTokens,
+  composeStoryOnlySystemPrompt,
+  generationExecutionProtocolIdentity,
   planContext,
   serializeProviderRequest,
   fictionGuidanceForEvents,
   fictionGuidanceForRoll,
   formatNarrationParagraphs,
+  generationPolicyIdentity,
   isNarrationFieldComplete,
   localRpgAssessment,
   logProviderTransportError,
@@ -85,8 +89,20 @@ import {
   stableStringify
 } from "../../../packages/domain/src/index.js";
 import { logger } from "../../../packages/logger/src/index.js";
+import { providerPromptProtocolVersion } from "./provider-application-composition.js";
 
 type GenerationTextProvider = RuntimeTextExecution;
+
+function frozenPolicyIdentity(job: GenerationExecutionPayload): string | null {
+  return job.generation_policy ? generationPolicyIdentity(job.generation_policy) : null;
+}
+
+export function generationContextFingerprint(input: Readonly<{ providerId: string; model: string; protocol: string; expectedTurnNumber: number; action: string; inputMode: string; storyLength: unknown; context: unknown; generationPolicyIdentity?: string | null }>): string {
+  return sha256(stableStringify({ provider: input.providerId, model: input.model, protocol: input.protocol,
+    ...(input.generationPolicyIdentity ? { generationPolicyIdentity: input.generationPolicyIdentity } : {}),
+    expectedTurnNumber: input.expectedTurnNumber, action: input.action, inputMode: input.inputMode,
+    storyLength: input.storyLength, context: input.context }));
+}
 
 type GenerationCostAttribution = Readonly<{
   ownerUserId: string;
@@ -619,6 +635,9 @@ function compatibleValidatedMainDraft(
       || value.worldVersionId !== (job.world_version_id || null)
       || stableStringify(value.baseIdentity) !== stableStringify(job.generation_base_identity)
       || value.promptProtocolVersion !== job.prompt_protocol_version
+      || (job.generation_policy
+        ? value.generationPolicyIdentity !== frozenPolicyIdentity(job)
+        : value.generationPolicyIdentity !== undefined)
       || value.providerId !== provider.id
       || value.providerModel !== provider.model
       || value.providerConfigurationHash !== effectiveProviderConfigurationHash(provider, job)
@@ -932,7 +951,8 @@ async function executeLoadedGeneration(
   };
   const phase = <T>(phaseName: TurnGenerationPhase, operation: () => Promise<T>) =>
     runTurnGenerationPhase(diagnosticContext, phaseName, generationStartedAt, operation);
-  if (!promptSnapshotSchema.safeParse(job.prompt_snapshot).success) {
+  const promptSnapshot = promptSnapshotSchema.safeParse(job.prompt_snapshot);
+  if (!promptSnapshot.success) {
     assertActiveGenerationUpdate(await repository.markRecoverable({
       jobId: job.id,
       ownerUserId: job.owner_user_id,
@@ -943,6 +963,45 @@ async function executeLoadedGeneration(
       errorMessage: "Saved generation instructions are invalid.",
       recoveryMetadata: { reason: "generation_prompt_snapshot_invalid" }
     }), "saving invalid prompt snapshot recovery state");
+    return false;
+  }
+  const parsedGenerationPolicy = job.generation_policy === null
+    ? null
+    : generationPolicySnapshotSchema.safeParse(job.generation_policy);
+  if (parsedGenerationPolicy !== null && !parsedGenerationPolicy.success) {
+    assertActiveGenerationUpdate(await repository.markRecoverable({
+      jobId: job.id,
+      ownerUserId: job.owner_user_id,
+      workerId,
+      providerResponseId: null,
+      providerFinishReason: null,
+      errorCode: "generation_policy_invalid",
+      errorMessage: "Saved generation policy is invalid.",
+      recoveryMetadata: { reason: "generation_policy_invalid", retryable: true }
+    }), "saving invalid generation policy recovery state");
+    return false;
+  }
+  const generationPolicy = parsedGenerationPolicy === null ? null : parsedGenerationPolicy.data;
+  let frozenGenerationPolicyIdentity: string | null = null;
+  try {
+    frozenGenerationPolicyIdentity = generationPolicy ? generationPolicyIdentity(generationPolicy) : null;
+    if (generationPolicy && generationExecutionProtocolIdentity(
+      providerPromptProtocolVersion(promptSnapshot.data),
+      generationPolicy
+    ) !== job.prompt_protocol_version) {
+      throw new Error("Saved Story Direction protocol identity is incompatible.");
+    }
+  } catch {
+    assertActiveGenerationUpdate(await repository.markRecoverable({
+      jobId: job.id,
+      ownerUserId: job.owner_user_id,
+      workerId,
+      providerResponseId: null,
+      providerFinishReason: null,
+      errorCode: "generation_policy_invalid",
+      errorMessage: "Saved Story Direction instructions no longer match their frozen hash.",
+      recoveryMetadata: { reason: "generation_policy_invalid", retryable: true }
+    }), "saving invalid generation policy recovery state");
     return false;
   }
   logger.info({
@@ -966,7 +1025,10 @@ async function executeLoadedGeneration(
       const effectiveContextWindow = effectiveContextWindowTokens(provider, job);
       const inputTokenLimit = effectiveContextWindow - provider.maxOutputTokens;
       const emptyPromptContext = { worldCanon: {}, campaignCanon: {}, chronicle: [], currentScene: null };
-      const storySystemPrompt = collaborators.promptFromSnapshot(job.prompt_snapshot, "story_system");
+      const baseStorySystemPrompt = collaborators.promptFromSnapshot(job.prompt_snapshot, "story_system");
+      const storySystemPrompt = generationPolicy?.playMode === "story_only"
+        ? composeStoryOnlySystemPrompt(baseStorySystemPrompt, generationPolicy)
+        : baseStorySystemPrompt;
       const fixedPromptEnvelope = estimateStoryTokens(storySystemPrompt)
         + estimateStoryTokens(buildStoryUserPrompt(
           emptyPromptContext,
@@ -1109,16 +1171,9 @@ async function executeLoadedGeneration(
       );
       promptContext = planned.promptContext;
       const { storyInput, contextPlan } = planned;
-      const contextFingerprint = sha256(stableStringify({
-        provider: provider.id,
-        model: provider.model,
-        protocol: job.prompt_protocol_version,
-        expectedTurnNumber: job.expected_turn_number,
-        action: safeAction,
-        inputMode: job.resolved_input_mode,
-        storyLength,
-        context: promptContext
-      }));
+      const contextFingerprint = generationContextFingerprint({ providerId: provider.id, model: provider.model,
+        protocol: job.prompt_protocol_version, ...(frozenGenerationPolicyIdentity ? { generationPolicyIdentity: frozenGenerationPolicyIdentity } : {}), expectedTurnNumber: job.expected_turn_number,
+        action: safeAction, inputMode: job.resolved_input_mode, storyLength, context: promptContext });
       const contextDiagnostics = {
         countMode: "estimated",
         estimatorVersion: "story-token-estimate-v1",
@@ -1643,6 +1698,7 @@ async function executeLoadedGeneration(
           worldVersionId: job.world_version_id || null,
           baseIdentity: job.generation_base_identity,
           promptProtocolVersion: job.prompt_protocol_version,
+          ...(frozenGenerationPolicyIdentity ? { generationPolicyIdentity: frozenGenerationPolicyIdentity } : {}),
           providerId: provider.id,
           providerModel: provider.model,
           providerConfigurationHash: effectiveProviderConfigurationHash(provider, job),
@@ -1771,6 +1827,7 @@ async function executeLoadedGeneration(
             version: 2, ownerUserId: job.owner_user_id, campaignId: job.campaign_id,
             worldVersionId: job.world_version_id || null, baseIdentity: job.generation_base_identity,
             promptProtocolVersion: job.prompt_protocol_version, providerId: provider.id, providerModel: provider.model,
+            ...(frozenGenerationPolicyIdentity ? { generationPolicyIdentity: frozenGenerationPolicyIdentity } : {}),
             providerConfigurationHash: effectiveProviderConfigurationHash(provider, job),
             action: job.action, originalInputHash: sha256(storyInput),
             requestBody: preparedRequestForResult(repairResult!, provider, repairRequest).body,

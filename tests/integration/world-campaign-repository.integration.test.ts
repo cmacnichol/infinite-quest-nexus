@@ -321,6 +321,10 @@ integration("PostgreSQL world campaign repository adapters", () => {
       expect((await queuedBehindStyle).status).toBe("queued");
       expect((await pool.query("SELECT turn_control_style FROM campaigns WHERE id=$1", [campaign.created.id])).rows[0]).toEqual({ turn_control_style: "flexible_scene" });
       expect((await pool.query("SELECT count(*)::int AS count FROM generation_jobs WHERE campaign_id=$1", [campaign.created.id])).rows[0]).toEqual({ count: 1 });
+      expect((await pool.query("SELECT generation_policy, requested_input_mode, resolved_input_mode, input_mode_source FROM generation_jobs WHERE campaign_id=$1", [campaign.created.id])).rows[0]).toMatchObject({
+        generation_policy: { playMode: "story_only", turnControlStyle: "flexible_scene" },
+        requested_input_mode: "scene", resolved_input_mode: "scene", input_mode_source: "explicit"
+      });
     } finally {
       await holder.query("ROLLBACK").catch(() => undefined);
       holder.release();
@@ -345,6 +349,10 @@ integration("PostgreSQL world campaign repository adapters", () => {
       expect(await styleBehindEnqueue).toMatchObject({ ok: false, failure: { reason: "generation_in_progress", details: { unresolvedGenerationStatuses: ["queued"] } } });
       expect((await pool.query("SELECT turn_control_style FROM campaigns WHERE id=$1", [campaign.created.id])).rows[0]).toEqual({ turn_control_style: "flexible_action" });
       expect((await pool.query("SELECT count(*)::int AS count FROM generation_jobs WHERE campaign_id=$1", [campaign.created.id])).rows[0]).toEqual({ count: 1 });
+      expect((await pool.query("SELECT generation_policy, requested_input_mode, resolved_input_mode, input_mode_source FROM generation_jobs WHERE campaign_id=$1", [campaign.created.id])).rows[0]).toMatchObject({
+        generation_policy: { playMode: "legacy", turnControlStyle: "flexible_action" },
+        requested_input_mode: "scene", resolved_input_mode: "scene", input_mode_source: "explicit"
+      });
     } finally {
       await enqueueHolder.query("ROLLBACK").catch(() => undefined);
       enqueueHolder.release();

@@ -5,7 +5,7 @@ import { GenerationApplicationError } from "../../packages/application/src/index
 import { generationRequestSchema, generationRetryLatestRequestSchema } from "../../packages/contracts/src/generation.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { createPostgresGenerationCommandRepository } from "../../packages/database/src/generation-repository.js";
-import { sha256 } from "../../packages/domain/src/index.js";
+import { sha256, stableStringify } from "../../packages/domain/src/index.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { readTurnReportedCostsForTest } from "../helpers/provider-application-fixtures.js";
@@ -421,7 +421,7 @@ integration("PostgreSQL generation command repository", () => {
     }] });
   });
 
-  it("classifies missing and resolved-mode-mismatched Auto classifications as conflicts", async () => {
+  it("rejects fresh Auto generation requests without reading or consuming historical classifications", async () => {
     const imported = await campaign();
     const commands = repository();
     const action = "Open the Auto-classification observatory.";
@@ -429,7 +429,7 @@ integration("PostgreSQL generation command repository", () => {
     await expect(commands.enqueueAppend(
       { ownerUserId, campaignId: imported.campaignId },
       autoRequest(action, crypto.randomUUID())
-    )).rejects.toMatchObject({ kind: "conflict", details: { reason: "classification_missing_or_expired" } });
+    )).rejects.toMatchObject({ kind: "invalid_state", details: { reason: "turn_input_classification_removed" } });
 
     const classification = await pool.query<{ id: string }>(
       `INSERT INTO turn_input_classifications (
@@ -441,10 +441,12 @@ integration("PostgreSQL generation command repository", () => {
     await expect(commands.enqueueAppend(
       { ownerUserId, campaignId: imported.campaignId },
       autoRequest(action, classification.rows[0]!.id)
-    )).rejects.toMatchObject({ kind: "conflict", details: { reason: "classification_mode_mismatch" } });
+    )).rejects.toMatchObject({ kind: "invalid_state", details: { reason: "turn_input_classification_removed" } });
+    await expect(pool.query("SELECT consumed_at FROM turn_input_classifications WHERE id=$1", [classification.rows[0]!.id]))
+      .resolves.toMatchObject({ rows: [{ consumed_at: null }] });
   });
 
-  it("keeps Auto-classification consumption scoped to the owner and campaign", async () => {
+  it("does not issue classification writes for rejected Auto input", async () => {
     const imported = await campaign();
     const { commands, statements } = recordingRepository();
     const action = "Open the owner-scoped Auto-classification observatory.";
@@ -456,13 +458,12 @@ integration("PostgreSQL generation command repository", () => {
       [ownerUserId, imported.campaignId, sha256(action), providerProfileId]
     );
 
-    await commands.enqueueAppend(
+    await expect(commands.enqueueAppend(
       { ownerUserId, campaignId: imported.campaignId },
       autoRequest(action, classification.rows[0]!.id)
-    );
+    )).rejects.toMatchObject({ details: { reason: "turn_input_classification_removed" } });
 
-    expect(statements.find((statement) => statement.startsWith("UPDATE turn_input_classifications")))
-      .toContain("WHERE id = $1 AND owner_user_id = $2 AND campaign_id = $3");
+    expect(statements.some((statement) => statement.startsWith("UPDATE turn_input_classifications"))).toBe(false);
   });
 
   it("rejects stale, missing, and actively illustrated latest turns while removing only queued latest-turn images", async () => {
@@ -616,6 +617,126 @@ integration("PostgreSQL generation command repository", () => {
     )).rows[0]!;
     expect(after.prompt_snapshot).toEqual(before.prompt_snapshot);
     expect(after.prompt_protocol_version).toBe(before.prompt_protocol_version);
+  });
+
+  it("captures an immutable story-only policy for append and rejects retired Auto input after replay lookup", async () => {
+    const imported = await campaign();
+    await pool.query("UPDATE campaigns SET turn_control_style = 'flexible_scene' WHERE id = $1 AND owner_user_id = $2", [imported.campaignId, ownerUserId]);
+    const commands = repository();
+    const key = crypto.randomUUID();
+    const scene = generationRequestSchema.parse({
+      action: "The observatory roof collapses in rain.", providerProfileId, idempotencyKey: key,
+      requestedInputMode: "scene", resolvedInputMode: "scene", inputModeSource: "explicit",
+      context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 }
+    });
+    const queued = await commands.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, scene);
+    const stored = await commands.getJob({ ownerUserId, jobId: queued.id });
+    expect(stored.generationPolicy).toMatchObject({
+      version: 1, playMode: "story_only", turnControlStyle: "flexible_scene", protocolVersion: "story-only-v1",
+      prompts: { systemSupplementHash: expect.stringMatching(/^[a-f0-9]{64}$/) }
+    });
+    expect(stored.requestedInputMode).toBe("scene");
+    expect(stored.inputModeSource).toBe("explicit");
+    await pool.query("UPDATE campaigns SET turn_control_style = 'flexible_action' WHERE id = $1 AND owner_user_id = $2", [imported.campaignId, ownerUserId]);
+    expect((await commands.getJob({ ownerUserId, jobId: queued.id })).generationPolicy).toEqual(stored.generationPolicy);
+
+    const replay = await commands.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, scene);
+    expect(replay).toMatchObject({ id: queued.id, duplicate: true });
+    await expect(commands.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({
+      ...scene, idempotencyKey: crypto.randomUUID(), requestedInputMode: "auto", resolvedInputMode: "action", inputModeSource: "auto", classificationId: crypto.randomUUID()
+    }))).rejects.toMatchObject({ details: { reason: "turn_input_classification_removed" } });
+  });
+
+  it("persists a fresh Story Direction replacement policy from the current campaign setting", async () => {
+    const imported = await campaign();
+    await pool.query("UPDATE campaigns SET turn_control_style = 'flexible_scene' WHERE id = $1", [imported.campaignId]);
+    const replacement = await repository().enqueueReplacement({ ownerUserId, campaignId: imported.campaignId }, generationRetryLatestRequestSchema.parse({
+      ...replacementRequest("Replace the observatory scene."), requestedInputMode: "scene", resolvedInputMode: "scene", inputModeSource: "explicit"
+    }));
+    const stored = (await pool.query("SELECT generation_policy, prompt_protocol_version, requested_input_mode, resolved_input_mode, input_mode_source FROM generation_jobs WHERE id = $1", [replacement.id])).rows[0]!;
+    expect(stored).toMatchObject({ generation_policy: { version: 1, playMode: "story_only", turnControlStyle: "flexible_scene", protocolVersion: "story-only-v1", prompts: { systemSupplementHash: expect.stringMatching(/^[a-f0-9]{64}$/), choiceRepairSystemHash: expect.stringMatching(/^[a-f0-9]{64}$/) } }, requested_input_mode: "scene", resolved_input_mode: "scene", input_mode_source: "explicit" });
+    await pool.query("UPDATE campaigns SET turn_control_style = 'flexible_action' WHERE id = $1", [imported.campaignId]);
+    await expect(pool.query("SELECT generation_policy, prompt_protocol_version FROM generation_jobs WHERE id = $1", [replacement.id])).resolves.toMatchObject({ rows: [{ generation_policy: stored.generation_policy, prompt_protocol_version: stored.prompt_protocol_version }] });
+  });
+
+  it("retains a fresh Action policy across retry", async () => {
+    const imported = await campaign();
+    const queued = await repository().enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({
+      ...appendRequest("Take the lantern."), requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit"
+    }));
+    const before = (await pool.query("UPDATE generation_jobs SET status = 'recoverable' WHERE id = $1 RETURNING generation_policy, prompt_snapshot, prompt_protocol_version", [queued.id])).rows[0]!;
+    expect(before.generation_policy).toEqual({ version: 1, playMode: "legacy", turnControlStyle: "flexible_action" });
+    await expect(repository().retry({ ownerUserId, jobId: queued.id })).resolves.toMatchObject({ id: queued.id, status: "queued" });
+    await expect(pool.query("SELECT generation_policy, prompt_snapshot, prompt_protocol_version FROM generation_jobs WHERE id = $1", [queued.id])).resolves.toMatchObject({ rows: [before] });
+  });
+
+  it("rejects a hash-mismatched frozen policy retry without rewriting the recoverable job", async () => {
+    const imported = await campaign();
+    await pool.query("UPDATE campaigns SET turn_control_style = 'flexible_scene' WHERE id = $1", [imported.campaignId]);
+    const queued = await repository().enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({
+      action: "Continue through the flooded archive.", providerProfileId, idempotencyKey: crypto.randomUUID(),
+      requestedInputMode: "scene", resolvedInputMode: "scene", inputModeSource: "explicit",
+      context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 }
+    }));
+    const original = (await pool.query<{
+      status: string;
+      generation_policy: { prompts: { systemSupplementHash: string } };
+      prompt_snapshot: Record<string, unknown>;
+      prompt_protocol_version: string;
+    }>("SELECT status, generation_policy, prompt_snapshot, prompt_protocol_version FROM generation_jobs WHERE id = $1", [queued.id])).rows[0]!;
+    const malformed = {
+      ...original.generation_policy,
+      prompts: { ...original.generation_policy.prompts, systemSupplementHash: "0".repeat(64) }
+    };
+    const before = (await pool.query<{
+      status: string;
+      generation_policy: unknown;
+      prompt_snapshot: Record<string, unknown>;
+      prompt_protocol_version: string;
+    }>(
+      "UPDATE generation_jobs SET status = 'recoverable', generation_policy = $2::jsonb WHERE id = $1 RETURNING status, generation_policy, prompt_snapshot, prompt_protocol_version",
+      [queued.id, JSON.stringify(malformed)]
+    )).rows[0]!;
+
+    await expect(repository().retry({ ownerUserId, jobId: queued.id }))
+      .rejects.toMatchObject({ kind: "conflict", details: { reason: "retry_protocol_incompatible" } });
+    await expect(pool.query(
+      "SELECT status, generation_policy, prompt_snapshot, prompt_protocol_version FROM generation_jobs WHERE id = $1",
+      [queued.id]
+    )).resolves.toMatchObject({ rows: [before] });
+  });
+
+  it("replays persisted historical Auto append and replacement jobs before retirement validation", async () => {
+    const imported = await campaign();
+    const commands = repository();
+    const promptSnapshot = await loadPromptSnapshotForTest(pool, ownerUserId, imported.campaignId);
+    const append = generationRequestSchema.parse({
+      action: "Historical Auto append.", providerProfileId, idempotencyKey: crypto.randomUUID(),
+      requestedInputMode: "auto", resolvedInputMode: "action", inputModeSource: "auto", classificationId: crypto.randomUUID(),
+      context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 }
+    });
+    const replacement = generationRetryLatestRequestSchema.parse({
+      ...append, action: "Historical Auto replacement.", idempotencyKey: crypto.randomUUID(), expectedCurrentTurnNumber: 2
+    });
+    const seed = async (request: typeof append | typeof replacement, operationKind: "append" | "replace_latest") => (
+      await pool.query<{ id: string }>(
+        `INSERT INTO generation_jobs (owner_user_id,campaign_id,provider_profile_id,idempotency_key,expected_turn_number,action,
+          requested_input_mode,resolved_input_mode,input_mode_source,turn_input_classification_id,operation_kind,replacement_turn_id,
+          status,prompt_snapshot,prompt_protocol_version,recovery_metadata,generation_policy)
+         VALUES ($1,$2,$3,$4,$5,$6,'auto','action','auto',NULL,$7,$8,$9,$10,$11,$12::jsonb,NULL) RETURNING id`,
+        [ownerUserId, imported.campaignId, providerProfileId, request.idempotencyKey,
+          operationKind === "append" ? 3 : 2, request.action, operationKind,
+          operationKind === "append" ? null : await latestTurnId(imported.campaignId), operationKind === "append" ? "queued" : "failed",
+          JSON.stringify(promptSnapshot), providerPromptProtocolVersion(promptSnapshot), JSON.stringify({ requestFingerprint: sha256(stableStringify(request)) })]
+      )).rows[0]!.id;
+    const appendId = await seed(append, "append");
+    const replacementId = await seed(replacement, "replace_latest");
+    await expect(commands.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, append))
+      .resolves.toMatchObject({ id: appendId, duplicate: true });
+    await expect(commands.enqueueReplacement({ ownerUserId, campaignId: imported.campaignId }, replacement))
+      .resolves.toMatchObject({ id: replacementId, duplicate: true });
+    await expect(commands.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, { ...append, action: "Changed historical request." }))
+      .rejects.toMatchObject({ details: { reason: "idempotency_mismatch" } });
   });
 
   it("rejects a malformed retry snapshot even when its stored protocol hash matches", async () => {
@@ -936,13 +1057,13 @@ integration("PostgreSQL generation command repository", () => {
     )).rejects.toMatchObject({ kind: "conflict", details: { reason: "idempotency_mismatch" } });
   });
 
-  it("rolls back a losing replacement's pre-insert cleanup and classification consumption", async () => {
+  it("rolls back a losing replacement's pre-insert cleanup without touching historical classification provenance", async () => {
     const imported = await campaign();
     const { commands, statements } = recordingRepository();
     const latestTurn = await latestTurnId(imported.campaignId);
     const queuedImageJobId = await directTurnImageJob(imported.campaignId, latestTurn, "queued");
     const competingJobId = await directGenerationJob(imported.campaignId, "failed");
-    const losingAction = "Rewrite the turn with the losing Auto-classification request.";
+    const losingAction = "Rewrite the turn with the losing explicit request.";
     const losingIdempotencyKey = crypto.randomUUID();
     const classification = await pool.query<{ id: string }>(
       `INSERT INTO turn_input_classifications (
@@ -956,10 +1077,9 @@ integration("PostgreSQL generation command repository", () => {
       { ownerUserId, campaignId: imported.campaignId },
       generationRetryLatestRequestSchema.parse({
         ...replacementRequest(losingAction, losingIdempotencyKey),
-        requestedInputMode: "auto",
+        requestedInputMode: "action",
         resolvedInputMode: "action",
-        inputModeSource: "auto",
-        classificationId: classification.rows[0]!.id
+        inputModeSource: "explicit"
       })
     );
     try {

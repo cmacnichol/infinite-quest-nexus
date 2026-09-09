@@ -22,8 +22,7 @@ import {
   buildEventTriggerPrompt,
   buildRpgAssessmentPrompt,
   buildSceneCoveragePrompt,
-  buildStoryUserPrompt,
-  buildTurnIntentPrompt
+  buildStoryUserPrompt
 } from "../../story-engine/src/index.js";
 import type { DatabaseClient } from "./pool.js";
 
@@ -115,7 +114,6 @@ function establishedPromptPreview(key: PromptTemplateKey, content: string) {
     scratchpad: "Mira opened the gate.", tracker_updates: [], image_prompt: "A lantern at an open gate", continuity_summary: "Mira stands at the opened gate.",
     canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: []
   }, ["Blue light floods the rain-swept bridge."], context, "Mira opens the gate.");
-  else if (key === "turn_intent") structuredInput = buildTurnIntentPrompt("Mira opens the gate and calls for the ferryman.");
   else if (key === "scene_coverage" || key === "scene_coverage_rewrite") structuredInput = buildSceneCoveragePrompt("Mira opens the gate.", "Mira presses her palm to the blue glass, and the gate opens.");
   if (structuredInput) {
     const inputSection = preview.sections.find((section) => section.role === "input");
@@ -126,6 +124,10 @@ function establishedPromptPreview(key: PromptTemplateKey, content: string) {
 }
 
 export function createPromptRepository(database: DatabaseClient): PromptLibraryPort {
+  const activeDefinition = (key: PromptTemplateKey) => {
+    if (key === "turn_intent") throw Object.assign(new Error("This historical prompt is unavailable."), { statusCode: 410, code: "turn_input_classification_removed" });
+    return PROMPT_TEMPLATE_CATALOG[key];
+  };
   async function loadPromptSnapshot(scope: PromptScope): Promise<PromptSnapshotVersion> {
     const snapshot = await resolveSnapshot(database, scope);
     return { catalogVersion: CATALOG_VERSION, protocolVersion: protocolVersion(snapshot), snapshot };
@@ -145,7 +147,7 @@ export function createPromptRepository(database: DatabaseClient): PromptLibraryP
     return {
       catalogVersion: CATALOG_VERSION,
       campaignId: scope.scope === "campaign" ? scope.campaignId : null,
-      templates: Object.values(PROMPT_TEMPLATE_CATALOG).map((definition) => ({
+      templates: Object.values(PROMPT_TEMPLATE_CATALOG).filter((definition) => definition.key !== "turn_intent").map((definition) => ({
         key: definition.key,
         title: definition.title,
         category: definition.category,
@@ -183,6 +185,7 @@ export function createPromptRepository(database: DatabaseClient): PromptLibraryP
         content: request.content,
         scope: "application"
       });
+      activeDefinition(value.key);
       return establishedPromptPreview(value.key, value.content);
     },
     async savePromptOverride(command) {
@@ -194,6 +197,7 @@ export function createPromptRepository(database: DatabaseClient): PromptLibraryP
         ...(campaignId ? { campaignId } : {}),
         ...(command.compatibilityAcknowledgement === undefined ? {} : { compatibilityAcknowledgement: command.compatibilityAcknowledgement })
       });
+      activeDefinition(value.key);
       const requirement = promptCompatibilityRequirement(value.key);
       if (requirement && (value.compatibilityAcknowledgement?.requiredShapeVersion !== requirement.requiredShapeVersion
         || value.compatibilityAcknowledgement.protocolIdentity !== requirement.protocolIdentity
@@ -217,12 +221,13 @@ export function createPromptRepository(database: DatabaseClient): PromptLibraryP
     },
     async resetPromptOverride(command) {
       const campaignId = command.scope === "campaign" ? command.campaignId : null;
-      promptTemplateOverrideSchema.parse({
+      const value = promptTemplateOverrideSchema.parse({
         key: command.key,
         content: PROMPT_TEMPLATE_CATALOG[command.key].defaultContent,
         scope: command.scope,
         ...(campaignId ? { campaignId } : {})
       });
+      activeDefinition(value.key);
       if (campaignId) await assertCampaignOwner(database, command.ownerUserId, campaignId);
       await database.query(
         `DELETE FROM prompt_template_overrides

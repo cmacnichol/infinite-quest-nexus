@@ -131,16 +131,6 @@ function dependencies(): ProviderApplicationDependencies {
         } as unknown as ImmutablePromptSnapshot
       }))
     },
-    intent: {
-      classifyTurnIntent: vi.fn(async () => ({
-        classificationId: "00000000-0000-4000-8000-000000000020",
-        classification: "action" as const,
-        resolvedMode: "action" as const,
-        confidenceBand: "clear" as const,
-        providerSource: "intent_default" as const,
-        expiresAt: "2026-08-05T12:10:00.000Z"
-      }))
-    },
     costs: {
       recordCost: vi.fn(async () => "00000000-0000-4000-8000-000000000030"),
       attributeGenerationCostsToTurn: vi.fn(async () => undefined),
@@ -218,7 +208,6 @@ describe("provider application contracts", () => {
       campaignId: campaignScope.campaignId,
       key: "story_system"
     });
-    await application.classifyTurnIntent({ ...campaignScope, text: "Open the gate." });
     await application.recordCost(transaction, {
       ...campaignScope,
       providerProfileId: textProfile.id,
@@ -253,10 +242,6 @@ describe("provider application contracts", () => {
     expect(ports.prompts.previewPrompt).toHaveBeenCalledOnce();
     expect(ports.prompts.savePromptOverride).toHaveBeenCalledOnce();
     expect(ports.prompts.resetPromptOverride).toHaveBeenCalledOnce();
-    expect(ports.intent.classifyTurnIntent).toHaveBeenCalledWith({
-      ...campaignScope,
-      text: "Open the gate."
-    });
     expect(ports.costs.recordCost).toHaveBeenCalledOnce();
     expect(ports.costs.attributeGenerationCostsToTurn).toHaveBeenCalledOnce();
     expect(ports.costs.getTurnCosts).toHaveBeenCalledOnce();
@@ -438,17 +423,6 @@ void embeddingFallback;
 // @ts-expect-error Image resolution is role-pinned and cannot use a text profile.
 const invalidImageFallback: DirectProviderResolution<"image"> = { ...imageResolution, resolvedRole: "text" };
 void invalidImageFallback;
-
-const invalidIntentSource: Awaited<ReturnType<ProviderApplicationDependencies["intent"]["classifyTurnIntent"]>> = {
-  classificationId: "00000000-0000-4000-8000-000000000020",
-  classification: "action",
-  resolvedMode: "action",
-  confidenceBand: "clear",
-  // @ts-expect-error Intent classification cannot report an implicit story-text fallback.
-  providerSource: "story_text",
-  expiresAt: "2026-08-05T12:10:00.000Z"
-};
-void invalidIntentSource;
 
 // The runtime-only lease is distinct from all public/application views.
 expectTypeOf<ProviderRuntimeLeasePort>().toBeObject();

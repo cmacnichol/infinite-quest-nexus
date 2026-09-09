@@ -9,11 +9,14 @@ import type { DatabasePool } from "../../packages/database/src/pool.js";
 import { PROMPT_TEMPLATE_CATALOG } from "../../packages/contracts/src/prompt-library.js";
 import { sha256, stableStringify } from "../../packages/domain/src/index.js";
 import { ContextBudgetError } from "../../packages/story-engine/src/context-budget.js";
+import { generationExecutionProtocolIdentity, storyOnlyPromptSnapshot } from "../../packages/story-engine/src/index.js";
 import {
   createGenerationExecutor,
+  generationContextFingerprint,
   sentCanonicalFactIds,
   type GenerationExecutionCollaborators
 } from "../../services/runtime/src/generation-executor-adapter.js";
+import { providerPromptProtocolVersion } from "../../services/runtime/src/provider-application-composition.js";
 import { DEDICATED_CHUNKED_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
 
 const claim: ClaimedGeneration = {
@@ -91,6 +94,10 @@ function validPromptSnapshot(): GenerationExecutionPayload["prompt_snapshot"] {
   }])) as GenerationExecutionPayload["prompt_snapshot"];
 }
 
+function snapshotProtocolIdentity(snapshot: GenerationExecutionPayload["prompt_snapshot"]): string {
+  return providerPromptProtocolVersion(snapshot);
+}
+
 function completeGenerationExecutionPayload(): GenerationExecutionPayload {
   return {
     id: claim.jobId,
@@ -112,6 +119,7 @@ function completeGenerationExecutionPayload(): GenerationExecutionPayload {
     context_options: { budgetTokens: 8_000, compression: "auto", query: "Open the observatory door.", recentTurns: 4 },
     prompt_protocol_version: "test-protocol",
     prompt_snapshot: validPromptSnapshot(),
+    generation_policy: null,
     generation_base_identity: {
       operationKind: "append", expectedTurnNumber: claim.expectedTurnNumber,
       baseTurnNumber: claim.expectedTurnNumber - 1, campaignActiveTurnNumber: claim.expectedTurnNumber - 1,
@@ -130,6 +138,11 @@ function completeGenerationExecutionPayload(): GenerationExecutionPayload {
 }
 
 describe("generation executor adapter", () => {
+  it("preserves the historical context fingerprint field set and separates frozen policy", () => {
+    const input = { providerId: "provider", model: "model", protocol: "legacy", expectedTurnNumber: 2, action: "Act", inputMode: "action", storyLength: { label: "short" }, context: { world: "canon" } };
+    expect(generationContextFingerprint(input)).toBe("6f4bd446bda2f101a509ba415a10f79036caf7d252b4f08fe37378e351254de3");
+    expect(generationContextFingerprint({ ...input, generationPolicyIdentity: "frozen-policy" })).not.toBe(generationContextFingerprint(input));
+  });
   it.each([0, Number.POSITIVE_INFINITY])("rejects supplied effective context window %s before provider execution", async (modelContextWindowTokens) => {
     const job = completeGenerationExecutionPayload();
     job.context_options.modelContextWindowTokens = modelContextWindowTokens;
@@ -146,6 +159,97 @@ describe("generation executor adapter", () => {
     await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators }).execute({ workerId: "invalid-window", leaseSeconds: 30, claim })).resolves.toBe(true);
     expect(provider.execute).not.toHaveBeenCalled();
     expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({ errorCode: "context_budget_invalid" }));
+  });
+
+  it("accounts for the frozen Story Direction supplement before context retrieval or dispatch", async () => {
+    const job = completeGenerationExecutionPayload();
+    const supplement = "frozen story direction instruction ".repeat(6_000);
+    const unmodifiedPolicy = {
+      version: 1, playMode: "story_only", turnControlStyle: "flexible_scene", protocolVersion: "story-only-v1",
+      prompts: {
+        ...storyOnlyPromptSnapshot(),
+        systemSupplement: supplement,
+        systemSupplementHash: sha256(supplement)
+      }
+    } as const;
+    job.generation_policy = unmodifiedPolicy;
+    job.prompt_protocol_version = generationExecutionProtocolIdentity(snapshotProtocolIdentity(job.prompt_snapshot), unmodifiedPolicy);
+    const repository = {
+      loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
+      saveOrchestration: vi.fn(async () => true), savePartialNarration: vi.fn(async () => true), saveStreamingSegments: vi.fn(async () => true),
+      recordAttempt: vi.fn(async () => undefined), markRecoverable: vi.fn(async () => true), markValidating: vi.fn(async () => true),
+      markCommitting: vi.fn(async () => true), commitAcceptedTurn: vi.fn(async () => ({ turnId: "unexpected" })), markFailed: vi.fn(async () => true)
+    } as unknown as GenerationExecutionRepository;
+    const provider = { id: claim.providerProfileId, name: "Provider", providerRole: "text" as const, providerType: "openai_compatible" as const,
+      model: "test-model", contextWindowTokens: 12_000, maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {}, execute: vi.fn() };
+    const loadGenerationContext = vi.fn();
+    const collaborators = {
+      ...rejectedCollaborators(), loadTextExecution: vi.fn(async () => provider), promptFromSnapshot: vi.fn(() => "Write fiction."),
+      memory: { loadGenerationContext }, recordProfileCost: vi.fn(async () => undefined), attributeGenerationCostsToTurn: vi.fn(async () => undefined)
+    } as unknown as GenerationExecutionCollaborators;
+
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators }).execute({ workerId: "story-only-envelope", leaseSeconds: 30, claim })).resolves.toBe(true);
+
+    expect(loadGenerationContext).not.toHaveBeenCalled();
+    expect(provider.execute).not.toHaveBeenCalled();
+    expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({ errorCode: "context_budget_invalid" }));
+  });
+
+  it("marks a hash-mismatched frozen Story Direction policy recoverable before provider work", async () => {
+    const job = completeGenerationExecutionPayload();
+    const unmodifiedPolicy = {
+      version: 1, playMode: "story_only", turnControlStyle: "flexible_scene", protocolVersion: "story-only-v1",
+      prompts: storyOnlyPromptSnapshot()
+    } as const;
+    job.prompt_protocol_version = generationExecutionProtocolIdentity(snapshotProtocolIdentity(job.prompt_snapshot), unmodifiedPolicy);
+    job.generation_policy = { ...unmodifiedPolicy, prompts: { ...unmodifiedPolicy.prompts, systemSupplementHash: "0".repeat(64) } };
+    const repository = {
+      loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
+      saveOrchestration: vi.fn(async () => true), savePartialNarration: vi.fn(async () => true), saveStreamingSegments: vi.fn(async () => true),
+      recordAttempt: vi.fn(async () => undefined), markRecoverable: vi.fn(async () => true), markValidating: vi.fn(async () => true),
+      markCommitting: vi.fn(async () => true), commitAcceptedTurn: vi.fn(async () => ({ turnId: "unexpected" })), markFailed: vi.fn(async () => true)
+    } as unknown as GenerationExecutionRepository;
+    const provider = { id: claim.providerProfileId, name: "Provider", providerRole: "text" as const, providerType: "openai_compatible" as const,
+      model: "test-model", contextWindowTokens: 16_000, maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {}, execute: vi.fn() };
+    const loadGenerationContext = vi.fn();
+    const collaborators = {
+      ...rejectedCollaborators(), loadTextExecution: vi.fn(async () => provider), promptFromSnapshot: vi.fn(() => "Write fiction."),
+      memory: { loadGenerationContext }, recordProfileCost: vi.fn(async () => undefined), attributeGenerationCostsToTurn: vi.fn(async () => undefined)
+    } as unknown as GenerationExecutionCollaborators;
+
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators }).execute({ workerId: "story-only-hash", leaseSeconds: 30, claim })).resolves.toBe(false);
+
+    expect(loadGenerationContext).not.toHaveBeenCalled();
+    expect(provider.execute).not.toHaveBeenCalled();
+    expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({
+      errorCode: "generation_policy_invalid",
+      recoveryMetadata: expect.objectContaining({ reason: "generation_policy_invalid" })
+    }));
+    expect(repository.markFailed).not.toHaveBeenCalled();
+  });
+
+  it("marks a schema-invalid non-null policy recoverable before provider work", async () => {
+    const job = completeGenerationExecutionPayload();
+    job.generation_policy = { version: 1, playMode: "legacy", turnControlStyle: "flexible_scene" } as never;
+    const repository = {
+      loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
+      saveOrchestration: vi.fn(async () => true), savePartialNarration: vi.fn(async () => true), saveStreamingSegments: vi.fn(async () => true),
+      recordAttempt: vi.fn(async () => undefined), markRecoverable: vi.fn(async () => true), markValidating: vi.fn(async () => true),
+      markCommitting: vi.fn(async () => true), commitAcceptedTurn: vi.fn(async () => ({ turnId: "unexpected" })), markFailed: vi.fn(async () => true)
+    } as unknown as GenerationExecutionRepository;
+    const provider = { id: claim.providerProfileId, name: "Provider", providerRole: "text" as const, providerType: "openai_compatible" as const,
+      model: "test-model", contextWindowTokens: 16_000, maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {}, execute: vi.fn() };
+    const loadGenerationContext = vi.fn();
+    const collaborators = {
+      ...rejectedCollaborators(), loadTextExecution: vi.fn(async () => provider), promptFromSnapshot: vi.fn(() => "Write fiction."),
+      memory: { loadGenerationContext }, recordProfileCost: vi.fn(async () => undefined), attributeGenerationCostsToTurn: vi.fn(async () => undefined)
+    } as unknown as GenerationExecutionCollaborators;
+
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators }).execute({ workerId: "story-only-schema", leaseSeconds: 30, claim })).resolves.toBe(false);
+
+    expect(loadGenerationContext).not.toHaveBeenCalled();
+    expect(provider.execute).not.toHaveBeenCalled();
+    expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({ errorCode: "generation_policy_invalid" }));
   });
 
   it("extracts fact authority from exact main, extension, and LM Studio recovery bodies only", () => {
@@ -206,8 +310,21 @@ describe("generation executor adapter", () => {
     expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({ errorCode: "generation_checkpoint_incompatible" }));
   });
 
-  it("reclaims a compatible validated draft without asking the text provider for a different narration", async () => {
+  it.each([
+    ["Action", "action", "action", "explicit"],
+    ["Scene", "scene", "scene", "explicit"],
+    ["resolved Auto", "auto", "action", "auto"],
+    ["new Action policy", "action", "action", "explicit"]
+  ] as const)("reclaims a compatible %s draft without another narration call", async (label, requestedInputMode, resolvedInputMode, inputModeSource) => {
     const job = completeGenerationExecutionPayload();
+    job.requested_input_mode = requestedInputMode;
+    job.resolved_input_mode = resolvedInputMode;
+    job.input_mode_source = inputModeSource;
+    job.generation_policy = null;
+    if (label === "new Action policy") {
+      job.generation_policy = { version: 1, playMode: "legacy", turnControlStyle: "flexible_action" };
+      job.prompt_protocol_version = generationExecutionProtocolIdentity(snapshotProtocolIdentity(job.prompt_snapshot), job.generation_policy);
+    }
     const firstNarration = "The first validated draft opens the observatory door.";
     const repository = {
       loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true),
@@ -241,7 +358,11 @@ describe("generation executor adapter", () => {
           modelInstanceId: "test-instance", usage: { inputTokens: 10, outputTokens: 20, totalTokens: 30 },
           reportedCost: null, rawMetadata: {}
         })
-        .mockRejectedValueOnce(new Error("A reclaim must not regenerate the main draft."))
+        .mockResolvedValue({
+          content: JSON.stringify({ covered: true, missing_required_beats: [], contradictions: [] }),
+          responseId: "scene-coverage", finishReason: "stop", outputLimited: false,
+          modelInstanceId: "test-instance", usage: {}, reportedCost: null, rawMetadata: {}
+        })
     };
     const collaborators = {
       memory: {
@@ -251,7 +372,7 @@ describe("generation executor adapter", () => {
         }))
       },
       illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) },
-      loadTextExecution: vi.fn(async () => provider), promptFromSnapshot: vi.fn(() => "Write a concise fictional scene."),
+      loadTextExecution: vi.fn(async () => provider), promptFromSnapshot: vi.fn((_snapshot, key) => String(key)),
       recordProfileCost: vi.fn(async () => undefined), attributeGenerationCostsToTurn: vi.fn(async () => undefined)
     } as unknown as GenerationExecutionCollaborators;
 
@@ -261,11 +382,20 @@ describe("generation executor adapter", () => {
     job.attempts = 2;
     await expect(executor.execute({ workerId: "worker-b", leaseSeconds: 30, claim: { ...claim, attempts: 2 } })).resolves.toBe(true);
 
-    expect(provider.execute).toHaveBeenCalledOnce();
+    const mainNarrationCalls = (provider.execute as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([request]) => request.systemPrompt === "story_system");
+    expect(mainNarrationCalls).toHaveLength(1);
     expect(repository.commitAcceptedTurn).toHaveBeenCalledWith(expect.objectContaining({
       story: expect.objectContaining({ narration: firstNarration }),
       response: expect.objectContaining({ responseId: "first-response" })
     }));
+    if (label === "new Action policy") {
+      expect(job.generation_policy).toEqual({ version: 1, playMode: "legacy", turnControlStyle: "flexible_action" });
+    } else {
+      expect(job.prompt_protocol_version).toBe("test-protocol");
+      expect(job.generation_policy).toBeNull();
+    }
+    expect(repository.markRecoverable).not.toHaveBeenCalled();
   });
 
   it("makes an incompatible validated-draft checkpoint recoverable before provider work", async () => {
@@ -888,6 +1018,7 @@ describe("generation executor adapter", () => {
       },
       prompt_protocol_version: "test-protocol",
       prompt_snapshot: validPromptSnapshot(),
+      generation_policy: null,
       generation_base_identity: {
         operationKind: "append",
         expectedTurnNumber: claim.expectedTurnNumber,

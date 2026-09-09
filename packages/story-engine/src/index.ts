@@ -7,7 +7,7 @@ export * from "./output.js";
 export * from "./provider-response.js";
 export * from "./provider-request.js";
 export * from "./prompt.js";
-export * from "./turn-intent.js";
+export * from "./story-only-prompt.js";
 export * from "./scene-coverage.js";
 export * from "./token-estimate.js";
 export * from "./providers.js";

@@ -14,6 +14,8 @@ import {
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { generationStreamSnapshotSchema, type GenerationStreamSnapshot } from "../../packages/contracts/src/generation.js";
+import { generationRequestSchema, generationRetryLatestRequestSchema } from "../../packages/contracts/src/generation.js";
+import { sha256, stableStringify } from "../../packages/domain/src/index.js";
 import { logger } from "../../packages/logger/src/index.js";
 import { buildServer } from "../../services/api/src/server.js";
 import { createApiGenerationApplication } from "../helpers/runtime-application-fixtures.js";
@@ -314,6 +316,8 @@ integration("generation job notification delivery", () => {
       worldCampaign: createApiWorldCampaignApplication(countedPool, { credentialSecret: runtimeConfig(3).credentialEncryptionKey }),
       generationEvents: source
     }));
+    await pool.query("INSERT INTO turns (owner_user_id,campaign_id,turn_number,narration) VALUES ($1,$2,1,'Historical replacement turn.')", [ownerUserId, campaignId]);
+    await pool.query("UPDATE campaigns SET active_turn_number=1 WHERE id=$1", [campaignId]);
     let stream: Awaited<ReturnType<typeof openGenerationStream>> | undefined;
     try {
       await source.start();
@@ -401,6 +405,59 @@ integration("generation job notification delivery", () => {
       await source.close();
       await routePool.end();
     }
+  });
+
+  it("replays historical Auto jobs through append and replacement routes before retirement validation", async () => {
+    const campaignId = await campaign();
+    const routePool = createDatabasePool(databaseUrl!, 3);
+    const source = createPostgresGenerationEventSource(routePool, databaseUrl!);
+    const app = await buildServer(inertStorageServerOptions({
+      config: runtimeConfig(3), pool: routePool,
+      generation: createApiGenerationApplication(routePool), illustration: createApiIllustrationApplication(routePool),
+      memory: apiMemoryApplication(routePool), providers: inertProviders,
+      infiniteWorldsProviders: apiProviderGraph(routePool, runtimeConfig(3).credentialEncryptionKey).infiniteWorlds,
+      worldCampaign: createApiWorldCampaignApplication(routePool, { credentialSecret: runtimeConfig(3).credentialEncryptionKey }), generationEvents: source
+    }));
+    await pool.query(
+      "INSERT INTO turns (owner_user_id,campaign_id,turn_number,narration) VALUES ($1,$2,1,'Historical replacement turn.')",
+      [ownerUserId, campaignId]
+    );
+    await pool.query("UPDATE campaigns SET active_turn_number=1 WHERE id=$1", [campaignId]);
+    const append = generationRequestSchema.parse({ action: "Historical API Auto append.", providerProfileId, idempotencyKey: crypto.randomUUID(), requestedInputMode: "auto", resolvedInputMode: "action", inputModeSource: "auto", classificationId: crypto.randomUUID(), context: { budgetTokens: 16000, compression: "full", recentTurns: 8 } });
+    const replacement = generationRetryLatestRequestSchema.parse({ ...append, action: "Historical API Auto replacement.", idempotencyKey: crypto.randomUUID(), expectedCurrentTurnNumber: 1 });
+    const seed = async (body: typeof append | typeof replacement, kind: "append" | "replace_latest") => (await pool.query<{ id: string }>(
+      `INSERT INTO generation_jobs (owner_user_id,campaign_id,provider_profile_id,idempotency_key,expected_turn_number,action,requested_input_mode,resolved_input_mode,input_mode_source,operation_kind,replacement_turn_id,status,prompt_snapshot,prompt_protocol_version,recovery_metadata,generation_policy)
+       VALUES ($1,$2,$3,$4,$5,$6,'auto','action','auto',$7,$8,$9,'{}'::jsonb,'legacy',$10::jsonb,NULL) RETURNING id`,
+      [ownerUserId, campaignId, providerProfileId, body.idempotencyKey, kind === "append" ? 2 : 1, body.action, kind,
+        kind === "append" ? null : (await pool.query<{ id: string }>("SELECT id FROM turns WHERE campaign_id=$1 AND turn_number=1", [campaignId])).rows[0]!.id,
+        kind === "append" ? "queued" : "failed", JSON.stringify({ requestFingerprint: sha256(stableStringify(body)) })]
+    )).rows[0]!.id;
+    const appendId = await seed(append, "append");
+    const replacementId = await seed(replacement, "replace_latest");
+    try {
+      const appendReplay = await app.inject({ method: "POST", url: `/api/v1/campaigns/${campaignId}/generations`, payload: append });
+      const replacementReplay = await app.inject({ method: "POST", url: `/api/v1/campaigns/${campaignId}/generations/retry-latest`, payload: replacement });
+      expect(appendReplay.statusCode).toBe(200); expect(appendReplay.json()).toMatchObject({ id: appendId, duplicate: true });
+      expect(replacementReplay.statusCode).toBe(200); expect(replacementReplay.json()).toMatchObject({ id: replacementId, duplicate: true });
+      expect((await app.inject({ method: "POST", url: `/api/v1/campaigns/${campaignId}/generations`, payload: { ...append, action: "changed" } })).statusCode).toBe(409);
+      expect((await app.inject({ method: "POST", url: `/api/v1/campaigns/${campaignId}/generations/retry-latest`, payload: { ...replacement, action: "changed" } })).statusCode).toBe(409);
+      const before = await pool.query<{ jobs: string; classifications: string }>("SELECT (SELECT count(*)::text FROM generation_jobs WHERE campaign_id=$1) AS jobs,(SELECT count(*)::text FROM turn_input_classifications WHERE campaign_id=$1) AS classifications", [campaignId]);
+      expect((await app.inject({ method: "POST", url: `/api/v1/campaigns/${campaignId}/generations`, payload: { ...append, idempotencyKey: crypto.randomUUID() } })).statusCode).toBe(410);
+      expect((await app.inject({ method: "POST", url: `/api/v1/campaigns/${campaignId}/generations/retry-latest`, payload: { ...replacement, idempotencyKey: crypto.randomUUID() } })).statusCode).toBe(410);
+      expect((await app.inject({ method: "POST", url: `/api/v1/campaigns/${campaignId}/generations`, payload: { ...append, idempotencyKey: crypto.randomUUID(), requestedInputMode: "action", inputModeSource: "fallback", classificationId: undefined } })).statusCode).toBe(410);
+      expect((await app.inject({ method: "POST", url: `/api/v1/campaigns/${campaignId}/generations/retry-latest`, payload: { ...replacement, idempotencyKey: crypto.randomUUID(), requestedInputMode: "action", inputModeSource: "fallback", classificationId: undefined } })).statusCode).toBe(410);
+      await expect(pool.query("SELECT (SELECT count(*)::text FROM generation_jobs WHERE campaign_id=$1) AS jobs,(SELECT count(*)::text FROM turn_input_classifications WHERE campaign_id=$1) AS classifications", [campaignId])).resolves.toEqual(before);
+      const foreignOwnerId = crypto.randomUUID();
+      await pool.query("INSERT INTO users (id, display_name, status) VALUES ($1,'Foreign replay owner','active')", [foreignOwnerId]);
+      const foreignWorldId = (await pool.query<{ id: string }>("INSERT INTO worlds (owner_user_id,title) VALUES ($1,'Foreign replay world') RETURNING id", [foreignOwnerId])).rows[0]!.id;
+      const foreignVersionId = (await pool.query<{ id: string }>("INSERT INTO world_versions (world_id,owner_user_id,version_number,content) VALUES ($1,$2,1,'{}'::jsonb) RETURNING id", [foreignWorldId, foreignOwnerId])).rows[0]!.id;
+      const foreignCampaignId = (await pool.query<{ id: string }>("INSERT INTO campaigns (owner_user_id,world_version_id,title) VALUES ($1,$2,'Foreign replay campaign') RETURNING id", [foreignOwnerId, foreignVersionId])).rows[0]!.id;
+      const foreignProviderId = (await pool.query<{ id: string }>("INSERT INTO provider_profiles (owner_user_id,name,provider_type,provider_role,base_url,default_model) VALUES ($1,'Foreign replay provider','openai_compatible','text','http://foreign.test','model') RETURNING id", [foreignOwnerId])).rows[0]!.id;
+      await pool.query("INSERT INTO generation_jobs (owner_user_id,campaign_id,provider_profile_id,idempotency_key,expected_turn_number,action,requested_input_mode,resolved_input_mode,input_mode_source,status,prompt_snapshot,prompt_protocol_version,recovery_metadata) VALUES ($1,$2,$3,$4,1,$5,'auto','action','auto','queued','{}'::jsonb,'legacy',$6::jsonb)", [foreignOwnerId, foreignCampaignId, foreignProviderId, append.idempotencyKey, append.action, JSON.stringify({ requestFingerprint: sha256(stableStringify(append)) })]);
+      const foreignBefore = await pool.query("SELECT count(*)::text AS jobs FROM generation_jobs WHERE campaign_id=$1", [foreignCampaignId]);
+      expect((await app.inject({ method: "POST", url: `/api/v1/campaigns/${foreignCampaignId}/generations`, payload: append })).statusCode).toBe(404);
+      await expect(pool.query("SELECT count(*)::text AS jobs FROM generation_jobs WHERE campaign_id=$1", [foreignCampaignId])).resolves.toEqual(foreignBefore);
+    } finally { await app.close(); await source.close(); await routePool.end(); }
   });
 
   it("removes and restores the notification trigger and function through the migration down/up path", async () => {
@@ -611,7 +668,8 @@ integration("generation job notification delivery", () => {
           "0090_authoring_apply_review_selection",
           "0091_story_source_authoring",
           "0092_source_synthesis_review_fence",
-          "0093_portable_source_material_authority_paths"
+          "0093_portable_source_material_authority_paths",
+          "0094_story_generation_policy"
         ]);
       await expect(migrationPool.query<{ trigger_name: string | null; function_name: string | null }>(
          `SELECT (
