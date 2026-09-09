@@ -12,6 +12,7 @@ import {
 } from "./story-prompt.js";
 import { apiTimestampSchema } from "./http.js";
 import { storyLengthProfileSchema } from "./story-settings.js";
+import { generationPolicySnapshotSchema } from "./campaign-generation-policy.js";
 
 export const providerTypeSchema = z.enum(["lmstudio", "openrouter", "manifest", "openai_compatible", "sogni", "sogni_sdk"]);
 export const providerRoleSchema = z.enum(["text", "image", "embedding", "intent"]);
@@ -438,7 +439,8 @@ export const generationJobStatusSchema = z.object({
   updatedAt: apiTimestampSchema,
   completedAt: apiTimestampSchema.nullable().optional(),
   partialOutput: z.string().nullable().optional(),
-  partialNarration: z.string().nullable().optional()
+  partialNarration: z.string().nullable().optional(),
+  generationPolicy: generationPolicySnapshotSchema.nullable().optional()
 });
 
 export const PUBLIC_GENERATION_FAILURE_CODE = "generation_failed" as const;

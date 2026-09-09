@@ -1,16 +1,37 @@
 import { z } from "zod";
+import {
+  campaignTurnControlStyleSchema,
+  historicalCampaignTurnControlStyleSchema,
+  type CampaignTurnControlStyle,
+  type HistoricalCampaignTurnControlStyle
+} from "./campaign-generation-policy.js";
+
+export function normalizeHistoricalDefaultTurnControlStyle(
+  style: HistoricalCampaignTurnControlStyle | undefined
+): CampaignTurnControlStyle {
+  return style === "flexible_scene" ? "flexible_scene" : style === "action_only" ? "action_only" : "flexible_action";
+}
 
 export const userSettingsSchema = z.object({
   autoSubmitTurnChoices: z.boolean().default(true),
   continuousReading: z.boolean().default(false),
-  defaultTurnControlStyle: z.enum(["action_only", "flexible_auto", "flexible_action", "flexible_scene"]).default("flexible_auto")
+  defaultTurnControlStyle: campaignTurnControlStyleSchema.default("flexible_action")
 }).passthrough();
+
+export const historicalUserSettingsSchema = z.object({
+  autoSubmitTurnChoices: z.boolean().default(true),
+  continuousReading: z.boolean().default(false),
+  defaultTurnControlStyle: historicalCampaignTurnControlStyleSchema.optional()
+}).passthrough().transform((settings) => ({
+  ...settings,
+  defaultTurnControlStyle: normalizeHistoricalDefaultTurnControlStyle(settings.defaultTurnControlStyle)
+}));
 
 export const userProfileSchema = z.object({
   id: z.uuid(),
   systemKey: z.string().nullable().default(null),
   displayName: z.string(),
-  settings: userSettingsSchema.default({ autoSubmitTurnChoices: true, continuousReading: false, defaultTurnControlStyle: "flexible_auto" })
+  settings: userSettingsSchema.default({ autoSubmitTurnChoices: true, continuousReading: false, defaultTurnControlStyle: "flexible_action" })
 });
 
 export const userProfileUpdateSchema = z.object({

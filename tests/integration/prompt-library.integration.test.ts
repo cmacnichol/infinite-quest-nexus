@@ -40,7 +40,7 @@ integration("Prompt Library persistence", () => {
       selectedCharacterId: "hero",
       storyLengthProfile: "standard",
       storyContextBudgetTokens: 32_000,
-      turnControlStyle: "flexible_auto"
+      turnControlStyle: "flexible_action"
     })).id;
   });
 

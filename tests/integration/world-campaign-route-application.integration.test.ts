@@ -329,7 +329,7 @@ integration("world campaign Fastify production application cutover", () => {
       selectedCharacterId: "route-explorer",
       storyLengthProfile: "standard",
       storyContextBudgetTokens: 32_000,
-      turnControlStyle: "flexible_auto"
+      turnControlStyle: "flexible_action"
     });
     trackCampaign(campaign.id, title);
     return { title, campaign };

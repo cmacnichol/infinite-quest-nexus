@@ -147,7 +147,7 @@ integration("PostgreSQL world campaign repository adapters", () => {
         title,
         storyLengthProfile: "standard",
         storyContextBudgetTokens: 32_000,
-        turnControlStyle: "flexible_auto"
+        turnControlStyle: "flexible_action"
       }
     )));
     return { title, created };
@@ -211,7 +211,7 @@ integration("PostgreSQL world campaign repository adapters", () => {
     const version = await publishFixtureWorld(adapters, world.id, world.draftRevision, "Invalid rule");
     const result = await adapters.transaction.command((transaction) => adapters.campaigns.createCampaign(transaction, { ownerUserId }, {
       worldVersionId: version.worldVersionId, title: "Invalid campaign", storyLengthProfile: "standard",
-      storyContextBudgetTokens: 32_000, turnControlStyle: "flexible_auto"
+      storyContextBudgetTokens: 32_000, turnControlStyle: "flexible_action"
     }));
     expect(result).toMatchObject({ ok: false, failure: { reason: "invalid_transition" } });
     expect((await pool.query("SELECT count(*)::int AS count FROM campaigns WHERE world_version_id=$1", [version.worldVersionId])).rows[0].count).toBe(0);
@@ -582,7 +582,7 @@ integration("PostgreSQL world campaign repository adapters", () => {
         title: `Spoofed campaign ${crypto.randomUUID()}`,
         storyLengthProfile: "standard",
         storyContextBudgetTokens: 32_000,
-        turnControlStyle: "flexible_auto"
+        turnControlStyle: "flexible_action"
       }
     ));
     expect(foreignCreate).toMatchObject({ ok: false, failure: { reason: "world_version_not_found" } });
@@ -725,7 +725,7 @@ integration("PostgreSQL world campaign repository adapters", () => {
           title: `Rolled back embedded campaign ${crypto.randomUUID()}`,
           storyLengthProfile: "standard",
           storyContextBudgetTokens: 32_000,
-          turnControlStyle: "flexible_auto"
+          turnControlStyle: "flexible_action"
         }
       ));
       rolledBackCampaignId = created.id;

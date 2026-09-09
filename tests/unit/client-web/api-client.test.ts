@@ -164,7 +164,7 @@ describe("createNexusApiClient", () => {
         selectedCharacterId: "observer",
         storyLengthProfile: "standard",
         storyContextBudgetTokens: 32_000,
-        turnControlStyle: "flexible_auto"
+        turnControlStyle: "flexible_action"
       }, signal),
       () => client.campaigns.turns("campaign / id", signal),
       () => client.campaigns.turns("campaign / id", { before: "older-page", limit: 3 }, signal),
@@ -295,7 +295,7 @@ describe("createNexusApiClient", () => {
       worldVersionId,
       storyLengthProfile: "standard",
       storyContextBudgetTokens: 32_000,
-      turnControlStyle: "flexible_auto",
+      turnControlStyle: "flexible_action",
       updatedAt: "2026-08-02T00:00:00.000Z",
       selectedCharacterId: null,
       selectedCharacterName: "",
@@ -310,7 +310,7 @@ describe("createNexusApiClient", () => {
         worldVersionId,
         storyLengthProfile: "standard",
         storyContextBudgetTokens: 32_000,
-        turnControlStyle: "flexible_auto",
+        turnControlStyle: "flexible_action",
         updatedAt: "2026-08-02T00:00:00.000Z",
         selectedCharacterId: null,
         selectedCharacterName: "",
@@ -365,7 +365,7 @@ describe("createNexusApiClient", () => {
       selectedCharacterId: "observer",
       storyLengthProfile: "standard",
       storyContextBudgetTokens: 32_000,
-      turnControlStyle: "flexible_auto",
+      turnControlStyle: "flexible_action",
       user_id: "spoofed"
     } as never).catch(() => undefined);
     await client.session.updateProfile({ displayName: "Initial Owner", user_id: "spoofed" } as never).catch(() => undefined);

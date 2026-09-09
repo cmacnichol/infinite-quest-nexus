@@ -22,8 +22,8 @@ import { chronicleRetrievalAuditSchema } from "./memory.js";
 import { storyContextBudgetTokensSchema, storyLengthProfileSchema } from "./story-settings.js";
 import { userProfileSchema, userProfileUpdateSchema } from "./users.js";
 import { campaignCreateSchema, playableCharacterSchema, worldCreateSchema } from "./world-library.js";
+import { campaignTurnControlStyleSchema } from "./campaign-generation-policy.js";
 
-const turnControlStyleSchema = z.enum(["action_only", "flexible_auto", "flexible_action", "flexible_scene"]);
 const operationKindSchema = generationJobStatusSchema.shape.operationKind;
 const generationStatusSchema = generationJobStatusSchema.shape.status;
 const nullableObjectSchema = z.record(z.string(), z.unknown()).nullable();
@@ -55,7 +55,7 @@ export const campaignSummarySchema = z.object({
   updatedAt: apiTimestampSchema,
   storyLengthProfile: storyLengthProfileSchema,
   storyContextBudgetTokens: storyContextBudgetTokensSchema,
-  turnControlStyle: turnControlStyleSchema,
+  turnControlStyle: campaignTurnControlStyleSchema,
   selectedCharacterId: z.string().nullable(),
   selectedCharacterName: z.string().nullable(),
   worldId: z.uuid(),
@@ -179,7 +179,7 @@ const campaignSyncCampaignSchema = z.object({
   worldVersionId: z.uuid(),
   storyLengthProfile: storyLengthProfileSchema,
   storyContextBudgetTokens: storyContextBudgetTokensSchema,
-  turnControlStyle: turnControlStyleSchema,
+  turnControlStyle: campaignTurnControlStyleSchema,
   updatedAt: apiTimestampSchema,
   selectedCharacterId: z.string().nullable(),
   selectedCharacterName: z.string(),

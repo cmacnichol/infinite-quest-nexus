@@ -1,6 +1,7 @@
 export * from "./imports.js";
 export * from "./memory.js";
 export * from "./generation.js";
+export * from "./campaign-generation-policy.js";
 export * from "./story-settings.js";
 export * from "./http.js";
 export * from "./client-api.js";
