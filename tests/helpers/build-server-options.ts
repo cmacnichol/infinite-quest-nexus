@@ -309,7 +309,7 @@ export function testWorldCampaignApplication(
       updatedAt: TEST_TIMESTAMP,
       storyLengthProfile: "standard",
       storyContextBudgetTokens: 32_000,
-      turnControlStyle: "flexible_auto",
+      turnControlStyle: "flexible_action",
       selectedCharacterId: "observer",
       selectedCharacterName: "The Observer",
       worldId: TEST_WORLD_ID,
@@ -390,7 +390,7 @@ export function testWorldCampaignApplication(
       selectedCharacterId?: string;
       storyLengthProfile: "brief" | "standard" | "long" | "extended";
       storyContextBudgetTokens: 32_000 | 64_000 | 128_000 | 256_000 | 1_000_000 | 2_000_000 | 4_000_000;
-      turnControlStyle: "action_only" | "flexible_auto" | "flexible_action" | "flexible_scene";
+      turnControlStyle: "action_only" | "flexible_action" | "flexible_scene";
     }) => ({
       id: TEST_CAMPAIGN_ID,
       title: request.title,
@@ -419,7 +419,7 @@ export function testWorldCampaignApplication(
         worldVersionId: TEST_WORLD_VERSION_ID,
         storyLengthProfile: "standard",
         storyContextBudgetTokens: 32_000,
-        turnControlStyle: "flexible_auto",
+        turnControlStyle: "flexible_action",
         updatedAt: TEST_TIMESTAMP,
         selectedCharacterId: "observer",
         selectedCharacterName: "The Observer",
@@ -434,7 +434,7 @@ export function testWorldCampaignApplication(
           worldVersionId: TEST_WORLD_VERSION_ID,
           storyLengthProfile: "standard",
           storyContextBudgetTokens: 32_000,
-          turnControlStyle: "flexible_auto",
+          turnControlStyle: "flexible_action",
           updatedAt: TEST_TIMESTAMP,
           selectedCharacterId: "observer",
           selectedCharacterName: "The Observer",

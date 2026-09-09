@@ -30,7 +30,6 @@ import {
   playableCharacterListResponseSchema,
   providerListResponseSchema,
   sessionResponseSchema,
-  turnInputClassificationResponseSchema,
   turnListResponseSchema,
   userProfileResponseSchema,
   worldCreateResponseSchema,
@@ -220,6 +219,9 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
       options.onInitialOwnerRead?.();
       return { rows: [{ id: OWNER_ID }] };
     }
+    if (sql === "SELECT id FROM campaigns WHERE id = $1 AND owner_user_id = $2") {
+      return { rows: [{ id: CAMPAIGN_ID }] };
+    }
     if (sql.startsWith('SELECT id, system_key AS "systemKey"')) return { rows: [{
       id: OWNER_ID,
       systemKey: "initial-owner",
@@ -310,7 +312,7 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
       title: "The Observatory",
       story_length_profile: "standard",
       storyContextBudgetTokens: 32_000,
-      turn_control_style: "flexible_auto",
+      turn_control_style: "flexible_action",
       selected_character_id: "observer",
       character_snapshot: { name: "The Observer", characterText: "A patient observer." },
       character_profile: null,
@@ -392,7 +394,7 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
       updatedAt: NOW,
       storyLengthProfile: "standard",
       storyContextBudgetTokens: 32_000,
-      turnControlStyle: "flexible_auto",
+      turnControlStyle: "flexible_action",
       selectedCharacterId: "observer",
       selectedCharacterName: "The Observer",
       worldId: WORLD_ID,
@@ -413,7 +415,7 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
       worldVersionId: WORLD_VERSION_ID,
       storyLengthProfile: "standard",
       storyContextBudgetTokens: 32_000,
-      turnControlStyle: "flexible_auto",
+      turnControlStyle: "flexible_action",
       selectedCharacterId: "observer",
       characterSnapshot: { name: "The Observer", characterText: "A patient observer." },
       characterProfile: null,
@@ -540,7 +542,8 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
       operationKind: "append",
       replacementTurnId: null,
       promptSnapshot: RETRY_PROMPT_SNAPSHOT,
-      promptProtocolVersion: providerPromptProtocolVersion(RETRY_PROMPT_SNAPSHOT)
+      promptProtocolVersion: providerPromptProtocolVersion(RETRY_PROMPT_SNAPSHOT),
+      generationPolicy: null
     }] };
 
     if (sql.startsWith("WITH source AS ( SELECT id, status, campaign_id AS \"campaignId\"")) return { rows: [{
@@ -911,17 +914,6 @@ describe("client API route contracts without PostgreSQL", () => {
         revision: 1
       });
 
-      const classification = await app.inject({
-        method: "POST",
-        url: `/api/v1/campaigns/${CAMPAIGN_ID}/turn-input/classify`,
-        payload: { text: "Open the dome.", preferredFallback: "action" }
-      });
-      expect(classification.statusCode).toBe(200);
-      expect(turnInputClassificationResponseSchema.parse(classification.json())).toMatchObject({
-        classification: "action",
-        resolvedMode: "action"
-      });
-
       const rewind = await app.inject({
         method: "POST",
         url: `/api/v1/campaigns/${CAMPAIGN_ID}/rewind`,
@@ -962,7 +954,7 @@ describe("client API route contracts without PostgreSQL", () => {
           title: "Route Campaign",
           selectedCharacterId: "observer",
           storyLengthProfile: "standard",
-          turnControlStyle: "flexible_auto"
+          turnControlStyle: "flexible_action"
         }
       });
       expect(campaign.statusCode).toBe(201);
@@ -992,7 +984,6 @@ describe("client API route contracts without PostgreSQL", () => {
     ["POST", "/api/v1/worlds"],
     ["POST", "/api/v1/campaigns"],
     ["PATCH", `/api/v1/campaigns/${CAMPAIGN_ID}/state`],
-    ["POST", `/api/v1/campaigns/${CAMPAIGN_ID}/turn-input/classify`],
     ["POST", `/api/v1/campaigns/${CAMPAIGN_ID}/rewind`],
     ["POST", `/api/v1/campaigns/${CAMPAIGN_ID}/branch`]
   ] as const)("returns a correlated contract error for malformed %s %s input", async (method, url) => {
@@ -1008,6 +999,24 @@ describe("client API route contracts without PostgreSQL", () => {
       expect(apiErrorEnvelopeSchema.parse(response.json())).toMatchObject({
         correlationId: `invalid-${method.toLowerCase()}`,
         details: {}
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("retires the historical turn classifier after verifying campaign ownership", async () => {
+    const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool() }));
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/v1/campaigns/${CAMPAIGN_ID}/turn-input/classify`,
+        payload: { text: "Open the dome.", preferredFallback: "action" }
+      });
+      expect(response.statusCode).toBe(410);
+      expect(response.json()).toEqual({
+        code: "turn_input_classification_removed",
+        message: "Turn classification was removed. Refresh and use the campaign turn-control setting."
       });
     } finally {
       await app.close();
