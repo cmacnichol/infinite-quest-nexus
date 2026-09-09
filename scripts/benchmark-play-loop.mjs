@@ -277,7 +277,7 @@ async function seedCampaign({ pool, worldCampaign, legacyWorldContent, storyTemp
     selectedCharacterId: content.playableCharacters[0].id,
     storyLengthProfile: "standard",
     storyContextBudgetTokens: 32_000,
-    turnControlStyle: "flexible_auto",
+    turnControlStyle: "flexible_action",
   });
   const campaignId = campaign.id;
   const worldId = world.id;

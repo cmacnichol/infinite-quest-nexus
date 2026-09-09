@@ -191,6 +191,24 @@ integration("Story Direction choice repair PostgreSQL workflow", () => {
     return { imported, queued, repository, choiceRepair: stored.rows[0]!.orchestration.choiceRepair };
   }
 
+  async function persistedPendingRepair(workerId: string) {
+    const imported = await campaign();
+    const before = await campaignCounts(imported.campaignId);
+    const queued = await enqueue(imported.campaignId);
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const operations: string[] = [];
+    await execute(queued.id, workerId, [
+      { content: "{not valid JSON", responseId: "pending-recovery-rejected" },
+      { content: output(["Enter the observatory.", " enter the observatory. ", "Wait beneath the eaves.", "Speak to the keeper."], "\uff33\uff50\uff45\uff41\uff4b\uff0e"), responseId: "pending-recovery-duplicate" }
+    ], operations, []);
+    expect(operations).toEqual(["story_generation", "story_recovery"]);
+    const stored = await pool.query<{ orchestration: { choiceRepair: Record<string, unknown> } }>(
+      "SELECT orchestration_private AS orchestration FROM generation_jobs WHERE id=$1", [queued.id]
+    );
+    expect(stored.rows[0]!.orchestration.choiceRepair.status).toBe("pending");
+    return { imported, before, queued, repository, choiceRepair: stored.rows[0]!.orchestration.choiceRepair };
+  }
+
   it("repairs duplicate choices once while preserving every non-choice field and original authority", async () => {
     const imported = await campaign();
     const sourceFactId = await seedCanonicalFact(imported.campaignId);
@@ -234,6 +252,146 @@ integration("Story Direction choice repair PostgreSQL workflow", () => {
       "SELECT content,valid_until_turn FROM campaign_canonical_facts WHERE id=$1", [sourceFactId]
     );
     expect(sourceFact.rows).toEqual([{ content: "The keeper's lantern burns above the west door.", valid_until_turn: expect.any(Number) }]);
+  }, 60_000);
+
+  it.each([
+    ["malformed JSON", "{not valid JSON"],
+    ["schema-invalid output", JSON.stringify({ narration: "The observatory door opens beneath the rain." })],
+    ["mechanics-bearing output", JSON.stringify({
+      ...JSON.parse(output(["Enter the observatory.", "Call for the keeper.", "Study the threshold.", "Circle the tower."])),
+      narration: "Mara rolls a die before opening the observatory door."
+    })],
+    ["output-limited normalized duplicate choices", "{not-valid-json", true]
+  ])("keeps a recovered Story Direction draft pending when %s is followed by normalized duplicate choices", async (_caseName, rejected, recoveredOutputLimited = false) => {
+    const imported = await campaign();
+    const sourceFactId = await seedCanonicalFact(imported.campaignId);
+    const before = await campaignCounts(imported.campaignId);
+    const queued = await enqueue(imported.campaignId);
+    const operations: string[] = [];
+    const requests: string[] = [];
+    const duplicateRecovered = output([
+      "Enter the observatory.",
+      " enter the observatory. ",
+      "Wait beneath the eaves.",
+      "Speak to the keeper."
+    ], "\uff33\uff50\uff45\uff41\uff4b\uff0e");
+
+    await execute(queued.id, `choice-repair-generic-${crypto.randomUUID()}`, [
+      { content: rejected, responseId: "generic-recovery-rejected" },
+      { content: duplicateRecovered, responseId: "generic-recovery-duplicate", outputLimited: recoveredOutputLimited }
+    ], operations, requests);
+
+    expect(operations).toEqual(["story_generation", "story_recovery"]);
+    expect(requests).toHaveLength(2);
+    expect(await campaignCounts(imported.campaignId)).toEqual(before);
+    const saved = await pool.query<{
+      status: string;
+      errorCode: string | null;
+      resultTurnId: string | null;
+      policy: { playMode?: string; turnControlStyle?: string };
+      orchestration: { choiceRepair?: Record<string, unknown> };
+    }>(`SELECT status,error_code AS "errorCode",result_turn_id AS "resultTurnId",
+                 generation_policy AS policy,orchestration_private AS orchestration
+          FROM generation_jobs WHERE id=$1`, [queued.id]);
+    expect(saved.rows).toMatchObject([{
+      status: "recoverable", errorCode: "invalid_schema", resultTurnId: null,
+      policy: { playMode: "story_only", turnControlStyle: "flexible_scene" },
+      orchestration: { choiceRepair: {
+        status: "pending", originalResponse: { responseId: "generic-recovery-duplicate" },
+        base: { narration: "Rain turns the observatory glass silver as Mara opens the west door." }
+      } }
+    }]);
+    const pendingCheckpoint = saved.rows[0]!.orchestration.choiceRepair!;
+    expect(pendingCheckpoint.originalRequestBody).not.toBe("");
+    expect(pendingCheckpoint.originalRequestPayloadHash).toEqual(expect.any(String));
+    expect(pendingCheckpoint.originalSentFactIds).toEqual([sourceFactId]);
+
+    await commands().retry({ ownerUserId, jobId: queued.id });
+    const retryOperations: string[] = [];
+    const retryRequests: string[] = [];
+    await execute(queued.id, `choice-repair-generic-retry-${crypto.randomUUID()}`, [
+      { content: validRepair(), responseId: "generic-recovery-choice-repair" }
+    ], retryOperations, retryRequests);
+    await expect(pool.query("SELECT status,error_code FROM generation_jobs WHERE id=$1", [queued.id]))
+      .resolves.toMatchObject({ rows: [{ status: "completed", error_code: null }] });
+    expect(retryOperations).toEqual(["story_choice_repair"]);
+    expect(retryRequests).toHaveLength(1);
+    await expect(pool.query<{ status: string; resultTurnId: string; responseId: string; narration: string; facts: string[]; orchestration: { choiceRepair: Record<string, unknown> } }>(
+      `SELECT j.status,j.result_turn_id AS "resultTurnId",j.provider_response_id AS "responseId",
+              t.narration,
+              (SELECT coalesce(jsonb_agg(f.content ORDER BY f.source_fact_index), '[]'::jsonb)
+                 FROM campaign_canonical_facts f WHERE f.source_turn_id=t.id) AS facts,
+              j.orchestration_private AS orchestration
+         FROM generation_jobs j JOIN turns t ON t.id=j.result_turn_id WHERE j.id=$1`, [queued.id]
+    )).resolves.toMatchObject({ rows: [{ status: "completed", resultTurnId: expect.any(String),
+      responseId: "generic-recovery-duplicate", narration: "Rain turns the observatory glass silver as Mara opens the west door.",
+      facts: ["The west door is open."] }] });
+    const acceptedCheckpoint = (await pool.query<{ orchestration: { choiceRepair: Record<string, unknown> } }>(
+      "SELECT orchestration_private AS orchestration FROM generation_jobs WHERE id=$1", [queued.id]
+    )).rows[0]!.orchestration.choiceRepair;
+    expect(acceptedCheckpoint).toMatchObject({
+      originalRequestBody: pendingCheckpoint.originalRequestBody,
+      originalRequestPayloadHash: pendingCheckpoint.originalRequestPayloadHash,
+      originalSentFactIds: pendingCheckpoint.originalSentFactIds,
+      originalResponse: pendingCheckpoint.originalResponse
+    });
+  }, 60_000);
+
+  it("does not let a pending recovered choice repair dispatch on lease reclaim before an explicit retry", async () => {
+    const fixture = await persistedPendingRepair("choice-repair-pending-reclaim-a");
+    await pool.query(
+      "UPDATE generation_jobs SET status='queued',lease_owner=NULL,lease_expires_at=NULL WHERE id=$1",
+      [fixture.queued.id]
+    );
+    const reclaimed = await fixture.repository.claimNext({ workerId: "choice-repair-pending-reclaim-b", leaseSeconds: 30 });
+    expect(reclaimed?.jobId).toBe(fixture.queued.id);
+    const operations: string[] = [];
+    const requests: string[] = [];
+    await expect(createGenerationExecutor({ pool, repository: fixture.repository, collaborators: collaborators([], operations, requests) })
+      .execute({ workerId: "choice-repair-pending-reclaim-b", leaseSeconds: 30, claim: reclaimed! })).resolves.toBe(true);
+    expect(operations).toEqual([]);
+    expect(requests).toEqual([]);
+    expect(await campaignCounts(fixture.imported.campaignId)).toEqual(fixture.before);
+    await expect(pool.query("SELECT status,error_code,result_turn_id FROM generation_jobs WHERE id=$1", [fixture.queued.id]))
+      .resolves.toMatchObject({ rows: [{ status: "recoverable", error_code: "automatic_repair_consumed", result_turn_id: null }] });
+  }, 60_000);
+
+  it("fails closed when a pending recovered choice-repair checkpoint is tampered", async () => {
+    const fixture = await persistedPendingRepair("choice-repair-pending-tamper-a");
+    const tampered = structuredClone(fixture.choiceRepair);
+    (tampered.base as Record<string, unknown>).narration = "Tampered recovered narration.";
+    await pool.query("UPDATE generation_jobs SET orchestration_private=$2::jsonb WHERE id=$1", [fixture.queued.id, JSON.stringify({ choiceRepair: tampered })]);
+    await commands().retry({ ownerUserId, jobId: fixture.queued.id });
+    const claimed = await fixture.repository.claimNext({ workerId: "choice-repair-pending-tamper-b", leaseSeconds: 30 });
+    expect(claimed?.jobId).toBe(fixture.queued.id);
+    const operations: string[] = [];
+    const requests: string[] = [];
+    await expect(createGenerationExecutor({ pool, repository: fixture.repository, collaborators: collaborators([], operations, requests) })
+      .execute({ workerId: "choice-repair-pending-tamper-b", leaseSeconds: 30, claim: claimed! })).resolves.toBe(true);
+    expect(operations).toEqual([]);
+    expect(requests).toEqual([]);
+    expect(await campaignCounts(fixture.imported.campaignId)).toEqual(fixture.before);
+    await expect(pool.query("SELECT status,error_code,result_turn_id FROM generation_jobs WHERE id=$1", [fixture.queued.id]))
+      .resolves.toMatchObject({ rows: [{ status: "recoverable", error_code: "generation_checkpoint_incompatible", result_turn_id: null }] });
+  }, 60_000);
+
+  it("fails closed when a pending recovered choice-repair checkpoint is malformed", async () => {
+    const fixture = await persistedPendingRepair("choice-repair-pending-malformed-a");
+    const malformed = structuredClone(fixture.choiceRepair);
+    malformed.repairRequestPayloadHash = "";
+    await pool.query("UPDATE generation_jobs SET orchestration_private=$2::jsonb WHERE id=$1", [fixture.queued.id, JSON.stringify({ choiceRepair: malformed })]);
+    await commands().retry({ ownerUserId, jobId: fixture.queued.id });
+    const claimed = await fixture.repository.claimNext({ workerId: "choice-repair-pending-malformed-b", leaseSeconds: 30 });
+    expect(claimed?.jobId).toBe(fixture.queued.id);
+    const operations: string[] = [];
+    const requests: string[] = [];
+    await expect(createGenerationExecutor({ pool, repository: fixture.repository, collaborators: collaborators([], operations, requests) })
+      .execute({ workerId: "choice-repair-pending-malformed-b", leaseSeconds: 30, claim: claimed! })).resolves.toBe(false);
+    expect(operations).toEqual([]);
+    expect(requests).toEqual([]);
+    expect(await campaignCounts(fixture.imported.campaignId)).toEqual(fixture.before);
+    await expect(pool.query("SELECT status,error_code,result_turn_id FROM generation_jobs WHERE id=$1", [fixture.queued.id]))
+      .resolves.toMatchObject({ rows: [{ status: "recoverable", error_code: "generation_checkpoint_incompatible", result_turn_id: null }] });
   }, 60_000);
 
   it("fails an oversized protected choice-repair request before repair transport or authoritative writes", async () => {

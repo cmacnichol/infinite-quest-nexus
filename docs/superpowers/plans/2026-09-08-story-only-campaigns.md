@@ -499,6 +499,7 @@ The sanitized 12-case quality corpus may be authored and independently reviewed 
 - Create `tests/helpers/story-only-generation-fixtures.ts`, `tests/fixtures/story-only/quality-cases.json`, `scripts/benchmark-story-only.ts`, `tests/unit/story-only-benchmark.test.ts`, `docs/review/story-only-campaigns/verification.md`.
 - Extend new story-only PostgreSQL/browser suites and existing `tests/integration/generation-budget-growth.integration.test.ts` where policy adds prompt tokens.
 - Update `services/runtime/src/generation-executor-adapter.ts` only for bounded safe stage telemetry needed by the benchmark; retain current phase logs and operation names.
+- Reconcile aggregate-discovered consumers of the changed contracts: `tests/integration/campaign-archive.integration.test.ts` must re-import current payloads through the current archive path; `tests/integration/migrations.integration.test.ts` and `tests/integration/task-14e2c-adapter-matrix.integration.test.ts` must include migration 0094 in exact upgrade expectations; `scripts/benchmark-play-loop.mjs` must create a campaign using a supported current setting. Preserve historical-reader rejection and existing query-budget assertions, and verify each actual failure before changing its expectation.
 
 **Benchmark interface**
 
@@ -515,10 +516,16 @@ Fixture observation points are explicit: `invalid_narration` and `output_limited
 - [ ] Write RED composed cases asserting clean Story only has exactly one narrative call; events_configured also has one; choice_repair has exactly two; legacy mode retains the corresponding existing call sequence. Do not assert elapsed time alone.
 
 ```ts
-const result = await runStoryOnlyFixture(createStoryOnlyFixture({playMode: "story_only", scenario: "events_configured"}));
-expect(result.operations).toEqual(["story_generation"]);
-expect(result.afterState.pendingEventTriggers).toEqual(result.beforeState.pendingEventTriggers);
-expect(result.committed).toBe(true);
+const fixture = await createStoryOnlyFixture({ playMode: "story_only", scenario: "events_configured" });
+try {
+  const result = await runStoryOnlyFixture(fixture);
+  expect(result.operations).toEqual(["story_generation"]);
+  expect(JSON.parse(result.afterState).state.pending_event_triggers)
+    .toEqual(JSON.parse(result.beforeState).state.pending_event_triggers);
+  expect(result.committed).toBe(true);
+} finally {
+  await fixture.close();
+}
 ```
 
 - [ ] Write RED benchmark test with a synthetic timing source proving percentile calculation, failure counts, and distinct operation groups; do not write a test that merely snapshots a printed table.
@@ -547,6 +554,8 @@ Before the aggregate browser run, the controller must integrate both released E2
 
 **Owner:** Terra documentation implementer, then fresh Terra final reviewer. **Depends on:** Task 8.
 
+**Documentation drafting exception:** after Tasks 1–7 are accepted and Task 8 has a reviewed benchmark with only test/report remediation and aggregate execution remaining, a Terra documentation worker with exclusive documentation ownership may draft the product guides, architecture decision, and rollout instructions in disjoint files. Task 8 retains ownership of its verification report until accepted. The documentation worker must reconcile the final report after that handoff; documentation acceptance, final whole-branch review, and completion still depend on Task 8. This changes work order only, not any verification gate.
+
 **Files**
 - Modify `docs/player-guide/actions-and-choices.md`, `docs/player-guide/turn-input-modes.md`, `docs/concepts/generation-integrity.md`, `docs/workflows/testing.md`, `docs/runbooks/deployment.md`.
 - Reconcile current linked guidance outside those initial files: `docs/player-guide/interface.md`, `recovering-a-generation.md`, and `troubleshooting.md`; `docs/getting-started/first-story-turn.md`; `docs/installation/provider-configuration.md`; `docs/concepts/story-engine.md` and `mechanics-and-fiction-separation.md`; `docs/reference/capabilities.md`; and the affected campaign/provider pages under `docs/nexus-guide/`. A source search found active Auto-selection and intent-provider instructions there. Update the relevant sections and navigation, rather than leaving contradictory operating instructions beside the new guide. Preserve unrelated automatic choice submission, reading-width, artwork, and import options.
@@ -560,6 +569,7 @@ Before the aggregate browser run, the controller must integrate both released E2
 - [ ] Run `pnpm --filter @infinite-quest/docs build`, local link validation, and `git diff --check`. Resolve documentation build failures introduced by changed schemas/examples or navigation. Commit `Document story-only campaign workflow and rollout`.
 - [ ] Controller packages whole-branch diff from `977d8a53`, spec, all task reports, verification evidence, and parked findings for a fresh Terra reviewer. Require review of authority boundaries, policy immutability, pending-state preservation, prompt/repair provenance, portability versions, legacy regression, and UI screenshots.
 - [ ] Fix actionable findings through a Terra implementer and rerun affected checks before scoped re-review. Finish only when no unresolved load-bearing issue remains; explicitly report any release-only gate such as unrun live quality evaluation.
+- Final review identified a recovery edge case that must be covered before acceptance: generic narrative/schema recovery must reapply Story-only choice validation. If its non-choice fields are valid but choices are defective after the automatic budget is used, preserve a truthful pending choice-repair checkpoint with producing-request provenance; do not dispatch a third automatic call. Verify that reclaim cannot grant repair, explicit retry repairs only choices, accepted authority stays unchanged until valid output commits, and legacy recovery remains unchanged. The narrow fix may extend the private checkpoint type/validator in `packages/database/src/generation-execution-repository.ts` alongside the executor and regression tests; no new public API or database migration is required.
 - [ ] Deliver branch/worktree, final commit SHA, exact tests, benchmark caveats, screenshots, design deviations, and remaining release steps. Preserve worktree; no push, PR, merge, or deployment unless separately requested.
 
 ## Final acceptance matrix

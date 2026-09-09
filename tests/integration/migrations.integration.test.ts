@@ -78,7 +78,8 @@ integration("standard database migration runner", () => {
           "0090_authoring_apply_review_selection",
           "0091_story_source_authoring",
           "0092_source_synthesis_review_fence",
-          "0093_portable_source_material_authority_paths"
+          "0093_portable_source_material_authority_paths",
+          "0094_story_generation_policy"
         ]);
       const acknowledgement = await isolatedPool.query<{ compatibility_protocol_identity: string }>(
         "SELECT compatibility_protocol_identity FROM prompt_template_overrides WHERE owner_user_id=$1 AND prompt_key='story_system'",
@@ -1767,7 +1768,8 @@ END;
         "0090_authoring_apply_review_selection",
         "0091_story_source_authoring",
         "0092_source_synthesis_review_fence",
-        "0093_portable_source_material_authority_paths"
+        "0093_portable_source_material_authority_paths",
+        "0094_story_generation_policy"
       ]);
 
       const scrubbed = await isolatedPool.query<{ technical_metadata: Record<string, unknown> }>(
@@ -2767,11 +2769,18 @@ END;
         "0090_authoring_apply_review_selection",
         "0091_story_source_authoring",
         "0092_source_synthesis_review_fence",
-        "0093_portable_source_material_authority_paths"
+        "0093_portable_source_material_authority_paths",
+        "0094_story_generation_policy"
       ]);
 
-      // Accepted turns and every derived vector survive the upgrade untouched.
-      expect(await snapshotTurnRows(isolatedPool, ownerUserId, campaign.rows[0]!.id)).toEqual(beforeTurns);
+      // The additive nullable generation-policy column is present after the upgrade;
+      // every existing accepted-turn value and row version remains unchanged.
+      const upgradedTurns = await snapshotTurnRows(isolatedPool, ownerUserId, campaign.rows[0]!.id);
+      expect(upgradedTurns).toEqual(beforeTurns.map((turn) => ({
+        ...turn,
+        data: { ...turn.data, generation_policy: null }
+      })));
+      expect(upgradedTurns.map((turn) => turn.data.generation_policy)).toEqual(beforeTurns.map(() => null));
       expect(await isolatedPool.query(
         `SELECT id,embedding::text AS embedding,embedding_status,embedding_skip_reason,content_hash
            FROM chronicle_memory_chunks ORDER BY chunk_kind`

@@ -150,7 +150,8 @@ export type GenerationOrchestrationState = {
     repairResponseFormat: "json_object" | "none";
     fields?: Pick<StoryTurnOutput, "choices" | "custom_action_suggestion">;
     resultHash?: string;
-    status: "dispatched" | "validated";
+    /** Prepared after an exhausted generic recovery; only an explicit retry may dispatch it. */
+    status: "pending" | "dispatched" | "validated";
   } | undefined;
   /** One durable, provenance-fenced rewrite allowance for rejected event fiction. */
   eventCoverageRepair?: {
@@ -198,7 +199,7 @@ function hasValidChoiceRepair(value: unknown): boolean {
     && typeof repair.repairRequestBody === "string" && repair.repairRequestBody.length > 0
     && (repair.repairResponseFormat === "json_object" || repair.repairResponseFormat === "none")
     && typeof repair.repairRequestPayloadHash === "string" && repair.repairRequestPayloadHash.length > 0
-    && (repair.status === "dispatched" || repair.status === "validated")
+    && (repair.status === "pending" || repair.status === "dispatched" || repair.status === "validated")
     && (repair.status !== "validated" || (typeof repair.repairRequestPayloadHash === "string" && typeof repair.resultHash === "string" && typeof repair.fields === "object" && repair.fields !== null));
 }
 

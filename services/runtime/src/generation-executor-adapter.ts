@@ -135,6 +135,8 @@ export type GenerationExecutionCollaborators = Readonly<{
     attribution: GenerationCostAttribution,
     result: ProviderResult
   ): Promise<string | null>;
+  /** Observes every actual provider dispatch, including attempts that fail before a cost row exists. */
+  onProviderDispatch?(operation: StoryCostOperation): void;
   attributeGenerationCostsToTurn(
     client: DatabaseClient,
     ownerUserId: string,
@@ -850,6 +852,7 @@ async function callCampaignTextProvider(
     recovery: Boolean(request.recoveryInput)
   });
   try {
+    dependencies.collaborators.onProviderDispatch?.(operation);
     const result = await provider.execute({
       ...request,
       // Every generation operation is serialized and checked before transport.
@@ -1272,6 +1275,18 @@ async function executeLoadedGeneration(
     }
     let resumedChoiceStory: StoryTurnOutput | null = null;
     const savedChoiceRepair = orchestration.choiceRepair;
+    if (!validatedDraft && savedChoiceRepair?.status === "pending" && orchestration.automaticRepair) {
+      assertActiveGenerationUpdate(await repository.markRecoverable({
+        ...scope, providerResponseId: null, providerFinishReason: null,
+        errorCode: "automatic_repair_consumed",
+        errorMessage: "Story Direction choice repair awaits an explicit retry after the automatic recovery.",
+        recoveryMetadata: { retryable: true, stage: "choice_repair" }
+      }), "saving pending Story Direction choice repair state");
+      return true;
+    }
+    const resumingPendingChoiceRepair = !validatedDraft
+      && savedChoiceRepair?.status === "pending"
+      && !orchestration.automaticRepair;
     if (!validatedDraft && savedChoiceRepair?.status === "dispatched") {
       assertActiveGenerationUpdate(await repository.markRecoverable({
         ...scope, providerResponseId: null, providerFinishReason: null,
@@ -1291,8 +1306,8 @@ async function executeLoadedGeneration(
           || savedChoiceRepair.providerModel !== provider.model
           || savedChoiceRepair.providerConfigurationHash !== effectiveProviderConfigurationHash(provider, job)
           || savedChoiceRepair.baseHash !== sha256(stableStringify(savedChoiceRepair.base))
-          || savedChoiceRepair.status !== "validated" || !savedChoiceRepair.fields
-          || savedChoiceRepair.resultHash !== sha256(stableStringify(savedChoiceRepair.fields))
+          || (savedChoiceRepair.status !== "pending" && (savedChoiceRepair.status !== "validated" || !savedChoiceRepair.fields))
+          || (savedChoiceRepair.status === "validated" && savedChoiceRepair.resultHash !== sha256(stableStringify(savedChoiceRepair.fields)))
           || savedChoiceRepair.originalRequestPayloadHash !== sha256(savedChoiceRepair.originalRequestBody)
           || savedChoiceRepair.repairRequestPayloadHash !== sha256(savedChoiceRepair.repairRequestBody)
           || stableStringify(choiceRepairPreparedRequest(provider,
@@ -1306,7 +1321,9 @@ async function executeLoadedGeneration(
         if (original.ok || original.kind !== "choices" || stableStringify(original.base) !== stableStringify(savedChoiceRepair.base)) {
           throw new Error("Choice repair checkpoint does not match the original rejected draft.");
         }
-        resumedChoiceStory = mergeChoiceRepair(savedChoiceRepair.base, savedChoiceRepair.fields);
+        if (savedChoiceRepair.status === "validated") {
+          resumedChoiceStory = mergeChoiceRepair(savedChoiceRepair.base, savedChoiceRepair.fields!);
+        }
       } catch {
         assertActiveGenerationUpdate(await repository.markRecoverable({
           ...scope, providerResponseId: null, providerFinishReason: null,
@@ -1563,7 +1580,7 @@ async function executeLoadedGeneration(
         return true;
       }
     }
-    if (generationPolicy?.playMode === "story_only" && result.outputLimited) {
+    if (generationPolicy?.playMode === "story_only" && result.outputLimited && !resumingPendingChoiceRepair) {
       const choiceOnly = parseStoryOnlyOutput(result.content);
       if (!choiceOnly.ok && choiceOnly.kind === "choices") {
         assertActiveGenerationUpdate(await repository.markRecoverable({
@@ -1574,7 +1591,8 @@ async function executeLoadedGeneration(
         return true;
       }
     }
-    if (generationPolicy?.playMode === "story_only" && !validatedDraft && !result.outputLimited) {
+    if (generationPolicy?.playMode === "story_only" && !validatedDraft
+        && (!result.outputLimited || resumingPendingChoiceRepair)) {
       const choiceOnly = parseStoryOnlyOutput(result.content);
       if (!choiceOnly.ok && choiceOnly.kind === "choices") {
         const existing = orchestration.choiceRepair;
@@ -1586,7 +1604,7 @@ async function executeLoadedGeneration(
           } catch {
             // The checkpoint is rejected below as a recoverable integrity failure.
           }
-        } else if (existing) {
+        } else if (existing && existing.status !== "pending") {
           assertActiveGenerationUpdate(await repository.markRecoverable({
             ...scope, providerResponseId: null, providerFinishReason: null,
             errorCode: "automatic_repair_consumed",
@@ -1601,15 +1619,18 @@ async function executeLoadedGeneration(
             budgetOutput: { kind: "story_choice_repair" as const }
           };
           const initialRepairRequest = choiceRepairPreparedRequest(provider, generationPolicy.prompts.choiceRepairSystem, choiceOnly.base, "json_object");
-          const originalPrepared = preparedRequestForResult(result, provider, primaryRequest);
+          const pendingCheckpoint = existing?.status === "pending" ? existing : null;
+          const originalPrepared = pendingCheckpoint
+            ? { body: pendingCheckpoint.originalRequestBody, payloadHash: pendingCheckpoint.originalRequestPayloadHash }
+            : preparedRequestForResult(result, provider, primaryRequest);
           orchestration = await persistOrchestration(repository, scope, job, {
             choiceRepair: {
               version: 1, ownerUserId: job.owner_user_id, campaignId: job.campaign_id, baseIdentity: job.generation_base_identity,
               providerId: provider.id, providerModel: provider.model, providerConfigurationHash: effectiveProviderConfigurationHash(provider, job),
               policyIdentity: frozenGenerationPolicyIdentity!, baseHash: sha256(stableStringify(choiceOnly.base)),
               base: choiceOnly.base, originalRequestBody: originalPrepared.body, originalRequestPayloadHash: originalPrepared.payloadHash,
-              originalSentFactIds: sentCanonicalFactIds(originalPrepared.body),
-              originalResponse: result, consumedAttempt: job.attempts,
+              originalSentFactIds: pendingCheckpoint?.originalSentFactIds || sentCanonicalFactIds(originalPrepared.body),
+              originalResponse: pendingCheckpoint?.originalResponse || result, consumedAttempt: job.attempts,
               repairRequestBody: initialRepairRequest.body, repairRequestPayloadHash: initialRepairRequest.payloadHash,
               repairResponseFormat: "json_object", status: "dispatched"
             }
@@ -1670,22 +1691,23 @@ async function executeLoadedGeneration(
           consumedAttempt: job.attempts
         }
       });
+      const recoveryRequest = {
+        ...baseRequest,
+        recoveryInput: recoveryPromptFromSnapshot(
+          collaborators,
+          job,
+          recoveryReason,
+          initialValidationErrors,
+          storyLength
+        ),
+        rejectedResponse
+      };
       result = await phase("story_recovery", () => callCampaignTextProvider(
         dependencies,
         provider,
         job,
         "story_recovery",
-        {
-          ...baseRequest,
-          recoveryInput: recoveryPromptFromSnapshot(
-            collaborators,
-            job,
-            recoveryReason,
-            initialValidationErrors,
-            storyLength
-          ),
-          rejectedResponse
-        }
+        recoveryRequest
       ));
       validation = await phase("story_validation", async () => {
         const recoveredParsed = parseStoryOutput(result.content, storyMemoryDefaults);
@@ -1731,6 +1753,37 @@ async function executeLoadedGeneration(
         };
       });
       ({ parsed, firstReason, initialValidationErrors, initialAttemptNumber } = validation);
+      if (generationPolicy?.playMode === "story_only" && parsed.ok) {
+        const recoveredChoiceOnly = parseStoryOnlyOutput(result.content);
+        if (!recoveredChoiceOnly.ok && recoveredChoiceOnly.kind === "choices") {
+          const preparedRecoveryRequest = preparedRequestForResult(result, provider, recoveryRequest);
+          const preparedChoiceRepair = choiceRepairPreparedRequest(
+            provider,
+            generationPolicy.prompts.choiceRepairSystem,
+            recoveredChoiceOnly.base,
+            "json_object"
+          );
+          orchestration = await persistOrchestration(repository, scope, job, {
+            choiceRepair: {
+              version: 1, ownerUserId: job.owner_user_id, campaignId: job.campaign_id,
+              baseIdentity: job.generation_base_identity, providerId: provider.id, providerModel: provider.model,
+              providerConfigurationHash: effectiveProviderConfigurationHash(provider, job),
+              policyIdentity: frozenGenerationPolicyIdentity!, baseHash: sha256(stableStringify(recoveredChoiceOnly.base)),
+              base: recoveredChoiceOnly.base, originalRequestBody: preparedRecoveryRequest.body,
+              originalRequestPayloadHash: preparedRecoveryRequest.payloadHash,
+              originalSentFactIds: sentCanonicalFactIds(preparedRecoveryRequest.body), originalResponse: result,
+              consumedAttempt: job.attempts, repairRequestBody: preparedChoiceRepair.body,
+              repairRequestPayloadHash: preparedChoiceRepair.payloadHash, repairResponseFormat: "json_object", status: "pending"
+            }
+          });
+          assertActiveGenerationUpdate(await repository.markRecoverable({
+            ...scope, providerResponseId: result.responseId || null, providerFinishReason: result.finishReason || null,
+            errorCode: "invalid_schema", errorMessage: "Recovered Story Direction choices require an explicit retry.",
+            recoveryMetadata: { retryable: true, stage: "choice_repair", attemptCount: 2 }
+          }), "saving recovered Story Direction choice repair state");
+          return true;
+        }
+      }
     }
     const validationFailure = "code" in parsed ? parsed : null;
     if (validationFailure) {
