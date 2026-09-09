@@ -279,6 +279,7 @@ const effectiveEventTriggers = stages.allowEventEvaluation ? inputs.eventTrigger
 - Create `packages/story-engine/src/story-only-output.ts`, `tests/unit/story-only-output.test.ts`, `tests/integration/story-only-choice-repair.integration.test.ts`.
 - Modify `packages/story-engine/src/story-only-prompt.ts`, `packages/story-engine/src/index.ts`, `services/runtime/src/generation-executor-adapter.ts`, `packages/database/src/generation-execution-repository.ts`, `packages/contracts/src/generation.ts` for private checkpoint types.
 - Review `packages/story-engine/src/output.ts`, `provider-request.ts`, `providers.ts`, and `services/runtime/src` text-provider operation mapping before adding the repair operation; preserve legacy parser behavior.
+- Include `services/api/src/generation-diagnostics.ts` alongside the runtime executor's separate phase/cost unions when adding `story_choice_repair`. Review `packages/client-core/src/generation/workflow.ts` and its tests: its first-attempt recoverable path automatically retries, so the persisted repair allowance must survive that retry without another repair dispatch. Update these consumers where required rather than relying only on direct executor tests.
 - Tests: new output/repair suites, `tests/unit/story-output.test.ts`, `tests/unit/generation-executor-adapter.test.ts`, `tests/unit/provider-request-budget.test.ts`.
 
 **Produces**
