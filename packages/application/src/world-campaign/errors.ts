@@ -34,6 +34,7 @@ const INVALID_REQUEST_REASONS: ReadonlySet<WorldCampaignTransitionFailureReason>
   "owner_scope_required",
   "world_transfer_required",
   "fact_campaign_mismatch",
+  "turn_control_style_fence_required",
   "invalid_transition"
 ]);
 
@@ -41,6 +42,7 @@ const STALE_REASONS: ReadonlySet<WorldCampaignTransitionFailureReason> = new Set
   "draft_revision_changed",
   "world_version_changed",
   "promotion_requires_current_version",
+  "turn_control_style_changed",
   "active_turn_changed",
   "state_revision_changed"
 ]);

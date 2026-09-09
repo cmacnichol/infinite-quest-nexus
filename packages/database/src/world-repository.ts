@@ -1263,6 +1263,65 @@ function createPostgresCampaignRepository(
     },
     async updateCampaign(transaction, scope, request) {
       const client = worldCampaignDatabaseClient(transaction);
+      const currentResult = await client.query<{
+        turn_control_style: string;
+        active_turn_number: number;
+        revision: number;
+      }>(
+        `SELECT campaign.turn_control_style, campaign.active_turn_number, state.revision
+           FROM campaigns campaign
+           JOIN campaign_state state ON state.campaign_id = campaign.id
+            AND state.owner_user_id = campaign.owner_user_id
+          WHERE campaign.id = $1 AND campaign.owner_user_id = $2
+          FOR UPDATE OF campaign, state`,
+        [scope.campaignId, scope.ownerUserId]
+      );
+      const current = currentResult.rows[0];
+      if (!current) return failure("campaign_not_found", { campaignId: scope.campaignId });
+      const changingTurnControlStyle = request.turnControlStyle !== undefined
+        && request.turnControlStyle !== current.turn_control_style;
+      if (changingTurnControlStyle) {
+        if (request.expectedTurnControlStyle === undefined
+          || request.expectedActiveTurnNumber === undefined
+          || request.expectedStateRevision === undefined) {
+          return failure("turn_control_style_fence_required", {
+            campaignId: scope.campaignId,
+            actualTurnControlStyle: current.turn_control_style
+          });
+        }
+        if (request.expectedTurnControlStyle !== current.turn_control_style) {
+          return failure("turn_control_style_changed", {
+            campaignId: scope.campaignId,
+            expectedTurnControlStyle: request.expectedTurnControlStyle,
+            actualTurnControlStyle: current.turn_control_style
+          });
+        }
+        if (request.expectedActiveTurnNumber !== current.active_turn_number) {
+          return failure("active_turn_changed", {
+            campaignId: scope.campaignId,
+            expectedTurnNumber: request.expectedActiveTurnNumber,
+            actualTurnNumber: current.active_turn_number
+          });
+        }
+        if (request.expectedStateRevision !== current.revision) {
+          return failure("state_revision_changed", {
+            campaignId: scope.campaignId,
+            expectedStateRevision: request.expectedStateRevision,
+            actualStateRevision: current.revision
+          });
+        }
+        const unresolved = await client.query(
+          `SELECT 1 FROM generation_jobs
+            WHERE campaign_id = $1 AND owner_user_id = $2
+              AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable')
+            LIMIT 1`,
+          [scope.campaignId, scope.ownerUserId]
+        );
+if (unresolved.rowCount) return failure("generation_in_progress", {
+          campaignId: scope.campaignId,
+          unresolvedGenerationStatuses: ["queued", "replacement_queued", "assessing", "generating", "validating", "committing", "recoverable"]
+        });
+      }
       for (const [profileId, role] of [
         [request.textProviderProfileId, "text"],
         [request.imageProviderProfileId, "image"]
@@ -1316,6 +1375,22 @@ function createPostgresCampaignRepository(
             [scope.campaignId, scope.ownerUserId, profile.id, profile.default_model]
           );
         }
+      }
+      if (changingTurnControlStyle) {
+        await client.query(
+          "DELETE FROM model_chains WHERE campaign_id = $1 AND owner_user_id = $2",
+          [scope.campaignId, scope.ownerUserId]
+        );
+        await client.query(
+          `INSERT INTO activity_events (owner_user_id, campaign_id, event_type, details)
+           VALUES ($1,$2,'campaign_turn_control_style_changed',$3)`,
+          [scope.ownerUserId, scope.campaignId, json({
+            fromTurnControlStyle: current.turn_control_style,
+            toTurnControlStyle: request.turnControlStyle,
+            activeTurnNumber: current.active_turn_number,
+            stateRevision: current.revision
+          })]
+        );
       }
       return success(row);
     },

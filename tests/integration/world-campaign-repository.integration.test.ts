@@ -153,6 +153,131 @@ integration("PostgreSQL world campaign repository adapters", () => {
     return { title, created };
   }
 
+  it("fences turn-control-style transitions and invalidates only campaign chains", async () => {
+    const adapters = createAdapters();
+    const world = await createFixtureWorld(adapters, "Style fence world");
+    const version = await publishFixtureWorld(adapters, world.created.id, world.created.draftRevision, "Style fence version");
+    const campaign = await createFixtureCampaign(adapters, version.worldVersionId, "Style fence campaign");
+
+    const missingFence = await adapters.transaction.command((transaction) => adapters.campaigns.updateCampaign(
+      transaction,
+      { ownerUserId, campaignId: campaign.created.id },
+      { turnControlStyle: "flexible_scene" }
+    ));
+    expect(missingFence).toMatchObject({ ok: false, failure: {
+      reason: "turn_control_style_fence_required",
+      details: { actualTurnControlStyle: "flexible_action" }
+    } });
+
+    const changed = unwrap(await adapters.transaction.command((transaction) => adapters.campaigns.updateCampaign(
+      transaction,
+      { ownerUserId, campaignId: campaign.created.id },
+      {
+        turnControlStyle: "flexible_scene",
+        expectedTurnControlStyle: "flexible_action",
+        expectedActiveTurnNumber: 0,
+        expectedStateRevision: 0
+      }
+    )));
+    expect(changed.turnControlStyle).toBe("flexible_scene");
+    expect((await pool.query(
+      "SELECT event_type FROM activity_events WHERE campaign_id = $1",
+      [campaign.created.id]
+    )).rows).toEqual([{ event_type: "campaign_turn_control_style_changed" }]);
+
+    const staleStyle = await adapters.transaction.command((transaction) => adapters.campaigns.updateCampaign(
+      transaction,
+      { ownerUserId, campaignId: campaign.created.id },
+      {
+        turnControlStyle: "flexible_action",
+        expectedTurnControlStyle: "flexible_action",
+        expectedActiveTurnNumber: 0,
+        expectedStateRevision: 0
+      }
+    ));
+    expect(staleStyle).toMatchObject({ ok: false, failure: {
+      reason: "turn_control_style_changed",
+      details: { expectedTurnControlStyle: "flexible_action", actualTurnControlStyle: "flexible_scene" }
+    } });
+  });
+
+  it("blocks style changes while generation is unresolved without mutating dormant state", async () => {
+    const adapters = createAdapters();
+    const world = await createFixtureWorld(adapters, "Unresolved style world");
+    const version = await publishFixtureWorld(adapters, world.created.id, world.created.draftRevision, "Unresolved style version");
+    const campaign = await createFixtureCampaign(adapters, version.worldVersionId, "Unresolved style campaign");
+    const provider = await pool.query<{ id: string }>(
+      `INSERT INTO provider_profiles (owner_user_id, name, provider_type, provider_role, base_url, default_model)
+       VALUES ($1,$2,'openai_compatible','text','http://provider.test','test-model') RETURNING id`,
+      [ownerUserId, `Style fence provider ${crypto.randomUUID()}`]
+    );
+    const before = await pool.query<{ trackers: unknown; pending_event_triggers: unknown; rpg_stats: unknown; revision: number }>(
+      "SELECT trackers, pending_event_triggers, rpg_stats, revision FROM campaign_state WHERE campaign_id = $1",
+      [campaign.created.id]
+    );
+    const unresolvedJob = await pool.query<{ id: string }>(
+      `INSERT INTO generation_jobs (
+         owner_user_id, campaign_id, provider_profile_id, idempotency_key, expected_turn_number,
+         action, status, prompt_protocol_version, prompt_snapshot
+       ) VALUES ($1,$2,$3,$4,1,'Wait','recoverable','story-v1','{}'::jsonb) RETURNING id`,
+      [ownerUserId, campaign.created.id, provider.rows[0]!.id, crypto.randomUUID()]
+    );
+    const blocked = await adapters.transaction.command((transaction) => adapters.campaigns.updateCampaign(
+      transaction,
+      { ownerUserId, campaignId: campaign.created.id },
+      {
+        turnControlStyle: "flexible_scene",
+        expectedTurnControlStyle: "flexible_action",
+        expectedActiveTurnNumber: 0,
+        expectedStateRevision: 0
+      }
+    ));
+    expect(blocked).toMatchObject({ ok: false, failure: {
+      reason: "generation_in_progress",
+      details: { unresolvedGenerationStatuses: expect.arrayContaining(["recoverable"]) }
+    } });
+    const after = await pool.query<{ trackers: unknown; pending_event_triggers: unknown; rpg_stats: unknown; revision: number }>(
+      "SELECT trackers, pending_event_triggers, rpg_stats, revision FROM campaign_state WHERE campaign_id = $1",
+      [campaign.created.id]
+    );
+    expect(after.rows[0]).toEqual(before.rows[0]);
+    const storyPolicy = {
+      version: 1,
+      playMode: "story_only",
+      turnControlStyle: "flexible_scene",
+      protocolVersion: "story-only-v1",
+      prompts: {
+        systemSupplement: "Story only.",
+        systemSupplementHash: "system-hash",
+        choiceRepairSystem: "Repair choices.",
+        choiceRepairSystemHash: "repair-hash"
+      }
+    };
+    await pool.query(
+      `UPDATE generation_jobs SET generation_policy = $2::jsonb WHERE id = $1`,
+      [unresolvedJob.rows[0]!.id, JSON.stringify(storyPolicy)]
+    );
+    const turn = await pool.query<{ id: string }>(
+      `INSERT INTO turns (owner_user_id, campaign_id, turn_number, narration, generation_policy)
+       VALUES ($1,$2,1,'A quiet opening.',$3::jsonb) RETURNING id`,
+      [ownerUserId, campaign.created.id, JSON.stringify(storyPolicy)]
+    );
+    for (const malformed of [
+      { ...storyPolicy, version: "1" },
+      { ...storyPolicy, prompts: { ...storyPolicy.prompts, choiceRepairSystem: null } },
+      { ...storyPolicy, prompts: { systemSupplement: "Story only." } },
+      { ...storyPolicy, turnControlStyle: "flexible_action" }
+    ]) {
+      await expect(pool.query(
+        "UPDATE generation_jobs SET generation_policy = $2::jsonb WHERE id = $1",
+        [unresolvedJob.rows[0]!.id, JSON.stringify(malformed)]
+      )).rejects.toMatchObject({ code: "23514" });
+      await expect(pool.query(
+        "UPDATE turns SET generation_policy = $2::jsonb WHERE id = $1",
+        [turn.rows[0]!.id, JSON.stringify(malformed)]
+      )).rejects.toMatchObject({ code: "23514" });
+    }
+  });
   it("loads and preserves mixed authored event rules before the first turn", async () => {
     const adapters = createAdapters();
     const rule = "When the gate opens, the keeper greets the traveler.";
@@ -540,7 +665,7 @@ integration("PostgreSQL world campaign repository adapters", () => {
     expect(ownCampaign.created).toMatchObject({
       status: "active",
       activeTurnNumber: 0,
-      turnControlStyle: "flexible_auto",
+      turnControlStyle: "flexible_action",
       worldId: ownWorld.created.id,
       worldVersionId: ownVersion.worldVersionId,
       selectedCharacterId: "character-one",
@@ -600,7 +725,10 @@ integration("PostgreSQL world campaign repository adapters", () => {
     const updated = unwrap(await adapters.transaction.command((transaction) => adapters.campaigns.updateCampaign(
       transaction,
       { ownerUserId, campaignId: ownCampaign.created.id },
-      { title: `${ownCampaign.title} updated`, status: "archived", storyLengthProfile: "long", turnControlStyle: "action_only" }
+      {
+        title: `${ownCampaign.title} updated`, status: "archived", storyLengthProfile: "long", turnControlStyle: "action_only",
+        expectedTurnControlStyle: "flexible_action", expectedActiveTurnNumber: 0, expectedStateRevision: 0
+      }
     )));
     expect(updated).toMatchObject({
       title: `${ownCampaign.title} updated`,
