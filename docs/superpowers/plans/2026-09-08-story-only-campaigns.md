@@ -508,6 +508,8 @@ The script creates and disposes its own dedicated test database through the exis
 
 The fixture helper exports `createStoryOnlyFixture({playMode, scenario})` and `runStoryOnlyFixture(fixture)` for benchmark and integration use. Scenarios: `clean`, `events_configured`, `choice_repair`, `invalid_narration`, `output_limited`, `lease_reclaim`; results contain `{operations: string[], committed: boolean, timingsMs: Record<string, number>, beforeState, afterState}`. Capture actual operation dispatch via collaborator instrumentation. Use neutral fictional test data only.
 
+Fixture observation points are explicit: `invalid_narration` and `output_limited` return after one scheduled execution, including its permitted bounded automatic recovery, without issuing a user retry; seed persistently invalid or limited output so these cases remain uncommitted. Test an explicit retry separately. `lease_reclaim` returns after the controlled reclaim completes and reports all dispatch attempts across both workers, including failed attempts. Count dispatch attempts at the executor/provider boundary, not only successful cost records. `events_configured` retains dormant stored events and pending state without invoking them. The legacy Scene comparison uses a `flexible_action` campaign with explicit scene input; do not enqueue a new `flexible_scene` campaign and label it legacy. Historical null-policy recovery remains a separate compatibility case. Keep pool/provider/clock injection private to the fixture setup and use the existing dedicated-target guards. Reuse collaborator instrumentation before adding production telemetry; synthetic transport delay is not model-speed evidence.
+
 - [ ] Write RED composed cases asserting clean Story only has exactly one narrative call; events_configured also has one; choice_repair has exactly two; legacy mode retains the corresponding existing call sequence. Do not assert elapsed time alone.
 
 ```ts
@@ -529,11 +531,13 @@ pnpm test:unit --exclude '**/.worktrees/**' --exclude '**/.codex/**'
 node tmp/story-only-test/run-all.mjs
 pnpm check
 pnpm build
-pnpm exec playwright test --config playwright.story-only-runtime.config.ts tests/e2e/story-only-campaigns.e2e.test.ts
+node node_modules/@playwright/test/cli.js test --config playwright.story-only-runtime.config.ts tests/e2e/story-only-campaigns.e2e.test.ts tests/e2e/story-only-new-ui.e2e.test.ts
 git diff --check
 ```
 
 For this worktree, use the prepared ignored `tmp/story-only-test/run-all.mjs` runner: it discovers the canonical integration suite and executes each file with the dedicated `tmp/story-only-test/vitest.config.ts` override on port 15439. Verify those files and target configuration before running; the default `pnpm test:integration` global setup uses shared port 55432 and is not authorized here. Set `IQ_UI_RUNTIME_BASE_URL` and `IQ_UI_TEST_CAMPAIGN_ID` from the running disposable harness before the explicit Playwright command. Neither environment value may identify the user's active campaign. If the broad integration runner includes unrelated pre-existing failures, report them separately with exact output; do not count skipped database checks as passes. Keep all fixture logs and generated benchmark output out of production and public artifacts.
+
+Before the aggregate browser run, the controller must integrate both released E2E files into the shared config's `testMatch` and verify test discovery for each file and viewport. Run each required new renderer build variant and record it separately. Give each opening scenario an independently empty campaign for its client and viewport, including when both suites run together, so an earlier test cannot satisfy a later opening assertion. Populate every suite-required fixture environment variable from that runtime's state file. A zero-test selection, skipped variant, or reused already-opened campaign does not verify that row.
 
 - [ ] Save summarized verification and benchmark results, screenshots index, actual limitations, and comparison base/head. Commit `Verify story-only integrity and request reduction`.
 
