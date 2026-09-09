@@ -500,14 +500,14 @@ expect(result.committed).toBe(true);
 
 ```powershell
 pnpm test:unit --exclude '**/.worktrees/**' --exclude '**/.codex/**'
-pnpm test:integration
+node tmp/story-only-test/run-all.mjs
 pnpm check
 pnpm build
-pnpm exec playwright test tests/e2e/story-only-campaigns.e2e.test.ts
+pnpm exec playwright test --config playwright.story-only-runtime.config.ts tests/e2e/story-only-campaigns.e2e.test.ts
 git diff --check
 ```
 
-Use configured browser project/base URL for the disposable instance, never the user's active campaign. If the broad integration runner includes unrelated pre-existing failures, report them separately with exact output; do not count skipped database checks as passes. Keep all fixture logs and generated benchmark output out of production and public artifacts.
+For this worktree, use the prepared ignored `tmp/story-only-test/run-all.mjs` runner: it discovers the canonical integration suite and executes each file with the dedicated `tmp/story-only-test/vitest.config.ts` override on port 15439. Verify those files and target configuration before running; the default `pnpm test:integration` global setup uses shared port 55432 and is not authorized here. Set `IQ_UI_RUNTIME_BASE_URL` and `IQ_UI_TEST_CAMPAIGN_ID` from the running disposable harness before the explicit Playwright command. Neither environment value may identify the user's active campaign. If the broad integration runner includes unrelated pre-existing failures, report them separately with exact output; do not count skipped database checks as passes. Keep all fixture logs and generated benchmark output out of production and public artifacts.
 
 - [ ] Save summarized verification and benchmark results, screenshots index, actual limitations, and comparison base/head. Commit `Verify story-only integrity and request reduction`.
 
