@@ -129,6 +129,29 @@ export type GenerationOrchestrationState = {
     rejectedDraftHash: string;
     consumedAttempt: number;
   } | undefined;
+  choiceRepair?: {
+    version: 1;
+    ownerUserId: string;
+    campaignId: string;
+    baseIdentity: GenerationBaseIdentity;
+    providerId: string;
+    providerModel: string;
+    providerConfigurationHash: string;
+    policyIdentity: string;
+    baseHash: string;
+    base: Omit<StoryTurnOutput, "choices" | "custom_action_suggestion">;
+    originalRequestBody: string;
+    originalRequestPayloadHash: string;
+    originalSentFactIds: readonly string[];
+    originalResponse: ProviderResult;
+    consumedAttempt: number;
+    repairRequestBody: string;
+    repairRequestPayloadHash?: string;
+    repairResponseFormat: "json_object" | "none";
+    fields?: Pick<StoryTurnOutput, "choices" | "custom_action_suggestion">;
+    resultHash?: string;
+    status: "dispatched" | "validated";
+  } | undefined;
   /** One durable, provenance-fenced rewrite allowance for rejected event fiction. */
   eventCoverageRepair?: {
     rejectedFinalStoryHash: string;
@@ -152,6 +175,31 @@ function hasValidAutomaticRepair(value: unknown): boolean {
     && typeof repair.rejectedDraftHash === "string" && repair.rejectedDraftHash.length > 0
     && typeof repair.consumedAttempt === "number" && Number.isSafeInteger(repair.consumedAttempt)
     && repair.consumedAttempt > 0;
+}
+
+function hasValidChoiceRepair(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const repair = value as Record<string, unknown>;
+  return repair.version === 1 && typeof repair.policyIdentity === "string" && repair.policyIdentity.length > 0
+    && typeof repair.ownerUserId === "string" && repair.ownerUserId.length > 0
+    && typeof repair.campaignId === "string" && repair.campaignId.length > 0
+    && typeof repair.baseIdentity === "object" && repair.baseIdentity !== null
+    && typeof repair.providerId === "string" && repair.providerId.length > 0
+    && typeof repair.providerModel === "string" && repair.providerModel.length > 0
+    && typeof repair.providerConfigurationHash === "string" && repair.providerConfigurationHash.length > 0
+    && typeof repair.baseHash === "string" && repair.baseHash.length > 0
+    && typeof repair.base === "object" && repair.base !== null && !Array.isArray(repair.base)
+    && typeof repair.originalRequestBody === "string" && repair.originalRequestBody.length > 0
+    && typeof repair.originalRequestPayloadHash === "string" && repair.originalRequestPayloadHash.length > 0
+    && Array.isArray(repair.originalSentFactIds) && repair.originalSentFactIds.every((id) => typeof id === "string")
+    && typeof repair.originalResponse === "object" && repair.originalResponse !== null
+    && typeof repair.consumedAttempt === "number" && Number.isSafeInteger(repair.consumedAttempt) && repair.consumedAttempt > 0
+    && typeof repair.repairRequestBody === "string" && repair.repairRequestBody.length > 0
+    && (repair.repairResponseFormat === "json_object" || repair.repairResponseFormat === "none")
+    && typeof repair.repairRequestPayloadHash === "string" && repair.repairRequestPayloadHash.length > 0
+    && (repair.status === "dispatched" || repair.status === "validated")
+    && (repair.status !== "validated" || (typeof repair.repairRequestPayloadHash === "string" && typeof repair.resultHash === "string" && typeof repair.fields === "object" && repair.fields !== null));
 }
 
 function hasValidEventCoverageRepair(value: unknown): boolean {
@@ -867,6 +915,7 @@ export function createPostgresGenerationExecutionRepository(
       const row = result.rows[0];
       if (!row) return null;
       if (!hasValidAutomaticRepair(row.orchestration_private?.automaticRepair)
+          || !hasValidChoiceRepair(row.orchestration_private?.choiceRepair)
           || !hasValidEventCoverageRepair(row.orchestration_private?.eventCoverageRepair)) {
         await client.query(
           `UPDATE generation_jobs

@@ -14,6 +14,7 @@ export type TurnGenerationPhase =
   | "story_generation"
   | "story_validation"
   | "story_recovery"
+  | "story_choice_repair"
   | "scene_coverage_validation"
   | "scene_coverage_rewrite"
   | "after_event_evaluation"

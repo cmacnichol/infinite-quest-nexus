@@ -76,7 +76,7 @@ export const storyTurnOutputHistoricalSchema = z.object(storyTurnOutputFields).p
 });
 
 export const generationDiagnosticOperationSchema = z.enum([
-  "story_generation", "rpg_assessment", "event_trigger", "event_extension",
+  "story_generation", "story_choice_repair", "rpg_assessment", "event_trigger", "event_extension",
   "turn_intent", "scene_coverage", "scene_coverage_rewrite", "event_coverage"
 ]);
 

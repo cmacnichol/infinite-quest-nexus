@@ -49,6 +49,10 @@ export type ProviderOutputBudget =
       kind: "story_append" | "story_replace";
     }>
   | Readonly<{
+      /** A repair may emit only the two unprotected choice fields. */
+      kind: "story_choice_repair";
+    }>
+  | Readonly<{
       kind: "event_extension";
       protectedStory: Readonly<{
         narration: string;
@@ -176,6 +180,9 @@ function eventExtensionMinimum(output: Extract<ProviderOutputBudget, { kind: "ev
 }
 
 function outputSkeleton(output: ProviderOutputBudget): unknown {
+  if (output.kind === "story_choice_repair") {
+    return { choices: ["x", "x", "x", "x"], custom_action_suggestion: "x" };
+  }
   if (output.kind === "event_extension") {
     const extension = eventExtensionMinimum(output);
     return {
