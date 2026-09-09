@@ -10,6 +10,14 @@
 
 **Spec:** [Story-only campaign design](../specs/2026-09-08-story-only-campaigns-design.md). Read it before implementing any task.
 
+## Required UI scope for this revision
+
+Update both the legacy and new UI as part of this plan. Task 7A owns the active legacy Nexus and Story surfaces; Task 7B owns the new application, including both Story renderers. Each receives a fresh Terra implementer and a separate review. Backend completion alone does not complete this feature.
+
+Both clients reuse the existing Action / Story Direction campaign setting, remove Auto and its automatic turn-type selection code, and show the story-only composer when Story Direction is selected. Include campaign creation/settings, profile defaults, typed input, generated choices, custom suggestions, help text, and obsolete classifier setup controls. Preserve automatic choice submission, which is a separate preference.
+
+The release gate requires both clients to pass their own behavior checks and the same-campaign cross-interface checks in Task 7. Record missing or skipped surface checks as open gates; do not treat completion of one UI as completion of the other. RPG redesign remains deferred.
+
 ## Global constraints
 
 - Both active interfaces are mandatory deliverables: legacy Nexus management `/nexus/` and Story `/story/:campaignId`, plus new management/player surfaces under `/app/`. Neither client may retain Auto or omit the revised campaign-setting behavior. `apps/web/public/index.html` and `apps/web/public/story.html` are active legacy markup in scope; root `index.html` remains reference-only.
@@ -405,6 +413,7 @@ Run this checklist independently for 7A and 7B; include a result for every row i
 - [ ] **7B RED/GREEN:** implement all new-UI cells, including both profile render paths and both Story presenters. Verify `/app/` management and `/app/story/:campaignId`, capture new-UI screenshots, and rerun shared helper plus legacy surface regressions after edits. Where the new UI links to existing management, verify that destination instead of building an unrelated duplicate creation/provider page.
 - [ ] **Cross-interface gate:** save Story Direction in legacy management, open the same disposable campaign in the new player and verify policy; then save Action in the new editor and verify the legacy player after refresh. Repeat with profile defaults, removed Auto preferences, multi-choice drafts, and setting-save conflicts. Use the same server/fixture campaign; isolated frontend mocks do not establish parity.
 - [ ] Report legacy management/player, new management/player, profile paths, and new renderer variants separately as passed/failed/skipped. Capture desktop/mobile screenshots under `docs/review/story-only-campaigns/screenshots/legacy/` and `docs/review/story-only-campaigns/screenshots/new/`, identifying route, renderer, viewport, and fixture. Task 7 is incomplete if either active UI is unverified.
+- [ ] Attach a surface coverage table to the Task 7 review report, with one row per legacy management, legacy Story, legacy profile dialog, new management, new profile path, and new Story renderer. Record implementer, changed files, focused test result, desktop/mobile browser result, screenshot paths, and remaining gaps. Check the table against the required behavior matrix above before closing Task 7; a shared-helper test cannot substitute for either client's rendered interaction evidence.
 - [ ] Include a per-client cleanup inventory in the 7A and 7B handoffs: removed Auto options/defaults, automatic turn-type selection handlers, classifier requests, confirmation/help markup, and now-unused styles/tests. Identify historical compatibility references separately so retained provenance readers are not mistaken for active selection logic. The final Terra reviewer must reconcile both inventories with the cross-interface browser evidence before accepting Task 7.
 
 - [ ] Write RED model/DOM tests for story-only selection, no intent call on typed text or choice click, no mode buttons/confirmation, `Continue story` button, retained draft and multi-selection, preserved auto-submit preference, and campaign-switch isolation. Test both replacement presenters, not only the visible default renderer.
