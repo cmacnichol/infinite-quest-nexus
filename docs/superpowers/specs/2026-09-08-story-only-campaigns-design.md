@@ -1,6 +1,6 @@
 # Story-only campaigns: implementation design
 
-Status: implementation proposal derived from the user's requested outline. No product implementation is authorized by the request to write this plan.
+Status: implementation in progress under the user's subsequent explicit authorization to implement the plan and correct gaps. Both active interfaces remain required deliverables.
 
 ## Objective
 
