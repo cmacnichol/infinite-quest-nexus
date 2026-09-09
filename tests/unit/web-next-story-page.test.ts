@@ -153,6 +153,8 @@ function deferred<T>() {
 async function settle(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
 }
 
 function fixture() {
@@ -164,6 +166,7 @@ function fixture() {
 
 function composition(options: {
   readonly list?: ReturnType<typeof vi.fn>;
+  readonly providers?: ReturnType<typeof vi.fn>;
   readonly syncStatus?: ReturnType<typeof vi.fn>;
   readonly turns?: ReturnType<typeof vi.fn>;
   readonly readableExport?: ReturnType<typeof vi.fn>;
@@ -177,6 +180,11 @@ function composition(options: {
   const campaignStore = options.campaignStore ?? createCampaignStore();
   return {
     api: {
+      providers: {
+        list: options.providers ?? vi.fn().mockResolvedValue({ providers: [{
+          id: "44444444-4444-4444-8444-444444444444", name: "Test text provider", providerType: "openai_compatible", providerRole: "text", enabled: true, isDefault: true
+        }] })
+      },
       campaigns: {
         list: options.list ?? vi.fn().mockResolvedValue({ campaigns: [campaignSummary()] }),
         readableExport: options.readableExport ?? vi.fn().mockResolvedValue(new Blob(["# Accepted story"])),
@@ -679,7 +687,8 @@ describe("Story Player page shell", () => {
     });
     const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: null }, composition({
       list: vi.fn().mockResolvedValue({ campaigns: [campaignSummary({ textProviderProfileId: null })] }),
-      syncStatus: vi.fn().mockResolvedValue(active)
+      syncStatus: vi.fn().mockResolvedValue(active),
+      providers: vi.fn().mockResolvedValue({ providers: [] })
     }));
     await settle();
 
@@ -687,6 +696,175 @@ describe("Story Player page shell", () => {
     expect(page.document.querySelector("[data-first-action]")?.textContent).toContain("Take the real first action.");
     expect(page.document.querySelector<HTMLButtonElement>('[data-action="begin-story"]')?.disabled).toBe(true);
     expect(page.document.querySelector<HTMLAnchorElement>('[data-story-setup]')?.getAttribute("href")).toBe("/nexus/#providers");
+    mounted.dispose();
+  });
+
+  it.each(["native", "web-awesome"] as const)("allows %s Begin Story through an enabled default text provider and keeps Story Direction opening mode", async (uiImplementation) => {
+    const page = fixture();
+    const submit = vi.fn().mockResolvedValue({
+      campaignId, jobId: "55555555-5555-4555-8555-555555555555", operationKind: "append", replacementTurnId: null,
+      async *watch() {}, async *retryGeneration() {}, cancelGeneration: vi.fn(), discardGeneration: vi.fn(), fetchResult: vi.fn()
+    });
+    const base = composition({
+      list: vi.fn().mockResolvedValue({ campaigns: [campaignSummary({ textProviderProfileId: null, turnControlStyle: "flexible_scene" })] }),
+      providers: vi.fn().mockResolvedValue({ providers: [{ id: "44444444-4444-4444-8444-444444444444", name: "Default text", providerType: "openai_compatible", providerRole: "text", enabled: true, isDefault: true }] })
+    });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: null }, {
+      ...base,
+      workflow: { ...base.workflow, submit },
+      idFactory: { ...base.idFactory, create: vi.fn(() => "opening-idempotency-key") }
+    } as StoryPlayerComposition, { uiImplementation });
+    await settle();
+
+    const begin = page.document.querySelector<HTMLButtonElement>("[data-action='begin-story']");
+    expect(begin?.disabled).toBe(false);
+    expect(page.document.querySelector("[data-story-setup]")).toBeNull();
+    begin?.click();
+    await vi.waitFor(() => expect(submit).toHaveBeenCalledOnce());
+    expect(submit).toHaveBeenCalledWith(campaignId, expect.objectContaining({ request: expect.objectContaining({ requestedInputMode: "scene", resolvedInputMode: "scene", inputModeSource: "opening_action" }) }));
+    mounted.dispose();
+  });
+
+  it.each([
+    ["native", "missing", []],
+    ["web-awesome", "missing", []],
+    ["native", "disabled", [{ id: "44444444-4444-4444-8444-444444444444", name: "Disabled default", providerType: "openai_compatible", providerRole: "text", enabled: false, isDefault: true }]],
+    ["web-awesome", "disabled", [{ id: "44444444-4444-4444-8444-444444444444", name: "Disabled default", providerType: "openai_compatible", providerRole: "text", enabled: false, isDefault: true }]]
+  ] as const)("keeps %s Begin Story unavailable when the default text provider is %s", async (uiImplementation, _reason, providers) => {
+    const page = fixture();
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: null }, composition({
+      list: vi.fn().mockResolvedValue({ campaigns: [campaignSummary({ textProviderProfileId: null })] }),
+      providers: vi.fn().mockResolvedValue({ providers })
+    }), { uiImplementation });
+    await settle();
+
+    expect(page.document.querySelector<HTMLButtonElement>("[data-action='begin-story']")?.disabled).toBe(true);
+    expect(page.document.querySelector<HTMLAnchorElement>("[data-story-setup]")?.getAttribute("href")).toBe("/nexus/#providers");
+    mounted.dispose();
+  });
+
+  it("keeps setup recovery available when the zero-turn provider lookup fails", async () => {
+    const page = fixture();
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: null }, composition({
+      list: vi.fn().mockResolvedValue({ campaigns: [campaignSummary({ textProviderProfileId: null })] }),
+      providers: vi.fn().mockRejectedValue(new Error("Provider service unavailable."))
+    }));
+    await settle();
+
+    expect(page.document.querySelector<HTMLButtonElement>("[data-action='begin-story']")?.disabled).toBe(true);
+    expect(page.document.querySelector<HTMLAnchorElement>("[data-story-setup]")?.getAttribute("href")).toBe("/nexus/#providers");
+    mounted.dispose();
+  });
+
+  it.each(["native", "web-awesome"] as const)("allows an enabled explicit text-provider override without a default in %s", async (uiImplementation) => {
+    const page = fixture();
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: null }, composition({
+      list: vi.fn().mockResolvedValue({ campaigns: [campaignSummary({ textProviderProfileId: "55555555-5555-4555-8555-555555555555" })] }),
+      providers: vi.fn().mockResolvedValue({ providers: [{ id: "55555555-5555-4555-8555-555555555555", name: "Explicit text", providerType: "openai_compatible", providerRole: "text", enabled: true, isDefault: false }] })
+    }), { uiImplementation });
+    await settle();
+
+    expect(page.document.querySelector<HTMLButtonElement>("[data-action='begin-story']")?.disabled).toBe(false);
+    expect(page.document.querySelector("[data-story-setup]")).toBeNull();
+    mounted.dispose();
+  });
+
+  it.each([
+    ["resolves a single enabled non-default provider", null, [{ id: "55555555-5555-4555-8555-555555555555", name: "Only", providerType: "openai_compatible", providerRole: "text", enabled: true, isDefault: false }], false],
+    ["rejects multiple enabled providers without a default", null, [
+      { id: "55555555-5555-4555-8555-555555555555", name: "One", providerType: "openai_compatible", providerRole: "text", enabled: true, isDefault: false },
+      { id: "66666666-6666-4666-8666-666666666666", name: "Two", providerType: "openai_compatible", providerRole: "text", enabled: true, isDefault: false }
+    ], true],
+    ["resolves the default among multiple enabled providers", null, [
+      { id: "55555555-5555-4555-8555-555555555555", name: "One", providerType: "openai_compatible", providerRole: "text", enabled: true, isDefault: false },
+      { id: "66666666-6666-4666-8666-666666666666", name: "Default", providerType: "openai_compatible", providerRole: "text", enabled: true, isDefault: true }
+    ], false],
+    ["rejects a provider whose enabled state is missing", null, [
+      { id: "55555555-5555-4555-8555-555555555555", name: "Unverified", providerType: "openai_compatible", providerRole: "text", isDefault: true }
+    ], true],
+    ["does not fall back from a missing explicit provider", "77777777-7777-4777-8777-777777777777", [{ id: "55555555-5555-4555-8555-555555555555", name: "Default", providerType: "openai_compatible", providerRole: "text", enabled: true, isDefault: true }], true],
+    ["does not fall back from a disabled explicit provider", "77777777-7777-4777-8777-777777777777", [
+      { id: "77777777-7777-4777-8777-777777777777", name: "Disabled explicit", providerType: "openai_compatible", providerRole: "text", enabled: false, isDefault: false },
+      { id: "55555555-5555-4555-8555-555555555555", name: "Default", providerType: "openai_compatible", providerRole: "text", enabled: true, isDefault: true }
+    ], true]
+  ] as const)("matches server text-provider selection: %s", async (_caseName, textProviderProfileId, providers, unavailable) => {
+    const page = fixture();
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: null }, composition({
+      list: vi.fn().mockResolvedValue({ campaigns: [campaignSummary({ textProviderProfileId })] }),
+      providers: vi.fn().mockResolvedValue({ providers })
+    }));
+    await settle();
+
+    expect(page.document.querySelector<HTMLButtonElement>("[data-action='begin-story']")?.disabled).toBe(unavailable);
+    expect(page.document.querySelector("[data-story-setup]") !== null).toBe(unavailable);
+    mounted.dispose();
+  });
+
+  it("does not query providers while loading an accepted turn", async () => {
+    const page = fixture();
+    const providers = vi.fn().mockRejectedValue(new Error("Provider lookup must not run for accepted turns."));
+    const loaded = sync({
+      activeTurnNumber: 1,
+      campaign: { ...sync().campaign, activeTurnNumber: 1 },
+      turns: turnWindow([1])
+    });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: null }, composition({
+      providers,
+      syncStatus: vi.fn().mockResolvedValue(loaded)
+    }));
+    await settle();
+
+    expect(providers).not.toHaveBeenCalled();
+    expect(page.document.querySelector("[data-story-reader]")?.textContent).toContain("Narration 1.");
+    mounted.dispose();
+  });
+
+  it.each([
+    ["native", "flexible_scene", "scene"],
+    ["web-awesome", "flexible_scene", "scene"],
+    ["native", "flexible_action", "action"],
+    ["web-awesome", "flexible_action", "action"],
+    ["native", "action_only", "action"],
+    ["web-awesome", "action_only", "action"]
+  ] as const)("submits the %s %s opening with the campaign's %s mode", async (uiImplementation, turnControlStyle, expectedMode) => {
+    const page = fixture();
+    const run = {
+      campaignId,
+      jobId: "55555555-5555-4555-8555-555555555555",
+      operationKind: "append" as const,
+      replacementTurnId: null,
+      async *watch() {},
+      async *retryGeneration() {},
+      cancelGeneration: vi.fn(),
+      discardGeneration: vi.fn(),
+      fetchResult: vi.fn()
+    };
+    const base = composition({
+      list: vi.fn().mockResolvedValue({ campaigns: [campaignSummary({ turnControlStyle })] }),
+      syncStatus: vi.fn().mockResolvedValue(sync())
+    });
+    const submit = vi.fn().mockResolvedValue(run);
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: null }, {
+      ...base,
+      workflow: { ...base.workflow, submit },
+      idFactory: { ...base.idFactory, create: vi.fn(() => "opening-idempotency-key") }
+    } as StoryPlayerComposition, { uiImplementation });
+    await settle();
+
+    const begin = page.document.querySelector<HTMLButtonElement>("[data-action='begin-story']");
+    expect(begin?.disabled).toBe(false);
+    begin?.click();
+    await vi.waitFor(() => expect(submit).toHaveBeenCalledOnce());
+    expect(submit).toHaveBeenCalledWith(campaignId, expect.objectContaining({
+      operationKind: "append",
+      expectedTurnNumber: 1,
+      request: expect.objectContaining({
+        action: "Take the real first action.",
+        requestedInputMode: expectedMode,
+        resolvedInputMode: expectedMode,
+        inputModeSource: "opening_action"
+      })
+    }));
     mounted.dispose();
   });
 
@@ -1065,7 +1243,7 @@ describe("Story Player page shell", () => {
   });
 
   it("prepares an explicit composer submission with its selected turn length", async () => {
-    await expect(prepareTurnSubmission("Try another path.", "action", "action", undefined, "brief")).resolves.toEqual({
+    await expect(prepareTurnSubmission("Try another path.", "action", "brief")).resolves.toEqual({
       kind: "ready",
       submission: {
         action: "Try another path.",

@@ -66,7 +66,7 @@ const worldAggregateFixture = {
     worldVersionNumber: 1,
     selectedCharacterId: null,
     selectedCharacterName: null,
-    turnControlStyle: "flexible_auto",
+    turnControlStyle: "flexible_action",
     updatedAt: "2026-08-11T12:15:00.000Z"
   }]
 };
@@ -100,7 +100,7 @@ describe("World Editor browser boundary", () => {
       ...worldAggregateFixture,
       campaigns: [{
         ...worldAggregateFixture.campaigns[0],
-        turnControlStyle: { toString: () => "flexible_auto" }
+        turnControlStyle: { toString: () => "flexible_action" }
       }]
     }]
   ])("rejects a non-string %s before checking its allowed values", (_field, response) => {

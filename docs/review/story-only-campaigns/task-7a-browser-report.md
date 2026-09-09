@@ -14,7 +14,7 @@ At a 320px viewport the workspace previously expanded to 453px because the mobil
 
 ## Runtime and source
 
-The image includes the reviewed legacy changes, the two test typing corrections, and the separately reviewed mobile grid correction. It was built from the working tree based on `8f179cc2`; harness checkpoint `488418fa` records the same harness content used for this build. The owned database is `infinitequest_storyonly_6430d0c947e447f2ad8529f46b34301f`, served only at `http://127.0.0.1:18081` by harness session 1187. It remains running for the separate new UI checks; final cleanup is pending their completion. The previous abandoned runtime was removed, and its database removal was verified while the dedicated base database remained running.
+The image included the reviewed legacy changes, the two test typing corrections, and the separately reviewed mobile grid correction. It was built from the working tree based on `8f179cc2`; harness checkpoint `488418fa` records the same harness content used for this build. Its owned database was `infinitequest_storyonly_6430d0c947e447f2ad8529f46b34301f`, served only at `http://127.0.0.1:18081` by harness session 1187. That runtime was retained for the subsequent native new-UI checks, then its owned containers, network, database, and fixture directories were removed. The dedicated base PostgreSQL instance remained running. Later combined renderer runs are recorded in the Task 7B handoff; this paragraph identifies the original legacy checkpoint.
 
 ```powershell
 node node_modules/@playwright/test/cli.js test tests/e2e/story-only-campaigns.e2e.test.ts --config playwright.story-only-runtime.config.ts

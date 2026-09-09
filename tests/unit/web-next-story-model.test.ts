@@ -32,7 +32,6 @@ describe("Story Player local UI model", () => {
       "generationFollowing",
       "history",
       "illustration",
-      "intentConfirmation",
       "message",
       "phase",
       "readingWidth",
@@ -77,23 +76,16 @@ describe("Story Player local UI model", () => {
 
     model.syncComposer("campaign-a", 7, "flexible_scene");
     model.setComposerDraft("  Keep this exact draft.  ");
-    model.setIntentConfirmation({
-      action: "  Keep this exact draft.  ",
-      classificationId: "classification-a",
-      requestedInputMode: "auto",
-      storyLengthProfileOverride: null
-    });
 
     expect(model.get()).toEqual(expect.objectContaining({
       draft: "  Keep this exact draft.  ",
       draftOwnerKey: "campaign-a:7",
       draftOwnerTurnNumber: 7,
-      requestedInputMode: "scene",
-      intentConfirmation: expect.objectContaining({ action: "  Keep this exact draft.  " })
+      requestedInputMode: "scene"
     }));
     model.clearComposerDraft();
     expect(model.get()).toEqual(expect.objectContaining({
-      draft: "", choiceSelection: [], choiceBaseText: "", intentConfirmation: null
+      draft: "", choiceSelection: [], choiceBaseText: ""
     }));
   });
 
@@ -109,6 +101,24 @@ describe("Story Player local UI model", () => {
     expect(model.get().storyLengthProfileOverride).toBe("extended");
     model.syncComposer("campaign-a", 8, "flexible_action");
     expect(model.get().storyLengthProfileOverride).toBeNull();
+  });
+
+  it("refreshes the same campaign turn policy without losing its draft, choices, or length override", () => {
+    const model = createStoryUiModel({}, memoryStorage());
+    model.syncComposer("campaign-a", 7, "flexible_action");
+    model.setComposerDraft("Follow the lantern.");
+    model.setChoiceDraft({ selectedIndexes: [0, 1], baseText: "Follow the lantern.\nInspect the platform." }, "Follow the lantern.");
+    model.setStoryLengthProfileOverride("extended");
+
+    model.syncComposer("campaign-a", 7, "flexible_scene");
+    expect(model.get()).toEqual(expect.objectContaining({
+      draft: "Follow the lantern.", choiceSelection: [0, 1], storyLengthProfileOverride: "extended", requestedInputMode: "scene"
+    }));
+
+    model.syncComposer("campaign-a", 7, "flexible_action");
+    expect(model.get()).toEqual(expect.objectContaining({
+      draft: "Follow the lantern.", choiceSelection: [0, 1], storyLengthProfileOverride: "extended", requestedInputMode: "action"
+    }));
   });
 
   it("publishes a restored Retry Latest draft before focus can return to the composer", () => {

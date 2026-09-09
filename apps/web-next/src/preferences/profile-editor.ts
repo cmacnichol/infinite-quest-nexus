@@ -64,9 +64,8 @@ export function mountProfileEditor(document: Document, port: ProfilePort): Profi
   turnStyle.dataset.profile = "turn-control-style";
   for (const [value, label] of [
     ["action_only", "Actions only"],
-    ["flexible_auto", "Automatic interpretation"],
-    ["flexible_action", "Prefer actions"],
-    ["flexible_scene", "Prefer scene direction"]
+    ["flexible_action", "Action"],
+    ["flexible_scene", "Story Direction"]
   ] as const) {
     const option = document.createElement("wa-option");
     option.setAttribute("value", value);

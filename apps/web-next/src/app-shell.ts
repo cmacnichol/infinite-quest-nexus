@@ -77,10 +77,8 @@ export function renderAppShell(
             <label class="user-profile-check"><input id="user-profile-continuous-reading" type="checkbox" />Keep the full story in view while reading</label>
             <label class="user-profile-field">Default turn-control style
               <select id="user-profile-turn-style">
-                <option value="action_only">Player actions only</option>
-                <option value="flexible_auto">Flexible — Auto</option>
-                <option value="flexible_action">Flexible — Player action first</option>
-                <option value="flexible_scene">Flexible — Scene direction first</option>
+                <option value="flexible_action">Action</option>
+                <option value="flexible_scene">Story Direction</option>
               </select>
             </label>
           </fieldset>

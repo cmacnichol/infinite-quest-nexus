@@ -91,6 +91,10 @@ main[data-ui-implementation="web-awesome"] .story-turn-length :is(
     font-size: 0;
   }
 
+  main[data-ui-implementation="web-awesome"] .quiet-leaf-footer .quiet-leaf-composer-footer button.story-turn-length__details {
+    font-size: 0;
+  }
+
   .story-turn-length__details::after {
     content: "Details";
     font-size: 0.72rem;

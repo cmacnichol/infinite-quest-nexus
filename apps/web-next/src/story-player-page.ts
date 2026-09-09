@@ -2,6 +2,7 @@ import {
   buildCurrentStateUpdate,
   createCampaignContinuityDraft,
   NexusApiError,
+  turnInputModeForControlStyle,
   toggleChoiceDraftSelection,
   type CampaignProjection,
   type StoryTurnInputMode
@@ -11,8 +12,8 @@ import type {
   CampaignRuntimeStateResponse,
   CampaignSummary,
   MetaResponse,
+  ProviderListResponse,
   StoryLengthProfile,
-  TurnInputClassificationResponse,
   TurnInputModeSource
 } from "@infinite-quest/contracts";
 import { mountAppShell } from "./app-shell-lifecycle";
@@ -83,7 +84,6 @@ export interface PreparedStoryTurnSubmission {
   readonly requestedInputMode: StoryTurnInputMode;
   readonly resolvedInputMode: "action" | "scene";
   readonly inputModeSource: TurnInputModeSource;
-  readonly classificationId?: string;
   readonly storyLengthProfileOverride?: StoryLengthProfile;
 }
 
@@ -96,15 +96,23 @@ export interface StoryPlayerPageOptions {
   readonly storyResumeStore?: StoryResumeStore;
 }
 
-export type TurnInputClassifier = (request: Readonly<{
-  text: string;
-  preferredFallback: "action" | "scene";
-}>) => Promise<TurnInputClassificationResponse>;
+export type TurnSubmissionPreparation = Readonly<{ kind: "ready"; submission: PreparedStoryTurnSubmission }>;
 
-export type TurnSubmissionPreparation = Readonly<
-  | { kind: "ready"; submission: PreparedStoryTurnSubmission }
-  | { kind: "confirmation"; action: string; classificationId: string; storyLengthProfileOverride?: StoryLengthProfile }
->;
+function canResolveStoryTextProvider(
+  campaign: CampaignSummary | null,
+  providers: readonly ProviderListResponse["providers"][number][]
+): boolean {
+  if (campaign === null) return false;
+  const enabledTextProviders = providers.filter((provider) => {
+    const details = provider as typeof provider & { enabled?: unknown };
+    return provider.providerRole === "text" && details.enabled === true;
+  });
+  if (campaign.textProviderProfileId !== null) return enabledTextProviders.some((provider) => provider.id === campaign.textProviderProfileId);
+  return enabledTextProviders.length === 1 || enabledTextProviders.some((provider) => {
+    const details = provider as typeof provider & { isDefault?: unknown };
+    return details.isDefault === true;
+  });
+}
 
 /**
  * Resolves a local Story draft immediately before submission. It deliberately
@@ -113,35 +121,15 @@ export type TurnSubmissionPreparation = Readonly<
 export async function prepareTurnSubmission(
   draft: string,
   requestedInputMode: StoryTurnInputMode,
-  campaignFallback: "action" | "scene",
-  classifyTurnInput?: TurnInputClassifier,
   storyLengthProfileOverride: StoryLengthProfile | null = null
 ): Promise<TurnSubmissionPreparation> {
-  if (requestedInputMode === "action" || requestedInputMode === "scene") {
-    return {
-      kind: "ready",
-      submission: {
-        action: draft, requestedInputMode, resolvedInputMode: requestedInputMode, inputModeSource: "explicit",
-        ...(storyLengthProfileOverride ? { storyLengthProfileOverride } : {})
-      }
-    };
-  }
-  if (!classifyTurnInput) throw new Error("Prompt interpretation is unavailable.");
-  const result = await classifyTurnInput({ text: draft, preferredFallback: campaignFallback });
-  if (result.confidenceBand === "ambiguous") {
-    return {
-      kind: "confirmation", action: draft, classificationId: result.classificationId,
-      ...(storyLengthProfileOverride ? { storyLengthProfileOverride } : {})
-    };
-  }
   return {
     kind: "ready",
     submission: {
       action: draft,
-      requestedInputMode: "auto",
-      resolvedInputMode: result.resolvedMode,
-      inputModeSource: "auto",
-      classificationId: result.classificationId,
+      requestedInputMode,
+      resolvedInputMode: requestedInputMode === "scene" ? "scene" : "action",
+      inputModeSource: "explicit",
       ...(storyLengthProfileOverride ? { storyLengthProfileOverride } : {})
     }
   };
@@ -166,6 +154,7 @@ export function mountStoryPlayerPage(
   const storyResumeStore = options.storyResumeStore ?? createStoryResumeStore(browserStorage(root));
   let campaigns: readonly CampaignSummary[] = [];
   let selectedCampaign: CampaignSummary | null = null;
+  let canBeginStory = false;
   let disposed = false;
   let controller: AbortController | null = null;
   let projection: Readonly<CampaignProjection> = composition.campaignStore.store.get();
@@ -470,7 +459,6 @@ export function mountStoryPlayerPage(
   };
   const composerCampaign = () => projection.campaign !== null && selectedCampaign?.id === projection.campaign.id
     ? selectedCampaign : null;
-  const campaignFallback = () => composerCampaign()?.turnControlStyle === "flexible_scene" ? "scene" as const : "action" as const;
   const canEditCurrentState = (): boolean => projection.campaign !== null && projection.generation === null;
   const canWriteCurrentCampaign = (): boolean => {
     const campaign = projection.campaign;
@@ -502,54 +490,17 @@ export function mountStoryPlayerPage(
       focusDraft();
       return;
     }
-    const classifyTurnInput = composition.api.campaigns.classifyTurnInput;
-    if (current.requestedInputMode === "auto" && typeof classifyTurnInput !== "function") {
-      ui.setMessage("Prompt interpretation is unavailable. Choose Action or Scene Direction.");
-      return;
-    }
     try {
       const preparation = await prepareTurnSubmission(
         draft,
         current.requestedInputMode,
-        campaignFallback(),
-        typeof classifyTurnInput === "function"
-          ? (request) => classifyTurnInput(campaign.id, request)
-          : undefined,
         storyLengthProfileOverride
       );
       if (disposed || projection.campaign?.id !== campaign.id || ui.get().draft !== draft) return;
-      if (preparation.kind === "confirmation") {
-        ui.setIntentConfirmation({
-          action: preparation.action,
-          classificationId: preparation.classificationId,
-          requestedInputMode: "auto",
-          storyLengthProfileOverride: preparation.storyLengthProfileOverride ?? null
-        });
-        root.querySelector<HTMLButtonElement>("[data-action='confirm-intent-action'], [data-confirm-intent-action]")?.focus();
-        return;
-      }
       await submitPreparedTurn(preparation.submission);
     } catch {
-      if (!disposed) ui.setMessage("Prompt interpretation could not be completed. Choose Action or Scene Direction.");
+      if (!disposed) ui.setMessage("Story generation could not be started. Your draft is preserved.");
     }
-  };
-  const confirmComposerIntent = async (resolvedInputMode: "action" | "scene"): Promise<void> => {
-    const intent = ui.get().intentConfirmation;
-    if (intent === null) return;
-    if (!canWriteCurrentCampaign()) {
-      ui.setIntentConfirmation(null);
-      focusDraft();
-      return;
-    }
-    ui.setIntentConfirmation(null);
-    await submitPreparedTurn({
-      action: intent.action,
-      requestedInputMode: "auto",
-      resolvedInputMode,
-      inputModeSource: "auto",
-      classificationId: intent.classificationId,
-      ...(intent.storyLengthProfileOverride ? { storyLengthProfileOverride: intent.storyLengthProfileOverride } : {})
-    });
   };
   const syncComposer = () => {
     const campaign = projection.campaign;
@@ -563,7 +514,6 @@ export function mountStoryPlayerPage(
     const clear = composer.querySelector<HTMLButtonElement>("[data-action='clear-story-draft']");
     if (clear) clear.disabled = !textarea.value;
     for (const choice of composer.querySelectorAll<HTMLButtonElement>("[data-story-choice]")) choice.setAttribute("aria-pressed", "false");
-    composer.querySelector("[data-story-intent-confirmation]")?.remove();
   };
   const selectInputMode = (mode: StoryTurnInputMode) => {
     ui.setRequestedInputMode(mode);
@@ -604,13 +554,6 @@ export function mountStoryPlayerPage(
     ui.setActiveDialog("history");
     void history.openCompleteHistory().catch(() => undefined);
   };
-  const confirmStoryIntent = (mode: "action" | "scene"): void => {
-    void confirmComposerIntent(mode);
-  };
-  const returnToStoryEditor = (): void => {
-    ui.setIntentConfirmation(null);
-    focusDraft();
-  };
   const composerActions: ComposerActions = {
     draft: (text) => {
       ui.setComposerDraft(text);
@@ -622,9 +565,7 @@ export function mountStoryPlayerPage(
     length: (profile) => ui.setStoryLengthProfileOverride(profile),
     continueStory: () => { void submitComposer(); },
     retryTurn: () => prepareRetryTurn(),
-    history: () => openStoryHistory(root.querySelector<HTMLElement>("[data-history]")),
-    confirm: (mode) => confirmStoryIntent(mode),
-    returnToEditor: () => returnToStoryEditor()
+    history: () => openStoryHistory(root.querySelector<HTMLElement>("[data-history]"))
   };
   if (selectedUiImplementation === "web-awesome") {
     const presenterRoot = root.querySelector<HTMLElement>(".story-reader");
@@ -646,6 +587,7 @@ export function mountStoryPlayerPage(
       ui: ui.get(),
       campaigns,
       selectedCampaign,
+      canBeginStory,
       projection,
       inspectedState,
       currentState,
@@ -948,7 +890,7 @@ export function mountStoryPlayerPage(
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-input-mode]")) {
       control.addEventListener("click", () => {
         const mode = control.dataset.inputMode;
-        if (mode === "auto" || mode === "action" || mode === "scene") selectInputMode(mode);
+        if (mode === "action" || mode === "scene") selectInputMode(mode);
       });
       control.addEventListener("keydown", (event) => {
         const modes = [...root.querySelectorAll<HTMLButtonElement>("[data-input-mode]")];
@@ -960,9 +902,9 @@ export function mountStoryPlayerPage(
               : event.key === "ArrowLeft" || event.key === "ArrowUp" ? (currentIndex - 1 + modes.length) % modes.length
                 : -1;
         const mode = modes[nextIndex]?.dataset.inputMode;
-        if (nextIndex < 0 || (mode !== "auto" && mode !== "action" && mode !== "scene")) return;
+        if (nextIndex < 0 || (mode !== "action" && mode !== "scene")) return;
         event.preventDefault();
-        selectInputMode(mode);
+        selectInputMode(mode as StoryTurnInputMode);
       });
     }
     for (const control of root.querySelectorAll<HTMLSelectElement>("[data-story-length-profile]")) {
@@ -998,11 +940,12 @@ export function mountStoryPlayerPage(
       control.addEventListener("click", () => {
         const world = projection.world;
         if (!world) return;
+        const openingInputMode = turnInputModeForControlStyle(selectedCampaign?.turnControlStyle);
         submittedDraft = null;
         void generation.submitAppend({
           action: world.firstAction,
-          requestedInputMode: "action",
-          resolvedInputMode: "action",
+          requestedInputMode: openingInputMode,
+          resolvedInputMode: openingInputMode,
           inputModeSource: "opening_action"
         }).then((accepted) => { if (accepted) ui.setGenerationFollowing(true); });
       });
@@ -1024,15 +967,6 @@ export function mountStoryPlayerPage(
     }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='discard-generation']")) {
       control.addEventListener("click", () => { void generation.discard(); });
-    }
-    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='confirm-intent-action']")) {
-      control.addEventListener("click", () => { confirmStoryIntent("action"); });
-    }
-    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='confirm-intent-scene']")) {
-      control.addEventListener("click", () => { confirmStoryIntent("scene"); });
-    }
-    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='return-to-story-editor']")) {
-      control.addEventListener("click", () => { returnToStoryEditor(); });
     }
     for (const textarea of root.querySelectorAll<HTMLTextAreaElement>("[data-story-illustration-prompt]")) {
       textarea.addEventListener("input", () => { void illustrations.editPrompt(textarea.value); });
@@ -1098,6 +1032,11 @@ export function mountStoryPlayerPage(
       if (disposed || nextController.signal.aborted) return;
       campaigns = listed.campaigns;
       selectedCampaign = campaigns.find((campaign) => campaign.id === route.campaignId) ?? null;
+      if (sync.campaign.activeTurnNumber === 0) {
+        const providerList = await composition.api.providers.list(nextController.signal).catch(() => ({ providers: [] }));
+        if (disposed || nextController.signal.aborted) return;
+        canBeginStory = canResolveStoryTextProvider(selectedCampaign, providerList.providers);
+      } else canBeginStory = false;
       composition.campaignStore.load(sync);
       syncComposer();
       if (route.turnNumber === null) ui.setViewTurnNumber(sync.campaign.activeTurnNumber);

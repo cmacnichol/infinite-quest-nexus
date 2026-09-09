@@ -285,17 +285,6 @@ main[data-page="story-player"] {
   background: var(--accent-hover);
 }
 
-.story-intent-confirmation {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 12px;
-  border: 1px solid var(--rule-strong);
-  background: var(--surface-muted);
-}
-
-.story-intent-confirmation > p { width: 100%; margin: 0; }
-
 .story-generation-preview {
   border-inline: 1px solid var(--accent);
   background: var(--accent-soft);

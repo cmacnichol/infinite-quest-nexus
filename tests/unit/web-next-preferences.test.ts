@@ -12,7 +12,7 @@ const PROFILE = {
   settings: {
     autoSubmitTurnChoices: true,
     continuousReading: false,
-    defaultTurnControlStyle: "flexible_auto" as const
+    defaultTurnControlStyle: "flexible_action" as const
   }
 };
 

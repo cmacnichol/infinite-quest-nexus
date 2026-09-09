@@ -34,24 +34,31 @@ test("Custom Action starts tall and grows without replacing the field", async ({
   }
 });
 
-test("flexible controls select Action, Direction, and Auto by keyboard without classifying while typing", async ({ page }) => {
+test("flexible controls select Action and Story Direction by keyboard without Auto or classifier requests", async ({ page }) => {
   const { api, field } = await openStory(page, { turnControlStyle: "flexible_action" });
+  const classifierRequests: string[] = [];
+  page.on("request", (request) => {
+    if (/\/turn-input\/(?:classify|intent)|\bclassif/i.test(request.url())) classifierRequests.push(request.url());
+  });
   try {
     const modes = page.locator('wa-radio-group[label="Interpret prompt as"]');
-    const auto = page.getByRole("radio", { name: "Auto", exact: true });
-    await auto.focus();
-    await expect(auto).toBeFocused();
+    const action = page.getByRole("radio", { name: "Story Action", exact: true });
+    const direction = page.getByRole("radio", { name: "Story Direction", exact: true });
+    await expect(modes.getByRole("radio")).toHaveCount(2);
+    await expect(page.getByRole("radio", { name: "Auto", exact: true })).toHaveCount(0);
+    await action.focus();
+    await expect(action).toBeFocused();
     for (const option of [
-      { key: "ArrowRight", label: "Story Action", value: "action" },
-      { key: "ArrowRight", label: "Story Direction", value: "scene" },
-      { key: "ArrowRight", label: "Auto", value: "auto" }
+      { key: "ArrowRight", radio: direction, value: "scene" },
+      { key: "ArrowRight", radio: action, value: "action" }
     ]) {
       await page.keyboard.press(option.key);
-      await expect(page.getByRole("radio", { name: option.label, exact: true })).toHaveAttribute("aria-checked", "true");
+      await expect(option.radio).toHaveAttribute("aria-checked", "true");
       await expect(modes).toHaveJSProperty("value", option.value);
     }
     await field.fill("A typed draft is still local.");
     await expect(field).toHaveValue("A typed draft is still local.");
+    expect(classifierRequests).toEqual([]);
   } finally {
     api.assertNoUnexpectedRequests();
   }

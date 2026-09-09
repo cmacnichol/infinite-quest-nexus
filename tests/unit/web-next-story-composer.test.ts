@@ -194,25 +194,17 @@ describe("Story continuation composer", () => {
     mounted.dispose();
   });
 
-  it("captures the turn length before Auto confirmation and retains it after a rejected submission", async () => {
+  it("captures the turn length for a direct submission and retains it after a rejected submission", async () => {
     const page = fixture();
-    const classifyTurnInput = vi.fn().mockResolvedValue({
-      classificationId: "11111111-1111-4111-8111-111111111111", classification: "mixed", resolvedMode: "scene",
-      confidenceBand: "ambiguous", providerSource: "story_text", expiresAt: "2026-08-18T00:01:00.000Z"
-    });
     const observer = vi.fn();
-    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({ turnControlStyle: "flexible_auto", classifyTurnInput }), { onSubmit: observer });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition(), { onSubmit: observer });
     await settle();
 
     selectTurnLength(page, "extended");
     enter(page, "Describe the moment.");
     page.document.querySelector<HTMLButtonElement>("[data-action='continue-story']")?.click();
     await settle();
-    selectTurnLength(page, "brief");
-    page.document.querySelector<HTMLButtonElement>("[data-action='confirm-intent-scene']")?.click();
-    await settle();
-
-    expect(observer).toHaveBeenCalledWith(expect.objectContaining({ storyLengthProfileOverride: "extended", resolvedInputMode: "scene" }));
+    expect(observer).toHaveBeenCalledWith(expect.objectContaining({ storyLengthProfileOverride: "extended", resolvedInputMode: "action" }));
     mounted.dispose();
 
     const rejectedPage = fixture();
@@ -275,7 +267,7 @@ describe("Story continuation composer", () => {
     expect(confirm).toHaveBeenCalledTimes(2);
     mounted.dispose();
   });
-  it("uses the campaign control style to render an action-only or flexible compact interpretation bar", async () => {
+  it("keeps interpretation controls for Action styles and hides them for Story Direction", async () => {
     const actionPage = fixture();
     const actionMounted = mountStoryPlayerPage(actionPage.root, { campaignId, turnNumber: 1 }, composition());
     await settle();
@@ -286,8 +278,8 @@ describe("Story continuation composer", () => {
     const flexiblePage = fixture();
     const flexibleMounted = mountStoryPlayerPage(flexiblePage.root, { campaignId, turnNumber: 1 }, composition({ turnControlStyle: "flexible_scene" }));
     await settle();
-    expect([...flexiblePage.document.querySelectorAll<HTMLButtonElement>("[data-input-mode]")].map((button) => [button.textContent, button.getAttribute("aria-checked")]))
-      .toEqual([["Auto", "false"], ["Action", "false"], ["Scene Direction", "true"]]);
+    expect(flexiblePage.document.querySelector("[data-story-input-modes]")).toBeNull();
+    expect(flexiblePage.document.querySelector("[data-input-mode]")).toBeNull();
     flexibleMounted.dispose();
   });
 
@@ -332,23 +324,17 @@ describe("Story continuation composer", () => {
   it("moves the compact interpretation radio selection with Arrow, Home, and End keys", async () => {
     const page = fixture();
     const focus = vi.spyOn(page.window.HTMLElement.prototype, "focus");
-    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({ turnControlStyle: "flexible_auto" }));
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({ turnControlStyle: "flexible_action" }));
     await settle();
-    const auto = page.document.querySelector<HTMLButtonElement>("[data-input-mode='auto']");
-    if (!auto) throw new Error("Auto interpretation control is missing.");
-
-    keydown(page, auto, "ArrowRight");
-    let action = page.document.querySelector<HTMLButtonElement>("[data-input-mode='action']");
-    expect(action?.getAttribute("aria-checked")).toBe("true");
-    expect(focus.mock.instances).toContain(action);
-
+    const action = page.document.querySelector<HTMLButtonElement>("[data-input-mode='action']");
     if (!action) throw new Error("Action interpretation control is missing.");
+
     keydown(page, action, "End");
     const scene = page.document.querySelector<HTMLButtonElement>("[data-input-mode='scene']");
     expect(scene?.getAttribute("aria-checked")).toBe("true");
     if (!scene) throw new Error("Scene interpretation control is missing.");
     keydown(page, scene, "Home");
-    expect(page.document.querySelector<HTMLButtonElement>("[data-input-mode='auto']")?.getAttribute("aria-checked")).toBe("true");
+    expect(page.document.querySelector<HTMLButtonElement>("[data-input-mode='action']")?.getAttribute("aria-checked")).toBe("true");
     mounted.dispose();
   });
 
@@ -364,23 +350,15 @@ describe("Story continuation composer", () => {
     mounted.dispose();
   });
 
-  it("clears text, choices, and an intent decision before restoring textarea focus", async () => {
+  it("clears text and choices before restoring textarea focus", async () => {
     const page = fixture();
     const focus = vi.spyOn(page.window.HTMLElement.prototype, "focus");
-    const classifyTurnInput = vi.fn().mockResolvedValue({
-      classificationId: "88888888-8888-4888-8888-888888888888", classification: "mixed", resolvedMode: "scene",
-      confidenceBand: "ambiguous", providerSource: "story_text", expiresAt: "2026-08-18T00:01:00.000Z"
-    });
-    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({ turnControlStyle: "flexible_auto", classifyTurnInput }));
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition());
     await settle();
     enter(page, "A cautiously ambiguous prompt.");
     page.document.querySelector<HTMLButtonElement>("[data-story-choice]")?.click();
     expect(page.document.querySelector<HTMLTextAreaElement>("[data-story-draft]")?.value).toBe("A cautiously ambiguous prompt.\nOpen the door");
     expect(page.document.querySelector<HTMLButtonElement>("[data-story-choice]")?.getAttribute("aria-pressed")).toBe("true");
-    page.document.querySelector<HTMLButtonElement>("[data-input-mode='auto']")?.click();
-    page.document.querySelector<HTMLButtonElement>("[data-action='continue-story']")?.click();
-    await settle();
-    expect(page.document.querySelector("[data-story-intent-confirmation]")).toBeTruthy();
     page.document.querySelector<HTMLButtonElement>("[data-action='clear-story-draft']")?.click();
     expect(page.document.querySelector<HTMLTextAreaElement>("[data-story-draft]")?.value).toBe("");
     expect(page.document.querySelector("[data-story-character-count]")?.textContent).toContain("0 / 12,000");
@@ -395,7 +373,7 @@ describe("Story continuation composer", () => {
     const focus = vi.spyOn(page.window.HTMLElement.prototype, "focus");
     const classifyTurnInput = vi.fn();
     const submit = vi.fn();
-    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({ turnControlStyle: "flexible_auto", classifyTurnInput }), { onSubmit: submit });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({ turnControlStyle: "flexible_action", classifyTurnInput }), { onSubmit: submit });
     await settle();
     page.document.querySelector<HTMLButtonElement>("[data-action='continue-story']")?.click();
     expect(classifyTurnInput).not.toHaveBeenCalled();
@@ -456,71 +434,40 @@ describe("Story continuation composer", () => {
     enabledMounted.dispose();
   });
 
-  it("submits clear Auto results directly and keeps ambiguous classifications for explicit confirmation", async () => {
+  it("submits direct actions without invoking a classifier", async () => {
     const page = fixture();
-    const classifyTurnInput = vi.fn()
-      .mockResolvedValueOnce({ classificationId: "77777777-7777-4777-8777-777777777777", classification: "action", resolvedMode: "action", confidenceBand: "clear", providerSource: "story_text", expiresAt: "2026-08-18T00:01:00.000Z" })
-      .mockResolvedValueOnce({ classificationId: "88888888-8888-4888-8888-888888888888", classification: "mixed", resolvedMode: "scene", confidenceBand: "ambiguous", providerSource: "story_text", expiresAt: "2026-08-18T00:01:00.000Z" });
+    const classifyTurnInput = vi.fn();
     const submit = vi.fn();
-    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({ turnControlStyle: "flexible_auto", classifyTurnInput }), { onSubmit: submit });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({ turnControlStyle: "flexible_action", classifyTurnInput }), { onSubmit: submit });
     await settle();
 
     enter(page, "Open the observatory.");
     page.document.querySelector<HTMLButtonElement>("[data-action='continue-story']")?.click();
     await settle();
-    expect(submit).toHaveBeenLastCalledWith(expect.objectContaining({ action: "Open the observatory.", requestedInputMode: "auto", resolvedInputMode: "action", classificationId: "77777777-7777-4777-8777-777777777777" }));
-    await vi.waitFor(() => expect(page.document.querySelector("[data-story-draft]")).toBeTruthy());
 
-    enter(page, "  Perhaps describe what changes.  ");
-    page.document.querySelector<HTMLButtonElement>("[data-action='continue-story']")?.click();
-    await settle();
-    expect(page.document.querySelector("[data-story-intent-confirmation]")?.textContent).toContain("  Perhaps describe what changes.  ");
-    page.document.querySelector<HTMLButtonElement>("[data-action='confirm-intent-scene']")?.click();
-    await settle();
-    expect(submit).toHaveBeenLastCalledWith(expect.objectContaining({ action: "  Perhaps describe what changes.  ", requestedInputMode: "auto", resolvedInputMode: "scene", classificationId: "88888888-8888-4888-8888-888888888888" }));
-    expect(classifyTurnInput).toHaveBeenCalledTimes(2);
+    expect(submit).toHaveBeenLastCalledWith(expect.objectContaining({
+      action: "Open the observatory.", requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit"
+    }));
+    expect(classifyTurnInput).not.toHaveBeenCalled();
+    expect(page.document.querySelector("[data-story-intent-confirmation]")).toBeNull();
     mounted.dispose();
   });
 
-  it("prepares an ambiguous Auto draft without changing its exact text", async () => {
+  it("prepares an explicit Story Direction draft without provider interpretation", async () => {
     const prepare = submissionPreparer();
     expect(prepare).toEqual(expect.any(Function));
     if (!prepare) return;
-    const classify = vi.fn().mockResolvedValue({
-      classificationId: "99999999-9999-4999-8999-999999999999", classification: "mixed", resolvedMode: "scene",
-      confidenceBand: "ambiguous", providerSource: "story_text", expiresAt: "2026-08-18T00:01:00.000Z"
-    });
 
-    await expect(prepare("  Preserve my spacing.  ", "auto", "action", classify)).resolves.toEqual({
-      kind: "confirmation",
-      action: "  Preserve my spacing.  ",
-      classificationId: "99999999-9999-4999-8999-999999999999"
+    await expect(prepare("  Preserve my spacing.  ", "scene")).resolves.toEqual({
+      kind: "ready",
+      submission: {
+        action: "  Preserve my spacing.  ",
+        requestedInputMode: "scene",
+        resolvedInputMode: "scene",
+        inputModeSource: "explicit"
+      }
     });
-    expect(classify).toHaveBeenCalledWith({ text: "  Preserve my spacing.  ", preferredFallback: "action" });
   });
 
-  it("moves focus into a labelled inline confirmation region and returns it to the editor", async () => {
-    const page = fixture();
-    const focus = vi.spyOn(page.window.HTMLElement.prototype, "focus");
-    const classifyTurnInput = vi.fn().mockResolvedValue({
-      classificationId: "88888888-8888-4888-8888-888888888888", classification: "mixed", resolvedMode: "scene",
-      confidenceBand: "ambiguous", providerSource: "story_text", expiresAt: "2026-08-18T00:01:00.000Z"
-    });
-    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({ turnControlStyle: "flexible_auto", classifyTurnInput }));
-    await settle();
-    enter(page, "Perhaps describe what changes.");
-    page.document.querySelector<HTMLButtonElement>("[data-action='continue-story']")?.click();
-    await settle();
 
-    const confirmation = page.document.querySelector<HTMLElement>("[data-story-intent-confirmation]");
-    const useAction = page.document.querySelector<HTMLButtonElement>("[data-action='confirm-intent-action']");
-    expect(confirmation?.getAttribute("role")).toBe("region");
-    expect(confirmation?.getAttribute("aria-labelledby")).toBeTruthy();
-    expect(confirmation?.getAttribute("role")).not.toBe("alertdialog");
-    expect(focus.mock.instances).toContain(useAction);
-
-    page.document.querySelector<HTMLButtonElement>("[data-action='return-to-story-editor']")?.click();
-    expect(focus.mock.instances).toContain(page.document.querySelector("[data-story-draft]"));
-    mounted.dispose();
-  });
 });

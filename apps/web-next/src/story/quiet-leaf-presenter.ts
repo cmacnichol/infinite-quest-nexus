@@ -120,8 +120,7 @@ export function mountQuietLeafPresenter(
       },
       canContinue: availability.canContinue,
       canRetry: availability.canRetry,
-      status: state.ui.message,
-      confirmation: state.ui.intentConfirmation === null ? null : { action: state.ui.intentConfirmation.action }
+      status: state.ui.message
     });
   }
 

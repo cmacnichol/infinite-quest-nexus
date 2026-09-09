@@ -1,4 +1,4 @@
-export type StoryTurnInputMode = "auto" | "action" | "scene";
+export type StoryTurnInputMode = "action" | "scene";
 
 export type ChoiceDraftSelection = {
   baseText: string;

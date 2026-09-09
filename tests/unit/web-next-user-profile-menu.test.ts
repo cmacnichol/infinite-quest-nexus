@@ -10,7 +10,7 @@ const profile = {
   settings: {
     autoSubmitTurnChoices: true,
     continuousReading: false,
-    defaultTurnControlStyle: "flexible_auto"
+    defaultTurnControlStyle: "flexible_action"
   }
 };
 
@@ -102,7 +102,7 @@ describe("web-next user profile menu", () => {
     expect(controlValue(name)).toBe("Initial Owner");
     expect(autoSubmit.checked).toBe(true);
     expect(continuous.checked).toBe(false);
-    expect(controlValue(turnStyle)).toBe("flexible_auto");
+    expect(controlValue(turnStyle)).toBe("flexible_action");
 
     setControlValue(name, "Atlas Keeper");
     name.dispatchEvent(new Event("input"));

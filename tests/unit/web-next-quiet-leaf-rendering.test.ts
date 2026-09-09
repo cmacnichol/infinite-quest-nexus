@@ -4,7 +4,7 @@ import { createStoryTestDom, createStoryTestComposition, settleStoryTest } from 
 
 it("keeps Core narration free of the native turn heading and duplicate retry action", async () => {
   const page = createStoryTestDom();
-  const composition = createStoryTestComposition({ turnControlStyle: "flexible_auto" });
+  const composition = createStoryTestComposition({ turnControlStyle: "flexible_action" });
   const mounted = mountStoryPlayerPage(page.root, { campaignId: "11111111-1111-4111-8111-111111111111", turnNumber: null }, composition, { uiImplementation: "web-awesome" });
   await settleStoryTest();
 
@@ -18,7 +18,7 @@ it("keeps Core narration free of the native turn heading and duplicate retry act
 
 it("keeps the native turn heading and latest-generation retry action", async () => {
   const page = createStoryTestDom();
-  const composition = createStoryTestComposition({ turnControlStyle: "flexible_auto" });
+  const composition = createStoryTestComposition({ turnControlStyle: "flexible_action" });
   const mounted = mountStoryPlayerPage(page.root, { campaignId: "11111111-1111-4111-8111-111111111111", turnNumber: null }, composition, { uiImplementation: "native" });
   await settleStoryTest();
 
