@@ -18,7 +18,7 @@ Commit: `9f892c4f` (amended below to include this recorded SHA)
 - RED: `node node_modules/vitest/vitest.mjs run tests/unit/campaign-generation-policy.test.ts`
   - Failed before production code as intended: module `../../packages/contracts/src/campaign-generation-policy.js` did not exist.
 - GREEN: `node node_modules/vitest/vitest.mjs run tests/unit/campaign-generation-policy.test.ts tests/unit/generation.test.ts tests/unit/campaign-state-contract.test.ts tests/unit/story-settings.test.ts tests/unit/application/world-campaign-use-cases.test.ts tests/unit/client-web/api-client.test.ts`
-  - Passed: 6 files, 70 tests.
+  - Final output: `Test Files 6 passed (6)` and `Tests 71 passed (71)`. The earlier 70-test run preceded the historical profile-preference normalization test.
 - Application type check: `pnpm --filter @infinite-quest/application check`
   - Passed.
 - Diff hygiene: `git diff --check`
