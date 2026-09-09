@@ -18,6 +18,18 @@ const RUNTIME_PORT = 18081;
 const CREDENTIAL_SECRET = "story-only-runtime-test-credential-secret";
 const STORY_ONLY_POSTGRES_CONTAINER = "infinitequest-story-only-test";
 
+export type StoryOnlyRuntimeRenderer = "native" | "web-awesome";
+
+export function resolveStoryOnlyRuntimeRenderer(value: unknown): StoryOnlyRuntimeRenderer {
+  if (value === undefined) return "native";
+  if (value === "native" || value === "web-awesome") return value;
+  throw new Error("Unsupported story-only runtime renderer. Use native or web-awesome.");
+}
+
+export function storyOnlyRuntimeDockerBuildArgs(renderer: StoryOnlyRuntimeRenderer, dockerImage: string): string[] {
+  return ["build", "--build-arg", `VITE_UI_COMPONENTS=${renderer}`, "--file", "tests/helpers/story-only-runtime.Dockerfile", "--tag", dockerImage, "."];
+}
+
 export type StoryOnlyRuntimeTarget = Readonly<{ host: string; port: string; database: string; baseUrl: URL }>;
 
 export function assertStoryOnlyRuntimeTarget(databaseUrl: string): StoryOnlyRuntimeTarget {
@@ -55,11 +67,13 @@ export function safeStoryOnlyRuntimeSummary(input: Readonly<{
   databaseUrl: string;
   provider: Awaited<ReturnType<StoryOnlySyntheticProvider["summary"]>>;
   runtimeBaseUrl: string;
+  renderer: StoryOnlyRuntimeRenderer;
 }>) {
   return Object.freeze({
     database: new URL(input.databaseUrl).pathname.replace(/^\//u, ""),
     providerOperations: input.provider.operations,
     providerRequestCount: input.provider.total,
+    renderer: input.renderer,
     runtimeBaseUrl: input.runtimeBaseUrl
   });
 }
@@ -67,7 +81,13 @@ export function safeStoryOnlyRuntimeSummary(input: Readonly<{
 export type StoryOnlyRuntimeFixture = Readonly<{
   baseUrl: string;
   campaignId: string;
+  emptyStoryCampaignId: string;
+  emptyStoryCampaignMobileId: string;
+  emptyNewUiStoryCampaignId: string;
+  emptyNewUiStoryCampaignMobileId: string;
+  actionOnlyCampaignId: string;
   databaseName: string;
+  renderer: StoryOnlyRuntimeRenderer;
   provider: StoryOnlySyntheticProvider;
   summary(): Promise<ReturnType<typeof safeStoryOnlyRuntimeSummary>>;
   close(): Promise<void>;
@@ -228,8 +248,9 @@ async function dropOwnedDatabase(target: StoryOnlyRuntimeTarget, databaseName: s
   } finally { await admin.end(); }
 }
 
-export async function startStoryOnlyRuntime(options: Readonly<{ databaseUrl: string; root?: string; port?: number; signal?: AbortSignal }> ): Promise<StoryOnlyRuntimeFixture> {
+export async function startStoryOnlyRuntime(options: Readonly<{ databaseUrl: string; root?: string; port?: number; renderer?: unknown; signal?: AbortSignal }> ): Promise<StoryOnlyRuntimeFixture> {
   if (options.signal?.aborted) throw new Error("Story-only runtime startup was cancelled.");
+  const renderer = resolveStoryOnlyRuntimeRenderer(options.renderer);
   const target = assertStoryOnlyRuntimeTarget(options.databaseUrl);
   const root = resolve(options.root ?? process.cwd());
   const port = options.port ?? RUNTIME_PORT;
@@ -274,7 +295,7 @@ export async function startStoryOnlyRuntime(options: Readonly<{ databaseUrl: str
     pool = createDatabasePool(databaseUrl, 12);
     await migrateDatabase(pool, resolve(root, "database/migrations"));
     if (docker) {
-      await runCommand("docker", ["build", "--file", "tests/helpers/story-only-runtime.Dockerfile", "--tag", dockerImage, "."]); dockerImageBuilt = true;
+      await runCommand("docker", storyOnlyRuntimeDockerBuildArgs(renderer, dockerImage)); dockerImageBuilt = true;
       await runCommand("docker", ["network", "create", dockerNetwork]); dockerNetworkCreated = true;
       await runCommand("docker", ["network", "connect", dockerNetwork, STORY_ONLY_POSTGRES_CONTAINER]); postgresConnected = true;
       await runCommand("docker", ["run", "--detach", "--name", dockerProvider, "--network", dockerNetwork, "--env", "STORY_ONLY_SYNTHETIC_PROVIDER_HOST=0.0.0.0", dockerImage, "node", "node_modules/tsx/dist/cli.mjs", "scripts/story-only-synthetic-provider.ts"]); dockerProviderStarted = true;
@@ -294,15 +315,20 @@ export async function startStoryOnlyRuntime(options: Readonly<{ databaseUrl: str
       isDefault: true,
       configuration: {}
     }, CREDENTIAL_SECRET);
-    const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({
-      sourceName: "story-only-runtime-fixture.story",
+    const fixtureStory = (title: string, turnControlStyle: "action_only" | "flexible_action" | "flexible_scene", turns: readonly unknown[]) => storyImportRequestSchema.parse({
+      sourceName: `${title.toLowerCase().replaceAll(/[^a-z]+/gu, "-")}.story`,
       story: {
-        world: { title: "Story-only Runtime Fixture", genre: "test", tone: "sanitized", premise: "A safe local fixture.", backgroundStory: "", character: "", firstAction: "Continue the story.", rules: "" },
-        settings: { storyLength: "standard", textProviderProfileId: profile.id },
-        turns: [{ id: "story-only-runtime-turn-1", turnNumber: 1, action: "Begin.", narration: "The safe fixture begins at a quiet station.", choices: ["Continue"] }],
-        scratchpad: "", trackers: []
+        world: { title, genre: "test", tone: "sanitized", premise: "A safe local fixture.", backgroundStory: "", character: "", firstAction: "Continue the story.", rules: "" },
+        settings: { storyLength: "standard", textProviderProfileId: profile.id, turnControlStyle },
+        turns, scratchpad: "", trackers: []
       }
-    }), memoryGeneration(pool, CREDENTIAL_SECRET));
+    });
+    const imported = await importLegacyStory(pool, fixtureStory("Story-only Runtime Fixture", "flexible_action", [{ id: "story-only-runtime-turn-1", turnNumber: 1, action: "Begin.", narration: "The safe fixture begins at a quiet station.", choices: ["Continue"] }]), memoryGeneration(pool, CREDENTIAL_SECRET));
+    const emptyStory = await importLegacyStory(pool, fixtureStory("Empty Story Direction Fixture", "flexible_scene", []), memoryGeneration(pool, CREDENTIAL_SECRET));
+    const emptyStoryMobile = await importLegacyStory(pool, fixtureStory("Empty Story Direction Mobile Fixture", "flexible_scene", []), memoryGeneration(pool, CREDENTIAL_SECRET));
+    const emptyNewUiStory = await importLegacyStory(pool, fixtureStory("Empty New UI Story Direction Fixture", "flexible_scene", []), memoryGeneration(pool, CREDENTIAL_SECRET));
+    const emptyNewUiStoryMobile = await importLegacyStory(pool, fixtureStory("Empty New UI Story Direction Mobile Fixture", "flexible_scene", []), memoryGeneration(pool, CREDENTIAL_SECRET));
+    const actionOnly = await importLegacyStory(pool, fixtureStory("Action-only Fixture", "action_only", [{ id: "action-only-runtime-turn-1", turnNumber: 1, action: "Begin.", narration: "The action fixture begins.", choices: ["Continue"] }]), memoryGeneration(pool, CREDENTIAL_SECRET));
     await pool.end();
     pool = undefined;
     const runtimeBaseUrl = `http://127.0.0.1:${port}`;
@@ -349,8 +375,8 @@ export async function startStoryOnlyRuntime(options: Readonly<{ databaseUrl: str
       async () => { await rm(resolve(root, "tmp/story-only-test/archives", databaseName), { recursive: true, force: true }); }
     ]);
     return Object.freeze({
-      baseUrl: runtimeBaseUrl, campaignId: imported.campaignId, databaseName, provider: activeProvider,
-      summary: async () => safeStoryOnlyRuntimeSummary({ databaseUrl, provider: await activeProvider.summary(), runtimeBaseUrl }),
+      baseUrl: runtimeBaseUrl, campaignId: imported.campaignId, emptyStoryCampaignId: emptyStory.campaignId, emptyStoryCampaignMobileId: emptyStoryMobile.campaignId, emptyNewUiStoryCampaignId: emptyNewUiStory.campaignId, emptyNewUiStoryCampaignMobileId: emptyNewUiStoryMobile.campaignId, actionOnlyCampaignId: actionOnly.campaignId, databaseName, renderer, provider: activeProvider,
+      summary: async () => safeStoryOnlyRuntimeSummary({ databaseUrl, provider: await activeProvider.summary(), renderer, runtimeBaseUrl }),
       close
     });
   } catch (error) {

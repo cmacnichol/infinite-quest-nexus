@@ -9,6 +9,8 @@ import {
   createStoryOnlyRuntimeCleanup,
   closeStoryOnlyRuntimeInput,
   storyOnlyDockerCleanupNames,
+  resolveStoryOnlyRuntimeRenderer,
+  storyOnlyRuntimeDockerBuildArgs,
 } from "../helpers/story-only-runtime-fixture.js";
 import {
   createStoryOnlySyntheticProvider,
@@ -118,8 +120,29 @@ describe("story-only disposable runtime harness", () => {
     expect(safeStoryOnlyRuntimeSummary({
       databaseUrl: "postgresql://test:secret@127.0.0.1:15439/infinitequest_storyonly_abc",
       provider: { operations: { "chat.completions": 2 }, total: 2 },
-      runtimeBaseUrl: "http://127.0.0.1:18081"
-    })).toEqual({ database: "infinitequest_storyonly_abc", providerOperations: { "chat.completions": 2 }, providerRequestCount: 2, runtimeBaseUrl: "http://127.0.0.1:18081" });
+      runtimeBaseUrl: "http://127.0.0.1:18081",
+      renderer: "native"
+    })).toEqual({ database: "infinitequest_storyonly_abc", providerOperations: { "chat.completions": 2 }, providerRequestCount: 2, renderer: "native", runtimeBaseUrl: "http://127.0.0.1:18081" });
+  });
+
+  it("defaults the disposable Docker build to the native renderer and identifies it in the safe summary", () => {
+    expect(resolveStoryOnlyRuntimeRenderer(undefined)).toBe("native");
+    expect(storyOnlyRuntimeDockerBuildArgs("native", "infinitequest-story-only-runtime:test")).toEqual([
+      "build", "--build-arg", "VITE_UI_COMPONENTS=native", "--file", "tests/helpers/story-only-runtime.Dockerfile", "--tag", "infinitequest-story-only-runtime:test", "."
+    ]);
+    expect(safeStoryOnlyRuntimeSummary({
+      databaseUrl: "postgresql://test:secret@127.0.0.1:15439/infinitequest_storyonly_abc",
+      provider: { operations: {}, total: 0 },
+      runtimeBaseUrl: "http://127.0.0.1:18081",
+      renderer: "native"
+    })).toMatchObject({ renderer: "native" });
+  });
+
+  it("uses web-awesome only when explicitly selected and rejects unsupported renderer values before Docker can build", () => {
+    expect(resolveStoryOnlyRuntimeRenderer("web-awesome")).toBe("web-awesome");
+    expect(storyOnlyRuntimeDockerBuildArgs("web-awesome", "infinitequest-story-only-runtime:test"))
+      .toContain("VITE_UI_COMPONENTS=web-awesome");
+    expect(() => resolveStoryOnlyRuntimeRenderer("experimental")).toThrow("Unsupported story-only runtime renderer");
   });
 
   it("refuses cleanup names outside this harness ownership", () => {

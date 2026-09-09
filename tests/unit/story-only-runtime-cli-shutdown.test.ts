@@ -5,6 +5,7 @@ const seams = vi.hoisted(() => ({
   mkdir: vi.fn(),
   readFile: vi.fn(),
   rm: vi.fn(),
+  startRuntime: vi.fn(),
   summary: vi.fn(),
   writeFile: vi.fn()
 }));
@@ -21,10 +22,16 @@ vi.mock("../helpers/story-only-runtime-fixture.js", async (importOriginal) => {
   return {
     ...actual,
     closeStoryOnlyRuntimeInput: vi.fn(),
-    startStoryOnlyRuntime: vi.fn(async () => ({
+    startStoryOnlyRuntime: seams.startRuntime.mockImplementation(async (options: { renderer?: unknown }) => ({
       baseUrl: "http://127.0.0.1:18081",
       campaignId: "campaign-1",
+      emptyStoryCampaignId: "legacy-empty-desktop",
+      emptyStoryCampaignMobileId: "legacy-empty-mobile",
+      emptyNewUiStoryCampaignId: "new-ui-empty-desktop",
+      emptyNewUiStoryCampaignMobileId: "new-ui-empty-mobile",
+      actionOnlyCampaignId: "action-only-campaign",
       databaseName: "infinitequest_storyonly_cli",
+      renderer: options.renderer,
       close: seams.fixtureClose,
       summary: seams.summary
     }))
@@ -41,6 +48,7 @@ describe("story-only runtime CLI shutdown", () => {
     seams.mkdir.mockReset();
     seams.readFile.mockReset();
     seams.rm.mockReset();
+    seams.startRuntime.mockClear();
     seams.summary.mockReset();
     seams.writeFile.mockReset();
     seams.fixtureClose.mockRejectedValue(new Error("owned cleanup failed: postgresql://test:secret@127.0.0.1:15439/infinitequest_storyonly_cli"));
@@ -85,5 +93,28 @@ describe("story-only runtime CLI shutdown", () => {
 
     expect(seams.fixtureClose).toHaveBeenCalledOnce();
     expect(seams.rm).toHaveBeenCalledWith(expect.stringMatching(/runtime\.json$/u), { force: true });
+  });
+
+  it("passes the selected renderer into the fixture and publishes its isolated campaign IDs", async () => {
+    const originalRenderer = process.env.VITE_UI_COMPONENTS;
+    process.env.VITE_UI_COMPONENTS = "web-awesome";
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    try {
+      await startCli();
+
+      expect(seams.startRuntime).toHaveBeenCalledWith(expect.objectContaining({ renderer: "web-awesome" }));
+      expect(JSON.parse(seams.writeFile.mock.calls[0]![1] as string)).toMatchObject({
+        emptyStoryCampaignId: "legacy-empty-desktop",
+        emptyStoryCampaignMobileId: "legacy-empty-mobile",
+        emptyNewUiStoryCampaignId: "new-ui-empty-desktop",
+        emptyNewUiStoryCampaignMobileId: "new-ui-empty-mobile",
+        renderer: "web-awesome"
+      });
+    } finally {
+      if (originalRenderer === undefined) delete process.env.VITE_UI_COMPONENTS;
+      else process.env.VITE_UI_COMPONENTS = originalRenderer;
+    }
   });
 });

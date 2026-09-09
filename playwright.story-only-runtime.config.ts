@@ -8,8 +8,9 @@ if (!baseURL || !campaignId) {
 
 export default defineConfig({
   testDir: "./tests/e2e",
-  testMatch: "story-only-campaigns.e2e.test.ts",
+  testMatch: ["story-only-campaigns.e2e.test.ts", "story-only-new-ui.e2e.test.ts"],
   fullyParallel: false,
+  workers: 1,
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? "github" : "line",
