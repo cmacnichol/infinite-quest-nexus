@@ -38,7 +38,9 @@ export async function installStoryApi(page: Page, options: QuietLeafFixtureOptio
     if (request.method() === "GET" && path === "/api/v1/campaigns") return respond(payloads.campaigns);
     if (request.method() === "GET" && path === "/api/v1/worlds") return respond(payloads.worlds);
     if (request.method() === "GET" && path === `/api/v1/campaigns/${payloads.campaignId}/sync-status`) return respond(payloads.syncStatus);
-    if (request.method() === "GET" && path === `/api/v1/campaigns/${payloads.campaignId}/turns`) return respond(payloads.turns);
+    if (request.method() === "GET" && path === `/api/v1/campaigns/${payloads.campaignId}/turns`) {
+      return respond(url.searchParams.has("before") && payloads.olderTurns !== null ? payloads.olderTurns : payloads.turns);
+    }
     if (request.method() === "GET" && path === `/api/v1/campaigns/${payloads.campaignId}/state`) return respond(payloads.runtimeState);
     if (request.method() === "GET" && path === `/api/v1/campaigns/${payloads.campaignId}/state/inspection`) return respond(payloads.runtimeState);
     if (request.method() === "GET" && path === "/api/v1/session") return respond({ ...payloads.session, user });

@@ -141,6 +141,7 @@ export function createStoryUiModel(
   const listeners = new Set<(state: Readonly<StoryUiState>) => void>();
   let state = localInitialState(initial, storage);
   let disposed = false;
+  let composerPolicy: "action_only" | "flexible_action" | "flexible_scene" | null = null;
 
   const publish = (next: StoryUiState) => {
     if (disposed || Object.is(state, next)) return;
@@ -189,12 +190,18 @@ export function createStoryUiModel(
     syncComposer(campaignId, acceptedTurnNumber, turnControlStyle) {
       if (!campaignId || !Number.isSafeInteger(acceptedTurnNumber) || acceptedTurnNumber < 0) return;
       const ownerKey = `${campaignId}:${acceptedTurnNumber}`;
+      const nextComposerPolicy = turnControlStyle === "flexible_scene"
+        ? "flexible_scene"
+        : turnControlStyle === "flexible_action" ? "flexible_action" : "action_only";
       const requestedInputMode = turnInputModeForControlStyle(turnControlStyle) === "scene" ? "scene" : "action";
       if (state.draftOwnerKey === ownerKey) {
+        if (composerPolicy === nextComposerPolicy) return;
+        composerPolicy = nextComposerPolicy;
         if (state.requestedInputMode !== requestedInputMode) publish({ ...state, requestedInputMode });
         return;
       }
       const selection = createChoiceDraftSelection();
+      composerPolicy = nextComposerPolicy;
       publish({
         ...state,
         draft: "",

@@ -1753,7 +1753,7 @@ async function executeLoadedGeneration(
         };
       });
       ({ parsed, firstReason, initialValidationErrors, initialAttemptNumber } = validation);
-      if (generationPolicy?.playMode === "story_only" && parsed.ok) {
+      if (generationPolicy?.playMode === "story_only") {
         const recoveredChoiceOnly = parseStoryOnlyOutput(result.content);
         if (!recoveredChoiceOnly.ok && recoveredChoiceOnly.kind === "choices") {
           const preparedRecoveryRequest = preparedRequestForResult(result, provider, recoveryRequest);

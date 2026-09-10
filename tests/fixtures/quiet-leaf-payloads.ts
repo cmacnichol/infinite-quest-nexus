@@ -28,6 +28,7 @@ export interface QuietLeafFixtureOptions {
   readonly turnControlStyle?: CampaignSummary["turnControlStyle"];
   readonly returningUser?: boolean;
   readonly expectedProfileUpdates?: number;
+  readonly completeHistory?: boolean;
 }
 
 export interface QuietLeafApiPayloads {
@@ -36,6 +37,7 @@ export interface QuietLeafApiPayloads {
   readonly session: ReturnType<typeof sessionResponseSchema.parse>;
   readonly syncStatus: CampaignSyncStatus;
   readonly turns: ReturnType<typeof turnListResponseSchema.parse>;
+  readonly olderTurns: ReturnType<typeof turnListResponseSchema.parse> | null;
   readonly worlds: ReturnType<typeof worldListResponseSchema.parse>;
   readonly runtimeState: ReturnType<typeof campaignRuntimeStateResponseSchema.parse>;
   readonly illustrationConfig: ReturnType<typeof illustrationConfigResponseSchema.parse>;
@@ -44,11 +46,12 @@ export interface QuietLeafApiPayloads {
 }
 
 export function quietLeafApiPayloads(options: QuietLeafFixtureOptions = {}): QuietLeafApiPayloads {
+  const activeTurnNumber = options.completeHistory ? 2 : 1;
   const campaign = {
     id: quietLeafCampaignId,
     title: "Fixture Story",
     status: "active",
-    activeTurnNumber: 1,
+    activeTurnNumber,
     createdAt: timestamp,
     updatedAt: timestamp,
     storyLengthProfile: "standard",
@@ -104,7 +107,7 @@ export function quietLeafApiPayloads(options: QuietLeafFixtureOptions = {}): Qui
   };
   const turn = {
     id: turnId,
-    turnNumber: 1,
+    turnNumber: activeTurnNumber,
     action: "Survey the empty platform.",
     inputMode: "action",
     inputModeSource: "explicit",
@@ -121,6 +124,13 @@ export function quietLeafApiPayloads(options: QuietLeafFixtureOptions = {}): Qui
     chronicleRetrieval: null,
     reportedCost: null
   };
+  const olderTurn = options.completeHistory ? {
+    ...turn,
+    id: "77777777-7777-4777-8777-777777777777",
+    turnNumber: 1,
+    action: "Follow the chalk marks.",
+    narration: "The earlier fixture turn marks the route toward the door."
+  } : null;
   const illustrationMode = options.illustration ?? "disabled";
   const illustrationSegments = illustrationMode === "enabled" ? [{
     setId: "88888888-8888-4888-8888-888888888888",
@@ -199,11 +209,12 @@ export function quietLeafApiPayloads(options: QuietLeafFixtureOptions = {}): Qui
       turnWindowMode: "replace",
       turns: {
         campaignId: quietLeafCampaignId,
-        nextCursor: null,
+        nextCursor: options.completeHistory ? "before-turn-2" : null,
         turns: [turn]
       }
     }),
-    turns: turnListResponseSchema.parse({ campaignId: quietLeafCampaignId, turns: [turn], nextCursor: null }),
+    turns: turnListResponseSchema.parse({ campaignId: quietLeafCampaignId, turns: [turn], nextCursor: options.completeHistory ? "before-turn-2" : null }),
+    olderTurns: olderTurn === null ? null : turnListResponseSchema.parse({ campaignId: quietLeafCampaignId, turns: [olderTurn], nextCursor: null }),
     worlds: worldListResponseSchema.parse({
       worlds: [{
         id: worldId,
@@ -233,8 +244,8 @@ export function quietLeafApiPayloads(options: QuietLeafFixtureOptions = {}): Qui
     }),
     runtimeState: campaignRuntimeStateResponseSchema.parse({
       campaignId: quietLeafCampaignId,
-      activeTurnNumber: 1,
-      viewedTurnNumber: 1,
+      activeTurnNumber,
+      viewedTurnNumber: activeTurnNumber,
       isCurrent: true,
       revision: 1,
       updatedAt: timestamp,

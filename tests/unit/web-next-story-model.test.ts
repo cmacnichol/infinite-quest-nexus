@@ -89,6 +89,20 @@ describe("Story Player local UI model", () => {
     }));
   });
 
+  it("keeps an explicit input mode when its composer owner policy is refreshed", () => {
+    const model = createStoryUiModel({}, memoryStorage());
+
+    model.syncComposer("campaign-a", 7, "flexible_action");
+    model.setComposerDraft("Describe the next scene.");
+    model.setRequestedInputMode("scene");
+    model.syncComposer("campaign-a", 7, "flexible_action");
+
+    expect(model.get()).toEqual(expect.objectContaining({
+      draft: "Describe the next scene.",
+      requestedInputMode: "scene"
+    }));
+  });
+
   it("keeps a valid turn length override for its composer owner and rejects invalid values", () => {
     const model = createStoryUiModel({}, memoryStorage());
 

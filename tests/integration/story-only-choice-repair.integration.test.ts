@@ -261,15 +261,20 @@ integration("Story Direction choice repair PostgreSQL workflow", () => {
       ...JSON.parse(output(["Enter the observatory.", "Call for the keeper.", "Study the threshold.", "Circle the tower."])),
       narration: "Mara rolls a die before opening the observatory door."
     })],
-    ["output-limited normalized duplicate choices", "{not-valid-json", true]
-  ])("keeps a recovered Story Direction draft pending when %s is followed by normalized duplicate choices", async (_caseName, rejected, recoveredOutputLimited = false) => {
+    ["output-limited normalized duplicate choices", "{not-valid-json", true],
+    ["three recovered choices", "{not-valid-json", false, output(["Enter.", "Wait.", "Speak."])],
+    ["missing recovered choices", "{not-valid-json", false, output(undefined)],
+    ["empty recovered suggestion", "{not-valid-json", false, output(["Enter.", "Wait.", "Speak.", "Observe."], "")],
+    ["mechanics in recovered choices", "{not-valid-json", false, output(["Roll a d20.", "Wait.", "Speak.", "Observe."])],
+    ["output-limited three recovered choices", "{not-valid-json", true, output(["Enter.", "Wait.", "Speak."])]
+  ])("keeps a recovered Story Direction draft pending when %s leaves invalid choices", async (_caseName, rejected, recoveredOutputLimited = false, recoveredContent?: string) => {
     const imported = await campaign();
     const sourceFactId = await seedCanonicalFact(imported.campaignId);
     const before = await campaignCounts(imported.campaignId);
     const queued = await enqueue(imported.campaignId);
     const operations: string[] = [];
     const requests: string[] = [];
-    const duplicateRecovered = output([
+    const duplicateRecovered = recoveredContent ?? output([
       "Enter the observatory.",
       " enter the observatory. ",
       "Wait beneath the eaves.",

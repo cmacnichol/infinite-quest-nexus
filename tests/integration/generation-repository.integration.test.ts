@@ -619,14 +619,14 @@ integration("PostgreSQL generation command repository", () => {
     expect(after.prompt_protocol_version).toBe(before.prompt_protocol_version);
   });
 
-  it("captures an immutable story-only policy for append and rejects retired Auto input after replay lookup", async () => {
+  it.each(["scene", "action"] as const)("captures an immutable story-only policy for %s append input and rejects retired Auto after replay lookup", async (inputMode) => {
     const imported = await campaign();
     await pool.query("UPDATE campaigns SET turn_control_style = 'flexible_scene' WHERE id = $1 AND owner_user_id = $2", [imported.campaignId, ownerUserId]);
     const commands = repository();
     const key = crypto.randomUUID();
     const scene = generationRequestSchema.parse({
       action: "The observatory roof collapses in rain.", providerProfileId, idempotencyKey: key,
-      requestedInputMode: "scene", resolvedInputMode: "scene", inputModeSource: "explicit",
+      requestedInputMode: inputMode, resolvedInputMode: inputMode, inputModeSource: "explicit",
       context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 }
     });
     const queued = await commands.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, scene);
@@ -647,11 +647,11 @@ integration("PostgreSQL generation command repository", () => {
     }))).rejects.toMatchObject({ details: { reason: "turn_input_classification_removed" } });
   });
 
-  it("persists a fresh Story Direction replacement policy from the current campaign setting", async () => {
+  it.each(["scene", "action"] as const)("persists a fresh Story Direction replacement policy for %s input", async (inputMode) => {
     const imported = await campaign();
     await pool.query("UPDATE campaigns SET turn_control_style = 'flexible_scene' WHERE id = $1", [imported.campaignId]);
     const replacement = await repository().enqueueReplacement({ ownerUserId, campaignId: imported.campaignId }, generationRetryLatestRequestSchema.parse({
-      ...replacementRequest("Replace the observatory scene."), requestedInputMode: "scene", resolvedInputMode: "scene", inputModeSource: "explicit"
+      ...replacementRequest("Replace the observatory scene."), requestedInputMode: inputMode, resolvedInputMode: inputMode, inputModeSource: "explicit"
     }));
     const stored = (await pool.query("SELECT generation_policy, prompt_protocol_version, requested_input_mode, resolved_input_mode, input_mode_source FROM generation_jobs WHERE id = $1", [replacement.id])).rows[0]!;
     expect(stored).toMatchObject({ generation_policy: { version: 1, playMode: "story_only", turnControlStyle: "flexible_scene", protocolVersion: "story-only-v1", prompts: { systemSupplementHash: expect.stringMatching(/^[a-f0-9]{64}$/), choiceRepairSystemHash: expect.stringMatching(/^[a-f0-9]{64}$/) } }, requested_input_mode: "scene", resolved_input_mode: "scene", input_mode_source: "explicit" });

@@ -64,6 +64,31 @@ test("flexible controls select Action and Story Direction by keyboard without Au
   }
 });
 
+test("complete history refresh keeps the selected Story Direction and draft", async ({ page }, testInfo) => {
+  const { api, field } = await openStory(page, { turnControlStyle: "flexible_action", completeHistory: true });
+  try {
+    const direction = page.getByRole("radio", { name: "Story Direction", exact: true });
+    await direction.click();
+    await expect(direction).toHaveAttribute("aria-checked", "true");
+    await field.fill("Keep this scene direction while loading history.");
+
+    await page.getByRole("button", { name: "History", exact: true }).click();
+    const historyDialog = page.getByRole("dialog", { name: "Turn History", exact: true });
+    await expect(historyDialog).toBeVisible();
+    await expect(historyDialog.getByRole("button", { name: /^Turn 1:/u })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(historyDialog).toBeHidden();
+    await expect(direction).toHaveAttribute("aria-checked", "true");
+    await expect(field).toHaveValue("Keep this scene direction while loading history.");
+    await page.screenshot({
+      path: `docs/review/story-only-campaigns/screenshots/review-fixes/history-selection-${testInfo.project.name}.png`,
+      fullPage: true
+    });
+  } finally {
+    api.assertNoUnexpectedRequests();
+  }
+});
+
 test("Retry Turn prepares the prior action without appending a turn", async ({ page }) => {
   const { api, field } = await openStory(page);
   try {

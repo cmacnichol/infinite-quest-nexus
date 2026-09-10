@@ -203,12 +203,6 @@ async function validateTurnInputMode(
   if (request.requestedInputMode === "auto" || request.inputModeSource === "auto" || request.inputModeSource === "fallback" || request.classificationId) {
     throw new GenerationApplicationError("invalid_state", { reason: "turn_input_classification_removed" });
   }
-  if (turnControlStyle === "flexible_scene") {
-    if (request.requestedInputMode !== "scene" || request.resolvedInputMode !== "scene") {
-      throw new GenerationApplicationError("invalid_state", { reason: "story_only_scene_required" });
-    }
-    return null;
-  }
   if (turnControlStyle === "action_only" && request.resolvedInputMode !== "action") {
     throw new GenerationApplicationError("invalid_state", { reason: "action_only_mode" });
   }

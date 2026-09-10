@@ -868,6 +868,32 @@ describe("Story Player page shell", () => {
     mounted.dispose();
   });
 
+  it("keeps an explicit Story Direction selection through history and runtime refreshes", async () => {
+    const page = fixture();
+    const campaignStore = createCampaignStore();
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 1 },
+      activeTurnNumber: 1,
+      turns: turnWindow([1])
+    });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: null }, composition({
+      campaignStore,
+      list: vi.fn().mockResolvedValue({ campaigns: [campaignSummary({ turnControlStyle: "flexible_action", activeTurnNumber: 1 })] }),
+      syncStatus: vi.fn().mockResolvedValue(loaded)
+    }));
+    await settle();
+
+    page.document.querySelector<HTMLButtonElement>("[data-input-mode='scene']")?.click();
+    expect(page.document.querySelector("[data-input-mode='scene']")?.getAttribute("aria-checked")).toBe("true");
+
+    campaignStore.prependOlderTurns(turnWindow([0]));
+    campaignStore.loadRuntimeState({ ...historicalState(1, "The observatory waits."), activeTurnNumber: 1, viewedTurnNumber: 1 });
+    await settle();
+
+    expect(page.document.querySelector("[data-input-mode='scene']")?.getAttribute("aria-checked")).toBe("true");
+    mounted.dispose();
+  });
+
   it("renders accepted narration without mechanics and exposes recovery as a bounded state", async () => {
     const page = fixture();
     const loaded = sync({
