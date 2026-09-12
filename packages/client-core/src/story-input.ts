@@ -1,4 +1,4 @@
-export type StoryTurnInputMode = "auto" | "action" | "scene";
+export type StoryTurnInputMode = "action" | "scene";
 
 export type ChoiceDraftSelection = {
   baseText: string;
@@ -13,7 +13,6 @@ export type ChoiceDraftSelectionResult = {
 };
 
 export function turnInputModeForControlStyle(turnControlStyle: unknown): StoryTurnInputMode {
-  if (turnControlStyle === "flexible_auto") return "auto";
   if (turnControlStyle === "flexible_scene") return "scene";
   return "action";
 }

@@ -427,7 +427,7 @@ describe("world and campaign application use cases", () => {
       worldVersionId: currentVersionId,
       storyLengthProfile: "standard" as const,
       storyContextBudgetTokens: 32_000 as const,
-      turnControlStyle: "flexible_auto" as const,
+      turnControlStyle: "flexible_action" as const,
       updatedAt: repositoryCampaignUpdatedAt,
       selectedCharacterId: null,
       selectedCharacterName: "",
@@ -520,7 +520,7 @@ describe("world and campaign application use cases", () => {
     expectTypeOf<WorldAggregateView["versions"][number]["deletionBlockers"]["campaignTransfers"]>().toEqualTypeOf<number>();
     expectTypeOf<CampaignListView["campaigns"][number]["worldVersionId"]>().toEqualTypeOf<string>();
     expectTypeOf<CampaignListView["campaigns"][number]["updatedAt"]>().toEqualTypeOf<string>();
-    expectTypeOf<CampaignUpdateView["turnControlStyle"]>().toEqualTypeOf<"action_only" | "flexible_auto" | "flexible_action" | "flexible_scene">();
+    expectTypeOf<CampaignUpdateView["turnControlStyle"]>().toEqualTypeOf<"action_only" | "flexible_action" | "flexible_scene">();
     expectTypeOf<CampaignPlayerConfigSyncRequest["expectedStateRevision"]>().toEqualTypeOf<number>();
     expectTypeOf<CampaignStateEditView["snapshot"]["canonicalFacts"]>().toMatchTypeOf<readonly unknown[]>();
     expectTypeOf<CharacterProfileView["revision"]>().toEqualTypeOf<number>();

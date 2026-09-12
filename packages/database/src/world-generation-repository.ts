@@ -9,7 +9,7 @@ import type {
   WorldGenerationProgressRepositoryPort
 } from "../../application/src/world-campaign/index.js";
 import { WorldCampaignApplicationError } from "../../application/src/world-campaign/index.js";
-import { userProfileSchema, userProfileUpdateSchema } from "../../contracts/src/users.js";
+import { historicalUserSettingsSchema, userProfileSchema, userProfileUpdateSchema } from "../../contracts/src/users.js";
 import { worldCampaignDatabaseClient } from "./world-campaign-transaction.js";
 
 const PROCESSING_EXPIRY = "30 minutes";
@@ -82,9 +82,10 @@ function parseRequest<T>(schema: z.ZodType<T>, value: unknown): T {
 }
 
 function parseSessionProfile(value: unknown) {
+  const row = parsePersisted(sessionProfileRowSchema, value);
   return parsePersisted(
     userProfileSchema,
-    parsePersisted(sessionProfileRowSchema, value),
+    { ...row, settings: parsePersisted(historicalUserSettingsSchema, row.settings) },
   );
 }
 

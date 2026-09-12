@@ -131,7 +131,6 @@ export function createProviderApplication(
     resetPromptOverride: (command) => dependencies.prompts.resetPromptOverride(command),
     loadPromptSnapshot: async (scope) =>
       immutablePromptSnapshot(await dependencies.prompts.loadPromptSnapshot(scope)),
-    classifyTurnIntent: (command) => dependencies.intent.classifyTurnIntent(command),
     recordCost: (database, command) => dependencies.costs.recordCost(database, command),
     attributeGenerationCostsToTurn: (database, scope) =>
       dependencies.costs.attributeGenerationCostsToTurn(database, scope),

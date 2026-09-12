@@ -41,6 +41,12 @@ export function mapGenerationApplicationError(error: GenerationApplicationError)
       return generationHttpError("The idempotency key was already used for a different generation request.", 409);
     case "action_only_mode":
       return generationHttpError("This campaign accepts player actions only.", 400);
+    case "story_only_scene_required":
+      return generationHttpError("This Story Direction campaign accepts scene input only.", 400);
+    case "turn_control_style_invalid":
+      return generationHttpError("Campaign turn-control style is invalid. Refresh the campaign before trying again.", 409);
+    case "turn_input_classification_removed":
+      return generationHttpError("Turn classification was removed. Refresh and use the campaign turn-control setting.", 410, { code: "turn_input_classification_removed" });
     case "explicit_input_mode_mismatch":
       return generationHttpError("Explicit turn input mode does not match the resolved mode.", 400);
     case "classification_id_forbidden":

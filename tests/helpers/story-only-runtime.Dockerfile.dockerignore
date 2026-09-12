@@ -1,0 +1,11 @@
+.git
+.github
+.agents
+.codex
+node_modules
+dist
+coverage
+.env
+.env.*
+*.story
+*.log

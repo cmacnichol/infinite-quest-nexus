@@ -11,6 +11,10 @@ import {
   type SystemArchiveDomain,
   type SystemRecordEnvelope,
 } from "../../contracts/src/index.js";
+import {
+  portableAcceptedGenerationPolicyProvenance,
+  portableAcceptedTurnModelMetadata
+} from "../../contracts/src/campaign-generation-policy.js";
 import { canonicalizeWorldContent, worldSourceMaterialSchema } from "../../contracts/src/world-library.js";
 import { toSafeProviderConfiguration } from "../../application/src/providers/use-cases.js";
 import type {
@@ -170,7 +174,7 @@ function projectCanonicalFacts(value: unknown): readonly Record<string, unknown>
   });
 }
 
-function projectCampaignStateSnapshot(value: unknown, partial: boolean): Record<string, unknown> {
+function projectCampaignStateSnapshot(value: unknown, partial: boolean, preserveRawDormantMechanics = false): Record<string, unknown> {
   const source = typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
@@ -183,12 +187,22 @@ function projectCampaignStateSnapshot(value: unknown, partial: boolean): Record<
   if (!partial || has("canonicalFacts")) result.canonicalFacts = projectCanonicalFacts(source.canonicalFacts);
   if (!partial || has("scratchpad")) result.scratchpad = legacyText(source.scratchpad, 1_000_000);
   if (!partial || has("trackers")) result.trackers = projectDefaultTriggers(source.trackers ?? []);
-  if (!partial || has("rpgStats")) result.rpgStats = projectRpgStats(source.rpgStats ?? []);
+  if (!partial || has("rpgStats")) {
+    if (preserveRawDormantMechanics) {
+      if (!Array.isArray(source.rpgStats)) throw exportError("System Archive RPG stats is not a logical array.");
+      result.rpgStats = source.rpgStats;
+    } else {
+      result.rpgStats = projectRpgStats(source.rpgStats ?? []);
+    }
+  }
   if (!partial || has("defaultTriggers")) result.defaultTriggers = projectDefaultTriggers(source.defaultTriggers ?? []);
   if (!partial || has("eventTriggers")) result.eventTriggers = projectEventTriggers(source.eventTriggers ?? []);
-  if (!partial || has("pendingEventTriggers")) result.pendingEventTriggers = Array.isArray(source.pendingEventTriggers)
-    ? source.pendingEventTriggers
-    : [];
+  if (!partial || has("pendingEventTriggers")) {
+    if (preserveRawDormantMechanics && !Array.isArray(source.pendingEventTriggers)) {
+      throw exportError("System Archive pending event triggers is not a logical array.");
+    }
+    result.pendingEventTriggers = Array.isArray(source.pendingEventTriggers) ? source.pendingEventTriggers : [];
+  }
   return result;
 }
 
@@ -279,7 +293,7 @@ function projectCharacterProfileEditContent(value: unknown): unknown {
   }
 }
 
-function projectCampaignStateEditContent(value: unknown): unknown {
+function projectCampaignStateEditContent(value: unknown, preserveRawDormantMechanics = false): unknown {
   if (typeof value !== "string") return value;
   try {
     const parsed = JSON.parse(value) as unknown;
@@ -287,7 +301,7 @@ function projectCampaignStateEditContent(value: unknown): unknown {
     const details = parsed as Record<string, unknown>;
     return JSON.stringify({
       ...details,
-      stateSnapshot: projectCampaignStateSnapshot(details.stateSnapshot, false),
+      stateSnapshot: projectCampaignStateSnapshot(details.stateSnapshot, false, preserveRawDormantMechanics),
     });
   } catch {
     return value;
@@ -440,7 +454,7 @@ function parseEnvelope(domain: SystemArchiveDomain, value: unknown): SystemRecor
       record: {
         ...envelope.record,
         baseUrl: portableProviderBaseUrl(envelope.record?.baseUrl),
-        ...(envelope.formatVersion === 2 ? {
+        ...(envelope.formatVersion >= 2 ? {
           authority: {
             ...envelope.record?.authority,
             configuration: toSafeProviderConfiguration(envelope.record?.authority?.configuration),
@@ -450,7 +464,7 @@ function parseEnvelope(domain: SystemArchiveDomain, value: unknown): SystemRecor
     };
   }
   if (typeof candidate === "object" && candidate !== null
-    && (candidate as Record<string, unknown>).formatVersion === 2) {
+    && ([2, 3] as const).includes((candidate as Record<string, unknown>).formatVersion as 2 | 3)) {
     const envelope = candidate as Record<string, any>;
     const authority = envelope.record?.authority;
     switch (domain) {
@@ -462,22 +476,32 @@ function parseEnvelope(domain: SystemArchiveDomain, value: unknown): SystemRecor
         characterProfile: projectCampaignCharacterProfile(envelope.record?.characterProfile) } };
         break;
       case "turns":
+        const { generationPolicy, ...portableAuthority } = authority ?? {};
         candidate = { ...envelope, record: { ...envelope.record, authority: {
-          ...authority,
+          ...portableAuthority,
           imageUrl: sanitizedPortableImageUrl(authority?.imageUrl),
           mechanicsPrivate: authority?.mechanicsPrivate === null
             ? null
             : sanitizedPortableJson(authority?.mechanicsPrivate),
-          modelMetadata: sanitizedPortableObject(authority?.modelMetadata, "turn model metadata"),
+          modelMetadata: portableAcceptedTurnModelMetadata(
+            sanitizedPortableObject(authority?.modelMetadata, "turn model metadata"),
+            generationPolicy,
+          ),
           importMetadata: sanitizedPortableObject(authority?.importMetadata, "turn import metadata"),
-        }, stateSnapshotPrivate: projectCampaignStateSnapshot(envelope.record?.stateSnapshotPrivate, true) } };
+          ...(envelope.formatVersion === 3 ? {
+            portableAcceptedGenerationPolicyProvenance: portableAcceptedGenerationPolicyProvenance(
+              generationPolicy,
+              authority?.modelMetadata?.portableAcceptedGenerationPolicyProvenance ?? null,
+            ),
+          } : {}),
+        }, stateSnapshotPrivate: projectCampaignStateSnapshot(envelope.record?.stateSnapshotPrivate, true, envelope.formatVersion === 3) } };
         break;
       case "campaign-state":
         candidate = { ...envelope, record: { ...envelope.record, authority: {
           ...authority,
           importProvenance: sanitizePortableMetadata(authority?.importProvenance),
           initialStateSnapshot: sanitizePortableMetadata(authority?.initialStateSnapshot),
-        }, state: projectCampaignStateSnapshot(envelope.record?.state, false) } };
+        }, state: projectCampaignStateSnapshot(envelope.record?.state, false, envelope.formatVersion === 3) } };
         break;
       case "campaign-history":
         candidate = { ...envelope, record: { ...envelope.record, authority: {
@@ -490,7 +514,7 @@ function parseEnvelope(domain: SystemArchiveDomain, value: unknown): SystemRecor
         }, ...(envelope.record?.eventType === "character-profile-edit" ? {
           content: projectCharacterProfileEditContent(envelope.record?.content),
         } : envelope.record?.eventType === "campaign-state-edit" ? {
-          content: projectCampaignStateEditContent(envelope.record?.content),
+          content: projectCampaignStateEditContent(envelope.record?.content, envelope.formatVersion === 3),
         } : {}) } };
         break;
       case "canonical-facts":
@@ -554,7 +578,7 @@ const DOMAIN_SQL = {
   providers: `
     SELECT '00:' || profile.id::text AS sort_key,
            jsonb_build_object(
-             'domain','providers','formatVersion',2,'sourceId',profile.id,
+             'domain','providers','formatVersion',3,'sourceId',profile.id,
              'record',jsonb_build_object(
                'sourceId',profile.id,
                'kind',profile.provider_role,
@@ -583,7 +607,7 @@ const DOMAIN_SQL = {
   prompts: `
     SELECT '00:' || COALESCE(prompt.campaign_id::text,'') || ':' || prompt.prompt_key || ':' || prompt.id::text AS sort_key,
            jsonb_build_object(
-             'domain','prompts','formatVersion',2,'sourceId',prompt.id,
+             'domain','prompts','formatVersion',3,'sourceId',prompt.id,
              'record',jsonb_build_object(
                'sourceId',prompt.id,'campaignId',prompt.campaign_id,'templateKey',prompt.prompt_key,
                'overrideText',prompt.content,'updatedAt',prompt.updated_at,
@@ -595,7 +619,7 @@ const DOMAIN_SQL = {
   worlds: `
     SELECT '00:' || world.id::text AS sort_key,
            jsonb_build_object(
-             'domain','worlds','formatVersion',2,'sourceId',world.id,
+             'domain','worlds','formatVersion',3,'sourceId',world.id,
              'record',jsonb_build_object(
                'sourceId',world.id,'title',world.title,'status',world.status,
                'forkedFromWorldId',world.forked_from_world_id,
@@ -611,7 +635,7 @@ const DOMAIN_SQL = {
   "world-versions": `
     SELECT '00:' || version.id::text AS sort_key,
            jsonb_build_object(
-             'domain','world-versions','formatVersion',2,'sourceId',version.id,
+             'domain','world-versions','formatVersion',3,'sourceId',version.id,
              'record',jsonb_build_object(
                'sourceId',version.id,'worldId',version.world_id,
                'versionNumber',version.version_number,'title',world.title,
@@ -632,7 +656,7 @@ const DOMAIN_SQL = {
   "world-drafts": `
     SELECT '00:' || draft.world_id::text AS sort_key,
            jsonb_build_object(
-             'domain','world-drafts','formatVersion',2,'sourceId',draft.world_id,
+             'domain','world-drafts','formatVersion',3,'sourceId',draft.world_id,
              'record',jsonb_build_object(
                'sourceId',draft.world_id,'worldId',draft.world_id,
                'basedOnWorldVersionId',draft.based_on_world_version_id,
@@ -647,7 +671,7 @@ const DOMAIN_SQL = {
   campaigns: `
     SELECT '00:' || campaign.id::text AS sort_key,
            jsonb_build_object(
-             'domain','campaigns','formatVersion',2,'sourceId',campaign.id,
+             'domain','campaigns','formatVersion',3,'sourceId',campaign.id,
              'record',jsonb_build_object(
                'sourceId',campaign.id,'worldVersionId',campaign.world_version_id,
                'title',campaign.title,'status',campaign.status,
@@ -668,6 +692,7 @@ const DOMAIN_SQL = {
                  'imageProviderProfileId',campaign.image_provider_profile_id,
                  'storyLengthProfile',campaign.story_length_profile,
                  'turnControlStyle',campaign.turn_control_style,
+                 'generationPolicyVersion',1,
                  'legacySettings',campaign.legacy_settings
                )
              )
@@ -677,7 +702,7 @@ const DOMAIN_SQL = {
   turns: `
     SELECT '00:' || turn_row.id::text AS sort_key,
            jsonb_build_object(
-             'domain','turns','formatVersion',2,'sourceId',turn_row.id,
+             'domain','turns','formatVersion',3,'sourceId',turn_row.id,
              'record',jsonb_build_object(
                'sourceId',turn_row.id,'campaignId',turn_row.campaign_id,
                'turnNumber',turn_row.turn_number,'action',turn_row.action,
@@ -690,6 +715,7 @@ const DOMAIN_SQL = {
                  'customActionSuggestion',turn_row.custom_action_suggestion,
                  'imageUrl',turn_row.image_url,'mechanicsPrivate',turn_row.mechanics_private,
                  'modelMetadata',turn_row.model_metadata,'importMetadata',turn_row.import_metadata,
+                 'generationPolicy',turn_row.generation_policy,
                  'createdAt',turn_row.created_at,'inputMode',turn_row.input_mode,
                  'inputModeSource',turn_row.input_mode_source
                )
@@ -701,7 +727,7 @@ const DOMAIN_SQL = {
     SELECT '00:' || correction.turn_id::text || ':' || lpad(correction.revision::text,10,'0')
            || ':' || correction.id::text AS sort_key,
            jsonb_build_object(
-             'domain','turn-corrections','formatVersion',2,'sourceId',correction.id,
+             'domain','turn-corrections','formatVersion',3,'sourceId',correction.id,
              'record',jsonb_build_object(
                'sourceId',correction.id,'turnId',correction.turn_id,
                'revision',correction.revision,'narration',correction.narration,
@@ -720,7 +746,7 @@ const DOMAIN_SQL = {
   "campaign-state": `
     SELECT '00:' || state.campaign_id::text AS sort_key,
            jsonb_build_object(
-             'domain','campaign-state','formatVersion',2,'sourceId',state.campaign_id,
+             'domain','campaign-state','formatVersion',3,'sourceId',state.campaign_id,
              'record',jsonb_build_object(
                'sourceId',state.campaign_id,'campaignId',state.campaign_id,
                'revision',state.revision,
@@ -788,7 +814,7 @@ const DOMAIN_SQL = {
   "campaign-history": `
     SELECT history.sort_key,
            jsonb_build_object(
-             'domain','campaign-history','formatVersion',2,'sourceId',history.source_id,
+             'domain','campaign-history','formatVersion',3,'sourceId',history.source_id,
              'record',jsonb_build_object(
                'sourceId',history.source_id,'campaignId',history.campaign_id,
                'eventType',history.event_type,'content',history.content,
@@ -930,7 +956,7 @@ const DOMAIN_SQL = {
   "canonical-facts": `
     SELECT '00:' || fact.id::text AS sort_key,
            jsonb_build_object(
-             'domain','canonical-facts','formatVersion',2,'sourceId',fact.id,
+             'domain','canonical-facts','formatVersion',3,'sourceId',fact.id,
              'record',jsonb_build_object(
                'sourceId',fact.id,'campaignId',fact.campaign_id,
                'worldVersionId',fact.world_version_id,
@@ -956,7 +982,7 @@ const DOMAIN_SQL = {
   chronicle: `
     SELECT '01:' || memory.id::text AS sort_key,
            jsonb_build_object(
-             'domain','chronicle','formatVersion',2,'sourceId',memory.id,
+             'domain','chronicle','formatVersion',3,'sourceId',memory.id,
              'record',jsonb_build_object(
                'sourceId',memory.id,'campaignId',memory.campaign_id,'kind','memory',
                'turnId',memory.turn_id,'memoryKind',memory.memory_kind,'content',memory.content,
@@ -973,7 +999,7 @@ const DOMAIN_SQL = {
     UNION ALL
     SELECT '02:' || checkpoint.id::text AS sort_key,
            jsonb_build_object(
-             'domain','chronicle','formatVersion',2,'sourceId',checkpoint.id,
+             'domain','chronicle','formatVersion',3,'sourceId',checkpoint.id,
              'record',jsonb_build_object(
                'sourceId',checkpoint.id,'campaignId',checkpoint.campaign_id,
                'kind','summary-checkpoint','throughTurn',checkpoint.through_turn,
@@ -987,7 +1013,7 @@ const DOMAIN_SQL = {
   illustrations: `
     SELECT '00:' || segment_asset.asset_id::text || ':' || segment_asset.segment_id::text AS sort_key,
            jsonb_build_object(
-             'domain','illustrations','formatVersion',2,
+             'domain','illustrations','formatVersion',3,
              'sourceId',overlay(overlay(md5('illustration:' || segment_asset.segment_id::text || ':' || segment_asset.variant_index::text)
                placing '5' from 13) placing '8' from 17)::uuid,
              'record',jsonb_build_object(
@@ -1018,7 +1044,7 @@ const DOMAIN_SQL = {
   imports: `
     SELECT '00:' || import_row.id::text AS sort_key,
            jsonb_build_object(
-             'domain','imports','formatVersion',2,'sourceId',import_row.id,
+             'domain','imports','formatVersion',3,'sourceId',import_row.id,
              'record',jsonb_build_object(
                'sourceId',import_row.id,'sourceType',import_row.source_type,
                'campaignId',import_row.campaign_id,
@@ -1036,7 +1062,7 @@ const DOMAIN_SQL = {
   "cost-events": `
     SELECT '00:' || cost.id::text AS sort_key,
            jsonb_build_object(
-             'domain','cost-events','formatVersion',2,'sourceId',cost.id,
+             'domain','cost-events','formatVersion',3,'sourceId',cost.id,
              'record',jsonb_build_object(
                'sourceId',cost.id,'campaignId',cost.campaign_id,
                'authority',jsonb_build_object(
@@ -1056,7 +1082,7 @@ const DOMAIN_SQL = {
   "activity-events": `
     SELECT '00:' || lpad(to_hex(activity.id),16,'0') AS sort_key,
            jsonb_build_object(
-             'domain','activity-events','formatVersion',2,
+             'domain','activity-events','formatVersion',3,
              'sourceId',activity.id::text,
              'record',jsonb_build_object(
                'sourceId',activity.id::text,

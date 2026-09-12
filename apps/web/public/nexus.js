@@ -16,8 +16,18 @@ let campaignArchivePreviewSequence = 0;
 let campaignArchivePreviewAbortController = null;
 let campaignImportRefreshSequence = 0;
 let selectedCampaign = null;
+let campaignSelectionRequest = 0;
 const CAMPAIGN_SETTINGS_PANEL_IDS = Object.freeze(["overview", "story", "illustrations", "chronicle", "usage"]);
 let activeCampaignSettingsPanel = "overview";
+
+function normalizedTurnControlStyle(value) {
+  return value === "flexible_scene" ? "flexible_scene" : "flexible_action";
+}
+
+function savedTurnControlStyle(value, existingStyle) {
+  if (value === "flexible_scene") return "flexible_scene";
+  return existingStyle === "action_only" ? "action_only" : "flexible_action";
+}
 let worlds = [];
 let campaigns = [];
 let selectedWorld = null;
@@ -329,7 +339,7 @@ function applyManagementView() {
   document.body.dataset.managementView = dashboardView ? "dashboard" : providerView ? "providers" : promptLibraryView ? "prompt-library" : dataTransferView ? "data-transfer" : "worlds";
   elements.managementTitle.textContent = providerView ? "Provider Management" : promptLibraryView ? "Prompt Library" : dataTransferView ? "Data Transfer" : hash === "#campaigns" ? "Campaign Management" : "World Management";
   elements.managementDescription.textContent = providerView
-    ? "Add and manage provider profiles independently for story text, turn intent, image generation, and Chronicle embeddings."
+    ? "Add and manage provider profiles independently for story text, image generation, and Chronicle embeddings."
     : promptLibraryView
       ? "Edit the application-owned instructions used for text and image generation. Changes apply to newly queued work."
       : dataTransferView
@@ -3248,7 +3258,7 @@ async function createCampaignFromWorld() {
       body: JSON.stringify({
         title,
         worldVersionId: selectedWorldVersionId(),
-        turnControlStyle: elements.newCampaignTurnControlStyle.value,
+        turnControlStyle: normalizedTurnControlStyle(elements.newCampaignTurnControlStyle.value),
         ...(selectedCharacterId ? { selectedCharacterId } : {})
       })
     });
@@ -3268,6 +3278,7 @@ async function loadCampaigns(preselectId = "", { focusNoSelection = false } = {}
   elements.campaignList.replaceChildren();
   if (!campaigns.length) {
     elements.campaignList.innerHTML = '<p class="muted">No database-backed campaigns yet.</p>';
+    campaignSelectionRequest += 1;
     selectedCampaign = null;
     updateStoryViewLink();
     clearCampaignEditorSelection({ focus: focusNoSelection });
@@ -3292,6 +3303,7 @@ async function loadCampaigns(preselectId = "", { focusNoSelection = false } = {}
   const target = campaigns.find((campaign) => campaign.id === preselectId) || (selectedCampaign && campaigns.find((campaign) => campaign.id === selectedCampaign.id));
   if (target) await selectCampaign(target);
   else {
+    campaignSelectionRequest += 1;
     selectedCampaign = null;
     updateStoryViewLink();
     clearCampaignEditorSelection({ focus: focusNoSelection });
@@ -3300,7 +3312,15 @@ async function loadCampaigns(preselectId = "", { focusNoSelection = false } = {}
 
 async function selectCampaign(campaign) {
   elements.embeddingProgress.classList.add("hidden");
-  selectedCampaign = campaign;
+  const selectionRequest = ++campaignSelectionRequest;
+  const runtimeState = await api(`/api/v1/campaigns/${campaign.id}/state`);
+  if (selectionRequest !== campaignSelectionRequest) return;
+  selectedCampaign = {
+    ...campaign,
+    activeTurnNumber: runtimeState.activeTurnNumber,
+    stateRevision: runtimeState.revision
+  };
+  campaign = selectedCampaign;
   updateStoryViewLink();
   document.querySelectorAll(".campaign-button").forEach((button) => button.classList.toggle("active", button.dataset.campaignId === campaign.id));
   elements.memoryTitle.textContent = campaign.title;
@@ -3316,12 +3336,13 @@ async function selectCampaign(campaign) {
   [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignTurnControlStyle, elements.campaignStoryLengthProfile, elements.campaignStoryContextBudgetTokens, elements.saveCampaign, elements.transferCampaign, elements.editCampaignCharacter, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationSourcePolicy, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts, elements.illustrationMatchingScope, elements.illustrationConfidenceProfile, elements.illustrationRepetitionWindow, elements.illustrationSegmentWordCount, elements.illustrationImagesPerSegment, elements.illustrationSegmentPromptMode, elements.openIllustrationPromptEditor, elements.embeddingEnabled, elements.embeddingRetrievalImplementation, elements.embeddingRetrievalShadowEnabled, elements.embeddingProvider, elements.discoverEmbeddingModels, elements.embeddingModel, elements.embeddingDocumentPrefix, elements.embeddingQueryPrefix, elements.embeddingBatchSize, elements.budgetTokens, elements.compression, elements.memoryQuery].forEach((element) => { element.disabled = false; });
   elements.campaignTextProvider.value = campaign.textProviderProfileId || "";
   elements.campaignImageProvider.value = campaign.imageProviderProfileId || "";
-  elements.campaignTurnControlStyle.value = campaign.turnControlStyle || "flexible_auto";
+  elements.campaignTurnControlStyle.value = normalizedTurnControlStyle(campaign.turnControlStyle);
   elements.campaignStoryLengthProfile.value = campaign.storyLengthProfile || "standard";
   elements.campaignStoryContextBudgetTokens.value = String(campaign.storyContextBudgetTokens || 32_000);
   applyStoryProviderContextBudget();
   populateEmbeddingProviderSelect();
   const world = await api(`/api/v1/worlds/${campaign.worldId}`);
+  if (selectionRequest !== campaignSelectionRequest) return;
   elements.campaignWorldVersion.replaceChildren();
   for (const version of [...world.versions].reverse()) {
     elements.campaignWorldVersion.append(new Option(`Version ${version.versionNumber}`, version.id));
@@ -3332,13 +3353,18 @@ async function selectCampaign(campaign) {
   if (campaign.worldUpdateAvailable) campaignMessage(`This campaign is pinned to version ${campaign.worldVersionNumber}; version ${campaign.latestWorldVersionNumber} is available. Migration is explicit and does not rewrite accepted turns.`);
   else elements.campaignStatusMessage.classList.add("hidden");
   const metrics = await refreshCampaignMemoryMetrics();
+  if (selectionRequest !== campaignSelectionRequest) return;
   await refreshCampaignCostSummary();
+  if (selectionRequest !== campaignSelectionRequest) return;
   await loadEmbeddingConfig();
+  if (selectionRequest !== campaignSelectionRequest) return;
   if (["queued", "running"].includes(metrics?.semanticHealth?.jobStatus) && metrics.semanticHealth.jobId) {
     void resumeEmbeddingJobProgress(metrics.semanticHealth.jobId, campaign.id);
   }
   await loadIllustrationConfig();
+  if (selectionRequest !== campaignSelectionRequest) return;
   await loadLatestImageJob(false);
+  if (selectionRequest !== campaignSelectionRequest) return;
   await previewContext();
 }
 
@@ -3353,7 +3379,10 @@ async function saveSelectedCampaign(event) {
         title: elements.campaignTitle.value,
         status: elements.campaignStatus.value,
         textProviderProfileId: elements.campaignTextProvider.value || null,
-        turnControlStyle: elements.campaignTurnControlStyle.value,
+        turnControlStyle: savedTurnControlStyle(elements.campaignTurnControlStyle.value, selectedCampaign.turnControlStyle),
+        expectedTurnControlStyle: selectedCampaign.turnControlStyle,
+        expectedActiveTurnNumber: selectedCampaign.activeTurnNumber,
+        expectedStateRevision: selectedCampaign.stateRevision,
         storyLengthProfile: elements.campaignStoryLengthProfile.value,
         storyContextBudgetTokens: Number(elements.campaignStoryContextBudgetTokens.value)
       })
@@ -3562,6 +3591,7 @@ async function deleteSelectedCampaign() {
       method: "DELETE",
       body: JSON.stringify({ confirmation: "DELETE", expectedTitle })
     });
+    campaignSelectionRequest += 1;
     selectedCampaign = null;
     updateStoryViewLink();
     await loadCampaigns("", { focusNoSelection: true });
@@ -3711,7 +3741,11 @@ async function refreshCampaignCostSummary() {
 
 async function loadEmbeddingConfig() {
   if (!selectedCampaign) return;
-  embeddingConfig = await api(`/api/v1/campaigns/${selectedCampaign.id}/memory/embedding-config`);
+  const campaignId = selectedCampaign.id;
+  const selectionRequest = campaignSelectionRequest;
+  const config = await api(`/api/v1/campaigns/${campaignId}/memory/embedding-config`);
+  if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
+  embeddingConfig = config;
   discoveredEmbeddingModels = [];
   elements.embeddingEnabled.checked = embeddingConfig.enabled;
   elements.embeddingRetrievalImplementation.value = embeddingConfig.retrievalImplementation;
@@ -3734,7 +3768,11 @@ async function loadEmbeddingConfig() {
 
 async function loadIllustrationConfig() {
   if (!selectedCampaign) return;
-  illustrationConfig = await api(`/api/v1/campaigns/${selectedCampaign.id}/illustration-config`);
+  const campaignId = selectedCampaign.id;
+  const selectionRequest = campaignSelectionRequest;
+  const config = await api(`/api/v1/campaigns/${campaignId}/illustration-config`);
+  if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
+  illustrationConfig = config;
   elements.illustrationSourcePolicy.value = illustrationConfig.sourcePolicy || (illustrationConfig.enabled ? "generate_only" : "off");
   elements.illustrationMatchingScope.value = illustrationConfig.matchingScope || "world";
   elements.illustrationConfidenceProfile.value = illustrationConfig.confidenceProfile || "balanced";
@@ -3975,6 +4013,15 @@ function renderProviderProfiles() {
     const summary = document.createElement("span");
     summary.textContent = `${provider.providerRole} · ${providerTypeLabel(provider.providerType)} · ${provider.defaultModel || "model not selected"} · ${Number(provider.requestTimeoutMs || 300000) / 60000} min timeout`;
     details.append(title, summary);
+    if (provider.providerRole === "intent") {
+      const retired = document.createElement("span");
+      retired.className = "default-badge";
+      retired.textContent = "Retired classifier profile · retained for historical provenance";
+      details.append(retired);
+      row.append(details);
+      elements.providerProfileList.append(row);
+      continue;
+    }
     const actions = document.createElement("div");
     actions.className = "button-row";
     const edit = document.createElement("button");
@@ -3988,9 +4035,7 @@ function renderProviderProfiles() {
     remove.className = "button danger";
     remove.textContent = "Delete";
     remove.addEventListener("click", async () => {
-      const impact = provider.providerRole === "intent"
-        ? "Future Auto decisions will fall back to each campaign's Story text provider. Existing turns are unchanged."
-        : "Campaign assignments and provider-linked jobs, chains, or derived data may be removed.";
+      const impact = "Campaign assignments and provider-linked jobs, chains, or derived data may be removed.";
       if (!window.confirm(`Delete provider profile “${provider.name}”? ${impact}`)) return;
       remove.disabled = true;
       try {
@@ -4004,7 +4049,7 @@ function renderProviderProfiles() {
       }
     });
     actions.append(remove);
-    const implicitlyDefault = provider.providerRole !== "intent" && enabledProviders(provider.providerRole).length === 1;
+    const implicitlyDefault = enabledProviders(provider.providerRole).length === 1;
     if (provider.isDefault || implicitlyDefault) {
       const badge = document.createElement("span");
       badge.className = "default-badge";
@@ -4012,16 +4057,10 @@ function renderProviderProfiles() {
       details.append(badge);
       row.append(details, actions);
     } else {
-      if (provider.providerRole === "intent") {
-        const inactive = document.createElement("span");
-        inactive.className = "default-badge";
-        inactive.textContent = "Inactive · Story text fallback";
-        details.append(inactive);
-      }
       const makeDefault = document.createElement("button");
       makeDefault.type = "button";
       makeDefault.className = "button secondary";
-      makeDefault.textContent = provider.providerRole === "intent" ? "Make system default" : "Make default";
+      makeDefault.textContent = "Make default";
       makeDefault.addEventListener("click", async () => {
         makeDefault.disabled = true;
         await api(`/api/v1/providers/${provider.id}/default`, { method: "PUT", body: "{}" });
@@ -4076,16 +4115,13 @@ function syncProviderRoleSettings(options = {}) {
   const sogni = sogniRest || sogniSdk;
   if (sogni) elements.providerRole.value = "image";
   const illustration = elements.providerRole.value === "image";
-  const intent = elements.providerRole.value === "intent";
-  elements.providerRoleNote.textContent = intent
-    ? "Classifies Auto as Action or Scene direction only. It never generates story narration. Until explicitly made system default, Auto uses the campaign Story text provider."
-    : elements.providerRole.value === "image"
+  elements.providerRoleNote.textContent = elements.providerRole.value === "image"
       ? "Illustration providers are independent from story text and use separate credentials."
       : elements.providerRole.value === "embedding"
         ? "Embedding providers index Chronicle memory and do not generate narration."
-        : "Story text providers generate narration and are the fallback for Auto classification.";
-  elements.providerStreaming.disabled = intent || sogni;
-  if (intent || sogni) elements.providerStreaming.checked = false;
+        : "Story text providers generate narration.";
+  elements.providerStreaming.disabled = sogni;
+  if (sogni) elements.providerStreaming.checked = false;
   elements.providerRole.disabled = Boolean(editingProviderId) || sogni;
   for (const field of document.querySelectorAll(".text-model-setting")) {
     field.classList.toggle("hidden", illustration);
@@ -4103,11 +4139,6 @@ function syncProviderRoleSettings(options = {}) {
   elements.providerSogniWebpFormat.hidden = !sogniSdk;
   elements.providerSogniWebpFormat.disabled = !sogniSdk;
   if (sogniRest && elements.providerSogniOutputFormat.value === "webp") elements.providerSogniOutputFormat.value = "png";
-  if (intent && options.applySuggestedDefaults) {
-    elements.providerContextTokens.value = "8192";
-    elements.providerOutputTokens.value = "256";
-    elements.providerTemperature.value = "0";
-  }
 }
 
 function isIllustrationProviderForm() {
@@ -4502,14 +4533,12 @@ function renderProviderModelPicker() {
 async function openProviderModelPicker(forceRefresh = false) {
   providerModelPickerTarget = "provider";
   const role = elements.providerRole.value;
-  elements.providerModelDialogTitle.textContent = role === "image" ? "Choose image model" : role === "embedding" ? "Choose embedding model" : role === "intent" ? "Choose intent classifier model" : "Choose default model";
+  elements.providerModelDialogTitle.textContent = role === "image" ? "Choose image model" : role === "embedding" ? "Choose embedding model" : "Choose default model";
   elements.providerModelDialogDescription.textContent = role === "image"
     ? "Only image-capable models are shown when the provider advertises modality data. Active models appear first."
     : role === "embedding"
       ? "Only embedding models are shown when the provider offers a dedicated inventory. Active models appear first."
-      : role === "intent"
-        ? "Choose a small, instruction-following text model. Classification requests use deterministic settings and at most 256 output tokens."
-        : "Active models appear first. You may also select an available model that is not currently loaded.";
+      : "Active models appear first. You may also select an available model that is not currently loaded.";
   elements.providerModelFilter.value = "";
   elements.providerCustomModel.value = elements.providerDefaultModel.value;
   elements.providerModelPickerStatus.textContent = discoveredProfileModels.length
@@ -5140,7 +5169,10 @@ async function monitorImageJob(jobId) {
 
 async function loadLatestImageJob(monitor = false) {
   if (!selectedCampaign) return;
-  const { jobs } = await api(`/api/v1/campaigns/${selectedCampaign.id}/image-jobs`);
+  const campaignId = selectedCampaign.id;
+  const selectionRequest = campaignSelectionRequest;
+  const { jobs } = await api(`/api/v1/campaigns/${campaignId}/image-jobs`);
+  if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
   const job = jobs[0];
   if (!job) return;
   renderImageJobStatus(job);
@@ -5774,6 +5806,8 @@ async function previewContext(event) {
   event?.preventDefault();
   if (!selectedCampaign) return;
   const sequence = ++contextPreviewSequence;
+  const campaignId = selectedCampaign.id;
+  const selectionRequest = campaignSelectionRequest;
   elements.previewContext.disabled = true;
   elements.contextPreview.textContent = "Building fiction-only context…";
   try {
@@ -5785,19 +5819,19 @@ async function previewContext(event) {
       query: elements.memoryQuery.value,
       recentTurns: "8"
     });
-    const result = await api(`/api/v1/campaigns/${selectedCampaign.id}/memory/context-preview?${parameters}`);
-    if (sequence !== contextPreviewSequence) return;
+    const result = await api(`/api/v1/campaigns/${campaignId}/memory/context-preview?${parameters}`);
+    if (sequence !== contextPreviewSequence || selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
     elements.contextSummary.classList.remove("hidden", "error");
     elements.contextSummary.textContent = `${result.selectedCompression} compression selected · ${result.retrieval.mode} retrieval · approximately ${number(result.budget.estimatedSelectedTokens)} of ${number(result.budget.configuredTokens)} tokens · ${result.scopes.chronicle.length} Chronicle entries${result.budget.truncated ? " · context was budget-limited" : ""}`;
     elements.contextPreview.textContent = JSON.stringify(result, null, 2);
   } catch (error) {
-    if (sequence !== contextPreviewSequence) return;
+    if (sequence !== contextPreviewSequence || selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
     elements.contextSummary.classList.remove("hidden");
     elements.contextSummary.classList.add("error");
     elements.contextSummary.textContent = error.message || String(error);
     elements.contextPreview.textContent = "Context preview unavailable.";
   } finally {
-    if (sequence === contextPreviewSequence) elements.previewContext.disabled = false;
+    if (sequence === contextPreviewSequence && selectionRequest === campaignSelectionRequest && selectedCampaign?.id === campaignId) elements.previewContext.disabled = false;
   }
 }
 
@@ -6218,10 +6252,7 @@ async function loadSessionPreferences() {
   sessionUser = response.user || null;
   systemArchiveOwnerId = typeof sessionUser?.id === "string" ? sessionUser.id : null;
   beginSystemArchiveRecoveryWhenReady();
-  const defaultTurnControlStyle = sessionUser?.settings?.defaultTurnControlStyle;
-  if (["action_only", "flexible_auto", "flexible_action", "flexible_scene"].includes(defaultTurnControlStyle)) {
-    elements.newCampaignTurnControlStyle.value = defaultTurnControlStyle;
-  }
+  elements.newCampaignTurnControlStyle.value = normalizedTurnControlStyle(sessionUser?.settings?.defaultTurnControlStyle);
 }
 
 async function openNexusUserProfile() {
@@ -6230,7 +6261,7 @@ async function openNexusUserProfile() {
     elements.nexusUserProfileDisplayName.value = sessionUser?.displayName || "Initial Owner";
     elements.nexusUserProfileAutoSubmitChoices.checked = sessionUser?.settings?.autoSubmitTurnChoices !== false;
     elements.nexusUserProfileContinuousReading.checked = Boolean(sessionUser?.settings?.continuousReading);
-    elements.nexusUserProfileDefaultTurnControlStyle.value = sessionUser?.settings?.defaultTurnControlStyle || "flexible_auto";
+    elements.nexusUserProfileDefaultTurnControlStyle.value = normalizedTurnControlStyle(sessionUser?.settings?.defaultTurnControlStyle);
     elements.nexusUserProfileStatus.textContent = "";
     elements.nexusUserProfileStatus.className = "status hidden";
     openManagedModal(elements.nexusUserProfileDialog);
@@ -6253,12 +6284,12 @@ async function saveNexusUserProfile(event) {
         settings: {
           autoSubmitTurnChoices: elements.nexusUserProfileAutoSubmitChoices.checked,
           continuousReading: elements.nexusUserProfileContinuousReading.checked,
-          defaultTurnControlStyle: elements.nexusUserProfileDefaultTurnControlStyle.value
+          defaultTurnControlStyle: normalizedTurnControlStyle(elements.nexusUserProfileDefaultTurnControlStyle.value)
         }
       })
     });
     sessionUser = response.user || sessionUser;
-    elements.newCampaignTurnControlStyle.value = sessionUser?.settings?.defaultTurnControlStyle || "flexible_auto";
+    elements.newCampaignTurnControlStyle.value = normalizedTurnControlStyle(sessionUser?.settings?.defaultTurnControlStyle);
     elements.nexusUserProfileDialog.close();
   } catch (error) {
     elements.nexusUserProfileStatus.textContent = error.message || String(error);

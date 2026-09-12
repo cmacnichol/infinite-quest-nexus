@@ -328,7 +328,9 @@ export const SYSTEM_ARCHIVE_SOURCE_COLUMN_CLASSIFICATIONS = Object.freeze({
       "custom_action_suggestion", "image_prompt", "image_url", "mechanics_private", "state_snapshot_private",
       "accepted_at", "created_at", "input_mode", "input_mode_source"
     ],
-    portable_sanitized: ["model_metadata", "import_metadata"],
+    // Runtime policy snapshots are deliberately reduced to accepted portable
+    // provenance at the System Archive record boundary.
+    portable_sanitized: ["model_metadata", "import_metadata", "generation_policy"],
     owner_remapped: ["owner_user_id"]
   }),
   users: sourceColumns({

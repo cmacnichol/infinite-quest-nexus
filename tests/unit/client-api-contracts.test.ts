@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import * as contracts from "../../packages/contracts/src/index.js";
 import {
   apiErrorEnvelopeSchema,
   campaignBranchResponseSchema,
@@ -21,8 +22,6 @@ import {
   playableCharacterListResponseSchema,
   providerListResponseSchema,
   sessionResponseSchema,
-  turnInputClassificationRequestSchema,
-  turnInputClassificationResponseSchema,
   turnListResponseSchema,
   turnPageRequestSchema,
   syncStatusRequestSchema,
@@ -47,13 +46,17 @@ const invalidCompletedActionStatus: GenerationActionResponse["status"] = "comple
 void invalidCompletedActionStatus;
 
 describe("client API response contracts", () => {
+  it("does not publish retired turn-classification request or response contracts", () => {
+    expect("turnInputClassificationRequestSchema" in contracts).toBe(false);
+    expect("turnInputClassificationResponseSchema" in contracts).toBe(false);
+  });
+
   it.each([
     ["meta response", metaResponseSchema],
     ["session response", sessionResponseSchema],
     ["profile response", userProfileResponseSchema],
     ["provider list response", providerListResponseSchema],
     ["runtime state response", campaignRuntimeStateResponseSchema],
-    ["classification response", turnInputClassificationResponseSchema],
     ["rewind response", campaignRewindResponseSchema],
     ["branch response", campaignBranchResponseSchema],
     ["world creation response", worldCreateResponseSchema],
@@ -66,7 +69,6 @@ describe("client API response contracts", () => {
   it.each([
     ["profile update", userProfileUpdateSchema],
     ["runtime state update", campaignRuntimeStateUpdateRequestSchema],
-    ["turn classification", turnInputClassificationRequestSchema],
     ["rewind", campaignRewindSchema],
     ["branch", campaignBranchSchema],
     ["world creation", worldCreateSchema],
@@ -123,7 +125,7 @@ describe("client API response contracts", () => {
       worldVersionId: WORLD_VERSION_ID,
       storyLengthProfile: "standard",
       storyContextBudgetTokens: 64_000,
-      turnControlStyle: "flexible_auto",
+      turnControlStyle: "flexible_action",
       updatedAt: TIMESTAMP,
       selectedCharacterId: null,
       selectedCharacterName: "",
@@ -138,7 +140,7 @@ describe("client API response contracts", () => {
         worldVersionId: WORLD_VERSION_ID,
         storyLengthProfile: "standard",
         storyContextBudgetTokens: 64_000,
-        turnControlStyle: "flexible_auto",
+        turnControlStyle: "flexible_action",
         updatedAt: TIMESTAMP,
         selectedCharacterId: null,
         selectedCharacterName: "",
@@ -229,7 +231,7 @@ describe("client API response contracts", () => {
       updatedAt: TIMESTAMP,
       storyLengthProfile: "standard",
       storyContextBudgetTokens: 128_000,
-      turnControlStyle: "flexible_auto",
+      turnControlStyle: "flexible_action",
       selectedCharacterId: "observer",
       selectedCharacterName: "The Observer",
       worldId: WORLD_ID,
@@ -301,7 +303,7 @@ describe("client API response contracts", () => {
       worldVersionId: WORLD_VERSION_ID,
       storyLengthProfile: "standard",
       storyContextBudgetTokens: 32_000,
-      turnControlStyle: "flexible_auto",
+      turnControlStyle: "flexible_action",
       updatedAt: TIMESTAMP,
       selectedCharacterId: "observer",
       selectedCharacterName: "The Observer",

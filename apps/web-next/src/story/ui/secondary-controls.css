@@ -1,6 +1,5 @@
 /* Quiet Leaf's native secondary controls stay project-owned beside Core elements. */
 main[data-ui-implementation="web-awesome"] :is(
-  .quiet-leaf-intent-confirmation__actions button,
   .quiet-leaf-composer-footer button,
   .quiet-leaf-history button,
   .quiet-leaf .story-reader-toolbar button,
@@ -18,7 +17,6 @@ main[data-ui-implementation="web-awesome"] :is(
 }
 
 main[data-ui-implementation="web-awesome"] :is(
-  .quiet-leaf-intent-confirmation__actions button,
   .quiet-leaf-composer-footer button,
   .quiet-leaf-history button,
   .quiet-leaf .story-reader-toolbar button,
@@ -28,7 +26,6 @@ main[data-ui-implementation="web-awesome"] :is(
 }
 
 main[data-ui-implementation="web-awesome"] :is(
-  .quiet-leaf-intent-confirmation__actions button,
   .quiet-leaf-composer-footer button,
   .quiet-leaf-history button,
   .quiet-leaf .story-reader-toolbar button,
@@ -39,7 +36,6 @@ main[data-ui-implementation="web-awesome"] :is(
 }
 
 main[data-ui-implementation="web-awesome"] :is(
-  .quiet-leaf-intent-confirmation__actions button,
   .quiet-leaf-composer-footer button,
   .quiet-leaf-history button,
   .quiet-leaf .story-reader-toolbar button,

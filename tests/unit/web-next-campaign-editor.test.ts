@@ -13,6 +13,132 @@ const campaignEditorPage = campaignEditorPageModule as Record<string, unknown>;
 afterEach(() => vi.unstubAllGlobals());
 
 describe("web-next campaign editor routing", () => {
+  const overviewCampaign = {
+    id: "campaign-1", title: "Glass Harbor", status: "active", activeTurnNumber: 4,
+    worldId: "world-1", worldTitle: "World", worldVersionId: "version-1", worldVersionNumber: 1,
+    latestWorldVersionNumber: 1, worldUpdateAvailable: false, selectedCharacterName: null,
+    textProviderProfileId: null, imageProviderProfileId: null, turnControlStyle: "action_only",
+    storyLengthProfile: "standard", storyContextBudgetTokens: 64000,
+    costInformation: [{ amount: 12.5, currency: "USD", textGenerationAmount: 10, imageGenerationAmount: 2, memoryAmount: 0.5 }]
+  };
+
+  function overviewFetch(response: Response, campaign = overviewCampaign): Readonly<{ fetchMock: ReturnType<typeof vi.fn>; setStateRevision(revision: number): void; stateRequestCount(): number }> {
+    let stateRevision = 11;
+    let stateRequests = 0;
+    const fetchMock = vi.fn(async (url: string, init: RequestInit = {}) => {
+      if (url === "/api/v1/campaigns") return new Response(JSON.stringify({ campaigns: [campaign] }), { status: 200 });
+      if (url === "/api/v1/providers") return new Response(JSON.stringify({ providers: [] }), { status: 200 });
+      if (url === "/api/v1/campaigns/campaign-1/state") {
+        stateRequests += 1;
+        return new Response(JSON.stringify({ revision: stateRevision }), { status: 200 });
+      }
+      if (url === "/api/v1/campaigns/campaign-1" && init.method === "PATCH") return response;
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    return { fetchMock, setStateRevision(revision) { stateRevision = revision; }, stateRequestCount: () => stateRequests };
+  }
+
+  function installOverviewFormData(): void {
+    vi.stubGlobal("FormData", class {
+      readonly values: Array<[string, string]>;
+      constructor(form: HTMLFormElement) {
+        this.values = [...form.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>("input[name], select[name], textarea[name]")]
+          .map((control) => [control.name, control.value] as [string, string]);
+      }
+      entries(): IterableIterator<[string, string]> { return this.values[Symbol.iterator](); }
+    });
+  }
+
+  function selectOverviewTurnStyle(select: HTMLSelectElement, value: "flexible_action" | "flexible_scene"): void {
+    for (const option of select.querySelectorAll<HTMLOptionElement>("option")) option.toggleAttribute("selected", option.value === value);
+  }
+
+  it("saves the complete loaded overview payload with its original state fence and retained cost markup", async () => {
+    const { document } = parseHTML("<body><div id=app></div></body>");
+    const root = document.querySelector<HTMLElement>("#app")!;
+    const overview = overviewFetch(new Response(JSON.stringify(overviewCampaign), { status: 200 }));
+    const { fetchMock } = overview;
+    vi.stubGlobal("fetch", fetchMock);
+    installOverviewFormData();
+    const mounted = mountCampaignEditorPage(root, { campaignId: overviewCampaign.id, section: "overview" });
+    await vi.waitFor(() => expect(root.querySelector("#overview-form")).toBeTruthy());
+    await vi.waitFor(() => expect(overview.stateRequestCount()).toBe(1));
+    const form = root.querySelector<HTMLFormElement>("#overview-form")!;
+    expect(form.querySelector<HTMLSelectElement>("select[name='storyContextBudgetTokens']")?.value).toBe("64000");
+    expect(root.textContent).toContain("Reported provider cost");
+    expect(root.textContent).toContain("Story text");
+    overview.setStateRevision(29);
+    const title = form.querySelector<HTMLInputElement>("input[name='title']")!;
+    title.value = "Renamed harbor";
+    form.dispatchEvent(new document.defaultView!.Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === "/api/v1/campaigns/campaign-1" && (init as RequestInit).method === "PATCH")).toBe(true));
+
+    const patch = fetchMock.mock.calls.find(([url, init]) => url === "/api/v1/campaigns/campaign-1" && (init as RequestInit).method === "PATCH");
+    const payload = JSON.parse(String((patch?.[1] as RequestInit).body));
+    expect(payload).toEqual({
+      title: "Renamed harbor",
+      status: "active",
+      textProviderProfileId: null,
+      turnControlStyle: "action_only",
+      storyLengthProfile: "standard",
+      storyContextBudgetTokens: 64000,
+      expectedTurnControlStyle: "action_only",
+      expectedActiveTurnNumber: 4,
+      expectedStateRevision: 11
+    });
+    expect(overview.stateRequestCount()).toBe(1);
+    mounted.dispose();
+  });
+
+  it("keeps the overview draft after a fenced settings conflict", async () => {
+    const { document } = parseHTML("<body><div id=app></div></body>");
+    const root = document.querySelector<HTMLElement>("#app")!;
+    const { fetchMock } = overviewFetch(new Response(JSON.stringify({ error: "Campaign changed." }), { status: 409 }));
+    vi.stubGlobal("fetch", fetchMock);
+    installOverviewFormData();
+    const mounted = mountCampaignEditorPage(root, { campaignId: overviewCampaign.id, section: "overview" });
+    await vi.waitFor(() => expect(root.querySelector("#overview-form")).toBeTruthy());
+    const form = root.querySelector<HTMLFormElement>("#overview-form")!;
+    const title = form.querySelector<HTMLInputElement>("input[name='title']")!;
+    title.value = "Keep this local title";
+    const turnStyle = form.querySelector<HTMLSelectElement>("select[name='turnControlStyle']")!;
+    selectOverviewTurnStyle(turnStyle, "flexible_scene");
+    form.dispatchEvent(new document.defaultView!.Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(root.textContent).toContain("Campaign changed."));
+    expect(title.value).toBe("Keep this local title");
+    expect(turnStyle.querySelector("option[selected]")?.getAttribute("value")).toBe("flexible_scene");
+    const patch = fetchMock.mock.calls.find(([url, init]) => url === "/api/v1/campaigns/campaign-1" && (init as RequestInit).method === "PATCH");
+    expect(JSON.parse(String((patch?.[1] as RequestInit).body))).toMatchObject({
+      title: "Keep this local title", turnControlStyle: "flexible_scene", expectedTurnControlStyle: "action_only",
+      expectedActiveTurnNumber: 4, expectedStateRevision: 11
+    });
+    mounted.dispose();
+  });
+
+  it.each([
+    { from: "flexible_action" as const, to: "flexible_scene" as const },
+    { from: "flexible_scene" as const, to: "flexible_action" as const }
+  ])("writes $from to $to with the loaded authority fences", async ({ from, to }) => {
+    const { document } = parseHTML("<body><div id=app></div></body>");
+    const root = document.querySelector<HTMLElement>("#app")!;
+    const campaign = { ...overviewCampaign, turnControlStyle: from };
+    const { fetchMock } = overviewFetch(new Response(JSON.stringify(campaign), { status: 200 }), campaign);
+    vi.stubGlobal("fetch", fetchMock);
+    installOverviewFormData();
+    const mounted = mountCampaignEditorPage(root, { campaignId: campaign.id, section: "overview" });
+    await vi.waitFor(() => expect(root.querySelector("#overview-form")).toBeTruthy());
+    const form = root.querySelector<HTMLFormElement>("#overview-form")!;
+    const turnStyle = form.querySelector<HTMLSelectElement>("select[name='turnControlStyle']")!;
+    selectOverviewTurnStyle(turnStyle, to);
+    form.dispatchEvent(new document.defaultView!.Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === "/api/v1/campaigns/campaign-1" && (init as RequestInit).method === "PATCH")).toBe(true));
+    const patch = fetchMock.mock.calls.find(([url, init]) => url === "/api/v1/campaigns/campaign-1" && (init as RequestInit).method === "PATCH");
+    expect(JSON.parse(String((patch?.[1] as RequestInit).body))).toMatchObject({
+      turnControlStyle: to, expectedTurnControlStyle: from, expectedActiveTurnNumber: 4, expectedStateRevision: 11
+    });
+    mounted.dispose();
+  });
+
   it("gives every confirmed editor section its own canonical subpage", () => {
     expect(CAMPAIGN_SECTIONS).toEqual(["overview", "character", "state", "history", "chronicle", "illustrations", "world-transfer", "data"]);
     for (const section of CAMPAIGN_SECTIONS) {

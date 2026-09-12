@@ -121,6 +121,13 @@ integration("world generation supporting PostgreSQL adapters", () => {
     const repository = createRepository() as SessionProfileRepositoryPort;
     const transactions = createPostgresWorldCampaignTransactionPort(pool);
 
+    await expect(transactions.read((transaction) => repository.getSessionProfile(
+      transaction,
+      { ownerUserId: sessionOwnerUserId },
+    ))).resolves.toMatchObject({
+      settings: { defaultTurnControlStyle: "flexible_action", retainedPreference: "keep" }
+    });
+
     const updated = unwrap(await transactions.command((transaction) => repository.updateSessionProfile(
       transaction,
       { ownerUserId: sessionOwnerUserId },
@@ -137,7 +144,7 @@ integration("world generation supporting PostgreSQL adapters", () => {
       settings: {
         autoSubmitTurnChoices: true,
         continuousReading: true,
-        defaultTurnControlStyle: "flexible_auto",
+        defaultTurnControlStyle: "flexible_action",
         retainedPreference: "keep"
       }
     });

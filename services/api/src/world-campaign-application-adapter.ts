@@ -38,6 +38,12 @@ function applicationErrorMessage(error: WorldCampaignApplicationError): string {
       return "The world draft changed. Reload it before saving.";
     case "world_version_changed":
       return "The campaign world version changed. Reload it before continuing.";
+    case "turn_control_style_fence_required":
+      return "Reload the campaign before changing Story Direction.";
+    case "turn_control_style_changed":
+      return "The campaign setting changed. Reload it before saving.";
+    case "generation_in_progress":
+      return "Wait for the current generation to finish before changing Story Direction.";
     case "active_turn_changed":
       return "The campaign turn changed. Reload it before continuing.";
     case "state_revision_changed":

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { parseHTML } from "linkedom";
 import { expect, it, vi } from "vitest";
 import { mountComposer, type ComposerState } from "../../apps/web-next/src/story/ui/composer.js";
@@ -23,7 +24,7 @@ function fixture() {
 
 const state: ComposerState = {
   draft: { ownerKey: "a:1", value: "Test", disabled: false },
-  input: { style: "flexible_auto", value: "auto", disabled: false },
+  input: { style: "flexible_action", value: "action", disabled: false },
   choices: { choices: [], selected: [], disabled: false },
   length: { campaignDefault: "standard", override: null, disabled: false },
   canContinue: true,
@@ -80,71 +81,28 @@ it("blocks unavailable turn controls and does not invent an idle status", () => 
   composer.dispose();
 });
 
-it("renders captured ambiguity as text and confirms without rereading the draft", () => {
-  const { document, window, actions, composer } = fixture();
-  const captured = '<img src=x onerror="alert(1)"> Decide later';
-  composer.update({ ...state, confirmation: { action: captured } });
-  composer.update({ ...state, draft: { ...state.draft, value: "A newer draft" }, confirmation: { action: captured } });
-
-  const confirmation = composer.element.querySelector<HTMLElement>("[data-story-intent-confirmation]");
-  const action = confirmation?.querySelector<HTMLButtonElement>("[data-confirm-intent-action]");
-  const scene = confirmation?.querySelector<HTMLButtonElement>("[data-confirm-intent-scene]");
-  if (!confirmation || !action || !scene) throw new Error("Composer confirmation controls are missing.");
-  expect(confirmation.textContent).toContain(captured);
-  expect(confirmation.querySelector("img")).toBeNull();
-
-  action.dispatchEvent(new window.Event("click", { bubbles: true }));
-  scene.dispatchEvent(new window.Event("click", { bubbles: true }));
-  expect(actions.confirm).toHaveBeenNthCalledWith(1, "action");
-  expect(actions.confirm).toHaveBeenNthCalledWith(2, "scene");
-  composer.dispose();
-});
-
-it("returns focus to the existing draft after leaving confirmation", () => {
-  const { window, actions, composer } = fixture();
-  composer.update({ ...state, confirmation: { action: "Keep the lamp lit" } });
-  const input = composer.element.querySelector<HTMLElement>("wa-textarea");
-  const returnToEditor = composer.element.querySelector<HTMLButtonElement>("[data-return-to-editor]");
-  if (!input || !returnToEditor) throw new Error("Composer editor controls are missing.");
-  const focus = vi.spyOn(input, "focus");
-
-  returnToEditor.dispatchEvent(new window.Event("click", { bubbles: true }));
-  expect(actions.returnToEditor).toHaveBeenCalledExactlyOnceWith();
-  expect(focus).toHaveBeenCalledOnce();
-  composer.dispose();
-});
-
-it("disables unavailable confirmation actions", () => {
-  const { document, window, actions, composer } = fixture();
-  composer.update({ ...state, canContinue: false, confirmation: { action: "Wait for the active turn" } });
-  const action = composer.element.querySelector<HTMLButtonElement>("[data-confirm-intent-action]");
-  const scene = composer.element.querySelector<HTMLButtonElement>("[data-confirm-intent-scene]");
-  if (!action || !scene) throw new Error("Composer confirmation controls are missing.");
-
-  expect(action.disabled).toBe(true);
-  expect(scene.disabled).toBe(true);
-  action.dispatchEvent(new window.Event("click", { bubbles: true }));
-  scene.dispatchEvent(new window.Event("click", { bubbles: true }));
-  expect(actions.confirm).not.toHaveBeenCalled();
-  expect(document.querySelector("[data-story-intent-confirmation]")).toBeTruthy();
-  composer.dispose();
-});
-
-it("keeps hidden confirmations out of the accessibility tree and labels each composer uniquely", () => {
-  const { document, composer } = fixture();
-  const second = mountComposer(document, {
-    draft: vi.fn(), clearDraft: vi.fn(), mode: vi.fn(), choose: vi.fn(), length: vi.fn(),
-    continueStory: vi.fn(), retryTurn: vi.fn(), history: vi.fn(), confirm: vi.fn(), returnToEditor: vi.fn()
-  });
-  document.body.append(second.element);
+it("does not render retired confirmation controls", () => {
+  const { composer } = fixture();
   composer.update(state);
-  second.update(state);
-
-  const confirmations = document.querySelectorAll<HTMLElement>("[data-story-intent-confirmation]");
-  expect(confirmations).toHaveLength(2);
-  expect(confirmations[0]?.hidden).toBe(true);
-  expect(confirmations[0]?.getAttribute("aria-labelledby")).not.toBe(confirmations[1]?.getAttribute("aria-labelledby"));
-
+  expect(composer.element.querySelector("[data-story-intent-confirmation]")).toBeNull();
+  expect(composer.element.textContent).not.toContain("Confirm prompt interpretation");
   composer.dispose();
-  second.dispose();
+});
+
+it("hides turn-type controls for Story Direction while retaining its composer", () => {
+  const { composer } = fixture();
+  composer.update({ ...state, input: { ...state.input, style: "flexible_scene", value: "scene" } });
+  expect(composer.element.querySelector("wa-radio-group")).toBeNull();
+  expect(composer.element.hasAttribute("data-story-composer")).toBe(true);
+  composer.dispose();
+});
+
+it("does not retain retired confirmation styles", () => {
+  const composerCss = readFileSync(new URL("../../apps/web-next/src/story/ui/composer.css", import.meta.url), "utf8");
+  const secondaryCss = readFileSync(new URL("../../apps/web-next/src/story/ui/secondary-controls.css", import.meta.url), "utf8");
+  const playerCss = readFileSync(new URL("../../apps/web-next/src/story-player.css", import.meta.url), "utf8");
+
+  expect(composerCss).not.toContain("quiet-leaf-intent-confirmation");
+  expect(secondaryCss).not.toContain("quiet-leaf-intent-confirmation");
+  expect(playerCss).not.toContain("story-intent-confirmation");
 });

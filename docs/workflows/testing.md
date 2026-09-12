@@ -89,6 +89,23 @@ The production rollout still requires copied-campaign canaries with the actual
 provider, payload/commit/next-turn checks, and observed usage/latency. A skipped
 database, browser, or provider check is not a passed gate.
 
+## Story-only campaign-policy verification
+
+Generation-policy changes need focused unit coverage for policy creation,
+portable redaction, prompts, output validation, and bounded choice-only repair.
+The real-PostgreSQL integration matrix must cover Story Direction dispatch and
+commit, invalid and output-limited responses without authority mutation,
+expired-lease reclaim, duplicate claims, frozen policy after a campaign-setting
+change, latest-turn replacement, and cross-owner/campaign prompt isolation.
+It must also prove that stored RPG data and pending events are preserved while
+the story-only request omits mechanics and event evaluation.
+
+Use a deterministic provider for those checks. A benchmark can measure the
+fixture's dispatch and completion behavior, but it does not establish live
+provider quality or production latency. Report a real PostgreSQL run, browser
+coverage for each supported player surface, and any unavailable platform gate
+separately.
+
 ## Generation Notification Verification
 
 Run `tests/integration/generation-events.integration.test.ts` against real

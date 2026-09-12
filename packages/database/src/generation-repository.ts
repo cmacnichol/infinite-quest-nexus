@@ -10,10 +10,11 @@ import {
   type GenerationMutationResult
 } from "../../application/src/index.js";
 import { promptSnapshotSchema, type PromptSnapshot } from "../../contracts/src/prompt-library.js";
+import { campaignTurnControlStyleSchema, generationPolicySnapshotSchema, type GenerationPolicySnapshot } from "../../contracts/src/campaign-generation-policy.js";
 import { storyLengthProfileFromUnknown, storyLengthWordRange } from "../../contracts/src/story-settings.js";
 import { parseStoredChronicleRetrievalAudit } from "../../contracts/src/memory.js";
 import { sha256, stableStringify } from "../../domain/src/index.js";
-import { extractPartialNarration, formatNarrationParagraphs } from "../../story-engine/src/index.js";
+import { extractPartialNarration, formatNarrationParagraphs, generationExecutionProtocolIdentity, storyOnlyPromptSnapshot } from "../../story-engine/src/index.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
 import { resolveGenerationAuthoritySnapshot } from "./generation-authority.js";
@@ -58,6 +59,7 @@ type JobRow = {
   updatedAt: string;
   completedAt: string | null;
   partialOutput: string | null;
+  generationPolicy: GenerationPolicySnapshot | null;
 };
 
 type ResultRow = {
@@ -180,6 +182,7 @@ function jobResult(row: JobRow): GenerationJob {
     completedAt: row.completedAt,
     partialOutput: row.partialOutput,
     partialNarration: row.partialOutput ? extractPartialNarration(row.partialOutput) : null
+    , generationPolicy: row.generationPolicy
   };
   return row.operationKind === "append"
     ? { ...base, operationKind: "append", replacementTurnId: null }
@@ -197,39 +200,38 @@ async function validateTurnInputMode(
   request: GenerationRequest,
   turnControlStyle: string
 ): Promise<string | null> {
+  if (request.requestedInputMode === "auto" || request.inputModeSource === "auto" || request.inputModeSource === "fallback" || request.classificationId) {
+    throw new GenerationApplicationError("invalid_state", { reason: "turn_input_classification_removed" });
+  }
   if (turnControlStyle === "action_only" && request.resolvedInputMode !== "action") {
     throw new GenerationApplicationError("invalid_state", { reason: "action_only_mode" });
   }
-  if (request.requestedInputMode !== "auto") {
-    if (request.classificationId) {
-      throw new GenerationApplicationError("invalid_state", { reason: "classification_id_forbidden" });
-    }
-    if (request.requestedInputMode !== request.resolvedInputMode) {
-      throw new GenerationApplicationError("invalid_state", { reason: "explicit_input_mode_mismatch" });
-    }
-    return null;
+  if (request.requestedInputMode !== request.resolvedInputMode) {
+    throw new GenerationApplicationError("invalid_state", { reason: "explicit_input_mode_mismatch" });
   }
-  if (!request.classificationId) {
-    throw new GenerationApplicationError("invalid_state", { reason: "classification_missing_or_expired" });
+  return null;
+}
+
+function generationPolicyForStyle(turnControlStyle: string): GenerationPolicySnapshot {
+  const parsedStyle = campaignTurnControlStyleSchema.safeParse(turnControlStyle);
+  if (!parsedStyle.success) {
+    throw new GenerationApplicationError("invalid_state", { reason: "turn_control_style_invalid" });
   }
-  const result = await client.query<{ id: string; resolved_mode: "action" | "scene" }>(
-    `SELECT id, resolved_mode FROM turn_input_classifications
-      WHERE id = $1 AND owner_user_id = $2 AND campaign_id = $3 AND input_hash = $4
-        AND consumed_at IS NULL AND expires_at > now() FOR UPDATE`,
-    [request.classificationId, ownerUserId, campaignId, sha256(request.action)]
-  );
-  const classification = result.rows[0];
-  if (!classification) {
-    throw new GenerationApplicationError("conflict", { reason: "classification_missing_or_expired" });
+  const style = parsedStyle.data;
+  if (style === "flexible_scene") {
+    return {
+      version: 1,
+      playMode: "story_only",
+      turnControlStyle: style,
+      protocolVersion: "story-only-v1",
+      prompts: storyOnlyPromptSnapshot()
+    };
   }
-  if (classification.resolved_mode !== request.resolvedInputMode) {
-    throw new GenerationApplicationError("conflict", { reason: "classification_mode_mismatch" });
-  }
-  await client.query(
-    "UPDATE turn_input_classifications SET consumed_at = now() WHERE id = $1 AND owner_user_id = $2 AND campaign_id = $3",
-    [classification.id, ownerUserId, campaignId]
-  );
-  return classification.id;
+  return {
+    version: 1,
+    playMode: "legacy",
+    turnControlStyle: style
+  };
 }
 
 async function resolveTextProviderId(
@@ -320,6 +322,7 @@ export function createPostgresGenerationCommandRepository(
         const campaign = campaignResult.rows[0];
         if (!campaign) throw notFound({ campaignId: scope.campaignId });
         const classificationId = await validateTurnInputMode(client, scope.ownerUserId, scope.campaignId, request, campaign.turn_control_style);
+        const generationPolicy = generationPolicyForStyle(campaign.turn_control_style);
         const providerProfileId = await resolveTextProviderId(client, scope.ownerUserId, request.providerProfileId || campaign.text_provider_profile_id);
         if (!providerProfileId) throw new GenerationApplicationError("provider_required", { reason: "no_text_provider" });
         const storyLengthProfile = request.storyLengthProfileOverride
@@ -346,14 +349,16 @@ export function createPostgresGenerationCommandRepository(
                owner_user_id, campaign_id, provider_profile_id, idempotency_key, expected_turn_number,
                action, requested_input_mode, resolved_input_mode, input_mode_source, turn_input_classification_id,
                requested_model, context_options, prompt_protocol_version, recovery_metadata, prompt_snapshot,
-               generation_base_identity
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+               generation_base_identity, generation_policy
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
              RETURNING id, status, action, operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId",
                        expected_turn_number AS "expectedTurnNumber", created_at AS "createdAt"`,
             [scope.ownerUserId, scope.campaignId, providerProfileId, request.idempotencyKey, campaign.active_turn_number + 1,
-              request.action, request.requestedInputMode, request.resolvedInputMode, request.inputModeSource, classificationId,
-              request.model || "", json(contextSnapshot), dependencies.promptProtocolVersion(promptSnapshot),
-              json({ requestFingerprint }), json(promptSnapshot), json(authority.baseIdentity)]
+              request.action, generationPolicy.playMode === "story_only" ? "scene" : request.requestedInputMode,
+              generationPolicy.playMode === "story_only" ? "scene" : request.resolvedInputMode,
+              generationPolicy.playMode === "story_only" ? "explicit" : request.inputModeSource, classificationId,
+              request.model || "", json(contextSnapshot), generationExecutionProtocolIdentity(dependencies.promptProtocolVersion(promptSnapshot), generationPolicy),
+              json({ requestFingerprint }), json(promptSnapshot), json(authority.baseIdentity), json(generationPolicy)]
           );
           return enqueueResult(inserted.rows[0]!, false);
         } catch (error) {
@@ -401,6 +406,7 @@ export function createPostgresGenerationCommandRepository(
         const campaign = campaignResult.rows[0];
         if (!campaign) throw notFound({ campaignId: scope.campaignId });
         const classificationId = await validateTurnInputMode(client, scope.ownerUserId, scope.campaignId, request, campaign.turn_control_style);
+        const generationPolicy = generationPolicyForStyle(campaign.turn_control_style);
         if (campaign.active_turn_number !== request.expectedCurrentTurnNumber) {
           throw new GenerationApplicationError("stale_turn", {
             reason: "stale_current_turn",
@@ -484,15 +490,17 @@ export function createPostgresGenerationCommandRepository(
                action, requested_input_mode, resolved_input_mode, input_mode_source, turn_input_classification_id,
                requested_model, context_options, prompt_protocol_version, recovery_metadata, prompt_snapshot,
                operation_kind, replacement_turn_id, base_turn_number, base_state_private, base_scratchpad_safe_for_prompt,
-               generation_base_identity, status
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'replace_latest',$16,$17,$18,$19,$20,'replacement_queued')
+               generation_base_identity, status, generation_policy
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'replace_latest',$16,$17,$18,$19,$20,'replacement_queued',$21)
             RETURNING id, status, action, expected_turn_number AS "expectedTurnNumber",
                       operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId", created_at AS "createdAt"`,
             [scope.ownerUserId, scope.campaignId, providerProfileId, request.idempotencyKey, campaign.active_turn_number,
-              request.action, request.requestedInputMode, request.resolvedInputMode, request.inputModeSource, classificationId,
-              request.model || "", json(contextSnapshot), dependencies.promptProtocolVersion(promptSnapshot),
+              request.action, generationPolicy.playMode === "story_only" ? "scene" : request.requestedInputMode,
+              generationPolicy.playMode === "story_only" ? "scene" : request.resolvedInputMode,
+              generationPolicy.playMode === "story_only" ? "explicit" : request.inputModeSource, classificationId,
+              request.model || "", json(contextSnapshot), generationExecutionProtocolIdentity(dependencies.promptProtocolVersion(promptSnapshot), generationPolicy),
               json({ requestFingerprint }), json(promptSnapshot), replacementTurnId,
-              baseTurnNumber, json(baseState), baseScratchpadSafeForPrompt, json(authority.baseIdentity)]
+              baseTurnNumber, json(baseState), baseScratchpadSafeForPrompt, json(authority.baseIdentity), json(generationPolicy)]
           );
           await client.query("RELEASE SAVEPOINT enqueue_replacement_insert");
           return enqueueResult(inserted.rows[0]!, false);
@@ -538,7 +546,7 @@ export function createPostgresGenerationCommandRepository(
                 provider_finish_reason AS "providerFinishReason", result_turn_id AS "resultTurnId",
                 error_code AS "errorCode", error_message AS "errorMessage", recovery_metadata AS "recoveryMetadata",
                 created_at AS "createdAt", updated_at AS "updatedAt", completed_at AS "completedAt",
-                partial_output AS "partialOutput"
+                partial_output AS "partialOutput", generation_policy AS "generationPolicy"
            FROM generation_jobs WHERE id = $1 AND owner_user_id = $2`,
         [scope.jobId, scope.ownerUserId]
       );
@@ -605,11 +613,12 @@ export function createPostgresGenerationCommandRepository(
           generationStatus: JobStatus;
           promptSnapshot: PromptSnapshot;
           promptProtocolVersion: string;
+          generationPolicy: GenerationPolicySnapshot | null;
         }>(
           `SELECT id, status AS "generationStatus", campaign_id AS "campaignId", provider_profile_id AS "providerProfileId",
                   expected_turn_number AS "expectedTurnNumber", attempts, operation_kind AS "operationKind",
                   replacement_turn_id AS "replacementTurnId", prompt_snapshot AS "promptSnapshot",
-                  prompt_protocol_version AS "promptProtocolVersion"
+                  prompt_protocol_version AS "promptProtocolVersion", generation_policy AS "generationPolicy"
              FROM generation_jobs WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
           [scope.jobId, scope.ownerUserId]
         );
@@ -619,7 +628,23 @@ export function createPostgresGenerationCommandRepository(
           throw new GenerationApplicationError("invalid_state", { reason: "retry_source_state", generationStatus: job.generationStatus });
         }
         const promptSnapshot = promptSnapshotSchema.safeParse(job.promptSnapshot);
-        if (!promptSnapshot.success || dependencies.promptProtocolVersion(promptSnapshot.data) !== job.promptProtocolVersion) {
+        const generationPolicy = job.generationPolicy === null
+          ? null
+          : generationPolicySnapshotSchema.safeParse(job.generationPolicy);
+        let protocolCompatible = false;
+        try {
+          protocolCompatible = promptSnapshot.success
+            && (generationPolicy === null || generationPolicy.success)
+            && generationExecutionProtocolIdentity(
+              dependencies.promptProtocolVersion(promptSnapshot.data),
+              generationPolicy === null
+                ? { version: 1, playMode: "legacy", turnControlStyle: "flexible_action" }
+                : generationPolicy.data
+            ) === job.promptProtocolVersion;
+        } catch {
+          protocolCompatible = false;
+        }
+        if (!protocolCompatible) {
           throw new GenerationApplicationError("conflict", { reason: "retry_protocol_incompatible" });
         }
         const updated = await client.query<MutationRow>(

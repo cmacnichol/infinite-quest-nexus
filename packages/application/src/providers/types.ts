@@ -1,9 +1,6 @@
 import type {
   PromptTemplateKey,
-  ProviderType,
-  TurnInputMode,
-  TurnIntentClassification,
-  TurnIntentConfidenceBand
+  ProviderType
 } from "@infinite-quest/contracts";
 import type { OwnerScope } from "../generation/types.js";
 
@@ -352,22 +349,6 @@ export type SavePromptOverrideCommand = PromptScope & Readonly<{
 
 export type ResetPromptOverrideCommand = PromptScope & Readonly<{
   key: PromptTemplateKey;
-}>;
-
-export type TurnIntentClassificationCommand = OwnerScope & Readonly<{
-  campaignId: string;
-  text: string;
-  preferredFallback?: TurnInputMode;
-}>;
-
-export type TurnIntentClassificationView = Readonly<{
-  classificationId: string;
-  classification: TurnIntentClassification;
-  resolvedMode: TurnInputMode;
-  confidenceBand: TurnIntentConfidenceBand;
-  /** Text-profile fallback is intentionally not representable. */
-  providerSource: "intent_default" | "campaign_fallback";
-  expiresAt: string;
 }>;
 
 export type CostCategory = "story" | "image" | "memory";

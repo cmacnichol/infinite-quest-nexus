@@ -1,6 +1,12 @@
 # System data transfer
 
-The System Archive **ZIP container format is version 1**. It moves the Current Owner's portable library from one Infinite Quest Nexus installation to another and can carry logical payload/record version 1 or 2. It contains portable stories, worlds, settings, and every retained original image, including unbound and archived Image Library entries. It is a point-in-time logical migration, not a database clone, merge, synchronization service, or disaster-recovery backup.
+The current System Archive ZIP container uses root manifest version 2 and
+logical payload/record version 3. It moves the Current Owner's portable library
+from one Infinite Quest Nexus installation to another. It contains portable
+stories, worlds, settings, and every retained original image, including unbound
+and archived Image Library entries. It is a point-in-time logical migration,
+not a database clone, merge, synchronization service, or disaster-recovery
+backup.
 
 ::: tip Released capability
 System Archive is enabled by default for the direct runtime and single-node Compose deployment. Its API routes and both Data Transfer clients are available while `SYSTEM_ARCHIVE_ENABLED=true`. Set the value to `false` to withdraw the capability for an instance; World, Campaign, legacy/external, and readable export workflows remain available.
@@ -21,7 +27,7 @@ The automated release matrix and an isolated source-to-empty-destination drill h
 
 System Archive augments these formats; it does not replace them. It is not the right way to add one campaign or world to a populated destination.
 
-## What System Archive format version 1 contains
+## What the current System Archive contains
 
 System Archive exports versioned logical records rather than SQL or table dumps. Portable authority includes:
 
@@ -59,7 +65,9 @@ The ZIP is not encrypted and has no archive password. Checksums detect corruptio
 
 ## Destination requirements
 
-The version 1 ZIP container accepts exactly one source owner and exactly one empty initialized Destination Instance. The destination must support the archive's logical payload/record version (1 or 2) and must:
+The root manifest version 2 accepts exactly one source owner and exactly one
+empty initialized Destination Instance. The destination must support logical
+payload/record version 3 and must:
 
 - run all required database migrations and a compatible System Archive payload version;
 - contain its generated `initial-owner` user but no authoritative owner data;

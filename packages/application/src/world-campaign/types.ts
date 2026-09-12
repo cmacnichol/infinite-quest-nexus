@@ -83,6 +83,9 @@ export type WorldCampaignTransitionFailureReason =
   | "fact_not_found"
   | "fact_campaign_mismatch"
   | "fact_already_replaced"
+  | "turn_control_style_fence_required"
+  | "turn_control_style_changed"
+  | "generation_in_progress"
   | "active_turn_changed"
   | "state_revision_changed"
   | "idempotency_mismatch"
@@ -110,6 +113,9 @@ export type WorldCampaignErrorDetails = Readonly<{
   actualTurnNumber?: number;
   expectedStateRevision?: number;
   actualStateRevision?: number;
+  expectedTurnControlStyle?: string;
+  actualTurnControlStyle?: string;
+  unresolvedGenerationStatuses?: readonly string[];
   blockers?: readonly string[];
   findings?: readonly CampaignTransferFinding[];
 }>;

@@ -28,12 +28,16 @@ Private mechanics, trigger reasons, scratchpads, parser diagnostics, and model r
 - **← Previous turn** and **Next turn →** browse accepted scenes.
 - **Undo latest** rewinds the current campaign from its latest accepted boundary after confirmation.
 - **Retry latest generation** is available for the applicable latest-generation recovery path.
-- The turn editor accepts original actions or scene direction.
-- Flexible campaigns show **Auto**, **Action**, and **Scene direction** above the editor. Actions-only campaigns show a locked Action badge.
-- The label, example text, helper message, and submit button change with the selected mode.
+- The turn editor accepts original Action or Story Direction input.
+- Story Direction campaigns expose Story Direction only. Flexible Action
+  campaigns can expose an Action/Story Direction selector, while Actions-only
+  campaigns show a locked Action badge.
+- The label, example text, helper message, and submit button follow the
+  selected workflow.
 - A character counter shows the remaining turn-input limit.
 
-When Auto resolves clearly, the player briefly shows **Auto → Action** or **Auto → Scene direction**. Mixed or ambiguous input opens a confirmation with explicit Action and Scene choices rather than guessing silently.
+Story Direction remains selected for generated choices and custom suggestions
+after save, reload, or navigation between the legacy and replacement players.
 
 You cannot submit a new canonical turn while browsing an older scene. Return to the latest turn or use the explicit restart/branch workflow.
 

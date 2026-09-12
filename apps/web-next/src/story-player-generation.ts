@@ -22,7 +22,6 @@ export interface StoryGenerationSubmission {
   readonly requestedInputMode: StoryTurnInputMode;
   readonly resolvedInputMode: "action" | "scene";
   readonly inputModeSource: TurnInputModeSource;
-  readonly classificationId?: string;
   readonly storyLengthProfileOverride?: StoryLengthProfile;
 }
 
@@ -132,7 +131,6 @@ export function createStoryGenerationController(
     requestedInputMode: submission.requestedInputMode,
     resolvedInputMode: submission.resolvedInputMode,
     inputModeSource: submission.inputModeSource,
-    ...(submission.classificationId ? { classificationId: submission.classificationId } : {}),
     ...(submission.storyLengthProfileOverride ? { storyLengthProfileOverride: submission.storyLengthProfileOverride } : {}),
     idempotencyKey: dependencies.idFactory.create(),
     context: GENERATION_CONTEXT

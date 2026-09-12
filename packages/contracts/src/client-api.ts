@@ -12,7 +12,6 @@ import {
   PUBLIC_GENERATION_FAILURE_MESSAGE,
   playerEventTriggerSchema,
   playerRpgStatSchema,
-  turnInputClassificationRequestSchema,
   turnInputModeSchema,
   turnInputModeSourceSchema
 } from "./generation.js";
@@ -22,8 +21,8 @@ import { chronicleRetrievalAuditSchema } from "./memory.js";
 import { storyContextBudgetTokensSchema, storyLengthProfileSchema } from "./story-settings.js";
 import { userProfileSchema, userProfileUpdateSchema } from "./users.js";
 import { campaignCreateSchema, playableCharacterSchema, worldCreateSchema } from "./world-library.js";
+import { campaignTurnControlStyleSchema } from "./campaign-generation-policy.js";
 
-const turnControlStyleSchema = z.enum(["action_only", "flexible_auto", "flexible_action", "flexible_scene"]);
 const operationKindSchema = generationJobStatusSchema.shape.operationKind;
 const generationStatusSchema = generationJobStatusSchema.shape.status;
 const nullableObjectSchema = z.record(z.string(), z.unknown()).nullable();
@@ -55,7 +54,7 @@ export const campaignSummarySchema = z.object({
   updatedAt: apiTimestampSchema,
   storyLengthProfile: storyLengthProfileSchema,
   storyContextBudgetTokens: storyContextBudgetTokensSchema,
-  turnControlStyle: turnControlStyleSchema,
+  turnControlStyle: campaignTurnControlStyleSchema,
   selectedCharacterId: z.string().nullable(),
   selectedCharacterName: z.string().nullable(),
   worldId: z.uuid(),
@@ -100,15 +99,6 @@ export const providerSummarySchema = z.object({
 }).passthrough();
 
 export const providerListResponseSchema = z.object({ providers: z.array(providerSummarySchema) });
-
-export const turnInputClassificationResponseSchema = z.object({
-  classificationId: z.uuid(),
-  classification: z.enum(["action", "scene", "mixed", "uncertain"]),
-  resolvedMode: turnInputModeSchema,
-  confidenceBand: z.enum(["clear", "probable", "ambiguous"]),
-  providerSource: z.enum(["intent_default", "story_text", "campaign_fallback"]),
-  expiresAt: apiTimestampSchema
-});
 
 export const campaignRuntimeStateResponseSchema = campaignRuntimeStateSchema;
 export const campaignRuntimeStateUpdateRequestSchema = campaignRuntimeStateUpdateSchema;
@@ -168,7 +158,7 @@ export const playableCharacterListResponseSchema = z.object({
   }).passthrough()
 });
 
-export { campaignBranchSchema, campaignRewindSchema, turnInputClassificationRequestSchema } from "./generation.js";
+export { campaignBranchSchema, campaignRewindSchema } from "./generation.js";
 export { userProfileUpdateSchema } from "./users.js";
 export { campaignCreateSchema, worldCreateSchema } from "./world-library.js";
 
@@ -179,7 +169,7 @@ const campaignSyncCampaignSchema = z.object({
   worldVersionId: z.uuid(),
   storyLengthProfile: storyLengthProfileSchema,
   storyContextBudgetTokens: storyContextBudgetTokensSchema,
-  turnControlStyle: turnControlStyleSchema,
+  turnControlStyle: campaignTurnControlStyleSchema,
   updatedAt: apiTimestampSchema,
   selectedCharacterId: z.string().nullable(),
   selectedCharacterName: z.string(),
@@ -395,7 +385,6 @@ export type MetaResponse = z.infer<typeof metaResponseSchema>;
 export type SessionResponse = z.infer<typeof sessionResponseSchema>;
 export type UserProfileResponse = z.infer<typeof userProfileResponseSchema>;
 export type ProviderListResponse = z.infer<typeof providerListResponseSchema>;
-export type TurnInputClassificationResponse = z.infer<typeof turnInputClassificationResponseSchema>;
 export type CampaignRuntimeStateResponse = z.infer<typeof campaignRuntimeStateResponseSchema>;
 export type CampaignRewindResponse = z.infer<typeof campaignRewindResponseSchema>;
 export type CampaignBranchResponse = z.infer<typeof campaignBranchResponseSchema>;

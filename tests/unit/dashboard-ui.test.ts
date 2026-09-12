@@ -31,7 +31,9 @@ describe("Nexus central dashboard", () => {
     expect(navigationCss).toContain("justify-items: start;");
     expect(navigationCss).toContain(".nav-menu-label { margin: 6px 12px 3px;");
     expect(navigationCss).toContain("@media (max-width: 340px)");
-    expect(navigationCss).toContain(".universal-nav .nav-meta { display: none; }");
+    expect(navigationCss).toContain(".nav-meta { min-width: 38px; }");
+    expect(navigationCss).toContain(".nav-meta > :not(.nav-profile-button) { display: none; }");
+    expect(navigationCss).not.toContain(".universal-nav .nav-meta { display: none; }");
     expect(navigationCss).not.toContain('content: "⌄"');
     expect(dashboardScript).toContain('function closeNavigationMenus(except = null)');
     expect(dashboardScript).toContain('function setNavigationMenuState(menu, open)');

@@ -16,6 +16,7 @@ import type {
 } from "../../application/src/imports/private-portable-composition.js";
 import type { WorldRepositoryPort } from "../../application/src/world-campaign/ports.js";
 import { legacyStorySchema, storyContextBudgetTokensFromUnknown, worldImportRequestSchema } from "../../contracts/src/index.js";
+import { portableAcceptedGenerationPolicyProvenanceSchema } from "../../contracts/src/campaign-generation-policy.js";
 import type {
   ImportOwnerScope,
   PortableArchiveDiagnosticCode,
@@ -43,6 +44,7 @@ import { rebuildImportedCampaignCanonicalFactProjections } from "./chronicle-rep
 import { importPrivatePortableWorldAtExactTarget } from "./world-repository.js";
 import { runPostgresWorldCampaignCommandWithClient } from "./world-campaign-transaction.js";
 import { estimateTokens, stripMechanicsLeakage } from "../../domain/src/text.js";
+import { normalizeHistoricalTurnControlStyle } from "../../domain/src/campaign-generation-policy.js";
 
 type WorkRow = Readonly<{
   operation_id: string;
@@ -1256,7 +1258,11 @@ async function commitRichPortableCampaign(
   const chronicle = unknownRecord(input.payload.chronicle);
   const sourceCampaign = unknownRecord(campaignPayload.campaign);
   const archiveRecords = unknownRecord(campaignPayload.archiveRecords);
-  if (!Array.isArray(campaignPayload.turns) || archiveRecords.formatVersion !== 1
+  const campaignFormatVersion = campaignPayload.formatVersion;
+  const v4 = campaignFormatVersion === 4;
+  if (!Array.isArray(campaignPayload.turns)
+    || (campaignFormatVersion !== undefined && campaignFormatVersion !== 3 && !v4)
+    || archiveRecords.formatVersion !== 1
     || chronicle.formatVersion !== 1 || !Array.isArray(chronicle.memories) || !Array.isArray(chronicle.summaries)) {
     throw new Error("portable_import_payload_invalid");
   }
@@ -1269,7 +1275,18 @@ async function commitRichPortableCampaign(
   );
   const importId = imported.rows[0]!.id;
   const turns = campaignPayload.turns;
-  const settings = unknownRecord(campaignPayload.settings);
+  const sourceSettings = unknownRecord(campaignPayload.settings);
+  if (v4 && (campaignPayload.generationPolicyVersion !== 1
+    || !Object.prototype.hasOwnProperty.call(sourceSettings, "turnControlStyle")
+    || !["action_only", "flexible_action", "flexible_scene"].includes(String(sourceSettings.turnControlStyle)))) {
+    throw new Error("portable_import_payload_invalid");
+  }
+  const historicalTurnControlStyle = sourceSettings.turnControlStyle === "Auto"
+    ? "flexible_auto"
+    : sourceSettings.turnControlStyle;
+  const settings: Record<string, unknown> = !v4 && historicalTurnControlStyle === "flexible_auto"
+    ? { ...sourceSettings, turnControlStyle: normalizeHistoricalTurnControlStyle(historicalTurnControlStyle) }
+    : { ...sourceSettings };
   const activeTurnNumber = Math.max(0, ...turns.map((turn) => Number(unknownRecord(turn).turnNumber ?? 0)));
   const campaignId = input.targetPlan?.campaignId ?? randomUUID();
   await database.query(
@@ -1282,7 +1299,7 @@ async function commitRichPortableCampaign(
       activeTurnNumber, JSON.stringify(settings),
       typeof settings.storyLength === "string" ? settings.storyLength : "standard",
       storyContextBudgetTokensFromUnknown(settings.storyContextBudgetTokens),
-      ["action_only", "flexible_auto", "flexible_action", "flexible_scene"].includes(String(settings.turnControlStyle))
+      ["action_only", "flexible_action", "flexible_scene"].includes(String(settings.turnControlStyle))
         ? settings.turnControlStyle : "flexible_action",
       typeof sourceCampaign.selectedCharacterId === "string" ? sourceCampaign.selectedCharacterId : null,
       sourceCampaign.characterSnapshot == null ? null : JSON.stringify(sourceCampaign.characterSnapshot),
@@ -1352,12 +1369,16 @@ async function commitRichPortableCampaign(
   );
   for (const [index, turnValue] of turns.entries()) {
     const turn = unknownRecord(turnValue);
+    const portableProvenance = v4
+      ? portableAcceptedGenerationPolicyProvenanceSchema.safeParse(turn.portableAcceptedGenerationPolicyProvenance)
+      : { success: true as const, data: null };
+    if (!portableProvenance.success) throw new Error("portable_import_payload_invalid");
     await database.query(
       `INSERT INTO turns (
          id,owner_user_id,campaign_id,turn_number,source_turn_id,action,input_mode,input_mode_source,narration,
          choices,custom_action_suggestion,image_prompt,image_url,mechanics_private,state_snapshot_private,
-         model_metadata,import_metadata,accepted_at
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13,$14::jsonb,$15::jsonb,$16::jsonb,$17::jsonb,$18)`,
+         model_metadata,import_metadata,generation_policy,accepted_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13,$14::jsonb,$15::jsonb,$16::jsonb,$17::jsonb,$18::jsonb,$19)`,
       [requireRichId(maps.turn, turn.id), input.owner.ownerUserId, campaignId,
         Number(turn.turnNumber ?? index + 1), String(turn.id), String(turn.action ?? ""),
         typeof turn.inputMode === "string" ? turn.inputMode : "action",
@@ -1373,8 +1394,11 @@ async function commitRichPortableCampaign(
             destinationTurnId: requireRichId(maps.turn, turn.id),
             factIds: destinationFactIds
           }
-        ), {}), jsonValue(turn.llmModelInfo, {}),
-        jsonValue({ importedFrom: "portable_campaign_zip", sourceTurnId: turn.id }, {}), portableDate(turn.createdAt)]
+        ), {}), jsonValue({
+          ...unknownRecord(turn.llmModelInfo),
+          portableAcceptedGenerationPolicyProvenance: portableProvenance.data
+        }, {}),
+        jsonValue({ importedFrom: "portable_campaign_zip", sourceTurnId: turn.id }, {}), null, portableDate(turn.createdAt)]
     );
   }
   for (const value of unknownArray(archiveRecords.characterProfileEdits)) {
@@ -1628,9 +1652,15 @@ async function commitPortableCampaign(
   );
   const importId = imported.rows[0]!.id;
   const campaignId = input.targetPlan?.campaignId ?? randomUUID();
-  const legacySettings = Object.keys(campaignSeed).length
+  const importedLegacySettings = Object.keys(campaignSeed).length
     ? unknownRecord(campaignSeed.legacySettings)
     : story.settings ?? {};
+  const legacyControlStyle = importedLegacySettings.turnControlStyle === "Auto"
+    ? "flexible_auto"
+    : importedLegacySettings.turnControlStyle;
+  const legacySettings: Record<string, unknown> = legacyControlStyle === "flexible_auto"
+    ? { ...importedLegacySettings, turnControlStyle: normalizeHistoricalTurnControlStyle(legacyControlStyle) }
+    : { ...importedLegacySettings };
   const selectedCharacterId = typeof campaignSeed.selectedCharacterId === "string"
     && campaignSeed.selectedCharacterId.trim()
     ? campaignSeed.selectedCharacterId.trim()
@@ -1647,9 +1677,12 @@ async function commitPortableCampaign(
   const storyLengthProfile = ["brief", "standard", "long", "extended"].includes(String(campaignSeed.storyLengthProfile))
     ? String(campaignSeed.storyLengthProfile)
     : "standard";
+  const sourceTurnControlStyle = campaignSeed.turnControlStyle === "Auto"
+    ? "flexible_auto"
+    : campaignSeed.turnControlStyle;
   const turnControlStyle = ["action_only", "flexible_auto", "flexible_action", "flexible_scene"]
-    .includes(String(campaignSeed.turnControlStyle))
-    ? String(campaignSeed.turnControlStyle)
+    .includes(String(sourceTurnControlStyle))
+    ? normalizeHistoricalTurnControlStyle(sourceTurnControlStyle as "action_only" | "flexible_auto" | "flexible_action" | "flexible_scene")
     : "flexible_action";
   await database.query(
     `INSERT INTO campaigns (

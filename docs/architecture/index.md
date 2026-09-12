@@ -38,6 +38,7 @@ See also [Repository Overview](./repository-overview.md) for project-goal/naming
 - [ADR 0024: Chronicle entity identity is scoped and derived](./0024-scoped-chronicle-entity-identity.md)
 - [ADR 0029: Chronicle turn retrieval audits are versioned, atomic provenance](./0029-chronicle-turn-retrieval-audit.md)
 - [ADR 0020: Retire the legacy player from the runtime](./0020-retire-legacy-player-runtime.md)
+- [Story-only campaign policy](./story-only-campaign-policy.md)
 - [ADR 0021: Typed turn input and optional intent classification](./0021-turn-input-intent-classification.md)
 - [ADR 0024: Central Prompt Library](./0024-central-prompt-library.md)
 - [Task 10 B1 generation boundary completion audit](../review/2026-08-03-task-10-b1-completion.md)
@@ -74,5 +75,9 @@ The ADRs define the System Archive, specialized-format, and disaster-recovery bo
 Some early ADRs refer to the legacy player bridge or to provider work that was implemented later. Preserve that chronology when reading the records. For current deployment and product behavior, use the active guides and concept pages and follow their links back to the relevant decisions.
 
 ADR 0020 supersedes ADR 0004's runtime-routing decision. ADR 0004 remains the historical record of the temporary migration bridge.
+
+The [Story-only campaign policy](./story-only-campaign-policy.md) supersedes
+ADR 0021 for active turn handling. ADR 0021 remains the historical record of
+the retired Auto-classifier design and older persisted rows.
 
 ADR numbers are not unique across the full history: `0011` and `0024` each name two distinct records, and ADR 0028 was renumbered from a third collision at `0026`. Cite ADRs by filename rather than by number.

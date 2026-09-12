@@ -13,7 +13,7 @@ The [Nexus dashboard](./dashboard.md) is the main landing page. It provides libr
 - [Chronicle](./chronicle/inspect.md)
 - [Providers](./providers/text.md)
 - [Prompt Library](./prompt-library.md)
-- [Turn intent classification](./providers/turn-intent.md)
+- [Turn intent classification retirement](./providers/turn-intent.md)
 
 ## Safety model
 

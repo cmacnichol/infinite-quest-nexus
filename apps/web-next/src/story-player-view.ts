@@ -12,6 +12,7 @@ export interface StoryPlayerViewState {
   readonly ui: Readonly<StoryUiState>;
   readonly campaigns: readonly CampaignSummary[];
   readonly selectedCampaign: CampaignSummary | null;
+  readonly canBeginStory: boolean;
   readonly projection: Readonly<CampaignProjection>;
   readonly inspectedState: CampaignRuntimeStateResponse | null;
   readonly currentState: CampaignRuntimeStateResponse | null;
@@ -174,9 +175,11 @@ function composerModeButtons(document: Document, turnControlStyle: string, curre
   group.dataset.storyInputModes = "";
   group.setAttribute("role", "radiogroup");
   group.setAttribute("aria-label", "Interpret prompt as");
-  const modes = turnControlStyle === "action_only"
-    ? [["action", "Action"]] as const
-    : [["auto", "Auto"], ["action", "Action"], ["scene", "Scene Direction"]] as const;
+  const modes = turnControlStyle === "flexible_scene"
+    ? [["scene", "Story Direction"]] as const
+    : turnControlStyle === "action_only"
+      ? [["action", "Action"]] as const
+      : [["action", "Action"], ["scene", "Story Direction"]] as const;
   for (const [mode, label] of modes) {
     const button = element(document, "button", "story-input-mode", label);
     button.type = "button";
@@ -235,7 +238,7 @@ function storyComposer(
     choiceList.append(button);
   }
   if (choices.length) composer.append(choiceList);
-  composer.append(composerModeButtons(document, turnControlStyle, ui.requestedInputMode));
+  if (turnControlStyle !== "flexible_scene") composer.append(composerModeButtons(document, turnControlStyle, ui.requestedInputMode));
   composer.append(composerLengthSelect(document, state.selectedCampaign?.storyLengthProfile ?? "standard", ui.storyLengthProfileOverride));
 
   const field = element(document, "div", "story-draft-field");
@@ -253,7 +256,7 @@ function storyComposer(
   clear.setAttribute("aria-label", "Clear story prompt");
   clear.title = "Clear story prompt";
   clear.disabled = !ui.draft;
-  const help = element(document, "p", "story-draft-help", "Choose a suggestion or describe the next moment. Auto interprets your prompt only when you continue.");
+  const help = element(document, "p", "story-draft-help", "Choose a suggestion or describe the next moment.");
   help.id = "story-draft-help";
   const count = element(document, "p", "story-draft-count", `${ui.draft.length.toLocaleString()} / 12,000`);
   count.id = "story-draft-count";
@@ -262,26 +265,6 @@ function storyComposer(
   count.setAttribute("aria-live", "polite");
   field.append(label, textarea, clear, help, count);
   composer.append(field);
-
-  if (ui.intentConfirmation !== null) {
-    const confirmation = element(document, "section", "story-intent-confirmation");
-    confirmation.dataset.storyIntentConfirmation = "";
-    confirmation.setAttribute("role", "region");
-    const title = element(document, "h2", "story-intent-title", "Confirm prompt interpretation");
-    title.id = "story-intent-title";
-    confirmation.setAttribute("aria-labelledby", title.id);
-    const useAction = element(document, "button", undefined, "Use as Action");
-    useAction.type = "button";
-    useAction.dataset.action = "confirm-intent-action";
-    const useScene = element(document, "button", undefined, "Use as Scene Direction");
-    useScene.type = "button";
-    useScene.dataset.action = "confirm-intent-scene";
-    const returnToEditor = element(document, "button", undefined, "Return to editor");
-    returnToEditor.type = "button";
-    returnToEditor.dataset.action = "return-to-story-editor";
-    confirmation.append(title, element(document, "p", undefined, `Choose how to continue: ${ui.intentConfirmation.action}`), useAction, useScene, returnToEditor);
-    composer.append(confirmation);
-  }
 
   const secondary = element(document, "div", "story-composer-secondary-actions");
   const history = element(document, "button", undefined, "Turn History");
@@ -490,10 +473,9 @@ function campaignReader(document: Document, state: StoryPlayerViewState): HTMLEl
     const begin = element(document, "button", "story-begin", "Begin Story");
     begin.type = "button";
     begin.dataset.action = "begin-story";
-    const hasTextProvider = state.selectedCampaign?.textProviderProfileId !== null && state.selectedCampaign !== null;
-    begin.disabled = projection.generation !== null || !hasTextProvider;
+    begin.disabled = projection.generation !== null || !state.canBeginStory;
     reader.append(background, firstAction, begin);
-    if (!hasTextProvider) {
+    if (!state.canBeginStory) {
       const setup = element(document, "a", "story-setup", "Set up a text provider");
       setup.href = "/nexus/#providers";
       setup.dataset.storySetup = "";
@@ -555,10 +537,9 @@ export function renderStoryContent(document: Document, state: StoryPlayerViewSta
     const begin = element(document, "button", "story-begin", "Begin Story");
     begin.type = "button";
     begin.dataset.action = "begin-story";
-    const hasTextProvider = state.selectedCampaign?.textProviderProfileId !== null && state.selectedCampaign !== null;
-    begin.disabled = state.projection.generation !== null || !hasTextProvider;
+    begin.disabled = state.projection.generation !== null || !state.canBeginStory;
     content.push(background, firstAction, begin);
-    if (!hasTextProvider) {
+    if (!state.canBeginStory) {
       const setup = element(document, "a", "story-setup", "Set up a text provider");
       setup.href = "/nexus/#providers";
       setup.dataset.storySetup = "";

@@ -42,8 +42,7 @@ import {
   playerCampaignConfigSchema,
   providerProfileInputSchema,
   providerProfileUpdateSchema,
-  providerTextRequestSchema,
-  turnInputClassificationRequestSchema
+  providerTextRequestSchema
 } from "../../../packages/contracts/src/generation.js";
 import { projectSafeGenerationDiagnostic } from "../../../packages/contracts/src/story-prompt.js";
 import {
@@ -84,7 +83,6 @@ import {
   providerListResponseSchema,
   sessionResponseSchema,
   syncStatusRequestSchema,
-  turnInputClassificationResponseSchema,
   turnListResponseSchema,
   turnPageRequestSchema,
   userProfileResponseSchema,
@@ -1253,14 +1251,18 @@ export async function buildServer({
     )
   ));
 
-  app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/turn-input/classify", async (request) => {
-    const body = turnInputClassificationRequestSchema.parse(request.body);
-    return parseResponseProjection(turnInputClassificationResponseSchema, await providers.application.classifyTurnIntent({
-      ownerUserId: await initialOwnerId(pool),
-      campaignId: uuidSchema.parse(request.params.campaignId),
-      text: body.text,
-      ...(body.preferredFallback === undefined ? {} : { preferredFallback: body.preferredFallback })
-    }));
+  app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/turn-input/classify", async (request, reply) => {
+    const campaignId = uuidSchema.parse(request.params.campaignId);
+    const ownerUserId = await initialOwnerId(pool);
+    const owned = await pool.query<{ id: string }>(
+      "SELECT id FROM campaigns WHERE id = $1 AND owner_user_id = $2",
+      [campaignId, ownerUserId]
+    );
+    if (!owned.rows[0]) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
+    return reply.code(410).send({
+      code: "turn_input_classification_removed",
+      message: "Turn classification was removed. Refresh and use the campaign turn-control setting."
+    });
   });
 
   app.post<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/generations", async (request, reply) => {

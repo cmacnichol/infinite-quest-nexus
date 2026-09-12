@@ -167,7 +167,7 @@ export const archiveAssetRecordSchema = z.object({
   bindings: z.array(archiveAssetBindingSchema)
 }).strict();
 
-export const archiveManifestSchema = z.object({
+export const archiveManifestV1Schema = z.object({
   format: z.literal("infinite-quest-archive"),
   formatVersion: z.literal(1),
   archiveType: archiveTypeSchema,
@@ -268,6 +268,70 @@ export const archiveManifestSchema = z.object({
     }
   }
 });
+
+/** Version two gates the new campaign-policy payload before an old reader can apply it. */
+export const archiveManifestV2Schema = z.object({
+  format: z.literal("infinite-quest-archive"),
+  formatVersion: z.literal(2),
+  archiveType: archiveTypeSchema,
+  createdAt: z.iso.datetime({ offset: true }),
+  contentFingerprint: archiveSha256Schema,
+  campaignId: z.uuid().optional(),
+  worldId: z.uuid().optional(),
+  worldVersionId: z.uuid().optional(),
+  entries: z.array(archiveEntrySchema),
+  payloads: z.array(archivePayloadSchema),
+  assets: z.array(archiveAssetRecordSchema)
+}).strict().superRefine((manifest, context) => {
+  // Keep the complete v1 integrity validator. Version two changes only the
+  // declared campaign payload semantics; it must not relax archive safety.
+  const baseAssets = manifest.assets.map((asset) => {
+    const source = asset as unknown as Record<string, unknown>;
+    const { authority: _authority, bindings, ...baseAsset } = source;
+    return {
+      ...baseAsset,
+      bindings: Array.isArray(bindings)
+        ? bindings.map((binding) => {
+          const sourceBinding = binding as Record<string, unknown>;
+          // System Archive v2 binds specialized illustration authority to the
+          // record.  Its timestamp is not part of the common v1 binding
+          // grammar, but remains on the outer v2 record after this integrity
+          // projection has run.
+          const { authority: _bindingAuthority, createdAt: _createdAt, ...baseBinding } = sourceBinding;
+          return baseBinding;
+        })
+        : bindings
+    };
+  });
+  const v1Integrity = archiveManifestV1Schema.safeParse({
+    format: manifest.format,
+    formatVersion: 1,
+    archiveType: manifest.archiveType,
+    createdAt: manifest.createdAt,
+    contentFingerprint: manifest.contentFingerprint,
+    campaignId: manifest.campaignId,
+    worldId: manifest.worldId,
+    worldVersionId: manifest.worldVersionId,
+    entries: manifest.entries,
+    payloads: manifest.payloads,
+    assets: baseAssets
+  });
+  if (!v1Integrity.success) {
+    for (const issue of v1Integrity.error.issues) {
+      context.addIssue({ code: "custom", path: issue.path, message: issue.message });
+    }
+  }
+  if (manifest.archiveType !== "campaign") return;
+  if (!manifest.campaignId || !manifest.worldId || !manifest.worldVersionId) {
+    context.addIssue({ code: "custom", message: "Campaign manifests require campaign, world, and world version identifiers." });
+  }
+  const campaignPayload = manifest.payloads.find((payload) => payload.kind === "campaign" && payload.path === "campaign.json");
+  if (!campaignPayload || campaignPayload.formatVersion !== 4) {
+    context.addIssue({ code: "custom", path: ["payloads"], message: "Version-two campaign manifests require campaign payload version four." });
+  }
+});
+
+export const archiveManifestSchema = z.union([archiveManifestV2Schema, archiveManifestV1Schema]);
 
 export function sanitizePortableMetadata(value: unknown): unknown {
   if (Array.isArray(value)) return value.map((item) => sanitizePortableMetadata(item));

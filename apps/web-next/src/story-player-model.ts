@@ -12,13 +12,6 @@ export const STORY_READING_WIDTH_STORAGE_KEY = "infinite-quest.story.reading-wid
 
 export type StoryUiPhase = "chooser" | "loading" | "loaded" | "error" | "not_found";
 
-export interface StoryIntentConfirmation {
-  readonly action: string;
-  readonly classificationId: string;
-  readonly requestedInputMode: "auto";
-  readonly storyLengthProfileOverride: StoryLengthProfile | null;
-}
-
 export interface StoryUiState {
   readonly phase: StoryUiPhase;
   readonly viewTurnNumber: number | null;
@@ -30,7 +23,6 @@ export interface StoryUiState {
   readonly draftOwnerTurnNumber: number | null;
   readonly requestedInputMode: StoryTurnInputMode;
   readonly storyLengthProfileOverride: StoryLengthProfile | null;
-  readonly intentConfirmation: StoryIntentConfirmation | null;
   readonly activeDialog: string | null;
   readonly continuousReading: boolean;
   readonly generationFollowing: boolean;
@@ -56,7 +48,6 @@ export interface StoryUiModel {
   setChoiceDraft(selection: ChoiceDraftSelection, draft: string): void;
   setRequestedInputMode(mode: StoryTurnInputMode): void;
   setStoryLengthProfileOverride(profile: StoryLengthProfile | null): void;
-  setIntentConfirmation(intent: StoryIntentConfirmation | null): void;
   clearComposerDraft(): void;
   clearSubmittedComposerDraft(submittedDraft: string): void;
   setPhase(phase: StoryUiPhase): void;
@@ -75,7 +66,6 @@ const DEFAULT_STATE: StoryUiState = {
   draftOwnerTurnNumber: null,
   requestedInputMode: "action",
   storyLengthProfileOverride: null,
-  intentConfirmation: null,
   activeDialog: null,
   continuousReading: false,
   generationFollowing: true,
@@ -122,10 +112,9 @@ function localInitialState(
       ? value.draftOwnerKey : DEFAULT_STATE.draftOwnerKey,
     draftOwnerTurnNumber: typeof value.draftOwnerTurnNumber === "number" && Number.isSafeInteger(value.draftOwnerTurnNumber)
       ? value.draftOwnerTurnNumber : value.draftOwnerTurnNumber === null ? null : DEFAULT_STATE.draftOwnerTurnNumber,
-    requestedInputMode: value.requestedInputMode === "auto" || value.requestedInputMode === "scene" || value.requestedInputMode === "action"
+    requestedInputMode: value.requestedInputMode === "scene" || value.requestedInputMode === "action"
       ? value.requestedInputMode : DEFAULT_STATE.requestedInputMode,
     storyLengthProfileOverride: isStoryLengthProfile(value.storyLengthProfileOverride) ? value.storyLengthProfileOverride : null,
-    intentConfirmation: isIntentConfirmation(value.intentConfirmation) ? value.intentConfirmation : DEFAULT_STATE.intentConfirmation,
     activeDialog: typeof value.activeDialog === "string" || value.activeDialog === null
       ? value.activeDialog : DEFAULT_STATE.activeDialog,
     continuousReading: value.continuousReading === true,
@@ -145,15 +134,6 @@ function snapshot(state: StoryUiState): StoryUiState {
   return { ...state, choiceSelection: [...state.choiceSelection] };
 }
 
-function isIntentConfirmation(value: unknown): value is StoryIntentConfirmation {
-  return typeof value === "object" && value !== null
-    && typeof (value as { action?: unknown }).action === "string"
-    && typeof (value as { classificationId?: unknown }).classificationId === "string"
-    && (value as { requestedInputMode?: unknown }).requestedInputMode === "auto"
-    && ((value as { storyLengthProfileOverride?: unknown }).storyLengthProfileOverride === null
-      || isStoryLengthProfile((value as { storyLengthProfileOverride?: unknown }).storyLengthProfileOverride));
-}
-
 export function createStoryUiModel(
   initial: Partial<StoryUiState> = {},
   storage: Pick<Storage, "getItem" | "setItem"> | null = null
@@ -161,6 +141,7 @@ export function createStoryUiModel(
   const listeners = new Set<(state: Readonly<StoryUiState>) => void>();
   let state = localInitialState(initial, storage);
   let disposed = false;
+  let composerPolicy: "action_only" | "flexible_action" | "flexible_scene" | null = null;
 
   const publish = (next: StoryUiState) => {
     if (disposed || Object.is(state, next)) return;
@@ -209,8 +190,18 @@ export function createStoryUiModel(
     syncComposer(campaignId, acceptedTurnNumber, turnControlStyle) {
       if (!campaignId || !Number.isSafeInteger(acceptedTurnNumber) || acceptedTurnNumber < 0) return;
       const ownerKey = `${campaignId}:${acceptedTurnNumber}`;
-      if (state.draftOwnerKey === ownerKey) return;
+      const nextComposerPolicy = turnControlStyle === "flexible_scene"
+        ? "flexible_scene"
+        : turnControlStyle === "flexible_action" ? "flexible_action" : "action_only";
+      const requestedInputMode = turnInputModeForControlStyle(turnControlStyle) === "scene" ? "scene" : "action";
+      if (state.draftOwnerKey === ownerKey) {
+        if (composerPolicy === nextComposerPolicy) return;
+        composerPolicy = nextComposerPolicy;
+        if (state.requestedInputMode !== requestedInputMode) publish({ ...state, requestedInputMode });
+        return;
+      }
       const selection = createChoiceDraftSelection();
+      composerPolicy = nextComposerPolicy;
       publish({
         ...state,
         draft: "",
@@ -218,49 +209,45 @@ export function createStoryUiModel(
         choiceBaseText: selection.baseText,
         draftOwnerKey: ownerKey,
         draftOwnerTurnNumber: acceptedTurnNumber,
-        requestedInputMode: turnInputModeForControlStyle(turnControlStyle),
+        requestedInputMode,
         storyLengthProfileOverride: null,
-        intentConfirmation: null,
         message: null
       });
     },
     setComposerDraft(draft) {
       const selection = createChoiceDraftSelection(draft);
-      if (state.draft === draft && !state.choiceSelection.length && state.choiceBaseText === selection.baseText && state.intentConfirmation === null) return;
-      state = { ...state, draft, choiceSelection: selection.selectedIndexes, choiceBaseText: selection.baseText, intentConfirmation: null };
+      if (state.draft === draft && !state.choiceSelection.length && state.choiceBaseText === selection.baseText) return;
+      state = { ...state, draft, choiceSelection: selection.selectedIndexes, choiceBaseText: selection.baseText };
     },
     restoreComposerDraft(draft) {
       const selection = createChoiceDraftSelection(draft);
-      if (state.draft === draft && !state.choiceSelection.length && state.choiceBaseText === selection.baseText && state.intentConfirmation === null) return;
-      publish({ ...state, draft, choiceSelection: selection.selectedIndexes, choiceBaseText: selection.baseText, intentConfirmation: null });
+      if (state.draft === draft && !state.choiceSelection.length && state.choiceBaseText === selection.baseText) return;
+      publish({ ...state, draft, choiceSelection: selection.selectedIndexes, choiceBaseText: selection.baseText });
     },
     setChoiceDraft(selection, draft) {
       const selectedIndexes = selection.selectedIndexes.filter((index) => Number.isSafeInteger(index) && index >= 0);
       if (state.draft === draft && state.choiceBaseText === selection.baseText && state.choiceSelection.join(",") === selectedIndexes.join(",")) return;
-      publish({ ...state, draft, choiceBaseText: selection.baseText, choiceSelection: selectedIndexes, intentConfirmation: null });
+      publish({ ...state, draft, choiceBaseText: selection.baseText, choiceSelection: selectedIndexes });
     },
     setRequestedInputMode(requestedInputMode) {
-      if (requestedInputMode !== "auto" && requestedInputMode !== "action" && requestedInputMode !== "scene") return;
-      if (state.requestedInputMode !== requestedInputMode || state.intentConfirmation !== null) {
-        publish({ ...state, requestedInputMode, intentConfirmation: null });
+      if (requestedInputMode !== "action" && requestedInputMode !== "scene") return;
+      if (state.requestedInputMode !== requestedInputMode) {
+        publish({ ...state, requestedInputMode });
       }
     },
     setStoryLengthProfileOverride(storyLengthProfileOverride) {
       if (storyLengthProfileOverride !== null && !isStoryLengthProfile(storyLengthProfileOverride)) return;
       if (state.storyLengthProfileOverride !== storyLengthProfileOverride) publish({ ...state, storyLengthProfileOverride });
     },
-    setIntentConfirmation(intentConfirmation) {
-      if (state.intentConfirmation !== intentConfirmation) publish({ ...state, intentConfirmation });
-    },
     clearComposerDraft() {
       const selection = createChoiceDraftSelection();
-      if (!state.draft && !state.choiceSelection.length && state.intentConfirmation === null) return;
-      publish({ ...state, draft: "", choiceSelection: selection.selectedIndexes, choiceBaseText: selection.baseText, intentConfirmation: null, message: null });
+      if (!state.draft && !state.choiceSelection.length) return;
+      publish({ ...state, draft: "", choiceSelection: selection.selectedIndexes, choiceBaseText: selection.baseText, message: null });
     },
     clearSubmittedComposerDraft(submittedDraft) {
       if (state.draft !== submittedDraft) return;
       const selection = createChoiceDraftSelection();
-      publish({ ...state, draft: "", choiceSelection: selection.selectedIndexes, choiceBaseText: selection.baseText, intentConfirmation: null, message: null });
+      publish({ ...state, draft: "", choiceSelection: selection.selectedIndexes, choiceBaseText: selection.baseText, message: null });
     },
     setPhase(phase) {
       if (state.phase !== phase) publish({ ...state, phase });

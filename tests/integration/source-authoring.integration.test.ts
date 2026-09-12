@@ -448,7 +448,7 @@ integration("P3.9 source authoring end-to-end acceptance", () => {
               title: "P3.9 source campaign",
               storyLengthProfile: "standard",
               storyContextBudgetTokens: 32_000,
-              turnControlStyle: "flexible_auto",
+              turnControlStyle: "flexible_action",
               ...(content.playableCharacters[0]?.id ? { selectedCharacterId: content.playableCharacters[0].id } : {})
             }
           ));

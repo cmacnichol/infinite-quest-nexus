@@ -2,6 +2,8 @@ import { resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { worldContentSchema, WORLD_CONTENT_SCHEMA_VERSION } from "../../packages/contracts/src/world-library.js";
 import { worldImportRequestSchema } from "../../packages/contracts/src/world-library.js";
+import { generationRequestSchema } from "../../packages/contracts/src/generation.js";
+import { createApiGenerationApplication } from "../helpers/runtime-application-fixtures.js";
 import {
   createPostgresChronicleGenerationTransactionPort
 } from "../../packages/database/src/chronicle-repository.js";
@@ -147,13 +149,230 @@ integration("PostgreSQL world campaign repository adapters", () => {
         title,
         storyLengthProfile: "standard",
         storyContextBudgetTokens: 32_000,
-        turnControlStyle: "flexible_auto"
+        turnControlStyle: "flexible_action"
       }
     )));
     return { title, created };
   }
 
-  it("loads and preserves mixed authored event rules before the first turn", async () => {
+  it("requires each turn-control-style fence and preserves rows for stale active turn and state revision", async () => {
+    const adapters = createAdapters();
+    const world = await createFixtureWorld(adapters, "Style fence world");
+    const version = await publishFixtureWorld(adapters, world.created.id, world.created.draftRevision, "Style fence version");
+    const campaign = await createFixtureCampaign(adapters, version.worldVersionId, "Style fence campaign");
+    const scope = { ownerUserId, campaignId: campaign.created.id };
+
+    for (const [name, request, blocker] of [
+      ["style", { expectedActiveTurnNumber: 0, expectedStateRevision: 0 }, "turn_control_style"],
+      ["active turn", { expectedTurnControlStyle: "flexible_action", expectedStateRevision: 0 }, "active_turn_number"],
+      ["state revision", { expectedTurnControlStyle: "flexible_action", expectedActiveTurnNumber: 0 }, "state_revision"]
+    ] as const) {
+      const result = await adapters.transaction.command((transaction) => adapters.campaigns.updateCampaign(
+        transaction, scope, { turnControlStyle: "flexible_scene", ...request }
+      ));
+      expect(result, name).toMatchObject({ ok: false, failure: {
+        reason: "turn_control_style_fence_required",
+        details: { actualTurnControlStyle: "flexible_action", blockers: [blocker] }
+      } });
+      expect((await pool.query("SELECT turn_control_style FROM campaigns WHERE id=$1", [campaign.created.id])).rows[0]).toEqual({ turn_control_style: "flexible_action" });
+    }
+
+    await pool.query("UPDATE campaigns SET active_turn_number=1 WHERE id=$1", [campaign.created.id]);
+    const staleTurn = await adapters.transaction.command((transaction) => adapters.campaigns.updateCampaign(transaction, scope, {
+      turnControlStyle: "flexible_scene", expectedTurnControlStyle: "flexible_action", expectedActiveTurnNumber: 0, expectedStateRevision: 0
+    }));
+    expect(staleTurn).toMatchObject({ ok: false, failure: { reason: "active_turn_changed", details: { expectedTurnNumber: 0, actualTurnNumber: 1 } } });
+    expect((await pool.query("SELECT turn_control_style, active_turn_number FROM campaigns WHERE id=$1", [campaign.created.id])).rows[0]).toEqual({ turn_control_style: "flexible_action", active_turn_number: 1 });
+
+    await pool.query("UPDATE campaigns SET active_turn_number=0 WHERE id=$1", [campaign.created.id]);
+    await pool.query("UPDATE campaign_state SET revision=1 WHERE campaign_id=$1", [campaign.created.id]);
+    const staleRevision = await adapters.transaction.command((transaction) => adapters.campaigns.updateCampaign(transaction, scope, {
+      turnControlStyle: "flexible_scene", expectedTurnControlStyle: "flexible_action", expectedActiveTurnNumber: 0, expectedStateRevision: 0
+    }));
+    expect(staleRevision).toMatchObject({ ok: false, failure: { reason: "state_revision_changed", details: { expectedStateRevision: 0, actualStateRevision: 1 } } });
+    expect((await pool.query("SELECT turn_control_style FROM campaigns WHERE id=$1", [campaign.created.id])).rows[0]).toEqual({ turn_control_style: "flexible_action" });
+  });
+
+  it("preserves mechanics, pending state, history, and revision across Action to Story to Action", async () => {
+    const adapters = createAdapters();
+    const world = await createFixtureWorld(adapters, "Direction preservation world");
+    const version = await publishFixtureWorld(adapters, world.created.id, world.created.draftRevision, "Direction preservation version");
+    const campaign = await createFixtureCampaign(adapters, version.worldVersionId, "Direction preservation campaign");
+    const state = {
+      rpgStats: [{ id: "health", name: "Health", value: 37 }],
+      eventTriggers: [{ id: "alarm", name: "Alarm", value: "armed" }],
+      pendingEventTriggers: [{ id: "arrival", timing: "before", condition: "arrive" }]
+    };
+    await pool.query(
+      "UPDATE campaign_state SET rpg_stats=$2::jsonb, event_triggers=$3::jsonb, pending_event_triggers=$4::jsonb WHERE campaign_id=$1",
+      [campaign.created.id, JSON.stringify(state.rpgStats), JSON.stringify(state.eventTriggers), JSON.stringify(state.pendingEventTriggers)]
+    );
+    await pool.query(
+      "INSERT INTO turns (owner_user_id,campaign_id,turn_number,narration) VALUES ($1,$2,1,'Existing accepted history.')",
+      [ownerUserId, campaign.created.id]
+    );
+    const before = (await pool.query("SELECT rpg_stats,event_triggers,pending_event_triggers,revision FROM campaign_state WHERE campaign_id=$1", [campaign.created.id])).rows[0];
+    const historyBefore = await pool.query("SELECT turn_number,narration FROM turns WHERE campaign_id=$1 ORDER BY turn_number", [campaign.created.id]);
+    const scope = { ownerUserId, campaignId: campaign.created.id };
+    const story = unwrap(await adapters.transaction.command((transaction) => adapters.campaigns.updateCampaign(transaction, scope, {
+      turnControlStyle: "flexible_scene", expectedTurnControlStyle: "flexible_action", expectedActiveTurnNumber: 0, expectedStateRevision: 0
+    })));
+    expect(story.turnControlStyle).toBe("flexible_scene");
+    const action = unwrap(await adapters.transaction.command((transaction) => adapters.campaigns.updateCampaign(transaction, scope, {
+      turnControlStyle: "flexible_action", expectedTurnControlStyle: "flexible_scene", expectedActiveTurnNumber: 0, expectedStateRevision: 0
+    })));
+    expect(action.turnControlStyle).toBe("flexible_action");
+    expect((await pool.query("SELECT rpg_stats,event_triggers,pending_event_triggers,revision FROM campaign_state WHERE campaign_id=$1", [campaign.created.id])).rows[0]).toEqual(before);
+    expect((await pool.query("SELECT turn_number,narration FROM turns WHERE campaign_id=$1 ORDER BY turn_number", [campaign.created.id])).rows).toEqual(historyBefore.rows);
+  });
+
+  it("invalidates only the changed campaign model chains and scopes its activity audit", async () => {
+    const adapters = createAdapters();
+    const ownWorld = await createFixtureWorld(adapters, "Own chain world");
+    const ownVersion = await publishFixtureWorld(adapters, ownWorld.created.id, ownWorld.created.draftRevision, "Own chain version");
+    const changedCampaign = await createFixtureCampaign(adapters, ownVersion.worldVersionId, "Changed chain campaign");
+    const untouchedCampaign = await createFixtureCampaign(adapters, ownVersion.worldVersionId, "Untouched chain campaign");
+    const foreignOwner = (await pool.query<{ id: string }>("INSERT INTO users (display_name,status) VALUES ($1,'active') RETURNING id", [`Foreign chain owner ${crypto.randomUUID()}`])).rows[0]!.id;
+    const foreignWorld = await createFixtureWorld(adapters, "Foreign chain world", foreignOwner);
+    const foreignVersion = await publishFixtureWorld(adapters, foreignWorld.created.id, foreignWorld.created.draftRevision, "Foreign chain version", foreignOwner);
+    const foreignCampaign = await createFixtureCampaign(adapters, foreignVersion.worldVersionId, "Foreign chain campaign", foreignOwner);
+    const ownProvider = (await pool.query<{ id: string }>(`INSERT INTO provider_profiles (owner_user_id,name,provider_type,provider_role,base_url,default_model) VALUES ($1,$2,'openai_compatible','text','http://provider.test','test-model') RETURNING id`, [ownerUserId, `Own chain provider ${crypto.randomUUID()}`])).rows[0]!.id;
+    const foreignProvider = (await pool.query<{ id: string }>(`INSERT INTO provider_profiles (owner_user_id,name,provider_type,provider_role,base_url,default_model) VALUES ($1,$2,'openai_compatible','text','http://provider.test','test-model') RETURNING id`, [foreignOwner, `Foreign chain provider ${crypto.randomUUID()}`])).rows[0]!.id;
+    const insertChain = async (chainOwner: string, campaignId: string, worldVersionId: string, providerId: string, fingerprint: string) => {
+      await pool.query(`INSERT INTO model_chains (owner_user_id,campaign_id,world_version_id,provider_profile_id,model,endpoint_identity,prompt_protocol_version,context_fingerprint,previous_response_id) VALUES ($1,$2,$3,$4,'test-model','provider.test','story-v1',$5,$6)`, [chainOwner,campaignId,worldVersionId,providerId,fingerprint,`response-${fingerprint}`]);
+    };
+    await insertChain(ownerUserId, changedCampaign.created.id, ownVersion.worldVersionId, ownProvider, "changed");
+    await insertChain(ownerUserId, untouchedCampaign.created.id, ownVersion.worldVersionId, ownProvider, "untouched");
+    await insertChain(foreignOwner, foreignCampaign.created.id, foreignVersion.worldVersionId, foreignProvider, "foreign");
+
+    unwrap(await adapters.transaction.command((transaction) => adapters.campaigns.updateCampaign(transaction, { ownerUserId, campaignId: changedCampaign.created.id }, {
+      turnControlStyle: "flexible_scene", expectedTurnControlStyle: "flexible_action", expectedActiveTurnNumber: 0, expectedStateRevision: 0
+    })));
+    for (const [campaignId, expected] of [[changedCampaign.created.id, 0], [untouchedCampaign.created.id, 1], [foreignCampaign.created.id, 1]] as const) {
+      expect((await pool.query<{ count: number }>("SELECT count(*)::int AS count FROM model_chains WHERE campaign_id=$1", [campaignId])).rows[0]!.count).toBe(expected);
+    }
+    expect((await pool.query("SELECT owner_user_id,campaign_id,event_type,details FROM activity_events WHERE event_type='campaign_turn_control_style_changed' ORDER BY created_at", [])).rows).toEqual([expect.objectContaining({ owner_user_id: ownerUserId, campaign_id: changedCampaign.created.id, event_type: "campaign_turn_control_style_changed", details: expect.objectContaining({ fromTurnControlStyle: "flexible_action", toTurnControlStyle: "flexible_scene" }) })]);
+  });
+
+  it("blocks each unresolved generation status but permits an unchanged-style compatible save", async () => {
+    const adapters = createAdapters();
+    const world = await createFixtureWorld(adapters, "Unresolved style world");
+    const version = await publishFixtureWorld(adapters, world.created.id, world.created.draftRevision, "Unresolved style version");
+    const campaign = await createFixtureCampaign(adapters, version.worldVersionId, "Unresolved style campaign");
+    const provider = (await pool.query<{ id: string }>(`INSERT INTO provider_profiles (owner_user_id,name,provider_type,provider_role,base_url,default_model) VALUES ($1,$2,'openai_compatible','text','http://provider.test','test-model') RETURNING id`, [ownerUserId, `Style fence provider ${crypto.randomUUID()}`])).rows[0]!.id;
+    const pending = [{ id: "pending", condition: "still waiting" }];
+    await pool.query("UPDATE campaign_state SET pending_event_triggers=$2::jsonb WHERE campaign_id=$1", [campaign.created.id, JSON.stringify(pending)]);
+    const scope = { ownerUserId, campaignId: campaign.created.id };
+    for (const status of ["queued", "replacement_queued", "assessing", "generating", "validating", "committing", "recoverable"]) {
+      const job = await pool.query<{ id: string }>(`INSERT INTO generation_jobs (owner_user_id,campaign_id,provider_profile_id,idempotency_key,expected_turn_number,action,status,prompt_protocol_version,prompt_snapshot) VALUES ($1,$2,$3,$4,1,'Wait',$5,'story-v1','{}'::jsonb) RETURNING id`, [ownerUserId,campaign.created.id,provider,crypto.randomUUID(),status]);
+      const before = (await pool.query("SELECT turn_control_style FROM campaigns WHERE id=$1", [campaign.created.id])).rows[0];
+      const blocked = await adapters.transaction.command((transaction) => adapters.campaigns.updateCampaign(transaction, scope, { turnControlStyle: "flexible_scene", expectedTurnControlStyle: "flexible_action", expectedActiveTurnNumber: 0, expectedStateRevision: 0 }));
+      expect(blocked, status).toMatchObject({ ok: false, failure: { reason: "generation_in_progress", details: { unresolvedGenerationStatuses: [status] } } });
+      expect((await pool.query("SELECT turn_control_style FROM campaigns WHERE id=$1", [campaign.created.id])).rows[0]).toEqual(before);
+      expect((await pool.query("SELECT pending_event_triggers FROM campaign_state WHERE campaign_id=$1", [campaign.created.id])).rows[0]).toEqual({ pending_event_triggers: pending });
+      await pool.query("DELETE FROM generation_jobs WHERE id=$1", [job.rows[0]!.id]);
+    }
+    await pool.query(`INSERT INTO generation_jobs (owner_user_id,campaign_id,provider_profile_id,idempotency_key,expected_turn_number,action,status,prompt_protocol_version,prompt_snapshot) VALUES ($1,$2,$3,$4,1,'Wait','queued','story-v1','{}'::jsonb)`, [ownerUserId,campaign.created.id,provider,crypto.randomUUID()]);
+    const saved = unwrap(await adapters.transaction.command((transaction) => adapters.campaigns.updateCampaign(transaction, scope, { title: "Compatible title save", turnControlStyle: "flexible_action" })));
+    expect(saved.title).toBe("Compatible title save");
+    expect(saved.turnControlStyle).toBe("flexible_action");
+    expect((await pool.query("SELECT pending_event_triggers FROM campaign_state WHERE campaign_id=$1", [campaign.created.id])).rows[0]).toEqual({ pending_event_triggers: pending });
+  });
+
+  it("serializes production enqueue with style settings in both lock orders", async () => {
+    const adapters = createAdapters();
+    const world = await createFixtureWorld(adapters, "Settings enqueue ordering world");
+    const version = await publishFixtureWorld(adapters, world.created.id, world.created.draftRevision, "Settings enqueue ordering version");
+    const campaign = await createFixtureCampaign(adapters, version.worldVersionId, "Settings enqueue ordering campaign");
+    const provider = (await pool.query<{ id: string }>(`INSERT INTO provider_profiles (owner_user_id,name,provider_type,provider_role,base_url,default_model) VALUES ($1,$2,'openai_compatible','text','http://provider.test','test-model') RETURNING id`, [ownerUserId, `Settings enqueue provider ${crypto.randomUUID()}`])).rows[0]!.id;
+    const generation = createApiGenerationApplication(pool);
+    const scope = { ownerUserId, campaignId: campaign.created.id };
+    const enqueue = (key: string) => generation.enqueueAppend(scope, generationRequestSchema.parse({
+      action: "Continue the scene.", providerProfileId: provider, idempotencyKey: key,
+      requestedInputMode: "scene", resolvedInputMode: "scene", inputModeSource: "explicit",
+      context: { budgetTokens: 32_000, compression: "auto", recentTurns: 8 }
+    }));
+    const lockWaits = async (minimum: number) => {
+      for (let attempt = 0; attempt < 1_000; attempt += 1) {
+        const result = await pool.query<{ count: number }>("SELECT count(*)::int AS count FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'");
+        if (result.rows[0]!.count >= minimum) return;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      throw new Error("expected PostgreSQL lock waiter was not observed");
+    };
+
+    const advisoryKey = 907_942;
+    const holder = await pool.connect();
+    try {
+      await holder.query("BEGIN");
+      await holder.query("SELECT pg_advisory_lock($1)", [advisoryKey]);
+      await pool.query(`CREATE OR REPLACE FUNCTION block_style_change_for_enqueue_ordering() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(${advisoryKey}); RETURN NEW; END $$`);
+      await pool.query("CREATE TRIGGER style_change_enqueue_ordering BEFORE UPDATE OF turn_control_style ON campaigns FOR EACH ROW EXECUTE FUNCTION block_style_change_for_enqueue_ordering()");
+      const styleFirst = adapters.transaction.command((transaction) => adapters.campaigns.updateCampaign(transaction, scope, {
+        turnControlStyle: "flexible_scene", expectedTurnControlStyle: "flexible_action", expectedActiveTurnNumber: 0, expectedStateRevision: 0
+      }));
+      await lockWaits(1);
+      const queuedBehindStyle = enqueue(crypto.randomUUID());
+      await lockWaits(2);
+      expect((await pool.query<{ count: number }>("SELECT count(*)::int AS count FROM generation_jobs WHERE campaign_id=$1", [campaign.created.id])).rows[0]!.count).toBe(0);
+      await holder.query("SELECT pg_advisory_unlock($1)", [advisoryKey]);
+      await holder.query("COMMIT");
+      expect((await styleFirst).ok).toBe(true);
+      expect((await queuedBehindStyle).status).toBe("queued");
+      expect((await pool.query("SELECT turn_control_style FROM campaigns WHERE id=$1", [campaign.created.id])).rows[0]).toEqual({ turn_control_style: "flexible_scene" });
+      expect((await pool.query("SELECT count(*)::int AS count FROM generation_jobs WHERE campaign_id=$1", [campaign.created.id])).rows[0]).toEqual({ count: 1 });
+      expect((await pool.query("SELECT generation_policy, requested_input_mode, resolved_input_mode, input_mode_source FROM generation_jobs WHERE campaign_id=$1", [campaign.created.id])).rows[0]).toMatchObject({
+        generation_policy: { playMode: "story_only", turnControlStyle: "flexible_scene" },
+        requested_input_mode: "scene", resolved_input_mode: "scene", input_mode_source: "explicit"
+      });
+    } finally {
+      await holder.query("ROLLBACK").catch(() => undefined);
+      holder.release();
+      await pool.query("DROP TRIGGER IF EXISTS style_change_enqueue_ordering ON campaigns");
+      await pool.query("DROP FUNCTION IF EXISTS block_style_change_for_enqueue_ordering()");
+    }
+
+    await pool.query("DELETE FROM generation_jobs WHERE campaign_id=$1", [campaign.created.id]);
+    await pool.query("UPDATE campaigns SET turn_control_style='flexible_action' WHERE id=$1", [campaign.created.id]);
+    const enqueueHolder = await pool.connect();
+    try {
+      await enqueueHolder.query("BEGIN");
+      await enqueueHolder.query("SELECT id FROM campaigns WHERE id=$1 FOR UPDATE", [campaign.created.id]);
+      const enqueueFirst = enqueue(crypto.randomUUID());
+      await lockWaits(1);
+      const styleBehindEnqueue = adapters.transaction.command((transaction) => adapters.campaigns.updateCampaign(transaction, scope, {
+        turnControlStyle: "flexible_scene", expectedTurnControlStyle: "flexible_action", expectedActiveTurnNumber: 0, expectedStateRevision: 0
+      }));
+      await lockWaits(2);
+      await enqueueHolder.query("COMMIT");
+      expect((await enqueueFirst).status).toBe("queued");
+      expect(await styleBehindEnqueue).toMatchObject({ ok: false, failure: { reason: "generation_in_progress", details: { unresolvedGenerationStatuses: ["queued"] } } });
+      expect((await pool.query("SELECT turn_control_style FROM campaigns WHERE id=$1", [campaign.created.id])).rows[0]).toEqual({ turn_control_style: "flexible_action" });
+      expect((await pool.query("SELECT count(*)::int AS count FROM generation_jobs WHERE campaign_id=$1", [campaign.created.id])).rows[0]).toEqual({ count: 1 });
+      expect((await pool.query("SELECT generation_policy, requested_input_mode, resolved_input_mode, input_mode_source FROM generation_jobs WHERE campaign_id=$1", [campaign.created.id])).rows[0]).toMatchObject({
+        generation_policy: { playMode: "legacy", turnControlStyle: "flexible_action" },
+        requested_input_mode: "scene", resolved_input_mode: "scene", input_mode_source: "explicit"
+      });
+    } finally {
+      await enqueueHolder.query("ROLLBACK").catch(() => undefined);
+      enqueueHolder.release();
+    }
+  });
+  it("rejects malformed generation policies on both persisted job and turn rows", async () => {
+    const adapters = createAdapters();
+    const world = await createFixtureWorld(adapters, "Policy validation world");
+    const version = await publishFixtureWorld(adapters, world.created.id, world.created.draftRevision, "Policy validation version");
+    const campaign = await createFixtureCampaign(adapters, version.worldVersionId, "Policy validation campaign");
+    const provider = (await pool.query<{ id: string }>(`INSERT INTO provider_profiles (owner_user_id,name,provider_type,provider_role,base_url,default_model) VALUES ($1,$2,'openai_compatible','text','http://provider.test','test-model') RETURNING id`, [ownerUserId, `Policy validation provider ${crypto.randomUUID()}`])).rows[0]!.id;
+    const job = (await pool.query<{ id: string }>(`INSERT INTO generation_jobs (owner_user_id,campaign_id,provider_profile_id,idempotency_key,expected_turn_number,action,status,prompt_protocol_version,prompt_snapshot) VALUES ($1,$2,$3,$4,1,'Wait','recoverable','story-v1','{}'::jsonb) RETURNING id`, [ownerUserId,campaign.created.id,provider,crypto.randomUUID()])).rows[0]!.id;
+    const policy = { version: 1, playMode: "story_only", turnControlStyle: "flexible_scene", protocolVersion: "story-only-v1", prompts: { systemSupplement: "Story only.", systemSupplementHash: "system-hash", choiceRepairSystem: "Repair choices.", choiceRepairSystemHash: "repair-hash" } };
+    await pool.query("UPDATE generation_jobs SET generation_policy=$2::jsonb WHERE id=$1", [job,JSON.stringify(policy)]);
+    const turn = (await pool.query<{ id: string }>("INSERT INTO turns (owner_user_id,campaign_id,turn_number,narration,generation_policy) VALUES ($1,$2,1,'A quiet opening.',$3::jsonb) RETURNING id", [ownerUserId,campaign.created.id,JSON.stringify(policy)])).rows[0]!.id;
+    for (const malformed of [{ ...policy, version: "1" }, { ...policy, prompts: { ...policy.prompts, choiceRepairSystem: null } }, { ...policy, prompts: { systemSupplement: "Story only." } }, { ...policy, turnControlStyle: "flexible_action" }, { version: 1, playMode: "legacy", turnControlStyle: "flexible_action", protocolVersion: "story-only-v1" }]) {
+      await expect(pool.query("UPDATE generation_jobs SET generation_policy=$2::jsonb WHERE id=$1", [job,JSON.stringify(malformed)])).rejects.toMatchObject({ code: "23514" });
+      await expect(pool.query("UPDATE turns SET generation_policy=$2::jsonb WHERE id=$1", [turn,JSON.stringify(malformed)])).rejects.toMatchObject({ code: "23514" });
+    }
+  });  it("loads and preserves mixed authored event rules before the first turn", async () => {
     const adapters = createAdapters();
     const rule = "When the gate opens, the keeper greets the traveler.";
     const structured = {
@@ -211,7 +430,7 @@ integration("PostgreSQL world campaign repository adapters", () => {
     const version = await publishFixtureWorld(adapters, world.id, world.draftRevision, "Invalid rule");
     const result = await adapters.transaction.command((transaction) => adapters.campaigns.createCampaign(transaction, { ownerUserId }, {
       worldVersionId: version.worldVersionId, title: "Invalid campaign", storyLengthProfile: "standard",
-      storyContextBudgetTokens: 32_000, turnControlStyle: "flexible_auto"
+      storyContextBudgetTokens: 32_000, turnControlStyle: "flexible_action"
     }));
     expect(result).toMatchObject({ ok: false, failure: { reason: "invalid_transition" } });
     expect((await pool.query("SELECT count(*)::int AS count FROM campaigns WHERE world_version_id=$1", [version.worldVersionId])).rows[0].count).toBe(0);
@@ -540,7 +759,7 @@ integration("PostgreSQL world campaign repository adapters", () => {
     expect(ownCampaign.created).toMatchObject({
       status: "active",
       activeTurnNumber: 0,
-      turnControlStyle: "flexible_auto",
+      turnControlStyle: "flexible_action",
       worldId: ownWorld.created.id,
       worldVersionId: ownVersion.worldVersionId,
       selectedCharacterId: "character-one",
@@ -582,7 +801,7 @@ integration("PostgreSQL world campaign repository adapters", () => {
         title: `Spoofed campaign ${crypto.randomUUID()}`,
         storyLengthProfile: "standard",
         storyContextBudgetTokens: 32_000,
-        turnControlStyle: "flexible_auto"
+        turnControlStyle: "flexible_action"
       }
     ));
     expect(foreignCreate).toMatchObject({ ok: false, failure: { reason: "world_version_not_found" } });
@@ -600,7 +819,10 @@ integration("PostgreSQL world campaign repository adapters", () => {
     const updated = unwrap(await adapters.transaction.command((transaction) => adapters.campaigns.updateCampaign(
       transaction,
       { ownerUserId, campaignId: ownCampaign.created.id },
-      { title: `${ownCampaign.title} updated`, status: "archived", storyLengthProfile: "long", turnControlStyle: "action_only" }
+      {
+        title: `${ownCampaign.title} updated`, status: "archived", storyLengthProfile: "long", turnControlStyle: "action_only",
+        expectedTurnControlStyle: "flexible_action", expectedActiveTurnNumber: 0, expectedStateRevision: 0
+      }
     )));
     expect(updated).toMatchObject({
       title: `${ownCampaign.title} updated`,
@@ -725,7 +947,7 @@ integration("PostgreSQL world campaign repository adapters", () => {
           title: `Rolled back embedded campaign ${crypto.randomUUID()}`,
           storyLengthProfile: "standard",
           storyContextBudgetTokens: 32_000,
-          turnControlStyle: "flexible_auto"
+          turnControlStyle: "flexible_action"
         }
       ));
       rolledBackCampaignId = created.id;

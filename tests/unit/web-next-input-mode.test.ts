@@ -6,20 +6,19 @@ function fixture() {
   return parseHTML("<body></body>");
 }
 
-it("preserves model values while changing visible terminology", () => {
-  expect(inputModeOptions("flexible_auto")).toEqual([
+it("keeps Action campaigns explicit and locks Story Direction campaigns to scene input", () => {
+  expect(inputModeOptions("flexible_action")).toEqual([
     { value: "action", label: "Story Action" },
-    { value: "scene", label: "Story Direction" },
-    { value: "auto", label: "Auto" }
+    { value: "scene", label: "Story Direction" }
   ]);
   expect(inputModeOptions("action_only")).toEqual([{ value: "action", label: "Story Action" }]);
+  expect(inputModeOptions("flexible_scene")).toEqual([{ value: "scene", label: "Story Direction" }]);
 });
 
 describe("Story interpretation control", () => {
-  it("offers all flexible styles the three explicit model values", () => {
-    for (const style of ["flexible_auto", "flexible_action", "flexible_scene"] as const) {
-      expect(inputModeOptions(style).map((option) => option.value)).toEqual(["action", "scene", "auto"]);
-    }
+  it("does not offer an automatic turn type", () => {
+    expect(inputModeOptions("flexible_action").map((option) => option.value)).toEqual(["action", "scene"]);
+    expect(inputModeOptions("flexible_scene").map((option) => option.value)).toEqual(["scene"]);
   });
 
   it("normalizes action-only updates and never emits unavailable or invalid values", () => {
@@ -46,18 +45,18 @@ describe("Story interpretation control", () => {
     const onChange = vi.fn();
     const control = mountInputMode(document, onChange);
     document.body.append(control.element);
-    control.update({ style: "flexible_auto", value: "auto", disabled: false });
+    control.update({ style: "flexible_action", value: "action", disabled: false });
     const group = control.element.querySelector<HTMLElement>("wa-radio-group");
     if (!group) throw new Error("Interpretation group is missing.");
 
     expect(group.getAttribute("label")).toBe("Interpret prompt as");
     expect(group.getAttribute("orientation")).toBe("horizontal");
     expect([...group.querySelectorAll("wa-radio")].map((radio) => [radio.getAttribute("value"), radio.textContent, radio.getAttribute("appearance")]))
-      .toEqual([["action", "Story Action", "button"], ["scene", "Story Direction", "button"], ["auto", "Auto", "button"]]);
-    expect(control.element.textContent).toContain("classification happens when continuing");
+      .toEqual([["action", "Story Action", "button"], ["scene", "Story Direction", "button"]]);
+    expect(control.element.textContent).not.toContain("classification");
 
     const originalRadios = [...group.querySelectorAll("wa-radio")];
-    control.update({ style: "flexible_auto", value: "auto", disabled: false });
+    control.update({ style: "flexible_action", value: "action", disabled: false });
     expect(group.querySelector("wa-radio")).toBe(originalRadios[0]);
     (group as unknown as { value: unknown }).value = "scene";
     group.dispatchEvent(new window.Event("change", { bubbles: true }));
@@ -81,9 +80,9 @@ describe("Story interpretation control", () => {
     expect(onChange).not.toHaveBeenCalled();
     control.update({ style: "flexible_scene", value: "scene", disabled: false });
     expect(group.hasAttribute("disabled")).toBe(false);
-    (group as unknown as { value: unknown }).value = "action";
+    (group as unknown as { value: unknown }).value = "scene";
     group.dispatchEvent(new window.Event("change", { bubbles: true }));
-    expect(onChange).toHaveBeenCalledWith("action");
+    expect(onChange).toHaveBeenCalledWith("scene");
     control.dispose();
     group.dispatchEvent(new window.Event("change", { bubbles: true }));
     expect(onChange).toHaveBeenCalledTimes(1);

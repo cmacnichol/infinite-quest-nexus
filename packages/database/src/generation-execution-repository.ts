@@ -22,6 +22,10 @@ import {
   type MemoryContextQuery
 } from "../../contracts/src/memory.js";
 import type { PromptSnapshot } from "../../contracts/src/prompt-library.js";
+import {
+  generationPolicySnapshotSchema,
+  type GenerationPolicySnapshot
+} from "../../contracts/src/campaign-generation-policy.js";
 import type { StoryLengthProfile } from "../../contracts/src/story-settings.js";
 import {
   applyTriggerHits,
@@ -77,6 +81,7 @@ export type GenerationValidatedMainDraftCheckpoint = Readonly<{
   worldVersionId: string | null;
   baseIdentity: GenerationBaseIdentity;
   promptProtocolVersion: string;
+  generationPolicyIdentity?: string;
   providerId: string;
   providerModel: string;
   /** Hash of the effective non-secret provider configuration used on the wire. */
@@ -124,6 +129,30 @@ export type GenerationOrchestrationState = {
     rejectedDraftHash: string;
     consumedAttempt: number;
   } | undefined;
+  choiceRepair?: {
+    version: 1;
+    ownerUserId: string;
+    campaignId: string;
+    baseIdentity: GenerationBaseIdentity;
+    providerId: string;
+    providerModel: string;
+    providerConfigurationHash: string;
+    policyIdentity: string;
+    baseHash: string;
+    base: Omit<StoryTurnOutput, "choices" | "custom_action_suggestion">;
+    originalRequestBody: string;
+    originalRequestPayloadHash: string;
+    originalSentFactIds: readonly string[];
+    originalResponse: ProviderResult;
+    consumedAttempt: number;
+    repairRequestBody: string;
+    repairRequestPayloadHash?: string;
+    repairResponseFormat: "json_object" | "none";
+    fields?: Pick<StoryTurnOutput, "choices" | "custom_action_suggestion">;
+    resultHash?: string;
+    /** Prepared after an exhausted generic recovery; only an explicit retry may dispatch it. */
+    status: "pending" | "dispatched" | "validated";
+  } | undefined;
   /** One durable, provenance-fenced rewrite allowance for rejected event fiction. */
   eventCoverageRepair?: {
     rejectedFinalStoryHash: string;
@@ -147,6 +176,31 @@ function hasValidAutomaticRepair(value: unknown): boolean {
     && typeof repair.rejectedDraftHash === "string" && repair.rejectedDraftHash.length > 0
     && typeof repair.consumedAttempt === "number" && Number.isSafeInteger(repair.consumedAttempt)
     && repair.consumedAttempt > 0;
+}
+
+function hasValidChoiceRepair(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const repair = value as Record<string, unknown>;
+  return repair.version === 1 && typeof repair.policyIdentity === "string" && repair.policyIdentity.length > 0
+    && typeof repair.ownerUserId === "string" && repair.ownerUserId.length > 0
+    && typeof repair.campaignId === "string" && repair.campaignId.length > 0
+    && typeof repair.baseIdentity === "object" && repair.baseIdentity !== null
+    && typeof repair.providerId === "string" && repair.providerId.length > 0
+    && typeof repair.providerModel === "string" && repair.providerModel.length > 0
+    && typeof repair.providerConfigurationHash === "string" && repair.providerConfigurationHash.length > 0
+    && typeof repair.baseHash === "string" && repair.baseHash.length > 0
+    && typeof repair.base === "object" && repair.base !== null && !Array.isArray(repair.base)
+    && typeof repair.originalRequestBody === "string" && repair.originalRequestBody.length > 0
+    && typeof repair.originalRequestPayloadHash === "string" && repair.originalRequestPayloadHash.length > 0
+    && Array.isArray(repair.originalSentFactIds) && repair.originalSentFactIds.every((id) => typeof id === "string")
+    && typeof repair.originalResponse === "object" && repair.originalResponse !== null
+    && typeof repair.consumedAttempt === "number" && Number.isSafeInteger(repair.consumedAttempt) && repair.consumedAttempt > 0
+    && typeof repair.repairRequestBody === "string" && repair.repairRequestBody.length > 0
+    && (repair.repairResponseFormat === "json_object" || repair.repairResponseFormat === "none")
+    && typeof repair.repairRequestPayloadHash === "string" && repair.repairRequestPayloadHash.length > 0
+    && (repair.status === "pending" || repair.status === "dispatched" || repair.status === "validated")
+    && (repair.status !== "validated" || (typeof repair.repairRequestPayloadHash === "string" && typeof repair.resultHash === "string" && typeof repair.fields === "object" && repair.fields !== null));
 }
 
 function hasValidEventCoverageRepair(value: unknown): boolean {
@@ -215,6 +269,8 @@ export type GenerationExecutionPayload = {
   };
   prompt_protocol_version: string;
   prompt_snapshot: PromptSnapshot;
+  /** Null is a historical row whose policy must never be inferred from current settings. */
+  generation_policy: GenerationPolicySnapshot | null;
   generation_base_identity: GenerationBaseIdentity;
   attempts: number;
   orchestration_private: GenerationOrchestrationState;
@@ -534,14 +590,22 @@ async function commitAcceptedTurn(
       });
     }
   }
-  const stateResult = await client.query<{ trackers: unknown }>(
-    "SELECT trackers FROM campaign_state WHERE campaign_id = $1 AND owner_user_id = $2 FOR UPDATE",
+  const stateResult = await client.query<{
+    trackers: unknown;
+    rpg_stats: unknown;
+    event_triggers: unknown;
+    pending_event_triggers: unknown;
+  }>(
+    `SELECT trackers,rpg_stats,event_triggers,pending_event_triggers
+       FROM campaign_state WHERE campaign_id = $1 AND owner_user_id = $2 FOR UPDATE`,
     [job.campaign_id, job.owner_user_id]
   );
   const trackerBase = isReplacement && Array.isArray(job.base_state_private?.trackers)
     ? job.base_state_private.trackers
     : stateResult.rows[0]?.trackers;
   const trackers = mergedTrackers(trackerBase, story.tracker_updates);
+  const storyOnly = job.generation_policy?.playMode === "story_only";
+  const lockedMechanics = stateResult.rows[0];
   if (orchestration.extension && (
       orchestration.extension.finalStoryHash !== stableStringify(orchestration.extension.story)
       || stableStringify(story) !== orchestration.extension.finalStoryHash
@@ -555,13 +619,15 @@ async function commitAcceptedTurn(
       code: "generation_checkpoint_incompatible"
     });
   }
-  const fulfilledEvents = [
+  const fulfilledEvents = storyOnly ? [] : [
     ...(orchestration.beforeEvents || []),
     // An after-event is fulfilled only when its immediate fiction was accepted.
     ...((orchestration.extension ? orchestration.afterEvents || [] : []).filter((event) => event.addTextAfter))
   ];
-  const eventTriggers = applyTriggerHits(inputs.eventTriggers, fulfilledEvents, new Date().toISOString());
-  const pendingEventTriggers = (orchestration.afterEvents || [])
+  const eventTriggers = storyOnly
+    ? lockedMechanics?.event_triggers
+    : applyTriggerHits(inputs.eventTriggers, fulfilledEvents, new Date().toISOString());
+  const pendingEventTriggers = storyOnly ? lockedMechanics?.pending_event_triggers : (orchestration.afterEvents || [])
     .filter((event) => !event.addTextAfter || Boolean(orchestration.extensionError))
     .map(({ addTextAfter: _addTextAfter, ...event }) => event);
   const mechanicsPrivate = {
@@ -600,8 +666,8 @@ async function commitAcceptedTurn(
   }
   const turnResult = await client.query<{ id: string }>(
     `INSERT INTO turns (owner_user_id, campaign_id, turn_number, action, input_mode, input_mode_source, narration, choices,
-       custom_action_suggestion, image_prompt, mechanics_private, state_snapshot_private, model_metadata)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
+       custom_action_suggestion, image_prompt, mechanics_private, state_snapshot_private, model_metadata, generation_policy)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`,
     [job.owner_user_id, job.campaign_id, job.expected_turn_number, job.action,
       job.resolved_input_mode, job.input_mode_source, story.narration, json(story.choices),
       story.custom_action_suggestion, story.image_prompt, json(mechanicsPrivate),
@@ -610,7 +676,7 @@ async function commitAcceptedTurn(
         trackers,
         eventTriggers,
         pendingEventTriggers,
-        rpgStats: inputs.rpgStats,
+        rpgStats: storyOnly ? lockedMechanics?.rpg_stats : inputs.rpgStats,
         continuitySummary: story.continuity_summary,
         canonicalFacts: story.canonical_facts,
         supersededFacts: story.superseded_facts,
@@ -628,10 +694,11 @@ async function commitAcceptedTurn(
         responseId: response.responseId,
         usage: response.usage,
         promptProtocolVersion: job.prompt_protocol_version,
+        generationPolicy: job.generation_policy,
         contextFingerprint: input.contextFingerprint,
         contextDiagnostics: input.contextDiagnostics,
         chronicleRetrieval
-      })]
+      }), job.generation_policy === null ? null : json(job.generation_policy)]
   );
   const turnId = turnResult.rows[0]?.id;
   if (!turnId) throw new Error("Story turn insert did not return an ID.");
@@ -642,13 +709,22 @@ async function commitAcceptedTurn(
     job.id,
     turnId
   );
-  await client.query(
-    `UPDATE campaign_state SET scratchpad_private = $3, scratchpad_safe_for_prompt = true, trackers = $4, event_triggers = $5,
-       pending_event_triggers = $6, rpg_stats = $7, revision = revision + 1, updated_at = now()
-      WHERE campaign_id = $1 AND owner_user_id = $2`,
-    [job.campaign_id, job.owner_user_id, story.scratchpad, json(trackers), json(eventTriggers),
-      json(pendingEventTriggers), json(inputs.rpgStats)]
-  );
+  if (storyOnly) {
+    await client.query(
+      `UPDATE campaign_state SET scratchpad_private = $3, scratchpad_safe_for_prompt = true, trackers = $4,
+         revision = revision + 1, updated_at = now()
+        WHERE campaign_id = $1 AND owner_user_id = $2`,
+      [job.campaign_id, job.owner_user_id, story.scratchpad, json(trackers)]
+    );
+  } else {
+    await client.query(
+      `UPDATE campaign_state SET scratchpad_private = $3, scratchpad_safe_for_prompt = true, trackers = $4, event_triggers = $5,
+         pending_event_triggers = $6, rpg_stats = $7, revision = revision + 1, updated_at = now()
+        WHERE campaign_id = $1 AND owner_user_id = $2`,
+      [job.campaign_id, job.owner_user_id, story.scratchpad, json(trackers), json(eventTriggers),
+        json(pendingEventTriggers), json(inputs.rpgStats)]
+    );
+  }
   await client.query(
     "UPDATE campaigns SET active_turn_number = $3, updated_at = now() WHERE id = $1 AND owner_user_id = $2",
     [job.campaign_id, job.owner_user_id, job.expected_turn_number]
@@ -819,7 +895,7 @@ export function createPostgresGenerationExecutionRepository(
                 j.base_turn_number, j.base_state_private, j.base_scratchpad_safe_for_prompt,
                 j.action, j.requested_input_mode, j.resolved_input_mode, j.input_mode_source,
                 j.requested_model, j.context_options, j.prompt_protocol_version, j.prompt_snapshot,
-                j.generation_base_identity,
+                j.generation_base_identity, j.generation_policy,
                 j.attempts, j.orchestration_private, j.streaming_segments_state,
                 c.world_version_id, c.legacy_settings, c.character_profile, c.character_snapshot,
                 cs.rpg_stats, cs.event_triggers, cs.pending_event_triggers,
@@ -840,6 +916,7 @@ export function createPostgresGenerationExecutionRepository(
       const row = result.rows[0];
       if (!row) return null;
       if (!hasValidAutomaticRepair(row.orchestration_private?.automaticRepair)
+          || !hasValidChoiceRepair(row.orchestration_private?.choiceRepair)
           || !hasValidEventCoverageRepair(row.orchestration_private?.eventCoverageRepair)) {
         await client.query(
           `UPDATE generation_jobs
@@ -850,6 +927,19 @@ export function createPostgresGenerationExecutionRepository(
             WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
               AND status = 'assessing' AND lease_expires_at > now()`,
           [row.id, row.owner_user_id, request.workerId, json({ reason: "orchestration_repair_invalid" })]
+        );
+        return null;
+      }
+      if (row.generation_policy !== null && !generationPolicySnapshotSchema.safeParse(row.generation_policy).success) {
+        await client.query(
+          `UPDATE generation_jobs
+              SET status = 'recoverable', error_code = 'generation_checkpoint_incompatible',
+                  error_message = 'Saved generation policy is invalid.',
+                  recovery_metadata = recovery_metadata || $4::jsonb,
+                  lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+            WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
+              AND status = 'assessing' AND lease_expires_at > now()`,
+          [row.id, row.owner_user_id, request.workerId, json({ reason: "generation_policy_invalid" })]
         );
         return null;
       }

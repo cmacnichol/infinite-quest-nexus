@@ -14,7 +14,13 @@ Each campaign owns its Story context budget. Campaign Management controls use 32
 
 The requested budget is distinct from the provider/model context window. Before retrieval, the runtime takes the smaller applicable window, reserves provider output and protocol overhead, then derives the effective Chronicle budget. High-priority authoritative context is retained while lower-priority derived material is compressed or omitted. If fixed authority cannot fit, generation reports the existing context-budget error rather than silently dropping it.
 
-The current turn is typed before prompt construction. Only the active Action or Scene direction contract is included near the submitted text: Action asks the model to resolve and narrate intent, while Scene direction requires the stated current-turn beats before aftermath. Auto never appears in the story prompt because it resolves before the generation job is created.
+The current turn is typed before prompt construction. Action asks the model to
+resolve and narrate intent. An explicit Story Direction in a flexible Action
+campaign uses the legacy scene contract; a job queued while the campaign setting
+is Story Direction uses the story-only policy. That policy supplies its frozen
+fiction direction contract, skips RPG assessment, event evaluation, and
+independent semantic scene coverage, and still retains authoritative world and
+campaign context, corrected continuity, retrieval, budgets, and validation.
 
 Compression modes range from complete selected memories to summary-plus-recent context. Automatic mode chooses the least compressed form that fits.
 

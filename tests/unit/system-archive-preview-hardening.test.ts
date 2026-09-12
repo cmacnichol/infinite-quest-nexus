@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import JSZip from "jszip";
 import { afterEach, describe, expect, it } from "vitest";
+import { calculateContentFingerprint } from "../../packages/contracts/src/archives-node.js";
 import { systemRecordEnvelopeSchema } from "../../packages/contracts/src/system-archives.js";
 import { stageArchiveUpload } from "../../services/api/src/archive-io.js";
 import { inspectSystemArchiveForPreview } from "../../services/runtime/src/system-archive-composition.js";
@@ -97,6 +98,74 @@ async function inspect(bytes: Buffer): Promise<unknown> {
   }
 }
 
+async function versionedSystemArchive(
+  manifestVersion: 1 | 2,
+  payloadVersion: number,
+  records: readonly unknown[] = [],
+): Promise<Buffer> {
+  const sourceOwner = payloadVersion === 1
+    ? { sourceId: ownerId, displayName: "Initial owner" }
+    : {
+      sourceId: ownerId,
+      displayName: "Initial owner",
+      status: "active",
+      settings: {},
+      createdAt: "2026-08-25T12:00:00.000Z",
+      updatedAt: "2026-08-25T12:00:00.000Z",
+    };
+  const payloads = new Map<string, Buffer>([
+    ["system.json", Buffer.from(JSON.stringify({
+      formatVersion: payloadVersion,
+      sourceInstallationId: ownerId,
+      sourceOwnerCount: 1,
+      sourceOwner,
+      records: [],
+    }), "utf8")],
+    ["assets/assets.json", Buffer.from(JSON.stringify({ formatVersion: payloadVersion, assets: [] }), "utf8")],
+  ]);
+  if (records.length > 0) {
+    payloads.set("records/worlds/000000.ndjson", Buffer.from(`${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8"));
+  }
+  const entries = [...payloads].map(([path, bytes]) => ({
+    path,
+    logicalType: path === "system.json" ? "system" : path === "assets/assets.json" ? "assets" : "records",
+    mediaType: path.endsWith(".ndjson") ? "application/x-ndjson" : "application/json",
+    byteLength: bytes.byteLength,
+    sha256: hash(bytes),
+  }));
+  const contentFingerprint = calculateContentFingerprint({
+    payloadHashes: entries.map((entry) => entry.sha256),
+    originalAssetHashes: [],
+  });
+  const manifest = {
+    format: "infinite-quest-archive",
+    formatVersion: manifestVersion,
+    archiveType: "system",
+    createdAt: "2026-08-25T12:00:00.000Z",
+    contentFingerprint,
+    sourceApplication: "0.1.0",
+    sourceMigration: "0079_resumable_system_archive_uploads",
+    sourceInstallationId: ownerId,
+    sourceOwnerCount: 1,
+    sourceOwner: { sourceId: ownerId, displayName: "Initial owner" },
+    omittedOperationalRows: 0,
+    operationalOmissions: {
+      generation: 0, illustration: 0, chronicle: 0, imports: 0, "system-archive": 0,
+    },
+    entries,
+    payloads: entries.map((entry) => ({
+      kind: entry.logicalType,
+      path: entry.path,
+      formatVersion: payloadVersion,
+    })),
+    assets: [],
+  };
+  const zip = new JSZip();
+  for (const [path, bytes] of payloads) zip.file(path, bytes);
+  zip.file("manifest.json", JSON.stringify(manifest));
+  return zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+}
+
 describe("System Archive bounded preview metadata", () => {
   it.each(["system.json", "assets/assets.json"] as const)(
     "rejects oversized %s before allocating the configured 1 GiB generic JSON allowance",
@@ -106,6 +175,57 @@ describe("System Archive bounded preview metadata", () => {
       });
     },
   );
+});
+
+describe("System Archive preview reader version admission", () => {
+  it.each([
+    [1, 1],
+    [1, 2],
+    [2, 3],
+  ] as const)("accepts manifest v%s with payload v%s through the staged preview reader", async (manifestVersion, payloadVersion) => {
+    await expect(inspect(await versionedSystemArchive(manifestVersion, payloadVersion))).resolves.toMatchObject({
+      formatVersion: manifestVersion,
+    });
+  });
+
+  it.each([
+    [1, 3],
+    [2, 1],
+    [2, 2],
+  ] as const)("rejects manifest v%s with payload v%s before returning a preview", async (manifestVersion, payloadVersion) => {
+    await expect(inspect(await versionedSystemArchive(manifestVersion, payloadVersion))).rejects.toMatchObject({
+      code: "archive-version-unsupported",
+    });
+  });
+
+  it("rejects a v3 payload containing a v2 record before returning a preview", async () => {
+    const worldId = randomUUID();
+    const v2World = systemRecordEnvelopeSchema.parse({
+      domain: "worlds",
+      formatVersion: 2,
+      sourceId: worldId,
+      record: {
+        sourceId: worldId,
+        title: "Mixed record version world",
+        status: "active",
+        forkedFromWorldId: null,
+        forkedFromWorldVersionId: null,
+        createdAt: "2026-08-25T12:00:00.000Z",
+        updatedAt: "2026-08-25T12:00:00.000Z",
+        authority: { nextVersionNumber: 1, coverAssetId: null },
+      },
+    });
+
+    await expect(inspect(await versionedSystemArchive(2, 3, [v2World]))).rejects.toMatchObject({
+      code: "archive-json-invalid",
+    });
+  });
+
+  it("rejects an unknown declared payload version before returning a preview", async () => {
+    await expect(inspect(await versionedSystemArchive(2, 99))).rejects.toMatchObject({
+      code: "archive-version-unsupported",
+    });
+  });
 });
 
 describe("System Archive governed relationship index", () => {

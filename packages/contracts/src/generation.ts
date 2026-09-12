@@ -12,6 +12,7 @@ import {
 } from "./story-prompt.js";
 import { apiTimestampSchema } from "./http.js";
 import { storyLengthProfileSchema } from "./story-settings.js";
+import { generationPolicySnapshotSchema } from "./campaign-generation-policy.js";
 
 export const providerTypeSchema = z.enum(["lmstudio", "openrouter", "manifest", "openai_compatible", "sogni", "sogni_sdk"]);
 export const providerRoleSchema = z.enum(["text", "image", "embedding", "intent"]);
@@ -21,11 +22,6 @@ export const turnInputSelectionSchema = z.enum(["auto", "action", "scene"]);
 export const turnInputModeSourceSchema = z.enum(["explicit", "auto", "generated_choice", "opening_action", "fallback"]);
 export const turnIntentClassificationSchema = z.enum(["action", "scene", "mixed", "uncertain"]);
 export const turnIntentConfidenceBandSchema = z.enum(["clear", "probable", "ambiguous"]);
-
-export const turnInputClassificationRequestSchema = z.object({
-  text: z.string().trim().min(1).max(12_000),
-  preferredFallback: turnInputModeSchema.optional()
-});
 
 export const providerProfileInputSchema = z.object({
   name: z.string().trim().min(1).max(120),
@@ -438,7 +434,8 @@ export const generationJobStatusSchema = z.object({
   updatedAt: apiTimestampSchema,
   completedAt: apiTimestampSchema.nullable().optional(),
   partialOutput: z.string().nullable().optional(),
-  partialNarration: z.string().nullable().optional()
+  partialNarration: z.string().nullable().optional(),
+  generationPolicy: generationPolicySnapshotSchema.nullable().optional()
 });
 
 export const PUBLIC_GENERATION_FAILURE_CODE = "generation_failed" as const;
@@ -501,7 +498,6 @@ export type TurnInputSelection = z.infer<typeof turnInputSelectionSchema>;
 export type TurnInputModeSource = z.infer<typeof turnInputModeSourceSchema>;
 export type TurnIntentClassification = z.infer<typeof turnIntentClassificationSchema>;
 export type TurnIntentConfidenceBand = z.infer<typeof turnIntentConfidenceBandSchema>;
-export type TurnInputClassificationRequest = z.infer<typeof turnInputClassificationRequestSchema>;
 export type GenerationRequest = z.infer<typeof generationRequestSchema>;
 export type GenerationRetryLatestRequest = z.infer<typeof generationRetryLatestRequestSchema>;
 export type CampaignRewindRequest = z.infer<typeof campaignRewindSchema>;

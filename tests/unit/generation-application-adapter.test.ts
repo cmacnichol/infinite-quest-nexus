@@ -53,6 +53,9 @@ type MappingFixture = Readonly<{
 const mappingFixtures: Record<GenerationApplicationErrorReason, MappingFixture> = {
   idempotency_mismatch: { kind: "conflict", details: {}, expectedStatusCode: 409, expectedMessage: "The idempotency key was already used for a different generation request." },
   action_only_mode: { kind: "invalid_state", details: {}, expectedStatusCode: 400, expectedMessage: "This campaign accepts player actions only." },
+  story_only_scene_required: { kind: "invalid_state", details: {}, expectedStatusCode: 400, expectedMessage: "This Story Direction campaign accepts scene input only." },
+  turn_control_style_invalid: { kind: "invalid_state", details: {}, expectedStatusCode: 409, expectedMessage: "Campaign turn-control style is invalid. Refresh the campaign before trying again." },
+  turn_input_classification_removed: { kind: "invalid_state", details: {}, expectedStatusCode: 410, expectedMessage: "Turn classification was removed. Refresh and use the campaign turn-control setting.", expectedDetails: { code: "turn_input_classification_removed" } },
   explicit_input_mode_mismatch: { kind: "invalid_state", details: {}, expectedStatusCode: 400, expectedMessage: "Explicit turn input mode does not match the resolved mode." },
   classification_id_forbidden: { kind: "invalid_state", details: {}, expectedStatusCode: 400, expectedMessage: "Classification IDs are valid only for Auto input." },
   classification_missing_or_expired: { kind: "conflict", details: {}, expectedStatusCode: 409, expectedMessage: "The Auto classification is missing, expired, consumed, or does not match this input." },

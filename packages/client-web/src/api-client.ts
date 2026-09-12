@@ -21,8 +21,6 @@ import {
   providerListResponseSchema,
   sessionResponseSchema,
   syncStatusRequestSchema,
-  turnInputClassificationRequestSchema,
-  turnInputClassificationResponseSchema,
   turnListResponseSchema,
   turnPageRequestSchema,
   userProfileResponseSchema,
@@ -56,8 +54,6 @@ import type {
   PlayableCharacterListResponse,
   ProviderListResponse,
   SessionResponse,
-  TurnInputClassificationRequest,
-  TurnInputClassificationResponse,
   TurnListResponse,
   TurnPageRequest,
   SyncStatusRequest,
@@ -89,7 +85,6 @@ export interface CampaignApi {
   updateState(campaignId: string, request: CampaignRuntimeStateUpdate, signal?: AbortSignal): Promise<CampaignRuntimeStateResponse>;
   getTurnCorrection(campaignId: string, turnId: string, signal?: AbortSignal): Promise<AcceptedTurnCorrectionView>;
   correctTurnNarration(campaignId: string, turnId: string, request: Omit<AcceptedTurnCorrectionRequest, "turnId">, signal?: AbortSignal): Promise<AcceptedTurnCorrectionView>;
-  classifyTurnInput(campaignId: string, request: TurnInputClassificationRequest, signal?: AbortSignal): Promise<TurnInputClassificationResponse>;
   rewind(campaignId: string, request: CampaignRewindRequest, signal?: AbortSignal): Promise<CampaignRewindResponse>;
   branch(campaignId: string, request: CampaignBranchRequest, signal?: AbortSignal): Promise<CampaignBranchResponse>;
   create(request: CampaignCreateRequest, signal?: AbortSignal): Promise<CampaignCreateResponse>;
@@ -228,12 +223,6 @@ export function createNexusApiClient(options: NexusHttpClientOptions): NexusApiC
       const path = `/campaigns/${encodedPathSegment(campaignId)}/turns/${encodedPathSegment(turnId)}/correction`;
       const body = validatedRequest(acceptedTurnCorrectionRequestSchema, { ...request, turnId }, method, path);
       return http.request(withSignal({ method, path, body: { kind: "json", value: body }, responseSchema: acceptedTurnCorrectionViewSchema }, signal));
-    },
-    async classifyTurnInput(campaignId, request, signal) {
-      const method: HttpMethod = "POST";
-      const path = `/campaigns/${encodedPathSegment(campaignId)}/turn-input/classify`;
-      const body = validatedRequest(turnInputClassificationRequestSchema, request, method, path);
-      return http.request(withSignal({ method, path, body: { kind: "json", value: body }, responseSchema: turnInputClassificationResponseSchema }, signal));
     },
     async rewind(campaignId, request, signal) {
       const method: HttpMethod = "POST";

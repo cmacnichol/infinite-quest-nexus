@@ -1,5 +1,5 @@
 import type { Page, Route } from "@playwright/test";
-import { turnInputClassificationRequestSchema, userProfileResponseSchema, userProfileUpdateSchema } from "../../packages/contracts/src/index.js";
+import { userProfileResponseSchema, userProfileUpdateSchema } from "../../packages/contracts/src/index.js";
 import { quietLeafApiPayloads, type QuietLeafFixtureOptions } from "./quiet-leaf-payloads.js";
 
 export interface InstalledStoryApi {
@@ -21,7 +21,6 @@ export async function installStoryApi(page: Page, options: QuietLeafFixtureOptio
   const unexpected: string[] = [];
   let user = payloads.session.user;
   let profileUpdates = 0;
-  let classificationCalls = 0;
 
   page.on("request", request => {
     const url = new URL(request.url());
@@ -39,21 +38,12 @@ export async function installStoryApi(page: Page, options: QuietLeafFixtureOptio
     if (request.method() === "GET" && path === "/api/v1/campaigns") return respond(payloads.campaigns);
     if (request.method() === "GET" && path === "/api/v1/worlds") return respond(payloads.worlds);
     if (request.method() === "GET" && path === `/api/v1/campaigns/${payloads.campaignId}/sync-status`) return respond(payloads.syncStatus);
-    if (request.method() === "GET" && path === `/api/v1/campaigns/${payloads.campaignId}/turns`) return respond(payloads.turns);
+    if (request.method() === "GET" && path === `/api/v1/campaigns/${payloads.campaignId}/turns`) {
+      return respond(url.searchParams.has("before") && payloads.olderTurns !== null ? payloads.olderTurns : payloads.turns);
+    }
     if (request.method() === "GET" && path === `/api/v1/campaigns/${payloads.campaignId}/state`) return respond(payloads.runtimeState);
     if (request.method() === "GET" && path === `/api/v1/campaigns/${payloads.campaignId}/state/inspection`) return respond(payloads.runtimeState);
     if (request.method() === "GET" && path === "/api/v1/session") return respond({ ...payloads.session, user });
-    if (request.method() === "POST" && path === `/api/v1/campaigns/${payloads.campaignId}/turn-input/classify`) {
-      const expectedClassificationCalls = options.expectedClassificationCalls ?? 0;
-      if (classificationCalls >= expectedClassificationCalls) {
-        unexpected.push(`unexpected classification request: ${requestLabel(route)}`);
-        await route.abort("blockedbyclient");
-        return;
-      }
-      turnInputClassificationRequestSchema.parse(JSON.parse(request.postData() ?? "{}"));
-      classificationCalls += 1;
-      return respond(payloads.classification);
-    }
     if (request.method() === "GET" && path === `/api/v1/campaigns/${payloads.campaignId}/illustration-config`) {
       if (options.illustration === "error") return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify(payloads.illustrationError) });
       return respond(payloads.illustrationConfig);
@@ -87,12 +77,8 @@ export async function installStoryApi(page: Page, options: QuietLeafFixtureOptio
     campaignId: payloads.campaignId,
     assertNoUnexpectedRequests() {
       const expectedProfileUpdates = options.expectedProfileUpdates ?? 0;
-      const expectedClassificationCalls = options.expectedClassificationCalls ?? 0;
       if (profileUpdates !== expectedProfileUpdates) {
         unexpected.push(`expected ${expectedProfileUpdates} profile mutation(s), received ${profileUpdates}`);
-      }
-      if (classificationCalls !== expectedClassificationCalls) {
-        unexpected.push(`expected ${expectedClassificationCalls} classification request(s), received ${classificationCalls}`);
       }
       if (unexpected.length) throw new Error(`Quiet Leaf fixture rejected request(s): ${unexpected.join("; ")}`);
     }

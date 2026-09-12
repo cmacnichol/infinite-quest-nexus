@@ -13,8 +13,7 @@ type InputModeOption = Readonly<{ value: StoryTurnInputMode; label: string }>;
 
 const flexibleOptions: readonly InputModeOption[] = [
   { value: "action", label: "Story Action" },
-  { value: "scene", label: "Story Direction" },
-  { value: "auto", label: "Auto" }
+  { value: "scene", label: "Story Direction" }
 ];
 
 const actionOnlyOptions: readonly InputModeOption[] = [
@@ -22,6 +21,7 @@ const actionOnlyOptions: readonly InputModeOption[] = [
 ];
 
 export function inputModeOptions(style: TurnControlStyle): readonly InputModeOption[] {
+  if (style === "flexible_scene") return [{ value: "scene", label: "Story Direction" }];
   return style === "action_only" ? actionOnlyOptions : flexibleOptions;
 }
 
@@ -49,7 +49,7 @@ export function mountInputMode(document: Document, onChange: (mode: StoryTurnInp
   group.setAttribute("orientation", "horizontal");
   const help = document.createElement("p");
   help.className = "story-input-mode-help";
-  help.textContent = "Auto classification happens when continuing, not while typing.";
+  help.textContent = "Choose how this turn continues before continuing.";
   element.append(group, help);
 
   let state: InputModeState | undefined;

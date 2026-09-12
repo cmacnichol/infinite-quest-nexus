@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { campaignTurnControlStyleSchema } from "./campaign-generation-policy.js";
 import {
   DEFAULT_STORY_CONTEXT_BUDGET_TOKENS,
   DEFAULT_STORY_LENGTH_PROFILE,
@@ -264,7 +265,7 @@ export const campaignCreateSchema = z.object({
   selectedCharacterId: characterId.optional(),
   storyLengthProfile: storyLengthProfileSchema.default(DEFAULT_STORY_LENGTH_PROFILE),
   storyContextBudgetTokens: storyContextBudgetTokensSchema.default(DEFAULT_STORY_CONTEXT_BUDGET_TOKENS),
-  turnControlStyle: z.enum(["action_only", "flexible_auto", "flexible_action", "flexible_scene"]).default("flexible_auto")
+  turnControlStyle: campaignTurnControlStyleSchema.default("flexible_action")
 });
 
 export const campaignUpdateSchema = z.object({
@@ -274,8 +275,19 @@ export const campaignUpdateSchema = z.object({
   imageProviderProfileId: z.uuid().nullable().optional(),
   storyLengthProfile: storyLengthProfileSchema.optional(),
   storyContextBudgetTokens: storyContextBudgetTokensSchema.optional(),
-  turnControlStyle: z.enum(["action_only", "flexible_auto", "flexible_action", "flexible_scene"]).optional()
-}).refine((value) => Object.values(value).some((item) => item !== undefined), "At least one field is required.");
+  turnControlStyle: campaignTurnControlStyleSchema.optional(),
+  expectedTurnControlStyle: campaignTurnControlStyleSchema.optional(),
+  expectedActiveTurnNumber: z.coerce.number().int().min(0).optional(),
+  expectedStateRevision: z.coerce.number().int().min(0).optional()
+}).refine((value) => (
+  value.title !== undefined ||
+  value.status !== undefined ||
+  value.textProviderProfileId !== undefined ||
+  value.imageProviderProfileId !== undefined ||
+  value.storyLengthProfile !== undefined ||
+  value.storyContextBudgetTokens !== undefined ||
+  value.turnControlStyle !== undefined
+), "At least one field is required.");
 
 export const campaignWorldMigrationSchema = z.object({
   worldVersionId: z.uuid(),

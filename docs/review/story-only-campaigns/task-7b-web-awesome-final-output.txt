@@ -1,0 +1,60 @@
+
+Running 42 tests using 1 worker
+
+
+
+(node:8992) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+[1/42] [desktop] › tests\e2e\story-only-campaigns.e2e.test.ts:45:1 › legacy Nexus persists Story Direction and its profile without Auto
+[2/42] [desktop] › tests\e2e\story-only-campaigns.e2e.test.ts:94:1 › legacy Story Direction accepts typed and choice submissions as scene turns after reload
+[3/42] [desktop] › tests\e2e\story-only-campaigns.e2e.test.ts:124:1 › legacy Story profile exposes separate automatic choice submission preferences
+[4/42] [desktop] › tests\e2e\story-only-campaigns.e2e.test.ts:148:1 › legacy campaign settings restore explicit Action controls after Story Direction
+[5/42] [desktop] › tests\e2e\story-only-campaigns.e2e.test.ts:163:1 › legacy player navigates accepted history without treating it as a new generation
+[6/42] [desktop] › tests\e2e\story-only-campaigns.e2e.test.ts:173:1 › empty Story Direction campaign opens with a persisted scene turn
+[7/42] [desktop] › tests\e2e\story-only-campaigns.e2e.test.ts:186:1 › action-only campaign keeps Action locked
+[8/42] [desktop] › tests\e2e\story-only-campaigns.e2e.test.ts:193:1 › stale Nexus settings save leaves the selected draft intact
+[9/42] [desktop] › tests\e2e\story-only-campaigns.e2e.test.ts:233:1 › retry replaces the latest accepted turn without appending history
+[10/42] [desktop] › tests\e2e\story-only-new-ui.e2e.test.ts:162:1 › new UI saves Story Direction without Auto
+[11/42] [desktop] › tests\e2e\story-only-new-ui.e2e.test.ts:187:1 › new action-only campaign keeps Action locked
+[12/42] [desktop] › tests\e2e\story-only-new-ui.e2e.test.ts:205:1 › new UI profile persists Story Direction without Auto
+[desktop] › tests\e2e\story-only-new-ui.e2e.test.ts:205:1 › new UI profile persists Story Direction without Auto
+{"profileDialog":{"clientHeight":616,"scrollHeight":915,"scrollTop":299,"top":51.203125,"bottom":668.796875,"viewportHeight":720}}
+
+[13/42] [desktop] › tests\e2e\story-only-new-ui.e2e.test.ts:252:1 › new Story Direction composer has no classifier controls and submits scene turns
+[14/42] [desktop] › tests\e2e\story-only-new-ui.e2e.test.ts:273:1 › new Story Direction accepts generated choices as persisted scene turns
+[15/42] [desktop] › tests\e2e\story-only-new-ui.e2e.test.ts:285:1 › new Story Direction keeps automatic choice submission separate from multiselect keyboard submission
+[16/42] [desktop] › tests\e2e\story-only-new-ui.e2e.test.ts:301:1 › new flexible controls submit explicit Action then Story Direction without a classifier
+[17/42] [desktop] › tests\e2e\story-only-new-ui.e2e.test.ts:329:1 › the same campaign saves Story Direction from legacy management and Action from the new editor
+[18/42] [desktop] › tests\e2e\story-only-new-ui.e2e.test.ts:355:1 › new editor preserves an unsaved Action style and title after a real concurrent Story Direction turn
+[19/42] [desktop] › tests\e2e\story-only-new-ui.e2e.test.ts:382:1 › new Story player history navigation does not append a turn
+[20/42] [desktop] › tests\e2e\story-only-new-ui.e2e.test.ts:397:1 › new Story retry replaces the accepted turn ID without appending history
+[21/42] [desktop] › tests\e2e\story-only-new-ui.e2e.test.ts:426:1 › empty new Story Direction campaign begins a persisted scene for each renderer and viewport
+(node:27196) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+[22/42] [mobile] › tests\e2e\story-only-campaigns.e2e.test.ts:45:1 › legacy Nexus persists Story Direction and its profile without Auto
+[23/42] [mobile] › tests\e2e\story-only-campaigns.e2e.test.ts:94:1 › legacy Story Direction accepts typed and choice submissions as scene turns after reload
+[24/42] [mobile] › tests\e2e\story-only-campaigns.e2e.test.ts:124:1 › legacy Story profile exposes separate automatic choice submission preferences
+[25/42] [mobile] › tests\e2e\story-only-campaigns.e2e.test.ts:148:1 › legacy campaign settings restore explicit Action controls after Story Direction
+[26/42] [mobile] › tests\e2e\story-only-campaigns.e2e.test.ts:163:1 › legacy player navigates accepted history without treating it as a new generation
+[27/42] [mobile] › tests\e2e\story-only-campaigns.e2e.test.ts:173:1 › empty Story Direction campaign opens with a persisted scene turn
+[28/42] [mobile] › tests\e2e\story-only-campaigns.e2e.test.ts:186:1 › action-only campaign keeps Action locked
+[29/42] [mobile] › tests\e2e\story-only-campaigns.e2e.test.ts:193:1 › stale Nexus settings save leaves the selected draft intact
+[30/42] [mobile] › tests\e2e\story-only-campaigns.e2e.test.ts:233:1 › retry replaces the latest accepted turn without appending history
+[31/42] [mobile] › tests\e2e\story-only-new-ui.e2e.test.ts:162:1 › new UI saves Story Direction without Auto
+[32/42] [mobile] › tests\e2e\story-only-new-ui.e2e.test.ts:187:1 › new action-only campaign keeps Action locked
+[33/42] [mobile] › tests\e2e\story-only-new-ui.e2e.test.ts:205:1 › new UI profile persists Story Direction without Auto
+[mobile] › tests\e2e\story-only-new-ui.e2e.test.ts:205:1 › new UI profile persists Story Direction without Auto
+{"profileDialog":{"clientHeight":565,"scrollHeight":935,"scrollTop":370,"top":159.953125,"bottom":727,"viewportHeight":727}}
+
+[34/42] [mobile] › tests\e2e\story-only-new-ui.e2e.test.ts:252:1 › new Story Direction composer has no classifier controls and submits scene turns
+[35/42] [mobile] › tests\e2e\story-only-new-ui.e2e.test.ts:273:1 › new Story Direction accepts generated choices as persisted scene turns
+[36/42] [mobile] › tests\e2e\story-only-new-ui.e2e.test.ts:285:1 › new Story Direction keeps automatic choice submission separate from multiselect keyboard submission
+[37/42] [mobile] › tests\e2e\story-only-new-ui.e2e.test.ts:301:1 › new flexible controls submit explicit Action then Story Direction without a classifier
+[38/42] [mobile] › tests\e2e\story-only-new-ui.e2e.test.ts:329:1 › the same campaign saves Story Direction from legacy management and Action from the new editor
+[39/42] [mobile] › tests\e2e\story-only-new-ui.e2e.test.ts:355:1 › new editor preserves an unsaved Action style and title after a real concurrent Story Direction turn
+[40/42] [mobile] › tests\e2e\story-only-new-ui.e2e.test.ts:382:1 › new Story player history navigation does not append a turn
+[41/42] [mobile] › tests\e2e\story-only-new-ui.e2e.test.ts:397:1 › new Story retry replaces the accepted turn ID without appending history
+[42/42] [mobile] › tests\e2e\story-only-new-ui.e2e.test.ts:426:1 › empty new Story Direction campaign begins a persisted scene for each renderer and viewport
+  42 passed (1.4m)

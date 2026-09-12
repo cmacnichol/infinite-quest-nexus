@@ -407,7 +407,11 @@ export class SystemArchivePreviewIndex {
       case "campaign-history": {
         let history;
         try {
-          history = parseSystemCampaignHistoryDetails(envelope.record.eventType, envelope.record.content);
+          history = parseSystemCampaignHistoryDetails(
+            envelope.record.eventType,
+            envelope.record.content,
+            envelope.formatVersion === 3,
+          );
         } catch {
           throw relationshipFailure();
         }

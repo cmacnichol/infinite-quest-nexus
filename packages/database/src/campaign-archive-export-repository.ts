@@ -236,7 +236,7 @@ export async function loadCampaignArchiveExportSnapshot(
      WHERE c.id=$1 AND c.owner_user_id=$2`, [campaignId, ownerUserId])).rows[0];
     if (!campaign) throw Object.assign(new Error("Campaign not found."), { statusCode: 404, expose: true });
     const turns = (await client.query<Record<string, any>>(`SELECT id,turn_number,action,input_mode,input_mode_source,narration,choices,custom_action_suggestion,image_prompt,image_url,
-      mechanics_private,state_snapshot_private,model_metadata,accepted_at FROM turns
+      mechanics_private,state_snapshot_private,model_metadata,generation_policy,accepted_at FROM turns
       WHERE campaign_id=$1 AND owner_user_id=$2 AND accepted_at IS NOT NULL ORDER BY turn_number`, [campaignId, ownerUserId])).rows;
     if (Number(turns.at(-1)?.turn_number ?? 0) !== Number(campaign.active_turn_number)) {
       throw exportError("Accepted turns do not match the campaign active turn number.");

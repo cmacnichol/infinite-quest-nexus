@@ -8,9 +8,12 @@ Configure providers from **Setup → Provider Setup** after installation.
 | OpenRouter | Story text or illustrations | Uses role-specific APIs and credentials |
 | Sogni AI | Illustrations | Dedicated asynchronous image adapter; hosted API defaults to `https://api.sogni.ai` |
 | Manifest | Story text | Adapter-specific discovery and request behavior |
-| OpenAI-compatible | Text, turn intent, embeddings, or images | Capability depends on the selected endpoint |
+| OpenAI-compatible | Text, embeddings, or images | Capability depends on the selected endpoint |
 
-Create separate profiles for **Story text**, **Chronicle embeddings**, and **Illustrations**. Optionally add a **Turn intent classification** profile when a small model should classify Auto input instead of the campaign Story text model. Never reuse an endpoint or key across roles merely because the provider brand is the same.
+Create separate profiles for **Story text**, **Chronicle embeddings**, and
+**Illustrations**. The Turn intent classification role is retired; new Story
+Direction jobs do not use a classifier. Never reuse an endpoint or key across
+roles merely because the provider brand is the same.
 
 ## Chronicle embedding capabilities
 
@@ -27,8 +30,6 @@ The Chronicle embedding worker starts with the provider's runtime descriptor and
 Invalid or out-of-range overrides are ignored by the safe capability projection. Provider request timeout continues to use the existing provider-profile timeout; it is not a Chronicle capability override. Changing provider, model, dimensions, prefix protocol, or other fingerprinted capability makes old chunk vectors incompatible and requires a derived rebuild. Production falls open to legacy retrieval until the new index is complete.
 
 Disabling or deleting an embedding profile does not affect the story-text or illustration credentials and must not stop story generation. Reassign the campaign to a valid Chronicle embedding profile and rebuild. Do not delete legacy embeddings or vectors as part of provider rotation; retain them for config-only rollback until a separate cleanup is approved.
-
-An Intent profile is used only after it is explicitly made the system default; being the sole enabled profile is insufficient. Without one, no additional provider configuration is required because Auto uses the campaign's Story text provider.
 
 For Docker Desktop host services, `host.docker.internal` is commonly available. Linux Engine and Swarm installations need a stable address resolvable and reachable from the container or every worker node.
 

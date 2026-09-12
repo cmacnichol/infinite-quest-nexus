@@ -350,6 +350,21 @@ describe("generation workflow", () => {
     expect(events.at(-1)).toEqual({ type: "settled", outcome: "completed", result: completedResult() });
   });
 
+  it("does not retry a consumed Story Direction choice-repair fence more than once", async () => {
+    const source = sourceFromSessions([
+      [{ kind: "snapshot", snapshot: snapshot({ status: "recoverable", attempts: 1 }) }],
+      [{ kind: "snapshot", snapshot: snapshot({ status: "recoverable", attempts: 2 }) }]
+    ]);
+    const client = api({ retry: async () => { client.retries += 1; return actionResponse("queued"); } });
+    const workflow = createGenerationWorkflow({ api: client, source, clock: { now: () => 1_000 }, pendingSubmissions: store() });
+    const run = await workflow.submit(campaignId, submission());
+
+    const events = await collect(run.watch(signal()));
+
+    expect(client.retries).toBe(1);
+    expect(events.at(-1)).toMatchObject({ type: "settled", outcome: "unrecoverable" });
+  });
+
   it("does not auto-retry a recovered job after a prior attempt has already advanced", async () => {
     const pending = store({ ...submission(), createdAt: 1_000, jobId });
     const client = api({ syncStatus: async () => sync() });

@@ -12,7 +12,6 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
 import { canonicalArchiveJson } from "../../packages/contracts/src/archives.js";
 import { calculateContentFingerprint } from "../../packages/contracts/src/archives-node.js";
-import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import {
   inspectArchive,
   readVerifiedEntry,
@@ -30,7 +29,6 @@ import { buildServer } from "../../services/api/src/server.js";
 import { inertStorageServerOptions, legacyStoryImportServerOptions, serverOptions } from "../helpers/build-server-options.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import { DEDICATED_CHUNKED_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
-import { importLegacyStory } from "../helpers/memory-aware-services.js";
 
 const archiveCleanupTestState = vi.hoisted(() => ({
   failOncePaths: new Set<string>()
@@ -506,22 +504,24 @@ integration("campaign archive export", () => {
     }
   });
 
-  it("keeps retrieval provenance local when portable payloads are re-imported", async () => {
-    const snapshot = await loadCampaignArchiveExportSnapshot(pool, ownerUserId, campaignId);
-    const portableCampaign = structuredClone(storyImportRequestSchema.parse({
-      sourceName: "portable-retrieval-audit.source",
-      story: campaignArchivePayloads(snapshot).campaign
-    }).story);
-    if (!portableCampaign.campaign) throw new Error("Portable campaign export must contain campaign metadata.");
-    portableCampaign.campaign.title = `Portable retrieval audit ${randomUUID()}`;
-    const serialized = canonicalArchiveJson(portableCampaign);
+  secureGeneratedStagingIt("keeps retrieval provenance local through current ZIP preview and import", async () => {
+    const staged = await stagedExport();
+    const destination = await createCompatibleDestination(`Portable retrieval audit ${randomUUID()}`);
+    const archive = await inspectArchive(staged, limits, "campaign");
+    const serialized = (await Promise.all(["campaign.json", "world.json", "chronicle.json"].map(async (path) => (
+      (await readVerifiedEntry(archive, path, limits.maxJsonEntryBytes)).toString("utf8")
+    )))).join("\n");
     expect(serialized).not.toContain("chronicleRetrieval");
     expect(serialized).not.toContain("must-not-export");
 
-    const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({
-      sourceName: `portable-retrieval-audit-${randomUUID()}.story`,
-      story: portableCampaign
-    }));
+    const preview = await previewCampaignArchive(pool, runtimeConfig(), staged, "portable-retrieval-audit.zip", {
+      kind: "existing_world_version",
+      worldVersionId: destination.worldVersionId
+    });
+    const imported = await importCampaignArchive(pool, runtimeConfig(), { root }, {
+      previewToken: preview.previewToken,
+      destination: { kind: "existing_world_version", worldVersionId: destination.worldVersionId }
+    });
     await expect(readTurnPage(pool, ownerUserId, imported.campaignId, undefined, 10)).resolves.toMatchObject({
       turns: [{ chronicleRetrieval: null }]
     });

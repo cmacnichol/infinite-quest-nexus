@@ -14,6 +14,7 @@ import {
 } from "../../packages/story-engine/src/provider-request.js";
 import { planContext } from "../../packages/story-engine/src/context-budget.js";
 import { parseEventExtension } from "../../packages/story-engine/src/mechanics.js";
+import { buildStoryOnlyChoiceRepairInput } from "../../packages/story-engine/src/story-only-prompt.js";
 
 const profile: TextProviderProfile = {
   providerType: "lmstudio",
@@ -43,6 +44,24 @@ function createTestProviderTransport(fetcher: typeof fetch): ProviderTransport {
 }
 
 describe("provider request serialization", () => {
+  it("measures the compact Story Direction choice repair wire body and rejects an oversized protected base before transport", () => {
+    const base = {
+      narration: "The gate closes behind you.", scratchpad: "", tracker_updates: [], image_prompt: "",
+      continuity_summary: "Inside the courtyard.", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: []
+    };
+    const input = buildStoryOnlyChoiceRepairInput(base);
+    const prepared = serializeCheckedProviderRequest(profile, { systemPrompt: "repair choices", input }, {
+      inputLimit: 100_000, count: (body) => body.length, output: { kind: "story_choice_repair" }
+    });
+    expect(prepared.body).toContain("final_narration");
+    const choicesOnlyReserve = JSON.stringify({ choices: ["x", "x", "x", "x"], custom_action_suggestion: "x" }).length;
+    expect(() => serializeCheckedProviderRequest({ ...profile, maxOutputTokens: choicesOnlyReserve }, {
+      systemPrompt: "repair choices", input
+    }, { inputLimit: 100_000, count: (body) => body.length, output: { kind: "story_choice_repair" } })).not.toThrow();
+    expect(() => serializeCheckedProviderRequest(profile, {
+      systemPrompt: "repair choices", input: buildStoryOnlyChoiceRepairInput({ ...base, narration: "n".repeat(20_000) })
+    }, { inputLimit: 100, count: (body) => body.length, output: { kind: "story_choice_repair" } })).toThrow(expect.objectContaining({ code: "context_budget_exceeded", scope: "provider_request" }));
+  });
   it("prepares the complete self-contained LM Studio recovery body before transport", async () => {
     const rejectedContent = JSON.stringify({ narration: "A complete rejected draft\nwith \\slashes and 雪." });
     const completeRejectedDraft = validateCompleteRejectedDraft(rejectedContent);

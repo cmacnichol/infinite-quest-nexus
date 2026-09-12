@@ -14,6 +14,7 @@ import {
   characterSnapshot
 } from "./world-characters.js";
 import { estimateTokens, stripMechanicsLeakage } from "./text.js";
+import { normalizeHistoricalTurnControlStyle } from "./campaign-generation-policy.js";
 
 export type LegacyCampaignDestination =
   | Readonly<{ kind: "create_world" }>
@@ -48,7 +49,7 @@ export type NormalizedLegacyCampaign = Readonly<{
     characterProfileRevision: number;
     characterStrategy: "preserve_source" | "map_to_target";
     storyLengthProfile: StoryLengthProfile;
-    turnControlStyle: "action_only" | "flexible_auto" | "flexible_action" | "flexible_scene";
+    turnControlStyle: "action_only" | "flexible_action" | "flexible_scene";
     legacySettings: Readonly<Record<string, unknown>>;
   }>;
   initialState: Readonly<Record<string, unknown>>;
@@ -158,10 +159,10 @@ function sanitizedSettings(story: LegacyStory): Record<string, unknown> {
     "nexusBranchWorldVersionId"
   ]) delete settings[key];
   settings.storyLength = storyLengthProfileFromUnknown(settings.storyLength ?? settings.story_length);
-  const control = settings.turnControlStyle;
+  const control = settings.turnControlStyle === "Auto" ? "flexible_auto" : settings.turnControlStyle;
   settings.turnControlStyle = control === "action_only" || control === "flexible_auto"
     || control === "flexible_action" || control === "flexible_scene"
-    ? control
+    ? normalizeHistoricalTurnControlStyle(control)
     : "flexible_action";
   settings.useRpgStats = Boolean(settings.useRpgStats ?? settings.use_rpg_stats ?? story.rpgStats?.length);
   settings.suppressEventTriggers = Boolean(

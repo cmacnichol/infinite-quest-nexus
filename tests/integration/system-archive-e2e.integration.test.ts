@@ -834,7 +834,10 @@ async function dropDestinationDatabase(admin: DatabasePool, name: string): Promi
 async function seedRepresentativeOwner(pool: DatabasePool, assetRoot: string): Promise<RepresentativeOwner> {
   await migrateDatabase(pool, resolve("database/migrations"));
   const ownerUserId = await initialOwnerId(pool);
-  await pool.query("UPDATE users SET display_name='Release Gate Owner' WHERE id=$1", [ownerUserId]);
+  await pool.query(
+    "UPDATE users SET display_name='Release Gate Owner',settings=$2::jsonb WHERE id=$1",
+    [ownerUserId, JSON.stringify({ defaultTurnControlStyle: "flexible_auto", retainedPreference: "keep" })],
+  );
 
   const providerIds: string[] = [];
   const providers: RepresentativeProvider[] = [];
@@ -1901,7 +1904,7 @@ async function assertRepresentativeArchive(
   assertRoundThreeArchiveRelationships(records, source);
 
   for (const record of records) {
-    expect(record.formatVersion).toBe(2);
+    expect(record.formatVersion).toBe(3);
     expect(Object.prototype.hasOwnProperty.call(record.record, "authority")).toBe(true);
   }
 
@@ -2037,6 +2040,7 @@ async function assertRepresentativeArchive(
         imageProviderProfileId: null,
         storyLengthProfile: "standard",
         turnControlStyle: "flexible_scene",
+        generationPolicyVersion: 1,
         legacySettings: {},
       },
     },
@@ -2058,6 +2062,7 @@ async function assertRepresentativeArchive(
         imageProviderProfileId: null,
         storyLengthProfile: "standard",
         turnControlStyle: "flexible_action",
+        generationPolicyVersion: 1,
         legacySettings: {},
       },
     },
@@ -2413,6 +2418,12 @@ async function assertImportedAuthority(
     expect(destinationOwnerId).not.toBe(source.ownerUserId);
     const sourceOwnerRows = await pool.query<{ count: string }>("SELECT count(*)::text AS count FROM users WHERE id=$1", [source.ownerUserId]);
     expect(sourceOwnerRows.rows[0]!.count).toBe("0");
+    await expect(pool.query<{ settings: Record<string, unknown> }>(
+      "SELECT settings FROM users WHERE id=$1",
+      [destinationOwnerId],
+    )).resolves.toMatchObject({ rows: [{
+      settings: { defaultTurnControlStyle: "flexible_action", retainedPreference: "keep" },
+    }] });
 
     const providers = await pool.query<{
       id: string;

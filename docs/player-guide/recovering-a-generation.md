@@ -8,11 +8,19 @@ Reload the campaign, select it from the dashboard again, or choose **Story** whi
 
 ## Recoverable provider output
 
-When a provider stops at an output limit or returns incomplete structured output, the worker can retry through its persisted recovery path. Private assessment and random resolution remain stable across that recovery.
+When a provider stops at an output limit or returns incomplete structured
+output, the worker preserves a recoverable job. For Story Direction, a valid
+narration with invalid or duplicate choices can use the bounded automatic repair
+allowance. If the response still needs choice repair after that allowance is
+used, it becomes pending and waits for you to select the explicit retry action.
+That retry makes one choices-only request; a lease reclaim does not make an
+extra provider request. Private assessment and random resolution remain stable
+for Action recovery.
 
-The player performs one supported automatic retry for a recoverable generation. Continue to watch the current job rather than submitting the action again.
-
-The pending turn retains its resolved Action or Scene direction mode. Recovery and retry do not classify Auto again, even if provider defaults change. A staged replacement may change the mode only when the campaign's control style permits it.
+Continue to watch the current job rather than submitting the action again.
+The pending turn retains its frozen Action or Story Direction policy, including
+the saved prompt identity. Recovery, retry, reclaim, and replacement do not
+reclassify or convert it.
 
 ## Terminal failure
 

@@ -103,7 +103,7 @@ export function initializeUserProfileMenu(root: HTMLElement): () => void {
     setControlValue(displayName, nextProfile.displayName);
     autoSubmit.checked = nextProfile.settings.autoSubmitTurnChoices;
     continuousReading.checked = nextProfile.settings.continuousReading;
-    setControlValue(turnStyle, nextProfile.settings.defaultTurnControlStyle);
+    setControlValue(turnStyle, nextProfile.settings.defaultTurnControlStyle === "flexible_scene" ? "flexible_scene" : "flexible_action");
   };
   const draft = (): UserProfileUpdate | null => {
     const nextDisplayName = controlValue(displayName).trim();

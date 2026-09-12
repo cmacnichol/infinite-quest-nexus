@@ -1365,7 +1365,7 @@ describe("archive artifact writing and cleanup", () => {
           displayName: "Archive owner"
         },
         unknownExtension: "rejected"
-      } as ArchiveManifest),
+      } as unknown as ArchiveManifest),
       DEFAULT_LIMITS,
       (value) => systemArchiveManifestSchema.parse(value)
     )).rejects.toMatchObject({ code: "archive-export-inconsistent" });
@@ -1386,7 +1386,7 @@ describe("archive artifact writing and cleanup", () => {
           sourceId: "11111111-1111-4111-8111-111111111111",
           displayName: "Archive owner"
         }
-      } as ArchiveManifest),
+      } as unknown as ArchiveManifest),
       DEFAULT_LIMITS,
       (value) => systemArchiveManifestSchema.parse(value)
     )).rejects.toMatchObject({ code: "archive-export-inconsistent" });
@@ -1412,7 +1412,7 @@ describe("archive artifact writing and cleanup", () => {
     await expect(writeArchiveArtifact(
       root,
       [{ path: `${archiveType}.json`, logicalType: archiveType, mediaType: "application/json", source: Readable.from(data) }],
-      (entries) => ({ ...systemManifest(entries), archiveType, unknownExtension: "rejected" } as ArchiveManifest),
+      (entries) => ({ ...systemManifest(entries), archiveType, unknownExtension: "rejected" } as unknown as ArchiveManifest),
       DEFAULT_LIMITS
     )).rejects.toMatchObject({ code: "archive-export-inconsistent" });
   });
