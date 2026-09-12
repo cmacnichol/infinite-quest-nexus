@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ProviderRequest, ProviderResult } from "../../packages/story-engine/src/providers.js";
+import { logger } from "../../packages/logger/src/index.js";
+import { ProviderTransportError, type ProviderRequest, type ProviderResult } from "../../packages/story-engine/src/providers.js";
 import { serializeLegacyProviderRequest } from "../../packages/story-engine/src/provider-request.js";
 import type { RuntimeTextExecution } from "../../services/runtime/src/provider-credential-transport-adapter.js";
 import {
@@ -31,6 +32,48 @@ const initialRequest: ProviderRequest = {
 };
 
 describe("runtime source authoring request budget", () => {
+  it("records the completed response ID when the provider sends no generation header", async () => {
+    const info = vi.spyOn(logger, "info").mockImplementation(() => undefined);
+    try {
+      await createRuntimeSourceAuthoringRequestBudget(execution(), undefined, { authoringJobId: "job", stageKey: "source:chunk:0" }).executeInitial(initialRequest);
+      expect(info.mock.calls.map(([event]) => event)).toContainEqual(expect.objectContaining({ event: "authoring_provider_completed", providerResponseId: "response" }));
+    } finally { info.mockRestore(); }
+  });
+
+  it.each([false, true])("records a timeout with headersReceived=%s without losing the original error", async (headersReceived) => {
+    const info = vi.spyOn(logger, "info").mockImplementation(() => undefined);
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+    const error = new ProviderTransportError("PRIVATE ERROR", { providerType: "openrouter", operation: "source", endpoint: "https://private.test", model: "model", timeoutMs: 300_000, durationMs: 300_000, timedOut: true, transportCode: "UND_ERR_BODY_TIMEOUT", causeCategory: "timeout", causeMessage: "PRIVATE CAUSE" });
+    const provider = execution({ execute: async (request) => {
+      if (headersReceived) request.onResponseHeaders?.({ statusCode: 200, providerResponseId: "gen-timeout" });
+      throw error;
+    } });
+    try {
+      await expect(createRuntimeSourceAuthoringRequestBudget(provider, undefined, { authoringJobId: "job", stageKey: "source:chunk:0" }).executeInitial(initialRequest)).rejects.toBe(error);
+      expect(warn.mock.calls.map(([event]) => event)).toContainEqual(expect.objectContaining({ event: "authoring_provider_failed", authoringJobId: "job", headersReceived, diagnosticCode: "provider_request_timeout", transportCode: "UND_ERR_BODY_TIMEOUT", timeoutMs: 300_000 }));
+      expect(JSON.stringify([...warn.mock.calls, ...info.mock.calls])).not.toContain("PRIVATE");
+      expect(JSON.stringify(warn.mock.calls)).not.toContain("private.test");
+    } finally { info.mockRestore(); warn.mockRestore(); }
+  });
+
+  it("logs request settings, headers and usage without changing the wire payload or exposing content", async () => {
+    const info = vi.spyOn(logger, "info").mockImplementation(() => undefined);
+    const context = { authoringJobId: "job", stageKey: "source:chunk:0", stageGeneration: 2 };
+    const provider = execution({ contextWindowTokens: 10_000, execute: async (request) => {
+      request.onResponseHeaders?.({ statusCode: 200, providerResponseId: "gen-test" });
+      expect(serializeLegacyProviderRequest(provider, request).body).toBe(serializeLegacyProviderRequest(provider, initialRequest).body);
+      return { content: "PRIVATE OUTPUT", responseId: "gen-test", finishReason: "length", outputLimited: true, modelInstanceId: "model", usage: { inputTokens: 42, outputTokens: 100, totalTokens: 142 }, reportedCost: null, rawMetadata: { secret: "PRIVATE METADATA" } };
+    } });
+    try {
+      await createRuntimeSourceAuthoringRequestBudget(provider, undefined, context).executeInitial(initialRequest);
+      const events = info.mock.calls.map(([event]) => event);
+      expect(events).toContainEqual(expect.objectContaining({ ...context, event: "authoring_provider_started", streaming: false, maxOutputTokens: 100, requestAttempt: 1 }));
+      expect(events).toContainEqual(expect.objectContaining({ ...context, event: "authoring_provider_headers", statusCode: 200, providerResponseId: "gen-test" }));
+      expect(events).toContainEqual(expect.objectContaining({ ...context, event: "authoring_provider_completed", finishReason: "length", outputLimited: true, outputTokens: 100 }));
+      expect(JSON.stringify(events)).not.toContain("PRIVATE");
+      expect(JSON.stringify(events)).not.toContain(initialRequest.input);
+    } finally { info.mockRestore(); }
+  });
   it("measures the exact escaped legacy initial request body", () => {
     const provider = execution();
     const budget = createRuntimeSourceAuthoringRequestBudget(provider);

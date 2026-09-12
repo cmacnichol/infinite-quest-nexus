@@ -55,6 +55,8 @@ export type ProviderRequest = {
   previousResponseId?: string;
   recoveryInput?: string;
   rejectedResponse?: string;
+  /** Metadata-only observer; does not enable streaming or change the request body. */
+  onResponseHeaders?: (headers: { statusCode: number; providerResponseId?: string }) => void;
   onChunk?: (delta: string, accumulated: string) => void | Promise<void>;
   canonicalBudgeting?: boolean;
   /** Snapshotted job/provider ceiling; canonical generation must not exceed it. */
@@ -952,11 +954,19 @@ function checkedStoryRequest(profile: TextProviderProfile, request: ProviderRequ
   });
 }
 
+function reportResponseHeaders(request: ProviderRequest, response: Response): void {
+  const id = response.headers.get("x-generation-id");
+  try {
+    request.onResponseHeaders?.({ statusCode: response.status, ...(id && /^[a-zA-Z0-9_-]{1,200}$/.test(id) ? { providerResponseId: id } : {}) });
+  } catch { /* Diagnostic observers must not interrupt provider execution. */ }
+}
+
 async function callLmStudio(profile: TextProviderProfile, request: ProviderRequest, transport: ProviderTransport): Promise<ProviderResult> {
   const prepared = request.canonicalBudgeting ? checkedStoryRequest(profile, request) : serializeLegacyProviderRequest(profile, request);
   await ensureLmStudioModelLoaded(profile, "story generation model loading", transport);
   const url = `${lmStudioRoot(profile.baseUrl)}/api/v1/chat`;
   const response = await sendPreparedProviderRequest(profile, prepared, transport);
+  reportResponseHeaders(request, response);
   if (response.ok && request.onChunk && response.headers.get("content-type")?.includes("event-stream")) {
     const { content, finalData, allData } = await readSseStream(response, request.onChunk, profile, "story generation", url);
     const stats = allData.findLast((item) => item.stats)?.stats || finalData.stats || {};
@@ -1003,7 +1013,11 @@ async function callLmStudio(profile: TextProviderProfile, request: ProviderReque
 async function callOpenAiCompatible(profile: TextProviderProfile, request: ProviderRequest, transport: ProviderTransport): Promise<ProviderResult> {
   let prepared = request.canonicalBudgeting ? checkedStoryRequest(profile, request) : serializeLegacyProviderRequest(profile, request);
   const url = `${openAiRoot(profile.baseUrl)}/chat/completions`;
-  const send = (preparedRequest: PreparedProviderRequest) => sendPreparedProviderRequest(profile, preparedRequest, transport);
+  const send = async (preparedRequest: PreparedProviderRequest) => {
+    const response = await sendPreparedProviderRequest(profile, preparedRequest, transport);
+    reportResponseHeaders(request, response);
+    return response;
+  };
   let response = await send(prepared);
   if (!response.ok) {
     const clone = response.clone();

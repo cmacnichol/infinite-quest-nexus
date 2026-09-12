@@ -210,7 +210,17 @@ function createRun(
             }
             const parsed = generationStreamSnapshotSchema.safeParse(sourceEvent.snapshot);
             if (!parsed.success) throw new GenerationWorkflowProtocolError("invalid_snapshot", { cause: parsed.error });
-            const observation = await observeSnapshot(parsed.data);
+            let observation = await observeSnapshot(parsed.data);
+            // A new watcher must settle even if this run already observed the terminal snapshot.
+            if (observation.kind === "duplicate"
+              && ["completed", "failed", "discarded", "cancelled", "recoverable"].includes(parsed.data.status)) {
+              observation = {
+                kind: "accepted",
+                snapshot: parsed.data,
+                narrationChanged: false,
+                terminal: true
+              };
+            }
             if (observation.kind !== "accepted") continue;
             yield { type: "status", snapshot: observation.snapshot };
             if (observation.narrationChanged) {

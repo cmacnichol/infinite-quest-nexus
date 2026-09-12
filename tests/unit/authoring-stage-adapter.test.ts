@@ -228,7 +228,7 @@ describe("executeAuthoringStage", () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
-  it("does not send a resumed source chunk with an older quote-anchor protocol to the provider", async () => {
+  it.each(["source-extraction-v2-absolute-code-points", "source-extraction-v3-quote-anchor", "source-extraction-v4-labelled-paragraphs", "source-extraction-v5-contiguous-quotes"])("does not send a resumed source chunk with older protocol %s to the provider", async (sourceProtocol) => {
     const source = normalizeSourceDocument("chapter.txt", "Iris fastened her blue coat.", "job-1");
     const chunk = planSourceChunks({
       source,
@@ -248,7 +248,7 @@ describe("executeAuthoringStage", () => {
         kind: "story_source", idempotencyKey: "source-key", target: { kind: "new_world" },
         name: "chapter.txt", text: source.text, mode: "faithful", boundaryParagraphId: source.paragraphs[0]!.id, instructions: ""
       },
-      snapshot: { ...snapshot, protocols: { ...snapshot.protocols, source: "source-extraction-v2-absolute-code-points" } },
+      snapshot: { ...snapshot, protocols: { ...snapshot.protocols, source: sourceProtocol } },
       stageKey: `source:chunk:${chunk.id}`,
       parentOutputs: [{ kind: "source_plan", chunks: [{
         ...chunk,

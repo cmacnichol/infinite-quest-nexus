@@ -8,6 +8,15 @@ import {
 } from "../../../packages/story-engine/src/providers.js";
 import { ProviderResponseTooLargeError } from "../../../packages/story-engine/src/provider-response.js";
 
+import { logger } from "../../../packages/logger/src/index.js";
+
+export type AuthoringDiagnosticContext = Readonly<{
+  authoringJobId: string;
+  stageKey: string;
+  stageGeneration?: number;
+  stageId?: string;
+}>;
+
 const MAX_GENERATION_CALLS = 4;
 const MAX_TRANSPORT_ATTEMPTS_PER_RESPONSE = 2;
 const MAX_REJECTED_RESPONSE_CODE_POINTS = 16_000;
@@ -130,6 +139,7 @@ function recognizedOutputIssues(error: unknown): AuthoringIssue[] | null {
 
 export async function runAuthoringResponse<T>(options: {
   stage: AuthoringStage;
+  diagnosticContext?: AuthoringDiagnosticContext;
   request(attempt: AuthoringAttempt): Promise<ProviderResult>;
   parse(content: string): T;
   delay(milliseconds: number): Promise<void>;
@@ -163,6 +173,7 @@ export async function runAuthoringResponse<T>(options: {
         if (!decision.retry || transportAttempts >= MAX_TRANSPORT_ATTEMPTS_PER_RESPONSE || generationCalls >= MAX_GENERATION_CALLS) {
           throw failure(options.stage, decision.code, decision.retry);
         }
+        if (options.diagnosticContext) logger.warn({ event: "authoring_transport_retry", ...options.diagnosticContext, requestAttempt: generationCalls, repair, code: decision.code, delayMs: decision.delayMs });
         await options.delay(decision.delayMs);
       }
     }
@@ -173,6 +184,7 @@ export async function runAuthoringResponse<T>(options: {
       if (options.currentClaim && !await options.currentClaim()) {
         throw failure(options.stage, "authoring_cancelled", false);
       }
+      if (options.diagnosticContext) logger.info({ event: "authoring_validation_completed", ...options.diagnosticContext, requestAttempt: generationCalls, repair, valid: true });
       return parsed;
     } catch (error) {
       const projected = recognizedOutputIssues(error);
@@ -181,9 +193,11 @@ export async function runAuthoringResponse<T>(options: {
         ? [...projected.slice(0, 19), limitedIssue(options.stage)]
         : projected;
       issues = stageIssues(options.stage, outputIssues);
+      if (options.diagnosticContext) logger.warn({ event: "authoring_validation_completed", ...options.diagnosticContext, requestAttempt: generationCalls, repair, valid: false, outputLimited: result.outputLimited, issues });
       if (repair) {
         throw failure(options.stage, result.outputLimited ? "authoring_output_limit" : "invalid_authoring_output", true, issues);
       }
+      if (options.diagnosticContext) logger.info({ event: "authoring_repair_started", ...options.diagnosticContext, requestAttempt: generationCalls });
       repair = true;
       rejectedResponse = boundedRejectedResponse(result.content);
     }

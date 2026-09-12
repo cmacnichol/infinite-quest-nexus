@@ -29,3 +29,78 @@ Set `AI_AUTHORING_JOBS_ENABLED=false` on the API and worker, then return clients
 System Archive deliberately excludes authoring inputs, stage output, reviews, and receipts. Use the normal PostgreSQL recovery procedure for installation recovery; a portable System Archive does not preserve operational authoring work.
 
 For story-source proposals, discard, successful apply, and expiry cleanup also clear the operational source plan and fact review. The accepted appendix saved in a draft or version is authoritative portable content and is not deleted by job cleanup.
+
+## Source authoring diagnostics
+
+Story-source extraction and synthesis emit `authoring_provider_started`,
+`authoring_provider_headers`, `authoring_provider_completed`, and
+`authoring_provider_failed`. Correlate by `authoringJobId`, `stageId`,
+`stageGeneration`, and `requestAttempt`; `repair` distinguishes repair calls.
+The start event records the pinned provider/model, actual streaming mode,
+request bytes, context/output limits, and timeout. Completion records token usage,
+finish reason, truncation status, and a provider response ID when available.
+Headers events preserve a safe OpenRouter generation ID even if reading the body
+later fails. Failure events report whether headers arrived and the transport code,
+so waiting for headers can be distinguished from failure after headers.
+
+`authoring_transport_retry`, `authoring_repair_started`, and
+`authoring_validation_completed` explain the work between provider calls. Failed
+validation records bounded, sanitized issue paths and reasons. These diagnostics
+do not log source text, prompts, rejected output, credentials, or raw provider
+errors. Validation success is not a durable-checkpoint receipt; use the job API
+for authoritative stage status. No streaming, retry, or validation policy changes
+are required to enable these logs; deploy the updated runtime normally.
+
+For exact-quote failures, `authoring_citation_mismatch` adds fact/citation indexes,
+trusted paragraph IDs, code-point lengths, and a `matchCategory`:
+`wrong_paragraph`, `formatting_difference`, `cross_paragraph`, `changed_text`,
+`outside_chunk`, or `coordinate_mismatch`. Formatting diagnostics identify
+`whitespace`, `unicode` (NFC), `quotation_marks` (curly versus straight), or
+`combined` normalization. Comparisons remain in memory and search only through
+the selected source boundary. `changed_text` means no tested match was found;
+it does not establish that the model invented the quote. These diagnostic
+comparisons never accept a previously rejected citation or change the prompt.
+
+Source extraction protocol `source-extraction-v6-evidence-ids` supplies content-based
+IDs alongside exact paragraph excerpts. The provider selects evidence IDs; the
+server resolves them against the current validated chunk and attaches the exact
+source text, paragraph, and Unicode coordinates. Unknown IDs and mixed ID/quote
+objects are rejected. Existing quote/coordinate responses remain strictly validated
+for compatibility; they are never fuzzy-matched or reassigned. Evidence selection
+proves a source location, not that the fact is semantically supported: human review
+remains required. The runtime budgets the same evidence table used for execution.
+
+After deployment, create a new source proposal. Older extraction snapshots retain
+their protocol and fail with `source_evidence_invalid` before provider execution.
+Saved citations and world data need no migration. If temporary text logging is still
+needed, update its job ID to the new proposal; evidence-ID failures contain no
+provider quote for that logger to capture.
+
+### Temporary citation text capture
+
+To diagnose an exact-quote mismatch, set `AI_AUTHORING_CITATION_DEBUG_JOB_ID`
+to the affected proposal UUID in the local `.env`, then rebuild/recreate the
+Compose application and retry that proposal. For Swarm, pass the same environment
+variable to the worker service. Empty or unset disables text capture; other jobs
+keep metadata-only diagnostics.
+
+For that job only, `authoring_citation_mismatch` includes `sourceDebug` with
+`rejectedQuote`, `citedParagraphText`, and `providedSpanText`. These are literal
+texts, including Unicode and whitespace, JSON-escaped by the structured logger.
+Both initial and repair failures are captured. The source paragraph stays within
+the selected boundary; the span is the excerpt sent to the provider. Validation
+and retry behavior are unchanged. This opt-in is an exception to the metadata-only
+logging described above: captured logs contain private story and provider text.
+Clear the variable and recreate the service to stop capture; existing logs retain
+captured text under the installation's log retention policy. Remove this temporary
+hook, Compose variable, and documentation once troubleshooting is complete.
+
+### Reviewing facts with multiple values
+
+Source predicates are free-form descriptions, not declared single-value fields.
+Two accepted facts may share a subject and predicate while having different values
+(for example, two skills or two facilities at a location). Saving preserves both;
+reviewers can reject or leave uncertain any claim they consider contradictory.
+The server still rejects unknown or stale fact IDs, invalid identity representatives,
+duplicate identity membership, and incomplete character grouping. No database or
+prompt-protocol migration is required for this review-save correction.

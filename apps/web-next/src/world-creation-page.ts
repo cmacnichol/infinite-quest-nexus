@@ -387,6 +387,7 @@ export function mountWorldCreationPage(
   }
   let pendingSubmission: Extract<AuthoringSubmit, { kind: "world_concept" }> | null = null;
   let savedCharacterParent: AuthoringJobView | null = null;
+  let characterReturnPending = false;
   let activeCollection: EditableCollection = "entities";
   let activeCharacterHandoff: Pick<CharacterWorkspaceSession, "key" | "workflowId"> | null = null;
   let characterHandoffError: string | null = null;
@@ -442,6 +443,9 @@ export function mountWorldCreationPage(
     if (disposed) return;
     const snapshot = authoringSession?.state();
     if (!snapshot) return;
+    authoringResume.querySelectorAll<HTMLButtonElement>('[data-action="select-authoring-job"]').forEach(button => {
+      if (button.dataset.jobId === snapshot.jobId) button.textContent = `${snapshot.jobId} · ${snapshot.job.status.replaceAll("_", " ")}`;
+    });
     authoringResumeStatus.textContent = snapshot.unavailable ? "This proposal is unavailable or expired. Your local draft is preserved." : snapshot.saveState === "conflict"
       ? "A proposal changed in another tab. Reload or compare before saving."
       : `Proposal ${snapshot.jobId} is ${snapshot.job.status.replaceAll("_", " ")} · ${snapshot.saveState}.`;
@@ -458,7 +462,7 @@ export function mountWorldCreationPage(
       retryApply.disabled = creationController !== null;
       stageActions.append(retryApply);
     }
-    requiredElement<HTMLButtonElement>(authoringResume, '[data-action="cancel-authoring"]').hidden = terminal || ["queued", "running", "recoverable", "cancel_requested"].includes(snapshot.job.status) === false;
+    requiredElement<HTMLButtonElement>(authoringResume, '[data-action="cancel-authoring"]').hidden = terminal || ["queued", "running", "awaiting_review", "recoverable", "cancel_requested"].includes(snapshot.job.status) === false;
     authoringResume.querySelectorAll<HTMLButtonElement>('[data-action="retry-authoring-stage"], [data-action="cancel-authoring"]').forEach(button => { button.disabled = snapshot.commandPending; });
   }
 
@@ -1277,6 +1281,14 @@ export function mountWorldCreationPage(
 
   async function submitCreation(): Promise<void> {
     if (creationController || createdWorld) return;
+    if (characterReturnPending && !authoringApply) {
+      authoringResume.hidden = false;
+      authoringResumeStatus.textContent = savedCharacterParent
+        ? "Your local draft differs from the character's saved parent. Restore the reviewed parent draft before creating the world."
+        : "The returned character has not been loaded. Reload this page to recover it before creating the world.";
+      authoringResume.scrollIntoView?.({ block: "nearest" });
+      return;
+    }
     // A request that may have committed before its response was lost is a
     // frozen replay. It must not be replaced by current local edits, an
     // applied poll, validation, or a synchronous legacy creation fallback.
@@ -1626,10 +1638,8 @@ export function mountWorldCreationPage(
     else if (action === "cancel-authoring") void authoringSession?.cancel().catch(() => { authoringResumeStatus.textContent = "Cancellation could not be confirmed. Reload the proposal."; });
     else if (action === "restore-reviewed-parent" && savedCharacterParent) {
       try {
-        const parent = reviewedCharacterParent(savedCharacterParent);
-        state = { ...state, draft: parent, stage: "characters", method: "ai", provenance: "ai", furthestStageIndex: Math.max(state.furthestStageIndex, STAGE_ORDER.indexOf("characters")), navigationDirty: true };
-        savedCharacterParent = null; actionButton?.remove(); renderStage(); setDirtyGuard(true);
-        authoringResumeStatus.textContent = "Parent draft restored with the reviewed character. Review the world before saving.";
+        restoreReviewedCharacterParent(savedCharacterParent);
+        actionButton?.remove();
       } catch { authoringResumeStatus.textContent = "The character no longer matches the saved parent draft."; }
     }
     else if (action === "cancel-generation") cancelGeneration();
@@ -1708,6 +1718,20 @@ export function mountWorldCreationPage(
 
   function clearCharacterHandoffPointer(pointer: WorldCreationCharacterHandoffPointer): void {
     characterHandoffPointerStore?.clear(pointer);
+  }
+
+  function restoreReviewedCharacterParent(job: AuthoringJobView): void {
+    const parent = reviewedCharacterParent(job);
+    state = { ...state, draft: parent, stage: "characters", method: "ai", provenance: "ai", furthestStageIndex: Math.max(state.furthestStageIndex, STAGE_ORDER.indexOf("characters")), navigationDirty: true };
+    // Retire the older local parent pointer so a reload cannot restore its
+    // pre-character roster over this server-backed return.
+    if (activeCharacterHandoff) clearCharacterHandoffPointer(activeCharacterHandoff);
+    activeCharacterHandoff = null;
+    savedCharacterParent = null;
+    characterReturnPending = false;
+    renderStage();
+    setDirtyGuard(true);
+    authoringResumeStatus.textContent = "Reviewed character added to this draft. Review the world before saving.";
   }
 
   function recoverCharacterHandoffPointer(): void {
@@ -1831,6 +1855,7 @@ export function mountWorldCreationPage(
   const pageHref = (pageView as Partial<Window>).location?.href;
   const authoringJobId = pageHref ? new URL(pageHref).searchParams.get("authoringJob") : null;
   const characterJobId = dependencies.resumeCharacterJobId ?? (pageHref ? new URL(pageHref).searchParams.get("authoringCharacter") : null);
+  characterReturnPending = Boolean(characterJobId);
   void loadDurableCapability().then(async (enabled) => {
     if (!enabled || disposed || !authoringJobs) return;
     if (characterJobId) {
@@ -1838,9 +1863,13 @@ export function mountWorldCreationPage(
       if (disposed) return;
       if (job.kind !== "character" || job.target.kind !== "new_world") throw new Error("Parent mismatch");
       reviewedCharacterParent(job);
+      if (!hasLocalWorldCreationContent(state.draft) || JSON.stringify(worldCreationSubmissionSnapshot(state.draft)) === JSON.stringify(worldCreationSubmissionSnapshot(job.request!.content))) {
+        restoreReviewedCharacterParent(job);
+        return;
+      }
       savedCharacterParent = job;
       const restore = document.createElement("button"); restore.type = "button"; restore.dataset.action = "restore-reviewed-parent"; restore.textContent = "Restore reviewed parent draft";
-      authoringResume.append(restore); authoringResumeStatus.textContent = "The reviewed character and its parent draft are ready to restore.";
+      authoringResume.append(restore); authoringResumeStatus.textContent = "Your local draft differs from the character's saved parent. Restore the reviewed parent draft before creating the world.";
     } else if (authoringJobId) beginAuthoringSession(await authoringJobs.loadAuthoringJob(authoringJobId, authoringController.signal));
   }).catch(() => { if (!disposed) { authoringResume.hidden = false; authoringResumeStatus.textContent = "Saved AI Assist proposal is unavailable, expired, or could not be loaded. Try again."; } });
   renderStage();

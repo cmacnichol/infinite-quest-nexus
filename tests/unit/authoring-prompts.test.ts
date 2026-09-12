@@ -72,12 +72,12 @@ describe("authoring prompt contracts", () => {
   it("makes source citation coordinates unambiguous for bounded excerpts", () => {
     const prompt = effectiveAuthoringPrompt("source_extraction", "Extract facts.");
 
-    expect(SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION).toBe("source-extraction-v3-quote-anchor");
-    expect(prompt.content).toContain('"citations":[{"paragraphId":"paragraph:0","quote":"exact source text"}]');
-    expect(prompt.content).toContain("Do not calculate or return coordinates");
-    expect(prompt.content).toContain("provided paragraph span");
-    expect(prompt.content).toContain("unique exact literal passage inside one provided paragraph span");
-    expect(prompt.content).toContain("prefer an entire provided paragraph/span");
+    expect(SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION).toBe("source-extraction-v6-evidence-ids");
+    expect(prompt.content).toContain('"citations":[{"evidenceId":"copy a provided evidenceId"}]');
+    expect(prompt.content).toContain("Return only evidenceId");
+    expect(prompt.content).toContain("pairs an evidenceId with its exact text");
+    expect(prompt.content).toContain("Never calculate IDs");
+    expect(prompt.content).toContain("throughout the supplied excerpt");
   });
 
   it("derives the source-world closed mapping contract from the validator rules", () => {

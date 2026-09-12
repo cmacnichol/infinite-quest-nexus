@@ -510,3 +510,65 @@ it("aborts intake work and ignores a stale submit response after disposal", asyn
   expect(onJobAvailable).not.toHaveBeenCalled();
   expect(host.textContent).toBe(before);
 });
+
+
+it("follows the last paragraph while typing until the user explicitly selects a boundary", () => {
+  const { document, window } = parseHTML("<main></main>");
+  mountSourceAuthoringPanel(document.querySelector("main")!, { api: sourceApi() as never });
+  const paste = document.querySelector<HTMLTextAreaElement>("[data-source-text]")!;
+  for (const value of ["First.", "First.\n\nSecond."]) {
+    paste.value = value; paste.dispatchEvent(new window.Event("input"));
+  }
+  expect(document.querySelector<HTMLSelectElement>("[data-source-boundary]")!.value).toBe("paragraph:1");
+  expect(document.querySelector("[data-source-coverage]")!.textContent).toContain("2 of 2 paragraphs");
+  choose(document.querySelector<HTMLSelectElement>("[data-source-boundary]")!, "paragraph:0", window as unknown as Window);
+  paste.value += "\n\nThird."; paste.dispatchEvent(new window.Event("input"));
+  expect(document.querySelector<HTMLSelectElement>("[data-source-boundary]")!.value).toBe("paragraph:0");
+  expect(document.querySelector("[data-source-coverage]")!.textContent).toContain("1 of 3 paragraphs");
+  expect(document.querySelector("[data-source-coverage]")!.textContent).toContain("Later paragraphs will not be extracted");
+});
+
+it("keeps an empty saved review blocked with an actionable explanation", async () => {
+  const { document } = parseHTML("<main></main>");
+  const api = sourceApi({ saveSourceFactReview: vi.fn().mockResolvedValue({ ...job, revision: 2 }) });
+  const panel = mountSourceAuthoringPanel(document.querySelector("main")!, { api: api as never });
+  panel.resume(job as never);
+  document.querySelector<HTMLButtonElement>("[data-action='save-source-review']")!.click();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const button = document.querySelector<HTMLButtonElement>("[data-action='generate-source-world']")!;
+  expect(button.disabled).toBe(true);
+  expect(document.querySelector("[data-source-synthesis-reason]")!.textContent).toContain("Accept at least one fact");
+  expect(document.querySelector("[data-source-command-status]")!.textContent).toContain("No facts are accepted");
+  panel.resume({ ...job, revision: 2 } as never);
+  expect(document.querySelector<HTMLButtonElement>("[data-action='generate-source-world']")!.disabled).toBe(true);
+});
+
+
+it("preserves dropdown nodes on unchanged polling snapshots but renders actual updates", () => {
+  const { document } = parseHTML("<main></main>");
+  const fact = { id: "gate", kind: "location", subject: "Gate", predicate: "stands", value: "north", provenance: "stated", citations: [] };
+  const initial = { ...job, source: { ...job.source, facts: [fact] } };
+  const panel = mountSourceAuthoringPanel(document.querySelector("main")!, { api: sourceApi() as never });
+  panel.resume(initial as never);
+  const disposition = document.querySelector("[data-fact-disposition]");
+  const manualKind = document.querySelector('[name="manual.kind"]');
+  panel.resume(structuredClone(initial) as never);
+  expect(document.querySelector("[data-fact-disposition]")).toBe(disposition);
+  expect(document.querySelector('[name="manual.kind"]')).toBe(manualKind);
+  panel.resume({ ...initial, source: { ...initial.source, extractionComplete: false }, status: "running" } as never);
+  expect(document.querySelector("main")!.textContent).toContain("Extraction is running");
+});
+
+it("explains canon selection, dispositions, identity grouping and the next action", () => {
+  const { document } = parseHTML("<main></main>");
+  const fact = { id: "gate", kind: "location", subject: "Gate", predicate: "stands", value: "north", provenance: "stated", citations: [] };
+  const panel = mountSourceAuthoringPanel(document.querySelector("main")!, { api: sourceApi() as never });
+  panel.resume({ ...job, source: { ...job.source, facts: [fact], acceptedFactIds: [fact.id] } } as never);
+  const content = document.querySelector("main")!.textContent!;
+  expect(content).toContain("Choose what belongs in your world");
+  expect(content).toContain("Only accepted facts are used to generate the world draft");
+  expect(content).toContain("Group facts about the same character");
+  expect(content).toContain("1 accepted fact · 0 character groups");
+  expect(document.querySelector('[data-action="save-source-review"]')!.textContent).toBe("Save fact selections");
+  expect(document.querySelector('[data-fact-disposition]')!.textContent).toContain("Uncertain — leave undecided; excluded from the draft");
+});

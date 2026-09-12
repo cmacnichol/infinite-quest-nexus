@@ -41,6 +41,21 @@ const profile: TextProviderProfile = {
   temperature: 0.8
 };
 
+it("ignores observer failures and excludes invalid generation IDs from header diagnostics", async () => {
+  const onResponseHeaders = vi.fn(() => { throw new Error("observer failed"); });
+  const fetcher = vi.fn(async () => new Response(JSON.stringify({ choices: [{ message: { content: "{}" } }] }), { headers: { "x-generation-id": "private unexpected text" } }));
+  await expect(callTextProvider({ ...profile, providerType: "openrouter" }, { systemPrompt: "private", input: "private", onResponseHeaders }, createTestProviderTransport(fetcher as typeof fetch))).resolves.toMatchObject({ content: "{}" });
+  expect(onResponseHeaders).toHaveBeenCalledExactlyOnceWith({ statusCode: 200 });
+});
+
+it("reports safe response headers before consuming an authoring response", async () => {
+  const onResponseHeaders = vi.fn();
+  const fetcher = vi.fn(async () => new Response(JSON.stringify({ id: "gen-test", choices: [{ message: { content: "{}" }, finish_reason: "stop" }] }), { headers: { "x-generation-id": "gen-test", "authorization": "PRIVATE" } }));
+  const result = await callTextProvider({ ...profile, providerType: "openrouter" }, { systemPrompt: "private", input: "private", onResponseHeaders }, createTestProviderTransport(fetcher as typeof fetch));
+  expect(result.content).toBe("{}");
+  expect(onResponseHeaders).toHaveBeenCalledExactlyOnceWith({ statusCode: 200, providerResponseId: "gen-test" });
+});
+
 function createTestProviderTransport(fetcher: typeof fetch): ProviderTransport {
   const dispatcher = {
     dispatch: vi.fn(),

@@ -2038,18 +2038,62 @@ describe("World Creation generation and convergent editing", () => {
   });
 });
 
-it("restores a server-backed character parent beyond the legacy storage limit and preserves its roster", async () => {
+it.each(["empty", "unchanged"])("includes a reviewed character on return to an %s parent and in the saved world", async (parentState) => {
+  const { document, root } = creationFixture();
+  const character = reviewedCharacter("returned", "Returned character");
+  const content = generatedPreview.content;
+  const createWorld = vi.fn().mockResolvedValue(createdWorld);
+  const mounted = mountWorldCreationPage(root, {
+    initialState: parentState === "empty" ? undefined : { ...reviewedState("ai"), draft: structuredClone(content) },
+    resumeCharacterJobId: "character-job", createWorld, navigate: vi.fn(),
+    authoringJobsApi: {
+      loadAuthoringCapabilities: vi.fn().mockResolvedValue({ enabled: true, supportedKinds: ["world_concept", "character"] }),
+      loadAuthoringJob: vi.fn().mockResolvedValue({ id: "character-job", revision: 3, kind: "character", status: "awaiting_review", target: { kind: "new_world" }, stages: [], expiresAt: "2026-09-17T00:00:00.000Z", incomplete: false, canApply: false,
+        request: { kind: "character", idempotencyKey: "request", prompt: "Create character", target: { kind: "new_world" }, content }, result: character, reviewedContent: character })
+    } as never
+  });
+  try {
+    await vi.waitFor(() => expect(document.querySelectorAll("[data-character-roster-item]")).toHaveLength(1));
+    expect(root.textContent).toContain("Returned character");
+    document.querySelector<HTMLButtonElement>('[data-action="continue-stage"]')!.click();
+    document.querySelector<HTMLButtonElement>('[data-action="create-world"]')!.click();
+    await vi.waitFor(() => expect(createWorld).toHaveBeenCalled());
+    expect(createWorld.mock.calls[0]?.[0].playableCharacters).toEqual([character]);
+  } finally { mounted.dispose(); }
+});
+
+it.each(["loading", "failed"])("blocks world creation while the returned character is %s", async (status) => {
+  const { document, root } = creationFixture();
+  const createWorld = vi.fn().mockResolvedValue(createdWorld);
+  const mounted = mountWorldCreationPage(root, { initialState: reviewedState(), resumeCharacterJobId: "character-job", createWorld, navigate: vi.fn(), authoringJobsApi: {
+    loadAuthoringCapabilities: vi.fn().mockResolvedValue({ enabled: true, supportedKinds: ["world_concept", "character"] }),
+    loadAuthoringJob: status === "failed" ? vi.fn().mockRejectedValue(new Error("Offline")) : vi.fn(() => new Promise(() => {}))
+  } as never });
+  try {
+    await settle(); await settle();
+    document.querySelector<HTMLButtonElement>('[data-action="create-world"]')!.click();
+    await settle();
+    expect(createWorld).not.toHaveBeenCalled();
+    expect(root.textContent).toContain("character");
+  } finally { mounted.dispose(); }
+});
+
+it("restores a server-backed character parent beyond the legacy storage limit only after reviewing local differences", async () => {
   const { document, root } = creationFixture();
   const original = reviewedCharacter("selected", "Original");
   const companion = reviewedCharacter("companion", "Companion");
   const content = { ...generatedPreview.content, playableCharacters: [original, companion], preservedLore: "x".repeat(600_000) };
-  const mounted = mountWorldCreationPage(root, { resumeCharacterJobId: "character-job", authoringJobsApi: {
+  const createWorld = vi.fn();
+  const mounted = mountWorldCreationPage(root, { initialState: reviewedState(), createWorld, resumeCharacterJobId: "character-job", authoringJobsApi: {
     loadAuthoringCapabilities: vi.fn().mockResolvedValue({ enabled: true, supportedKinds: ["world_concept", "character"] }),
     loadAuthoringJob: vi.fn().mockResolvedValue({ id: "character-job", revision: 3, kind: "character", status: "awaiting_review", target: { kind: "new_world" }, stages: [], expiresAt: "2026-09-13T00:00:00.000Z", incomplete: false, canApply: false,
       request: { kind: "character", idempotencyKey: "request", prompt: "Improve selected", characterId: "selected", target: { kind: "new_world" }, content }, reviewedContent: reviewedCharacter("selected", "Reviewed") })
   } as never });
   await settle(); await settle();
   await vi.waitFor(() => expect(document.querySelector('[data-action="restore-reviewed-parent"]')).not.toBeNull());
+  document.querySelector<HTMLButtonElement>('[data-action="create-world"]')!.click();
+  await settle();
+  expect(createWorld).not.toHaveBeenCalled();
   document.querySelector<HTMLButtonElement>('[data-action="restore-reviewed-parent"]')?.click();
   expect(root.textContent).toContain("Reviewed");
   expect(root.textContent).toContain("Companion");
@@ -2071,6 +2115,33 @@ it("bounds the readable comparison and omits schema metadata", async () => {
   await vi.waitFor(() => expect(document.querySelector("[data-authoring-compare-remote]")?.textContent).toContain("Remote title"));
   expect(document.querySelector("[data-authoring-comparison]")?.textContent).not.toContain("schemaVersion");
   mounted.dispose();
+});
+
+it("lets a saved world proposal awaiting review be cancelled from the new-world screen", async () => {
+  const { document, root, window } = creationFixture();
+  Object.defineProperty(window, "history", { configurable: true, value: { replaceState: vi.fn() } });
+  let job = { id: "world-job", revision: 3, kind: "world_concept", status: "awaiting_review", target: { kind: "new_world" }, stages: [], expiresAt: "2026-09-17T00:00:00.000Z", incomplete: false, canApply: false, result: generatedPreview.content };
+  const cancel = vi.fn(async () => { job = { ...job, status: "cancelled", revision: 4 }; return job; });
+  const mounted = mountWorldCreationPage(root, { authoringJobsApi: {
+    loadAuthoringCapabilities: vi.fn().mockResolvedValue({ enabled: true, supportedKinds: ["world_concept"] }),
+    listAuthoringJobs: vi.fn(async () => ({ jobs: [job] })),
+    loadAuthoringJob: vi.fn(async () => job),
+    cancelAuthoringJob: cancel
+  } as never });
+  try {
+    await vi.waitFor(() => expect(document.querySelector("[data-authoring-resume]")?.hasAttribute("hidden")).toBe(false));
+    document.querySelector<HTMLButtonElement>('[data-action="resume-authoring"]')!.click();
+    await vi.waitFor(() => expect(document.querySelector('[data-action="select-authoring-job"]')).not.toBeNull());
+    document.querySelector<HTMLButtonElement>('[data-action="select-authoring-job"]')!.click();
+    await vi.waitFor(() => expect(document.querySelector("[data-authoring-resume-status]")?.textContent).toContain("awaiting review"));
+    const cancelButton = document.querySelector<HTMLButtonElement>('[data-action="cancel-authoring"]')!;
+    expect(cancelButton.hidden).toBe(false);
+    cancelButton.click();
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalledWith("world-job", { expectedRevision: 3 }, expect.any(AbortSignal)));
+    await vi.waitFor(() => expect(document.querySelector("[data-authoring-resume-status]")?.textContent).toContain("cancelled"));
+    expect(document.querySelector('[data-action="select-authoring-job"]')?.textContent).toContain("cancelled");
+    expect(cancelButton.hidden).toBe(true);
+  } finally { mounted.dispose(); }
 });
 
 function durableReviewFixture(stage: WorldCreationState["stage"] = "mechanics", extras: Partial<Parameters<typeof mountWorldCreationPage>[1]> = {}) {

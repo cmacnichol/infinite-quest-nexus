@@ -454,6 +454,38 @@ describe("generation workflow", () => {
     expect("updatedAt" in (events[1] as { snapshot: object }).snapshot).toBe(false);
   });
 
+  it.each([
+    ["failed", "failed"],
+    ["recoverable", "unrecoverable"],
+    ["cancelled", "cancelled"],
+    ["discarded", "discarded"],
+    ["completed", "completed"]
+  ] as const)("settles a repeated %s snapshot when monitoring the same run again", async (status, outcome) => {
+    const terminal = snapshot({
+      status,
+      attempts: status === "recoverable" ? 2 : 1,
+      partialNarration: "The gate opened.",
+      errorMessage: "Generation could not be completed."
+    });
+    const source = sourceFromSessions([
+      [{ kind: "snapshot", snapshot: terminal }],
+      [{ kind: "snapshot", snapshot: terminal }]
+    ]);
+    const client = api({ retry: async () => { client.retries += 1; return actionResponse("queued"); } });
+    const workflow = createGenerationWorkflow({ api: client, source, clock: { now: () => 1_000 }, pendingSubmissions: store() });
+    const run = await workflow.submit(campaignId, submission());
+
+    expect((await collect(run.watch(signal()))).at(-1)).toMatchObject({ type: "settled", outcome });
+    const resumed = await collect(run.watch(signal()));
+
+    expect(resumed.at(-1)).toMatchObject({ type: "settled", outcome });
+    if (status !== "completed") {
+      expect(resumed.at(-1)).toMatchObject({ error: new Error("Generation could not be completed.") });
+    }
+    expect(resumed.filter((event) => event.type === "narration")).toHaveLength(0);
+    expect(client.retries).toBe(0);
+  });
+
   it("fails protocol-safe on malformed snapshots or a non-terminal source completion", async () => {
     const malformed = createGenerationWorkflow({
       api: api(),

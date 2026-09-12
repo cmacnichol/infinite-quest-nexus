@@ -207,8 +207,7 @@ integration("durable story-source authoring", () => {
           const frame = sourceRequest ? JSON.parse(sourceRequest) as {
             acceptedFacts?: Array<{ id: string; kind: string; subject: string; predicate: string; value: string; provenance?: string }>;
             selectedCharacterFactIds?: string[];
-            chunk?: { sourceRange: { start: number; end: number }; paragraphSpans: Array<{ paragraphId: string; start: number; end: number }> };
-            sourceText?: string;
+            chunk?: { sourceRange: { start: number; end: number }; paragraphSpans: Array<{ paragraphId: string; start: number; end: number; evidenceId: string; text: string }> };
           } : {};
           if (Array.isArray(frame.acceptedFacts)) {
             sourceWorldResponseCount += 1;
@@ -239,13 +238,13 @@ integration("durable story-source authoring", () => {
                 : selected && fact
               ? { fields: [], characterFields: [{ selectedCharacterFactId: selected, fields: [{ path: "profile.appearance.clothing", value: fact.value, supportingFactIds: [fact.id] }] }] }
               : { fields: [], characterFields: [] });
-          } else if (frame.chunk && frame.sourceText) {
+          } else if (frame.chunk?.paragraphSpans.length) {
             const span = frame.chunk.paragraphSpans[0]!;
             content = JSON.stringify({ facts: [{
               category: "character", subject: "Iris", predicate: "clothing", value: "blue coat", provenance: "stated",
               citations: [quoteOnlyExtractionFixture
-                ? { paragraphId: span.paragraphId, quote: frame.sourceText }
-                : { paragraphId: span.paragraphId, start: span.start, end: span.end, quote: frame.sourceText }]
+                ? { paragraphId: span.paragraphId, quote: span.text }
+                : { evidenceId: span.evidenceId }]
             }] });
           }
         }
@@ -315,6 +314,42 @@ integration("durable story-source authoring", () => {
     providerCallCount = () => 0;
     await pool?.end();
     if (provider) await new Promise<void>((done) => provider.close(() => done()));
+  });
+
+  it.each(["character", "location"] as const)("saves multiple values for a free-form %s predicate and permits synthesis", async (kind) => {
+    const repository = createPostgresAuthoringRepository(pool);
+    const text = "The beacon has a brass bell and a stone stair.";
+    const submitted = await repository.submit({ ownerUserId }, {
+      kind: "story_source", idempotencyKey: randomUUID(), target: { kind: "new_world" }, name: "multi-value.txt", text,
+      mode: "faithful", boundaryParagraphId: "paragraph:0", instructions: ""
+    }, sha256(text));
+    jobs.push(submitted.id);
+    const source = normalizeSourceDocument("multi-value.txt", text, submitted.id);
+    const chunks = planSourceChunks({ source, boundaryParagraphId: "paragraph:0", systemPrompt: "", instructions: "", budget: { contextWindowTokens: 100_000, maxOutputTokens: 100, countTokens: value => Buffer.byteLength(value) } });
+    const plan = await repository.claim("multi-value-plan", 60);
+    await repository.initializeExecutionSnapshot(plan!, { providerProfileId: randomUUID(), model: "synthetic", configurationHash: "a".repeat(64), contextWindowTokens: 100_000, maxOutputTokens: 100, requestTimeoutMs: 10_000, prompts: {}, protocols: { source: SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION } });
+    await repository.checkpoint(plan!, { kind: "source_plan", chunks });
+    const chunkClaim = await repository.claim("multi-value-extraction", 60);
+    await repository.checkpoint(chunkClaim!, { kind: "source_extraction", facts: ["a brass bell", "a stone stair"].map((value, index) => ({
+      id: `fixture:${index}`, kind, subject: "Beacon", predicate: "has", value, provenance: "stated" as const,
+      citations: [{ sourceId: source.id, paragraphId: "paragraph:0", start: 0, end: text.length, quote: text }]
+    })) });
+    const extracted = (await repository.read({ ownerUserId }, submitted.id))!;
+    if (extracted.kind !== "story_source") throw new Error("Expected source job.");
+    const ids = extracted.source!.facts.map(fact => fact.id);
+    expect(ids).toHaveLength(2);
+    const reviewed = await repository.reviewSourceFacts!({ ownerUserId }, submitted.id, {
+      expectedRevision: extracted.revision, acceptedFactIds: ids, rejectedFactIds: [], uncertainFactIds: [], manualFacts: [],
+      selectedCharacterFactIds: [], characterIdentityGroups: kind === "character" ? [{ representativeFactId: ids[0]!, factIds: ids }] : []
+    });
+    if (reviewed.kind !== "story_source") throw new Error("Expected source review.");
+    expect(reviewed.source!.acceptedFactIds).toEqual(ids);
+    const reloaded = (await repository.read({ ownerUserId }, submitted.id))!;
+    if (reloaded.kind !== "story_source") throw new Error("Expected source review reload.");
+    expect(reloaded.source!.acceptedFactIds).toEqual(ids);
+    expect(reloaded.source!.facts.map(fact => fact.value).sort()).toEqual(["a brass bell", "a stone stair"]);
+    const synthesis = await repository.startSourceSynthesis!({ ownerUserId }, submitted.id, reloaded.revision);
+    expect(synthesis.stages.some(stage => stage.key === "source:synthesis" && stage.status === "queued")).toBe(true);
   });
 
   it("persists normalized source once, checkpoints independent chunks, and requires explicit review before synthesis", async () => {
@@ -389,32 +424,33 @@ integration("durable story-source authoring", () => {
     expect((await repository.read({ ownerUserId }, submitted.id))!.revision).toBe(beforeForeignReview.revision);
 
     const accepted = regenerated.source!.facts.map((item) => item.id);
-    const conflictingDateIds = regenerated.source!.facts.filter((item) => item.predicate === "arrives").map((item) => item.id);
+    const arrivalFactIds = regenerated.source!.facts.filter((item) => item.predicate === "arrives").map((item) => item.id);
     const visitsIds = regenerated.source!.facts.filter((item) => item.predicate === "visits").map((item) => item.id);
-    expect(conflictingDateIds).toHaveLength(2);
+    expect(arrivalFactIds).toHaveLength(2);
     expect(visitsIds).toHaveLength(1);
     await expect(repository.reviewSourceFacts!({ ownerUserId }, submitted.id, {
-      expectedRevision: regenerated.revision, acceptedFactIds: accepted, rejectedFactIds: [], uncertainFactIds: [], selectedCharacterFactIds: [visitsIds[0]!, conflictingDateIds[0]!],
+      expectedRevision: regenerated.revision, acceptedFactIds: accepted, rejectedFactIds: [], uncertainFactIds: [], selectedCharacterFactIds: [visitsIds[0]!, arrivalFactIds[0]!],
       characterIdentityGroups: [
         { representativeFactId: visitsIds[0]!, factIds: visitsIds },
-        { representativeFactId: conflictingDateIds[0]!, factIds: conflictingDateIds }
+        { representativeFactId: arrivalFactIds[0]!, factIds: [...arrivalFactIds, visitsIds[0]!] }
       ],
       manualFacts: [{ id: "unrelated-manual-fact", kind: "rule", subject: "Lantern", predicate: "means", value: "hope", provenance: "manual", citations: [] }]
-    })).rejects.toMatchObject({ code: "invalid_state" });
-    const resolvedAccepted = accepted.filter((id) => id !== conflictingDateIds[1]);
+    })).rejects.toMatchObject({ name: "ZodError", issues: expect.arrayContaining([expect.objectContaining({ message: "A fact can belong to only one identity." })]) });
+    expect((await repository.read({ ownerUserId }, submitted.id))!.revision).toBe(regenerated.revision);
+    const resolvedAccepted = accepted.filter((id) => id !== arrivalFactIds[1]);
     const resolvedCharacterGroup = { representativeFactId: visitsIds[0]!, factIds: resolvedAccepted };
     const reviewed = await repository.reviewSourceFacts!({ ownerUserId }, submitted.id, {
-      expectedRevision: regenerated.revision, acceptedFactIds: resolvedAccepted, rejectedFactIds: [], uncertainFactIds: [conflictingDateIds[1]!], selectedCharacterFactIds: [visitsIds[0]!], characterIdentityGroups: [resolvedCharacterGroup],
+      expectedRevision: regenerated.revision, acceptedFactIds: resolvedAccepted, rejectedFactIds: [], uncertainFactIds: [arrivalFactIds[1]!], selectedCharacterFactIds: [visitsIds[0]!], characterIdentityGroups: [resolvedCharacterGroup],
       manualFacts: [{ id: "author-entered-manual-fact", kind: "rule", subject: "Lantern", predicate: "means", value: "hope", provenance: "manual", citations: [] }]
     });
     if (reviewed.kind !== "story_source") throw new Error("Expected source review detail.");
     const manualId = reviewed.source?.facts.find((item) => item.provenance === "manual")?.id;
     expect(manualId).toMatch(/^source-fact:manual:/u);
     expect(reviewed.source?.acceptedFactIds).toEqual([...resolvedAccepted, manualId]);
-    expect(reviewed.source?.uncertainFactIds).toEqual([conflictingDateIds[1]]);
+    expect(reviewed.source?.uncertainFactIds).toEqual([arrivalFactIds[1]]);
     expect(reviewed.source?.characterIdentityGroups).toEqual([resolvedCharacterGroup]);
     const rereviewed = await repository.reviewSourceFacts!({ ownerUserId }, submitted.id, {
-      expectedRevision: reviewed.revision, acceptedFactIds: [...resolvedAccepted, manualId!], rejectedFactIds: [], uncertainFactIds: [conflictingDateIds[1]!], selectedCharacterFactIds: [visitsIds[0]!], characterIdentityGroups: [resolvedCharacterGroup], manualFacts: []
+      expectedRevision: reviewed.revision, acceptedFactIds: [...resolvedAccepted, manualId!], rejectedFactIds: [], uncertainFactIds: [arrivalFactIds[1]!], selectedCharacterFactIds: [visitsIds[0]!], characterIdentityGroups: [resolvedCharacterGroup], manualFacts: []
     });
     const synthesis = await repository.startSourceSynthesis!({ ownerUserId }, submitted.id, rereviewed.revision);
     expect(synthesis.status).toBe("queued");

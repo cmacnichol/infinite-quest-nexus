@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { logger } from "../../packages/logger/src/index.js";
 import { ProviderDestinationNotAllowedError } from "../../packages/security/src/provider-network-policy.js";
 import {
   ProviderHttpError,
@@ -42,6 +43,31 @@ function timeoutError(): ProviderTransportError {
     causeMessage: "The provider request timed out."
   });
 }
+
+it("logs correlated transport retries and failed repair validation without response content", async () => {
+  const info = vi.spyOn(logger, "info").mockImplementation(() => undefined);
+  const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+  const diagnosticContext = { authoringJobId: "job", stageKey: "source:chunk:0", stageGeneration: 2 };
+  let calls = 0;
+  try {
+    await expect(runAuthoringResponse({
+      stage: "source", diagnosticContext,
+      request: async () => {
+        if (++calls === 1) throw timeoutError();
+        return providerResult("PRIVATE GENERATED TEXT");
+      },
+      parse: () => { throw new z.ZodError([{ code: "custom", path: ["facts", 9, "citations", 0], message: "PRIVATE VALIDATION MESSAGE", params: { authoringReason: "source_quote" } }]); },
+      delay: async () => undefined
+    })).rejects.toMatchObject({ authoringFailure: { code: "invalid_authoring_output" } });
+    const events = [...info.mock.calls, ...warn.mock.calls].map(([event]) => event);
+    expect(events).toContainEqual(expect.objectContaining({ ...diagnosticContext, event: "authoring_transport_retry", requestAttempt: 1 }));
+    expect(events).toContainEqual(expect.objectContaining({ ...diagnosticContext, event: "authoring_validation_completed", requestAttempt: 3, repair: true, valid: false }));
+    expect(events).toContainEqual(expect.objectContaining({ event: "authoring_repair_started", requestAttempt: 2 }));
+    expect(JSON.stringify(events)).toContain("facts.9.citations.0");
+    expect(JSON.stringify(events)).not.toContain("PRIVATE");
+    expect(calls).toBe(3);
+  } finally { info.mockRestore(); warn.mockRestore(); }
+});
 
 function creativeCharacter(overrides: Record<string, unknown> = {}) {
   return {

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { logger } from "../../../packages/logger/src/index.js";
 import type { SourceDocument, SourceFact } from "../../../packages/contracts/src/source-authoring.js";
 import {
   hasValidSourceChunkWithinBoundary,
@@ -16,7 +17,7 @@ import {
 } from "../../../packages/domain/src/source-world-proposal.js";
 import { projectAuthoringIssues } from "../../../packages/domain/src/authoring-output.js";
 import type { ProviderRequest, ProviderResult } from "../../../packages/story-engine/src/providers.js";
-import { AuthoringResponseError, runAuthoringResponse } from "./authoring-response-adapter.js";
+import { AuthoringResponseError, runAuthoringResponse, type AuthoringDiagnosticContext } from "./authoring-response-adapter.js";
 
 const MAX_SOURCE_FACTS_PER_CHUNK = 200;
 
@@ -102,7 +103,72 @@ function sourceOutputIssue(path: Array<string | number>, authoringReason: "sourc
 
 const sourceExtractionEnvelopeSchema = z.object({ facts: z.unknown() }).strict();
 
-function parseCandidates(input: SourceExtractionInput, content: string, outputLimited: boolean): SourceFact[] {
+type CitationDiagnosticContext = AuthoringDiagnosticContext & Readonly<{ requestAttempt: number; repair: boolean }>;
+
+/** Explain rejected citations; temporary source-text logging requires an exact job opt-in. */
+function logCitationMismatches(input: SourceExtractionInput, candidates: unknown, error: unknown, context: CitationDiagnosticContext): void {
+  if (!(error instanceof z.ZodError)) return;
+  const characters = Array.from(input.source.text);
+  const boundary = input.source.paragraphs.find((paragraph) => paragraph.id === input.boundaryParagraphId);
+  if (!boundary) return;
+  const paragraphs = input.source.paragraphs.filter((paragraph) => paragraph.end <= boundary.end);
+  const selectedText = characters.slice(0, boundary.end).join("");
+  const whitespace = (text: string) => text.replace(/\s+/gu, " ").trim();
+  const quotationMarks = (text: string) => text.replace(/[\u2018\u2019]/gu, "'").replace(/[\u201c\u201d]/gu, '"');
+  const normalizers = [
+    ["whitespace", whitespace],
+    ["unicode", (text: string) => text.normalize("NFC")],
+    ["quotation_marks", quotationMarks],
+    ["combined", (text: string) => whitespace(quotationMarks(text.normalize("NFC")))]
+  ] as const;
+  for (const issue of error.issues.slice(0, 20)) {
+    if (issue.code !== "custom" || issue.params?.authoringReason !== "source_quote") continue;
+    const [root, factIndex, field, citationIndex] = issue.path;
+    if (root !== "facts" || field !== "citations" || typeof factIndex !== "number" || typeof citationIndex !== "number") continue;
+    const citation = Array.isArray(candidates) ? candidates[factIndex]?.citations?.[citationIndex] : undefined;
+    if (typeof citation?.quote !== "string") continue;
+    const paragraph = paragraphs.find((paragraph) => paragraph.id === citation.paragraphId);
+    const span = input.chunk.spans.find((span) => span.paragraphId === paragraph?.id);
+    if (!paragraph || !span) continue;
+    const quote: string = citation.quote;
+    const spanText = characters.slice(span.start, span.end).join("");
+    const exactParagraph = characters.slice(paragraph.start, paragraph.end).join("").includes(quote)
+      ? paragraph
+      : paragraphs.find((candidate) => characters.slice(candidate.start, candidate.end).join("").includes(quote));
+    let matchCategory = "changed_text";
+    let normalization: string | undefined;
+    if (spanText.includes(quote)) matchCategory = "coordinate_mismatch";
+    else if (exactParagraph) matchCategory = exactParagraph.id === paragraph.id ? "outside_chunk" : "wrong_paragraph";
+    else if (selectedText.includes(quote)) matchCategory = "cross_paragraph";
+    else {
+      for (const [name, normalize] of normalizers) {
+        const normalizedQuote = normalize(quote);
+        if (normalizedQuote && normalize(spanText).includes(normalizedQuote)) {
+          matchCategory = "formatting_difference";
+          normalization = name;
+          break;
+        }
+      }
+    }
+    logger.warn({
+      event: "authoring_citation_mismatch", ...context, factIndex, citationIndex,
+      paragraphId: paragraph.id, quoteCodePoints: Array.from(quote).length,
+      paragraphCodePoints: paragraph.end - paragraph.start, spanCodePoints: span.end - span.start,
+      matchCategory, ...(normalization === undefined ? {} : { normalization }),
+      ...(exactParagraph === undefined ? {} : { matchedParagraphId: exactParagraph.id }),
+      // Temporary troubleshooting only. Remove after the citation incident is resolved.
+      ...(process.env.AI_AUTHORING_CITATION_DEBUG_JOB_ID?.trim() === context.authoringJobId ? {
+        sourceDebug: {
+          rejectedQuote: quote,
+          citedParagraphText: characters.slice(paragraph.start, paragraph.end).join(""),
+          providedSpanText: spanText
+        }
+      } : {})
+    });
+  }
+}
+
+function parseCandidates(input: SourceExtractionInput, content: string, outputLimited: boolean, diagnostics?: CitationDiagnosticContext): SourceFact[] {
   if (outputLimited) throw sourceOutputIssue(["facts"], "source_output_limit");
   let decoded: unknown;
   try {
@@ -116,12 +182,15 @@ function parseCandidates(input: SourceExtractionInput, content: string, outputLi
   } catch {
     throw sourceOutputIssue(["facts"], "source_envelope");
   }
-  const facts = validateExtractedSourceFactsWithinBoundary(
-    input.source,
-    input.chunk,
-    input.boundaryParagraphId,
-    envelope.facts
-  );
+  let facts: SourceFact[];
+  try {
+    facts = validateExtractedSourceFactsWithinBoundary(input.source, input.chunk, input.boundaryParagraphId, envelope.facts);
+  } catch (error) {
+    try {
+      if (diagnostics) logCitationMismatches(input, envelope.facts, error, diagnostics);
+    } catch { /* Diagnostics must preserve the original validation failure. */ }
+    throw error;
+  }
   if (input.mode === "faithful") {
     const inferredIndex = facts.findIndex((fact) => fact.provenance !== "stated");
     if (inferredIndex >= 0) throw new z.ZodError([{
@@ -140,6 +209,7 @@ function hasOutputLimitIssue(error: unknown): boolean {
 
 export function createSourceAuthoringAdapter(options: Readonly<{
   requestBudget: SourceExtractionRequestBudget;
+  diagnosticContext?: AuthoringDiagnosticContext;
   delay(milliseconds: number): Promise<void>;
 }>): Readonly<{ extractSourceChunk(input: SourceExtractionInput, currentClaim?: () => Promise<boolean>): Promise<SourceFact[]> }> {
   return Object.freeze({
@@ -148,10 +218,15 @@ export function createSourceAuthoringAdapter(options: Readonly<{
         throw new Error("The source chunk does not match the selected source boundary.");
       }
       let outputLimited = false;
+      let requestAttempt = 0;
+      let repair = false;
       try {
         return await runAuthoringResponse({
           stage: "source",
+          ...(options.diagnosticContext === undefined ? {} : { diagnosticContext: options.diagnosticContext }),
           request: async (attempt) => {
+            requestAttempt += 1;
+            repair = attempt.repair;
             const request = renderSourceExtractionRequest(input, attempt.repair, attempt.issues, attempt.rejectedResponse);
             const result = await (attempt.repair
               ? options.requestBudget.executeRepair(request)
@@ -159,7 +234,9 @@ export function createSourceAuthoringAdapter(options: Readonly<{
             outputLimited = result.outputLimited;
             return result;
           },
-          parse: (content) => parseCandidates(input, content, outputLimited),
+          parse: (content) => parseCandidates(input, content, outputLimited, options.diagnosticContext
+            ? { ...options.diagnosticContext, requestAttempt, repair }
+            : undefined),
           delay: options.delay,
           ...(currentClaim === undefined ? {} : { currentClaim })
         });
@@ -248,6 +325,7 @@ export function renderSourceWorldProviderRequest(
 
 export function createSourceWorldAuthoringAdapter(options: Readonly<{
   requestBudget: SourceExtractionRequestBudget;
+  diagnosticContext?: AuthoringDiagnosticContext;
   delay(milliseconds: number): Promise<void>;
 }>): Readonly<{ synthesizeSourceWorld(input: SourceWorldSynthesisInput, currentClaim?: () => Promise<boolean>): Promise<SourceWorldProposalAssembly> }> {
   return Object.freeze({
@@ -267,6 +345,7 @@ export function createSourceWorldAuthoringAdapter(options: Readonly<{
       }
       return runAuthoringResponse({
         stage: "source",
+        ...(options.diagnosticContext === undefined ? {} : { diagnosticContext: options.diagnosticContext }),
         request: async (attempt) => {
           const request = renderSourceWorldProviderRequest(input, attempt.repair, attempt.issues, attempt.rejectedResponse);
           return attempt.repair

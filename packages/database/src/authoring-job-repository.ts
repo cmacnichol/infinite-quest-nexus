@@ -327,13 +327,6 @@ function pruneSourceReviewAfterExtractionRetry(rawReview: unknown, stages: reado
   });
 }
 
-function factsConflict(facts: readonly SourceFact[]): boolean {
-  return facts.some((fact, index) => facts.slice(index + 1).some((other) =>
-    fact.subject.trim().toLocaleLowerCase() === other.subject.trim().toLocaleLowerCase()
-    && fact.predicate.trim().toLocaleLowerCase() === other.predicate.trim().toLocaleLowerCase()
-    && fact.value.trim().toLocaleLowerCase() !== other.value.trim().toLocaleLowerCase()));
-}
-
 function splitSourceChunk(source: ReturnType<typeof sourceDocumentFromNormalizedText>, chunk: Extract<AuthoringStageOutput, { kind: "source_plan" }> ["chunks"][number]) {
   const characters = Array.from(source.text);
   const { start, end } = chunk.sourceRange;
@@ -1062,12 +1055,14 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
             if (identityMembership.has(factId)) throw new AuthoringRepositoryError("invalid_state");
             identityMembership.add(factId);
           }
-          if (factsConflict(group.factIds.map((id) => factById.get(id)!))) throw new AuthoringRepositoryError("invalid_state");
         }
         if (identityMembership.size !== acceptedCharacterIds.size) throw new AuthoringRepositoryError("invalid_state");
         const representatives = new Set(finalReview.characterIdentityGroups.map((group) => group.representativeFactId));
         if (finalReview.selectedCharacterFactIds.some((id) => !representatives.has(id))) throw new AuthoringRepositoryError("invalid_state");
-        if (factsConflict(accepted.filter((fact) => fact.kind !== "character"))) throw new AuthoringRepositoryError("invalid_state");
+        // Source predicates are free-form and may have multiple values. Matching
+        // subject/predicate text is not a declared single-value constraint.
+        // Reviewers choose which supported facts to accept; structural checks above
+        // still enforce valid IDs, ownership, and complete identity membership.
         const persisted = finalReview;
         await client.query(
           `UPDATE authoring_jobs SET source_review = $2::jsonb, review_generation = review_generation + 1,

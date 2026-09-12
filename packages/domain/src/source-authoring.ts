@@ -273,6 +273,16 @@ export function hasValidSourceChunkWithinBoundary(source: SourceDocument, chunk:
     && chunk.spans.every((span) => span.end <= boundary.end);
 }
 
+/** Shared by prompt rendering and validation; IDs bind the exact provided span. */
+export function sourceEvidenceEntries(sourceText: string, sourceRange: SourceChunk["sourceRange"], spans: SourceChunk["spans"]) {
+  const characters = Array.from(sourceText);
+  return spans.map((span) => {
+    const text = characters.slice(span.start - sourceRange.start, span.end - sourceRange.start).join("");
+    const evidenceId = `evidence:${createHash("sha256").update(JSON.stringify([span.paragraphId, span.start, span.end, text])).digest("hex").slice(0, 24)}`;
+    return { ...span, evidenceId, text };
+  });
+}
+
 const sourceExtractionLegacyCitationSchema = z.object({
   paragraphId: sourceDocumentIdSchema,
   start: z.number().int().nonnegative(),
@@ -284,6 +294,7 @@ const sourceExtractionQuoteAnchorCitationSchema = z.object({
   quote: z.string().min(1)
 }).strict();
 const sourceExtractionCitationSchema = z.union([
+  z.object({ evidenceId: z.string().regex(/^evidence:[a-f0-9]{24}$/) }).strict(),
   sourceExtractionLegacyCitationSchema,
   sourceExtractionQuoteAnchorCitationSchema
 ]);
@@ -351,7 +362,7 @@ function safeSourceSchemaIssuePath(path: readonly PropertyKey[]): Array<string |
   if (typeof citationIndex !== "number" || !Number.isInteger(citationIndex) || citationIndex < 0) return [...base, "citations"];
   const citationBase: Array<string | number> = [...base, "citations", citationIndex];
   const citationField = path[3];
-  return citationField === "paragraphId" || citationField === "start" || citationField === "end" || citationField === "quote"
+  return citationField === "evidenceId" || citationField === "paragraphId" || citationField === "start" || citationField === "end" || citationField === "quote"
     ? [...citationBase, citationField]
     : citationBase;
 }
@@ -402,8 +413,16 @@ function validateExtractedSourceFactsWithBoundary(
   const paragraphIndexById = new Map(source.paragraphs.map((paragraph, index) => [paragraph.id, index]));
   const spanByParagraph = new Map(chunk.spans.map((span) => [span.paragraphId, span]));
   const boundaryIndex = boundaryParagraphId === undefined ? undefined : paragraphIndexById.get(boundaryParagraphId);
+  const evidenceById = new Map(sourceEvidenceEntries(
+    characters.slice(chunk.sourceRange.start, chunk.sourceRange.end).join(""), chunk.sourceRange, chunk.spans
+  ).map((entry) => [entry.evidenceId, entry]));
   const facts = parsed.map((candidate, factIndex) => {
     const citations = candidate.citations.map((citation, citationIndex) => {
+      if ("evidenceId" in citation) {
+        const entry = evidenceById.get(citation.evidenceId);
+        if (!entry) throw new z.ZodError([sourceEvidenceIssue(["facts", factIndex, "citations", citationIndex], "source_citation_target")]);
+        return { sourceId: source.id, paragraphId: entry.paragraphId, start: entry.start, end: entry.end, quote: entry.text };
+      }
       const paragraph = paragraphById.get(citation.paragraphId);
       const span = spanByParagraph.get(citation.paragraphId);
       const paragraphIndex = paragraphIndexById.get(citation.paragraphId);

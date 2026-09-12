@@ -9,6 +9,10 @@ import type { AuthoringBudget } from "../../../packages/domain/src/source-author
 import type { RuntimeTextExecution } from "./provider-credential-transport-adapter.js";
 import type { RuntimeProviderExecutionPort } from "./provider-credential-transport-adapter.js";
 
+import { logger } from "../../../packages/logger/src/index.js";
+import { providerTransportErrorDetails, ProviderHttpError } from "../../../packages/story-engine/src/providers.js";
+import type { AuthoringDiagnosticContext } from "./authoring-response-adapter.js";
+
 const SOURCE_CONTEXT_FRACTION = 0.8;
 
 export class RuntimeSourceAuthoringBudgetError extends Error {
@@ -159,7 +163,8 @@ function assertMeasuredLegacySourceRequest(request: ProviderRequest): void {
 
 export function createRuntimeSourceAuthoringRequestBudget(
   execution: RuntimeTextExecution,
-  verifiedModelContextWindowTokens?: number
+  verifiedModelContextWindowTokens?: number,
+  diagnosticContext?: AuthoringDiagnosticContext
 ): RuntimeSourceAuthoringRequestBudget {
   const contextWindowTokens = resolveAuthoringContextWindowTokens(execution.contextWindowTokens, verifiedModelContextWindowTokens);
   const inputLimit = sourceInputLimit(contextWindowTokens, execution.maxOutputTokens);
@@ -183,6 +188,30 @@ export function createRuntimeSourceAuthoringRequestBudget(
       return toPrepared(withoutDiagnostic, serializeLegacyProviderRequest(profile, withoutDiagnostic), inputLimit, true);
     }
   };
+  let requestAttempt = 0;
+  const execute = async (prepared: PreparedSourceAuthoringRequest, repair: boolean): Promise<ProviderResult> => {
+    if (!diagnosticContext) return execution.execute(prepared.request);
+    const startedAt = Date.now();
+    const context = { ...diagnosticContext, providerProfileId: execution.id, model: execution.model, providerType: execution.providerType, requestAttempt: ++requestAttempt, repair };
+    let headersReceived = false;
+    let providerResponseId: string | undefined;
+    logger.info({ event: "authoring_provider_started", ...context, streaming: Boolean(prepared.request.onChunk), requestBytes: prepared.byteLength, maxOutputTokens: execution.maxOutputTokens, contextWindowTokens, requestTimeoutMs: execution.requestTimeoutMs, droppedRejectedResponse: prepared.droppedRejectedResponse });
+    try {
+      const result = await execution.execute({ ...prepared.request, onResponseHeaders: (headers) => {
+        headersReceived = true;
+        providerResponseId = headers.providerResponseId;
+        logger.info({ event: "authoring_provider_headers", ...context, ...headers, durationMs: Date.now() - startedAt });
+        prepared.request.onResponseHeaders?.(headers);
+      } });
+      providerResponseId ??= /^[a-zA-Z0-9_-]{1,200}$/.test(result.responseId) ? result.responseId : undefined;
+      logger.info({ event: "authoring_provider_completed", ...context, providerResponseId, durationMs: Date.now() - startedAt, finishReason: /^(stop|length|tool_calls|content_filter|max_tokens|end_turn)$/.test(result.finishReason) ? result.finishReason : "other", outputLimited: result.outputLimited, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, totalTokens: result.usage.totalTokens, outputCharacters: result.content.length });
+      return result;
+    } catch (error) {
+      const transport = providerTransportErrorDetails(error);
+      logger.warn({ event: "authoring_provider_failed", ...context, providerResponseId, durationMs: Date.now() - startedAt, headersReceived, ...(transport ? { diagnosticCode: transport.timedOut ? "provider_request_timeout" : "provider_transport_error", transportCode: transport.transportCode, timeoutMs: transport.timeoutMs } : { diagnosticCode: error instanceof ProviderHttpError ? "provider_http_error" : "provider_error" }), ...(error instanceof ProviderHttpError ? { statusCode: error.statusCode } : {}) });
+      throw error;
+    }
+  };
   return Object.freeze({
     budget,
     inputLimit,
@@ -194,11 +223,11 @@ export function createRuntimeSourceAuthoringRequestBudget(
     prepareRepair,
     executeInitial: async (request) => {
       const prepared = prepareInitial(request);
-      return execution.execute(prepared.request);
+      return execute(prepared, false);
     },
     executeRepair: async (request) => {
       const prepared = prepareRepair(request);
-      return execution.execute(prepared.request);
+      return execute(prepared, true);
     }
   });
 }

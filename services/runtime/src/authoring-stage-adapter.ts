@@ -70,6 +70,8 @@ export function createAuthoringExecutionSnapshot(
 
 export type LoadedAuthoringStage = Readonly<{
   jobId: string;
+  stageId?: string;
+  stageGeneration?: number;
   input: Awaited<ReturnType<AuthoringExecutionRepository["loadClaim"]>> extends infer Claim
     ? Claim extends { input: infer Input } ? Input : never
     : never;
@@ -107,7 +109,7 @@ export async function executeAuthoringStage(options: Readonly<{
     loaded = await options.repository.loadClaim(options.claim);
   }
   if (!loaded) return null;
-  return options.dispatch({ ...loaded, jobId: options.claim.jobId, ownerUserId: options.claim.ownerUserId, currentClaim: async () => {
+  return options.dispatch({ ...loaded, stageId: options.claim.stageId, stageGeneration: options.claim.stageGeneration, jobId: options.claim.jobId, ownerUserId: options.claim.ownerUserId, currentClaim: async () => {
     if (options.currentClaim && !await options.currentClaim()) return false;
     if (!await options.repository.loadClaim(options.claim)) return false;
     // Local shutdown/heartbeat loss can happen while the database read waits.
@@ -163,7 +165,8 @@ export function createRuntimeAuthoringStageDispatcher(options: Readonly<{
         throw new AuthoringResponseError({ code: "source_evidence_invalid", stage: "source", retryable: false, issues: [] });
       }
       const sourceInput = stage.input;
-      const requestBudget = createRuntimeSourceAuthoringRequestBudget(provider);
+      const diagnosticContext = { authoringJobId: stage.jobId, stageKey: stage.stageKey, ...(stage.stageId === undefined ? {} : { stageId: stage.stageId }), ...(stage.stageGeneration === undefined ? {} : { stageGeneration: stage.stageGeneration }) };
+      const requestBudget = createRuntimeSourceAuthoringRequestBudget(provider, undefined, diagnosticContext);
       if (isSourceWorldStage) {
         if (!stage.sourceSelection) {
           throw new AuthoringResponseError({ code: "source_review_conflict", stage: "source", retryable: false, issues: [] });
@@ -174,7 +177,7 @@ export function createRuntimeAuthoringStageDispatcher(options: Readonly<{
         if (selectedCharacterFactIds.some((id) => !stage.sourceSelection!.selectedCharacterFactIds.includes(id))) {
           throw new AuthoringResponseError({ code: "source_review_conflict", stage: "source", retryable: false, issues: [] });
         }
-        const adapter = createSourceWorldAuthoringAdapter({ requestBudget, delay: async () => undefined });
+        const adapter = createSourceWorldAuthoringAdapter({ requestBudget, diagnosticContext, delay: async () => undefined });
         const assembled = await adapter.synthesizeSourceWorld({
           selection: { ...stage.sourceSelection, selectedCharacterFactIds },
           reviewGeneration: stage.sourceSelection.reviewGeneration,
@@ -235,6 +238,7 @@ export function createRuntimeAuthoringStageDispatcher(options: Readonly<{
         if (!chunk) throw new Error("Source extraction stage is missing its durable chunk plan.");
         const adapter = createSourceAuthoringAdapter({
           requestBudget,
+          diagnosticContext,
           delay: async () => undefined
         });
         return { kind: "source_extraction", facts: await adapter.extractSourceChunk({

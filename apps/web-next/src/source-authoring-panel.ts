@@ -58,6 +58,7 @@ export function mountSourceAuthoringPanel(host: HTMLElement, dependencies: Sourc
   let name = "Pasted story";
   let mode: "faithful" | "expand" = "faithful";
   let boundary = "";
+  let boundaryExplicit = false;
   let current: AuthoringJobView | null = null;
   let disposed = false;
   let localReview: SourceFactReview | null = null;
@@ -82,6 +83,18 @@ export function mountSourceAuthoringPanel(host: HTMLElement, dependencies: Sourc
     return { normalized, characters: Array.from(normalized), paragraphs: sourceParagraphMap(normalized), bytes: rawBytes(rawText), codePoints: Array.from(rawText).length };
   }
 
+  function updateBoundary(shown: IntakePreview): void {
+    if (!boundaryExplicit || !shown.paragraphs.some((paragraph) => paragraph.id === boundary)) {
+      boundary = shown.paragraphs.at(-1)?.id ?? "";
+      boundaryExplicit = false;
+    }
+  }
+
+  function coverageText(shown: Pick<IntakePreview, "paragraphs">, selected = boundary): string {
+    const count = shown.paragraphs.findIndex((paragraph) => paragraph.id === selected) + 1;
+    return `Including ${count} of ${shown.paragraphs.length} paragraphs. ${count < shown.paragraphs.length ? "Later paragraphs will not be extracted." : "The entire source is included."}`;
+  }
+
   function fillBoundaryOptions(select: HTMLSelectElement, shown: IntakePreview): void {
     select.replaceChildren();
     for (const paragraph of shown.paragraphs) {
@@ -103,9 +116,11 @@ export function mountSourceAuthoringPanel(host: HTMLElement, dependencies: Sourc
     const submit = host.querySelector<HTMLButtonElement>("[data-action='submit-source']");
     try {
       const shown = preview();
-      if (!boundary || !shown.paragraphs.some((paragraph) => paragraph.id === boundary)) boundary = shown.paragraphs.at(-1)?.id ?? "";
+      updateBoundary(shown);
       if (size) size.textContent = `${name} · ${shown.bytes} bytes · ${shown.codePoints} code points`;
       if (select) fillBoundaryOptions(select, shown);
+      const coverage = host.querySelector<HTMLElement>("[data-source-coverage]");
+      if (coverage) coverage.textContent = coverageText(shown);
       if (submit) submit.disabled = commandController !== null || (!pendingSubmission && (!rawText.trim() || shown.bytes > MAX_SOURCE_DOCUMENT_BYTES || shown.codePoints > MAX_SOURCE_DOCUMENT_CODE_POINTS || !boundary));
     } catch {
       if (submit) submit.disabled = commandController !== null || !pendingSubmission;
@@ -368,7 +383,11 @@ export function mountSourceAuthoringPanel(host: HTMLElement, dependencies: Sourc
 
   function renderReview(view: SourceAuthoringView): void {
     localReview = reviewFrom(view, current!.revision);
+    host.append(text(document, "Choose what belongs in your world", "h3"));
+    host.append(text(document, "These facts are AI-extracted suggestions for your world canon, not just a chapter summary. Check the source evidence and accept facts that are accurate and useful for the world you want to create. Only accepted facts are used to generate the world draft. You can review and edit that draft before creating the world."));
+    host.append(text(document, "Accept includes a fact. Reject excludes an incorrect, irrelevant, or unwanted fact. Uncertain leaves it undecided and excludes it from the draft."));
     host.append(text(document, `${view.source.name} · ${rawBytes(view.source.text)} bytes · ${Array.from(view.source.text).length} code points · ${view.mode} · included through ${view.boundaryParagraphId}.`));
+    host.append(text(document, coverageText({ paragraphs: view.source.paragraphs }, view.boundaryParagraphId)));
     host.append(text(document, extractionStatusText(view)));
     const stages = currentStages(current!);
     const chunks = stages.filter((stage) => stage.key.startsWith("source:chunk:"));
@@ -390,7 +409,11 @@ export function mountSourceAuthoringPanel(host: HTMLElement, dependencies: Sourc
       for (const value of ["accepted", "rejected", "uncertain"] as const) {
         const option = document.createElement("option");
         option.value = value;
-        option.textContent = value;
+        option.textContent = {
+          accepted: "Accept — include in the world draft",
+          rejected: "Reject — exclude from the world draft",
+          uncertain: "Uncertain — leave undecided; excluded from the draft"
+        }[value];
         option.selected = value === (localReview.acceptedFactIds.includes(fact.id) ? "accepted" : localReview.rejectedFactIds.includes(fact.id) ? "rejected" : "uncertain");
         disposition.append(option);
       }
@@ -414,16 +437,22 @@ export function mountSourceAuthoringPanel(host: HTMLElement, dependencies: Sourc
       host.append(row, renderEvidence(fact, view));
     }
 
-    host.append(text(document, "Character identities are an explicit review decision. Add each accepted character fact to exactly one group; same names may remain separate."));
+    host.append(text(document, "Group facts about the same character", "h3"));
+    host.append(text(document, "Put accepted facts describing the same person into one identity group so the draft does not treat each fact as a separate character. Confirm separate identities for different people, even if they share a name. Choose one member fact to represent each group; this is a label for the group, not its only included fact. Optionally add that representative to the playable roster. All accepted character facts must belong to exactly one group."));
     renderManualForm();
     renderIdentityGroups(view);
     if (localReview.selectedCharacterFactIds.length >= 20) host.append(text(document, "The playable roster already has the maximum 20 representatives."));
 
+    const acceptedCount = localReview.acceptedFactIds.length;
+    const groupCount = localReview.characterIdentityGroups.length;
+    const summary = text(document, `${acceptedCount} accepted fact${acceptedCount === 1 ? "" : "s"} · ${groupCount} character group${groupCount === 1 ? "" : "s"} · ${localReview.selectedCharacterFactIds.length} playable representatives`);
+    summary.dataset.sourceSelectionSummary = "";
+    host.append(summary, text(document, "Save fact selections, then Generate world draft. Saving selections does not create a world."));
     const issue = reviewIssue(view);
     if (issue) host.append(text(document, issue));
     const save = document.createElement("button");
     save.type = "button";
-    save.textContent = "Use selected facts";
+    save.textContent = "Save fact selections";
     save.dataset.action = "save-source-review";
     save.disabled = !view.extractionComplete || !!issue || !!reviewConflict || commandController !== null;
     save.addEventListener("click", () => { void saveReview(); });
@@ -431,7 +460,20 @@ export function mountSourceAuthoringPanel(host: HTMLElement, dependencies: Sourc
     synthesis.type = "button";
     synthesis.textContent = "Generate world draft";
     synthesis.dataset.action = "generate-source-world";
-    synthesis.disabled = !view.extractionComplete || !!issue || !reviewSaved || localDirty || !!reviewConflict || commandController !== null;
+    const synthesisReason = !view.extractionComplete ? "Wait for extraction to complete before generating a world draft."
+      : reviewConflict ? "Resolve the review conflict before generating a world draft."
+      : commandController !== null ? "Wait for the current operation to finish."
+      : !localReview.acceptedFactIds.length ? "Accept at least one fact, then click Save fact selections."
+      : issue ?? (!reviewSaved || localDirty ? "Click Save fact selections to save your review before generating a world draft." : null);
+    synthesis.disabled = synthesisReason !== null;
+    if (synthesisReason) {
+      const reason = text(document, synthesisReason);
+      reason.dataset.sourceSynthesisReason = "";
+      reason.id = "source-synthesis-reason";
+      reason.setAttribute("role", "status");
+      synthesis.setAttribute("aria-describedby", reason.id);
+      host.append(reason);
+    }
     synthesis.addEventListener("click", () => { void beginSynthesis(); });
     host.append(save, synthesis);
     if (newerIntakeAvailable) appendNewSubmissionAction("Start a new proposal from the source edits made while the earlier submission was pending.");
@@ -581,11 +623,12 @@ export function mountSourceAuthoringPanel(host: HTMLElement, dependencies: Sourc
     let nextDraftValid = false;
     try {
       const shown = preview();
-      if (!boundary || !shown.paragraphs.some((paragraph) => paragraph.id === boundary)) boundary = shown.paragraphs.at(-1)?.id ?? "";
+      updateBoundary(shown);
       const size = text(document, `${name} · ${shown.bytes} bytes · ${shown.codePoints} code points`); size.dataset.sourceSize = ""; host.append(size);
       const select = document.createElement("select"); select.dataset.sourceBoundary = "";
       fillBoundaryOptions(select, shown);
-      select.addEventListener("change", () => { boundary = select.value; markIntakeChanged(); }); const boundaryLabel = text(document, "Include through paragraph", "label"); boundaryLabel.append(select); host.append(boundaryLabel);
+      select.addEventListener("change", () => { boundary = select.value; boundaryExplicit = true; markIntakeChanged(); refreshIntakePreview(); }); const boundaryLabel = text(document, "Include through paragraph", "label"); boundaryLabel.append(select); host.append(boundaryLabel);
+      const coverage = text(document, coverageText(shown)); coverage.dataset.sourceCoverage = ""; coverage.setAttribute("role", "status"); host.append(coverage);
       nextDraftValid = !!rawText.trim() && shown.bytes <= MAX_SOURCE_DOCUMENT_BYTES && shown.codePoints <= MAX_SOURCE_DOCUMENT_CODE_POINTS && !!boundary;
     } catch { host.append(text(document, "Source text cannot contain NUL characters or invalid Unicode.")); }
     const submit = document.createElement("button"); submit.type = "button"; submit.textContent = pendingSubmission ? "Retry original source submission" : "Extract source facts"; submit.dataset.action = "submit-source";
@@ -603,7 +646,7 @@ export function mountSourceAuthoringPanel(host: HTMLElement, dependencies: Sourc
     try {
       rawText = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(await selected.arrayBuffer());
       if (disposed) return;
-      name = selected.name; boundary = ""; markIntakeChanged(); render();
+      name = selected.name; boundary = ""; boundaryExplicit = false; markIntakeChanged(); render();
     } catch { if (!disposed) { commandStatus = "The file is not valid UTF-8 text."; render(); } }
   }
 
@@ -727,7 +770,7 @@ export function mountSourceAuthoringPanel(host: HTMLElement, dependencies: Sourc
       }
       if (submittedGeneration === editGeneration) {
         publishJob(received);
-        localReview = null; localDirty = false; reviewSaved = true; reviewConflict = null; commandStatus = "Source review saved.";
+        localReview = null; localDirty = false; reviewSaved = true; reviewConflict = null; commandStatus = received.source?.acceptedFactIds.length ? "Source review saved." : "Review saved. No facts are accepted; accept at least one fact to generate a world draft.";
       } else {
         const rebased = localReview && rebaseReviewAfterSave(localReview, submitted, previous, received);
         publishJob(received);
@@ -747,7 +790,7 @@ export function mountSourceAuthoringPanel(host: HTMLElement, dependencies: Sourc
   }
 
   async function beginSynthesis(): Promise<void> {
-    if (!current || !reviewSaved || localDirty || reviewConflict) return;
+    if (!current || !reviewSaved || localDirty || reviewConflict || !localReview?.acceptedFactIds.length) return;
     const command = beginCommand(); if (!command) return;
     const expectedId = current.id; commandStatus = "Starting source synthesis…"; render();
     try {
@@ -779,6 +822,8 @@ export function mountSourceAuthoringPanel(host: HTMLElement, dependencies: Sourc
     resume(job) {
       if (disposed || job.kind !== "story_source" || !job.source) return;
       if (job.id === ignoredResumeJobId) return;
+      // Poll notifications must not replace native dropdowns when no data changed.
+      if (current?.id === job.id && JSON.stringify(current) === JSON.stringify(job)) return;
       if (current && current.id !== job.id) {
         localReview = null; localDirty = false; reviewConflict = null; reviewSaved = false; commandStatus = ""; openCitations.clear();
         manualDraft.kind = "character"; manualDraft.subject = ""; manualDraft.predicate = ""; manualDraft.value = "";
