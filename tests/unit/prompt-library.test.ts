@@ -119,6 +119,29 @@ describe("Prompt Library catalog", () => {
     expect(PROMPT_TEMPLATE_CATALOG.event_extension.defaultContent).toContain("Stop once the event is integrated.");
   });
 
+  it.each([
+    "story_system", "story_recovery_output_limit", "story_recovery_mechanics",
+    "story_recovery_schema", "scene_coverage_rewrite", "event_extension"
+  ] as const)("includes prose-quality guidance in the resolved %s provider preview", async (key) => {
+    const prompts = createPromptRepository({ query: vi.fn().mockResolvedValue({ rows: [] }) } as never);
+    const { snapshot } = await prompts.loadPromptSnapshot({ ownerUserId: crypto.randomUUID(), scope: "application" });
+    const preview = buildPromptPreview(key, snapshot[key].content);
+    const text = preview.sections.map((section) => section.content).join("\n");
+
+    expect(text).toContain('Split sequences of three or more independent clauses joined by "and" into separate sentences.');
+    expect(text).toContain("Allow ordinary conjunctions in lists and natural dialogue.");
+    expect(text).toContain("Avoid circular abstractions that repeatedly redefine the previous phrase without adding meaning.");
+    expect(text).toContain("Preserve established facts, requested events, viewpoint, and tone.");
+    expect(preview.unresolvedVariables).toEqual([]);
+  });
+
+  it("limits event-extension prose revision to newly appended narration", () => {
+    const preview = buildPromptPreview("event_extension", PROMPT_TEMPLATE_CATALOG.event_extension.defaultContent);
+    const text = preview.sections.map((section) => section.content).join("\n");
+    expect(text).toContain("Apply the prose guidance only to newly appended narration; never revise the supplied narration.");
+    expect(text).toContain("Preserve the supplied narration unchanged");
+  });
+
   it("allows only eligible campaign overrides", () => {
     expect(promptTemplateOverrideSchema.safeParse({ key: "story_system", scope: "campaign", campaignId: crypto.randomUUID(), content: "Write safely." }).success).toBe(true);
     expect(promptTemplateOverrideSchema.safeParse({ key: "world_generation", scope: "campaign", campaignId: crypto.randomUUID(), content: "Write safely." }).success).toBe(false);

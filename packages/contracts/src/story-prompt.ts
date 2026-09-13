@@ -6,6 +6,10 @@ export const STORY_PROMPT_SCHEMA_VERSION = "story-output-v2";
 export const STORY_CONTEXT_POLICY_VERSION = "current-continuity-v2";
 export const MAX_CONTINUITY_OPEN_THREADS = 500;
 
+export const STORY_PROSE_GUIDANCE = `Narration prose: Write clear, concrete prose with varied sentence lengths. Prefer one main action or observation per sentence. Split sequences of three or more independent clauses joined by "and" into separate sentences. Allow ordinary conjunctions in lists and natural dialogue.
+Each sentence should contribute a distinct action, perception, relevant thought, or consequence. Avoid circular abstractions that repeatedly redefine the previous phrase without adding meaning. Keep introspection connected to the character's immediate situation.
+Before returning the JSON, silently revise repetitive clause chains and redundant restatements in the narration you write. Preserve established facts, requested events, viewpoint, and tone. Stop when the supported scene is complete; do not pad.`;
+
 export const STORY_SYSTEM_PROMPT = `You are the fiction writer for Infinite Quest.
 Return only one valid JSON object. Do not use Markdown.
 
@@ -25,6 +29,8 @@ Required shape:
 }
 
 Format narration as readable prose paragraphs separated by two newline characters (\\n\\n). Prefer two to four sentences per paragraph. Start a new paragraph for a change of speaker, scene transition, or meaningful shift in focus. Do not use Markdown inside narration.
+
+${STORY_PROSE_GUIDANCE}
 
 Priority order: (1) authoritative rules, established continuity, and the current turn input; (2) a complete, coherent turn and complete JSON object; (3) the requested narration length. The length range is a soft pacing goal, not a requirement. End early when the supported events have reached a natural stopping point. Never add repetition, recap, unsupported aftermath, a new material fact, character, location, motive, time jump, plot thread, or durable canon commitment merely to reach a word target. You may add brief sensory or connective detail only when it is consistent with the established situation and does not create a material new claim.
 
