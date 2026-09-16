@@ -29,6 +29,8 @@ Current local verification supersedes the corresponding limitations in the histo
 - Compiled Linux System Archive end-to-end suite: three passed, including its rendered browser coverage, using writable container source and a dedicated test database.
 - Whitespace check: passed. GitHub workflow results are recorded on [PR #157](https://github.com/cmacnichol/infinite-quest-nexus/pull/157); local checks are not represented as remote CI results.
 
+The first run past setup exposed a Linux-only unit-fixture error: the evaluator's private-manifest test supplied a hard-coded Windows absolute path. The fixture now constructs platform-native absolute paths while retaining its sibling-directory rejection assertion. All 14 evaluator tests pass on both Linux and Windows; production path validation is unchanged.
+
 No campaign migration, production repair, live-provider call, or rollout promotion is part of these CI fixes. The release decisions above remain unchanged.
 
 ### Historical implementation runs

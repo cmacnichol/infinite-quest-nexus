@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { resolve } from "node:path";
 import { createStoryEvidence, generationEvidenceManifestHash } from "../../packages/application/src/memory/generation-context.js";
 import { describe, expect, it } from "vitest";
 import {
@@ -193,14 +194,15 @@ describe("story continuity evaluator", () => {
   });
 
   it("creates a private 30-day manifest without credentials or provider endpoints", () => {
+    const privateArtifactDirectory = resolve("operator-private", "continuity");
     const manifest = createPrivateArtifactManifest({
       runId: "continuity-run", sourceAuthorization: "operator approved copied campaign", copiedDestination: "copy-campaign",
-      privateArtifactDirectory: "C:\\operator-private\\continuity", issuedAt: "2026-09-16T12:00:00.000Z",
-      artifactPaths: ["C:\\operator-private\\continuity\\raw-output.json"], accessPolicy: "operator/current-owner review team"
+      privateArtifactDirectory, issuedAt: "2026-09-16T12:00:00.000Z",
+      artifactPaths: [resolve(privateArtifactDirectory, "raw-output.json")], accessPolicy: "operator/current-owner review team"
     });
     expect(manifest.expiresAt).toBe("2026-10-16T12:00:00.000Z");
     expect(JSON.stringify(manifest)).not.toMatch(/api[_-]?key|https?:\/\//i);
-    expect(() => createPrivateArtifactManifest({ ...manifest, artifactPaths: ["C:\\operator-private\\continuity-other\\raw-output.json"] })).toThrow(/stay under/i);
+    expect(() => createPrivateArtifactManifest({ ...manifest, artifactPaths: [resolve(privateArtifactDirectory, "..", "continuity-other", "raw-output.json")] })).toThrow(/stay under/i);
   });
 
   it("binds captured evidence to source identity and wire field, and scores independent replacement oracles", () => {
