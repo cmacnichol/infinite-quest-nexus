@@ -18,9 +18,9 @@ import { runWorker } from "../../services/worker/src/worker.js";
 import { startNextGeneration } from "../../services/worker/src/worker.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import {
-  branchCampaign,
+  branchCampaignWithMemoryOff as branchCampaign,
   buildContextPreview,
-  importLegacyStory,
+  importLegacyStoryWithMemoryOff as importLegacyStory,
   rebuildCampaignMemories,
   rewindCampaign,
   setCampaignEmbeddingConfig,

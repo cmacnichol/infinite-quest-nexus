@@ -124,6 +124,7 @@ export function storyCampaignToolsMarkup(): string {
       <button type="button" data-tool-action="open-world-setup">Current World Setup</button>
       <button type="button" data-tool-action="edit-character-profile">Edit Character Profile</button>
       <button type="button" data-tool-action="edit-campaign-state">Edit Campaign State</button>
+      <button type="button" data-tool-action="edit-story-memory">Campaign Memory</button>
       <button type="button" data-tool-action="open-campaign-history">Turn History &amp; State</button>
       <button type="button" data-tool-action="open-activity">Activity Log</button>
       <button type="button" data-tool-action="open-about">About</button>

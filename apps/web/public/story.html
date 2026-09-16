@@ -539,6 +539,21 @@
           </label>
         </div>
       </div>
+      <div class="settings-section-card">
+        <div class="settings-section-header">
+          <span class="settings-section-title">Current Campaign Memory</span>
+        </div>
+        <label class="settings-field" title="Sets the durable Story Memory review level for future generated turns. Story context budget remains independent.">
+          <span class="settings-option-label">Story memory level</span>
+          <select id="storyMemoryLevel" disabled>
+            <option value="off">Off</option>
+            <option value="standard">Standard</option>
+            <option value="enhanced">Enhanced</option>
+            <option value="max">Max</option>
+          </select>
+        </label>
+        <p id="storyMemoryStatus" class="mini" role="status" aria-live="polite">Loading the saved Story Memory level for this campaign.</p>
+      </div>
       <div class="row wrap dialog-actions dialog-actions-spaced">
         <button id="btnCancelUserProfile" type="button">Cancel</button>
         <button id="btnSaveUserProfile" class="primary" type="button">Save Profile</button>

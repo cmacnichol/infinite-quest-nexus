@@ -72,6 +72,8 @@ function runtimeConfig(): RuntimeConfig {
     workerPollIntervalMs: 1000,
     workerLeaseSeconds: 60,
     workerGenerationConcurrency: 1,
+    storyMemoryCapability: "r3",
+    storyMemoryEnforceEnabled: true,
     legacyWebRoot: resolve("apps/web/public"),
     nextWebRoot: resolve("apps/web-next"),
     assetStorageDriver: "filesystem",
@@ -123,6 +125,7 @@ integration("world campaign Fastify production application cutover", () => {
   let app: FastifyInstance;
   let worldCampaign: WorldCampaignApplication;
   let ownerUserId: string;
+  let config: RuntimeConfig;
   const trackedCampaigns: TrackedResource[] = [];
   const trackedWorlds: TrackedResource[] = [];
   const trackedForeignUsers: string[] = [];
@@ -339,7 +342,7 @@ integration("world campaign Fastify production application cutover", () => {
     pool = createDatabasePool(databaseUrl!, 4);
     await migrateDatabase(pool, resolve("database/migrations"));
     ownerUserId = await initialOwnerId(pool);
-    const config = runtimeConfig();
+    config = runtimeConfig();
     worldCampaign = createApiWorldCampaignApplication(pool, {
       credentialSecret: config.credentialEncryptionKey
     });
@@ -413,6 +416,66 @@ integration("world campaign Fastify production application cutover", () => {
         settings: original.settings
       });
     }
+  });
+
+  it("serves strict, owner-scoped Story Memory settings through the production API", async () => {
+    const world = await createPublishedWorld("story memory settings");
+    const owned = await createCampaign("story memory settings", world.published.worldVersionId);
+
+    const initial = await app.inject({ method: "GET", url: `/api/v1/campaigns/${owned.campaign.id}/story-memory` });
+    expect(initial.statusCode).toBe(200);
+    expect(initial.json()).toEqual({
+      level: "max", reviewMode: "enforce", availableLevels: ["off", "standard", "enhanced", "max"]
+    });
+
+    const enhanced = await app.inject({
+      method: "PUT", url: `/api/v1/campaigns/${owned.campaign.id}/story-memory`, payload: { level: "enhanced" }
+    });
+    expect(enhanced.statusCode).toBe(200);
+    expect(enhanced.json()).toMatchObject({ level: "enhanced", reviewMode: "off" });
+
+    const invalid = await app.inject({
+      method: "PUT", url: `/api/v1/campaigns/${owned.campaign.id}/story-memory`,
+      payload: { level: "max", reviewMode: "enforce" }
+    });
+    expect(invalid.statusCode).toBe(400);
+
+    config.storyMemoryEnforceEnabled = false;
+    const enforceDisabled = await app.inject({
+      method: "PUT", url: `/api/v1/campaigns/${owned.campaign.id}/story-memory`, payload: { level: "max" }
+    });
+    expect(enforceDisabled.statusCode).toBe(409);
+    config.storyMemoryCapability = "r1";
+    const capabilityUnavailable = await app.inject({
+      method: "PUT", url: `/api/v1/campaigns/${owned.campaign.id}/story-memory`, payload: { level: "enhanced" }
+    });
+    expect(capabilityUnavailable.statusCode).toBe(409);
+    config.storyMemoryCapability = "r3";
+    config.storyMemoryEnforceEnabled = true;
+
+    const off = await app.inject({
+      method: "PUT", url: `/api/v1/campaigns/${owned.campaign.id}/story-memory`, payload: { level: "off" }
+    });
+    expect(off.statusCode).toBe(200);
+    expect(off.json()).toMatchObject({ level: "off", reviewMode: "off" });
+
+    const foreignUserId = crypto.randomUUID();
+    trackedForeignUsers.push(foreignUserId);
+    await pool.query("INSERT INTO users (id, display_name, status) VALUES ($1,$2,'active')", [foreignUserId, `14c3 memory foreign ${foreignUserId}`]);
+    const foreignWorld = await createPublishedWorld("foreign story memory", foreignUserId);
+    const foreignCampaign = await worldCampaign.createCampaign(ownerScope(foreignUserId), {
+      title: `14c3 foreign memory campaign ${crypto.randomUUID()}`,
+      worldVersionId: foreignWorld.published.worldVersionId,
+      selectedCharacterId: "route-explorer",
+      storyLengthProfile: "standard",
+      storyContextBudgetTokens: 32_000,
+      turnControlStyle: "flexible_action"
+    });
+    trackCampaign(foreignCampaign.id, foreignCampaign.title, foreignUserId);
+    const foreign = await app.inject({
+      method: "GET", url: `/api/v1/campaigns/${foreignCampaign.id}/story-memory`, headers: { "x-user-id": foreignUserId }
+    });
+    expect(foreign.statusCode).toBe(404);
   });
 
   it("exercises the complete world, generation, progress, and portable-export route family against production PostgreSQL", async () => {
@@ -788,6 +851,11 @@ integration("world campaign Fastify production application cutover", () => {
     });
     expect(branch.statusCode).toBe(201);
     expect(branch.json()).toMatchObject({ title: branchTitle, activeTurnNumber: 0 });
+    const branchSettings = await app.inject({
+      method: "GET", url: `/api/v1/campaigns/${branch.json().id}/story-memory`
+    });
+    expect(branchSettings.statusCode).toBe(200);
+    expect(branchSettings.json()).toMatchObject({ level: "max", reviewMode: "enforce" });
     trackCampaign(branch.json().id, branchTitle);
   });
 

@@ -88,9 +88,11 @@ and every omission has a fixed reason. Current protected state remains whole;
 an overflow is recoverable rather than a reason to truncate or substitute a
 summary.
 
-Story Memory capability is operational. An operator enables an installed
-capability, then the server may explicitly enroll a campaign. Neither archive
-import nor installation enrolls a campaign. The enqueue transaction freezes the
+Story Memory capability remains installation-owned. Migration 0096 enrolls all
+existing campaigns at Max (R3/enforce), and new campaign rows receive Max through
+a database trigger, including branches and imports. Campaign settings can select
+Off, Standard, Enhanced or Max; an explicit Off selection stays disabled.
+Operator configuration can restrict available levels. The enqueue transaction freezes the
 resolved policy, its canonical hash, protocol identities, and effective provider
 configuration fingerprint. Later enrollment, prompt, or provider changes apply
 only to new jobs. A worker that cannot read the frozen policy reports a

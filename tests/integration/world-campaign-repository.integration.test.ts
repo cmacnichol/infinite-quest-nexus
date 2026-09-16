@@ -19,6 +19,7 @@ import {
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createPostgresCampaignAuthorityAdapters } from "../../packages/database/src/campaign-state-repository.js";
 import { createPostgresGenerationExecutionRepository } from "../../packages/database/src/generation-execution-repository.js";
+import { clearStoryMemoryEnrollment } from "../../packages/database/src/story-memory-policy-repository.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe.sequential : describe.skip;
@@ -284,6 +285,8 @@ integration("PostgreSQL world campaign repository adapters", () => {
     const world = await createFixtureWorld(adapters, "Settings enqueue ordering world");
     const version = await publishFixtureWorld(adapters, world.created.id, world.created.draftRevision, "Settings enqueue ordering version");
     const campaign = await createFixtureCampaign(adapters, version.worldVersionId, "Settings enqueue ordering campaign");
+    // This fixture verifies legacy enqueue/style locking, independently of memory review.
+    await clearStoryMemoryEnrollment(pool, { ownerUserId, campaignId: campaign.created.id });
     const provider = (await pool.query<{ id: string }>(`INSERT INTO provider_profiles (owner_user_id,name,provider_type,provider_role,base_url,default_model) VALUES ($1,$2,'openai_compatible','text','http://provider.test','test-model') RETURNING id`, [ownerUserId, `Settings enqueue provider ${crypto.randomUUID()}`])).rows[0]!.id;
     const generation = createApiGenerationApplication(pool);
     const scope = { ownerUserId, campaignId: campaign.created.id };

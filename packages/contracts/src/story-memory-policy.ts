@@ -10,6 +10,15 @@ type DeepReadonly<T> = T extends readonly (infer U)[] ? readonly DeepReadonly<U>
 
 export const storyMemoryCapabilitySchema = z.enum(["r1", "r2", "r3"]);
 export const storyMemoryReviewModeSchema = z.enum(["off", "observe", "enforce"]);
+export const storyMemoryLevelSchema = z.enum(["off", "standard", "enhanced", "max"]);
+export type StoryMemoryLevel = z.infer<typeof storyMemoryLevelSchema>;
+export const storyMemorySettingsSchema = z.object({
+  level: storyMemoryLevelSchema,
+  reviewMode: storyMemoryReviewModeSchema,
+  availableLevels: z.array(storyMemoryLevelSchema)
+}).strict();
+export type StoryMemorySettings = Readonly<z.infer<typeof storyMemorySettingsSchema>>;
+export const storyMemorySettingsUpdateSchema = z.object({ level: storyMemoryLevelSchema }).strict();
 export const storyMemoryRankAggregationSchema = z.enum(["legacy_sum", "query_family_max_v1"]);
 export const storyMemorySelectionReasonSchema = z.enum([
   "selected", "context_limit", "request_limit", "recent_gap", "unsupported_world_shape",

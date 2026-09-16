@@ -381,6 +381,10 @@ main[data-page="story-player"] {
   background: var(--artwork-overlay);
 }
 
+.story-tool-dialog:has([data-story-memory-level]) {
+  background: var(--surface-entry-hover);
+}
+
 main[data-page="story-player"] :is(button, a, input, select, textarea, summary) {
   box-sizing: border-box;
   min-inline-size: 44px;

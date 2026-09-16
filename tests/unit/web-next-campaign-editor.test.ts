@@ -53,6 +53,54 @@ describe("web-next campaign editor routing", () => {
     for (const option of select.querySelectorAll<HTMLOptionElement>("option")) option.toggleAttribute("selected", option.value === value);
   }
 
+  it("loads, restricts, and saves the campaign-owned memory level", async () => {
+    const { document } = parseHTML("<body><div id=app></div></body>");
+    const root = document.querySelector<HTMLElement>("#app")!;
+    const settings = { level: "standard", reviewMode: "off", availableLevels: ["off", "standard", "enhanced"] };
+    const fetchMock = vi.fn(async (url: string, init: RequestInit = {}) => {
+      if (url === "/api/v1/campaigns") return new Response(JSON.stringify({ campaigns: [overviewCampaign] }), { status: 200 });
+      if (url === "/api/v1/providers") return new Response(JSON.stringify({ providers: [] }), { status: 200 });
+      if (url === "/api/v1/campaigns/campaign-1/state") return new Response(JSON.stringify({ revision: 11 }), { status: 200 });
+      if (url === "/api/v1/campaigns/campaign-1/story-memory" && init.method === "PUT") return new Response(JSON.stringify({ level: "standard", reviewMode: "off", availableLevels: settings.availableLevels }), { status: 200 });
+      if (url === "/api/v1/campaigns/campaign-1/story-memory") return new Response(JSON.stringify(settings), { status: 200 });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const mounted = mountCampaignEditorPage(root, { campaignId: overviewCampaign.id, section: "overview" });
+    await vi.waitFor(() => expect(root.querySelector("#memory-settings-form")).toBeTruthy());
+    const select = root.querySelector<HTMLSelectElement>("select[name='storyMemoryLevel']")!;
+    expect(select.value).toBe("standard");
+    expect(select.querySelector<HTMLOptionElement>("option[value='max']")?.hasAttribute("disabled")).toBe(true);
+    expect(root.textContent).toContain("This campaign's current review mode is off.");
+
+    root.querySelector<HTMLFormElement>("#memory-settings-form")!.dispatchEvent(new document.defaultView!.Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === "/api/v1/campaigns/campaign-1/story-memory" && (init as RequestInit).method === "PUT")).toBe(true));
+    const save = fetchMock.mock.calls.find(([url, init]) => url === "/api/v1/campaigns/campaign-1/story-memory" && (init as RequestInit).method === "PUT");
+    expect(JSON.parse(String((save?.[1] as RequestInit).body))).toEqual({ level: "standard" });
+    expect(root.textContent).toContain("Campaign memory level saved.");
+    mounted.dispose();
+  });
+
+  it("disables the campaign memory selector when its settings cannot be loaded", async () => {
+    const { document } = parseHTML("<body><div id=app></div></body>");
+    const root = document.querySelector<HTMLElement>("#app")!;
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url === "/api/v1/campaigns") return new Response(JSON.stringify({ campaigns: [overviewCampaign] }), { status: 200 });
+      if (url === "/api/v1/providers") return new Response(JSON.stringify({ providers: [] }), { status: 200 });
+      if (url === "/api/v1/campaigns/campaign-1/state") return new Response(JSON.stringify({ revision: 11 }), { status: 200 });
+      if (url === "/api/v1/campaigns/campaign-1/story-memory") return new Response(JSON.stringify({ error: "Memory service unavailable" }), { status: 503 });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const mounted = mountCampaignEditorPage(root, { campaignId: overviewCampaign.id, section: "overview" });
+    await vi.waitFor(() => expect(root.querySelector("#memory-settings-form")).toBeTruthy());
+    expect(root.querySelector<HTMLSelectElement>("select[name='storyMemoryLevel']")?.hasAttribute("disabled")).toBe(true);
+    expect(root.textContent).toContain("Campaign memory settings could not be loaded.");
+    mounted.dispose();
+  });
+
   it("saves the complete loaded overview payload with its original state fence and retained cost markup", async () => {
     const { document } = parseHTML("<body><div id=app></div></body>");
     const root = document.querySelector<HTMLElement>("#app")!;

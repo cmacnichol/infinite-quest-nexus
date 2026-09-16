@@ -220,8 +220,9 @@ integration("T19 story-memory archive compatibility", () => {
       expect(restored.rows[0]!.world_version_id).not.toBe(source.world_version_id);
     }
     expect(JSON.stringify(restored.rows[0]!.character_profile)).toContain(profileMarker);
-    await expect(pool.query("SELECT * FROM campaign_story_memory_enrollments WHERE owner_user_id=$1", [ownerUserId]))
-      .resolves.toMatchObject({ rows: [] });
+    // Operational source enrollment is excluded; the destination applies its Max default.
+    await expect(pool.query("SELECT campaign_id,capability,review_mode FROM campaign_story_memory_enrollments WHERE owner_user_id=$1", [ownerUserId]))
+      .resolves.toMatchObject({ rows: [{ campaign_id: restored.rows[0]!.id, capability: "r3", review_mode: "enforce" }] });
 
 
     providerId = (await createProvider(pool, {

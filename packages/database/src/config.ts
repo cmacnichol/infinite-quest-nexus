@@ -60,9 +60,9 @@ export type RuntimeConfig = {
   systemArchiveLimits: ArchiveLimits;
   credentialEncryptionKey: string;
   worldSharingEnabled?: boolean;
-  /** Operator capability; campaigns remain legacy until separately enrolled. */
+  /** Operator capability ceiling; defaults to R3 for Max campaign memory. */
   storyMemoryCapability?: "r1" | "r2" | "r3" | null;
-  /** Enables R3 enforce enrollments; disabled by default. */
+  /** Enables R3 enforce enrollments; enabled by default for Max. */
   storyMemoryEnforceEnabled?: boolean;
   security: RuntimeSecurityConfig;
 };
@@ -192,7 +192,8 @@ function booleanSetting(name: string, fallback: boolean): boolean {
 
 function storyMemoryCapabilitySetting(): "r1" | "r2" | "r3" | null {
   const raw = process.env.STORY_MEMORY_CAPABILITY?.trim().toLowerCase();
-  if (!raw || raw === "off") return null;
+  if (!raw) return "r3";
+  if (raw === "off") return null;
   if (raw === "r1" || raw === "r2" || raw === "r3") return raw;
   throw new Error("STORY_MEMORY_CAPABILITY must be off, r1, r2, or r3.");
 }
@@ -266,7 +267,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
     credentialEncryptionKey: secretSetting("CREDENTIAL_ENCRYPTION_KEY"),
     worldSharingEnabled: booleanSetting("WORLD_SHARING_ENABLED", false),
     storyMemoryCapability: storyMemoryCapabilitySetting(),
-    storyMemoryEnforceEnabled: booleanSetting("STORY_MEMORY_ENFORCE_ENABLED", false),
+    storyMemoryEnforceEnabled: booleanSetting("STORY_MEMORY_ENFORCE_ENABLED", true),
     security: {
       corsAllowedOrigins: parseExactOriginList(process.env.CORS_ALLOWED_ORIGINS, "CORS_ALLOWED_ORIGINS"),
       providerNetworkAllowlist: parseProviderAllowlist(process.env.PROVIDER_NETWORK_ALLOWLIST),

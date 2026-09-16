@@ -1,5 +1,7 @@
 # Nexus Story Continuity: Investigation and Implementation Handoff
 
+> **Default-policy follow-up:** The user subsequently requested Max memory for all existing and new campaigns, with enforced conflict repair and blocking. The [campaign memory defaults plan](../superpowers/plans/2026-09-16-campaign-memory-defaults.md) supersedes this document's opt-in/default-off rollout choices. The original integrity, isolation and frozen-job requirements remain in force.
+
 > **For agentic workers:** Use `superpowers:executing-plans` to implement this plan task by task. Use `superpowers:subagent-driven-development` only when the execution session authorizes delegation. Each task below is a bounded handoff; do not implement the entire program in one unreviewed change. Follow the repository's current `AGENTS.md` and relevant skills before implementation.
 
 **Goal:** Stop preventable loss of story history by repairing what Nexus sends to the model, preserving relevant history under real request budgets, and detecting evidence-backed continuity failures before acceptance.

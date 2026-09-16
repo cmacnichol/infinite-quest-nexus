@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { readFile } from "node:fs/promises";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
-import { clearStoryMemoryEnrollment, resolveStoryMemoryPolicySnapshot, saveStoryMemoryEnrollment } from "../../packages/database/src/story-memory-policy-repository.js";
+import { clearStoryMemoryEnrollment, readStoryMemorySettings, resolveStoryMemoryPolicySnapshot, saveStoryMemoryEnrollment } from "../../packages/database/src/story-memory-policy-repository.js";
 import type { StoryMemoryOperatorConfig } from "../../packages/database/src/story-memory-policy-repository.js";
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
@@ -30,7 +30,7 @@ integration("Story Memory enrollment", () => {
   const scope = () => ({ ownerUserId, campaignId });
   const resolveSnapshot = () => withTransaction(pool, (client) => resolveStoryMemoryPolicySnapshot(
     client, { ...scope(), providerProfileId, requestedModel: "" },
-    { installedCapability: "r3", enforceEnabled: false }
+    { installedCapability: "r3", enforceEnabled: true }
   ));
   const commands = (config: StoryMemoryOperatorConfig = { installedCapability: "r3", enforceEnabled: false }) => createPostgresGenerationCommandRepository(pool, {
     resolvePromptSnapshot: (client, scopeOwnerUserId, scopedCampaignId, storyMemoryPolicy) => storyMemoryPolicy
@@ -49,13 +49,64 @@ integration("Story Memory enrollment", () => {
     action: "Continue the enrollment boundary.", providerProfileId, idempotencyKey,
     context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 }
   });
-  it("freezes only an explicitly enrolled compatible policy and clears it for future jobs", async () => {
+  it("defaults imported campaigns to enforced Max and preserves an explicit Off", async () => {
+    await expect(resolveSnapshot()).resolves.toMatchObject({ policy: { capability: "r3", continuityReview: "enforce" } });
+    await expect(readStoryMemorySettings(pool, scope(), { installedCapability: "r3", enforceEnabled: true })).resolves.toEqual({
+      level: "max", reviewMode: "enforce", availableLevels: ["off", "standard", "enhanced", "max"]
+    });
+    await clearStoryMemoryEnrollment(pool, scope());
     await expect(resolveSnapshot()).resolves.toBeNull();
+    await expect(readStoryMemorySettings(pool, scope(), { installedCapability: "r3", enforceEnabled: true })).resolves.toEqual({
+      level: "off", reviewMode: "off", availableLevels: ["off", "standard", "enhanced", "max"]
+    });
+  });
+
+  it("saves an explicitly selected enrollment and clears it for future jobs", async () => {
     await saveStoryMemoryEnrollment(pool, scope(), { capability: "r2", reviewMode: "off" }, { installedCapability: "r3", enforceEnabled: false });
     const frozen = await resolveSnapshot();
     expect(frozen).toMatchObject({ policy: { capability: "r2", continuityReview: "off" }, contextProtocol: "current-continuity-v3" });
     await clearStoryMemoryEnrollment(pool, scope());
     await expect(resolveSnapshot()).resolves.toBeNull();
+  });
+  it("upgrades every preexisting enrollment to Max without changing accepted turns or queued snapshots", async () => {
+    const standard = await importCampaign("migration standard");
+    const enhanced = await importCampaign("migration enhanced");
+    const observe = await importCampaign("migration observe");
+    const queuedScope = { ownerUserId, campaignId: standard.campaignId };
+    await saveStoryMemoryEnrollment(pool, queuedScope, { capability: "r1", reviewMode: "off" }, { installedCapability: "r3", enforceEnabled: false });
+    const queued = await commands().enqueueAppend(queuedScope, append());
+    const beforeJob = (await pool.query<{ context_options: unknown; prompt_snapshot: unknown }>(
+      "SELECT context_options,prompt_snapshot FROM generation_jobs WHERE id=$1", [queued.id]
+    )).rows[0]!;
+    const beforeTurns = await pool.query<{ campaign_id: string; turn_number: number; narration: string }>(
+      "SELECT campaign_id,turn_number,narration FROM turns WHERE campaign_id=ANY($1::uuid[]) ORDER BY campaign_id,turn_number",
+      [[standard.campaignId, enhanced.campaignId, observe.campaignId]]
+    );
+    await pool.query(
+      `UPDATE campaign_story_memory_enrollments
+          SET capability=CASE campaign_id
+            WHEN $1 THEN 'r1'
+            WHEN $2 THEN 'r2'
+            ELSE 'r3' END,
+              review_mode=CASE campaign_id WHEN $3 THEN 'observe' ELSE 'off' END`,
+      [standard.campaignId, enhanced.campaignId, observe.campaignId]
+    );
+    const migration = await readFile(resolve("database/migrations/0096_campaign_memory_defaults.sql"), "utf8");
+    await pool.query(migration.slice(0, migration.indexOf("CREATE FUNCTION")));
+    await expect(pool.query<{ capability: string; review_mode: string }>(
+      "SELECT capability,review_mode FROM campaign_story_memory_enrollments WHERE campaign_id=ANY($1::uuid[]) ORDER BY campaign_id",
+      [[standard.campaignId, enhanced.campaignId, observe.campaignId]]
+    )).resolves.toMatchObject({ rows: [
+      { capability: "r3", review_mode: "enforce" },
+      { capability: "r3", review_mode: "enforce" },
+      { capability: "r3", review_mode: "enforce" }
+    ] });
+    await expect(pool.query("SELECT context_options,prompt_snapshot FROM generation_jobs WHERE id=$1", [queued.id]))
+      .resolves.toMatchObject({ rows: [beforeJob] });
+    await expect(pool.query(
+      "SELECT campaign_id,turn_number,narration FROM turns WHERE campaign_id=ANY($1::uuid[]) ORDER BY campaign_id,turn_number",
+      [[standard.campaignId, enhanced.campaignId, observe.campaignId]]
+    )).resolves.toMatchObject({ rows: beforeTurns.rows });
   });
   it("hashes the same safe effective provider projection used by runtime with request overrides", async () => {
     await saveStoryMemoryEnrollment(pool, scope(), { capability: "r1", reviewMode: "off" }, { installedCapability: "r3", enforceEnabled: false });
@@ -164,6 +215,7 @@ integration("Story Memory enrollment", () => {
     await saveStoryMemoryEnrollment(pool, scope(), { capability: "r1", reviewMode: "off" }, { installedCapability: "r3", enforceEnabled: false });
     await expect(saveStoryMemoryEnrollment(pool, { ownerUserId: foreignOwnerUserId, campaignId }, { capability: "r2", reviewMode: "off" }, { installedCapability: "r3", enforceEnabled: false })).rejects.toMatchObject({ code: "not_found", statusCode: 404 });
     await expect(clearStoryMemoryEnrollment(pool, { ownerUserId: foreignOwnerUserId, campaignId })).rejects.toMatchObject({ code: "not_found", statusCode: 404 });
+    await expect(readStoryMemorySettings(pool, { ownerUserId: foreignOwnerUserId, campaignId }, { installedCapability: "r3", enforceEnabled: true })).rejects.toMatchObject({ code: "not_found", statusCode: 404 });
     await expect(resolveSnapshot()).resolves.toMatchObject({ policy: { capability: "r1" } });
   });
   it("keeps queued snapshots frozen across enrollment edits, disable, and re-enable", async () => {

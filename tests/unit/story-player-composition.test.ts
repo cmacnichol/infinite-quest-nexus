@@ -16,6 +16,7 @@ describe("Story Player composition bootstrap", () => {
     const source = { watch: vi.fn() };
     const workflow = { submit: vi.fn(), resume: vi.fn() };
     const illustrations = { config: vi.fn() };
+    const storyMemory = { get: vi.fn(), update: vi.fn() };
     const factories = {
       createSession: vi.fn(() => session),
       createClock: vi.fn(() => clock),
@@ -26,7 +27,8 @@ describe("Story Player composition bootstrap", () => {
       createPendingSubmissions: vi.fn(() => pendingSubmissions),
       createSource: vi.fn(() => source),
       createWorkflow: vi.fn(() => workflow),
-      createIllustrations: vi.fn(() => illustrations)
+      createIllustrations: vi.fn(() => illustrations),
+      createStoryMemory: vi.fn(() => storyMemory)
     };
 
     const composition = createStoryPlayerComposition({
@@ -52,7 +54,8 @@ describe("Story Player composition bootstrap", () => {
       source
     });
     expect(factories.createIllustrations).toHaveBeenCalledWith({ basePath: "/api/v1", session });
-    expect(composition).toMatchObject({ session, clock, delay, idFactory, pendingSubmissions, api, workflow, illustrations });
+    expect(factories.createStoryMemory).toHaveBeenCalledWith({ basePath: "/api/v1", session });
+    expect(composition).toMatchObject({ session, clock, delay, idFactory, pendingSubmissions, api, workflow, illustrations, storyMemory });
     Object.values(factories).forEach((factory) => expect(factory).toHaveBeenCalledOnce());
   });
 

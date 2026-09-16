@@ -9,7 +9,7 @@ import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../pac
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createProvider } from "../helpers/provider-application-fixtures.js";
 import { createApiGenerationApplication } from "../helpers/runtime-application-fixtures.js";
-import { enqueueChronicleReindex, importLegacyStory, runNextChronicle, setCampaignEmbeddingConfig } from "../helpers/memory-aware-services.js";
+import { enqueueChronicleReindex, importLegacyStoryWithMemoryOff as importLegacyStory, runNextChronicle, setCampaignEmbeddingConfig } from "../helpers/memory-aware-services.js";
 import { runGenerationJob } from "../helpers/generation-worker-harness.js";
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 import { estimatedInputSafetyAllowanceTokens } from "../../packages/story-engine/src/provider-request.js";

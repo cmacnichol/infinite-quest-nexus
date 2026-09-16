@@ -1,11 +1,17 @@
 import { generationDiagnosticPresentation, type CampaignProjection } from "@infinite-quest/client-core";
-import type { AcceptedTurnCorrectionView, CampaignCharacterProfileUpdate, CampaignRuntimeStateResponse, CampaignSummary, MetaResponse, StoryLengthProfile } from "@infinite-quest/contracts";
+import type { AcceptedTurnCorrectionView, CampaignCharacterProfileUpdate, CampaignRuntimeStateResponse, CampaignSummary, MetaResponse, StoryLengthProfile, StoryMemorySettings } from "@infinite-quest/contracts";
 import { storyPlayerPath, type StoryRoute } from "./story-route";
 import type { ReadingWidth, StoryUiState } from "./story-player-model";
 import { alignLatestSpine, latestCampaignSpine } from "./story-player-history";
 import { storyIllustrationCapabilities, type StoryIllustrationState } from "./story-player-illustrations";
 import type { StoryActivityRecord } from "./story-player-tools";
 import type { CampaignContinuityEditor } from "./campaign-continuity-editor";
+
+function storyMemoryGuidance(settings: StoryMemorySettings): string {
+  return settings.reviewMode === "enforce"
+    ? "Max reviews continuity, attempts a repair, and blocks unresolved conflicts. Your Story context limit still applies."
+    : `This campaign's current review mode is ${settings.reviewMode}. Max behavior follows the server's current review mode. Your Story context limit still applies.`;
+}
 
 export interface StoryPlayerViewState {
   readonly route: StoryRoute;
@@ -29,6 +35,11 @@ export interface StoryPlayerViewState {
   readonly characterProfileError: string | null;
   readonly characterProfileLocked: boolean;
   readonly characterProfileSaveInFlight: boolean;
+  readonly storyMemorySettings: StoryMemorySettings | null;
+  readonly storyMemoryDraft: StoryMemorySettings["level"] | null;
+  readonly storyMemoryError: string | null;
+  readonly storyMemoryLocked: boolean;
+  readonly storyMemorySaveInFlight: boolean;
   readonly activityRecords: readonly StoryActivityRecord[];
   readonly illustrations: Readonly<StoryIllustrationState>;
 }
@@ -793,12 +804,13 @@ function editorField(document: Document, labelText: string, action: string, valu
 
 function toolDialog(document: Document, state: StoryPlayerViewState): HTMLDialogElement | null {
   const active = state.ui.activeDialog;
-  if (active !== "world" && active !== "current-state" && active !== "character-profile" && active !== "correction" && active !== "activity" && active !== "about" && !active?.startsWith("restart:")) return null;
+  if (active !== "world" && active !== "current-state" && active !== "character-profile" && active !== "story-memory" && active !== "correction" && active !== "activity" && active !== "about" && !active?.startsWith("restart:")) return null;
   const dialog = element(document, "dialog", "story-tool-dialog") as HTMLDialogElement;
   dialog.dataset.storyToolDialog = "";
   const title = element(document, "h2", undefined, active === "world" ? "Current World Setup"
     : active === "current-state" ? "Edit Campaign State"
       : active === "character-profile" ? "Edit Character Profile"
+      : active === "story-memory" ? "Campaign Memory"
       : active === "correction" ? "Edit Response" : "Restart from this turn");
   title.textContent = active === "activity" ? "Activity Log" : active === "about" ? "About Infinite Quest Nexus" : title.textContent;
   title.id = "story-tool-dialog-title";
@@ -890,6 +902,34 @@ function toolDialog(document: Document, state: StoryPlayerViewState): HTMLDialog
       const save = element(document, "button", undefined, "Save Character Profile"); save.type = "button"; save.dataset.action = "save-character-profile"; save.disabled = state.characterProfileLocked;
       const status = element(document, "p", "story-status", state.characterProfileError ?? ""); status.dataset.storyStatus = ""; status.setAttribute("aria-live", "polite");
       dialog.append(nameLabel, jsonLabel, status, save);
+    }
+  } else if (active === "story-memory") {
+    const settings = state.storyMemorySettings;
+    if (settings === null) dialog.append(element(document, "p", "story-status", state.storyMemoryError ?? "Loading campaign memory settings…"));
+    else {
+      const select = element(document, "select") as HTMLSelectElement;
+      select.dataset.storyMemoryLevel = "";
+      select.disabled = state.storyMemoryLocked;
+      const selected = state.storyMemoryDraft ?? settings.level;
+      for (const [value, label] of [["off", "Off"], ["standard", "Standard"], ["enhanced", "Enhanced"], ["max", "Max"]] as const) {
+        const option = element(document, "option", undefined, label) as HTMLOptionElement;
+        option.value = value;
+        option.selected = value === selected;
+        option.disabled = !settings.availableLevels.includes(value);
+        select.append(option);
+      }
+      const label = element(document, "label", "story-tool-field", "Memory level");
+      label.append(select);
+      const help = element(document, "p", undefined, storyMemoryGuidance(settings));
+      const scope = element(document, "p", undefined, "This applies to newly queued turns. Existing jobs keep their saved memory policy. Your story draft is unchanged.");
+      const status = element(document, "p", "story-status", state.storyMemoryError ?? "");
+      status.dataset.storyStatus = "";
+      status.setAttribute("aria-live", "polite");
+      const save = element(document, "button", undefined, "Save Campaign Memory");
+      save.type = "button";
+      save.dataset.action = "save-story-memory";
+      save.disabled = state.storyMemoryLocked || !settings.availableLevels.includes(selected);
+      dialog.append(label, help, scope, status, save);
     }
   } else if (active === "correction") {
     const correction = state.correction;

@@ -12,6 +12,15 @@ function serviceEnvironment(source: string, service: string): string {
 }
 
 describe("deployment security configuration", () => {
+  it.each([
+    ["compose.yaml", "infinitequest-app"],
+    ["deploy/swarm/stack.yaml", "infinitequest-api"],
+    ["deploy/swarm/stack.yaml", "infinitequest-worker"]
+  ])("defaults %s %s to Max while forwarding explicit operator overrides", (path, service) => {
+    const environment = serviceEnvironment(readFileSync(path, "utf8"), service);
+    expect(environment).toContain("STORY_MEMORY_CAPABILITY: ${STORY_MEMORY_CAPABILITY:-r3}");
+    expect(environment).toContain("STORY_MEMORY_ENFORCE_ENABLED: ${STORY_MEMORY_ENFORCE_ENABLED:-true}");
+  });
   it.each(["Dockerfile", "tests/helpers/story-only-runtime.Dockerfile"])("installs the package-manager-pinned pnpm in %s without relying on bundled Corepack", (path) => {
     const packageManifest = JSON.parse(readFileSync("package.json", "utf8")) as { packageManager?: string };
     const dockerfile = readFileSync(path, "utf8");

@@ -3,13 +3,14 @@ import {
   createBrowserDelayScheduler,
   createBrowserGenerationSource,
   createBrowserIdFactory,
+  createStoryMemoryApi,
   createDocumentVisibilitySource,
   createNoopSessionPort,
   createNexusApiClient,
   createPendingSubmissionStore
 } from "@infinite-quest/client-web";
 import { createGenerationWorkflow, type Clock, type DelayScheduler, type GenerationWorkflow, type IdFactory, type PendingSubmissionStore, type SessionPort } from "@infinite-quest/client-core";
-import type { EventSourceFactory, NexusApiClient } from "@infinite-quest/client-web";
+import type { EventSourceFactory, NexusApiClient, StoryMemoryApi } from "@infinite-quest/client-web";
 import { createLegacyIllustrationApi, type LegacyIllustrationApi } from "./legacy-illustration-api.js";
 
 export interface StoryPlayerComposition {
@@ -20,6 +21,7 @@ export interface StoryPlayerComposition {
   readonly illustrations: LegacyIllustrationApi;
   readonly pendingSubmissions: PendingSubmissionStore;
   readonly session: SessionPort;
+  readonly storyMemory: StoryMemoryApi;
   readonly workflow: GenerationWorkflow;
 }
 
@@ -41,6 +43,7 @@ export interface StoryPlayerCompositionFactories {
   readonly createSource: typeof createBrowserGenerationSource;
   readonly createWorkflow: typeof createGenerationWorkflow;
   readonly createIllustrations: typeof createLegacyIllustrationApi;
+  readonly createStoryMemory: typeof createStoryMemoryApi;
 }
 
 const defaultFactories: StoryPlayerCompositionFactories = {
@@ -53,7 +56,8 @@ const defaultFactories: StoryPlayerCompositionFactories = {
   createPendingSubmissions: createPendingSubmissionStore,
   createSource: createBrowserGenerationSource,
   createWorkflow: createGenerationWorkflow,
-  createIllustrations: createLegacyIllustrationApi
+  createIllustrations: createLegacyIllustrationApi,
+  createStoryMemory: createStoryMemoryApi
 };
 
 function browserEnvironment(): StoryPlayerEnvironment {
@@ -103,6 +107,7 @@ export function createStoryPlayerComposition(
     illustrations: factories.createIllustrations({ basePath: "/api/v1", session }),
     pendingSubmissions,
     session,
+    storyMemory: factories.createStoryMemory({ basePath: "/api/v1", session }),
     workflow
   };
 }

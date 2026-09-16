@@ -1,5 +1,7 @@
 # Story memory release readiness — September 16, 2026
 
+> **Default-policy follow-up:** The user subsequently requested Max for all existing and new campaigns and explicitly selected enforced review. The [campaign memory defaults plan](../superpowers/plans/2026-09-16-campaign-memory-defaults.md) supersedes the original default-off and promotion-policy decisions below. Migration `0096` sets every existing campaign to R3/enforce and initializes new campaigns, imports and branches at Max; both interfaces expose persistent memory settings. The historical verification and missing live-provider evidence below remain valid as recorded. This implementation does not itself deploy the upgrade or run live-provider canaries.
+
 Core implementation T01–T20 and the T21 read-only repair proposal tool are scoped to this worktree, based on `60a4aabe4adc2759f14fd53370e31465daabb783`. Optional experiments T22–T26 are excluded. Nothing has been deployed or enabled in production. Operational enrollment defaults off; enforcement defaults false. Code readiness and permission to promote are separate decisions.
 
 The subsequent review identified four integration gaps in fact remapping, profile-response validation, selected-world evidence binding and prompt-library readback. All four are fixed; the [targeted fix record](story-memory-review-fixes-2026-09-16.md) contains the regression results, screenshots and remaining verification limitation. The promotion decisions below remain unchanged.

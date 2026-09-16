@@ -17,6 +17,7 @@ let campaignArchivePreviewAbortController = null;
 let campaignImportRefreshSequence = 0;
 let selectedCampaign = null;
 let campaignSelectionRequest = 0;
+let campaignStoryMemorySettings = null;
 const CAMPAIGN_SETTINGS_PANEL_IDS = Object.freeze(["overview", "story", "illustrations", "chronicle", "usage"]);
 let activeCampaignSettingsPanel = "overview";
 
@@ -143,16 +144,94 @@ function setCampaignSettingsAvailability(available) {
   if (!available) setCampaignSettingsPanel("overview");
 }
 
+const STORY_MEMORY_LEVELS = Object.freeze(["off", "standard", "enhanced", "max"]);
+
+function readCampaignStoryMemorySettings(value) {
+  if (!value || typeof value !== "object" || !STORY_MEMORY_LEVELS.includes(value.level)
+    || !["off", "observe", "enforce"].includes(value.reviewMode) || !Array.isArray(value.availableLevels)
+    || value.availableLevels.some((level) => !STORY_MEMORY_LEVELS.includes(level))) {
+    throw new Error("Story Memory settings response is invalid.");
+  }
+  return value;
+}
+
+function campaignStoryMemoryDescription(settings) {
+  if (settings.level === "max" && settings.reviewMode === "enforce") {
+    return "Max reviews continuity before accepting each future turn, repairs eligible issues, and blocks unresolved conflicts. Story context budget remains separate.";
+  }
+  if (settings.level === "max") return `Max continuity review is currently in ${settings.reviewMode} mode. It applies to future turns; Story context budget remains separate.`;
+  return `Saved level: ${settings.level}. It applies to future turns; Story context budget remains separate.`;
+}
+
+function renderCampaignStoryMemorySettings(settings, { draftLevel = null, message = null, disabled = false } = {}) {
+  const selector = elements.campaignStoryMemoryLevel;
+  const status = elements.campaignStoryMemoryStatus;
+  if (!settings) {
+    selector.disabled = true;
+    status.textContent = message || "Story Memory controls are unavailable for this campaign.";
+    status.className = "field-note";
+    return;
+  }
+  const available = new Set(settings.availableLevels);
+  for (const option of selector.options) {
+    option.disabled = !available.has(option.value);
+    option.toggleAttribute("disabled", !available.has(option.value));
+  }
+  selector.value = draftLevel || settings.level;
+  selector.disabled = disabled || !selectedCampaign;
+  status.textContent = message || campaignStoryMemoryDescription(settings);
+  status.className = "field-note";
+}
+
+async function loadCampaignStoryMemory(campaignId, selectionRequest) {
+  campaignStoryMemorySettings = null;
+  renderCampaignStoryMemorySettings(null, { message: "Loading the saved Story Memory level for this campaign." });
+  try {
+    const settings = readCampaignStoryMemorySettings(await api(`/api/v1/campaigns/${campaignId}/story-memory`));
+    if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
+    campaignStoryMemorySettings = settings;
+    renderCampaignStoryMemorySettings(settings);
+  } catch (error) {
+    if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
+    renderCampaignStoryMemorySettings(null, { message: `Story Memory settings are unavailable: ${error.message || String(error)}` });
+  }
+}
+
+async function saveCampaignStoryMemory() {
+  const campaignId = selectedCampaign?.id;
+  const level = elements.campaignStoryMemoryLevel.value;
+  const selectionRequest = campaignSelectionRequest;
+  if (!campaignId || !campaignStoryMemorySettings || !STORY_MEMORY_LEVELS.includes(level)) return;
+  renderCampaignStoryMemorySettings(campaignStoryMemorySettings, { draftLevel: level, disabled: true, message: "Saving Story Memory level…" });
+  try {
+    const settings = readCampaignStoryMemorySettings(await api(`/api/v1/campaigns/${campaignId}/story-memory`, {
+      method: "PUT", body: JSON.stringify({ level })
+    }));
+    if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
+    campaignStoryMemorySettings = settings;
+    renderCampaignStoryMemorySettings(settings);
+    campaignMessage("Story Memory level saved for future turns. Existing and in-flight turns keep their frozen policy.", "success");
+  } catch (error) {
+    if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
+    renderCampaignStoryMemorySettings(campaignStoryMemorySettings, {
+      draftLevel: level,
+      message: `Story Memory level was not saved: ${error.message || String(error)}`
+    });
+  }
+}
+
 function syncCampaignSettingsRailOrientation(mediaQuery) {
   elements.campaignSettingsRail.setAttribute("aria-orientation", mediaQuery.matches ? "horizontal" : "vertical");
 }
 
 function clearCampaignEditorSelection({ focus = false } = {}) {
   setCampaignSettingsAvailability(false);
+  campaignStoryMemorySettings = null;
   elements.memoryTitle.textContent = "Select a campaign";
   elements.campaignEditorSummary.textContent = "";
   elements.campaignStatusMessage.textContent = "";
   elements.campaignStatusMessage.className = "status hidden";
+  renderCampaignStoryMemorySettings(null, { message: "Select a campaign to load its saved Story Memory level." });
   [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignTurnControlStyle, elements.campaignStoryLengthProfile, elements.campaignStoryContextBudgetTokens, elements.saveCampaign, elements.migrateCampaign, elements.transferCampaign, elements.editCampaignCharacter, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationSourcePolicy, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts, elements.illustrationMatchingScope, elements.illustrationConfidenceProfile, elements.illustrationRepetitionWindow, elements.illustrationSegmentWordCount, elements.illustrationImagesPerSegment, elements.illustrationSegmentPromptMode, elements.openIllustrationPromptEditor, elements.previewIllustrationBackfill, elements.previewIllustrationRebuild, elements.saveIllustrationConfig, elements.discoverIllustrationModels, elements.reindexMemory, elements.previewContext, elements.saveEmbeddingConfig, elements.reindexEmbeddings, elements.embeddingEnabled, elements.embeddingRetrievalImplementation, elements.embeddingRetrievalShadowEnabled, elements.embeddingProvider, elements.discoverEmbeddingModels, elements.embeddingModel, elements.embeddingDocumentPrefix, elements.embeddingQueryPrefix, elements.embeddingBatchSize, elements.budgetTokens, elements.compression, elements.memoryQuery].forEach((element) => { element.disabled = true; });
   elements.campaignCostSection.classList.add("hidden");
   if (focus) elements.refreshCampaigns.focus();
@@ -3321,6 +3400,7 @@ async function selectCampaign(campaign) {
     stateRevision: runtimeState.revision
   };
   campaign = selectedCampaign;
+  void loadCampaignStoryMemory(campaign.id, selectionRequest);
   updateStoryViewLink();
   document.querySelectorAll(".campaign-button").forEach((button) => button.classList.toggle("active", button.dataset.campaignId === campaign.id));
   elements.memoryTitle.textContent = campaign.title;
@@ -6102,6 +6182,7 @@ elements.archiveWorld.addEventListener("click", toggleWorldArchive);
 elements.deleteWorld.addEventListener("click", deleteSelectedWorld);
 elements.refreshCampaigns.addEventListener("click", () => loadCampaigns("", { focusNoSelection: true }).catch((error) => setStatus(error.message, "error")));
 elements.campaignForm.addEventListener("submit", saveSelectedCampaign);
+elements.campaignStoryMemoryLevel.addEventListener("change", () => { void saveCampaignStoryMemory(); });
 const campaignSettingsRailMediaQuery = window.matchMedia("(max-width: 820px)");
 syncCampaignSettingsRailOrientation(campaignSettingsRailMediaQuery);
 campaignSettingsRailMediaQuery.addEventListener("change", syncCampaignSettingsRailOrientation);

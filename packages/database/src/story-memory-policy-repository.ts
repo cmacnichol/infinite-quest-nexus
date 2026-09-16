@@ -1,4 +1,4 @@
-import { defaultStoryMemoryPolicy, effectiveProviderConfigurationFingerprint, resolveStoryMemoryPolicy, storyMemoryPolicyHash, storyMemoryPolicySchema, type StoryMemoryCapability, type StoryMemoryPolicySnapshot } from "../../contracts/src/story-memory-policy.js";
+import { defaultStoryMemoryPolicy, effectiveProviderConfigurationFingerprint, resolveStoryMemoryPolicy, storyMemoryPolicyHash, storyMemoryPolicySchema, type StoryMemoryCapability, type StoryMemoryLevel, type StoryMemoryPolicySnapshot, type StoryMemorySettings } from "../../contracts/src/story-memory-policy.js";
 import { STORY_MEMORY_CONTEXT_POLICY_VERSION, STORY_MEMORY_PROMPT_PROTOCOL_VERSION } from "../../contracts/src/story-prompt.js";
 import { sha256 } from "../../domain/src/index.js";
 import { resolveEffectiveContextWindowTokens } from "../../story-engine/src/context-budget.js";
@@ -9,6 +9,28 @@ import { withTransaction } from "./pool.js";
 
 export type StoryMemoryOperatorConfig = Readonly<{ installedCapability: StoryMemoryCapability | null; enforceEnabled: boolean }>;
 export type StoryMemoryEnrollmentInput = Readonly<{ capability: StoryMemoryCapability; reviewMode: "off" | "observe" | "enforce" }>;
+
+function availableLevels(config: StoryMemoryOperatorConfig): StoryMemoryLevel[] {
+  const levels: StoryMemoryLevel[] = ["off"];
+  if (config.installedCapability && supports(config.installedCapability, "r1")) levels.push("standard");
+  if (config.installedCapability && supports(config.installedCapability, "r2")) levels.push("enhanced");
+  if (config.installedCapability === "r3" && config.enforceEnabled) levels.push("max");
+  return levels;
+}
+
+function levelForEnrollment(row: { capability: StoryMemoryCapability; reviewMode: "off" | "observe" | "enforce" } | undefined): StoryMemoryLevel {
+  if (!row) return "off";
+  if (row.capability === "r1") return "standard";
+  if (row.capability === "r2") return "enhanced";
+  return "max";
+}
+
+function enrollmentForLevel(level: StoryMemoryLevel): StoryMemoryEnrollmentInput | null {
+  if (level === "off") return null;
+  if (level === "standard") return { capability: "r1", reviewMode: "off" };
+  if (level === "enhanced") return { capability: "r2", reviewMode: "off" };
+  return { capability: "r3", reviewMode: "enforce" };
+}
 
 function supports(installed: StoryMemoryCapability, requested: StoryMemoryCapability): boolean {
   return (["r1", "r2", "r3"] as const).indexOf(requested) <= (["r1", "r2", "r3"] as const).indexOf(installed);
@@ -41,6 +63,28 @@ export async function clearStoryMemoryEnrollment(pool: DatabasePool, scope: Read
     if (!owned.rows[0]) throw enrollmentError("Campaign not found.", "not_found", 404);
     await client.query("DELETE FROM campaign_story_memory_enrollments WHERE campaign_id=$1 AND owner_user_id=$2", [scope.campaignId, scope.ownerUserId]);
   });
+}
+
+export async function readStoryMemorySettings(pool: DatabasePool, scope: Readonly<{ ownerUserId: string; campaignId: string }>, config: StoryMemoryOperatorConfig): Promise<StoryMemorySettings> {
+  const result = await pool.query<{ capability: StoryMemoryCapability | null; review_mode: "off" | "observe" | "enforce" | null }>(
+    `SELECT enrollment.capability,enrollment.review_mode
+       FROM campaigns campaign
+       LEFT JOIN campaign_story_memory_enrollments enrollment
+         ON enrollment.campaign_id=campaign.id AND enrollment.owner_user_id=campaign.owner_user_id
+      WHERE campaign.id=$1 AND campaign.owner_user_id=$2`,
+    [scope.campaignId, scope.ownerUserId]
+  );
+  const row = result.rows[0];
+  if (!row) throw enrollmentError("Campaign not found.", "not_found", 404);
+  const enrollment = row.capability && row.review_mode ? { capability: row.capability, reviewMode: row.review_mode } : undefined;
+  return { level: levelForEnrollment(enrollment), reviewMode: enrollment?.reviewMode ?? "off", availableLevels: availableLevels(config) };
+}
+
+export async function saveStoryMemorySettings(pool: DatabasePool, scope: Readonly<{ ownerUserId: string; campaignId: string }>, level: StoryMemoryLevel, config: StoryMemoryOperatorConfig): Promise<StoryMemorySettings> {
+  const enrollment = enrollmentForLevel(level);
+  if (enrollment) await saveStoryMemoryEnrollment(pool, scope, enrollment, config);
+  else await clearStoryMemoryEnrollment(pool, scope);
+  return readStoryMemorySettings(pool, scope, config);
 }
 
 export async function resolveStoryMemoryPolicySnapshot(client: DatabaseClient, scope: Readonly<{

@@ -16,7 +16,7 @@ import { loadPostgresChronicleGenerationAuthorityContext } from "../../packages/
 import { resolveGenerationAuthoritySnapshot } from "../../packages/database/src/generation-authority.js";
 import { createProvider } from "../helpers/provider-application-fixtures.js";
 import { createApiGenerationApplication } from "../helpers/runtime-application-fixtures.js";
-import { importLegacyStory } from "../helpers/memory-aware-services.js";
+import { importLegacyStoryWithMemoryOff as importLegacyStory } from "../helpers/memory-aware-services.js";
 import { runGenerationJob } from "../helpers/generation-worker-harness.js";
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 import { planChronicleQueries } from "../../packages/domain/src/chronicle-query-plan.js";

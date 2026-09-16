@@ -18,6 +18,7 @@ The repository contains a production-shaped pre-authentication deployment for a 
 - The Infinite Quest player experience
 - Durable, validated Story Engine jobs and recovery
 - Campaign-scoped Chronicle memory and optional embeddings
+- Campaign memory levels in both interfaces, defaulting to Max with enforced continuity review and bounded conflict repair
 - Independent text, embedding, and illustration provider profiles
 - OpenRouter image-model discovery with image-unit pricing, campaign text-versus-image cost totals, and durable world-cover generation
 - A two-container local Compose deployment
@@ -61,6 +62,8 @@ The slim universal navigation bar links the dashboard, active Story, Setup, and 
 
 The first startup creates the database schema and credential-free initial owner. Configure a text provider under **Setup**, create or import a world in **World Management**, and publish a version. Configure a separate default image provider when you want optional turn illustrations or generated world covers. The dashboard then supports quick campaign creation from a world card and immediately opens the new story; existing campaign cards resume play.
 
+Upgrading through migration `0096` enables **Max** memory for every existing campaign. New campaigns, branches and imports also start at Max. Choose Off, Standard, Enhanced or Max in campaign settings or the Story player's campaign tools. Changes apply to newly queued turns; accepted history and already queued jobs retain their existing behavior. Max can add review and repair calls and blocks unresolved continuity conflicts. See [campaign memory settings](docs/nexus-guide/campaigns/configure.md#choose-a-memory-level) and the [upgrade and rollback runbook](docs/runbooks/story-memory-rollout.md), including custom-prompt acknowledgement and explicit operator overrides.
+
 Stop the containers while preserving the database and generated assets:
 
 ```powershell
@@ -91,7 +94,7 @@ Maintainers can follow the [GitHub Pages publishing guide](docs/contributing/git
 
 ## Development
 
-Source-level development requires Node.js 22.13 or newer and pnpm 11.24.0.
+Source-level development requires Node.js 22.13 or newer and the pnpm version declared in `package.json`. Use `corepack pnpm` when your global pnpm version differs.
 
 ```powershell
 pnpm install --frozen-lockfile
