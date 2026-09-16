@@ -7,6 +7,7 @@ import { planChronicleQueries } from '../../../../packages/domain/src/chronicle-
 import { parseStoryOnlyOutput } from '../../../../packages/story-engine/src/story-only-output.ts';
 import { buildStoryUserPrompt } from '../../../../packages/story-engine/src/prompt.ts';
 import { generationStagePolicy } from '../../../../packages/domain/src/campaign-generation-policy.ts';
+import { logger } from '../../../../packages/logger/src/index.ts';
 
 const snapshot = { continuitySummary: 'The sealed gate is ahead.', scratchpad: '', openThreads: [], canonicalFacts: [] };
 const worldContent = {
@@ -67,10 +68,11 @@ const unrelatedOutput = {
 assert.equal(parseStoryOnlyOutput(JSON.stringify(unrelatedOutput)).ok, true);
 assert.equal(generationStagePolicy('story_only').allowSceneCoverage, false);
 
-console.log(JSON.stringify({
+logger.info({
+  event: 'story_direction_context_audit_probes_complete',
   authorityProjection: { worldRulesPresent: true, omittedCanaries: omitted, mockedDatabase: true },
   canonicalProjection: { structuredOnlyFactAbsentFromProtectedContinuity: true, plainFactProtectedId: plain.canonicalFacts[0].id },
   longDirectionRetrieval: { directionCharacters: direction.length, variants: queries.map(({ kind, query }) => ({ kind, characters: query.length })), lateBeatAndHintsAbsent: true },
   semanticValidationBoundary: { unrelatedNarrationWithEmptyContinuityAcceptedByParser: true, storyOnlySceneCoverageEnabled: false },
   limitations: 'Synthetic function probes, not a real PostgreSQL or live-provider run. They demonstrate current behavior, not approved behavior.'
-}, null, 2));
+});

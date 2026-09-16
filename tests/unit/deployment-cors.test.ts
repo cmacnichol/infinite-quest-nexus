@@ -12,13 +12,23 @@ function serviceEnvironment(source: string, service: string): string {
 }
 
 describe("deployment security configuration", () => {
-  it("installs the package-manager-pinned pnpm without relying on bundled Corepack", () => {
+  it.each(["Dockerfile", "tests/helpers/story-only-runtime.Dockerfile"])("installs the package-manager-pinned pnpm in %s without relying on bundled Corepack", (path) => {
     const packageManifest = JSON.parse(readFileSync("package.json", "utf8")) as { packageManager?: string };
-    const dockerfile = readFileSync("Dockerfile", "utf8");
+    const dockerfile = readFileSync(path, "utf8");
 
-    expect(packageManifest.packageManager).toBe("pnpm@11.24.0");
-    expect(dockerfile).toContain("RUN npm install --global pnpm@11.24.0");
+    expect(packageManifest.packageManager).toMatch(/^pnpm@\d+\.\d+\.\d+(?:\+sha\d+\.[a-f0-9]+)?$/);
+    const installCommand = 'RUN npm install --global "$(node -p "require(\'./package.json\').packageManager.split(\'+\')[0]")"';
+    expect(dockerfile).toContain(installCommand);
+    expect(dockerfile.indexOf("COPY package.json ./")).toBeGreaterThanOrEqual(0);
+    expect(dockerfile.indexOf("COPY package.json ./")).toBeLessThan(dockerfile.indexOf(installCommand));
     expect(dockerfile).not.toContain("corepack enable");
+  });
+
+  it.each([".github/workflows/ci.yml", ".github/workflows/docs.yml"])("lets %s resolve pnpm from the package manifest", (path) => {
+    const workflow = readFileSync(path, "utf8");
+    const installStep = workflow.match(/- name: Install pnpm\r?\n[\s\S]*?(?=\r?\n      - name:|$)/)?.[0];
+    expect(installStep).toContain("uses: pnpm/action-setup@");
+    expect(installStep).not.toMatch(/\r?\n\s+version:/);
   });
 
   it.each([

@@ -25,6 +25,16 @@ let activeScenario: SourceScenario | undefined;
 let extractionServiceFailuresRemaining = 0;
 let characterInvalidResponsesRemaining = 0;
 
+function parseWorkerResult(stdout: string): { completed: number; runs: boolean[]; outcomes?: unknown } {
+  for (const line of stdout.trim().split(/\r?\n/u).reverse()) {
+    try {
+      const candidate = JSON.parse(line) as { completed?: unknown; runs?: unknown; outcomes?: unknown };
+      if (typeof candidate.completed === "number" && Array.isArray(candidate.runs)) return candidate as { completed: number; runs: boolean[]; outcomes?: unknown };
+    } catch { /* Pino output is not the worker result. */ }
+  }
+  throw new Error("source worker did not emit a result frame");
+}
+
 async function chainEligibility(jobId: string | undefined) {
   if (!chainDiagnosticPool || !jobId) return undefined;
   const [job, stages] = await Promise.all([
@@ -73,7 +83,7 @@ function runSourceWorker(limit: number, expectedJobId?: string): Promise<{ compl
     child.once("exit", async (code, signal) => {
       if (code !== 0 || signal) { reject(new Error(`source worker exited ${code ?? signal}: ${stderr}`)); return; }
       try {
-        const result = JSON.parse(stdout.trim()) as { completed: number; runs: boolean[]; outcomes?: unknown };
+        const result = parseWorkerResult(stdout);
         const outcomes = result.outcomes as Array<{ jobId?: string }> | undefined;
         process.stdout.write(`${JSON.stringify({
           scenario: activeScenario?.id,
@@ -282,15 +292,13 @@ integration("P3.9 source authoring end-to-end acceptance", () => {
         const frames = (payload.messages ?? []).flatMap((message) => {
           if (message.role !== "user" || typeof message.content !== "string") return [];
           try { return [JSON.parse(message.content) as {
-            chunk?: { sourceRange: { start: number; end: number }; paragraphSpans: Array<{ paragraphId: string; start: number; end: number }> };
-            sourceText?: string;
+            chunk?: { sourceRange: { start: number; end: number }; paragraphSpans: Array<{ paragraphId: string; start: number; end: number; evidenceId: string; text: string }> };
             acceptedFacts?: Array<{ id: string }>;
             selectedCharacterFactIds?: string[];
           }]; } catch { return []; }
         });
         const frame = (frames.find((candidate) => candidate.chunk || candidate.acceptedFacts) ?? {}) as {
-          chunk?: { sourceRange: { start: number; end: number }; paragraphSpans: Array<{ paragraphId: string; start: number; end: number }> };
-          sourceText?: string;
+          chunk?: { sourceRange: { start: number; end: number }; paragraphSpans: Array<{ paragraphId: string; start: number; end: number; evidenceId: string; text: string }> };
           acceptedFacts?: Array<{ id: string }>;
           selectedCharacterFactIds?: string[];
         };
@@ -307,25 +315,20 @@ integration("P3.9 source authoring end-to-end acceptance", () => {
           return;
         }
         let content = JSON.stringify({ facts: [] });
-        if (activeScenario && frame.chunk && frame.sourceText) {
+        if (activeScenario && frame.chunk) {
           content = JSON.stringify({
             facts: activeScenario.accepted
-              .filter((fact) => frame.sourceText!.includes(fact.quote))
-              .map((fact) => {
-                const localStart = Array.from(frame.sourceText!.slice(0, frame.sourceText!.indexOf(fact.quote))).length;
-                const start = frame.chunk!.sourceRange.start + localStart;
-                const end = start + Array.from(fact.quote).length;
-                const paragraph = frame.chunk!.paragraphSpans.find((candidate) => start >= candidate.start && end <= candidate.end)
-                  ?? frame.chunk!.paragraphSpans[0]!;
-                return {
+              .flatMap((fact) => {
+                const evidence = frame.chunk!.paragraphSpans.find((candidate) => candidate.text.includes(fact.quote));
+                return evidence === undefined ? [] : [{
                   category: kindFor(fact.subject), subject: fact.subject, predicate: fact.predicate, value: fact.value, provenance: "stated",
-                  citations: [{ paragraphId: paragraph.paragraphId, start, end, quote: fact.quote }]
-                };
+                  citations: [{ evidenceId: evidence.evidenceId }]
+                }];
               })
-              .concat(activeScenario.id === "unsupported-additions" && frame.sourceText.includes("The brass gate opens")
+              .concat(activeScenario.id === "unsupported-additions" && frame.chunk.paragraphSpans.some((span) => span.text.includes("The brass gate opens"))
                 ? [{
                     category: "rule", subject: "gate", predicate: "protects", value: "the harbor", provenance: "inferred",
-                    citations: [{ paragraphId: frame.chunk.paragraphSpans[0]!.paragraphId, start: frame.chunk.sourceRange.start, end: frame.chunk.sourceRange.start + "The brass gate opens when Mara lifts the lantern.".length, quote: "The brass gate opens when Mara lifts the lantern." }]
+                    citations: [{ evidenceId: frame.chunk.paragraphSpans[0]!.evidenceId }]
                   }]
                 : [])
           });
@@ -507,7 +510,7 @@ integration("P3.9 source authoring end-to-end acceptance", () => {
         [submitted.id]
       );
       expect(plannedLeaves.rows.length).toBeGreaterThan(1);
-      expect(await runSourceWorker(1, submitted.id)).toMatchObject({ completed: 1, runs: [true] });
+      expect(await runSourceWorker(plannedLeaves.rows.length - 2, submitted.id)).toMatchObject({ completed: plannedLeaves.rows.length - 2, runs: Array(plannedLeaves.rows.length - 2).fill(true) });
       const retainedLeaves = await pool.query<{ id: string; stage_key: string; output: string }>(
         "SELECT id,stage_key,output::text AS output FROM authoring_job_stages WHERE job_id=$1 AND stage_key LIKE 'source:chunk:%' AND status='validated' ORDER BY stage_key",
         [submitted.id]

@@ -1,8 +1,9 @@
 # syntax=docker/dockerfile:1.7
 FROM node:26-bookworm-slim AS build
 WORKDIR /app
-RUN npm install --global pnpm@11.24.0
-COPY package.json pnpm-workspace.yaml tsconfig.json tsconfig.build.json ./
+COPY package.json ./
+RUN npm install --global "$(node -p "require('./package.json').packageManager.split('+')[0]")"
+COPY pnpm-workspace.yaml tsconfig.json tsconfig.build.json ./
 COPY database ./database
 COPY packages ./packages
 COPY services ./services

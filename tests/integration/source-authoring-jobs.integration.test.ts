@@ -22,6 +22,16 @@ type WorkerProcessResult = { completed: number; runs: boolean[]; outcomes?: Arra
 let workerDiagnosticPool: DatabasePool | undefined;
 let providerCallCount = () => 0;
 
+function parseWorkerResult(stdout: string): WorkerProcessResult {
+  for (const line of stdout.trim().split(/\r?\n/u).reverse()) {
+    try {
+      const candidate = JSON.parse(line) as { completed?: unknown; runs?: unknown };
+      if (typeof candidate.completed === "number" && Array.isArray(candidate.runs)) return candidate as WorkerProcessResult;
+    } catch { /* Pino output is not the worker result. */ }
+  }
+  throw new Error("source worker did not emit a result frame");
+}
+
 function runSourceWorker(limit: number, diagnostics = true): Promise<WorkerProcessResult> {
   return new Promise((resolveProcess, reject) => {
     const providerCallsBefore = providerCallCount();
@@ -43,7 +53,7 @@ function runSourceWorker(limit: number, diagnostics = true): Promise<WorkerProce
     child.once("exit", async (code, signal) => {
       if (code !== 0 || signal) { reject(new Error(`source worker exited ${code ?? signal}: ${stderr}`)); return; }
       try {
-        const result = JSON.parse(stdout.trim()) as WorkerProcessResult;
+        const result = parseWorkerResult(stdout);
         const outcomes = result.outcomes;
         const jobId = outcomes?.find((outcome) => outcome.jobId)?.jobId;
         const eligibility = workerDiagnosticPool && jobId ? await sourceEligibility(workerDiagnosticPool, jobId) : undefined;
