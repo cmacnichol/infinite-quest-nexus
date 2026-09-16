@@ -13,6 +13,8 @@ Implementation uses focused RED/GREEN regressions, independent review, related u
 
 Status: all four fixes implemented and independently reviewed. No consequential review findings remain in these targeted fixes.
 
+The later [CI remediation record](story-memory-release-readiness-2026-09-16.md#ci-remediation-follow-up) supersedes the aggregate-check limitations below: the source-authoring panel's union narrowing and review-probe logging now pass the full repository/type check. It also records the toolchain and integration-fixture repairs; production promotion gates remain unchanged.
+
 ## Implementation and regression results
 
 - F1 preserves the first registered destination identity for repeated explicit object fact IDs. The failing unit regression is now green. Real PostgreSQL tests cover valid source replay, branch, portable campaign import, retained corrections, fact retirement/supersession and unchanged source evidence.
